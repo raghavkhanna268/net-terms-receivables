@@ -69,6 +69,15 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Test session storage with non-UTC process TZ
+        run: |
+          # Run session storage tests with Asia/Calcutta process timezone
+          # This catches bugs where timestamps shift by the process TZ offset
+          # See issue #19 for background
+          TZ=Asia/Calcutta npx vitest run \
+            app/__tests__/integration/light-session-storage.test.ts \
+            app/__tests__/integration/prisma-session-storage.test.ts
+
       - name: Build
         run: npm run build
 
