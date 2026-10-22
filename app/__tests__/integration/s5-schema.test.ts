@@ -23,7 +23,11 @@ import type {
  * 3. TIMESTAMPTZ columns round-trip correctly regardless of DB session timezone
  * 4. Unique constraints reject duplicates (UTR per shop, reminder per rule+invoice, etc.)
  * 5. CASCADE delete propagates correctly from Shop down
- * 6. Decimal money fields are handled correctly (returned as strings by postgres.js)
+ * 6. NO ACTION prevents deletion of financial parents with children
+ * 7. Decimal money fields are handled correctly (returned as strings by postgres.js)
+ * 8. Cross-shop integrity: composite FKs reject mismatched shopId
+ * 9. CHECK constraints are enforced
+ * 10. updatedAt trigger fires on update
  *
  * These tests run against the CI Postgres 16 service container.
  */
@@ -45,13 +49,13 @@ describeWithDb("S5 Data Model Schema", () => {
 
   afterAll(async () => {
     // Clean up test data - cascade will handle dependent rows
-    await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`.catch(() => {});
+    await sql`DELETE FROM "Shop" WHERE id LIKE ${"shop-" + TEST_SUFFIX + "%"}`.catch(() => {});
     await sql.end();
   });
 
   beforeEach(async () => {
     // Clean up before each test
-    await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`.catch(() => {});
+    await sql`DELETE FROM "Shop" WHERE id LIKE ${"shop-" + TEST_SUFFIX + "%"}`.catch(() => {});
   });
 
   describe("Fixture Insert and Read", () => {
@@ -223,13 +227,14 @@ describeWithDb("S5 Data Model Schema", () => {
 
       await sql`
         INSERT INTO "Invoice" (
-          id, "shopId", "buyerAccountId", name, total, outstanding,
+          id, "shopId", "buyerAccountId", "draftOrderId", name, total, outstanding,
           "issuedAt", "dueAt", "dueSource", "dueBasis", "dueReason",
           status, "createdAt", "updatedAt"
         ) VALUES (
           ${invoiceNoneId},
           ${TEST_SHOP_ID},
           ${taggedAccountId},
+          'gid://shopify/DraftOrder/2001',
           '#1004',
           '5000.00',
           '5000.00',
@@ -281,17 +286,19 @@ describeWithDb("S5 Data Model Schema", () => {
         )
       `;
 
+      const matchReasons = { name_match: true, amount_match: true };
       await sql`
         INSERT INTO "Match" (
-          id, "paymentId", "invoiceId", amount, score, reasons, state,
+          id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state,
           "confirmedBy", "confirmedAt", "createdAt", "updatedAt"
         ) VALUES (
           ${matchId},
+          ${TEST_SHOP_ID},
           ${paymentId},
           ${invoiceScheduleId},
           '50000.00',
           95,
-          ${JSON.stringify({ name_match: true, amount_match: true })}::jsonb,
+          ${JSON.stringify(matchReasons)}::jsonb,
           'confirmed',
           'user:admin@example.com',
           ${now},
@@ -329,6 +336,7 @@ describeWithDb("S5 Data Model Schema", () => {
 
       // 7. Insert AuditEvent
       const eventId = `event-${TEST_SUFFIX}`;
+      const eventData = { invoiceId: invoiceScheduleId, amount: "50000.00" };
       await sql`
         INSERT INTO "AuditEvent" (id, "shopId", actor, type, data, at)
         VALUES (
@@ -336,7 +344,7 @@ describeWithDb("S5 Data Model Schema", () => {
           ${TEST_SHOP_ID},
           'user:admin@example.com',
           'invoice.created',
-          ${JSON.stringify({ invoiceId: invoiceScheduleId, amount: "50000.00" })}::jsonb,
+          ${JSON.stringify(eventData)}::jsonb,
           ${now}
         )
       `;
@@ -404,6 +412,8 @@ describeWithDb("S5 Data Model Schema", () => {
       const [match] = await sql<MatchRow[]>`SELECT * FROM "Match" WHERE id = ${matchId}`;
       expect(match.score).toBe(95);
       expect(match.state).toBe("confirmed");
+      expect(match.shopId).toBe(TEST_SHOP_ID);
+      // postgres.js parses JSONB into objects
       expect(match.reasons).toEqual({ name_match: true, amount_match: true });
 
       const [rule] = await sql<ReminderRuleRow[]>`SELECT * FROM "ReminderRule" WHERE id = ${ruleId}`;
@@ -486,7 +496,6 @@ describeWithDb("S5 Data Model Schema", () => {
       const overrideDate = new Date("2025-08-20T23:59:59.999Z");
       const now = new Date();
 
-      // Setup shop and account
       const shopId = `shop-inv-tz-${TEST_SUFFIX}`;
       const accountId = `account-inv-tz-${TEST_SUFFIX}`;
       const invoiceId = `invoice-tz-${TEST_SUFFIX}`;
@@ -497,27 +506,25 @@ describeWithDb("S5 Data Model Schema", () => {
       `;
 
       await sql`
-        INSERT INTO "BuyerAccount" (id, "shopId", kind, name, "createdAt", "updatedAt")
-        VALUES (${accountId}, ${shopId}, 'COMPANY', 'Test Co', ${now}, ${now})
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+        VALUES (${accountId}, ${shopId}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test Co', ${now}, ${now})
       `;
 
-      // Test with Asia/Kolkata session
       const sqlKolkata = postgres(TEST_DATABASE_URL!, { max: 1 });
       await sqlKolkata`SET TIME ZONE 'Asia/Kolkata'`;
 
       await sqlKolkata`
         INSERT INTO "Invoice" (
-          id, "shopId", "buyerAccountId", name, total, outstanding,
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
           "issuedAt", "dueAt", "dueOverrideAt", status, "createdAt", "updatedAt"
         ) VALUES (
-          ${invoiceId}, ${shopId}, ${accountId}, '#TZ-001',
+          ${invoiceId}, ${shopId}, ${accountId}, 'gid://shopify/Order/TZ001', '#TZ-001',
           '1000.00', '1000.00', ${now}, ${dueDate}, ${overrideDate},
           'open', ${now}, ${now}
         )
       `;
       await sqlKolkata.end();
 
-      // Read with America/New_York session
       const sqlNy = postgres(TEST_DATABASE_URL!, { max: 1 });
       await sqlNy`SET TIME ZONE 'America/New_York'`;
 
@@ -548,14 +555,13 @@ describeWithDb("S5 Data Model Schema", () => {
 
       await sql`
         INSERT INTO "Payment" (id, "shopId", "importId", "valueDate", amount, utr, narration, "createdAt", "updatedAt")
-        VALUES ('pay1-${TEST_SUFFIX}', ${shopId}, ${importId}, ${now}, '1000.00', 'UNIQUE123', 'test', ${now}, ${now})
+        VALUES (${"pay1-utr-" + TEST_SUFFIX}, ${shopId}, ${importId}, ${now}, '1000.00', 'UNIQUE123', 'test', ${now}, ${now})
       `;
 
-      // Should reject duplicate UTR for same shop
       await expect(
         sql`
           INSERT INTO "Payment" (id, "shopId", "importId", "valueDate", amount, utr, narration, "createdAt", "updatedAt")
-          VALUES ('pay2-${TEST_SUFFIX}', ${shopId}, ${importId}, ${now}, '2000.00', 'UNIQUE123', 'test2', ${now}, ${now})
+          VALUES (${"pay2-utr-" + TEST_SUFFIX}, ${shopId}, ${importId}, ${now}, '2000.00', 'UNIQUE123', 'test2', ${now}, ${now})
         `
       ).rejects.toThrow(/unique/i);
 
@@ -575,13 +581,13 @@ describeWithDb("S5 Data Model Schema", () => {
       `;
 
       await sql`
-        INSERT INTO "BuyerAccount" (id, "shopId", kind, name, "createdAt", "updatedAt")
-        VALUES (${accountId}, ${shopId}, 'COMPANY', 'Test', ${now}, ${now})
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+        VALUES (${accountId}, ${shopId}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test', ${now}, ${now})
       `;
 
       await sql`
-        INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
-        VALUES (${invoiceId}, ${shopId}, ${accountId}, '#1', '100.00', '100.00', ${now}, 'open', ${now}, ${now})
+        INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
+        VALUES (${invoiceId}, ${shopId}, ${accountId}, 'gid://shopify/Order/REM1', '#1', '100.00', '100.00', ${now}, 'open', ${now}, ${now})
       `;
 
       await sql`
@@ -591,14 +597,13 @@ describeWithDb("S5 Data Model Schema", () => {
 
       await sql`
         INSERT INTO "ReminderLog" (id, "ruleId", "invoiceId", "sentAt")
-        VALUES ('log1-${TEST_SUFFIX}', ${ruleId}, ${invoiceId}, ${now})
+        VALUES (${"log1-rem-" + TEST_SUFFIX}, ${ruleId}, ${invoiceId}, ${now})
       `;
 
-      // Should reject duplicate rule+invoice combination
       await expect(
         sql`
           INSERT INTO "ReminderLog" (id, "ruleId", "invoiceId", "sentAt")
-          VALUES ('log2-${TEST_SUFFIX}', ${ruleId}, ${invoiceId}, ${now})
+          VALUES (${"log2-rem-" + TEST_SUFFIX}, ${ruleId}, ${invoiceId}, ${now})
         `
       ).rejects.toThrow(/unique/i);
 
@@ -609,6 +614,7 @@ describeWithDb("S5 Data Model Schema", () => {
       const now = new Date();
       const shopId = `shop-acc-${TEST_SUFFIX}`;
       const locationGid = "gid://shopify/CompanyLocation/999";
+      const companyGid = "gid://shopify/Company/999";
 
       await sql`
         INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
@@ -616,15 +622,14 @@ describeWithDb("S5 Data Model Schema", () => {
       `;
 
       await sql`
-        INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyLocationId", name, "createdAt", "updatedAt")
-        VALUES ('acc1-${TEST_SUFFIX}', ${shopId}, 'COMPANY', ${locationGid}, 'Acc1', ${now}, ${now})
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+        VALUES (${"acc1-loc-" + TEST_SUFFIX}, ${shopId}, 'COMPANY', ${companyGid}, ${locationGid}, 'Acc1', ${now}, ${now})
       `;
 
-      // Should reject duplicate companyLocationId for same shop
       await expect(
         sql`
-          INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyLocationId", name, "createdAt", "updatedAt")
-          VALUES ('acc2-${TEST_SUFFIX}', ${shopId}, 'COMPANY', ${locationGid}, 'Acc2', ${now}, ${now})
+          INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+          VALUES (${"acc2-loc-" + TEST_SUFFIX}, ${shopId}, 'COMPANY', ${companyGid}, ${locationGid}, 'Acc2', ${now}, ${now})
         `
       ).rejects.toThrow(/unique/i);
 
@@ -643,14 +648,13 @@ describeWithDb("S5 Data Model Schema", () => {
 
       await sql`
         INSERT INTO "BuyerAccount" (id, "shopId", kind, "customerId", name, "createdAt", "updatedAt")
-        VALUES ('acc1-${TEST_SUFFIX}', ${shopId}, 'TAGGED_CUSTOMER', ${customerGid}, 'Cust1', ${now}, ${now})
+        VALUES (${"acc1-cust-" + TEST_SUFFIX}, ${shopId}, 'TAGGED_CUSTOMER', ${customerGid}, 'Cust1', ${now}, ${now})
       `;
 
-      // Should reject duplicate customerId for same shop
       await expect(
         sql`
           INSERT INTO "BuyerAccount" (id, "shopId", kind, "customerId", name, "createdAt", "updatedAt")
-          VALUES ('acc2-${TEST_SUFFIX}', ${shopId}, 'TAGGED_CUSTOMER', ${customerGid}, 'Cust2', ${now}, ${now})
+          VALUES (${"acc2-cust-" + TEST_SUFFIX}, ${shopId}, 'TAGGED_CUSTOMER', ${customerGid}, 'Cust2', ${now}, ${now})
         `
       ).rejects.toThrow(/unique/i);
 
@@ -672,15 +676,14 @@ describeWithDb("S5 Data Model Schema", () => {
         VALUES (${importId}, ${shopId}, 'hdfc', 'test.csv', 2, ${now})
       `;
 
-      // Both payments have NULL UTR - should be allowed
       await sql`
         INSERT INTO "Payment" (id, "shopId", "importId", "valueDate", amount, utr, narration, "createdAt", "updatedAt")
-        VALUES ('pay1-null-${TEST_SUFFIX}', ${shopId}, ${importId}, ${now}, '1000.00', NULL, 'test1', ${now}, ${now})
+        VALUES (${"pay1-null-" + TEST_SUFFIX}, ${shopId}, ${importId}, ${now}, '1000.00', NULL, 'test1', ${now}, ${now})
       `;
 
       await sql`
         INSERT INTO "Payment" (id, "shopId", "importId", "valueDate", amount, utr, narration, "createdAt", "updatedAt")
-        VALUES ('pay2-null-${TEST_SUFFIX}', ${shopId}, ${importId}, ${now}, '2000.00', NULL, 'test2', ${now}, ${now})
+        VALUES (${"pay2-null-" + TEST_SUFFIX}, ${shopId}, ${importId}, ${now}, '2000.00', NULL, 'test2', ${now}, ${now})
       `;
 
       const payments = await sql<PaymentRow[]>`SELECT * FROM "Payment" WHERE "shopId" = ${shopId}`;
@@ -705,7 +708,6 @@ describeWithDb("S5 Data Model Schema", () => {
       const aliasId = `alias-cascade-${TEST_SUFFIX}`;
       const eventId = `event-cascade-${TEST_SUFFIX}`;
 
-      // Create complete hierarchy
       await sql`
         INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
         VALUES (${shopId}, ${`cascade-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
@@ -717,8 +719,8 @@ describeWithDb("S5 Data Model Schema", () => {
       `;
 
       await sql`
-        INSERT INTO "BuyerAccount" (id, "shopId", kind, name, "createdAt", "updatedAt")
-        VALUES (${accountId}, ${shopId}, 'COMPANY', 'Test', ${now}, ${now})
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+        VALUES (${accountId}, ${shopId}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test', ${now}, ${now})
       `;
 
       await sql`
@@ -727,8 +729,8 @@ describeWithDb("S5 Data Model Schema", () => {
       `;
 
       await sql`
-        INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
-        VALUES (${invoiceId}, ${shopId}, ${accountId}, '#1', '100.00', '100.00', ${now}, 'open', ${now}, ${now})
+        INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
+        VALUES (${invoiceId}, ${shopId}, ${accountId}, 'gid://shopify/Order/CASCADE1', '#1', '100.00', '100.00', ${now}, 'open', ${now}, ${now})
       `;
 
       await sql`
@@ -742,8 +744,8 @@ describeWithDb("S5 Data Model Schema", () => {
       `;
 
       await sql`
-        INSERT INTO "Match" (id, "paymentId", "invoiceId", amount, score, reasons, "createdAt", "updatedAt")
-        VALUES (${matchId}, ${paymentId}, ${invoiceId}, '100.00', 80, '{}', ${now}, ${now})
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, "createdAt", "updatedAt")
+        VALUES (${matchId}, ${shopId}, ${paymentId}, ${invoiceId}, '100.00', 80, '{}', ${now}, ${now})
       `;
 
       await sql`
@@ -761,11 +763,10 @@ describeWithDb("S5 Data Model Schema", () => {
         VALUES (${eventId}, ${shopId}, 'test', 'test.event', '{}', ${now})
       `;
 
-      // Verify everything exists
       const [shop] = await sql`SELECT * FROM "Shop" WHERE id = ${shopId}`;
       expect(shop).toBeDefined();
 
-      // Delete shop
+      // Delete shop - should cascade to all dependent rows
       await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
 
       // Verify cascade deleted everything
@@ -804,6 +805,572 @@ describeWithDb("S5 Data Model Schema", () => {
     });
   });
 
+  describe("NO ACTION Prevents Financial History Deletion", () => {
+    it("rejects deleting a BuyerAccount that has invoices", async () => {
+      const now = new Date();
+      const shopId = `shop-noact-acc-${TEST_SUFFIX}`;
+      const accountId = `account-noact-${TEST_SUFFIX}`;
+      const invoiceId = `invoice-noact-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${shopId}, ${`noact-acc-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+        VALUES (${accountId}, ${shopId}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test', ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
+        VALUES (${invoiceId}, ${shopId}, ${accountId}, 'gid://shopify/Order/NOACT1', '#1', '100.00', '100.00', ${now}, 'open', ${now}, ${now})
+      `;
+
+      // Attempting to delete the account should fail
+      await expect(
+        sql`DELETE FROM "BuyerAccount" WHERE id = ${accountId}`
+      ).rejects.toThrow(/violates foreign key/i);
+
+      // Clean up via shop delete (which cascades)
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    });
+
+    it("rejects deleting a BankImport that has payments", async () => {
+      const now = new Date();
+      const shopId = `shop-noact-imp-${TEST_SUFFIX}`;
+      const importId = `import-noact-${TEST_SUFFIX}`;
+      const paymentId = `payment-noact-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${shopId}, ${`noact-imp-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
+        VALUES (${importId}, ${shopId}, 'hdfc', 'test.csv', 1, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "Payment" (id, "shopId", "importId", "valueDate", amount, narration, "createdAt", "updatedAt")
+        VALUES (${paymentId}, ${shopId}, ${importId}, ${now}, '100.00', 'test', ${now}, ${now})
+      `;
+
+      // Attempting to delete the import should fail
+      await expect(
+        sql`DELETE FROM "BankImport" WHERE id = ${importId}`
+      ).rejects.toThrow(/violates foreign key/i);
+
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    });
+
+    it("rejects deleting a Payment that has matches", async () => {
+      const now = new Date();
+      const shopId = `shop-noact-pay-${TEST_SUFFIX}`;
+      const accountId = `account-noact-pay-${TEST_SUFFIX}`;
+      const invoiceId = `invoice-noact-pay-${TEST_SUFFIX}`;
+      const importId = `import-noact-pay-${TEST_SUFFIX}`;
+      const paymentId = `payment-noact-pay-${TEST_SUFFIX}`;
+      const matchId = `match-noact-pay-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${shopId}, ${`noact-pay-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+        VALUES (${accountId}, ${shopId}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test', ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
+        VALUES (${invoiceId}, ${shopId}, ${accountId}, 'gid://shopify/Order/NOACT2', '#1', '100.00', '100.00', ${now}, 'open', ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
+        VALUES (${importId}, ${shopId}, 'hdfc', 'test.csv', 1, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "Payment" (id, "shopId", "importId", "valueDate", amount, narration, "createdAt", "updatedAt")
+        VALUES (${paymentId}, ${shopId}, ${importId}, ${now}, '100.00', 'test', ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, "createdAt", "updatedAt")
+        VALUES (${matchId}, ${shopId}, ${paymentId}, ${invoiceId}, '100.00', 80, '{}', ${now}, ${now})
+      `;
+
+      // Attempting to delete the payment should fail
+      await expect(
+        sql`DELETE FROM "Payment" WHERE id = ${paymentId}`
+      ).rejects.toThrow(/violates foreign key/i);
+
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    });
+
+    it("rejects deleting a ReminderRule that has logs", async () => {
+      const now = new Date();
+      const shopId = `shop-noact-rule-${TEST_SUFFIX}`;
+      const accountId = `account-noact-rule-${TEST_SUFFIX}`;
+      const invoiceId = `invoice-noact-rule-${TEST_SUFFIX}`;
+      const ruleId = `rule-noact-${TEST_SUFFIX}`;
+      const logId = `log-noact-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${shopId}, ${`noact-rule-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+        VALUES (${accountId}, ${shopId}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test', ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
+        VALUES (${invoiceId}, ${shopId}, ${accountId}, 'gid://shopify/Order/NOACT3', '#1', '100.00', '100.00', ${now}, 'open', ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, "createdAt", "updatedAt")
+        VALUES (${ruleId}, ${shopId}, 0, 'email', ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "ReminderLog" (id, "ruleId", "invoiceId", "sentAt")
+        VALUES (${logId}, ${ruleId}, ${invoiceId}, ${now})
+      `;
+
+      // Attempting to delete the rule should fail
+      await expect(
+        sql`DELETE FROM "ReminderRule" WHERE id = ${ruleId}`
+      ).rejects.toThrow(/violates foreign key/i);
+
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    });
+  });
+
+  describe("Cross-shop Integrity", () => {
+    it("rejects Invoice with mismatched shopId from BuyerAccount", async () => {
+      const now = new Date();
+      const shop1Id = `shop-xshop1-${TEST_SUFFIX}`;
+      const shop2Id = `shop-xshop2-${TEST_SUFFIX}`;
+      const accountId = `account-xshop-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${shop1Id}, ${`xshop1-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${shop2Id}, ${`xshop2-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+        VALUES (${accountId}, ${shop1Id}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test', ${now}, ${now})
+      `;
+
+      // Try to create invoice in shop2 referencing account from shop1
+      await expect(
+        sql`
+          INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
+          VALUES (${"inv-xshop-" + TEST_SUFFIX}, ${shop2Id}, ${accountId}, 'gid://shopify/Order/XSHOP1', '#1', '100.00', '100.00', ${now}, 'open', ${now}, ${now})
+        `
+      ).rejects.toThrow(/violates foreign key/i);
+
+      await sql`DELETE FROM "Shop" WHERE id = ${shop1Id}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${shop2Id}`;
+    });
+
+    it("rejects Payment with mismatched shopId from BankImport", async () => {
+      const now = new Date();
+      const shop1Id = `shop-xpay1-${TEST_SUFFIX}`;
+      const shop2Id = `shop-xpay2-${TEST_SUFFIX}`;
+      const importId = `import-xpay-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${shop1Id}, ${`xpay1-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${shop2Id}, ${`xpay2-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
+        VALUES (${importId}, ${shop1Id}, 'hdfc', 'test.csv', 1, ${now})
+      `;
+
+      // Try to create payment in shop2 referencing import from shop1
+      await expect(
+        sql`
+          INSERT INTO "Payment" (id, "shopId", "importId", "valueDate", amount, narration, "createdAt", "updatedAt")
+          VALUES (${"pay-xpay-" + TEST_SUFFIX}, ${shop2Id}, ${importId}, ${now}, '100.00', 'test', ${now}, ${now})
+        `
+      ).rejects.toThrow(/violates foreign key/i);
+
+      await sql`DELETE FROM "Shop" WHERE id = ${shop1Id}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${shop2Id}`;
+    });
+
+    it("rejects Match with mismatched shopId", async () => {
+      const now = new Date();
+      const shop1Id = `shop-xmatch1-${TEST_SUFFIX}`;
+      const shop2Id = `shop-xmatch2-${TEST_SUFFIX}`;
+      const account1Id = `account-xmatch1-${TEST_SUFFIX}`;
+      const account2Id = `account-xmatch2-${TEST_SUFFIX}`;
+      const invoice1Id = `invoice-xmatch1-${TEST_SUFFIX}`;
+      const import1Id = `import-xmatch1-${TEST_SUFFIX}`;
+      const import2Id = `import-xmatch2-${TEST_SUFFIX}`;
+      const payment1Id = `payment-xmatch1-${TEST_SUFFIX}`;
+      const payment2Id = `payment-xmatch2-${TEST_SUFFIX}`;
+
+      // Create shop1 with invoice
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${shop1Id}, ${`xmatch1-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+        VALUES (${account1Id}, ${shop1Id}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test1', ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
+        VALUES (${invoice1Id}, ${shop1Id}, ${account1Id}, 'gid://shopify/Order/XMATCH1', '#1', '100.00', '100.00', ${now}, 'open', ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
+        VALUES (${import1Id}, ${shop1Id}, 'hdfc', 'test.csv', 1, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "Payment" (id, "shopId", "importId", "valueDate", amount, narration, "createdAt", "updatedAt")
+        VALUES (${payment1Id}, ${shop1Id}, ${import1Id}, ${now}, '100.00', 'test', ${now}, ${now})
+      `;
+
+      // Create shop2 with payment
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${shop2Id}, ${`xmatch2-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+        VALUES (${account2Id}, ${shop2Id}, 'COMPANY', 'gid://shopify/Company/2', 'gid://shopify/CompanyLocation/2', 'Test2', ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
+        VALUES (${import2Id}, ${shop2Id}, 'hdfc', 'test.csv', 1, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "Payment" (id, "shopId", "importId", "valueDate", amount, narration, "createdAt", "updatedAt")
+        VALUES (${payment2Id}, ${shop2Id}, ${import2Id}, ${now}, '100.00', 'test', ${now}, ${now})
+      `;
+
+      // Try to create match linking payment from shop2 to invoice from shop1
+      await expect(
+        sql`
+          INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, "createdAt", "updatedAt")
+          VALUES (${"match-xmatch-" + TEST_SUFFIX}, ${shop2Id}, ${payment2Id}, ${invoice1Id}, '100.00', 80, '{}', ${now}, ${now})
+        `
+      ).rejects.toThrow(/violates foreign key/i);
+
+      await sql`DELETE FROM "Shop" WHERE id = ${shop1Id}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${shop2Id}`;
+    });
+  });
+
+  describe("CHECK Constraints", () => {
+    it("rejects outstanding > total", async () => {
+      const now = new Date();
+      const shopId = `shop-chk-out-${TEST_SUFFIX}`;
+      const accountId = `account-chk-out-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${shopId}, ${`chk-out-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+        VALUES (${accountId}, ${shopId}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test', ${now}, ${now})
+      `;
+
+      await expect(
+        sql`
+          INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
+          VALUES (${"inv-chk-out-" + TEST_SUFFIX}, ${shopId}, ${accountId}, 'gid://shopify/Order/CHK1', '#1', '100.00', '150.00', ${now}, 'open', ${now}, ${now})
+        `
+      ).rejects.toThrow(/Invoice_outstanding_range/i);
+
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    });
+
+    it("rejects negative outstanding", async () => {
+      const now = new Date();
+      const shopId = `shop-chk-neg-${TEST_SUFFIX}`;
+      const accountId = `account-chk-neg-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${shopId}, ${`chk-neg-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+        VALUES (${accountId}, ${shopId}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test', ${now}, ${now})
+      `;
+
+      await expect(
+        sql`
+          INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
+          VALUES (${"inv-chk-neg-" + TEST_SUFFIX}, ${shopId}, ${accountId}, 'gid://shopify/Order/CHK2', '#1', '100.00', '-10.00', ${now}, 'open', ${now}, ${now})
+        `
+      ).rejects.toThrow(/Invoice_outstanding_range/i);
+
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    });
+
+    it("rejects Payment with non-positive amount", async () => {
+      const now = new Date();
+      const shopId = `shop-chk-pamt-${TEST_SUFFIX}`;
+      const importId = `import-chk-pamt-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${shopId}, ${`chk-pamt-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
+        VALUES (${importId}, ${shopId}, 'hdfc', 'test.csv', 1, ${now})
+      `;
+
+      await expect(
+        sql`
+          INSERT INTO "Payment" (id, "shopId", "importId", "valueDate", amount, narration, "createdAt", "updatedAt")
+          VALUES (${"pay-chk-pamt-" + TEST_SUFFIX}, ${shopId}, ${importId}, ${now}, '0.00', 'test', ${now}, ${now})
+        `
+      ).rejects.toThrow(/Payment_amount_positive/i);
+
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    });
+
+    it("rejects Match with non-positive amount", async () => {
+      const now = new Date();
+      const shopId = `shop-chk-mamt-${TEST_SUFFIX}`;
+      const accountId = `account-chk-mamt-${TEST_SUFFIX}`;
+      const invoiceId = `invoice-chk-mamt-${TEST_SUFFIX}`;
+      const importId = `import-chk-mamt-${TEST_SUFFIX}`;
+      const paymentId = `payment-chk-mamt-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${shopId}, ${`chk-mamt-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+        VALUES (${accountId}, ${shopId}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test', ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
+        VALUES (${invoiceId}, ${shopId}, ${accountId}, 'gid://shopify/Order/CHK3', '#1', '100.00', '100.00', ${now}, 'open', ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
+        VALUES (${importId}, ${shopId}, 'hdfc', 'test.csv', 1, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "Payment" (id, "shopId", "importId", "valueDate", amount, narration, "createdAt", "updatedAt")
+        VALUES (${paymentId}, ${shopId}, ${importId}, ${now}, '100.00', 'test', ${now}, ${now})
+      `;
+
+      await expect(
+        sql`
+          INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, "createdAt", "updatedAt")
+          VALUES (${"match-chk-mamt-" + TEST_SUFFIX}, ${shopId}, ${paymentId}, ${invoiceId}, '-50.00', 80, '{}', ${now}, ${now})
+        `
+      ).rejects.toThrow(/Match_amount_positive/i);
+
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    });
+
+    it("rejects Match with score out of range", async () => {
+      const now = new Date();
+      const shopId = `shop-chk-score-${TEST_SUFFIX}`;
+      const accountId = `account-chk-score-${TEST_SUFFIX}`;
+      const invoiceId = `invoice-chk-score-${TEST_SUFFIX}`;
+      const importId = `import-chk-score-${TEST_SUFFIX}`;
+      const paymentId = `payment-chk-score-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${shopId}, ${`chk-score-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+        VALUES (${accountId}, ${shopId}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test', ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
+        VALUES (${invoiceId}, ${shopId}, ${accountId}, 'gid://shopify/Order/CHK4', '#1', '100.00', '100.00', ${now}, 'open', ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
+        VALUES (${importId}, ${shopId}, 'hdfc', 'test.csv', 1, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "Payment" (id, "shopId", "importId", "valueDate", amount, narration, "createdAt", "updatedAt")
+        VALUES (${paymentId}, ${shopId}, ${importId}, ${now}, '100.00', 'test', ${now}, ${now})
+      `;
+
+      await expect(
+        sql`
+          INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, "createdAt", "updatedAt")
+          VALUES (${"match-chk-score-" + TEST_SUFFIX}, ${shopId}, ${paymentId}, ${invoiceId}, '100.00', 150, '{}', ${now}, ${now})
+        `
+      ).rejects.toThrow(/Match_score_range/i);
+
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    });
+
+    it("rejects Invoice with neither orderId nor draftOrderId", async () => {
+      const now = new Date();
+      const shopId = `shop-chk-xor1-${TEST_SUFFIX}`;
+      const accountId = `account-chk-xor1-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${shopId}, ${`chk-xor1-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+        VALUES (${accountId}, ${shopId}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test', ${now}, ${now})
+      `;
+
+      await expect(
+        sql`
+          INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
+          VALUES (${"inv-chk-xor1-" + TEST_SUFFIX}, ${shopId}, ${accountId}, '#1', '100.00', '100.00', ${now}, 'open', ${now}, ${now})
+        `
+      ).rejects.toThrow(/Invoice_order_xor_draft/i);
+
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    });
+
+    it("rejects Invoice with both orderId and draftOrderId", async () => {
+      const now = new Date();
+      const shopId = `shop-chk-xor2-${TEST_SUFFIX}`;
+      const accountId = `account-chk-xor2-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${shopId}, ${`chk-xor2-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+        VALUES (${accountId}, ${shopId}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test', ${now}, ${now})
+      `;
+
+      await expect(
+        sql`
+          INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", "draftOrderId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
+          VALUES (${"inv-chk-xor2-" + TEST_SUFFIX}, ${shopId}, ${accountId}, 'gid://shopify/Order/XOR1', 'gid://shopify/DraftOrder/XOR1', '#1', '100.00', '100.00', ${now}, 'open', ${now}, ${now})
+        `
+      ).rejects.toThrow(/Invoice_order_xor_draft/i);
+
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    });
+
+    it("rejects COMPANY account without companyLocationId", async () => {
+      const now = new Date();
+      const shopId = `shop-chk-kind1-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${shopId}, ${`chk-kind1-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+      `;
+
+      await expect(
+        sql`
+          INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", name, "createdAt", "updatedAt")
+          VALUES (${"acc-chk-kind1-" + TEST_SUFFIX}, ${shopId}, 'COMPANY', 'gid://shopify/Company/1', 'Test', ${now}, ${now})
+        `
+      ).rejects.toThrow(/BuyerAccount_kind_consistency/i);
+
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    });
+
+    it("rejects TAGGED_CUSTOMER account without customerId", async () => {
+      const now = new Date();
+      const shopId = `shop-chk-kind2-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${shopId}, ${`chk-kind2-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+      `;
+
+      await expect(
+        sql`
+          INSERT INTO "BuyerAccount" (id, "shopId", kind, name, "createdAt", "updatedAt")
+          VALUES (${"acc-chk-kind2-" + TEST_SUFFIX}, ${shopId}, 'TAGGED_CUSTOMER', 'Test', ${now}, ${now})
+        `
+      ).rejects.toThrow(/BuyerAccount_kind_consistency/i);
+
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    });
+  });
+
+  describe("updatedAt Trigger", () => {
+    it("sets updatedAt on update", async () => {
+      const now = new Date();
+      const shopId = `shop-trigger-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${shopId}, ${`trigger-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+      `;
+
+      const [beforeUpdate] = await sql<ShopRow[]>`SELECT * FROM "Shop" WHERE id = ${shopId}`;
+      const originalUpdatedAt = beforeUpdate.updatedAt;
+
+      // Wait a bit to ensure timestamp differs
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      await sql`UPDATE "Shop" SET plan = 'premium' WHERE id = ${shopId}`;
+
+      const [afterUpdate] = await sql<ShopRow[]>`SELECT * FROM "Shop" WHERE id = ${shopId}`;
+      
+      expect(afterUpdate.plan).toBe("premium");
+      expect(afterUpdate.updatedAt.getTime()).toBeGreaterThan(originalUpdatedAt.getTime());
+
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    });
+  });
+
   describe("Decimal Money Fields", () => {
     it("handles decimal money fields correctly", async () => {
       const now = new Date();
@@ -817,13 +1384,13 @@ describeWithDb("S5 Data Model Schema", () => {
       `;
 
       await sql`
-        INSERT INTO "BuyerAccount" (id, "shopId", kind, name, "creditLimit", "createdAt", "updatedAt")
-        VALUES (${accountId}, ${shopId}, 'COMPANY', 'Test', '99999999999999.99', ${now}, ${now})
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "createdAt", "updatedAt")
+        VALUES (${accountId}, ${shopId}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test', '99999999999999.99', ${now}, ${now})
       `;
 
       await sql`
-        INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
-        VALUES (${invoiceId}, ${shopId}, ${accountId}, '#1', '12345678901234.56', '12345678901234.56', ${now}, 'open', ${now}, ${now})
+        INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
+        VALUES (${invoiceId}, ${shopId}, ${accountId}, 'gid://shopify/Order/MONEY1', '#1', '12345678901234.56', '12345678901234.56', ${now}, 'open', ${now}, ${now})
       `;
 
       const [account] = await sql<BuyerAccountRow[]>`SELECT * FROM "BuyerAccount" WHERE id = ${accountId}`;
@@ -848,13 +1415,13 @@ describeWithDb("S5 Data Model Schema", () => {
       `;
 
       await sql`
-        INSERT INTO "BuyerAccount" (id, "shopId", kind, name, "creditLimit", "createdAt", "updatedAt")
-        VALUES (${accountId}, ${shopId}, 'COMPANY', 'Test', '0.01', ${now}, ${now})
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "createdAt", "updatedAt")
+        VALUES (${accountId}, ${shopId}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test', '0.01', ${now}, ${now})
       `;
 
       await sql`
-        INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
-        VALUES (${invoiceId}, ${shopId}, ${accountId}, '#1', '0.01', '0.00', ${now}, 'open', ${now}, ${now})
+        INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
+        VALUES (${invoiceId}, ${shopId}, ${accountId}, 'gid://shopify/Order/SMALL1', '#1', '0.01', '0.00', ${now}, 'open', ${now}, ${now})
       `;
 
       const [account] = await sql<BuyerAccountRow[]>`SELECT * FROM "BuyerAccount" WHERE id = ${accountId}`;
@@ -865,6 +1432,26 @@ describeWithDb("S5 Data Model Schema", () => {
       expect(invoice.outstanding).toBe("0.00");
 
       await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    });
+  });
+
+  describe("DB-generated Defaults", () => {
+    it("generates UUID for id when not provided", async () => {
+      const domain = `uuid-gen-${TEST_SUFFIX}.myshopify.com`;
+
+      // Insert without providing id
+      await sql`
+        INSERT INTO "Shop" (domain)
+        VALUES (${domain})
+      `;
+
+      const [shop] = await sql<ShopRow[]>`SELECT * FROM "Shop" WHERE domain = ${domain}`;
+      expect(shop.id).toBeDefined();
+      expect(shop.id.length).toBeGreaterThan(0);
+      // UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+      expect(shop.id).toMatch(/^[0-9a-f-]{36}$/i);
+
+      await sql`DELETE FROM "Shop" WHERE domain = ${domain}`;
     });
   });
 });

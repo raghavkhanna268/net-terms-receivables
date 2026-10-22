@@ -122,6 +122,7 @@ export interface PaymentRow {
 
 export interface MatchRow {
   id: string;
+  shopId: string;
   paymentId: string;
   invoiceId: string;
   amount: string; // Decimal -> string

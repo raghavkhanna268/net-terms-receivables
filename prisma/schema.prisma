@@ -128,7 +128,7 @@ model Session {
 /// Merchant shop configuration
 /// Created when a shop installs the app; deleted on uninstall (S22)
 model Shop {
-  id               String   @id @default(cuid())
+  id               String   @id @default(dbgenerated("gen_random_uuid()::text"))
   /// Shopify shop domain (e.g. "example.myshopify.com")
   domain           String   @unique
   /// Default currency for the shop
@@ -142,8 +142,8 @@ model Shop {
   timezone         String   @default("Asia/Kolkata")
   /// When the shop installed the app
   createdAt        DateTime @default(now()) @db.Timestamptz(3)
-  /// When shop settings were last updated
-  updatedAt        DateTime @updatedAt @db.Timestamptz(3)
+  /// When shop settings were last updated (set by trigger)
+  updatedAt        DateTime @default(now()) @db.Timestamptz(3)
 
   // Relations
   accounts      BuyerAccount[]
@@ -156,7 +156,7 @@ model Shop {
 /// Tag rule for non-B2B wholesale (tagged customer accounts)
 /// Maps customer tags to default payment terms
 model AccountSource {
-  id               String @id @default(cuid())
+  id               String @id @default(dbgenerated("gen_random_uuid()::text"))
   shopId           String
   /// Customer tag to match (e.g. "net30", "wholesale-gold")
   tag              String
@@ -164,8 +164,8 @@ model AccountSource {
   defaultTermsDays Int
   /// When the rule was created
   createdAt        DateTime @default(now()) @db.Timestamptz(3)
-  /// When the rule was last updated
-  updatedAt        DateTime @updatedAt @db.Timestamptz(3)
+  /// When the rule was last updated (set by trigger)
+  updatedAt        DateTime @default(now()) @db.Timestamptz(3)
 
   // Relations (onDelete: CASCADE - tag rules are shop-specific configuration)
   shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
@@ -177,8 +177,12 @@ model AccountSource {
 
 /// Buyer account: either a B2B Company/CompanyLocation or a tagged Customer
 /// Represents an entity that can receive invoices and make payments
+///
+/// CHECK constraint enforces kind consistency:
+/// - COMPANY requires companyLocationId (and companyId)
+/// - TAGGED_CUSTOMER requires customerId
 model BuyerAccount {
-  id                  String             @id @default(cuid())
+  id                  String             @id @default(dbgenerated("gen_random_uuid()::text"))
   shopId              String
   /// Type of buyer: B2B company or tagged customer
   kind                AccountKind
@@ -203,14 +207,18 @@ model BuyerAccount {
   bypass              Boolean            @default(false)
   /// When the account was created
   createdAt           DateTime           @default(now()) @db.Timestamptz(3)
-  /// When the account was last updated
-  updatedAt           DateTime           @updatedAt @db.Timestamptz(3)
+  /// When the account was last updated (set by trigger)
+  updatedAt           DateTime           @default(now()) @db.Timestamptz(3)
 
   // Relations (onDelete: CASCADE - accounts are shop-specific)
   shop     Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  // Invoices use NoAction to prevent silent deletion of financial history
   invoices Invoice[]
+  // Aliases can cascade - they're just helper data
   aliases  PayerAlias[]
 
+  // Composite unique for cross-shop integrity (enables composite FKs)
+  @@unique([id, shopId])
   // B2B: one account per company location per shop
   // Tagged: one account per customer per shop
   // nulls are distinct in unique constraints, so these work correctly
@@ -226,8 +234,12 @@ model BuyerAccount {
 
 /// Invoice from an order or draft order
 /// Tracks outstanding amounts and payment status
+///
+/// CHECK constraints:
+/// - 0 <= outstanding <= total
+/// - Exactly one of orderId/draftOrderId must be set
 model Invoice {
-  id              String        @id @default(cuid())
+  id              String        @id @default(dbgenerated("gen_random_uuid()::text"))
   shopId          String
   buyerAccountId  String
   /// Shopify Order GID (mutually exclusive with draftOrderId)
@@ -261,14 +273,20 @@ model Invoice {
   status          InvoiceStatus @default(open)
   /// When the invoice was created in our system
   createdAt       DateTime      @default(now()) @db.Timestamptz(3)
-  /// When the invoice was last updated
-  updatedAt       DateTime      @updatedAt @db.Timestamptz(3)
+  /// When the invoice was last updated (set by trigger)
+  updatedAt       DateTime      @default(now()) @db.Timestamptz(3)
 
-  // Relations (onDelete: CASCADE - invoices belong to buyer accounts)
-  account     BuyerAccount  @relation(fields: [buyerAccountId], references: [id], onDelete: Cascade)
+  // Relations
+  // Composite FK ensures invoice belongs to same shop as account
+  // NoAction: deleting an account with invoices is rejected (preserves financial history)
+  account     BuyerAccount  @relation(fields: [buyerAccountId, shopId], references: [id, shopId], onDelete: NoAction)
+  // Matches use NoAction to prevent silent deletion of allocations
   allocations Match[]
+  // ReminderLogs use NoAction to prevent silent deletion
   reminders   ReminderLog[]
 
+  // Composite unique for cross-shop integrity (enables composite FKs)
+  @@unique([id, shopId])
   // Index for common queries: open invoices by shop, sorted by due date
   @@index([shopId, status, dueAt])
   // Index for finding invoices by account
@@ -278,7 +296,7 @@ model Invoice {
 /// Bank statement import (HDFC, ICICI, or mapped format)
 /// Groups payments from a single import operation
 model BankImport {
-  id        String    @id @default(cuid())
+  id        String    @id @default(dbgenerated("gen_random_uuid()::text"))
   shopId    String
   /// Bank type: hdfc, icici, or mapped (normalized format)
   bank      String
@@ -291,15 +309,25 @@ model BankImport {
 
   // Relations (onDelete: CASCADE - imports are shop-specific)
   shop     Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  // Payments use NoAction to prevent silent deletion of financial history
   payments Payment[]
 
+  // Composite unique for cross-shop integrity (enables composite FKs)
+  @@unique([id, shopId])
   @@index([shopId, createdAt])
 }
 
 /// Payment: one bank credit from a statement import
 /// May match to one or more invoices
+///
+/// CHECK constraint: amount > 0
+///
+/// DPDP/Privacy note: narration and payerText contain raw bank statement data
+/// which may include payer names and identifiers. The customers/redact webhook
+/// handler (S22) will need to redact these fields for the affected customer.
+/// See GitHub issue for S22 implementation.
 model Payment {
-  id         String        @id @default(cuid())
+  id         String        @id @default(dbgenerated("gen_random_uuid()::text"))
   shopId     String
   importId   String
   /// Value date from the bank statement
@@ -310,21 +338,26 @@ model Payment {
   rail       String?
   /// Unique Transaction Reference (bank transaction ID)
   utr        String?
-  /// Payer name/text from the bank statement
+  /// Payer name/text from the bank statement (may contain PII - see DPDP note)
   payerText  String?
-  /// Full narration from the bank statement
+  /// Full narration from the bank statement (may contain PII - see DPDP note)
   narration  String
   /// Payment matching status
   status     PaymentStatus @default(unmatched)
   /// When the payment was imported
   createdAt  DateTime      @default(now()) @db.Timestamptz(3)
-  /// When the payment was last updated
-  updatedAt  DateTime      @updatedAt @db.Timestamptz(3)
+  /// When the payment was last updated (set by trigger)
+  updatedAt  DateTime      @default(now()) @db.Timestamptz(3)
 
-  // Relations (onDelete: CASCADE - payments belong to imports)
-  import  BankImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+  // Relations
+  // Composite FK ensures payment belongs to same shop as import
+  // NoAction: deleting an import with payments is rejected (preserves financial history)
+  import  BankImport @relation(fields: [importId, shopId], references: [id, shopId], onDelete: NoAction)
+  // Matches use NoAction to prevent silent deletion of allocations
   matches Match[]
 
+  // Composite unique for cross-shop integrity (enables composite FKs)
+  @@unique([id, shopId])
   // UTR is unique per shop (prevents duplicate imports)
   // Nullable UTR is allowed (some payments don't have UTR)
   @@unique([shopId, utr])
@@ -334,8 +367,15 @@ model Payment {
 
 /// Match: payment-to-invoice allocation (confirm-only model)
 /// Links a payment to an invoice with amount and confidence
+///
+/// CHECK constraints:
+/// - amount > 0
+/// - score between 0 and 100
+///
+/// shopId ensures payment and invoice are from the same shop via composite FKs
 model Match {
-  id          String     @id @default(cuid())
+  id          String     @id @default(dbgenerated("gen_random_uuid()::text"))
+  shopId      String
   paymentId   String
   invoiceId   String
   /// Amount allocated from this payment to this invoice
@@ -352,28 +392,31 @@ model Match {
   confirmedAt DateTime?  @db.Timestamptz(3)
   /// When the match was created
   createdAt   DateTime   @default(now()) @db.Timestamptz(3)
-  /// When the match was last updated
-  updatedAt   DateTime   @updatedAt @db.Timestamptz(3)
+  /// When the match was last updated (set by trigger)
+  updatedAt   DateTime   @default(now()) @db.Timestamptz(3)
 
-  // Relations (onDelete: CASCADE - matches belong to both payment and invoice)
-  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
-  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  // Relations
+  // Composite FKs ensure payment and invoice are from the same shop
+  // NoAction: deleting a payment/invoice with matches is rejected
+  payment Payment @relation(fields: [paymentId, shopId], references: [id, shopId], onDelete: NoAction)
+  invoice Invoice @relation(fields: [invoiceId, shopId], references: [id, shopId], onDelete: NoAction)
 
   @@index([paymentId])
   @@index([invoiceId])
+  @@index([shopId])
 }
 
 /// Payer alias: maps narration tokens to buyer accounts
 /// Used by the matching algorithm to recognize payers
 model PayerAlias {
-  id             String @id @default(cuid())
+  id             String @id @default(dbgenerated("gen_random_uuid()::text"))
   buyerAccountId String
   /// Normalized narration token (lowercase, common prefixes stripped)
   payerKey       String
   /// When the alias was created
   createdAt      DateTime @default(now()) @db.Timestamptz(3)
 
-  // Relations (onDelete: CASCADE - aliases belong to accounts)
+  // Relations (onDelete: CASCADE - aliases are helper data, not financial records)
   account BuyerAccount @relation(fields: [buyerAccountId], references: [id], onDelete: Cascade)
 
   // One alias per payer key per account
@@ -387,7 +430,7 @@ model PayerAlias {
 
 /// Reminder rule: when to send reminders relative to invoice due date
 model ReminderRule {
-  id         String          @id @default(cuid())
+  id         String          @id @default(dbgenerated("gen_random_uuid()::text"))
   shopId     String
   /// Days offset from due date: negative = before, 0 = on due, positive = after
   /// e.g. -3 = 3 days before due, 7 = 7 days overdue
@@ -398,11 +441,12 @@ model ReminderRule {
   enabled    Boolean         @default(true)
   /// When the rule was created
   createdAt  DateTime        @default(now()) @db.Timestamptz(3)
-  /// When the rule was last updated
-  updatedAt  DateTime        @updatedAt @db.Timestamptz(3)
+  /// When the rule was last updated (set by trigger)
+  updatedAt  DateTime        @default(now()) @db.Timestamptz(3)
 
-  // Relations (onDelete: CASCADE - rules are shop-specific)
+  // Relations (onDelete: CASCADE - rules are shop-specific config)
   shop Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  // Logs use NoAction to prevent silent deletion of reminder history
   logs ReminderLog[]
 
   @@index([shopId, enabled])
@@ -410,15 +454,17 @@ model ReminderRule {
 
 /// Reminder log: tracks sent reminders to prevent duplicates
 model ReminderLog {
-  id        String   @id @default(cuid())
+  id        String   @id @default(dbgenerated("gen_random_uuid()::text"))
   ruleId    String
   invoiceId String
   /// When the reminder was sent
   sentAt    DateTime @default(now()) @db.Timestamptz(3)
 
-  // Relations (onDelete: CASCADE - logs belong to rules and invoices)
-  rule    ReminderRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
-  invoice Invoice      @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  // Relations
+  // NoAction: deleting a rule with logs is rejected (preserves reminder history)
+  rule    ReminderRule @relation(fields: [ruleId], references: [id], onDelete: NoAction)
+  // NoAction: deleting an invoice with logs is rejected
+  invoice Invoice      @relation(fields: [invoiceId], references: [id], onDelete: NoAction)
 
   // One reminder per rule per invoice (prevents duplicate sends)
   @@unique([ruleId, invoiceId])
@@ -431,7 +477,7 @@ model ReminderLog {
 
 /// Audit event: tracks significant actions for compliance
 model AuditEvent {
-  id     String   @id @default(cuid())
+  id     String   @id @default(dbgenerated("gen_random_uuid()::text"))
   shopId String
   /// Who performed the action (user ID, "system", "webhook")
   actor  String
