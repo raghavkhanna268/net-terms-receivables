@@ -1,0 +1,39 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "net-terms-receivables",
+  "compatibility_date": "2026-10-19",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "./workers/app.ts",
+  
+  // Smart Placement - prefer Mumbai region for India-based merchants
+  "placement": {
+    "mode": "smart"
+  },
+  
+  // KV namespace for session storage
+  // Create with: wrangler kv namespace create SESSIONS
+  // Then replace <YOUR_KV_NAMESPACE_ID> with the actual ID
+  "kv_namespaces": [
+    {
+      "binding": "SESSIONS",
+      "id": "<YOUR_KV_NAMESPACE_ID>"
+    }
+  ],
+  
+  // Public environment variables (non-sensitive)
+  "vars": {
+    // Add non-sensitive vars here
+  },
+  
+  "observability": {
+    "enabled": true
+  },
+  
+  "upload_source_maps": true
+  
+  // Secrets are configured via wrangler CLI, not in this file:
+  // wrangler secret put SHOPIFY_API_KEY
+  // wrangler secret put SHOPIFY_API_SECRET
+  // wrangler secret put SHOPIFY_APP_URL
+  // wrangler secret put SCOPES
+}

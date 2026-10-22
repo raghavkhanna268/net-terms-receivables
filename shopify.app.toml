@@ -1,0 +1,47 @@
+# This file stores configurations for your Shopify app.
+# The client_id will be populated when you run `shopify app config link`
+client_id = ""
+
+[access_scopes]
+# Minimal scopes for initial scaffold - add more as needed
+# B2B wholesale net-terms will need: read_orders, read_customers
+# Later may need: write_orders, read_products, etc.
+scopes = "read_orders,read_customers"
+
+[webhooks]
+api_version = "2026-10"
+
+  # App lifecycle webhooks
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/uninstalled"
+  topics = ["app/uninstalled"]
+
+  [[webhooks.subscriptions]]
+  topics = ["app/scopes_update"]
+  uri = "/webhooks/app/scopes_update"
+
+  # Mandatory compliance topics for public apps
+  # Uncomment before submitting to App Store
+  # [[webhooks.subscriptions]]
+  # uri = "/webhooks/customers/data_request"
+  # compliance_topics = ["customers/data_request"]
+
+  # [[webhooks.subscriptions]]
+  # uri = "/webhooks/customers/redact"
+  # compliance_topics = ["customers/redact"]
+
+  # [[webhooks.subscriptions]]
+  # uri = "/webhooks/shop/redact"
+  # compliance_topics = ["shop/redact"]
+
+[auth]
+redirect_urls = [
+  "https://net-terms-receivables.<YOUR_WORKERS_SUBDOMAIN>.workers.dev/auth/callback",
+  "https://localhost/auth/callback"
+]
+
+[pos]
+embedded = false
+
+[build]
+automatically_update_urls_on_dev = true

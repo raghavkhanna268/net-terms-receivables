@@ -1,0 +1,47 @@
+node_modules
+
+# macOS
+.DS_Store
+
+# Build outputs
+/.cache
+/build
+/app/build
+/public/build/
+/public/_dev
+/app/public/build
+.wrangler
+dist
+
+# Environment files - NEVER commit secrets
+.env
+.env.*
+!.env.example
+
+# Lock files (using npm)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Shopify CLI files
+.shopify/*
+.shopify.lock
+
+# React Router auto-generated types
+.react-router/
+
+# Extensions build output
+/extensions/*/dist
+
+# Cloudflare
+.dev.vars
+.wrangler
+
+# TypeScript build info
+*.tsbuildinfo
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
