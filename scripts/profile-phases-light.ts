@@ -80,7 +80,8 @@ async function main() {
   console.log('\n--- Phase 4: Session Storage ---');
   
   const storageImportStart = performance.now();
-  const { LightSessionStorage } = await import('../app/lib/session-storage-light.server');
+  const { LightSessionStorage: _LightSessionStorage } = await import('../app/lib/session-storage-light.server');
+  void _LightSessionStorage; // Import timing only - class not used
   recordPhase('import LightSessionStorage', performance.now() - storageImportStart);
 
   // Phase 5: React SSR imports
