@@ -1,16 +1,29 @@
-import type { LoaderFunctionArgs } from "react-router";
+import type { LoaderFunctionArgs, HeadersFunction } from "react-router";
 import { redirect, Form, useLoaderData } from "react-router";
 
 import styles from "./styles.module.css";
 
+/**
+ * Cache-Control for the landing page.
+ * - private: response may contain user-specific content (login form)
+ * - max-age=60: browser caches for 1 minute
+ */
+export const headers: HeadersFunction = () => ({
+  "Cache-Control": "private, max-age=60",
+});
+
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
-  const { shopify } = context;
 
+  // Redirect shop parameter to /app without loading heavy Shopify modules
   if (url.searchParams.get("shop")) {
     throw redirect(`/app?${url.searchParams.toString()}`);
   }
 
+  // For App Store distribution apps, login form is always available.
+  // We access shopify.login to determine this, but for public apps
+  // this is a lightweight check (no DB access, no session).
+  const { shopify } = context;
   return { showForm: Boolean(shopify.login) };
 };
 

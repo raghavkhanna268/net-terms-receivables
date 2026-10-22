@@ -5,7 +5,8 @@ import {
   LogSeverity,
   shopifyApp,
 } from "@shopify/shopify-app-react-router/server";
-import { PrismaSessionStorage } from "./lib/session-storage.server";
+import { LightSessionStorage } from "./lib/session-storage-light.server";
+import { getRequestSql } from "./lib/request-context.server";
 import { parseScopes } from "./lib/scopes";
 
 /**
@@ -25,11 +26,14 @@ function requireEnv(name: string): string {
 /**
  * Module-scoped session storage singleton.
  *
- * Uses AsyncLocalStorage internally to get the correct Prisma client for
+ * Uses AsyncLocalStorage internally to get the correct SQL client for
  * each request. Safe to share across requests because it delegates to
- * getRequestPrisma() which returns the request-scoped client.
+ * getRequestSql() which returns the request-scoped client.
+ *
+ * This uses the lightweight postgres.js driver (~45KB gzipped) instead of
+ * Prisma (~1.1MB WASM) to reduce cold start time on Workers.
  */
-export const sessionStorage = new PrismaSessionStorage();
+export const sessionStorage = new LightSessionStorage(getRequestSql);
 
 /**
  * Cached Shopify app instance - created lazily on first access.
@@ -45,7 +49,7 @@ let cachedShopifyApp: ReturnType<typeof shopifyApp> | null = null;
  *
  * This function creates the shopifyApp instance once per isolate rather than
  * once per request. The session storage uses AsyncLocalStorage internally,
- * so each request automatically gets the correct Prisma client.
+ * so each request automatically gets the correct SQL client.
  *
  * CPU savings: ~4ms per warm request by avoiding repeated shopifyApp() calls.
  */
@@ -88,7 +92,7 @@ export function getShopifyApp(): ReturnType<typeof shopifyApp> {
 export const apiVersion = ApiVersion.October26;
 
 // Re-export types and session storage for routes
-export type { PrismaSessionStorage };
+export type { LightSessionStorage };
 export type ShopifyApp = ReturnType<typeof shopifyApp>;
 
 /**
