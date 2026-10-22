@@ -44,8 +44,8 @@ export function ErrorBoundary() {
         ? "The page you're looking for doesn't exist."
         : error.data?.message || message;
   } else if (error instanceof Error) {
-    message = error.message;
     if (import.meta.env.DEV) {
+      message = error.message;
       console.error(error);
     }
   }

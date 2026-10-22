@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { wrapWithSentry, captureException, captureMessage } from "./sentry";
 
 describe("sentry", () => {
@@ -24,6 +24,80 @@ describe("sentry", () => {
 
       expect(wrappedHandler).toHaveProperty("fetch");
       expect(wrappedHandler).toHaveProperty("scheduled");
+    });
+
+    it("passes inner Response through unchanged when no DSN is set", async () => {
+      const expectedBody = "test response body";
+      const expectedStatus = 201;
+      const expectedHeaders = { "X-Custom-Header": "test-value" };
+
+      const innerResponse = new Response(expectedBody, {
+        status: expectedStatus,
+        headers: expectedHeaders,
+      });
+
+      const handler = {
+        fetch: vi.fn().mockResolvedValue(innerResponse),
+      };
+
+      const wrappedHandler = wrapWithSentry(handler);
+
+      const mockRequest = new Request("https://example.com/test");
+      const mockEnv = {};
+      const mockCtx = {
+        waitUntil: vi.fn(),
+        passThroughOnException: vi.fn(),
+      };
+
+      const response = await wrappedHandler.fetch!(
+        mockRequest as unknown as Parameters<
+          NonNullable<typeof wrappedHandler.fetch>
+        >[0],
+        mockEnv as unknown as Parameters<
+          NonNullable<typeof wrappedHandler.fetch>
+        >[1],
+        mockCtx as unknown as Parameters<
+          NonNullable<typeof wrappedHandler.fetch>
+        >[2]
+      );
+
+      expect(handler.fetch).toHaveBeenCalledTimes(1);
+      expect(response.status).toBe(expectedStatus);
+      expect(response.headers.get("X-Custom-Header")).toBe("test-value");
+      expect(await response.text()).toBe(expectedBody);
+    });
+
+    it("passes inner Response through unchanged when DSN is empty string", async () => {
+      const expectedBody = "empty dsn response";
+      const innerResponse = new Response(expectedBody);
+
+      const handler = {
+        fetch: vi.fn().mockResolvedValue(innerResponse),
+      };
+
+      const wrappedHandler = wrapWithSentry(handler);
+
+      const mockRequest = new Request("https://example.com/test");
+      const mockEnv = { SENTRY_DSN: "" };
+      const mockCtx = {
+        waitUntil: vi.fn(),
+        passThroughOnException: vi.fn(),
+      };
+
+      const response = await wrappedHandler.fetch!(
+        mockRequest as unknown as Parameters<
+          NonNullable<typeof wrappedHandler.fetch>
+        >[0],
+        mockEnv as unknown as Parameters<
+          NonNullable<typeof wrappedHandler.fetch>
+        >[1],
+        mockCtx as unknown as Parameters<
+          NonNullable<typeof wrappedHandler.fetch>
+        >[2]
+      );
+
+      expect(handler.fetch).toHaveBeenCalledTimes(1);
+      expect(await response.text()).toBe(expectedBody);
     });
   });
 
