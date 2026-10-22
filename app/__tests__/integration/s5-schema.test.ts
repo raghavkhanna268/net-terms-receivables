@@ -416,8 +416,9 @@ describeWithDb("S5 Data Model Schema", () => {
       expect(match.score).toBe(95);
       expect(match.state).toBe("confirmed");
       expect(match.shopId).toBe(TEST_SHOP_ID);
-      // postgres.js parses JSONB into objects
-      expect(match.reasons).toEqual({ name_match: true, amount_match: true });
+      // With fetch_types:false, postgres.js returns JSONB as strings
+      const reasons = typeof match.reasons === "string" ? JSON.parse(match.reasons) : match.reasons;
+      expect(reasons).toEqual({ name_match: true, amount_match: true });
 
       const [rule] = await sql<ReminderRuleRow[]>`SELECT * FROM "ReminderRule" WHERE id = ${ruleId}`;
       expect(rule.offsetDays).toBe(-3);
@@ -430,7 +431,9 @@ describeWithDb("S5 Data Model Schema", () => {
 
       const [event] = await sql<AuditEventRow[]>`SELECT * FROM "AuditEvent" WHERE id = ${eventId}`;
       expect(event.type).toBe("invoice.created");
-      expect(event.data).toHaveProperty("invoiceId", invoiceScheduleId);
+      // With fetch_types:false, postgres.js returns JSONB as strings
+      const parsedEventData = typeof event.data === "string" ? JSON.parse(event.data) : event.data;
+      expect(parsedEventData).toHaveProperty("invoiceId", invoiceScheduleId);
 
       const [alias] = await sql<PayerAliasRow[]>`SELECT * FROM "PayerAlias" WHERE id = ${aliasId}`;
       expect(alias.payerKey).toBe("acme corp");
