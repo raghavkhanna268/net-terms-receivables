@@ -4,11 +4,11 @@
  * These types match the Prisma schema and are used by postgres.js queries.
  * Keep in sync with prisma/schema.prisma.
  *
- * Note: postgres.js with fetch_types: false returns:
+ * Note: postgres.js returns:
  * - numeric/decimal as strings (to avoid precision loss)
  * - int8/bigint as strings (to avoid precision loss)
  * - timestamptz as Date objects
- * - jsonb as STRINGS (not parsed) - must JSON.parse() at runtime
+ * - json/jsonb as parsed objects (built-in for oids 114/3802)
  */
 
 // =============================================================================
@@ -127,7 +127,7 @@ export interface MatchRow {
   invoiceId: string;
   amount: string; // Decimal -> string
   score: number;
-  reasons: string; // JSONB -> string with fetch_types:false, JSON.parse() at runtime
+  reasons: Record<string, unknown>; // JSONB -> parsed object
   state: MatchState;
   confirmedBy: string | null;
   confirmedAt: Date | null;
@@ -165,6 +165,6 @@ export interface AuditEventRow {
   shopId: string;
   actor: string;
   type: string;
-  data: string; // JSONB -> string with fetch_types:false, JSON.parse() at runtime
+  data: Record<string, unknown>; // JSONB -> parsed object
   at: Date;
 }

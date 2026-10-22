@@ -11,7 +11,7 @@
  * - No WASM, no query compilation overhead
  */
 
-import postgres from "postgres";
+import postgres, { type Options } from "postgres";
 
 export type Sql = ReturnType<typeof postgres>;
 
@@ -43,28 +43,43 @@ export interface SessionRow {
 }
 
 /**
+ * Shared postgres.js options for both production and test clients.
+ *
+ * Key behaviors:
+ * - fetch_types: false - Required for Hyperdrive, skips type-lookup query
+ * - Decimal/numeric columns return as strings (no precision loss)
+ * - TIMESTAMPTZ returns as Date objects
+ * - Bigint (int8) returns as strings
+ * - JSON/JSONB columns are parsed as objects (built-in for oids 114/3802)
+ *
+ * For JSON writes, use sql.json(obj) to serialize correctly.
+ * Use this for all postgres() clients to ensure consistent type handling.
+ */
+export const sqlOptions: Options<Record<string, never>> = {
+  // Hyperdrive handles pooling at the network level, so we use a single
+  // connection per request. The client is created lazily and closed in
+  // ctx.waitUntil after the response.
+  max: 1,
+  // Null handling for undefined values in parameters
+  transform: { undefined: null },
+  // Connection timeout in seconds
+  connect_timeout: 10,
+  // Skip type-lookup query on new connections (saves a round trip).
+  // Required for Hyperdrive per Cloudflare docs. Side effect: array params
+  // need explicit handling - use `IN ${sql(ids)}` instead of `ANY(${ids})`
+  // because ANY() needs type info to serialize arrays correctly.
+  // JSON/JSONB parsing still works (built-in for oids 114/3802).
+  fetch_types: false,
+};
+
+/**
  * Creates a postgres.js SQL client for Cloudflare Workers with Hyperdrive.
  *
  * @param connectionString - The Hyperdrive connection string from env.HYPERDRIVE.connectionString
  * @returns A configured postgres.js SQL instance
  */
 export function createSql(connectionString: string): Sql {
-  return postgres(connectionString, {
-    // Hyperdrive handles pooling at the network level, so we use a single
-    // connection per request. The client is created lazily and closed in
-    // ctx.waitUntil after the response.
-    max: 1,
-    // Null handling for undefined values in parameters
-    transform: { undefined: null },
-    // Connection timeout in seconds
-    connect_timeout: 10,
-    // Skip type-lookup query on new connections (saves a round trip).
-    // Required for Hyperdrive per Cloudflare docs. Side effect: array params
-    // need explicit handling - use `IN ${sql(ids)}` instead of `ANY(${ids})`
-    // because ANY() needs type info to serialize arrays correctly.
-    // Date/boolean/bigint parsing still works via postgres.js defaults.
-    fetch_types: false,
-  });
+  return postgres(connectionString, sqlOptions);
 }
 
 /**

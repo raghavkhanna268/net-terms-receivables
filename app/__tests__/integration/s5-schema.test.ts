@@ -13,6 +13,7 @@ import type {
   ReminderLogRow,
   AuditEventRow,
 } from "~/lib/s5-types";
+import { sqlOptions } from "~/lib/db-light.server";
 
 /**
  * Integration tests for S5 data model schema.
@@ -28,6 +29,7 @@ import type {
  * 8. Cross-shop integrity: composite FKs reject mismatched shopId
  * 9. CHECK constraints are enforced
  * 10. updatedAt trigger fires on update
+ * 11. JSON/JSONB columns are parsed as objects (via shared sqlOptions)
  *
  * These tests run against the CI Postgres 16 service container.
  */
@@ -44,8 +46,8 @@ describeWithDb("S5 Data Model Schema", () => {
   const TEST_SHOP_DOMAIN = `test-s5-${TEST_SUFFIX}.myshopify.com`;
 
   beforeAll(async () => {
-    // fetch_types:false required for Hyperdrive compatibility
-    sql = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+    // Use shared sqlOptions to match prod behavior (fetch_types:false + JSON parsing)
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
   });
 
   afterAll(async () => {
@@ -300,7 +302,7 @@ describeWithDb("S5 Data Model Schema", () => {
           ${invoiceScheduleId},
           '50000.00',
           95,
-          ${JSON.stringify(matchReasons)}::jsonb,
+          ${sql.json(matchReasons)},
           'confirmed',
           'user:admin@example.com',
           ${now},
@@ -347,7 +349,7 @@ describeWithDb("S5 Data Model Schema", () => {
           ${TEST_SHOP_ID},
           'user:admin@example.com',
           'invoice.created',
-          ${JSON.stringify(eventData)}::jsonb,
+          ${sql.json(eventData)},
           ${now}
         )
       `;
@@ -416,9 +418,13 @@ describeWithDb("S5 Data Model Schema", () => {
       expect(match.score).toBe(95);
       expect(match.state).toBe("confirmed");
       expect(match.shopId).toBe(TEST_SHOP_ID);
-      // With fetch_types:false, postgres.js returns JSONB as strings
-      const reasons = typeof match.reasons === "string" ? JSON.parse(match.reasons) : match.reasons;
-      expect(reasons).toEqual({ name_match: true, amount_match: true });
+      // JSONB is parsed as object by postgres.js (built-in for oid 3802)
+      expect(typeof match.reasons).toBe("object");
+      expect(Array.isArray(match.reasons)).toBe(false);
+      expect(match.reasons).toEqual({ name_match: true, amount_match: true });
+      // DB-side verification that it's stored as a JSON object, not a string scalar
+      const [matchJsonType] = await sql<{ t: string }[]>`SELECT jsonb_typeof(reasons) as t FROM "Match" WHERE id = ${matchId}`;
+      expect(matchJsonType.t).toBe("object");
 
       const [rule] = await sql<ReminderRuleRow[]>`SELECT * FROM "ReminderRule" WHERE id = ${ruleId}`;
       expect(rule.offsetDays).toBe(-3);
@@ -431,9 +437,13 @@ describeWithDb("S5 Data Model Schema", () => {
 
       const [event] = await sql<AuditEventRow[]>`SELECT * FROM "AuditEvent" WHERE id = ${eventId}`;
       expect(event.type).toBe("invoice.created");
-      // With fetch_types:false, postgres.js returns JSONB as strings
-      const parsedEventData = typeof event.data === "string" ? JSON.parse(event.data) : event.data;
-      expect(parsedEventData).toHaveProperty("invoiceId", invoiceScheduleId);
+      // JSONB is parsed as object by postgres.js (built-in for oid 3802)
+      expect(typeof event.data).toBe("object");
+      expect(Array.isArray(event.data)).toBe(false);
+      expect(event.data).toHaveProperty("invoiceId", invoiceScheduleId);
+      // DB-side verification that it's stored as a JSON object, not a string scalar
+      const [eventJsonType] = await sql<{ t: string }[]>`SELECT jsonb_typeof(data) as t FROM "AuditEvent" WHERE id = ${eventId}`;
+      expect(eventJsonType.t).toBe("object");
 
       const [alias] = await sql<PayerAliasRow[]>`SELECT * FROM "PayerAlias" WHERE id = ${aliasId}`;
       expect(alias.payerKey).toBe("acme corp");
@@ -444,7 +454,7 @@ describeWithDb("S5 Data Model Schema", () => {
     const TEST_TIMESTAMP = new Date("2025-07-04T23:30:00.000Z");
 
     it("round-trips correctly with DB session timezone UTC", async () => {
-      const sqlUtc = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+      const sqlUtc = postgres(TEST_DATABASE_URL!, sqlOptions);
       await sqlUtc`SET TIME ZONE 'UTC'`;
 
       const shopId = `shop-tz-utc-${TEST_SUFFIX}`;
@@ -461,7 +471,7 @@ describeWithDb("S5 Data Model Schema", () => {
     });
 
     it("round-trips correctly with DB session timezone Asia/Kolkata", async () => {
-      const sqlKolkata = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+      const sqlKolkata = postgres(TEST_DATABASE_URL!, sqlOptions);
       await sqlKolkata`SET TIME ZONE 'Asia/Kolkata'`;
 
       const shopId = `shop-tz-kolkata-${TEST_SUFFIX}`;
@@ -478,7 +488,7 @@ describeWithDb("S5 Data Model Schema", () => {
     });
 
     it("cross-writes and cross-reads correctly (write in Kolkata, read in NY)", async () => {
-      const sqlWrite = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+      const sqlWrite = postgres(TEST_DATABASE_URL!, sqlOptions);
       await sqlWrite`SET TIME ZONE 'Asia/Kolkata'`;
 
       const shopId = `shop-tz-cross-${TEST_SUFFIX}`;
@@ -488,7 +498,7 @@ describeWithDb("S5 Data Model Schema", () => {
       `;
       await sqlWrite.end();
 
-      const sqlRead = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+      const sqlRead = postgres(TEST_DATABASE_URL!, sqlOptions);
       await sqlRead`SET TIME ZONE 'America/New_York'`;
 
       const [shop] = await sqlRead<ShopRow[]>`SELECT * FROM "Shop" WHERE id = ${shopId}`;
@@ -517,7 +527,7 @@ describeWithDb("S5 Data Model Schema", () => {
         VALUES (${accountId}, ${shopId}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test Co', ${now}, ${now})
       `;
 
-      const sqlKolkata = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+      const sqlKolkata = postgres(TEST_DATABASE_URL!, sqlOptions);
       await sqlKolkata`SET TIME ZONE 'Asia/Kolkata'`;
 
       await sqlKolkata`
@@ -532,7 +542,7 @@ describeWithDb("S5 Data Model Schema", () => {
       `;
       await sqlKolkata.end();
 
-      const sqlNy = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+      const sqlNy = postgres(TEST_DATABASE_URL!, sqlOptions);
       await sqlNy`SET TIME ZONE 'America/New_York'`;
 
       const [invoice] = await sqlNy<InvoiceRow[]>`SELECT * FROM "Invoice" WHERE id = ${invoiceId}`;
@@ -760,7 +770,7 @@ describeWithDb("S5 Data Model Schema", () => {
       // Create Match
       await sql`
         INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, "createdAt", "updatedAt")
-        VALUES (${matchId}, ${shopId}, ${paymentId}, ${invoiceId}, '100.00', 80, '{}', ${now}, ${now})
+        VALUES (${matchId}, ${shopId}, ${paymentId}, ${invoiceId}, '100.00', 80, ${sql.json({})}, ${now}, ${now})
       `;
 
       // Create ReminderRule
@@ -778,7 +788,7 @@ describeWithDb("S5 Data Model Schema", () => {
       // Create AuditEvent
       await sql`
         INSERT INTO "AuditEvent" (id, "shopId", actor, type, data, at)
-        VALUES (${eventId}, ${shopId}, 'test', 'test.event', '{}', ${now})
+        VALUES (${eventId}, ${shopId}, 'test', 'test.event', ${sql.json({})}, ${now})
       `;
 
       // Verify everything exists
@@ -941,7 +951,7 @@ describeWithDb("S5 Data Model Schema", () => {
 
       await sql`
         INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, "createdAt", "updatedAt")
-        VALUES (${matchId}, ${shopId}, ${paymentId}, ${invoiceId}, '100.00', 80, '{}', ${now}, ${now})
+        VALUES (${matchId}, ${shopId}, ${paymentId}, ${invoiceId}, '100.00', 80, ${sql.json({})}, ${now}, ${now})
       `;
 
       // Attempting to delete the payment should fail
@@ -988,7 +998,7 @@ describeWithDb("S5 Data Model Schema", () => {
 
       await sql`
         INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, "createdAt", "updatedAt")
-        VALUES (${matchId}, ${shopId}, ${paymentId}, ${invoiceId}, '100.00', 80, '{}', ${now}, ${now})
+        VALUES (${matchId}, ${shopId}, ${paymentId}, ${invoiceId}, '100.00', 80, ${sql.json({})}, ${now}, ${now})
       `;
 
       // Attempting to delete the invoice should fail
@@ -1165,7 +1175,7 @@ describeWithDb("S5 Data Model Schema", () => {
       await expect(
         sql`
           INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, "createdAt", "updatedAt")
-          VALUES (${"match-xmatch-" + TEST_SUFFIX}, ${shop2Id}, ${payment2Id}, ${invoice1Id}, '100.00', 80, '{}', ${now}, ${now})
+          VALUES (${"match-xmatch-" + TEST_SUFFIX}, ${shop2Id}, ${payment2Id}, ${invoice1Id}, '100.00', 80, ${sql.json({})}, ${now}, ${now})
         `
       ).rejects.toThrow(/violates foreign key/i);
 
@@ -1286,7 +1296,7 @@ describeWithDb("S5 Data Model Schema", () => {
       await expect(
         sql`
           INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, "createdAt", "updatedAt")
-          VALUES (${"match-chk-mamt-" + TEST_SUFFIX}, ${shopId}, ${paymentId}, ${invoiceId}, '-50.00', 80, '{}', ${now}, ${now})
+          VALUES (${"match-chk-mamt-" + TEST_SUFFIX}, ${shopId}, ${paymentId}, ${invoiceId}, '-50.00', 80, ${sql.json({})}, ${now}, ${now})
         `
       ).rejects.toThrow(/Match_amount_positive/i);
 
@@ -1329,7 +1339,7 @@ describeWithDb("S5 Data Model Schema", () => {
       await expect(
         sql`
           INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, "createdAt", "updatedAt")
-          VALUES (${"match-chk-score-" + TEST_SUFFIX}, ${shopId}, ${paymentId}, ${invoiceId}, '100.00', 150, '{}', ${now}, ${now})
+          VALUES (${"match-chk-score-" + TEST_SUFFIX}, ${shopId}, ${paymentId}, ${invoiceId}, '100.00', 150, ${sql.json({})}, ${now}, ${now})
         `
       ).rejects.toThrow(/Match_score_range/i);
 
