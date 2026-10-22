@@ -17,7 +17,7 @@
   "hyperdrive": [
     {
       "binding": "HYPERDRIVE",
-      "id": "<YOUR_HYPERDRIVE_ID>",
+      "id": "dd3bb958bfd844cda0ab39126f0154fb",
       // For local dev, point to Supabase session pooler or local Postgres
       // wrangler dev uses this instead of Hyperdrive
       "localConnectionString": "postgresql://postgres:password@localhost:5432/net_terms"

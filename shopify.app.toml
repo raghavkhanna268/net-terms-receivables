@@ -1,8 +1,8 @@
 # This file stores configurations for your Shopify app.
 # The client_id will be populated when you run `shopify app config link`
-client_id = ""
+client_id = "dbfae79a0ca15489c7467598bce10965"
 name = "Net Terms Receivables"
-application_url = "https://net-terms-receivables.example.workers.dev"
+application_url = "https://net-terms-receivables.raghavkhanna.workers.dev"
 embedded = true
 
 [access_scopes]
@@ -29,13 +29,10 @@ api_version = "2026-10"
   compliance_topics = ["customers/data_request", "customers/redact", "shop/redact"]
 
 [auth]
-redirect_urls = [
-  "https://net-terms-receivables.<YOUR_WORKERS_SUBDOMAIN>.workers.dev/auth/callback",
-  "https://localhost/auth/callback"
-]
+redirect_urls = ["https://net-terms-receivables.raghavkhanna.workers.dev/auth/callback"]
 
 [pos]
 embedded = false
 
 [build]
-automatically_update_urls_on_dev = true
+automatically_update_urls_on_dev = false
