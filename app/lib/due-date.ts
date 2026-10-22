@@ -4,42 +4,42 @@
  * This module determines invoice due dates based on multiple sources with
  * a defined precedence order:
  *
- * 1. Shopify PaymentSchedule (source: "schedule") - highest priority, not configurable
+ * 1. Shopify PaymentSchedule with dueAt (source: "schedule") - highest priority
  *    - Uses the earliest non-completed schedule's dueAt
- *    - Falls back to the last schedule if all are completed
- *    - FULFILLMENT terms without fulfillment date return null
- *    - RECEIPT means due on the issue date
+ *    - Falls back to the latest dueAt if all completed
+ *    - RECEIPT terms: use Shopify's dueAt if provided, else EOD of order date
  *
- * 2. Merchant override (source: "override") - beats all INFERRED sources
+ * 1b. NET/FIXED with dueInDays but no schedule dueAt (source: "schedule", basis: "paymentTermsDueInDays")
+ *    - Computed from orderCreatedAt + dueInDays
+ *
+ * 2. FULFILLMENT terms without fulfillment date
+ *    - Returns pending status, then falls through to override/inferred sources
+ *    - Once fulfilled, calculates from fulfillment date
+ *
+ * 3. Merchant override (source: "override") - beats all INFERRED sources
  *    - Optional merchantOverrideDueAt input
- *    - IMPORTANT: Does NOT override a Shopify PaymentSchedule dueAt, because for
- *      schedule-backed orders Shopify is the source of truth (its paymentReminderSend
- *      and overdue state use that date). In that case we keep 'schedule' and note
- *      in `reason` that the override was ignored and terms should be changed in Shopify.
+ *    - IMPORTANT: Does NOT override a Shopify PaymentSchedule with dueAt, because
+ *      for schedule-backed orders Shopify is the source of truth. In that case we
+ *      keep 'schedule' and note in `reason` that the override was ignored.
+ *    - CAN apply when FULFILLMENT has no date yet (no Shopify date to conflict with)
  *
- * 3-5. Inferred sources (configurable via INFERENCE_ORDER or inferenceOrder param):
- *    - "accountDefault": Account's EXPLICIT defaultTermsDays (more specific than tag rules)
- *      If accountDefaultTermsSource is 'tag', this step is skipped (see below).
- *    - "tagRule": Tag rule match (case-insensitive, trimmed matching)
- *      If multiple rules match, uses the LARGEST defaultTermsDays
- *      (conservative: never flag overdue early)
+ * 4-6. Inferred sources (configurable via INFERENCE_ORDER or inferenceOrder param):
+ *    - "accountDefault": Account's EXPLICIT defaultTermsDays
+ *    - "tagRule": Tag rule match OR tag-copied account default (more specific than shop)
+ *      If multiple rules match, uses the LARGEST defaultTermsDays (conservative)
  *    - "shopDefault": Shop's default terms days (last resort before 'none')
  *
  * Special case: tag-copied account defaults
  *    If accountDefaultTermsSource is 'tag', the account's default was copied from
- *    a tag at sync time. We skip it at the account-default step and let the tag-rule
- *    step decide. If no tag rule currently matches, we fall back to the copied value
- *    but report it as tag-derived in `reason`.
+ *    a tag at sync time. We skip it at the account-default step. It participates
+ *    at the tag-rule level: if a current tag rule matches, use it; otherwise fall
+ *    back to the copied value (it's more specific than the shop default).
  *
- * 6. No source available (source: "none")
- *
- * The inferred-source precedence can be changed by:
- * - Modifying INFERENCE_ORDER constant (one-line change for product owner)
- * - Passing inferenceOrder option to inferDueDate()
+ * 7. No source available (source: "none")
  *
  * Date arithmetic: adds N calendar days in the shop's IANA timezone
  * (default 'Asia/Kolkata') and returns end-of-day (23:59:59.999 local)
- * as a UTC Date. Handles DST correctly using Intl APIs.
+ * as a UTC Date. Handles DST correctly using iterative offset calculation.
  */
 
 /**
@@ -56,6 +56,12 @@ export const INFERENCE_ORDER = [
 
 /** Type for inferred source keys */
 export type InferredSourceKey = (typeof INFERENCE_ORDER)[number];
+
+/** Basis for the due date calculation */
+export type DueDateBasis =
+  | InferredSourceKey
+  | "paymentTermsDueInDays"
+  | null;
 
 /** Shopify payment terms types */
 export type PaymentTermsType = "NET" | "FIXED" | "FULFILLMENT" | "RECEIPT";
@@ -82,7 +88,7 @@ export interface PaymentTerms {
 export interface TagRule {
   /** The tag to match (case-insensitive, trimmed) */
   tag: string;
-  /** Default terms days when this tag matches */
+  /** Default terms days when this tag matches (must be non-negative integer) */
   defaultTermsDays: number;
 }
 
@@ -130,8 +136,8 @@ export interface InferDueDateResult {
   dueAt: Date | null;
   /** Source of the due date */
   dueSource: "schedule" | "override" | "inferred" | "none";
-  /** Which inferred source was used (null if dueSource is not 'inferred') */
-  basis: InferredSourceKey | null;
+  /** Which inferred source was used (null if dueSource is not 'inferred', or 'paymentTermsDueInDays' for computed NET) */
+  basis: DueDateBasis;
   /** Human-readable explanation of how the due date was determined */
   reason: string;
 }
@@ -139,56 +145,128 @@ export interface InferDueDateResult {
 const DEFAULT_TIMEZONE = "Asia/Kolkata";
 
 /**
- * Calculate end-of-day (23:59:59.999) for a given date in a specific timezone,
- * then convert back to UTC.
- *
- * Uses Intl.DateTimeFormat to get timezone offset, avoiding heavy date libraries.
- * Handles DST transitions correctly by working with the local date components.
+ * Validate that a timezone is valid IANA timezone.
  */
-export function getEndOfDayInTimezone(date: Date, timezone: string): Date {
+function isValidTimezone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validate that a Date is valid.
+ */
+function isValidDate(d: Date): boolean {
+  return d instanceof Date && !isNaN(d.getTime());
+}
+
+/**
+ * Get offset in milliseconds for a given UTC instant in a timezone.
+ * Returns the difference: localTime - utcTime (positive for east of UTC).
+ */
+function getOffsetMs(utcInstant: Date, timezone: string): number {
   const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone: timezone,
+    hourCycle: "h23",
     year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "numeric",
+    second: "numeric",
   });
 
-  const parts = formatter.formatToParts(date);
-  const getPart = (type: Intl.DateTimeFormatPartTypes): string =>
-    parts.find((p) => p.type === type)?.value ?? "0";
+  const parts = formatter.formatToParts(utcInstant);
+  const getPart = (type: Intl.DateTimeFormatPartTypes): number => {
+    const part = parts.find((p) => p.type === type);
+    return part ? parseInt(part.value, 10) : 0;
+  };
 
-  const year = parseInt(getPart("year"), 10);
-  const month = parseInt(getPart("month"), 10);
-  const day = parseInt(getPart("day"), 10);
+  const localYear = getPart("year");
+  const localMonth = getPart("month");
+  const localDay = getPart("day");
+  const localHour = getPart("hour");
+  const localMinute = getPart("minute");
+  const localSecond = getPart("second");
 
-  // Create end of day in UTC first, then adjust for timezone
-  const eodUtc = Date.UTC(year, month - 1, day, 23, 59, 59, 999);
+  const localAsUtc = Date.UTC(
+    localYear,
+    localMonth - 1,
+    localDay,
+    localHour,
+    localMinute,
+    localSecond,
+    utcInstant.getUTCMilliseconds()
+  );
 
-  // Get the offset at this moment in the target timezone
-  const testDate = new Date(eodUtc);
-  const tzParts = formatter.formatToParts(testDate);
-  const tzGetPart = (type: Intl.DateTimeFormatPartTypes): string =>
-    tzParts.find((p) => p.type === type)?.value ?? "0";
+  return localAsUtc - utcInstant.getTime();
+}
 
-  const tzYear = parseInt(tzGetPart("year"), 10);
-  const tzMonth = parseInt(tzGetPart("month"), 10);
-  const tzDay = parseInt(tzGetPart("day"), 10);
-  const tzHour = parseInt(tzGetPart("hour"), 10);
-  const tzMinute = parseInt(tzGetPart("minute"), 10);
+/**
+ * Get the local date components for a UTC instant in a timezone.
+ */
+function getLocalDateParts(
+  utcInstant: Date,
+  timezone: string
+): { year: number; month: number; day: number } {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+  });
 
-  // Calculate offset: what's the difference between UTC and local?
-  const localMs = Date.UTC(tzYear, tzMonth - 1, tzDay, tzHour, tzMinute, 59, 999);
-  const offsetMs = localMs - eodUtc;
+  const parts = formatter.formatToParts(utcInstant);
+  const getPart = (type: Intl.DateTimeFormatPartTypes): number => {
+    const part = parts.find((p) => p.type === type);
+    return part ? parseInt(part.value, 10) : 0;
+  };
 
-  // Now create the actual end of day: start with the target date's EOD in UTC,
-  // then subtract the offset to get when that local time occurs in UTC
-  const result = new Date(eodUtc - offsetMs);
+  return {
+    year: getPart("year"),
+    month: getPart("month"),
+    day: getPart("day"),
+  };
+}
 
-  return result;
+/**
+ * Calculate end-of-day (23:59:59.999) for a given local date in a specific timezone,
+ * returning the UTC instant.
+ *
+ * Uses iterative offset calculation to handle DST transitions correctly:
+ * 1. Start with wall clock time 23:59:59.999 as if it were UTC
+ * 2. Adjust by the offset at that instant
+ * 3. Re-adjust by the offset at the corrected instant (handles DST edge)
+ */
+export function endOfLocalDay(
+  year: number,
+  month: number,
+  day: number,
+  timezone: string
+): Date {
+  // Wall clock time we want: 23:59:59.999 on the given date
+  const wallMs = Date.UTC(year, month - 1, day, 23, 59, 59, 999);
+
+  // First approximation: UTC instant = wall - offset(wall)
+  let t = wallMs - getOffsetMs(new Date(wallMs), timezone);
+
+  // Second iteration: refine with offset at the approximated instant
+  // This handles DST transitions where the offset changes between wall and t
+  t = wallMs - getOffsetMs(new Date(t), timezone);
+
+  return new Date(t);
+}
+
+/**
+ * Calculate end-of-day (23:59:59.999) for a given UTC instant's local date in a timezone.
+ */
+export function getEndOfDayInTimezone(utcInstant: Date, timezone: string): Date {
+  const { year, month, day } = getLocalDateParts(utcInstant, timezone);
+  return endOfLocalDay(year, month, day, timezone);
 }
 
 /**
@@ -199,98 +277,139 @@ export function addDaysAndGetEndOfDay(
   days: number,
   timezone: string
 ): Date {
-  // Get the date components in the target timezone
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: timezone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
+  // Get the local date components
+  const { year, month, day } = getLocalDateParts(baseDate, timezone);
 
-  const parts = formatter.formatToParts(baseDate);
-  const getPart = (type: Intl.DateTimeFormatPartTypes): string =>
-    parts.find((p) => p.type === type)?.value ?? "0";
+  // Add days using UTC date arithmetic to get the target calendar date
+  // This correctly handles month/year overflow
+  const targetDate = new Date(Date.UTC(year, month - 1, day + days));
 
-  const year = parseInt(getPart("year"), 10);
-  const month = parseInt(getPart("month"), 10);
-  const day = parseInt(getPart("day"), 10);
+  // Return end of that target date in the timezone
+  return endOfLocalDay(
+    targetDate.getUTCFullYear(),
+    targetDate.getUTCMonth() + 1,
+    targetDate.getUTCDate(),
+    timezone
+  );
+}
 
-  // Add days using UTC date arithmetic (avoids any DST issues during addition)
-  const targetDate = new Date(Date.UTC(year, month - 1, day + days, 12, 0, 0));
+/**
+ * Validate tag rules: must have non-negative integer defaultTermsDays.
+ * Returns valid rules and a list of invalid rules.
+ */
+function validateTagRules(rules: TagRule[]): {
+  valid: TagRule[];
+  invalid: TagRule[];
+} {
+  const valid: TagRule[] = [];
+  const invalid: TagRule[] = [];
 
-  // Now get end of day for that target date in the timezone
-  return getEndOfDayInTimezone(targetDate, timezone);
+  for (const rule of rules) {
+    if (
+      typeof rule.defaultTermsDays === "number" &&
+      Number.isInteger(rule.defaultTermsDays) &&
+      rule.defaultTermsDays >= 0
+    ) {
+      valid.push(rule);
+    } else {
+      invalid.push(rule);
+    }
+  }
+
+  return { valid, invalid };
 }
 
 /**
  * Infer the due date for an invoice based on available information.
- *
- * Precedence (documented architecture decision):
- * 1. Shopify PaymentSchedule dueAt → source "schedule"
- * 2. Merchant override → source "override" (but not if schedule exists)
- * 3-5. Inferred sources per INFERENCE_ORDER → source "inferred"
- * 6. Nothing available → null with source "none"
  */
 export function inferDueDate(input: InferDueDateInput): InferDueDateResult {
-  const timezone = input.shopTimezone ?? DEFAULT_TIMEZONE;
+  // Validate orderCreatedAt
+  if (!isValidDate(input.orderCreatedAt)) {
+    return {
+      dueAt: null,
+      dueSource: "none",
+      basis: null,
+      reason: "Invalid order created date",
+    };
+  }
+
+  // Validate and normalize timezone
+  const requestedTz = input.shopTimezone ?? DEFAULT_TIMEZONE;
+  const timezone = isValidTimezone(requestedTz) ? requestedTz : DEFAULT_TIMEZONE;
+  const tzNote =
+    timezone !== requestedTz
+      ? ` (invalid timezone '${requestedTz}' replaced with '${DEFAULT_TIMEZONE}')`
+      : "";
+
   const order = input.inferenceOrder ?? INFERENCE_ORDER;
 
   // 1. Try Shopify PaymentSchedule first (highest priority)
-  // RECEIPT type works even with empty schedules (due on order date)
   if (input.paymentTerms) {
-    const scheduleResult = inferFromPaymentSchedule(
+    const scheduleResult = inferFromPaymentTerms(
       input.paymentTerms,
       input.orderCreatedAt,
       input.fulfilledAt,
       timezone
     );
+
     if (scheduleResult) {
-      // If there's a merchant override but schedule exists, note it in reason
-      if (input.merchantOverrideDueAt && scheduleResult.dueAt) {
-        return {
-          ...scheduleResult,
-          reason:
-            scheduleResult.reason +
-            " (merchant override ignored; change terms in Shopify for schedule-backed orders)",
-        };
+      // If we got a definite schedule result (not pending FULFILLMENT)
+      if (scheduleResult.dueAt !== null || scheduleResult.dueSource === "schedule") {
+        // If there's a merchant override but we have a schedule dueAt, note it
+        if (input.merchantOverrideDueAt && scheduleResult.dueAt) {
+          return {
+            ...scheduleResult,
+            reason:
+              scheduleResult.reason +
+              " (merchant override ignored; change terms in Shopify for schedule-backed orders)" +
+              tzNote,
+          };
+        }
+        // For FULFILLMENT pending (null dueAt), fall through to try override
+        if (scheduleResult.dueAt !== null) {
+          return {
+            ...scheduleResult,
+            reason: scheduleResult.reason + tzNote,
+          };
+        }
       }
-      return scheduleResult;
     }
   }
 
+  // Check for pending FULFILLMENT - can use override or inferred sources
+  const isPendingFulfillment =
+    input.paymentTerms?.type === "FULFILLMENT" && !input.fulfilledAt;
+  const fulfillmentNote = isPendingFulfillment
+    ? " (FULFILLMENT pending: no fulfillment date yet)"
+    : "";
+
   // 2. Merchant override beats all inferred sources
   if (input.merchantOverrideDueAt) {
+    if (!isValidDate(input.merchantOverrideDueAt)) {
+      return {
+        dueAt: null,
+        dueSource: "none",
+        basis: null,
+        reason: "Invalid merchant override date" + fulfillmentNote + tzNote,
+      };
+    }
     return {
       dueAt: input.merchantOverrideDueAt,
       dueSource: "override",
       basis: null,
-      reason: "Merchant override for this invoice",
+      reason: "Merchant override for this invoice" + fulfillmentNote + tzNote,
     };
   }
 
   // 3-5. Try inferred sources in configured order
   for (const source of order) {
     const result = tryInferredSource(source, input, timezone);
-    if (result) return result;
-  }
-
-  // Special case: tag-copied account default as fallback when no tag rule matched
-  if (
-    input.accountDefaultTermsSource === "tag" &&
-    input.accountDefaultTermsDays !== null &&
-    input.accountDefaultTermsDays >= 0
-  ) {
-    const dueAt = addDaysAndGetEndOfDay(
-      input.orderCreatedAt,
-      input.accountDefaultTermsDays,
-      timezone
-    );
-    return {
-      dueAt,
-      dueSource: "inferred",
-      basis: "tagRule",
-      reason: `Tag-derived account default: net ${input.accountDefaultTermsDays} days (no current tag rule matched)`,
-    };
+    if (result) {
+      return {
+        ...result,
+        reason: result.reason + fulfillmentNote + tzNote,
+      };
+    }
   }
 
   // 6. Nothing available
@@ -299,7 +418,9 @@ export function inferDueDate(input: InferDueDateInput): InferDueDateResult {
     dueSource: "none",
     basis: null,
     reason:
-      "No payment terms, merchant override, account default, tag rule, or shop default found",
+      "No payment terms, merchant override, account default, tag rule, or shop default found" +
+      fulfillmentNote +
+      tzNote,
   };
 }
 
@@ -315,7 +436,7 @@ function tryInferredSource(
     case "accountDefault":
       return tryAccountDefault(input, timezone);
     case "tagRule":
-      return tryTagRules(input, timezone);
+      return tryTagRulesWithCopiedFallback(input, timezone);
     case "shopDefault":
       return tryShopDefault(input, timezone);
   }
@@ -336,6 +457,7 @@ function tryAccountDefault(
 
   if (
     input.accountDefaultTermsDays !== null &&
+    Number.isInteger(input.accountDefaultTermsDays) &&
     input.accountDefaultTermsDays >= 0
   ) {
     const dueAt = addDaysAndGetEndOfDay(
@@ -355,12 +477,52 @@ function tryAccountDefault(
 }
 
 /**
- * Try tag rules.
+ * Try tag rules, with fallback to tag-copied account default.
  *
  * ARCHITECTURE DECISION: When multiple rules match, we use the LARGEST
  * defaultTermsDays. This is a conservative choice that ensures we never
  * flag a buyer as overdue prematurely. The tradeoff is that some payments
  * may appear current for longer than intended if tags are misconfigured.
+ *
+ * Tag-copied account defaults participate at this level (more specific than
+ * shop default). If a current tag rule matches, use it. Otherwise fall back
+ * to the copied value.
+ */
+function tryTagRulesWithCopiedFallback(
+  input: InferDueDateInput,
+  timezone: string
+): InferDueDateResult | null {
+  // First try matching tag rules
+  const tagRuleResult = tryTagRules(input, timezone);
+  if (tagRuleResult) {
+    return tagRuleResult;
+  }
+
+  // Fall back to tag-copied account default (more specific than shop default)
+  if (
+    input.accountDefaultTermsSource === "tag" &&
+    input.accountDefaultTermsDays !== null &&
+    Number.isInteger(input.accountDefaultTermsDays) &&
+    input.accountDefaultTermsDays >= 0
+  ) {
+    const dueAt = addDaysAndGetEndOfDay(
+      input.orderCreatedAt,
+      input.accountDefaultTermsDays,
+      timezone
+    );
+    return {
+      dueAt,
+      dueSource: "inferred",
+      basis: "tagRule",
+      reason: `Tag-derived account default: net ${input.accountDefaultTermsDays} days (no current tag rule matched)`,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Try tag rules only (no fallback).
  */
 function tryTagRules(
   input: InferDueDateInput,
@@ -370,13 +532,26 @@ function tryTagRules(
     return null;
   }
 
+  // Validate tag rules
+  const { valid: validRules, invalid: invalidRules } = validateTagRules(
+    input.tagRules
+  );
+
+  if (validRules.length === 0) {
+    if (invalidRules.length > 0) {
+      // All rules were invalid - this shouldn't block, just skip
+      return null;
+    }
+    return null;
+  }
+
   // Normalize customer tags: lowercase and trim
   const normalizedCustomerTags = input.customerTags.map((t) =>
     t.toLowerCase().trim()
   );
 
   // Find all matching rules
-  const matchingRules = input.tagRules.filter((rule) =>
+  const matchingRules = validRules.filter((rule) =>
     normalizedCustomerTags.includes(rule.tag.toLowerCase().trim())
   );
 
@@ -404,6 +579,11 @@ function tryTagRules(
     reason = `Tag rule '${bestRule.tag}': net ${bestRule.defaultTermsDays} days`;
   }
 
+  // Note if any rules were invalid
+  if (invalidRules.length > 0) {
+    reason += ` (${invalidRules.length} invalid rule(s) ignored)`;
+  }
+
   return {
     dueAt,
     dueSource: "inferred",
@@ -421,6 +601,7 @@ function tryShopDefault(
 ): InferDueDateResult | null {
   if (
     input.shopDefaultTermsDays !== null &&
+    Number.isInteger(input.shopDefaultTermsDays) &&
     input.shopDefaultTermsDays >= 0
   ) {
     const dueAt = addDaysAndGetEndOfDay(
@@ -440,18 +621,30 @@ function tryShopDefault(
 }
 
 /**
- * Infer due date from Shopify payment schedule.
+ * Infer due date from Shopify payment terms.
+ * Returns null only if we should fall through to other sources.
  */
-function inferFromPaymentSchedule(
+function inferFromPaymentTerms(
   terms: PaymentTerms,
   orderCreatedAt: Date,
   fulfilledAt: Date | null,
   timezone: string
 ): InferDueDateResult | null {
-  const { type, schedules } = terms;
+  const { type, schedules, dueInDays } = terms;
 
-  // Handle RECEIPT type: due immediately on issue date
+  // Handle RECEIPT type
   if (type === "RECEIPT") {
+    // Check if any schedule has a dueAt set by Shopify - use it if so
+    const scheduleWithDue = schedules.find((s) => s.dueAt !== null);
+    if (scheduleWithDue?.dueAt) {
+      return {
+        dueAt: scheduleWithDue.dueAt,
+        dueSource: "schedule",
+        basis: null,
+        reason: "Payment due on receipt (Shopify schedule)",
+      };
+    }
+    // Otherwise use end of order date
     const dueAt = getEndOfDayInTimezone(orderCreatedAt, timezone);
     return {
       dueAt,
@@ -461,9 +654,9 @@ function inferFromPaymentSchedule(
     };
   }
 
-  // Handle FULFILLMENT type: due date depends on fulfillment
+  // Handle FULFILLMENT type
   if (type === "FULFILLMENT") {
-    // Check if any schedule has a dueAt already set
+    // Check if any schedule has a dueAt already set by Shopify
     const scheduleWithDue = schedules.find((s) => s.dueAt !== null);
     if (scheduleWithDue?.dueAt) {
       return {
@@ -476,17 +669,13 @@ function inferFromPaymentSchedule(
 
     // No dueAt set yet - need fulfillment date
     if (!fulfilledAt) {
-      return {
-        dueAt: null,
-        dueSource: "schedule",
-        basis: null,
-        reason:
-          "FULFILLMENT terms: due date unknown until order is fulfilled",
-      };
+      // Return null to signal fall-through to override/inferred sources
+      // The caller will add the fulfillment note
+      return null;
     }
 
     // Calculate due date from fulfillment date
-    const daysToAdd = terms.dueInDays ?? 0;
+    const daysToAdd = dueInDays ?? 0;
     const dueAt = addDaysAndGetEndOfDay(fulfilledAt, daysToAdd, timezone);
     return {
       dueAt,
@@ -497,11 +686,12 @@ function inferFromPaymentSchedule(
   }
 
   // For NET and FIXED types: find the appropriate schedule
-  // Use the earliest non-completed schedule; if all completed, use the last one
+  // First, try to find a schedule with dueAt
   const nonCompletedSchedules = schedules.filter((s) => s.completedAt === null);
+  const completedSchedules = schedules.filter((s) => s.completedAt !== null);
 
+  // Use the earliest non-completed schedule with dueAt
   if (nonCompletedSchedules.length > 0) {
-    // Find earliest dueAt among non-completed schedules
     const withDueAt = nonCompletedSchedules.filter((s) => s.dueAt !== null);
     if (withDueAt.length > 0) {
       const earliest = withDueAt.reduce((min, s) =>
@@ -519,19 +709,38 @@ function inferFromPaymentSchedule(
     }
   }
 
-  // All schedules are completed - use the last one
-  if (schedules.length > 0) {
-    const lastSchedule = schedules[schedules.length - 1];
-    if (lastSchedule.dueAt) {
+  // All schedules are completed - use the latest dueAt (not array-last)
+  if (completedSchedules.length > 0) {
+    const withDueAt = completedSchedules.filter((s) => s.dueAt !== null);
+    if (withDueAt.length > 0) {
+      const latest = withDueAt.reduce((max, s) =>
+        s.dueAt!.getTime() > max.dueAt!.getTime() ? s : max
+      );
       return {
-        dueAt: lastSchedule.dueAt,
+        dueAt: latest.dueAt,
         dueSource: "schedule",
         basis: null,
-        reason: "Last payment schedule (all payments completed)",
+        reason: "Latest payment schedule (all payments completed)",
       };
     }
   }
 
-  // Schedules exist but none have dueAt - shouldn't happen in practice
+  // No schedule has dueAt, but we have dueInDays - compute from order date
+  if (
+    dueInDays !== null &&
+    Number.isInteger(dueInDays) &&
+    dueInDays >= 0 &&
+    (type === "NET" || type === "FIXED")
+  ) {
+    const dueAt = addDaysAndGetEndOfDay(orderCreatedAt, dueInDays, timezone);
+    return {
+      dueAt,
+      dueSource: "schedule",
+      basis: "paymentTermsDueInDays",
+      reason: `${type} terms: net ${dueInDays} days from order date (computed from dueInDays)`,
+    };
+  }
+
+  // Nothing usable in payment terms
   return null;
 }
