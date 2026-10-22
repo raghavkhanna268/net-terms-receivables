@@ -27,7 +27,7 @@
   // Public environment variables (non-sensitive, ok to commit placeholders)
   "vars": {
     "SCOPES": "",
-    "SHOPIFY_APP_URL": "https://net-terms-receivables.<subdomain>.workers.dev"
+    "SHOPIFY_APP_URL": "https://net-terms-receivables.raghavkhanna.workers.dev"
   },
 
   "observability": {
