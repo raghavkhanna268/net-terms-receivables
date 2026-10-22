@@ -3,8 +3,23 @@ import { ServerRouter } from "react-router";
 import { renderToReadableStream } from "react-dom/server";
 import { isbot } from "isbot";
 import { addDocumentResponseHeaders, sessionStorage } from "./shopify.server";
+import { captureException } from "./lib/sentry";
 
 export const streamTimeout = 5000;
+
+/**
+ * React Router error handler - reports uncaught errors to Sentry.
+ * Skips aborted requests (user navigated away).
+ */
+export function handleError(
+  error: unknown,
+  { request }: { request: Request }
+): void {
+  if (request.signal.aborted) {
+    return;
+  }
+  captureException(error);
+}
 
 export default async function handleRequest(
   request: Request,
@@ -14,7 +29,8 @@ export default async function handleRequest(
   loadContext: AppLoadContext
 ) {
   // Inject the KV namespace into session storage for this request
-  const env = (loadContext as any).cloudflare?.env;
+  const cloudflare = (loadContext as { cloudflare?: { env?: Env } }).cloudflare;
+  const env = cloudflare?.env;
   if (env?.SESSIONS) {
     sessionStorage.setNamespace(env.SESSIONS);
   }

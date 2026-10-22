@@ -1,0 +1,12 @@
+# Cloudflare Workers local development secrets
+# Copy to .dev.vars and fill in values (never commit .dev.vars)
+
+# Shopify App credentials (from Partner Dashboard)
+SHOPIFY_API_KEY=
+SHOPIFY_API_SECRET=
+SHOPIFY_APP_URL=http://localhost:3000
+SCOPES=read_orders,read_customers
+
+# Sentry error monitoring (optional, leave empty for local dev)
+SENTRY_DSN=
+SENTRY_TRACES_SAMPLE_RATE=0

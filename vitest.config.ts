@@ -1,9 +1,11 @@
 import { defineConfig } from "vitest/config";
+import tsconfigPaths from "vite-tsconfig-paths";
 
 export default defineConfig({
+  plugins: [tsconfigPaths()],
   test: {
     environment: "node",
-    include: ["**/__tests__/**/*.test.ts"],
-    globals: true,
+    include: ["**/*.test.{ts,tsx}", "**/__tests__/**/*.test.ts"],
+    exclude: ["node_modules", "build", ".react-router"],
   },
 });

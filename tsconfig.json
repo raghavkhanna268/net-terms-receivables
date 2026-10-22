@@ -7,14 +7,16 @@
     "workers/**/*",
     "worker-configuration.d.ts",
     "vite.config.ts",
+    "vitest.config.ts",
     "react-router.config.ts",
-    ".graphqlrc.ts"
+    ".graphqlrc.ts",
+    "env.d.ts"
   ],
   "compilerOptions": {
     "strict": true,
     "skipLibCheck": true,
     "lib": ["DOM", "DOM.Iterable", "ES2022"],
-    "types": ["vite/client", "@shopify/polaris-types", "node"],
+    "types": ["vite/client", "@shopify/polaris-types"],
     "target": "ES2022",
     "module": "ES2022",
     "moduleResolution": "bundler",
