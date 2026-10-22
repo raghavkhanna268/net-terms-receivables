@@ -14,7 +14,8 @@ export default async function handleRequest(
   loadContext: AppLoadContext
 ) {
   // Inject the KV namespace into session storage for this request
-  const env = (loadContext as any).cloudflare?.env;
+  const cloudflare = (loadContext as { cloudflare?: { env?: Env } }).cloudflare;
+  const env = cloudflare?.env;
   if (env?.SESSIONS) {
     sessionStorage.setNamespace(env.SESSIONS);
   }
