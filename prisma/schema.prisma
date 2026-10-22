@@ -5,17 +5,31 @@
 // Worker connects through Hyperdrive binding (pooled)
 
 generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+  runtime  = "cloudflare"
+}
+
+generator client_node {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma-node"
+  runtime  = "nodejs"
+}
+
+generator client_legacy {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")
-  directUrl = env("DATABASE_URL_DIRECT")
+  provider = "postgresql"
 }
 
 /// Shopify OAuth session storage
 /// Required by @shopify/shopify-app-session-storage-prisma
+///
+/// PII note: firstName, lastName, and email columns are populated only for
+/// online sessions (isOnline=true). Offline sessions (used for background jobs)
+/// do not contain user PII. Handle per your GDPR/CCPA compliance requirements.
 model Session {
   id                  String    @id
   shop                String

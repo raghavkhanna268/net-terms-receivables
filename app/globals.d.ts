@@ -1,4 +1,4 @@
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "~/generated/prisma/client";
 import type { SessionStorage } from "@shopify/shopify-app-session-storage";
 
 // Augment React Router's AppLoadContext with our per-request instances

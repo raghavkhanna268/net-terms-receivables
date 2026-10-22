@@ -51,6 +51,11 @@ export default defineConfig({
     reactRouter(),
     tsconfigPaths(),
   ],
+  resolve: {
+    alias: {
+      ".prisma/client/default": "./node_modules/.prisma/client/edge.js",
+    },
+  },
   optimizeDeps: {
     include: ["@shopify/app-bridge-react"],
   },

@@ -1,5 +1,5 @@
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "~/generated/prisma/client";
 
 /**
  * Creates a PrismaClient configured for Cloudflare Workers with Hyperdrive.

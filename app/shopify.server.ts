@@ -6,7 +6,7 @@ import {
 } from "@shopify/shopify-app-react-router/server";
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import type { SessionStorage } from "@shopify/shopify-app-session-storage";
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "~/generated/prisma/client";
 import { parseScopes } from "./lib/scopes";
 
 /**
@@ -40,7 +40,11 @@ const scopes = parseScopes(scopesEnv);
  * @returns A PrismaSessionStorage instance
  */
 export function createSessionStorage(prisma: PrismaClient): SessionStorage {
-  return new PrismaSessionStorage(prisma);
+  // Type assertion needed: @shopify/shopify-app-session-storage-prisma expects
+  // Prisma 6 types, but we use Prisma 7's generated client. The runtime API is
+  // compatible; only the type signatures differ due to Prisma 7's restructured types.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return new PrismaSessionStorage(prisma as any);
 }
 
 /**

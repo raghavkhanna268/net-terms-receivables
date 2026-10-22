@@ -46,6 +46,7 @@ jobs:
         if: steps.check-secret.outputs.skip != 'true'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_MIGRATIONS }}
         run: npx prisma migrate deploy
 
       - name: Migration status

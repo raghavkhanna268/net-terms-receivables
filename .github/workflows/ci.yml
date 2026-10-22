@@ -46,3 +46,23 @@ jobs:
 
       - name: Wrangler dry-run (bundle + bindings check, no upload)
         run: npx wrangler deploy --dry-run
+
+      - name: Verify bundle contains Prisma WASM
+        run: |
+          # Check that the Prisma WASM module was bundled
+          if ls dist/server/assets/query_compiler_fast_bg-*.wasm 1>/dev/null 2>&1; then
+            echo "✓ Prisma WASM module found"
+            ls -la dist/server/assets/*.wasm
+          else
+            echo "✗ Prisma WASM module not found in bundle"
+            exit 1
+          fi
+          # Check bundle size is under Workers Free limit (3 MB)
+          ENTRY_SIZE=$(stat -c%s dist/server/assets/worker-entry-*.js)
+          ENTRY_SIZE_MB=$(echo "scale=2; $ENTRY_SIZE / 1048576" | bc)
+          echo "Worker entry size: ${ENTRY_SIZE_MB} MB"
+          if [ "$ENTRY_SIZE" -gt 3145728 ]; then
+            echo "✗ Worker entry exceeds 3 MB limit"
+            exit 1
+          fi
+          echo "✓ Bundle size is within limits"

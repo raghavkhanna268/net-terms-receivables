@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "@prisma/client";
+// Use Node.js runtime generator for testing (cloudflare runtime doesn't run in Node.js)
+import { PrismaClient } from "~/generated/prisma-node/client";
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import { Session } from "@shopify/shopify-api";
 
@@ -24,7 +25,10 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
 describeWithDb("Prisma Session Storage Integration", () => {
   let prisma: PrismaClient;
-  let sessionStorage: PrismaSessionStorage<PrismaClient>;
+  // Type assertion needed: @shopify/shopify-app-session-storage-prisma expects
+  // Prisma 6 types, but we use Prisma 7's generated client. Runtime is compatible.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let sessionStorage: PrismaSessionStorage<any>;
 
   const TEST_SHOP = "test-integration-shop.myshopify.com";
   const TEST_SESSION_ID = "test-session-id-" + Date.now();
@@ -36,7 +40,8 @@ describeWithDb("Prisma Session Storage Integration", () => {
     prisma = new PrismaClient({ adapter });
 
     // Create session storage the same way shopify.server.ts does
-    sessionStorage = new PrismaSessionStorage(prisma);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    sessionStorage = new PrismaSessionStorage(prisma as any);
 
     // Clean up any leftover test data
     await prisma.session.deleteMany({

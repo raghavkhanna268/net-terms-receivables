@@ -72,15 +72,13 @@ describe("Route context storage verification", () => {
   });
 
   describe("webhooks.app.uninstalled route", () => {
-    it("receives sessionStorage from context and calls findSessionsByShop", async () => {
-      const sessionStorage = createMockSessionStorage();
+    it("uses prisma.session.deleteMany directly (bypasses 25-session limit)", async () => {
       const shopify = createMockShopify();
-
-      // Mock finding sessions
-      sessionStorage.findSessionsByShop.mockResolvedValue([
-        { id: "session-1" },
-        { id: "session-2" },
-      ]);
+      const mockPrisma = {
+        session: {
+          deleteMany: vi.fn().mockResolvedValue({ count: 5 }),
+        },
+      };
 
       shopify.authenticate.webhook.mockResolvedValue({
         shop: "uninstall-test.myshopify.com",
@@ -89,37 +87,41 @@ describe("Route context storage verification", () => {
         payload: {},
       });
 
-      const args = createMockArgs({ sessionStorage, shopify });
+      const args = {
+        request: new Request("https://example.com/test"),
+        params: {},
+        context: {
+          cloudflare: { env: {}, ctx: {} },
+          prisma: mockPrisma,
+          sessionStorage: {},
+          shopify,
+        },
+      } as unknown as ActionFunctionArgs;
 
-      // Import and call the action
       const { action } = await import(
         "../../routes/webhooks.app.uninstalled"
       );
       await action(args);
 
-      // Verify sessionStorage.findSessionsByShop was called with the shop
-      expect(sessionStorage.findSessionsByShop).toHaveBeenCalledWith(
-        "uninstall-test.myshopify.com"
-      );
-
-      // Verify deleteSessions was called with the session IDs
-      expect(sessionStorage.deleteSessions).toHaveBeenCalledWith([
-        "session-1",
-        "session-2",
-      ]);
+      // Verify prisma.session.deleteMany was called with shop filter
+      // This avoids the findSessionsByShop 25-session limit
+      expect(mockPrisma.session.deleteMany).toHaveBeenCalledWith({
+        where: { shop: "uninstall-test.myshopify.com" },
+      });
     });
 
-    it("uses context.sessionStorage, not a module-level import", async () => {
+    it("uses context.prisma, not a module-level import", async () => {
       // This test verifies no module-level state is mutated
       // by checking that different mock instances are used independently
 
-      const storage1 = createMockSessionStorage();
-      const storage2 = createMockSessionStorage();
       const shopify1 = createMockShopify();
       const shopify2 = createMockShopify();
-
-      storage1.findSessionsByShop.mockResolvedValue([{ id: "s1" }]);
-      storage2.findSessionsByShop.mockResolvedValue([{ id: "s2" }]);
+      const prisma1 = {
+        session: { deleteMany: vi.fn().mockResolvedValue({ count: 3 }) },
+      };
+      const prisma2 = {
+        session: { deleteMany: vi.fn().mockResolvedValue({ count: 7 }) },
+      };
 
       shopify1.authenticate.webhook.mockResolvedValue({
         shop: "shop1.myshopify.com",
@@ -134,8 +136,27 @@ describe("Route context storage verification", () => {
         payload: {},
       });
 
-      const args1 = createMockArgs({ sessionStorage: storage1, shopify: shopify1 });
-      const args2 = createMockArgs({ sessionStorage: storage2, shopify: shopify2 });
+      const args1 = {
+        request: new Request("https://example.com/test"),
+        params: {},
+        context: {
+          cloudflare: { env: {}, ctx: {} },
+          prisma: prisma1,
+          sessionStorage: {},
+          shopify: shopify1,
+        },
+      } as unknown as ActionFunctionArgs;
+
+      const args2 = {
+        request: new Request("https://example.com/test"),
+        params: {},
+        context: {
+          cloudflare: { env: {}, ctx: {} },
+          prisma: prisma2,
+          sessionStorage: {},
+          shopify: shopify2,
+        },
+      } as unknown as ActionFunctionArgs;
 
       const { action } = await import(
         "../../routes/webhooks.app.uninstalled"
@@ -144,21 +165,13 @@ describe("Route context storage verification", () => {
       // Simulate concurrent requests with different contexts
       await Promise.all([action(args1), action(args2)]);
 
-      // Each request used its own context's sessionStorage
-      expect(storage1.findSessionsByShop).toHaveBeenCalledWith(
-        "shop1.myshopify.com"
-      );
-      expect(storage2.findSessionsByShop).toHaveBeenCalledWith(
-        "shop2.myshopify.com"
-      );
-
-      // Each deleted its own sessions
-      expect(storage1.deleteSessions).toHaveBeenCalledWith(["s1"]);
-      expect(storage2.deleteSessions).toHaveBeenCalledWith(["s2"]);
-
-      // No cross-contamination between requests
-      expect(storage1.deleteSessions).not.toHaveBeenCalledWith(["s2"]);
-      expect(storage2.deleteSessions).not.toHaveBeenCalledWith(["s1"]);
+      // Each request used its own context's prisma client
+      expect(prisma1.session.deleteMany).toHaveBeenCalledWith({
+        where: { shop: "shop1.myshopify.com" },
+      });
+      expect(prisma2.session.deleteMany).toHaveBeenCalledWith({
+        where: { shop: "shop2.myshopify.com" },
+      });
     });
   });
 
@@ -307,9 +320,9 @@ describe("Route context storage verification", () => {
       // - app/routes/app._index.tsx - uses context.shopify
       // - app/routes/auth.$.tsx - uses context.shopify
       // - app/routes/auth.login/route.tsx - uses context.shopify
-      // - app/routes/webhooks.app.uninstalled.tsx - uses context.shopify, context.sessionStorage
+      // - app/routes/webhooks.app.uninstalled.tsx - uses context.shopify, context.prisma
       // - app/routes/webhooks.app.scopes_update.tsx - uses context.shopify, context.sessionStorage
-      // - app/routes/webhooks.compliance.tsx - uses context.shopify, context.sessionStorage
+      // - app/routes/webhooks.compliance.tsx - uses context.shopify, context.prisma
       //
       // The actual verification is done via code review and the other tests in this file
       // that mock context and verify the routes use context.sessionStorage correctly.
