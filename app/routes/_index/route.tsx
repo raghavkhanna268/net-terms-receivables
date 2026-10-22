@@ -5,12 +5,12 @@ import styles from "./styles.module.css";
 
 /**
  * Cache-Control for the landing page.
- * - public: can be cached by CDN (Cloudflare)
  * - max-age=60: browser caches for 1 minute
- * - s-maxage=3600: CDN caches for 1 hour
- * - stale-while-revalidate=86400: serve stale while revalidating for 24 hours
  *
- * This significantly reduces Worker invocations for the landing page.
+ * Note: On workers.dev, Cloudflare does not cache Worker responses based on
+ * Cache-Control headers alone (the Worker runs before the cache layer).
+ * The s-maxage directive is kept for custom domains with caching enabled.
+ * To reduce Worker invocations, use Cloudflare Cache Rules on custom domains.
  */
 export const headers: HeadersFunction = () => ({
   "Cache-Control": "public, max-age=60, s-maxage=3600, stale-while-revalidate=86400",

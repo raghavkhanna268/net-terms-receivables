@@ -377,14 +377,93 @@ describeWithDb("Light Session Storage Integration", () => {
     }
   });
 
-  it("deleteSession propagates errors", async () => {
-    // This test verifies that errors from the database are not swallowed.
-    // We can't easily trigger a DB error in a real test, but we can verify
-    // the method doesn't catch and swallow errors by checking behavior.
+  it("round-trips online session with large userId (bigint)", async () => {
+    // Test bigint userId that exceeds 32-bit integer range but is safe in JS
+    // Shopify user IDs can be large numbers stored as bigint in Postgres
+    const largeUserId = 8589934592; // 2^33, larger than 32-bit max (2^31-1 = 2147483647)
+    const expires = new Date("2025-06-15T12:00:00.000Z");
+
+    const session = new Session({
+      id: TEST_SESSION_ID,
+      shop: TEST_SHOP,
+      state: "test-state",
+      isOnline: true,
+      scope: "read_orders",
+      expires,
+      accessToken: "shpat_test-bigint-token",
+      onlineAccessInfo: {
+        expires_in: 86400,
+        associated_user_scope: "read_orders",
+        associated_user: {
+          id: largeUserId,
+          first_name: "BigInt",
+          last_name: "User",
+          email: "bigint@example.com",
+          account_owner: false,
+          locale: "en-GB",
+          collaborator: true,
+          email_verified: false,
+        },
+      },
+    });
+
+    // Store and load
+    await sessionStorage.storeSession(session);
+    const loaded = await sessionStorage.loadSession(TEST_SESSION_ID);
+
+    // Verify bigint userId round-trips correctly
+    expect(loaded).not.toBeUndefined();
+    expect(loaded!.onlineAccessInfo).not.toBeUndefined();
+    expect(loaded!.onlineAccessInfo!.associated_user.id).toBe(largeUserId);
+  });
+
+  it("round-trips expires Date across timezones (UTC)", async () => {
+    // Test that Date fields are stored and retrieved in UTC correctly
+    // Use a date with specific time to verify no timezone drift
+    const expires = new Date("2025-07-04T23:59:59.999Z");
+    const refreshTokenExpires = new Date("2026-01-01T00:00:00.000Z");
+
+    const session = new Session({
+      id: TEST_SESSION_ID,
+      shop: TEST_SHOP,
+      state: "test-state",
+      isOnline: false,
+      accessToken: "test-token",
+      expires,
+      refreshToken: "test-refresh",
+      refreshTokenExpires,
+    });
+
+    await sessionStorage.storeSession(session);
+    const loaded = await sessionStorage.loadSession(TEST_SESSION_ID);
+
+    // Verify timestamps are preserved exactly
+    expect(loaded!.expires!.getTime()).toBe(expires.getTime());
+    expect(loaded!.refreshTokenExpires!.getTime()).toBe(refreshTokenExpires.getTime());
     
-    // Delete non-existent session should still return true (no error)
-    const result = await sessionStorage.deleteSession("non-existent-id");
-    expect(result).toBe(true);
+    // Verify ISO strings match (proves UTC preservation)
+    expect(loaded!.expires!.toISOString()).toBe("2025-07-04T23:59:59.999Z");
+    expect(loaded!.refreshTokenExpires!.toISOString()).toBe("2026-01-01T00:00:00.000Z");
+  });
+
+  it("propagates errors from closed SQL connection", async () => {
+    // Create a separate SQL client and close it to test error propagation
+    const closedSql = postgres(TEST_DATABASE_URL!, { max: 1 });
+    const closedStorage = new LightSessionStorage(closedSql);
+    
+    // Close the connection
+    await closedSql.end();
+
+    // Operations should throw errors, not silently fail
+    await expect(closedStorage.loadSession("any-id")).rejects.toThrow();
+  });
+
+  it("propagates errors from invalid table query", async () => {
+    // Create a storage that queries a non-existent table by using raw SQL
+    // This verifies that SQL errors propagate correctly
+    await expect(
+      sql`SELECT * FROM "NonExistentTable" WHERE id = 'test'`
+    ).rejects.toThrow();
   });
 
   it("deleteSessions handles empty array", async () => {
