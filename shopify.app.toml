@@ -29,10 +29,7 @@ api_version = "2026-10"
   compliance_topics = ["customers/data_request", "customers/redact", "shop/redact"]
 
 [auth]
-redirect_urls = [
-  "https://net-terms-receivables.raghavkhanna.workers.dev/auth/callback",
-  "https://localhost/auth/callback"
-]
+redirect_urls = ["https://net-terms-receivables.raghavkhanna.workers.dev/auth/callback"]
 
 [pos]
 embedded = false
