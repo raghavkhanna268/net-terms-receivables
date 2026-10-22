@@ -5,10 +5,8 @@ import { action } from "../webhooks.app.uninstalled";
 describe("webhooks.app.uninstalled", () => {
   const TEST_SHOP = "test-shop.myshopify.com";
 
-  const mockPrisma = {
-    session: {
-      deleteMany: vi.fn(),
-    },
+  const mockSessionStorage = {
+    deleteAllForShop: vi.fn(),
   };
 
   const mockShopify = {
@@ -19,8 +17,7 @@ describe("webhooks.app.uninstalled", () => {
 
   const createMockContext = () => ({
     shopify: mockShopify,
-    prisma: mockPrisma,
-    sessionStorage: {},
+    sessionStorage: mockSessionStorage,
     cloudflare: { env: {}, ctx: {} },
   });
 
@@ -51,46 +48,39 @@ describe("webhooks.app.uninstalled", () => {
     });
   });
 
-  it("deletes all sessions for the shop using deleteMany", async () => {
-    mockPrisma.session.deleteMany.mockResolvedValue({ count: 5 });
+  it("deletes all sessions for the shop using deleteAllForShop", async () => {
+    mockSessionStorage.deleteAllForShop.mockResolvedValue(5);
 
     const response = await action(createActionArgs());
 
     expect(response).toBeInstanceOf(Response);
-    expect(mockPrisma.session.deleteMany).toHaveBeenCalledWith({
-      where: { shop: TEST_SHOP },
-    });
+    expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledWith(TEST_SHOP);
   });
 
   it("handles shops with no sessions gracefully", async () => {
-    mockPrisma.session.deleteMany.mockResolvedValue({ count: 0 });
+    mockSessionStorage.deleteAllForShop.mockResolvedValue(0);
 
     const response = await action(createActionArgs());
 
     expect(response).toBeInstanceOf(Response);
-    expect(mockPrisma.session.deleteMany).toHaveBeenCalledWith({
-      where: { shop: TEST_SHOP },
-    });
+    expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledWith(TEST_SHOP);
   });
 
   it("deletes more than 25 sessions (bypasses findSessionsByShop limit)", async () => {
-    // This test verifies that deleteMany is used instead of findSessionsByShop,
-    // which has a default limit of 25 sessions. With deleteMany, all sessions
-    // are deleted regardless of count.
-    mockPrisma.session.deleteMany.mockResolvedValue({ count: 50 });
+    // deleteAllForShop uses deleteMany internally, avoiding the 25-session
+    // limit of findSessionsByShop. All sessions are deleted in one query.
+    mockSessionStorage.deleteAllForShop.mockResolvedValue(50);
 
     const response = await action(createActionArgs());
 
     expect(response).toBeInstanceOf(Response);
-    expect(mockPrisma.session.deleteMany).toHaveBeenCalledTimes(1);
-    expect(mockPrisma.session.deleteMany).toHaveBeenCalledWith({
-      where: { shop: TEST_SHOP },
-    });
+    expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledTimes(1);
+    expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledWith(TEST_SHOP);
   });
 
   it("logs but does not fail on database errors", async () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    mockPrisma.session.deleteMany.mockRejectedValue(new Error("DB error"));
+    mockSessionStorage.deleteAllForShop.mockRejectedValue(new Error("DB error"));
 
     const response = await action(createActionArgs());
 

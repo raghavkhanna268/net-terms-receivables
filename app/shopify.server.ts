@@ -4,9 +4,11 @@ import {
   AppDistribution,
   shopifyApp,
 } from "@shopify/shopify-app-react-router/server";
-import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
-import type { SessionStorage } from "@shopify/shopify-app-session-storage";
 import type { PrismaClient } from "~/generated/prisma/client";
+import {
+  PrismaSessionStorage,
+  type PrismaClientGetter,
+} from "./lib/session-storage.server";
 import { parseScopes } from "./lib/scopes";
 
 /**
@@ -36,15 +38,13 @@ const scopes = parseScopes(scopesEnv);
  * ensuring each request gets its own session storage instance backed by
  * a per-request PrismaClient (required for Cloudflare Workers with Hyperdrive).
  *
- * @param prisma - A PrismaClient instance created for this request
+ * @param prismaOrGetter - A PrismaClient instance or getter for lazy creation
  * @returns A PrismaSessionStorage instance
  */
-export function createSessionStorage(prisma: PrismaClient): SessionStorage {
-  // Type assertion needed: @shopify/shopify-app-session-storage-prisma expects
-  // Prisma 6 types, but we use Prisma 7's generated client. The runtime API is
-  // compatible; only the type signatures differ due to Prisma 7's restructured types.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return new PrismaSessionStorage(prisma as any);
+export function createSessionStorage(
+  prismaOrGetter: PrismaClient | PrismaClientGetter
+): PrismaSessionStorage {
+  return new PrismaSessionStorage(prismaOrGetter);
 }
 
 /**
@@ -56,7 +56,7 @@ export function createSessionStorage(prisma: PrismaClient): SessionStorage {
  * @param sessionStorage - A session storage instance for this request
  * @returns Configured Shopify app instance
  */
-export function createShopifyApp(sessionStorage: SessionStorage) {
+export function createShopifyApp(sessionStorage: PrismaSessionStorage) {
   return shopifyApp({
     apiKey,
     apiSecretKey,
@@ -78,4 +78,4 @@ export function createShopifyApp(sessionStorage: SessionStorage) {
 export const apiVersion = ApiVersion.October26;
 
 // Re-export types needed by routes
-export type { SessionStorage };
+export type { PrismaSessionStorage };

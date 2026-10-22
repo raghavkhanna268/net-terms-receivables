@@ -1,5 +1,6 @@
 import { createRequestHandler } from "react-router";
 import { wrapWithSentry } from "~/lib/sentry";
+import type { PrismaClient } from "../app/lib/db.server";
 import { createPrismaClient } from "../app/lib/db.server";
 import { createSessionStorage, createShopifyApp } from "../app/shopify.server";
 
@@ -10,30 +11,35 @@ const requestHandler = createRequestHandler(
 
 export default wrapWithSentry({
   async fetch(request, env, ctx) {
-    // Create per-request database client using Hyperdrive connection pooling.
-    // This is required in Workers: module-level clients would share mutable state
-    // across concurrent requests in the same isolate. Hyperdrive handles pooling
-    // at the network level, so per-request client creation is efficient.
-    const prisma = createPrismaClient(env.HYPERDRIVE.connectionString);
+    // Lazy Prisma client: only created when a route actually touches the DB.
+    // Requests that don't need the database (static assets, health checks)
+    // never open a connection. Hyperdrive handles pooling at the network level.
+    let prisma: PrismaClient | null = null;
+    const getPrisma = (): PrismaClient => {
+      if (!prisma) {
+        prisma = createPrismaClient(env.HYPERDRIVE.connectionString);
+      }
+      return prisma;
+    };
 
-    // Create per-request session storage backed by Prisma
-    const sessionStorage = createSessionStorage(prisma);
+    // Session storage wraps lazy client getter - DB accessed only when session ops run
+    const sessionStorage = createSessionStorage(getPrisma);
 
-    // Create per-request Shopify app instance with the session storage
+    // Shopify app instance for this request
     const shopify = createShopifyApp(sessionStorage);
 
     try {
       return await requestHandler(request, {
         cloudflare: { env, ctx },
-        // Inject per-request instances for routes to use
-        prisma,
         sessionStorage,
         shopify,
       });
     } finally {
-      // Schedule connection cleanup after the response is sent.
-      // waitUntil allows graceful disconnect without blocking the response.
-      ctx.waitUntil(prisma.$disconnect());
+      // $disconnect runs in ctx.waitUntil after the response is sent to the client.
+      // This allows graceful connection cleanup without blocking the response.
+      if (prisma !== null) {
+        ctx.waitUntil((prisma as PrismaClient).$disconnect());
+      }
     }
   },
 } satisfies ExportedHandler<Env>);

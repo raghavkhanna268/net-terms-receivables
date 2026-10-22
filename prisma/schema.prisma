@@ -16,16 +16,12 @@ generator client_node {
   runtime  = "nodejs"
 }
 
-generator client_legacy {
-  provider = "prisma-client-js"
-}
-
 datasource db {
   provider = "postgresql"
 }
 
 /// Shopify OAuth session storage
-/// Required by @shopify/shopify-app-session-storage-prisma
+/// Used by app/lib/session-storage.server.ts (custom implementation)
 ///
 /// PII note: firstName, lastName, and email columns are populated only for
 /// online sessions (isOnline=true). Offline sessions (used for background jobs)

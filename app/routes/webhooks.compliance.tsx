@@ -8,8 +8,7 @@ import type { ActionFunctionArgs } from "react-router";
  * 401 Unauthorized for invalid signatures.
  */
 export const action = async ({ request, context }: ActionFunctionArgs) => {
-  // Prisma client and Shopify app are injected per-request via loadContext in workers/app.ts
-  const { shopify, prisma } = context;
+  const { shopify, sessionStorage } = context;
 
   const { shop, topic, webhookId } = await shopify.authenticate.webhook(request);
 
@@ -35,14 +34,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       break;
 
     case "SHOP_REDACT": {
-      // Delete all session data for this shop directly by shop column.
-      // This is idempotent: returns 200 even when no sessions exist.
-      // Using deleteMany avoids the stale session ID issue from #10.
-      const result = await prisma.session.deleteMany({
-        where: { shop },
-      });
+      // Delete all session data for this shop via deleteAllForShop.
+      // Idempotent: returns 200 even when no sessions exist.
+      const count = await sessionStorage.deleteAllForShop(shop);
       console.log(
-        `[Compliance] shop/redact: Deleted ${result.count} session(s) for shop=${shop}`
+        `[Compliance] shop/redact: Deleted ${count} session(s) for shop=${shop}`
       );
       break;
     }

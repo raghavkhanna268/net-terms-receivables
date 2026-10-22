@@ -33,7 +33,6 @@
     "@prisma/client": "7.10.1",
     "@sentry/cloudflare": "^11.8.0",
     "@shopify/shopify-app-react-router": "^4.0.0",
-    "@shopify/shopify-app-session-storage-prisma": "^11.0.1",
     "isbot": "^5.1.36",
     "pg": "^8.23.1",
     "prisma": "7.10.1",
@@ -80,8 +79,6 @@
   ],
   "overrides": {
     "p-map": "^4.0.0",
-    "qs": "^6.16.0",
-    "@prisma/client": "7.10.1",
-    "prisma": "7.10.1"
+    "qs": "^6.16.0"
   }
 }

@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readFileSync } from "fs";
+import { join } from "path";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 
 /**
@@ -14,7 +16,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
  * a real database or Shopify credentials.
  */
 
-// Mock session storage that tracks method calls
+// Mock session storage that tracks method calls (matches PrismaSessionStorage interface)
 function createMockSessionStorage() {
   return {
     storeSession: vi.fn().mockResolvedValue(true),
@@ -22,6 +24,8 @@ function createMockSessionStorage() {
     deleteSession: vi.fn().mockResolvedValue(true),
     deleteSessions: vi.fn().mockResolvedValue(true),
     findSessionsByShop: vi.fn().mockResolvedValue([]),
+    deleteAllForShop: vi.fn().mockResolvedValue(0),
+    updateScopeForShop: vi.fn().mockResolvedValue(0),
   };
 }
 
@@ -59,7 +63,6 @@ function createMockArgs(
     params: {},
     context: {
       cloudflare: { env: {}, ctx: {} },
-      prisma: {},
       sessionStorage,
       shopify,
     },
@@ -72,13 +75,10 @@ describe("Route context storage verification", () => {
   });
 
   describe("webhooks.app.uninstalled route", () => {
-    it("uses prisma.session.deleteMany directly (bypasses 25-session limit)", async () => {
+    it("uses sessionStorage.deleteAllForShop (bypasses 25-session limit)", async () => {
+      const sessionStorage = createMockSessionStorage();
       const shopify = createMockShopify();
-      const mockPrisma = {
-        session: {
-          deleteMany: vi.fn().mockResolvedValue({ count: 5 }),
-        },
-      };
+      sessionStorage.deleteAllForShop.mockResolvedValue(5);
 
       shopify.authenticate.webhook.mockResolvedValue({
         shop: "uninstall-test.myshopify.com",
@@ -87,41 +87,25 @@ describe("Route context storage verification", () => {
         payload: {},
       });
 
-      const args = {
-        request: new Request("https://example.com/test"),
-        params: {},
-        context: {
-          cloudflare: { env: {}, ctx: {} },
-          prisma: mockPrisma,
-          sessionStorage: {},
-          shopify,
-        },
-      } as unknown as ActionFunctionArgs;
+      const args = createMockArgs({ sessionStorage, shopify });
 
       const { action } = await import(
         "../../routes/webhooks.app.uninstalled"
       );
       await action(args);
 
-      // Verify prisma.session.deleteMany was called with shop filter
-      // This avoids the findSessionsByShop 25-session limit
-      expect(mockPrisma.session.deleteMany).toHaveBeenCalledWith({
-        where: { shop: "uninstall-test.myshopify.com" },
-      });
+      expect(sessionStorage.deleteAllForShop).toHaveBeenCalledWith(
+        "uninstall-test.myshopify.com"
+      );
     });
 
-    it("uses context.prisma, not a module-level import", async () => {
-      // This test verifies no module-level state is mutated
-      // by checking that different mock instances are used independently
-
+    it("uses context.sessionStorage, not a module-level import", async () => {
       const shopify1 = createMockShopify();
       const shopify2 = createMockShopify();
-      const prisma1 = {
-        session: { deleteMany: vi.fn().mockResolvedValue({ count: 3 }) },
-      };
-      const prisma2 = {
-        session: { deleteMany: vi.fn().mockResolvedValue({ count: 7 }) },
-      };
+      const storage1 = createMockSessionStorage();
+      const storage2 = createMockSessionStorage();
+      storage1.deleteAllForShop.mockResolvedValue(3);
+      storage2.deleteAllForShop.mockResolvedValue(7);
 
       shopify1.authenticate.webhook.mockResolvedValue({
         shop: "shop1.myshopify.com",
@@ -136,57 +120,25 @@ describe("Route context storage verification", () => {
         payload: {},
       });
 
-      const args1 = {
-        request: new Request("https://example.com/test"),
-        params: {},
-        context: {
-          cloudflare: { env: {}, ctx: {} },
-          prisma: prisma1,
-          sessionStorage: {},
-          shopify: shopify1,
-        },
-      } as unknown as ActionFunctionArgs;
-
-      const args2 = {
-        request: new Request("https://example.com/test"),
-        params: {},
-        context: {
-          cloudflare: { env: {}, ctx: {} },
-          prisma: prisma2,
-          sessionStorage: {},
-          shopify: shopify2,
-        },
-      } as unknown as ActionFunctionArgs;
+      const args1 = createMockArgs({ sessionStorage: storage1, shopify: shopify1 });
+      const args2 = createMockArgs({ sessionStorage: storage2, shopify: shopify2 });
 
       const { action } = await import(
         "../../routes/webhooks.app.uninstalled"
       );
 
-      // Simulate concurrent requests with different contexts
       await Promise.all([action(args1), action(args2)]);
 
-      // Each request used its own context's prisma client
-      expect(prisma1.session.deleteMany).toHaveBeenCalledWith({
-        where: { shop: "shop1.myshopify.com" },
-      });
-      expect(prisma2.session.deleteMany).toHaveBeenCalledWith({
-        where: { shop: "shop2.myshopify.com" },
-      });
+      expect(storage1.deleteAllForShop).toHaveBeenCalledWith("shop1.myshopify.com");
+      expect(storage2.deleteAllForShop).toHaveBeenCalledWith("shop2.myshopify.com");
     });
   });
 
   describe("webhooks.app.scopes_update route", () => {
-    it("receives sessionStorage from context and updates session scope", async () => {
+    it("uses sessionStorage.updateScopeForShop to update all sessions", async () => {
       const sessionStorage = createMockSessionStorage();
       const shopify = createMockShopify();
-
-      const existingSession = {
-        id: "scopes-session",
-        shop: "scopes-test.myshopify.com",
-        scope: "read_orders",
-      };
-
-      sessionStorage.findSessionsByShop.mockResolvedValue([existingSession]);
+      sessionStorage.updateScopeForShop.mockResolvedValue(2);
 
       shopify.authenticate.webhook.mockResolvedValue({
         shop: "scopes-test.myshopify.com",
@@ -202,21 +154,18 @@ describe("Route context storage verification", () => {
       );
       await action(args);
 
-      // Verify sessionStorage.storeSession was called with updated scope
-      expect(sessionStorage.storeSession).toHaveBeenCalled();
-      const storedSession = sessionStorage.storeSession.mock.calls[0][0];
-      expect(storedSession.scope).toBe("read_orders,read_customers,write_orders");
+      expect(sessionStorage.updateScopeForShop).toHaveBeenCalledWith(
+        "scopes-test.myshopify.com",
+        "read_orders,read_customers,write_orders"
+      );
     });
   });
 
   describe("webhooks.compliance route", () => {
-    it("uses prisma.session.deleteMany directly for shop/redact (idempotent)", async () => {
+    it("uses sessionStorage.deleteAllForShop for shop/redact (idempotent)", async () => {
+      const sessionStorage = createMockSessionStorage();
       const shopify = createMockShopify();
-      const mockPrisma = {
-        session: {
-          deleteMany: vi.fn().mockResolvedValue({ count: 2 }),
-        },
-      };
+      sessionStorage.deleteAllForShop.mockResolvedValue(2);
 
       shopify.authenticate.webhook.mockResolvedValue({
         shop: "compliance-test.myshopify.com",
@@ -225,34 +174,20 @@ describe("Route context storage verification", () => {
         payload: {},
       });
 
-      const args = {
-        request: new Request("https://example.com/test"),
-        params: {},
-        context: {
-          cloudflare: { env: {}, ctx: {} },
-          prisma: mockPrisma,
-          sessionStorage: {},
-          shopify,
-        },
-      } as unknown as ActionFunctionArgs;
+      const args = createMockArgs({ sessionStorage, shopify });
 
       const { action } = await import("../../routes/webhooks.compliance");
       await action(args);
 
-      // Verify prisma.session.deleteMany was called with shop filter
-      // This is the direct delete pattern that avoids stale session ID issues
-      expect(mockPrisma.session.deleteMany).toHaveBeenCalledWith({
-        where: { shop: "compliance-test.myshopify.com" },
-      });
+      expect(sessionStorage.deleteAllForShop).toHaveBeenCalledWith(
+        "compliance-test.myshopify.com"
+      );
     });
 
     it("returns 200 even when no sessions exist (idempotent)", async () => {
+      const sessionStorage = createMockSessionStorage();
       const shopify = createMockShopify();
-      const mockPrisma = {
-        session: {
-          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
-        },
-      };
+      sessionStorage.deleteAllForShop.mockResolvedValue(0);
 
       shopify.authenticate.webhook.mockResolvedValue({
         shop: "empty-shop.myshopify.com",
@@ -261,21 +196,11 @@ describe("Route context storage verification", () => {
         payload: {},
       });
 
-      const args = {
-        request: new Request("https://example.com/test"),
-        params: {},
-        context: {
-          cloudflare: { env: {}, ctx: {} },
-          prisma: mockPrisma,
-          sessionStorage: {},
-          shopify,
-        },
-      } as unknown as ActionFunctionArgs;
+      const args = createMockArgs({ sessionStorage, shopify });
 
       const { action } = await import("../../routes/webhooks.compliance");
       const response = await action(args);
 
-      // Must return 200 even with no rows deleted
       expect(response.status).toBe(200);
     });
   });
@@ -310,23 +235,25 @@ describe("Route context storage verification", () => {
       expect(typeof dbModule.createPrismaClient).toBe("function");
     });
 
-    it("routes do not call setNamespace (verified by grep)", async () => {
-      // Static verification: the following routes should NOT contain setNamespace
-      // This is verified by the route implementations using context.sessionStorage
-      // instead of the old pattern that called sessionStorage.setNamespace(env.SESSIONS)
-      //
-      // Routes verified:
-      // - app/routes/app.tsx - uses context.shopify
-      // - app/routes/app._index.tsx - uses context.shopify
-      // - app/routes/auth.$.tsx - uses context.shopify
-      // - app/routes/auth.login/route.tsx - uses context.shopify
-      // - app/routes/webhooks.app.uninstalled.tsx - uses context.shopify, context.prisma
-      // - app/routes/webhooks.app.scopes_update.tsx - uses context.shopify, context.sessionStorage
-      // - app/routes/webhooks.compliance.tsx - uses context.shopify, context.prisma
-      //
-      // The actual verification is done via code review and the other tests in this file
-      // that mock context and verify the routes use context.sessionStorage correctly.
-      expect(true).toBe(true);
+    it("routes do not call setNamespace (verified by file content)", async () => {
+      // Verify that no route files contain setNamespace calls
+      // This ensures routes use context.sessionStorage instead of module-level state
+      const routeFiles = [
+        "app/routes/app.tsx",
+        "app/routes/app._index.tsx",
+        "app/routes/auth.$.tsx",
+        "app/routes/auth.login/route.tsx",
+        "app/routes/webhooks.app.uninstalled.tsx",
+        "app/routes/webhooks.app.scopes_update.tsx",
+        "app/routes/webhooks.compliance.tsx",
+      ];
+
+      for (const routeFile of routeFiles) {
+        const filePath = join(process.cwd(), routeFile);
+        const content = readFileSync(filePath, "utf-8");
+        expect(content).not.toContain("setNamespace");
+        expect(content).not.toContain(".setNamespace(");
+      }
     });
   });
 });

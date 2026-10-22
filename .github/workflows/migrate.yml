@@ -16,7 +16,6 @@ jobs:
   migrate:
     name: Run Prisma Migrations
     runs-on: ubuntu-latest
-    # Only run if the secret is available (skip for forks without secrets)
     if: ${{ vars.ENABLE_MIGRATIONS != 'false' }}
 
     steps:
@@ -32,28 +31,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Check for migration secret
-        id: check-secret
-        run: |
-          if [ -z "${{ secrets.DATABASE_URL_MIGRATIONS }}" ]; then
-            echo "skip=true" >> $GITHUB_OUTPUT
-            echo "::notice::DATABASE_URL_MIGRATIONS secret not set - skipping migrations"
-          else
-            echo "skip=false" >> $GITHUB_OUTPUT
-          fi
-
       - name: Run migrations
-        if: steps.check-secret.outputs.skip != 'true'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
-          DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_MIGRATIONS }}
-        run: npx prisma migrate deploy
-
-      - name: Migration status
-        if: steps.check-secret.outputs.skip == 'true'
         run: |
-          echo "⚠️ Migrations skipped - DATABASE_URL_MIGRATIONS secret not configured"
-          echo "To enable migrations:"
-          echo "1. Create a Supabase project"
-          echo "2. Get the SESSION pooler connection string (port 5432)"
-          echo "3. Add it as DATABASE_URL_MIGRATIONS in GitHub Secrets"
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::notice::DATABASE_URL_MIGRATIONS secret not set - skipping migrations"
+            echo "To enable migrations:"
+            echo "1. Create a Supabase project"
+            echo "2. Get the SESSION pooler connection string (port 5432)"
+            echo "3. Add it as DATABASE_URL_MIGRATIONS in GitHub Secrets"
+            exit 0
+          fi
+          npx prisma migrate deploy

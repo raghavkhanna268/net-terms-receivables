@@ -7,10 +7,8 @@ const mockShopify = {
   },
 };
 
-const mockPrisma = {
-  session: {
-    deleteMany: vi.fn(),
-  },
+const mockSessionStorage = {
+  deleteAllForShop: vi.fn(),
 };
 
 function createMockActionArgs(
@@ -23,8 +21,7 @@ function createMockActionArgs(
     context: {
       cloudflare: { env, ctx: {} },
       shopify: mockShopify,
-      prisma: mockPrisma,
-      sessionStorage: {},
+      sessionStorage: mockSessionStorage,
     },
     url: new URL(request.url),
     pattern: "/webhooks/compliance",
@@ -34,12 +31,12 @@ function createMockActionArgs(
 import { action } from "../webhooks.compliance";
 
 const mockWebhook = mockShopify.authenticate.webhook as Mock;
-const mockDeleteMany = mockPrisma.session.deleteMany as Mock;
+const mockDeleteAllForShop = mockSessionStorage.deleteAllForShop as Mock;
 
 describe("webhooks.compliance", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockDeleteMany.mockResolvedValue({ count: 0 });
+    mockDeleteAllForShop.mockResolvedValue(0);
   });
 
   describe("HMAC verification", () => {
@@ -109,8 +106,8 @@ describe("webhooks.compliance", () => {
   });
 
   describe("shop/redact", () => {
-    it("deletes sessions directly by shop using prisma.session.deleteMany", async () => {
-      mockDeleteMany.mockResolvedValue({ count: 3 });
+    it("deletes sessions via sessionStorage.deleteAllForShop", async () => {
+      mockDeleteAllForShop.mockResolvedValue(3);
 
       mockWebhook.mockResolvedValue({
         shop: "test-shop.myshopify.com",
@@ -128,15 +125,11 @@ describe("webhooks.compliance", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-      // Verify deleteMany was called with shop filter (not session IDs)
-      expect(mockDeleteMany).toHaveBeenCalledWith({
-        where: { shop: "test-shop.myshopify.com" },
-      });
+      expect(mockDeleteAllForShop).toHaveBeenCalledWith("test-shop.myshopify.com");
     });
 
     it("returns 200 even when no sessions exist (idempotent)", async () => {
-      // No sessions to delete
-      mockDeleteMany.mockResolvedValue({ count: 0 });
+      mockDeleteAllForShop.mockResolvedValue(0);
 
       mockWebhook.mockResolvedValue({
         shop: "no-sessions-shop.myshopify.com",
@@ -153,15 +146,12 @@ describe("webhooks.compliance", () => {
 
       const response = await action(createMockActionArgs(request));
 
-      // Must return 200 even with no rows deleted
       expect(response.status).toBe(200);
-      expect(mockDeleteMany).toHaveBeenCalledWith({
-        where: { shop: "no-sessions-shop.myshopify.com" },
-      });
+      expect(mockDeleteAllForShop).toHaveBeenCalledWith("no-sessions-shop.myshopify.com");
     });
 
     it("handles multiple sessions for the same shop", async () => {
-      mockDeleteMany.mockResolvedValue({ count: 5 });
+      mockDeleteAllForShop.mockResolvedValue(5);
 
       mockWebhook.mockResolvedValue({
         shop: "multi-session-shop.myshopify.com",
@@ -178,17 +168,13 @@ describe("webhooks.compliance", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-      expect(mockDeleteMany).toHaveBeenCalledWith({
-        where: { shop: "multi-session-shop.myshopify.com" },
-      });
+      expect(mockDeleteAllForShop).toHaveBeenCalledWith("multi-session-shop.myshopify.com");
     });
   });
 
   describe("context injection", () => {
-    it("uses prisma from context (not module-level state)", async () => {
-      // This verifies the route receives prisma via context injection
-      // from workers/app.ts, not from a module-level import
-      mockDeleteMany.mockResolvedValue({ count: 1 });
+    it("uses sessionStorage from context (not module-level state)", async () => {
+      mockDeleteAllForShop.mockResolvedValue(1);
 
       mockWebhook.mockResolvedValue({
         shop: "context-test.myshopify.com",
@@ -204,8 +190,7 @@ describe("webhooks.compliance", () => {
 
       await action(createMockActionArgs(request));
 
-      // The mock prisma was passed via context and used
-      expect(mockDeleteMany).toHaveBeenCalled();
+      expect(mockDeleteAllForShop).toHaveBeenCalled();
     });
   });
 });

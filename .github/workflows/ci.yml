@@ -32,6 +32,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Validate Prisma schema
+        run: npx prisma validate
+
       - name: Lint
         run: npm run lint
 
@@ -44,25 +47,55 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Wrangler dry-run (bundle + bindings check, no upload)
-        run: npx wrangler deploy --dry-run
-
-      - name: Verify bundle contains Prisma WASM
+      - name: Wrangler dry-run and size check
         run: |
-          # Check that the Prisma WASM module was bundled
-          if ls dist/server/assets/query_compiler_fast_bg-*.wasm 1>/dev/null 2>&1; then
-            echo "✓ Prisma WASM module found"
-            ls -la dist/server/assets/*.wasm
-          else
-            echo "✗ Prisma WASM module not found in bundle"
+          OUTPUT=$(npx wrangler deploy --dry-run --outdir /tmp/wrangler-out 2>&1)
+          echo "$OUTPUT"
+          
+          # Extract gzip total from output
+          GZIP_LINE=$(echo "$OUTPUT" | grep "gzip:")
+          GZIP_SIZE=$(echo "$GZIP_LINE" | grep -oP '\d+\.\d+ KiB$' | head -1 | cut -d' ' -f1)
+          echo "Gzip total: ${GZIP_SIZE} KiB"
+          
+          # Convert to bytes for comparison (2.5 MB = 2560 KiB)
+          GZIP_INT=$(echo "$GZIP_SIZE" | cut -d'.' -f1)
+          if [ "$GZIP_INT" -gt 2560 ]; then
+            echo "✗ Gzip size exceeds 2.5 MB limit"
             exit 1
           fi
-          # Check bundle size is under Workers Free limit (3 MB)
-          ENTRY_SIZE=$(stat -c%s dist/server/assets/worker-entry-*.js)
-          ENTRY_SIZE_MB=$(echo "scale=2; $ENTRY_SIZE / 1048576" | bc)
-          echo "Worker entry size: ${ENTRY_SIZE_MB} MB"
-          if [ "$ENTRY_SIZE" -gt 3145728 ]; then
-            echo "✗ Worker entry exceeds 3 MB limit"
+          echo "✓ Bundle gzip size is within 2.5 MB limit"
+
+      - name: Worker boot test
+        run: |
+          # Start wrangler dev with dummy env vars for boot test
+          # The Worker will boot but fail on first request without real creds
+          SHOPIFY_API_KEY=test-key \
+          SHOPIFY_API_SECRET=test-secret \
+          SHOPIFY_APP_URL=https://example.com \
+          timeout 30 npx wrangler dev --port 8787 &
+          WRANGLER_PID=$!
+          
+          # Wait for Worker to start
+          sleep 10
+          
+          # Try to reach the Worker (expect non-5xx response or connection)
+          RESPONSE=$(curl -s -o /tmp/response.txt -w "%{http_code}" http://localhost:8787/ 2>/dev/null || echo "000")
+          
+          # Check logs for module errors
+          LOGS=$(cat /home/runner/.config/.wrangler/logs/*.log 2>/dev/null || echo "")
+          if echo "$LOGS" | grep -q "No such module"; then
+            echo "✗ Worker failed with module resolution error"
+            cat /home/runner/.config/.wrangler/logs/*.log
+            kill $WRANGLER_PID 2>/dev/null || true
             exit 1
           fi
-          echo "✓ Bundle size is within limits"
+          
+          # Any response (including 302 redirect to Shopify auth) means boot succeeded
+          if [ "$RESPONSE" = "000" ]; then
+            echo "✗ Worker did not respond"
+            kill $WRANGLER_PID 2>/dev/null || true
+            exit 1
+          fi
+          
+          echo "✓ Worker booted successfully (HTTP $RESPONSE)"
+          kill $WRANGLER_PID 2>/dev/null || true

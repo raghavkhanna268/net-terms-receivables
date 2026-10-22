@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { PrismaPg } from "@prisma/adapter-pg";
 // Use Node.js runtime generator for testing (cloudflare runtime doesn't run in Node.js)
 import { PrismaClient } from "~/generated/prisma-node/client";
-import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
+import { PrismaSessionStorage } from "~/lib/session-storage.server";
 import { Session } from "@shopify/shopify-api";
 
 /**
@@ -10,8 +10,8 @@ import { Session } from "@shopify/shopify-api";
  *
  * This test verifies the complete data path that the Worker uses:
  * 1. PrismaClient with @prisma/adapter-pg driver adapter
- * 2. PrismaSessionStorage from @shopify/shopify-app-session-storage-prisma
- * 3. Full CRUD operations: store, load, findSessionsByShop, deleteSessions
+ * 2. Custom PrismaSessionStorage from app/lib/session-storage.server.ts
+ * 3. Full CRUD operations: store, load, findSessionsByShop, deleteAllForShop
  *
  * The test uses the same adapter configuration that workers/app.ts uses,
  * proving the Hyperdrive connection path works end-to-end.
@@ -25,19 +25,17 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
 describeWithDb("Prisma Session Storage Integration", () => {
   let prisma: PrismaClient;
-  // Type assertion needed: @shopify/shopify-app-session-storage-prisma expects
-  // Prisma 6 types, but we use Prisma 7's generated client. Runtime is compatible.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let sessionStorage: PrismaSessionStorage<any>;
+  let sessionStorage: PrismaSessionStorage;
 
   const TEST_SHOP = "test-integration-shop.myshopify.com";
   const TEST_SESSION_ID = "test-session-id-" + Date.now();
 
   beforeAll(async () => {
     // Create PrismaClient using the same adapter pattern as workers/app.ts
-    // This proves the @prisma/adapter-pg path works with real Postgres
     const adapter = new PrismaPg({ connectionString: TEST_DATABASE_URL! });
-    prisma = new PrismaClient({ adapter });
+    // Type assertion: Node.js generator types differ slightly from cloudflare
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    prisma = new PrismaClient({ adapter }) as any;
 
     // Create session storage the same way shopify.server.ts does
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

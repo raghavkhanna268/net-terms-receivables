@@ -1,7 +1,6 @@
 import type { ActionFunctionArgs } from "react-router";
 
 export const action = async ({ request, context }: ActionFunctionArgs) => {
-  // Session storage is injected per-request via loadContext in workers/app.ts
   const { shopify, sessionStorage } = context;
 
   const { shop, topic, payload } = await shopify.authenticate.webhook(request);
@@ -10,20 +9,13 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   // Update session scopes when the merchant changes app permissions.
   // The payload contains the current scopes granted to the app.
-  // We need to update all sessions for this shop to reflect the new scopes.
+  // Uses updateScopeForShop which calls updateMany in a single query.
   try {
-    const sessions = await sessionStorage.findSessionsByShop(shop);
     const currentScopes = (payload as { current?: string[] })?.current?.join(",");
 
-    if (currentScopes && sessions.length > 0) {
-      for (const session of sessions) {
-        // Only update if scopes actually changed
-        if (session.scope !== currentScopes) {
-          session.scope = currentScopes;
-          await sessionStorage.storeSession(session);
-          console.log(`Updated scopes for session ${session.id} to: ${currentScopes}`);
-        }
-      }
+    if (currentScopes) {
+      const count = await sessionStorage.updateScopeForShop(shop, currentScopes);
+      console.log(`Updated scopes for ${count} session(s) to: ${currentScopes}`);
     }
   } catch (error) {
     console.error(`Error updating scopes for ${shop}:`, error);
