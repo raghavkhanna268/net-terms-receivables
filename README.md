@@ -131,10 +131,10 @@ Merges to `main` trigger automatic deployment via GitHub Actions:
 
 The deploy workflow always deploys the **current main HEAD** (not the triggering run's sha) to prevent stale or out-of-order deploys. Before deploying, it verifies:
 - CI has a successful push run for that sha on main
-- No migrations are queued or in progress on main
-- If migrations ran for that sha, they succeeded
+- No migrations are active (not yet completed) on main
+- The latest migration run on main succeeded (or was skipped)
 
-If conditions aren't met yet, the run skips with a notice (not a failure). This ensures that when commit A's migration finishes after commit B merges, the deploy ships B (once B is green) rather than rolling back to A.
+If conditions aren't met yet, the run skips with a notice (not a failure). If the latest migration failed, the deploy fails until migrations are fixed or re-run. This ensures that when commit A's migration finishes after commit B merges, the deploy ships B (once B is green) rather than rolling back to A—and if A's migration failed, B won't deploy until migrations are fixed.
 
 **Required repository secrets:**
 - `CLOUDFLARE_API_TOKEN` - API token with Workers edit permissions
