@@ -258,4 +258,102 @@ describeWithDb("Prisma Session Storage Integration", () => {
     const remaining = await sessionStorage.findSessionsByShop(TEST_SHOP);
     expect(remaining).toHaveLength(0);
   });
+
+  it("round-trips session with refresh token and expiry (expiringOfflineAccessTokens)", async () => {
+    // Test session with refresh token for future.expiringOfflineAccessTokens: true
+    const expires = new Date("2025-06-15T12:00:00.000Z");
+    const refreshTokenExpires = new Date("2025-12-15T12:00:00.000Z");
+
+    const session = new Session({
+      id: TEST_SESSION_ID,
+      shop: TEST_SHOP,
+      state: "test-state",
+      isOnline: false,
+      scope: "read_orders,write_orders",
+      expires,
+      accessToken: "shpat_test-access-token",
+      refreshToken: "shprt_test-refresh-token",
+      refreshTokenExpires,
+    });
+
+    // Store the session
+    await sessionStorage.storeSession(session);
+
+    // Load it back
+    const loaded = await sessionStorage.loadSession(TEST_SESSION_ID);
+
+    // Verify all fields round-trip correctly
+    expect(loaded).not.toBeUndefined();
+    expect(loaded!.id).toBe(session.id);
+    expect(loaded!.shop).toBe(session.shop);
+    expect(loaded!.state).toBe(session.state);
+    expect(loaded!.isOnline).toBe(session.isOnline);
+    expect(loaded!.scope).toBe(session.scope);
+    expect(loaded!.accessToken).toBe(session.accessToken);
+
+    // Verify refresh token fields
+    expect(loaded!.refreshToken).toBe(session.refreshToken);
+
+    // Verify Date fields are correctly restored (comparing ISO strings for equality)
+    expect(loaded!.expires).toBeInstanceOf(Date);
+    expect(loaded!.expires!.toISOString()).toBe(expires.toISOString());
+
+    expect(loaded!.refreshTokenExpires).toBeInstanceOf(Date);
+    expect(loaded!.refreshTokenExpires!.toISOString()).toBe(
+      refreshTokenExpires.toISOString()
+    );
+
+    // Deep equality check: the loaded session should equal the original
+    expect(loaded!.equals(session)).toBe(true);
+  });
+
+  it("round-trips online session with user info", async () => {
+    // Test online session with onlineAccessInfo
+    const expires = new Date("2025-06-15T12:00:00.000Z");
+
+    const session = new Session({
+      id: TEST_SESSION_ID,
+      shop: TEST_SHOP,
+      state: "test-state",
+      isOnline: true,
+      scope: "read_orders",
+      expires,
+      accessToken: "shpat_test-online-token",
+      onlineAccessInfo: {
+        expires_in: 86400,
+        associated_user_scope: "read_orders",
+        associated_user: {
+          id: 12345678,
+          first_name: "Test",
+          last_name: "User",
+          email: "test@example.com",
+          account_owner: true,
+          locale: "en-US",
+          collaborator: false,
+          email_verified: true,
+        },
+      },
+    });
+
+    // Store and load
+    await sessionStorage.storeSession(session);
+    const loaded = await sessionStorage.loadSession(TEST_SESSION_ID);
+
+    // Verify basic fields
+    expect(loaded).not.toBeUndefined();
+    expect(loaded!.isOnline).toBe(true);
+
+    // Verify user info is restored
+    expect(loaded!.onlineAccessInfo).not.toBeUndefined();
+    expect(loaded!.onlineAccessInfo!.associated_user.id).toBe(12345678);
+    expect(loaded!.onlineAccessInfo!.associated_user.first_name).toBe("Test");
+    expect(loaded!.onlineAccessInfo!.associated_user.last_name).toBe("User");
+    expect(loaded!.onlineAccessInfo!.associated_user.email).toBe(
+      "test@example.com"
+    );
+    expect(loaded!.onlineAccessInfo!.associated_user.account_owner).toBe(true);
+    expect(loaded!.onlineAccessInfo!.associated_user.locale).toBe("en-US");
+    expect(loaded!.onlineAccessInfo!.associated_user.collaborator).toBe(false);
+    expect(loaded!.onlineAccessInfo!.associated_user.email_verified).toBe(true);
+  });
 });

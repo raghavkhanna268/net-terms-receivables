@@ -55,10 +55,22 @@ jobs:
           # Extract gzip total from output
           GZIP_LINE=$(echo "$OUTPUT" | grep "gzip:")
           GZIP_SIZE=$(echo "$GZIP_LINE" | grep -oP '\d+\.\d+ KiB$' | head -1 | cut -d' ' -f1)
+          
+          # Fail if we couldn't parse the gzip size
+          if [ -z "$GZIP_SIZE" ]; then
+            echo "✗ Could not parse gzip size from wrangler output"
+            exit 1
+          fi
+          
           echo "Gzip total: ${GZIP_SIZE} KiB"
           
-          # Convert to bytes for comparison (2.5 MB = 2560 KiB)
+          # Convert to integer for comparison (2.5 MB = 2560 KiB)
           GZIP_INT=$(echo "$GZIP_SIZE" | cut -d'.' -f1)
+          if ! [[ "$GZIP_INT" =~ ^[0-9]+$ ]]; then
+            echo "✗ Gzip size is not a valid number: $GZIP_SIZE"
+            exit 1
+          fi
+          
           if [ "$GZIP_INT" -gt 2560 ]; then
             echo "✗ Gzip size exceeds 2.5 MB limit"
             exit 1
@@ -67,35 +79,81 @@ jobs:
 
       - name: Worker boot test
         run: |
-          # Start wrangler dev with dummy env vars for boot test
-          # The Worker will boot but fail on first request without real creds
-          SHOPIFY_API_KEY=test-key \
-          SHOPIFY_API_SECRET=test-secret \
-          SHOPIFY_APP_URL=https://example.com \
-          timeout 30 npx wrangler dev --port 8787 &
+          # Create throwaway .dev.vars for boot test (wrangler dev doesn't forward shell env)
+          cat > .dev.vars << 'EOF'
+          SHOPIFY_API_KEY=test-key
+          SHOPIFY_API_SECRET=test-secret
+          SHOPIFY_APP_URL=https://example.com
+          EOF
+          
+          # Create directory for wrangler logs
+          mkdir -p /tmp/wrangler-logs
+          
+          # Start wrangler dev with bindings
+          timeout 60 npx wrangler dev --port 8787 > /tmp/wrangler-logs/output.log 2>&1 &
           WRANGLER_PID=$!
           
-          # Wait for Worker to start
-          sleep 10
+          # Retry loop with timeout (max 30 seconds, 1 second intervals)
+          MAX_ATTEMPTS=30
+          ATTEMPT=0
+          RESPONSE=""
           
-          # Try to reach the Worker (expect non-5xx response or connection)
-          RESPONSE=$(curl -s -o /tmp/response.txt -w "%{http_code}" http://localhost:8787/ 2>/dev/null || echo "000")
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            sleep 1
+            
+            RESPONSE=$(curl -s -o /tmp/response.txt -w "%{http_code}" http://localhost:8787/ 2>/dev/null || echo "000")
+            
+            # Break if we got any response (not connection refused)
+            if [ "$RESPONSE" != "000" ]; then
+              break
+            fi
+            
+            # Check if wrangler process is still running
+            if ! kill -0 $WRANGLER_PID 2>/dev/null; then
+              echo "✗ Wrangler process died unexpectedly"
+              cat /tmp/wrangler-logs/output.log
+              exit 1
+            fi
+          done
           
-          # Check logs for module errors
-          LOGS=$(cat /home/runner/.config/.wrangler/logs/*.log 2>/dev/null || echo "")
+          # Check logs for module errors or uncaught exceptions
+          LOGS=$(cat /tmp/wrangler-logs/output.log 2>/dev/null || echo "")
           if echo "$LOGS" | grep -q "No such module"; then
             echo "✗ Worker failed with module resolution error"
-            cat /home/runner/.config/.wrangler/logs/*.log
+            cat /tmp/wrangler-logs/output.log
             kill $WRANGLER_PID 2>/dev/null || true
+            rm -f .dev.vars
+            exit 1
+          fi
+          if echo "$LOGS" | grep -qE "Uncaught|uncaught exception"; then
+            echo "✗ Worker failed with uncaught exception"
+            cat /tmp/wrangler-logs/output.log
+            kill $WRANGLER_PID 2>/dev/null || true
+            rm -f .dev.vars
             exit 1
           fi
           
-          # Any response (including 302 redirect to Shopify auth) means boot succeeded
+          # Clean up .dev.vars
+          rm -f .dev.vars
+          
+          # Fail if no response (timeout)
           if [ "$RESPONSE" = "000" ]; then
-            echo "✗ Worker did not respond"
+            echo "✗ Worker did not respond after $MAX_ATTEMPTS attempts"
+            cat /tmp/wrangler-logs/output.log
             kill $WRANGLER_PID 2>/dev/null || true
             exit 1
           fi
           
+          # Fail on 5xx server errors
+          if [[ "$RESPONSE" =~ ^5[0-9][0-9]$ ]]; then
+            echo "✗ Worker returned server error (HTTP $RESPONSE)"
+            cat /tmp/response.txt
+            cat /tmp/wrangler-logs/output.log
+            kill $WRANGLER_PID 2>/dev/null || true
+            exit 1
+          fi
+          
+          # Assert success (any 2xx, 3xx, or 4xx is acceptable for boot test)
           echo "✓ Worker booted successfully (HTTP $RESPONSE)"
           kill $WRANGLER_PID 2>/dev/null || true

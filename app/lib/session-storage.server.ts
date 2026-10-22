@@ -48,13 +48,8 @@ export class PrismaSessionStorage {
   }
 
   async deleteSession(id: string): Promise<boolean> {
-    try {
-      await this.prisma.session.delete({ where: { id } });
-      return true;
-    } catch {
-      // Session may not exist - that's ok
-      return true;
-    }
+    await this.prisma.session.deleteMany({ where: { id } });
+    return true;
   }
 
   async deleteSessions(ids: string[]): Promise<boolean> {
@@ -111,8 +106,8 @@ export class PrismaSessionStorage {
         session.onlineAccessInfo?.associated_user?.collaborator ?? false,
       emailVerified:
         session.onlineAccessInfo?.associated_user?.email_verified ?? false,
-      refreshToken: null,
-      refreshTokenExpires: null,
+      refreshToken: session.refreshToken ?? null,
+      refreshTokenExpires: session.refreshTokenExpires ?? null,
     };
   }
 
@@ -125,6 +120,8 @@ export class PrismaSessionStorage {
       scope: row.scope ?? undefined,
       expires: row.expires ?? undefined,
       accessToken: row.accessToken,
+      refreshToken: row.refreshToken ?? undefined,
+      refreshTokenExpires: row.refreshTokenExpires ?? undefined,
     };
 
     if (row.userId !== null) {
