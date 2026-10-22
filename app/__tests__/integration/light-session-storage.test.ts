@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import postgres from "postgres";
 import { LightSessionStorage } from "~/lib/session-storage-light.server";
 import { Session } from "@shopify/shopify-api";
+import { sqlOptions } from "~/lib/db-light.server";
 
 /**
  * Integration test for lightweight session storage with a real PostgreSQL database.
@@ -32,9 +33,7 @@ describeWithDb("Light Session Storage Integration", () => {
   const TEST_SESSION_ID = "test-light-session-id-" + Date.now();
 
   beforeAll(async () => {
-    // Create postgres.js client with fetch_types disabled (matches production).
-    // fetch_types:false skips type-lookup round trip (required for Hyperdrive).
-    sql = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
 
     // Create session storage with the SQL client
     sessionStorage = new LightSessionStorage(sql);
@@ -375,7 +374,7 @@ describeWithDb("Light Session Storage Integration", () => {
   });
 
   it("propagates errors from closed SQL connection", async () => {
-    const closedSql = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+    const closedSql = postgres(TEST_DATABASE_URL!, sqlOptions);
     const closedStorage = new LightSessionStorage(closedSql);
     
     await closedSql.end();
@@ -388,8 +387,7 @@ describeWithDb("Light Session Storage Integration", () => {
     // Use a connection string to a non-existent database to test error propagation
     // through LightSessionStorage (not raw SQL)
     const badSql = postgres("postgresql://postgres:postgres@localhost:5432/nonexistent_db_12345", {
-      max: 1,
-      fetch_types: false,
+      ...sqlOptions,
       connect_timeout: 2,
     });
     const badStorage = new LightSessionStorage(badSql);
@@ -428,13 +426,13 @@ describeWithDb("Light Session Storage Timezone Handling", () => {
 
   afterAll(async () => {
     // Clean up test data with a fresh connection
-    const cleanupSql = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+    const cleanupSql = postgres(TEST_DATABASE_URL!, sqlOptions);
     await cleanupSql`DELETE FROM "Session" WHERE shop = ${TZ_TEST_SHOP}`;
     await cleanupSql.end();
   });
 
   it("stores UTC timestamp correctly (raw column verification)", async () => {
-    const sqlUtc = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+    const sqlUtc = postgres(TEST_DATABASE_URL!, sqlOptions);
     const storage = new LightSessionStorage(sqlUtc);
 
     const session = new Session({
@@ -468,7 +466,7 @@ describeWithDb("Light Session Storage Timezone Handling", () => {
   });
 
   it("round-trips correctly with DB session timezone UTC (process TZ=UTC)", async () => {
-    const sqlUtc = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+    const sqlUtc = postgres(TEST_DATABASE_URL!, sqlOptions);
     await sqlUtc`SET TIME ZONE 'UTC'`;
     const storage = new LightSessionStorage(sqlUtc);
 
@@ -493,7 +491,7 @@ describeWithDb("Light Session Storage Timezone Handling", () => {
   });
 
   it("round-trips correctly with DB session timezone Asia/Kolkata (process TZ=UTC)", async () => {
-    const sqlKolkata = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+    const sqlKolkata = postgres(TEST_DATABASE_URL!, sqlOptions);
     await sqlKolkata`SET TIME ZONE 'Asia/Kolkata'`;
     const storage = new LightSessionStorage(sqlKolkata);
 
@@ -519,7 +517,7 @@ describeWithDb("Light Session Storage Timezone Handling", () => {
   });
 
   it("round-trips correctly with DB session timezone Europe/London", async () => {
-    const sqlLondon = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+    const sqlLondon = postgres(TEST_DATABASE_URL!, sqlOptions);
     await sqlLondon`SET TIME ZONE 'Europe/London'`;
     const storage = new LightSessionStorage(sqlLondon);
 
@@ -544,7 +542,7 @@ describeWithDb("Light Session Storage Timezone Handling", () => {
   });
 
   it("round-trips correctly with DB session timezone America/New_York", async () => {
-    const sqlNy = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+    const sqlNy = postgres(TEST_DATABASE_URL!, sqlOptions);
     await sqlNy`SET TIME ZONE 'America/New_York'`;
     const storage = new LightSessionStorage(sqlNy);
 
@@ -570,7 +568,7 @@ describeWithDb("Light Session Storage Timezone Handling", () => {
 
   it("is compatible with rows written by Prisma (stored as UTC wall time)", async () => {
     // Simulate a row that Prisma would have written (UTC wall time in TIMESTAMP column)
-    const sqlDirect = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+    const sqlDirect = postgres(TEST_DATABASE_URL!, sqlOptions);
     
     // Insert directly using the same format Prisma uses (UTC wall time)
     await sqlDirect`
@@ -605,7 +603,7 @@ describeWithDb("Light Session Storage Timezone Handling", () => {
 
   it("cross-writes and cross-reads correctly (write in Kolkata TZ, read in NY TZ)", async () => {
     // Write with Asia/Kolkata DB session
-    const sqlWrite = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+    const sqlWrite = postgres(TEST_DATABASE_URL!, sqlOptions);
     await sqlWrite`SET TIME ZONE 'Asia/Kolkata'`;
     const writeStorage = new LightSessionStorage(sqlWrite);
 
@@ -623,7 +621,7 @@ describeWithDb("Light Session Storage Timezone Handling", () => {
     await sqlWrite.end();
 
     // Read with America/New_York DB session
-    const sqlRead = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+    const sqlRead = postgres(TEST_DATABASE_URL!, sqlOptions);
     await sqlRead`SET TIME ZONE 'America/New_York'`;
     const readStorage = new LightSessionStorage(sqlRead);
 
