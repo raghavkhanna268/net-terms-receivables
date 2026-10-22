@@ -12,10 +12,10 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   // Session storage is injected per-request via loadContext in workers/app.ts
   const { shopify, sessionStorage } = context;
 
-  const { shop, topic, payload } = await shopify.authenticate.webhook(request);
+  const { shop, topic, webhookId } = await shopify.authenticate.webhook(request);
 
   console.log(
-    `[Compliance] Received ${topic} webhook for shop=${shop}, webhook_id=${payload?.webhook_id ?? "unknown"}`
+    `[Compliance] Received ${topic} webhook for shop=${shop}, webhook_id=${webhookId}`
   );
 
   switch (topic) {
