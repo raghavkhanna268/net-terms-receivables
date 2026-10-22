@@ -58,6 +58,12 @@ export function createSql(connectionString: string): Sql {
     transform: { undefined: null },
     // Connection timeout in seconds
     connect_timeout: 10,
+    // Skip type-lookup query on new connections (saves a round trip).
+    // Required for Hyperdrive per Cloudflare docs. Side effect: array params
+    // need explicit handling - use `IN ${sql(ids)}` instead of `ANY(${ids})`
+    // because ANY() needs type info to serialize arrays correctly.
+    // Date/boolean/bigint parsing still works via postgres.js defaults.
+    fetch_types: false,
   });
 }
 
