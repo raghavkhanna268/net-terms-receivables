@@ -1,16 +1,12 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
-import { authenticate, sessionStorage } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
-  // Inject KV namespace for session storage
-  const env = context.cloudflare?.env;
-  if (env?.SESSIONS) {
-    sessionStorage.setNamespace(env.SESSIONS);
-  }
+  // Session storage is injected per-request via loadContext in workers/app.ts
+  const { shopify } = context;
 
-  const { session } = await authenticate.admin(request);
+  const { session } = await shopify.authenticate.admin(request);
 
   return {
     shopName: session.shop.replace(".myshopify.com", ""),
@@ -40,12 +36,12 @@ export default function Index() {
 
       <s-section slot="aside" heading="Getting Started">
         <s-paragraph>
-          This scaffold proves authentication is working. Next steps in S2:
+          Next steps after S2:
         </s-paragraph>
         <s-unordered-list>
-          <s-list-item>Connect Supabase Postgres via Hyperdrive</s-list-item>
           <s-list-item>Build buyer management UI</s-list-item>
           <s-list-item>Implement credit limit tracking</s-list-item>
+          <s-list-item>Add invoice generation</s-list-item>
         </s-unordered-list>
       </s-section>
 
@@ -63,9 +59,13 @@ export default function Index() {
           </s-link>
         </s-paragraph>
         <s-paragraph>
-          <s-text>Session Storage: </s-text>
-          <s-link href="https://developers.cloudflare.com/kv" target="_blank">
-            Cloudflare KV
+          <s-text>Database: </s-text>
+          <s-link href="https://supabase.com" target="_blank">
+            Supabase Postgres
+          </s-link>
+          <s-text> via </s-text>
+          <s-link href="https://developers.cloudflare.com/hyperdrive" target="_blank">
+            Hyperdrive
           </s-link>
         </s-paragraph>
         <s-paragraph>

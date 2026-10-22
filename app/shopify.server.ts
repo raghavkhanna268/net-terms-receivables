@@ -4,34 +4,78 @@ import {
   AppDistribution,
   shopifyApp,
 } from "@shopify/shopify-app-react-router/server";
-import { KVSessionStorage } from "@shopify/shopify-app-session-storage-kv";
+import type { PrismaClient } from "~/generated/prisma/client";
+import {
+  PrismaSessionStorage,
+  type PrismaClientGetter,
+} from "./lib/session-storage.server";
+import { parseScopes } from "./lib/scopes";
 
-// KV session storage for Cloudflare Workers
-// The KV namespace is bound via wrangler.jsonc and accessed through context
-const sessionStorage = new KVSessionStorage();
+/**
+ * Fail fast on missing required environment variables.
+ */
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(
+      `Missing required environment variable: ${name}. ` +
+        `For local dev, set it in .dev.vars. For production, use 'wrangler secret put ${name}'.`
+    );
+  }
+  return value;
+}
 
-const shopify = shopifyApp({
-  apiKey: process.env.SHOPIFY_API_KEY,
-  apiSecretKey: process.env.SHOPIFY_API_SECRET || "",
-  apiVersion: ApiVersion.October26,
-  scopes: process.env.SCOPES?.split(","),
-  appUrl: process.env.SHOPIFY_APP_URL || "",
-  authPathPrefix: "/auth",
-  sessionStorage,
-  distribution: AppDistribution.AppStore,
-  future: {
-    expiringOfflineAccessTokens: true,
-  },
-  ...(process.env.SHOP_CUSTOM_DOMAIN
-    ? { customShopDomains: [process.env.SHOP_CUSTOM_DOMAIN] }
-    : {}),
-});
+const apiKey = requireEnv("SHOPIFY_API_KEY");
+const apiSecretKey = requireEnv("SHOPIFY_API_SECRET");
+const appUrl = requireEnv("SHOPIFY_APP_URL");
+const scopesEnv = process.env.SCOPES ?? "";
+const scopes = parseScopes(scopesEnv);
 
-export default shopify;
+/**
+ * Creates a PrismaSessionStorage instance for Shopify session management.
+ *
+ * This factory function is called per-request in the Worker entry point,
+ * ensuring each request gets its own session storage instance backed by
+ * a per-request PrismaClient (required for Cloudflare Workers with Hyperdrive).
+ *
+ * @param prismaOrGetter - A PrismaClient instance or getter for lazy creation
+ * @returns A PrismaSessionStorage instance
+ */
+export function createSessionStorage(
+  prismaOrGetter: PrismaClient | PrismaClientGetter
+): PrismaSessionStorage {
+  return new PrismaSessionStorage(prismaOrGetter);
+}
+
+/**
+ * Creates the Shopify app configuration with the provided session storage.
+ *
+ * This factory function is called per-request to ensure proper isolation
+ * in Workers environments where concurrent requests share the same isolate.
+ *
+ * @param sessionStorage - A session storage instance for this request
+ * @returns Configured Shopify app instance
+ */
+export function createShopifyApp(sessionStorage: PrismaSessionStorage) {
+  return shopifyApp({
+    apiKey,
+    apiSecretKey,
+    apiVersion: ApiVersion.October26,
+    scopes,
+    appUrl,
+    authPathPrefix: "/auth",
+    sessionStorage,
+    distribution: AppDistribution.AppStore,
+    future: {
+      expiringOfflineAccessTokens: true,
+    },
+    ...(process.env.SHOP_CUSTOM_DOMAIN
+      ? { customShopDomains: [process.env.SHOP_CUSTOM_DOMAIN] }
+      : {}),
+  });
+}
+
 export const apiVersion = ApiVersion.October26;
-export const addDocumentResponseHeaders = shopify.addDocumentResponseHeaders;
-export const authenticate = shopify.authenticate;
-export const unauthenticated = shopify.unauthenticated;
-export const login = shopify.login;
-export const registerWebhooks = shopify.registerWebhooks;
-export { sessionStorage };
+
+// Re-export types needed by routes
+export type { PrismaSessionStorage };

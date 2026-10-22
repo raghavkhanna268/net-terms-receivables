@@ -1,6 +1,16 @@
 import { describe, it, expect, vi, beforeEach, Mock } from "vitest";
 import type { ActionFunctionArgs } from "react-router";
 
+const mockShopify = {
+  authenticate: {
+    webhook: vi.fn(),
+  },
+};
+
+const mockSessionStorage = {
+  deleteAllForShop: vi.fn(),
+};
+
 function createMockActionArgs(
   request: Request,
   env: Record<string, unknown> = {}
@@ -8,36 +18,25 @@ function createMockActionArgs(
   return {
     request,
     params: {},
-    context: { cloudflare: { env } },
+    context: {
+      cloudflare: { env, ctx: {} },
+      shopify: mockShopify,
+      sessionStorage: mockSessionStorage,
+    },
     url: new URL(request.url),
     pattern: "/webhooks/compliance",
-  } as ActionFunctionArgs;
+  } as unknown as ActionFunctionArgs;
 }
 
-vi.mock("../../shopify.server", () => ({
-  authenticate: {
-    webhook: vi.fn(),
-  },
-  sessionStorage: {
-    setNamespace: vi.fn(),
-    findSessionsByShop: vi.fn(),
-    deleteSessions: vi.fn(),
-  },
-}));
-
 import { action } from "../webhooks.compliance";
-import { authenticate, sessionStorage } from "../../shopify.server";
 
-const mockWebhook = authenticate.webhook as Mock;
-const mockSetNamespace = sessionStorage.setNamespace as Mock;
-const mockFindSessionsByShop = sessionStorage.findSessionsByShop as Mock;
-const mockDeleteSessions = sessionStorage.deleteSessions as Mock;
+const mockWebhook = mockShopify.authenticate.webhook as Mock;
+const mockDeleteAllForShop = mockSessionStorage.deleteAllForShop as Mock;
 
 describe("webhooks.compliance", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockFindSessionsByShop.mockResolvedValue([]);
-    mockDeleteSessions.mockResolvedValue(true);
+    mockDeleteAllForShop.mockResolvedValue(0);
   });
 
   describe("HMAC verification", () => {
@@ -45,7 +44,8 @@ describe("webhooks.compliance", () => {
       mockWebhook.mockResolvedValue({
         shop: "test-shop.myshopify.com",
         topic: "CUSTOMERS_DATA_REQUEST",
-        payload: { webhook_id: "test-webhook-123" },
+        webhookId: "test-webhook-123",
+        payload: {},
       });
 
       const request = new Request("https://example.com/webhooks/compliance", {
@@ -64,7 +64,8 @@ describe("webhooks.compliance", () => {
       mockWebhook.mockResolvedValue({
         shop: "test-shop.myshopify.com",
         topic: "CUSTOMERS_REDACT",
-        payload: { webhook_id: "test-webhook-456" },
+        webhookId: "test-webhook-456",
+        payload: {},
       });
 
       const request = new Request("https://example.com/webhooks/compliance", {
@@ -76,34 +77,6 @@ describe("webhooks.compliance", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-    });
-
-    it("returns 200 for valid HMAC (shop/redact) and deletes sessions", async () => {
-      const mockSessions = [{ id: "session-1" }, { id: "session-2" }];
-      mockFindSessionsByShop.mockResolvedValue(mockSessions);
-
-      mockWebhook.mockResolvedValue({
-        shop: "test-shop.myshopify.com",
-        topic: "SHOP_REDACT",
-        payload: { webhook_id: "test-webhook-789" },
-      });
-
-      const request = new Request("https://example.com/webhooks/compliance", {
-        method: "POST",
-        body: JSON.stringify({ shop_id: 123 }),
-        headers: { "Content-Type": "application/json" },
-      });
-
-      const response = await action(createMockActionArgs(request));
-
-      expect(response.status).toBe(200);
-      expect(mockFindSessionsByShop).toHaveBeenCalledWith(
-        "test-shop.myshopify.com"
-      );
-      expect(mockDeleteSessions).toHaveBeenCalledWith([
-        "session-1",
-        "session-2",
-      ]);
     });
 
     it("returns 401 for invalid HMAC", async () => {
@@ -132,12 +105,58 @@ describe("webhooks.compliance", () => {
     });
   });
 
-  describe("session namespace injection", () => {
-    it("sets KV namespace when available", async () => {
-      const mockNamespace = { get: vi.fn(), put: vi.fn(), delete: vi.fn() };
+  describe("shop/redact", () => {
+    it("deletes sessions via sessionStorage.deleteAllForShop", async () => {
+      mockDeleteAllForShop.mockResolvedValue(3);
+
       mockWebhook.mockResolvedValue({
         shop: "test-shop.myshopify.com",
-        topic: "CUSTOMERS_DATA_REQUEST",
+        topic: "SHOP_REDACT",
+        webhookId: "test-webhook-789",
+        payload: {},
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify({ shop_id: 123 }),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const response = await action(createMockActionArgs(request));
+
+      expect(response.status).toBe(200);
+      expect(mockDeleteAllForShop).toHaveBeenCalledWith("test-shop.myshopify.com");
+    });
+
+    it("returns 200 even when no sessions exist (idempotent)", async () => {
+      mockDeleteAllForShop.mockResolvedValue(0);
+
+      mockWebhook.mockResolvedValue({
+        shop: "no-sessions-shop.myshopify.com",
+        topic: "SHOP_REDACT",
+        webhookId: "test-webhook-idempotent",
+        payload: {},
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify({ shop_id: 999 }),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const response = await action(createMockActionArgs(request));
+
+      expect(response.status).toBe(200);
+      expect(mockDeleteAllForShop).toHaveBeenCalledWith("no-sessions-shop.myshopify.com");
+    });
+
+    it("handles multiple sessions for the same shop", async () => {
+      mockDeleteAllForShop.mockResolvedValue(5);
+
+      mockWebhook.mockResolvedValue({
+        shop: "multi-session-shop.myshopify.com",
+        topic: "SHOP_REDACT",
+        webhookId: "test-webhook-multi",
         payload: {},
       });
 
@@ -146,9 +165,32 @@ describe("webhooks.compliance", () => {
         body: "{}",
       });
 
-      await action(createMockActionArgs(request, { SESSIONS: mockNamespace }));
+      const response = await action(createMockActionArgs(request));
 
-      expect(mockSetNamespace).toHaveBeenCalledWith(mockNamespace);
+      expect(response.status).toBe(200);
+      expect(mockDeleteAllForShop).toHaveBeenCalledWith("multi-session-shop.myshopify.com");
+    });
+  });
+
+  describe("context injection", () => {
+    it("uses sessionStorage from context (not module-level state)", async () => {
+      mockDeleteAllForShop.mockResolvedValue(1);
+
+      mockWebhook.mockResolvedValue({
+        shop: "context-test.myshopify.com",
+        topic: "SHOP_REDACT",
+        webhookId: "context-webhook",
+        payload: {},
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: "{}",
+      });
+
+      await action(createMockActionArgs(request));
+
+      expect(mockDeleteAllForShop).toHaveBeenCalled();
     });
   });
 });

@@ -1,0 +1,46 @@
+# Database Migrations Workflow
+# Runs prisma migrate deploy on pushes to main
+# Uses Supabase's SESSION pooler (port 5432) for migrations
+# Skips when DATABASE_URL_MIGRATIONS secret is not set (forks/PRs without access)
+
+name: Database Migrations
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'prisma/**'
+
+jobs:
+  migrate:
+    name: Run Prisma Migrations
+    runs-on: ubuntu-latest
+    if: ${{ vars.ENABLE_MIGRATIONS != 'false' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::notice::DATABASE_URL_MIGRATIONS secret not set - skipping migrations"
+            echo "To enable migrations:"
+            echo "1. Create a Supabase project"
+            echo "2. Get the SESSION pooler connection string (port 5432)"
+            echo "3. Add it as DATABASE_URL_MIGRATIONS in GitHub Secrets"
+            exit 0
+          fi
+          npx prisma migrate deploy

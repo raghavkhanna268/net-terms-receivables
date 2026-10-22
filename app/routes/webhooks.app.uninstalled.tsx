@@ -1,21 +1,22 @@
 import type { ActionFunctionArgs } from "react-router";
-import { authenticate, sessionStorage } from "../shopify.server";
 
 export const action = async ({ request, context }: ActionFunctionArgs) => {
-  // Inject KV namespace for session storage
-  const env = context.cloudflare?.env;
-  if (env?.SESSIONS) {
-    sessionStorage.setNamespace(env.SESSIONS);
-  }
+  const { shopify, sessionStorage } = context;
 
-  const { shop, session, topic } = await authenticate.webhook(request);
+  const { shop, topic } = await shopify.authenticate.webhook(request);
 
   console.log(`Received ${topic} webhook for ${shop}`);
 
-  // Webhook requests can trigger multiple times and after an app has already been uninstalled.
-  // If this webhook already ran, the session may have been deleted previously.
-  if (session) {
-    await sessionStorage.deleteSession(session.id);
+  // Delete ALL sessions for this shop (DPDP compliance).
+  // Uses deleteAllForShop which calls deleteMany internally, avoiding
+  // the 25-session limit of findSessionsByShop.
+  // Idempotent: returns count=0 if no sessions exist (already uninstalled).
+  try {
+    const count = await sessionStorage.deleteAllForShop(shop);
+    console.log(`Deleted ${count} session(s) for ${shop}`);
+  } catch (error) {
+    // Log but don't fail - the shop is already uninstalled
+    console.error(`Error deleting sessions for ${shop}:`, error);
   }
 
   return new Response();

@@ -4,5 +4,7 @@
 roles = ["frontend", "backend"]
 
 [commands]
-dev = "npm run dev:cf -- --port $PORT"
+# Note: vite.config.ts reads PORT from env, so no --port flag needed.
+# Shopify CLI runs this without a shell, so $PORT would be literal.
+dev = "npm run dev:cf"
 build = "npm run build"
