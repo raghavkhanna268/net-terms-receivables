@@ -11,9 +11,20 @@ import { _resetShopifyAppForTesting, getShopifyApp } from "../../shopify.server"
  */
 
 describe("shopifyApp Singleton", () => {
-  const originalEnv = { ...process.env };
+  // Track which keys were added (not just modified) so we can delete them in cleanup
+  const testEnvKeys = ["SHOPIFY_API_KEY", "SHOPIFY_API_SECRET", "SHOPIFY_APP_URL"] as const;
+  const keysToDelete: string[] = [];
+  const originalValues: Record<string, string | undefined> = {};
 
   beforeAll(() => {
+    // Save original values and track which keys need to be deleted on cleanup
+    for (const key of testEnvKeys) {
+      originalValues[key] = process.env[key];
+      if (process.env[key] === undefined) {
+        keysToDelete.push(key);
+      }
+    }
+
     // Use Object.assign to bypass strict literal type checking from wrangler types
     Object.assign(process.env, {
       SHOPIFY_API_KEY: "test-api-key",
@@ -23,7 +34,18 @@ describe("shopifyApp Singleton", () => {
   });
 
   afterAll(() => {
-    Object.assign(process.env, originalEnv);
+    // Restore original values for keys that existed
+    // Type cast needed to bypass strict literal types from wrangler
+    const env = process.env as Record<string, string | undefined>;
+    for (const key of testEnvKeys) {
+      if (originalValues[key] !== undefined) {
+        env[key] = originalValues[key];
+      }
+    }
+    // Delete keys that were added (weren't set before the test)
+    for (const key of keysToDelete) {
+      delete env[key];
+    }
   });
 
   beforeEach(() => {

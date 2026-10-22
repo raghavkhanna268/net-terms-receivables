@@ -1,16 +1,33 @@
-import type { LoaderFunctionArgs } from "react-router";
+import type { LoaderFunctionArgs, HeadersFunction } from "react-router";
 import { redirect, Form, useLoaderData } from "react-router";
 
 import styles from "./styles.module.css";
 
+/**
+ * Cache-Control for the landing page.
+ * - public: can be cached by CDN (Cloudflare)
+ * - max-age=60: browser caches for 1 minute
+ * - s-maxage=3600: CDN caches for 1 hour
+ * - stale-while-revalidate=86400: serve stale while revalidating for 24 hours
+ *
+ * This significantly reduces Worker invocations for the landing page.
+ */
+export const headers: HeadersFunction = () => ({
+  "Cache-Control": "public, max-age=60, s-maxage=3600, stale-while-revalidate=86400",
+});
+
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
-  const { shopify } = context;
 
+  // Redirect shop parameter to /app without loading heavy Shopify modules
   if (url.searchParams.get("shop")) {
     throw redirect(`/app?${url.searchParams.toString()}`);
   }
 
+  // For App Store distribution apps, login form is always available.
+  // We access shopify.login to determine this, but for public apps
+  // this is a lightweight check (no DB access, no session).
+  const { shopify } = context;
   return { showForm: Boolean(shopify.login) };
 };
 
