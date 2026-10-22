@@ -4,7 +4,7 @@ A B2B wholesale net-terms receivables management app for Shopify. Track invoices
 
 ## Tech Stack
 
-- **Runtime**: Cloudflare Workers (Free tier, Smart Placement near Mumbai)
+- **Runtime**: Cloudflare Workers (Free tier, placed near AWS Seoul via region hint)
 - **Framework**: React Router v7 with `@shopify/shopify-app-react-router`
 - **UI**: Polaris Web Components + App Bridge
 - **Session Storage**: Cloudflare KV (via `@shopify/shopify-app-session-storage-kv`)
@@ -13,7 +13,7 @@ A B2B wholesale net-terms receivables management app for Shopify. Track invoices
 ### Why This Stack?
 
 - **$0/month until paying merchants**: Cloudflare Workers Free tier (100k requests/day), Supabase Free tier (later)
-- **Low latency for India**: Smart Placement prefers Mumbai region
+- **Low latency for DB**: Explicit region hint places Worker near Supabase Postgres (AWS ap-northeast-2)
 - **Edge-native**: No cold starts, global distribution
 - **Official Shopify support**: Uses `@shopify/shopify-app-react-router` with Node adapter + `nodejs_compat`
 

@@ -5,10 +5,10 @@
   "compatibility_flags": ["nodejs_compat"],
   "main": "./workers/app.ts",
 
-  // Smart Placement optimizes latency by running the Worker close to backend services.
-  // It does not accept region preferences; placement is automatic based on access patterns.
+  // Explicit region placement: run Worker near Supabase Postgres in AWS Seoul.
+  // If the DB moves to Mumbai, switch the hint to aws:ap-south-1.
   "placement": {
-    "mode": "smart"
+    "region": "aws:ap-northeast-2"
   },
 
   // Hyperdrive binding for Supabase Postgres connection pooling
