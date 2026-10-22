@@ -1,0 +1,8 @@
+# Web component configuration for Shopify CLI
+# Serves both frontend (app UI) and backend (webhooks, auth, API)
+
+roles = ["frontend", "backend"]
+
+[commands]
+dev = "npm run dev:cf -- --port $PORT"
+build = "npm run build"
