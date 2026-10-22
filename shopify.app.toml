@@ -35,4 +35,4 @@ redirect_urls = ["https://net-terms-receivables.raghavkhanna.workers.dev/auth/ca
 embedded = false
 
 [build]
-automatically_update_urls_on_dev = true
+automatically_update_urls_on_dev = false
