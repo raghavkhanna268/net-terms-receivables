@@ -1,6 +1,17 @@
 import { describe, it, expect, vi, beforeEach, Mock } from "vitest";
 import type { ActionFunctionArgs } from "react-router";
 
+const mockShopify = {
+  authenticate: {
+    webhook: vi.fn(),
+  },
+};
+
+const mockSessionStorage = {
+  findSessionsByShop: vi.fn(),
+  deleteSessions: vi.fn(),
+};
+
 function createMockActionArgs(
   request: Request,
   env: Record<string, unknown> = {}
@@ -8,30 +19,22 @@ function createMockActionArgs(
   return {
     request,
     params: {},
-    context: { cloudflare: { env } },
+    context: {
+      cloudflare: { env, ctx: {} },
+      shopify: mockShopify,
+      sessionStorage: mockSessionStorage,
+      prisma: {},
+    },
     url: new URL(request.url),
     pattern: "/webhooks/compliance",
-  } as ActionFunctionArgs;
+  } as unknown as ActionFunctionArgs;
 }
 
-vi.mock("../../shopify.server", () => ({
-  authenticate: {
-    webhook: vi.fn(),
-  },
-  sessionStorage: {
-    setNamespace: vi.fn(),
-    findSessionsByShop: vi.fn(),
-    deleteSessions: vi.fn(),
-  },
-}));
-
 import { action } from "../webhooks.compliance";
-import { authenticate, sessionStorage } from "../../shopify.server";
 
-const mockWebhook = authenticate.webhook as Mock;
-const mockSetNamespace = sessionStorage.setNamespace as Mock;
-const mockFindSessionsByShop = sessionStorage.findSessionsByShop as Mock;
-const mockDeleteSessions = sessionStorage.deleteSessions as Mock;
+const mockWebhook = mockShopify.authenticate.webhook as Mock;
+const mockFindSessionsByShop = mockSessionStorage.findSessionsByShop as Mock;
+const mockDeleteSessions = mockSessionStorage.deleteSessions as Mock;
 
 describe("webhooks.compliance", () => {
   beforeEach(() => {
@@ -132,12 +135,11 @@ describe("webhooks.compliance", () => {
     });
   });
 
-  describe("session namespace injection", () => {
-    it("sets KV namespace when available", async () => {
-      const mockNamespace = { get: vi.fn(), put: vi.fn(), delete: vi.fn() };
+  describe("session storage via context", () => {
+    it("receives session storage from context (not module import)", async () => {
       mockWebhook.mockResolvedValue({
         shop: "test-shop.myshopify.com",
-        topic: "CUSTOMERS_DATA_REQUEST",
+        topic: "SHOP_REDACT",
         payload: {},
       });
 
@@ -146,9 +148,11 @@ describe("webhooks.compliance", () => {
         body: "{}",
       });
 
-      await action(createMockActionArgs(request, { SESSIONS: mockNamespace }));
+      await action(createMockActionArgs(request));
 
-      expect(mockSetNamespace).toHaveBeenCalledWith(mockNamespace);
+      // Session storage is now passed via context, not set via setNamespace
+      // This test verifies the route uses context.sessionStorage
+      expect(mockFindSessionsByShop).toHaveBeenCalled();
     });
   });
 });

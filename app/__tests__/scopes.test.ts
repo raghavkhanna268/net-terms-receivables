@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseScopes } from "../shopify.server";
+import { parseScopes } from "../lib/scopes";
 
 describe("parseScopes", () => {
   it("returns empty array for empty string", () => {
