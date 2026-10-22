@@ -197,13 +197,13 @@ describe("Route context storage verification", () => {
   });
 
   describe("webhooks.compliance route", () => {
-    it("receives sessionStorage from context for shop/redact", async () => {
-      const sessionStorage = createMockSessionStorage();
+    it("uses prisma.session.deleteMany directly for shop/redact (idempotent)", async () => {
       const shopify = createMockShopify();
-
-      sessionStorage.findSessionsByShop.mockResolvedValue([
-        { id: "compliance-session-1" },
-      ]);
+      const mockPrisma = {
+        session: {
+          deleteMany: vi.fn().mockResolvedValue({ count: 2 }),
+        },
+      };
 
       shopify.authenticate.webhook.mockResolvedValue({
         shop: "compliance-test.myshopify.com",
@@ -212,18 +212,58 @@ describe("Route context storage verification", () => {
         payload: {},
       });
 
-      const args = createMockArgs({ sessionStorage, shopify });
+      const args = {
+        request: new Request("https://example.com/test"),
+        params: {},
+        context: {
+          cloudflare: { env: {}, ctx: {} },
+          prisma: mockPrisma,
+          sessionStorage: {},
+          shopify,
+        },
+      } as unknown as ActionFunctionArgs;
 
       const { action } = await import("../../routes/webhooks.compliance");
       await action(args);
 
-      // Verify sessionStorage methods were called
-      expect(sessionStorage.findSessionsByShop).toHaveBeenCalledWith(
-        "compliance-test.myshopify.com"
-      );
-      expect(sessionStorage.deleteSessions).toHaveBeenCalledWith([
-        "compliance-session-1",
-      ]);
+      // Verify prisma.session.deleteMany was called with shop filter
+      // This is the direct delete pattern that avoids stale session ID issues
+      expect(mockPrisma.session.deleteMany).toHaveBeenCalledWith({
+        where: { shop: "compliance-test.myshopify.com" },
+      });
+    });
+
+    it("returns 200 even when no sessions exist (idempotent)", async () => {
+      const shopify = createMockShopify();
+      const mockPrisma = {
+        session: {
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+      };
+
+      shopify.authenticate.webhook.mockResolvedValue({
+        shop: "empty-shop.myshopify.com",
+        topic: "SHOP_REDACT",
+        webhookId: "compliance-webhook-empty",
+        payload: {},
+      });
+
+      const args = {
+        request: new Request("https://example.com/test"),
+        params: {},
+        context: {
+          cloudflare: { env: {}, ctx: {} },
+          prisma: mockPrisma,
+          sessionStorage: {},
+          shopify,
+        },
+      } as unknown as ActionFunctionArgs;
+
+      const { action } = await import("../../routes/webhooks.compliance");
+      const response = await action(args);
+
+      // Must return 200 even with no rows deleted
+      expect(response.status).toBe(200);
     });
   });
 

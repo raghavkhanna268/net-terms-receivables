@@ -7,9 +7,10 @@ const mockShopify = {
   },
 };
 
-const mockSessionStorage = {
-  findSessionsByShop: vi.fn(),
-  deleteSessions: vi.fn(),
+const mockPrisma = {
+  session: {
+    deleteMany: vi.fn(),
+  },
 };
 
 function createMockActionArgs(
@@ -22,8 +23,8 @@ function createMockActionArgs(
     context: {
       cloudflare: { env, ctx: {} },
       shopify: mockShopify,
-      sessionStorage: mockSessionStorage,
-      prisma: {},
+      prisma: mockPrisma,
+      sessionStorage: {},
     },
     url: new URL(request.url),
     pattern: "/webhooks/compliance",
@@ -33,14 +34,12 @@ function createMockActionArgs(
 import { action } from "../webhooks.compliance";
 
 const mockWebhook = mockShopify.authenticate.webhook as Mock;
-const mockFindSessionsByShop = mockSessionStorage.findSessionsByShop as Mock;
-const mockDeleteSessions = mockSessionStorage.deleteSessions as Mock;
+const mockDeleteMany = mockPrisma.session.deleteMany as Mock;
 
 describe("webhooks.compliance", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockFindSessionsByShop.mockResolvedValue([]);
-    mockDeleteSessions.mockResolvedValue(true);
+    mockDeleteMany.mockResolvedValue({ count: 0 });
   });
 
   describe("HMAC verification", () => {
@@ -48,7 +47,8 @@ describe("webhooks.compliance", () => {
       mockWebhook.mockResolvedValue({
         shop: "test-shop.myshopify.com",
         topic: "CUSTOMERS_DATA_REQUEST",
-        payload: { webhook_id: "test-webhook-123" },
+        webhookId: "test-webhook-123",
+        payload: {},
       });
 
       const request = new Request("https://example.com/webhooks/compliance", {
@@ -67,7 +67,8 @@ describe("webhooks.compliance", () => {
       mockWebhook.mockResolvedValue({
         shop: "test-shop.myshopify.com",
         topic: "CUSTOMERS_REDACT",
-        payload: { webhook_id: "test-webhook-456" },
+        webhookId: "test-webhook-456",
+        payload: {},
       });
 
       const request = new Request("https://example.com/webhooks/compliance", {
@@ -79,34 +80,6 @@ describe("webhooks.compliance", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-    });
-
-    it("returns 200 for valid HMAC (shop/redact) and deletes sessions", async () => {
-      const mockSessions = [{ id: "session-1" }, { id: "session-2" }];
-      mockFindSessionsByShop.mockResolvedValue(mockSessions);
-
-      mockWebhook.mockResolvedValue({
-        shop: "test-shop.myshopify.com",
-        topic: "SHOP_REDACT",
-        payload: { webhook_id: "test-webhook-789" },
-      });
-
-      const request = new Request("https://example.com/webhooks/compliance", {
-        method: "POST",
-        body: JSON.stringify({ shop_id: 123 }),
-        headers: { "Content-Type": "application/json" },
-      });
-
-      const response = await action(createMockActionArgs(request));
-
-      expect(response.status).toBe(200);
-      expect(mockFindSessionsByShop).toHaveBeenCalledWith(
-        "test-shop.myshopify.com"
-      );
-      expect(mockDeleteSessions).toHaveBeenCalledWith([
-        "session-1",
-        "session-2",
-      ]);
     });
 
     it("returns 401 for invalid HMAC", async () => {
@@ -135,11 +108,92 @@ describe("webhooks.compliance", () => {
     });
   });
 
-  describe("session storage via context", () => {
-    it("receives session storage from context (not module import)", async () => {
+  describe("shop/redact", () => {
+    it("deletes sessions directly by shop using prisma.session.deleteMany", async () => {
+      mockDeleteMany.mockResolvedValue({ count: 3 });
+
       mockWebhook.mockResolvedValue({
         shop: "test-shop.myshopify.com",
         topic: "SHOP_REDACT",
+        webhookId: "test-webhook-789",
+        payload: {},
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify({ shop_id: 123 }),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const response = await action(createMockActionArgs(request));
+
+      expect(response.status).toBe(200);
+      // Verify deleteMany was called with shop filter (not session IDs)
+      expect(mockDeleteMany).toHaveBeenCalledWith({
+        where: { shop: "test-shop.myshopify.com" },
+      });
+    });
+
+    it("returns 200 even when no sessions exist (idempotent)", async () => {
+      // No sessions to delete
+      mockDeleteMany.mockResolvedValue({ count: 0 });
+
+      mockWebhook.mockResolvedValue({
+        shop: "no-sessions-shop.myshopify.com",
+        topic: "SHOP_REDACT",
+        webhookId: "test-webhook-idempotent",
+        payload: {},
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify({ shop_id: 999 }),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const response = await action(createMockActionArgs(request));
+
+      // Must return 200 even with no rows deleted
+      expect(response.status).toBe(200);
+      expect(mockDeleteMany).toHaveBeenCalledWith({
+        where: { shop: "no-sessions-shop.myshopify.com" },
+      });
+    });
+
+    it("handles multiple sessions for the same shop", async () => {
+      mockDeleteMany.mockResolvedValue({ count: 5 });
+
+      mockWebhook.mockResolvedValue({
+        shop: "multi-session-shop.myshopify.com",
+        topic: "SHOP_REDACT",
+        webhookId: "test-webhook-multi",
+        payload: {},
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: "{}",
+      });
+
+      const response = await action(createMockActionArgs(request));
+
+      expect(response.status).toBe(200);
+      expect(mockDeleteMany).toHaveBeenCalledWith({
+        where: { shop: "multi-session-shop.myshopify.com" },
+      });
+    });
+  });
+
+  describe("context injection", () => {
+    it("uses prisma from context (not module-level state)", async () => {
+      // This verifies the route receives prisma via context injection
+      // from workers/app.ts, not from a module-level import
+      mockDeleteMany.mockResolvedValue({ count: 1 });
+
+      mockWebhook.mockResolvedValue({
+        shop: "context-test.myshopify.com",
+        topic: "SHOP_REDACT",
+        webhookId: "context-webhook",
         payload: {},
       });
 
@@ -150,9 +204,8 @@ describe("webhooks.compliance", () => {
 
       await action(createMockActionArgs(request));
 
-      // Session storage is now passed via context, not set via setNamespace
-      // This test verifies the route uses context.sessionStorage
-      expect(mockFindSessionsByShop).toHaveBeenCalled();
+      // The mock prisma was passed via context and used
+      expect(mockDeleteMany).toHaveBeenCalled();
     });
   });
 });

@@ -1,5 +1,4 @@
 import type { ActionFunctionArgs } from "react-router";
-import type { Session } from "@shopify/shopify-api";
 
 /**
  * Compliance webhook handler for GDPR/CCPA mandatory webhooks.
@@ -9,8 +8,8 @@ import type { Session } from "@shopify/shopify-api";
  * 401 Unauthorized for invalid signatures.
  */
 export const action = async ({ request, context }: ActionFunctionArgs) => {
-  // Session storage is injected per-request via loadContext in workers/app.ts
-  const { shopify, sessionStorage } = context;
+  // Prisma client and Shopify app are injected per-request via loadContext in workers/app.ts
+  const { shopify, prisma } = context;
 
   const { shop, topic, webhookId } = await shopify.authenticate.webhook(request);
 
@@ -35,13 +34,18 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       );
       break;
 
-    case "SHOP_REDACT":
-      // Delete all session data for this shop (DPDP compliance).
-      await deleteShopSessions(shop, sessionStorage);
+    case "SHOP_REDACT": {
+      // Delete all session data for this shop directly by shop column.
+      // This is idempotent: returns 200 even when no sessions exist.
+      // Using deleteMany avoids the stale session ID issue from #10.
+      const result = await prisma.session.deleteMany({
+        where: { shop },
+      });
       console.log(
-        `[Compliance] shop/redact: Deleted all sessions for shop=${shop}`
+        `[Compliance] shop/redact: Deleted ${result.count} session(s) for shop=${shop}`
       );
       break;
+    }
 
     default:
       console.log(`[Compliance] Unhandled topic: ${topic}`);
@@ -49,24 +53,3 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   return new Response(null, { status: 200 });
 };
-
-/**
- * Delete all sessions for a shop via the session storage abstraction.
- * This goes through sessionStorage.findSessionsByShop + deleteSessions
- * to work with both KV (legacy) and Prisma (S2+) storage backends.
- */
-async function deleteShopSessions(
-  shop: string,
-  sessionStorage: {
-    findSessionsByShop: (shop: string) => Promise<Session[]>;
-    deleteSessions: (ids: string[]) => Promise<boolean>;
-  }
-): Promise<void> {
-  const sessions = await sessionStorage.findSessionsByShop(shop);
-  if (sessions.length === 0) {
-    return;
-  }
-
-  const sessionIds = sessions.map((s: Session) => s.id);
-  await sessionStorage.deleteSessions(sessionIds);
-}
