@@ -2,7 +2,8 @@ import { createRequestHandler } from "react-router";
 import { wrapWithSentry } from "~/lib/sentry";
 import type { PrismaClient } from "../app/lib/db.server";
 import { createPrismaClient } from "../app/lib/db.server";
-import { createSessionStorage, createShopifyApp } from "../app/shopify.server";
+import { requestContext } from "../app/lib/request-context.server";
+import { getShopifyApp, sessionStorage } from "../app/shopify.server";
 
 const requestHandler = createRequestHandler(
   () => import("virtual:react-router/server-build"),
@@ -22,21 +23,26 @@ export default wrapWithSentry({
       return prisma;
     };
 
-    // Session storage wraps lazy client getter - DB accessed only when session ops run
-    const sessionStorage = createSessionStorage(getPrisma);
+    // Get the module-scoped Shopify app singleton (created once per isolate).
+    // Session storage uses AsyncLocalStorage internally to get the correct
+    // Prisma client for this request.
+    const shopify = getShopifyApp();
 
-    // Shopify app instance for this request
-    const shopify = createShopifyApp(sessionStorage);
-
+    // Run the request inside AsyncLocalStorage context so session storage
+    // can access this request's Prisma client getter.
     try {
-      return await requestHandler(request, {
-        cloudflare: { env, ctx },
-        sessionStorage,
-        shopify,
+      return await requestContext.run({ getPrisma }, async () => {
+        return requestHandler(request, {
+          cloudflare: { env, ctx },
+          sessionStorage,
+          shopify,
+        });
       });
     } finally {
       // $disconnect runs in ctx.waitUntil after the response is sent to the client.
       // This allows graceful connection cleanup without blocking the response.
+      // Only disconnects if the Prisma client was actually created during this request.
+      // Using finally ensures cleanup even when the handler throws.
       if (prisma !== null) {
         ctx.waitUntil((prisma as PrismaClient).$disconnect());
       }

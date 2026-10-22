@@ -1,7 +1,8 @@
 import { Session as ShopifySession } from "@shopify/shopify-api";
 import type { PrismaClient, Session as PrismaSession } from "~/generated/prisma/client";
+import { getRequestPrisma, type PrismaClientGetter } from "./request-context.server";
 
-export type PrismaClientGetter = () => PrismaClient;
+export type { PrismaClientGetter };
 
 /**
  * Custom Prisma-based session storage for Shopify sessions.
@@ -9,9 +10,13 @@ export type PrismaClientGetter = () => PrismaClient;
  * This replaces @shopify/shopify-app-session-storage-prisma to:
  * - Use the Prisma 7 generated client directly (runtime = cloudflare)
  * - Avoid the .prisma/client/default resolution issues in Workers
- * - Support lazy client creation via getter function
+ * - Support both AsyncLocalStorage (production) and direct injection (tests)
  * - Add deleteAllForShop for efficient bulk deletion (DPDP compliance)
  * - Skip readiness checks (Hyperdrive handles connection pooling)
+ *
+ * Two usage modes:
+ * - Production: Call constructor with no args; getPrisma uses AsyncLocalStorage
+ * - Tests: Pass a PrismaClient or getter directly for isolation
  *
  * Two generators in schema.prisma:
  * - runtime = "cloudflare" for production Worker (app/generated/prisma)
@@ -20,11 +25,14 @@ export type PrismaClientGetter = () => PrismaClient;
 export class PrismaSessionStorage {
   private getPrisma: PrismaClientGetter;
 
-  constructor(prismaOrGetter: PrismaClient | PrismaClientGetter) {
-    this.getPrisma =
-      typeof prismaOrGetter === "function"
-        ? prismaOrGetter
-        : () => prismaOrGetter;
+  constructor(prismaOrGetter?: PrismaClient | PrismaClientGetter) {
+    if (prismaOrGetter === undefined) {
+      this.getPrisma = getRequestPrisma;
+    } else if (typeof prismaOrGetter === "function") {
+      this.getPrisma = prismaOrGetter;
+    } else {
+      this.getPrisma = () => prismaOrGetter;
+    }
   }
 
   private get prisma(): PrismaClient {
