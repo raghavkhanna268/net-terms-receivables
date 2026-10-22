@@ -121,6 +121,28 @@ After deployment, update your app URLs in Partner Dashboard:
 - App URL: `https://net-terms-receivables.<your-subdomain>.workers.dev`
 - Redirect URLs: `https://net-terms-receivables.<your-subdomain>.workers.dev/auth/callback`
 
+## Deployment
+
+Merges to `main` trigger automatic deployment via GitHub Actions:
+
+1. **CI workflow** runs lint, typecheck, tests, and build on every push/PR
+2. **Database Migrations workflow** runs `prisma migrate deploy` when `prisma/` files change
+3. **Deploy workflow** triggers when either CI or Migrations completes on `main`:
+   - Verifies CI passed for the commit
+   - Verifies Migrations passed (if it ran)
+   - Builds and deploys the Worker to Cloudflare
+   - Syncs `SHOPIFY_API_KEY` and `SHOPIFY_API_SECRET` as Worker secrets
+
+The deploy workflow uses `workflow_run` triggers to ensure both CI and any migrations succeed before deploying. Non-migration changes deploy after CI passes; migration changes deploy after both CI and migrations pass.
+
+**Required repository secrets:**
+- `CLOUDFLARE_API_TOKEN` - API token with Workers edit permissions
+- `CLOUDFLARE_ACCOUNT_ID` - Your Cloudflare account ID
+- `SHOPIFY_API_KEY` - Shopify app API key
+- `SHOPIFY_API_SECRET` - Shopify app API secret
+
+**Manual deployment:** Use the "Run workflow" button on the Deploy workflow in GitHub Actions.
+
 ## Available Scripts
 
 | Script | Description |

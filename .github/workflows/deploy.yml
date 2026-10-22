@@ -1,0 +1,170 @@
+# Deploys the Cloudflare Worker on merges to main.
+#
+# Triggers:
+#   - workflow_run: When CI or Database Migrations completes on main
+#   - workflow_dispatch: Manual deployment
+#
+# Before deploying, verifies that:
+#   1. CI workflow is successful for the commit
+#   2. Database Migrations workflow passed (if it ran)
+#
+# Repository secrets required:
+#   CLOUDFLARE_API_TOKEN   - Cloudflare API token with Workers permissions
+#   CLOUDFLARE_ACCOUNT_ID  - Cloudflare account ID
+#   SHOPIFY_API_KEY        - Shopify app API key (synced as Worker secret)
+#   SHOPIFY_API_SECRET     - Shopify app API secret (synced as Worker secret)
+
+name: Deploy
+
+on:
+  workflow_run:
+    workflows:
+      - "CI"
+      - "Database Migrations"
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy Worker to Cloudflare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # For workflow_run: only proceed if the triggering workflow succeeded
+    # For workflow_dispatch: always proceed
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Verify CI is green for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
+          echo "Checking CI status for commit $SHA"
+
+          CI_STATUS=$(gh api \
+            "/repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=$SHA&per_page=1" \
+            --jq '.workflow_runs[0].conclusion // "not_found"')
+
+          echo "CI workflow conclusion: $CI_STATUS"
+
+          if [ "$CI_STATUS" != "success" ]; then
+            echo "::error::CI workflow ('Lint, typecheck, test, build') is not successful for commit $SHA (status: $CI_STATUS)"
+            exit 1
+          fi
+          echo "✓ CI is green for $SHA"
+
+      - name: Verify migrations passed (if triggered)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
+          echo "Checking migrations status for commit $SHA"
+
+          MIGRATE_RESULT=$(gh api \
+            "/repos/${{ github.repository }}/actions/workflows/migrate.yml/runs?head_sha=$SHA&per_page=1" \
+            --jq '.workflow_runs[0] // empty')
+
+          if [ -z "$MIGRATE_RESULT" ]; then
+            echo "✓ Migrations workflow was not triggered (no prisma/ changes)"
+            exit 0
+          fi
+
+          MIGRATE_STATUS=$(echo "$MIGRATE_RESULT" | jq -r '.conclusion // "in_progress"')
+          MIGRATE_URL=$(echo "$MIGRATE_RESULT" | jq -r '.html_url // "unknown"')
+          echo "Migrations workflow conclusion: $MIGRATE_STATUS"
+          echo "Migrations run: $MIGRATE_URL"
+
+          case "$MIGRATE_STATUS" in
+            success)
+              echo "✓ Migrations passed"
+              ;;
+            skipped)
+              echo "✓ Migrations skipped"
+              ;;
+            in_progress|null|"")
+              echo "::error::Migrations workflow is still running for $SHA. Deploy will retry when it completes."
+              exit 1
+              ;;
+            *)
+              echo "::error::Migrations workflow failed for $SHA (status: $MIGRATE_STATUS). See: $MIGRATE_URL"
+              exit 1
+              ;;
+          esac
+
+      - name: Guard Hyperdrive configuration
+        run: |
+          # Extract Hyperdrive id from wrangler.jsonc
+          HYPERDRIVE_ID=$(grep -oP '"id":\s*"\K[^"]+' wrangler.jsonc | head -1 || true)
+
+          if [ -z "$HYPERDRIVE_ID" ]; then
+            echo "::error file=wrangler.jsonc::Hyperdrive id is missing or empty. Create with 'wrangler hyperdrive create' and commit the id."
+            exit 1
+          fi
+
+          if echo "$HYPERDRIVE_ID" | grep -qiE '<|YOUR_|PLACEHOLDER'; then
+            echo "::error file=wrangler.jsonc::Hyperdrive id is a placeholder ($HYPERDRIVE_ID). Replace with actual id from 'wrangler hyperdrive create'."
+            exit 1
+          fi
+
+          echo "✓ Hyperdrive id configured: $HYPERDRIVE_ID"
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Prepare Worker secrets file
+        id: secrets
+        env:
+          SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
+          SHOPIFY_API_SECRET: ${{ secrets.SHOPIFY_API_SECRET }}
+        run: |
+          umask 077
+          f="$RUNNER_TEMP/worker-secrets.json"
+
+          # Build JSON with only secrets that have values
+          jq -n \
+            --arg key "$SHOPIFY_API_KEY" \
+            --arg secret "$SHOPIFY_API_SECRET" \
+            '{SHOPIFY_API_KEY: $key, SHOPIFY_API_SECRET: $secret} | with_entries(select(.value != ""))' \
+            > "$f"
+
+          n=$(jq 'length' "$f")
+          echo "Syncing $n Worker secret(s): $(jq -r 'keys | join(", ")' "$f")"
+          echo "file=$f" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy with Wrangler
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          packageManager: npm
+          command: deploy --secrets-file ${{ steps.secrets.outputs.file }}
+
+      - name: Remove secrets file
+        if: always()
+        run: rm -f "$RUNNER_TEMP/worker-secrets.json"
