@@ -145,12 +145,18 @@ model Shop {
   /// When shop settings were last updated (set by trigger)
   updatedAt        DateTime @default(now()) @db.Timestamptz(3)
 
-  // Relations
-  accounts      BuyerAccount[]
-  sources       AccountSource[]
-  imports       BankImport[]
-  rules         ReminderRule[]
-  auditEvents   AuditEvent[]
+  // Relations - direct children with CASCADE
+  accounts     BuyerAccount[]
+  sources      AccountSource[]
+  imports      BankImport[]
+  rules        ReminderRule[]
+  auditEvents  AuditEvent[]
+  // Direct CASCADE relations to enable Shop delete when financial records exist
+  // These rows are deleted before their parents (BuyerAccount, BankImport, etc.)
+  invoices     Invoice[]
+  payments     Payment[]
+  matches      Match[]
+  reminderLogs ReminderLog[]
 }
 
 /// Tag rule for non-B2B wholesale (tagged customer accounts)
@@ -277,6 +283,8 @@ model Invoice {
   updatedAt       DateTime      @default(now()) @db.Timestamptz(3)
 
   // Relations
+  // Direct Shop FK with CASCADE enables Shop delete to work
+  shop        Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
   // Composite FK ensures invoice belongs to same shop as account
   // NoAction: deleting an account with invoices is rejected (preserves financial history)
   account     BuyerAccount  @relation(fields: [buyerAccountId, shopId], references: [id, shopId], onDelete: NoAction)
@@ -325,7 +333,7 @@ model BankImport {
 /// DPDP/Privacy note: narration and payerText contain raw bank statement data
 /// which may include payer names and identifiers. The customers/redact webhook
 /// handler (S22) will need to redact these fields for the affected customer.
-/// See GitHub issue for S22 implementation.
+/// See GitHub issue #22 for S22 implementation.
 model Payment {
   id         String        @id @default(dbgenerated("gen_random_uuid()::text"))
   shopId     String
@@ -350,6 +358,8 @@ model Payment {
   updatedAt  DateTime      @default(now()) @db.Timestamptz(3)
 
   // Relations
+  // Direct Shop FK with CASCADE enables Shop delete to work
+  shop    Shop       @relation(fields: [shopId], references: [id], onDelete: Cascade)
   // Composite FK ensures payment belongs to same shop as import
   // NoAction: deleting an import with payments is rejected (preserves financial history)
   import  BankImport @relation(fields: [importId, shopId], references: [id, shopId], onDelete: NoAction)
@@ -396,6 +406,8 @@ model Match {
   updatedAt   DateTime   @default(now()) @db.Timestamptz(3)
 
   // Relations
+  // Direct Shop FK with CASCADE enables Shop delete to work
+  shop    Shop    @relation(fields: [shopId], references: [id], onDelete: Cascade)
   // Composite FKs ensure payment and invoice are from the same shop
   // NoAction: deleting a payment/invoice with matches is rejected
   payment Payment @relation(fields: [paymentId, shopId], references: [id, shopId], onDelete: NoAction)
@@ -449,26 +461,32 @@ model ReminderRule {
   // Logs use NoAction to prevent silent deletion of reminder history
   logs ReminderLog[]
 
+  // Composite unique for cross-shop integrity (enables composite FKs from ReminderLog)
+  @@unique([id, shopId])
   @@index([shopId, enabled])
 }
 
 /// Reminder log: tracks sent reminders to prevent duplicates
 model ReminderLog {
   id        String   @id @default(dbgenerated("gen_random_uuid()::text"))
+  shopId    String
   ruleId    String
   invoiceId String
   /// When the reminder was sent
   sentAt    DateTime @default(now()) @db.Timestamptz(3)
 
   // Relations
-  // NoAction: deleting a rule with logs is rejected (preserves reminder history)
-  rule    ReminderRule @relation(fields: [ruleId], references: [id], onDelete: NoAction)
-  // NoAction: deleting an invoice with logs is rejected
-  invoice Invoice      @relation(fields: [invoiceId], references: [id], onDelete: NoAction)
+  // Direct Shop FK with CASCADE enables Shop delete to work
+  shop    Shop         @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  // Composite FKs ensure rule and invoice are from the same shop
+  // NoAction: deleting a rule/invoice with logs is rejected (preserves reminder history)
+  rule    ReminderRule @relation(fields: [ruleId, shopId], references: [id, shopId], onDelete: NoAction)
+  invoice Invoice      @relation(fields: [invoiceId, shopId], references: [id, shopId], onDelete: NoAction)
 
   // One reminder per rule per invoice (prevents duplicate sends)
   @@unique([ruleId, invoiceId])
   @@index([invoiceId])
+  @@index([shopId])
 }
 
 // =============================================================================

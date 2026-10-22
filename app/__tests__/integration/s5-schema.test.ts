@@ -22,7 +22,7 @@ import type {
  * 2. Full fixture set can be inserted and read back
  * 3. TIMESTAMPTZ columns round-trip correctly regardless of DB session timezone
  * 4. Unique constraints reject duplicates (UTR per shop, reminder per rule+invoice, etc.)
- * 5. CASCADE delete propagates correctly from Shop down
+ * 5. CASCADE delete propagates correctly from Shop down to all tables
  * 6. NO ACTION prevents deletion of financial parents with children
  * 7. Decimal money fields are handled correctly (returned as strings by postgres.js)
  * 8. Cross-shop integrity: composite FKs reject mismatched shopId
@@ -44,18 +44,20 @@ describeWithDb("S5 Data Model Schema", () => {
   const TEST_SHOP_DOMAIN = `test-s5-${TEST_SUFFIX}.myshopify.com`;
 
   beforeAll(async () => {
-    sql = postgres(TEST_DATABASE_URL!, { max: 1 });
+    // fetch_types:false required for Hyperdrive compatibility
+    sql = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
   });
 
   afterAll(async () => {
     // Clean up test data - cascade will handle dependent rows
-    await sql`DELETE FROM "Shop" WHERE id LIKE ${"shop-" + TEST_SUFFIX + "%"}`.catch(() => {});
+    // Let cleanup failures surface (no .catch(() => {}))
+    await sql`DELETE FROM "Shop" WHERE id LIKE ${"shop-" + TEST_SUFFIX + "%"}`;
     await sql.end();
   });
 
   beforeEach(async () => {
-    // Clean up before each test
-    await sql`DELETE FROM "Shop" WHERE id LIKE ${"shop-" + TEST_SUFFIX + "%"}`.catch(() => {});
+    // Clean up before each test - let failures surface
+    await sql`DELETE FROM "Shop" WHERE id LIKE ${"shop-" + TEST_SUFFIX + "%"}`;
   });
 
   describe("Fixture Insert and Read", () => {
@@ -325,9 +327,10 @@ describeWithDb("S5 Data Model Schema", () => {
       `;
 
       await sql`
-        INSERT INTO "ReminderLog" (id, "ruleId", "invoiceId", "sentAt")
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", "sentAt")
         VALUES (
           ${logId},
+          ${TEST_SHOP_ID},
           ${ruleId},
           ${invoiceScheduleId},
           ${now}
@@ -421,6 +424,7 @@ describeWithDb("S5 Data Model Schema", () => {
       expect(rule.channel).toBe("email");
 
       const [log] = await sql<ReminderLogRow[]>`SELECT * FROM "ReminderLog" WHERE id = ${logId}`;
+      expect(log.shopId).toBe(TEST_SHOP_ID);
       expect(log.ruleId).toBe(ruleId);
       expect(log.invoiceId).toBe(invoiceScheduleId);
 
@@ -437,7 +441,7 @@ describeWithDb("S5 Data Model Schema", () => {
     const TEST_TIMESTAMP = new Date("2025-07-04T23:30:00.000Z");
 
     it("round-trips correctly with DB session timezone UTC", async () => {
-      const sqlUtc = postgres(TEST_DATABASE_URL!, { max: 1 });
+      const sqlUtc = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
       await sqlUtc`SET TIME ZONE 'UTC'`;
 
       const shopId = `shop-tz-utc-${TEST_SUFFIX}`;
@@ -454,7 +458,7 @@ describeWithDb("S5 Data Model Schema", () => {
     });
 
     it("round-trips correctly with DB session timezone Asia/Kolkata", async () => {
-      const sqlKolkata = postgres(TEST_DATABASE_URL!, { max: 1 });
+      const sqlKolkata = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
       await sqlKolkata`SET TIME ZONE 'Asia/Kolkata'`;
 
       const shopId = `shop-tz-kolkata-${TEST_SUFFIX}`;
@@ -471,7 +475,7 @@ describeWithDb("S5 Data Model Schema", () => {
     });
 
     it("cross-writes and cross-reads correctly (write in Kolkata, read in NY)", async () => {
-      const sqlWrite = postgres(TEST_DATABASE_URL!, { max: 1 });
+      const sqlWrite = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
       await sqlWrite`SET TIME ZONE 'Asia/Kolkata'`;
 
       const shopId = `shop-tz-cross-${TEST_SUFFIX}`;
@@ -481,7 +485,7 @@ describeWithDb("S5 Data Model Schema", () => {
       `;
       await sqlWrite.end();
 
-      const sqlRead = postgres(TEST_DATABASE_URL!, { max: 1 });
+      const sqlRead = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
       await sqlRead`SET TIME ZONE 'America/New_York'`;
 
       const [shop] = await sqlRead<ShopRow[]>`SELECT * FROM "Shop" WHERE id = ${shopId}`;
@@ -510,7 +514,7 @@ describeWithDb("S5 Data Model Schema", () => {
         VALUES (${accountId}, ${shopId}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test Co', ${now}, ${now})
       `;
 
-      const sqlKolkata = postgres(TEST_DATABASE_URL!, { max: 1 });
+      const sqlKolkata = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
       await sqlKolkata`SET TIME ZONE 'Asia/Kolkata'`;
 
       await sqlKolkata`
@@ -525,7 +529,7 @@ describeWithDb("S5 Data Model Schema", () => {
       `;
       await sqlKolkata.end();
 
-      const sqlNy = postgres(TEST_DATABASE_URL!, { max: 1 });
+      const sqlNy = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
       await sqlNy`SET TIME ZONE 'America/New_York'`;
 
       const [invoice] = await sqlNy<InvoiceRow[]>`SELECT * FROM "Invoice" WHERE id = ${invoiceId}`;
@@ -596,14 +600,14 @@ describeWithDb("S5 Data Model Schema", () => {
       `;
 
       await sql`
-        INSERT INTO "ReminderLog" (id, "ruleId", "invoiceId", "sentAt")
-        VALUES (${"log1-rem-" + TEST_SUFFIX}, ${ruleId}, ${invoiceId}, ${now})
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", "sentAt")
+        VALUES (${"log1-rem-" + TEST_SUFFIX}, ${shopId}, ${ruleId}, ${invoiceId}, ${now})
       `;
 
       await expect(
         sql`
-          INSERT INTO "ReminderLog" (id, "ruleId", "invoiceId", "sentAt")
-          VALUES (${"log2-rem-" + TEST_SUFFIX}, ${ruleId}, ${invoiceId}, ${now})
+          INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", "sentAt")
+          VALUES (${"log2-rem-" + TEST_SUFFIX}, ${shopId}, ${ruleId}, ${invoiceId}, ${now})
         `
       ).rejects.toThrow(/unique/i);
 
@@ -694,7 +698,7 @@ describeWithDb("S5 Data Model Schema", () => {
   });
 
   describe("Cascade Delete", () => {
-    it("deleting a shop cascades to all dependent rows", async () => {
+    it("deleting a shop cascades to all dependent rows including financial records", async () => {
       const now = new Date();
       const shopId = `shop-cascade-${TEST_SUFFIX}`;
       const accountId = `account-cascade-${TEST_SUFFIX}`;
@@ -708,65 +712,85 @@ describeWithDb("S5 Data Model Schema", () => {
       const aliasId = `alias-cascade-${TEST_SUFFIX}`;
       const eventId = `event-cascade-${TEST_SUFFIX}`;
 
+      // Create Shop
       await sql`
         INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
         VALUES (${shopId}, ${`cascade-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
       `;
 
+      // Create AccountSource
       await sql`
         INSERT INTO "AccountSource" (id, "shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")
         VALUES (${sourceId}, ${shopId}, 'test', 30, ${now}, ${now})
       `;
 
+      // Create BuyerAccount
       await sql`
         INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
         VALUES (${accountId}, ${shopId}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test', ${now}, ${now})
       `;
 
+      // Create PayerAlias
       await sql`
         INSERT INTO "PayerAlias" (id, "buyerAccountId", "payerKey", "createdAt")
         VALUES (${aliasId}, ${accountId}, 'test key', ${now})
       `;
 
+      // Create Invoice
       await sql`
         INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
         VALUES (${invoiceId}, ${shopId}, ${accountId}, 'gid://shopify/Order/CASCADE1', '#1', '100.00', '100.00', ${now}, 'open', ${now}, ${now})
       `;
 
+      // Create BankImport
       await sql`
         INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
         VALUES (${importId}, ${shopId}, 'hdfc', 'test.csv', 1, ${now})
       `;
 
+      // Create Payment
       await sql`
         INSERT INTO "Payment" (id, "shopId", "importId", "valueDate", amount, narration, "createdAt", "updatedAt")
         VALUES (${paymentId}, ${shopId}, ${importId}, ${now}, '100.00', 'test', ${now}, ${now})
       `;
 
+      // Create Match
       await sql`
         INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, "createdAt", "updatedAt")
         VALUES (${matchId}, ${shopId}, ${paymentId}, ${invoiceId}, '100.00', 80, '{}', ${now}, ${now})
       `;
 
+      // Create ReminderRule
       await sql`
         INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, "createdAt", "updatedAt")
         VALUES (${ruleId}, ${shopId}, 0, 'email', ${now}, ${now})
       `;
 
+      // Create ReminderLog
       await sql`
-        INSERT INTO "ReminderLog" (id, "ruleId", "invoiceId", "sentAt")
-        VALUES (${logId}, ${ruleId}, ${invoiceId}, ${now})
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", "sentAt")
+        VALUES (${logId}, ${shopId}, ${ruleId}, ${invoiceId}, ${now})
       `;
 
+      // Create AuditEvent
       await sql`
         INSERT INTO "AuditEvent" (id, "shopId", actor, type, data, at)
         VALUES (${eventId}, ${shopId}, 'test', 'test.event', '{}', ${now})
       `;
 
+      // Verify everything exists
       const [shop] = await sql`SELECT * FROM "Shop" WHERE id = ${shopId}`;
       expect(shop).toBeDefined();
+      const [invoice] = await sql`SELECT * FROM "Invoice" WHERE id = ${invoiceId}`;
+      expect(invoice).toBeDefined();
+      const [payment] = await sql`SELECT * FROM "Payment" WHERE id = ${paymentId}`;
+      expect(payment).toBeDefined();
+      const [match] = await sql`SELECT * FROM "Match" WHERE id = ${matchId}`;
+      expect(match).toBeDefined();
+      const [log] = await sql`SELECT * FROM "ReminderLog" WHERE id = ${logId}`;
+      expect(log).toBeDefined();
 
-      // Delete shop - should cascade to all dependent rows
+      // Delete shop - should cascade to ALL dependent rows
       await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
 
       // Verify cascade deleted everything
@@ -802,6 +826,19 @@ describeWithDb("S5 Data Model Schema", () => {
 
       const [deletedEvent] = await sql`SELECT * FROM "AuditEvent" WHERE id = ${eventId}`;
       expect(deletedEvent).toBeUndefined();
+
+      // Verify zero rows remain for this shop in every table
+      const invoiceCount = await sql`SELECT count(*) as c FROM "Invoice" WHERE "shopId" = ${shopId}`;
+      expect(Number(invoiceCount[0].c)).toBe(0);
+
+      const paymentCount = await sql`SELECT count(*) as c FROM "Payment" WHERE "shopId" = ${shopId}`;
+      expect(Number(paymentCount[0].c)).toBe(0);
+
+      const matchCount = await sql`SELECT count(*) as c FROM "Match" WHERE "shopId" = ${shopId}`;
+      expect(Number(matchCount[0].c)).toBe(0);
+
+      const logCount = await sql`SELECT count(*) as c FROM "ReminderLog" WHERE "shopId" = ${shopId}`;
+      expect(Number(logCount[0].c)).toBe(0);
     });
   });
 
@@ -912,6 +949,53 @@ describeWithDb("S5 Data Model Schema", () => {
       await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
     });
 
+    it("rejects deleting an Invoice that has matches", async () => {
+      const now = new Date();
+      const shopId = `shop-noact-inv-${TEST_SUFFIX}`;
+      const accountId = `account-noact-inv-${TEST_SUFFIX}`;
+      const invoiceId = `invoice-noact-inv-${TEST_SUFFIX}`;
+      const importId = `import-noact-inv-${TEST_SUFFIX}`;
+      const paymentId = `payment-noact-inv-${TEST_SUFFIX}`;
+      const matchId = `match-noact-inv-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${shopId}, ${`noact-inv-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+        VALUES (${accountId}, ${shopId}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test', ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
+        VALUES (${invoiceId}, ${shopId}, ${accountId}, 'gid://shopify/Order/NOACT3', '#1', '100.00', '100.00', ${now}, 'open', ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
+        VALUES (${importId}, ${shopId}, 'hdfc', 'test.csv', 1, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "Payment" (id, "shopId", "importId", "valueDate", amount, narration, "createdAt", "updatedAt")
+        VALUES (${paymentId}, ${shopId}, ${importId}, ${now}, '100.00', 'test', ${now}, ${now})
+      `;
+
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, "createdAt", "updatedAt")
+        VALUES (${matchId}, ${shopId}, ${paymentId}, ${invoiceId}, '100.00', 80, '{}', ${now}, ${now})
+      `;
+
+      // Attempting to delete the invoice should fail
+      await expect(
+        sql`DELETE FROM "Invoice" WHERE id = ${invoiceId}`
+      ).rejects.toThrow(/violates foreign key/i);
+
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    });
+
     it("rejects deleting a ReminderRule that has logs", async () => {
       const now = new Date();
       const shopId = `shop-noact-rule-${TEST_SUFFIX}`;
@@ -932,7 +1016,7 @@ describeWithDb("S5 Data Model Schema", () => {
 
       await sql`
         INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
-        VALUES (${invoiceId}, ${shopId}, ${accountId}, 'gid://shopify/Order/NOACT3', '#1', '100.00', '100.00', ${now}, 'open', ${now}, ${now})
+        VALUES (${invoiceId}, ${shopId}, ${accountId}, 'gid://shopify/Order/NOACT4', '#1', '100.00', '100.00', ${now}, 'open', ${now}, ${now})
       `;
 
       await sql`
@@ -941,8 +1025,8 @@ describeWithDb("S5 Data Model Schema", () => {
       `;
 
       await sql`
-        INSERT INTO "ReminderLog" (id, "ruleId", "invoiceId", "sentAt")
-        VALUES (${logId}, ${ruleId}, ${invoiceId}, ${now})
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", "sentAt")
+        VALUES (${logId}, ${shopId}, ${ruleId}, ${invoiceId}, ${now})
       `;
 
       // Attempting to delete the rule should fail
@@ -1030,7 +1114,6 @@ describeWithDb("S5 Data Model Schema", () => {
       const invoice1Id = `invoice-xmatch1-${TEST_SUFFIX}`;
       const import1Id = `import-xmatch1-${TEST_SUFFIX}`;
       const import2Id = `import-xmatch2-${TEST_SUFFIX}`;
-      const payment1Id = `payment-xmatch1-${TEST_SUFFIX}`;
       const payment2Id = `payment-xmatch2-${TEST_SUFFIX}`;
 
       // Create shop1 with invoice
@@ -1052,11 +1135,6 @@ describeWithDb("S5 Data Model Schema", () => {
       await sql`
         INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
         VALUES (${import1Id}, ${shop1Id}, 'hdfc', 'test.csv', 1, ${now})
-      `;
-
-      await sql`
-        INSERT INTO "Payment" (id, "shopId", "importId", "valueDate", amount, narration, "createdAt", "updatedAt")
-        VALUES (${payment1Id}, ${shop1Id}, ${import1Id}, ${now}, '100.00', 'test', ${now}, ${now})
       `;
 
       // Create shop2 with payment

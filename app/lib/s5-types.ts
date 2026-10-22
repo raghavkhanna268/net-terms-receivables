@@ -154,6 +154,7 @@ export interface ReminderRuleRow {
 
 export interface ReminderLogRow {
   id: string;
+  shopId: string;
   ruleId: string;
   invoiceId: string;
   sentAt: Date;

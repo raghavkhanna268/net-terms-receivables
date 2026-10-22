@@ -7,10 +7,16 @@
 --     (prevents silent deletion of financial history; parent delete is rejected if children exist)
 --   PayerAlias: CASCADE (helper data, not financial record)
 --
+-- Shop cascade mechanism:
+--   Invoice, Payment, Match, ReminderLog have DIRECT FKs to Shop with CASCADE.
+--   This ensures they are deleted as part of the Shop cascade BEFORE their parents
+--   (BuyerAccount, BankImport, ReminderRule) are deleted. The NO ACTION FKs from
+--   parent to child pass because the children are already gone.
+--
 -- Cross-shop integrity:
---   Composite unique (id, shopId) on BuyerAccount, BankImport, Invoice, Payment
---   Composite FKs ensure Invoice->BuyerAccount, Payment->BankImport, Match->Payment/Invoice
---   all reference entities from the same shop
+--   Composite unique (id, shopId) on BuyerAccount, BankImport, Invoice, Payment, ReminderRule
+--   Composite FKs ensure Invoice->BuyerAccount, Payment->BankImport, Match->Payment/Invoice,
+--   ReminderLog->ReminderRule/Invoice all reference entities from the same shop
 
 -- CreateEnum
 CREATE TYPE "AccountKind" AS ENUM ('COMPANY', 'TAGGED_CUSTOMER');
@@ -197,6 +203,7 @@ CREATE TABLE "ReminderRule" (
 -- CreateTable
 CREATE TABLE "ReminderLog" (
     "id" TEXT NOT NULL DEFAULT gen_random_uuid()::text,
+    "shopId" TEXT NOT NULL,
     "ruleId" TEXT NOT NULL,
     "invoiceId" TEXT NOT NULL,
     "sentAt" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -257,10 +264,12 @@ CREATE INDEX "PayerAlias_payerKey_idx" ON "PayerAlias"("payerKey");
 CREATE UNIQUE INDEX "PayerAlias_buyerAccountId_payerKey_key" ON "PayerAlias"("buyerAccountId", "payerKey");
 
 -- CreateIndex: ReminderRule
+CREATE UNIQUE INDEX "ReminderRule_id_shopId_key" ON "ReminderRule"("id", "shopId");
 CREATE INDEX "ReminderRule_shopId_enabled_idx" ON "ReminderRule"("shopId", "enabled");
 
 -- CreateIndex: ReminderLog
 CREATE INDEX "ReminderLog_invoiceId_idx" ON "ReminderLog"("invoiceId");
+CREATE INDEX "ReminderLog_shopId_idx" ON "ReminderLog"("shopId");
 CREATE UNIQUE INDEX "ReminderLog_ruleId_invoiceId_key" ON "ReminderLog"("ruleId", "invoiceId");
 
 -- CreateIndex: AuditEvent
@@ -274,14 +283,23 @@ ALTER TABLE "BankImport" ADD CONSTRAINT "BankImport_shopId_fkey" FOREIGN KEY ("s
 ALTER TABLE "ReminderRule" ADD CONSTRAINT "ReminderRule_shopId_fkey" FOREIGN KEY ("shopId") REFERENCES "Shop"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "AuditEvent" ADD CONSTRAINT "AuditEvent_shopId_fkey" FOREIGN KEY ("shopId") REFERENCES "Shop"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
--- AddForeignKey: Financial relations (NO ACTION to preserve history)
--- Note: NO ACTION is checked at end of statement, allowing Shop cascade to work through multiple paths
+-- AddForeignKey: Direct Shop FKs with CASCADE on financial records
+-- These ensure Invoice, Payment, Match, ReminderLog are deleted BEFORE their parents
+-- when a Shop is deleted, so the NO ACTION FKs from parent to child pass.
+ALTER TABLE "Invoice" ADD CONSTRAINT "Invoice_shopId_fkey" FOREIGN KEY ("shopId") REFERENCES "Shop"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "Payment" ADD CONSTRAINT "Payment_shopId_fkey" FOREIGN KEY ("shopId") REFERENCES "Shop"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "Match" ADD CONSTRAINT "Match_shopId_fkey" FOREIGN KEY ("shopId") REFERENCES "Shop"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "ReminderLog" ADD CONSTRAINT "ReminderLog_shopId_fkey" FOREIGN KEY ("shopId") REFERENCES "Shop"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey: Financial parent-to-child relations (NO ACTION to preserve history)
+-- Note: NO ACTION is checked at end of statement. Since Invoice/Payment/Match/ReminderLog
+-- are deleted via direct Shop cascade BEFORE their parents, these checks pass.
 ALTER TABLE "Invoice" ADD CONSTRAINT "Invoice_buyerAccountId_shopId_fkey" FOREIGN KEY ("buyerAccountId", "shopId") REFERENCES "BuyerAccount"("id", "shopId") ON DELETE NO ACTION ON UPDATE CASCADE;
 ALTER TABLE "Payment" ADD CONSTRAINT "Payment_importId_shopId_fkey" FOREIGN KEY ("importId", "shopId") REFERENCES "BankImport"("id", "shopId") ON DELETE NO ACTION ON UPDATE CASCADE;
 ALTER TABLE "Match" ADD CONSTRAINT "Match_paymentId_shopId_fkey" FOREIGN KEY ("paymentId", "shopId") REFERENCES "Payment"("id", "shopId") ON DELETE NO ACTION ON UPDATE CASCADE;
 ALTER TABLE "Match" ADD CONSTRAINT "Match_invoiceId_shopId_fkey" FOREIGN KEY ("invoiceId", "shopId") REFERENCES "Invoice"("id", "shopId") ON DELETE NO ACTION ON UPDATE CASCADE;
-ALTER TABLE "ReminderLog" ADD CONSTRAINT "ReminderLog_ruleId_fkey" FOREIGN KEY ("ruleId") REFERENCES "ReminderRule"("id") ON DELETE NO ACTION ON UPDATE CASCADE;
-ALTER TABLE "ReminderLog" ADD CONSTRAINT "ReminderLog_invoiceId_fkey" FOREIGN KEY ("invoiceId") REFERENCES "Invoice"("id") ON DELETE NO ACTION ON UPDATE CASCADE;
+ALTER TABLE "ReminderLog" ADD CONSTRAINT "ReminderLog_ruleId_shopId_fkey" FOREIGN KEY ("ruleId", "shopId") REFERENCES "ReminderRule"("id", "shopId") ON DELETE NO ACTION ON UPDATE CASCADE;
+ALTER TABLE "ReminderLog" ADD CONSTRAINT "ReminderLog_invoiceId_shopId_fkey" FOREIGN KEY ("invoiceId", "shopId") REFERENCES "Invoice"("id", "shopId") ON DELETE NO ACTION ON UPDATE CASCADE;
 
 -- AddForeignKey: Helper data (CASCADE)
 ALTER TABLE "PayerAlias" ADD CONSTRAINT "PayerAlias_buyerAccountId_fkey" FOREIGN KEY ("buyerAccountId") REFERENCES "BuyerAccount"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -307,5 +325,5 @@ CREATE TRIGGER "ReminderRule_updatedAt" BEFORE UPDATE ON "ReminderRule" FOR EACH
 -- DPDP/Privacy comment:
 -- Payment.narration and Payment.payerText contain raw bank statement data which may include
 -- payer names, account numbers, and other identifiers. The customers/redact webhook handler
--- (to be implemented in S22) must redact these fields for affected customers. See the S22
--- GitHub issue linked in the PR for implementation details.
+-- (to be implemented in S22) must redact these fields for affected customers. See GitHub
+-- issue #22 for implementation details.
