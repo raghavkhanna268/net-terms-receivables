@@ -2,13 +2,10 @@ import "@shopify/shopify-app-react-router/adapters/node";
 import {
   ApiVersion,
   AppDistribution,
+  LogSeverity,
   shopifyApp,
 } from "@shopify/shopify-app-react-router/server";
-import type { PrismaClient } from "~/generated/prisma/client";
-import {
-  PrismaSessionStorage,
-  type PrismaClientGetter,
-} from "./lib/session-storage.server";
+import { PrismaSessionStorage } from "./lib/session-storage.server";
 import { parseScopes } from "./lib/scopes";
 
 /**
@@ -25,39 +22,47 @@ function requireEnv(name: string): string {
   return value;
 }
 
-const apiKey = requireEnv("SHOPIFY_API_KEY");
-const apiSecretKey = requireEnv("SHOPIFY_API_SECRET");
-const appUrl = requireEnv("SHOPIFY_APP_URL");
-const scopesEnv = process.env.SCOPES ?? "";
-const scopes = parseScopes(scopesEnv);
+/**
+ * Module-scoped session storage singleton.
+ *
+ * Uses AsyncLocalStorage internally to get the correct Prisma client for
+ * each request. Safe to share across requests because it delegates to
+ * getRequestPrisma() which returns the request-scoped client.
+ */
+export const sessionStorage = new PrismaSessionStorage();
 
 /**
- * Creates a PrismaSessionStorage instance for Shopify session management.
+ * Cached Shopify app instance - created lazily on first access.
+ * Creating shopifyApp() is expensive (~4ms) because it initializes
+ * auth flows, validates config, creates client factories, etc.
  *
- * This factory function is called per-request in the Worker entry point,
- * ensuring each request gets its own session storage instance backed by
- * a per-request PrismaClient (required for Cloudflare Workers with Hyperdrive).
- *
- * @param prismaOrGetter - A PrismaClient instance or getter for lazy creation
- * @returns A PrismaSessionStorage instance
+ * Safe to share across requests because session storage uses ALS internally.
  */
-export function createSessionStorage(
-  prismaOrGetter: PrismaClient | PrismaClientGetter
-): PrismaSessionStorage {
-  return new PrismaSessionStorage(prismaOrGetter);
-}
+let cachedShopifyApp: ReturnType<typeof shopifyApp> | null = null;
 
 /**
- * Creates the Shopify app configuration with the provided session storage.
+ * Get the Shopify app singleton, creating it lazily on first access.
  *
- * This factory function is called per-request to ensure proper isolation
- * in Workers environments where concurrent requests share the same isolate.
+ * This function creates the shopifyApp instance once per isolate rather than
+ * once per request. The session storage uses AsyncLocalStorage internally,
+ * so each request automatically gets the correct Prisma client.
  *
- * @param sessionStorage - A session storage instance for this request
- * @returns Configured Shopify app instance
+ * CPU savings: ~4ms per warm request by avoiding repeated shopifyApp() calls.
  */
-export function createShopifyApp(sessionStorage: PrismaSessionStorage) {
-  return shopifyApp({
+export function getShopifyApp(): ReturnType<typeof shopifyApp> {
+  if (cachedShopifyApp) {
+    return cachedShopifyApp;
+  }
+
+  const apiKey = requireEnv("SHOPIFY_API_KEY");
+  const apiSecretKey = requireEnv("SHOPIFY_API_SECRET");
+  const appUrl = requireEnv("SHOPIFY_APP_URL");
+  const scopesEnv = process.env.SCOPES ?? "";
+  const scopes = parseScopes(scopesEnv);
+
+  const isProduction = process.env.NODE_ENV === "production";
+
+  cachedShopifyApp = shopifyApp({
     apiKey,
     apiSecretKey,
     apiVersion: ApiVersion.October26,
@@ -69,13 +74,27 @@ export function createShopifyApp(sessionStorage: PrismaSessionStorage) {
     future: {
       expiringOfflineAccessTokens: true,
     },
+    logger: {
+      level: isProduction ? LogSeverity.Warning : LogSeverity.Info,
+    },
     ...(process.env.SHOP_CUSTOM_DOMAIN
       ? { customShopDomains: [process.env.SHOP_CUSTOM_DOMAIN] }
       : {}),
   });
+
+  return cachedShopifyApp;
 }
 
 export const apiVersion = ApiVersion.October26;
 
-// Re-export types needed by routes
+// Re-export types and session storage for routes
 export type { PrismaSessionStorage };
+export type ShopifyApp = ReturnType<typeof shopifyApp>;
+
+/**
+ * Reset the cached Shopify app - only for testing purposes.
+ * @internal
+ */
+export function _resetShopifyAppForTesting(): void {
+  cachedShopifyApp = null;
+}

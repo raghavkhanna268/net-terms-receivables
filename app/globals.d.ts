@@ -1,4 +1,5 @@
 import type { PrismaSessionStorage } from "~/lib/session-storage.server";
+import type { ShopifyApp } from "~/shopify.server";
 
 // Augment React Router's AppLoadContext with our per-request instances
 declare module "react-router" {
@@ -8,7 +9,7 @@ declare module "react-router" {
       ctx: ExecutionContext;
     };
     sessionStorage: PrismaSessionStorage;
-    shopify: ReturnType<typeof import("./shopify.server").createShopifyApp>;
+    shopify: ShopifyApp;
   }
 }
 
