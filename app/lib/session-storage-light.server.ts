@@ -130,7 +130,10 @@ export class LightSessionStorage {
 
   async deleteSessions(ids: string[]): Promise<boolean> {
     if (ids.length === 0) return true;
-    await this.sql`DELETE FROM "Session" WHERE id = ANY(${ids})`;
+    // Use IN ${sql(ids)} instead of ANY(${ids}) for fetch_types:false compatibility.
+    // ANY() requires type info to serialize arrays correctly; sql() creates
+    // a properly formatted parameter list that works without type lookup.
+    await this.sql`DELETE FROM "Session" WHERE id IN ${this.sql(ids)}`;
     return true;
   }
 
