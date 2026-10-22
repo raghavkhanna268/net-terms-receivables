@@ -4,12 +4,14 @@ import { defineConfig } from "vite";
 import tsconfigPaths from "vite-tsconfig-paths";
 
 // Replace the HOST env var with SHOPIFY_APP_URL for Shopify CLI compatibility
+// Type assertion needed: wrangler types generates literal types for vars,
+// but at runtime we may override them
 if (
   process.env.HOST &&
   (!process.env.SHOPIFY_APP_URL ||
     process.env.SHOPIFY_APP_URL === process.env.HOST)
 ) {
-  process.env.SHOPIFY_APP_URL = process.env.HOST;
+  (process.env as Record<string, string>).SHOPIFY_APP_URL = process.env.HOST;
   delete process.env.HOST;
 }
 

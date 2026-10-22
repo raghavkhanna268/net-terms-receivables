@@ -2,29 +2,22 @@ import { useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { Form, useActionData, useLoaderData } from "react-router";
 
-import { login, sessionStorage } from "../../shopify.server";
 import { loginErrorMessage } from "./error.server";
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
-  // Inject KV namespace for session storage
-  const env = context.cloudflare?.env;
-  if (env?.SESSIONS) {
-    sessionStorage.setNamespace(env.SESSIONS);
-  }
+  // Session storage is injected per-request via loadContext in workers/app.ts
+  const { shopify } = context;
 
-  const errors = loginErrorMessage(await login(request));
+  const errors = loginErrorMessage(await shopify.login(request));
 
   return { errors };
 };
 
 export const action = async ({ request, context }: ActionFunctionArgs) => {
-  // Inject KV namespace for session storage
-  const env = context.cloudflare?.env;
-  if (env?.SESSIONS) {
-    sessionStorage.setNamespace(env.SESSIONS);
-  }
+  // Session storage is injected per-request via loadContext in workers/app.ts
+  const { shopify } = context;
 
-  const errors = loginErrorMessage(await login(request));
+  const errors = loginErrorMessage(await shopify.login(request));
 
   return {
     errors,

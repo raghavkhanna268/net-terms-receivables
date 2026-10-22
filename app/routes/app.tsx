@@ -3,16 +3,11 @@ import { Outlet, useLoaderData, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 
-import { authenticate, sessionStorage } from "../shopify.server";
-
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
-  // Inject KV namespace for session storage on each request
-  const env = context.cloudflare?.env;
-  if (env?.SESSIONS) {
-    sessionStorage.setNamespace(env.SESSIONS);
-  }
+  // Session storage is injected per-request via loadContext in workers/app.ts
+  const { shopify } = context;
 
-  await authenticate.admin(request);
+  await shopify.authenticate.admin(request);
 
   return { apiKey: process.env.SHOPIFY_API_KEY || "" };
 };

@@ -1,15 +1,11 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { authenticate, sessionStorage } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
-  // Inject KV namespace for session storage
-  const env = context.cloudflare?.env;
-  if (env?.SESSIONS) {
-    sessionStorage.setNamespace(env.SESSIONS);
-  }
+  // Session storage is injected per-request via loadContext in workers/app.ts
+  const { shopify } = context;
 
-  await authenticate.admin(request);
+  await shopify.authenticate.admin(request);
 
   return null;
 };

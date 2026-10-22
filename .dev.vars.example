@@ -5,8 +5,16 @@
 SHOPIFY_API_KEY=
 SHOPIFY_API_SECRET=
 SHOPIFY_APP_URL=http://localhost:3000
-SCOPES=read_orders,read_customers
+SCOPES=
 
 # Sentry error monitoring (optional, leave empty for local dev)
 SENTRY_DSN=
 SENTRY_TRACES_SAMPLE_RATE=0
+
+# Database connection for local development
+# Option 1: Local Postgres (recommended for offline dev)
+# CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE=postgresql://postgres:password@localhost:5432/net_terms
+
+# Option 2: Supabase session pooler (for testing against real DB)
+# Get this from Supabase Dashboard > Project Settings > Database > Connection string (Session mode, port 5432)
+# CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE=postgresql://postgres.[project-ref]:[password]@aws-0-ap-south-1.pooler.supabase.com:5432/postgres

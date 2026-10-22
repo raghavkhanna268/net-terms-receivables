@@ -4,36 +4,39 @@
   "compatibility_date": "2026-10-19",
   "compatibility_flags": ["nodejs_compat"],
   "main": "./workers/app.ts",
-  
-  // Smart Placement - prefer Mumbai region for India-based merchants
+
+  // Smart Placement optimizes latency by running the Worker close to backend services.
+  // It does not accept region preferences; placement is automatic based on access patterns.
   "placement": {
     "mode": "smart"
   },
-  
-  // KV namespace for session storage
-  // Create with: wrangler kv namespace create SESSIONS
-  // Then replace <YOUR_KV_NAMESPACE_ID> with the actual ID
-  "kv_namespaces": [
+
+  // Hyperdrive binding for Supabase Postgres connection pooling
+  // Create with: wrangler hyperdrive create net-terms-db --connection-string="<SUPABASE_SESSION_POOLER_URL>"
+  // Then replace <YOUR_HYPERDRIVE_ID> with the actual ID from the output
+  "hyperdrive": [
     {
-      "binding": "SESSIONS",
-      "id": "<YOUR_KV_NAMESPACE_ID>"
+      "binding": "HYPERDRIVE",
+      "id": "<YOUR_HYPERDRIVE_ID>",
+      // For local dev, point to Supabase session pooler or local Postgres
+      // wrangler dev uses this instead of Hyperdrive
+      "localConnectionString": "postgresql://postgres:password@localhost:5432/net_terms"
     }
   ],
-  
-  // Public environment variables (non-sensitive)
+
+  // Public environment variables (non-sensitive, ok to commit placeholders)
   "vars": {
-    // Add non-sensitive vars here
+    "SCOPES": "",
+    "SHOPIFY_APP_URL": "https://net-terms-receivables.<subdomain>.workers.dev"
   },
-  
+
   "observability": {
     "enabled": true
   },
-  
+
   "upload_source_maps": true
-  
+
   // Secrets are configured via wrangler CLI, not in this file:
   // wrangler secret put SHOPIFY_API_KEY
   // wrangler secret put SHOPIFY_API_SECRET
-  // wrangler secret put SHOPIFY_APP_URL
-  // wrangler secret put SCOPES
 }

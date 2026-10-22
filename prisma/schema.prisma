@@ -1,0 +1,40 @@
+// Prisma schema for Shopify App Session Storage
+// Uses Supabase Postgres Free (Mumbai, ap-south-1) via Cloudflare Hyperdrive
+//
+// Migrations run from CI over Supabase's Supavisor SESSION pooler (port 5432)
+// Worker connects through Hyperdrive binding (pooled)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DATABASE_URL_DIRECT")
+}
+
+/// Shopify OAuth session storage
+/// Required by @shopify/shopify-app-session-storage-prisma
+model Session {
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean   @default(false)
+  emailVerified       Boolean   @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+
+  // Index for efficient lookup when deleting all sessions for a shop (DPDP compliance)
+  @@index([shop])
+}
