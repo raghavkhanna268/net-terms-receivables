@@ -121,6 +121,29 @@ After deployment, update your app URLs in Partner Dashboard:
 - App URL: `https://net-terms-receivables.<your-subdomain>.workers.dev`
 - Redirect URLs: `https://net-terms-receivables.<your-subdomain>.workers.dev/auth/callback`
 
+## Deployment
+
+Merges to `main` trigger automatic deployment via GitHub Actions:
+
+1. **CI workflow** runs lint, typecheck, tests, and build on every push/PR
+2. **Database Migrations workflow** runs `prisma migrate deploy` when `prisma/` files change
+3. **Deploy workflow** triggers when either CI or Migrations completes on `main`
+
+The deploy workflow always deploys the **current main HEAD** (not the triggering run's sha) to prevent stale or out-of-order deploys. Before deploying, it verifies:
+- CI has a successful push run for that sha on main
+- No migrations are active (not yet completed) on main
+- The latest migration run on main succeeded (or was skipped)
+
+If conditions aren't met yet, the run skips with a notice (not a failure). If the latest migration failed, the deploy fails until migrations are fixed or re-run. This ensures that when commit A's migration finishes after commit B merges, the deploy ships B (once B is green) rather than rolling back to A—and if A's migration failed, B won't deploy until migrations are fixed.
+
+**Required repository secrets:**
+- `CLOUDFLARE_API_TOKEN` - API token with Workers edit permissions
+- `CLOUDFLARE_ACCOUNT_ID` - Your Cloudflare account ID
+- `SHOPIFY_API_KEY` - Shopify app API key
+- `SHOPIFY_API_SECRET` - Shopify app API secret
+
+**Manual deployment:** Use the "Run workflow" button on the Deploy workflow in GitHub Actions (main branch only).
+
 ## Available Scripts
 
 | Script | Description |
