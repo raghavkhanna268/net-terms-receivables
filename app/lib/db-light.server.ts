@@ -54,10 +54,6 @@ export function createSql(connectionString: string): Sql {
     // connection per request. The client is created lazily and closed in
     // ctx.waitUntil after the response.
     max: 1,
-    // Skip fetching type OIDs on connect - saves a round trip to the DB.
-    // Safe because we don't use custom types or arrays that need OID lookup.
-    // The ANY(${ids}::text[]) cast handles array parameters explicitly.
-    fetch_types: false,
     // Null handling for undefined values in parameters
     transform: { undefined: null },
     // Connection timeout in seconds
