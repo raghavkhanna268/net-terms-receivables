@@ -14,13 +14,16 @@ describe("shopifyApp Singleton", () => {
   const originalEnv = { ...process.env };
 
   beforeAll(() => {
-    process.env.SHOPIFY_API_KEY = "test-api-key";
-    process.env.SHOPIFY_API_SECRET = "test-api-secret";
-    process.env.SHOPIFY_APP_URL = "https://test.example.com";
+    // Use Object.assign to bypass strict literal type checking from wrangler types
+    Object.assign(process.env, {
+      SHOPIFY_API_KEY: "test-api-key",
+      SHOPIFY_API_SECRET: "test-api-secret",
+      SHOPIFY_APP_URL: "https://test.example.com",
+    });
   });
 
   afterAll(() => {
-    process.env = originalEnv;
+    Object.assign(process.env, originalEnv);
   });
 
   beforeEach(() => {
