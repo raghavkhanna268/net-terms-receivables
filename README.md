@@ -127,13 +127,14 @@ Merges to `main` trigger automatic deployment via GitHub Actions:
 
 1. **CI workflow** runs lint, typecheck, tests, and build on every push/PR
 2. **Database Migrations workflow** runs `prisma migrate deploy` when `prisma/` files change
-3. **Deploy workflow** triggers when either CI or Migrations completes on `main`:
-   - Verifies CI passed for the commit
-   - Verifies Migrations passed (if it ran)
-   - Builds and deploys the Worker to Cloudflare
-   - Syncs `SHOPIFY_API_KEY` and `SHOPIFY_API_SECRET` as Worker secrets
+3. **Deploy workflow** triggers when either CI or Migrations completes on `main`
 
-The deploy workflow uses `workflow_run` triggers to ensure both CI and any migrations succeed before deploying. Non-migration changes deploy after CI passes; migration changes deploy after both CI and migrations pass.
+The deploy workflow always deploys the **current main HEAD** (not the triggering run's sha) to prevent stale or out-of-order deploys. Before deploying, it verifies:
+- CI has a successful push run for that sha on main
+- No migrations are queued or in progress on main
+- If migrations ran for that sha, they succeeded
+
+If conditions aren't met yet, the run skips with a notice (not a failure). This ensures that when commit A's migration finishes after commit B merges, the deploy ships B (once B is green) rather than rolling back to A.
 
 **Required repository secrets:**
 - `CLOUDFLARE_API_TOKEN` - API token with Workers edit permissions
@@ -141,7 +142,7 @@ The deploy workflow uses `workflow_run` triggers to ensure both CI and any migra
 - `SHOPIFY_API_KEY` - Shopify app API key
 - `SHOPIFY_API_SECRET` - Shopify app API secret
 
-**Manual deployment:** Use the "Run workflow" button on the Deploy workflow in GitHub Actions.
+**Manual deployment:** Use the "Run workflow" button on the Deploy workflow in GitHub Actions (main branch only).
 
 ## Available Scripts
 

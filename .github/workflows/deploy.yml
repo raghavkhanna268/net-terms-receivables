@@ -1,12 +1,17 @@
-# Deploys the Cloudflare Worker on merges to main.
+# Deploys the Cloudflare Worker when code merges to main.
 #
 # Triggers:
-#   - workflow_run: When CI or Database Migrations completes on main
-#   - workflow_dispatch: Manual deployment
+#   - workflow_run: When CI or Database Migrations completes (push to main only)
+#   - workflow_dispatch: Manual deployment (main branch only)
 #
-# Before deploying, verifies that:
-#   1. CI workflow is successful for the commit
-#   2. Database Migrations workflow passed (if it ran)
+# Design:
+#   Always deploys the CURRENT main HEAD (not the triggering run's sha) to prevent
+#   stale or out-of-order deploys. Before deploying, verifies:
+#     1. CI workflow has a successful push run for that sha on main
+#     2. No Database Migrations run on main is queued or in_progress
+#     3. If migrations ran for that sha, they succeeded
+#   If conditions aren't met yet, skips with a notice (not a failure).
+#   Re-checks main HEAD hasn't moved right before wrangler deploy.
 #
 # Repository secrets required:
 #   CLOUDFLARE_API_TOKEN   - Cloudflare API token with Workers permissions
@@ -39,82 +44,127 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
-    # For workflow_run: only proceed if the triggering workflow succeeded
-    # For workflow_dispatch: always proceed
+    # Only deploy from main branch pushes, never from PR runs or other branches
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
 
     steps:
-      - name: Checkout
+      - name: Resolve current main HEAD
+        id: main-head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA=$(gh api "repos/${{ github.repository }}/git/ref/heads/main" --jq '.object.sha')
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Resolved main HEAD: $SHA"
+
+      - name: Checkout main HEAD
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ steps.main-head.outputs.sha }}
 
-      - name: Verify CI is green for this commit
+      - name: Check deploy readiness
+        id: gate
         env:
           GH_TOKEN: ${{ github.token }}
+          MAIN_SHA: ${{ steps.main-head.outputs.sha }}
         run: |
-          SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
-          echo "Checking CI status for commit $SHA"
+          echo "Checking deploy readiness for $MAIN_SHA"
 
-          CI_STATUS=$(gh api \
-            "/repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=$SHA&per_page=1" \
-            --jq '.workflow_runs[0].conclusion // "not_found"')
-
-          echo "CI workflow conclusion: $CI_STATUS"
-
-          if [ "$CI_STATUS" != "success" ]; then
-            echo "::error::CI workflow ('Lint, typecheck, test, build') is not successful for commit $SHA (status: $CI_STATUS)"
-            exit 1
-          fi
-          echo "✓ CI is green for $SHA"
-
-      - name: Verify migrations passed (if triggered)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
-          echo "Checking migrations status for commit $SHA"
-
-          MIGRATE_RESULT=$(gh api \
-            "/repos/${{ github.repository }}/actions/workflows/migrate.yml/runs?head_sha=$SHA&per_page=1" \
+          # 1. Check CI has a successful push run for this sha on main
+          CI_RESULT=$(gh api \
+            "/repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=$MAIN_SHA&branch=main&event=push&per_page=1" \
             --jq '.workflow_runs[0] // empty')
 
-          if [ -z "$MIGRATE_RESULT" ]; then
-            echo "✓ Migrations workflow was not triggered (no prisma/ changes)"
+          if [ -z "$CI_RESULT" ]; then
+            echo "::notice::CI workflow has not run for $MAIN_SHA on main yet. Skipping deploy."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          MIGRATE_STATUS=$(echo "$MIGRATE_RESULT" | jq -r '.conclusion // "in_progress"')
-          MIGRATE_URL=$(echo "$MIGRATE_RESULT" | jq -r '.html_url // "unknown"')
-          echo "Migrations workflow conclusion: $MIGRATE_STATUS"
-          echo "Migrations run: $MIGRATE_URL"
+          CI_STATUS=$(echo "$CI_RESULT" | jq -r '.status')
+          CI_CONCLUSION=$(echo "$CI_RESULT" | jq -r '.conclusion // "pending"')
 
-          case "$MIGRATE_STATUS" in
-            success)
-              echo "✓ Migrations passed"
-              ;;
-            skipped)
-              echo "✓ Migrations skipped"
-              ;;
-            in_progress|null|"")
-              echo "::error::Migrations workflow is still running for $SHA. Deploy will retry when it completes."
-              exit 1
-              ;;
-            *)
-              echo "::error::Migrations workflow failed for $SHA (status: $MIGRATE_STATUS). See: $MIGRATE_URL"
-              exit 1
-              ;;
-          esac
+          if [ "$CI_STATUS" != "completed" ]; then
+            echo "::notice::CI workflow is still running for $MAIN_SHA. Skipping deploy."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$CI_CONCLUSION" != "success" ]; then
+            echo "::error::CI workflow failed for $MAIN_SHA (conclusion: $CI_CONCLUSION)"
+            exit 1
+          fi
+          echo "✓ CI is green for $MAIN_SHA"
+
+          # 2. Check no migrations run on main is queued or in_progress
+          MIGRATE_ACTIVE=$(gh api \
+            "/repos/${{ github.repository }}/actions/workflows/migrate.yml/runs?branch=main&event=push&per_page=10" \
+            --jq '[.workflow_runs[] | select(.status == "queued" or .status == "in_progress")] | length')
+
+          if [ "$MIGRATE_ACTIVE" -gt 0 ]; then
+            echo "::notice::$MIGRATE_ACTIVE migration(s) queued or in progress on main. Skipping deploy."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "✓ No migrations queued or in progress"
+
+          # 3. If migrations ran for this sha, they must have succeeded
+          MIGRATE_RESULT=$(gh api \
+            "/repos/${{ github.repository }}/actions/workflows/migrate.yml/runs?head_sha=$MAIN_SHA&branch=main&event=push&per_page=1" \
+            --jq '.workflow_runs[0] // empty')
+
+          if [ -n "$MIGRATE_RESULT" ]; then
+            MIGRATE_STATUS=$(echo "$MIGRATE_RESULT" | jq -r '.status')
+            MIGRATE_CONCLUSION=$(echo "$MIGRATE_RESULT" | jq -r '.conclusion // "pending"')
+            MIGRATE_URL=$(echo "$MIGRATE_RESULT" | jq -r '.html_url')
+
+            if [ "$MIGRATE_STATUS" != "completed" ]; then
+              echo "::notice::Migrations still running for $MAIN_SHA. Skipping deploy."
+              echo "ready=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            case "$MIGRATE_CONCLUSION" in
+              success|skipped)
+                echo "✓ Migrations passed for $MAIN_SHA"
+                ;;
+              *)
+                echo "::error::Migrations failed for $MAIN_SHA (conclusion: $MIGRATE_CONCLUSION). See: $MIGRATE_URL"
+                exit 1
+                ;;
+            esac
+          else
+            echo "✓ No migrations ran for $MAIN_SHA (no prisma/ changes)"
+          fi
+
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+          echo "✓ All checks passed, ready to deploy"
 
       - name: Guard Hyperdrive configuration
+        if: steps.gate.outputs.ready == 'true'
         run: |
-          # Extract Hyperdrive id from wrangler.jsonc
-          HYPERDRIVE_ID=$(grep -oP '"id":\s*"\K[^"]+' wrangler.jsonc | head -1 || true)
+          # Parse wrangler.jsonc: strip comments, extract hyperdrive[0].id
+          HYPERDRIVE_ID=$(node -e "
+            const fs = require('fs');
+            const content = fs.readFileSync('wrangler.jsonc', 'utf8');
+            // Strip single-line // comments (not inside strings)
+            const noComments = content.replace(/^\s*\/\/.*$/gm, '').replace(/,(\s*[}\]])/g, '\$1');
+            try {
+              const config = JSON.parse(noComments);
+              const id = config.hyperdrive?.[0]?.id || '';
+              console.log(id);
+            } catch (e) {
+              console.error('Failed to parse wrangler.jsonc:', e.message);
+              process.exit(1);
+            }
+          ")
 
           if [ -z "$HYPERDRIVE_ID" ]; then
-            echo "::error file=wrangler.jsonc::Hyperdrive id is missing or empty. Create with 'wrangler hyperdrive create' and commit the id."
+            echo "::error file=wrangler.jsonc::Hyperdrive id is missing or empty in hyperdrive[0].id. Create with 'wrangler hyperdrive create' and commit the id."
             exit 1
           fi
 
@@ -126,18 +176,22 @@ jobs:
           echo "✓ Hyperdrive id configured: $HYPERDRIVE_ID"
 
       - name: Setup Node
+        if: steps.gate.outputs.ready == 'true'
         uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
 
       - name: Install dependencies
+        if: steps.gate.outputs.ready == 'true'
         run: npm ci
 
       - name: Build
+        if: steps.gate.outputs.ready == 'true'
         run: npm run build
 
       - name: Prepare Worker secrets file
+        if: steps.gate.outputs.ready == 'true'
         id: secrets
         env:
           SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
@@ -157,7 +211,25 @@ jobs:
           echo "Syncing $n Worker secret(s): $(jq -r 'keys | join(", ")' "$f")"
           echo "file=$f" >> "$GITHUB_OUTPUT"
 
+      - name: Verify main HEAD unchanged
+        if: steps.gate.outputs.ready == 'true'
+        id: verify-head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ steps.main-head.outputs.sha }}
+        run: |
+          CURRENT_SHA=$(gh api "repos/${{ github.repository }}/git/ref/heads/main" --jq '.object.sha')
+
+          if [ "$CURRENT_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::notice::main HEAD moved from $EXPECTED_SHA to $CURRENT_SHA during build. Skipping deploy to avoid deploying stale code."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "✓ main HEAD unchanged: $CURRENT_SHA"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Deploy with Wrangler
+        if: steps.gate.outputs.ready == 'true' && steps.verify-head.outputs.changed != 'true'
         uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
