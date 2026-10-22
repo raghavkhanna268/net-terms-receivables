@@ -1,5 +1,5 @@
 // Prisma schema for Shopify App Session Storage
-// Uses Supabase Postgres Free (Mumbai, ap-south-1) via Cloudflare Hyperdrive
+// Uses Supabase Postgres Free (Seoul, ap-northeast-2) via Cloudflare Hyperdrive
 //
 // Migrations run from CI over Supabase's Supavisor SESSION pooler (port 5432)
 // Worker connects through Hyperdrive binding (pooled)

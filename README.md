@@ -7,7 +7,7 @@ A B2B wholesale net-terms receivables management app for Shopify. Track invoices
 - **Runtime**: Cloudflare Workers (Free tier, placed near AWS Seoul via region hint)
 - **Framework**: React Router v7 with `@shopify/shopify-app-react-router`
 - **UI**: Polaris Web Components + App Bridge
-- **Session Storage**: Cloudflare KV (via `@shopify/shopify-app-session-storage-kv`)
+- **Session Storage**: Postgres (postgres.js LightSessionStorage via Hyperdrive)
 - **Build**: Vite with `@cloudflare/vite-plugin`
 
 ### Why This Stack?
@@ -62,26 +62,18 @@ npx @shopify/cli@latest store create dev
 # Or use existing dev store: net-terms-receivables.myshopify.com
 ```
 
-### 5. Set Up Cloudflare KV (for Sessions)
+### 5. Set Up Hyperdrive (for Database Connection)
 
 ```bash
 # Login to Cloudflare
 npx wrangler login
 
-# Create KV namespace for sessions
-npx wrangler kv namespace create SESSIONS
-# Copy the id from output, e.g.: id = "abc123..."
+# Create Hyperdrive config pointing to your Supabase session pooler
+npx wrangler hyperdrive create net-terms-db --connection-string="<SESSION_POOLER_URL>"
+# Copy the id from output
 ```
 
-Update `wrangler.jsonc` with your namespace ID:
-```jsonc
-"kv_namespaces": [
-  {
-    "binding": "SESSIONS",
-    "id": "abc123..."  // ← Your actual ID here
-  }
-]
-```
+Update `wrangler.jsonc` with your Hyperdrive ID (see existing config for structure).
 
 ### 6. Configure Secrets
 
@@ -199,16 +191,11 @@ If requests exceed 10ms, you'll see errors in logs. The Worker will return error
 
 ## Session Storage Choice
 
-### Current: Cloudflare KV
+### Current: Postgres via Hyperdrive
 
-- **Why**: Works on Workers, official Shopify adapter (`@shopify/shopify-app-session-storage-kv`), no external database needed for S1
-- **Trade-offs**: Eventually consistent (not an issue for sessions), 1 write/sec per key limit
-
-### Future (S2): Supabase Postgres via Hyperdrive
-
-- Prisma + Cloudflare Hyperdrive for connection pooling
-- Replace KV session storage with Prisma session storage
-- Add business data tables (buyers, invoices, payments)
+- **Implementation**: `app/lib/session-storage-light.server.ts` using postgres.js LightSessionStorage
+- **Why**: Unified data layer with business data, strong consistency, no separate KV namespace needed
+- **Connection**: Cloudflare Hyperdrive for connection pooling to Supabase Postgres (Seoul, ap-northeast-2)
 
 ## OAuth Scopes
 
@@ -243,8 +230,8 @@ scopes = "read_orders,read_customers"
 ## Troubleshooting
 
 ### "Session not found" errors
-- Ensure KV namespace ID is correct in `wrangler.jsonc`
-- Check that `SESSIONS` binding is present
+- Ensure Hyperdrive config is correct in `wrangler.jsonc`
+- Check database connection and that the Session table exists
 
 ### OAuth redirect fails
 - Verify `SHOPIFY_APP_URL` matches your actual deployment URL
