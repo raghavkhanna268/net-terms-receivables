@@ -292,4 +292,90 @@ describe("AsyncLocalStorage Request Isolation", () => {
       });
     });
   });
+
+  describe("Error handling and cleanup", () => {
+    it("schedules $disconnect even when handler throws (try/finally pattern)", async () => {
+      const disconnectFn = vi.fn().mockResolvedValue(undefined);
+      const mockClient = {
+        ...createMockPrismaClient("error-client"),
+        $disconnect: disconnectFn,
+      };
+      let prisma: typeof mockClient | null = null;
+      const waitUntilCalls: Promise<void>[] = [];
+
+      const getPrisma = (): PrismaClient => {
+        if (!prisma) {
+          prisma = mockClient;
+        }
+        return prisma as unknown as PrismaClient;
+      };
+
+      const mockCtx = {
+        waitUntil: (p: Promise<void>) => {
+          waitUntilCalls.push(p);
+        },
+      };
+
+      const throwingHandler = async () => {
+        getRequestPrisma();
+        throw new Error("Simulated handler error");
+      };
+
+      try {
+        await requestContext.run({ getPrisma }, async () => {
+          try {
+            await throwingHandler();
+          } finally {
+            if (prisma !== null) {
+              mockCtx.waitUntil(Promise.resolve(prisma.$disconnect()));
+            }
+          }
+        });
+      } catch {
+        // Expected error
+      }
+
+      expect(prisma).not.toBeNull();
+      expect(waitUntilCalls).toHaveLength(1);
+      expect(disconnectFn).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not call $disconnect if Prisma client was never created", async () => {
+      const disconnectFn = vi.fn().mockResolvedValue(undefined);
+      const mockClient = {
+        ...createMockPrismaClient("unused-client"),
+        $disconnect: disconnectFn,
+      };
+      let prisma: typeof mockClient | null = null;
+      const waitUntilCalls: Promise<void>[] = [];
+
+      const getPrisma = (): PrismaClient => {
+        if (!prisma) {
+          prisma = mockClient;
+        }
+        return prisma as unknown as PrismaClient;
+      };
+
+      const mockCtx = {
+        waitUntil: (p: Promise<void>) => {
+          waitUntilCalls.push(p);
+        },
+      };
+
+      await requestContext.run({ getPrisma }, async () => {
+        try {
+          // Handler that doesn't use the database
+          return "no-db-access";
+        } finally {
+          if (prisma !== null) {
+            mockCtx.waitUntil(Promise.resolve(prisma.$disconnect()));
+          }
+        }
+      });
+
+      expect(prisma).toBeNull();
+      expect(waitUntilCalls).toHaveLength(0);
+      expect(disconnectFn).not.toHaveBeenCalled();
+    });
+  });
 });

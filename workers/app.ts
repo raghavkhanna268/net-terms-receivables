@@ -30,21 +30,22 @@ export default wrapWithSentry({
 
     // Run the request inside AsyncLocalStorage context so session storage
     // can access this request's Prisma client getter.
-    const response = await requestContext.run({ getPrisma }, async () => {
-      return requestHandler(request, {
-        cloudflare: { env, ctx },
-        sessionStorage,
-        shopify,
+    try {
+      return await requestContext.run({ getPrisma }, async () => {
+        return requestHandler(request, {
+          cloudflare: { env, ctx },
+          sessionStorage,
+          shopify,
+        });
       });
-    });
-
-    // $disconnect runs in ctx.waitUntil after the response is sent to the client.
-    // This allows graceful connection cleanup without blocking the response.
-    // Only disconnects if the Prisma client was actually created during this request.
-    if (prisma !== null) {
-      ctx.waitUntil((prisma as PrismaClient).$disconnect());
+    } finally {
+      // $disconnect runs in ctx.waitUntil after the response is sent to the client.
+      // This allows graceful connection cleanup without blocking the response.
+      // Only disconnects if the Prisma client was actually created during this request.
+      // Using finally ensures cleanup even when the handler throws.
+      if (prisma !== null) {
+        ctx.waitUntil((prisma as PrismaClient).$disconnect());
+      }
     }
-
-    return response;
   },
 } satisfies ExportedHandler<Env>);
