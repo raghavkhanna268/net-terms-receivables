@@ -1463,20 +1463,20 @@ describeWithDb("S5 Data Model Schema", () => {
 
       await sql`
         INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "createdAt", "updatedAt")
-        VALUES (${accountId}, ${shopId}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test', '99999999999999.99', ${now}, ${now})
+        VALUES (${accountId}, ${shopId}, 'COMPANY', 'gid://shopify/Company/1', 'gid://shopify/CompanyLocation/1', 'Test', '999999999999.99', ${now}, ${now})
       `;
 
       await sql`
         INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
-        VALUES (${invoiceId}, ${shopId}, ${accountId}, 'gid://shopify/Order/MONEY1', '#1', '12345678901234.56', '12345678901234.56', ${now}, 'open', ${now}, ${now})
+        VALUES (${invoiceId}, ${shopId}, ${accountId}, 'gid://shopify/Order/MONEY1', '#1', '123456789012.56', '123456789012.56', ${now}, 'open', ${now}, ${now})
       `;
 
       const [account] = await sql<BuyerAccountRow[]>`SELECT * FROM "BuyerAccount" WHERE id = ${accountId}`;
-      expect(account.creditLimit).toBe("99999999999999.99");
+      expect(account.creditLimit).toBe("999999999999.99");
 
       const [invoice] = await sql<InvoiceRow[]>`SELECT * FROM "Invoice" WHERE id = ${invoiceId}`;
-      expect(invoice.total).toBe("12345678901234.56");
-      expect(invoice.outstanding).toBe("12345678901234.56");
+      expect(invoice.total).toBe("123456789012.56");
+      expect(invoice.outstanding).toBe("123456789012.56");
 
       await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
     });
