@@ -13,6 +13,11 @@
  * - Direct SQL execution (no query compilation)
  *
  * Prisma schema remains the source of truth for migrations.
+ *
+ * TIMESTAMP HANDLING:
+ * The schema uses TIMESTAMP(3) WITHOUT TIME ZONE. Prisma stores UTC wall time.
+ * We use `::timestamptz AT TIME ZONE 'UTC'` on write and read to ensure correct
+ * round-trip regardless of process TZ or DB session timezone settings.
  */
 
 import { Session as ShopifySession } from "@shopify/shopify-api";
@@ -25,6 +30,19 @@ export type SqlGetter = () => Sql;
 function isSqlGetter(value: Sql | SqlGetter): value is SqlGetter {
   return typeof value === "function" && !("begin" in value);
 }
+
+/**
+ * Explicit column list for SELECT queries with timezone-safe timestamp handling.
+ * Uses AT TIME ZONE 'UTC' to interpret stored TIMESTAMP values as UTC.
+ */
+const SELECT_COLUMNS = `
+  id, shop, state, "isOnline", scope,
+  ("expires" AT TIME ZONE 'UTC') AS "expires",
+  "accessToken", "userId", "firstName", "lastName", email,
+  "accountOwner", locale, collaborator, "emailVerified",
+  "refreshToken",
+  ("refreshTokenExpires" AT TIME ZONE 'UTC') AS "refreshTokenExpires"
+`;
 
 /**
  * Lightweight session storage using postgres.js direct SQL.
@@ -48,6 +66,9 @@ export class LightSessionStorage {
     const data = this.sessionToRow(session);
     // Convert BigInt to string for postgres.js compatibility
     const userIdStr = data.userId !== null ? data.userId.toString() : null;
+    // Convert Date to ISO string for timezone-safe storage
+    const expiresStr = data.expires?.toISOString() ?? null;
+    const refreshTokenExpiresStr = data.refreshTokenExpires?.toISOString() ?? null;
 
     await this.sql`
       INSERT INTO "Session" (
@@ -56,10 +77,13 @@ export class LightSessionStorage {
         locale, collaborator, "emailVerified", "refreshToken", "refreshTokenExpires"
       ) VALUES (
         ${session.id}, ${data.shop}, ${data.state}, ${data.isOnline},
-        ${data.scope}, ${data.expires}, ${data.accessToken}, ${userIdStr}::bigint,
+        ${data.scope},
+        ${expiresStr}::timestamptz AT TIME ZONE 'UTC',
+        ${data.accessToken}, ${userIdStr}::bigint,
         ${data.firstName}, ${data.lastName}, ${data.email}, ${data.accountOwner},
         ${data.locale}, ${data.collaborator}, ${data.emailVerified},
-        ${data.refreshToken}, ${data.refreshTokenExpires}
+        ${data.refreshToken},
+        ${refreshTokenExpiresStr}::timestamptz AT TIME ZONE 'UTC'
       )
       ON CONFLICT (id) DO UPDATE SET
         shop = EXCLUDED.shop,
@@ -85,7 +109,9 @@ export class LightSessionStorage {
 
   async loadSession(id: string): Promise<ShopifySession | undefined> {
     const rows = await this.sql<SessionRow[]>`
-      SELECT * FROM "Session" WHERE id = ${id}
+      SELECT ${this.sql.unsafe(SELECT_COLUMNS)}
+      FROM "Session"
+      WHERE id = ${id}
     `;
 
     if (rows.length === 0) return undefined;
@@ -104,13 +130,16 @@ export class LightSessionStorage {
 
   async deleteSessions(ids: string[]): Promise<boolean> {
     if (ids.length === 0) return true;
-    await this.sql`DELETE FROM "Session" WHERE id = ANY(${ids})`;
+    // Cast to text[] explicitly since fetch_types is disabled
+    await this.sql`DELETE FROM "Session" WHERE id = ANY(${ids}::text[])`;
     return true;
   }
 
   async findSessionsByShop(shop: string): Promise<ShopifySession[]> {
     const rows = await this.sql<SessionRow[]>`
-      SELECT * FROM "Session" WHERE shop = ${shop}
+      SELECT ${this.sql.unsafe(SELECT_COLUMNS)}
+      FROM "Session"
+      WHERE shop = ${shop}
     `;
     return rows.map((row) => this.rowToSession(row));
   }
@@ -138,7 +167,7 @@ export class LightSessionStorage {
     return result.count;
   }
 
-  private sessionToRow(session: ShopifySession): Omit<SessionRow, "id"> {
+  private sessionToRow(session: ShopifySession): Omit<SessionRow, "id" | "userId"> & { userId: bigint | null } {
     return {
       shop: session.shop,
       state: session.state,
@@ -177,12 +206,13 @@ export class LightSessionStorage {
       refreshTokenExpires: row.refreshTokenExpires ?? undefined,
     };
 
+    // userId is returned as string by postgres.js (int8 -> string)
     if (row.userId !== null) {
       sessionData.onlineAccessInfo = {
         expires_in: 0,
         associated_user_scope: row.scope ?? "",
         associated_user: {
-          id: Number(row.userId),
+          id: parseInt(row.userId, 10),
           first_name: row.firstName ?? "",
           last_name: row.lastName ?? "",
           email: row.email ?? "",

@@ -5,15 +5,11 @@ import styles from "./styles.module.css";
 
 /**
  * Cache-Control for the landing page.
+ * - private: response may contain user-specific content (login form)
  * - max-age=60: browser caches for 1 minute
- *
- * Note: On workers.dev, Cloudflare does not cache Worker responses based on
- * Cache-Control headers alone (the Worker runs before the cache layer).
- * The s-maxage directive is kept for custom domains with caching enabled.
- * To reduce Worker invocations, use Cloudflare Cache Rules on custom domains.
  */
 export const headers: HeadersFunction = () => ({
-  "Cache-Control": "public, max-age=60, s-maxage=3600, stale-while-revalidate=86400",
+  "Cache-Control": "private, max-age=60",
 });
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {

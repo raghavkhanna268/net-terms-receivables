@@ -49,7 +49,7 @@ let cachedShopifyApp: ReturnType<typeof shopifyApp> | null = null;
  *
  * This function creates the shopifyApp instance once per isolate rather than
  * once per request. The session storage uses AsyncLocalStorage internally,
- * so each request automatically gets the correct Prisma client.
+ * so each request automatically gets the correct SQL client.
  *
  * CPU savings: ~4ms per warm request by avoiding repeated shopifyApp() calls.
  */

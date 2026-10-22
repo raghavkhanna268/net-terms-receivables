@@ -18,6 +18,9 @@ export type Sql = ReturnType<typeof postgres>;
 /**
  * Session row type matching the Prisma schema.
  * Keep in sync with prisma/schema.prisma Session model.
+ *
+ * Note: postgres.js returns bigint (int8) columns as strings to avoid
+ * JavaScript number precision loss. The userId field is typed as string.
  */
 export interface SessionRow {
   id: string;
@@ -27,7 +30,7 @@ export interface SessionRow {
   scope: string | null;
   expires: Date | null;
   accessToken: string;
-  userId: bigint | null;
+  userId: string | null; // postgres.js returns int8 as string
   firstName: string | null;
   lastName: string | null;
   email: string | null;
@@ -47,14 +50,18 @@ export interface SessionRow {
  */
 export function createSql(connectionString: string): Sql {
   return postgres(connectionString, {
-    // Hyperdrive handles pooling, so we only need 1 connection per request
+    // Hyperdrive handles pooling at the network level, so we use a single
+    // connection per request. The client is created lazily and closed in
+    // ctx.waitUntil after the response.
     max: 1,
-    // Transform column names from snake_case to camelCase
-    // Our schema uses camelCase (Prisma convention), so disable this
+    // Skip fetching type OIDs on connect - saves a round trip to the DB.
+    // Safe because we don't use custom types or arrays that need OID lookup.
+    // The ANY(${ids}::text[]) cast handles array parameters explicitly.
+    fetch_types: false,
+    // Null handling for undefined values in parameters
     transform: { undefined: null },
-    // Connection settings optimized for Workers
-    idle_timeout: 0, // Don't hold idle connections
-    connect_timeout: 10, // 10 second timeout
+    // Connection timeout in seconds
+    connect_timeout: 10,
   });
 }
 

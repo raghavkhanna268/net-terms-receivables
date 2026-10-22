@@ -89,18 +89,18 @@ jobs:
           
           echo "Gzip total: ${GZIP_SIZE} KiB"
           
-          # Convert to integer for comparison (2.5 MB = 2560 KiB)
+          # Convert to integer for comparison (400 KiB limit)
           GZIP_INT=$(echo "$GZIP_SIZE" | cut -d'.' -f1)
           if ! [[ "$GZIP_INT" =~ ^[0-9]+$ ]]; then
             echo "✗ Gzip size is not a valid number: $GZIP_SIZE"
             exit 1
           fi
           
-          if [ "$GZIP_INT" -gt 2560 ]; then
-            echo "✗ Gzip size exceeds 2.5 MB limit"
+          if [ "$GZIP_INT" -gt 400 ]; then
+            echo "✗ Gzip size exceeds 400 KiB limit"
             exit 1
           fi
-          echo "✓ Bundle gzip size is within 2.5 MB limit"
+          echo "✓ Bundle gzip size is within 400 KiB limit"
 
       - name: Worker boot test
         run: |

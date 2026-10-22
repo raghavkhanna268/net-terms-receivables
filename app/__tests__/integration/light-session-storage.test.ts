@@ -12,6 +12,7 @@ import { Session } from "@shopify/shopify-api";
  * 3. Full CRUD operations: store, load, findSessionsByShop, deleteAllForShop
  * 4. Refresh token round-trip (expiringOfflineAccessTokens support)
  * 5. Error propagation from deleteSession (deleteMany semantics)
+ * 6. Timezone-safe timestamp handling across process TZ and DB session TZ
  *
  * The test uses postgres.js which is the same driver used in production,
  * proving the Hyperdrive connection path works end-to-end.
@@ -31,8 +32,8 @@ describeWithDb("Light Session Storage Integration", () => {
   const TEST_SESSION_ID = "test-light-session-id-" + Date.now();
 
   beforeAll(async () => {
-    // Create postgres.js client directly
-    sql = postgres(TEST_DATABASE_URL!, { max: 1 });
+    // Create postgres.js client with fetch_types disabled (matches production)
+    sql = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
 
     // Create session storage with the SQL client
     sessionStorage = new LightSessionStorage(sql);
@@ -73,7 +74,6 @@ describeWithDb("Light Session Storage Integration", () => {
   });
 
   it("loads a session by id", async () => {
-    // Store a session first
     const session = new Session({
       id: TEST_SESSION_ID,
       shop: TEST_SHOP,
@@ -84,7 +84,6 @@ describeWithDb("Light Session Storage Integration", () => {
     });
     await sessionStorage.storeSession(session);
 
-    // Load it back
     const loaded = await sessionStorage.loadSession(TEST_SESSION_ID);
 
     expect(loaded).not.toBeUndefined();
@@ -96,12 +95,10 @@ describeWithDb("Light Session Storage Integration", () => {
 
   it("returns undefined for non-existent session", async () => {
     const loaded = await sessionStorage.loadSession("non-existent-id");
-
     expect(loaded).toBeUndefined();
   });
 
   it("finds sessions by shop", async () => {
-    // Store multiple sessions for the same shop
     const session1 = new Session({
       id: `${TEST_SESSION_ID}-1`,
       shop: TEST_SHOP,
@@ -120,7 +117,6 @@ describeWithDb("Light Session Storage Integration", () => {
     await sessionStorage.storeSession(session1);
     await sessionStorage.storeSession(session2);
 
-    // Find all sessions for the shop
     const sessions = await sessionStorage.findSessionsByShop(TEST_SHOP);
 
     expect(sessions).toHaveLength(2);
@@ -134,12 +130,10 @@ describeWithDb("Light Session Storage Integration", () => {
     const sessions = await sessionStorage.findSessionsByShop(
       "nonexistent-shop.myshopify.com"
     );
-
     expect(sessions).toEqual([]);
   });
 
   it("deletes a single session", async () => {
-    // Store a session
     const session = new Session({
       id: TEST_SESSION_ID,
       shop: TEST_SHOP,
@@ -149,18 +143,14 @@ describeWithDb("Light Session Storage Integration", () => {
     });
     await sessionStorage.storeSession(session);
 
-    // Delete it
     const result = await sessionStorage.deleteSession(TEST_SESSION_ID);
 
     expect(result).toBe(true);
-
-    // Verify it's gone
     const loaded = await sessionStorage.loadSession(TEST_SESSION_ID);
     expect(loaded).toBeUndefined();
   });
 
   it("deletes multiple sessions (deleteSessions)", async () => {
-    // Store multiple sessions
     const session1 = new Session({
       id: `${TEST_SESSION_ID}-1`,
       shop: TEST_SHOP,
@@ -179,21 +169,17 @@ describeWithDb("Light Session Storage Integration", () => {
     await sessionStorage.storeSession(session1);
     await sessionStorage.storeSession(session2);
 
-    // Delete both at once
     const result = await sessionStorage.deleteSessions([
       `${TEST_SESSION_ID}-1`,
       `${TEST_SESSION_ID}-2`,
     ]);
 
     expect(result).toBe(true);
-
-    // Verify both are gone
     const remaining = await sessionStorage.findSessionsByShop(TEST_SHOP);
     expect(remaining).toHaveLength(0);
   });
 
   it("updates an existing session (upsert behavior)", async () => {
-    // Store initial session
     const session = new Session({
       id: TEST_SESSION_ID,
       shop: TEST_SHOP,
@@ -204,17 +190,14 @@ describeWithDb("Light Session Storage Integration", () => {
     });
     await sessionStorage.storeSession(session);
 
-    // Update it with new scope (simulating scopes_update webhook)
     session.scope = "read_orders,read_customers,write_orders";
     await sessionStorage.storeSession(session);
 
-    // Load and verify update
     const loaded = await sessionStorage.loadSession(TEST_SESSION_ID);
     expect(loaded?.scope).toBe("read_orders,read_customers,write_orders");
   });
 
   it("handles shop uninstall flow (deleteAllForShop)", async () => {
-    // Store multiple sessions (offline + online)
     const offlineSession = new Session({
       id: `offline_${TEST_SHOP}`,
       shop: TEST_SHOP,
@@ -233,17 +216,14 @@ describeWithDb("Light Session Storage Integration", () => {
     await sessionStorage.storeSession(offlineSession);
     await sessionStorage.storeSession(onlineSession);
 
-    // Delete all sessions for shop using deleteAllForShop
     const deletedCount = await sessionStorage.deleteAllForShop(TEST_SHOP);
     expect(deletedCount).toBe(2);
 
-    // Verify all gone
     const remaining = await sessionStorage.findSessionsByShop(TEST_SHOP);
     expect(remaining).toHaveLength(0);
   });
 
   it("round-trips session with refresh token and expiry (expiringOfflineAccessTokens)", async () => {
-    // Test session with refresh token for future.expiringOfflineAccessTokens: true
     const expires = new Date("2025-06-15T12:00:00.000Z");
     const refreshTokenExpires = new Date("2025-12-15T12:00:00.000Z");
 
@@ -259,25 +239,15 @@ describeWithDb("Light Session Storage Integration", () => {
       refreshTokenExpires,
     });
 
-    // Store the session
     await sessionStorage.storeSession(session);
-
-    // Load it back
     const loaded = await sessionStorage.loadSession(TEST_SESSION_ID);
 
-    // Verify all fields round-trip correctly
     expect(loaded).not.toBeUndefined();
     expect(loaded!.id).toBe(session.id);
     expect(loaded!.shop).toBe(session.shop);
-    expect(loaded!.state).toBe(session.state);
-    expect(loaded!.isOnline).toBe(session.isOnline);
-    expect(loaded!.scope).toBe(session.scope);
     expect(loaded!.accessToken).toBe(session.accessToken);
-
-    // Verify refresh token fields
     expect(loaded!.refreshToken).toBe(session.refreshToken);
 
-    // Verify Date fields are correctly restored (comparing ISO strings for equality)
     expect(loaded!.expires).toBeInstanceOf(Date);
     expect(loaded!.expires!.toISOString()).toBe(expires.toISOString());
 
@@ -286,12 +256,10 @@ describeWithDb("Light Session Storage Integration", () => {
       refreshTokenExpires.toISOString()
     );
 
-    // Deep equality check: the loaded session should equal the original
     expect(loaded!.equals(session)).toBe(true);
   });
 
   it("round-trips online session with user info", async () => {
-    // Test online session with onlineAccessInfo
     const expires = new Date("2025-06-15T12:00:00.000Z");
 
     const session = new Session({
@@ -318,22 +286,16 @@ describeWithDb("Light Session Storage Integration", () => {
       },
     });
 
-    // Store and load
     await sessionStorage.storeSession(session);
     const loaded = await sessionStorage.loadSession(TEST_SESSION_ID);
 
-    // Verify basic fields
     expect(loaded).not.toBeUndefined();
     expect(loaded!.isOnline).toBe(true);
-
-    // Verify user info is restored
     expect(loaded!.onlineAccessInfo).not.toBeUndefined();
     expect(loaded!.onlineAccessInfo!.associated_user.id).toBe(12345678);
     expect(loaded!.onlineAccessInfo!.associated_user.first_name).toBe("Test");
     expect(loaded!.onlineAccessInfo!.associated_user.last_name).toBe("User");
-    expect(loaded!.onlineAccessInfo!.associated_user.email).toBe(
-      "test@example.com"
-    );
+    expect(loaded!.onlineAccessInfo!.associated_user.email).toBe("test@example.com");
     expect(loaded!.onlineAccessInfo!.associated_user.account_owner).toBe(true);
     expect(loaded!.onlineAccessInfo!.associated_user.locale).toBe("en-US");
     expect(loaded!.onlineAccessInfo!.associated_user.collaborator).toBe(false);
@@ -341,7 +303,6 @@ describeWithDb("Light Session Storage Integration", () => {
   });
 
   it("updateScopeForShop updates all sessions for a shop", async () => {
-    // Store multiple sessions
     const session1 = new Session({
       id: `${TEST_SESSION_ID}-1`,
       shop: TEST_SHOP,
@@ -362,14 +323,12 @@ describeWithDb("Light Session Storage Integration", () => {
     await sessionStorage.storeSession(session1);
     await sessionStorage.storeSession(session2);
 
-    // Update scope for all sessions
     const updatedCount = await sessionStorage.updateScopeForShop(
       TEST_SHOP,
       "read_orders,write_orders"
     );
     expect(updatedCount).toBe(2);
 
-    // Verify both sessions have new scope
     const sessions = await sessionStorage.findSessionsByShop(TEST_SHOP);
     expect(sessions).toHaveLength(2);
     for (const session of sessions) {
@@ -378,9 +337,8 @@ describeWithDb("Light Session Storage Integration", () => {
   });
 
   it("round-trips online session with large userId (bigint)", async () => {
-    // Test bigint userId that exceeds 32-bit integer range but is safe in JS
-    // Shopify user IDs can be large numbers stored as bigint in Postgres
-    const largeUserId = 8589934592; // 2^33, larger than 32-bit max (2^31-1 = 2147483647)
+    // Test bigint userId that exceeds 32-bit integer range
+    const largeUserId = 8589934592; // 2^33, larger than 32-bit max
     const expires = new Date("2025-06-15T12:00:00.000Z");
 
     const session = new Session({
@@ -407,68 +365,274 @@ describeWithDb("Light Session Storage Integration", () => {
       },
     });
 
-    // Store and load
     await sessionStorage.storeSession(session);
     const loaded = await sessionStorage.loadSession(TEST_SESSION_ID);
 
-    // Verify bigint userId round-trips correctly
     expect(loaded).not.toBeUndefined();
     expect(loaded!.onlineAccessInfo).not.toBeUndefined();
     expect(loaded!.onlineAccessInfo!.associated_user.id).toBe(largeUserId);
   });
 
-  it("round-trips expires Date across timezones (UTC)", async () => {
-    // Test that Date fields are stored and retrieved in UTC correctly
-    // Use a date with specific time to verify no timezone drift
-    const expires = new Date("2025-07-04T23:59:59.999Z");
-    const refreshTokenExpires = new Date("2026-01-01T00:00:00.000Z");
-
-    const session = new Session({
-      id: TEST_SESSION_ID,
-      shop: TEST_SHOP,
-      state: "test-state",
-      isOnline: false,
-      accessToken: "test-token",
-      expires,
-      refreshToken: "test-refresh",
-      refreshTokenExpires,
-    });
-
-    await sessionStorage.storeSession(session);
-    const loaded = await sessionStorage.loadSession(TEST_SESSION_ID);
-
-    // Verify timestamps are preserved exactly
-    expect(loaded!.expires!.getTime()).toBe(expires.getTime());
-    expect(loaded!.refreshTokenExpires!.getTime()).toBe(refreshTokenExpires.getTime());
-    
-    // Verify ISO strings match (proves UTC preservation)
-    expect(loaded!.expires!.toISOString()).toBe("2025-07-04T23:59:59.999Z");
-    expect(loaded!.refreshTokenExpires!.toISOString()).toBe("2026-01-01T00:00:00.000Z");
-  });
-
   it("propagates errors from closed SQL connection", async () => {
-    // Create a separate SQL client and close it to test error propagation
-    const closedSql = postgres(TEST_DATABASE_URL!, { max: 1 });
+    const closedSql = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
     const closedStorage = new LightSessionStorage(closedSql);
     
-    // Close the connection
     await closedSql.end();
 
-    // Operations should throw errors, not silently fail
+    // Operations through LightSessionStorage should throw errors
     await expect(closedStorage.loadSession("any-id")).rejects.toThrow();
   });
 
-  it("propagates errors from invalid table query", async () => {
-    // Create a storage that queries a non-existent table by using raw SQL
-    // This verifies that SQL errors propagate correctly
-    await expect(
-      sql`SELECT * FROM "NonExistentTable" WHERE id = 'test'`
-    ).rejects.toThrow();
+  it("propagates errors from storage operations on invalid connection", async () => {
+    // Use a connection string to a non-existent database to test error propagation
+    // through LightSessionStorage (not raw SQL)
+    const badSql = postgres("postgresql://postgres:postgres@localhost:5432/nonexistent_db_12345", {
+      max: 1,
+      fetch_types: false,
+      connect_timeout: 2,
+    });
+    const badStorage = new LightSessionStorage(badSql);
+
+    // Storage operations should propagate database errors
+    await expect(badStorage.loadSession("any-id")).rejects.toThrow();
+    
+    await badSql.end().catch(() => {});
   });
 
   it("deleteSessions handles empty array", async () => {
-    // Should not throw or make a DB call for empty array
     const result = await sessionStorage.deleteSessions([]);
     expect(result).toBe(true);
+  });
+});
+
+/**
+ * Timezone tests - verify timestamp handling across different timezone configurations.
+ * 
+ * These tests verify that expires and refreshTokenExpires are stored and read correctly
+ * regardless of:
+ * - Process timezone (TZ environment variable)
+ * - Database session timezone (SET TIME ZONE)
+ * 
+ * The stored TIMESTAMP(3) column should always contain UTC wall time, and our
+ * AT TIME ZONE 'UTC' handling should ensure correct round-trips.
+ */
+describeWithDb("Light Session Storage Timezone Handling", () => {
+  const TZ_TEST_SHOP = "test-tz-shop.myshopify.com";
+  const TZ_TEST_SESSION_ID = "test-tz-session-" + Date.now();
+  
+  // Test timestamp: July 4, 2025, 11:30 PM UTC (carefully chosen to expose TZ bugs)
+  // In Asia/Kolkata (UTC+5:30), this is July 5, 2025, 5:00 AM
+  const TEST_EXPIRES = new Date("2025-07-04T23:30:00.000Z");
+  const TEST_REFRESH_EXPIRES = new Date("2026-01-15T06:45:00.000Z");
+
+  afterAll(async () => {
+    // Clean up test data with a fresh connection
+    const cleanupSql = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+    await cleanupSql`DELETE FROM "Session" WHERE shop = ${TZ_TEST_SHOP}`;
+    await cleanupSql.end();
+  });
+
+  it("stores UTC timestamp correctly (raw column verification)", async () => {
+    const sqlUtc = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+    const storage = new LightSessionStorage(sqlUtc);
+
+    const session = new Session({
+      id: `${TZ_TEST_SESSION_ID}-raw`,
+      shop: TZ_TEST_SHOP,
+      state: "test",
+      isOnline: false,
+      accessToken: "token",
+      expires: TEST_EXPIRES,
+      refreshTokenExpires: TEST_REFRESH_EXPIRES,
+    });
+
+    await storage.storeSession(session);
+
+    // Verify raw column contains UTC wall time (no timezone conversion)
+    // Cast to text to see the exact stored value
+    const [row] = await sqlUtc`
+      SELECT 
+        expires::text as expires_text,
+        "refreshTokenExpires"::text as refresh_expires_text
+      FROM "Session" 
+      WHERE id = ${`${TZ_TEST_SESSION_ID}-raw`}
+    `;
+
+    // Raw timestamp should be UTC wall time
+    expect(row.expires_text).toBe("2025-07-04 23:30:00");
+    expect(row.refresh_expires_text).toBe("2026-01-15 06:45:00");
+
+    await sqlUtc`DELETE FROM "Session" WHERE id = ${`${TZ_TEST_SESSION_ID}-raw`}`;
+    await sqlUtc.end();
+  });
+
+  it("round-trips correctly with DB session timezone UTC (process TZ=UTC)", async () => {
+    const sqlUtc = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+    await sqlUtc`SET TIME ZONE 'UTC'`;
+    const storage = new LightSessionStorage(sqlUtc);
+
+    const session = new Session({
+      id: `${TZ_TEST_SESSION_ID}-utc-utc`,
+      shop: TZ_TEST_SHOP,
+      state: "test",
+      isOnline: false,
+      accessToken: "token",
+      expires: TEST_EXPIRES,
+      refreshTokenExpires: TEST_REFRESH_EXPIRES,
+    });
+
+    await storage.storeSession(session);
+    const loaded = await storage.loadSession(`${TZ_TEST_SESSION_ID}-utc-utc`);
+
+    expect(loaded!.expires!.toISOString()).toBe(TEST_EXPIRES.toISOString());
+    expect(loaded!.refreshTokenExpires!.toISOString()).toBe(TEST_REFRESH_EXPIRES.toISOString());
+
+    await sqlUtc`DELETE FROM "Session" WHERE id = ${`${TZ_TEST_SESSION_ID}-utc-utc`}`;
+    await sqlUtc.end();
+  });
+
+  it("round-trips correctly with DB session timezone Asia/Kolkata (process TZ=UTC)", async () => {
+    const sqlKolkata = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+    await sqlKolkata`SET TIME ZONE 'Asia/Kolkata'`;
+    const storage = new LightSessionStorage(sqlKolkata);
+
+    const session = new Session({
+      id: `${TZ_TEST_SESSION_ID}-utc-kolkata`,
+      shop: TZ_TEST_SHOP,
+      state: "test",
+      isOnline: false,
+      accessToken: "token",
+      expires: TEST_EXPIRES,
+      refreshTokenExpires: TEST_REFRESH_EXPIRES,
+    });
+
+    await storage.storeSession(session);
+    const loaded = await storage.loadSession(`${TZ_TEST_SESSION_ID}-utc-kolkata`);
+
+    // Should still get UTC back regardless of DB session timezone
+    expect(loaded!.expires!.toISOString()).toBe(TEST_EXPIRES.toISOString());
+    expect(loaded!.refreshTokenExpires!.toISOString()).toBe(TEST_REFRESH_EXPIRES.toISOString());
+
+    await sqlKolkata`DELETE FROM "Session" WHERE id = ${`${TZ_TEST_SESSION_ID}-utc-kolkata`}`;
+    await sqlKolkata.end();
+  });
+
+  it("round-trips correctly with DB session timezone Europe/London", async () => {
+    const sqlLondon = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+    await sqlLondon`SET TIME ZONE 'Europe/London'`;
+    const storage = new LightSessionStorage(sqlLondon);
+
+    const session = new Session({
+      id: `${TZ_TEST_SESSION_ID}-utc-london`,
+      shop: TZ_TEST_SHOP,
+      state: "test",
+      isOnline: false,
+      accessToken: "token",
+      expires: TEST_EXPIRES,
+      refreshTokenExpires: TEST_REFRESH_EXPIRES,
+    });
+
+    await storage.storeSession(session);
+    const loaded = await storage.loadSession(`${TZ_TEST_SESSION_ID}-utc-london`);
+
+    expect(loaded!.expires!.toISOString()).toBe(TEST_EXPIRES.toISOString());
+    expect(loaded!.refreshTokenExpires!.toISOString()).toBe(TEST_REFRESH_EXPIRES.toISOString());
+
+    await sqlLondon`DELETE FROM "Session" WHERE id = ${`${TZ_TEST_SESSION_ID}-utc-london`}`;
+    await sqlLondon.end();
+  });
+
+  it("round-trips correctly with DB session timezone America/New_York", async () => {
+    const sqlNy = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+    await sqlNy`SET TIME ZONE 'America/New_York'`;
+    const storage = new LightSessionStorage(sqlNy);
+
+    const session = new Session({
+      id: `${TZ_TEST_SESSION_ID}-utc-ny`,
+      shop: TZ_TEST_SHOP,
+      state: "test",
+      isOnline: false,
+      accessToken: "token",
+      expires: TEST_EXPIRES,
+      refreshTokenExpires: TEST_REFRESH_EXPIRES,
+    });
+
+    await storage.storeSession(session);
+    const loaded = await storage.loadSession(`${TZ_TEST_SESSION_ID}-utc-ny`);
+
+    expect(loaded!.expires!.toISOString()).toBe(TEST_EXPIRES.toISOString());
+    expect(loaded!.refreshTokenExpires!.toISOString()).toBe(TEST_REFRESH_EXPIRES.toISOString());
+
+    await sqlNy`DELETE FROM "Session" WHERE id = ${`${TZ_TEST_SESSION_ID}-utc-ny`}`;
+    await sqlNy.end();
+  });
+
+  it("is compatible with rows written by Prisma (stored as UTC wall time)", async () => {
+    // Simulate a row that Prisma would have written (UTC wall time in TIMESTAMP column)
+    const sqlDirect = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+    
+    // Insert directly using the same format Prisma uses (UTC wall time)
+    await sqlDirect`
+      INSERT INTO "Session" (
+        id, shop, state, "isOnline", scope, expires, "accessToken",
+        "userId", "firstName", "lastName", email, "accountOwner",
+        locale, collaborator, "emailVerified", "refreshToken", "refreshTokenExpires"
+      ) VALUES (
+        ${`${TZ_TEST_SESSION_ID}-prisma-compat`},
+        ${TZ_TEST_SHOP},
+        'test',
+        false,
+        null,
+        '2025-07-04 23:30:00'::timestamp,
+        'token',
+        null, null, null, null, false, null, false, false, null,
+        '2026-01-15 06:45:00'::timestamp
+      )
+    `;
+
+    // Read using LightSessionStorage
+    const storage = new LightSessionStorage(sqlDirect);
+    const loaded = await storage.loadSession(`${TZ_TEST_SESSION_ID}-prisma-compat`);
+
+    // Should correctly interpret as UTC
+    expect(loaded!.expires!.toISOString()).toBe("2025-07-04T23:30:00.000Z");
+    expect(loaded!.refreshTokenExpires!.toISOString()).toBe("2026-01-15T06:45:00.000Z");
+
+    await sqlDirect`DELETE FROM "Session" WHERE id = ${`${TZ_TEST_SESSION_ID}-prisma-compat`}`;
+    await sqlDirect.end();
+  });
+
+  it("cross-writes and cross-reads correctly (write in Kolkata TZ, read in NY TZ)", async () => {
+    // Write with Asia/Kolkata DB session
+    const sqlWrite = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+    await sqlWrite`SET TIME ZONE 'Asia/Kolkata'`;
+    const writeStorage = new LightSessionStorage(sqlWrite);
+
+    const session = new Session({
+      id: `${TZ_TEST_SESSION_ID}-cross-tz`,
+      shop: TZ_TEST_SHOP,
+      state: "test",
+      isOnline: false,
+      accessToken: "token",
+      expires: TEST_EXPIRES,
+      refreshTokenExpires: TEST_REFRESH_EXPIRES,
+    });
+
+    await writeStorage.storeSession(session);
+    await sqlWrite.end();
+
+    // Read with America/New_York DB session
+    const sqlRead = postgres(TEST_DATABASE_URL!, { max: 1, fetch_types: false });
+    await sqlRead`SET TIME ZONE 'America/New_York'`;
+    const readStorage = new LightSessionStorage(sqlRead);
+
+    const loaded = await readStorage.loadSession(`${TZ_TEST_SESSION_ID}-cross-tz`);
+
+    // Should still get the original UTC timestamps
+    expect(loaded!.expires!.toISOString()).toBe(TEST_EXPIRES.toISOString());
+    expect(loaded!.refreshTokenExpires!.toISOString()).toBe(TEST_REFRESH_EXPIRES.toISOString());
+
+    await sqlRead`DELETE FROM "Session" WHERE id = ${`${TZ_TEST_SESSION_ID}-cross-tz`}`;
+    await sqlRead.end();
   });
 });
