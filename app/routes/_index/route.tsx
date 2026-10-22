@@ -1,7 +1,20 @@
-import type { LoaderFunctionArgs } from "react-router";
+import type { LoaderFunctionArgs, HeadersFunction } from "react-router";
 import { redirect, Form, useLoaderData } from "react-router";
 
 import styles from "./styles.module.css";
+
+/**
+ * Cache-Control headers for the landing page.
+ * - public: Can be cached by CDN edge nodes
+ * - max-age=3600: Browser cache for 1 hour
+ * - s-maxage=86400: Edge cache for 24 hours
+ * - stale-while-revalidate: Serve stale while fetching fresh
+ * 
+ * This eliminates Worker CPU usage for repeat visits.
+ */
+export const headers: HeadersFunction = () => ({
+  "Cache-Control": "public, max-age=3600, s-maxage=86400, stale-while-revalidate=3600",
+});
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
