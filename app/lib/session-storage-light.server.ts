@@ -130,8 +130,8 @@ export class LightSessionStorage {
 
   async deleteSessions(ids: string[]): Promise<boolean> {
     if (ids.length === 0) return true;
-    // Cast to text[] explicitly since fetch_types is disabled
-    await this.sql`DELETE FROM "Session" WHERE id = ANY(${ids}::text[])`;
+    // Use postgres.js array helper for proper array parameter handling
+    await this.sql`DELETE FROM "Session" WHERE id = ANY(${this.sql.array(ids)})`;
     return true;
   }
 
