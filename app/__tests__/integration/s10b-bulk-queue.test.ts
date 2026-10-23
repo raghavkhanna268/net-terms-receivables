@@ -27,39 +27,9 @@ describeWithDb("S10b processBulkQueue Integration", () => {
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
 
-    // Ensure required tables exist
-    await sql`
-      CREATE TABLE IF NOT EXISTS s6_dead_letter (
-        id BIGSERIAL PRIMARY KEY,
-        original_queue TEXT NOT NULL,
-        original_msg_id TEXT NOT NULL,
-        message JSONB NOT NULL,
-        error TEXT NOT NULL,
-        dead_lettered_at TIMESTAMPTZ(6) NOT NULL DEFAULT NOW()
-      )
-    `;
-
-    // Ensure s6_bulk_operations table exists for failure_count tracking
-    await sql`
-      CREATE TABLE IF NOT EXISTS s6_bulk_operations (
-        id TEXT PRIMARY KEY,
-        shop TEXT NOT NULL,
-        bulk_operation_id TEXT NOT NULL,
-        bulk_type TEXT NOT NULL CHECK (bulk_type IN ('companies', 'orders', 'customers')),
-        url TEXT,
-        file_size BIGINT,
-        object_count INT,
-        completed_at TIMESTAMPTZ(6),
-        byte_offset BIGINT NOT NULL DEFAULT 0,
-        lines_processed INT NOT NULL DEFAULT 0,
-        origin TEXT NOT NULL DEFAULT 'webhook' CHECK (origin IN ('reconcile', 'webhook', 'manual')),
-        reconcile_stage TEXT CHECK (reconcile_stage IS NULL OR reconcile_stage IN ('companies', 'orders')),
-        failure_count INT NOT NULL DEFAULT 0,
-        chunk_size INT NOT NULL DEFAULT 524288,
-        created_at TIMESTAMPTZ(6) NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ(6) NOT NULL DEFAULT NOW()
-      )
-    `;
+    // Tables are created by migrations - just verify they exist
+    // s6_dead_letter is created by s10_drain_cron migration
+    // s6_bulk_operations is created by s6_pgmq_queues migration
   });
 
   afterAll(async () => {
@@ -270,31 +240,25 @@ describeWithDb("S10b processBulkQueue Integration", () => {
       const bulkOpId = `gid://shopify/BulkOperation/idempotent-${TEST_SUFFIX}`;
 
       // Create bulk operation record with saved progress
+      // Note: s6_bulk_operations uses bulk_operation_id as PRIMARY KEY
       await sql`
         INSERT INTO s6_bulk_operations (
-          id, shop, bulk_operation_id, bulk_type, url, file_size, object_count,
-          byte_offset, lines_processed, origin
+          bulk_operation_id, shop, bulk_type, byte_offset, origin
         ) VALUES (
-          ${`test-op-${TEST_SUFFIX}`},
-          ${TEST_SHOP},
           ${bulkOpId},
+          ${TEST_SHOP},
           'companies',
-          'https://example.com/test.jsonl',
-          1000,
-          10,
           500,
-          5,
           'webhook'
         )
       `;
 
       // Verify progress was saved
-      const [opResult] = await sql<{ byte_offset: string; lines_processed: number }[]>`
-        SELECT byte_offset, lines_processed FROM s6_bulk_operations
+      const [opResult] = await sql<{ byte_offset: string }[]>`
+        SELECT byte_offset FROM s6_bulk_operations
         WHERE bulk_operation_id = ${bulkOpId}
       `;
       expect(Number(opResult.byte_offset)).toBe(500);
-      expect(opResult.lines_processed).toBe(5);
 
       // Simulate replay: same message reprocessed picks up from byte_offset
       const testMessage: BulkMessage = {
@@ -330,18 +294,12 @@ describeWithDb("S10b processBulkQueue Integration", () => {
       // Create completed bulk operation record
       await sql`
         INSERT INTO s6_bulk_operations (
-          id, shop, bulk_operation_id, bulk_type, url, file_size, object_count,
-          byte_offset, lines_processed, completed_at, origin
+          bulk_operation_id, shop, bulk_type, byte_offset, completed_at, origin
         ) VALUES (
-          ${`test-completed-${TEST_SUFFIX}`},
-          ${TEST_SHOP},
           ${bulkOpId},
+          ${TEST_SHOP},
           'companies',
-          'https://example.com/test.jsonl',
           1000,
-          10,
-          1000,
-          10,
           NOW(),
           'webhook'
         )
@@ -481,17 +439,11 @@ describeWithDb("S10b processBulkQueue Integration", () => {
       // Create bulk operation record
       await sql`
         INSERT INTO s6_bulk_operations (
-          id, shop, bulk_operation_id, bulk_type, url, file_size, object_count,
-          byte_offset, lines_processed, failure_count, origin
+          bulk_operation_id, shop, bulk_type, byte_offset, failure_count, origin
         ) VALUES (
-          ${`test-failcount-${TEST_SUFFIX}`},
-          ${TEST_SHOP},
           ${bulkOpId},
+          ${TEST_SHOP},
           'companies',
-          'https://example.com/test.jsonl',
-          1000,
-          10,
-          0,
           0,
           0,
           'webhook'
@@ -502,7 +454,7 @@ describeWithDb("S10b processBulkQueue Integration", () => {
       for (let i = 1; i <= 3; i++) {
         await sql`
           UPDATE s6_bulk_operations
-          SET failure_count = failure_count + 1, updated_at = NOW()
+          SET failure_count = failure_count + 1
           WHERE bulk_operation_id = ${bulkOpId}
         `;
 
@@ -520,17 +472,11 @@ describeWithDb("S10b processBulkQueue Integration", () => {
       // Create bulk operation with existing failures
       await sql`
         INSERT INTO s6_bulk_operations (
-          id, shop, bulk_operation_id, bulk_type, url, file_size, object_count,
-          byte_offset, lines_processed, failure_count, origin
+          bulk_operation_id, shop, bulk_type, byte_offset, failure_count, origin
         ) VALUES (
-          ${`test-failreset-${TEST_SUFFIX}`},
-          ${TEST_SHOP},
           ${bulkOpId},
+          ${TEST_SHOP},
           'companies',
-          'https://example.com/test.jsonl',
-          1000,
-          10,
-          0,
           0,
           3,
           'webhook'
@@ -547,7 +493,7 @@ describeWithDb("S10b processBulkQueue Integration", () => {
       // Simulate successful progress: update offset and reset failure_count
       await sql`
         UPDATE s6_bulk_operations
-        SET byte_offset = 500, lines_processed = 5, failure_count = 0, updated_at = NOW()
+        SET byte_offset = 500, failure_count = 0
         WHERE bulk_operation_id = ${bulkOpId}
       `;
 
@@ -567,17 +513,11 @@ describeWithDb("S10b processBulkQueue Integration", () => {
       // Create bulk operation
       await sql`
         INSERT INTO s6_bulk_operations (
-          id, shop, bulk_operation_id, bulk_type, url, file_size, object_count,
-          byte_offset, lines_processed, failure_count, origin
+          bulk_operation_id, shop, bulk_type, byte_offset, failure_count, origin
         ) VALUES (
-          ${`test-maxfail-${TEST_SUFFIX}`},
-          ${TEST_SHOP},
           ${bulkOpId},
+          ${TEST_SHOP},
           'companies',
-          'https://example.com/test.jsonl',
-          1000,
-          10,
-          0,
           0,
           4,
           'webhook'
@@ -587,7 +527,7 @@ describeWithDb("S10b processBulkQueue Integration", () => {
       // Increment to MAX_FAILURE_COUNT
       await sql`
         UPDATE s6_bulk_operations
-        SET failure_count = failure_count + 1, updated_at = NOW()
+        SET failure_count = failure_count + 1
         WHERE bulk_operation_id = ${bulkOpId}
       `;
 
