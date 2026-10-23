@@ -105,6 +105,8 @@ export interface ShopifyOrder {
   id: string; // GID: gid://shopify/Order/789
   name: string; // Display name, e.g., "#1001"
   createdAt: string;
+  /** The date the order was processed (for backdated orders via orderCreate processedAt) */
+  processedAt?: string | null;
   updatedAt?: string;
   cancelledAt?: string | null;
   closedAt?: string | null;
@@ -206,6 +208,8 @@ export interface BulkOrderLine {
   id: string;
   name: string;
   createdAt: string;
+  /** The date the order was processed (for backdated orders via orderCreate processedAt) */
+  processedAt?: string | null;
   cancelledAt?: string | null;
   closedAt?: string | null;
   displayFinancialStatus?: string | null;

@@ -105,37 +105,46 @@ This document lists all OAuth scopes requested by the Net Terms Receivables app,
 
 > **Pre-granted for S13**: Hold fulfillment for orders from accounts that are overdue or on credit hold. Both mutations require `write_merchant_managed_fulfillment_orders` OR `write_third_party_fulfillment_orders`. Since this app is merchant-facing (not a fulfillment service), we use `write_merchant_managed_fulfillment_orders`.
 
-## Scopes NOT in Production Config
+## Dev Seed Script
 
-These scopes are used only by the dev store seed script and are configured in `shopify.app.dev.toml`.
+The seed script (`scripts/seed.ts`) runs with **the same 11 production scopes** — no separate dev app needed. It uses **only the dev-store token** (`SHOPIFY_ADMIN_TOKEN` env var) and refuses to run on any shop other than `net-terms-receivables.myshopify.com`.
 
-### write_draft_orders
+### How the Seed Uses Production Scopes
 
-**Seed-only.** Used by the seed script to create draft orders for non-B2B customers. The production app never creates draft orders.
+| Feature | Scope | Mutation | Reference |
+|---------|-------|----------|-----------|
+| Create B2B companies | write_companies | `companyCreate` | [companyCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyCreate) |
+| Create company locations (Net 15/30/60) | write_companies | `companyLocationCreate` | [companyLocationCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyLocationCreate) |
+| Set payment terms on location | write_companies | `companyLocationUpdate` with `buyerExperienceConfiguration.paymentTermsTemplateId` | [companyLocationUpdate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyLocationUpdate) |
+| Create orders with custom line items | write_orders | `orderCreate` with title + priceSet (no variantId needed) | [orderCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/orderCreate) |
+| Backdate orders | write_orders | `orderCreate` with `processedAt` | [OrderCreateOrderInput.processedAt](https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateOrderInput) |
 
-### write_payment_terms
+### Backdating with processedAt
 
-**Not required.** The seed script sets payment terms on B2B CompanyLocations via `companyLocationUpdate` with `buyerExperienceConfiguration.paymentTermsTemplateId`, which only requires `write_companies`. Orders created for that location inherit the payment terms automatically. See `scripts/seed.ts` header for details.
+Orders are backdated using `processedAt` from [OrderCreateOrderInput](https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateOrderInput): *"The date and time when the order was created."* This creates overdue invoices for testing S9 due date inference.
 
-References:
-- [companyLocationUpdate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyLocationUpdate) — "configure the B2B checkout experience through `BuyerExperienceConfiguration` settings that control... `PaymentTermsTemplate` settings"
-- [BuyerExperienceConfigurationInput](https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/BuyerExperienceConfigurationInput) — `paymentTermsTemplateId` field
+### Why No Additional Scopes Are Needed
+
+**No `write_draft_orders`**: The seed uses `orderCreate` with custom line items instead of draft orders. Custom line items only require `title` + `priceSet` — no product or variant lookup needed.
+
+**No `read_products`**: Custom line items bypass the product catalog entirely. See [OrderCreateLineItemInput](https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateLineItemInput).
+
+**No `write_payment_terms`**: Payment terms are configured on company locations via `companyLocationUpdate` with `buyerExperienceConfiguration.paymentTermsTemplateId` (requires `write_companies`). If Shopify doesn't inherit these terms to orders created via API, S9 inference uses DB defaults instead (BuyerAccount.defaultTermsDays or AccountSource tag rules).
+
+**FIXED terms not supported**: FIXED payment terms require a specific `dueAt` date per order, which cannot be expressed through location templates. The seed only creates NET terms (15, 30, 60 days).
+
+### Payment Terms Inheritance (Warning, Not Failure)
+
+`OrderCreateOrderInput` does not have a `paymentTerms` field. We rely on Shopify inheriting terms from `companyLocationId`. If orders come back with null `paymentTerms`:
+- The seed logs a **warning** (not a failure) with counts of inherited vs inferred
+- S9 inference computes due dates from DB defaults seeded by this script
+- **No `write_payment_terms` scope is added** (Team Lead scope decision)
 
 ## Final Production Scope List (11)
 
 ```
 read_companies,read_customers,read_draft_orders,read_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations
 ```
-
-## Dev Seed Scope List (13)
-
-See `shopify.app.dev.toml`:
-
-```
-read_companies,read_customers,read_draft_orders,read_orders,read_payment_terms,read_products,write_companies,write_customers,write_draft_orders,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations
-```
-
-Additional dev-only: `read_products`, `write_draft_orders`
 
 ## Protected Customer Data
 

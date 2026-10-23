@@ -395,6 +395,226 @@ describeWithDb("Order Sync", () => {
       `;
       expect(invoice.status).toBe("cancelled");
     });
+
+    it("does not update issuedAt or dueAt for paid invoice on ORDERS_UPDATED", async () => {
+      const orderId = `gid://shopify/Order/ord-${TEST_SUFFIX}-paid-dates`;
+      const originalIssuedAt = new Date("2025-06-01T00:00:00.000Z");
+      const originalDueAt = new Date("2025-07-01T00:00:00.000Z");
+      
+      await sql`
+        INSERT INTO "Invoice" (
+          "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          "issuedAt", "dueAt", "dueSource", status, "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId}, '#PAID-DATES', '30000.00', '0.00',
+          ${originalIssuedAt}, ${originalDueAt}, 'schedule', 'paid', NOW(), NOW()
+        )
+      `;
+
+      // Try to update with different dates
+      const order: ShopifyOrder = {
+        id: orderId,
+        name: "#PAID-DATES",
+        createdAt: "2025-08-01T00:00:00.000Z", // Different date
+        processedAt: "2025-07-15T00:00:00.000Z", // Different processedAt
+        totalPriceSet: {
+          shopMoney: { amount: "30000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+          dueInDays: 30,
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      await processOrderWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "ORDERS_UPDATED",
+        order,
+        `wh-ord-${TEST_SUFFIX}-paid-dates-update`
+      );
+
+      const [invoice] = await sql`
+        SELECT * FROM "Invoice" WHERE "orderId" = ${orderId}
+      `;
+      
+      // issuedAt and dueAt should NOT be updated for paid invoices
+      expect(new Date(invoice.issuedAt).toISOString()).toBe(originalIssuedAt.toISOString());
+      expect(new Date(invoice.dueAt).toISOString()).toBe(originalDueAt.toISOString());
+      expect(invoice.status).toBe("paid");
+    });
+
+    it("does not update issuedAt or dueAt for cancelled invoice on ORDERS_UPDATED", async () => {
+      const orderId = `gid://shopify/Order/ord-${TEST_SUFFIX}-cancelled-dates`;
+      const originalIssuedAt = new Date("2025-06-01T00:00:00.000Z");
+      const originalDueAt = new Date("2025-07-01T00:00:00.000Z");
+      
+      await sql`
+        INSERT INTO "Invoice" (
+          "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          "issuedAt", "dueAt", "dueSource", status, "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId}, '#CANCELLED-DATES', '25000.00', '25000.00',
+          ${originalIssuedAt}, ${originalDueAt}, 'schedule', 'cancelled', NOW(), NOW()
+        )
+      `;
+
+      const order: ShopifyOrder = {
+        id: orderId,
+        name: "#CANCELLED-DATES",
+        createdAt: "2025-08-01T00:00:00.000Z",
+        processedAt: "2025-07-15T00:00:00.000Z",
+        totalPriceSet: {
+          shopMoney: { amount: "25000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+          dueInDays: 30,
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      await processOrderWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "ORDERS_UPDATED",
+        order,
+        `wh-ord-${TEST_SUFFIX}-cancelled-dates-update`
+      );
+
+      const [invoice] = await sql`
+        SELECT * FROM "Invoice" WHERE "orderId" = ${orderId}
+      `;
+      
+      // issuedAt and dueAt should NOT be updated for cancelled invoices
+      expect(new Date(invoice.issuedAt).toISOString()).toBe(originalIssuedAt.toISOString());
+      expect(new Date(invoice.dueAt).toISOString()).toBe(originalDueAt.toISOString());
+      expect(invoice.status).toBe("cancelled");
+    });
+
+    it("does not overwrite existing dueAt with null", async () => {
+      const orderId = `gid://shopify/Order/ord-${TEST_SUFFIX}-no-null-due`;
+      const originalIssuedAt = new Date("2025-06-01T00:00:00.000Z");
+      const originalDueAt = new Date("2025-07-01T00:00:00.000Z");
+      
+      await sql`
+        INSERT INTO "Invoice" (
+          "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          "issuedAt", "dueAt", "dueSource", status, "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId}, '#NO-NULL-DUE', '20000.00', '20000.00',
+          ${originalIssuedAt}, ${originalDueAt}, 'schedule', 'open', NOW(), NOW()
+        )
+      `;
+
+      // Order with no paymentSchedules and no dueInDays (would produce null dueAt)
+      const order: ShopifyOrder = {
+        id: orderId,
+        name: "#NO-NULL-DUE",
+        createdAt: "2025-06-01T00:00:00.000Z",
+        processedAt: "2025-06-01T00:00:00.000Z",
+        totalPriceSet: {
+          shopMoney: { amount: "20000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt",
+          paymentTermsName: "Due on Receipt",
+          paymentTermsType: "RECEIPT",
+          // No dueInDays, no paymentSchedules
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      await processOrderWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "ORDERS_UPDATED",
+        order,
+        `wh-ord-${TEST_SUFFIX}-no-null-due-update`
+      );
+
+      const [invoice] = await sql`
+        SELECT * FROM "Invoice" WHERE "orderId" = ${orderId}
+      `;
+      
+      // dueAt should NOT be overwritten with null
+      expect(invoice.dueAt).not.toBeNull();
+      expect(new Date(invoice.dueAt).toISOString()).toBe(originalDueAt.toISOString());
+    });
+
+    it("updates issuedAt and dueAt for open invoice on ORDERS_UPDATED", async () => {
+      const orderId = `gid://shopify/Order/ord-${TEST_SUFFIX}-open-dates`;
+      const originalIssuedAt = new Date("2025-06-01T00:00:00.000Z");
+      const originalDueAt = new Date("2025-07-01T00:00:00.000Z");
+      
+      await sql`
+        INSERT INTO "Invoice" (
+          "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          "issuedAt", "dueAt", "dueSource", status, "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId}, '#OPEN-DATES', '15000.00', '15000.00',
+          ${originalIssuedAt}, ${originalDueAt}, 'schedule', 'open', NOW(), NOW()
+        )
+      `;
+
+      const newProcessedAt = "2025-07-15T00:00:00.000Z";
+      const order: ShopifyOrder = {
+        id: orderId,
+        name: "#OPEN-DATES",
+        createdAt: "2025-08-01T00:00:00.000Z",
+        processedAt: newProcessedAt, // New processedAt
+        totalPriceSet: {
+          shopMoney: { amount: "15000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+          dueInDays: 30,
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      await processOrderWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "ORDERS_UPDATED",
+        order,
+        `wh-ord-${TEST_SUFFIX}-open-dates-update`
+      );
+
+      const [invoice] = await sql`
+        SELECT * FROM "Invoice" WHERE "orderId" = ${orderId}
+      `;
+      
+      // issuedAt SHOULD be updated for open invoices
+      expect(new Date(invoice.issuedAt).toISOString()).toBe(new Date(newProcessedAt).toISOString());
+      // dueAt should be recalculated: processedAt + 30 days
+      const expectedDueAt = new Date(newProcessedAt);
+      expectedDueAt.setDate(expectedDueAt.getDate() + 30);
+      expect(new Date(invoice.dueAt).toISOString()).toBe(expectedDueAt.toISOString());
+    });
   });
 
   describe("mapOrderToInvoice", () => {
@@ -502,6 +722,92 @@ describeWithDb("Order Sync", () => {
 
       expect(result.status).toBe("paid");
       expect(result.outstanding).toBe("0.00");
+    });
+
+    it("uses processedAt for issuedAt when processedAt is 35 days before createdAt", () => {
+      // Simulate a backdated order via orderCreate: processedAt is 35 days before createdAt
+      // S6 sync must use processedAt (not createdAt) for issuedAt
+      const now = new Date("2025-08-01T12:00:00.000Z");
+      const processedAt = new Date(now);
+      processedAt.setDate(processedAt.getDate() - 35); // 35 days before createdAt
+
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/backdated-1",
+        name: "#BACKDATED",
+        createdAt: now.toISOString(), // When API call was made
+        processedAt: processedAt.toISOString(), // Backdated via orderCreate processedAt
+        totalPriceSet: {
+          shopMoney: { amount: "100000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt-backdated",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+          dueInDays: 30,
+        },
+      };
+
+      const result = mapOrderToInvoice("shop-1", "account-1", order);
+
+      // issuedAt MUST equal processedAt, NOT createdAt
+      expect(result.issuedAt.toISOString()).toBe(processedAt.toISOString());
+      expect(result.issuedAt.toISOString()).not.toBe(now.toISOString());
+
+      // Due date should be processedAt + 30 days (5 days before createdAt)
+      const expectedDueAt = new Date(processedAt);
+      expectedDueAt.setDate(expectedDueAt.getDate() + 30);
+      expect(result.dueAt?.toISOString()).toBe(expectedDueAt.toISOString());
+
+      // This order would be 5 days overdue as of createdAt
+      expect(result.dueAt!.getTime()).toBeLessThan(now.getTime());
+    });
+
+    it("falls back to createdAt when processedAt is null", () => {
+      const createdAt = "2025-07-15T10:00:00.000Z";
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/no-processed",
+        name: "#NO_PROCESSED",
+        createdAt,
+        processedAt: null, // Explicitly null
+        totalPriceSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt-no-processed",
+          paymentTermsName: "Net 15",
+          paymentTermsType: "NET",
+          dueInDays: 15,
+        },
+      };
+
+      const result = mapOrderToInvoice("shop-1", "account-1", order);
+
+      // issuedAt should fall back to createdAt
+      expect(result.issuedAt.toISOString()).toBe(createdAt);
+    });
+
+    it("falls back to createdAt when processedAt is undefined", () => {
+      const createdAt = "2025-07-15T10:00:00.000Z";
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/no-processed-2",
+        name: "#NO_PROCESSED_2",
+        createdAt,
+        // processedAt not set (undefined)
+        totalPriceSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt-no-processed-2",
+          paymentTermsName: "Net 15",
+          paymentTermsType: "NET",
+          dueInDays: 15,
+        },
+      };
+
+      const result = mapOrderToInvoice("shop-1", "account-1", order);
+
+      // issuedAt should fall back to createdAt
+      expect(result.issuedAt.toISOString()).toBe(createdAt);
     });
   });
 });

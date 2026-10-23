@@ -255,6 +255,7 @@ export const ORDER_QUERY = `
         id
         name
         createdAt
+        processedAt
         cancelledAt
         closedAt
         displayFinancialStatus

@@ -116,6 +116,7 @@ export const BULK_ORDERS_QUERY = `
               id
               name
               createdAt
+              processedAt
               updatedAt
               cancelledAt
               closedAt

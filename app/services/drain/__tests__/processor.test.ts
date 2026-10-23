@@ -544,6 +544,111 @@ describe("Deleted shop handling", () => {
   });
 });
 
+describe("Order processedAt in drain path", () => {
+  let mockAdminGraphQL: ReturnType<typeof vi.fn>;
+  let mockProcessOrderWebhook: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.resetModules();
+
+    const { adminGraphQL } = await import("../admin-client.server");
+    const { processOrderWebhook } = await import("~/services/sync/order.server");
+
+    mockAdminGraphQL = adminGraphQL as ReturnType<typeof vi.fn>;
+    mockProcessOrderWebhook = processOrderWebhook as ReturnType<typeof vi.fn>;
+  });
+
+  it("passes processedAt to processOrderWebhook when present", async () => {
+    // Simulate a backdated order where processedAt is 35 days before createdAt
+    const createdAt = "2026-10-20T12:00:00.000Z";
+    const processedAt = "2026-09-15T12:00:00.000Z"; // 35 days before createdAt
+
+    mockAdminGraphQL.mockResolvedValue({
+      success: true,
+      data: {
+        node: {
+          id: "gid://shopify/Order/backdated-123",
+          name: "#BACKDATED",
+          createdAt,
+          processedAt,
+          displayFinancialStatus: "PENDING",
+          totalPriceSet: { shopMoney: { amount: "100000.00", currencyCode: "INR" } },
+          paymentTerms: {
+            id: "pt-1",
+            paymentTermsName: "Net 30",
+            paymentTermsType: "NET",
+            dueInDays: 30,
+            paymentSchedules: { edges: [] },
+          },
+          purchasingEntity: {
+            company: { id: "gid://shopify/Company/1" },
+            location: { id: "gid://shopify/CompanyLocation/1" },
+          },
+        },
+      },
+      retryable: false,
+    });
+
+    mockProcessOrderWebhook.mockResolvedValue({
+      success: true,
+      action: "created",
+      entityId: "invoice-backdated",
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("ORDERS_CREATE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([{ exists: false }]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "ORDERS_CREATE",
+      shop: "test.myshopify.com",
+      webhookId: "wh-backdated-1",
+      resourceGid: "gid://shopify/Order/backdated-123",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    await handler!(mockSql as never, message);
+
+    // Verify processOrderWebhook receives the order with processedAt
+    expect(mockProcessOrderWebhook).toHaveBeenCalledWith(
+      mockSql,
+      "test.myshopify.com",
+      "ORDERS_CREATE",
+      expect.objectContaining({
+        id: "gid://shopify/Order/backdated-123",
+        createdAt,
+        processedAt, // Must include processedAt
+      }),
+      "wh-backdated-1"
+    );
+
+    // The order passed to processOrderWebhook should have processedAt != createdAt
+    const passedOrder = mockProcessOrderWebhook.mock.calls[0][3];
+    expect(passedOrder.processedAt).toBe(processedAt);
+    expect(passedOrder.createdAt).toBe(createdAt);
+    expect(passedOrder.processedAt).not.toBe(passedOrder.createdAt);
+  });
+
+  it("ORDER_QUERY includes processedAt field", async () => {
+    // Read the actual file to check the query since the module is mocked
+    const fs = await import("fs/promises");
+    const path = await import("path");
+    
+    const clientPath = path.resolve(__dirname, "../admin-client.server.ts");
+    const content = await fs.readFile(clientPath, "utf-8");
+    
+    // Extract ORDER_QUERY from the file content
+    expect(content).toContain("export const ORDER_QUERY");
+    expect(content).toMatch(/ORDER_QUERY[\s\S]*?processedAt/);
+    expect(content).toMatch(/ORDER_QUERY[\s\S]*?createdAt/);
+  });
+});
+
 describe("Customer bulk query PII fields", () => {
   // Import directly from customer-fields to avoid mock interference
   it("includes email and displayName with CUSTOMER_PII_FIELDS=1", async () => {
