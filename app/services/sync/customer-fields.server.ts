@@ -11,12 +11,14 @@
  * - Forbidden fields (NEVER fetched): phone, addresses, firstName, lastName
  *
  * The CUSTOMER_PII_FIELDS flag requires:
- * 1. Shopify Protected Customer Data Level 2 approval in Partner Dashboard
+ * 1. Shopify Protected Customer Data approval (Level 1 + Email and Name fields)
  * 2. Environment variable CUSTOMER_PII_FIELDS=1 set on the Worker
  *
- * Without approval, requesting email/name returns null from Shopify anyway.
- * The flag exists so we don't request fields we can't access, keeping
- * queries minimal and compliant.
+ * Current state: CUSTOMER_PII_FIELDS is off by default; we fetch neither
+ * email nor name. When the approval is granted and the flag is enabled,
+ * email and displayName will be included in queries.
+ *
+ * Phone and address are NEVER fetched, regardless of approval level.
  */
 
 /**
@@ -26,7 +28,7 @@
 export const CUSTOMER_BASE_FIELDS = ["id", "tags"] as const;
 
 /**
- * Optional PII fields that require Protected Customer Data Level 2.
+ * Optional PII fields that require Protected Customer Data (Level 1 + Email/Name).
  * Only included when CUSTOMER_PII_FIELDS=1 is set.
  */
 export const CUSTOMER_OPTIONAL_PII_FIELDS = ["email", "displayName"] as const;

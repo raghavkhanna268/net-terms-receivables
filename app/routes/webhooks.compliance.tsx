@@ -4,19 +4,23 @@ import {
   verifyPayloadShopMatch,
   normalizeWebhookTopic,
 } from "~/lib/webhook-verify.server";
+import { getRequestSql } from "~/lib/request-context.server";
+import { redactCustomerData, redactShopData } from "~/services/sync/customer.server";
 
 /**
  * Compliance webhook handler for GDPR/CCPA mandatory webhooks.
  * Handles: customers/data_request, customers/redact, shop/redact
  *
  * OPTIMIZATION: Uses lightweight verifyWebhook() instead of authenticate.webhook()
- * to avoid unnecessary session lookups. Most compliance handlers don't need DB access:
- * - customers/data_request: No-op (no customer data stored)
- * - customers/redact: No-op (no customer data stored)
- * - shop/redact: Only needs deleteAllForShop (delete-only, no session loading)
+ * to avoid unnecessary session lookups. Most compliance handlers don't need DB access
+ * for session management, only for S8 data purges.
  *
  * CPU savings: ~5-10ms by avoiding session DB round-trip on every webhook.
  * HMAC verification uses Web Crypto (crypto.subtle) with constant-time comparison.
+ *
+ * S8 data handling:
+ * - customers/redact: Deletes s8_tagged_customers rows for the customer
+ * - shop/redact: Deletes all s8_tagged_customers and s8_draft_orders for the shop
  */
 export const action = async ({ request, context }: ActionFunctionArgs) => {
   const apiSecret = process.env.SHOPIFY_API_SECRET;
@@ -34,24 +38,43 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     `[Compliance] Received ${normalizedTopic} webhook for shop=${shop}, webhook_id=${webhookId}`
   );
 
+  const sql = getRequestSql();
+
   switch (normalizedTopic) {
     case "CUSTOMERS_DATA_REQUEST":
       // TODO(S22): When customer data is stored, respond with data export.
-      // Currently the app stores no customer data, so this is a no-op.
-      // S8 PR #32 will add a purge of s8_tagged_customers.
+      // S8 stores customer GID and tags only (no PII to export).
       console.log(
-        `[Compliance] customers/data_request: No customer data stored for shop=${shop}`
+        `[Compliance] customers/data_request: No exportable customer data for shop=${shop}`
       );
       break;
 
-    case "CUSTOMERS_REDACT":
-      // TODO(S22): When customer data is stored, delete it here.
-      // Currently the app stores no customer data, so this is a no-op.
-      // S8 PR #32 will add a purge of s8_tagged_customers.
-      console.log(
-        `[Compliance] customers/redact: No customer data to delete for shop=${shop}`
-      );
+    case "CUSTOMERS_REDACT": {
+      // S8: Delete s8_tagged_customers rows for this customer
+      const typedPayload = payload as {
+        shop_domain?: string;
+        customer?: { id?: number };
+      };
+
+      // Get shop ID for S8 data deletion
+      const [shopRecord] = await sql<{ id: string }[]>`
+        SELECT id FROM "Shop" WHERE domain = ${shop}
+      `;
+
+      if (shopRecord && typedPayload.customer?.id) {
+        // Customer GID format: gid://shopify/Customer/123
+        const customerGid = `gid://shopify/Customer/${typedPayload.customer.id}`;
+        const count = await redactCustomerData(sql, shopRecord.id, customerGid);
+        console.log(
+          `[Compliance] customers/redact: Deleted ${count} S8 row(s) for customer=${customerGid} shop=${shop}`
+        );
+      } else {
+        console.log(
+          `[Compliance] customers/redact: No shop or customer ID for shop=${shop}`
+        );
+      }
       break;
+    }
 
     case "SHOP_REDACT": {
       // Verify payload shop_domain matches header shop for security.
@@ -65,6 +88,18 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       console.log(
         `[Compliance] shop/redact: Deleted ${count} session(s) for shop=${payloadShop}`
       );
+
+      // S8: Delete all s8_tagged_customers and s8_draft_orders for this shop
+      const [shopRecord] = await sql<{ id: string }[]>`
+        SELECT id FROM "Shop" WHERE domain = ${payloadShop}
+      `;
+
+      if (shopRecord) {
+        const s8Counts = await redactShopData(sql, shopRecord.id);
+        console.log(
+          `[Compliance] shop/redact: Deleted ${s8Counts.taggedCustomers} tagged customer(s), ${s8Counts.draftOrders} draft order(s) for shop=${payloadShop}`
+        );
+      }
       break;
     }
 

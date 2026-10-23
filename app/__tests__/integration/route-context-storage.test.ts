@@ -3,6 +3,19 @@ import { readFileSync } from "fs";
 import { join } from "path";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 
+// Mock SQL client for S8 compliance redaction functions
+// Returns an empty array (for SELECT queries) with count property (for DELETE queries)
+const mockSqlResult = Object.assign([], { count: 0 });
+const mockSql = Object.assign(
+  vi.fn().mockResolvedValue(mockSqlResult),
+  { json: vi.fn((v) => v) }
+);
+
+// Mock the request context module for compliance webhook tests
+vi.mock("~/lib/request-context.server", () => ({
+  getRequestSql: vi.fn(() => mockSql),
+}));
+
 /**
  * Tests that non-document routes (webhooks, loaders, actions) receive
  * session storage from the Worker entry's loadContext, NOT from module imports.

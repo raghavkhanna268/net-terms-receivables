@@ -10,12 +10,13 @@
  *
  * Lifecycle:
  * - CREATE: Store draft if it has payment terms and a buyer account
- * - UPDATE: Update amount, status, or buyer account
+ * - UPDATE: Update amount, status, or buyer account; includes completion
  * - DELETE: Remove the draft order record
  *
- * When a draft order is completed (becomes an Order), Shopify sends an
- * orders/create webhook. The Invoice is created by the order processor,
- * and a draft_orders/delete webhook removes the draft record.
+ * When a draft order is completed (becomes an Order), Shopify sends a
+ * draft_orders/update webhook with status=completed, then an orders/create
+ * webhook. The Invoice is created by the order processor, and the draft
+ * record is excluded from pending exposure (status=completed).
  */
 
 import type { Sql } from "~/lib/db-light.server";

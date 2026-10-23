@@ -558,42 +558,50 @@ model S6BulkOperation {
 /// DPDP compliance: Only stores customer GID and tags array by default.
 /// Phone and address are NEVER stored.
 ///
+/// Tag activation design:
+/// - tag_active is separate from BuyerAccount.holdState
+/// - Tag sync NEVER touches holdState - that belongs to credit logic alone
+/// - When tag removed: set tag_active=false, record tag_deactivated_at
+/// - When tag re-added: set tag_active=true, clear tag_deactivated_at
+///
 /// Reserved PII fields (email, displayName):
-/// - Requires Shopify Protected Customer Data Level 2 approval
+/// - Requires Protected Customer Data approval (Level 1 + Email/Name fields)
 /// - Gated by CUSTOMER_PII_FIELDS env var (default: off)
 /// - Always NULL until approval is granted and flag is enabled
 ///
 /// When a customer gains or loses the configurable tag (stored in AccountSource),
-/// the corresponding BuyerAccount (kind=TAGGED_CUSTOMER) is created or deactivated.
+/// the corresponding BuyerAccount (kind=TAGGED_CUSTOMER) is created or updated.
 ///
 /// Precedence rule: When a customer is both a B2B company contact AND tagged,
 /// the COMPANY BuyerAccount takes precedence for order mapping. The tagged
 /// customer record is still tracked but won't create a duplicate BuyerAccount.
 model S8TaggedCustomer {
-  id          String   @id @default(dbgenerated("gen_random_uuid()::text"))
-  shopId      String   @map("shop_id")
+  id              String    @id @default(dbgenerated("gen_random_uuid()::text"))
+  shopId          String    @map("shop_id")
   /// Shopify Customer GID (e.g., "gid://shopify/Customer/123")
-  customerId  String   @map("customer_id")
+  customerId      String    @map("customer_id")
   /// Customer tags as JSON array (e.g., ["net-terms", "wholesale"])
   /// Only the tags are stored for rule matching; no other customer data
-  tags        Json     @default("[]")
-  /// Whether the customer currently has the buyer tag (from AccountSource)
-  /// When false, the BuyerAccount is deactivated but not deleted
-  hasTag      Boolean  @default(false) @map("has_tag")
-  /// Reserved: customer email, requires Protected Customer Data Level 2 approval
+  tags            Json      @default("[]")
+  /// Whether the customer currently has a matching buyer tag
+  /// Separate from BuyerAccount.holdState - tag sync never touches credit hold
+  tagActive       Boolean   @default(false) @map("tag_active")
+  /// When the customer lost the matching tag (NULL if tagActive=true)
+  tagDeactivatedAt DateTime? @map("tag_deactivated_at") @db.Timestamptz(3)
+  /// Reserved: customer email, requires Protected Customer Data approval
   /// Always NULL until CUSTOMER_PII_FIELDS=1 is set after approval
-  email       String?
-  /// Reserved: customer display name, requires Protected Customer Data Level 2 approval
+  email           String?
+  /// Reserved: customer display name, requires Protected Customer Data approval
   /// Always NULL until CUSTOMER_PII_FIELDS=1 is set after approval
-  displayName String?  @map("display_name")
+  displayName     String?   @map("display_name")
   /// When the record was created
-  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
   /// When the record was last updated
-  updatedAt   DateTime @default(now()) @map("updated_at") @db.Timestamptz(3)
+  updatedAt       DateTime  @default(now()) @map("updated_at") @db.Timestamptz(3)
 
   // One record per customer per shop
   @@unique([shopId, customerId])
-  @@index([shopId, hasTag])
+  @@index([shopId, tagActive])
   @@map("s8_tagged_customers")
 }
 

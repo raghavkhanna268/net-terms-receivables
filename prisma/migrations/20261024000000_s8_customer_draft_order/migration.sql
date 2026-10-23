@@ -11,6 +11,12 @@
 --   - s8_draft_orders stores only order GID, amount, and buyer reference
 --   - No PII fields (names, emails, phones, addresses) are stored
 --
+-- Tag activation design:
+--   Tag activation state (tag_active/tag_deactivated_at) is separate from credit
+--   hold state (BuyerAccount.holdState). Tag sync never touches holdState - that
+--   belongs to the credit logic alone. When a tag is removed, we set tag_active=false
+--   and record tag_deactivated_at; when re-added, we set tag_active=true.
+--
 -- Precedence rule (documented in S8):
 --   When a customer is both a B2B company contact AND has a buyer tag,
 --   the COMPANY BuyerAccount takes precedence for order mapping.
@@ -23,9 +29,14 @@ CREATE TABLE IF NOT EXISTS s8_tagged_customers (
     shop_id TEXT NOT NULL,
     customer_id TEXT NOT NULL,
     tags JSONB NOT NULL DEFAULT '[]'::jsonb,
-    has_tag BOOLEAN NOT NULL DEFAULT false,
-    -- Reserved PII fields: gated on Shopify Protected Customer Data approval (Level 2)
-    -- These columns are always NULL until the approval is granted and CUSTOMER_PII_FIELDS=1 is set.
+    -- Tag activation state (separate from BuyerAccount.holdState)
+    -- tag_active=true means customer currently has a matching tag
+    -- tag_active=false means tag was removed; tag_deactivated_at records when
+    tag_active BOOLEAN NOT NULL DEFAULT false,
+    tag_deactivated_at TIMESTAMPTZ,
+    -- Reserved PII fields: gated on Protected Customer Data approval
+    -- (Level 1 plus Email and Name fields when approved and CUSTOMER_PII_FIELDS=1)
+    -- These columns are always NULL until approval is granted.
     -- Phone and address are never stored regardless of approval level.
     email TEXT,
     display_name TEXT,
@@ -36,13 +47,15 @@ CREATE TABLE IF NOT EXISTS s8_tagged_customers (
 );
 
 -- Indexes for efficient queries
-CREATE INDEX IF NOT EXISTS idx_s8_tagged_customers_shop_has_tag 
-    ON s8_tagged_customers(shop_id, has_tag);
+CREATE INDEX IF NOT EXISTS idx_s8_tagged_customers_shop_tag_active 
+    ON s8_tagged_customers(shop_id, tag_active);
 
 -- Comment documenting table purpose and DPDP compliance
-COMMENT ON TABLE s8_tagged_customers IS 'S8 tagged customer tracking: minimal customer data (GID + tags only) for tag-based buyer accounts. email/display_name reserved for future Protected Customer Data approval.';
-COMMENT ON COLUMN s8_tagged_customers.email IS 'Reserved: requires Protected Customer Data Level 2 approval and CUSTOMER_PII_FIELDS=1. Always NULL until approved.';
-COMMENT ON COLUMN s8_tagged_customers.display_name IS 'Reserved: requires Protected Customer Data Level 2 approval and CUSTOMER_PII_FIELDS=1. Always NULL until approved.';
+COMMENT ON TABLE s8_tagged_customers IS 'S8 tagged customer tracking: minimal customer data (GID + tags only) for tag-based buyer accounts. tag_active is separate from holdState. email/display_name reserved for future Protected Customer Data approval.';
+COMMENT ON COLUMN s8_tagged_customers.tag_active IS 'Whether customer currently has a matching buyer tag. Separate from BuyerAccount.holdState - tag sync never touches credit hold state.';
+COMMENT ON COLUMN s8_tagged_customers.tag_deactivated_at IS 'When the customer lost the matching tag. NULL if tag_active=true.';
+COMMENT ON COLUMN s8_tagged_customers.email IS 'Reserved: requires Protected Customer Data approval (Level 1 + Email) and CUSTOMER_PII_FIELDS=1. Always NULL until approved.';
+COMMENT ON COLUMN s8_tagged_customers.display_name IS 'Reserved: requires Protected Customer Data approval (Level 1 + Name) and CUSTOMER_PII_FIELDS=1. Always NULL until approved.';
 
 -- Create s8_draft_orders table
 -- Tracks draft orders with payment terms for pending credit exposure
