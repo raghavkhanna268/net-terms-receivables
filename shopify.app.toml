@@ -6,10 +6,25 @@ application_url = "https://net-terms-receivables.raghavkhanna.workers.dev"
 embedded = true
 
 [access_scopes]
-# Start with no scopes - add only when features require them
-# B2B wholesale net-terms will eventually need: read_orders, read_customers
-# Request protected customer data scopes only after filing DPDP form
-scopes = ""
+# See docs/scopes.md for the complete scope audit with justifications and reference URLs.
+#
+# Read scopes (S6 sync + S8 pre-grant):
+# - read_companies: B2B company/location sync
+# - read_customers: Tagged customer sync (S8 pre-grant)
+# - read_draft_orders: Draft order payment terms (S8 pre-grant)
+# - read_orders: Order sync, webhooks
+# - read_payment_terms: Payment terms on orders and company locations
+#
+# Write scopes (S11-S13, S17 features):
+# - write_companies: metafieldsSet on Company/CompanyLocation (S11), companyLocationUpdate for payment terms (S4 seed)
+# - write_customers: metafieldsSet on Customer (S11)
+# - write_merchant_managed_fulfillment_orders: fulfillmentOrderHold/Release (S13)
+# - write_orders: orderMarkAsPaid (S17), tagsAdd (S13/S17)
+# - write_payment_customizations: paymentCustomizationCreate (S13)
+# - write_validations: validationCreate (S12)
+#
+# NOT included: write_draft_orders, write_payment_terms (seed uses companyLocationUpdate instead)
+scopes = "read_companies,read_customers,read_draft_orders,read_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations"
 
 [webhooks]
 api_version = "2026-10"
@@ -27,6 +42,28 @@ api_version = "2026-10"
   [[webhooks.subscriptions]]
   uri = "/webhooks/compliance"
   compliance_topics = ["customers/data_request", "customers/redact", "shop/redact"]
+
+  # S6: Company sync webhooks (B2B buyer accounts)
+  # Maps Company/CompanyLocation to BuyerAccount (kind=COMPANY)
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/companies"
+  topics = ["companies/create", "companies/update", "companies/delete"]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/company_locations"
+  topics = ["company_locations/create", "company_locations/update", "company_locations/delete"]
+
+  # S6: Order sync webhooks (net-terms invoices)
+  # Tracks orders with payment terms for invoice management
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/orders"
+  topics = ["orders/create", "orders/updated", "orders/cancelled", "orders/paid"]
+
+  # S6: Bulk operations webhook (backfill completion)
+  # Triggers JSONL download/processing for company and order backfills
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/bulk_operations/finish"
+  topics = ["bulk_operations/finish"]
 
 [auth]
 redirect_urls = ["https://net-terms-receivables.raghavkhanna.workers.dev/auth/callback"]

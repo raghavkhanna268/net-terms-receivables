@@ -512,3 +512,38 @@ model AuditEvent {
   @@index([shopId, at])
   @@index([shopId, type])
 }
+
+// =============================================================================
+// S6 QUEUE SUPPORT TABLES
+// =============================================================================
+
+/// Webhook dedupe table for idempotent processing (S6)
+/// Stores processed webhook IDs to prevent duplicate processing when
+/// Shopify retries webhooks or the drain reprocesses messages.
+///
+/// Note: This table is created by the S6 migration, not Prisma.
+/// It's included here to keep schema.prisma in sync with the database.
+model S6ProcessedWebhook {
+  webhookId   String   @id @map("webhook_id")
+  topic       String
+  resourceGid String   @map("resource_gid")
+  processedAt DateTime @default(now()) @map("processed_at") @db.Timestamptz(3)
+
+  @@index([processedAt])
+  @@map("s6_processed_webhooks")
+}
+
+/// Bulk operations tracking table (S6)
+/// Records the type of each bulk operation at launch so the finish webhook
+/// knows how to process the JSONL result.
+///
+/// Note: This table is created by the S6 migration, not Prisma.
+/// It's included here to keep schema.prisma in sync with the database.
+model S6BulkOperation {
+  bulkOperationId String   @id @map("bulk_operation_id")
+  shop            String
+  bulkType        String   @map("bulk_type")
+  startedAt       DateTime @default(now()) @map("started_at") @db.Timestamptz(3)
+
+  @@map("s6_bulk_operations")
+}

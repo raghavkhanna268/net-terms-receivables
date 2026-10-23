@@ -22,7 +22,19 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16
+        # Use pgmq's Postgres 16 image which includes pgmq extension pre-installed.
+        # Pinned to v1.5.1 to match production Supabase (pgmq 1.5.1).
+        #
+        # Version compatibility note:
+        # - Production (Supabase): pgmq 1.5.1
+        # - CI: pgmq 1.5.1 (this image)
+        # The runtime SQL (pgmq.send, pgmq.read, pgmq.delete) is compatible across 1.5.x-1.10.x.
+        # Tests use explicit ::bigint casts on msg_ids for pgmq.delete to avoid function
+        # overload ambiguity that exists in some pgmq versions.
+        #
+        # pg_cron and pg_net are NOT available in CI; the migration handles this gracefully.
+        # In production (Supabase), all three extensions are available.
+        image: ghcr.io/pgmq/pg16-pgmq:v1.5.1
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
