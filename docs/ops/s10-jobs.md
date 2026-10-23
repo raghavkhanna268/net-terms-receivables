@@ -29,8 +29,8 @@ The box can't reach Postgres ports. The Management API SQL endpoint (`POST /v1/p
   - If no row in `vault.secrets` has that name, run `vault.create_secret(:val, 'jobs_drain_secret')`.
   - Otherwise run `vault.update_secret(id, :val, name)` using the existing row's id.
   - Do the same for `jobs_drain_url`.
-- **Passing values safely:** use `psql -v secret_value="$VAULT_SECRET_VALUE"` with `:'secret_value'` binding via heredoc. The value never appears in the workflow YAML, argv, or logs. Masked with `::add-mask::`, no `set -x`, and never echoed.
-- **Verification step:** prints only `name, created_at, updated_at` from `vault.secrets`, never the decrypted value.
+- **Passing values safely:** uses psql 16+ `\getenv` inside the heredoc to read the secret from an environment variable. The value never appears in the workflow YAML, argv, or logs. Masked with `::add-mask::`, no `set -x`, and never echoed.
+- **Verification step:** prints only `name, length(decrypted_secret)` from `vault.decrypted_secrets`, never the actual value.
 - The workflow runs only on dispatch, so it does not gate deploy (the deploy gate checks push-event migrate runs only).
 
 ### Running the workflow
@@ -42,9 +42,9 @@ The box can't reach Postgres ports. The Management API SQL endpoint (`POST /v1/p
 5. Click **Run workflow**
 
 The workflow outputs:
-- `NOTICE: created secret: jobs_drain_secret` or `NOTICE: updated secret: jobs_drain_secret`
-- `NOTICE: created entry: jobs_drain_url` or `NOTICE: updated entry: jobs_drain_url`
-- A table showing `name, created_at, updated_at` for verification
+- `created secret: jobs_drain_secret` or `updated secret: jobs_drain_secret`
+- `created entry: jobs_drain_url` or `updated entry: jobs_drain_url`
+- A table showing `name, len` (length of decrypted secret) for verification
 
 ### Verifying without exposing values
 
