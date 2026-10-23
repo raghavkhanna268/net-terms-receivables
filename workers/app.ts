@@ -62,17 +62,17 @@ export default wrapWithSentry({
     try {
       console.log(`[scheduled] cron trigger at ${new Date(event.scheduledTime).toISOString()}`);
 
-      // Run the drain
+      // Run the drain with generous batch size for cron
+      // Time budget is 15s default (configurable in DrainConfig)
       const result = await runDrain(sql, {
         batchSize: 10,
-        timeBudgetMs: 25000, // 25s for cron (more generous than HTTP)
       });
 
       console.log(
         `[scheduled] drain complete: processed=${result.processed} ` +
           `skipped=${result.skipped} failed=${result.failed} ` +
-          `dlq=${result.deadLettered} timedOut=${result.timedOut} ` +
-          `elapsed=${result.elapsedMs}ms`
+          `dlq=${result.deadLettered} noHandler=${result.noHandler} ` +
+          `timedOut=${result.timedOut} elapsed=${result.elapsedMs}ms`
       );
     } catch (error) {
       console.error("[scheduled] drain error:", error);

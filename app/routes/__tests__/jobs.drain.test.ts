@@ -11,6 +11,7 @@ import type { ActionFunctionArgs } from "react-router";
  * 4. Time budget configuration from query params
  * 5. Reconcile mode enqueues messages
  * 6. Drain runs and returns result
+ * 7. 500 response is generic (no raw error)
  */
 
 // Mock SQL client
@@ -30,6 +31,7 @@ const mockRunDrain = vi.fn().mockResolvedValue({
   failed: 0,
   deadLettered: 0,
   skipped: 1,
+  noHandler: 0,
   timedOut: false,
   elapsedMs: 150,
   errors: [],
@@ -40,8 +42,10 @@ vi.mock("~/services/drain/processor.server", () => ({
   DEFAULT_DRAIN_CONFIG: {
     batchSize: 5,
     visibilityTimeoutSec: 30,
-    timeBudgetMs: 20000,
+    timeBudgetMs: 15000,
     maxRetries: 5,
+    noHandlerMaxReads: 48,
+    bulkChunkSize: 500,
   },
 }));
 
@@ -175,9 +179,7 @@ describe("jobs.drain route", () => {
       expect(response.status).toBe(200);
     });
 
-    it("uses constant-time comparison (timing-safe)", async () => {
-      // This test verifies the code path, not actual timing
-      // The constantTimeCompare function uses timingSafeEqual
+    it("uses constant-time byte comparison (timing-safe)", async () => {
       const { action } = await import("../jobs.drain");
 
       // Test with same-length but different secrets
@@ -235,11 +237,11 @@ describe("jobs.drain route", () => {
 
     it("parses timeBudgetMs from query params", async () => {
       const { action } = await import("../jobs.drain");
-      const request = createRequest({ queryParams: { timeBudgetMs: "15000" } });
+      const request = createRequest({ queryParams: { timeBudgetMs: "10000" } });
 
       await action(createActionArgs(request));
 
-      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, { timeBudgetMs: 15000 });
+      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, { timeBudgetMs: 10000 });
     });
 
     it("ignores invalid batchSize values", async () => {
@@ -263,7 +265,7 @@ describe("jobs.drain route", () => {
       expect(mockRunDrain).toHaveBeenCalledWith(mockSql, {});
     });
 
-    it("returns drain result as JSON", async () => {
+    it("returns drain result as JSON with noHandler field", async () => {
       const { action } = await import("../jobs.drain");
       const request = createRequest();
 
@@ -278,12 +280,13 @@ describe("jobs.drain route", () => {
         failed: 0,
         deadLettered: 0,
         skipped: 1,
+        noHandler: 0,
         timedOut: false,
         elapsedMs: 150,
       });
     });
 
-    it("returns 500 on drain error", async () => {
+    it("returns generic 500 on drain error (no raw error.message)", async () => {
       mockRunDrain.mockRejectedValueOnce(new Error("Database connection failed"));
       const { action } = await import("../jobs.drain");
       const request = createRequest();
@@ -292,7 +295,10 @@ describe("jobs.drain route", () => {
 
       expect(response.status).toBe(500);
       const result = (await response.json()) as { error: string };
-      expect(result.error).toBe("Database connection failed");
+      // Should be generic, not the raw error message
+      expect(result.error).toBe("Internal server error");
+      // Error should be logged
+      expect(console.error).toHaveBeenCalled();
     });
   });
 

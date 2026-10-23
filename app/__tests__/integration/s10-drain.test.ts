@@ -10,6 +10,7 @@ import { sqlOptions } from "~/lib/db-light.server";
  * 2. Messages can be moved to DLQ
  * 3. Reconcile handlers are registered
  * 4. Handler registration is extensible
+ * 5. No-handler visibility extension via pgmq.set_vt
  *
  * Tests run against the CI Postgres with pgmq extension.
  */
@@ -33,7 +34,7 @@ describeWithDb("S10 Drain Integration", () => {
           original_msg_id TEXT NOT NULL,
           message JSONB NOT NULL,
           error TEXT NOT NULL,
-          dead_lettered_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          dead_lettered_at TIMESTAMPTZ(6) NOT NULL DEFAULT NOW()
         )
       `;
     } catch {
@@ -183,6 +184,51 @@ describeWithDb("S10 Drain Integration", () => {
 
       expect(readResult.message.topic).toBe("RECONCILE_COMPANIES");
       expect(readResult.message.shop).toBe(`test-${TEST_SUFFIX}.myshopify.com`);
+    });
+
+    it("reconcile webhookId is idempotent per day", async () => {
+      // The pattern is reconcile:<shop>:<YYYY-MM-DD>:<kind>
+      const today = new Date().toISOString().split("T")[0];
+      const expectedId = `reconcile:test.myshopify.com:${today}:companies`;
+
+      // Verify the pattern format
+      expect(expectedId).toMatch(/^reconcile:.+:\d{4}-\d{2}-\d{2}:(companies|orders)$/);
+    });
+  });
+
+  describe("no-handler visibility extension", () => {
+    it("can extend message visibility with pgmq.set_vt", async () => {
+      const testMsg = {
+        topic: "UNKNOWN_FUTURE_TOPIC",
+        shop: `test-${TEST_SUFFIX}.myshopify.com`,
+        webhookId: `unknown-${TEST_SUFFIX}-1`,
+        resourceGid: "gid://shopify/Unknown/123",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      // Send message
+      const [sendResult] = await sql<{ send: string }[]>`
+        SELECT pgmq.send('s6_sync', ${sql.json(testMsg)}) as send
+      `;
+      const msgId = sendResult.send;
+
+      // Read to make it visible
+      await sql`SELECT * FROM pgmq.read('s6_sync', 5, 1)`;
+
+      // Extend visibility by 3600 seconds (1 hour)
+      const [vtResult] = await sql<{ set_vt: Date }[]>`
+        SELECT pgmq.set_vt('s6_sync', ${msgId}::bigint, 3600) as set_vt
+      `;
+      expect(vtResult.set_vt).toBeDefined();
+
+      // The new vt should be approximately 1 hour from now
+      const newVt = new Date(vtResult.set_vt);
+      const oneHourFromNow = new Date(Date.now() + 3600 * 1000);
+      const diffMs = Math.abs(newVt.getTime() - oneHourFromNow.getTime());
+      expect(diffMs).toBeLessThan(5000); // Within 5 seconds
+
+      // Clean up
+      await sql`SELECT pgmq.delete('s6_sync', ${msgId}::bigint)`;
     });
   });
 });

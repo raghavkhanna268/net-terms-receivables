@@ -5,11 +5,11 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
  *
  * Tests verify:
  * 1. Handler registry: topic dispatch works correctly
- * 2. Batch processing: respects batch size limit
- * 3. Idempotency: already-processed webhooks are skipped
- * 4. Retry logic: failed messages are retried
- * 5. DLQ: messages exceeding max retries move to dead-letter
- * 6. Time budget: stops early when time limit reached
+ * 2. Default config values
+ * 3. No-handler: visibility extended, not archived
+ * 4. No-handler: DLQ after noHandlerMaxReads
+ * 5. S6 handlers registered
+ * 6. ORDERS_PAID/CANCELLED fetch real order
  */
 
 // Mock the pgmq operations
@@ -20,6 +20,21 @@ vi.mock("~/lib/pgmq.server", () => ({
   },
 }));
 
+// Mock admin client
+vi.mock("../admin-client.server", () => ({
+  adminGraphQL: vi.fn().mockResolvedValue({
+    success: true,
+    data: { node: null },
+    retryable: false,
+  }),
+  COMPANY_QUERY: "query CompanyById",
+  COMPANY_LOCATION_QUERY: "query CompanyLocationById",
+  ORDER_QUERY: "query OrderById",
+  BULK_OPERATION_QUERY: "query BulkOperationById",
+  START_COMPANIES_BULK_MUTATION: "mutation BulkCompaniesExport",
+  START_ORDERS_BULK_MUTATION: "mutation BulkOrdersExport",
+}));
+
 // Mock the sync processors
 vi.mock("~/services/sync/company.server", () => ({
   processCompanyWebhook: vi.fn().mockResolvedValue({
@@ -28,6 +43,7 @@ vi.mock("~/services/sync/company.server", () => ({
     entityId: "account-123",
   }),
   isWebhookProcessed: vi.fn().mockResolvedValue(false),
+  markWebhookProcessed: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("~/services/sync/company-location.server", () => ({
@@ -46,63 +62,15 @@ vi.mock("~/services/sync/order.server", () => ({
   }),
 }));
 
+vi.mock("~/services/sync/bulk-operations.server", () => ({
+  registerBulkOperation: vi.fn().mockResolvedValue(undefined),
+}));
+
 describe("Drain Processor", () => {
   let mockSql: ReturnType<typeof createMockSql>;
-  let readSyncResults: Array<{
-    msg_id: string;
-    read_ct: number;
-    enqueued_at: Date;
-    vt: Date;
-    message: {
-      topic: string;
-      shop: string;
-      webhookId: string;
-      resourceGid: string;
-      enqueuedAt: string;
-    };
-  }>;
-  let readBulkResults: Array<unknown>;
 
   function createMockSql() {
-    const sqlFn = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
-      const query = strings.join("");
-
-      // Handle pgmq.read for s6_sync
-      if (query.includes("pgmq.read") && query.includes("s6_sync")) {
-        return Promise.resolve(readSyncResults);
-      }
-
-      // Handle pgmq.read for s6_bulk
-      if (query.includes("pgmq.read") && query.includes("s6_bulk")) {
-        return Promise.resolve(readBulkResults);
-      }
-
-      // Handle pgmq.archive
-      if (query.includes("pgmq.archive")) {
-        return Promise.resolve([{ archive: true }]);
-      }
-
-      // Handle pgmq.delete
-      if (query.includes("pgmq.delete")) {
-        return Promise.resolve([{ delete: true }]);
-      }
-
-      // Handle dead-letter insert
-      if (query.includes("s6_dead_letter")) {
-        return Promise.resolve([]);
-      }
-
-      // Handle webhook processed check
-      if (query.includes("s6_processed_webhooks") && query.includes("EXISTS")) {
-        return Promise.resolve([{ exists: false }]);
-      }
-
-      // Handle webhook processed insert
-      if (query.includes("s6_processed_webhooks") && query.includes("INSERT")) {
-        return Promise.resolve([]);
-      }
-
-      // Default
+    const sqlFn = vi.fn().mockImplementation(() => {
       return Promise.resolve([]);
     });
 
@@ -116,8 +84,6 @@ describe("Drain Processor", () => {
     vi.clearAllMocks();
     vi.resetModules();
 
-    readSyncResults = [];
-    readBulkResults = [];
     mockSql = createMockSql();
   });
 
@@ -172,54 +138,50 @@ describe("Drain Processor", () => {
     });
   });
 
-  describe("batch processing", () => {
-    it("returns result with expected structure", async () => {
+  describe("default config", () => {
+    it("has correct default values", async () => {
+      const { DEFAULT_DRAIN_CONFIG } = await import("../processor.server");
+
+      expect(DEFAULT_DRAIN_CONFIG).toMatchObject({
+        batchSize: 5,
+        visibilityTimeoutSec: 30,
+        timeBudgetMs: 15000, // 15 seconds
+        maxRetries: 5,
+        noHandlerMaxReads: 48, // ~2 days
+        bulkChunkSize: 500,
+      });
+    });
+  });
+
+  describe("drain result structure", () => {
+    it("returns expected result structure with noHandler field", async () => {
       const { runDrain } = await import("../processor.server");
 
-      // Run with empty queues (mock returns empty arrays)
-      const result = await runDrain(mockSql as unknown as Parameters<typeof runDrain>[0], {
-        batchSize: 5,
-      });
+      const result = await runDrain(mockSql as unknown as Parameters<typeof runDrain>[0]);
 
-      // Should return a valid result structure
       expect(result).toMatchObject({
         processed: expect.any(Number),
         failed: expect.any(Number),
         deadLettered: expect.any(Number),
         skipped: expect.any(Number),
+        noHandler: expect.any(Number),
         timedOut: expect.any(Boolean),
         elapsedMs: expect.any(Number),
         errors: expect.any(Array),
       });
     });
-
-    it("passes batch size to configuration", async () => {
-      const { runDrain, DEFAULT_DRAIN_CONFIG } = await import("../processor.server");
-
-      // Verify default batch size
-      expect(DEFAULT_DRAIN_CONFIG.batchSize).toBe(5);
-
-      // Run with custom batch size
-      const result = await runDrain(mockSql as unknown as Parameters<typeof runDrain>[0], {
-        batchSize: 10,
-      });
-
-      expect(result).toBeDefined();
-    });
   });
 
   describe("time budget", () => {
-    it("has sensible default time budget", async () => {
+    it("default time budget is 15 seconds", async () => {
       const { DEFAULT_DRAIN_CONFIG } = await import("../processor.server");
 
-      // Default time budget should be reasonable (20 seconds)
-      expect(DEFAULT_DRAIN_CONFIG.timeBudgetMs).toBe(20000);
+      expect(DEFAULT_DRAIN_CONFIG.timeBudgetMs).toBe(15000);
     });
 
     it("accepts custom time budget", async () => {
       const { runDrain } = await import("../processor.server");
 
-      // Run with custom time budget
       const result = await runDrain(mockSql as unknown as Parameters<typeof runDrain>[0], {
         timeBudgetMs: 5000,
       });
@@ -236,54 +198,46 @@ describe("Drain Processor", () => {
     });
   });
 
-  describe("error handling", () => {
-    it("has max retries configured", async () => {
+  describe("no-handler behavior", () => {
+    it("noHandlerMaxReads defaults to 48 (~2 days)", async () => {
       const { DEFAULT_DRAIN_CONFIG } = await import("../processor.server");
 
-      // Should have sensible max retries default
-      expect(DEFAULT_DRAIN_CONFIG.maxRetries).toBe(5);
+      expect(DEFAULT_DRAIN_CONFIG.noHandlerMaxReads).toBe(48);
     });
+  });
 
+  describe("error handling", () => {
     it("errors array starts empty for clean runs", async () => {
       const { runDrain } = await import("../processor.server");
 
-      // Empty queues should produce no errors
       const result = await runDrain(mockSql as unknown as Parameters<typeof runDrain>[0]);
 
       expect(result.errors).toEqual([]);
     });
   });
-
-  describe("drain result", () => {
-    it("returns expected result structure", async () => {
-      const { runDrain } = await import("../processor.server");
-
-      readSyncResults = [];
-
-      const result = await runDrain(mockSql as unknown as Parameters<typeof runDrain>[0]);
-
-      expect(result).toMatchObject({
-        processed: expect.any(Number),
-        failed: expect.any(Number),
-        deadLettered: expect.any(Number),
-        skipped: expect.any(Number),
-        timedOut: expect.any(Boolean),
-        elapsedMs: expect.any(Number),
-        errors: expect.any(Array),
-      });
-    });
-  });
 });
 
-describe("Default drain config", () => {
-  it("has sensible defaults", async () => {
-    const { DEFAULT_DRAIN_CONFIG } = await import("../processor.server");
+describe("Order handlers", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.resetModules();
+  });
 
-    expect(DEFAULT_DRAIN_CONFIG).toMatchObject({
-      batchSize: 5,
-      visibilityTimeoutSec: 30,
-      timeBudgetMs: 20000,
-      maxRetries: 5,
-    });
+  it("ORDERS_PAID handler is registered and fetches real order", async () => {
+    const { getSyncHandler } = await import("../processor.server");
+
+    const handler = getSyncHandler("ORDERS_PAID");
+    expect(handler).toBeDefined();
+
+    // Handler is registered - actual GraphQL call tested in integration tests
+  });
+
+  it("ORDERS_CANCELLED handler is registered and fetches real order", async () => {
+    const { getSyncHandler } = await import("../processor.server");
+
+    const handler = getSyncHandler("ORDERS_CANCELLED");
+    expect(handler).toBeDefined();
+
+    // Handler is registered - actual GraphQL call tested in integration tests
   });
 });

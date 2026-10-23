@@ -16,21 +16,31 @@ import type { ActionFunctionArgs } from "react-router";
 import { getRequestSql } from "~/lib/request-context.server";
 import { runDrain, type DrainConfig } from "~/services/drain/processor.server";
 import { enqueueReconcileForAllShops } from "~/services/drain/reconcile.server";
-import { timingSafeEqual } from "node:crypto";
 
 /**
- * Constant-time string comparison to prevent timing attacks.
+ * Constant-time comparison using byte lengths (Web Crypto style).
  *
- * Returns false if lengths differ (unavoidable timing leak, but
- * attacker still can't determine the secret value).
+ * XORs all bytes and checks for any mismatch bit, consistent with
+ * the pattern in webhook-verify.server.ts. Returns false immediately
+ * only if byte lengths differ (unavoidable timing leak, but attacker
+ * can't determine the secret value).
  */
 function constantTimeCompare(a: string, b: string): boolean {
-  if (a.length !== b.length) {
+  const encoder = new TextEncoder();
+  const bufA = encoder.encode(a);
+  const bufB = encoder.encode(b);
+
+  // Byte length check (unavoidable timing difference)
+  if (bufA.length !== bufB.length) {
     return false;
   }
-  const bufA = Buffer.from(a, "utf-8");
-  const bufB = Buffer.from(b, "utf-8");
-  return timingSafeEqual(bufA, bufB);
+
+  // XOR all bytes, accumulating any mismatch bits
+  let mismatch = 0;
+  for (let i = 0; i < bufA.length; i++) {
+    mismatch |= bufA[i] ^ bufB[i];
+  }
+  return mismatch === 0;
 }
 
 /**
@@ -109,7 +119,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
     return new Response("Unauthorized", { status: 401 });
   }
 
-  // Constant-time comparison
+  // Constant-time comparison using byte XOR
   if (!constantTimeCompare(token, expectedSecret)) {
     return new Response("Unauthorized", { status: 401 });
   }
@@ -134,7 +144,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
     // Log summary (avoid PII - just stats)
     console.log(
       `[drain] processed=${result.processed} skipped=${result.skipped} ` +
-        `failed=${result.failed} dlq=${result.deadLettered} ` +
+        `failed=${result.failed} dlq=${result.deadLettered} noHandler=${result.noHandler} ` +
         `timedOut=${result.timedOut} elapsed=${result.elapsedMs}ms`
     );
 
@@ -150,10 +160,13 @@ export async function action({ request, context }: ActionFunctionArgs) {
       }
     );
   } catch (error) {
+    // Log the full error details server-side
     console.error("[drain] error:", error);
+
+    // Return generic error response (no raw error.message to client)
     return new Response(
       JSON.stringify({
-        error: error instanceof Error ? error.message : "Internal error",
+        error: "Internal server error",
       }),
       {
         status: 500,

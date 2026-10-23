@@ -6,11 +6,12 @@
  *
  * The heavy work happens through the bulk operation flow:
  * 1. This function enqueues RECONCILE_COMPANIES and RECONCILE_ORDERS messages
- * 2. The drain handler (not yet implemented) starts bulk operations
+ * 2. The drain handler starts bulk operations via Admin API
  * 3. The bulk_operations/finish webhook enqueues completion messages
- * 4. The drain processes the JSONL results
+ * 4. The drain processes the JSONL results in chunks
  *
- * This keeps CPU low during the reconcile trigger (just enqueues).
+ * Idempotency: Uses webhookId pattern "reconcile:<shop>:<YYYY-MM-DD>:<kind>"
+ * so a nightly run is idempotent per day.
  */
 
 import type { Sql } from "~/lib/db-light.server";
@@ -26,6 +27,26 @@ export interface ReconcileMessage {
   webhookId: string;
   enqueuedAt: string;
   [key: string]: string;
+}
+
+/**
+ * Get today's date in YYYY-MM-DD format (UTC).
+ */
+function getTodayUTC(): string {
+  return new Date().toISOString().split("T")[0];
+}
+
+/**
+ * Generate an idempotent webhookId for reconcile.
+ * Format: reconcile:<shop>:<YYYY-MM-DD>:<kind>
+ *
+ * This ensures:
+ * - Each shop gets at most one reconcile per kind per day
+ * - Re-running the nightly job on the same day is idempotent
+ */
+function makeReconcileWebhookId(shop: string, kind: "companies" | "orders"): string {
+  const today = getTodayUTC();
+  return `reconcile:${shop}:${today}:${kind}`;
 }
 
 /**
@@ -57,7 +78,7 @@ export async function enqueueReconcileForAllShops(sql: Sql): Promise<number> {
     const companiesMsg: ReconcileMessage = {
       topic: "RECONCILE_COMPANIES",
       shop: shop.domain,
-      webhookId: `reconcile-companies-${shop.domain}-${Date.now()}`,
+      webhookId: makeReconcileWebhookId(shop.domain, "companies"),
       enqueuedAt: now,
     };
     await sql`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sql.json(companiesMsg)})`;
@@ -66,7 +87,7 @@ export async function enqueueReconcileForAllShops(sql: Sql): Promise<number> {
     const ordersMsg: ReconcileMessage = {
       topic: "RECONCILE_ORDERS",
       shop: shop.domain,
-      webhookId: `reconcile-orders-${shop.domain}-${Date.now()}`,
+      webhookId: makeReconcileWebhookId(shop.domain, "orders"),
       enqueuedAt: now,
     };
     await sql`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sql.json(ordersMsg)})`;

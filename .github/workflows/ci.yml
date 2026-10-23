@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # Run on PRs to any branch (supports stacked PRs)
   workflow_dispatch:
 
 permissions:
