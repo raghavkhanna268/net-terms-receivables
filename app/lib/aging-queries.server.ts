@@ -8,6 +8,11 @@
  * All amounts are returned as bigint strings (paise) for exact arithmetic.
  * Currency grouping is done in SQL - amounts are never summed across currencies.
  *
+ * Timezone handling:
+ * All date calculations use the shop's IANA timezone (stored in Shop.timezone)
+ * to determine calendar-day boundaries. This ensures accurate aging buckets
+ * for shops in different timezones (e.g., "America/New_York", "Europe/London").
+ *
  * Bucket boundaries match app/lib/aging.ts:
  * - Current: days_past_due <= 0
  * - 1-30: 1 <= days_past_due <= 30
@@ -54,7 +59,7 @@ export async function getShopAgingTotals(
   asOf: Date
 ): Promise<SerializableAgingTotals> {
   // Query aggregates invoices by currency and bucket
-  // Uses DATE_TRUNC for IST timezone day boundaries to match TS implementation
+  // Uses DATE_TRUNC with shop timezone for day boundaries to match TS implementation
   const rows = await sql<ShopTotalRow[]>`
     WITH invoice_buckets AS (
       SELECT
@@ -63,8 +68,8 @@ export async function getShopAgingTotals(
         CASE
           WHEN i."dueAt" IS NULL THEN 0
           ELSE EXTRACT(DAY FROM (
-            DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE 'Asia/Kolkata') -
-            DATE_TRUNC('day', i."dueAt" AT TIME ZONE 'Asia/Kolkata')
+            DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE s.timezone) -
+            DATE_TRUNC('day', i."dueAt" AT TIME ZONE s.timezone)
           ))::int
         END AS days_past_due
       FROM "Invoice" i
@@ -139,20 +144,21 @@ export async function getShopAgingTotals(
       CASE
         WHEN i."dueAt" IS NULL THEN 0
         ELSE EXTRACT(DAY FROM (
-          DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE 'Asia/Kolkata') -
-          DATE_TRUNC('day', i."dueAt" AT TIME ZONE 'Asia/Kolkata')
+          DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE s.timezone) -
+          DATE_TRUNC('day', i."dueAt" AT TIME ZONE s.timezone)
         ))::int
       END
     ) FILTER (WHERE 
       CASE
         WHEN i."dueAt" IS NULL THEN 0
         ELSE EXTRACT(DAY FROM (
-          DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE 'Asia/Kolkata') -
-          DATE_TRUNC('day', i."dueAt" AT TIME ZONE 'Asia/Kolkata')
+          DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE s.timezone) -
+          DATE_TRUNC('day', i."dueAt" AT TIME ZONE s.timezone)
         ))::int
       END > 0
     ) AS oldest_days
     FROM "Invoice" i
+    JOIN "Shop" s ON s.id = i."shopId"
     JOIN "BuyerAccount" ba ON ba.id = i."buyerAccountId"
     WHERE i."shopId" = ${shopId}
       AND i.status = 'open'
@@ -207,8 +213,8 @@ export async function getBuyerLedger(
         CASE
           WHEN i."dueAt" IS NULL THEN 0
           ELSE EXTRACT(DAY FROM (
-            DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE 'Asia/Kolkata') -
-            DATE_TRUNC('day', i."dueAt" AT TIME ZONE 'Asia/Kolkata')
+            DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE s.timezone) -
+            DATE_TRUNC('day', i."dueAt" AT TIME ZONE s.timezone)
           ))::int
         END AS days_past_due
       FROM "Invoice" i
@@ -318,8 +324,8 @@ export async function getBuyerInvoices(
       CASE
         WHEN i."dueAt" IS NULL THEN 0
         ELSE EXTRACT(DAY FROM (
-          DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE 'Asia/Kolkata') -
-          DATE_TRUNC('day', i."dueAt" AT TIME ZONE 'Asia/Kolkata')
+          DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE s.timezone) -
+          DATE_TRUNC('day', i."dueAt" AT TIME ZONE s.timezone)
         ))::int
       END AS days_past_due
     FROM "Invoice" i
@@ -385,37 +391,37 @@ export async function getAgingBucketsForParity(
       CASE
         WHEN i."dueAt" IS NULL THEN 0
         ELSE EXTRACT(DAY FROM (
-          DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE 'Asia/Kolkata') -
-          DATE_TRUNC('day', i."dueAt" AT TIME ZONE 'Asia/Kolkata')
+          DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE s.timezone) -
+          DATE_TRUNC('day', i."dueAt" AT TIME ZONE s.timezone)
         ))::int
       END AS days_past_due,
       CASE
         WHEN CASE
           WHEN i."dueAt" IS NULL THEN 0
           ELSE EXTRACT(DAY FROM (
-            DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE 'Asia/Kolkata') -
-            DATE_TRUNC('day', i."dueAt" AT TIME ZONE 'Asia/Kolkata')
+            DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE s.timezone) -
+            DATE_TRUNC('day', i."dueAt" AT TIME ZONE s.timezone)
           ))::int
         END <= 0 THEN 'current'
         WHEN CASE
           WHEN i."dueAt" IS NULL THEN 0
           ELSE EXTRACT(DAY FROM (
-            DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE 'Asia/Kolkata') -
-            DATE_TRUNC('day', i."dueAt" AT TIME ZONE 'Asia/Kolkata')
+            DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE s.timezone) -
+            DATE_TRUNC('day', i."dueAt" AT TIME ZONE s.timezone)
           ))::int
         END <= 30 THEN '1-30'
         WHEN CASE
           WHEN i."dueAt" IS NULL THEN 0
           ELSE EXTRACT(DAY FROM (
-            DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE 'Asia/Kolkata') -
-            DATE_TRUNC('day', i."dueAt" AT TIME ZONE 'Asia/Kolkata')
+            DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE s.timezone) -
+            DATE_TRUNC('day', i."dueAt" AT TIME ZONE s.timezone)
           ))::int
         END <= 60 THEN '31-60'
         WHEN CASE
           WHEN i."dueAt" IS NULL THEN 0
           ELSE EXTRACT(DAY FROM (
-            DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE 'Asia/Kolkata') -
-            DATE_TRUNC('day', i."dueAt" AT TIME ZONE 'Asia/Kolkata')
+            DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE s.timezone) -
+            DATE_TRUNC('day', i."dueAt" AT TIME ZONE s.timezone)
           ))::int
         END <= 90 THEN '61-90'
         ELSE '90+'

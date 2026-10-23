@@ -3,6 +3,11 @@
  *
  * Uses luxon for timezone-aware date math. This module is kept separate
  * from aging.ts to avoid bundling luxon in the client.
+ *
+ * Timezone handling:
+ * All aging calculations use the shop's IANA timezone (stored in Shop.timezone)
+ * to determine calendar-day boundaries. This ensures accurate aging buckets
+ * for shops in different timezones (e.g., "America/New_York", "Europe/London").
  */
 
 import { DateTime } from "luxon";
@@ -14,20 +19,36 @@ import type {
 } from "./aging";
 import { getBucketForDaysPastDue } from "./aging";
 
+/** Default timezone for backward compatibility */
+export const DEFAULT_TIMEZONE = "Asia/Kolkata";
+
 /**
- * Get the local date at start of day in Asia/Kolkata for a given Date.
+ * Get the local date at start of day in the specified timezone.
  * Used to calculate "as of" date for consistent day boundaries.
+ *
+ * @param asOf - The "as of" date
+ * @param timezone - IANA timezone (e.g., "America/New_York"). Defaults to Asia/Kolkata for backward compatibility.
  */
-export function getAsOfDateIST(asOf: Date): DateTime {
-  return DateTime.fromJSDate(asOf, { zone: "Asia/Kolkata" }).startOf("day");
+export function getAsOfDate(asOf: Date, timezone: string = DEFAULT_TIMEZONE): DateTime {
+  return DateTime.fromJSDate(asOf, { zone: timezone }).startOf("day");
 }
 
 /**
- * Get the local date at start of day for a due date in Asia/Kolkata.
- * Null due dates are handled by the caller.
+ * @deprecated Use getAsOfDate(asOf, timezone) instead
  */
-function getDueDateIST(dueAt: Date): DateTime {
-  return DateTime.fromJSDate(dueAt, { zone: "Asia/Kolkata" }).startOf("day");
+export function getAsOfDateIST(asOf: Date): DateTime {
+  return getAsOfDate(asOf, DEFAULT_TIMEZONE);
+}
+
+/**
+ * Get the local date at start of day for a due date in the specified timezone.
+ * Null due dates are handled by the caller.
+ *
+ * @param dueAt - The due date
+ * @param timezone - IANA timezone (e.g., "America/New_York"). Defaults to Asia/Kolkata for backward compatibility.
+ */
+function getDueDate(dueAt: Date, timezone: string = DEFAULT_TIMEZONE): DateTime {
+  return DateTime.fromJSDate(dueAt, { zone: timezone }).startOf("day");
 }
 
 /**
@@ -35,17 +56,22 @@ function getDueDateIST(dueAt: Date): DateTime {
  *
  * @param dueAt - Invoice due date (null = not yet due, returns 0)
  * @param asOf - "As of" date for calculation
+ * @param timezone - IANA timezone for day boundary calculations. Defaults to Asia/Kolkata for backward compatibility.
  * @returns Days past due (0 or negative means not yet due)
  */
-export function calculateDaysPastDue(dueAt: Date | null, asOf: Date): number {
+export function calculateDaysPastDue(
+  dueAt: Date | null,
+  asOf: Date,
+  timezone: string = DEFAULT_TIMEZONE
+): number {
   if (dueAt === null) {
     return 0;
   }
 
-  const asOfIST = getAsOfDateIST(asOf);
-  const dueIST = getDueDateIST(dueAt);
+  const asOfLocal = getAsOfDate(asOf, timezone);
+  const dueLocal = getDueDate(dueAt, timezone);
 
-  const diffDays = Math.floor(asOfIST.diff(dueIST, "days").days);
+  const diffDays = Math.floor(asOfLocal.diff(dueLocal, "days").days);
   return diffDays;
 }
 
@@ -93,12 +119,14 @@ function addToCurrencyMap(
  * Amounts are never summed across currencies - each currency is tracked separately.
  *
  * @param invoices - List of open invoices with outstanding amounts
- * @param asOf - "As of" date for calculating days past due (in Asia/Kolkata timezone)
+ * @param asOf - "As of" date for calculating days past due
+ * @param timezone - IANA timezone for day boundary calculations. Defaults to Asia/Kolkata for backward compatibility.
  * @returns Shop-wide totals and per-buyer breakdown
  */
 export function calculateAging(
   invoices: OpenInvoice[],
-  asOf: Date
+  asOf: Date,
+  timezone: string = DEFAULT_TIMEZONE
 ): ShopAgingResult {
   const shopTotals = emptyAgingTotals();
   const byBuyer = new Map<string, AgingTotals>();
@@ -110,7 +138,7 @@ export function calculateAging(
       continue;
     }
 
-    const daysPastDue = calculateDaysPastDue(dueAt, asOf);
+    const daysPastDue = calculateDaysPastDue(dueAt, asOf, timezone);
     const bucket = getBucketForDaysPastDue(daysPastDue);
     const isOverdue = daysPastDue > 0;
 
