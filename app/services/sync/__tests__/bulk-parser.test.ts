@@ -136,6 +136,7 @@ describe("parseOrderBulkJsonl", () => {
     expect(result.orders[0].name).toBe("#1001");
     expect(result.orders[1].name).toBe("#1002");
     expect(result.orders[2].name).toBe("#1003");
+    expect(result.childLineCount).toBe(0);
   });
 
   it("returns orders without payment terms for eligibility check", () => {
@@ -148,6 +149,7 @@ describe("parseOrderBulkJsonl", () => {
     expect(result.orders).toHaveLength(2);
     expect(result.orders[0].paymentTerms).toBeUndefined();
     expect(result.orders[1].paymentTerms).toBeUndefined();
+    expect(result.childLineCount).toBe(0);
   });
 
   it("handles null payment terms", () => {
@@ -158,6 +160,99 @@ describe("parseOrderBulkJsonl", () => {
     // Orders with null paymentTerms are returned for eligibility check
     expect(result.orders).toHaveLength(1);
     expect(result.orders[0].paymentTerms).toBeNull();
+    expect(result.childLineCount).toBe(0);
+  });
+
+  describe("PaymentSchedule child line handling (bug fix)", () => {
+    it("attaches PaymentSchedule dueAt to parent order", () => {
+      // Shopify bulk exports write CONNECTION nodes as separate JSONL lines
+      // with __parentId pointing to the parent Order
+      const jsonl = `{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-01T00:00:00Z","displayFinancialStatus":"PENDING","paymentTerms":{"id":"pt1","paymentTermsName":"Net 30","paymentTermsType":"NET","dueInDays":30}}
+{"id":"gid://shopify/PaymentSchedule/456","dueAt":"2025-01-31T00:00:00Z","issuedAt":"2025-01-01T00:00:00Z","amount":{"amount":"1000.00","currencyCode":"USD"},"__parentId":"gid://shopify/Order/123"}`;
+
+      const result = parseOrderBulkJsonl(jsonl);
+
+      // Should have 1 order, not 2
+      expect(result.orders).toHaveLength(1);
+      expect(result.orders[0].name).toBe("#1001");
+
+      // PaymentSchedule should be attached to order's paymentTerms
+      const schedules = result.orders[0].paymentTerms?.paymentSchedules?.edges;
+      expect(schedules).toHaveLength(1);
+      expect(schedules?.[0].node.id).toBe("gid://shopify/PaymentSchedule/456");
+      expect(schedules?.[0].node.dueAt).toBe("2025-01-31T00:00:00Z");
+      expect(schedules?.[0].node.issuedAt).toBe("2025-01-01T00:00:00Z");
+      expect(schedules?.[0].node.amount?.amount).toBe("1000.00");
+
+      // Child lines counted separately
+      expect(result.childLineCount).toBe(1);
+    });
+
+    it("does not count child lines as orders", () => {
+      const jsonl = `{"id":"gid://shopify/Order/1","name":"#1001","createdAt":"2025-01-01T00:00:00Z","paymentTerms":{"id":"pt1","paymentTermsName":"Net 30"}}
+{"id":"gid://shopify/PaymentSchedule/10","dueAt":"2025-01-31T00:00:00Z","__parentId":"gid://shopify/Order/1"}
+{"id":"gid://shopify/Order/2","name":"#1002","createdAt":"2025-01-02T00:00:00Z","paymentTerms":{"id":"pt2","paymentTermsName":"Net 60"}}
+{"id":"gid://shopify/PaymentSchedule/20","dueAt":"2025-03-02T00:00:00Z","__parentId":"gid://shopify/Order/2"}`;
+
+      const result = parseOrderBulkJsonl(jsonl);
+
+      // Should have 2 orders, not 4
+      expect(result.orders).toHaveLength(2);
+      expect(result.childLineCount).toBe(2);
+
+      // Each order should have its schedule attached
+      expect(result.orders[0].paymentTerms?.paymentSchedules?.edges).toHaveLength(1);
+      expect(result.orders[1].paymentTerms?.paymentSchedules?.edges).toHaveLength(1);
+    });
+
+    it("handles order without PaymentSchedule children", () => {
+      const jsonl = `{"id":"gid://shopify/Order/1","name":"#1001","createdAt":"2025-01-01T00:00:00Z","displayFinancialStatus":"PENDING","paymentTerms":{"id":"pt1","paymentTermsName":"Net 30"}}`;
+
+      const result = parseOrderBulkJsonl(jsonl);
+
+      expect(result.orders).toHaveLength(1);
+      expect(result.childLineCount).toBe(0);
+      // No schedules added
+      expect(result.orders[0].paymentTerms?.paymentSchedules).toBeUndefined();
+    });
+
+    it("handles PaymentSchedule appearing before its parent order (streaming robustness)", () => {
+      // Though Shopify typically puts children after parents, we handle reverse order
+      const jsonl = `{"id":"gid://shopify/PaymentSchedule/456","dueAt":"2025-01-31T00:00:00Z","__parentId":"gid://shopify/Order/123"}
+{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-01T00:00:00Z","paymentTerms":{"id":"pt1","paymentTermsName":"Net 30"}}`;
+
+      const result = parseOrderBulkJsonl(jsonl);
+
+      expect(result.orders).toHaveLength(1);
+      expect(result.childLineCount).toBe(1);
+      // Schedule should still be attached (via orphan re-attachment pass)
+      expect(result.orders[0].paymentTerms?.paymentSchedules?.edges).toHaveLength(1);
+      expect(result.orders[0].paymentTerms?.paymentSchedules?.edges?.[0].node.dueAt).toBe("2025-01-31T00:00:00Z");
+    });
+
+    it("ignores orphan PaymentSchedule without matching parent", () => {
+      const jsonl = `{"id":"gid://shopify/Order/1","name":"#1001","createdAt":"2025-01-01T00:00:00Z","paymentTerms":{"id":"pt1","paymentTermsName":"Net 30"}}
+{"id":"gid://shopify/PaymentSchedule/orphan","dueAt":"2025-01-31T00:00:00Z","__parentId":"gid://shopify/Order/999"}`;
+
+      const result = parseOrderBulkJsonl(jsonl);
+
+      // Orphan schedule counted but not attached to any order
+      expect(result.orders).toHaveLength(1);
+      expect(result.childLineCount).toBe(1);
+      expect(result.orders[0].paymentTerms?.paymentSchedules).toBeUndefined();
+    });
+
+    it("does not attach schedule to order without paymentTerms", () => {
+      const jsonl = `{"id":"gid://shopify/Order/1","name":"#1001","createdAt":"2025-01-01T00:00:00Z"}
+{"id":"gid://shopify/PaymentSchedule/456","dueAt":"2025-01-31T00:00:00Z","__parentId":"gid://shopify/Order/1"}`;
+
+      const result = parseOrderBulkJsonl(jsonl);
+
+      expect(result.orders).toHaveLength(1);
+      expect(result.childLineCount).toBe(1);
+      // Order has no paymentTerms, so schedule is not attached
+      expect(result.orders[0].paymentTerms).toBeUndefined();
+    });
   });
 });
 

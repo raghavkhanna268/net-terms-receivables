@@ -415,10 +415,14 @@ async function processOrderLines(
   context?: EligibilityContext
 ): Promise<number> {
   const jsonl = lines.join("\n");
-  const { orders, errors } = parseOrderBulkJsonl(jsonl);
+  const { orders, childLineCount, errors } = parseOrderBulkJsonl(jsonl);
 
   if (errors.length > 0) {
     console.warn(`[bulk-jsonl] ${errors.length} parse errors in orders batch`);
+  }
+
+  if (childLineCount > 0) {
+    console.log(`[bulk-jsonl] ${childLineCount} child lines (PaymentSchedule) attached to parent orders`);
   }
 
   if (orders.length === 0) {
