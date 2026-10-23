@@ -402,6 +402,21 @@ export async function incrementBulkOperationFailureCount(
 }
 
 /**
+ * Reset failure count to 0 after successful progress.
+ * Called on successful progress to give the operation a clean slate.
+ */
+export async function resetBulkOperationFailureCount(
+  sql: import("~/lib/db-light.server").Sql,
+  bulkOperationId: string
+): Promise<void> {
+  await sql`
+    UPDATE s6_bulk_operations
+    SET failure_count = 0
+    WHERE bulk_operation_id = ${bulkOperationId}
+  `;
+}
+
+/**
  * Update chunk size for a bulk operation (for growing range window).
  */
 export async function updateBulkOperationChunkSize(

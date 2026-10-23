@@ -43,6 +43,7 @@ import {
   getBulkOperationMetadata,
   updateBulkOperationChunkSize,
   incrementBulkOperationFailureCount,
+  resetBulkOperationFailureCount,
 } from "./bulk-operations.server";
 
 /**
@@ -69,6 +70,13 @@ export const DEFAULT_MAX_LINES = 100;
 export const MAX_FAILURE_COUNT = 5;
 
 /**
+ * Error classification for retry logic.
+ * - retryable: network, 5xx, 429, timeouts - increment failure_count, retry until 5
+ * - permanent: 4xx (not 429), bad data - go straight to DLQ
+ */
+export type ErrorType = "retryable" | "permanent";
+
+/**
  * Result of a bulk operation processing.
  * Extends SyncResult with a status field for progress tracking.
  */
@@ -77,6 +85,8 @@ export interface BulkProcessResult extends SyncResult {
   status?: "complete" | "progress" | "error";
   /** Whether to chain to orders reconcile after companies complete */
   chainToOrders?: boolean;
+  /** Error classification for retry logic (only set when status='error') */
+  errorType?: ErrorType;
 }
 
 /**
@@ -127,6 +137,8 @@ export interface ChunkFetchResult {
   totalSize?: number;
   /** Error message if failed */
   error?: string;
+  /** HTTP status code (for error classification) */
+  httpStatus?: number;
 }
 
 /**
@@ -167,6 +179,9 @@ export async function fetchJsonlChunk(
     // If startByte > 0 and we got 200, we need to slice
     if (response.status === 200 && startByte > 0) {
       // Server ignored our Range request - slice from startByte
+      console.warn(
+        `[bulk-jsonl] Server returned 200 instead of 206 for Range request (startByte=${startByte}). Slicing locally.`
+      );
       if (bytes.length <= startByte) {
         // We're past EOF
         return { success: true, bytes: new Uint8Array(0), isEof: true };
@@ -186,6 +201,7 @@ export async function fetchJsonlChunk(
         success: false,
         isEof: false,
         error: `HTTP ${response.status}: ${response.statusText}`,
+        httpStatus: response.status,
       };
     }
 
@@ -218,12 +234,40 @@ export async function fetchJsonlChunk(
 
     return { success: true, bytes, isEof, totalSize };
   } catch (err) {
+    // Network errors are retryable
     return {
       success: false,
       isEof: false,
       error: err instanceof Error ? err.message : "Network error",
+      httpStatus: 0, // Network error, not an HTTP response
     };
   }
+}
+
+/**
+ * Classify HTTP status code for retry logic.
+ * - Retryable: 0 (network error), 429 (rate limit), 5xx (server error)
+ * - Permanent: 4xx (except 429) - client error, bad request
+ */
+export function classifyHttpError(httpStatus: number | undefined): ErrorType {
+  if (httpStatus === undefined || httpStatus === 0) {
+    // Network error - retryable
+    return "retryable";
+  }
+  if (httpStatus === 429) {
+    // Rate limit - retryable
+    return "retryable";
+  }
+  if (httpStatus >= 500) {
+    // Server error - retryable
+    return "retryable";
+  }
+  if (httpStatus >= 400 && httpStatus < 500) {
+    // Client error (4xx except 429) - permanent
+    return "permanent";
+  }
+  // Anything else unexpected - retryable to be safe
+  return "retryable";
 }
 
 /**
@@ -271,9 +315,9 @@ export function splitBytesIntoLines(
             lineEndPositions.push(i + 1); // Position after the newline
           }
         } catch {
-          // Invalid UTF-8 - skip this line, but still record position
+          // Invalid UTF-8 - skip this line entirely, don't record position
+          // (lineEndPositions must stay aligned with lines array)
           console.warn("[bulk-jsonl] Invalid UTF-8 in line, skipping");
-          lineEndPositions.push(i + 1);
         }
       }
       lastNewlinePos = i;
@@ -338,29 +382,12 @@ async function processCompanyLines(
     }
   }
 
-  // Handle orphan locations: parent company from earlier chunk
-  // Look up existing company by __parentId (company GID)
+  // Handle orphan locations: parent company from earlier chunk or slice
+  // Map unconditionally using parent company GID - guarded upserts handle duplicates
+  // This ensures locations are processed even when company ended previous slice
   for (const orphanLoc of orphanLocations) {
-    const companyGid = orphanLoc.__parentId;
-    // Check if we have a BuyerAccount for this company
-    const [existingCompany] = await sql<{ id: string }[]>`
-      SELECT id FROM "BuyerAccount"
-      WHERE "shopId" = ${shopId}
-        AND "companyId" = ${companyGid}
-      LIMIT 1
-    `;
-
-    if (existingCompany) {
-      // Parent company exists, process this location
-      const shopifyLoc = bulkLocationToShopifyLocation(orphanLoc);
-      accounts.push(mapCompanyLocationToBuyerAccount(shopId, shopifyLoc));
-    } else {
-      // Parent company not in DB yet - log and skip for now
-      // It may come in a later chunk or was deleted
-      console.warn(
-        `[bulk-jsonl] Orphan location ${orphanLoc.id} - parent ${companyGid} not found`
-      );
-    }
+    const shopifyLoc = bulkLocationToShopifyLocation(orphanLoc);
+    accounts.push(mapCompanyLocationToBuyerAccount(shopId, shopifyLoc));
   }
 
   return await bulkUpsertBuyerAccounts(sql, accounts);
@@ -613,6 +640,7 @@ export async function processBulkOperation(
       action: "skipped",
       error: `Shop not found: ${shop}`,
       status: "error",
+      errorType: "permanent", // Bad data, shop doesn't exist
     };
   }
 
@@ -627,6 +655,7 @@ export async function processBulkOperation(
       action: "skipped",
       error: `Bulk operation not found: ${bulkOperationId}`,
       status: "error",
+      errorType: "permanent", // Bad data, operation not registered
     };
   }
 
@@ -646,13 +675,14 @@ export async function processBulkOperation(
     };
   }
 
-  // Check failure count
+  // Check failure count - if already at max, this goes to DLQ
   if (progress.failureCount >= MAX_FAILURE_COUNT) {
     return {
       success: false,
       action: "skipped",
       error: `Max failures exceeded (${progress.failureCount})`,
       status: "error",
+      errorType: "permanent", // Already exhausted retries
     };
   }
 
@@ -660,13 +690,18 @@ export async function processBulkOperation(
   const statusResult = await getBulkOperationStatus(shop, bulkOperationId);
 
   if (!statusResult.success || !statusResult.data?.url) {
-    // Increment failure count
-    await incrementBulkOperationFailureCount(sql, bulkOperationId);
+    // Increment failure count for retryable API error
+    const newFailureCount = await incrementBulkOperationFailureCount(
+      sql,
+      bulkOperationId
+    );
+    const exhaustedRetries = newFailureCount >= MAX_FAILURE_COUNT;
     return {
       success: false,
       action: "skipped",
       error: statusResult.error || "No result URL available",
       status: "error",
+      errorType: exhaustedRetries ? "permanent" : "retryable",
     };
   }
 
@@ -682,13 +717,32 @@ export async function processBulkOperation(
   );
 
   if (!chunkResult.success || !chunkResult.bytes) {
-    // Increment failure count
-    await incrementBulkOperationFailureCount(sql, bulkOperationId);
+    // Classify error based on HTTP status
+    const httpErrorType = classifyHttpError(chunkResult.httpStatus);
+
+    if (httpErrorType === "permanent") {
+      // Permanent error (4xx) - go straight to DLQ
+      return {
+        success: false,
+        action: "skipped",
+        error: chunkResult.error || "Failed to fetch chunk",
+        status: "error",
+        errorType: "permanent",
+      };
+    }
+
+    // Retryable error - increment failure count
+    const newFailureCount = await incrementBulkOperationFailureCount(
+      sql,
+      bulkOperationId
+    );
+    const exhaustedRetries = newFailureCount >= MAX_FAILURE_COUNT;
     return {
       success: false,
       action: "skipped",
       error: chunkResult.error || "Failed to fetch chunk",
       status: "error",
+      errorType: exhaustedRetries ? "permanent" : "retryable",
     };
   }
 
@@ -732,24 +786,27 @@ export async function processBulkOperation(
   const { lines, lineEndPositions, bytesConsumed, tailBytes } =
     splitBytesIntoLines(bytes, decoder);
 
-  // Handle case where no newlines found in chunk
-  if (lines.length === 0 && !chunkResult.isEof) {
+  // Handle case where no newlines found in chunk (bytesConsumed===0 means no newlines)
+  if (bytesConsumed === 0 && !chunkResult.isEof) {
     // No newlines found - grow the range window
     const newChunkSize = Math.min(currentChunkSize * 2, MAX_CHUNK_SIZE);
 
     if (newChunkSize <= currentChunkSize) {
-      // Already at max chunk size - line exceeds cap, terminal error
-      await incrementBulkOperationFailureCount(sql, bulkOperationId);
+      // Already at max chunk size - line exceeds cap, terminal error (bad data)
       return {
         success: false,
         action: "skipped",
         error: `Line exceeds ${MAX_CHUNK_SIZE} byte cap`,
         status: "error",
+        errorType: "permanent", // Bad data, not retryable
       };
     }
 
     // Save increased chunk size and retry
     await updateBulkOperationChunkSize(sql, bulkOperationId, newChunkSize);
+
+    // Reset failure count on successful progress
+    await resetBulkOperationFailureCount(sql, bulkOperationId);
 
     console.log(
       `[bulk-jsonl] No newlines in ${currentChunkSize}B chunk, growing to ${newChunkSize}B`
@@ -859,6 +916,9 @@ export async function processBulkOperation(
   // Reset chunk size to default if we found lines
   const nextChunkSize = lines.length > 0 ? DEFAULT_CHUNK_SIZE : currentChunkSize;
   await saveBulkOperationProgress(sql, bulkOperationId, newByteOffset, null, nextChunkSize);
+
+  // Reset failure count on successful progress
+  await resetBulkOperationFailureCount(sql, bulkOperationId);
 
   console.log(
     `[bulk-jsonl] Progress ${bulkType} for ${shop}: offset=${newByteOffset}, lines=${linesToProcess.length}, upserted=${totalUpserted}`

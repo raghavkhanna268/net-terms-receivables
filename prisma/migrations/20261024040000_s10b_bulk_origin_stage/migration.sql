@@ -34,9 +34,15 @@ BEGIN
   ALTER TABLE s6_bulk_operations 
     ADD CONSTRAINT s6_bulk_operations_bulk_type_check 
     CHECK (bulk_type IN ('companies', 'orders', 'customers'));
-EXCEPTION WHEN OTHERS THEN
-  -- Constraint may not exist in CI, ignore errors
-  NULL;
+EXCEPTION
+  WHEN undefined_object THEN
+    -- Constraint didn't exist, add it fresh
+    ALTER TABLE s6_bulk_operations 
+      ADD CONSTRAINT s6_bulk_operations_bulk_type_check 
+      CHECK (bulk_type IN ('companies', 'orders', 'customers'));
+  WHEN duplicate_object THEN
+    -- Constraint already exists with desired definition, ok
+    NULL;
 END;
 $do$;
 

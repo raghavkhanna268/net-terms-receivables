@@ -680,14 +680,14 @@ async function processBulkQueue(
       if (bulkResult.success) {
         // Check status for progress vs complete
         if (bulkResult.status === "progress") {
-          // Archive this message and send a fresh continuation with read_ct=0
-          // This prevents progress iterations from counting toward DLQ threshold
-          await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
-
-          // Send fresh continuation message (new msg_id, read_ct starts at 0)
+          // Send fresh continuation message FIRST (new msg_id, read_ct starts at 0)
+          // Then archive the old one. This order ensures we never strand an op:
+          // - If crash after send but before archive: duplicate message, handled by idempotency
+          // - If crash before send: old message retried normally
           await sql`
             SELECT pgmq.send(${S6_QUEUES.BULK}, ${sql.json(msg.message)})
           `;
+          await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
 
           result.processed++; // Count as progress
         } else {
@@ -700,27 +700,38 @@ async function processBulkQueue(
           }
         }
       } else {
-        // Failure - the failure_count in s6_bulk_operations tracks real failures
-        // We still use read_ct for catastrophic errors (handler threw exception)
-        // but bulk operation failures are tracked via failure_count by the processor
-        // The processBulkOperation increments failure_count on errors and checks it
-        // If status is 'error', the failure was already counted
-        if (bulkResult.status === "error") {
-          // Failure was tracked in s6_bulk_operations.failure_count by the processor
-          // Archive this message - a continuation was not needed
-          await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
-          result.failed++;
-        } else if (msg.read_ct >= config.maxRetries) {
+        // Error handling based on errorType classification
+        const errorType = bulkResult.errorType;
+
+        if (errorType === "permanent") {
+          // Permanent error (4xx, bad data, exhausted retries) - go to DLQ
           await moveToDeadLetter(
             sql,
             S6_QUEUES.BULK,
             msg.msg_id,
             msg.message,
-            bulkResult.error || "Max retries exceeded"
+            bulkResult.error || "Permanent error"
           );
           result.deadLettered++;
-        } else {
+        } else if (errorType === "retryable") {
+          // Retryable error - leave message in queue for retry via read_ct
+          // The failure_count was already incremented by processBulkOperation
+          // Message will be retried on next read (visibility timeout reset)
           result.failed++;
+        } else {
+          // Unknown error type or legacy path - use read_ct for DLQ
+          if (msg.read_ct >= config.maxRetries) {
+            await moveToDeadLetter(
+              sql,
+              S6_QUEUES.BULK,
+              msg.msg_id,
+              msg.message,
+              bulkResult.error || "Max retries exceeded"
+            );
+            result.deadLettered++;
+          } else {
+            result.failed++;
+          }
         }
         result.errors.push({
           msgId: msg.msg_id,

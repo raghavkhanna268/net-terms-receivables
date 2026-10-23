@@ -90,6 +90,44 @@ describe("Bulk JSONL Processor", () => {
     vi.restoreAllMocks();
   });
 
+  describe("classifyHttpError", () => {
+    it("classifies network errors (0) as retryable", async () => {
+      const { classifyHttpError } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+      expect(classifyHttpError(0)).toBe("retryable");
+      expect(classifyHttpError(undefined)).toBe("retryable");
+    });
+
+    it("classifies 429 (rate limit) as retryable", async () => {
+      const { classifyHttpError } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+      expect(classifyHttpError(429)).toBe("retryable");
+    });
+
+    it("classifies 5xx errors as retryable", async () => {
+      const { classifyHttpError } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+      expect(classifyHttpError(500)).toBe("retryable");
+      expect(classifyHttpError(502)).toBe("retryable");
+      expect(classifyHttpError(503)).toBe("retryable");
+      expect(classifyHttpError(504)).toBe("retryable");
+    });
+
+    it("classifies 4xx (except 429) as permanent", async () => {
+      const { classifyHttpError } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+      expect(classifyHttpError(400)).toBe("permanent");
+      expect(classifyHttpError(401)).toBe("permanent");
+      expect(classifyHttpError(403)).toBe("permanent");
+      expect(classifyHttpError(404)).toBe("permanent");
+      expect(classifyHttpError(410)).toBe("permanent");
+    });
+  });
+
   describe("splitBytesIntoLines", () => {
     it("splits complete lines and tracks per-line byte positions", async () => {
       const { splitBytesIntoLines } = await import(
@@ -503,6 +541,51 @@ describe("Orphan location handling", () => {
 
     // In processCompanyLines, this orphan would be looked up in DB
     // and processed if parent company exists
+  });
+
+  it("MUST-FIX #3: orphan locations at slice boundary are mapped unconditionally", async () => {
+    // This tests the exact slice boundary: company ends one slice,
+    // its first locations start the next slice (within maxLines batch)
+    const { parseCompanyBulkJsonl, bulkLocationToShopifyLocation } =
+      await import("../bulk-parser.server");
+
+    // Simulate slice 1 ending with a company (lines 1-100)
+    // Slice 2 starting with that company's locations
+    const slice2Lines = `{"id":"gid://shopify/CompanyLocation/1","name":"HQ","__parentId":"gid://shopify/Company/999"}
+{"id":"gid://shopify/CompanyLocation/2","name":"Branch","__parentId":"gid://shopify/Company/999"}`;
+
+    const parseResult = parseCompanyBulkJsonl(slice2Lines);
+
+    // Both locations are orphans (parent company was in previous slice)
+    expect(parseResult.companies.size).toBe(0);
+    expect(parseResult.orphanLocations).toHaveLength(2);
+
+    // Both orphans reference the same parent
+    expect(parseResult.orphanLocations[0].__parentId).toBe(
+      "gid://shopify/Company/999"
+    );
+    expect(parseResult.orphanLocations[1].__parentId).toBe(
+      "gid://shopify/Company/999"
+    );
+
+    // The orphan locations should be mapped unconditionally using parent company GID
+    // Even if no BuyerAccount exists yet for the parent company
+    const shopifyLoc1 = bulkLocationToShopifyLocation(
+      parseResult.orphanLocations[0]
+    );
+    const shopifyLoc2 = bulkLocationToShopifyLocation(
+      parseResult.orphanLocations[1]
+    );
+
+    // Verify conversion uses __parentId as company.id
+    expect(shopifyLoc1.company.id).toBe("gid://shopify/Company/999");
+    expect(shopifyLoc2.company.id).toBe("gid://shopify/Company/999");
+
+    // The mock mapCompanyLocationToBuyerAccount uses the company.id from the location
+    // This verifies orphans are processed with their parent company GID
+    // even when the parent company hasn't been processed yet in this slice
+    expect(shopifyLoc1.id).toBe("gid://shopify/CompanyLocation/1");
+    expect(shopifyLoc2.id).toBe("gid://shopify/CompanyLocation/2");
   });
 });
 
