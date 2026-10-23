@@ -21,7 +21,15 @@ A manually-triggered GitHub Actions workflow for read-only diagnostics against t
 2. Click **Run workflow**
 3. Select `main` branch (required - workflow only runs from main)
 4. Enter the shop domain (e.g., `net-terms-receivables.myshopify.com`)
-5. Click **Run workflow**
+5. Optionally check **fail_on_expired** for strict mode (fails if token expired)
+6. Click **Run workflow**
+
+### Inputs
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `shop` | `net-terms-receivables.myshopify.com` | Shopify shop domain |
+| `fail_on_expired` | `false` | If true, fail the workflow when the offline token has expired |
 
 ### Output Interpretation
 
@@ -35,12 +43,20 @@ Queries the `Session` table and displays:
 | `isOnline` | `true` = staff user session, `false` = offline (app) session |
 | `scope` | OAuth scopes granted to the session |
 | `hasAccessToken` | `true` if access token is present and non-empty |
-| `expires` | Session expiration timestamp (null for offline sessions) |
+| `expires` | Session expiration timestamp. For expiring offline tokens (`future.expiringOfflineAccessTokens: true`), this is set; null only for legacy non-expiring tokens |
+
+Additionally, for the offline session:
+
+| Field | Meaning |
+|-------|---------|
+| `token_expired` | `true` if the offline token's `expires` timestamp has passed |
+| `has_refresh_token` | `true` if a refresh token is stored (can be used to renew) |
 
 **Common issues:**
 - No rows returned → Shop has uninstalled or never installed
 - `hasAccessToken = false` → Token revoked or corrupted session
 - Missing `scope` → OAuth flow incomplete
+- `token_expired = true` → Offline token has expired; see "Token Expiration" below
 
 #### Step 2: Protected Customer Data Probe
 
@@ -59,12 +75,43 @@ Calls the Shopify Admin GraphQL API with the offline token and reports:
 - `customer_found = false` → Shop has no customers yet
 - `email_non_null = false` with `customer_found = true` → PCD scopes not approved
 - `email_not_redacted = false` → Customer has redacted email (test account or GDPR)
-- `graphql_errors` present → Check error codes for scope issues (403) or rate limits (429)
+- `graphql_error_codes` present → Check error codes for scope issues or rate limits
+
+**Possible status values:**
+- `success` → API call succeeded, boolean fields populated
+- `skipped` → Token expired, API call not attempted
+- `auth_failed` → HTTP 401/403, token invalid or revoked
+- `error` → Other API error (e.g., rate limit, server error)
+
+### Token Expiration
+
+This app uses expiring offline access tokens (`future.expiringOfflineAccessTokens: true` in `shopify.app.toml`). Offline tokens have an `expires` timestamp and must be periodically refreshed.
+
+**When `token_expired = true`:**
+
+The workflow skips the Admin API probe and exits successfully (exit 0) unless `fail_on_expired = true`.
+
+**Why the workflow doesn't refresh the token:**
+
+This workflow is strictly read-only. Refreshing an expired token via Shopify's OAuth refresh endpoint would:
+1. Return a new access token and a **new refresh token**
+2. Invalidate the old refresh token
+
+Without writing the new tokens back to the database, the app's session would be permanently broken. The drain path does not yet include token refresh, so this workflow must not attempt it.
+
+**How to renew an expired token:**
+
+1. **Open the app in Shopify admin** — The embedded app OAuth flow automatically refreshes the token when a merchant opens the app
+2. **Implement a refresh flow** — A future background job could refresh tokens before expiry and write them back to the database
 
 ### Security Notes
 
 - The workflow runs with `permissions: contents: read` only
+- Database queries use `PGOPTIONS='-c default_transaction_read_only=on'` to enforce read-only mode
 - Access token is masked via `::add-mask::` before any use
-- No customer PII (email, names, IDs) is printed in logs
+- Access token is passed to curl via `--config` file (mode 600), never on argv
+- No customer PII (email, names, IDs) is printed in logs — only boolean indicators
+- Error responses only print HTTP status and GraphQL error codes, never raw bodies
 - No artifacts are uploaded
 - All values passed via environment variables, not command-line arguments
+- Temp files are cleaned up via trap on EXIT
