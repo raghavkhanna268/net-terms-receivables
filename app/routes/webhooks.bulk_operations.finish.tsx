@@ -32,15 +32,6 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const { shop, topic, payload, webhookId } =
     await shopify.authenticate.webhook(request);
 
-  const sql = getRequestSql();
-
-  // Edge idempotency: record receipt, skip if duplicate (S20)
-  const isNew = await recordWebhookReceipt(sql, shop, webhookId, "BULK_OPERATIONS_FINISH", triggeredAt);
-  if (!isNew) {
-    console.log(`[webhooks.bulk_operations.finish] Duplicate for ${shop}, skipping`);
-    return new Response(null, { status: 200 });
-  }
-
   const typedPayload = payload as {
     admin_graphql_api_id?: string;
     status?: string;
@@ -63,6 +54,8 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     return new Response(null, { status: 200 });
   }
 
+  const sql = getRequestSql();
+
   // Look up bulk type from tracking table (set when operation was started)
   const bulkType = await lookupBulkOperationType(sql, bulkOperationId);
 
@@ -73,14 +66,29 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     return new Response(null, { status: 200 });
   }
 
-  await sendBulkMessage(sql, {
-    topic,
-    shop,
-    webhookId,
-    bulkOperationId,
-    bulkType,
-    enqueuedAt: new Date().toISOString(),
+  // S20: Edge idempotency + enqueue in ONE transaction
+  const result = await sql.begin(async (tx) => {
+    const isNew = await recordWebhookReceipt(tx, shop, webhookId, "BULK_OPERATIONS_FINISH", triggeredAt);
+    if (!isNew) {
+      return { duplicate: true };
+    }
+
+    await sendBulkMessage(tx, {
+      topic,
+      shop,
+      webhookId,
+      bulkOperationId,
+      bulkType,
+      enqueuedAt: new Date().toISOString(),
+    });
+
+    return { duplicate: false };
   });
+
+  if (result.duplicate) {
+    console.log(`[webhooks.bulk_operations.finish] Duplicate for ${shop}, skipping`);
+    return new Response(null, { status: 200 });
+  }
 
   console.log(
     `[webhooks.bulk_operations.finish] Enqueued ${bulkType} bulk operation for ${shop}: ${bulkOperationId}`

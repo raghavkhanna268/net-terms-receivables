@@ -5,7 +5,7 @@ import {
 } from "~/lib/webhook-verify.server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { markShopUninstalled } from "~/services/compliance";
-import { recordWebhookReceipt, parseTriggeredAt, deleteWebhookReceiptsForShop } from "~/lib/webhook-receipts.server";
+import { deleteWebhookReceiptsForShop } from "~/lib/webhook-receipts.server";
 
 /**
  * App uninstalled webhook handler.
@@ -22,6 +22,11 @@ import { recordWebhookReceipt, parseTriggeredAt, deleteWebhookReceiptsForShop } 
  * This gives merchants a grace period if they reinstall, and ensures
  * we meet GDPR/CCPA requirements for data deletion timing.
  *
+ * Idempotency: No edge deduplication - handlers are fully idempotent:
+ * - deleteAllForShop: deleting 0 sessions is safe
+ * - markShopUninstalled: re-marking is safe (timestamp already set)
+ * - deleteWebhookReceiptsForShop: deleting 0 receipts is safe
+ *
  * OPTIMIZATION: Uses lightweight verifyWebhook() instead of authenticate.webhook()
  * to avoid unnecessary session loading. This webhook only needs to DELETE sessions,
  * not read them - deleteAllForShop runs a single DELETE query.
@@ -35,20 +40,10 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     return new Response(null, { status: 500 });
   }
 
-  const triggeredAt = parseTriggeredAt(request);
-  const { shop, topic, webhookId } = await verifyWebhook(request, apiSecret);
+  const { shop, topic } = await verifyWebhook(request, apiSecret);
   const normalizedTopic = normalizeWebhookTopic(topic);
 
   console.log(`Received ${normalizedTopic} webhook for ${shop}`);
-
-  const sql = getRequestSql();
-
-  // Edge idempotency: record receipt, skip if duplicate (S20)
-  const isNew = await recordWebhookReceipt(sql, shop, webhookId, normalizedTopic, triggeredAt);
-  if (!isNew) {
-    console.log(`[uninstalled] Duplicate ${normalizedTopic} for ${shop}, skipping`);
-    return new Response();
-  }
 
   if (normalizedTopic !== "APP_UNINSTALLED") {
     console.log(
@@ -56,6 +51,8 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     );
     return new Response();
   }
+
+  const sql = getRequestSql();
 
   try {
     const { sessionStorage } = context;

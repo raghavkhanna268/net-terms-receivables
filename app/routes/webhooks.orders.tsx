@@ -18,11 +18,12 @@ import { recordWebhookReceipt, parseTriggeredAt } from "~/lib/webhook-receipts.s
  *
  * Processing:
  * 1. HMAC verification via verifyWebhook (returns 401 on failure)
- * 2. Edge idempotency: record receipt, skip if duplicate (S20)
- * 3. Topic guard: only process expected topics
- * 4. Extract minimal payload (just the order GID)
- * 5. Enqueue to s6_sync for async processing
- * 6. Return 200 immediately (within 10ms CPU budget)
+ * 2. Topic guard: only process expected topics
+ * 3. Extract minimal payload (just the order GID)
+ * 4. Edge idempotency + enqueue in ONE transaction (S20)
+ *    - If duplicate: return 200 (skip)
+ *    - If enqueue fails: receipt rolls back, Shopify retry succeeds
+ * 5. Return 200 immediately (within 10ms CPU budget)
  *
  * OPTIMIZATION: Uses lightweight verifyWebhook() instead of authenticate.webhook()
  * to avoid unnecessary session lookups. Saves ~5-10ms DB round-trip per webhook.
@@ -53,15 +54,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const { shop, topic, webhookId, payload } = await verifyWebhook(request, apiSecret);
   const normalizedTopic = normalizeWebhookTopic(topic);
 
-  const sql = getRequestSql();
-
-  // Edge idempotency: record receipt, skip if duplicate (S20)
-  const isNew = await recordWebhookReceipt(sql, shop, webhookId, normalizedTopic, triggeredAt);
-  if (!isNew) {
-    console.log(`[webhooks.orders] Duplicate ${normalizedTopic} for ${shop}, skipping`);
-    return new Response(null, { status: 200 });
-  }
-
   if (!ALLOWED_TOPICS.has(normalizedTopic)) {
     console.warn(
       `[webhooks.orders] Unexpected topic ${normalizedTopic} for ${shop}, ignoring`
@@ -79,14 +71,33 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return new Response(null, { status: 200 });
   }
 
-  await sendSyncMessage(sql, {
-    topic: normalizedTopic,
-    shop,
-    webhookId,
-    resourceGid,
-    enqueuedAt: new Date().toISOString(),
-    triggeredAt: triggeredAt?.toISOString(),
+  const sql = getRequestSql();
+
+  // S20: Edge idempotency + enqueue in ONE transaction
+  // If duplicate: return 200 (skip)
+  // If enqueue fails: receipt rolls back, Shopify retry succeeds
+  const result = await sql.begin(async (tx) => {
+    const isNew = await recordWebhookReceipt(tx, shop, webhookId, normalizedTopic, triggeredAt);
+    if (!isNew) {
+      return { duplicate: true };
+    }
+
+    await sendSyncMessage(tx, {
+      topic: normalizedTopic,
+      shop,
+      webhookId,
+      resourceGid,
+      enqueuedAt: new Date().toISOString(),
+      triggeredAt: triggeredAt?.toISOString(),
+    });
+
+    return { duplicate: false };
   });
+
+  if (result.duplicate) {
+    console.log(`[webhooks.orders] Duplicate ${normalizedTopic} for ${shop}, skipping`);
+    return new Response(null, { status: 200 });
+  }
 
   console.log(`[webhooks.orders] Enqueued ${normalizedTopic} for ${shop}: ${resourceGid}`);
 

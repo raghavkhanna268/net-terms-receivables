@@ -15,7 +15,7 @@ import {
   sendDataRequestNotification,
 } from "~/services/compliance";
 import { getShopifyApp } from "~/shopify.server";
-import { recordWebhookReceipt, parseTriggeredAt, deleteWebhookReceiptsForShop } from "~/lib/webhook-receipts.server";
+import { deleteWebhookReceiptsForShop } from "~/lib/webhook-receipts.server";
 
 /**
  * Fetch shop owner email using the offline session admin client.
@@ -60,6 +60,11 @@ async function fetchShopOwnerEmail(shop: string): Promise<string | null> {
  * - customers/redact: Deletes s8 data, anonymizes BuyerAccount/Invoice/Payment
  * - shop/redact: Deletes Shop row (CASCADE removes all shop data)
  *
+ * Idempotency: No edge deduplication - handlers are fully idempotent:
+ * - data_request: Regenerating export is safe (same data)
+ * - customers/redact: Deleting already-deleted data is safe
+ * - shop/redact: Deleting already-deleted shop is safe
+ *
  * Security: All handlers verify payload shop_domain matches header shop.
  * This prevents attackers from forging payloads to delete wrong shop's data.
  */
@@ -70,7 +75,6 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     return new Response(null, { status: 500 });
   }
 
-  const triggeredAt = parseTriggeredAt(request);
   const { shop, topic, webhookId, payload } = await verifyWebhook(request, apiSecret, {
     requireValidJson: true,
   });
@@ -81,13 +85,6 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   );
 
   const sql = getRequestSql();
-
-  // Edge idempotency: record receipt, skip if duplicate (S20)
-  const isNew = await recordWebhookReceipt(sql, shop, webhookId, normalizedTopic, triggeredAt);
-  if (!isNew) {
-    console.log(`[Compliance] Duplicate ${normalizedTopic} for ${shop}, skipping`);
-    return new Response(null, { status: 200 });
-  }
 
   switch (normalizedTopic) {
     case "CUSTOMERS_DATA_REQUEST": {

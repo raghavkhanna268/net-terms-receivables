@@ -5,11 +5,16 @@
  * - THROTTLED responses: Uses extensions.cost.throttleStatus to compute wait
  * - HTTP 429: Honours Retry-After header, else exponential backoff with jitter
  * - 5xx and network errors: Bounded exponential backoff
- * - 4xx and userErrors: Never retried (caller must handle)
+ *
+ * NOT retried (caller must handle):
+ * - HTTP 4xx (except 429): 400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found
+ * - GraphQL userErrors: Application-level validation errors (e.g., invalid input)
+ * - GraphQL errors without THROTTLED code: Query syntax errors, field errors
+ * - InvalidSession: Token revoked, shop needs to reinstall
  *
  * Worker budget awareness:
- * - Request-path code: At most 1 short retry, then surface retryable error
- * - Queue/job paths: Can wait longer within platform wall-clock limits
+ * - Request-path code: At most 1 short retry, 1s max wait
+ * - Queue/job paths: Up to 3 retries, 25s max wait (< 30s pgmq visibility timeout)
  *
  * Uses the existing admin client from drain/admin-client.server.ts as the
  * underlying implementation.
@@ -91,7 +96,7 @@ export interface RetryConfig {
   maxDelayMs: number;
   /** Max wait time for request-path in ms (default: 1000) */
   requestPathMaxWaitMs: number;
-  /** Max wait time for queue in ms (default: 30000) */
+  /** Max wait time for queue in ms (default: 25000, < 30s pgmq visibility timeout) */
   queueMaxWaitMs: number;
 }
 
@@ -101,7 +106,8 @@ const DEFAULT_RETRY_CONFIG: RetryConfig = {
   baseDelayMs: 100,
   maxDelayMs: 5000,
   requestPathMaxWaitMs: 1000,
-  queueMaxWaitMs: 30000,
+  // 25s < pgmq visibility timeout (30s) - ensures we finish before message becomes visible again
+  queueMaxWaitMs: 25000,
 };
 
 /**
@@ -206,11 +212,12 @@ export async function shopifyGraphQL<T = unknown>(
   let totalWaitTime = 0;
   let wasRateLimited = false;
 
+  // Hoist admin client outside retry loop - the session doesn't change between retries
+  const shopify = getShopifyApp();
+  const { admin } = await shopify.unauthenticated.admin(shop);
+
   while (attempt <= maxRetries) {
     try {
-      const shopify = getShopifyApp();
-      const { admin } = await shopify.unauthenticated.admin(shop);
-
       const response = await admin.graphql(query, { variables });
       const json = (await response.json()) as GraphQLResponse<T>;
 

@@ -7,33 +7,41 @@ This document describes the hardening measures implemented in S20 to ensure reli
 The Net Terms Receivables app receives webhooks from Shopify for various events (orders, companies, customers, etc.). These webhooks need to be processed reliably:
 
 1. **Exactly-once semantics**: Each webhook should be processed exactly once, even if Shopify retries delivery
-2. **Ordering safety**: Out-of-order events should not overwrite newer data
-3. **Rate limit handling**: API calls should gracefully handle throttling without losing data
-4. **Worker budget awareness**: Retries must respect the 10ms CPU budget on Cloudflare Workers Free
+2. **Rate limit handling**: API calls should gracefully handle throttling without losing data
+3. **Worker budget awareness**: Retries must respect platform limits
 
 ## Webhook Idempotency
 
-### Two-Level Deduplication
+### Two-Level Deduplication (Separate Tables)
 
-Webhooks are deduplicated at two levels:
+Webhooks are deduplicated at two independent levels using **separate tables**:
 
-#### 1. Edge Level (Webhook Route)
+#### 1. Edge Level (`webhook_receipts`)
 
-Immediately after HMAC verification, webhooks are recorded in the `webhook_receipts` table:
+For webhooks that enqueue to pgmq (orders, companies, customers, etc.), the receipt and enqueue happen in **ONE transaction**:
 
-```sql
-INSERT INTO webhook_receipts (shop, webhook_id, topic, triggered_at, received_at)
-VALUES ($1, $2, $3, $4, NOW())
-ON CONFLICT (shop, webhook_id) DO NOTHING
-RETURNING webhook_id
+```typescript
+const result = await sql.begin(async (tx) => {
+  const isNew = await recordWebhookReceipt(tx, shop, webhookId, topic, triggeredAt);
+  if (!isNew) {
+    return { duplicate: true };
+  }
+  
+  await sendSyncMessage(tx, { topic, shop, webhookId, resourceGid, ... });
+  return { duplicate: false };
+});
+
+if (result.duplicate) {
+  console.log("Duplicate, skipping");
+  return new Response(null, { status: 200 });
+}
 ```
 
-- If a row is returned, this is a **new webhook** → continue processing
-- If no row is returned (conflict), this is a **duplicate** → return 200 and skip
+This ensures:
+- If duplicate: Return 200 immediately (no double enqueue)
+- If enqueue fails: Receipt rolls back, Shopify's retry will succeed
 
-This prevents duplicate enqueues when Shopify retries webhooks.
-
-#### 2. Processor Level (Drain)
+#### 2. Drain Level (`s6_processed_webhooks`)
 
 Before processing queued messages, handlers check if the webhook was already processed:
 
@@ -41,59 +49,58 @@ Before processing queued messages, handlers check if the webhook was already pro
 if (await isWebhookProcessed(sql, webhookId, shop)) {
   return { success: true, action: "skipped" };
 }
+
+// ... process webhook ...
+
+await markWebhookProcessed(sql, webhookId, topic, resourceGid, shop);
 ```
 
 This provides belt-and-suspenders safety for queue retries.
 
+### Compliance Webhooks (No Edge Deduplication)
+
+Compliance webhooks (`app/uninstalled`, `shop/redact`, `customers/redact`, `customers/data_request`, `app/scopes_update`, `app/subscriptions_update`) do **not** use edge deduplication because:
+
+1. Their handlers are fully idempotent (delete/mark operations are safe to repeat)
+2. They don't enqueue to pgmq - they execute immediately
+3. Shopify retries are safe and may even be beneficial for resilience
+
 ### Data Model
 
 ```sql
+-- Edge deduplication (S20)
 CREATE TABLE webhook_receipts (
     shop TEXT NOT NULL,
     webhook_id TEXT NOT NULL,
     topic TEXT NOT NULL,
-    triggered_at TIMESTAMPTZ(6),  -- X-Shopify-Triggered-At
+    triggered_at TIMESTAMPTZ(6),
     received_at TIMESTAMPTZ(6) NOT NULL DEFAULT NOW(),
     PRIMARY KEY (shop, webhook_id)
+);
+
+-- Drain deduplication (S6, kept separate)
+CREATE TABLE s6_processed_webhooks (
+    webhook_id TEXT PRIMARY KEY,
+    topic TEXT NOT NULL,
+    resource_gid TEXT NOT NULL,
+    processed_at TIMESTAMPTZ NOT NULL
 );
 ```
 
 ### Retention
 
-- **30-day retention**: Receipts older than 30 days are purged via pg_cron daily at 04:30 UTC
-- **Shop deletion**: Receipts are immediately purged on `app/uninstalled` and `shop/redact` webhooks
+- **`webhook_receipts`**: 30-day retention via pg_cron (`s20_webhook_receipts_cleanup`, 04:30 UTC)
+- **`s6_processed_webhooks`**: 10-day retention via pg_cron (`s10_processed_webhooks_cleanup`, 03:00 UTC)
+- **Shop deletion**: Receipts are immediately purged on `app/uninstalled` and `shop/redact`
 
-## Ordering Guards
+## Ordering (No Explicit Guards)
 
-To prevent out-of-order events from overwriting newer data, processors use the `X-Shopify-Triggered-At` header:
+The drain re-fetches data from Shopify Admin API before processing. This means:
+- **Re-fetched data is always the latest Shopify state**
+- No `triggeredAt` vs `updatedAt` comparison needed
+- Terminal states (paid/cancelled) are protected in the upsert's `ON CONFLICT` clause
 
-### How It Works
-
-1. Webhook handlers parse `X-Shopify-Triggered-At` and include it in the queue message
-2. Processors compare the incoming `triggeredAt` against the existing record's `updatedAt`
-3. If the existing record is newer, the update is skipped
-
-```typescript
-if (triggeredAt) {
-  const [existing] = await sql`
-    SELECT id, "updatedAt" FROM "Invoice"
-    WHERE "orderId" = ${data.orderId}
-  `;
-  
-  if (existing && existing.updated_at > triggeredAt) {
-    return {
-      success: true,
-      action: "skipped",
-      skipReason: "Ordering guard: existing record is newer",
-    };
-  }
-}
-```
-
-### Protected Entities
-
-- **Invoices**: Order events check against Invoice.updatedAt
-- **BuyerAccounts**: Company/location events use upsert's natural ordering
+The `X-Shopify-Triggered-At` header is still parsed and stored for audit/debugging, but not used for ordering decisions.
 
 ## Rate Limit Handling
 
@@ -132,27 +139,25 @@ Wait time is calculated as: `(requestedCost - currentlyAvailable) / restoreRate`
 
 Retried with exponential backoff: `baseDelay * 2^attempt + jitter`
 
-#### 4xx Client Errors
+### NOT Retried (Caller Must Handle)
 
-**Never retried** - these indicate permanent failures:
-- 401/403: Authentication failures
-- 400: Invalid requests
-- userErrors in GraphQL responses
+- **HTTP 4xx (except 429)**: 400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found
+- **GraphQL userErrors**: Application-level validation errors (e.g., invalid input, constraint violations)
+- **GraphQL errors without THROTTLED code**: Query syntax errors, field errors, access denied
+- **InvalidSession**: Token revoked, shop needs to reinstall the app
 
 ### Worker Budget Awareness
 
 The retry behavior adapts to the execution context:
 
-| Context | Max Retries | Max Wait Time |
-|---------|-------------|---------------|
-| Request | 1 | 1 second |
-| Queue | 3 | 30 seconds |
+| Context | Max Retries | Max Wait Time | Use Case |
+|---------|-------------|---------------|----------|
+| Request | 1 | 1 second | Webhook handlers, user routes |
+| Queue | 3 | 25 seconds | Drain processor |
+
+**Important**: Queue max wait (25s) is less than pgmq visibility timeout (30s) to ensure processing completes before the message becomes visible to other workers.
 
 #### Request-Path Code
-
-Used for webhook handlers and user-facing routes:
-- At most 1 short retry
-- Surfaces `retryable: true` for pgmq to handle later
 
 ```typescript
 const result = await shopifyGraphQLRequest(shop, query);
@@ -163,11 +168,6 @@ if (!result.success && result.retryable) {
 ```
 
 #### Queue/Job Path Code
-
-Used by the drain processor:
-- Up to 3 retries
-- Can wait up to 30 seconds total
-- Respects platform wall-clock limits
 
 ```typescript
 const result = await shopifyGraphQLQueue(shop, query);
@@ -190,14 +190,15 @@ const result = await shopifyGraphQLQueue(shop, query);
 
 Tests verify:
 
-1. **Duplicate webhook replay**: Same payload twice produces exactly one write
-2. **Out-of-order events**: Older `triggeredAt` is ignored
-3. **THROTTLED retry**: Computed wait from throttleStatus
-4. **429 Retry-After**: Header is honoured
-5. **No retry on userErrors**: Permanent failures stop immediately
-6. **Request-path cap**: At most 1 retry in request context
+1. **Edge-then-drain**: Webhook is received at edge, processed in drain, write is applied
+2. **Replay test**: Same webhook twice produces exactly one write (no double processing)
+3. **Enqueue failure**: If enqueue throws, receipt is rolled back, retry succeeds
+4. **THROTTLED retry**: Computed wait from throttleStatus
+5. **429 Retry-After**: Header is honoured
+6. **No retry on userErrors**: Permanent failures stop immediately
+7. **Request-path cap**: At most 1 retry in request context
 
-Run tests:
+Run S20 tests:
 ```bash
 npm test -- --grep "S20"
 ```
@@ -211,8 +212,9 @@ No new environment variables required. Uses existing:
 
 ### Database Requirements
 
-- `webhook_receipts` table (created by migration)
-- pg_cron extension (for retention purge job)
+- `webhook_receipts` table (created by S20 migration)
+- `s6_processed_webhooks` table (created by S6 migration, still used)
+- pg_cron extension (for retention purge jobs)
 
 ## Monitoring
 
@@ -227,7 +229,8 @@ Log messages for observability:
 
 ## Migration
 
-Migration `20261024050000_s20_webhook_receipts` creates:
+Migration `20261025010000_s20_webhook_receipts` creates:
 - `webhook_receipts` table with indexes
-- pg_cron job for 30-day retention
-- Migrates existing `s6_processed_webhooks` data (deprecated table)
+- pg_cron job `s20_webhook_receipts_cleanup` for 30-day retention
+
+Note: `s10_processed_webhooks_cleanup` cron job is kept running since `s6_processed_webhooks` is still actively used for drain-level idempotency.

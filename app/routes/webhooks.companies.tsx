@@ -43,15 +43,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const { shop, topic, webhookId, payload } = await verifyWebhook(request, apiSecret);
   const normalizedTopic = normalizeWebhookTopic(topic);
 
-  const sql = getRequestSql();
-
-  // Edge idempotency: record receipt, skip if duplicate (S20)
-  const isNew = await recordWebhookReceipt(sql, shop, webhookId, normalizedTopic, triggeredAt);
-  if (!isNew) {
-    console.log(`[webhooks.companies] Duplicate ${normalizedTopic} for ${shop}, skipping`);
-    return new Response(null, { status: 200 });
-  }
-
   if (!ALLOWED_TOPICS.has(normalizedTopic)) {
     console.warn(
       `[webhooks.companies] Unexpected topic ${normalizedTopic} for ${shop}, ignoring`
@@ -69,14 +60,31 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return new Response(null, { status: 200 });
   }
 
-  await sendSyncMessage(sql, {
-    topic: normalizedTopic,
-    shop,
-    webhookId,
-    resourceGid,
-    enqueuedAt: new Date().toISOString(),
-    triggeredAt: triggeredAt?.toISOString(),
+  const sql = getRequestSql();
+
+  // S20: Edge idempotency + enqueue in ONE transaction
+  const result = await sql.begin(async (tx) => {
+    const isNew = await recordWebhookReceipt(tx, shop, webhookId, normalizedTopic, triggeredAt);
+    if (!isNew) {
+      return { duplicate: true };
+    }
+
+    await sendSyncMessage(tx, {
+      topic: normalizedTopic,
+      shop,
+      webhookId,
+      resourceGid,
+      enqueuedAt: new Date().toISOString(),
+      triggeredAt: triggeredAt?.toISOString(),
+    });
+
+    return { duplicate: false };
   });
+
+  if (result.duplicate) {
+    console.log(`[webhooks.companies] Duplicate ${normalizedTopic} for ${shop}, skipping`);
+    return new Response(null, { status: 200 });
+  }
 
   console.log(
     `[webhooks.companies] Enqueued ${normalizedTopic} for ${shop}: ${resourceGid}`

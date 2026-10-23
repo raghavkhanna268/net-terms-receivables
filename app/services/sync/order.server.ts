@@ -13,7 +13,11 @@
  * - dueSource: 'schedule' if from Shopify payment schedule
  *
  * Idempotent: Uses upsert with ON CONFLICT on orderId.
- * Ordering guard (S20): Uses triggeredAt to prevent older events overwriting newer data.
+ * 
+ * S20 ordering: No explicit ordering guard needed because:
+ * - The drain re-fetches the order from Shopify Admin API
+ * - Re-fetched data is always the latest Shopify state
+ * - Terminal states (paid/cancelled) are protected in the upsert
  */
 
 import type { Sql } from "~/lib/db-light.server";
@@ -28,14 +32,15 @@ import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
  * CANCELLED: Marks Invoice as cancelled
  * PAID: Marks Invoice as paid, sets outstanding to 0
  *
- * Ordering guard (S20): Uses triggeredAt to prevent older events overwriting newer data.
+ * S20: triggeredAt parameter kept for API compatibility but not used for ordering.
+ * The drain re-fetches from Shopify, so we always have the latest state.
  *
  * @param sql - postgres.js SQL client
  * @param shopDomain - Shop domain
  * @param topic - Webhook topic
  * @param order - Order data from webhook
  * @param webhookId - Webhook ID for idempotency
- * @param triggeredAt - X-Shopify-Triggered-At for ordering guards (optional)
+ * @param _triggeredAt - Unused, kept for API compatibility
  * @returns Sync result
  */
 export async function processOrderWebhook(
@@ -44,7 +49,7 @@ export async function processOrderWebhook(
   topic: string,
   order: ShopifyOrder,
   webhookId: string,
-  triggeredAt?: Date | null
+  _triggeredAt?: Date | null
 ): Promise<SyncResult> {
   // Idempotency check
   if (await isWebhookProcessed(sql, webhookId, shopDomain)) {
@@ -104,9 +109,9 @@ export async function processOrderWebhook(
     };
   }
 
-  // CREATE or UPDATED: Upsert invoice with ordering guard
+  // CREATE or UPDATED: Upsert invoice (re-fetched data is always latest)
   const invoiceData = mapOrderToInvoice(shopId, buyerAccountId, order);
-  const result = await upsertInvoice(sql, invoiceData, triggeredAt);
+  const result = await upsertInvoice(sql, invoiceData);
 
   await markWebhookProcessed(sql, webhookId, topic, order.id, shopDomain);
 
@@ -242,31 +247,14 @@ export function mapOrderToInvoice(
 /**
  * Upsert an Invoice from order data.
  * 
- * Ordering guard (S20): If triggeredAt is provided and the existing record's
- * updatedAt is newer, the update is skipped to prevent older events overwriting.
+ * S20: No ordering guard needed. The drain re-fetches from Shopify Admin API,
+ * so the data is always the latest Shopify state. Terminal states (paid/cancelled)
+ * are protected in the upsert's DO UPDATE clause.
  */
 async function upsertInvoice(
   sql: Sql,
-  data: ReturnType<typeof mapOrderToInvoice>,
-  triggeredAt?: Date | null
+  data: ReturnType<typeof mapOrderToInvoice>
 ): Promise<SyncResult> {
-  // If triggeredAt is provided, check ordering guard first
-  if (triggeredAt) {
-    const [existing] = await sql<{ id: string; updated_at: Date }[]>`
-      SELECT id, "updatedAt" as updated_at FROM "Invoice"
-      WHERE "orderId" = ${data.orderId}
-    `;
-    
-    if (existing && existing.updated_at > triggeredAt) {
-      return {
-        success: true,
-        action: "skipped",
-        skipReason: "Ordering guard: existing record is newer",
-        entityId: existing.id,
-      };
-    }
-  }
-
   const [result] = await sql<{ id: string; action: string }[]>`
     INSERT INTO "Invoice" (
       "shopId",

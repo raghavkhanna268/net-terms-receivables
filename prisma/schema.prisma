@@ -758,3 +758,35 @@ model S22DataRequest {
   @@index([shopId, customerGid])
   @@map("s22_data_requests")
 }
+
+// =============================================================================
+// S20 WEBHOOK RECEIPTS
+// =============================================================================
+
+/// Edge-level webhook idempotency (S20).
+/// Records received webhooks per shop to prevent duplicate enqueues.
+/// Receipt + enqueue happen in ONE transaction; failed enqueue rolls back the receipt.
+///
+/// This is separate from drain-level idempotency (s6_processed_webhooks):
+/// - Edge (webhook_receipts): Prevents duplicate enqueues from Shopify retries
+/// - Drain (s6_processed_webhooks): Prevents duplicate processing in queue
+///
+/// 30-day retention via pg_cron purge job (s20_webhook_receipts_cleanup).
+/// Purged immediately on app/uninstalled and shop/redact for compliance.
+model WebhookReceipt {
+  /// Shop domain (e.g., "example.myshopify.com")
+  shop        String
+  /// X-Shopify-Webhook-Id header value
+  webhookId   String   @map("webhook_id")
+  /// Normalized webhook topic (e.g., "ORDERS_CREATE")
+  topic       String
+  /// X-Shopify-Triggered-At header value (stored for audit, not used for ordering)
+  triggeredAt DateTime? @map("triggered_at") @db.Timestamptz(6)
+  /// When the webhook was received
+  receivedAt  DateTime  @default(now()) @map("received_at") @db.Timestamptz(6)
+
+  @@id([shop, webhookId], map: "webhook_receipts_pkey")
+  @@index([receivedAt], map: "idx_webhook_receipts_received_at")
+  @@index([shop], map: "idx_webhook_receipts_shop")
+  @@map("webhook_receipts")
+}

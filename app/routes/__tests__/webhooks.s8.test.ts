@@ -12,10 +12,16 @@ import crypto from "node:crypto";
  * 4. Missing GID returns 200 without enqueue
  */
 
-// Mock SQL client
+// Mock SQL client with transaction support
 const mockSql = Object.assign(
   vi.fn().mockResolvedValue([]),
-  { json: vi.fn((v) => v) }
+  { 
+    json: vi.fn((v) => v),
+    // Mock sql.begin for S20 transactional edge idempotency
+    begin: vi.fn(async (callback: (tx: typeof mockSql) => Promise<unknown>) => {
+      return callback(mockSql);
+    }),
+  }
 );
 
 // Mock the request context module

@@ -1,7 +1,6 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { getRequestSql } from "~/lib/request-context.server";
 import { verifyWebhook, normalizeWebhookTopic } from "~/lib/webhook-verify.server";
-import { recordWebhookReceipt, parseTriggeredAt } from "~/lib/webhook-receipts.server";
 import { refreshPlanCache, resolvePlan } from "~/services/plan.server";
 import { reactivateGatedAccounts } from "~/services/gating.server";
 import type { PlanKey } from "~/lib/entitlements";
@@ -14,8 +13,9 @@ import type { PlanKey } from "~/lib/entitlements";
  * 1. Refreshes the cached plan so changes take effect immediately
  * 2. On upgrade, reactivates gated accounts up to the new limit (oldest first)
  *
- * Idempotency: Uses HMAC verification + edge deduplication (S20) + safe-to-replay design.
- * Refreshing the cache multiple times is safe and has no side effects.
+ * Idempotency: HMAC verification + safe-to-replay design. No edge deduplication
+ * because handlers are fully idempotent (cache refresh + account reactivation).
+ * Shopify retries are safe and may even be beneficial for resilience.
  *
  * Background refresh: Uses cloudflare.ctx.waitUntil() to avoid blocking
  * the webhook response. Shopify expects a quick 200 response.
@@ -41,18 +41,8 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     return new Response(null, { status: 500 });
   }
 
-  const triggeredAt = parseTriggeredAt(request);
   const { shop, topic, webhookId } = await verifyWebhook(request, apiSecret);
   const normalizedTopic = normalizeWebhookTopic(topic);
-
-  const sql = getRequestSql();
-
-  // Edge idempotency: record receipt, skip if duplicate (S20)
-  const isNew = await recordWebhookReceipt(sql, shop, webhookId, normalizedTopic, triggeredAt);
-  if (!isNew) {
-    console.log(`[webhooks.app.subscriptions_update] Duplicate ${normalizedTopic} for ${shop}, skipping`);
-    return new Response(null, { status: 200 });
-  }
 
   if (!ALLOWED_TOPICS.has(normalizedTopic)) {
     console.warn(
@@ -60,6 +50,8 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     );
     return new Response(null, { status: 200 });
   }
+
+  const sql = getRequestSql();
 
   // Use waitUntil for background processing to avoid blocking the response.
   // This respects the Workers 10ms CPU budget by returning quickly.

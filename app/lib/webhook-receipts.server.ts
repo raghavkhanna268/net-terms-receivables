@@ -1,14 +1,14 @@
 /**
- * Webhook receipts for S20 idempotency.
+ * Webhook receipts for S20 edge-level idempotency.
  *
- * Two-level deduplication:
- * 1. Edge (webhook route): recordWebhookReceipt() returns false if duplicate
- * 2. Processor (drain): isWebhookReceived() checks before processing
+ * EDGE-level deduplication ONLY:
+ * - recordWebhookReceipt(): Called in transactional block with enqueue
+ * - Returns false if duplicate (skip processing)
+ * - If enqueue fails, transaction rolls back (no orphan receipts)
  *
- * Ordering guards:
- * - triggered_at from X-Shopify-Triggered-At is stored with receipts
- * - Processors compare against existing data's updated_at
- * - Older events never overwrite newer data
+ * This is separate from DRAIN-level idempotency (s6_processed_webhooks).
+ * - Edge (webhook_receipts): Prevents duplicate enqueues from Shopify retries
+ * - Drain (s6_processed_webhooks): Prevents duplicate processing in queue
  *
  * Retention:
  * - 30-day purge via pg_cron
@@ -18,13 +18,17 @@
 import type { Sql } from "./db-light.server";
 
 /**
- * Record a webhook receipt at the edge.
+ * Record a webhook receipt at the edge (INSIDE a transaction).
+ *
+ * IMPORTANT: Must be called within sql.begin() along with the enqueue.
+ * This ensures if enqueue fails, the receipt is rolled back and
+ * Shopify's retry will succeed.
  *
  * Uses INSERT ... ON CONFLICT DO NOTHING to atomically dedupe.
  * Returns true if this is a new webhook (should be processed).
  * Returns false if this is a duplicate (should be skipped).
  *
- * @param sql - postgres.js SQL client
+ * @param sql - postgres.js SQL client (use transaction sql from sql.begin)
  * @param shop - Shop domain
  * @param webhookId - X-Shopify-Webhook-Id header value
  * @param topic - Normalized webhook topic (e.g., "ORDERS_CREATE")
@@ -51,49 +55,6 @@ export async function recordWebhookReceipt(
 }
 
 /**
- * Check if a webhook has been received (for processor-level idempotency).
- *
- * @param sql - postgres.js SQL client
- * @param shop - Shop domain
- * @param webhookId - X-Shopify-Webhook-Id header value
- * @returns true if already received
- */
-export async function isWebhookReceived(
-  sql: Sql,
-  shop: string,
-  webhookId: string
-): Promise<boolean> {
-  const [result] = await sql<{ exists: boolean }[]>`
-    SELECT EXISTS(
-      SELECT 1 FROM webhook_receipts
-      WHERE shop = ${shop} AND webhook_id = ${webhookId}
-    ) as exists
-  `;
-  return result?.exists ?? false;
-}
-
-/**
- * Get the triggered_at timestamp for a webhook receipt.
- * Used by processors for ordering guard comparisons.
- *
- * @param sql - postgres.js SQL client
- * @param shop - Shop domain
- * @param webhookId - X-Shopify-Webhook-Id header value
- * @returns triggered_at timestamp or null if not found
- */
-export async function getWebhookTriggeredAt(
-  sql: Sql,
-  shop: string,
-  webhookId: string
-): Promise<Date | null> {
-  const [result] = await sql<{ triggered_at: Date | null }[]>`
-    SELECT triggered_at FROM webhook_receipts
-    WHERE shop = ${shop} AND webhook_id = ${webhookId}
-  `;
-  return result?.triggered_at ?? null;
-}
-
-/**
  * Delete all webhook receipts for a shop.
  * Called on app/uninstalled and shop/redact for compliance.
  *
@@ -109,31 +70,6 @@ export async function deleteWebhookReceiptsForShop(
     DELETE FROM webhook_receipts WHERE shop = ${shop}
   `;
   return result.count;
-}
-
-/**
- * Mark a webhook as processed (for processor-level tracking).
- * This is called after successful processing to ensure the webhook
- * is recorded even if edge recording was missed.
- *
- * @param sql - postgres.js SQL client
- * @param shop - Shop domain
- * @param webhookId - X-Shopify-Webhook-Id header value
- * @param topic - Normalized webhook topic
- * @param triggeredAt - X-Shopify-Triggered-At header value (optional)
- */
-export async function markWebhookReceived(
-  sql: Sql,
-  shop: string,
-  webhookId: string,
-  topic: string,
-  triggeredAt?: Date | null
-): Promise<void> {
-  await sql`
-    INSERT INTO webhook_receipts (shop, webhook_id, topic, triggered_at, received_at)
-    VALUES (${shop}, ${webhookId}, ${topic}, ${triggeredAt ?? null}, NOW())
-    ON CONFLICT (shop, webhook_id) DO NOTHING
-  `;
 }
 
 /**
