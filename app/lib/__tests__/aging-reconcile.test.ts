@@ -82,10 +82,11 @@ describeWithDb("SQL-vs-TS parity (DB-backed)", () => {
     // Create test buyer account
     const [buyer] = await sql<{ id: string }[]>`
       INSERT INTO "BuyerAccount" (
-        id, "shopId", kind, "companyId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
       )
       VALUES (
-        gen_random_uuid()::text, ${testShopId}, 'COMPANY', 'gid://shopify/Company/parity-test',
+        gen_random_uuid()::text, ${testShopId}, 'COMPANY',
+        'gid://shopify/Company/parity-test', 'gid://shopify/CompanyLocation/parity-test',
         'Parity Test Buyer', 100000, 'OK', NOW(), NOW()
       )
       RETURNING id
@@ -241,10 +242,11 @@ describeWithDb("shop totals = sum of ledger (gating test)", () => {
     // Create active buyer
     const [activeBuyer] = await sql<{ id: string }[]>`
       INSERT INTO "BuyerAccount" (
-        id, "shopId", kind, "companyId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
       )
       VALUES (
-        gen_random_uuid()::text, ${testShopId}, 'COMPANY', 'gid://shopify/Company/active-test',
+        gen_random_uuid()::text, ${testShopId}, 'COMPANY',
+        'gid://shopify/Company/active-test', 'gid://shopify/CompanyLocation/active-test',
         'Active Buyer', 100000, 'OK', NOW(), NOW()
       )
       RETURNING id
@@ -254,10 +256,11 @@ describeWithDb("shop totals = sum of ledger (gating test)", () => {
     // Create gated buyer
     const [gatedBuyer] = await sql<{ id: string }[]>`
       INSERT INTO "BuyerAccount" (
-        id, "shopId", kind, "companyId", name, "creditLimit", "holdState", gated_at, "createdAt", "updatedAt"
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", gated_at, "createdAt", "updatedAt"
       )
       VALUES (
-        gen_random_uuid()::text, ${testShopId}, 'COMPANY', 'gid://shopify/Company/gated-test',
+        gen_random_uuid()::text, ${testShopId}, 'COMPANY',
+        'gid://shopify/Company/gated-test', 'gid://shopify/CompanyLocation/gated-test',
         'Gated Buyer', 100000, 'OK', NOW(), NOW(), NOW()
       )
       RETURNING id
