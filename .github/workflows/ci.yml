@@ -75,6 +75,9 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Check scope sync
+        run: npx tsx scripts/check-scope-sync.ts
+
       - name: Typecheck
         run: npm run typecheck
 

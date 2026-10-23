@@ -1,0 +1,29 @@
+# Development store configuration for Net Terms Receivables.
+#
+# This config is used by the dev store seed script and includes additional scopes
+# that are NOT needed in the production app.
+#
+# Usage: Create a separate Dev Dashboard app with these scopes for seeding.
+
+client_id = "" # Set to your Dev Dashboard app client ID
+name = "Net Terms Receivables (Dev Seed)"
+application_url = "https://localhost:3000"
+embedded = false
+
+[access_scopes]
+# All production scopes plus dev-only scopes for seeding.
+#
+# Production scopes (8):
+# - 5 read: read_companies, read_customers, read_draft_orders, read_orders, read_payment_terms
+# - 3 write: write_companies, write_customers, write_orders
+#
+# Dev-only scopes (for seed script):
+# - write_payment_terms: paymentTermsCreate for setting payment terms on orders
+#   (Production uses companyLocationUpdate instead, which only needs write_companies)
+# - write_draft_orders: draftOrderCreate for non-B2B customer orders in seed
+#
+# See docs/scopes.md for full audit.
+scopes = "read_companies,read_customers,read_draft_orders,read_orders,read_payment_terms,read_products,write_companies,write_customers,write_draft_orders,write_orders,write_payment_terms"
+
+[auth]
+redirect_urls = ["https://localhost:3000/auth/callback"]
