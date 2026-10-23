@@ -174,6 +174,7 @@ export interface SeedState {
   dryRun: boolean;
   reset: boolean;
   allowNonDevStore: boolean;
+  currencyCode: string;
   companies: Map<string, { id: string; locationId: string; contactId: string; contactCustomerId: string }>;
   customers: Map<string, { id: string }>;
   paymentTermsTemplates: PaymentTermsTemplate[];
@@ -190,13 +191,23 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export function formatCurrency(amount: number, currencyCode: string): string {
+  return `${currencyCode} ${amount.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+}
+
+export interface GraphQLOptions {
+  isMutation?: boolean;
+}
+
 export async function graphql<T>(
   state: SeedState,
   query: string,
-  variables?: Record<string, unknown>
+  variables?: Record<string, unknown>,
+  options?: GraphQLOptions
 ): Promise<GraphQLResponse<T>> {
   const url = `https://${state.shop}/admin/api/${API_VERSION}/graphql.json`;
   let lastError: Error | null = null;
+  const isMutation = options?.isMutation ?? false;
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
@@ -209,7 +220,7 @@ export async function graphql<T>(
         body: JSON.stringify({ query, variables }),
       });
 
-      // Retry on 429 with exponential backoff
+      // Retry on 429 with exponential backoff (safe for mutations: request was throttled, not executed)
       if (response.status === 429) {
         const delay = INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt);
         console.log(`  ⏳ Rate limited (429), retrying in ${delay}ms...`);
@@ -223,7 +234,7 @@ export async function graphql<T>(
 
       const json = (await response.json()) as GraphQLResponse<T>;
 
-      // Check for THROTTLED error in response
+      // Retry on THROTTLED (safe for mutations: request was throttled, not executed)
       const throttledError = json.errors?.find((e) => e.extensions?.code === "THROTTLED");
       if (throttledError) {
         const delay = INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt);
@@ -246,6 +257,14 @@ export async function graphql<T>(
       return json;
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
+      
+      // For mutations, do NOT auto-retry on network errors: the first request may have
+      // succeeded, and retrying could create duplicates. Callers should re-check existence.
+      if (isMutation) {
+        throw lastError;
+      }
+      
+      // For queries, retry with exponential backoff
       if (attempt < MAX_RETRIES - 1) {
         const delay = INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt);
         console.log(`  ⏳ Request failed, retrying in ${delay}ms...`);
@@ -285,6 +304,9 @@ export async function checkDevStore(state: SeedState): Promise<boolean> {
     console.error("  ❌ No shop info returned");
     return false;
   }
+
+  // Store the currency code for use in order creation
+  state.currencyCode = shop.currencyCode;
 
   if (!shop.plan.partnerDevelopment) {
     if (state.allowNonDevStore) {
@@ -482,7 +504,8 @@ async function deleteSeededDraftOrders(state: SeedState): Promise<void> {
             userErrors { field message }
           }
         }`,
-        { input: { id: draft.id } }
+        { input: { id: draft.id } },
+        { isMutation: true }
       );
 
       if (deleteResult.data?.draftOrderDelete.userErrors.length) {
@@ -517,7 +540,8 @@ async function deleteSeededCustomers(state: SeedState): Promise<void> {
           userErrors { field message }
         }
       }`,
-      { input: { id: customer.id } }
+      { input: { id: customer.id } },
+      { isMutation: true }
     );
 
     if (deleteResult.data?.customerDelete.userErrors.length) {
@@ -554,7 +578,8 @@ async function deleteSeededCompanies(state: SeedState): Promise<void> {
           userErrors { field message }
         }
       }`,
-      { id: company.id }
+      { id: company.id },
+      { isMutation: true }
     );
 
     if (deleteResult.data?.companyDelete.userErrors.length) {
@@ -684,7 +709,7 @@ export async function createCompany(
         lastName: seed.contact.lastName,
       },
     },
-  });
+  }, { isMutation: true });
 
   if (result.data?.companyCreate.userErrors.length) {
     console.error(`    ❌ Error creating ${seed.name}:`, result.data.companyCreate.userErrors);
@@ -786,7 +811,7 @@ export async function createCustomer(
         zip: "110001",
       }],
     },
-  });
+  }, { isMutation: true });
 
   if (result.data?.customerCreate.userErrors.length) {
     console.error(`    ❌ Error creating ${seed.email}:`, result.data.customerCreate.userErrors);
@@ -908,7 +933,7 @@ export async function seedOrders(state: SeedState): Promise<void> {
       console.log(
         `  [dry-run] Would create order ${orderIndex}: ${orderSpec.entityType} ${orderSpec.entityKey}, ` +
           `${orderSpec.termsType} ${orderSpec.termsType === "NET" ? orderSpec.dueInDays + " days" : "fixed"}, ` +
-          `₹${amount.toLocaleString("en-IN")}`
+          formatCurrency(amount, state.currencyCode)
       );
       state.createdCount.draftOrders++;
       continue;
@@ -933,7 +958,7 @@ export async function seedOrders(state: SeedState): Promise<void> {
     console.log(
       `  ✅ Created draft ${draftOrder.name}: ${orderSpec.entityType} ${orderSpec.entityKey}, ` +
         `${orderSpec.termsType} ${orderSpec.termsType === "NET" ? orderSpec.dueInDays + " days" : "fixed"}, ` +
-        `₹${draftOrder.totalPrice.toLocaleString("en-IN")}`
+        formatCurrency(draftOrder.totalPrice, state.currencyCode)
     );
 
     // Complete draft order - payment terms automatically create it as payment pending
@@ -942,7 +967,7 @@ export async function seedOrders(state: SeedState): Promise<void> {
     const completed = await completeDraftOrder(state, draftOrder.id);
     if (completed) {
       state.createdCount.orders++;
-      console.log(`    → Completed as order ${completed.name} (total: ₹${completed.totalPrice.toLocaleString("en-IN")})`);
+      console.log(`    → Completed as order ${completed.name} (total: ${formatCurrency(completed.totalPrice, state.currencyCode)})`);
     }
   }
 }
@@ -1015,12 +1040,12 @@ export async function createDraftOrder(
         quantity: 1,
         priceOverride: {
           amount: String(options.amount),
-          currencyCode: "INR",
+          currencyCode: state.currencyCode,
         },
       }],
-      presentmentCurrencyCode: "INR",
+      presentmentCurrencyCode: state.currencyCode,
     },
-  });
+  }, { isMutation: true });
 
   if (result.data?.draftOrderCreate.userErrors.length) {
     console.error(`    ❌ Error creating draft order:`, result.data.draftOrderCreate.userErrors);
@@ -1071,7 +1096,7 @@ export async function completeDraftOrder(
       } | null;
       userErrors: UserError[];
     };
-  }>(state, mutation, { id: draftOrderId });
+  }>(state, mutation, { id: draftOrderId }, { isMutation: true });
 
   if (result.data?.draftOrderComplete.userErrors.length) {
     console.error(`    ⚠️  Error completing draft order:`, result.data.draftOrderComplete.userErrors);
@@ -1137,6 +1162,7 @@ export async function main(): Promise<void> {
     dryRun,
     reset,
     allowNonDevStore,
+    currencyCode: "", // Set by checkDevStore()
     companies: new Map(),
     customers: new Map(),
     paymentTermsTemplates: [],

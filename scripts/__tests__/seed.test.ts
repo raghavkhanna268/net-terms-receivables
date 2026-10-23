@@ -18,6 +18,7 @@ import {
   findCompanyByExternalId,
   findCustomerByTag,
   resetSeedData,
+  formatCurrency,
   type SeedState,
   type GraphQLResponse,
 } from "../seed";
@@ -50,6 +51,7 @@ function createMockState(overrides: Partial<SeedState> = {}): SeedState {
     dryRun: false,
     reset: false,
     allowNonDevStore: false,
+    currencyCode: "INR",
     companies: new Map(),
     customers: new Map(),
     paymentTermsTemplates: [
@@ -720,5 +722,178 @@ describe("GraphQL Client", () => {
 
     expect(result.extensions?.cost?.throttleStatus).toBeDefined();
     expect(result.extensions?.cost?.throttleStatus.currentlyAvailable).toBeDefined();
+  });
+});
+
+describe("Mutation Retry Safety", () => {
+  let fetchCallCount: number;
+
+  beforeEach(() => {
+    fetchCallCount = 0;
+  });
+
+  afterEach(() => {
+    restoreFetch();
+  });
+
+  it("queries retry on network error", async () => {
+    global.fetch = vi.fn(async () => {
+      fetchCallCount++;
+      if (fetchCallCount < 3) {
+        throw new Error("Network error");
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { shop: { name: "Test" } } }),
+      } as Response;
+    });
+
+    const state = createMockState();
+    const result = await graphql(state, "query { shop { name } }");
+
+    expect(fetchCallCount).toBe(3);
+    expect(result.data).toEqual({ shop: { name: "Test" } });
+  });
+
+  it("mutations do NOT retry on network error", async () => {
+    global.fetch = vi.fn(async () => {
+      fetchCallCount++;
+      throw new Error("Network error");
+    });
+
+    const state = createMockState();
+    const mutation = "mutation CreateTest { testCreate { id } }";
+
+    await expect(graphql(state, mutation, {}, { isMutation: true })).rejects.toThrow("Network error");
+    expect(fetchCallCount).toBe(1);
+  });
+
+  it("mutations still retry on 429 throttle (safe because request wasn't executed)", async () => {
+    global.fetch = vi.fn(async () => {
+      fetchCallCount++;
+      if (fetchCallCount < 2) {
+        return {
+          ok: false,
+          status: 429,
+          statusText: "Too Many Requests",
+        } as Response;
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: { testCreate: { id: "123" } },
+          extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+        }),
+      } as Response;
+    });
+
+    const state = createMockState();
+    const result = await graphql(state, "mutation { testCreate { id } }", {}, { isMutation: true });
+
+    expect(fetchCallCount).toBe(2);
+    expect(result.data).toEqual({ testCreate: { id: "123" } });
+  });
+
+  it("mutations still retry on THROTTLED GraphQL error (safe because request wasn't executed)", async () => {
+    global.fetch = vi.fn(async () => {
+      fetchCallCount++;
+      if (fetchCallCount < 2) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            errors: [{ message: "Throttled", extensions: { code: "THROTTLED" } }],
+          }),
+        } as Response;
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: { testCreate: { id: "456" } },
+          extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+        }),
+      } as Response;
+    });
+
+    const state = createMockState();
+    const result = await graphql(state, "mutation { testCreate { id } }", {}, { isMutation: true });
+
+    expect(fetchCallCount).toBe(2);
+    expect(result.data).toEqual({ testCreate: { id: "456" } });
+  });
+});
+
+describe("Dynamic Currency", () => {
+  beforeEach(() => {
+    setupMockFetch();
+    mockResponses.clear();
+  });
+
+  afterEach(() => {
+    restoreFetch();
+    capturedRequests = [];
+  });
+
+  it("checkDevStore stores currencyCode in state", async () => {
+    mockResponses.set("shopInfo", {
+      data: { shop: { plan: { partnerDevelopment: true }, currencyCode: "USD" } },
+      extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+    });
+
+    const state = createMockState({ currencyCode: "" });
+    await checkDevStore(state);
+
+    expect(state.currencyCode).toBe("USD");
+  });
+
+  it("createDraftOrder uses state.currencyCode in priceOverride", async () => {
+    const state = createMockState({ currencyCode: "USD" });
+
+    await createDraftOrder(state, {
+      orderKey: `${SEED_PREFIX}order-currency-test`,
+      purchasingEntity: { customerId: "gid://shopify/Customer/123" },
+      paymentTermsInput: { paymentTermsTemplateId: "gid://shopify/PaymentTermsTemplate/4", paymentSchedules: [{ issuedAt: new Date().toISOString() }] },
+      billingAddress: { firstName: "Test", lastName: "User", address1: "123 St", city: "NYC", countryCode: "US", zip: "10001" },
+      variantId: "gid://shopify/ProductVariant/123",
+      amount: 50000,
+    });
+
+    const createCall = capturedRequests.find((r) => r.query.includes("draftOrderCreate"));
+    expect(createCall).toBeDefined();
+
+    const input = createCall?.variables?.input as Record<string, unknown>;
+    expect(input.presentmentCurrencyCode).toBe("USD");
+
+    const lineItems = input.lineItems as Array<Record<string, unknown>>;
+    expect(lineItems[0].priceOverride).toEqual({ amount: "50000", currencyCode: "USD" });
+  });
+
+  it("createDraftOrder uses INR when currencyCode is INR", async () => {
+    const state = createMockState({ currencyCode: "INR" });
+
+    await createDraftOrder(state, {
+      orderKey: `${SEED_PREFIX}order-inr-test`,
+      purchasingEntity: { customerId: "gid://shopify/Customer/456" },
+      paymentTermsInput: { paymentTermsTemplateId: "gid://shopify/PaymentTermsTemplate/3", paymentSchedules: [{ issuedAt: new Date().toISOString() }] },
+      billingAddress: { firstName: "Test", lastName: "User", address1: "456 St", city: "Mumbai", countryCode: "IN", zip: "400001" },
+      variantId: "gid://shopify/ProductVariant/456",
+      amount: 75000,
+    });
+
+    const createCall = capturedRequests.find((r) => r.query.includes("draftOrderCreate"));
+    const input = createCall?.variables?.input as Record<string, unknown>;
+    expect(input.presentmentCurrencyCode).toBe("INR");
+
+    const lineItems = input.lineItems as Array<Record<string, unknown>>;
+    expect(lineItems[0].priceOverride).toEqual({ amount: "75000", currencyCode: "INR" });
+  });
+
+  it("formatCurrency formats amounts with currency code", () => {
+    expect(formatCurrency(50000, "USD")).toBe("USD 50,000");
+    expect(formatCurrency(100000, "INR")).toBe("INR 100,000");
+    expect(formatCurrency(1234567, "EUR")).toBe("EUR 1,234,567");
   });
 });
