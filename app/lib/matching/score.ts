@@ -352,9 +352,16 @@ function scorePayerNameMatch(
   }
 
   // Check email if available (but don't store email in detail)
+  // Require minimum 3 chars for email prefix to avoid false positives from empty/short payers
   if (buyer.email) {
     const emailPrefix = buyer.email.split("@")[0].toLowerCase();
-    if (normalizedPayer.includes(emailPrefix) || emailPrefix.includes(normalizedPayer.replace(/\s/g, ""))) {
+    const payerNoSpaces = normalizedPayer.replace(/\s/g, "");
+    // Only match if both email prefix and payer are at least 3 characters
+    if (
+      emailPrefix.length >= 3 &&
+      payerNoSpaces.length >= 3 &&
+      (normalizedPayer.includes(emailPrefix) || emailPrefix.includes(payerNoSpaces))
+    ) {
       return {
         matched: true,
         type: "email_match",

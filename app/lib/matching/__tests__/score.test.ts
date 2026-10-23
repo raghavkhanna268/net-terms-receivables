@@ -755,3 +755,122 @@ describe("overpayment reduced points", () => {
     expect(exactReason?.points).toBe(20); // Full points
   });
 });
+
+// Email prefix minimum length (>= 3 chars)
+describe("email prefix minimum length", () => {
+  it("does NOT match when payer is too short (< 3 chars)", () => {
+    const payment: PaymentForScoring = {
+      id: "p1",
+      amountPaise: 100000n,
+      narration: "Payment",
+      payerText: "AB", // Too short (2 chars after normalization)
+      utr: null,
+      rail: null,
+    };
+    const invoice: InvoiceForScoring = {
+      id: "i1",
+      name: "#1",
+      orderId: null,
+      outstandingPaise: 100000n,
+      buyerAccountId: "b1",
+      dueAt: null,
+    };
+    const buyer: BuyerForScoring = {
+      id: "b1",
+      name: "Long Name Corp",
+      aliases: [],
+      email: "ab@example.com", // Prefix "ab" is only 2 chars
+    };
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+    // Should NOT have email_match reason
+    expect(result.reasons.some((r) => r.type === "email_match")).toBe(false);
+  });
+
+  it("does NOT match when email prefix is too short (< 3 chars)", () => {
+    const payment: PaymentForScoring = {
+      id: "p1",
+      amountPaise: 100000n,
+      narration: "Payment",
+      payerText: "JOHN DOE", // Long enough
+      utr: null,
+      rail: null,
+    };
+    const invoice: InvoiceForScoring = {
+      id: "i1",
+      name: "#1",
+      orderId: null,
+      outstandingPaise: 100000n,
+      buyerAccountId: "b1",
+      dueAt: null,
+    };
+    const buyer: BuyerForScoring = {
+      id: "b1",
+      name: "Different Name",
+      aliases: [],
+      email: "jd@example.com", // Prefix "jd" is only 2 chars
+    };
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+    // Should NOT have email_match reason
+    expect(result.reasons.some((r) => r.type === "email_match")).toBe(false);
+  });
+
+  it("DOES match when both payer and email prefix are >= 3 chars", () => {
+    const payment: PaymentForScoring = {
+      id: "p1",
+      amountPaise: 100000n,
+      narration: "Payment",
+      payerText: "JOHNDOE CORP", // Long enough
+      utr: null,
+      rail: null,
+    };
+    const invoice: InvoiceForScoring = {
+      id: "i1",
+      name: "#1",
+      orderId: null,
+      outstandingPaise: 100000n,
+      buyerAccountId: "b1",
+      dueAt: null,
+    };
+    const buyer: BuyerForScoring = {
+      id: "b1",
+      name: "Different Name",
+      aliases: [],
+      email: "johndoe@example.com", // Prefix "johndoe" >= 3 chars
+    };
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+    // Should have email_match reason since both are long enough
+    expect(result.reasons.some((r) => r.type === "email_match")).toBe(true);
+  });
+
+  it("does NOT match empty payer text", () => {
+    const payment: PaymentForScoring = {
+      id: "p1",
+      amountPaise: 100000n,
+      narration: "Payment",
+      payerText: "", // Empty
+      utr: null,
+      rail: null,
+    };
+    const invoice: InvoiceForScoring = {
+      id: "i1",
+      name: "#1",
+      orderId: null,
+      outstandingPaise: 100000n,
+      buyerAccountId: "b1",
+      dueAt: null,
+    };
+    const buyer: BuyerForScoring = {
+      id: "b1",
+      name: "Some Name",
+      aliases: [],
+      email: "someone@example.com",
+    };
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+    // Should NOT have email_match reason
+    expect(result.reasons.some((r) => r.type === "email_match")).toBe(false);
+  });
+});

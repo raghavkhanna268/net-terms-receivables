@@ -30,6 +30,7 @@ import {
   runMatcher,
   confirmMatch,
   rejectMatch,
+  MAX_PAYMENTS_PER_REQUEST,
 } from "~/services/matcher.server";
 import { formatPaiseAmount } from "~/lib/aging";
 
@@ -236,10 +237,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   try {
     switch (intent) {
       case "run_matcher": {
-        const result = await runMatcher(sql, shop.id, { limit: 100 });
+        // Use MAX_PAYMENTS_PER_REQUEST to respect Workers Free 10ms CPU budget
+        const result = await runMatcher(sql, shop.id, { limit: MAX_PAYMENTS_PER_REQUEST });
         return {
           success: true,
-          message: `Processed ${result.paymentsProcessed} payments, created ${result.matchesCreated} matches (${result.highConfidenceMatches} high confidence)`,
+          message: `Processed ${result.paymentsProcessed} payments, created ${result.matchesCreated} matches (${result.highConfidenceMatches} high confidence)${result.hasMore ? " (more pending)" : ""}`,
         };
       }
 

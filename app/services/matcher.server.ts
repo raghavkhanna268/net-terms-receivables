@@ -14,6 +14,7 @@
  * - PayerAlias is ONLY learned on merchant confirm (not from fuzzy matches)
  * - Rejected pairs are persisted and never re-suggested
  * - Transactions with FOR UPDATE locks prevent over-allocation
+ * - Lock order: Payment FIRST, then Match rows ORDER BY id, then Invoices ORDER BY id
  */
 
 import type { Sql } from "~/lib/db-light.server";
@@ -51,7 +52,7 @@ const AMOUNT_WINDOW_MAX_FACTOR = 2.0;
  * Maximum payments to process per request (Workers Free 10ms CPU budget).
  * Use the pgmq job path for larger batches.
  */
-const MAX_PAYMENTS_PER_REQUEST = 10;
+export const MAX_PAYMENTS_PER_REQUEST = 10;
 
 /** Result of running the matcher for a single payment */
 export interface MatcherResult {
@@ -345,13 +346,15 @@ async function matchSinglePayment(
  * Confirm a suggested match.
  * This records the merchant's decision for S17 to apply later.
  *
- * CRITICAL: Runs in a transaction with FOR UPDATE locks to prevent over-allocation.
- * - Locks the payment row to get current allocated total
- * - Locks affected invoice rows to get current outstanding
- * - Caps allocation at remaining payment amount
- * - Caps allocation at invoice remaining outstanding
- * - Drops competing suggestions for the same payment (including other buyers)
- * - Learns PayerAlias from confirmed matches
+ * CRITICAL: Lock order to prevent deadlocks:
+ * 1. Payment row FIRST (SELECT ... FOR UPDATE)
+ * 2. Match rows for this payment ORDER BY id FOR UPDATE
+ * 3. Invoice rows ORDER BY id FOR UPDATE
+ *
+ * Split-payment behavior:
+ * - Only drops OTHER buyers' suggestions for this payment
+ * - Same-buyer sibling suggestions remain confirmable
+ * - Each suggestion is capped at remaining payment/invoice outstanding
  *
  * @param sql - postgres.js SQL client
  * @param shopId - Shop ID
@@ -366,35 +369,7 @@ export async function confirmMatch(
 ): Promise<{ success: boolean; error?: string }> {
   try {
     return await sql.begin(async (tx) => {
-      // Get the match with FOR UPDATE SKIP LOCKED to prevent concurrent confirmations
-      const [match] = await tx<
-        {
-          id: string;
-          payment_id: string;
-          invoice_id: string;
-          amount_paise: string;
-          buyer_account_id: string;
-        }[]
-      >`
-        SELECT 
-          m.id,
-          m."paymentId" AS payment_id,
-          m."invoiceId" AS invoice_id,
-          (ROUND(m.amount * 100))::text AS amount_paise,
-          i."buyerAccountId" AS buyer_account_id
-        FROM "Match" m
-        JOIN "Invoice" i ON i.id = m."invoiceId"
-        WHERE m.id = ${matchId}
-          AND m."shopId" = ${shopId}
-          AND m.state = 'suggested'
-        FOR UPDATE OF m SKIP LOCKED
-      `;
-
-      if (!match) {
-        return { success: false, error: "Match not found or already processed" };
-      }
-
-      // Lock the payment row and get payment details
+      // STEP 1: Lock the payment row FIRST (consistent lock order)
       const [payment] = await tx<
         { id: string; amount_paise: string; payer_text: string | null }[]
       >`
@@ -403,94 +378,105 @@ export async function confirmMatch(
           (ROUND(amount * 100))::text AS amount_paise,
           "payerText" AS payer_text
         FROM "Payment"
-        WHERE id = ${match.payment_id}
+        WHERE id = (
+          SELECT "paymentId" FROM "Match" 
+          WHERE id = ${matchId} AND "shopId" = ${shopId} AND state = 'suggested'
+        )
           AND "shopId" = ${shopId}
         FOR UPDATE
       `;
 
       if (!payment) {
-        return { success: false, error: "Payment not found" };
+        return { success: false, error: "Payment not found or match not suggested" };
       }
 
-      // Get total already confirmed allocations for this payment
-      const [confirmedTotal] = await tx<{ total_paise: string }[]>`
-        SELECT COALESCE(SUM(ROUND(amount * 100)), 0)::text AS total_paise
-        FROM "Match"
-        WHERE "paymentId" = ${match.payment_id}
-          AND "shopId" = ${shopId}
-          AND state = 'confirmed'
+      // STEP 2: Lock ALL match rows for this payment ORDER BY id (consistent lock order)
+      const matchRows = await tx<
+        {
+          id: string;
+          invoice_id: string;
+          amount_paise: string;
+          state: string;
+          buyer_account_id: string;
+        }[]
+      >`
+        SELECT 
+          m.id,
+          m."invoiceId" AS invoice_id,
+          (ROUND(m.amount * 100))::text AS amount_paise,
+          m.state,
+          i."buyerAccountId" AS buyer_account_id
+        FROM "Match" m
+        JOIN "Invoice" i ON i.id = m."invoiceId"
+        WHERE m."paymentId" = ${payment.id}
+          AND m."shopId" = ${shopId}
+        ORDER BY m.id
+        FOR UPDATE OF m
       `;
 
-      const paymentAmountPaise = BigInt(payment.amount_paise);
-      const alreadyAllocatedPaise = BigInt(confirmedTotal?.total_paise ?? "0");
-      const remainingPaymentPaise = paymentAmountPaise - alreadyAllocatedPaise;
-
-      if (remainingPaymentPaise <= 0n) {
-        return {
-          success: false,
-          error: "Payment fully allocated",
-        };
+      // Find the match we're confirming
+      const match = matchRows.find((m) => m.id === matchId && m.state === "suggested");
+      if (!match) {
+        return { success: false, error: "Match not found or already processed" };
       }
 
-      // Lock the invoice row and get current outstanding
-      const [invoice] = await tx<{ id: string; outstanding_paise: string }[]>`
+      // STEP 3: Lock invoice rows ORDER BY id (consistent lock order)
+      const invoiceIds = [...new Set(matchRows.map((m) => m.invoice_id))].sort();
+      const invoiceRows = await tx<
+        { id: string; outstanding_paise: string }[]
+      >`
         SELECT 
           id,
           (ROUND(outstanding * 100))::text AS outstanding_paise
         FROM "Invoice"
-        WHERE id = ${match.invoice_id}
+        WHERE id IN ${tx(invoiceIds)}
           AND "shopId" = ${shopId}
+        ORDER BY id
         FOR UPDATE
       `;
 
-      if (!invoice) {
-        return { success: false, error: "Invoice not found" };
+      const invoiceMap = new Map(invoiceRows.map((i) => [i.id, BigInt(i.outstanding_paise)]));
+
+      // Calculate total already allocated (confirmed + pushed) for this payment
+      const confirmedMatches = matchRows.filter((m) => m.state === "confirmed" || m.state === "pushed");
+      const paymentAmountPaise = BigInt(payment.amount_paise);
+      const alreadyAllocatedPaise = confirmedMatches.reduce(
+        (sum, m) => sum + BigInt(m.amount_paise),
+        0n
+      );
+      const remainingPaymentPaise = paymentAmountPaise - alreadyAllocatedPaise;
+
+      if (remainingPaymentPaise <= 0n) {
+        return { success: false, error: "Payment fully allocated" };
       }
 
-      // Get total already confirmed allocations for this invoice
-      const [invoiceConfirmedTotal] = await tx<{ total_paise: string }[]>`
-        SELECT COALESCE(SUM(ROUND(amount * 100)), 0)::text AS total_paise
-        FROM "Match"
-        WHERE "invoiceId" = ${match.invoice_id}
-          AND "shopId" = ${shopId}
-          AND state = 'confirmed'
-      `;
+      // Calculate total already allocated (confirmed + pushed) for this invoice
+      const invoiceAllocated = new Map<string, bigint>();
+      for (const m of confirmedMatches) {
+        const current = invoiceAllocated.get(m.invoice_id) ?? 0n;
+        invoiceAllocated.set(m.invoice_id, current + BigInt(m.amount_paise));
+      }
 
-      const invoiceOutstandingPaise = BigInt(invoice.outstanding_paise);
-      const invoiceAlreadyAllocatedPaise = BigInt(
-        invoiceConfirmedTotal?.total_paise ?? "0"
-      );
-      const invoiceRemainingPaise =
-        invoiceOutstandingPaise - invoiceAlreadyAllocatedPaise;
+      const invoiceOutstandingPaise = invoiceMap.get(match.invoice_id) ?? 0n;
+      const invoiceAlreadyAllocatedPaise = invoiceAllocated.get(match.invoice_id) ?? 0n;
+      const invoiceRemainingPaise = invoiceOutstandingPaise - invoiceAlreadyAllocatedPaise;
 
       if (invoiceRemainingPaise <= 0n) {
-        return {
-          success: false,
-          error: "Invoice fully allocated",
-        };
+        return { success: false, error: "Invoice fully allocated" };
       }
 
-      // Calculate the capped allocation amount
+      // Calculate capped allocation amount
       const requestedPaise = BigInt(match.amount_paise);
-      const cappedByPayment =
-        requestedPaise > remainingPaymentPaise
-          ? remainingPaymentPaise
-          : requestedPaise;
-      const finalAllocationPaise =
-        cappedByPayment > invoiceRemainingPaise
-          ? invoiceRemainingPaise
-          : cappedByPayment;
+      const cappedByPayment = requestedPaise > remainingPaymentPaise ? remainingPaymentPaise : requestedPaise;
+      const finalAllocationPaise = cappedByPayment > invoiceRemainingPaise ? invoiceRemainingPaise : cappedByPayment;
 
       if (finalAllocationPaise <= 0n) {
-        return {
-          success: false,
-          error: "No remaining allocation possible",
-        };
+        return { success: false, error: "No remaining allocation possible" };
       }
 
       const finalAmountDecimal = Number(finalAllocationPaise) / 100;
 
-      // Update the match state to confirmed with capped amount
+      // Confirm this match with capped amount
       await tx`
         UPDATE "Match"
         SET
@@ -503,17 +489,51 @@ export async function confirmMatch(
           AND "shopId" = ${shopId}
       `;
 
-      // P1.1: Drop competing suggestions for this payment (all buyers)
-      await tx`
-        UPDATE "Match"
-        SET
-          state = 'unmatched',
-          "updatedAt" = NOW()
-        WHERE "paymentId" = ${match.payment_id}
-          AND "shopId" = ${shopId}
-          AND state = 'suggested'
-          AND id != ${matchId}
-      `;
+      // Calculate new remaining payment after this confirmation
+      const newRemainingPaymentPaise = remainingPaymentPaise - finalAllocationPaise;
+
+      // Update invoice allocated map for this invoice
+      invoiceAllocated.set(
+        match.invoice_id,
+        invoiceAlreadyAllocatedPaise + finalAllocationPaise
+      );
+
+      // P1: Drop competing suggestions - scoped correctly:
+      // 1. Drop all OTHER buyers' suggestions for this payment
+      // 2. For SAME buyer, only drop suggestions that no longer fit
+      const suggestedSiblings = matchRows.filter(
+        (m) => m.id !== matchId && m.state === "suggested"
+      );
+
+      const matchIdsToUnmatch: string[] = [];
+      for (const sibling of suggestedSiblings) {
+        if (sibling.buyer_account_id !== match.buyer_account_id) {
+          // Different buyer - always drop
+          matchIdsToUnmatch.push(sibling.id);
+        } else {
+          // Same buyer - only drop if no longer fits
+          const siblingInvoiceOutstanding = invoiceMap.get(sibling.invoice_id) ?? 0n;
+          const siblingInvoiceAllocated = invoiceAllocated.get(sibling.invoice_id) ?? 0n;
+          const siblingInvoiceRemaining = siblingInvoiceOutstanding - siblingInvoiceAllocated;
+
+          // Check if there's any room left for this sibling
+          if (newRemainingPaymentPaise <= 0n || siblingInvoiceRemaining <= 0n) {
+            matchIdsToUnmatch.push(sibling.id);
+          }
+          // Otherwise, keep the sibling suggested - it can still be confirmed
+        }
+      }
+
+      if (matchIdsToUnmatch.length > 0) {
+        await tx`
+          UPDATE "Match"
+          SET
+            state = 'unmatched',
+            "updatedAt" = NOW()
+          WHERE id IN ${tx(matchIdsToUnmatch)}
+            AND "shopId" = ${shopId}
+        `;
+      }
 
       // P1.4: Learn PayerAlias from confirmed match (NOT from fuzzy suggestions)
       if (payment.payer_text) {
@@ -523,11 +543,11 @@ export async function confirmMatch(
         }
       }
 
-      // P2.3: Update payment status based on confirmed allocations
+      // Update payment status based on confirmed allocations
       const newAllocatedTotal = alreadyAllocatedPaise + finalAllocationPaise;
       const isFullyAllocated = newAllocatedTotal >= paymentAmountPaise;
       const newStatus = isFullyAllocated ? "matched" : "partial";
-      await updatePaymentStatus(tx, shopId, match.payment_id, newStatus);
+      await updatePaymentStatus(tx, shopId, payment.id, newStatus);
 
       return { success: true };
     });
@@ -544,6 +564,10 @@ export async function confirmMatch(
  * Reject a suggested match.
  * Persists the rejection to prevent future re-suggestion.
  *
+ * Lock order to prevent deadlocks:
+ * 1. Payment row FIRST
+ * 2. Match rows ORDER BY id
+ *
  * @param sql - postgres.js SQL client
  * @param shopId - Shop ID
  * @param matchId - Match ID to reject
@@ -557,66 +581,70 @@ export async function rejectMatch(
 ): Promise<{ success: boolean; error?: string }> {
   try {
     return await sql.begin(async (tx) => {
-      // Get the match details with FOR UPDATE
-      const [match] = await tx<
-        { payment_id: string; invoice_id: string }[]
-      >`
-        SELECT "paymentId" AS payment_id, "invoiceId" AS invoice_id
-        FROM "Match"
-        WHERE id = ${matchId}
+      // STEP 1: Lock payment row FIRST (consistent lock order)
+      const [payment] = await tx<{ id: string }[]>`
+        SELECT id
+        FROM "Payment"
+        WHERE id = (
+          SELECT "paymentId" FROM "Match" 
+          WHERE id = ${matchId} AND "shopId" = ${shopId} AND state = 'suggested'
+        )
           AND "shopId" = ${shopId}
-          AND state = 'suggested'
         FOR UPDATE
       `;
 
+      if (!payment) {
+        return { success: false, error: "Payment not found or match not suggested" };
+      }
+
+      // STEP 2: Lock match rows ORDER BY id (consistent lock order)
+      const matchRows = await tx<
+        { id: string; invoice_id: string; state: string }[]
+      >`
+        SELECT id, "invoiceId" AS invoice_id, state
+        FROM "Match"
+        WHERE "paymentId" = ${payment.id}
+          AND "shopId" = ${shopId}
+        ORDER BY id
+        FOR UPDATE
+      `;
+
+      const match = matchRows.find((m) => m.id === matchId && m.state === "suggested");
       if (!match) {
-        return {
-          success: false,
-          error: "Match not found or already processed",
-        };
+        return { success: false, error: "Match not found or already processed" };
       }
 
       // Update the match state to unmatched (rejected)
+      // NOTE: Don't set confirmedBy for rejections - use rejectedBy in rejected_matches
       await tx`
         UPDATE "Match"
         SET
           state = 'unmatched',
-          "confirmedBy" = ${userId},
           "updatedAt" = NOW()
         WHERE id = ${matchId}
           AND "shopId" = ${shopId}
       `;
 
-      // P2.2: Persist the rejection to prevent re-suggestion
+      // Persist the rejection to prevent re-suggestion
       await createRejectedMatch(tx, {
         shopId,
-        paymentId: match.payment_id,
+        paymentId: payment.id,
         invoiceId: match.invoice_id,
         rejectedBy: userId,
       });
 
       // Check if all suggested matches for this payment are now processed
-      const [remaining] = await tx<{ count: string }[]>`
-        SELECT COUNT(*)::text AS count
-        FROM "Match"
-        WHERE "paymentId" = ${match.payment_id}
-          AND "shopId" = ${shopId}
-          AND state = 'suggested'
-      `;
+      const suggestedCount = matchRows.filter((m) => m.state === "suggested" && m.id !== matchId).length;
 
-      if (parseInt(remaining?.count ?? "0", 10) === 0) {
+      if (suggestedCount === 0) {
         // All suggestions processed, check if any confirmed
-        const [confirmed] = await tx<{ count: string }[]>`
-          SELECT COUNT(*)::text AS count
-          FROM "Match"
-          WHERE "paymentId" = ${match.payment_id}
-            AND "shopId" = ${shopId}
-            AND state = 'confirmed'
-        `;
+        const confirmedCount = matchRows.filter(
+          (m) => m.state === "confirmed" || m.state === "pushed"
+        ).length;
 
-        if (parseInt(confirmed?.count ?? "0", 10) === 0) {
+        if (confirmedCount === 0) {
           // No confirmed matches, payment goes back to unmatched
-          await updatePaymentStatus(tx, shopId, match.payment_id, "unmatched");
+          await updatePaymentStatus(tx, shopId, payment.id, "unmatched");
         }
         // If there are confirmed matches, payment status stays as is (matched/partial)
       }
@@ -636,9 +664,10 @@ export async function rejectMatch(
  * Update the allocation amount for a match before confirming.
  * Used for editing partial payment allocations.
  *
- * IMPORTANT: Must be called within a transaction for proper locking.
- * Consider removing this in favor of the Edit Allocation action that
- * uses the same caps and locks as confirmMatch.
+ * Lock order to prevent deadlocks:
+ * 1. Payment row FIRST
+ * 2. Match rows ORDER BY id
+ * 3. Invoice rows ORDER BY id
  *
  * @param sql - postgres.js SQL client
  * @param shopId - Shop ID
@@ -653,79 +682,79 @@ export async function updateMatchAllocation(
 ): Promise<{ success: boolean; error?: string }> {
   try {
     return await sql.begin(async (tx) => {
-      // Get the match with FOR UPDATE
-      const [match] = await tx<
-        { payment_id: string; invoice_id: string }[]
-      >`
-        SELECT "paymentId" AS payment_id, "invoiceId" AS invoice_id
-        FROM "Match"
-        WHERE id = ${matchId}
-          AND "shopId" = ${shopId}
-          AND state = 'suggested'
-        FOR UPDATE
-      `;
-
-      if (!match) {
-        return {
-          success: false,
-          error: "Match not found or already confirmed",
-        };
-      }
-
-      // Lock payment and get remaining unallocated amount
-      const [payment] = await tx<{ amount_paise: string }[]>`
-        SELECT (ROUND(amount * 100))::text AS amount_paise
+      // STEP 1: Lock payment row FIRST (consistent lock order)
+      const [payment] = await tx<{ id: string; amount_paise: string }[]>`
+        SELECT 
+          id,
+          (ROUND(amount * 100))::text AS amount_paise
         FROM "Payment"
-        WHERE id = ${match.payment_id}
+        WHERE id = (
+          SELECT "paymentId" FROM "Match" 
+          WHERE id = ${matchId} AND "shopId" = ${shopId} AND state = 'suggested'
+        )
           AND "shopId" = ${shopId}
         FOR UPDATE
       `;
 
       if (!payment) {
-        return { success: false, error: "Payment not found" };
+        return { success: false, error: "Payment not found or match not suggested" };
       }
 
-      // Get total confirmed allocations for this payment
-      const [confirmedTotal] = await tx<{ total_paise: string }[]>`
-        SELECT COALESCE(SUM(ROUND(amount * 100)), 0)::text AS total_paise
+      // STEP 2: Lock match rows ORDER BY id (consistent lock order)
+      const matchRows = await tx<
+        { id: string; invoice_id: string; amount_paise: string; state: string }[]
+      >`
+        SELECT 
+          id,
+          "invoiceId" AS invoice_id,
+          (ROUND(amount * 100))::text AS amount_paise,
+          state
         FROM "Match"
-        WHERE "paymentId" = ${match.payment_id}
+        WHERE "paymentId" = ${payment.id}
           AND "shopId" = ${shopId}
-          AND state = 'confirmed'
-      `;
-
-      const paymentAmountPaise = BigInt(payment.amount_paise);
-      const alreadyAllocatedPaise = BigInt(confirmedTotal?.total_paise ?? "0");
-      const remainingPaymentPaise = paymentAmountPaise - alreadyAllocatedPaise;
-
-      // Lock invoice and get remaining outstanding
-      const [invoice] = await tx<{ outstanding_paise: string }[]>`
-        SELECT (ROUND(outstanding * 100))::text AS outstanding_paise
-        FROM "Invoice"
-        WHERE id = ${match.invoice_id}
-          AND "shopId" = ${shopId}
+        ORDER BY id
         FOR UPDATE
       `;
 
-      if (!invoice) {
-        return { success: false, error: "Invoice not found" };
+      const match = matchRows.find((m) => m.id === matchId && m.state === "suggested");
+      if (!match) {
+        return { success: false, error: "Match not found or already confirmed" };
       }
 
-      // Get total confirmed allocations for this invoice
-      const [invoiceConfirmedTotal] = await tx<{ total_paise: string }[]>`
-        SELECT COALESCE(SUM(ROUND(amount * 100)), 0)::text AS total_paise
-        FROM "Match"
-        WHERE "invoiceId" = ${match.invoice_id}
+      // STEP 3: Lock invoice rows ORDER BY id (consistent lock order)
+      const invoiceIds = [...new Set(matchRows.map((m) => m.invoice_id))].sort();
+      const invoiceRows = await tx<{ id: string; outstanding_paise: string }[]>`
+        SELECT 
+          id,
+          (ROUND(outstanding * 100))::text AS outstanding_paise
+        FROM "Invoice"
+        WHERE id IN ${tx(invoiceIds)}
           AND "shopId" = ${shopId}
-          AND state = 'confirmed'
+        ORDER BY id
+        FOR UPDATE
       `;
 
-      const invoiceOutstandingPaise = BigInt(invoice.outstanding_paise);
-      const invoiceAlreadyAllocatedPaise = BigInt(
-        invoiceConfirmedTotal?.total_paise ?? "0"
+      const invoiceMap = new Map(invoiceRows.map((i) => [i.id, BigInt(i.outstanding_paise)]));
+
+      // Calculate remaining payment (after confirmed + pushed)
+      const confirmedMatches = matchRows.filter((m) => m.state === "confirmed" || m.state === "pushed");
+      const paymentAmountPaise = BigInt(payment.amount_paise);
+      const alreadyAllocatedPaise = confirmedMatches.reduce(
+        (sum, m) => sum + BigInt(m.amount_paise),
+        0n
       );
-      const invoiceRemainingPaise =
-        invoiceOutstandingPaise - invoiceAlreadyAllocatedPaise;
+      const remainingPaymentPaise = paymentAmountPaise - alreadyAllocatedPaise;
+
+      // Calculate remaining invoice outstanding (after confirmed + pushed)
+      const invoiceAllocated = new Map<string, bigint>();
+      for (const m of confirmedMatches) {
+        const current = invoiceAllocated.get(m.invoice_id) ?? 0n;
+        invoiceAllocated.set(m.invoice_id, current + BigInt(m.amount_paise));
+      }
+
+      const invoiceOutstandingPaise = invoiceMap.get(match.invoice_id) ?? 0n;
+      const invoiceAlreadyAllocatedPaise = invoiceAllocated.get(match.invoice_id) ?? 0n;
+      const invoiceRemainingPaise = invoiceOutstandingPaise - invoiceAlreadyAllocatedPaise;
 
       // Cap the new amount at remaining payment and invoice amounts
       let cappedAmount = newAmountPaise;
