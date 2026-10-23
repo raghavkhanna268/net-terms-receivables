@@ -221,6 +221,170 @@ describeWithDb("SQL-vs-TS parity (DB-backed)", () => {
   });
 });
 
+/**
+ * Non-IST timezone parity test.
+ *
+ * Verifies that SQL and TypeScript aging calculations produce the same results
+ * for a shop in America/New_York timezone. This catches timezone-related bugs
+ * where day boundaries differ between IST and other timezones.
+ */
+describeWithDb("SQL-vs-TS parity (non-IST timezone)", () => {
+  let sql: ReturnType<typeof postgres>;
+  let testShopId: string;
+  let testBuyerAccountId: string;
+
+  const TEST_SHOP_DOMAIN = `parity-ny-${Date.now()}.myshopify.com`;
+  const TEST_TIMEZONE = "America/New_York";
+  
+  // Use a time that's midnight in New York (04:00 UTC in October due to EDT)
+  // This is important because the same UTC instant is different calendar days
+  // in IST vs New York
+  const AS_OF_DATE = DateTime.fromISO("2026-10-23T04:00:00", { zone: "UTC" }).toJSDate();
+
+  // Boundary test fixtures specifically chosen to test timezone edge cases
+  const NY_PARITY_FIXTURES: Array<{
+    name: string;
+    daysPastDue: number;
+    expectedBucket: AgingBucketKey;
+  }> = [
+    { name: "due today NY", daysPastDue: 0, expectedBucket: "current" },
+    { name: "1 day past due NY", daysPastDue: 1, expectedBucket: "1-30" },
+    { name: "30 days past due NY", daysPastDue: 30, expectedBucket: "1-30" },
+    { name: "31 days past due NY", daysPastDue: 31, expectedBucket: "31-60" },
+    { name: "60 days past due NY", daysPastDue: 60, expectedBucket: "31-60" },
+    { name: "61 days past due NY", daysPastDue: 61, expectedBucket: "61-90" },
+    { name: "90 days past due NY", daysPastDue: 90, expectedBucket: "61-90" },
+    { name: "91 days past due NY", daysPastDue: 91, expectedBucket: "90+" },
+  ];
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    // Create test shop with New York timezone
+    const [shop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_DOMAIN}, 'USD', ${TEST_TIMEZONE}, NOW(), NOW())
+      RETURNING id
+    `;
+    testShopId = shop.id;
+
+    // Create test buyer account
+    const [buyer] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, 'COMPANY',
+        'gid://shopify/Company/parity-ny-test', 'gid://shopify/CompanyLocation/parity-ny-test',
+        'NY Parity Test Buyer', 100000, 'OK', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    testBuyerAccountId = buyer.id;
+
+    // Create invoices for each parity fixture
+    // Due dates are calculated in New York timezone
+    for (const fixture of NY_PARITY_FIXTURES) {
+      const dueDate = DateTime.fromJSDate(AS_OF_DATE, { zone: TEST_TIMEZONE })
+        .minus({ days: fixture.daysPastDue })
+        .endOf("day")
+        .toJSDate();
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          gen_random_uuid()::text, ${testShopId}, ${testBuyerAccountId},
+          ${"gid://shopify/Order/parity-ny-" + fixture.daysPastDue},
+          ${"INV-NY-" + fixture.name}, 1000.00, 'open', 1000.00, NOW(), ${dueDate}, NOW(), NOW()
+        )
+      `;
+    }
+  });
+
+  afterAll(async () => {
+    // Clean up test data
+    if (sql && testShopId) {
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+    }
+    if (sql) {
+      await sql.end();
+    }
+  });
+
+  it("SQL bucketing matches TypeScript bucketing for New York timezone", async () => {
+    // Get SQL results using the shop's timezone
+    const sqlRows = await sql<
+      Array<{
+        name: string;
+        due_at: Date | null;
+        days_past_due: number;
+        sql_bucket: string;
+      }>
+    >`
+      SELECT
+        i.name,
+        i."dueAt" AS due_at,
+        CASE
+          WHEN i."dueAt" IS NULL THEN 0
+          ELSE EXTRACT(DAY FROM (
+            DATE_TRUNC('day', ${AS_OF_DATE}::timestamptz AT TIME ZONE ${TEST_TIMEZONE}) -
+            DATE_TRUNC('day', i."dueAt" AT TIME ZONE ${TEST_TIMEZONE})
+          ))::int
+        END AS days_past_due,
+        CASE
+          WHEN CASE
+            WHEN i."dueAt" IS NULL THEN 0
+            ELSE EXTRACT(DAY FROM (
+              DATE_TRUNC('day', ${AS_OF_DATE}::timestamptz AT TIME ZONE ${TEST_TIMEZONE}) -
+              DATE_TRUNC('day', i."dueAt" AT TIME ZONE ${TEST_TIMEZONE})
+            ))::int
+          END <= 0 THEN 'current'
+          WHEN CASE
+            WHEN i."dueAt" IS NULL THEN 0
+            ELSE EXTRACT(DAY FROM (
+              DATE_TRUNC('day', ${AS_OF_DATE}::timestamptz AT TIME ZONE ${TEST_TIMEZONE}) -
+              DATE_TRUNC('day', i."dueAt" AT TIME ZONE ${TEST_TIMEZONE})
+            ))::int
+          END <= 30 THEN '1-30'
+          WHEN CASE
+            WHEN i."dueAt" IS NULL THEN 0
+            ELSE EXTRACT(DAY FROM (
+              DATE_TRUNC('day', ${AS_OF_DATE}::timestamptz AT TIME ZONE ${TEST_TIMEZONE}) -
+              DATE_TRUNC('day', i."dueAt" AT TIME ZONE ${TEST_TIMEZONE})
+            ))::int
+          END <= 60 THEN '31-60'
+          WHEN CASE
+            WHEN i."dueAt" IS NULL THEN 0
+            ELSE EXTRACT(DAY FROM (
+              DATE_TRUNC('day', ${AS_OF_DATE}::timestamptz AT TIME ZONE ${TEST_TIMEZONE}) -
+              DATE_TRUNC('day', i."dueAt" AT TIME ZONE ${TEST_TIMEZONE})
+            ))::int
+          END <= 90 THEN '61-90'
+          ELSE '90+'
+        END AS sql_bucket
+      FROM "Invoice" i
+      WHERE i."shopId" = ${testShopId}
+        AND i.status = 'open'
+      ORDER BY i.name
+    `;
+
+    expect(sqlRows.length).toBe(NY_PARITY_FIXTURES.length);
+
+    // Compare each row with TypeScript calculation using New York timezone
+    for (const row of sqlRows) {
+      const tsDaysPastDue = calculateDaysPastDue(row.due_at, AS_OF_DATE, TEST_TIMEZONE);
+      const tsBucket = getBucketForDaysPastDue(tsDaysPastDue);
+
+      expect(row.days_past_due).toBe(tsDaysPastDue);
+      expect(row.sql_bucket).toBe(tsBucket);
+    }
+  });
+});
+
 describeWithDb("shop totals = sum of ledger (gating test)", () => {
   let sql: ReturnType<typeof postgres>;
   let testShopId: string;
