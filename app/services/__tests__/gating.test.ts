@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
 import type { Sql } from "~/lib/db-light.server";
 
 /**
@@ -698,5 +698,97 @@ describe("Gating Service", () => {
       expect(stats.companies.current).toBe(3);
       expect(stats.companies.limit).toBe(3);
     });
+  });
+});
+
+/**
+ * DB-backed tests for activeAccountFragment.
+ * These tests verify that the SQL fragment actually excludes gated accounts.
+ */
+import postgres from "postgres";
+import { sqlOptions } from "~/lib/db-light.server";
+
+const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
+const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
+
+describeWithDb("activeAccountFragment DB integration", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-gating";
+  const TEST_SHOP_ID = `shop-gating-${TEST_SUFFIX}`;
+  const TEST_SHOP_DOMAIN = `gating-test-${TEST_SUFFIX}.myshopify.com`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    // Create test shop
+    await sql`
+      INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, NOW(), NOW())
+    `;
+
+    // Create test accounts: 2 active (gated_at IS NULL), 2 gated (gated_at IS NOT NULL)
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyLocationId", name, gated_at, "createdAt", "updatedAt")
+      VALUES 
+        (${"acc-active-1-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, 'COMPANY', ${"loc-1-" + TEST_SUFFIX}, 'Active Account 1', NULL, NOW(), NOW()),
+        (${"acc-active-2-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, 'COMPANY', ${"loc-2-" + TEST_SUFFIX}, 'Active Account 2', NULL, NOW(), NOW()),
+        (${"acc-gated-1-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, 'COMPANY', ${"loc-3-" + TEST_SUFFIX}, 'Gated Account 1', NOW(), NOW(), NOW()),
+        (${"acc-gated-2-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, 'COMPANY', ${"loc-4-" + TEST_SUFFIX}, 'Gated Account 2', NOW(), NOW(), NOW())
+    `;
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+    await sql.end();
+  });
+
+  it("returns all accounts when gating is OFF", async () => {
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+    vi.resetModules();
+    const { activeAccountFragment } = await import("../gating.server");
+
+    const accounts = await sql<{ id: string }[]>`
+      SELECT id FROM "BuyerAccount"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+        AND ${activeAccountFragment(sql)}
+    `;
+
+    // When gating is OFF, all 4 accounts should be returned
+    expect(accounts.length).toBe(4);
+  });
+
+  it("excludes gated accounts when gating is ON", async () => {
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+    vi.resetModules();
+    const { activeAccountFragment } = await import("../gating.server");
+
+    const accounts = await sql<{ id: string; name: string }[]>`
+      SELECT id, name FROM "BuyerAccount"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+        AND ${activeAccountFragment(sql)}
+    `;
+
+    // When gating is ON, only 2 active accounts should be returned
+    expect(accounts.length).toBe(2);
+    expect(accounts.every(a => a.name.includes("Active"))).toBe(true);
+  });
+
+  it("isAccountActive returns correct values with DB data", async () => {
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+    vi.resetModules();
+    const { isAccountActive } = await import("../gating.server");
+
+    // Fetch accounts with gated_at
+    const accounts = await sql<{ id: string; gated_at: Date | null }[]>`
+      SELECT id, gated_at FROM "BuyerAccount"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+    `;
+
+    const activeAccounts = accounts.filter(a => isAccountActive(a.gated_at));
+    const gatedAccounts = accounts.filter(a => !isAccountActive(a.gated_at));
+
+    expect(activeAccounts.length).toBe(2);
+    expect(gatedAccounts.length).toBe(2);
   });
 });
