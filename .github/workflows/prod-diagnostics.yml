@@ -239,7 +239,7 @@ jobs:
             # Extract only error codes, never messages or raw content
             ERROR_CODES=$(cat "$HTTP_RESPONSE" | jq -r '
               if .errors then
-                {error_codes: [.errors[] | .extensions.code // "UNKNOWN" | select(. != null)]}
+                {error_codes: [.errors[] | .extensions.code // "UNKNOWN"]}
               else
                 {error_code: "unknown"}
               end
@@ -338,23 +338,23 @@ jobs:
             # List cron jobs (jobname, schedule, active only - never command)
             echo "Cron jobs (command column omitted for security):"
             psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
-            SELECT
-              jobid,
-              jobname,
-              schedule,
-              active
-            FROM cron.job
-            ORDER BY jobname;
-            EOSQL
+          SELECT
+            jobid,
+            jobname,
+            schedule,
+            active
+          FROM cron.job
+          ORDER BY jobname;
+          EOSQL
 
             echo ""
             echo "S10 drain job status:"
             psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
-            SELECT json_build_object(
-              's10_drain_job_exists', EXISTS(SELECT 1 FROM cron.job WHERE jobname = 's10_drain_every_minute'),
-              's10_drain_job_active', COALESCE((SELECT active FROM cron.job WHERE jobname = 's10_drain_every_minute'), false)
-            );
-            EOSQL
+          SELECT json_build_object(
+            's10_drain_job_exists', EXISTS(SELECT 1 FROM cron.job WHERE jobname = 's10_drain_every_minute'),
+            's10_drain_job_active', COALESCE((SELECT active FROM cron.job WHERE jobname = 's10_drain_every_minute'), false)
+          );
+          EOSQL
           else
             echo "::notice::cron schema does not exist (pg_cron not installed or not configured)"
             echo '{"cron_schema_exists": false, "s10_drain_job_exists": false, "s10_drain_job_active": false}' | jq .
@@ -374,12 +374,12 @@ jobs:
             # Check if required secrets exist (query names only, never decrypted_secret)
             echo "Vault secrets existence check (names only, never values):"
             psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
-            SELECT json_build_object(
-              'vault_schema_exists', true,
-              'jobs_drain_secret_exists', EXISTS(SELECT 1 FROM vault.secrets WHERE name = 'jobs_drain_secret'),
-              'jobs_drain_url_exists', EXISTS(SELECT 1 FROM vault.secrets WHERE name = 'jobs_drain_url')
-            );
-            EOSQL
+          SELECT json_build_object(
+            'vault_schema_exists', true,
+            'jobs_drain_secret_exists', EXISTS(SELECT 1 FROM vault.secrets WHERE name = 'jobs_drain_secret'),
+            'jobs_drain_url_exists', EXISTS(SELECT 1 FROM vault.secrets WHERE name = 'jobs_drain_url')
+          );
+          EOSQL
           else
             echo "::notice::vault schema does not exist (supabase_vault not installed or not configured)"
             echo '{"vault_schema_exists": false, "jobs_drain_secret_exists": false, "jobs_drain_url_exists": false}' | jq .
