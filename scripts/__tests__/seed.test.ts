@@ -18,7 +18,6 @@ import {
   formatCurrency,
   type SeedState,
   type GraphQLResponse,
-  type CompanyData,
 } from "../seed";
 
 /**
