@@ -15,6 +15,7 @@ import {
   sendDataRequestNotification,
 } from "~/services/compliance";
 import { getShopifyApp } from "~/shopify.server";
+import { deleteWebhookReceiptsForShop } from "~/lib/webhook-receipts.server";
 
 /**
  * Fetch shop owner email using the offline session admin client.
@@ -58,6 +59,11 @@ async function fetchShopOwnerEmail(shop: string): Promise<string | null> {
  * - customers/data_request: Generate data export, persist s22_data_requests row
  * - customers/redact: Deletes s8 data, anonymizes BuyerAccount/Invoice/Payment
  * - shop/redact: Deletes Shop row (CASCADE removes all shop data)
+ *
+ * Idempotency: No edge deduplication - handlers are fully idempotent:
+ * - data_request: Regenerating export is safe (same data)
+ * - customers/redact: Deleting already-deleted data is safe
+ * - shop/redact: Deleting already-deleted shop is safe
  *
  * Security: All handlers verify payload shop_domain matches header shop.
  * This prevents attackers from forging payloads to delete wrong shop's data.
@@ -215,6 +221,12 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       const pgmqResult = await purgePgmqMessages(sql, payloadShop);
       console.log(
         `[Compliance] shop/redact: pgmq purge - ${pgmqResult.reason}`
+      );
+
+      // Purge webhook receipts for the shop (S20 compliance)
+      const receiptsDeleted = await deleteWebhookReceiptsForShop(sql, payloadShop);
+      console.log(
+        `[Compliance] shop/redact: Deleted ${receiptsDeleted} webhook receipts for shop=${payloadShop}`
       );
 
       const { deleted, shopId } = await deleteShop(sql, payloadShop);

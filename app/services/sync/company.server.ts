@@ -13,25 +13,26 @@ import type { Sql } from "~/lib/db-light.server";
 import type { ShopifyCompany, SyncResult } from "./types";
 
 /**
- * Webhook-id based dedupe table name.
- * Stores processed webhook IDs to prevent duplicate processing.
- */
-const DEDUPE_TABLE = "s6_processed_webhooks";
-
-/**
- * Check if a webhook has already been processed (idempotency check).
+ * Check if a webhook has already been processed (drain idempotency check).
+ * 
+ * S20: This is the DRAIN-level idempotency check using s6_processed_webhooks.
+ * It is separate from the EDGE-level check in webhook_receipts.
+ * - Edge (webhook_receipts): Prevents duplicate enqueues from Shopify retries
+ * - Drain (s6_processed_webhooks): Prevents duplicate processing in queue
  *
  * @param sql - postgres.js SQL client
  * @param webhookId - Shopify webhook ID
+ * @param _shop - Shop domain (unused, kept for API compatibility)
  * @returns true if already processed
  */
 export async function isWebhookProcessed(
   sql: Sql,
-  webhookId: string
+  webhookId: string,
+  _shop?: string
 ): Promise<boolean> {
   const [result] = await sql<{ exists: boolean }[]>`
     SELECT EXISTS(
-      SELECT 1 FROM ${sql(DEDUPE_TABLE)}
+      SELECT 1 FROM s6_processed_webhooks
       WHERE webhook_id = ${webhookId}
     ) as exists
   `;
@@ -39,21 +40,26 @@ export async function isWebhookProcessed(
 }
 
 /**
- * Mark a webhook as processed (for idempotency).
+ * Mark a webhook as processed (drain idempotency).
+ * 
+ * S20: Writes to s6_processed_webhooks for drain-level idempotency.
+ * This is separate from the edge-level webhook_receipts table.
  *
  * @param sql - postgres.js SQL client
  * @param webhookId - Shopify webhook ID
  * @param topic - Webhook topic
  * @param resourceGid - Resource GID that was processed
+ * @param _shop - Shop domain (unused, kept for API compatibility)
  */
 export async function markWebhookProcessed(
   sql: Sql,
   webhookId: string,
   topic: string,
-  resourceGid: string
+  resourceGid: string,
+  _shop?: string
 ): Promise<void> {
   await sql`
-    INSERT INTO ${sql(DEDUPE_TABLE)} (webhook_id, topic, resource_gid, processed_at)
+    INSERT INTO s6_processed_webhooks (webhook_id, topic, resource_gid, processed_at)
     VALUES (${webhookId}, ${topic}, ${resourceGid}, NOW())
     ON CONFLICT (webhook_id) DO NOTHING
   `;

@@ -2,6 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { getRequestSql } from "~/lib/request-context.server";
 import { sendSyncMessage } from "~/lib/pgmq.server";
 import { verifyWebhook, normalizeWebhookTopic } from "~/lib/webhook-verify.server";
+import { recordWebhookReceipt, parseTriggeredAt } from "~/lib/webhook-receipts.server";
 
 /**
  * Webhook handler for customer lifecycle events (S8).
@@ -13,10 +14,11 @@ import { verifyWebhook, normalizeWebhookTopic } from "~/lib/webhook-verify.serve
  *
  * Processing:
  * 1. HMAC verification via verifyWebhook (returns 401 on failure)
- * 2. Topic guard: only process expected topics
- * 3. Extract minimal payload (customer GID only)
- * 4. Enqueue to s6_sync for async processing
- * 5. Return 200 immediately (within 10ms CPU budget)
+ * 2. Edge idempotency: record receipt, skip if duplicate (S20)
+ * 3. Topic guard: only process expected topics
+ * 4. Extract minimal payload (customer GID only)
+ * 5. Enqueue to s6_sync for async processing
+ * 6. Return 200 immediately (within 10ms CPU budget)
  *
  * OPTIMIZATION: Uses lightweight verifyWebhook() instead of authenticate.webhook()
  * to avoid unnecessary session lookups. Saves ~5-10ms DB round-trip per webhook.
@@ -45,6 +47,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return new Response(null, { status: 500 });
   }
 
+  const triggeredAt = parseTriggeredAt(request);
   const { shop, topic, webhookId, payload } = await verifyWebhook(request, apiSecret);
   const normalizedTopic = normalizeWebhookTopic(topic);
 
@@ -67,13 +70,29 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   const sql = getRequestSql();
 
-  await sendSyncMessage(sql, {
-    topic: normalizedTopic,
-    shop,
-    webhookId,
-    resourceGid,
-    enqueuedAt: new Date().toISOString(),
+  // S20: Edge idempotency + enqueue in ONE transaction
+  const result = await sql.begin(async (tx) => {
+    const isNew = await recordWebhookReceipt(tx, shop, webhookId, normalizedTopic, triggeredAt);
+    if (!isNew) {
+      return { duplicate: true };
+    }
+
+    await sendSyncMessage(tx, {
+      topic: normalizedTopic,
+      shop,
+      webhookId,
+      resourceGid,
+      enqueuedAt: new Date().toISOString(),
+      triggeredAt: triggeredAt?.toISOString(),
+    });
+
+    return { duplicate: false };
   });
+
+  if (result.duplicate) {
+    console.log(`[webhooks.customers] Duplicate ${normalizedTopic} for ${shop}, skipping`);
+    return new Response(null, { status: 200 });
+  }
 
   console.log(
     `[webhooks.customers] Enqueued ${normalizedTopic} for ${shop}: ${resourceGid}`

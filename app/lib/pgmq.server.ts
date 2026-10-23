@@ -33,8 +33,10 @@ export interface BaseMessage {
   webhookId: string;
   /** Timestamp when the message was enqueued */
   enqueuedAt: string;
+  /** X-Shopify-Triggered-At header value, stored for audit (S20) */
+  triggeredAt?: string;
   /** Allow additional string keys for JSON serialization */
-  [key: string]: string;
+  [key: string]: string | undefined;
 }
 
 /**
@@ -88,6 +90,7 @@ export interface SendResult {
  *   webhookId: "abc123",
  *   resourceGid: "gid://shopify/Company/123",
  *   enqueuedAt: new Date().toISOString(),
+ *   triggeredAt: "2026-10-23T12:00:00Z", // X-Shopify-Triggered-At (stored for audit)
  * });
  * ```
  */

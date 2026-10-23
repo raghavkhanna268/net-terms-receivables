@@ -13,8 +13,9 @@ import type { PlanKey } from "~/lib/entitlements";
  * 1. Refreshes the cached plan so changes take effect immediately
  * 2. On upgrade, reactivates gated accounts up to the new limit (oldest first)
  *
- * Idempotency: Uses HMAC verification + safe-to-replay design.
- * Refreshing the cache multiple times is safe and has no side effects.
+ * Idempotency: HMAC verification + safe-to-replay design. No edge deduplication
+ * because handlers are fully idempotent (cache refresh + account reactivation).
+ * Shopify retries are safe and may even be beneficial for resilience.
  *
  * Background refresh: Uses cloudflare.ctx.waitUntil() to avoid blocking
  * the webhook response. Shopify expects a quick 200 response.

@@ -13,6 +13,11 @@
  * - dueSource: 'schedule' if from Shopify payment schedule
  *
  * Idempotent: Uses upsert with ON CONFLICT on orderId.
+ * 
+ * S20 ordering: No explicit ordering guard needed because:
+ * - The drain re-fetches the order from Shopify Admin API
+ * - Re-fetched data is always the latest Shopify state
+ * - Terminal states (paid/cancelled) are protected in the upsert
  */
 
 import type { Sql } from "~/lib/db-light.server";
@@ -27,11 +32,15 @@ import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
  * CANCELLED: Marks Invoice as cancelled
  * PAID: Marks Invoice as paid, sets outstanding to 0
  *
+ * S20: triggeredAt parameter kept for API compatibility but not used for ordering.
+ * The drain re-fetches from Shopify, so we always have the latest state.
+ *
  * @param sql - postgres.js SQL client
  * @param shopDomain - Shop domain
  * @param topic - Webhook topic
  * @param order - Order data from webhook
  * @param webhookId - Webhook ID for idempotency
+ * @param _triggeredAt - Unused, kept for API compatibility
  * @returns Sync result
  */
 export async function processOrderWebhook(
@@ -39,10 +48,11 @@ export async function processOrderWebhook(
   shopDomain: string,
   topic: string,
   order: ShopifyOrder,
-  webhookId: string
+  webhookId: string,
+  _triggeredAt?: Date | null
 ): Promise<SyncResult> {
   // Idempotency check
-  if (await isWebhookProcessed(sql, webhookId)) {
+  if (await isWebhookProcessed(sql, webhookId, shopDomain)) {
     return {
       success: true,
       action: "skipped",
@@ -99,11 +109,11 @@ export async function processOrderWebhook(
     };
   }
 
-  // CREATE or UPDATED: Upsert invoice
+  // CREATE or UPDATED: Upsert invoice (re-fetched data is always latest)
   const invoiceData = mapOrderToInvoice(shopId, buyerAccountId, order);
   const result = await upsertInvoice(sql, invoiceData);
 
-  await markWebhookProcessed(sql, webhookId, topic, order.id);
+  await markWebhookProcessed(sql, webhookId, topic, order.id, shopDomain);
 
   return result;
 }
@@ -236,6 +246,10 @@ export function mapOrderToInvoice(
 
 /**
  * Upsert an Invoice from order data.
+ * 
+ * S20: No ordering guard needed. The drain re-fetches from Shopify Admin API,
+ * so the data is always the latest Shopify state. Terminal states (paid/cancelled)
+ * are protected in the upsert's DO UPDATE clause.
  */
 async function upsertInvoice(
   sql: Sql,

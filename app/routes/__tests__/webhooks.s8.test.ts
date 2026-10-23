@@ -12,10 +12,16 @@ import crypto from "node:crypto";
  * 4. Missing GID returns 200 without enqueue
  */
 
-// Mock SQL client
+// Mock SQL client with transaction support
 const mockSql = Object.assign(
   vi.fn().mockResolvedValue([]),
-  { json: vi.fn((v) => v) }
+  { 
+    json: vi.fn((v) => v),
+    // Mock sql.begin for S20 transactional edge idempotency
+    begin: vi.fn(async (callback: (tx: typeof mockSql) => Promise<unknown>) => {
+      return callback(mockSql);
+    }),
+  }
 );
 
 // Mock the request context module
@@ -28,6 +34,16 @@ const mockSendSyncMessage = vi.fn().mockResolvedValue({ msgId: "msg-123" });
 
 vi.mock("~/lib/pgmq.server", () => ({
   sendSyncMessage: mockSendSyncMessage,
+}));
+
+// Mock the webhook receipts module (S20)
+const mockRecordWebhookReceipt = vi.fn().mockResolvedValue(true);
+const mockParseTriggeredAt = vi.fn().mockReturnValue(null);
+
+vi.mock("~/lib/webhook-receipts.server", () => ({
+  recordWebhookReceipt: (...args: unknown[]) => mockRecordWebhookReceipt(...args),
+  parseTriggeredAt: (...args: unknown[]) => mockParseTriggeredAt(...args),
+  deleteWebhookReceiptsForShop: vi.fn().mockResolvedValue(0),
 }));
 
 describe("S8 Webhook Handlers", () => {

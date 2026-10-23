@@ -12,10 +12,16 @@ import crypto from "node:crypto";
  * 4. Missing GID returns 200 without enqueue
  */
 
-// Mock SQL client that returns bulk operation type
+// Mock SQL client that returns bulk operation type, with transaction support
 const mockSql = Object.assign(
   vi.fn().mockResolvedValue([{ bulk_type: "companies" }]),
-  { json: vi.fn((v) => v) }
+  { 
+    json: vi.fn((v) => v),
+    // Mock sql.begin for S20 transactional edge idempotency
+    begin: vi.fn(async (callback: (tx: typeof mockSql) => Promise<unknown>) => {
+      return callback(mockSql);
+    }),
+  }
 );
 
 // Mock the request context module
@@ -30,6 +36,16 @@ const mockSendBulkMessage = vi.fn().mockResolvedValue({ msgId: "msg-456" });
 vi.mock("~/lib/pgmq.server", () => ({
   sendSyncMessage: mockSendSyncMessage,
   sendBulkMessage: mockSendBulkMessage,
+}));
+
+// Mock webhook receipts for S20 idempotency
+const mockRecordWebhookReceipt = vi.fn().mockResolvedValue(true);
+const mockParseTriggeredAt = vi.fn().mockReturnValue(null);
+
+vi.mock("~/lib/webhook-receipts.server", () => ({
+  recordWebhookReceipt: (...args: unknown[]) => mockRecordWebhookReceipt(...args),
+  parseTriggeredAt: (...args: unknown[]) => mockParseTriggeredAt(...args),
+  deleteWebhookReceiptsForShop: vi.fn().mockResolvedValue(0),
 }));
 
 // Mock shopify context for bulk_operations.finish (still uses authenticate.webhook)

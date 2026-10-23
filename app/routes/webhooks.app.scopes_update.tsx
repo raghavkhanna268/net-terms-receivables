@@ -7,6 +7,9 @@ import {
 /**
  * Scopes update webhook handler.
  *
+ * Idempotency: No edge deduplication - handler is fully idempotent
+ * (updating to the same scope value is safe).
+ *
  * OPTIMIZATION: Uses lightweight verifyWebhook() instead of authenticate.webhook()
  * to avoid unnecessary session loading. This webhook only needs to UPDATE scopes,
  * not read sessions - updateScopeForShop runs a single UPDATE query.
@@ -45,7 +48,6 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     }
   } catch (error) {
     console.error(`Error updating scopes for ${shop}:`, error);
-    // Don't fail the webhook - Shopify will retry
   }
 
   return new Response();
