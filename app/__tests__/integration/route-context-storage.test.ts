@@ -18,8 +18,10 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 
 // Mock verifyWebhook for webhook routes (they now use lightweight verification)
 const mockVerifyWebhook = vi.fn();
+const mockVerifyPayloadShopMatch = vi.fn((headerShop: string, _payload?: unknown) => headerShop);
 vi.mock("~/lib/webhook-verify.server", () => ({
-  verifyWebhook: (...args: unknown[]) => mockVerifyWebhook(...args),
+  verifyWebhook: (request: Request, secret: string) => mockVerifyWebhook(request, secret),
+  verifyPayloadShopMatch: (headerShop: string, payload: unknown) => mockVerifyPayloadShopMatch(headerShop, payload),
   normalizeWebhookTopic: (topic: string) => topic.replace(/\//g, "_").toUpperCase(),
 }));
 
@@ -177,6 +179,28 @@ describe("Route context storage verification", () => {
         "scopes-test.myshopify.com",
         "read_orders,read_customers,write_orders"
       );
+    });
+
+    it("does NOT update scopes when topic is app/uninstalled", async () => {
+      const sessionStorage = createMockSessionStorage();
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: "scopes-test.myshopify.com",
+        topic: "app/uninstalled",
+        webhookId: "webhook-wrong",
+        payload: { current: ["read_orders"] },
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const args = createMockArgs({ sessionStorage });
+
+      const { action } = await import(
+        "../../routes/webhooks.app.scopes_update"
+      );
+      await action(args);
+
+      expect(sessionStorage.updateScopeForShop).not.toHaveBeenCalled();
     });
   });
 

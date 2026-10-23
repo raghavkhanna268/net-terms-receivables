@@ -115,4 +115,59 @@ describe("webhooks.app.uninstalled", () => {
 
     expect(mockVerifyWebhook).toHaveBeenCalledWith(args.request, "test-secret");
   });
+
+  describe("topic guard", () => {
+    it("does NOT delete sessions when topic is app/scopes_update", async () => {
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "app/scopes_update",
+        webhookId: "test-webhook-id",
+        payload: {},
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const response = await action(createActionArgs());
+
+      expect(response).toBeInstanceOf(Response);
+      expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
+    });
+
+    it("does NOT delete sessions when topic is shop/redact", async () => {
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "shop/redact",
+        webhookId: "test-webhook-id",
+        payload: {},
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const response = await action(createActionArgs());
+
+      expect(response).toBeInstanceOf(Response);
+      expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
+    });
+
+    it("returns 200 even for unexpected topics (logs and no-ops)", async () => {
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "orders/create",
+        webhookId: "test-webhook-id",
+        payload: {},
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const response = await action(createActionArgs());
+
+      expect(response).toBeInstanceOf(Response);
+      expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Ignoring unexpected topic")
+      );
+      consoleSpy.mockRestore();
+    });
+  });
 });

@@ -25,6 +25,13 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   console.log(`Received ${normalizedTopic} webhook for ${shop}`);
 
+  if (normalizedTopic !== "APP_UNINSTALLED") {
+    console.log(
+      `[uninstalled] Ignoring unexpected topic ${normalizedTopic} for ${shop}`
+    );
+    return new Response();
+  }
+
   // Delete ALL sessions for this shop (DPDP compliance).
   // Uses deleteAllForShop which calls deleteMany internally, avoiding
   // the 25-session limit of findSessionsByShop.

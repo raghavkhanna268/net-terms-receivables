@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   verifyWebhook,
+  verifyPayloadShopMatch,
   normalizeWebhookTopic,
 } from "../webhook-verify.server";
 
@@ -38,23 +39,48 @@ async function generateHmac(secret: string, body: string): Promise<string> {
 }
 
 /**
- * Create a mock webhook request with proper Shopify headers.
+ * Create a mock webhook request with traditional X-Shopify-* headers.
  */
 function createWebhookRequest(
   body: string,
   topic: string,
   hmac: string,
-  webhookId = "test-webhook-id-123"
+  webhookId = "test-webhook-id-123",
+  shop = TEST_SHOP
 ): Request {
   return new Request("https://example.com/webhooks/compliance", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "X-Shopify-Topic": topic,
-      "X-Shopify-Shop-Domain": TEST_SHOP,
+      "X-Shopify-Shop-Domain": shop,
       "X-Shopify-Hmac-Sha256": hmac,
       "X-Shopify-Webhook-Id": webhookId,
       "X-Shopify-API-Version": "2026-10",
+    },
+    body,
+  });
+}
+
+/**
+ * Create a mock webhook request with event-style shopify-* headers.
+ */
+function createEventsWebhookRequest(
+  body: string,
+  topic: string,
+  hmac: string,
+  webhookId = "test-webhook-id-123",
+  shop = TEST_SHOP
+): Request {
+  return new Request("https://example.com/webhooks/compliance", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "shopify-topic": topic,
+      "shopify-shop-domain": shop,
+      "shopify-hmac-sha256": hmac,
+      "shopify-webhook-id": webhookId,
+      "shopify-api-version": "2026-10",
     },
     body,
   });
@@ -208,6 +234,151 @@ describe("verifyWebhook", () => {
     });
   });
 
+  describe("shop domain validation", () => {
+    it("accepts valid shop domain format", async () => {
+      const body = JSON.stringify({ shop_id: 123 });
+      const hmac = await generateHmac(TEST_API_SECRET, body);
+      const request = createWebhookRequest(body, "shop/redact", hmac, "test-id", "my-shop123.myshopify.com");
+
+      const result = await verifyWebhook(request, TEST_API_SECRET);
+
+      expect(result.shop).toBe("my-shop123.myshopify.com");
+    });
+
+    it("rejects shop domain without .myshopify.com suffix", async () => {
+      const body = JSON.stringify({ shop_id: 123 });
+      const hmac = await generateHmac(TEST_API_SECRET, body);
+      const request = createWebhookRequest(body, "shop/redact", hmac, "test-id", "malicious.com");
+
+      try {
+        await verifyWebhook(request, TEST_API_SECRET);
+        expect.fail("Expected verifyWebhook to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(400);
+        expect((error as Response).statusText).toBe("Invalid shop domain format");
+      }
+    });
+
+    it("rejects shop domain starting with hyphen", async () => {
+      const body = JSON.stringify({ shop_id: 123 });
+      const hmac = await generateHmac(TEST_API_SECRET, body);
+      const request = createWebhookRequest(body, "shop/redact", hmac, "test-id", "-invalid.myshopify.com");
+
+      try {
+        await verifyWebhook(request, TEST_API_SECRET);
+        expect.fail("Expected verifyWebhook to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(400);
+      }
+    });
+
+    it("rejects shop domain with uppercase letters", async () => {
+      const body = JSON.stringify({ shop_id: 123 });
+      const hmac = await generateHmac(TEST_API_SECRET, body);
+      const request = createWebhookRequest(body, "shop/redact", hmac, "test-id", "MyShop.myshopify.com");
+
+      try {
+        await verifyWebhook(request, TEST_API_SECRET);
+        expect.fail("Expected verifyWebhook to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(400);
+      }
+    });
+
+    it("rejects shop domain with special characters", async () => {
+      const body = JSON.stringify({ shop_id: 123 });
+      const hmac = await generateHmac(TEST_API_SECRET, body);
+      const request = createWebhookRequest(body, "shop/redact", hmac, "test-id", "shop_name.myshopify.com");
+
+      try {
+        await verifyWebhook(request, TEST_API_SECRET);
+        expect.fail("Expected verifyWebhook to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(400);
+      }
+    });
+  });
+
+  describe("event-style headers (shopify-*)", () => {
+    it("accepts valid HMAC with event-style headers", async () => {
+      const body = JSON.stringify({ shop_id: 123 });
+      const hmac = await generateHmac(TEST_API_SECRET, body);
+      const request = createEventsWebhookRequest(body, "shop/redact", hmac);
+
+      const result = await verifyWebhook(request, TEST_API_SECRET);
+
+      expect(result.shop).toBe(TEST_SHOP);
+      expect(result.topic).toBe("shop/redact");
+    });
+
+    it("rejects invalid HMAC with event-style headers", async () => {
+      const body = JSON.stringify({ shop_id: 123 });
+      const request = createEventsWebhookRequest(body, "shop/redact", "invalid-hmac");
+
+      try {
+        await verifyWebhook(request, TEST_API_SECRET);
+        expect.fail("Expected verifyWebhook to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(401);
+      }
+    });
+
+    it("event-style headers take precedence over traditional headers", async () => {
+      const body = JSON.stringify({ shop_id: 123 });
+      const hmac = await generateHmac(TEST_API_SECRET, body);
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "shopify-topic": "events/topic",
+          "shopify-shop-domain": "events-shop.myshopify.com",
+          "shopify-hmac-sha256": hmac,
+          "shopify-webhook-id": "events-id",
+          "shopify-api-version": "2026-10",
+          "X-Shopify-Topic": "traditional/topic",
+          "X-Shopify-Shop-Domain": "traditional-shop.myshopify.com",
+          "X-Shopify-Hmac-Sha256": "traditional-hmac",
+          "X-Shopify-Webhook-Id": "traditional-id",
+          "X-Shopify-API-Version": "2025-01",
+        },
+        body,
+      });
+
+      const result = await verifyWebhook(request, TEST_API_SECRET);
+
+      expect(result.shop).toBe("events-shop.myshopify.com");
+      expect(result.topic).toBe("events/topic");
+      expect(result.webhookId).toBe("events-id");
+    });
+
+    it("falls back to traditional headers when event-style HMAC is missing", async () => {
+      const body = JSON.stringify({ shop_id: 123 });
+      const hmac = await generateHmac(TEST_API_SECRET, body);
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Topic": "traditional/topic",
+          "X-Shopify-Shop-Domain": TEST_SHOP,
+          "X-Shopify-Hmac-Sha256": hmac,
+          "X-Shopify-Webhook-Id": "traditional-id",
+          "X-Shopify-API-Version": "2026-10",
+        },
+        body,
+      });
+
+      const result = await verifyWebhook(request, TEST_API_SECRET);
+
+      expect(result.topic).toBe("traditional/topic");
+      expect(result.webhookId).toBe("traditional-id");
+    });
+  });
+
   describe("payload parsing", () => {
     it("returns parsed JSON payload", async () => {
       const payload = { shop_id: 123, customer: { id: 456 } };
@@ -266,5 +437,47 @@ describe("normalizeWebhookTopic", () => {
 
   it("handles already uppercase topics", () => {
     expect(normalizeWebhookTopic("SHOP_REDACT")).toBe("SHOP_REDACT");
+  });
+});
+
+describe("verifyPayloadShopMatch", () => {
+  it("returns payload shop_domain when it matches header shop", () => {
+    const payload = { shop_domain: "test-shop.myshopify.com", shop_id: 123 };
+    const result = verifyPayloadShopMatch("test-shop.myshopify.com", payload);
+    expect(result).toBe("test-shop.myshopify.com");
+  });
+
+  it("throws 400 when payload shop_domain is missing", () => {
+    const payload = { shop_id: 123 };
+    try {
+      verifyPayloadShopMatch("test-shop.myshopify.com", payload);
+      expect.fail("Expected verifyPayloadShopMatch to throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(Response);
+      expect((error as Response).status).toBe(400);
+      expect((error as Response).statusText).toBe("Missing shop_domain in payload");
+    }
+  });
+
+  it("throws 400 when payload shop_domain does not match header", () => {
+    const payload = { shop_domain: "other-shop.myshopify.com", shop_id: 123 };
+    try {
+      verifyPayloadShopMatch("test-shop.myshopify.com", payload);
+      expect.fail("Expected verifyPayloadShopMatch to throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(Response);
+      expect((error as Response).status).toBe(400);
+      expect((error as Response).statusText).toBe("Payload shop_domain does not match header shop");
+    }
+  });
+
+  it("throws 400 when payload is null", () => {
+    try {
+      verifyPayloadShopMatch("test-shop.myshopify.com", null);
+      expect.fail("Expected verifyPayloadShopMatch to throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(Response);
+      expect((error as Response).status).toBe(400);
+    }
   });
 });

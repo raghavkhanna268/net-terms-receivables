@@ -25,6 +25,13 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   console.log(`Received ${normalizedTopic} webhook for ${shop}`);
 
+  if (normalizedTopic !== "APP_SCOPES_UPDATE") {
+    console.log(
+      `[scopes_update] Ignoring unexpected topic ${normalizedTopic} for ${shop}`
+    );
+    return new Response();
+  }
+
   // Update session scopes when the merchant changes app permissions.
   // The payload contains the current scopes granted to the app.
   // Uses updateScopeForShop which calls updateMany in a single query.

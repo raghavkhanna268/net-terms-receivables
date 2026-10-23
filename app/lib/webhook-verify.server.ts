@@ -14,6 +14,11 @@
  *
  * Security: Uses the same HMAC-SHA256 algorithm and constant-time comparison
  * as the Shopify library. Rejects invalid signatures with 401 Unauthorized.
+ *
+ * Header compatibility: Accepts the same header names as @shopify/shopify-api:
+ * - Traditional webhook headers: X-Shopify-Hmac-Sha256, X-Shopify-Topic, etc.
+ * - Newer event-style headers: shopify-hmac-sha256, shopify-topic, etc.
+ * Precedence: event-style headers checked first (same as library).
  */
 
 export interface WebhookVerifyResult {
@@ -32,7 +37,8 @@ export interface WebhookVerifyOptions {
 const decoder = new TextDecoder();
 
 /**
- * Shopify webhook header names (matches library constants).
+ * Shopify webhook header names - traditional X-Shopify-* style.
+ * These match @shopify/shopify-api ShopifyHeader enum values.
  */
 const WEBHOOK_HEADERS = {
   hmac: "X-Shopify-Hmac-Sha256",
@@ -41,6 +47,24 @@ const WEBHOOK_HEADERS = {
   webhookId: "X-Shopify-Webhook-Id",
   apiVersion: "X-Shopify-API-Version",
 } as const;
+
+/**
+ * Shopify event-style header names - newer lowercase shopify-* style.
+ * These match @shopify/shopify-api ShopifyEventsHeader values.
+ */
+const EVENTS_HEADERS = {
+  hmac: "shopify-hmac-sha256",
+  topic: "shopify-topic",
+  domain: "shopify-shop-domain",
+  webhookId: "shopify-webhook-id",
+  apiVersion: "shopify-api-version",
+} as const;
+
+/**
+ * Regex to validate Shopify shop domain format.
+ * Must be: lowercase alphanumeric, may contain hyphens (not at start), ends with .myshopify.com
+ */
+const SHOP_DOMAIN_REGEX = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
 
 /**
  * Isolate-scoped cache for CryptoKey instances.
@@ -112,11 +136,35 @@ function timingSafeEqual(a: string, b: string): boolean {
 }
 
 /**
+ * Detect webhook type based on which HMAC header is present.
+ * Event-style headers take precedence (same as @shopify/shopify-api).
+ */
+function detectWebhookType(request: Request): "events" | "webhooks" {
+  if (request.headers.get(EVENTS_HEADERS.hmac)) {
+    return "events";
+  }
+  return "webhooks";
+}
+
+/**
+ * Get header value, checking both event-style and traditional headers.
+ * Returns the value from whichever header set is being used.
+ */
+function getHeader(
+  request: Request,
+  webhookType: "events" | "webhooks",
+  headerKey: keyof typeof WEBHOOK_HEADERS
+): string | null {
+  const headers = webhookType === "events" ? EVENTS_HEADERS : WEBHOOK_HEADERS;
+  return request.headers.get(headers[headerKey]);
+}
+
+/**
  * Get HMAC header or throw 401 Unauthorized.
  * Shopify's App Store compliance check expects 401 for unauthenticated webhook calls.
  */
-function getHmacHeader(request: Request): string {
-  const value = request.headers.get(WEBHOOK_HEADERS.hmac);
+function getHmacHeader(request: Request, webhookType: "events" | "webhooks"): string {
+  const value = getHeader(request, webhookType, "hmac");
   if (!value) {
     throw new Response(null, {
       status: 401,
@@ -129,15 +177,33 @@ function getHmacHeader(request: Request): string {
 /**
  * Extract required header or throw 400 Bad Request.
  */
-function getRequiredHeader(request: Request, name: string): string {
-  const value = request.headers.get(name);
+function getRequiredHeader(
+  request: Request,
+  webhookType: "events" | "webhooks",
+  headerKey: keyof typeof WEBHOOK_HEADERS
+): string {
+  const value = getHeader(request, webhookType, headerKey);
+  const headerName = webhookType === "events" ? EVENTS_HEADERS[headerKey] : WEBHOOK_HEADERS[headerKey];
   if (!value) {
     throw new Response(null, {
       status: 400,
-      statusText: `Missing required header: ${name}`,
+      statusText: `Missing required header: ${headerName}`,
     });
   }
   return value;
+}
+
+/**
+ * Validate shop domain format.
+ * Must match: ^[a-z0-9][a-z0-9-]*\.myshopify\.com$
+ */
+function validateShopDomain(shop: string): void {
+  if (!SHOP_DOMAIN_REGEX.test(shop)) {
+    throw new Response(null, {
+      status: 400,
+      statusText: "Invalid shop domain format",
+    });
+  }
 }
 
 /**
@@ -147,7 +213,7 @@ function getRequiredHeader(request: Request, name: string): string {
  * @param apiSecret - The Shopify API secret for HMAC verification
  * @param options - Optional settings (requireValidJson for compliance topics)
  * @returns Verified webhook data including shop, topic, webhookId, and parsed payload
- * @throws Response with 401 if HMAC is invalid or missing, 400 if other headers missing or invalid JSON (when required), 405 if not POST
+ * @throws Response with 401 if HMAC is invalid or missing, 400 if other headers missing, invalid shop format, or invalid JSON (when required), 405 if not POST
  */
 export async function verifyWebhook(
   request: Request,
@@ -161,11 +227,14 @@ export async function verifyWebhook(
     });
   }
 
-  const providedHmac = getHmacHeader(request);
-  const topic = getRequiredHeader(request, WEBHOOK_HEADERS.topic);
-  const shop = getRequiredHeader(request, WEBHOOK_HEADERS.domain);
-  const webhookId = getRequiredHeader(request, WEBHOOK_HEADERS.webhookId);
-  const apiVersion = getRequiredHeader(request, WEBHOOK_HEADERS.apiVersion);
+  const webhookType = detectWebhookType(request);
+  const providedHmac = getHmacHeader(request, webhookType);
+  const topic = getRequiredHeader(request, webhookType, "topic");
+  const shop = getRequiredHeader(request, webhookType, "domain");
+  const webhookId = getRequiredHeader(request, webhookType, "webhookId");
+  const apiVersion = getRequiredHeader(request, webhookType, "apiVersion");
+
+  validateShopDomain(shop);
 
   const rawBody = await request.arrayBuffer();
   const expectedHmac = await computeHmac(apiSecret, rawBody);
@@ -199,6 +268,35 @@ export async function verifyWebhook(
     apiVersion,
     rawBody,
   };
+}
+
+/**
+ * Verify that the payload's shop_domain matches the header shop.
+ * For shop/redact, the shop to purge should come from the signed payload.
+ * @throws Response with 400 if they don't match
+ */
+export function verifyPayloadShopMatch(
+  headerShop: string,
+  payload: unknown
+): string {
+  const payloadObj = payload as { shop_domain?: string } | null;
+  const payloadShop = payloadObj?.shop_domain;
+
+  if (!payloadShop) {
+    throw new Response(null, {
+      status: 400,
+      statusText: "Missing shop_domain in payload",
+    });
+  }
+
+  if (payloadShop !== headerShop) {
+    throw new Response(null, {
+      status: 400,
+      statusText: "Payload shop_domain does not match header shop",
+    });
+  }
+
+  return payloadShop;
 }
 
 /**

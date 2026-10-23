@@ -1,6 +1,7 @@
 import type { ActionFunctionArgs } from "react-router";
 import {
   verifyWebhook,
+  verifyPayloadShopMatch,
   normalizeWebhookTopic,
 } from "~/lib/webhook-verify.server";
 
@@ -24,7 +25,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     return new Response(null, { status: 500 });
   }
 
-  const { shop, topic, webhookId } = await verifyWebhook(request, apiSecret, {
+  const { shop, topic, webhookId, payload } = await verifyWebhook(request, apiSecret, {
     requireValidJson: true,
   });
   const normalizedTopic = normalizeWebhookTopic(topic);
@@ -53,12 +54,16 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       break;
 
     case "SHOP_REDACT": {
+      // Verify payload shop_domain matches header shop for security.
+      // The shop to purge comes from the signed payload, not just the header.
+      const payloadShop = verifyPayloadShopMatch(shop, payload);
+
       // Delete all session data for this shop via deleteAllForShop.
       // Idempotent: returns 200 even when no sessions exist.
       const { sessionStorage } = context;
-      const count = await sessionStorage.deleteAllForShop(shop);
+      const count = await sessionStorage.deleteAllForShop(payloadShop);
       console.log(
-        `[Compliance] shop/redact: Deleted ${count} session(s) for shop=${shop}`
+        `[Compliance] shop/redact: Deleted ${count} session(s) for shop=${payloadShop}`
       );
       break;
     }
