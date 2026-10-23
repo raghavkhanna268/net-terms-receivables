@@ -44,7 +44,7 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | s8_tagged_customers | Customer GID, tags, tag_active, email*, displayName* | Tag-based buyer accounts | Until customers/redact or shop/redact |
 | s8_draft_orders | Draft order GID, buyer account ref, total, status | Pending credit exposure | Until draft completed/deleted |
 
-*Email and displayName are **gated** by `CUSTOMER_PII_FIELDS=1` env var, which requires Shopify Protected Customer Data approval (Level 1 + Email/Name fields). Always NULL until approval.
+*Email and displayName are **gated** by `CUSTOMER_PII_FIELDS=1` env var, which requires Protected Customer Data (PCD) approval. Level 1 + Name and Email fields have been requested in the Partner Dashboard; the fields remain NULL until approval is granted and the flag is enabled.
 
 **PII Minimisation (S22):** When a tagged customer becomes `tag_active=false` and has no open invoices, their email and displayName are automatically nulled.
 
@@ -61,7 +61,7 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 
 | Data Category | Fields | Purpose | Retention |
 |---------------|--------|---------|-----------|
-| s22_data_requests | Shop ID, customer GID, request ID, status, export JSON | GDPR/CCPA compliance | Until shop/redact |
+| s22_data_requests | Shop ID, customer GID, request ID, status, export JSON, expires_at | GDPR/CCPA compliance | 30 days (DPDP minimisation), then auto-purged |
 
 ### 2.6 Operational Data
 
@@ -114,7 +114,7 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 |--------------|---------|----------|-----|
 | Cloudflare, Inc. | Application hosting (Workers), connection pooling (Hyperdrive) | Global (Worker placed ap-south-1) | **TBD** |
 | Supabase, Inc. | Database hosting (Postgres) | AWS ap-south-1 (Mumbai) | **TBD** |
-| Resend, Inc. | Email delivery (data request notifications, payment reminders) | US | **TBD** |
+| Resend, Inc. | Email delivery (data request notifications, payment reminders) | US | [Resend DPA](https://resend.com/legal/dpa) |
 
 **Resend data handling:**
 - Data request notification emails contain **no customer PII** — only a notice and download link
@@ -132,8 +132,8 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | Shop and Account Data | Until 48 hours after uninstall | `shop/redact` webhook (sent by Shopify 48h after uninstall) |
 | Tagged Customer Data | Until customers/redact or shop/redact | Compliance webhooks |
 | Invoices | Retained for legal/tax compliance | Anonymized on customers/redact |
-| Payments | Until shop/redact | Anonymized on customers/redact if customer-related |
-| Data Request Records | Until shop/redact | Automatic cascade |
+| Payments | Until shop/redact | Redacted on customers/redact if linked to customer via Match→Invoice→BuyerAccount |
+| Data Request Records | 30 days (DPDP minimisation) | Auto-purged by pg_cron daily job, or on customers/redact, or on shop/redact (CASCADE) |
 | Audit Events | Until shop/redact | Automatic cascade |
 
 ---
@@ -161,22 +161,23 @@ When a customer requests their data:
    - `s8_tagged_customers`: GID, tags, tag_active, email, displayName
    - `s8_draft_orders`: Draft orders linked to customer's buyer account
    - `BuyerAccount`: Account details (kind=TAGGED_CUSTOMER)
-   - `Invoice`: Invoice history linked to buyer account
+   - `Invoice`: Invoice history linked to buyer account (no LIMIT)
 3. **Generate** JSON export with all found data
-4. **Persist** `s22_data_requests` record with status and export data
+4. **Persist** `s22_data_requests` record with status, export data, and 30-day expiration
 5. **Notify** shop owner via email (if configured)
 6. **Return** 200 (export available for merchant download)
 
 **Data delivery:**
-- **Primary:** In-admin download via `/app/data-requests` route
+- **Primary:** In-admin download via `/app/data-requests` route (fetches resource route, creates Blob, marks downloaded on success)
 - **Notification:** Email to shop owner via Resend API (gated on `RESEND_API_KEY` and `RESEND_FROM` env vars)
+- **Retention:** Exports are retained for **30 days** (DPDP minimisation), then automatically purged by pg_cron
 
 **Email notification details:**
 - Email contains ONLY a notice and link to the in-admin download page
 - **NO customer PII** is included in the email (no GID, email, name, or tags)
-- Shop owner email is fetched via Admin API (`shop { email contactEmail }`) at send time and **never stored or logged**
+- Shop owner email is fetched via Admin API (`shop { email contactEmail }`) using the app's offline session at send time and **never stored or logged**
 - If `RESEND_API_KEY` or `RESEND_FROM` is not set, email is skipped and logged as `data_request_email_skipped`
-- Resend API failures do not fail the webhook (still returns 200, logs error, export still available)
+- Resend API failures do not fail the webhook (still returns 200, logs status code only, export still available)
 
 **Handler:** `app/routes/webhooks.compliance.tsx`
 
@@ -186,13 +187,14 @@ When a customer must be deleted (GDPR/CCPA erasure request):
 1. **Verify** payload `shop_domain` matches header shop (returns 401 on mismatch)
 2. **Delete** `s8_tagged_customers` row for the customer
 3. **Delete** `s8_draft_orders` linked to customer's buyer account
-4. **Anonymize** `BuyerAccount`:
+4. **Delete** `s22_data_requests` for the customer (contains PII in export)
+5. **Anonymize** `BuyerAccount`:
    - Set `name` to "Redacted Customer"
    - Append timestamp to `customerId` to prevent FK conflicts
-5. **Anonymize** `Payment` fields (`payerText`, `narration`) if they contain customer identifier
-6. **Preserve** `Invoice` records for legal/tax compliance (updated timestamp only)
+6. **Redact** `Payment` fields (`payerText`, `narration`) for payments linked via Match→Invoice→BuyerAccount relationship (not pattern matching on customer ID)
+7. **Preserve** `Invoice` records for legal/tax compliance (Invoice has no customer-identifying fields; buyer relationship is through BuyerAccount which is anonymized)
 
-**Legal retention reasoning:** Invoices must be retained for tax compliance (typically 7+ years in India). The invoice itself is a business record; only customer PII is anonymized.
+**Legal retention reasoning:** Invoices must be retained for tax compliance (typically 7+ years in India). The invoice itself is a business record; the buyer link is anonymized.
 
 **Handler:** `app/routes/webhooks.compliance.tsx`
 
@@ -204,8 +206,8 @@ When 48 hours have passed after uninstall:
 3. **Delete** `Shop` row — **all shop data cascades via ON DELETE CASCADE FKs**:
    - `AccountSource`, `BuyerAccount`, `BankImport`, `ReminderRule`, `AuditEvent`
    - `Invoice`, `Payment`, `Match`, `ReminderLog` (direct Shop FKs)
-   - `s8_tagged_customers`, `s8_draft_orders` (S22 FKs)
-   - `s22_data_requests` (S22 FK)
+   - `s8_tagged_customers`, `s8_draft_orders` (S8 FKs)
+   - `s22_data_requests` (S22 FK — exports purged even if not yet expired)
    - `s6_dead_letter` (shop-scoped messages)
 
 **pgmq messages:** Cannot be purged per-shop (documented limitation). Messages for deleted shops are safely ignored by the drain processor.
@@ -252,7 +254,7 @@ For privacy inquiries:
 
 **Current scopes:** `read_companies`, `read_orders`, `read_payment_terms`, `read_customers`, `read_draft_orders`
 
-**Protected Customer Data:** The `read_customers` scope requires Shopify's Protected Customer Data (PCD) approval form. See launch checklist.
+**Protected Customer Data:** The `read_customers` scope requires Shopify's Protected Customer Data (PCD) approval. Level 1 access plus Name and Email fields have been requested in the Partner Dashboard. Until approval is granted and `CUSTOMER_PII_FIELDS=1` is set, the email and displayName fields in `s8_tagged_customers` remain NULL.
 
 ---
 

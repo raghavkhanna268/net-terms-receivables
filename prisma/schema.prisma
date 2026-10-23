@@ -524,8 +524,10 @@ model AuditEvent {
 /// Stores processed webhook IDs to prevent duplicate processing when
 /// Shopify retries webhooks or the drain reprocesses messages.
 ///
-/// S22: Added shop column for per-shop atomic dedupe using
-/// INSERT ... ON CONFLICT DO NOTHING RETURNING.
+/// S22: Added shop column for per-shop atomic dedupe.
+/// Note: The unique index on (shop, webhook_id) WHERE shop IS NOT NULL is
+/// created in the migration, not via Prisma @@unique (which would create
+/// a non-partial index that drifts from the migration's partial index).
 ///
 /// Note: This table is created by the S6 migration, not Prisma.
 /// It's included here to keep schema.prisma in sync with the database.
@@ -537,7 +539,6 @@ model S6ProcessedWebhook {
   /// Shop domain for per-shop deduplication (S22). NULL for legacy rows.
   shop        String?
 
-  @@unique([shop, webhookId])
   @@index([processedAt])
   @@map("s6_processed_webhooks")
 }
@@ -696,7 +697,8 @@ model S6DeadLetter {
 /// Stores customer data export requests from customers/data_request webhook.
 /// Merchant downloads pending exports via embedded admin route.
 ///
-/// Delivery path: In-admin download (email delivery requires product decision).
+/// Delivery path: In-admin download + email notification to shop owner (if configured).
+/// Exports are retained for 30 days (DPDP minimisation) then auto-purged by pg_cron.
 model S22DataRequest {
   id           String    @id @default(dbgenerated("gen_random_uuid()::text"))
   shopId       String    @map("shop_id")
@@ -714,6 +716,8 @@ model S22DataRequest {
   completedAt  DateTime? @map("completed_at") @db.Timestamptz(3)
   /// When merchant downloaded the export
   downloadedAt DateTime? @map("downloaded_at") @db.Timestamptz(3)
+  /// Expiration timestamp (30 days from creation). Expired exports are purged by pg_cron.
+  expiresAt    DateTime? @map("expires_at") @db.Timestamptz(3)
   createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
 
   @@index([shopId, status])

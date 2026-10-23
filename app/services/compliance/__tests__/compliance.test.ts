@@ -20,8 +20,8 @@ import {
   sendDataRequestNotification,
   minimiseInactiveCustomerPii,
   minimiseCustomerPiiIfInactive,
-  claimWebhook,
   markShopUninstalled,
+  markDataRequestDownloaded,
 } from "../compliance.server";
 
 const mockFetch = vi.fn();
@@ -72,13 +72,19 @@ describe("compliance.server", () => {
   });
 
   describe("redactCustomer", () => {
-    it("deletes s8_tagged_customers and s8_draft_orders", async () => {
+    it("deletes s8_tagged_customers, s8_draft_orders, and s22_data_requests", async () => {
+      // 1. DELETE s8_tagged_customers
       mockSql.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+      // 2. DELETE s8_draft_orders
       mockSql.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-      mockSql.mockResolvedValueOnce([{ id: "ba-1" }]);
+      // 3. DELETE s22_data_requests
       mockSql.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+      // 4. SELECT buyerAccount
+      mockSql.mockResolvedValueOnce([{ id: "ba-1" }]);
+      // 5. UPDATE BuyerAccount
+      mockSql.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+      // 6. UPDATE Payment (via Match→Invoice→BuyerAccount)
       mockSql.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
 
       const result = await redactCustomer(
         mockSql,
@@ -88,15 +94,23 @@ describe("compliance.server", () => {
 
       expect(result.taggedCustomersDeleted).toBe(1);
       expect(result.draftOrdersDeleted).toBe(2);
+      expect(result.dataRequestsDeleted).toBe(1);
       expect(result.buyerAccountAnonymized).toBe(true);
+      expect(result.paymentsRedacted).toBe(3);
     });
 
-    it("anonymizes buyer account and invoices when they exist", async () => {
+    it("redacts payments linked via Match→Invoice→BuyerAccount", async () => {
+      // 1. DELETE s8_tagged_customers
       mockSql.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+      // 2. DELETE s8_draft_orders
       mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 3. DELETE s22_data_requests
+      mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 4. SELECT buyerAccount
       mockSql.mockResolvedValueOnce([{ id: "ba-1" }]);
+      // 5. UPDATE BuyerAccount
       mockSql.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 5 }));
+      // 6. UPDATE Payment (via Match→Invoice→BuyerAccount)
       mockSql.mockResolvedValueOnce(Object.assign([], { count: 2 }));
 
       const result = await redactCustomer(
@@ -106,15 +120,18 @@ describe("compliance.server", () => {
       );
 
       expect(result.buyerAccountAnonymized).toBe(true);
-      expect(result.invoicesAnonymized).toBe(5);
-      expect(result.paymentsAnonymized).toBe(2);
+      expect(result.paymentsRedacted).toBe(2);
     });
 
     it("handles customer with no data gracefully", async () => {
+      // 1. DELETE s8_tagged_customers
       mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 2. DELETE s8_draft_orders
       mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 3. DELETE s22_data_requests
+      mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 4. SELECT buyerAccount (not found)
       mockSql.mockResolvedValueOnce([]);
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
 
       const result = await redactCustomer(
         mockSql,
@@ -124,7 +141,28 @@ describe("compliance.server", () => {
 
       expect(result.taggedCustomersDeleted).toBe(0);
       expect(result.draftOrdersDeleted).toBe(0);
+      expect(result.dataRequestsDeleted).toBe(0);
       expect(result.buyerAccountAnonymized).toBe(false);
+      expect(result.paymentsRedacted).toBe(0);
+    });
+
+    it("deletes data requests for the customer", async () => {
+      // 1. DELETE s8_tagged_customers
+      mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 2. DELETE s8_draft_orders
+      mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 3. DELETE s22_data_requests - 3 requests exist
+      mockSql.mockResolvedValueOnce(Object.assign([], { count: 3 }));
+      // 4. SELECT buyerAccount (not found)
+      mockSql.mockResolvedValueOnce([]);
+
+      const result = await redactCustomer(
+        mockSql,
+        "shop-123",
+        "gid://shopify/Customer/456"
+      );
+
+      expect(result.dataRequestsDeleted).toBe(3);
     });
   });
 
@@ -290,52 +328,6 @@ describe("compliance.server", () => {
     });
   });
 
-  describe("claimWebhook", () => {
-    it("returns true when webhook is claimed (INSERT succeeds)", async () => {
-      mockSql.mockResolvedValueOnce([{ webhook_id: "webhook-123" }]);
-
-      const result = await claimWebhook(
-        mockSql,
-        "test-shop.myshopify.com",
-        "webhook-123",
-        "orders/create",
-        "gid://shopify/Order/1"
-      );
-
-      expect(result).toBe(true);
-    });
-
-    it("returns false when webhook already claimed (INSERT returns nothing)", async () => {
-      mockSql.mockResolvedValueOnce([]);
-      mockSql.mockResolvedValueOnce([{ exists: true }]);
-
-      const result = await claimWebhook(
-        mockSql,
-        "test-shop.myshopify.com",
-        "webhook-123",
-        "orders/create",
-        "gid://shopify/Order/1"
-      );
-
-      expect(result).toBe(false);
-    });
-
-    it("handles legacy rows (shop=NULL) correctly", async () => {
-      mockSql.mockResolvedValueOnce([]);
-      mockSql.mockResolvedValueOnce([{ exists: false }]);
-
-      const result = await claimWebhook(
-        mockSql,
-        "test-shop.myshopify.com",
-        "new-webhook",
-        "orders/create",
-        "gid://shopify/Order/1"
-      );
-
-      expect(result).toBe(true);
-    });
-  });
-
   describe("markShopUninstalled", () => {
     it("marks shop as uninstalled and returns true", async () => {
       mockSql.mockResolvedValueOnce(Object.assign([], { count: 1 }));
@@ -361,7 +353,7 @@ describe("compliance.server", () => {
 
       const result = await sendDataRequestNotification(
         "test-shop.myshopify.com",
-        "test-token",
+        "owner@shop.com",
         "req-123"
       );
 
@@ -387,7 +379,7 @@ describe("compliance.server", () => {
 
       const result = await sendDataRequestNotification(
         "test-shop.myshopify.com",
-        "test-token",
+        "owner@shop.com",
         "req-123"
       );
 
@@ -401,12 +393,6 @@ describe("compliance.server", () => {
       process.env.RESEND_API_KEY = "re_test_key";
       process.env.RESEND_FROM = "noreply@example.com";
 
-      // Mock shop email fetch
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ data: { shop: { email: "owner@shop.com" } } }),
-      });
-
       // Mock Resend API call
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -415,15 +401,15 @@ describe("compliance.server", () => {
 
       const result = await sendDataRequestNotification(
         "test-shop.myshopify.com",
-        "test-token",
+        "owner@shop.com",
         "req-123"
       );
 
       expect(result.sent).toBe(true);
-      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
 
       // Verify the Resend API call
-      const resendCall = mockFetch.mock.calls[1];
+      const resendCall = mockFetch.mock.calls[0];
       expect(resendCall[0]).toBe("https://api.resend.com/emails");
 
       const requestBody = JSON.parse(resendCall[1].body);
@@ -447,12 +433,6 @@ describe("compliance.server", () => {
       process.env.RESEND_FROM = "noreply@example.com";
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
-      // Mock shop email fetch
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ data: { shop: { email: "owner@shop.com" } } }),
-      });
-
       // Mock Resend API failure
       mockFetch.mockResolvedValueOnce({
         ok: false,
@@ -462,12 +442,12 @@ describe("compliance.server", () => {
 
       const result = await sendDataRequestNotification(
         "test-shop.myshopify.com",
-        "test-token",
+        "owner@shop.com",
         "req-123"
       );
 
       expect(result.sent).toBe(false);
-      expect(result.error).toContain("Resend API error: 500");
+      expect(result.error).toBe("resend_api_error_500");
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining("data_request_email_failed")
       );
@@ -479,18 +459,12 @@ describe("compliance.server", () => {
       process.env.RESEND_FROM = "noreply@example.com";
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
-      // Mock shop email fetch
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ data: { shop: { email: "owner@shop.com" } } }),
-      });
-
       // Mock network error
       mockFetch.mockRejectedValueOnce(new Error("Network error"));
 
       const result = await sendDataRequestNotification(
         "test-shop.myshopify.com",
-        "test-token",
+        "owner@shop.com",
         "req-123"
       );
 
@@ -498,30 +472,15 @@ describe("compliance.server", () => {
       expect(result.error).toBe("Network error");
       consoleSpy.mockRestore();
     });
+  });
 
-    it("skips email when shop email cannot be fetched", async () => {
-      process.env.RESEND_API_KEY = "re_test_key";
-      process.env.RESEND_FROM = "noreply@example.com";
-      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  describe("markDataRequestDownloaded", () => {
+    it("updates the status to downloaded", async () => {
+      mockSql.mockResolvedValueOnce(Object.assign([], { count: 1 }));
 
-      // Mock shop email fetch failure
-      mockFetch.mockResolvedValueOnce({
-        ok: false,
-        status: 401,
-      });
+      await markDataRequestDownloaded(mockSql, "shop-123", "req-456");
 
-      const result = await sendDataRequestNotification(
-        "test-shop.myshopify.com",
-        "test-token",
-        "req-123"
-      );
-
-      expect(result.sent).toBe(false);
-      expect(result.skippedReason).toBe("no_shop_email");
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("data_request_email_skipped")
-      );
-      consoleSpy.mockRestore();
+      expect(mockSql).toHaveBeenCalled();
     });
   });
 });

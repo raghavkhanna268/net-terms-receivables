@@ -5,17 +5,15 @@
 export {
   deleteShop,
   purgePgmqMessages,
-  purgeDeadLetterForShop,
-  findCustomerDataLocations,
   redactCustomer,
   generateCustomerDataExport,
   persistDataRequest,
   getPendingDataRequests,
   getDataRequestExport,
+  markDataRequestDownloaded,
   sendDataRequestNotification,
   minimiseInactiveCustomerPii,
   minimiseCustomerPiiIfInactive,
-  claimWebhook,
   markShopUninstalled,
 } from "./compliance.server";
 

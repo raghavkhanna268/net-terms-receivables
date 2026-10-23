@@ -1,28 +1,27 @@
-import type {
-  ActionFunctionArgs,
-  LoaderFunctionArgs,
-  HeadersFunction,
-} from "react-router";
-import { useLoaderData, useSubmit } from "react-router";
+import type { LoaderFunctionArgs, HeadersFunction } from "react-router";
+import { useLoaderData, useNavigation } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
-import {
-  getPendingDataRequests,
-  getDataRequestExport,
-} from "~/services/compliance";
+import { getPendingDataRequests } from "~/services/compliance";
+import { useState } from "react";
 
 /**
  * S22 Admin route for GDPR/CCPA data request downloads.
  *
- * Delivery path: In-admin download.
- * Email delivery requires a product decision and is not implemented.
+ * Delivery path: In-admin download + email notification to shop owner.
  *
  * This route allows merchants to:
  * 1. View pending customer data requests
- * 2. Download JSON exports for each request
+ * 2. Download JSON exports for each request via authenticated fetch
+ *
+ * Download flow:
+ * 1. Client clicks download button
+ * 2. Client fetches the resource route (app.data-requests.$id.download.tsx)
+ *    using App Bridge authenticated fetch
+ * 3. Client creates a Blob from the response and triggers download
+ * 4. Resource route marks the request as downloaded after successful delivery
  *
  * Authentication: Uses Shopify admin authentication via shopify.authenticate.admin.
- * This ensures only authenticated merchants can access their shop's data requests.
  */
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
@@ -38,6 +37,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   if (!shop) {
     return {
       dataRequests: [],
+      expiresInDays: 30,
       error: "Shop not found. Please ensure the app is properly installed.",
     };
   }
@@ -51,53 +51,45 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       requestId: dr.requestId,
       receivedAt: dr.receivedAt.toISOString(),
       status: dr.status,
+      expiresAt: dr.expiresAt?.toISOString() ?? null,
     })),
+    expiresInDays: 30,
     error: null,
   };
 };
 
-export const action = async ({ request, context }: ActionFunctionArgs) => {
-  const { shopify } = context;
-  const { session } = await shopify.authenticate.admin(request);
-
-  const formData = await request.formData();
-  const requestId = formData.get("requestId") as string;
-  const actionType = formData.get("action") as string;
-
-  if (actionType !== "download" || !requestId) {
-    return { error: "Invalid action" };
-  }
-
-  const sql = getRequestSql();
-
-  const [shop] = await sql<{ id: string }[]>`
-    SELECT id FROM "Shop" WHERE domain = ${session.shop}
-  `;
-
-  if (!shop) {
-    return { error: "Shop not found" };
-  }
-
-  const exportData = await getDataRequestExport(sql, shop.id, requestId);
-
-  if (!exportData) {
-    return { error: "Data request not found" };
-  }
-
-  return new Response(JSON.stringify(exportData, null, 2), {
-    headers: {
-      "Content-Type": "application/json",
-      "Content-Disposition": `attachment; filename="customer-data-${requestId}.json"`,
-    },
-  });
-};
-
 export default function DataRequestsPage() {
-  const { dataRequests, error } = useLoaderData<typeof loader>();
-  const submit = useSubmit();
+  const { dataRequests, expiresInDays, error } = useLoaderData<typeof loader>();
+  const navigation = useNavigation();
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
-  const handleDownload = (requestId: string) => {
-    submit({ action: "download", requestId }, { method: "POST" });
+  const handleDownload = async (requestId: string) => {
+    setDownloadingId(requestId);
+    setDownloadError(null);
+
+    try {
+      const response = await fetch(`/app/data-requests/${requestId}/download`);
+
+      if (!response.ok) {
+        const errorData = (await response.json()) as { error?: string };
+        throw new Error(errorData.error || "Download failed");
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `customer-data-${requestId}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setDownloadError(err instanceof Error ? err.message : "Download failed");
+    } finally {
+      setDownloadingId(null);
+    }
   };
 
   return (
@@ -112,6 +104,12 @@ export default function DataRequestsPage() {
         {error && (
           <s-paragraph>
             <s-text>{error}</s-text>
+          </s-paragraph>
+        )}
+
+        {downloadError && (
+          <s-paragraph>
+            <s-text>Download error: {downloadError}</s-text>
           </s-paragraph>
         )}
 
@@ -140,8 +138,17 @@ export default function DataRequestsPage() {
                     <s-text type="strong">Status:</s-text>{" "}
                     <s-text>{dr.status}</s-text>
                   </s-paragraph>
-                  <s-button onClick={() => handleDownload(dr.requestId)}>
-                    Download Export
+                  {dr.expiresAt && (
+                    <s-paragraph>
+                      <s-text type="strong">Expires:</s-text>{" "}
+                      <s-text>{new Date(dr.expiresAt).toLocaleString()}</s-text>
+                    </s-paragraph>
+                  )}
+                  <s-button
+                    onClick={() => handleDownload(dr.requestId)}
+                    disabled={downloadingId === dr.requestId || navigation.state !== "idle"}
+                  >
+                    {downloadingId === dr.requestId ? "Downloading..." : "Download Export"}
                   </s-button>
                 </s-stack>
               </s-box>
@@ -166,9 +173,16 @@ export default function DataRequestsPage() {
           <s-list-item>Invoice history</s-list-item>
         </s-unordered-list>
         <s-paragraph>
+          <s-text type="strong">Delivery:</s-text>
+        </s-paragraph>
+        <s-unordered-list>
+          <s-list-item>In-admin download from this page</s-list-item>
+          <s-list-item>Email notification sent to shop owner (if configured)</s-list-item>
+        </s-unordered-list>
+        <s-paragraph>
           <s-text>
-            Delivery: In-admin download only. Email delivery is not currently
-            supported.
+            Exports are retained for {expiresInDays} days, after which they are automatically
+            purged per data minimisation requirements.
           </s-text>
         </s-paragraph>
       </s-section>

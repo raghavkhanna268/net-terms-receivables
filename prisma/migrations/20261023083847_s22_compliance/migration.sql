@@ -121,6 +121,7 @@ COMMENT ON COLUMN s6_dead_letter.shop IS 'Shop domain for shop-scoped dead-lette
 -- =============================================================================
 -- Stores GDPR/CCPA data export requests for customers/data_request webhook.
 -- Merchant downloads pending exports via admin route.
+-- Exports are retained for 30 days (DPDP minimisation) then auto-purged.
 
 CREATE TABLE IF NOT EXISTS s22_data_requests (
   id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
@@ -132,6 +133,7 @@ CREATE TABLE IF NOT EXISTS s22_data_requests (
   export_data JSONB,
   completed_at TIMESTAMPTZ(3),
   downloaded_at TIMESTAMPTZ(3),
+  expires_at TIMESTAMPTZ(3),
   created_at TIMESTAMPTZ(3) NOT NULL DEFAULT NOW()
 );
 
@@ -161,15 +163,44 @@ CREATE INDEX IF NOT EXISTS idx_s22_data_requests_shop_status
 CREATE INDEX IF NOT EXISTS idx_s22_data_requests_shop_customer
   ON s22_data_requests(shop_id, customer_gid);
 
-COMMENT ON TABLE s22_data_requests IS 'S22 GDPR/CCPA data requests: stores customer data exports from customers/data_request webhook. Merchant downloads via admin route.';
+-- Index for pg_cron purge of expired exports
+CREATE INDEX IF NOT EXISTS idx_s22_data_requests_expires_at
+  ON s22_data_requests(expires_at) WHERE expires_at IS NOT NULL;
+
+COMMENT ON TABLE s22_data_requests IS 'S22 GDPR/CCPA data requests: stores customer data exports from customers/data_request webhook. Merchant downloads via admin route. Exports expire after 30 days per DPDP minimisation.';
 COMMENT ON COLUMN s22_data_requests.status IS 'Request status: pending (export created), completed (ready for download), downloaded (merchant has retrieved), expired (past retention)';
 COMMENT ON COLUMN s22_data_requests.export_data IS 'JSON export of all customer data across tables. NULL before export is generated.';
+COMMENT ON COLUMN s22_data_requests.expires_at IS 'Expiration timestamp (30 days from creation). Expired exports are purged by pg_cron.';
 
 -- Enable RLS (no policies = blocked via PostgREST)
 ALTER TABLE s22_data_requests ENABLE ROW LEVEL SECURITY;
 
 -- =============================================================================
--- 6. UPDATE PRISMA SCHEMA SYNC COMMENTS
+-- 6. PG_CRON: PURGE EXPIRED DATA REQUESTS
+-- =============================================================================
+-- Scheduled job to delete expired data request exports (DPDP minimisation).
+-- Runs daily at 03:00 UTC (off-peak for most regions).
+--
+-- Note: pg_cron must be enabled on the Supabase database for this to work.
+-- If pg_cron is not available, manual purge via drain or admin route is fallback.
+--
+-- The cron.schedule call is idempotent: it uses a named job that gets replaced
+-- if it already exists.
+
+DO $$
+BEGIN
+  -- Only create the cron job if pg_cron extension is available
+  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+    PERFORM cron.schedule(
+      's22_purge_expired_data_requests',
+      '0 3 * * *',
+      $$DELETE FROM s22_data_requests WHERE expires_at IS NOT NULL AND expires_at < NOW()$$
+    );
+  END IF;
+END$$;
+
+-- =============================================================================
+-- 7. UPDATE PRISMA SCHEMA SYNC COMMENTS
 -- =============================================================================
 
 COMMENT ON COLUMN s8_tagged_customers.shop_id IS 'Shop ID (FK to Shop with CASCADE). Enables automatic deletion on shop/redact.';

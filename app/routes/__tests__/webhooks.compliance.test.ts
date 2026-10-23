@@ -11,7 +11,6 @@ vi.mock("~/lib/webhook-verify.server", () => ({
 
 const mockSessionStorage = {
   deleteAllForShop: vi.fn(),
-  findSessionsByShop: vi.fn(),
 };
 
 const mockSqlResult = Object.assign([], { count: 0 });
@@ -40,6 +39,16 @@ vi.mock("~/services/compliance", () => ({
   sendDataRequestNotification: (...args: unknown[]) => mockSendDataRequestNotification(...args),
 }));
 
+const mockGraphql = vi.fn();
+const mockUnauthenticatedAdmin = vi.fn();
+vi.mock("~/shopify.server", () => ({
+  getShopifyApp: () => ({
+    unauthenticated: {
+      admin: mockUnauthenticatedAdmin,
+    },
+  }),
+}));
+
 function createMockActionArgs(
   request: Request
 ): ActionFunctionArgs {
@@ -66,17 +75,19 @@ describe("webhooks.compliance", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockDeleteAllForShop.mockResolvedValue(0);
-    mockSessionStorage.findSessionsByShop.mockResolvedValue([
-      { id: "offline_test-shop", isOnline: false, accessToken: "test-token", shop: "test-shop.myshopify.com" },
-    ]);
+    // Mock unauthenticated.admin to return shop email
+    mockGraphql.mockResolvedValue({
+      json: async () => ({ data: { shop: { email: "owner@shop.com", contactEmail: null } } }),
+    });
+    mockUnauthenticatedAdmin.mockResolvedValue({ admin: { graphql: mockGraphql } });
     mockDeleteShop.mockResolvedValue({ deleted: true, shopId: "shop-123" });
     mockPurgePgmqMessages.mockResolvedValue({ purged: false, reason: "documented limitation" });
     mockRedactCustomer.mockResolvedValue({
       taggedCustomersDeleted: 1,
       draftOrdersDeleted: 0,
+      dataRequestsDeleted: 0,
       buyerAccountAnonymized: true,
-      invoicesAnonymized: 2,
-      paymentsAnonymized: 0,
+      paymentsRedacted: 0,
     });
     mockGenerateCustomerDataExport.mockResolvedValue({
       customerGid: "gid://shopify/Customer/456",
@@ -399,12 +410,12 @@ describe("webhooks.compliance", () => {
       expect(mockPersistDataRequest).toHaveBeenCalled();
       expect(mockSendDataRequestNotification).toHaveBeenCalledWith(
         "test-shop.myshopify.com",
-        "test-token",
+        "owner@shop.com",
         "789"
       );
     });
 
-    it("calls email notification with correct parameters when RESEND_API_KEY is set", async () => {
+    it("calls email notification with shop owner email fetched via admin API", async () => {
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       mockSendDataRequestNotification.mockResolvedValue({ sent: true });
 
@@ -431,9 +442,10 @@ describe("webhooks.compliance", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
+      expect(mockUnauthenticatedAdmin).toHaveBeenCalledWith("test-shop.myshopify.com");
       expect(mockSendDataRequestNotification).toHaveBeenCalledWith(
         "test-shop.myshopify.com",
-        "test-token",
+        "owner@shop.com",
         "789"
       );
     });
@@ -442,7 +454,7 @@ describe("webhooks.compliance", () => {
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       mockSendDataRequestNotification.mockResolvedValue({ 
         sent: false, 
-        error: "Resend API error: 500" 
+        error: "resend_api_error_500" 
       });
 
       const payload = {
@@ -471,9 +483,10 @@ describe("webhooks.compliance", () => {
       expect(mockPersistDataRequest).toHaveBeenCalled();
     });
 
-    it("skips email when no offline session with access token", async () => {
+    it("skips email when shop email cannot be fetched", async () => {
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
-      mockSessionStorage.findSessionsByShop.mockResolvedValue([]);
+      // Mock admin API failure
+      mockUnauthenticatedAdmin.mockRejectedValueOnce(new Error("No session"));
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
       const payload = {
@@ -503,6 +516,9 @@ describe("webhooks.compliance", () => {
       expect(mockSendDataRequestNotification).not.toHaveBeenCalled();
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining("data_request_email_skipped")
+      );
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining("reason=no_shop_email")
       );
       consoleSpy.mockRestore();
     });

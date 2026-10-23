@@ -78,110 +78,9 @@ export async function purgePgmqMessages(
   };
 }
 
-/**
- * Purge dead-letter entries for a shop.
- * The s6_dead_letter table has a shop FK with CASCADE, so this happens
- * automatically when the Shop row is deleted. This function is provided
- * for cases where manual cleanup is needed.
- *
- * @param sql - postgres.js SQL client
- * @param shopDomain - Shop domain to purge
- * @returns Number of rows deleted
- */
-export async function purgeDeadLetterForShop(
-  sql: Sql,
-  shopDomain: string
-): Promise<number> {
-  const result = await sql`
-    DELETE FROM s6_dead_letter
-    WHERE shop = ${shopDomain}
-  `;
-  return result.count;
-}
-
 // ============================================================================
 // CUSTOMERS/REDACT
 // ============================================================================
-
-/**
- * Customer data across all tables for purge/anonymization.
- */
-interface CustomerDataLocations {
-  s8TaggedCustomer: boolean;
-  s8DraftOrders: number;
-  buyerAccount: { id: string; hasOpenInvoices: boolean } | null;
-  invoices: Array<{ id: string; status: string }>;
-  payments: number;
-}
-
-/**
- * Find all data locations for a customer within a shop.
- * Used by customers/redact to identify what needs purging/anonymizing.
- *
- * @param sql - postgres.js SQL client
- * @param shopId - Shop ID
- * @param customerGid - Customer GID (e.g., "gid://shopify/Customer/123")
- */
-export async function findCustomerDataLocations(
-  sql: Sql,
-  shopId: string,
-  customerGid: string
-): Promise<CustomerDataLocations> {
-  const [taggedCustomer] = await sql<{ exists: boolean }[]>`
-    SELECT EXISTS(
-      SELECT 1 FROM s8_tagged_customers
-      WHERE shop_id = ${shopId} AND customer_id = ${customerGid}
-    ) as exists
-  `;
-
-  const [draftOrderCount] = await sql<{ count: string }[]>`
-    SELECT COUNT(*)::text as count
-    FROM s8_draft_orders do_
-    WHERE do_.shop_id = ${shopId}
-      AND do_.buyer_account_id IN (
-        SELECT id FROM "BuyerAccount"
-        WHERE "shopId" = ${shopId} AND "customerId" = ${customerGid}
-      )
-  `;
-
-  const [buyerAccount] = await sql<{ id: string; hasOpenInvoices: boolean }[]>`
-    SELECT 
-      ba.id,
-      EXISTS(
-        SELECT 1 FROM "Invoice" i
-        WHERE i."buyerAccountId" = ba.id AND i.status = 'open'
-      ) as "hasOpenInvoices"
-    FROM "BuyerAccount" ba
-    WHERE ba."shopId" = ${shopId} AND ba."customerId" = ${customerGid}
-  `;
-
-  const invoices = buyerAccount
-    ? await sql<{ id: string; status: string }[]>`
-        SELECT id, status::text
-        FROM "Invoice"
-        WHERE "buyerAccountId" = ${buyerAccount.id}
-      `
-    : [];
-
-  const customerIdNumeric = customerGid.split("/").pop() ?? "";
-  const [paymentCount] = await sql<{ count: string }[]>`
-    SELECT COUNT(*)::text as count
-    FROM "Payment" p
-    WHERE p."shopId" = ${shopId}
-      AND (
-        p."payerText" ILIKE '%' || ${customerIdNumeric} || '%'
-        OR p.narration ILIKE '%' || ${customerIdNumeric} || '%'
-      )
-  `;
-
-  return {
-    s8TaggedCustomer: taggedCustomer?.exists ?? false,
-    s8DraftOrders: parseInt(draftOrderCount?.count ?? "0", 10),
-    buyerAccount: buyerAccount ?? null,
-    invoices,
-    payments: parseInt(paymentCount?.count ?? "0", 10),
-  };
-}
 
 /**
  * Redact all customer data for customers/redact webhook.
@@ -189,13 +88,16 @@ export async function findCustomerDataLocations(
  * Purge strategy:
  * - s8_tagged_customers: DELETE (no legal retention requirement)
  * - s8_draft_orders: DELETE (no legal retention requirement)
+ * - s22_data_requests: DELETE or null export_data (contains customer PII)
  * - BuyerAccount: Keep for financial history, anonymize name
- * - Invoice: Keep for legal/tax compliance, anonymize customer-identifying fields
- * - Payment: Anonymize payerText/narration where customer is mentioned
+ * - Payments: Redact payments linked via Match→Invoice→BuyerAccount
+ *
+ * Note: Invoices have no customer-identifying fields to anonymize.
+ * The buyer relationship is through BuyerAccount which is anonymized.
  *
  * Legal retention reasoning:
  * - Invoices must be retained for tax compliance (typically 7+ years in India)
- * - The invoice itself is a business record; only customer PII is anonymized
+ * - The invoice itself is a business record; the buyer link is anonymized
  * - Payment records are part of accounting trail
  *
  * @param sql - postgres.js SQL client
@@ -210,15 +112,17 @@ export async function redactCustomer(
 ): Promise<{
   taggedCustomersDeleted: number;
   draftOrdersDeleted: number;
+  dataRequestsDeleted: number;
   buyerAccountAnonymized: boolean;
-  invoicesAnonymized: number;
-  paymentsAnonymized: number;
+  paymentsRedacted: number;
 }> {
+  // Delete tagged customer tracking record
   const taggedResult = await sql`
     DELETE FROM s8_tagged_customers
     WHERE shop_id = ${shopId} AND customer_id = ${customerGid}
   `;
 
+  // Delete draft orders linked to customer's buyer account
   const draftResult = await sql`
     DELETE FROM s8_draft_orders
     WHERE shop_id = ${shopId}
@@ -228,15 +132,23 @@ export async function redactCustomer(
       )
   `;
 
+  // Delete data request exports for this customer (contains PII)
+  const dataRequestResult = await sql`
+    DELETE FROM s22_data_requests
+    WHERE shop_id = ${shopId} AND customer_gid = ${customerGid}
+  `;
+
+  // Find buyer account for this customer
   const [buyerAccount] = await sql<{ id: string }[]>`
     SELECT id FROM "BuyerAccount"
     WHERE "shopId" = ${shopId} AND "customerId" = ${customerGid}
   `;
 
   let buyerAccountAnonymized = false;
-  let invoicesAnonymized = 0;
+  let paymentsRedacted = 0;
 
   if (buyerAccount) {
+    // Anonymize buyer account (keep for financial history)
     await sql`
       UPDATE "BuyerAccount"
       SET 
@@ -247,43 +159,30 @@ export async function redactCustomer(
     `;
     buyerAccountAnonymized = true;
 
-    const invoiceResult = await sql`
-      UPDATE "Invoice"
-      SET "updatedAt" = NOW()
-      WHERE "buyerAccountId" = ${buyerAccount.id}
-    `;
-    invoicesAnonymized = invoiceResult.count;
-  }
-
-  const customerIdNumeric = customerGid.split("/").pop() ?? "";
-  const paymentResult = await sql`
-    UPDATE "Payment"
-    SET
-      "payerText" = CASE 
-        WHEN "payerText" ILIKE '%' || ${customerIdNumeric} || '%' 
-        THEN '[REDACTED]'
-        ELSE "payerText"
-      END,
-      narration = REGEXP_REPLACE(
-        narration,
-        ${customerIdNumeric},
-        '[REDACTED]',
-        'gi'
-      ),
-      "updatedAt" = NOW()
-    WHERE "shopId" = ${shopId}
-      AND (
-        "payerText" ILIKE '%' || ${customerIdNumeric} || '%'
-        OR narration ILIKE '%' || ${customerIdNumeric} || '%'
+    // Redact payments linked to this buyer via Match→Invoice→BuyerAccount
+    // This is the correct way to find customer's payments, not ILIKE on narration
+    const paymentResult = await sql`
+      UPDATE "Payment" p
+      SET
+        "payerText" = '[REDACTED]',
+        narration = '[REDACTED]',
+        "updatedAt" = NOW()
+      WHERE p.id IN (
+        SELECT DISTINCT m."paymentId"
+        FROM "Match" m
+        JOIN "Invoice" i ON m."invoiceId" = i.id
+        WHERE i."buyerAccountId" = ${buyerAccount.id}
       )
-  `;
+    `;
+    paymentsRedacted = paymentResult.count;
+  }
 
   return {
     taggedCustomersDeleted: taggedResult.count,
     draftOrdersDeleted: draftResult.count,
+    dataRequestsDeleted: dataRequestResult.count,
     buyerAccountAnonymized,
-    invoicesAnonymized,
-    paymentsAnonymized: paymentResult.count,
+    paymentsRedacted,
   };
 }
 
@@ -394,6 +293,7 @@ export async function generateCustomerDataExport(
     WHERE "shopId" = ${shopId} AND "customerId" = ${customerGid}
   `;
 
+  // No LIMIT - data request should be complete
   const invoices = buyerAccount
     ? await sql<{
         id: string;
@@ -410,7 +310,6 @@ export async function generateCustomerDataExport(
         FROM "Invoice"
         WHERE "buyerAccountId" = ${buyerAccount.id}
         ORDER BY "issuedAt" DESC
-        LIMIT 100
       `
     : [];
 
@@ -459,7 +358,7 @@ export async function generateCustomerDataExport(
 }
 
 /**
- * Persist a data request record.
+ * Persist a data request record with 30-day expiration.
  *
  * @param sql - postgres.js SQL client
  * @param shopId - Shop ID
@@ -488,9 +387,9 @@ export async function persistDataRequest(
   const exportJson = sql.json(exportData as any);
   const [result] = await sql<{ id: string }[]>`
     INSERT INTO s22_data_requests (
-      shop_id, customer_gid, request_id, received_at, status, export_data, completed_at
+      shop_id, customer_gid, request_id, received_at, status, export_data, completed_at, expires_at
     ) VALUES (
-      ${shopId}, ${customerGid}, ${requestId}, NOW(), 'completed', ${exportJson}, NOW()
+      ${shopId}, ${customerGid}, ${requestId}, NOW(), 'completed', ${exportJson}, NOW(), NOW() + INTERVAL '30 days'
     )
     RETURNING id
   `;
@@ -515,6 +414,7 @@ export async function getPendingDataRequests(
     requestId: string;
     receivedAt: Date;
     status: string;
+    expiresAt: Date | null;
   }>
 > {
   return sql<{
@@ -523,16 +423,19 @@ export async function getPendingDataRequests(
     requestId: string;
     receivedAt: Date;
     status: string;
+    expiresAt: Date | null;
   }[]>`
     SELECT 
       id, 
       customer_gid as "customerGid",
       request_id as "requestId",
       received_at as "receivedAt",
-      status
+      status,
+      expires_at as "expiresAt"
     FROM s22_data_requests
     WHERE shop_id = ${shopId}
       AND status IN ('pending', 'completed')
+      AND (expires_at IS NULL OR expires_at > NOW())
     ORDER BY received_at DESC
     LIMIT 50
   `;
@@ -540,11 +443,12 @@ export async function getPendingDataRequests(
 
 /**
  * Get a data request export by ID (for download).
+ * Does NOT mark as downloaded - caller should do that after successful delivery.
  *
  * @param sql - postgres.js SQL client
  * @param shopId - Shop ID (for access control)
  * @param requestId - Request ID
- * @returns Export data or null if not found
+ * @returns Export data or null if not found/expired
  */
 export async function getDataRequestExport(
   sql: Sql,
@@ -554,18 +458,31 @@ export async function getDataRequestExport(
   const [result] = await sql<{ export_data: CustomerDataExport }[]>`
     SELECT export_data
     FROM s22_data_requests
-    WHERE shop_id = ${shopId} AND request_id = ${requestId}
+    WHERE shop_id = ${shopId} 
+      AND request_id = ${requestId}
+      AND (expires_at IS NULL OR expires_at > NOW())
   `;
 
-  if (!result) return null;
+  return result?.export_data ?? null;
+}
 
+/**
+ * Mark a data request as downloaded.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopId - Shop ID
+ * @param requestId - Request ID
+ */
+export async function markDataRequestDownloaded(
+  sql: Sql,
+  shopId: string,
+  requestId: string
+): Promise<void> {
   await sql`
     UPDATE s22_data_requests
     SET status = 'downloaded', downloaded_at = NOW()
     WHERE shop_id = ${shopId} AND request_id = ${requestId}
   `;
-
-  return result.export_data;
 }
 
 // ============================================================================
@@ -579,47 +496,6 @@ export interface DataRequestEmailResult {
   sent: boolean;
   skippedReason?: string;
   error?: string;
-}
-
-/**
- * Fetch shop owner email via Admin API.
- * Returns null if fetch fails - never logs or stores the email.
- *
- * @param shopDomain - Shop domain
- * @param accessToken - Shopify access token
- * @returns Shop owner email or null
- */
-async function fetchShopOwnerEmail(
-  shopDomain: string,
-  accessToken: string
-): Promise<string | null> {
-  try {
-    const response = await fetch(
-      `https://${shopDomain}/admin/api/2024-10/graphql.json`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": accessToken,
-        },
-        body: JSON.stringify({
-          query: `{ shop { email contactEmail } }`,
-        }),
-      }
-    );
-
-    if (!response.ok) {
-      return null;
-    }
-
-    const data = (await response.json()) as {
-      data?: { shop?: { email?: string; contactEmail?: string } };
-    };
-
-    return data.data?.shop?.contactEmail || data.data?.shop?.email || null;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -640,13 +516,13 @@ function buildDataRequestsAdminUrl(shopDomain: string): string {
  * NO customer PII (GID, email, name, tags) is included.
  *
  * @param shopDomain - Shop domain
- * @param accessToken - Shopify access token (for fetching shop email)
+ * @param shopOwnerEmail - Shop owner email (fetched by caller via Admin API)
  * @param requestId - Data request ID (for logging only, not in email body)
  * @returns Email result
  */
 export async function sendDataRequestNotification(
   shopDomain: string,
-  accessToken: string,
+  shopOwnerEmail: string,
   requestId: string
 ): Promise<DataRequestEmailResult> {
   const resendApiKey = process.env.RESEND_API_KEY;
@@ -666,14 +542,6 @@ export async function sendDataRequestNotification(
     return { sent: false, skippedReason: "no_sender" };
   }
 
-  const shopOwnerEmail = await fetchShopOwnerEmail(shopDomain, accessToken);
-  if (!shopOwnerEmail) {
-    console.log(
-      `data_request_email_skipped shop=${shopDomain} request_id=${requestId} reason=no_shop_email`
-    );
-    return { sent: false, skippedReason: "no_shop_email" };
-  }
-
   const downloadUrl = buildDataRequestsAdminUrl(shopDomain);
 
   const emailBody = {
@@ -686,6 +554,7 @@ export async function sendDataRequestNotification(
       <p>The data export is ready for download in your Shopify admin:</p>
       <p><a href="${downloadUrl}">Download Customer Data Export</a></p>
       <p>Please review and provide this data to the customer within the required timeframe.</p>
+      <p>The export will be available for 30 days.</p>
       <p>— Net Terms Receivables</p>
     `.trim(),
     text: `Hello,
@@ -696,6 +565,7 @@ The data export is ready for download in your Shopify admin:
 ${downloadUrl}
 
 Please review and provide this data to the customer within the required timeframe.
+The export will be available for 30 days.
 
 — Net Terms Receivables`,
   };
@@ -711,11 +581,11 @@ Please review and provide this data to the customer within the required timefram
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
+      // Log only status code, never response body (may contain PII)
       console.log(
         `data_request_email_failed shop=${shopDomain} request_id=${requestId} status=${response.status}`
       );
-      return { sent: false, error: `Resend API error: ${response.status} ${errorText}` };
+      return { sent: false, error: `resend_api_error_${response.status}` };
     }
 
     console.log(
@@ -802,49 +672,6 @@ export async function minimiseCustomerPiiIfInactive(
       )
   `;
   return result.count > 0;
-}
-
-// ============================================================================
-// ATOMIC DEDUPE (S20)
-// ============================================================================
-
-/**
- * Atomically check and mark a webhook as processed using INSERT ... ON CONFLICT.
- * Returns true if this call claimed the webhook (first processor wins).
- *
- * @param sql - postgres.js SQL client
- * @param shop - Shop domain
- * @param webhookId - Webhook ID
- * @param topic - Webhook topic
- * @param resourceGid - Resource GID
- * @returns True if this call claimed the webhook (should process)
- */
-export async function claimWebhook(
-  sql: Sql,
-  shop: string,
-  webhookId: string,
-  topic: string,
-  resourceGid: string
-): Promise<boolean> {
-  const [result] = await sql<{ webhook_id: string }[]>`
-    INSERT INTO s6_processed_webhooks (webhook_id, topic, resource_gid, processed_at, shop)
-    VALUES (${webhookId}, ${topic}, ${resourceGid}, NOW(), ${shop})
-    ON CONFLICT (shop, webhook_id) WHERE shop IS NOT NULL DO NOTHING
-    RETURNING webhook_id
-  `;
-
-  if (result) {
-    return true;
-  }
-
-  const [legacyCheck] = await sql<{ exists: boolean }[]>`
-    SELECT EXISTS(
-      SELECT 1 FROM s6_processed_webhooks
-      WHERE webhook_id = ${webhookId} AND shop IS NULL
-    ) as exists
-  `;
-
-  return !(legacyCheck?.exists ?? false);
 }
 
 // ============================================================================

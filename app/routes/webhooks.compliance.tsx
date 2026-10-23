@@ -13,6 +13,34 @@ import {
   persistDataRequest,
   sendDataRequestNotification,
 } from "~/services/compliance";
+import { getShopifyApp } from "~/shopify.server";
+
+/**
+ * Fetch shop owner email using the offline session admin client.
+ * Returns null if email cannot be fetched (no session, API error, etc.)
+ */
+async function fetchShopOwnerEmail(shop: string): Promise<string | null> {
+  try {
+    const shopify = getShopifyApp();
+    const { admin } = await shopify.unauthenticated.admin(shop);
+    
+    const response = await admin.graphql(`
+      query {
+        shop {
+          email
+          contactEmail
+        }
+      }
+    `);
+    
+    const json = await response.json() as { data?: { shop?: { email?: string; contactEmail?: string } } };
+    const shopData = json.data?.shop;
+    
+    return shopData?.email || shopData?.contactEmail || null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Compliance webhook handler for GDPR/CCPA mandatory webhooks.
@@ -109,17 +137,13 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       );
 
       // Send email notification to shop owner (gated on RESEND_API_KEY)
-      // Get access token from session storage for Admin API call
-      const { sessionStorage } = context;
-      const sessions = await sessionStorage.findSessionsByShop(payloadShop);
-      const offlineSession = sessions.find(
-        (s: { isOnline: boolean; accessToken?: string }) => !s.isOnline && s.accessToken
-      );
+      // Fetch shop owner email via Admin API using offline session
+      const shopOwnerEmail = await fetchShopOwnerEmail(payloadShop);
 
-      if (offlineSession?.accessToken) {
+      if (shopOwnerEmail) {
         const emailResult = await sendDataRequestNotification(
           payloadShop,
-          offlineSession.accessToken,
+          shopOwnerEmail,
           requestId
         );
         if (emailResult.sent) {
@@ -134,7 +158,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         // Note: skipped emails are logged inside sendDataRequestNotification
       } else {
         console.log(
-          `data_request_email_skipped shop=${payloadShop} request_id=${requestId} reason=no_access_token`
+          `data_request_email_skipped shop=${payloadShop} request_id=${requestId} reason=no_shop_email`
         );
       }
       break;
@@ -162,11 +186,10 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         const customerGid = `gid://shopify/Customer/${typedPayload.customer.id}`;
         const counts = await redactCustomer(sql, shopRecord.id, customerGid);
         console.log(
-          `[Compliance] customers/redact: Deleted ${counts.taggedCustomersDeleted} tagged customer(s), ` +
-            `${counts.draftOrdersDeleted} draft order(s), ` +
+          `[Compliance] customers/redact: Deleted tagged=${counts.taggedCustomersDeleted} ` +
+            `draft_orders=${counts.draftOrdersDeleted} data_requests=${counts.dataRequestsDeleted}, ` +
             `anonymized account=${counts.buyerAccountAnonymized}, ` +
-            `${counts.paymentsRedacted} payment(s) linked to buyer ` +
-            `shop=${payloadShop}`
+            `redacted payments=${counts.paymentsRedacted} shop=${payloadShop}`
         );
       } else {
         console.log(
