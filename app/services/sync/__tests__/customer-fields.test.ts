@@ -350,6 +350,59 @@ describe("buildTagFilterQuery", () => {
   });
 });
 
+describe("CUSTOMER_PII_FIELDS selection constraint", () => {
+  /**
+   * Security constraint: "Email and Name only, no phone or address."
+   *
+   * This test explicitly verifies that when CUSTOMER_PII_FIELDS=1:
+   * - Only email and displayName are selected (Level 1 + Name + Email)
+   * - Phone and address fields are NEVER selected, regardless of config
+   */
+  it("selects ONLY email and displayName with CUSTOMER_PII_FIELDS=1, phone and address NEVER selected", () => {
+    const fields = getCustomerFields({ CUSTOMER_PII_FIELDS: "1" });
+
+    // Only email and displayName should be in optional PII
+    expect(fields).toContain("email");
+    expect(fields).toContain("displayName");
+
+    // Phone and address must NEVER be selected
+    expect(fields).not.toContain("phone");
+    expect(fields).not.toContain("addresses");
+    expect(fields).not.toContain("defaultAddress");
+    expect(fields).not.toContain("firstName");
+    expect(fields).not.toContain("lastName");
+
+    // Exact field list: only id, tags, email, displayName
+    expect(fields).toEqual(["id", "tags", "email", "displayName"]);
+  });
+
+  it("generated queries NEVER contain phone or address even with CUSTOMER_PII_FIELDS=1", () => {
+    const query = getCustomerQuery({ CUSTOMER_PII_FIELDS: "1" });
+
+    // Verify email and displayName are included
+    expect(query).toContain("email");
+    expect(query).toContain("displayName");
+
+    // Verify phone and address are NEVER present
+    expect(query).not.toMatch(/\bphone\b/i);
+    expect(query).not.toMatch(/\baddress/i);
+    expect(query).not.toMatch(/\bfirstName\b/);
+    expect(query).not.toMatch(/\blastName\b/);
+  });
+
+  it("bulk customer query NEVER contains phone or address", () => {
+    const query = getBulkCustomersQuery([{ tag: "net-terms" }], { CUSTOMER_PII_FIELDS: "1" });
+
+    expect(query).not.toBeNull();
+    expect(query).toContain("email");
+    expect(query).toContain("displayName");
+
+    // Phone and address NEVER selected
+    expect(query).not.toMatch(/\bphone\b/i);
+    expect(query).not.toMatch(/\baddress/i);
+  });
+});
+
 describe("getBulkCustomersQuery", () => {
   const singleTagRule = [{ tag: "net-terms" }];
   const multipleTagRules = [{ tag: "net-terms" }, { tag: "gold-tier" }];

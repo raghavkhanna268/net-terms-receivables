@@ -71,6 +71,86 @@ describe("isTokenExpiredOrNearExpiry", () => {
   });
 });
 
+/**
+ * AbortError timeout test that runs without a real database.
+ * Uses mocked SQL to verify error classification.
+ */
+describe("refreshOfflineTokenIfNeeded AbortError handling (mocked)", () => {
+  const MOCK_SHOP = "mock-shop.myshopify.com";
+  const MOCK_SESSION_ID = `offline_${MOCK_SHOP}`;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("classifies AbortError as network_error with 'timed out' message", async () => {
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
+    const refreshTokenExpires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+    const sessionRow = {
+      id: MOCK_SESSION_ID,
+      accessToken: "shpat_old_token",
+      refreshToken: "shprt_refresh_token",
+      expires: twoMinutesAgo,
+      refreshTokenExpires: refreshTokenExpires,
+      needsReauth: false,
+      scope: "read_products",
+    };
+
+    // Create mock SQL function that returns session for any SELECT
+    const createMockQuery = () => {
+      const fn = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.raw.join("");
+
+        // Session lookup
+        if (query.includes("SELECT") && query.includes('"Session"')) {
+          return Promise.resolve([sessionRow]);
+        }
+
+        // Advisory lock
+        if (query.includes("pg_advisory_xact_lock")) {
+          return Promise.resolve([]);
+        }
+
+        // Update
+        if (query.includes("UPDATE")) {
+          return Promise.resolve([]);
+        }
+
+        return Promise.resolve([]);
+      });
+      return fn;
+    };
+
+    const mockSql = createMockQuery();
+
+    // Add begin() method that returns the callback result with the same mock
+    (mockSql as unknown as { begin: typeof mockSql.begin }).begin = vi.fn().mockImplementation(
+      async (callback: (tx: ReturnType<typeof createMockQuery>) => Promise<unknown>) => {
+        const txMock = createMockQuery();
+        return callback(txMock);
+      }
+    );
+
+    // Mock fetch to throw AbortError (simulates timeout)
+    const abortError = new Error("The operation was aborted");
+    abortError.name = "AbortError";
+    global.fetch = vi.fn().mockRejectedValueOnce(abortError);
+
+    const result = await refreshOfflineTokenIfNeeded(
+      mockSql as never,
+      MOCK_SHOP,
+      "test-client-id",
+      "test-client-secret"
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe("network_error");
+    expect(result.error).toContain("timed out");
+    expect(result.error).toContain(MOCK_SHOP);
+  });
+});
+
 describeWithDb("refreshOfflineTokenIfNeeded with real database", () => {
   let sql: ReturnType<typeof postgres>;
 

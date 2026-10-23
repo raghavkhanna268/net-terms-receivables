@@ -140,8 +140,8 @@ export const BULK_OPERATION_STATUS_QUERY = `
  * DPDP compliance and schema validation coverage.
  *
  * Reads CUSTOMER_PII_FIELDS from the Worker env binding via request context.
- * This ensures the drain processor uses the correct per-deployment config
- * rather than process.env (which is not available in Workers).
+ * This is the canonical source for per-deployment feature flags inside Workers.
+ * Falls back to empty env when called outside request context (e.g., tests).
  *
  * @returns GraphQL query string for fetching customer by GID
  */
