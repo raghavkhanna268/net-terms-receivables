@@ -85,10 +85,18 @@ export const BULK_COMPANIES_QUERY = `
 /**
  * GraphQL mutation to start a bulk operation for orders with payment terms.
  *
- * Filters to orders that may have outstanding payment terms:
- * - pending: Orders with "payment pending" (typical for net-terms)
- * - unpaid: Orders not yet paid
- * - partially_paid: Orders with partial payment
+ * Filters to orders with outstanding payment terms:
+ * - pending: Orders awaiting full payment (typical for net-terms)
+ * - partially_paid: Orders with partial payment received
+ *
+ * Per Shopify Admin API OrderDisplayFinancialStatus enum (2026-10):
+ * @see https://shopify.dev/docs/api/admin-graphql/2026-10/enums/OrderDisplayFinancialStatus
+ *
+ * Valid values: AUTHORIZED, EXPIRED, PAID, PARTIALLY_PAID, PARTIALLY_REFUNDED,
+ * PENDING, REFUNDED, VOIDED. For net-terms orders:
+ * - PENDING: Created with payment terms, awaiting full payment
+ * - PARTIALLY_PAID: Partial payment manually captured
+ * - AUTHORIZED does not apply to net-terms (for payment card auth holds only)
  *
  * Without read_all_orders scope, order access is limited to the last 60 days
  * (Shopify default). Once read_all_orders is approved, all historical orders
@@ -102,7 +110,7 @@ export const BULK_ORDERS_QUERY = `
     bulkOperationRunQuery(
       query: """
       {
-        orders(query: "financial_status:pending OR financial_status:unpaid OR financial_status:partially_paid") {
+        orders(query: "financial_status:pending OR financial_status:partially_paid") {
           edges {
             node {
               id

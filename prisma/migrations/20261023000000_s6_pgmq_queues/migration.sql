@@ -23,26 +23,44 @@ CREATE EXTENSION IF NOT EXISTS pgmq;
 -- Per Supabase docs: pg_cron must be installed in pg_catalog schema.
 -- Gracefully skip if not available (CI doesn't have pg_cron).
 -- No cron jobs are scheduled here; that's S10.
+--
+-- SQLSTATE handling:
+--   58P01 (undefined_file): Control file not found on filesystem
+--   0A000 (feature_not_supported): Extension not available at all
+-- Only these are caught; other errors (e.g., permission denied) will fail the migration.
 DO $$
 BEGIN
     CREATE EXTENSION IF NOT EXISTS pg_cron WITH SCHEMA pg_catalog;
     RAISE NOTICE 'pg_cron extension enabled in pg_catalog schema';
 EXCEPTION
-    WHEN OTHERS THEN
-        RAISE NOTICE 'pg_cron extension not available (OK for CI): %', SQLERRM;
+    WHEN undefined_file THEN
+        -- SQLSTATE 58P01: could not open extension control file
+        RAISE NOTICE 'pg_cron extension not available (control file missing, OK for CI)';
+    WHEN feature_not_supported THEN
+        -- SQLSTATE 0A000: extension "pg_cron" is not available
+        RAISE NOTICE 'pg_cron extension not available (not installed, OK for CI)';
 END;
 $$;
 
 -- Enable pg_net (optional - used for HTTP callbacks)
 -- Per Supabase docs: pg_net goes in extensions schema.
 -- Gracefully skip if not available (CI doesn't have pg_net).
+--
+-- SQLSTATE handling:
+--   58P01 (undefined_file): Control file not found on filesystem
+--   0A000 (feature_not_supported): Extension not available at all
+-- Only these are caught; other errors (e.g., permission denied) will fail the migration.
 DO $$
 BEGIN
     CREATE EXTENSION IF NOT EXISTS pg_net WITH SCHEMA extensions;
     RAISE NOTICE 'pg_net extension enabled in extensions schema';
 EXCEPTION
-    WHEN OTHERS THEN
-        RAISE NOTICE 'pg_net extension not available (OK for CI): %', SQLERRM;
+    WHEN undefined_file THEN
+        -- SQLSTATE 58P01: could not open extension control file
+        RAISE NOTICE 'pg_net extension not available (control file missing, OK for CI)';
+    WHEN feature_not_supported THEN
+        -- SQLSTATE 0A000: extension "pg_net" is not available
+        RAISE NOTICE 'pg_net extension not available (not installed, OK for CI)';
 END;
 $$;
 
