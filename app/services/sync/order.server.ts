@@ -75,6 +75,16 @@ export async function processOrderWebhook(
 
   const shopId = shop.id;
 
+  // Handle CANCELLED and PAID topics first - they update existing invoices
+  // and don't need buyer account resolution
+  if (topic === "ORDERS_CANCELLED") {
+    return await cancelInvoice(sql, shopId, order.id, webhookId);
+  }
+
+  if (topic === "ORDERS_PAID") {
+    return await markInvoicePaid(sql, shopId, order.id, webhookId);
+  }
+
   // Resolve buyer account from purchasing entity
   const buyerAccountId = await resolveBuyerAccount(sql, shopId, order);
 
@@ -87,15 +97,6 @@ export async function processOrderWebhook(
       action: "skipped",
       error: `Buyer account not found for order ${order.id}. Company may not be synced yet.`,
     };
-  }
-
-  // Handle based on topic
-  if (topic === "ORDERS_CANCELLED") {
-    return await cancelInvoice(sql, shopId, order.id, webhookId);
-  }
-
-  if (topic === "ORDERS_PAID") {
-    return await markInvoicePaid(sql, shopId, order.id, webhookId);
   }
 
   // CREATE or UPDATED: Upsert invoice
