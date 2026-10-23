@@ -1,0 +1,12 @@
+# SYNTHETIC TEST DATA - NOT REAL BANK DATA
+# Unknown bank format for testing detection failure
+
+RANDOM BANK
+Account Statement
+
+Transaction ID,Date,Description,Amount,Type,Balance
+TXN001,2026-10-01,Opening Balance,0.00,CR,100000.00
+TXN002,2026-10-01,Payment Received,50000.00,CR,150000.00
+TXN003,2026-10-02,Online Purchase,-2500.00,DR,147500.00
+TXN004,2026-10-03,Transfer In,25000.00,CR,172500.00
+TXN005,2026-10-05,ATM Withdrawal,-10000.00,DR,162500.00

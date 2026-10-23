@@ -1,0 +1,20 @@
+# SYNTHETIC MALFORMED TEST DATA - NOT REAL BANK DATA
+# Source: Public HDFC format documentation (see README.md)
+# Contains intentionally malformed rows for error handling tests
+
+HDFC BANK
+Statement of Account
+
+Date,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance
+01/10/26,Opening Balance,,,,,1,00,000.00
+01/10/26,NEFT CR-SYNTHETIC CORP-SALARY,SYNT2026100100003,01/10/26,,50,000.00,1,50,000.00
+,Missing date row,SYNT0001,,,100.00,
+INVALID,Invalid date format,SYNT0002,INVALID,500.00,,
+03/10/26,,SYNT0003,03/10/26,1,000.00,,
+03/10/26,Missing amounts,SYNT0004,03/10/26,,,1,50,000.00
+05/10/26,Valid row after malformed,SYNT2026100500001,05/10/26,,25,000.00,1,75,000.00
+32/13/26,Impossible date,SYNT0005,32/13/26,100.00,,
+07/10/26,NEFT CR-ANOTHER VALID ROW,SYNT2026100700003,07/10/26,,10,000.00,1,85,000.00
+07/10/26,Row with NaN amount,SYNT0006,07/10/26,NaN,,
+07/10/26,Row with text amount,SYNT0007,07/10/26,INVALID,,
+10/10/26,Final valid row,SYNT2026101000001,10/10/26,5,000.00,,1,80,000.00
