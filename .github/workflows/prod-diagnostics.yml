@@ -105,9 +105,11 @@ jobs:
 
           if [ -z "$OFFLINE_DATA" ]; then
             echo "No offline session found"
-            echo "token_expired=unknown" >> "$GITHUB_OUTPUT"
-            echo "has_refresh_token=false" >> "$GITHUB_OUTPUT"
-            echo "offline_session_exists=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "token_expired=unknown"
+              echo "has_refresh_token=false"
+              echo "offline_session_exists=false"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -115,22 +117,32 @@ jobs:
           HAS_REFRESH=$(echo "$OFFLINE_DATA" | cut -d'|' -f2)
 
           echo "has_refresh_token: $HAS_REFRESH"
-          echo "has_refresh_token=$HAS_REFRESH" >> "$GITHUB_OUTPUT"
-          echo "offline_session_exists=true" >> "$GITHUB_OUTPUT"
 
           if [ -z "$EXPIRES_RAW" ] || [ "$EXPIRES_RAW" = "" ]; then
             echo "token_expired: false (no expiry set - legacy non-expiring token)"
-            echo "token_expired=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "has_refresh_token=$HAS_REFRESH"
+              echo "offline_session_exists=true"
+              echo "token_expired=false"
+            } >> "$GITHUB_OUTPUT"
           else
             # Compare expiry to current UTC time (expires is already in UTC from query)
             EXPIRES_EPOCH=$(date -u -d "$EXPIRES_RAW" +%s 2>/dev/null || echo "0")
             NOW_EPOCH=$(date -u +%s)
             if [ "$EXPIRES_EPOCH" -le "$NOW_EPOCH" ]; then
               echo "token_expired: true (expired at ${EXPIRES_RAW} UTC)"
-              echo "token_expired=true" >> "$GITHUB_OUTPUT"
+              {
+                echo "has_refresh_token=$HAS_REFRESH"
+                echo "offline_session_exists=true"
+                echo "token_expired=true"
+              } >> "$GITHUB_OUTPUT"
             else
               echo "token_expired: false (expires at ${EXPIRES_RAW} UTC)"
-              echo "token_expired=false" >> "$GITHUB_OUTPUT"
+              {
+                echo "has_refresh_token=$HAS_REFRESH"
+                echo "offline_session_exists=true"
+                echo "token_expired=false"
+              } >> "$GITHUB_OUTPUT"
             fi
           fi
 
@@ -237,13 +249,13 @@ jobs:
             echo "::warning::Admin API returned HTTP $HTTP_STATUS (authentication/authorization failed)"
             echo ""
             # Extract only error codes, never messages or raw content
-            ERROR_CODES=$(cat "$HTTP_RESPONSE" | jq -r '
+            ERROR_CODES=$(jq -r '
               if .errors then
                 {error_codes: [.errors[] | .extensions.code // "UNKNOWN"]}
               else
                 {error_code: "unknown"}
               end
-            ' 2>/dev/null || echo '{"error_code": "parse_failed"}')
+            ' "$HTTP_RESPONSE" 2>/dev/null || echo '{"error_code": "parse_failed"}')
 
             echo "Protected Customer Data Probe Results:"
             echo "{\"status\": \"auth_failed\", \"http_status\": $HTTP_STATUS, \"details\": $ERROR_CODES}" | jq .
@@ -252,7 +264,7 @@ jobs:
 
           if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
             # Extract indicators without exposing PII
-            RESULT=$(cat "$HTTP_RESPONSE" | jq -r '
+            RESULT=$(jq -r '
               if .errors then
                 {
                   status: "error",
@@ -268,19 +280,19 @@ jobs:
                   last_name_non_null: ((.data.customers.nodes[0].lastName // null) != null)
                 }
               end
-            ')
+            ' "$HTTP_RESPONSE")
             echo "Protected Customer Data Probe Results:"
             echo "$RESULT" | jq .
           else
             echo "::warning::GraphQL API request failed with HTTP $HTTP_STATUS"
             # Extract only error codes from response, never raw content
-            ERROR_CODES=$(cat "$HTTP_RESPONSE" | jq -r '
+            ERROR_CODES=$(jq -r '
               if .errors then
                 [.errors[] | .extensions.code // "UNKNOWN"]
               else
                 ["UNKNOWN"]
               end
-            ' 2>/dev/null || echo '["parse_failed"]')
+            ' "$HTTP_RESPONSE" 2>/dev/null || echo '["parse_failed"]')
 
             echo "Protected Customer Data Probe Results:"
             echo "{\"status\": \"error\", \"http_status\": $HTTP_STATUS, \"error_codes\": $ERROR_CODES}" | jq .
