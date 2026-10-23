@@ -51,7 +51,38 @@ vi.mock("~/services/sync/order.server", () => ({
     dueReason: null,
     status: "open",
   })),
+  mapOrderToInvoiceWithEligibility: vi.fn((shopId, buyerAccountId, order, elig) => ({
+    shopId,
+    buyerAccountId,
+    orderId: order.id,
+    name: order.name,
+    total: "100.00",
+    outstanding: "100.00",
+    issuedAt: new Date(),
+    dueAt: elig?.dueDate?.dueAt ?? null,
+    dueSource: elig?.dueDate?.dueSource ?? "none",
+    dueBasis: elig?.dueDate?.basis ?? null,
+    dueReason: elig?.dueDate?.reason ?? null,
+    status: "open",
+  })),
   bulkUpsertInvoices: vi.fn().mockResolvedValue(0),
+}));
+
+vi.mock("~/lib/invoice-eligibility", () => ({
+  checkOrderEligibility: vi.fn().mockResolvedValue({
+    eligible: true,
+    reason: "shopify_payment_terms",
+    explanation: "Default mock",
+    buyerAccountId: "buyer-mock",
+    dueDate: {
+      dueAt: new Date("2025-01-31T00:00:00Z"),
+      dueSource: "schedule",
+      basis: null,
+      reason: "Default mock schedule",
+    },
+  }),
+  getEligibilityContext: vi.fn().mockResolvedValue({ shop: { id: "shop-123" } }),
+  isTerminalFinancialStatus: vi.fn().mockReturnValue(false),
 }));
 
 vi.mock("~/services/sync/customer.server", () => ({
@@ -921,9 +952,32 @@ describe("Processor-level tests: batch cut and due date handling", () => {
     vi.restoreAllMocks();
   });
 
-  describe("(a) batch cut: non-EOF [O1,O2,O3] with maxLines=3", () => {
-    it("drops final top-level line, processes O1,O2, offset at end of O2", async () => {
-      const { splitBytesIntoLines } = await import("../bulk-jsonl-processor.server");
+  describe("(a) lineHasParentId helper - used for batch cut", () => {
+    it("returns true for PaymentSchedule lines with __parentId", async () => {
+      const { lineHasParentId } = await import("../bulk-jsonl-processor.server");
+      
+      const childLine = '{"id":"gid://shopify/PaymentSchedule/10","dueAt":"2025-01-31T00:00:00Z","__parentId":"gid://shopify/Order/1"}';
+      expect(lineHasParentId(childLine)).toBe(true);
+    });
+
+    it("returns false for Order lines without __parentId", async () => {
+      const { lineHasParentId } = await import("../bulk-jsonl-processor.server");
+      
+      const orderLine = '{"id":"gid://shopify/Order/1","name":"#1001","createdAt":"2025-01-01T00:00:00Z"}';
+      expect(lineHasParentId(orderLine)).toBe(false);
+    });
+
+    it("returns false for malformed JSON (fails safe)", async () => {
+      const { lineHasParentId } = await import("../bulk-jsonl-processor.server");
+      
+      expect(lineHasParentId("not json")).toBe(false);
+      expect(lineHasParentId("")).toBe(false);
+    });
+  });
+
+  describe("(b) batch cut logic - drops final top-level line on non-EOF", () => {
+    it("non-EOF [O1,O2,O3] with maxLines=3: drop O3 (final top-level), keep O1,O2", async () => {
+      const { splitBytesIntoLines, lineHasParentId } = await import("../bulk-jsonl-processor.server");
       const encoder = new TextEncoder();
       const decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -931,234 +985,358 @@ describe("Processor-level tests: batch cut and due date handling", () => {
       const o1 = '{"id":"gid://shopify/Order/1","name":"#1001","createdAt":"2025-01-01T00:00:00Z"}\n';
       const o2 = '{"id":"gid://shopify/Order/2","name":"#1002","createdAt":"2025-01-02T00:00:00Z"}\n';
       const o3 = '{"id":"gid://shopify/Order/3","name":"#1003","createdAt":"2025-01-03T00:00:00Z"}\n';
-      const data = o1 + o2 + o3;
-      const bytes = encoder.encode(data);
+      const bytes = encoder.encode(o1 + o2 + o3);
 
       const { lines, lineEndPositions } = splitBytesIntoLines(bytes, decoder);
       expect(lines).toHaveLength(3);
       
-      // Simulate the batch cut logic from processBulkOperation
+      // Apply the actual batch cut logic from processBulkOperation (lines 1008-1023)
       const maxLines = 3;
       let linesToProcess = lines.slice(0, maxLines);
-      const isNonEof = true; // Simulating non-EOF
+      const isNonEof = true; // Simulate non-EOF batch
 
-      // The cut logic: if final line is top-level and batch > 1, drop it
+      // The cut: if final line is top-level (no __parentId) and batch > 1, drop it
       if (isNonEof && linesToProcess.length > 1) {
         const finalLine = linesToProcess[linesToProcess.length - 1];
-        const hasParentId = finalLine.includes('"__parentId"');
-        if (!hasParentId) {
+        if (!lineHasParentId(finalLine)) {
           linesToProcess = linesToProcess.slice(0, -1);
         }
       }
 
-      // Should process O1 and O2, drop O3
+      // Should process O1 and O2, dropped O3
       expect(linesToProcess).toHaveLength(2);
       expect(linesToProcess[0]).toContain("Order/1");
       expect(linesToProcess[1]).toContain("Order/2");
       
-      // Offset should be at end of O2
+      // Offset should be at end of O2 (index 1 in lineEndPositions)
       const expectedOffset = lineEndPositions[1];
-      expect(expectedOffset).toBeGreaterThan(0);
+      expect(expectedOffset).toBe(encoder.encode(o1 + o2).length);
     });
-  });
 
-  describe("(b) batch cut: [O1,S1] keeps both", () => {
-    it("keeps both lines when final line is a child", async () => {
-      const { splitBytesIntoLines } = await import("../bulk-jsonl-processor.server");
+    it("[O1,S1] keeps both lines when final line is a child", async () => {
+      const { splitBytesIntoLines, lineHasParentId } = await import("../bulk-jsonl-processor.server");
       const encoder = new TextEncoder();
       const decoder = new TextDecoder("utf-8", { fatal: true });
 
       // Order followed by PaymentSchedule child
       const o1 = '{"id":"gid://shopify/Order/1","name":"#1001","createdAt":"2025-01-01T00:00:00Z"}\n';
       const s1 = '{"id":"gid://shopify/PaymentSchedule/10","dueAt":"2025-01-31T00:00:00Z","__parentId":"gid://shopify/Order/1"}\n';
-      const data = o1 + s1;
-      const bytes = encoder.encode(data);
+      const bytes = encoder.encode(o1 + s1);
 
       const { lines, lineEndPositions } = splitBytesIntoLines(bytes, decoder);
       expect(lines).toHaveLength(2);
       
-      // Simulate the batch cut logic
+      // Apply batch cut logic
       let linesToProcess = lines.slice(0, 2);
       const isNonEof = true;
 
       if (isNonEof && linesToProcess.length > 1) {
         const finalLine = linesToProcess[linesToProcess.length - 1];
-        const hasParentId = finalLine.includes('"__parentId"');
-        if (!hasParentId) {
+        if (!lineHasParentId(finalLine)) {
           linesToProcess = linesToProcess.slice(0, -1);
         }
       }
 
-      // Both should be kept because final line has __parentId
+      // Both kept because final line (S1) has __parentId
       expect(linesToProcess).toHaveLength(2);
       expect(linesToProcess[0]).toContain("Order/1");
       expect(linesToProcess[1]).toContain("PaymentSchedule/10");
       
       // Offset should be at end of S1
-      expect(lineEndPositions[1]).toBeGreaterThan(lineEndPositions[0]);
+      const expectedOffset = lineEndPositions[1];
+      expect(expectedOffset).toBe(bytes.length);
     });
-  });
 
-  describe("(c) orphan schedule for paid invoice produces no UPDATE", () => {
-    it("orphan lookup query filters for status=open only", async () => {
-      const { parseOrderBulkJsonl } = await import("../bulk-parser.server");
+    it("single line batch always processes (no stall)", async () => {
+      const { splitBytesIntoLines, lineHasParentId } = await import("../bulk-jsonl-processor.server");
+      const encoder = new TextEncoder();
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+
+      const o1 = '{"id":"gid://shopify/Order/1","name":"#1001","createdAt":"2025-01-01T00:00:00Z"}\n';
+      const bytes = encoder.encode(o1);
+
+      const { lines } = splitBytesIntoLines(bytes, decoder);
+      expect(lines).toHaveLength(1);
       
-      // Parse orphan schedule
-      const jsonl = '{"id":"gid://shopify/PaymentSchedule/10","dueAt":"2025-01-31T00:00:00Z","__parentId":"gid://shopify/Order/999"}';
-      const result = parseOrderBulkJsonl(jsonl);
-      
-      // The orphan schedule is returned
-      expect(result.orphanSchedules).toHaveLength(1);
-      expect(result.orphanSchedules[0].__parentId).toBe("gid://shopify/Order/999");
-      
-      // The actual SQL query in processOrderLines includes:
-      // AND status = 'open'
-      // This ensures paid/cancelled/closed invoices are excluded
-      const expectedQuery = "status = 'open'";
-      expect(expectedQuery).toBeDefined();
-    });
-  });
+      // Apply batch cut logic - single line should not be dropped
+      let linesToProcess = lines.slice(0, 1);
+      const isNonEof = true;
 
-  describe("(d) existing invoice with account-default dueAt keeps dueAt", () => {
-    it("mapOrderToInvoiceWithEligibility preserves account-default dueAt", async () => {
-      vi.doUnmock("../order.server");
-      const orderModule = await vi.importActual<typeof import("../order.server")>("../order.server");
-      const { mapOrderToInvoiceWithEligibility } = orderModule;
-
-      const shopifyOrder = {
-        id: "gid://shopify/Order/123",
-        name: "#1001",
-        createdAt: "2025-01-15T00:00:00Z",
-        displayFinancialStatus: "PENDING",
-        // No schedule dueAt
-      };
-
-      const result = mapOrderToInvoiceWithEligibility(
-        "shop-123",
-        "buyer-456",
-        shopifyOrder,
-        {
-          eligible: true,
-          reason: "company_account_terms",
-          explanation: "Account default terms",
-          buyerAccountId: "buyer-456",
-          dueDate: {
-            dueAt: new Date("2025-02-14T00:00:00Z"),
-            dueSource: "inferred",
-            basis: "accountDefault",
-            reason: "Account default: net 30 days",
-          },
+      if (isNonEof && linesToProcess.length > 1) {
+        const finalLine = linesToProcess[linesToProcess.length - 1];
+        if (!lineHasParentId(finalLine)) {
+          linesToProcess = linesToProcess.slice(0, -1);
         }
-      );
+      }
 
-      expect(result.dueAt?.toISOString()).toBe("2025-02-14T00:00:00.000Z");
-      expect(result.dueSource).toBe("inferred");
-      expect(result.dueBasis).toBe("accountDefault");
-    });
-
-    it("mapOrderToInvoiceWithEligibility preserves merchant-override dueAt", async () => {
-      vi.doUnmock("../order.server");
-      const orderModule = await vi.importActual<typeof import("../order.server")>("../order.server");
-      const { mapOrderToInvoiceWithEligibility } = orderModule;
-
-      const shopifyOrder = {
-        id: "gid://shopify/Order/123",
-        name: "#1001",
-        createdAt: "2025-01-15T00:00:00Z",
-        displayFinancialStatus: "PENDING",
-      };
-
-      const result = mapOrderToInvoiceWithEligibility(
-        "shop-123",
-        "buyer-456",
-        shopifyOrder,
-        {
-          eligible: true,
-          reason: "shopify_payment_terms",
-          explanation: "Merchant override",
-          buyerAccountId: "buyer-456",
-          dueDate: {
-            dueAt: new Date("2025-03-01T00:00:00Z"),
-            dueSource: "override",
-            basis: null,
-            reason: "Merchant override",
-          },
-        }
-      );
-
-      expect(result.dueAt?.toISOString()).toBe("2025-03-01T00:00:00.000Z");
-      expect(result.dueSource).toBe("override");
+      // Single line kept (condition is linesToProcess.length > 1)
+      expect(linesToProcess).toHaveLength(1);
     });
   });
 
-  describe("(e) existing invoice with schedule child heals dueAt", () => {
-    it("schedule dueAt heals existing invoice", async () => {
-      vi.doUnmock("../order.server");
-      const orderModule = await vi.importActual<typeof import("../order.server")>("../order.server");
-      const { mapOrderToInvoiceWithEligibility } = orderModule;
+  describe("(c) orphan schedule for paid invoice issues NO UPDATE", () => {
+    it("processOrderLines skips UPDATE when no open invoices match orphan parents", async () => {
+      const { processOrderLines } = await import("../bulk-jsonl-processor.server");
+      
+      const recordedQueries: string[] = [];
+      
+      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        recordedQueries.push(query);
+        
+        // Orphan lookup - return empty (simulates paid invoice filtered out by status='open')
+        if (query.includes('"Invoice"') && query.includes("SELECT") && query.includes("orderId") && query.includes("status")) {
+          return Promise.resolve([]);
+        }
+        
+        // Existing invoice lookup for orders
+        if (query.includes('"Invoice"') && query.includes("SELECT") && query.includes("dueOverrideAt")) {
+          return Promise.resolve([]);
+        }
+        
+        const result: { count: number } & unknown[] = [] as unknown as { count: number } & unknown[];
+        result.count = 0;
+        return Promise.resolve(result);
+      });
+      
+      // Orphan schedule line only (parent order not in batch)
+      const lines = ['{"id":"gid://shopify/PaymentSchedule/10","dueAt":"2025-01-31T00:00:00Z","__parentId":"gid://shopify/Order/999"}'];
+      
+      await processOrderLines(mockSql as never, "shop-123", lines);
+      
+      // Verify the orphan lookup query includes status='open' filter
+      const lookupQuery = recordedQueries.find(q => 
+        q.includes('"Invoice"') && q.includes("SELECT") && q.includes("orderId") && q.includes("status")
+      );
+      expect(lookupQuery).toBeDefined();
+      expect(lookupQuery).toContain("status = 'open'");
+      
+      // Verify NO unnest UPDATE was issued (empty result from lookup = no updates)
+      const updateQuery = recordedQueries.find(q => q.includes("UPDATE") && q.includes("unnest"));
+      expect(updateQuery).toBeUndefined();
+    });
+  });
 
-      const shopifyOrder = {
-        id: "gid://shopify/Order/123",
-        name: "#1001",
-        createdAt: "2025-01-15T00:00:00Z",
-        displayFinancialStatus: "PENDING",
-        paymentTerms: {
-          id: "pt1",
-          paymentTermsName: "Net 30",
-          paymentTermsType: "NET",
-          dueInDays: 30,
-          paymentSchedules: {
-            edges: [
-              {
-                node: {
-                  id: "gid://shopify/PaymentSchedule/456",
-                  dueAt: "2025-02-15T00:00:00Z",
-                  issuedAt: "2025-01-15T00:00:00Z",
-                  completedAt: null,
-                },
-              },
-            ],
-          },
+  describe("(d) existing invoice with account-default dueAt", () => {
+    it("passes account-default dueAt and dueSource to bulkUpsertInvoices", async () => {
+      const { processOrderLines } = await import("../bulk-jsonl-processor.server");
+      const { bulkUpsertInvoices } = await import("../order.server");
+      const { checkOrderEligibility, getEligibilityContext } = await import("~/lib/invoice-eligibility");
+      
+      const mockUpsertInvoices = bulkUpsertInvoices as ReturnType<typeof vi.fn>;
+      const mockCheckEligibility = checkOrderEligibility as ReturnType<typeof vi.fn>;
+      const mockGetContext = getEligibilityContext as ReturnType<typeof vi.fn>;
+      
+      // Configure mocks
+      mockGetContext.mockResolvedValue({ shop: { id: "shop-123", defaultTermsDays: 30 } });
+      mockCheckEligibility.mockResolvedValue({
+        eligible: true,
+        reason: "company_account_terms",
+        explanation: "Account default terms",
+        buyerAccountId: "buyer-456",
+        dueDate: {
+          dueAt: new Date("2025-02-14T00:00:00Z"),
+          dueSource: "inferred",
+          basis: "accountDefault",
+          reason: "Account default: net 30 days",
         },
-      };
-
-      const result = mapOrderToInvoiceWithEligibility(
-        "shop-123",
-        "buyer-456",
-        shopifyOrder,
-        {
-          eligible: true,
-          reason: "shopify_payment_terms",
-          explanation: "Schedule heals",
-          buyerAccountId: "buyer-456",
-          dueDate: {
-            dueAt: new Date("2025-02-15T00:00:00Z"),
-            dueSource: "schedule",
-            basis: null,
-            reason: "Payment schedule from Shopify",
-          },
+      });
+      
+      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        
+        // Existing invoice lookup - return invoice with account-default dueAt
+        if (query.includes('"Invoice"') && query.includes("SELECT") && query.includes("dueOverrideAt")) {
+          return Promise.resolve([{
+            orderId: "gid://shopify/Order/123",
+            buyerAccountId: "buyer-456",
+            dueOverrideAt: null, // No merchant override
+            dueSource: "inferred",
+            dueAt: new Date("2025-02-14T00:00:00Z"),
+          }]);
         }
-      );
-
-      expect(result.dueAt?.toISOString()).toBe("2025-02-15T00:00:00.000Z");
-      expect(result.dueSource).toBe("schedule");
+        
+        return Promise.resolve([]);
+      });
+      
+      // Order without schedule (existing invoice has account-default dueAt)
+      const lines = ['{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING"}'];
+      
+      await processOrderLines(mockSql as never, "shop-123", lines);
+      
+      // Verify bulkUpsertInvoices was called with correct dueAt/dueSource
+      expect(mockUpsertInvoices).toHaveBeenCalled();
+      const invoices = mockUpsertInvoices.mock.calls[0][1];
+      expect(invoices).toHaveLength(1);
+      expect(invoices[0].dueAt?.toISOString()).toBe("2025-02-14T00:00:00.000Z");
+      expect(invoices[0].dueSource).toBe("inferred");
+      expect(invoices[0].dueBasis).toBe("accountDefault");
     });
 
-    it("schedule beats inferred but merchant override on existing invoice is preserved", async () => {
-      // This test documents the behavior in processOrderLines:
-      // If no schedule dueAt and invoice has dueOverrideAt, preserve existing dueAt
-      const { parseOrderBulkJsonl } = await import("../bulk-parser.server");
+    it("preserves merchant override when no schedule dueAt", async () => {
+      const { processOrderLines } = await import("../bulk-jsonl-processor.server");
+      const { bulkUpsertInvoices } = await import("../order.server");
+      const { checkOrderEligibility, getEligibilityContext } = await import("~/lib/invoice-eligibility");
+      
+      const mockUpsertInvoices = bulkUpsertInvoices as ReturnType<typeof vi.fn>;
+      const mockCheckEligibility = checkOrderEligibility as ReturnType<typeof vi.fn>;
+      const mockGetContext = getEligibilityContext as ReturnType<typeof vi.fn>;
+      
+      // Eligibility would return account-default, but merchant override exists
+      mockGetContext.mockResolvedValue({ shop: { id: "shop-123", defaultTermsDays: 30 } });
+      mockCheckEligibility.mockResolvedValue({
+        eligible: true,
+        reason: "company_account_terms",
+        explanation: "Account default would give different date",
+        buyerAccountId: "buyer-456",
+        dueDate: {
+          dueAt: new Date("2025-02-14T00:00:00Z"), // Would be Feb 14
+          dueSource: "inferred",
+          basis: "accountDefault",
+          reason: "Account default: net 30 days",
+        },
+      });
+      
+      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        
+        // Existing invoice WITH merchant override
+        if (query.includes('"Invoice"') && query.includes("SELECT") && query.includes("dueOverrideAt")) {
+          return Promise.resolve([{
+            orderId: "gid://shopify/Order/123",
+            buyerAccountId: "buyer-456",
+            dueOverrideAt: new Date("2025-03-01T00:00:00Z"), // Merchant override!
+            dueSource: "override",
+            dueAt: new Date("2025-03-01T00:00:00Z"),
+          }]);
+        }
+        
+        return Promise.resolve([]);
+      });
       
       // Order without schedule dueAt
-      const jsonl = '{"id":"gid://shopify/Order/1","name":"#1001","createdAt":"2025-01-01T00:00:00Z","displayFinancialStatus":"PENDING","paymentTerms":{"id":"pt1","paymentTermsName":"Net 30","paymentTermsType":"NET","dueInDays":30}}';
-      const result = parseOrderBulkJsonl(jsonl);
+      const lines = ['{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING"}'];
       
-      expect(result.orders).toHaveLength(1);
-      expect(result.orders[0].paymentTerms?.paymentSchedules).toBeUndefined();
+      await processOrderLines(mockSql as never, "shop-123", lines);
       
-      // The processing logic in processOrderLines checks:
-      // hasScheduleDueAt = false, hasMerchantOverride = true
-      // -> preserve existing.dueAt with dueSource='override'
+      // Verify merchant override is preserved
+      expect(mockUpsertInvoices).toHaveBeenCalled();
+      const invoices = mockUpsertInvoices.mock.calls[0][1];
+      expect(invoices).toHaveLength(1);
+      expect(invoices[0].dueAt?.toISOString()).toBe("2025-03-01T00:00:00.000Z");
+      expect(invoices[0].dueSource).toBe("override");
+    });
+  });
+
+  describe("(e) existing invoice with schedule child gets schedule dueAt", () => {
+    it("schedule dueAt heals existing invoice", async () => {
+      const { processOrderLines } = await import("../bulk-jsonl-processor.server");
+      const { bulkUpsertInvoices } = await import("../order.server");
+      const { checkOrderEligibility, getEligibilityContext } = await import("~/lib/invoice-eligibility");
+      
+      const mockUpsertInvoices = bulkUpsertInvoices as ReturnType<typeof vi.fn>;
+      const mockCheckEligibility = checkOrderEligibility as ReturnType<typeof vi.fn>;
+      const mockGetContext = getEligibilityContext as ReturnType<typeof vi.fn>;
+      
+      mockGetContext.mockResolvedValue({ shop: { id: "shop-123" } });
+      mockCheckEligibility.mockResolvedValue({
+        eligible: true,
+        reason: "shopify_payment_terms",
+        explanation: "Has schedule",
+        buyerAccountId: "buyer-456",
+        dueDate: {
+          dueAt: new Date("2025-02-15T00:00:00Z"),
+          dueSource: "schedule",
+          basis: null,
+          reason: "Payment schedule from Shopify",
+        },
+      });
+      
+      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        
+        // Existing invoice (no override, no dueAt)
+        if (query.includes('"Invoice"') && query.includes("SELECT") && query.includes("dueOverrideAt")) {
+          return Promise.resolve([{
+            orderId: "gid://shopify/Order/123",
+            buyerAccountId: "buyer-456",
+            dueOverrideAt: null,
+            dueSource: "none",
+            dueAt: null,
+          }]);
+        }
+        
+        return Promise.resolve([]);
+      });
+      
+      // Order WITH PaymentSchedule (schedule dueAt attached via parser)
+      const lines = [
+        '{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","paymentTerms":{"id":"pt1","paymentSchedules":{"edges":[{"node":{"id":"gid://shopify/PaymentSchedule/456","dueAt":"2025-02-15T00:00:00Z"}}]}}}',
+      ];
+      
+      await processOrderLines(mockSql as never, "shop-123", lines);
+      
+      // Verify schedule dueAt is used
+      expect(mockUpsertInvoices).toHaveBeenCalled();
+      const invoices = mockUpsertInvoices.mock.calls[0][1];
+      expect(invoices).toHaveLength(1);
+      expect(invoices[0].dueAt?.toISOString()).toBe("2025-02-15T00:00:00.000Z");
+      expect(invoices[0].dueSource).toBe("schedule");
+    });
+
+    it("schedule dueAt beats merchant override", async () => {
+      const { processOrderLines } = await import("../bulk-jsonl-processor.server");
+      const { bulkUpsertInvoices } = await import("../order.server");
+      const { checkOrderEligibility, getEligibilityContext } = await import("~/lib/invoice-eligibility");
+      
+      const mockUpsertInvoices = bulkUpsertInvoices as ReturnType<typeof vi.fn>;
+      const mockCheckEligibility = checkOrderEligibility as ReturnType<typeof vi.fn>;
+      const mockGetContext = getEligibilityContext as ReturnType<typeof vi.fn>;
+      
+      mockGetContext.mockResolvedValue({ shop: { id: "shop-123" } });
+      mockCheckEligibility.mockResolvedValue({
+        eligible: true,
+        reason: "shopify_payment_terms",
+        explanation: "Has schedule - beats override",
+        buyerAccountId: "buyer-456",
+        dueDate: {
+          dueAt: new Date("2025-02-15T00:00:00Z"),
+          dueSource: "schedule",
+          basis: null,
+          reason: "Payment schedule from Shopify",
+        },
+      });
+      
+      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        
+        // Existing invoice WITH merchant override
+        if (query.includes('"Invoice"') && query.includes("SELECT") && query.includes("dueOverrideAt")) {
+          return Promise.resolve([{
+            orderId: "gid://shopify/Order/123",
+            buyerAccountId: "buyer-456",
+            dueOverrideAt: new Date("2025-03-01T00:00:00Z"), // Has override
+            dueSource: "override",
+            dueAt: new Date("2025-03-01T00:00:00Z"),
+          }]);
+        }
+        
+        return Promise.resolve([]);
+      });
+      
+      // Order WITH schedule dueAt
+      const lines = [
+        '{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","paymentTerms":{"id":"pt1","paymentSchedules":{"edges":[{"node":{"id":"gid://shopify/PaymentSchedule/456","dueAt":"2025-02-15T00:00:00Z"}}]}}}',
+      ];
+      
+      await processOrderLines(mockSql as never, "shop-123", lines);
+      
+      // Schedule beats override
+      expect(mockUpsertInvoices).toHaveBeenCalled();
+      const invoices = mockUpsertInvoices.mock.calls[0][1];
+      expect(invoices).toHaveLength(1);
+      expect(invoices[0].dueAt?.toISOString()).toBe("2025-02-15T00:00:00.000Z");
+      expect(invoices[0].dueSource).toBe("schedule");
     });
   });
 });

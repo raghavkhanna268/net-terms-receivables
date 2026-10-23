@@ -89,8 +89,9 @@ export type ErrorType = "retryable" | "permanent";
 /**
  * Check if a raw JSONL line has __parentId (is a child line).
  * Used for batch boundary detection to avoid splitting parent/child groups.
+ * Exported for testing.
  */
-function lineHasParentId(line: string): boolean {
+export function lineHasParentId(line: string): boolean {
   try {
     const parsed = JSON.parse(line);
     return "__parentId" in parsed && parsed.__parentId !== undefined;
@@ -425,8 +426,10 @@ async function processCompanyLines(
  *
  * Orphan schedules (PaymentSchedule lines whose parent Order is not in this batch)
  * are handled by updating the dueAt on existing Invoices for those parent orders.
+ *
+ * Exported for testing.
  */
-async function processOrderLines(
+export async function processOrderLines(
   sql: Sql,
   shopId: string,
   lines: string[],
