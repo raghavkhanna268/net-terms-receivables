@@ -1266,3 +1266,434 @@ describe("Handler registration completeness", () => {
     }
   });
 });
+
+describe("S8 Customer handler path tests", () => {
+  let mockAdminGraphQL: ReturnType<typeof vi.fn>;
+  let mockProcessCustomerWebhook: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.resetModules();
+
+    const { adminGraphQL } = await import("../admin-client.server");
+    const { processCustomerWebhook } = await import("~/services/sync/customer.server");
+
+    mockAdminGraphQL = adminGraphQL as ReturnType<typeof vi.fn>;
+    mockProcessCustomerWebhook = processCustomerWebhook as ReturnType<typeof vi.fn>;
+  });
+
+  it("CUSTOMERS_CREATE fetches customer via GraphQL and processes it", async () => {
+    mockAdminGraphQL.mockResolvedValue({
+      success: true,
+      data: {
+        node: {
+          id: "gid://shopify/Customer/123",
+          tags: ["net-terms"],
+          email: "test@example.com",
+          displayName: "Test Customer",
+        },
+      },
+      retryable: false,
+    });
+
+    mockProcessCustomerWebhook.mockResolvedValue({
+      success: true,
+      action: "created",
+      entityId: "contact-123",
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("CUSTOMERS_CREATE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "CUSTOMERS_CREATE",
+      shop: "test.myshopify.com",
+      webhookId: "wh-cust-1",
+      resourceGid: "gid://shopify/Customer/123",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(mockAdminGraphQL).toHaveBeenCalledWith(
+      "test.myshopify.com",
+      expect.stringContaining("CustomerById"),
+      { id: "gid://shopify/Customer/123" }
+    );
+    expect(mockProcessCustomerWebhook).toHaveBeenCalledWith(
+      mockSql,
+      "test.myshopify.com",
+      "CUSTOMERS_CREATE",
+      expect.objectContaining({ id: "gid://shopify/Customer/123" }),
+      "wh-cust-1"
+    );
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("created");
+  });
+
+  it("CUSTOMERS_DELETE skips GraphQL fetch and processes directly", async () => {
+    mockProcessCustomerWebhook.mockResolvedValue({
+      success: true,
+      action: "deleted",
+      entityId: "contact-456",
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("CUSTOMERS_DELETE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "CUSTOMERS_DELETE",
+      shop: "test.myshopify.com",
+      webhookId: "wh-cust-del-1",
+      resourceGid: "gid://shopify/Customer/456",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    // DELETE should NOT call adminGraphQL
+    expect(mockAdminGraphQL).not.toHaveBeenCalled();
+    expect(mockProcessCustomerWebhook).toHaveBeenCalledWith(
+      mockSql,
+      "test.myshopify.com",
+      "CUSTOMERS_DELETE",
+      expect.objectContaining({ id: "gid://shopify/Customer/456", tags: [] }),
+      "wh-cust-del-1"
+    );
+    expect(result.success).toBe(true);
+  });
+
+  it("Customer ACCESS_DENIED error is non-retryable", async () => {
+    mockAdminGraphQL.mockResolvedValue({
+      success: false,
+      error: "Access denied. Scope read_customers not granted.",
+      retryable: false, // ACCESS_DENIED is non-retryable
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("CUSTOMERS_UPDATE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "CUSTOMERS_UPDATE",
+      shop: "test.myshopify.com",
+      webhookId: "wh-cust-access-denied",
+      resourceGid: "gid://shopify/Customer/789",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(result.success).toBe(false);
+    expect(result.retryable).toBe(false);
+    expect(result.error).toContain("Access denied");
+  });
+
+  it("Customer 5xx error is retryable", async () => {
+    mockAdminGraphQL.mockResolvedValue({
+      success: false,
+      error: "HTTP 503: Service Unavailable",
+      retryable: true, // 5xx is retryable
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("CUSTOMERS_CREATE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "CUSTOMERS_CREATE",
+      shop: "test.myshopify.com",
+      webhookId: "wh-cust-5xx",
+      resourceGid: "gid://shopify/Customer/111",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(result.success).toBe(false);
+    expect(result.retryable).toBe(true);
+    expect(result.error).toContain("503");
+  });
+
+  it("Customer null refetch treats as delete", async () => {
+    mockAdminGraphQL.mockResolvedValue({
+      success: true,
+      data: { node: null },
+      retryable: false,
+    });
+
+    mockProcessCustomerWebhook.mockResolvedValue({
+      success: true,
+      action: "deleted",
+      entityId: "contact-222",
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("CUSTOMERS_UPDATE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "CUSTOMERS_UPDATE",
+      shop: "test.myshopify.com",
+      webhookId: "wh-cust-null",
+      resourceGid: "gid://shopify/Customer/222",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    // Null refetch should call processCustomerWebhook with DELETE topic
+    expect(mockProcessCustomerWebhook).toHaveBeenCalledWith(
+      mockSql,
+      "test.myshopify.com",
+      "CUSTOMERS_DELETE",
+      expect.objectContaining({ id: "gid://shopify/Customer/222", tags: [] }),
+      "wh-cust-null"
+    );
+    expect(result.success).toBe(true);
+  });
+});
+
+describe("S8 Draft Order handler path tests", () => {
+  let mockAdminGraphQL: ReturnType<typeof vi.fn>;
+  let mockProcessDraftOrderWebhook: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.resetModules();
+
+    const { adminGraphQL } = await import("../admin-client.server");
+    const { processDraftOrderWebhook } = await import("~/services/sync/draft-order.server");
+
+    mockAdminGraphQL = adminGraphQL as ReturnType<typeof vi.fn>;
+    mockProcessDraftOrderWebhook = processDraftOrderWebhook as ReturnType<typeof vi.fn>;
+  });
+
+  it("DRAFT_ORDERS_CREATE fetches draft order via GraphQL and processes it", async () => {
+    mockAdminGraphQL.mockResolvedValue({
+      success: true,
+      data: {
+        node: {
+          id: "gid://shopify/DraftOrder/123",
+          name: "#D001",
+          createdAt: "2026-10-20T12:00:00Z",
+          updatedAt: "2026-10-20T12:30:00Z",
+          status: "OPEN",
+          totalPriceSet: { shopMoney: { amount: "1000.00", currencyCode: "INR" } },
+          paymentTerms: {
+            id: "pt-1",
+            paymentTermsName: "Net 30",
+            paymentTermsType: "NET",
+            dueInDays: 30,
+          },
+          purchasingEntity: {
+            company: { id: "gid://shopify/Company/1" },
+            location: { id: "gid://shopify/CompanyLocation/1" },
+          },
+          customer: { id: "gid://shopify/Customer/1" },
+        },
+      },
+      retryable: false,
+    });
+
+    mockProcessDraftOrderWebhook.mockResolvedValue({
+      success: true,
+      action: "created",
+      entityId: "draft-123",
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("DRAFT_ORDERS_CREATE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "DRAFT_ORDERS_CREATE",
+      shop: "test.myshopify.com",
+      webhookId: "wh-draft-1",
+      resourceGid: "gid://shopify/DraftOrder/123",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(mockAdminGraphQL).toHaveBeenCalledWith(
+      "test.myshopify.com",
+      expect.stringContaining("DraftOrderById"),
+      { id: "gid://shopify/DraftOrder/123" }
+    );
+    expect(mockProcessDraftOrderWebhook).toHaveBeenCalledWith(
+      mockSql,
+      "test.myshopify.com",
+      "DRAFT_ORDERS_CREATE",
+      expect.objectContaining({ id: "gid://shopify/DraftOrder/123" }),
+      "wh-draft-1"
+    );
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("created");
+  });
+
+  it("DRAFT_ORDERS_DELETE skips GraphQL fetch and processes directly", async () => {
+    mockProcessDraftOrderWebhook.mockResolvedValue({
+      success: true,
+      action: "deleted",
+      entityId: "draft-456",
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("DRAFT_ORDERS_DELETE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "DRAFT_ORDERS_DELETE",
+      shop: "test.myshopify.com",
+      webhookId: "wh-draft-del-1",
+      resourceGid: "gid://shopify/DraftOrder/456",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    // DELETE should NOT call adminGraphQL
+    expect(mockAdminGraphQL).not.toHaveBeenCalled();
+    expect(mockProcessDraftOrderWebhook).toHaveBeenCalledWith(
+      mockSql,
+      "test.myshopify.com",
+      "DRAFT_ORDERS_DELETE",
+      expect.objectContaining({ id: "gid://shopify/DraftOrder/456", name: "" }),
+      "wh-draft-del-1"
+    );
+    expect(result.success).toBe(true);
+  });
+
+  it("Draft Order ACCESS_DENIED error is non-retryable", async () => {
+    mockAdminGraphQL.mockResolvedValue({
+      success: false,
+      error: "Access denied. Scope read_draft_orders not granted.",
+      retryable: false, // ACCESS_DENIED is non-retryable
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("DRAFT_ORDERS_UPDATE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "DRAFT_ORDERS_UPDATE",
+      shop: "test.myshopify.com",
+      webhookId: "wh-draft-access-denied",
+      resourceGid: "gid://shopify/DraftOrder/789",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(result.success).toBe(false);
+    expect(result.retryable).toBe(false);
+    expect(result.error).toContain("Access denied");
+  });
+
+  it("Draft Order 5xx error is retryable", async () => {
+    mockAdminGraphQL.mockResolvedValue({
+      success: false,
+      error: "HTTP 502: Bad Gateway",
+      retryable: true, // 5xx is retryable
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("DRAFT_ORDERS_CREATE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "DRAFT_ORDERS_CREATE",
+      shop: "test.myshopify.com",
+      webhookId: "wh-draft-5xx",
+      resourceGid: "gid://shopify/DraftOrder/111",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(result.success).toBe(false);
+    expect(result.retryable).toBe(true);
+    expect(result.error).toContain("502");
+  });
+
+  it("Draft Order null refetch treats as delete", async () => {
+    mockAdminGraphQL.mockResolvedValue({
+      success: true,
+      data: { node: null },
+      retryable: false,
+    });
+
+    mockProcessDraftOrderWebhook.mockResolvedValue({
+      success: true,
+      action: "deleted",
+      entityId: "draft-222",
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("DRAFT_ORDERS_UPDATE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "DRAFT_ORDERS_UPDATE",
+      shop: "test.myshopify.com",
+      webhookId: "wh-draft-null",
+      resourceGid: "gid://shopify/DraftOrder/222",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    // Null refetch should call processDraftOrderWebhook with DELETE topic
+    expect(mockProcessDraftOrderWebhook).toHaveBeenCalledWith(
+      mockSql,
+      "test.myshopify.com",
+      "DRAFT_ORDERS_DELETE",
+      expect.objectContaining({ id: "gid://shopify/DraftOrder/222", name: "" }),
+      "wh-draft-null"
+    );
+    expect(result.success).toBe(true);
+  });
+});

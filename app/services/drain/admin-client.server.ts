@@ -19,6 +19,7 @@
 
 import { shopifyGraphQLQueue, type ShopifyClientResult } from "~/services/shopify-client.server";
 import { getCustomerByNodeQuery } from "~/services/sync/customer-fields.server";
+import { getRequestEnv } from "~/lib/request-context.server";
 
 export const API_VERSION = "2026-10";
 
@@ -138,10 +139,15 @@ export const BULK_OPERATION_STATUS_QUERY = `
  * Uses the shared getCustomerByNodeQuery from customer-fields.server.ts to ensure
  * DPDP compliance and schema validation coverage.
  *
+ * Reads CUSTOMER_PII_FIELDS from the Worker env binding via request context.
+ * This ensures the drain processor uses the correct per-deployment config
+ * rather than process.env (which is not available in Workers).
+ *
  * @returns GraphQL query string for fetching customer by GID
  */
 export function getCustomerQueryForDrain(): string {
-  return getCustomerByNodeQuery({ CUSTOMER_PII_FIELDS: process.env.CUSTOMER_PII_FIELDS });
+  const env = getRequestEnv() ?? {};
+  return getCustomerByNodeQuery(env);
 }
 
 /**

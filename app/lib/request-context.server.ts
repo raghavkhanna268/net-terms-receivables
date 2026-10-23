@@ -6,11 +6,21 @@ export type PrismaClientGetter = () => PrismaClient;
 export type SqlGetter = () => Sql;
 export type WaitUntilFn = (promise: Promise<unknown>) => void;
 
+/**
+ * Minimal Worker env interface for feature flags used by drain handlers.
+ * Add fields as needed when handlers require env bindings.
+ */
+export interface WorkerEnv {
+  CUSTOMER_PII_FIELDS?: string;
+}
+
 export interface RequestStore {
   getSql: SqlGetter;
   getPrisma?: PrismaClientGetter;
   /** ctx.waitUntil for background tasks that outlive the request response */
   waitUntil?: WaitUntilFn;
+  /** Worker env bindings for feature flags (optional, used by drain handlers) */
+  env?: WorkerEnv;
 }
 
 /**
@@ -83,4 +93,16 @@ export function getRequestPrisma(): PrismaClient {
 export function getRequestWaitUntil(): WaitUntilFn | undefined {
   const store = requestContext.getStore();
   return store?.waitUntil;
+}
+
+/**
+ * Get the Worker env bindings for the current request.
+ * Used by drain handlers that need feature flags (e.g., CUSTOMER_PII_FIELDS).
+ *
+ * Returns undefined if called outside request context or env not available.
+ * Callers should fall back to process.env if needed.
+ */
+export function getRequestEnv(): WorkerEnv | undefined {
+  const store = requestContext.getStore();
+  return store?.env;
 }
