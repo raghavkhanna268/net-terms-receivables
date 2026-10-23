@@ -17,7 +17,7 @@
  */
 
 import type { Sql } from "~/lib/db-light.server";
-import { isGatingEnforced } from "~/services/gating.server";
+import { activeAccountFragment } from "~/services/gating.server";
 import type {
   AgingBucketKey,
   SerializableAgingTotals,
@@ -32,27 +32,6 @@ interface ShopTotalRow {
   currency: string;
   bucket: string;
   total_paise: string;
-}
-
-
-/**
- * Returns a SQL fragment that excludes gated accounts when gating is enforced.
- * When gating is not enforced, returns an empty fragment (no filtering).
- *
- * TODO(#67): Replace with activeAccountPredicate from PR #67 (S21 pre-enable)
- * once it merges. That PR adds a shared fragment for this pattern.
- *
- * @param sql - postgres.js SQL client
- * @param tableAlias - The alias used for BuyerAccount table (e.g., "ba")
- * @returns SQL fragment for WHERE clause
- */
-function gatedAccountFilter(sql: Sql, tableAlias: string): ReturnType<Sql> {
-  if (isGatingEnforced()) {
-    // Use sql.unsafe only for the table alias which is controlled by us
-    return sql`AND ${sql.unsafe(tableAlias)}.gated_at IS NULL`;
-  }
-  // Return empty fragment when gating is not enforced
-  return sql``;
 }
 
 /**
@@ -74,9 +53,6 @@ export async function getShopAgingTotals(
   shopId: string,
   asOf: Date
 ): Promise<SerializableAgingTotals> {
-  // TODO(#67): Use activeAccountPredicate from PR #67 once merged
-  const gatedFilter = gatedAccountFilter(sql, "ba");
-
   // Query aggregates invoices by currency and bucket
   // Uses DATE_TRUNC for IST timezone day boundaries to match TS implementation
   const rows = await sql<ShopTotalRow[]>`
@@ -97,7 +73,7 @@ export async function getShopAgingTotals(
       WHERE i."shopId" = ${shopId}
         AND i.status = 'open'
         AND i.outstanding > 0
-        ${gatedFilter}
+        AND ${activeAccountFragment(sql)}
     )
     SELECT
       currency,
@@ -181,7 +157,7 @@ export async function getShopAgingTotals(
     WHERE i."shopId" = ${shopId}
       AND i.status = 'open'
       AND i.outstanding > 0
-      ${gatedFilter}
+      AND ${activeAccountFragment(sql)}
   `;
 
   result.oldestOverdueDays = oldestRow?.oldest_days ?? null;
@@ -218,9 +194,6 @@ export async function getBuyerLedger(
 ): Promise<{ rows: BuyerLedgerRow[]; totalCount: number }> {
   const { limit, offset, sortBy, sortOrder } = options;
 
-  // TODO(#67): Use activeAccountPredicate from PR #67 once merged
-  const gatedFilter = gatedAccountFilter(sql, "ba");
-
   // Build the query with dynamic sort
   // Note: We use separate queries for each sort option to avoid sql.unsafe for column names
   let rows: BuyerLedgerRow[];
@@ -244,7 +217,7 @@ export async function getBuyerLedger(
       WHERE i."shopId" = ${shopId}
         AND i.status = 'open'
         AND i.outstanding > 0
-        ${gatedFilter}
+        AND ${activeAccountFragment(sql)}
     ),
     buyer_totals AS (
       SELECT
@@ -300,7 +273,7 @@ export async function getBuyerLedger(
     WHERE i."shopId" = ${shopId}
       AND i.status = 'open'
       AND i.outstanding > 0
-      ${gatedFilter}
+      AND ${activeAccountFragment(sql)}
   `;
 
   return {
@@ -334,9 +307,6 @@ export async function getBuyerInvoices(
 ): Promise<{ rows: BuyerInvoiceRow[]; totalCount: number }> {
   const { limit, offset } = options;
 
-  // TODO(#67): Use activeAccountPredicate from PR #67 once merged
-  const gatedFilter = gatedAccountFilter(sql, "ba");
-
   const rows = await sql<BuyerInvoiceRow[]>`
     SELECT
       i.id,
@@ -359,7 +329,7 @@ export async function getBuyerInvoices(
       AND i."buyerAccountId" = ${buyerAccountId}
       AND i.status = 'open'
       AND i.outstanding > 0
-      ${gatedFilter}
+      AND ${activeAccountFragment(sql)}
     ORDER BY i."dueAt" ASC NULLS LAST, i.name ASC
     LIMIT ${limit}
     OFFSET ${offset}
@@ -373,7 +343,7 @@ export async function getBuyerInvoices(
       AND i."buyerAccountId" = ${buyerAccountId}
       AND i.status = 'open'
       AND i.outstanding > 0
-      ${gatedFilter}
+      AND ${activeAccountFragment(sql)}
   `;
 
   return {
