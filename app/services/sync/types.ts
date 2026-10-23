@@ -19,6 +19,9 @@ export interface ShopifyCompany {
 
 /**
  * Shopify CompanyLocation from webhook or bulk export.
+ *
+ * DPDP note: billingAddress only includes company (name fallback).
+ * No PII fields (names, addresses, phones) are stored.
  */
 export interface ShopifyCompanyLocation {
   id: string; // GID: gid://shopify/CompanyLocation/456
@@ -27,18 +30,7 @@ export interface ShopifyCompanyLocation {
     id: string; // Parent company GID
   };
   billingAddress?: {
-    firstName?: string | null;
-    lastName?: string | null;
     company?: string | null;
-    address1?: string | null;
-    address2?: string | null;
-    city?: string | null;
-    province?: string | null;
-    provinceCode?: string | null;
-    country?: string | null;
-    countryCode?: string | null;
-    zip?: string | null;
-    phone?: string | null;
   } | null;
   buyerExperienceConfiguration?: {
     paymentTermsTemplate?: {
@@ -113,10 +105,6 @@ export interface ShopifyOrder {
   } | null;
   customer?: {
     id: string;
-    email?: string | null;
-    firstName?: string | null;
-    lastName?: string | null;
-    tags?: string[];
   } | null;
 }
 

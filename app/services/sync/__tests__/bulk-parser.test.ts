@@ -163,8 +163,6 @@ describe("bulkLocationToShopifyLocation", () => {
       __parentId: "gid://shopify/Company/456",
       billingAddress: {
         company: "Acme Corp",
-        city: "Mumbai",
-        country: "India",
       },
       buyerExperienceConfiguration: {
         paymentTermsTemplate: {

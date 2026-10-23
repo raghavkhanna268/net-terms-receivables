@@ -24,6 +24,9 @@
  * This query exports all companies with their locations and payment terms
  * configuration. The JSONL output will contain Company and CompanyLocation
  * objects linked by __parentId.
+ *
+ * DPDP note: Only billingAddress.company is fetched (name fallback for BuyerAccount).
+ * No PII fields (names, addresses, phones) are requested.
  */
 export const BULK_COMPANIES_QUERY = `
   mutation BulkCompaniesExport {
@@ -47,18 +50,7 @@ export const BULK_COMPANIES_QUERY = `
                     createdAt
                     updatedAt
                     billingAddress {
-                      firstName
-                      lastName
                       company
-                      address1
-                      address2
-                      city
-                      province
-                      provinceCode
-                      country
-                      countryCodeV2
-                      zip
-                      phone
                     }
                     buyerExperienceConfiguration {
                       paymentTermsTemplate {
@@ -93,19 +85,24 @@ export const BULK_COMPANIES_QUERY = `
 /**
  * GraphQL mutation to start a bulk operation for orders with payment terms.
  *
- * Filters to orders with payment terms within the read_orders window (60 days).
- * The query uses financial_status:unpaid to focus on open invoices.
+ * Filters to orders that may have outstanding payment terms:
+ * - pending: Orders with "payment pending" (typical for net-terms)
+ * - unpaid: Orders not yet paid
+ * - partially_paid: Orders with partial payment
  *
- * Once read_all_orders scope is approved:
- * - Remove the created_at filter to backfill all historical orders
- * - Or add a configurable date range parameter
+ * Without read_all_orders scope, order access is limited to the last 60 days
+ * (Shopify default). Once read_all_orders is approved, all historical orders
+ * matching the filter will be included.
+ *
+ * DPDP note: Only customer.id is fetched (for BuyerAccount lookup).
+ * No PII fields (email, names, tags) are requested.
  */
 export const BULK_ORDERS_QUERY = `
   mutation BulkOrdersExport {
     bulkOperationRunQuery(
       query: """
       {
-        orders(query: "financial_status:unpaid OR financial_status:partially_paid") {
+        orders(query: "financial_status:pending OR financial_status:unpaid OR financial_status:partially_paid") {
           edges {
             node {
               id
@@ -159,10 +156,6 @@ export const BULK_ORDERS_QUERY = `
               }
               customer {
                 id
-                email
-                firstName
-                lastName
-                tags
               }
             }
           }
@@ -213,6 +206,11 @@ export interface BulkOperationResult {
   status?: string;
   error?: string;
 }
+
+/**
+ * Bulk operation type for tracking.
+ */
+export type BulkOperationType = "companies" | "orders";
 
 /**
  * Start a bulk companies export.
@@ -287,4 +285,31 @@ export function parseBulkOperationResult(
     bulkOperationId: bulkOperation.id,
     status: bulkOperation.status,
   };
+}
+
+/**
+ * Register a bulk operation in the tracking table.
+ *
+ * Call this after successfully starting a bulk operation to record its type.
+ * The finish webhook will look up the type to route the JSONL to the correct
+ * processor.
+ *
+ * @param sql - postgres.js SQL client
+ * @param bulkOperationId - The bulk operation GID from Shopify
+ * @param shop - Shop domain
+ * @param bulkType - Type of bulk operation (companies or orders)
+ */
+export async function registerBulkOperation(
+  sql: import("~/lib/db-light.server").Sql,
+  bulkOperationId: string,
+  shop: string,
+  bulkType: BulkOperationType
+): Promise<void> {
+  await sql`
+    INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type)
+    VALUES (${bulkOperationId}, ${shop}, ${bulkType})
+    ON CONFLICT (bulk_operation_id) DO UPDATE SET
+      shop = EXCLUDED.shop,
+      bulk_type = EXCLUDED.bulk_type
+  `;
 }

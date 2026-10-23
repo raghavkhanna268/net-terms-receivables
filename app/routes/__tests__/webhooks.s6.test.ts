@@ -10,9 +10,15 @@ import type { ActionFunctionArgs } from "react-router";
  * 3. Graceful handling of missing payload fields
  */
 
+// Mock SQL client that returns bulk operation type
+const mockSql = Object.assign(
+  vi.fn().mockResolvedValue([{ bulk_type: "companies" }]),
+  { json: vi.fn((v) => v) }
+);
+
 // Mock the request context module
 vi.mock("~/lib/request-context.server", () => ({
-  getRequestSql: vi.fn(() => ({})),
+  getRequestSql: vi.fn(() => mockSql),
 }));
 
 // Mock the pgmq module

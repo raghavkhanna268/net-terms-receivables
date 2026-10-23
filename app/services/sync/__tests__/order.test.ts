@@ -294,6 +294,107 @@ describeWithDb("Order Sync", () => {
       expect(result2.action).toBe("skipped");
       expect(result2.skipReason).toContain("idempotent");
     });
+
+    it("does not downgrade paid invoice status on ORDERS_UPDATED", async () => {
+      // Create a paid invoice
+      const orderId = `gid://shopify/Order/ord-${TEST_SUFFIX}-paid`;
+      await sql`
+        INSERT INTO "Invoice" (
+          "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          "issuedAt", status, "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId}, '#PAID', '30000.00', '0.00',
+          NOW(), 'paid', NOW(), NOW()
+        )
+      `;
+
+      // Try to update with an order that would set status to 'open'
+      const order: ShopifyOrder = {
+        id: orderId,
+        name: "#PAID",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING", // This would normally set status to 'open'
+        totalPriceSet: {
+          shopMoney: { amount: "30000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+          dueInDays: 30,
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      await processOrderWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "ORDERS_UPDATED",
+        order,
+        `wh-ord-${TEST_SUFFIX}-paid-update`
+      );
+
+      // Invoice should still be paid
+      const [invoice] = await sql`
+        SELECT * FROM "Invoice" WHERE "orderId" = ${orderId}
+      `;
+      expect(invoice.status).toBe("paid");
+      expect(invoice.outstanding).toBe("0.00");
+    });
+
+    it("does not downgrade cancelled invoice status on ORDERS_UPDATED", async () => {
+      // Create a cancelled invoice
+      const orderId = `gid://shopify/Order/ord-${TEST_SUFFIX}-cancelled`;
+      await sql`
+        INSERT INTO "Invoice" (
+          "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          "issuedAt", status, "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId}, '#CANCELLED', '25000.00', '25000.00',
+          NOW(), 'cancelled', NOW(), NOW()
+        )
+      `;
+
+      // Try to update with an order that would set status to 'open'
+      const order: ShopifyOrder = {
+        id: orderId,
+        name: "#CANCELLED",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
+        totalPriceSet: {
+          shopMoney: { amount: "25000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+          dueInDays: 30,
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      await processOrderWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "ORDERS_UPDATED",
+        order,
+        `wh-ord-${TEST_SUFFIX}-cancelled-update`
+      );
+
+      // Invoice should still be cancelled
+      const [invoice] = await sql`
+        SELECT * FROM "Invoice" WHERE "orderId" = ${orderId}
+      `;
+      expect(invoice.status).toBe("cancelled");
+    });
   });
 
   describe("mapOrderToInvoice", () => {

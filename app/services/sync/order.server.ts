@@ -277,7 +277,7 @@ async function upsertInvoice(
       name = EXCLUDED.name,
       total = EXCLUDED.total,
       outstanding = CASE
-        WHEN "Invoice".status = 'paid' THEN '0.00'
+        WHEN "Invoice".status IN ('paid', 'cancelled') THEN "Invoice".outstanding
         ELSE EXCLUDED.outstanding
       END,
       "dueAt" = COALESCE(EXCLUDED."dueAt", "Invoice"."dueAt"),
@@ -293,7 +293,11 @@ async function upsertInvoice(
         WHEN EXCLUDED."dueAt" IS NOT NULL THEN EXCLUDED."dueReason"
         ELSE "Invoice"."dueReason"
       END,
-      status = EXCLUDED.status,
+      -- Never downgrade terminal states (paid/cancelled)
+      status = CASE
+        WHEN "Invoice".status IN ('paid', 'cancelled') THEN "Invoice".status
+        ELSE EXCLUDED.status
+      END,
       "updatedAt" = NOW()
     RETURNING id, (xmax = 0)::text as action
   `;
@@ -425,7 +429,7 @@ export async function bulkUpsertInvoices(
         name = EXCLUDED.name,
         total = EXCLUDED.total,
         outstanding = CASE
-          WHEN "Invoice".status = 'paid' THEN '0.00'
+          WHEN "Invoice".status IN ('paid', 'cancelled') THEN "Invoice".outstanding
           ELSE EXCLUDED.outstanding
         END,
         "dueAt" = COALESCE(EXCLUDED."dueAt", "Invoice"."dueAt"),
@@ -433,7 +437,19 @@ export async function bulkUpsertInvoices(
           WHEN EXCLUDED."dueAt" IS NOT NULL THEN EXCLUDED."dueSource"
           ELSE "Invoice"."dueSource"
         END,
-        status = EXCLUDED.status,
+        "dueBasis" = CASE
+          WHEN EXCLUDED."dueAt" IS NOT NULL THEN EXCLUDED."dueBasis"
+          ELSE "Invoice"."dueBasis"
+        END,
+        "dueReason" = CASE
+          WHEN EXCLUDED."dueAt" IS NOT NULL THEN EXCLUDED."dueReason"
+          ELSE "Invoice"."dueReason"
+        END,
+        -- Never downgrade terminal states (paid/cancelled)
+        status = CASE
+          WHEN "Invoice".status IN ('paid', 'cancelled') THEN "Invoice".status
+          ELSE EXCLUDED.status
+        END,
         "updatedAt" = NOW()
     `;
     count += result.count;
