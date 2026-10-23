@@ -95,11 +95,11 @@ Planned screenshots:
 
 ## App Categories
 
-**TBD** — Verify category names against current Shopify App Store taxonomy before submission.
-
-Suggested categories (to be verified):
-- **Primary:** Orders and shipping → Invoicing
-- **Secondary:** Store management → Finances
+Suggested categories for Shopify App Store:
+- **Primary:** Orders and shipping → Orders → Invoices and receipts
+- **Secondary:** Store management → Finances → Accounting
+- **Note:** Confirm category availability in Partner Dashboard before submission
+- **Reference:** [Shopify App Listing Categories](https://shopify.dev/docs/apps/launch/app-store-review/app-listing-categories)
 
 ---
 

@@ -10,9 +10,10 @@
 ### Cloudflare Workers
 
 - [ ] **⚠️ Upgrade to Cloudflare Workers Paid ($5/month)** — Before App Store review or first real merchant, whichever comes first
-  - Free tier: 100k requests/day, 10ms CPU limit
-  - Paid tier: 10M requests/month, 30 seconds CPU limit
+  - Free tier: 100k requests/day, 10 ms CPU limit
+  - Paid tier: 10M requests/month, 30 seconds default CPU limit (max 5 min configurable)
   - **Why:** Production traffic may exceed free tier; paid tier provides significantly better CPU headroom
+  - **Reference:** [Cloudflare Workers Limits](https://developers.cloudflare.com/workers/platform/limits/)
 
 ### Supabase
 
@@ -51,13 +52,14 @@
 
 - [ ] **⚠️ Protected Customer Data (PCD) Access Request**
   - Required for: `read_customers`, `read_orders` scopes (after PR #28)
-  - [ ] **PCD Level 1** — Access to protected customer data in API responses
+  - [ ] **PCD Level 1** — Customer data excluding name, address, phone, and email fields
     - [ ] File PCD access request form in Partner Dashboard
     - [ ] Justify data access requirements
-  - [ ] **Name and Email fields** — App policy: only Name and Email fields are stored
+  - [ ] **Protected Customer Fields (Level 2)** — Name and Email fields only (no phone, no address)
+    - Request per-field access for Name and Email in Partner Dashboard
     - Phone, addresses, and other PII fields are never stored (blocked by code)
     - When `CUSTOMER_PII_FIELDS=1` is enabled, only `email` and `displayName` are persisted
-  - **Reference:** [Shopify Protected Customer Data](https://shopify.dev/docs/apps/store/data-protection/protected-customer-data)
+  - **Reference:** [Shopify Protected Customer Data](https://shopify.dev/docs/apps/launch/protected-customer-data)
 
 ### Privacy Policy
 
@@ -86,9 +88,10 @@
 ### Performance
 
 - [ ] **⚠️ Lighthouse/Web Vitals audit**
-  - [ ] Target: LCP < 2.5s, INP < 200ms, CLS < 0.1
+  - [ ] Target: LCP ≤ 2.5s, INP ≤ 200ms, CLS ≤ 0.1
   - [ ] Run Lighthouse on embedded app pages
-  - **Reference:** [Shopify App Performance Requirements](https://shopify.dev/docs/apps/store/requirements)
+  - **Note:** INP (Interaction to Next Paint) replaced FID as a Core Web Vital in March 2024
+  - **Reference:** [Shopify App Performance Requirements](https://shopify.dev/docs/apps/store/requirements), [Core Web Vitals](https://web.dev/articles/vitals)
 
 - [ ] Verify Worker CPU time stays under limits
   - Current estimates: 2-3ms per webhook (well under 10ms)
