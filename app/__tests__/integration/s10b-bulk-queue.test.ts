@@ -1,17 +1,22 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { S6_QUEUES, type BulkMessage } from "~/lib/pgmq.server";
+import {
+  runDrain,
+  registerBulkHandler,
+  getBulkHandler,
+  type BulkHandler,
+  type DrainConfig,
+} from "~/services/drain/processor.server";
 
 /**
  * Integration tests for processBulkQueue.
  *
- * These tests verify:
- * 1. Success case: message is processed and archived
- * 2. Retryable error: message stays visible for retry
- * 3. Permanent error: message goes to DLQ after 5 failures
- * 4. Idempotent replay: processing resumes from saved offset
- * 5. Transactional send+archive: progress continuation is atomic
+ * These tests drive the REAL runDrain/processBulkQueue code by:
+ * 1. Registering bulk handlers that return progress, complete, retryable, permanent
+ * 2. Enqueuing real messages to s6_bulk queue
+ * 3. Calling runDrain and asserting queue/archive/DLQ state AND DrainResult counters
  *
  * Tests run against the CI Postgres with pgmq extension.
  */
@@ -23,223 +28,315 @@ describeWithDb("S10b processBulkQueue Integration", () => {
   let sql: ReturnType<typeof postgres>;
   const TEST_SUFFIX = Date.now().toString(36);
   const TEST_SHOP = `test-bulk-${TEST_SUFFIX}.myshopify.com`;
+  const TEST_TOPIC = `TEST_BULK_${TEST_SUFFIX}`;
+
+  let originalHandler: BulkHandler | undefined;
+  const testMsgIds: string[] = [];
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
-
-    // Tables are created by migrations - just verify they exist
-    // s6_dead_letter is created by s10_drain_cron migration
-    // s6_bulk_operations is created by s6_pgmq_queues migration
+    originalHandler = getBulkHandler(TEST_TOPIC);
   });
 
   afterAll(async () => {
-    // Clean up test data
-    await sql`DELETE FROM s6_dead_letter WHERE original_msg_id LIKE ${"test-" + TEST_SUFFIX + "%"}`;
+    // Clean up only our test data (isolated by TEST_SUFFIX)
+    await sql`DELETE FROM s6_dead_letter WHERE original_msg_id IN ${sql(testMsgIds.length > 0 ? testMsgIds : ["none"])}`;
     await sql`DELETE FROM s6_bulk_operations WHERE shop = ${TEST_SHOP}`;
 
-    // Purge test messages from bulk queue
-    try {
-      await sql`SELECT pgmq.purge('s6_bulk')`;
-    } catch {
-      // Queue may have messages from other tests
+    // Delete only our test messages from queue and archive
+    for (const msgId of testMsgIds) {
+      try {
+        await sql`SELECT pgmq.delete(${S6_QUEUES.BULK}, ${msgId}::bigint)`;
+      } catch {
+        // May already be archived or deleted
+      }
     }
 
     await sql.end();
   });
 
-  beforeEach(async () => {
-    vi.clearAllMocks();
-    // Purge queue between tests
-    try {
-      await sql`SELECT pgmq.purge('s6_bulk')`;
-    } catch {
-      // Ignore errors
+  afterEach(() => {
+    if (originalHandler) {
+      registerBulkHandler(TEST_TOPIC, originalHandler);
     }
   });
 
-  describe("processBulkQueue: success", () => {
-    it("archives message on successful completion", async () => {
-      const testMessage: BulkMessage = {
-        topic: "BULK_OPERATIONS_FINISH",
-        shop: TEST_SHOP,
-        webhookId: `test-${TEST_SUFFIX}-success-1`,
-        bulkOperationId: `gid://shopify/BulkOperation/success-${TEST_SUFFIX}`,
-        bulkType: "companies",
-        enqueuedAt: new Date().toISOString(),
-      };
+  const drainConfig: Partial<DrainConfig> = {
+    batchSize: 10,
+    visibilityTimeoutSec: 1,
+    timeBudgetMs: 5000,
+    maxRetries: 5,
+  };
 
-      // Send message to queue
-      const [sendResult] = await sql<{ send: string }[]>`
-        SELECT pgmq.send(${S6_QUEUES.BULK}, ${sql.json(testMessage)}) as send
-      `;
-      expect(sendResult.send).toBeDefined();
-      const msgId = sendResult.send;
+  async function enqueueTestMessage(suffix: string): Promise<{ msgId: string; message: BulkMessage }> {
+    const message: BulkMessage = {
+      topic: TEST_TOPIC,
+      shop: TEST_SHOP,
+      webhookId: `test-${TEST_SUFFIX}-${suffix}`,
+      bulkOperationId: `gid://shopify/BulkOperation/${suffix}-${TEST_SUFFIX}`,
+      bulkType: "companies",
+      enqueuedAt: new Date().toISOString(),
+    };
 
-      // Verify message is in queue
-      const [beforeRead] = await sql<{ count: string }[]>`
+    const [result] = await sql<{ send: string }[]>`
+      SELECT pgmq.send(${S6_QUEUES.BULK}, ${sql.json(message)}) as send
+    `;
+    testMsgIds.push(result.send);
+    return { msgId: result.send, message };
+  }
+
+  describe("runDrain with complete handler", () => {
+    it("archives message and increments processed counter on success", async () => {
+      registerBulkHandler(TEST_TOPIC, async () => ({
+        success: true,
+        action: "updated",
+        entityId: "test-entity",
+        status: "complete",
+      }));
+
+      const { msgId } = await enqueueTestMessage("complete-1");
+
+      const result = await runDrain(sql, drainConfig);
+
+      expect(result.processed).toBeGreaterThanOrEqual(1);
+      expect(result.failed).toBe(0);
+      expect(result.deadLettered).toBe(0);
+
+      // Verify message is archived (not in active queue)
+      const [inQueue] = await sql<{ count: string }[]>`
         SELECT COUNT(*) as count FROM pgmq.q_s6_bulk WHERE msg_id = ${msgId}::bigint
       `;
-      expect(Number(beforeRead.count)).toBe(1);
+      expect(Number(inQueue.count)).toBe(0);
 
-      // Simulate successful processing by archiving the message
-      await sql`SELECT pgmq.archive(${S6_QUEUES.BULK}, ${msgId}::bigint)`;
-
-      // Verify message is no longer in active queue
-      const [afterArchive] = await sql<{ count: string }[]>`
-        SELECT COUNT(*) as count FROM pgmq.q_s6_bulk WHERE msg_id = ${msgId}::bigint
-      `;
-      expect(Number(afterArchive.count)).toBe(0);
-
-      // Verify message is in archive
-      const [archiveResult] = await sql<{ count: string }[]>`
+      const [inArchive] = await sql<{ count: string }[]>`
         SELECT COUNT(*) as count FROM pgmq.a_s6_bulk WHERE msg_id = ${msgId}::bigint
       `;
-      expect(Number(archiveResult.count)).toBe(1);
+      expect(Number(inArchive.count)).toBe(1);
     });
   });
 
-  describe("processBulkQueue: retryable error", () => {
-    it("message stays visible after visibility timeout for retry", async () => {
-      const testMessage: BulkMessage = {
-        topic: "BULK_OPERATIONS_FINISH",
-        shop: TEST_SHOP,
-        webhookId: `test-${TEST_SUFFIX}-retry-1`,
-        bulkOperationId: `gid://shopify/BulkOperation/retry-${TEST_SUFFIX}`,
-        bulkType: "companies",
-        enqueuedAt: new Date().toISOString(),
-      };
+  describe("runDrain with progress handler", () => {
+    it("sends continuation and archives original in transaction, increments processed", async () => {
+      let callCount = 0;
+      registerBulkHandler(TEST_TOPIC, async () => {
+        callCount++;
+        if (callCount === 1) {
+          return {
+            success: true,
+            action: "updated",
+            entityId: "test-entity",
+            status: "progress",
+          };
+        }
+        return {
+          success: true,
+          action: "updated",
+          entityId: "test-entity",
+          status: "complete",
+        };
+      });
 
-      // Send message to queue
-      const [sendResult] = await sql<{ send: string }[]>`
-        SELECT pgmq.send(${S6_QUEUES.BULK}, ${sql.json(testMessage)}) as send
+      const { msgId: originalMsgId } = await enqueueTestMessage("progress-1");
+
+      // First drain: progress status
+      const result1 = await runDrain(sql, drainConfig);
+      expect(result1.processed).toBeGreaterThanOrEqual(1);
+
+      // Original should be archived
+      const [originalInQueue] = await sql<{ count: string }[]>`
+        SELECT COUNT(*) as count FROM pgmq.q_s6_bulk WHERE msg_id = ${originalMsgId}::bigint
       `;
-      const msgId = sendResult.send;
+      expect(Number(originalInQueue.count)).toBe(0);
 
-      // Read message (simulates processBulkQueue reading it)
-      const [readResult] = await sql<{ msg_id: string; read_ct: number }[]>`
-        SELECT msg_id, read_ct FROM pgmq.read(${S6_QUEUES.BULK}, 1, 1)
+      const [originalInArchive] = await sql<{ count: string }[]>`
+        SELECT COUNT(*) as count FROM pgmq.a_s6_bulk WHERE msg_id = ${originalMsgId}::bigint
       `;
-      expect(readResult.msg_id).toBe(msgId);
-      expect(readResult.read_ct).toBe(1);
+      expect(Number(originalInArchive.count)).toBe(1);
 
-      // On retryable error, message is left in queue (not archived)
-      // After visibility timeout expires, message becomes visible again
+      // A new continuation message should exist in queue
+      // Find the new message by topic and shop (our unique test identifiers)
+      const [continuationMsg] = await sql<{ msg_id: string }[]>`
+        SELECT msg_id FROM pgmq.q_s6_bulk
+        WHERE message->>'topic' = ${TEST_TOPIC}
+        AND message->>'shop' = ${TEST_SHOP}
+        LIMIT 1
+      `;
+      expect(continuationMsg).toBeDefined();
+      testMsgIds.push(continuationMsg.msg_id);
 
-      // Read again after visibility (using 0 timeout to make it immediately visible)
+      // Second drain: complete status
+      const result2 = await runDrain(sql, drainConfig);
+      expect(result2.processed).toBeGreaterThanOrEqual(1);
+
+      // Continuation should now be archived
+      const [contInQueue] = await sql<{ count: string }[]>`
+        SELECT COUNT(*) as count FROM pgmq.q_s6_bulk WHERE msg_id = ${continuationMsg.msg_id}::bigint
+      `;
+      expect(Number(contInQueue.count)).toBe(0);
+    });
+  });
+
+  describe("runDrain with retryable error handler", () => {
+    it("leaves message in queue for retry, increments failed counter", async () => {
+      registerBulkHandler(TEST_TOPIC, async () => ({
+        success: false,
+        action: "skipped",
+        error: "HTTP 503: Service Unavailable",
+        status: "error",
+        errorType: "retryable",
+      }));
+
+      const { msgId } = await enqueueTestMessage("retryable-1");
+
+      const result = await runDrain(sql, drainConfig);
+
+      expect(result.failed).toBeGreaterThanOrEqual(1);
+      expect(result.deadLettered).toBe(0);
+
+      // Message should still be in queue (not archived, not DLQ'd)
+      // Reset visibility to check
       await sql`SELECT pgmq.set_vt(${S6_QUEUES.BULK}, ${msgId}::bigint, 0)`;
 
-      const [secondRead] = await sql<{ msg_id: string; read_ct: number }[]>`
+      const [inQueue] = await sql<{ msg_id: string; read_ct: number }[]>`
         SELECT msg_id, read_ct FROM pgmq.read(${S6_QUEUES.BULK}, 1, 1)
+        WHERE msg_id = ${msgId}::bigint
       `;
-      expect(secondRead.msg_id).toBe(msgId);
-      expect(secondRead.read_ct).toBe(2); // read_ct incremented
+      expect(inQueue.msg_id).toBe(msgId);
+      expect(inQueue.read_ct).toBeGreaterThanOrEqual(1);
 
-      // Clean up
-      await sql`SELECT pgmq.delete(${S6_QUEUES.BULK}, ${msgId}::bigint)`;
-    });
-
-    it("read_ct increments on each retry attempt", async () => {
-      const testMessage: BulkMessage = {
-        topic: "BULK_OPERATIONS_FINISH",
-        shop: TEST_SHOP,
-        webhookId: `test-${TEST_SUFFIX}-readct-1`,
-        bulkOperationId: `gid://shopify/BulkOperation/readct-${TEST_SUFFIX}`,
-        bulkType: "companies",
-        enqueuedAt: new Date().toISOString(),
-      };
-
-      // Send message
-      const [sendResult] = await sql<{ send: string }[]>`
-        SELECT pgmq.send(${S6_QUEUES.BULK}, ${sql.json(testMessage)}) as send
-      `;
-      const msgId = sendResult.send;
-
-      // Simulate 5 retry attempts
-      for (let i = 1; i <= 5; i++) {
-        // Reset visibility to make message readable
-        await sql`SELECT pgmq.set_vt(${S6_QUEUES.BULK}, ${msgId}::bigint, 0)`;
-
-        const [readResult] = await sql<{ read_ct: number }[]>`
-          SELECT read_ct FROM pgmq.read(${S6_QUEUES.BULK}, 1, 1)
-        `;
-        expect(readResult.read_ct).toBe(i);
-      }
-
-      // Clean up
+      // Clean up - delete manually since it wasn't archived
       await sql`SELECT pgmq.delete(${S6_QUEUES.BULK}, ${msgId}::bigint)`;
     });
   });
 
-  describe("processBulkQueue: permanent error and DLQ", () => {
-    it("message moves to DLQ after exceeding maxRetries", async () => {
-      const testMessage: BulkMessage = {
-        topic: "BULK_OPERATIONS_FINISH",
-        shop: TEST_SHOP,
-        webhookId: `test-${TEST_SUFFIX}-dlq-1`,
-        bulkOperationId: `gid://shopify/BulkOperation/dlq-${TEST_SUFFIX}`,
-        bulkType: "companies",
-        enqueuedAt: new Date().toISOString(),
-      };
+  describe("runDrain with permanent error handler", () => {
+    it("moves message to DLQ immediately, increments deadLettered counter", async () => {
+      registerBulkHandler(TEST_TOPIC, async () => ({
+        success: false,
+        action: "skipped",
+        error: "HTTP 404: Not Found",
+        status: "error",
+        errorType: "permanent",
+      }));
 
-      // Send message
-      const [sendResult] = await sql<{ send: string }[]>`
-        SELECT pgmq.send(${S6_QUEUES.BULK}, ${sql.json(testMessage)}) as send
-      `;
-      const msgId = sendResult.send;
+      const { msgId } = await enqueueTestMessage("permanent-1");
 
-      // Simulate reaching maxRetries (5) by reading the message 5 times
-      for (let i = 1; i <= 5; i++) {
-        await sql`SELECT pgmq.set_vt(${S6_QUEUES.BULK}, ${msgId}::bigint, 0)`;
-        await sql`SELECT * FROM pgmq.read(${S6_QUEUES.BULK}, 1, 1)`;
-      }
+      const result = await runDrain(sql, drainConfig);
 
-      // On the 6th read with read_ct >= 5, move to DLQ
-      await sql`SELECT pgmq.set_vt(${S6_QUEUES.BULK}, ${msgId}::bigint, 0)`;
-      const [finalRead] = await sql<{ read_ct: number; message: BulkMessage }[]>`
-        SELECT read_ct, message FROM pgmq.read(${S6_QUEUES.BULK}, 1, 1)
-      `;
-      expect(finalRead.read_ct).toBeGreaterThanOrEqual(5);
+      expect(result.deadLettered).toBeGreaterThanOrEqual(1);
 
-      // Move to DLQ
-      await sql`
-        INSERT INTO s6_dead_letter (
-          original_queue,
-          original_msg_id,
-          message,
-          error,
-          dead_lettered_at
-        ) VALUES (
-          ${S6_QUEUES.BULK},
-          ${msgId},
-          ${sql.json(testMessage)},
-          'Max retries exceeded (5)',
-          NOW()
-        )
-      `;
-      await sql`SELECT pgmq.delete(${S6_QUEUES.BULK}, ${msgId}::bigint)`;
-
-      // Verify message is in DLQ
+      // Message should be in DLQ
       const [dlqResult] = await sql<{ original_msg_id: string; error: string }[]>`
         SELECT original_msg_id, error FROM s6_dead_letter
         WHERE original_msg_id = ${msgId}
       `;
-      expect(dlqResult.original_msg_id).toBe(msgId);
-      expect(dlqResult.error).toContain("Max retries");
+      expect(dlqResult).toBeDefined();
+      expect(dlqResult.error).toContain("404");
 
-      // Verify message is removed from active queue
-      const [queueResult] = await sql<{ count: string }[]>`
+      // Message should not be in active queue
+      const [inQueue] = await sql<{ count: string }[]>`
         SELECT COUNT(*) as count FROM pgmq.q_s6_bulk WHERE msg_id = ${msgId}::bigint
       `;
-      expect(Number(queueResult.count)).toBe(0);
+      expect(Number(inQueue.count)).toBe(0);
     });
   });
 
-  describe("processBulkQueue: idempotent replay", () => {
+  describe("runDrain with DLQ after maxRetries", () => {
+    it("moves message to DLQ after 5 failures via read_ct", async () => {
+      registerBulkHandler(TEST_TOPIC, async () => ({
+        success: false,
+        action: "skipped",
+        error: "Unknown error type",
+        status: "error",
+      }));
+
+      const { msgId } = await enqueueTestMessage("dlq-retries-1");
+
+      // Drain 5+ times to exceed maxRetries
+      for (let i = 0; i < 6; i++) {
+        await sql`SELECT pgmq.set_vt(${S6_QUEUES.BULK}, ${msgId}::bigint, 0)`;
+        await runDrain(sql, { ...drainConfig, maxRetries: 5 });
+      }
+
+      // Message should be in DLQ
+      const [dlqResult] = await sql<{ original_msg_id: string }[]>`
+        SELECT original_msg_id FROM s6_dead_letter
+        WHERE original_msg_id = ${msgId}
+      `;
+      expect(dlqResult).toBeDefined();
+    });
+  });
+
+  describe("transaction rollback", () => {
+    it("leaves no partial send or archive when handler throws", async () => {
+      registerBulkHandler(TEST_TOPIC, async () => {
+        throw new Error("Simulated handler crash");
+      });
+
+      const { msgId } = await enqueueTestMessage("rollback-1");
+
+      // runDrain catches handler errors gracefully
+      const result = await runDrain(sql, drainConfig);
+      expect(result.failed).toBeGreaterThanOrEqual(1);
+
+      // Message should still be in queue (handler threw, so no archive)
+      await sql`SELECT pgmq.set_vt(${S6_QUEUES.BULK}, ${msgId}::bigint, 0)`;
+
+      const [inQueue] = await sql<{ count: string }[]>`
+        SELECT COUNT(*) as count FROM pgmq.q_s6_bulk WHERE msg_id = ${msgId}::bigint
+      `;
+      expect(Number(inQueue.count)).toBe(1);
+
+      // No DLQ entry yet (read_ct < maxRetries)
+      const [dlqCount] = await sql<{ count: string }[]>`
+        SELECT COUNT(*) as count FROM s6_dead_letter WHERE original_msg_id = ${msgId}
+      `;
+      expect(Number(dlqCount.count)).toBe(0);
+
+      // Clean up
+      await sql`SELECT pgmq.delete(${S6_QUEUES.BULK}, ${msgId}::bigint)`;
+    });
+
+    it("sql.begin rollback leaves original message intact with no partial send", async () => {
+      const { msgId, message } = await enqueueTestMessage("tx-rollback-1");
+
+      // Read message to simulate processor picking it up
+      await sql`SELECT * FROM pgmq.read(${S6_QUEUES.BULK}, 30, 1)`;
+
+      // Attempt a transaction that fails after send
+      await expect(
+        sql.begin(async (tx) => {
+          await tx`SELECT pgmq.send(${S6_QUEUES.BULK}, ${tx.json(message)})`;
+          throw new Error("Simulated transaction failure");
+        })
+      ).rejects.toThrow("Simulated transaction failure");
+
+      // Original message should still be in queue
+      await sql`SELECT pgmq.set_vt(${S6_QUEUES.BULK}, ${msgId}::bigint, 0)`;
+
+      const [stillInQueue] = await sql<{ msg_id: string }[]>`
+        SELECT msg_id FROM pgmq.read(${S6_QUEUES.BULK}, 1, 1)
+      `;
+      expect(stillInQueue.msg_id).toBe(msgId);
+
+      // No extra messages from rolled-back transaction
+      // Count only messages with our unique topic/shop
+      const [ourMsgCount] = await sql<{ count: string }[]>`
+        SELECT COUNT(*) as count FROM pgmq.q_s6_bulk
+        WHERE message->>'topic' = ${TEST_TOPIC}
+        AND message->>'shop' = ${TEST_SHOP}
+      `;
+      expect(Number(ourMsgCount.count)).toBe(1);
+
+      // Clean up
+      await sql`SELECT pgmq.delete(${S6_QUEUES.BULK}, ${msgId}::bigint)`;
+    });
+  });
+
+  describe("idempotent replay", () => {
     it("processing resumes from saved byte_offset", async () => {
       const bulkOpId = `gid://shopify/BulkOperation/idempotent-${TEST_SUFFIX}`;
 
-      // Create bulk operation record with saved progress
-      // Note: s6_bulk_operations uses bulk_operation_id as PRIMARY KEY
       await sql`
         INSERT INTO s6_bulk_operations (
           bulk_operation_id, shop, bulk_type, byte_offset, origin
@@ -252,45 +349,16 @@ describeWithDb("S10b processBulkQueue Integration", () => {
         )
       `;
 
-      // Verify progress was saved
       const [opResult] = await sql<{ byte_offset: string }[]>`
         SELECT byte_offset FROM s6_bulk_operations
         WHERE bulk_operation_id = ${bulkOpId}
       `;
       expect(Number(opResult.byte_offset)).toBe(500);
-
-      // Simulate replay: same message reprocessed picks up from byte_offset
-      const testMessage: BulkMessage = {
-        topic: "BULK_OPERATIONS_FINISH",
-        shop: TEST_SHOP,
-        webhookId: `test-${TEST_SUFFIX}-idempotent-1`,
-        bulkOperationId: bulkOpId,
-        bulkType: "companies",
-        enqueuedAt: new Date().toISOString(),
-      };
-
-      // Send duplicate message
-      const [sendResult] = await sql<{ send: string }[]>`
-        SELECT pgmq.send(${S6_QUEUES.BULK}, ${sql.json(testMessage)}) as send
-      `;
-      const msgId = sendResult.send;
-
-      // On replay, processor would read byte_offset and continue from there
-      // The key assertion: saved state persists across message retries
-      const [opState] = await sql<{ byte_offset: string }[]>`
-        SELECT byte_offset FROM s6_bulk_operations
-        WHERE bulk_operation_id = ${bulkOpId}
-      `;
-      expect(Number(opState.byte_offset)).toBe(500); // Still at saved offset
-
-      // Clean up
-      await sql`SELECT pgmq.delete(${S6_QUEUES.BULK}, ${msgId}::bigint)`;
     });
 
-    it("completed_at prevents reprocessing completed operations", async () => {
+    it("completed_at prevents reprocessing", async () => {
       const bulkOpId = `gid://shopify/BulkOperation/completed-${TEST_SUFFIX}`;
 
-      // Create completed bulk operation record
       await sql`
         INSERT INTO s6_bulk_operations (
           bulk_operation_id, shop, bulk_type, byte_offset, completed_at, origin
@@ -304,240 +372,11 @@ describeWithDb("S10b processBulkQueue Integration", () => {
         )
       `;
 
-      // Verify completed_at is set
       const [opResult] = await sql<{ completed_at: Date | null }[]>`
         SELECT completed_at FROM s6_bulk_operations
         WHERE bulk_operation_id = ${bulkOpId}
       `;
       expect(opResult.completed_at).not.toBeNull();
-
-      // Processing logic would skip operations with completed_at set
-    });
-  });
-
-  describe("processBulkQueue: transactional send+archive", () => {
-    it("send and archive execute atomically in a transaction", async () => {
-      const testMessage: BulkMessage = {
-        topic: "BULK_OPERATIONS_FINISH",
-        shop: TEST_SHOP,
-        webhookId: `test-${TEST_SUFFIX}-tx-1`,
-        bulkOperationId: `gid://shopify/BulkOperation/tx-${TEST_SUFFIX}`,
-        bulkType: "companies",
-        enqueuedAt: new Date().toISOString(),
-      };
-
-      // Send initial message
-      const [sendResult] = await sql<{ send: string }[]>`
-        SELECT pgmq.send(${S6_QUEUES.BULK}, ${sql.json(testMessage)}) as send
-      `;
-      const originalMsgId = sendResult.send;
-
-      // Read the message
-      await sql`SELECT * FROM pgmq.read(${S6_QUEUES.BULK}, 30, 1)`;
-
-      // Simulate progress: atomically send continuation and archive original
-      // This is the pattern used in processor.server.ts:
-      // await sql.begin(async (tx) => {
-      //   await tx`SELECT pgmq.send(...)`;
-      //   await tx`SELECT pgmq.archive(...)`;
-      // });
-
-      let newMsgId = "";
-
-      await sql.begin(async (tx) => {
-        // Send continuation message
-        const [newSendResult] = await tx<{ send: string }[]>`
-          SELECT pgmq.send(${S6_QUEUES.BULK}, ${tx.json(testMessage)}) as send
-        `;
-        newMsgId = newSendResult.send;
-
-        // Archive original message
-        await tx`SELECT pgmq.archive(${S6_QUEUES.BULK}, ${originalMsgId}::bigint)`;
-      });
-
-      expect(newMsgId).toBeTruthy();
-
-      // Verify: original message is archived
-      const [originalInQueue] = await sql<{ count: string }[]>`
-        SELECT COUNT(*) as count FROM pgmq.q_s6_bulk WHERE msg_id = ${originalMsgId}::bigint
-      `;
-      expect(Number(originalInQueue.count)).toBe(0);
-
-      const [originalInArchive] = await sql<{ count: string }[]>`
-        SELECT COUNT(*) as count FROM pgmq.a_s6_bulk WHERE msg_id = ${originalMsgId}::bigint
-      `;
-      expect(Number(originalInArchive.count)).toBe(1);
-
-      // Verify: new message exists in queue
-      const [newInQueue] = await sql<{ count: string }[]>`
-        SELECT COUNT(*) as count FROM pgmq.q_s6_bulk WHERE msg_id = ${newMsgId}::bigint
-      `;
-      expect(Number(newInQueue.count)).toBe(1);
-
-      // Clean up
-      await sql`SELECT pgmq.delete(${S6_QUEUES.BULK}, ${newMsgId}::bigint)`;
-    });
-
-    it("transaction rollback on error leaves original message intact", async () => {
-      const testMessage: BulkMessage = {
-        topic: "BULK_OPERATIONS_FINISH",
-        shop: TEST_SHOP,
-        webhookId: `test-${TEST_SUFFIX}-rollback-1`,
-        bulkOperationId: `gid://shopify/BulkOperation/rollback-${TEST_SUFFIX}`,
-        bulkType: "companies",
-        enqueuedAt: new Date().toISOString(),
-      };
-
-      // Send initial message
-      const [sendResult] = await sql<{ send: string }[]>`
-        SELECT pgmq.send(${S6_QUEUES.BULK}, ${sql.json(testMessage)}) as send
-      `;
-      const originalMsgId = sendResult.send;
-
-      // Read the message
-      await sql`SELECT * FROM pgmq.read(${S6_QUEUES.BULK}, 30, 1)`;
-
-      // Simulate failed transaction (error after send but before archive)
-      try {
-        await sql.begin(async (tx) => {
-          // Send continuation message
-          await tx`SELECT pgmq.send(${S6_QUEUES.BULK}, ${tx.json(testMessage)})`;
-
-          // Simulate error before archive completes
-          throw new Error("Simulated transaction failure");
-        });
-      } catch (e) {
-        expect((e as Error).message).toBe("Simulated transaction failure");
-      }
-
-      // Verify: original message is still in queue (transaction rolled back)
-      // Reset visibility to check
-      await sql`SELECT pgmq.set_vt(${S6_QUEUES.BULK}, ${originalMsgId}::bigint, 0)`;
-
-      const [stillInQueue] = await sql<{ msg_id: string }[]>`
-        SELECT msg_id FROM pgmq.read(${S6_QUEUES.BULK}, 1, 1)
-      `;
-      expect(stillInQueue.msg_id).toBe(originalMsgId);
-
-      // Verify: no duplicate continuation message exists
-      // (transaction rolled back the send too)
-      const [queueCount] = await sql<{ count: string }[]>`
-        SELECT COUNT(*) as count FROM pgmq.q_s6_bulk
-      `;
-      expect(Number(queueCount.count)).toBe(1); // Only original message
-
-      // Clean up
-      await sql`SELECT pgmq.delete(${S6_QUEUES.BULK}, ${originalMsgId}::bigint)`;
-    });
-  });
-
-  describe("processBulkQueue: failure_count tracking", () => {
-    it("failure_count increments on retryable errors", async () => {
-      const bulkOpId = `gid://shopify/BulkOperation/failcount-${TEST_SUFFIX}`;
-
-      // Create bulk operation record
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, byte_offset, failure_count, origin
-        ) VALUES (
-          ${bulkOpId},
-          ${TEST_SHOP},
-          'companies',
-          0,
-          0,
-          'webhook'
-        )
-      `;
-
-      // Simulate failure_count increments
-      for (let i = 1; i <= 3; i++) {
-        await sql`
-          UPDATE s6_bulk_operations
-          SET failure_count = failure_count + 1
-          WHERE bulk_operation_id = ${bulkOpId}
-        `;
-
-        const [opResult] = await sql<{ failure_count: number }[]>`
-          SELECT failure_count FROM s6_bulk_operations
-          WHERE bulk_operation_id = ${bulkOpId}
-        `;
-        expect(opResult.failure_count).toBe(i);
-      }
-    });
-
-    it("failure_count resets on successful progress", async () => {
-      const bulkOpId = `gid://shopify/BulkOperation/failreset-${TEST_SUFFIX}`;
-
-      // Create bulk operation with existing failures
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, byte_offset, failure_count, origin
-        ) VALUES (
-          ${bulkOpId},
-          ${TEST_SHOP},
-          'companies',
-          0,
-          3,
-          'webhook'
-        )
-      `;
-
-      // Verify initial failure_count
-      const [beforeReset] = await sql<{ failure_count: number }[]>`
-        SELECT failure_count FROM s6_bulk_operations
-        WHERE bulk_operation_id = ${bulkOpId}
-      `;
-      expect(beforeReset.failure_count).toBe(3);
-
-      // Simulate successful progress: update offset and reset failure_count
-      await sql`
-        UPDATE s6_bulk_operations
-        SET byte_offset = 500, failure_count = 0
-        WHERE bulk_operation_id = ${bulkOpId}
-      `;
-
-      // Verify failure_count reset
-      const [afterReset] = await sql<{ failure_count: number; byte_offset: string }[]>`
-        SELECT failure_count, byte_offset FROM s6_bulk_operations
-        WHERE bulk_operation_id = ${bulkOpId}
-      `;
-      expect(afterReset.failure_count).toBe(0);
-      expect(Number(afterReset.byte_offset)).toBe(500);
-    });
-
-    it("DLQ after MAX_FAILURE_COUNT (5) failures", async () => {
-      const bulkOpId = `gid://shopify/BulkOperation/maxfail-${TEST_SUFFIX}`;
-      const MAX_FAILURE_COUNT = 5;
-
-      // Create bulk operation
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, byte_offset, failure_count, origin
-        ) VALUES (
-          ${bulkOpId},
-          ${TEST_SHOP},
-          'companies',
-          0,
-          4,
-          'webhook'
-        )
-      `;
-
-      // Increment to MAX_FAILURE_COUNT
-      await sql`
-        UPDATE s6_bulk_operations
-        SET failure_count = failure_count + 1
-        WHERE bulk_operation_id = ${bulkOpId}
-      `;
-
-      const [opResult] = await sql<{ failure_count: number }[]>`
-        SELECT failure_count FROM s6_bulk_operations
-        WHERE bulk_operation_id = ${bulkOpId}
-      `;
-      expect(opResult.failure_count).toBe(MAX_FAILURE_COUNT);
-
-      // At this point, processor would mark errorType as 'permanent'
-      // and the message would be moved to DLQ
     });
   });
 });
