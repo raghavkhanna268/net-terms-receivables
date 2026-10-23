@@ -39,7 +39,7 @@ import {
   COMPANY_QUERY,
   COMPANY_LOCATION_QUERY,
   ORDER_QUERY,
-  CUSTOMER_QUERY,
+  getCustomerQueryForDrain,
   DRAFT_ORDER_QUERY,
 } from "./admin-client.server";
 import {
@@ -387,7 +387,7 @@ async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResul
   // Fetch customer data via GraphQL
   const result = await adminGraphQL<{
     node: ShopifyCustomer | null;
-  }>(message.shop, CUSTOMER_QUERY, { id: message.resourceGid });
+  }>(message.shop, getCustomerQueryForDrain(), { id: message.resourceGid });
 
   if (!result.success) {
     return {

@@ -31,7 +31,7 @@ vi.mock("../admin-client.server", () => ({
   COMPANY_QUERY: "query CompanyById",
   COMPANY_LOCATION_QUERY: "query CompanyLocationById",
   ORDER_QUERY: "query OrderById",
-  CUSTOMER_QUERY: "query CustomerById",
+  getCustomerQueryForDrain: vi.fn().mockReturnValue("query CustomerById"),
   DRAFT_ORDER_QUERY: "query DraftOrderById",
   BULK_OPERATION_STATUS_QUERY: "query BulkOperationStatus",
 }));

@@ -158,6 +158,33 @@ export function getCustomerQuery(env: PiiEnv): string {
 }
 
 /**
+ * GraphQL query to fetch a customer by GID using the node interface.
+ * Used by S8 drain processor for webhook-triggered fetches.
+ *
+ * Uses node(id: ID!) pattern which accepts any Shopify GID (gid://shopify/Customer/...).
+ * This is preferred over customer(id: ID!) when you have a GID from a webhook.
+ *
+ * IMPORTANT: Callers MUST pass the Worker env object. If env is omitted or
+ * CUSTOMER_PII_FIELDS is not set, the PCD fields (email, displayName) are
+ * silently omitted from the query. TypeScript enforces this via required param.
+ *
+ * @param env - Environment object to check PII flag (required)
+ * @returns GraphQL query string
+ */
+export function getCustomerByNodeQuery(env: PiiEnv): string {
+  const fields = buildCustomerFieldSelection(env);
+  return `
+    query CustomerById($id: ID!) {
+      node(id: $id) {
+        ... on Customer {
+          ${fields}
+        }
+      }
+    }
+  `;
+}
+
+/**
  * Escape a tag value for use in Shopify's search query syntax.
  *
  * Shopify search uses backslash escaping for special characters.

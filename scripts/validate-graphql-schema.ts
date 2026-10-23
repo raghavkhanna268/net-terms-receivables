@@ -564,15 +564,17 @@ async function validateDynamicQueryBuilders(schema: GraphQLSchema): Promise<{ re
   // Dynamically import the real module
   let getBulkCustomersQuery: (tagRules: Array<{ tag: string }>, env: { CUSTOMER_PII_FIELDS?: string }) => string | null;
   let getCustomerQuery: (env: { CUSTOMER_PII_FIELDS?: string }) => string;
+  let getCustomerByNodeQuery: (env: { CUSTOMER_PII_FIELDS?: string }) => string;
 
   try {
     const module = await import("../app/services/sync/customer-fields.server");
-    if (!module.getBulkCustomersQuery || !module.getCustomerQuery) {
-      console.error("❌ FATAL: getBulkCustomersQuery or getCustomerQuery not exported from customer-fields.server.ts");
+    if (!module.getBulkCustomersQuery || !module.getCustomerQuery || !module.getCustomerByNodeQuery) {
+      console.error("❌ FATAL: getBulkCustomersQuery, getCustomerQuery, or getCustomerByNodeQuery not exported from customer-fields.server.ts");
       process.exit(1);
     }
     getBulkCustomersQuery = module.getBulkCustomersQuery;
     getCustomerQuery = module.getCustomerQuery;
+    getCustomerByNodeQuery = module.getCustomerByNodeQuery;
   } catch (err) {
     console.error("❌ FATAL: Failed to import customer-fields.server.ts:", err);
     process.exit(1);
@@ -677,6 +679,38 @@ async function validateDynamicQueryBuilders(schema: GraphQLSchema): Promise<{ re
     validatedCount++;
   }
   console.log(`  ✓ getCustomerQuery (with PII): validated`);
+
+  // ===== getCustomerByNodeQuery variants (S8 drain processor) =====
+
+  // Variant 7: getCustomerByNodeQuery without PII
+  const nodeQueryNoPii = getCustomerByNodeQuery(envNoPii);
+  const nodeDocNoPii: GraphQLDocument = {
+    name: "getCustomerByNodeQuery({})",
+    source: nodeQueryNoPii,
+    filePath: customerFieldsPath,
+  };
+  const nodeErrorsNoPii = validateDocument(schema, nodeDocNoPii);
+  if (nodeErrorsNoPii.length > 0) {
+    results.push({ document: nodeDocNoPii, errors: nodeErrorsNoPii });
+  } else {
+    validatedCount++;
+  }
+  console.log(`  ✓ getCustomerByNodeQuery (no PII): validated`);
+
+  // Variant 8: getCustomerByNodeQuery with PII
+  const nodeQueryWithPii = getCustomerByNodeQuery(envWithPii);
+  const nodeDocWithPii: GraphQLDocument = {
+    name: "getCustomerByNodeQuery({CUSTOMER_PII_FIELDS:'1'})",
+    source: nodeQueryWithPii,
+    filePath: customerFieldsPath,
+  };
+  const nodeErrorsWithPii = validateDocument(schema, nodeDocWithPii);
+  if (nodeErrorsWithPii.length > 0) {
+    results.push({ document: nodeDocWithPii, errors: nodeErrorsWithPii });
+  } else {
+    validatedCount++;
+  }
+  console.log(`  ✓ getCustomerByNodeQuery (with PII): validated`);
 
   console.log("");
   return { results, count: validatedCount };

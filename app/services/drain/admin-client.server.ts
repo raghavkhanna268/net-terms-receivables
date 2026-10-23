@@ -18,6 +18,7 @@
  */
 
 import { shopifyGraphQLQueue, type ShopifyClientResult } from "~/services/shopify-client.server";
+import { getCustomerByNodeQuery } from "~/services/sync/customer-fields.server";
 
 export const API_VERSION = "2026-10";
 
@@ -132,21 +133,16 @@ export const BULK_OPERATION_STATUS_QUERY = `
 `;
 
 /**
- * Fetch a Customer by GID (S8).
- * Only fetches id, tags, and optional PII fields when CUSTOMER_PII_FIELDS=1.
- * DPDP compliance: Never fetches phone, addresses, firstName, lastName, defaultAddress.
+ * Get the customer query for S8 drain processor.
+ *
+ * Uses the shared getCustomerByNodeQuery from customer-fields.server.ts to ensure
+ * DPDP compliance and schema validation coverage.
+ *
+ * @returns GraphQL query string for fetching customer by GID
  */
-export const CUSTOMER_QUERY = `
-  query CustomerById($id: ID!) {
-    node(id: $id) {
-      ... on Customer {
-        id
-        tags
-        ${process.env.CUSTOMER_PII_FIELDS === "1" ? `email\ndisplayName` : ""}
-      }
-    }
-  }
-`;
+export function getCustomerQueryForDrain(): string {
+  return getCustomerByNodeQuery({ CUSTOMER_PII_FIELDS: process.env.CUSTOMER_PII_FIELDS });
+}
 
 /**
  * Fetch a DraftOrder by GID (S8).
