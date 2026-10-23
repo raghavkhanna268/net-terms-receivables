@@ -124,18 +124,13 @@ jobs:
             THRESHOLD_EPOCH=$((NOW_EPOCH + 300)) # 5 minutes from now
 
             if [ "$EXPIRES_EPOCH" -le "$NOW_EPOCH" ]; then
-              echo "expired=true"
               NEEDS_REFRESH=true
               TOKEN_EXPIRED=true
             elif [ "$EXPIRES_EPOCH" -le "$THRESHOLD_EPOCH" ]; then
-              echo "expired=false (but within 5 min of expiry)"
               NEEDS_REFRESH=true
-            else
-              echo "expired=false"
             fi
-          else
-            echo "expired=false (no expiry set)"
           fi
+          echo "expired=$TOKEN_EXPIRED"
 
           # Refresh if needed and we have a refresh token
           if [ "$NEEDS_REFRESH" = "true" ]; then
@@ -149,7 +144,8 @@ jobs:
               fi
 
               # Capture stdout only (not stderr), validate JSON
-              REFRESH_RESULT=$(DATABASE_URL="$DATABASE_URL_SESSION" npx tsx scripts/lib/refresh-offline-token.ts \
+              # Use env -u to unset PGOPTIONS so refresh helper can write to DB
+              REFRESH_RESULT=$(env -u PGOPTIONS DATABASE_URL="$DATABASE_URL_SESSION" npx tsx scripts/lib/refresh-offline-token.ts \
                 --shop "$SHOP" \
                 --threshold-minutes 5) || true
 
