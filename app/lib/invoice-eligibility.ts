@@ -206,8 +206,24 @@ export async function getEligibilityContextByDomain(
 }
 
 /**
+ * Result of looking up a BuyerAccount by CompanyLocation.
+ */
+type CompanyAccountLookupResult =
+  | { found: false; reason: "no_account" }
+  | { found: false; reason: "no_explicit_terms"; accountId: string }
+  | {
+      found: true;
+      accountId: string;
+      defaultTermsDays: number;
+      defaultTermsSource: "explicit" | "tag" | null;
+    };
+
+/**
  * Find a buyer account by CompanyLocation for condition (b).
- * Only returns active accounts with explicit defaultTermsDays.
+ * Returns a discriminated result to distinguish:
+ * - No account exists (location not synced yet) → retryable
+ * - Account exists but no explicit terms → permanent skip (retail)
+ * - Account exists with explicit terms → eligible
  *
  * @param sql - postgres.js SQL client
  * @param shopId - Internal shop ID
@@ -217,11 +233,7 @@ async function findCompanyAccountWithTerms(
   sql: Sql,
   shopId: string,
   companyLocationId: string
-): Promise<{
-  id: string;
-  defaultTermsDays: number;
-  defaultTermsSource: "explicit" | "tag" | null;
-} | null> {
+): Promise<CompanyAccountLookupResult> {
   const [account] = await sql<{
     id: string;
     defaultTermsDays: number | null;
@@ -234,10 +246,20 @@ async function findCompanyAccountWithTerms(
       AND ${activeAccountFragment(sql)}
   `;
 
-  if (!account || account.defaultTermsDays === null) return null;
+  if (!account) {
+    return { found: false, reason: "no_account" };
+  }
+
+  if (
+    account.defaultTermsDays === null ||
+    account.defaultTermsSource !== "explicit"
+  ) {
+    return { found: false, reason: "no_explicit_terms", accountId: account.id };
+  }
 
   return {
-    id: account.id,
+    found: true,
+    accountId: account.id,
     defaultTermsDays: account.defaultTermsDays,
     defaultTermsSource: account.defaultTermsSource as "explicit" | "tag" | null,
   };
@@ -488,35 +510,43 @@ export async function checkOrderEligibility(
   // Condition (b): purchasingEntity is a Company with active account having explicit terms
   const purchasingEntity = order.purchasingEntity;
 
+  // Track if we found a B2B location that hasn't synced yet (for retryable failure)
+  let unsyncedB2BLocation = false;
+
   if (purchasingEntity?.location?.id) {
     // Condition (b): CompanyLocation has active account with explicit terms
-    const companyAccount = await findCompanyAccountWithTerms(
+    const accountResult = await findCompanyAccountWithTerms(
       sql,
       shopId,
       purchasingEntity.location.id
     );
 
-    if (companyAccount && companyAccount.defaultTermsSource === "explicit") {
+    if (accountResult.found) {
+      // Account exists with explicit terms - eligible
       const dueDate = computeDueDate(
         order,
         context,
-        companyAccount.defaultTermsDays,
-        companyAccount.defaultTermsSource,
+        accountResult.defaultTermsDays,
+        accountResult.defaultTermsSource,
         []
       );
 
       return {
         eligible: true,
         reason: "company_account_terms",
-        explanation: `CompanyLocation account has explicit default terms: Net ${companyAccount.defaultTermsDays} days`,
-        buyerAccountId: companyAccount.id,
+        explanation: `CompanyLocation account has explicit default terms: Net ${accountResult.defaultTermsDays} days`,
+        buyerAccountId: accountResult.accountId,
         dueDate,
-        accountDefaultTermsDays: companyAccount.defaultTermsDays,
-        accountDefaultTermsSource: companyAccount.defaultTermsSource,
+        accountDefaultTermsDays: accountResult.defaultTermsDays,
+        accountDefaultTermsSource: accountResult.defaultTermsSource,
       };
+    } else if (accountResult.reason === "no_account") {
+      // Location exists but no BuyerAccount yet - track for potential retryable failure
+      unsyncedB2BLocation = true;
     }
-    // Location exists but no explicit terms - do NOT fall back to company level
-    // (that would leak another location's terms/credit)
+    // If reason === "no_explicit_terms", account exists but no explicit terms
+    // This is a permanent condition (not retryable), continue to check tag rules
+    // Do NOT fall back to company level (that would leak another location's terms/credit)
   } else if (purchasingEntity?.company?.id) {
     // No location but has company - try company-wide fallback (only if exactly one account)
     const companyAccount = await findCompanyAccountByCompanyWithTerms(
@@ -595,7 +625,18 @@ export async function checkOrderEligibility(
     }
   }
 
-  // None of the conditions matched - this is a retail order
+  // None of the conditions matched
+  // If this was a B2B order (has location) but no account synced yet, return retryable
+  if (unsyncedB2BLocation) {
+    return {
+      eligible: false,
+      reason: "no_buyer_account",
+      explanation: "CompanyLocation exists but no BuyerAccount synced yet - company may not be synced",
+      retryable: true,
+    };
+  }
+
+  // Otherwise this is a retail order (permanent skip)
   return {
     eligible: false,
     reason: "retail_order",

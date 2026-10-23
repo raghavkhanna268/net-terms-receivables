@@ -106,15 +106,18 @@ describeWithDb("Order Sync", () => {
       expect(invoice.dueSource).toBe("schedule");
     });
 
-    it("skips orders without payment terms", async () => {
+    it("skips retail orders (no payment terms, no B2B, no tag) as permanent skip", async () => {
+      // A retail order with no payment terms and no company location is a permanent skip
       const order: ShopifyOrder = {
         id: `gid://shopify/Order/ord-${TEST_SUFFIX}-2`,
         name: "#1002",
         createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
         totalPriceSet: {
           shopMoney: { amount: "1000.00", currencyCode: "INR" },
         },
         paymentTerms: null, // No payment terms
+        // No purchasingEntity (retail order)
       };
 
       const result = await processOrderWebhook(
@@ -127,7 +130,8 @@ describeWithDb("Order Sync", () => {
 
       expect(result.success).toBe(true);
       expect(result.action).toBe("skipped");
-      expect(result.skipReason).toContain("no payment terms");
+      expect(result.skipReason).toContain("retail");
+      // Retryable should be undefined (permanent skip)
 
       // No invoice should be created
       const invoices = await sql`
@@ -136,7 +140,8 @@ describeWithDb("Order Sync", () => {
       expect(invoices).toHaveLength(0);
     });
 
-    it("fails when company not yet synced (returns false for retry)", async () => {
+    it("fails with retryable when B2B location not synced yet (company sync pending)", async () => {
+      // B2B order with company location but no BuyerAccount yet - should be retryable
       const unknownCompanyId = `gid://shopify/Company/unknown-${TEST_SUFFIX}`;
       const unknownLocationId = `gid://shopify/CompanyLocation/unknown-${TEST_SUFFIX}`;
 
@@ -144,6 +149,7 @@ describeWithDb("Order Sync", () => {
         id: `gid://shopify/Order/ord-${TEST_SUFFIX}-3`,
         name: "#1003",
         createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
         totalPriceSet: {
           shopMoney: { amount: "25000.00", currencyCode: "INR" },
         },
@@ -169,8 +175,54 @@ describeWithDb("Order Sync", () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain("Buyer account not found");
-      expect(result.error).toContain("Company may not be synced");
+      expect(result.retryable).toBe(true);
+      expect(result.error).toContain("BuyerAccount");
+    });
+
+    it("always updates existing invoice even when eligibility would fail", async () => {
+      // First create an invoice (simulating it was created when eligible)
+      const orderId = `gid://shopify/Order/ord-${TEST_SUFFIX}-update`;
+      await sql`
+        INSERT INTO "Invoice" (
+          "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          "issuedAt", status, "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId}, '#9001', '10000.00', '10000.00',
+          NOW(), 'open', NOW(), NOW()
+        )
+      `;
+
+      // Now process an order update that would NOT be eligible (no payment terms, no company)
+      // But since invoice exists, it should still update
+      const order: ShopifyOrder = {
+        id: orderId,
+        name: "#9001-updated",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
+        totalPriceSet: {
+          shopMoney: { amount: "15000.00", currencyCode: "INR" },
+        },
+        paymentTerms: null, // No payment terms now
+        // No purchasingEntity (would be ineligible for creation)
+      };
+
+      const result = await processOrderWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "ORDERS_UPDATED",
+        order,
+        `wh-ord-${TEST_SUFFIX}-update`
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("updated");
+
+      // Verify invoice was updated (name and total changed)
+      const [invoice] = await sql`
+        SELECT * FROM "Invoice" WHERE "orderId" = ${orderId}
+      `;
+      expect(invoice.name).toBe("#9001-updated");
+      expect(invoice.total).toBe("15000.00");
     });
 
     it("marks invoice as cancelled on ORDERS_CANCELLED", async () => {

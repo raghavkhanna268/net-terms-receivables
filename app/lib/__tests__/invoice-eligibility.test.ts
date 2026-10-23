@@ -207,7 +207,7 @@ describe("Invoice Eligibility", () => {
         expect(result.explanation).toContain("CompanyLocation account has explicit default terms");
       });
 
-      it("is NOT eligible when location has account but no explicit terms (b-neg)", async () => {
+      it("is NOT eligible (permanent) when location has account but no explicit terms (b-neg)", async () => {
         const sql = createMockSql(new Map([
           ["buyerAccountByLocation", [{ 
             id: "ba-456", 
@@ -228,9 +228,10 @@ describe("Invoice Eligibility", () => {
 
         expect(result.eligible).toBe(false);
         expect(result.reason).toBe("retail_order");
+        expect(result.retryable).toBeUndefined(); // Permanent skip
       });
 
-      it("is NOT eligible when location has tag-derived terms (not explicit)", async () => {
+      it("is NOT eligible (permanent) when location has tag-derived terms (not explicit)", async () => {
         const sql = createMockSql(new Map([
           ["buyerAccountByLocation", [{ 
             id: "ba-456", 
@@ -251,6 +252,27 @@ describe("Invoice Eligibility", () => {
 
         expect(result.eligible).toBe(false);
         expect(result.reason).toBe("retail_order");
+        expect(result.retryable).toBeUndefined(); // Permanent skip
+      });
+
+      it("returns retryable failure when B2B location exists but no BuyerAccount synced yet", async () => {
+        const sql = createMockSql(new Map([
+          ["buyerAccountByLocation", []], // No account for this location yet
+          ["customerTags", []],
+        ]));
+
+        const order = createOrder({
+          purchasingEntity: {
+            __typename: "PurchasingCompany",
+            location: { id: "gid://shopify/CompanyLocation/789" },
+          },
+        });
+
+        const result = await checkOrderEligibility(sql as never, order, defaultContext);
+
+        expect(result.eligible).toBe(false);
+        expect(result.reason).toBe("no_buyer_account");
+        expect(result.retryable).toBe(true); // Should retry when company syncs
       });
     });
 
