@@ -4,7 +4,7 @@ A B2B wholesale net-terms receivables management app for Shopify. Track invoices
 
 ## Tech Stack
 
-- **Runtime**: Cloudflare Workers (Free tier, placed near AWS Seoul via region hint)
+- **Runtime**: Cloudflare Workers (Free tier, placed near AWS Mumbai via region hint)
 - **Framework**: React Router v7 with `@shopify/shopify-app-react-router`
 - **UI**: Polaris Web Components + App Bridge
 - **Session Storage**: Postgres (postgres.js LightSessionStorage via Hyperdrive)
@@ -13,7 +13,7 @@ A B2B wholesale net-terms receivables management app for Shopify. Track invoices
 ### Why This Stack?
 
 - **$0/month until paying merchants**: Cloudflare Workers Free tier (100k requests/day), Supabase Free tier (later)
-- **Low latency for DB**: Explicit region hint places Worker near Supabase Postgres (AWS ap-northeast-2)
+- **Low latency for DB**: Explicit region hint places Worker near Supabase Postgres (AWS ap-south-1)
 - **Edge-native**: No cold starts, global distribution
 - **Official Shopify support**: Uses `@shopify/shopify-app-react-router` with Node adapter + `nodejs_compat`
 
@@ -308,7 +308,7 @@ If requests exceed 10ms, you'll see errors in logs. The Worker will return error
 
 - **Implementation**: `app/lib/session-storage-light.server.ts` using postgres.js LightSessionStorage
 - **Why**: Unified data layer with business data, strong consistency, no separate KV namespace needed
-- **Connection**: Cloudflare Hyperdrive for connection pooling to Supabase Postgres (Seoul, ap-northeast-2)
+- **Connection**: Cloudflare Hyperdrive for connection pooling to Supabase Postgres (Mumbai, ap-south-1)
 
 ## OAuth Scopes
 

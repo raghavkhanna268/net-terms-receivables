@@ -17,4 +17,4 @@ SENTRY_TRACES_SAMPLE_RATE=0
 
 # Option 2: Supabase session pooler (for testing against real DB)
 # Get this from Supabase Dashboard > Project Settings > Database > Connection string (Session mode, port 5432)
-# CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE=postgresql://postgres.[project-ref]:[password]@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres
+# CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE=postgresql://postgres.zpgwwepehatywxeizowd:[password]@aws-0-ap-south-1.pooler.supabase.com:5432/postgres
