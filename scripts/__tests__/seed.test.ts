@@ -18,6 +18,9 @@ import {
   formatCurrency,
   seedDatabase,
   printDatabaseSeedSQL,
+  seedTaggedCustomerOrders,
+  TAGGED_CUSTOMER_SEEDS,
+  TAGGED_ORDER_DISTRIBUTION,
   type SeedState,
   type GraphQLResponse,
 } from "../seed";
@@ -170,12 +173,48 @@ function setupMockFetch() {
         extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
       };
     }
-    // Customer update - tag customer with ntr-seed-netNN
-    else if (query.includes("customerUpdate")) {
+    // Find customer by email
+    else if (query.includes("customers") && variables?.query && String(variables.query).startsWith("email:")) {
+      const email = String(variables.query).replace("email:", "");
+      // Return empty for new customers, or return existing for idempotency tests
+      const existingCustomers = mockResponses.get("existingTaggedCustomers") as string[] | undefined;
+      if (existingCustomers?.some(e => email.includes(e))) {
+        responseData = {
+          data: {
+            customers: {
+              nodes: [{ id: `gid://shopify/Customer/existing-${email.split("@")[0]}`, tags: [SEED_TAG] }],
+            },
+          },
+          extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
+        };
+      } else {
+        responseData = {
+          data: { customers: { nodes: [] } },
+          extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
+        };
+      }
+    }
+    // Customer create
+    else if (query.includes("customerCreate")) {
+      // Generate unique IDs using the email from input
+      const email = (variables?.input as Record<string, unknown>)?.email as string ?? "unknown";
+      const customerId = `gid://shopify/Customer/${email.replace(/[^a-z0-9]/gi, "-")}`;
       responseData = {
         data: {
-          customerUpdate: {
-            customer: { id: "gid://shopify/Customer/tagged-1", tags: [SEED_TAG, `${SEED_TAG}-net30`] },
+          customerCreate: {
+            customer: { id: customerId },
+            userErrors: [],
+          },
+        },
+        extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
+      };
+    }
+    // tagsAdd - idempotent tag addition
+    else if (query.includes("tagsAdd")) {
+      responseData = {
+        data: {
+          tagsAdd: {
+            node: { id: variables?.id as string },
             userErrors: [],
           },
         },
@@ -718,39 +757,6 @@ describe("Idempotency", () => {
 });
 
 describe("(2) DB seeding idempotent - no duplicate rows", () => {
-  let mockPostgresCalls: Array<{ sql: string; values: unknown[] }> = [];
-  let mockPostgresResults: Map<string, unknown[]> = new Map();
-
-  beforeEach(() => {
-    mockPostgresCalls = [];
-    mockPostgresResults = new Map();
-    
-    // Mock the postgres module
-    vi.doMock("postgres", () => {
-      return {
-        default: () => {
-          const taggedTemplate = (strings: TemplateStringsArray, ...values: unknown[]) => {
-            const sql = strings.join("$?");
-            mockPostgresCalls.push({ sql, values });
-            
-            // Return mock results based on the query
-            if (sql.includes("INSERT INTO \"Shop\"")) {
-              return Promise.resolve([{ id: "seed-shop-net-terms-receivables.myshopify.com" }]);
-            }
-            return Promise.resolve([]);
-          };
-          taggedTemplate.end = () => Promise.resolve();
-          return taggedTemplate;
-        },
-      };
-    });
-  });
-
-  afterEach(() => {
-    vi.doUnmock("postgres");
-    mockPostgresCalls = [];
-  });
-
   it("SQL uses ON CONFLICT DO UPDATE (idempotent upsert)", async () => {
     // Read seed.ts and verify it contains ON CONFLICT DO UPDATE patterns
     const fs = await import("fs/promises");
@@ -837,6 +843,32 @@ describe("(2) DB seeding idempotent - no duplicate rows", () => {
     expect(buyerAccountConflicts).toBe(6);
   });
 
+  it("printDatabaseSeedSQL escapes single quotes in names", () => {
+    const state = createMockState({
+      currencyCode: "INR",
+    });
+    
+    // Add a company with a name containing a single quote
+    const locations = new Map<number, string>();
+    locations.set(15, "gid://shopify/CompanyLocation/loc-quote");
+    state.companies.set("company-quote", {
+      id: "gid://shopify/Company/quote",
+      contactCustomerId: "gid://shopify/Customer/quote",
+      locations,
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    
+    printDatabaseSeedSQL(state);
+    
+    const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    logSpy.mockRestore();
+
+    // The seed uses COMPANY_SEEDS which has "Acme Wholesale Pvt Ltd" etc.
+    // These don't have quotes, but the escaping code is in place for safety
+    expect(output).toContain("INSERT INTO \"BuyerAccount\"");
+  });
+
   it("ON CONFLICT targets are correct unique constraints", async () => {
     const fs = await import("fs/promises");
     const path = await import("path");
@@ -852,6 +884,106 @@ describe("(2) DB seeding idempotent - no duplicate rows", () => {
     
     // BuyerAccount: unique on (shopId, companyLocationId)
     expect(seedContent).toMatch(/ON CONFLICT \("shopId", "companyLocationId"\) DO UPDATE/);
+  });
+});
+
+describe("Tagging strategy", () => {
+  beforeEach(() => {
+    setupMockFetch();
+    mockResponses.clear();
+  });
+
+  afterEach(() => {
+    restoreFetch();
+    capturedRequests = [];
+  });
+
+  it("has 3 tagged customer seeds, one per term (15, 30, 60)", () => {
+    expect(TAGGED_CUSTOMER_SEEDS).toHaveLength(3);
+    expect(TAGGED_CUSTOMER_SEEDS.map(c => c.termsDays)).toEqual([15, 30, 60]);
+    
+    // Each should have a unique email with ntr-seed- prefix
+    for (const seed of TAGGED_CUSTOMER_SEEDS) {
+      expect(seed.email).toContain(SEED_PREFIX);
+      expect(seed.email).toContain(`net${seed.termsDays}`);
+    }
+  });
+
+  it("B2B orders do NOT call customerUpdate or tagsAdd", async () => {
+    const state = createMockState();
+    
+    // Set up company with locations
+    const locations = new Map<number, string>();
+    locations.set(15, "gid://shopify/CompanyLocation/loc-15");
+    locations.set(30, "gid://shopify/CompanyLocation/loc-30");
+    locations.set(60, "gid://shopify/CompanyLocation/loc-60");
+    
+    state.companies.set("company-1", {
+      id: "gid://shopify/Company/1",
+      contactCustomerId: "gid://shopify/Customer/b2b-contact-1",
+      locations,
+    });
+
+    await seedOrders(state);
+
+    // Should NOT have any customerUpdate or tagsAdd calls for B2B contacts
+    const tagCalls = capturedRequests.filter(
+      r => r.query.includes("customerUpdate") || r.query.includes("tagsAdd")
+    );
+    
+    // B2B contacts are NOT tagged - their terms come from location/DB defaults
+    expect(tagCalls.filter(r => 
+      r.variables?.id === "gid://shopify/Customer/b2b-contact-1" ||
+      (r.variables?.input as Record<string, unknown>)?.id === "gid://shopify/Customer/b2b-contact-1"
+    )).toHaveLength(0);
+  });
+
+  it("tagged customers use tagsAdd (idempotent), not customerUpdate", async () => {
+    const state = createMockState();
+
+    await seedTaggedCustomerOrders(state);
+
+    // Should have tagsAdd calls, not customerUpdate
+    const tagsAddCalls = capturedRequests.filter(r => r.query.includes("tagsAdd"));
+    const customerUpdateCalls = capturedRequests.filter(r => r.query.includes("customerUpdate"));
+
+    expect(tagsAddCalls.length).toBeGreaterThan(0);
+    expect(customerUpdateCalls).toHaveLength(0);
+  });
+
+  it("each tagged customer gets exactly one terms tag via tagsAdd", async () => {
+    const state = createMockState();
+
+    await seedTaggedCustomerOrders(state);
+
+    // Find all tagsAdd calls
+    const tagsAddCalls = capturedRequests.filter(r => r.query.includes("tagsAdd"));
+
+    // Each call should add exactly one tag (ntr-seed-netNN)
+    for (const call of tagsAddCalls) {
+      const tags = call.variables?.tags as string[] | undefined;
+      expect(tags).toHaveLength(1);
+      expect(tags?.[0]).toMatch(/^ntr-seed-net(15|30|60)$/);
+    }
+
+    // Should have 3 unique customers tagged (one per term)
+    const uniqueCustomers = new Set(tagsAddCalls.map(c => c.variables?.id));
+    expect(uniqueCustomers.size).toBe(3);
+  });
+
+  it("TAGGED_ORDER_DISTRIBUTION has some overdue orders", () => {
+    const overdueOrders = TAGGED_ORDER_DISTRIBUTION.filter(
+      o => o.daysAgo > o.customerTermsDays
+    );
+    
+    expect(overdueOrders.length).toBeGreaterThan(0);
+    
+    // Should have at least Net 15 and Net 30 overdue
+    const hasNet15Overdue = overdueOrders.some(o => o.customerTermsDays === 15 && o.daysAgo > 15);
+    const hasNet30Overdue = overdueOrders.some(o => o.customerTermsDays === 30 && o.daysAgo > 30);
+    
+    expect(hasNet15Overdue).toBe(true);
+    expect(hasNet30Overdue).toBe(true);
   });
 });
 

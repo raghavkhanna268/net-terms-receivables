@@ -22,13 +22,20 @@
  * 2. Orders use processedAt to backdate, creating overdue invoices for testing
  *    @see https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateOrderInput
  *    "processedAt: The date and time when the order was created."
- * 3. S6 order sync maps order.createdAt (which equals processedAt when backdated) to issuedAt
- *    @see app/services/sync/order.server.ts:187 - const issuedAt = new Date(order.createdAt);
+ * 3. S6 order sync maps processedAt ?? createdAt to issuedAt
+ *    @see app/services/sync/order.server.ts:188 - const issuedAt = new Date(order.processedAt ?? order.createdAt);
  * 4. If Shopify returns paymentTerms on the order, those are used (inherited path)
  * 5. If Shopify returns null paymentTerms, S9 inference uses DB defaults (inferred path):
  *    - BuyerAccount.defaultTermsDays (explicit) from company location sync
  *    - AccountSource tag rules for tagged customers
  *    - Shop.defaultTermsDays as fallback
+ *
+ * TAGGING STRATEGY:
+ * - B2B contacts are NOT tagged; their terms come from location buyerExperienceConfiguration
+ *   and DB defaults (BuyerAccount.defaultTermsDays).
+ * - For tagged-customer path testing, we create 3 dedicated non-B2B seed customers
+ *   (ntr-seed-net15, ntr-seed-net30, ntr-seed-net60), each tagged exactly once with tagsAdd
+ *   (idempotent), and place a few non-B2B orders for them.
  *
  * SHOPIFY TERMS INHERITANCE (WARNING, NOT FAILURE):
  * OrderCreateOrderInput does NOT have a paymentTerms field. We rely on Shopify
@@ -868,11 +875,6 @@ export async function seedOrders(state: SeedState): Promise<void> {
       continue;
     }
 
-    // Tag the customer with ntr-seed-netNN so AccountSource tag rules apply
-    if (!state.dryRun) {
-      await tagCustomerForTerms(state, company.contactCustomerId, orderSpec.locationTermsDays);
-    }
-
     state.createdCount.orders++;
     const isOverdue = orderSpec.daysAgo > orderSpec.locationTermsDays;
     if (isOverdue) {
@@ -898,41 +900,321 @@ export async function findOrderByTag(state: SeedState, tag: string): Promise<Ord
   return result.data?.orders.nodes[0] ?? null;
 }
 
+// Tagged customer seeds - one per term (Net 15, 30, 60)
+// These are non-B2B customers used to test the tagged-customer path of S9 inference
+export const TAGGED_CUSTOMER_SEEDS = [
+  { email: `${SEED_PREFIX}net15@example.com`, termsDays: 15 },
+  { email: `${SEED_PREFIX}net30@example.com`, termsDays: 30 },
+  { email: `${SEED_PREFIX}net60@example.com`, termsDays: 60 },
+] as const;
+
+// Non-B2B order distribution for tagged customers
+// daysAgo creates backdated orders, some will be overdue
+export const TAGGED_ORDER_DISTRIBUTION = [
+  // Net 15 orders
+  { customerTermsDays: 15, daysAgo: 20 },  // Overdue (20 > 15)
+  { customerTermsDays: 15, daysAgo: 10 },  // Not yet due
+  // Net 30 orders
+  { customerTermsDays: 30, daysAgo: 35 },  // Overdue (35 > 30)
+  { customerTermsDays: 30, daysAgo: 15 },  // Not yet due
+  // Net 60 orders
+  { customerTermsDays: 60, daysAgo: 45 },  // Not yet due
+] as const;
+
 /**
- * Tag a customer with ntr-seed-netNN tag so AccountSource tag rules apply.
- * Uses customerUpdate to add tags without removing existing ones.
+ * Find or create a tagged customer, then tag with tagsAdd (idempotent).
+ * Does NOT tag B2B contacts - their terms come from location/DB defaults.
+ *
+ * @returns Customer ID or null on failure
  */
-async function tagCustomerForTerms(
+async function ensureTaggedCustomer(
   state: SeedState,
-  customerId: string,
+  email: string,
   termsDays: number
-): Promise<void> {
+): Promise<string | null> {
   const tag = `${SEED_TAG}-net${termsDays}`;
-  
-  const mutation = `
-    mutation TagCustomer($input: CustomerInput!) {
-      customerUpdate(input: $input) {
-        customer { id tags }
+
+  // First, try to find existing customer by email
+  const findResult = await graphql<{
+    customers: { nodes: Array<{ id: string; tags: string[] }> };
+  }>(state, `
+    query FindCustomer($query: String!) {
+      customers(first: 1, query: $query) {
+        nodes { id tags }
+      }
+    }
+  `, { query: `email:${email}` });
+
+  if (findResult.errors) {
+    console.log(`    ⚠️  GraphQL error finding customer: ${findResult.errors.map(e => e.message).join(", ")}`);
+    return null;
+  }
+
+  let customerId = findResult.data?.customers.nodes[0]?.id;
+
+  // If not found, create new customer
+  if (!customerId) {
+    const createResult = await graphql<{
+      customerCreate: {
+        customer: { id: string } | null;
+        userErrors: UserError[];
+      };
+    }>(state, `
+      mutation CreateCustomer($input: CustomerInput!) {
+        customerCreate(input: $input) {
+          customer { id }
+          userErrors { field message }
+        }
+      }
+    `, {
+      input: {
+        email,
+        tags: [SEED_TAG],
+      },
+    }, { isMutation: true });
+
+    if (createResult.errors) {
+      console.log(`    ⚠️  GraphQL error creating customer: ${createResult.errors.map(e => e.message).join(", ")}`);
+      return null;
+    }
+
+    if (createResult.data?.customerCreate.userErrors.length) {
+      console.log(`    ⚠️  Failed to create customer: ${createResult.data.customerCreate.userErrors[0].message}`);
+      return null;
+    }
+
+    customerId = createResult.data?.customerCreate.customer?.id;
+    if (!customerId) {
+      console.log(`    ⚠️  No customer ID returned`);
+      return null;
+    }
+    console.log(`    → Created customer: ${email}`);
+  }
+
+  // Use tagsAdd to add the terms tag (idempotent - won't duplicate)
+  const tagResult = await graphql<{
+    tagsAdd: {
+      node: { id: string } | null;
+      userErrors: UserError[];
+    };
+  }>(state, `
+    mutation TagCustomer($id: ID!, $tags: [String!]!) {
+      tagsAdd(id: $id, tags: $tags) {
+        node { ... on Customer { id } }
         userErrors { field message }
+      }
+    }
+  `, {
+    id: customerId,
+    tags: [tag],
+  }, { isMutation: true });
+
+  if (tagResult.errors) {
+    console.log(`    ⚠️  GraphQL error tagging customer: ${tagResult.errors.map(e => e.message).join(", ")}`);
+  }
+
+  if (tagResult.data?.tagsAdd.userErrors.length) {
+    console.log(`    ⚠️  Failed to tag customer: ${tagResult.data.tagsAdd.userErrors[0].message}`);
+  }
+
+  return customerId;
+}
+
+/**
+ * Seed orders for tagged (non-B2B) customers.
+ * Creates customers with tagsAdd (idempotent) and places orders.
+ */
+export async function seedTaggedCustomerOrders(state: SeedState): Promise<void> {
+  console.log("\n📝 Seeding orders for tagged (non-B2B) customers...");
+  console.log("   (These test the AccountSource tag rules path of S9 inference)");
+
+  // Build customer map: termsDays -> customerId
+  const customerMap = new Map<number, string>();
+
+  for (const seed of TAGGED_CUSTOMER_SEEDS) {
+    if (state.dryRun) {
+      console.log(`  [dry-run] Would create/tag customer: ${seed.email} → Net ${seed.termsDays}`);
+      customerMap.set(seed.termsDays, `dry-run-customer-${seed.termsDays}`);
+      continue;
+    }
+
+    const customerId = await ensureTaggedCustomer(state, seed.email, seed.termsDays);
+    if (customerId) {
+      customerMap.set(seed.termsDays, customerId);
+      console.log(`  ✅ Customer ${seed.email} tagged with ${SEED_TAG}-net${seed.termsDays}`);
+    }
+  }
+
+  // Place orders for tagged customers (no B2B, no companyLocationId)
+  let orderIndex = 0;
+  for (const orderSpec of TAGGED_ORDER_DISTRIBUTION) {
+    orderIndex++;
+    const orderKey = `${SEED_PREFIX}tagged-order-${orderIndex}`;
+
+    const existingOrder = await findOrderByTag(state, orderKey);
+    if (existingOrder) {
+      console.log(`  ⏭️  Tagged order ${orderIndex} already exists (${existingOrder.name})`);
+      state.skippedCount.orders++;
+      continue;
+    }
+
+    const customerId = customerMap.get(orderSpec.customerTermsDays);
+    if (!customerId) {
+      console.error(`  ❌ No customer found for Net ${orderSpec.customerTermsDays}`);
+      continue;
+    }
+
+    const amountRange = AMOUNT_RANGES_INR[orderIndex % AMOUNT_RANGES_INR.length];
+    const amount = Math.floor(Math.random() * (amountRange.max - amountRange.min) + amountRange.min);
+    const productTitle = SAMPLE_PRODUCTS[orderIndex % SAMPLE_PRODUCTS.length];
+
+    const processedAt = new Date();
+    processedAt.setDate(processedAt.getDate() - orderSpec.daysAgo);
+
+    if (state.dryRun) {
+      const isOverdue = orderSpec.daysAgo > orderSpec.customerTermsDays;
+      if (isOverdue) state.overdueOrdersCount++;
+      console.log(
+        `  [dry-run] Would create tagged order ${orderIndex}: ` +
+          `Net ${orderSpec.customerTermsDays}, ${orderSpec.daysAgo} days ago${isOverdue ? " (OVERDUE)" : ""}, ` +
+          formatCurrency(amount, state.currencyCode)
+      );
+      state.createdCount.orders++;
+      continue;
+    }
+
+    // Create non-B2B order (no companyLocationId)
+    const order = await createTaggedCustomerOrder(state, {
+      orderKey,
+      customerId,
+      productTitle,
+      amount,
+      processedAt: processedAt.toISOString(),
+      expectedTermsDays: orderSpec.customerTermsDays,
+    });
+
+    if (!order) {
+      state.errors.push(`Failed to create tagged order ${orderIndex}`);
+      continue;
+    }
+
+    state.createdCount.orders++;
+    const isOverdue = orderSpec.daysAgo > orderSpec.customerTermsDays;
+    if (isOverdue) state.overdueOrdersCount++;
+    console.log(
+      `  ✅ Created ${order.name}: tagged customer, ` +
+        `Net ${orderSpec.customerTermsDays}, ${orderSpec.daysAgo} days ago${isOverdue ? " (OVERDUE)" : ""}, ` +
+        formatCurrency(amount, state.currencyCode)
+    );
+  }
+}
+
+/**
+ * Create an order for a tagged (non-B2B) customer.
+ * Similar to createOrder but without companyLocationId.
+ */
+async function createTaggedCustomerOrder(
+  state: SeedState,
+  options: {
+    orderKey: string;
+    customerId: string;
+    productTitle: string;
+    amount: number;
+    processedAt: string;
+    expectedTermsDays: number;
+  }
+): Promise<{ id: string; name: string } | null> {
+  const mutation = `
+    mutation CreateOrder($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
+      orderCreate(order: $order, options: $options) {
+        order {
+          id
+          name
+          financialStatus
+          totalPriceSet {
+            shopMoney { amount currencyCode }
+          }
+        }
+        userErrors { field message code }
       }
     }
   `;
 
   const result = await graphql<{
-    customerUpdate: {
-      customer: { id: string; tags: string[] } | null;
+    orderCreate: {
+      order: {
+        id: string;
+        name: string;
+        financialStatus: string;
+        totalPriceSet: { shopMoney: { amount: string; currencyCode: string } };
+      } | null;
       userErrors: UserError[];
     };
   }>(state, mutation, {
-    input: {
-      id: customerId,
-      tags: [SEED_TAG, tag],
+    order: {
+      tags: [SEED_TAG, options.orderKey],
+      customer: { toAssociate: { id: options.customerId } },
+      currency: state.currencyCode,
+      financialStatus: "PENDING",
+      processedAt: options.processedAt,
+      lineItems: [{
+        title: options.productTitle,
+        quantity: 1,
+        priceSet: {
+          shopMoney: {
+            amount: String(options.amount),
+            currencyCode: state.currencyCode,
+          },
+        },
+      }],
+      billingAddress: {
+        firstName: "Tagged",
+        lastName: "Customer",
+        address1: "123 Test Street",
+        city: "Mumbai",
+        countryCode: "IN",
+        zip: "400001",
+      },
+      shippingAddress: {
+        firstName: "Tagged",
+        lastName: "Customer",
+        address1: "123 Test Street",
+        city: "Mumbai",
+        countryCode: "IN",
+        zip: "400001",
+      },
+    },
+    options: {
+      sendReceipt: false,
+      sendFulfillmentReceipt: false,
+      inventoryBehaviour: "BYPASS",
     },
   }, { isMutation: true });
 
-  if (result.data?.customerUpdate.userErrors.length) {
-    console.log(`    ⚠️  Failed to tag customer: ${result.data.customerUpdate.userErrors[0].message}`);
+  if (result.errors) {
+    console.log(`    ⚠️  GraphQL error: ${result.errors.map(e => e.message).join(", ")}`);
+    return null;
   }
+
+  if (result.data?.orderCreate.userErrors.length) {
+    console.error(`    ❌ Error creating order:`, result.data.orderCreate.userErrors);
+    return null;
+  }
+
+  const order = result.data?.orderCreate.order;
+  if (!order) {
+    console.error(`    ❌ No order returned`);
+    return null;
+  }
+
+  // No Shopify terms for non-B2B orders - S9 inference will use tag rules
+  state.ordersWithoutShopifyTerms++;
+  console.log(`    → No Shopify terms (will use tag rule: Net ${options.expectedTermsDays})`);
+
+  return {
+    id: order.id,
+    name: order.name,
+  };
 }
 
 /**
@@ -1218,7 +1500,9 @@ export function printDatabaseSeedSQL(state: SeedState): void {
   console.log(`-- Upsert BuyerAccount records for each company location`);
   for (const [companyKey, company] of state.companies) {
     for (const [dueInDays, locationId] of company.locations) {
-      const accountName = `${COMPANY_SEEDS.find(c => c.key === companyKey)?.name ?? companyKey} - Net ${dueInDays}`;
+      const rawName = `${COMPANY_SEEDS.find(c => c.key === companyKey)?.name ?? companyKey} - Net ${dueInDays}`;
+      // Escape single quotes for SQL (double them)
+      const accountName = rawName.replace(/'/g, "''");
       console.log(`INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "defaultTermsDays", "defaultTermsSource", "holdState", "createdAt", "updatedAt")`);
       console.log(`VALUES ('seed-account-${locationId}', '${shopId}', 'COMPANY', '${company.id}', '${locationId}', '${accountName}', ${dueInDays}, 'explicit', 'OK', NOW(), NOW())`);
       console.log(`ON CONFLICT ("shopId", "companyLocationId") DO UPDATE SET "defaultTermsDays" = EXCLUDED."defaultTermsDays", "defaultTermsSource" = EXCLUDED."defaultTermsSource", "updatedAt" = NOW();`);
@@ -1326,6 +1610,9 @@ export async function main(): Promise<void> {
   // Seed Shopify data
   await seedCompanies(state);
   await seedOrders(state);
+  
+  // Seed orders for tagged (non-B2B) customers
+  await seedTaggedCustomerOrders(state);
 
   // Seed database for S9 inference
   await seedDatabase(state);
