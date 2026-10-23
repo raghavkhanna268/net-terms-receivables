@@ -69,7 +69,7 @@ Calls the Shopify Admin GraphQL API with the offline token and reports:
 | `email_not_redacted` | `true` if email looks like a real address (not redacted) |
 | `first_name_non_null` | `true` if first name is present |
 | `last_name_non_null` | `true` if last name is present |
-| `graphql_errors` | Array of error messages/codes if the query failed |
+| `graphql_error_codes` | Array of GraphQL error codes if the query failed |
 
 **Common issues:**
 - `customer_found = false` → Shop has no customers yet
@@ -82,6 +82,45 @@ Calls the Shopify Admin GraphQL API with the offline token and reports:
 - `skipped` → Token expired, API call not attempted
 - `auth_failed` → HTTP 401/403, token invalid or revoked
 - `error` → Other API error (e.g., rate limit, server error)
+
+#### Step 3: Database Extensions and Jobs Check
+
+Checks database infrastructure required for S10 background jobs.
+
+**Extensions status:**
+
+| Field | Meaning |
+|-------|---------|
+| `pgmq_installed` | `true` if pgmq extension is installed |
+| `pg_cron_installed` | `true` if pg_cron extension is installed |
+| `pg_net_installed` | `true` if pg_net extension is installed |
+| `supabase_vault_installed` | `true` if supabase_vault extension is installed |
+
+**Cron jobs (if pg_cron is installed):**
+
+Lists all cron jobs showing `jobid`, `jobname`, `schedule`, `active`. The `command` column is never printed (may contain URLs or secrets).
+
+| Field | Meaning |
+|-------|---------|
+| `s10_drain_job_exists` | `true` if the `s10_drain_every_minute` job exists |
+| `s10_drain_job_active` | `true` if the drain job is active |
+
+**Vault secrets (if supabase_vault is installed):**
+
+| Field | Meaning |
+|-------|---------|
+| `vault_schema_exists` | `true` if the vault schema exists |
+| `jobs_drain_secret_exists` | `true` if the `jobs_drain_secret` entry exists |
+| `jobs_drain_url_exists` | `true` if the `jobs_drain_url` entry exists |
+
+**Note:** The workflow queries `vault.secrets` by name only. It never selects `decrypted_secret`.
+
+**Common issues:**
+- Extension not installed → Enable in Supabase Dashboard > Database > Extensions
+- `cron_schema_exists = false` → pg_cron not installed or not configured
+- `vault_schema_exists = false` → supabase_vault not installed
+- `s10_drain_job_exists = false` → S10 migration not applied
+- `jobs_drain_*_exists = false` → Run the Sync Vault Secrets workflow
 
 ### Token Expiration
 
@@ -115,3 +154,14 @@ Without writing the new tokens back to the database, the app's session would be 
 - No artifacts are uploaded
 - All values passed via environment variables, not command-line arguments
 - Temp files are cleaned up via trap on EXIT
+
+### Optional: GitHub Environment Protection
+
+The workflow can be gated on a GitHub Environment named `production` for additional approval control. To enable:
+
+1. Go to **Settings** → **Environments** → **New environment**
+2. Name it `production`
+3. Configure required reviewers or other protection rules
+4. Uncomment the `environment: production` line in the workflow
+
+When configured, the workflow will require approval before running diagnostics against production.

@@ -69,11 +69,11 @@ jobs:
 
       - name: Run seed script
         run: |
-          ARGS=""
+          ARGS=()
           if [ "${{ inputs.dry_run }}" = "true" ]; then
-            ARGS="$ARGS --dry-run"
+            ARGS+=("--dry-run")
           fi
           if [ "${{ inputs.reset }}" = "true" ]; then
-            ARGS="$ARGS --reset"
+            ARGS+=("--reset")
           fi
-          npx tsx scripts/seed.ts $ARGS
+          npx tsx scripts/seed.ts "${ARGS[@]}"

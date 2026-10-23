@@ -15,6 +15,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  actionlint:
+    name: Lint GitHub Actions workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install actionlint
+        env:
+          # Pin to specific version for reproducibility
+          ACTIONLINT_VERSION: "1.7.4"
+          # SHA256 of actionlint_1.7.4_linux_amd64.tar.gz
+          ACTIONLINT_SHA256: "fc0a6886bbb9a23a39eeec4b176193cadb54ddbe77cdbb19b637933919545395"
+        run: |
+          set -euo pipefail
+          TARBALL="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$TARBALL" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${TARBALL}"
+          echo "${ACTIONLINT_SHA256}  ${TARBALL}" | sha256sum -c -
+          tar xzf "$TARBALL" actionlint
+          rm "$TARBALL"
+          ./actionlint --version
+
+      - name: Run actionlint
+        run: |
+          # actionlint checks workflow syntax and runs shellcheck on run blocks
+          ./actionlint -color
+
   check:
     name: Lint, typecheck, test, build
     runs-on: ubuntu-latest
