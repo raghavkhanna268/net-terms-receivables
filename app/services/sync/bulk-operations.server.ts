@@ -90,10 +90,12 @@ export const BULK_COMPANIES_QUERY = `
  * Filters to orders relevant for net-terms invoice management:
  * - pending: Orders awaiting full payment (typical for net-terms)
  * - partially_paid: Orders with partial payment received
+ * - partially_refunded: Refunded but still has outstanding amount
  * - authorized: Orders with payment authorized (can become net-terms)
  * - paid: To update (settle) existing invoices that became PAID
  * - refunded: To update existing invoices that were refunded
  * - voided: To update existing invoices that were voided
+ * - expired: Payment authorization expired (can still have net-terms)
  *
  * Note: Eligibility rules still gate CREATION of new invoices.
  * This wider filter ensures reconcile can UPDATE existing invoices
@@ -114,7 +116,7 @@ export const BULK_ORDERS_QUERY = `
     bulkOperationRunQuery(
       query: """
       {
-        orders(query: "financial_status:pending OR financial_status:partially_paid OR financial_status:authorized OR financial_status:paid OR financial_status:refunded OR financial_status:voided") {
+        orders(query: "financial_status:pending OR financial_status:partially_paid OR financial_status:partially_refunded OR financial_status:authorized OR financial_status:paid OR financial_status:refunded OR financial_status:voided OR financial_status:expired") {
           edges {
             node {
               id

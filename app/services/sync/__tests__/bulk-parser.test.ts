@@ -136,7 +136,9 @@ describe("parseOrderBulkJsonl", () => {
     expect(result.orders[0].name).toBe("#1001");
     expect(result.orders[1].name).toBe("#1002");
     expect(result.orders[2].name).toBe("#1003");
-    expect(result.childLineCount).toBe(0);
+    expect(result.attachedChildCount).toBe(0);
+    expect(result.orphanChildCount).toBe(0);
+    expect(result.orphanSchedules).toHaveLength(0);
   });
 
   it("returns orders without payment terms for eligibility check", () => {
@@ -149,7 +151,7 @@ describe("parseOrderBulkJsonl", () => {
     expect(result.orders).toHaveLength(2);
     expect(result.orders[0].paymentTerms).toBeUndefined();
     expect(result.orders[1].paymentTerms).toBeUndefined();
-    expect(result.childLineCount).toBe(0);
+    expect(result.attachedChildCount).toBe(0);
   });
 
   it("handles null payment terms", () => {
@@ -160,7 +162,7 @@ describe("parseOrderBulkJsonl", () => {
     // Orders with null paymentTerms are returned for eligibility check
     expect(result.orders).toHaveLength(1);
     expect(result.orders[0].paymentTerms).toBeNull();
-    expect(result.childLineCount).toBe(0);
+    expect(result.attachedChildCount).toBe(0);
   });
 
   describe("PaymentSchedule child line handling (bug fix)", () => {
@@ -185,7 +187,8 @@ describe("parseOrderBulkJsonl", () => {
       expect(schedules?.[0].node.amount?.amount).toBe("1000.00");
 
       // Child lines counted separately
-      expect(result.childLineCount).toBe(1);
+      expect(result.attachedChildCount).toBe(1);
+      expect(result.orphanChildCount).toBe(0);
     });
 
     it("does not count child lines as orders", () => {
@@ -198,7 +201,7 @@ describe("parseOrderBulkJsonl", () => {
 
       // Should have 2 orders, not 4
       expect(result.orders).toHaveLength(2);
-      expect(result.childLineCount).toBe(2);
+      expect(result.attachedChildCount).toBe(2);
 
       // Each order should have its schedule attached
       expect(result.orders[0].paymentTerms?.paymentSchedules?.edges).toHaveLength(1);
@@ -211,7 +214,7 @@ describe("parseOrderBulkJsonl", () => {
       const result = parseOrderBulkJsonl(jsonl);
 
       expect(result.orders).toHaveLength(1);
-      expect(result.childLineCount).toBe(0);
+      expect(result.attachedChildCount).toBe(0);
       // No schedules added
       expect(result.orders[0].paymentTerms?.paymentSchedules).toBeUndefined();
     });
@@ -224,21 +227,25 @@ describe("parseOrderBulkJsonl", () => {
       const result = parseOrderBulkJsonl(jsonl);
 
       expect(result.orders).toHaveLength(1);
-      expect(result.childLineCount).toBe(1);
+      expect(result.attachedChildCount).toBe(1);
       // Schedule should still be attached (via orphan re-attachment pass)
       expect(result.orders[0].paymentTerms?.paymentSchedules?.edges).toHaveLength(1);
       expect(result.orders[0].paymentTerms?.paymentSchedules?.edges?.[0].node.dueAt).toBe("2025-01-31T00:00:00Z");
     });
 
-    it("ignores orphan PaymentSchedule without matching parent", () => {
+    it("returns orphan PaymentSchedule without matching parent", () => {
       const jsonl = `{"id":"gid://shopify/Order/1","name":"#1001","createdAt":"2025-01-01T00:00:00Z","paymentTerms":{"id":"pt1","paymentTermsName":"Net 30"}}
 {"id":"gid://shopify/PaymentSchedule/orphan","dueAt":"2025-01-31T00:00:00Z","__parentId":"gid://shopify/Order/999"}`;
 
       const result = parseOrderBulkJsonl(jsonl);
 
-      // Orphan schedule counted but not attached to any order
+      // Orphan schedule returned separately for processor to update existing invoices
       expect(result.orders).toHaveLength(1);
-      expect(result.childLineCount).toBe(1);
+      expect(result.attachedChildCount).toBe(0);
+      expect(result.orphanChildCount).toBe(1);
+      expect(result.orphanSchedules).toHaveLength(1);
+      expect(result.orphanSchedules[0].__parentId).toBe("gid://shopify/Order/999");
+      expect(result.orphanSchedules[0].dueAt).toBe("2025-01-31T00:00:00Z");
       expect(result.orders[0].paymentTerms?.paymentSchedules).toBeUndefined();
     });
 
@@ -249,8 +256,9 @@ describe("parseOrderBulkJsonl", () => {
       const result = parseOrderBulkJsonl(jsonl);
 
       expect(result.orders).toHaveLength(1);
-      expect(result.childLineCount).toBe(1);
-      // Order has no paymentTerms, so schedule is not attached
+      expect(result.attachedChildCount).toBe(1);
+      // Schedule is attached even if order has no paymentTerms initially
+      // (The attachScheduleToOrder function does nothing if paymentTerms is missing)
       expect(result.orders[0].paymentTerms).toBeUndefined();
     });
   });

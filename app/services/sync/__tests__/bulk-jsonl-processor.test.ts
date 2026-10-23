@@ -794,3 +794,120 @@ describe("Continuation without DLQ after 5+ progress rounds", () => {
     expect(typeof bulkModule.processBulkOperation).toBe("function");
   });
 });
+
+describe("P1: Order/PaymentSchedule batch boundary handling", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+  });
+
+  describe("lineHasParentId helper", () => {
+    it("returns true for PaymentSchedule child lines with __parentId", async () => {
+      // The lineHasParentId function is internal, but we can verify its behavior
+      // through parseOrderBulkJsonl which uses similar logic
+      const { parseOrderBulkJsonl } = await import("../bulk-parser.server");
+      
+      const jsonl = `{"id":"gid://shopify/Order/1","name":"#1001","createdAt":"2025-01-01T00:00:00Z","paymentTerms":{"id":"pt1"}}
+{"id":"gid://shopify/PaymentSchedule/10","dueAt":"2025-01-31T00:00:00Z","__parentId":"gid://shopify/Order/1"}`;
+
+      const result = parseOrderBulkJsonl(jsonl);
+      
+      // Parser correctly identified 1 order and 1 child
+      expect(result.orders).toHaveLength(1);
+      expect(result.attachedChildCount).toBe(1);
+    });
+
+    it("returns false for Order lines without __parentId", async () => {
+      const { parseOrderBulkJsonl } = await import("../bulk-parser.server");
+      
+      const jsonl = `{"id":"gid://shopify/Order/1","name":"#1001","createdAt":"2025-01-01T00:00:00Z"}
+{"id":"gid://shopify/Order/2","name":"#1002","createdAt":"2025-01-02T00:00:00Z"}`;
+
+      const result = parseOrderBulkJsonl(jsonl);
+      
+      // Both are orders, no children
+      expect(result.orders).toHaveLength(2);
+      expect(result.attachedChildCount).toBe(0);
+    });
+  });
+
+  describe("isPaymentScheduleLine checks id prefix", () => {
+    it("only recognizes lines with gid://shopify/PaymentSchedule/ prefix as children", async () => {
+      const { parseOrderBulkJsonl } = await import("../bulk-parser.server");
+      
+      // A line that has __parentId but NOT a PaymentSchedule GID prefix
+      // should be treated as an order (not a child)
+      const jsonl = `{"id":"gid://shopify/Order/1","name":"#1001","createdAt":"2025-01-01T00:00:00Z"}
+{"id":"gid://shopify/SomeOtherType/10","__parentId":"gid://shopify/Order/1"}`;
+
+      const result = parseOrderBulkJsonl(jsonl);
+      
+      // The second line should be treated as an order (it has __parentId but wrong prefix)
+      // It will fail the isPaymentScheduleLine check
+      expect(result.orders).toHaveLength(2);
+      expect(result.attachedChildCount).toBe(0);
+    });
+
+    it("correctly identifies PaymentSchedule lines by id prefix", async () => {
+      const { parseOrderBulkJsonl } = await import("../bulk-parser.server");
+      
+      const jsonl = `{"id":"gid://shopify/Order/1","name":"#1001","createdAt":"2025-01-01T00:00:00Z","paymentTerms":{"id":"pt1"}}
+{"id":"gid://shopify/PaymentSchedule/10","dueAt":"2025-01-31T00:00:00Z","__parentId":"gid://shopify/Order/1"}`;
+
+      const result = parseOrderBulkJsonl(jsonl);
+      
+      expect(result.orders).toHaveLength(1);
+      expect(result.attachedChildCount).toBe(1);
+      expect(result.orders[0].paymentTerms?.paymentSchedules?.edges).toHaveLength(1);
+    });
+  });
+
+  describe("orphan schedules returned for safety net", () => {
+    it("returns orphan PaymentSchedules for processor to update existing invoices", async () => {
+      const { parseOrderBulkJsonl } = await import("../bulk-parser.server");
+      
+      // This simulates a batch boundary split: Order was in previous batch,
+      // its PaymentSchedule is in this batch (orphan)
+      const jsonl = `{"id":"gid://shopify/PaymentSchedule/orphan","dueAt":"2025-02-15T00:00:00Z","__parentId":"gid://shopify/Order/999"}`;
+
+      const result = parseOrderBulkJsonl(jsonl);
+      
+      expect(result.orders).toHaveLength(0);
+      expect(result.attachedChildCount).toBe(0);
+      expect(result.orphanChildCount).toBe(1);
+      expect(result.orphanSchedules).toHaveLength(1);
+      expect(result.orphanSchedules[0].__parentId).toBe("gid://shopify/Order/999");
+      expect(result.orphanSchedules[0].dueAt).toBe("2025-02-15T00:00:00Z");
+    });
+
+    it("returns multiple orphans when batch contains only PaymentSchedules", async () => {
+      const { parseOrderBulkJsonl } = await import("../bulk-parser.server");
+      
+      const jsonl = `{"id":"gid://shopify/PaymentSchedule/1","dueAt":"2025-01-31T00:00:00Z","__parentId":"gid://shopify/Order/100"}
+{"id":"gid://shopify/PaymentSchedule/2","dueAt":"2025-02-28T00:00:00Z","__parentId":"gid://shopify/Order/200"}
+{"id":"gid://shopify/PaymentSchedule/3","dueAt":"2025-03-31T00:00:00Z","__parentId":"gid://shopify/Order/100"}`;
+
+      const result = parseOrderBulkJsonl(jsonl);
+      
+      expect(result.orders).toHaveLength(0);
+      expect(result.orphanSchedules).toHaveLength(3);
+      expect(result.orphanChildCount).toBe(3);
+    });
+  });
+});
+
+describe("BULK_ORDERS_QUERY filter", () => {
+  it("includes partially_refunded and expired in the filter", async () => {
+    const { BULK_ORDERS_QUERY } = await import("../bulk-operations.server");
+    
+    // Verify the filter includes all expected statuses
+    expect(BULK_ORDERS_QUERY).toContain("financial_status:partially_refunded");
+    expect(BULK_ORDERS_QUERY).toContain("financial_status:expired");
+    expect(BULK_ORDERS_QUERY).toContain("financial_status:pending");
+    expect(BULK_ORDERS_QUERY).toContain("financial_status:partially_paid");
+    expect(BULK_ORDERS_QUERY).toContain("financial_status:authorized");
+    expect(BULK_ORDERS_QUERY).toContain("financial_status:paid");
+    expect(BULK_ORDERS_QUERY).toContain("financial_status:refunded");
+    expect(BULK_ORDERS_QUERY).toContain("financial_status:voided");
+  });
+});

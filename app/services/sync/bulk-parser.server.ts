@@ -130,12 +130,19 @@ function isCompanyLocation(
 
 /**
  * Type guard for PaymentSchedule child lines.
- * PaymentSchedule lines have __parentId and typically lack "name" field.
+ * PaymentSchedule lines have __parentId pointing to an Order AND
+ * an id starting with 'gid://shopify/PaymentSchedule/'.
+ * This distinguishes PaymentSchedule from other potential child line types.
  */
 function isPaymentScheduleLine(
   item: BulkOrderLine | BulkPaymentScheduleLine
 ): item is BulkPaymentScheduleLine {
-  return "__parentId" in item && item.__parentId !== undefined;
+  return (
+    "__parentId" in item &&
+    item.__parentId !== undefined &&
+    typeof item.id === "string" &&
+    item.id.startsWith("gid://shopify/PaymentSchedule/")
+  );
 }
 
 /**
@@ -146,30 +153,35 @@ function isPaymentScheduleLine(
  * This function groups PaymentSchedule children to their parent Order
  * and attaches the schedule's dueAt to the parent's paymentTerms.
  *
+ * Orphan schedules (whose parent Order is not in this batch) are returned
+ * separately so the processor can update existing Invoices with dueAt.
+ *
  * @param jsonl - Raw JSONL from bulk order query
- * @returns Orders with attached schedules, child line count, and errors
+ * @returns Orders with attached schedules, orphan schedules, counts, and errors
  */
 export function parseOrderBulkJsonl(jsonl: string): {
   orders: BulkOrderLine[];
-  childLineCount: number;
+  orphanSchedules: BulkPaymentScheduleLine[];
+  attachedChildCount: number;
+  orphanChildCount: number;
   errors: ParsedBulkResult<unknown>["errors"];
 } {
   const parsed = parseJsonl<BulkOrderLine | BulkPaymentScheduleLine>(jsonl);
 
   const orders: BulkOrderLine[] = [];
   const ordersById = new Map<string, BulkOrderLine>();
-  const orphanSchedules: BulkPaymentScheduleLine[] = [];
-  let childLineCount = 0;
+  const pendingOrphanSchedules: BulkPaymentScheduleLine[] = [];
+  let attachedChildCount = 0;
 
   for (const item of parsed.items) {
     if (isPaymentScheduleLine(item)) {
-      childLineCount++;
       const parentId = item.__parentId;
       const parent = ordersById.get(parentId);
       if (parent) {
         attachScheduleToOrder(parent, item);
+        attachedChildCount++;
       } else {
-        orphanSchedules.push(item);
+        pendingOrphanSchedules.push(item);
       }
     } else {
       orders.push(item);
@@ -177,20 +189,24 @@ export function parseOrderBulkJsonl(jsonl: string): {
     }
   }
 
-  // Try to attach orphan schedules to orders added after them
+  // Try to attach pending orphan schedules to orders added after them
   // (Shopify typically puts children after parents, but be safe)
-  for (const schedule of orphanSchedules) {
+  const remainingOrphans: BulkPaymentScheduleLine[] = [];
+  for (const schedule of pendingOrphanSchedules) {
     const parent = ordersById.get(schedule.__parentId);
     if (parent) {
       attachScheduleToOrder(parent, schedule);
+      attachedChildCount++;
+    } else {
+      remainingOrphans.push(schedule);
     }
-    // Orphan schedules without matching parents are silently ignored
-    // (they'll be refetched on the next reconcile)
   }
 
   return {
     orders,
-    childLineCount,
+    orphanSchedules: remainingOrphans,
+    attachedChildCount,
+    orphanChildCount: remainingOrphans.length,
     errors: parsed.errors,
   };
 }
