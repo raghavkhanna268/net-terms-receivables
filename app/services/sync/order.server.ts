@@ -282,16 +282,30 @@ async function upsertInvoice(
         WHEN "Invoice".status IN ('paid', 'cancelled') THEN "Invoice".outstanding
         ELSE EXCLUDED.outstanding
       END,
-      "dueAt" = COALESCE(EXCLUDED."dueAt", "Invoice"."dueAt"),
+      -- issuedAt: only update for non-terminal invoices, never from null
+      "issuedAt" = CASE
+        WHEN "Invoice".status IN ('paid', 'cancelled') THEN "Invoice"."issuedAt"
+        WHEN EXCLUDED."issuedAt" IS NULL THEN "Invoice"."issuedAt"
+        ELSE EXCLUDED."issuedAt"
+      END,
+      -- dueAt: only update for non-terminal invoices, never from null
+      "dueAt" = CASE
+        WHEN "Invoice".status IN ('paid', 'cancelled') THEN "Invoice"."dueAt"
+        WHEN EXCLUDED."dueAt" IS NULL THEN "Invoice"."dueAt"
+        ELSE EXCLUDED."dueAt"
+      END,
       "dueSource" = CASE
+        WHEN "Invoice".status IN ('paid', 'cancelled') THEN "Invoice"."dueSource"
         WHEN EXCLUDED."dueAt" IS NOT NULL THEN EXCLUDED."dueSource"
         ELSE "Invoice"."dueSource"
       END,
       "dueBasis" = CASE
+        WHEN "Invoice".status IN ('paid', 'cancelled') THEN "Invoice"."dueBasis"
         WHEN EXCLUDED."dueAt" IS NOT NULL THEN EXCLUDED."dueBasis"
         ELSE "Invoice"."dueBasis"
       END,
       "dueReason" = CASE
+        WHEN "Invoice".status IN ('paid', 'cancelled') THEN "Invoice"."dueReason"
         WHEN EXCLUDED."dueAt" IS NOT NULL THEN EXCLUDED."dueReason"
         ELSE "Invoice"."dueReason"
       END,
@@ -434,16 +448,30 @@ export async function bulkUpsertInvoices(
           WHEN "Invoice".status IN ('paid', 'cancelled') THEN "Invoice".outstanding
           ELSE EXCLUDED.outstanding
         END,
-        "dueAt" = COALESCE(EXCLUDED."dueAt", "Invoice"."dueAt"),
+        -- issuedAt: only update for non-terminal invoices, never from null
+        "issuedAt" = CASE
+          WHEN "Invoice".status IN ('paid', 'cancelled') THEN "Invoice"."issuedAt"
+          WHEN EXCLUDED."issuedAt" IS NULL THEN "Invoice"."issuedAt"
+          ELSE EXCLUDED."issuedAt"
+        END,
+        -- dueAt: only update for non-terminal invoices, never from null
+        "dueAt" = CASE
+          WHEN "Invoice".status IN ('paid', 'cancelled') THEN "Invoice"."dueAt"
+          WHEN EXCLUDED."dueAt" IS NULL THEN "Invoice"."dueAt"
+          ELSE EXCLUDED."dueAt"
+        END,
         "dueSource" = CASE
+          WHEN "Invoice".status IN ('paid', 'cancelled') THEN "Invoice"."dueSource"
           WHEN EXCLUDED."dueAt" IS NOT NULL THEN EXCLUDED."dueSource"
           ELSE "Invoice"."dueSource"
         END,
         "dueBasis" = CASE
+          WHEN "Invoice".status IN ('paid', 'cancelled') THEN "Invoice"."dueBasis"
           WHEN EXCLUDED."dueAt" IS NOT NULL THEN EXCLUDED."dueBasis"
           ELSE "Invoice"."dueBasis"
         END,
         "dueReason" = CASE
+          WHEN "Invoice".status IN ('paid', 'cancelled') THEN "Invoice"."dueReason"
           WHEN EXCLUDED."dueAt" IS NOT NULL THEN EXCLUDED."dueReason"
           ELSE "Invoice"."dueReason"
         END,
