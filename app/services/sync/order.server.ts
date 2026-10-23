@@ -1,16 +1,22 @@
 /**
- * Order sync processor for S6.
+ * Order sync processor for S6 (S9 Refs).
  *
- * Maps Shopify Orders with payment terms to Invoices.
- * Only orders with paymentTerms are processed; others are skipped.
+ * Maps Shopify Orders to Invoices based on eligibility rules.
+ *
+ * Eligibility: An order becomes an Invoice when displayFinancialStatus is
+ * PENDING, PARTIALLY_PAID, or AUTHORIZED, AND any of:
+ *   (a) Order has Shopify paymentTerms
+ *   (b) purchasingEntity is a Company whose CompanyLocation maps to an active
+ *       BuyerAccount with explicit defaultTermsDays
+ *   (c) Customer matches a configured tag rule (AccountSource)
  *
  * Order -> Invoice mapping:
  * - orderId: Order GID
- * - buyerAccountId: From purchasingEntity (Company) or customer tags
+ * - buyerAccountId: From eligibility check
  * - total: From totalPriceSet
  * - outstanding: Same as total on create; updated on payment
- * - dueAt: From paymentTerms schedule
- * - dueSource: 'schedule' if from Shopify payment schedule
+ * - dueAt: From S9 inference (schedule > override > account > tag > shop)
+ * - dueSource/dueBasis: From S9 inference result
  *
  * Idempotent: Uses upsert with ON CONFLICT on orderId.
  * 
@@ -23,14 +29,23 @@
 import type { Sql } from "~/lib/db-light.server";
 import type { ShopifyOrder, SyncResult } from "./types";
 import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
+import {
+  checkOrderEligibility,
+  getEligibilityContextByDomain,
+  type EligibilityResult,
+} from "~/lib/invoice-eligibility";
 
 /**
  * Process an Order webhook event.
  *
- * CREATE: Creates Invoice if order has payment terms
+ * CREATE: Creates Invoice if order passes eligibility check
  * UPDATED: Updates Invoice amounts, status, due date
  * CANCELLED: Marks Invoice as cancelled
  * PAID: Marks Invoice as paid, sets outstanding to 0
+ *
+ * Eligibility (S9): Order becomes Invoice when status is PENDING/PARTIALLY_PAID/AUTHORIZED
+ * AND any of: (a) has Shopify paymentTerms, (b) company account has explicit terms,
+ * (c) customer matches a tag rule.
  *
  * S20: triggeredAt parameter kept for API compatibility but not used for ordering.
  * The drain re-fetches from Shopify, so we always have the latest state.
@@ -60,22 +75,10 @@ export async function processOrderWebhook(
     };
   }
 
-  // Skip orders without payment terms
-  if (!order.paymentTerms) {
-    await markWebhookProcessed(sql, webhookId, topic, order.id);
-    return {
-      success: true,
-      action: "skipped",
-      skipReason: "Order has no payment terms",
-    };
-  }
+  // Get shop and eligibility context
+  const contextResult = await getEligibilityContextByDomain(sql, shopDomain);
 
-  // Get shop
-  const [shop] = await sql<{ id: string }[]>`
-    SELECT id FROM "Shop" WHERE domain = ${shopDomain}
-  `;
-
-  if (!shop) {
+  if (!contextResult) {
     return {
       success: false,
       action: "skipped",
@@ -83,34 +86,71 @@ export async function processOrderWebhook(
     };
   }
 
-  const shopId = shop.id;
+  const { shopId, context } = contextResult;
 
-  // Handle CANCELLED and PAID topics first - they update existing invoices
-  // and don't need buyer account resolution
+  // Handle CANCELLED topic - updates existing invoices only
   if (topic === "ORDERS_CANCELLED") {
     return await cancelInvoice(sql, shopId, order.id, webhookId);
   }
 
+  // Handle PAID topic - updates existing invoices only
   if (topic === "ORDERS_PAID") {
     return await markInvoicePaid(sql, shopId, order.id, webhookId);
   }
 
-  // Resolve buyer account from purchasing entity
-  const buyerAccountId = await resolveBuyerAccount(sql, shopId, order);
+  // Check if Invoice already exists for this order
+  // If it exists, ALWAYS update it regardless of eligibility (for status changes,
+  // tag/terms changes, etc.) - eligibility only gates CREATION
+  const [existingInvoice] = await sql<{ id: string; buyerAccountId: string }[]>`
+    SELECT id, "buyerAccountId" FROM "Invoice"
+    WHERE "shopId" = ${shopId} AND "orderId" = ${order.id}
+  `;
 
-  if (!buyerAccountId) {
-    // Order has payment terms but we can't find a buyer account
-    // This can happen if the company hasn't been synced yet
-    // Return a failure so the message can be retried
+  if (existingInvoice) {
+    // Invoice exists - update it with latest order data
+    const eligibility = await checkOrderEligibility(sql, order, context);
+    const invoiceData = mapOrderToInvoiceWithEligibility(
+      shopId,
+      eligibility.buyerAccountId ?? existingInvoice.buyerAccountId,
+      order,
+      eligibility
+    );
+    const result = await upsertInvoice(sql, invoiceData);
+    await markWebhookProcessed(sql, webhookId, topic, order.id, shopDomain);
+    return result;
+  }
+
+  // No existing Invoice - check eligibility for CREATION
+  const eligibility = await checkOrderEligibility(sql, order, context);
+
+  if (!eligibility.eligible) {
+    // Check if this is a retryable failure (no_buyer_account)
+    if (eligibility.retryable) {
+      // Do NOT mark webhook as processed - let it retry
+      return {
+        success: false,
+        action: "skipped",
+        error: eligibility.explanation,
+        retryable: true,
+      };
+    }
+
+    // Permanent skip (retail, ineligible status)
+    await markWebhookProcessed(sql, webhookId, topic, order.id, shopDomain);
     return {
-      success: false,
+      success: true,
       action: "skipped",
-      error: `Buyer account not found for order ${order.id}. Company may not be synced yet.`,
+      skipReason: eligibility.explanation,
     };
   }
 
-  // CREATE or UPDATED: Upsert invoice (re-fetched data is always latest)
-  const invoiceData = mapOrderToInvoice(shopId, buyerAccountId, order);
+  // Eligible - create Invoice
+  const invoiceData = mapOrderToInvoiceWithEligibility(
+    shopId,
+    eligibility.buyerAccountId!,
+    order,
+    eligibility
+  );
   const result = await upsertInvoice(sql, invoiceData);
 
   await markWebhookProcessed(sql, webhookId, topic, order.id, shopDomain);
@@ -119,67 +159,9 @@ export async function processOrderWebhook(
 }
 
 /**
- * Resolve the BuyerAccount for an order.
- *
- * Order of resolution:
- * 1. purchasingEntity.location (CompanyLocation) -> BuyerAccount by companyLocationId
- * 2. purchasingEntity.company -> BuyerAccount by companyId (first location)
- * 3. customer with tags -> BuyerAccount by customerId (TAGGED_CUSTOMER)
- *
- * @param sql - postgres.js SQL client
- * @param shopId - Our internal shop ID
- * @param order - Order data
- * @returns BuyerAccount ID or null if not found
+ * Invoice data structure for upsert operations.
  */
-async function resolveBuyerAccount(
-  sql: Sql,
-  shopId: string,
-  order: ShopifyOrder
-): Promise<string | null> {
-  const purchasingEntity = order.purchasingEntity;
-
-  // Try CompanyLocation first (most specific)
-  if (purchasingEntity?.location?.id) {
-    const [account] = await sql<{ id: string }[]>`
-      SELECT id FROM "BuyerAccount"
-      WHERE "shopId" = ${shopId}
-        AND "companyLocationId" = ${purchasingEntity.location.id}
-    `;
-    if (account) return account.id;
-  }
-
-  // Try Company (any location for that company)
-  if (purchasingEntity?.company?.id) {
-    const [account] = await sql<{ id: string }[]>`
-      SELECT id FROM "BuyerAccount"
-      WHERE "shopId" = ${shopId}
-        AND "companyId" = ${purchasingEntity.company.id}
-      LIMIT 1
-    `;
-    if (account) return account.id;
-  }
-
-  // Try customer (for tagged customers)
-  if (order.customer?.id) {
-    const [account] = await sql<{ id: string }[]>`
-      SELECT id FROM "BuyerAccount"
-      WHERE "shopId" = ${shopId}
-        AND "customerId" = ${order.customer.id}
-    `;
-    if (account) return account.id;
-  }
-
-  return null;
-}
-
-/**
- * Map Order to Invoice insert data.
- */
-export function mapOrderToInvoice(
-  shopId: string,
-  buyerAccountId: string,
-  order: ShopifyOrder
-): {
+export interface InvoiceData {
   shopId: string;
   buyerAccountId: string;
   orderId: string;
@@ -188,18 +170,66 @@ export function mapOrderToInvoice(
   outstanding: string;
   issuedAt: Date;
   dueAt: Date | null;
-  dueSource: "schedule" | "none";
+  dueSource: "schedule" | "override" | "inferred" | "none";
   dueBasis: string | null;
   dueReason: string | null;
   status: "open" | "paid" | "cancelled";
-} {
+}
+
+/**
+ * Map Order to Invoice data using eligibility result.
+ * Uses S9 due date inference from the eligibility check.
+ */
+export function mapOrderToInvoiceWithEligibility(
+  shopId: string,
+  buyerAccountId: string,
+  order: ShopifyOrder,
+  eligibility: EligibilityResult
+): InvoiceData {
   const total = order.totalPriceSet?.shopMoney.amount ?? "0.00";
-  // Use processedAt if available (for backdated orders via orderCreate), else createdAt
   const issuedAt = new Date(order.processedAt ?? order.createdAt);
 
-  // Extract due date from payment schedule
+  // Use due date from S9 inference (eligibility result)
+  const dueDate = eligibility.dueDate;
+
+  // Determine status
+  let status: "open" | "paid" | "cancelled" = "open";
+  if (order.cancelledAt) {
+    status = "cancelled";
+  } else if (order.displayFinancialStatus === "PAID") {
+    status = "paid";
+  }
+
+  return {
+    shopId,
+    buyerAccountId,
+    orderId: order.id,
+    name: order.name,
+    total,
+    outstanding: status === "paid" ? "0.00" : total,
+    issuedAt,
+    dueAt: dueDate?.dueAt ?? null,
+    dueSource: dueDate?.dueSource ?? "none",
+    dueBasis: dueDate?.basis ?? null,
+    dueReason: dueDate?.reason ?? null,
+    status,
+  };
+}
+
+/**
+ * Map Order to Invoice data (legacy, for orders with Shopify paymentTerms).
+ * @deprecated Use mapOrderToInvoiceWithEligibility instead
+ */
+export function mapOrderToInvoice(
+  shopId: string,
+  buyerAccountId: string,
+  order: ShopifyOrder
+): InvoiceData {
+  const total = order.totalPriceSet?.shopMoney.amount ?? "0.00";
+  const issuedAt = new Date(order.processedAt ?? order.createdAt);
+
   let dueAt: Date | null = null;
-  let dueSource: "schedule" | "none" = "none";
+  let dueSource: "schedule" | "override" | "inferred" | "none" = "none";
   let dueBasis: string | null = null;
   let dueReason: string | null = null;
 
@@ -208,11 +238,10 @@ export function mapOrderToInvoice(
     if (schedule.dueAt) {
       dueAt = new Date(schedule.dueAt);
       dueSource = "schedule";
-      dueBasis = null; // Schedule-derived, not inferred
+      dueBasis = null;
       dueReason = `Payment schedule: ${order.paymentTerms.paymentTermsName}`;
     }
   } else if (order.paymentTerms?.dueInDays != null) {
-    // Calculate due date from dueInDays
     dueAt = new Date(issuedAt);
     dueAt.setDate(dueAt.getDate() + order.paymentTerms.dueInDays);
     dueSource = "schedule";
@@ -220,7 +249,6 @@ export function mapOrderToInvoice(
     dueReason = `${order.paymentTerms.paymentTermsName}: Net ${order.paymentTerms.dueInDays} days`;
   }
 
-  // Determine status
   let status: "open" | "paid" | "cancelled" = "open";
   if (order.cancelledAt) {
     status = "cancelled";
@@ -253,7 +281,7 @@ export function mapOrderToInvoice(
  */
 async function upsertInvoice(
   sql: Sql,
-  data: ReturnType<typeof mapOrderToInvoice>
+  data: InvoiceData
 ): Promise<SyncResult> {
   const [result] = await sql<{ id: string; action: string }[]>`
     INSERT INTO "Invoice" (
@@ -415,7 +443,7 @@ async function markInvoicePaid(
  */
 export async function bulkUpsertInvoices(
   sql: Sql,
-  invoices: ReturnType<typeof mapOrderToInvoice>[]
+  invoices: InvoiceData[]
 ): Promise<number> {
   if (invoices.length === 0) return 0;
 

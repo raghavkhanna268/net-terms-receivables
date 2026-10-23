@@ -65,6 +65,7 @@ describeWithDb("Order Sync", () => {
         id: `gid://shopify/Order/ord-${TEST_SUFFIX}-1`,
         name: "#1001",
         createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
         totalPriceSet: {
           shopMoney: { amount: "50000.00", currencyCode: "INR" },
         },
@@ -106,15 +107,18 @@ describeWithDb("Order Sync", () => {
       expect(invoice.dueSource).toBe("schedule");
     });
 
-    it("skips orders without payment terms", async () => {
+    it("skips retail orders (no payment terms, no B2B, no tag) as permanent skip", async () => {
+      // A retail order with no payment terms and no company location is a permanent skip
       const order: ShopifyOrder = {
         id: `gid://shopify/Order/ord-${TEST_SUFFIX}-2`,
         name: "#1002",
         createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
         totalPriceSet: {
           shopMoney: { amount: "1000.00", currencyCode: "INR" },
         },
         paymentTerms: null, // No payment terms
+        // No purchasingEntity (retail order)
       };
 
       const result = await processOrderWebhook(
@@ -127,7 +131,10 @@ describeWithDb("Order Sync", () => {
 
       expect(result.success).toBe(true);
       expect(result.action).toBe("skipped");
-      expect(result.skipReason).toContain("no payment terms");
+      // The message explains why it was skipped (retail order)
+      expect(result.skipReason).toContain("Retail order");
+      // Retryable should be undefined (permanent skip)
+      expect(result.retryable).toBeUndefined();
 
       // No invoice should be created
       const invoices = await sql`
@@ -136,7 +143,8 @@ describeWithDb("Order Sync", () => {
       expect(invoices).toHaveLength(0);
     });
 
-    it("fails when company not yet synced (returns false for retry)", async () => {
+    it("fails with retryable when B2B location not synced yet (company sync pending)", async () => {
+      // B2B order with company location but no BuyerAccount yet - should be retryable
       const unknownCompanyId = `gid://shopify/Company/unknown-${TEST_SUFFIX}`;
       const unknownLocationId = `gid://shopify/CompanyLocation/unknown-${TEST_SUFFIX}`;
 
@@ -144,6 +152,7 @@ describeWithDb("Order Sync", () => {
         id: `gid://shopify/Order/ord-${TEST_SUFFIX}-3`,
         name: "#1003",
         createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
         totalPriceSet: {
           shopMoney: { amount: "25000.00", currencyCode: "INR" },
         },
@@ -169,8 +178,55 @@ describeWithDb("Order Sync", () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain("Buyer account not found");
-      expect(result.error).toContain("Company may not be synced");
+      expect(result.retryable).toBe(true);
+      // The error message explains why it failed (BuyerAccount not found)
+      expect(result.error).toContain("BuyerAccount");
+    });
+
+    it("always updates existing invoice even when eligibility would fail", async () => {
+      // First create an invoice (simulating it was created when eligible)
+      const orderId = `gid://shopify/Order/ord-${TEST_SUFFIX}-update`;
+      await sql`
+        INSERT INTO "Invoice" (
+          "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          "issuedAt", status, "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId}, '#9001', '10000.00', '10000.00',
+          NOW(), 'open', NOW(), NOW()
+        )
+      `;
+
+      // Now process an order update that would NOT be eligible (no payment terms, no company)
+      // But since invoice exists, it should still update
+      const order: ShopifyOrder = {
+        id: orderId,
+        name: "#9001-updated",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
+        totalPriceSet: {
+          shopMoney: { amount: "15000.00", currencyCode: "INR" },
+        },
+        paymentTerms: null, // No payment terms now
+        // No purchasingEntity (would be ineligible for creation)
+      };
+
+      const result = await processOrderWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "ORDERS_UPDATED",
+        order,
+        `wh-ord-${TEST_SUFFIX}-update`
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("updated");
+
+      // Verify invoice was updated (name and total changed)
+      const [invoice] = await sql`
+        SELECT * FROM "Invoice" WHERE "orderId" = ${orderId}
+      `;
+      expect(invoice.name).toBe("#9001-updated");
+      expect(invoice.total).toBe("15000.00");
     });
 
     it("marks invoice as cancelled on ORDERS_CANCELLED", async () => {
@@ -255,6 +311,7 @@ describeWithDb("Order Sync", () => {
         id: `gid://shopify/Order/ord-${TEST_SUFFIX}-6`,
         name: "#1006",
         createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
         totalPriceSet: {
           shopMoney: { amount: "5000.00", currencyCode: "INR" },
         },
@@ -580,6 +637,7 @@ describeWithDb("Order Sync", () => {
         name: "#OPEN-DATES",
         createdAt: "2025-08-01T00:00:00.000Z",
         processedAt: newProcessedAt, // New processedAt
+        displayFinancialStatus: "PENDING",
         totalPriceSet: {
           shopMoney: { amount: "15000.00", currencyCode: "INR" },
         },
@@ -611,9 +669,12 @@ describeWithDb("Order Sync", () => {
       // issuedAt SHOULD be updated for open invoices
       expect(new Date(invoice.issuedAt).toISOString()).toBe(new Date(newProcessedAt).toISOString());
       // dueAt should be recalculated: processedAt + 30 days
-      const expectedDueAt = new Date(newProcessedAt);
-      expectedDueAt.setDate(expectedDueAt.getDate() + 30);
-      expect(new Date(invoice.dueAt).toISOString()).toBe(expectedDueAt.toISOString());
+      // The exact time depends on shop timezone (end-of-day in that timezone)
+      // so we just verify the date portion is correct
+      const actualDueAt = new Date(invoice.dueAt);
+      expect(actualDueAt.getUTCFullYear()).toBe(2025);
+      expect(actualDueAt.getUTCMonth()).toBe(7); // August (0-indexed)
+      expect(actualDueAt.getUTCDate()).toBe(14); // 14th
     });
   });
 
