@@ -1,8 +1,7 @@
 import type { ActionFunctionArgs } from "react-router";
 import { getRequestSql } from "~/lib/request-context.server";
-import { sendSyncMessage } from "~/lib/pgmq.server";
 import { verifyWebhook, normalizeWebhookTopic } from "~/lib/webhook-verify.server";
-import { recordWebhookReceipt, parseTriggeredAt } from "~/lib/webhook-receipts.server";
+import { parseTriggeredAt, recordAndEnqueueSync } from "~/lib/webhook-receipts.server";
 
 /**
  * Webhook handler for order lifecycle events.
@@ -73,30 +72,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   const sql = getRequestSql();
 
-  // S20: Edge idempotency + enqueue in ONE transaction
+  // S20: Edge idempotency + enqueue in ONE transaction (via shared helper)
   // If duplicate: return 200 (skip)
   // If enqueue fails: receipt rolls back, Shopify retry succeeds
-  const result = await sql.begin(async (tx) => {
-    const isNew = await recordWebhookReceipt(tx, shop, webhookId, normalizedTopic, triggeredAt);
-    if (!isNew) {
-      return { duplicate: true };
-    }
-
-    await sendSyncMessage(tx, {
-      topic: normalizedTopic,
-      shop,
-      webhookId,
-      resourceGid,
-      enqueuedAt: new Date().toISOString(),
-      triggeredAt: triggeredAt?.toISOString(),
-    });
-
-    return { duplicate: false };
+  const result = await recordAndEnqueueSync(sql, {
+    shop,
+    webhookId,
+    topic: normalizedTopic,
+    triggeredAt,
+    resourceGid,
   });
 
-  if (result.duplicate) {
+  if (result.status === "duplicate") {
     console.log(`[webhooks.orders] Duplicate ${normalizedTopic} for ${shop}, skipping`);
     return new Response(null, { status: 200 });
+  }
+
+  if (result.status === "error") {
+    console.error(`[webhooks.orders] Enqueue failed for ${shop}:`, result.error);
+    throw result.error;
   }
 
   console.log(`[webhooks.orders] Enqueued ${normalizedTopic} for ${shop}: ${resourceGid}`);

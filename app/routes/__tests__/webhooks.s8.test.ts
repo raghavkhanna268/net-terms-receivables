@@ -39,11 +39,28 @@ vi.mock("~/lib/pgmq.server", () => ({
 // Mock the webhook receipts module (S20)
 const mockRecordWebhookReceipt = vi.fn().mockResolvedValue(true);
 const mockParseTriggeredAt = vi.fn().mockReturnValue(null);
+const mockRecordAndEnqueueSync = vi.fn().mockImplementation(
+  async (_sql, params: { webhookId: string; topic: string; shop: string; resourceGid: string }) => {
+    // Call the sendSyncMessage mock to verify it's called with correct args
+    await mockSendSyncMessage(
+      {},
+      {
+        topic: params.topic,
+        shop: params.shop,
+        webhookId: params.webhookId,
+        resourceGid: params.resourceGid,
+        enqueuedAt: new Date().toISOString(),
+      }
+    );
+    return { status: "enqueued" as const, msgId: "msg-123" };
+  }
+);
 
 vi.mock("~/lib/webhook-receipts.server", () => ({
   recordWebhookReceipt: (...args: unknown[]) => mockRecordWebhookReceipt(...args),
   parseTriggeredAt: (...args: unknown[]) => mockParseTriggeredAt(...args),
   deleteWebhookReceiptsForShop: vi.fn().mockResolvedValue(0),
+  recordAndEnqueueSync: (...args: unknown[]) => mockRecordAndEnqueueSync(...args),
 }));
 
 describe("S8 Webhook Handlers", () => {

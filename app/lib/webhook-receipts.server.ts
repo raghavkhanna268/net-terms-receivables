@@ -88,3 +88,82 @@ export function parseTriggeredAt(request: Request): Date | null {
 
   return parsed;
 }
+
+/**
+ * Result of recordAndEnqueueSync operation.
+ */
+export type RecordAndEnqueueResult =
+  | { status: "enqueued"; msgId: string }
+  | { status: "duplicate" }
+  | { status: "error"; error: Error };
+
+/**
+ * S20 atomic receipt+enqueue helper for sync webhooks.
+ *
+ * Wraps recordWebhookReceipt and sendSyncMessage in ONE transaction.
+ * This is THE critical S20 guarantee:
+ * - If enqueue succeeds, receipt is committed
+ * - If enqueue fails, receipt is rolled back (Shopify retry succeeds)
+ * - If duplicate, skip without enqueue
+ *
+ * All sync webhook routes (companies, company_locations, orders, customers,
+ * draft_orders) MUST use this helper instead of manually calling
+ * sql.begin + recordWebhookReceipt + sendSyncMessage.
+ *
+ * @param sql - postgres.js SQL client (request-scoped, NOT a transaction)
+ * @param params - Webhook parameters and message payload
+ * @returns Result indicating enqueued, duplicate, or error
+ *
+ * @example
+ * ```ts
+ * const result = await recordAndEnqueueSync(sql, {
+ *   shop: "example.myshopify.com",
+ *   webhookId: "abc123",
+ *   topic: "ORDERS_CREATE",
+ *   triggeredAt: new Date("2026-10-23T12:00:00Z"),
+ *   resourceGid: "gid://shopify/Order/123",
+ * });
+ * if (result.status === "duplicate") return new Response(null, { status: 200 });
+ * if (result.status === "error") throw result.error;
+ * // result.status === "enqueued"
+ * ```
+ */
+export async function recordAndEnqueueSync(
+  sql: Sql,
+  params: {
+    shop: string;
+    webhookId: string;
+    topic: string;
+    triggeredAt?: Date | null;
+    resourceGid: string;
+  }
+): Promise<RecordAndEnqueueResult> {
+  const { shop, webhookId, topic, triggeredAt, resourceGid } = params;
+
+  // Lazy import to avoid circular dependencies
+  const { sendSyncMessage } = await import("./pgmq.server");
+
+  try {
+    const result = await sql.begin(async (tx) => {
+      const isNew = await recordWebhookReceipt(tx, shop, webhookId, topic, triggeredAt);
+      if (!isNew) {
+        return { status: "duplicate" as const };
+      }
+
+      const sendResult = await sendSyncMessage(tx, {
+        topic,
+        shop,
+        webhookId,
+        resourceGid,
+        enqueuedAt: new Date().toISOString(),
+        triggeredAt: triggeredAt?.toISOString(),
+      });
+
+      return { status: "enqueued" as const, msgId: sendResult.msgId };
+    });
+
+    return result;
+  } catch (err) {
+    return { status: "error", error: err instanceof Error ? err : new Error(String(err)) };
+  }
+}
