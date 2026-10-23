@@ -22,7 +22,7 @@ export interface RequestStore {
  * 1. workers/app.ts runs each request inside requestContext.run({ getSql, getPrisma? })
  * 2. Session storage calls getRequestSql() to get the current request's SQL client
  * 3. Business routes can call getRequestPrisma() for ORM features (lazy-loaded)
- * 4. ctx.waitUntil closes clients after the response, if they were created
+ * 4. No explicit sql.end(): clients are per-request and are not ended; Hyperdrive manages connection lifecycle (see workers/app.ts, PR #33)
  *
  * The lightweight SQL client (postgres.js) is used for session operations,
  * while Prisma is available for business logic that needs ORM features.
