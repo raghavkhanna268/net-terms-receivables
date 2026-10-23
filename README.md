@@ -189,9 +189,7 @@ The seed script requires an Admin API access token with the following scopes:
 4. Click **Release** to make the version installable
 5. Click **Install app** and select your dev store
 6. Complete the OAuth flow to install the app
-7. After installation, retrieve the access token:
-   - For Dev Dashboard apps, you'll need to capture the token from your app's OAuth callback
-   - Alternatively, use `shopify app token` if you've linked the app via Shopify CLI
+7. After installation, retrieve the access token from your app's OAuth callback handler
 
 For detailed instructions, see [Create apps using the Dev Dashboard](https://shopify.dev/docs/apps/build/dev-dashboard/create-apps-using-dev-dashboard).
 
