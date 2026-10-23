@@ -415,10 +415,18 @@ export async function confirmMatch(
       `;
 
       // Find the match we're confirming
-      const match = matchRows.find((m) => m.id === matchId && m.state === "suggested");
-      if (!match) {
+      const matchRow = matchRows.find((m) => m.id === matchId);
+      if (!matchRow) {
+        return { success: false, error: "Match not found" };
+      }
+      // P3: Return specific error for already-confirmed match
+      if (matchRow.state === "confirmed" || matchRow.state === "pushed") {
+        return { success: false, error: "This match is already confirmed" };
+      }
+      if (matchRow.state !== "suggested") {
         return { success: false, error: "Match not found or already processed" };
       }
+      const match = matchRow;
 
       // STEP 3: Lock invoice rows ORDER BY id (consistent lock order)
       const invoiceIds = [...new Set(matchRows.map((m) => m.invoice_id))].sort();
@@ -437,6 +445,24 @@ export async function confirmMatch(
 
       const invoiceMap = new Map(invoiceRows.map((i) => [i.id, BigInt(i.outstanding_paise)]));
 
+      // STEP 4: Query ALL 'confirmed' matches across ALL payments for these invoices
+      // P2: Count only 'confirmed' (not 'pushed') because 'pushed' is already reflected in Invoice.outstanding
+      const allConfirmedForInvoices = await tx<
+        { invoice_id: string; total_paise: string }[]
+      >`
+        SELECT 
+          "invoiceId" AS invoice_id,
+          (SUM(ROUND(amount * 100)))::text AS total_paise
+        FROM "Match"
+        WHERE "invoiceId" IN ${tx(invoiceIds)}
+          AND "shopId" = ${shopId}
+          AND state = 'confirmed'
+        GROUP BY "invoiceId"
+      `;
+      const invoiceAllocatedCrossPayment = new Map(
+        allConfirmedForInvoices.map((r) => [r.invoice_id, BigInt(r.total_paise)])
+      );
+
       // Calculate total already allocated (confirmed + pushed) for this payment
       const confirmedMatches = matchRows.filter((m) => m.state === "confirmed" || m.state === "pushed");
       const paymentAmountPaise = BigInt(payment.amount_paise);
@@ -450,12 +476,8 @@ export async function confirmMatch(
         return { success: false, error: "Payment fully allocated" };
       }
 
-      // Calculate total already allocated (confirmed + pushed) for this invoice
-      const invoiceAllocated = new Map<string, bigint>();
-      for (const m of confirmedMatches) {
-        const current = invoiceAllocated.get(m.invoice_id) ?? 0n;
-        invoiceAllocated.set(m.invoice_id, current + BigInt(m.amount_paise));
-      }
+      // Use cross-payment confirmed allocations for invoice-side calculation
+      const invoiceAllocated = new Map(invoiceAllocatedCrossPayment);
 
       const invoiceOutstandingPaise = invoiceMap.get(match.invoice_id) ?? 0n;
       const invoiceAlreadyAllocatedPaise = invoiceAllocated.get(match.invoice_id) ?? 0n;
@@ -736,6 +758,24 @@ export async function updateMatchAllocation(
 
       const invoiceMap = new Map(invoiceRows.map((i) => [i.id, BigInt(i.outstanding_paise)]));
 
+      // STEP 4: Query ALL 'confirmed' matches across ALL payments for these invoices
+      // P2: Count only 'confirmed' (not 'pushed') because 'pushed' is already reflected in Invoice.outstanding
+      const allConfirmedForInvoices = await tx<
+        { invoice_id: string; total_paise: string }[]
+      >`
+        SELECT 
+          "invoiceId" AS invoice_id,
+          (SUM(ROUND(amount * 100)))::text AS total_paise
+        FROM "Match"
+        WHERE "invoiceId" IN ${tx(invoiceIds)}
+          AND "shopId" = ${shopId}
+          AND state = 'confirmed'
+        GROUP BY "invoiceId"
+      `;
+      const invoiceAllocatedCrossPayment = new Map(
+        allConfirmedForInvoices.map((r) => [r.invoice_id, BigInt(r.total_paise)])
+      );
+
       // Calculate remaining payment (after confirmed + pushed)
       const confirmedMatches = matchRows.filter((m) => m.state === "confirmed" || m.state === "pushed");
       const paymentAmountPaise = BigInt(payment.amount_paise);
@@ -745,15 +785,9 @@ export async function updateMatchAllocation(
       );
       const remainingPaymentPaise = paymentAmountPaise - alreadyAllocatedPaise;
 
-      // Calculate remaining invoice outstanding (after confirmed + pushed)
-      const invoiceAllocated = new Map<string, bigint>();
-      for (const m of confirmedMatches) {
-        const current = invoiceAllocated.get(m.invoice_id) ?? 0n;
-        invoiceAllocated.set(m.invoice_id, current + BigInt(m.amount_paise));
-      }
-
+      // Use cross-payment confirmed allocations for invoice-side calculation
       const invoiceOutstandingPaise = invoiceMap.get(match.invoice_id) ?? 0n;
-      const invoiceAlreadyAllocatedPaise = invoiceAllocated.get(match.invoice_id) ?? 0n;
+      const invoiceAlreadyAllocatedPaise = invoiceAllocatedCrossPayment.get(match.invoice_id) ?? 0n;
       const invoiceRemainingPaise = invoiceOutstandingPaise - invoiceAlreadyAllocatedPaise;
 
       // Cap the new amount at remaining payment and invoice amounts

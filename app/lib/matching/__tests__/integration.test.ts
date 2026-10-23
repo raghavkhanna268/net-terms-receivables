@@ -1702,3 +1702,573 @@ describeWithDb("Concurrent confirms without deadlock (P2)", () => {
   });
 });
 
+// =============================================================================
+// P1: Cross-payment invoice over-allocation prevention
+// =============================================================================
+
+describeWithDb("Cross-payment invoice over-allocation prevention (P1)", () => {
+  let sql: ReturnType<typeof postgres>;
+  let sql2: ReturnType<typeof postgres>;
+  let testShopId: string;
+  let testBuyerId: string;
+  let testImportId: string;
+
+  const TEST_SHOP_DOMAIN = `cross-payment-test-${Date.now()}.myshopify.com`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+    sql2 = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    // Create test shop
+    const [shop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', NOW(), NOW())
+      RETURNING id
+    `;
+    testShopId = shop.id;
+
+    // Create test buyer
+    const [buyer] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, 'COMPANY',
+        'gid://shopify/Company/cross-payment-test', 'gid://shopify/CompanyLocation/cross-payment-test',
+        'Cross Payment Corp', 'OK', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    testBuyerId = buyer.id;
+
+    // Create test bank import
+    const [bankImport] = await sql<{ id: string }[]>`
+      INSERT INTO "BankImport" (
+        id, "shopId", bank, "fileName", "rowCount", "createdAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, 'hdfc', 'cross-payment-test.csv', 1, NOW()
+      )
+      RETURNING id
+    `;
+    testImportId = bankImport.id;
+  });
+
+  afterAll(async () => {
+    if (sql && testShopId) {
+      await sql`DELETE FROM "rejected_matches" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Match" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+    }
+    if (sql) await sql.end();
+    if (sql2) await sql2.end();
+  });
+
+  it("caps second payment when invoice is already allocated by first payment", async () => {
+    // Create invoice with 1000 paise outstanding
+    const [invoice] = await sql<{ id: string }[]>`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, outstanding, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${testBuyerId},
+        gen_random_uuid()::text, 'INV-CROSS-1', 10.00, 'open', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+
+    // Create payment X with 1000 paise
+    const [paymentX] = await sql<{ id: string }[]>`
+      INSERT INTO "Payment" (
+        id, "shopId", "importId", "valueDate", amount, rail, narration, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${testImportId},
+        NOW(), 10.00, 'NEFT', 'NEFT CR-PAYMENT X INV-CROSS-1', 'unmatched', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+
+    // Create payment Y with 1000 paise
+    const [paymentY] = await sql<{ id: string }[]>`
+      INSERT INTO "Payment" (
+        id, "shopId", "importId", "valueDate", amount, rail, narration, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${testImportId},
+        NOW(), 10.00, 'NEFT', 'NEFT CR-PAYMENT Y INV-CROSS-1', 'unmatched', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+
+    // Create match X -> invoice (1000 paise)
+    const matchIdX = await createMatch(sql, {
+      shopId: testShopId,
+      paymentId: paymentX.id,
+      invoiceId: invoice.id,
+      amountPaise: 1000n,
+      score: 85,
+      reasons: [],
+    });
+
+    // Create match Y -> invoice (1000 paise)
+    const matchIdY = await createMatch(sql, {
+      shopId: testShopId,
+      paymentId: paymentY.id,
+      invoiceId: invoice.id,
+      amountPaise: 1000n,
+      score: 85,
+      reasons: [],
+    });
+
+    // Confirm X first
+    const resultX = await confirmMatch(sql, testShopId, matchIdX, "user-1");
+    expect(resultX.success).toBe(true);
+
+    // Confirm Y - should be capped to 0 or rejected (invoice fully allocated)
+    const resultY = await confirmMatch(sql, testShopId, matchIdY, "user-2");
+    expect(resultY.success).toBe(false);
+    expect(resultY.error).toMatch(/invoice fully allocated|no remaining allocation/i);
+
+    // Verify total confirmed for invoice is <= 1000 paise
+    const [totalResult] = await sql<{ total_paise: string }[]>`
+      SELECT COALESCE(SUM(ROUND(amount * 100)), 0)::text AS total_paise
+      FROM "Match"
+      WHERE "invoiceId" = ${invoice.id}
+        AND state = 'confirmed'
+    `;
+    expect(BigInt(totalResult.total_paise)).toBeLessThanOrEqual(1000n);
+
+    // Cleanup
+    await sql`DELETE FROM "Match" WHERE "invoiceId" = ${invoice.id}`;
+    await sql`DELETE FROM "Payment" WHERE id IN (${paymentX.id}, ${paymentY.id})`;
+    await sql`DELETE FROM "Invoice" WHERE id = ${invoice.id}`;
+  });
+
+  it("handles concurrent confirms from two payments on same invoice without deadlock", async () => {
+    // Create invoice with 1000 paise outstanding
+    const [invoice] = await sql<{ id: string }[]>`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, outstanding, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${testBuyerId},
+        gen_random_uuid()::text, 'INV-CONCURRENT-CROSS', 10.00, 'open', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+
+    // Create payment X with 1000 paise
+    const [paymentX] = await sql<{ id: string }[]>`
+      INSERT INTO "Payment" (
+        id, "shopId", "importId", "valueDate", amount, rail, narration, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${testImportId},
+        NOW(), 10.00, 'NEFT', 'NEFT CR-CONCURRENT X', 'unmatched', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+
+    // Create payment Y with 1000 paise
+    const [paymentY] = await sql<{ id: string }[]>`
+      INSERT INTO "Payment" (
+        id, "shopId", "importId", "valueDate", amount, rail, narration, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${testImportId},
+        NOW(), 10.00, 'NEFT', 'NEFT CR-CONCURRENT Y', 'unmatched', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+
+    // Create matches
+    const matchIdX = await createMatch(sql, {
+      shopId: testShopId,
+      paymentId: paymentX.id,
+      invoiceId: invoice.id,
+      amountPaise: 1000n,
+      score: 85,
+      reasons: [],
+    });
+
+    const matchIdY = await createMatch(sql, {
+      shopId: testShopId,
+      paymentId: paymentY.id,
+      invoiceId: invoice.id,
+      amountPaise: 1000n,
+      score: 85,
+      reasons: [],
+    });
+
+    // Attempt concurrent confirms from different connections
+    const results = await Promise.all([
+      confirmMatch(sql, testShopId, matchIdX, "user-1"),
+      confirmMatch(sql2, testShopId, matchIdY, "user-2"),
+    ]);
+
+    // Check for deadlock errors
+    for (const result of results) {
+      if (!result.success && result.error) {
+        expect(result.error.toLowerCase()).not.toContain("deadlock");
+      }
+    }
+
+    // Exactly one should succeed, the other should fail (invoice fully allocated)
+    const successes = results.filter((r) => r.success);
+    expect(successes.length).toBe(1);
+
+    // Verify total confirmed for invoice is <= 1000 paise
+    const [totalResult] = await sql<{ total_paise: string }[]>`
+      SELECT COALESCE(SUM(ROUND(amount * 100)), 0)::text AS total_paise
+      FROM "Match"
+      WHERE "invoiceId" = ${invoice.id}
+        AND state = 'confirmed'
+    `;
+    expect(BigInt(totalResult.total_paise)).toBeLessThanOrEqual(1000n);
+
+    // Cleanup
+    await sql`DELETE FROM "Match" WHERE "invoiceId" = ${invoice.id}`;
+    await sql`DELETE FROM "Payment" WHERE id IN (${paymentX.id}, ${paymentY.id})`;
+    await sql`DELETE FROM "Invoice" WHERE id = ${invoice.id}`;
+  });
+});
+
+// =============================================================================
+// P2: Pushed allocation handling
+// =============================================================================
+
+describeWithDb("Pushed allocation handling (P2)", () => {
+  let sql: ReturnType<typeof postgres>;
+  let testShopId: string;
+  let testBuyerId: string;
+  let testImportId: string;
+
+  const TEST_SHOP_DOMAIN = `pushed-alloc-test-${Date.now()}.myshopify.com`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    // Create test shop
+    const [shop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', NOW(), NOW())
+      RETURNING id
+    `;
+    testShopId = shop.id;
+
+    // Create test buyer
+    const [buyer] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, 'COMPANY',
+        'gid://shopify/Company/pushed-alloc-test', 'gid://shopify/CompanyLocation/pushed-alloc-test',
+        'Pushed Alloc Corp', 'OK', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    testBuyerId = buyer.id;
+
+    // Create test bank import
+    const [bankImport] = await sql<{ id: string }[]>`
+      INSERT INTO "BankImport" (
+        id, "shopId", bank, "fileName", "rowCount", "createdAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, 'hdfc', 'pushed-alloc-test.csv', 1, NOW()
+      )
+      RETURNING id
+    `;
+    testImportId = bankImport.id;
+  });
+
+  afterAll(async () => {
+    if (sql && testShopId) {
+      await sql`DELETE FROM "rejected_matches" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Match" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+    }
+    if (sql) await sql.end();
+  });
+
+  it("does not double-count pushed allocations on invoice side", async () => {
+    // Create invoice with 2000 paise outstanding (this simulates after S17 has pushed and reduced outstanding)
+    // If we had started at 3000 and pushed 1000, outstanding would now be 2000
+    const [invoice] = await sql<{ id: string }[]>`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, outstanding, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${testBuyerId},
+        gen_random_uuid()::text, 'INV-PUSHED-1', 20.00, 'open', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+
+    // Create payment A (already pushed, 1000 paise - simulating S17 has already applied it)
+    const [paymentA] = await sql<{ id: string }[]>`
+      INSERT INTO "Payment" (
+        id, "shopId", "importId", "valueDate", amount, rail, narration, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${testImportId},
+        NOW(), 10.00, 'NEFT', 'NEFT CR-PUSHED A', 'matched', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+
+    // Create pushed match A -> invoice (1000 paise, already pushed)
+    await sql`
+      INSERT INTO "Match" (
+        id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${paymentA.id}, ${invoice.id},
+        10.00, 85, '[]'::jsonb, 'pushed', NOW(), NOW()
+      )
+    `;
+
+    // Create payment B (new, 2000 paise)
+    const [paymentB] = await sql<{ id: string }[]>`
+      INSERT INTO "Payment" (
+        id, "shopId", "importId", "valueDate", amount, rail, narration, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${testImportId},
+        NOW(), 20.00, 'NEFT', 'NEFT CR-NEW B INV-PUSHED-1', 'unmatched', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+
+    // Create match B -> invoice (2000 paise suggested)
+    const matchIdB = await createMatch(sql, {
+      shopId: testShopId,
+      paymentId: paymentB.id,
+      invoiceId: invoice.id,
+      amountPaise: 2000n,
+      score: 85,
+      reasons: [],
+    });
+
+    // Confirm B - should succeed with full 2000 paise
+    // Because: invoice.outstanding is 2000, and we only count 'confirmed' (not 'pushed')
+    // If we wrongly counted 'pushed', we'd have 2000 - 1000 = 1000 remaining, and cap at 1000
+    const resultB = await confirmMatch(sql, testShopId, matchIdB, "user-1");
+    expect(resultB.success).toBe(true);
+
+    // Verify match B was confirmed at 2000 paise (full amount, not capped)
+    const [matchB] = await sql<{ amount_paise: string; state: string }[]>`
+      SELECT (ROUND(amount * 100))::text AS amount_paise, state
+      FROM "Match"
+      WHERE id = ${matchIdB}
+    `;
+    expect(matchB.state).toBe("confirmed");
+    expect(BigInt(matchB.amount_paise)).toBe(2000n);
+
+    // Cleanup
+    await sql`DELETE FROM "Match" WHERE "invoiceId" = ${invoice.id}`;
+    await sql`DELETE FROM "Payment" WHERE id IN (${paymentA.id}, ${paymentB.id})`;
+    await sql`DELETE FROM "Invoice" WHERE id = ${invoice.id}`;
+  });
+
+  it("still counts pushed allocations on payment side", async () => {
+    // Create two invoices
+    const [invoice1] = await sql<{ id: string }[]>`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, outstanding, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${testBuyerId},
+        gen_random_uuid()::text, 'INV-PAYMENT-SIDE-1', 10.00, 'open', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+
+    const [invoice2] = await sql<{ id: string }[]>`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, outstanding, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${testBuyerId},
+        gen_random_uuid()::text, 'INV-PAYMENT-SIDE-2', 10.00, 'open', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+
+    // Create payment with 1500 paise
+    const [payment] = await sql<{ id: string }[]>`
+      INSERT INTO "Payment" (
+        id, "shopId", "importId", "valueDate", amount, rail, narration, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${testImportId},
+        NOW(), 15.00, 'NEFT', 'NEFT CR-PAYMENT SIDE TEST', 'partial', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+
+    // Create pushed match to invoice1 (1000 paise, already pushed)
+    await sql`
+      INSERT INTO "Match" (
+        id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${payment.id}, ${invoice1.id},
+        10.00, 85, '[]'::jsonb, 'pushed', NOW(), NOW()
+      )
+    `;
+
+    // Create suggested match to invoice2 (1000 paise)
+    const matchId2 = await createMatch(sql, {
+      shopId: testShopId,
+      paymentId: payment.id,
+      invoiceId: invoice2.id,
+      amountPaise: 1000n,
+      score: 85,
+      reasons: [],
+    });
+
+    // Confirm match to invoice2 - should be capped at 500 paise (1500 - 1000 pushed = 500 remaining)
+    const result = await confirmMatch(sql, testShopId, matchId2, "user-1");
+    expect(result.success).toBe(true);
+
+    // Verify match was capped at 500 paise
+    const [match2] = await sql<{ amount_paise: string; state: string }[]>`
+      SELECT (ROUND(amount * 100))::text AS amount_paise, state
+      FROM "Match"
+      WHERE id = ${matchId2}
+    `;
+    expect(match2.state).toBe("confirmed");
+    expect(BigInt(match2.amount_paise)).toBe(500n);
+
+    // Cleanup
+    await sql`DELETE FROM "Match" WHERE "paymentId" = ${payment.id}`;
+    await sql`DELETE FROM "Payment" WHERE id = ${payment.id}`;
+    await sql`DELETE FROM "Invoice" WHERE id IN (${invoice1.id}, ${invoice2.id})`;
+  });
+});
+
+// =============================================================================
+// P3: Already confirmed match error
+// =============================================================================
+
+describeWithDb("Already confirmed match error (P3)", () => {
+  let sql: ReturnType<typeof postgres>;
+  let testShopId: string;
+  let testBuyerId: string;
+  let testImportId: string;
+
+  const TEST_SHOP_DOMAIN = `already-confirmed-test-${Date.now()}.myshopify.com`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    // Create test shop
+    const [shop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', NOW(), NOW())
+      RETURNING id
+    `;
+    testShopId = shop.id;
+
+    // Create test buyer
+    const [buyer] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, 'COMPANY',
+        'gid://shopify/Company/already-confirmed-test', 'gid://shopify/CompanyLocation/already-confirmed-test',
+        'Already Confirmed Corp', 'OK', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    testBuyerId = buyer.id;
+
+    // Create test bank import
+    const [bankImport] = await sql<{ id: string }[]>`
+      INSERT INTO "BankImport" (
+        id, "shopId", bank, "fileName", "rowCount", "createdAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, 'hdfc', 'already-confirmed-test.csv', 1, NOW()
+      )
+      RETURNING id
+    `;
+    testImportId = bankImport.id;
+  });
+
+  afterAll(async () => {
+    if (sql && testShopId) {
+      await sql`DELETE FROM "rejected_matches" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Match" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+    }
+    if (sql) await sql.end();
+  });
+
+  it("returns specific error when confirming already-confirmed match", async () => {
+    // Create invoice
+    const [invoice] = await sql<{ id: string }[]>`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, outstanding, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${testBuyerId},
+        gen_random_uuid()::text, 'INV-ALREADY-CONFIRMED', 10.00, 'open', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+
+    // Create payment
+    const [payment] = await sql<{ id: string }[]>`
+      INSERT INTO "Payment" (
+        id, "shopId", "importId", "valueDate", amount, rail, narration, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${testImportId},
+        NOW(), 10.00, 'NEFT', 'NEFT CR-ALREADY CONFIRMED TEST', 'unmatched', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+
+    // Create suggested match
+    const matchId = await createMatch(sql, {
+      shopId: testShopId,
+      paymentId: payment.id,
+      invoiceId: invoice.id,
+      amountPaise: 1000n,
+      score: 85,
+      reasons: [],
+    });
+
+    // Confirm once - should succeed
+    const result1 = await confirmMatch(sql, testShopId, matchId, "user-1");
+    expect(result1.success).toBe(true);
+
+    // Try to confirm again - should fail with specific error
+    const result2 = await confirmMatch(sql, testShopId, matchId, "user-2");
+    expect(result2.success).toBe(false);
+    expect(result2.error).toBe("This match is already confirmed");
+
+    // Cleanup
+    await sql`DELETE FROM "Match" WHERE "invoiceId" = ${invoice.id}`;
+    await sql`DELETE FROM "Payment" WHERE id = ${payment.id}`;
+    await sql`DELETE FROM "Invoice" WHERE id = ${invoice.id}`;
+  });
+});
+

@@ -109,16 +109,37 @@ All matcher actions are idempotent:
 The `confirmMatch` function runs in a **transaction with FOR UPDATE locks** to prevent over-allocation:
 
 1. Locks the payment row and calculates remaining unallocated amount
-2. Locks the invoice row and calculates remaining outstanding
-3. Caps the allocation at the smaller of: requested amount, remaining payment, remaining invoice
-4. **Drops competing suggestions** for the same payment (all buyers, not just the confirmed one)
-5. Updates payment status to `partial` or `matched` based on total allocations
-6. Learns PayerAlias from the confirmed match
+2. Locks all match rows for this payment (ORDER BY id for consistent lock order)
+3. Locks all invoice rows (ORDER BY id for consistent lock order)
+4. Queries ALL confirmed matches across ALL payments for the locked invoices
+5. Caps the allocation at the smaller of: requested amount, remaining payment, remaining invoice
+6. **Drops competing suggestions** for the same payment (other buyers, plus same-buyer suggestions that no longer fit)
+7. Updates payment status to `partial` or `matched` based on total allocations
+8. Learns PayerAlias from the confirmed match
 
 This ensures that concurrent confirms cannot:
 - Allocate more than the payment amount across all invoices
-- Allocate more than an invoice's outstanding balance
+- Allocate more than an invoice's outstanding balance across all payments
 - Leave competing suggestions for a fully-allocated payment
+
+## Pushed vs Confirmed Allocation Handling
+
+Match states for allocation tracking:
+
+| State | Payment-side | Invoice-side | Description |
+|-------|--------------|--------------|-------------|
+| `confirmed` | ✓ Counted | ✓ Counted | Merchant confirmed, awaiting S17 push |
+| `pushed` | ✓ Counted | ✗ Not counted | S17 applied, Invoice.outstanding already reduced |
+
+**Why the difference?**
+
+- **Payment-side**: The payment amount is fixed. Both `confirmed` and `pushed` allocations consume the payment, so we count both to calculate remaining payment capacity.
+
+- **Invoice-side**: When S17 pushes a match, it calls `orderMarkAsPaid` which reduces `Invoice.outstanding`. Counting `pushed` allocations again would double-count because the outstanding is already lowered. We only count `confirmed` allocations that haven't yet been applied to the invoice balance.
+
+This ensures accurate cap calculations when:
+1. Multiple payments target the same invoice
+2. Some matches are pushed while others are still confirmed
 
 ## Gated Account Exclusion
 
