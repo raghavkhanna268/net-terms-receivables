@@ -11,12 +11,16 @@ on:
       - main
     paths:
       - 'prisma/**'
+  workflow_dispatch:
 
 jobs:
   migrate:
     name: Run Prisma Migrations
     runs-on: ubuntu-latest
-    if: ${{ vars.ENABLE_MIGRATIONS != 'false' }}
+    # Allow push (already branch-filtered) or manual dispatch on main only
+    if: >-
+      vars.ENABLE_MIGRATIONS != 'false' &&
+      (github.event_name == 'push' || github.ref == 'refs/heads/main')
 
     steps:
       - name: Checkout code
