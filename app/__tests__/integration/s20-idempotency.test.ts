@@ -219,13 +219,15 @@ describeWithDb("S20 Idempotency: recordAndEnqueueSync atomicity", () => {
   beforeEach(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
     await sql`DELETE FROM webhook_receipts WHERE shop = ${TEST_SHOP}`;
-    // Clean up any test messages from s6_sync queue
-    await sql`SELECT pgmq.purge('s6_sync')`.catch(() => {});
+    // Clean up only THIS file's messages from s6_sync queue (filter by TEST_SHOP)
+    // Never use pgmq.purge on shared queues - other test files run in parallel
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP}`.catch(() => {});
   });
 
   afterEach(async () => {
     vi.restoreAllMocks();
     await sql`DELETE FROM webhook_receipts WHERE shop = ${TEST_SHOP}`;
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP}`.catch(() => {});
     await sql.end();
   });
 
@@ -428,7 +430,9 @@ describeWithDb("S20 Idempotency: Full webhook route with HMAC-signed request", (
   beforeEach(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
     await sql`DELETE FROM webhook_receipts WHERE shop = ${TEST_SHOP}`;
-    await sql`SELECT pgmq.purge('s6_sync')`.catch(() => {});
+    // Clean up only THIS file's messages from s6_sync queue (filter by TEST_SHOP)
+    // Never use pgmq.purge on shared queues - other test files run in parallel
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP}`.catch(() => {});
     vi.stubEnv("SHOPIFY_API_SECRET", TEST_SECRET);
   });
 
@@ -436,6 +440,7 @@ describeWithDb("S20 Idempotency: Full webhook route with HMAC-signed request", (
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
     await sql`DELETE FROM webhook_receipts WHERE shop = ${TEST_SHOP}`;
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP}`.catch(() => {});
     await sql.end();
   });
 

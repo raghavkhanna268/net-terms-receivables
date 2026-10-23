@@ -240,6 +240,24 @@ describe("S6 Webhook Handlers", () => {
       expect(response.status).toBe(200);
       expect(mockSendSyncMessage).not.toHaveBeenCalled();
     });
+
+    it("throws when recordAndEnqueueSync returns error", async () => {
+      mockRecordAndEnqueueSync.mockResolvedValueOnce({
+        status: "error",
+        error: new Error("Simulated enqueue failure"),
+      });
+
+      const { action } = await import("../webhooks.companies");
+      const request = createMockRequest(
+        "https://example.com/webhooks/companies",
+        { admin_graphql_api_id: TEST_GID },
+        "companies/create"
+      );
+
+      await expect(action(createActionArgs(request))).rejects.toThrow(
+        "Simulated enqueue failure"
+      );
+    });
   });
 
   describe("webhooks.company_locations", () => {

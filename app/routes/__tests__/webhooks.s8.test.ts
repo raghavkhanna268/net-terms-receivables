@@ -227,6 +227,24 @@ describe("S8 Webhook Handlers", () => {
       expect(response.status).toBe(200);
       expect(mockSendSyncMessage).not.toHaveBeenCalled();
     });
+
+    it("throws when recordAndEnqueueSync returns error", async () => {
+      mockRecordAndEnqueueSync.mockResolvedValueOnce({
+        status: "error",
+        error: new Error("Simulated enqueue failure"),
+      });
+
+      const { action } = await import("../webhooks.customers");
+      const request = createMockRequest(
+        "https://example.com/webhooks/customers",
+        { admin_graphql_api_id: TEST_CUSTOMER_GID },
+        "customers/create"
+      );
+
+      await expect(action(createActionArgs(request))).rejects.toThrow(
+        "Simulated enqueue failure"
+      );
+    });
   });
 
   describe("webhooks.draft_orders", () => {
@@ -330,6 +348,24 @@ describe("S8 Webhook Handlers", () => {
 
       expect(response.status).toBe(200);
       expect(mockSendSyncMessage).not.toHaveBeenCalled();
+    });
+
+    it("throws when recordAndEnqueueSync returns error", async () => {
+      mockRecordAndEnqueueSync.mockResolvedValueOnce({
+        status: "error",
+        error: new Error("Simulated enqueue failure"),
+      });
+
+      const { action } = await import("../webhooks.draft_orders");
+      const request = createMockRequest(
+        "https://example.com/webhooks/draft_orders",
+        { admin_graphql_api_id: TEST_DRAFT_ORDER_GID },
+        "draft_orders/create"
+      );
+
+      await expect(action(createActionArgs(request))).rejects.toThrow(
+        "Simulated enqueue failure"
+      );
     });
   });
 });
