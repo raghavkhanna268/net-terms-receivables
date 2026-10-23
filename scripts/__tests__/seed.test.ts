@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from "vitest";
 import {
   SEED_TAG,
   SEED_PREFIX,
@@ -7,6 +7,8 @@ import {
   LOCATION_TERMS,
   API_VERSION,
   graphql,
+  logGraphQLErrors,
+  logUserErrors,
   checkDevStore,
   checkB2BSupport,
   fetchPaymentTermsTemplates,
@@ -20,10 +22,25 @@ import {
   seedTaggedCustomerOrders,
   TAGGED_CUSTOMER_SEEDS,
   TAGGED_ORDER_DISTRIBUTION,
+  B2B_ORDER_CREATE_MUTATION,
+  TAGGED_CUSTOMER_ORDER_CREATE_MUTATION,
+  COMPANY_CREATE_MUTATION,
+  COMPANY_LOCATION_CREATE_MUTATION,
+  buildCompanyCreateInput,
+  buildCompanyLocationCreateInput,
+  buildTaggedCustomerOrderInput,
+  buildB2BOrderInput,
+  getIndiaProvinceCode,
+  getIndiaAddressInfo,
+  INDIA_CITY_ADDRESS_INFO,
   type SeedState,
   type GraphQLResponse,
+  type UserError,
 } from "../seed";
 import { inferDueDate } from "~/lib/due-date";
+import { readFileSync } from "fs";
+import { resolve } from "path";
+import { buildClientSchema, parse, validate, coerceInputValue, type GraphQLSchema, type GraphQLInputType } from "graphql";
 
 /**
  * Unit tests for the seed script (orderCreate with processedAt version).
@@ -66,6 +83,7 @@ function createMockState(overrides: Partial<SeedState> = {}): SeedState {
     createdCount: { companies: 0, locations: 0, orders: 0, dbRules: 0, dbAccounts: 0 },
     skippedCount: { companies: 0, orders: 0 },
     deletedCount: { companies: 0, orders: 0 },
+    failedCount: { locations: 0, orders: 0 },
     ordersWithShopifyTerms: 0,
     ordersWithoutShopifyTerms: 0,
     overdueOrdersCount: 0,
@@ -1114,5 +1132,384 @@ describe("Dynamic Currency", () => {
   it("formatCurrency formats amounts with currency code", () => {
     expect(formatCurrency(50000, "USD")).toBe("USD 50,000");
     expect(formatCurrency(100000, "INR")).toBe("INR 100,000");
+  });
+});
+
+describe("GraphQL Document Validation against Admin API 2026-10 Schema", () => {
+  let schema: GraphQLSchema;
+
+  beforeAll(() => {
+    const schemaPath = resolve(__dirname, "../../test/fixtures/admin-2026-10.schema.json");
+    const schemaJson = JSON.parse(readFileSync(schemaPath, "utf-8"));
+    schema = buildClientSchema(schemaJson.data);
+  });
+
+  it("B2B_ORDER_CREATE_MUTATION is valid against 2026-10 schema", () => {
+    const document = parse(B2B_ORDER_CREATE_MUTATION);
+    const errors = validate(schema, document);
+    expect(errors).toEqual([]);
+  });
+
+  it("TAGGED_CUSTOMER_ORDER_CREATE_MUTATION is valid against 2026-10 schema", () => {
+    const document = parse(TAGGED_CUSTOMER_ORDER_CREATE_MUTATION);
+    const errors = validate(schema, document);
+    expect(errors).toEqual([]);
+  });
+
+  it("COMPANY_CREATE_MUTATION is valid against 2026-10 schema", () => {
+    const document = parse(COMPANY_CREATE_MUTATION);
+    const errors = validate(schema, document);
+    expect(errors).toEqual([]);
+  });
+
+  it("COMPANY_LOCATION_CREATE_MUTATION is valid against 2026-10 schema", () => {
+    const document = parse(COMPANY_LOCATION_CREATE_MUTATION);
+    const errors = validate(schema, document);
+    expect(errors).toEqual([]);
+  });
+
+  it("rejects the old financialStatus field (pre-fix validation)", () => {
+    const OLD_INVALID_MUTATION = `
+      mutation CreateOrder($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
+        orderCreate(order: $order, options: $options) {
+          order {
+            id
+            name
+            financialStatus
+            totalPriceSet {
+              shopMoney { amount currencyCode }
+            }
+          }
+          userErrors { field message code }
+        }
+      }
+    `;
+
+    const document = parse(OLD_INVALID_MUTATION);
+    const errors = validate(schema, document);
+
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors.some(e => e.message.includes("financialStatus"))).toBe(true);
+  });
+});
+
+describe("Error Logging Helpers", () => {
+  it("logGraphQLErrors logs top-level errors with path and code", () => {
+    const logSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response: GraphQLResponse<unknown> = {
+      data: null,
+      errors: [
+        { message: "Field does not exist", path: ["orderCreate", "order", "financialStatus"], extensions: { code: "INVALID_FIELD" } },
+      ],
+    };
+
+    logGraphQLErrors(response, "orderCreate");
+
+    expect(logSpy).toHaveBeenCalled();
+    const calls = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    expect(calls).toContain("GraphQL errors");
+    expect(calls).toContain("financialStatus");
+    expect(calls).toContain("INVALID_FIELD");
+
+    logSpy.mockRestore();
+  });
+
+  it("logGraphQLErrors logs when data is null", () => {
+    const logSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response: GraphQLResponse<unknown> = {
+      data: null,
+    };
+
+    logGraphQLErrors(response, "testMutation");
+
+    expect(logSpy).toHaveBeenCalled();
+    const calls = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    expect(calls).toContain("data is null");
+
+    logSpy.mockRestore();
+  });
+
+  it("logGraphQLErrors logs when mutation root field is null", () => {
+    const logSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response: GraphQLResponse<{ orderCreate: null }> = {
+      data: { orderCreate: null },
+    };
+
+    logGraphQLErrors(response, "orderCreate");
+
+    expect(logSpy).toHaveBeenCalled();
+    const calls = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    expect(calls).toContain("'orderCreate' is null");
+
+    logSpy.mockRestore();
+  });
+
+  it("logUserErrors logs user errors with field and code", () => {
+    const logSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const userErrors: UserError[] = [
+      { field: ["input", "companyLocation", "shippingAddress"], message: "Zone code required for IN addresses", code: "INVALID" },
+    ];
+
+    logUserErrors(userErrors, "companyLocationCreate");
+
+    expect(logSpy).toHaveBeenCalled();
+    const calls = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    expect(calls).toContain("User errors");
+    expect(calls).toContain("Zone code required");
+    expect(calls).toContain("input.companyLocation.shippingAddress");
+    expect(calls).toContain("INVALID");
+
+    logSpy.mockRestore();
+  });
+});
+
+describe("India Address Info Helper", () => {
+  it("returns provinceCode and zip for Mumbai", () => {
+    const info = getIndiaAddressInfo("Mumbai");
+    expect(info.provinceCode).toBe("MH");
+    expect(info.zip).toBe("400001");
+  });
+
+  it("returns provinceCode and zip for Delhi", () => {
+    const info = getIndiaAddressInfo("Delhi");
+    expect(info.provinceCode).toBe("DL");
+    expect(info.zip).toBe("110001");
+  });
+
+  it("returns provinceCode and zip for Kolkata", () => {
+    const info = getIndiaAddressInfo("Kolkata");
+    expect(info.provinceCode).toBe("WB");
+    expect(info.zip).toBe("700001");
+  });
+
+  it("returns provinceCode and zip for Ahmedabad", () => {
+    const info = getIndiaAddressInfo("Ahmedabad");
+    expect(info.provinceCode).toBe("GJ");
+    expect(info.zip).toBe("380001");
+  });
+
+  it("returns provinceCode and zip for Pune", () => {
+    const info = getIndiaAddressInfo("Pune");
+    expect(info.provinceCode).toBe("MH");
+    expect(info.zip).toBe("411001");
+  });
+
+  it("throws on unknown city", () => {
+    expect(() => getIndiaAddressInfo("UnknownCity")).toThrow("Unknown Indian city");
+    expect(() => getIndiaAddressInfo("UnknownCity")).toThrow("INDIA_CITY_ADDRESS_INFO");
+  });
+
+  it("getIndiaProvinceCode returns just the provinceCode", () => {
+    expect(getIndiaProvinceCode("Mumbai")).toBe("MH");
+    expect(getIndiaProvinceCode("Delhi")).toBe("DL");
+  });
+
+  it("COMPANY_SEEDS uses diverse cities", () => {
+    const cities = COMPANY_SEEDS.map(s => s.city);
+    const uniqueCities = new Set(cities);
+    expect(uniqueCities.size).toBeGreaterThanOrEqual(4);
+  });
+
+  it("each city's PIN prefix matches its state's PIN range", () => {
+    const statePinPrefixes: Record<string, string[]> = {
+      "MH": ["40", "41", "42", "43", "44"],
+      "DL": ["11"],
+      "KA": ["56", "57", "58", "59"],
+      "TN": ["60", "61", "62", "63", "64"],
+      "GJ": ["36", "37", "38", "39"],
+      "WB": ["70", "71", "72", "73", "74"],
+      "TG": ["50", "51"],
+      "RJ": ["30", "31", "32", "33", "34"],
+      "UP": ["20", "21", "22", "23", "24", "25", "26", "27", "28"],
+    };
+
+    for (const [_city, info] of Object.entries(INDIA_CITY_ADDRESS_INFO)) {
+      const validPrefixes = statePinPrefixes[info.provinceCode];
+      expect(validPrefixes).toBeDefined();
+      const pinPrefix = info.zip.slice(0, 2);
+      expect(validPrefixes).toContain(pinPrefix);
+    }
+  });
+
+  it("all COMPANY_SEEDS cities have valid address info with matching PIN", () => {
+    const statePinPrefixes: Record<string, string[]> = {
+      "MH": ["40", "41", "42", "43", "44"],
+      "DL": ["11"],
+      "GJ": ["36", "37", "38", "39"],
+      "WB": ["70", "71", "72", "73", "74"],
+    };
+
+    for (const seed of COMPANY_SEEDS) {
+      const info = getIndiaAddressInfo(seed.city);
+      const validPrefixes = statePinPrefixes[info.provinceCode];
+      expect(validPrefixes).toBeDefined();
+      const pinPrefix = info.zip.slice(0, 2);
+      expect(validPrefixes).toContain(pinPrefix);
+    }
+  });
+});
+
+describe("Variable Builder Input Coercion against Schema", () => {
+  let schema: GraphQLSchema;
+
+  function getInputType(typeName: string): GraphQLInputType {
+    const type = schema.getType(typeName);
+    if (!type) throw new Error(`Type ${typeName} not found in schema`);
+    return type as GraphQLInputType;
+  }
+
+  function coerceAndCollectErrors(value: unknown, typeName: string): string[] {
+    const errors: string[] = [];
+    const inputType = getInputType(typeName);
+    coerceInputValue(value, inputType, (path, _invalidValue, error) => {
+      errors.push(`${path.join(".")}: ${error.message}`);
+    });
+    return errors;
+  }
+
+  beforeAll(() => {
+    const schemaPath = resolve(__dirname, "../../test/fixtures/admin-2026-10.schema.json");
+    const schemaJson = JSON.parse(readFileSync(schemaPath, "utf-8"));
+    schema = buildClientSchema(schemaJson.data);
+  });
+
+  it("buildCompanyCreateInput produces valid CompanyCreateInput", () => {
+    const seed = COMPANY_SEEDS[0];
+    const variables = buildCompanyCreateInput(seed, "ntr-seed-test", "Net-15", "gid://template/1");
+    const errors = coerceAndCollectErrors(variables.input, "CompanyCreateInput");
+    expect(errors).toEqual([]);
+  });
+
+  it("buildCompanyLocationCreateInput produces valid CompanyLocationInput", () => {
+    const variables = buildCompanyLocationCreateInput(
+      "gid://company/1",
+      "Test Company",
+      "Delhi",
+      { suffix: "Net-30", dueInDays: 30 },
+      "gid://template/2"
+    );
+    const errors = coerceAndCollectErrors(variables.input, "CompanyLocationInput");
+    expect(errors).toEqual([]);
+  });
+
+  it("buildTaggedCustomerOrderInput produces valid OrderCreateOrderInput", () => {
+    const variables = buildTaggedCustomerOrderInput({
+      orderKey: "ntr-seed-order-1",
+      customerId: "gid://customer/1",
+      productTitle: "Test Product",
+      amount: 50000,
+      processedAt: new Date().toISOString(),
+      currencyCode: "INR",
+    });
+    const orderErrors = coerceAndCollectErrors(variables.order, "OrderCreateOrderInput");
+    expect(orderErrors).toEqual([]);
+    const optionsErrors = coerceAndCollectErrors(variables.options, "OrderCreateOptionsInput");
+    expect(optionsErrors).toEqual([]);
+  });
+
+  it("buildB2BOrderInput produces valid OrderCreateOrderInput", () => {
+    const variables = buildB2BOrderInput({
+      orderKey: "ntr-seed-order-2",
+      companyLocationId: "gid://location/1",
+      customerId: "gid://customer/2",
+      productTitle: "B2B Product",
+      amount: 100000,
+      processedAt: new Date().toISOString(),
+      currencyCode: "INR",
+    });
+    const orderErrors = coerceAndCollectErrors(variables.order, "OrderCreateOrderInput");
+    expect(orderErrors).toEqual([]);
+    const optionsErrors = coerceAndCollectErrors(variables.options, "OrderCreateOptionsInput");
+    expect(optionsErrors).toEqual([]);
+  });
+
+  it("buildTaggedCustomerOrderInput respects custom city", () => {
+    const variables = buildTaggedCustomerOrderInput({
+      orderKey: "ntr-seed-order-3",
+      customerId: "gid://customer/3",
+      productTitle: "Delhi Product",
+      amount: 25000,
+      processedAt: new Date().toISOString(),
+      currencyCode: "INR",
+      city: "Delhi",
+    });
+    const order = variables.order as Record<string, unknown>;
+    const billingAddress = order.billingAddress as Record<string, unknown>;
+    expect(billingAddress.city).toBe("Delhi");
+    expect(billingAddress.provinceCode).toBe("DL");
+    expect(billingAddress.zip).toBe("110001");
+  });
+
+  it("rejects zoneCode on MailingAddressInput (order addresses)", () => {
+    const invalidOrderInput = {
+      tags: ["test"],
+      customer: { toAssociate: { id: "gid://customer/1" } },
+      currency: "INR",
+      financialStatus: "PENDING",
+      processedAt: new Date().toISOString(),
+      lineItems: [{ title: "Test", quantity: 1, priceSet: { shopMoney: { amount: "100", currencyCode: "INR" } } }],
+      billingAddress: {
+        firstName: "Test",
+        lastName: "User",
+        address1: "123 Street",
+        city: "Mumbai",
+        zoneCode: "MH",
+        countryCode: "IN",
+        zip: "400001",
+      },
+    };
+
+    const errors = coerceAndCollectErrors(invalidOrderInput, "OrderCreateOrderInput");
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors.some(e => e.includes("zoneCode"))).toBe(true);
+  });
+
+  it("accepts provinceCode on MailingAddressInput (order addresses)", () => {
+    const validOrderInput = {
+      tags: ["test"],
+      customer: { toAssociate: { id: "gid://customer/1" } },
+      currency: "INR",
+      financialStatus: "PENDING",
+      processedAt: new Date().toISOString(),
+      lineItems: [{ title: "Test", quantity: 1, priceSet: { shopMoney: { amount: "100", currencyCode: "INR" } } }],
+      billingAddress: {
+        firstName: "Test",
+        lastName: "User",
+        address1: "123 Street",
+        city: "Mumbai",
+        provinceCode: "MH",
+        countryCode: "IN",
+        zip: "400001",
+      },
+    };
+
+    const errors = coerceAndCollectErrors(validOrderInput, "OrderCreateOrderInput");
+    expect(errors).toEqual([]);
+  });
+
+  it("accepts zoneCode on CompanyAddressInput (company addresses)", () => {
+    const validCompanyInput = {
+      company: { name: "Test Co" },
+      companyLocation: {
+        name: "HQ",
+        shippingAddress: {
+          firstName: "Test",
+          lastName: "User",
+          address1: "123 Street",
+          city: "Mumbai",
+          zoneCode: "MH",
+          countryCode: "IN",
+          zip: "400001",
+        },
+      },
+      companyContact: { email: "test@example.com", firstName: "Test", lastName: "User" },
+    };
+
+    const errors = coerceAndCollectErrors(validCompanyInput, "CompanyCreateInput");
+    expect(errors).toEqual([]);
   });
 });

@@ -71,7 +71,12 @@ import postgres from "postgres";
 
 export interface GraphQLResponse<T> {
   data?: T;
-  errors?: Array<{ message: string; extensions?: { code?: string }; locations?: Array<{ line: number; column: number }> }>;
+  errors?: Array<{
+    message: string;
+    path?: Array<string | number>;
+    extensions?: { code?: string };
+    locations?: Array<{ line: number; column: number }>;
+  }>;
   extensions?: {
     cost?: {
       requestedQueryCost: number;
@@ -166,12 +171,84 @@ export const LOCATION_TERMS: { suffix: string; dueInDays: number }[] = [
   { suffix: "Net-60", dueInDays: 60 },
 ];
 
+/**
+ * Indian city address data: ISO 3166-2:IN zone/province code and PIN code prefix.
+ * @see https://en.wikipedia.org/wiki/ISO_3166-2:IN
+ * @see https://en.wikipedia.org/wiki/Postal_Index_Number
+ * 
+ * Used by:
+ * - CompanyAddressInput.zoneCode (company/location addresses)
+ * - MailingAddressInput.provinceCode (order billing/shipping addresses)
+ * 
+ * Both fields use the same ISO 3166-2:IN codes (e.g., MH, DL, KA).
+ * PIN codes are 6 digits; we store a valid prefix for each city.
+ */
+export interface IndiaAddressInfo {
+  provinceCode: string;
+  zip: string;
+}
+
+export const INDIA_CITY_ADDRESS_INFO: Record<string, IndiaAddressInfo> = {
+  // Maharashtra (MH) - PIN 40xxxx-44xxxx
+  "Mumbai": { provinceCode: "MH", zip: "400001" },
+  "Pune": { provinceCode: "MH", zip: "411001" },
+  "Nagpur": { provinceCode: "MH", zip: "440001" },
+  // Delhi (DL) - PIN 11xxxx
+  "Delhi": { provinceCode: "DL", zip: "110001" },
+  "New Delhi": { provinceCode: "DL", zip: "110001" },
+  // Karnataka (KA) - PIN 56xxxx-59xxxx
+  "Bengaluru": { provinceCode: "KA", zip: "560001" },
+  "Bangalore": { provinceCode: "KA", zip: "560001" },
+  "Mysuru": { provinceCode: "KA", zip: "570001" },
+  // Tamil Nadu (TN) - PIN 60xxxx-64xxxx
+  "Chennai": { provinceCode: "TN", zip: "600001" },
+  "Coimbatore": { provinceCode: "TN", zip: "641001" },
+  // Gujarat (GJ) - PIN 36xxxx-39xxxx
+  "Ahmedabad": { provinceCode: "GJ", zip: "380001" },
+  "Surat": { provinceCode: "GJ", zip: "395001" },
+  // West Bengal (WB) - PIN 70xxxx-74xxxx
+  "Kolkata": { provinceCode: "WB", zip: "700001" },
+  // Telangana (TG) - PIN 50xxxx-51xxxx
+  "Hyderabad": { provinceCode: "TG", zip: "500001" },
+  // Rajasthan (RJ) - PIN 30xxxx-34xxxx
+  "Jaipur": { provinceCode: "RJ", zip: "302001" },
+  // Uttar Pradesh (UP) - PIN 20xxxx-28xxxx
+  "Lucknow": { provinceCode: "UP", zip: "226001" },
+  "Noida": { provinceCode: "UP", zip: "201301" },
+};
+
+/**
+ * Get address info (province/zone code and ZIP) for an Indian city.
+ * Throws if the city is not in the mapping - add it to INDIA_CITY_ADDRESS_INFO.
+ * 
+ * @returns Object with provinceCode (e.g., "MH") and zip (e.g., "400001")
+ */
+export function getIndiaAddressInfo(city: string): IndiaAddressInfo {
+  const info = INDIA_CITY_ADDRESS_INFO[city];
+  if (!info) {
+    throw new Error(
+      `Unknown Indian city "${city}" - add it to INDIA_CITY_ADDRESS_INFO in scripts/seed.ts. ` +
+      `See https://en.wikipedia.org/wiki/ISO_3166-2:IN for province codes and ` +
+      `https://en.wikipedia.org/wiki/Postal_Index_Number for PIN codes.`
+    );
+  }
+  return info;
+}
+
+/**
+ * Get the ISO 3166-2:IN subdivision code for an Indian city.
+ * @deprecated Use getIndiaAddressInfo() to get both provinceCode and zip together.
+ */
+export function getIndiaProvinceCode(city: string): string {
+  return getIndiaAddressInfo(city).provinceCode;
+}
+
 export const COMPANY_SEEDS = [
-  { key: "company-1", name: "Acme Wholesale Pvt Ltd", contact: { firstName: "Raj", lastName: "Sharma", email: "raj.sharma@acme-wholesale.example" } },
-  { key: "company-2", name: "Bharat Traders Co", contact: { firstName: "Priya", lastName: "Patel", email: "priya@bharat-traders.example" } },
-  { key: "company-3", name: "Delhi Distributors LLP", contact: { firstName: "Amit", lastName: "Singh", email: "amit.singh@delhi-dist.example" } },
-  { key: "company-4", name: "Mumbai Merchants Pvt Ltd", contact: { firstName: "Sneha", lastName: "Desai", email: "sneha@mumbai-merchants.example" } },
-  { key: "company-5", name: "Kolkata Commerce House", contact: { firstName: "Arjun", lastName: "Das", email: "arjun.das@kolkata-commerce.example" } },
+  { key: "company-1", name: "Acme Wholesale Pvt Ltd", city: "Mumbai", contact: { firstName: "Raj", lastName: "Sharma", email: "raj.sharma@acme-wholesale.example" } },
+  { key: "company-2", name: "Bharat Traders Co", city: "Ahmedabad", contact: { firstName: "Priya", lastName: "Patel", email: "priya@bharat-traders.example" } },
+  { key: "company-3", name: "Delhi Distributors LLP", city: "Delhi", contact: { firstName: "Amit", lastName: "Singh", email: "amit.singh@delhi-dist.example" } },
+  { key: "company-4", name: "Mumbai Merchants Pvt Ltd", city: "Pune", contact: { firstName: "Sneha", lastName: "Desai", email: "sneha@mumbai-merchants.example" } },
+  { key: "company-5", name: "Kolkata Commerce House", city: "Kolkata", contact: { firstName: "Arjun", lastName: "Das", email: "arjun.das@kolkata-commerce.example" } },
 ] as const;
 
 // B2B order distribution - each company gets orders from different locations (different terms)
@@ -227,6 +304,7 @@ export interface SeedState {
   createdCount: { companies: number; locations: number; orders: number; dbRules: number; dbAccounts: number };
   skippedCount: { companies: number; orders: number };
   deletedCount: { companies: number; orders: number };
+  failedCount: { locations: number; orders: number };
   ordersWithShopifyTerms: number;
   ordersWithoutShopifyTerms: number;
   overdueOrdersCount: number;
@@ -243,19 +321,56 @@ export function formatCurrency(amount: number, currencyCode: string): string {
   return `${currencyCode} ${amount.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
 }
 
-export interface GraphQLOptions {
+
+export interface GraphQLHelperOptions {
   isMutation?: boolean;
+  mutationName?: string;
+}
+
+export function logGraphQLErrors<T>(
+  response: GraphQLResponse<T>,
+  mutationName?: string
+): void {
+  if (response.errors && response.errors.length > 0) {
+    console.error(`  ❌ GraphQL errors${mutationName ? ` in ${mutationName}` : ""}:`);
+    for (const err of response.errors) {
+      const pathStr = err.path?.join(".") ?? "";
+      const codeStr = err.extensions?.code ? ` [${err.extensions.code}]` : "";
+      console.error(`     - ${err.message}${pathStr ? ` (path: ${pathStr})` : ""}${codeStr}`);
+    }
+  }
+
+  if (response.data === null || response.data === undefined) {
+    console.error(`  ❌ GraphQL response data is null${mutationName ? ` for ${mutationName}` : ""}`);
+  } else if (mutationName && typeof response.data === "object") {
+    const data = response.data as Record<string, unknown>;
+    if (data[mutationName] === null || data[mutationName] === undefined) {
+      console.error(`  ❌ Mutation root field '${mutationName}' is null`);
+    }
+  }
+}
+
+export function logUserErrors(userErrors: UserError[], context?: string): void {
+  if (userErrors.length > 0) {
+    console.error(`  ❌ User errors${context ? ` in ${context}` : ""}:`);
+    for (const err of userErrors) {
+      const fieldStr = err.field?.join(".") ?? "";
+      const codeStr = err.code ? ` [${err.code}]` : "";
+      console.error(`     - ${err.message}${fieldStr ? ` (field: ${fieldStr})` : ""}${codeStr}`);
+    }
+  }
 }
 
 export async function graphql<T>(
   state: SeedState,
   query: string,
   variables?: Record<string, unknown>,
-  options?: GraphQLOptions
+  options?: GraphQLHelperOptions
 ): Promise<GraphQLResponse<T>> {
   const url = `https://${state.shop}/admin/api/${API_VERSION}/graphql.json`;
   let lastError: Error | null = null;
   const isMutation = options?.isMutation ?? false;
+  const mutationName = options?.mutationName;
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
@@ -290,6 +405,9 @@ export async function graphql<T>(
         await sleep(delay);
         continue;
       }
+
+      // Log errors and data issues for better debugging
+      logGraphQLErrors(json, mutationName);
 
       const cost = json.extensions?.cost;
       if (cost) {
@@ -568,13 +686,14 @@ export async function seedCompanies(state: SeedState): Promise<void> {
             locations.set(loc.dueInDays, `dry-run-location-${seed.key}-${loc.dueInDays}`);
             state.createdCount.locations++;
           } else {
-            const locationId = await createCompanyLocation(state, existing.id, seed.name, loc, template?.id);
+            const locationId = await createCompanyLocation(state, existing.id, seed.name, seed.city, loc, template?.id);
             if (locationId) {
               locations.set(loc.dueInDays, locationId);
               console.log(`    ✅ Created location ${loc.suffix}`);
               state.createdCount.locations++;
             } else {
-              console.error(`    ❌ Failed to create location ${loc.suffix}`);
+              state.failedCount.locations++;
+              state.errors.push(`Failed to create location ${loc.suffix} for ${seed.name}`);
             }
           }
         }
@@ -644,6 +763,67 @@ export async function findCompanyByExternalId(
   return result.data?.companies.nodes[0] ?? null;
 }
 
+/**
+ * Company creation mutation.
+ * Note: India addresses require zoneCode (state code like MH for Maharashtra).
+ */
+export const COMPANY_CREATE_MUTATION = `
+  mutation CreateCompany($input: CompanyCreateInput!) {
+    companyCreate(input: $input) {
+      company {
+        id
+        name
+        locations(first: 1) {
+          edges { node { id name } }
+        }
+        contacts(first: 1) {
+          edges { node { id customer { id email } } }
+        }
+      }
+      userErrors { field message code }
+    }
+  }
+`;
+
+/**
+ * Build CompanyCreateInput variables for the companyCreate mutation.
+ * Exported for schema validation testing.
+ */
+export function buildCompanyCreateInput(
+  seed: { name: string; city: string; contact: { firstName: string; lastName: string; email: string } },
+  externalId: string,
+  locationSuffix: string,
+  paymentTermsTemplateId?: string
+): { input: Record<string, unknown> } {
+  const addressInfo = getIndiaAddressInfo(seed.city);
+  return {
+    input: {
+      company: { name: seed.name, externalId },
+      companyLocation: {
+        name: `${seed.name} - ${locationSuffix}`,
+        shippingAddress: {
+          firstName: seed.contact.firstName,
+          lastName: seed.contact.lastName,
+          address1: "123 Business Street",
+          city: seed.city,
+          zoneCode: addressInfo.provinceCode,
+          countryCode: "IN",
+          zip: addressInfo.zip,
+        },
+        billingSameAsShipping: true,
+        buyerExperienceConfiguration: paymentTermsTemplateId ? {
+          paymentTermsTemplateId,
+        } : undefined,
+      },
+      companyContact: {
+        email: seed.contact.email,
+        firstName: seed.contact.firstName,
+        lastName: seed.contact.lastName,
+      },
+    },
+  };
+}
+
 export async function createCompanyWithLocations(
   state: SeedState,
   seed: (typeof COMPANY_SEEDS)[number],
@@ -654,61 +834,25 @@ export async function createCompanyWithLocations(
     (t) => t.paymentTermsType === "NET" && t.dueInDays === firstLoc.dueInDays
   );
 
-  // Mutations must not retry on network errors (may have executed)
-  const createMutation = `
-    mutation CreateCompany($input: CompanyCreateInput!) {
-      companyCreate(input: $input) {
-        company {
-          id
-          name
-          locations(first: 1) {
-            edges { node { id name } }
-          }
-          contacts(first: 1) {
-            edges { node { id customer { id email } } }
-          }
-        }
-        userErrors { field message code }
-      }
-    }
-  `;
+  const variables = buildCompanyCreateInput(seed, externalId, firstLoc.suffix, firstTemplate?.id);
 
   const createResult = await graphql<{
     companyCreate: { company: CompanyNode | null; userErrors: UserError[] };
-  }>(state, createMutation, {
-    input: {
-      company: { name: seed.name, externalId },
-      companyLocation: {
-        name: `${seed.name} - ${firstLoc.suffix}`,
-        shippingAddress: {
-          firstName: seed.contact.firstName,
-          lastName: seed.contact.lastName,
-          address1: "123 Business Street",
-          city: "Mumbai",
-          countryCode: "IN",
-          zip: "400001",
-        },
-        billingSameAsShipping: true,
-        buyerExperienceConfiguration: firstTemplate ? {
-          paymentTermsTemplateId: firstTemplate.id,
-        } : undefined,
-      },
-      companyContact: {
-        email: seed.contact.email,
-        firstName: seed.contact.firstName,
-        lastName: seed.contact.lastName,
-      },
-    },
-  }, { isMutation: true });
+  }>(state, COMPANY_CREATE_MUTATION, variables, { isMutation: true, mutationName: "companyCreate" });
+
+  if (createResult.errors) {
+    console.error(`    ❌ Failed to create company ${seed.name}: GraphQL errors`);
+    return null;
+  }
 
   if (createResult.data?.companyCreate.userErrors.length) {
-    console.error(`    ❌ Error creating ${seed.name}:`, createResult.data.companyCreate.userErrors);
+    logUserErrors(createResult.data.companyCreate.userErrors, `createCompanyWithLocations(${seed.name})`);
     return null;
   }
 
   const company = createResult.data?.companyCreate.company;
   if (!company) {
-    console.error(`    ❌ No company returned for ${seed.name}`);
+    console.error(`    ❌ No company returned for ${seed.name} (companyCreate returned null)`);
     return null;
   }
 
@@ -727,11 +871,14 @@ export async function createCompanyWithLocations(
       (t) => t.paymentTermsType === "NET" && t.dueInDays === loc.dueInDays
     );
 
-    const locationId = await createCompanyLocation(state, company.id, seed.name, loc, template?.id);
+    const locationId = await createCompanyLocation(state, company.id, seed.name, seed.city, loc, template?.id);
     if (locationId) {
       locations.set(loc.dueInDays, locationId);
       console.log(`    → Location ${loc.suffix}: created`);
       state.createdCount.locations++;
+    } else {
+      state.failedCount.locations++;
+      state.errors.push(`Failed to create location ${loc.suffix} for ${seed.name}`);
     }
   }
 
@@ -742,32 +889,35 @@ export async function createCompanyWithLocations(
   };
 }
 
-async function createCompanyLocation(
-  state: SeedState,
+/**
+ * Company location creation mutation.
+ * Note: India addresses require zoneCode (state code like MH for Maharashtra).
+ */
+export const COMPANY_LOCATION_CREATE_MUTATION = `
+  mutation CreateCompanyLocation($companyId: ID!, $input: CompanyLocationInput!) {
+    companyLocationCreate(companyId: $companyId, input: $input) {
+      companyLocation {
+        id
+        name
+      }
+      userErrors { field message code }
+    }
+  }
+`;
+
+/**
+ * Build CompanyLocationInput variables for the companyLocationCreate mutation.
+ * Exported for schema validation testing.
+ */
+export function buildCompanyLocationCreateInput(
   companyId: string,
   companyName: string,
+  city: string,
   loc: { suffix: string; dueInDays: number },
   paymentTermsTemplateId?: string
-): Promise<string | null> {
-  // Mutations must not retry on network errors (may have executed)
-  const mutation = `
-    mutation CreateCompanyLocation($companyId: ID!, $input: CompanyLocationInput!) {
-      companyLocationCreate(companyId: $companyId, companyLocation: $input) {
-        companyLocation {
-          id
-          name
-        }
-        userErrors { field message code }
-      }
-    }
-  `;
-
-  const result = await graphql<{
-    companyLocationCreate: {
-      companyLocation: { id: string; name: string } | null;
-      userErrors: UserError[];
-    };
-  }>(state, mutation, {
+): { companyId: string; input: Record<string, unknown> } {
+  const addressInfo = getIndiaAddressInfo(city);
+  return {
     companyId,
     input: {
       name: `${companyName} - ${loc.suffix}`,
@@ -775,23 +925,53 @@ async function createCompanyLocation(
         firstName: "Branch",
         lastName: loc.suffix,
         address1: `${loc.dueInDays} Payment Lane`,
-        city: "Mumbai",
+        city: city,
+        zoneCode: addressInfo.provinceCode,
         countryCode: "IN",
-        zip: "400002",
+        zip: addressInfo.zip,
       },
       billingSameAsShipping: true,
       buyerExperienceConfiguration: paymentTermsTemplateId ? {
         paymentTermsTemplateId,
       } : undefined,
     },
-  }, { isMutation: true });
+  };
+}
 
-  if (result.data?.companyLocationCreate.userErrors.length) {
-    console.error(`    ⚠️  Error creating location ${loc.suffix}:`, result.data.companyLocationCreate.userErrors);
+async function createCompanyLocation(
+  state: SeedState,
+  companyId: string,
+  companyName: string,
+  city: string,
+  loc: { suffix: string; dueInDays: number },
+  paymentTermsTemplateId?: string
+): Promise<string | null> {
+  const variables = buildCompanyLocationCreateInput(companyId, companyName, city, loc, paymentTermsTemplateId);
+
+  const result = await graphql<{
+    companyLocationCreate: {
+      companyLocation: { id: string; name: string } | null;
+      userErrors: UserError[];
+    };
+  }>(state, COMPANY_LOCATION_CREATE_MUTATION, variables, { isMutation: true, mutationName: "companyLocationCreate" });
+
+  if (result.errors) {
+    console.error(`    ❌ Failed to create location ${loc.suffix}: GraphQL errors`);
     return null;
   }
 
-  return result.data?.companyLocationCreate.companyLocation?.id ?? null;
+  if (result.data?.companyLocationCreate.userErrors.length) {
+    logUserErrors(result.data.companyLocationCreate.userErrors, `createCompanyLocation(${loc.suffix})`);
+    return null;
+  }
+
+  const location = result.data?.companyLocationCreate.companyLocation;
+  if (!location) {
+    console.error(`    ❌ No location returned for ${loc.suffix} (companyLocationCreate returned null)`);
+    return null;
+  }
+
+  return location.id;
 }
 
 // -- Seeding: Orders --
@@ -871,6 +1051,7 @@ export async function seedOrders(state: SeedState): Promise<void> {
     });
 
     if (!order) {
+      state.failedCount.orders++;
       state.errors.push(`Failed to create order ${orderIndex}`);
       continue;
     }
@@ -1094,6 +1275,7 @@ export async function seedTaggedCustomerOrders(state: SeedState): Promise<void> 
     });
 
     if (!order) {
+      state.failedCount.orders++;
       state.errors.push(`Failed to create tagged order ${orderIndex}`);
       continue;
     }
@@ -1113,6 +1295,89 @@ export async function seedTaggedCustomerOrders(state: SeedState): Promise<void> 
  * Create an order for a tagged (non-B2B) customer.
  * Similar to createOrder but without companyLocationId.
  */
+export const TAGGED_CUSTOMER_ORDER_CREATE_MUTATION = `
+  mutation CreateOrder($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
+    orderCreate(order: $order, options: $options) {
+      order {
+        id
+        name
+        displayFinancialStatus
+        totalPriceSet {
+          shopMoney { amount currencyCode }
+        }
+      }
+      userErrors { field message code }
+    }
+  }
+`;
+
+/**
+ * Default city for orders without company association (tagged customer orders).
+ */
+const DEFAULT_ORDER_CITY = "Mumbai";
+
+/**
+ * Build OrderCreateOrderInput variables for tagged customer orders.
+ * Uses MailingAddressInput which has provinceCode (not zoneCode).
+ * Exported for schema validation testing.
+ */
+export function buildTaggedCustomerOrderInput(
+  options: {
+    orderKey: string;
+    customerId: string;
+    productTitle: string;
+    amount: number;
+    processedAt: string;
+    currencyCode: string;
+    city?: string;
+  }
+): { order: Record<string, unknown>; options: Record<string, unknown> } {
+  const city = options.city ?? DEFAULT_ORDER_CITY;
+  const addressInfo = getIndiaAddressInfo(city);
+  return {
+    order: {
+      tags: [SEED_TAG, options.orderKey],
+      customer: { toAssociate: { id: options.customerId } },
+      currency: options.currencyCode,
+      financialStatus: "PENDING",
+      processedAt: options.processedAt,
+      lineItems: [{
+        title: options.productTitle,
+        quantity: 1,
+        priceSet: {
+          shopMoney: {
+            amount: String(options.amount),
+            currencyCode: options.currencyCode,
+          },
+        },
+      }],
+      billingAddress: {
+        firstName: "Tagged",
+        lastName: "Customer",
+        address1: "123 Test Street",
+        city: city,
+        provinceCode: addressInfo.provinceCode,
+        countryCode: "IN",
+        zip: addressInfo.zip,
+      },
+      shippingAddress: {
+        firstName: "Tagged",
+        lastName: "Customer",
+        address1: "123 Test Street",
+        city: city,
+        provinceCode: addressInfo.provinceCode,
+        countryCode: "IN",
+        zip: addressInfo.zip,
+      },
+    },
+    options: {
+      sendReceipt: false,
+      sendFulfillmentReceipt: false,
+      inventoryBehaviour: "BYPASS",
+    },
+  };
+}
+
 async function createTaggedCustomerOrder(
   state: SeedState,
   options: {
@@ -1124,86 +1389,39 @@ async function createTaggedCustomerOrder(
     expectedTermsDays: number;
   }
 ): Promise<{ id: string; name: string } | null> {
-  const mutation = `
-    mutation CreateOrder($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
-      orderCreate(order: $order, options: $options) {
-        order {
-          id
-          name
-          financialStatus
-          totalPriceSet {
-            shopMoney { amount currencyCode }
-          }
-        }
-        userErrors { field message code }
-      }
-    }
-  `;
+  const variables = buildTaggedCustomerOrderInput({
+    orderKey: options.orderKey,
+    customerId: options.customerId,
+    productTitle: options.productTitle,
+    amount: options.amount,
+    processedAt: options.processedAt,
+    currencyCode: state.currencyCode,
+  });
 
   const result = await graphql<{
     orderCreate: {
       order: {
         id: string;
         name: string;
-        financialStatus: string;
+        displayFinancialStatus: string;
         totalPriceSet: { shopMoney: { amount: string; currencyCode: string } };
       } | null;
       userErrors: UserError[];
     };
-  }>(state, mutation, {
-    order: {
-      tags: [SEED_TAG, options.orderKey],
-      customer: { toAssociate: { id: options.customerId } },
-      currency: state.currencyCode,
-      financialStatus: "PENDING",
-      processedAt: options.processedAt,
-      lineItems: [{
-        title: options.productTitle,
-        quantity: 1,
-        priceSet: {
-          shopMoney: {
-            amount: String(options.amount),
-            currencyCode: state.currencyCode,
-          },
-        },
-      }],
-      billingAddress: {
-        firstName: "Tagged",
-        lastName: "Customer",
-        address1: "123 Test Street",
-        city: "Mumbai",
-        countryCode: "IN",
-        zip: "400001",
-      },
-      shippingAddress: {
-        firstName: "Tagged",
-        lastName: "Customer",
-        address1: "123 Test Street",
-        city: "Mumbai",
-        countryCode: "IN",
-        zip: "400001",
-      },
-    },
-    options: {
-      sendReceipt: false,
-      sendFulfillmentReceipt: false,
-      inventoryBehaviour: "BYPASS",
-    },
-  }, { isMutation: true });
+  }>(state, TAGGED_CUSTOMER_ORDER_CREATE_MUTATION, variables, { isMutation: true, mutationName: "orderCreate" });
 
   if (result.errors) {
-    console.log(`    ⚠️  GraphQL error: ${result.errors.map(e => e.message).join(", ")}`);
     return null;
   }
 
   if (result.data?.orderCreate.userErrors.length) {
-    console.error(`    ❌ Error creating order:`, result.data.orderCreate.userErrors);
+    logUserErrors(result.data.orderCreate.userErrors, "createTaggedCustomerOrder");
     return null;
   }
 
   const order = result.data?.orderCreate.order;
   if (!order) {
-    console.error(`    ❌ No order returned`);
+    console.error(`    ❌ No order returned from createTaggedCustomerOrder`);
     return null;
   }
 
@@ -1214,6 +1432,100 @@ async function createTaggedCustomerOrder(
   return {
     id: order.id,
     name: order.name,
+  };
+}
+
+/**
+ * B2B order creation mutation.
+ * Uses displayFinancialStatus (2026-10 schema) instead of financialStatus.
+ */
+export const B2B_ORDER_CREATE_MUTATION = `
+  mutation CreateOrder($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
+    orderCreate(order: $order, options: $options) {
+      order {
+        id
+        name
+        displayFinancialStatus
+        totalPriceSet {
+          shopMoney { amount currencyCode }
+        }
+        paymentTerms {
+          paymentTermsName
+          paymentTermsType
+          dueInDays
+          paymentSchedules(first: 1) {
+            nodes {
+              dueAt
+            }
+          }
+        }
+      }
+      userErrors { field message code }
+    }
+  }
+`;
+
+/**
+ * Build OrderCreateOrderInput variables for B2B orders.
+ * Uses MailingAddressInput which has provinceCode (not zoneCode).
+ * Exported for schema validation testing.
+ */
+export function buildB2BOrderInput(
+  options: {
+    orderKey: string;
+    companyLocationId: string;
+    customerId: string;
+    productTitle: string;
+    amount: number;
+    processedAt: string;
+    currencyCode: string;
+    city?: string;
+  }
+): { order: Record<string, unknown>; options: Record<string, unknown> } {
+  const city = options.city ?? DEFAULT_ORDER_CITY;
+  const addressInfo = getIndiaAddressInfo(city);
+  return {
+    order: {
+      tags: [SEED_TAG, options.orderKey],
+      companyLocationId: options.companyLocationId,
+      customer: { toAssociate: { id: options.customerId } },
+      currency: options.currencyCode,
+      financialStatus: "PENDING",
+      processedAt: options.processedAt,
+      lineItems: [{
+        title: options.productTitle,
+        quantity: 1,
+        priceSet: {
+          shopMoney: {
+            amount: String(options.amount),
+            currencyCode: options.currencyCode,
+          },
+        },
+      }],
+      billingAddress: {
+        firstName: "B2B",
+        lastName: "Billing",
+        address1: "123 Business Street",
+        city: city,
+        provinceCode: addressInfo.provinceCode,
+        countryCode: "IN",
+        zip: addressInfo.zip,
+      },
+      shippingAddress: {
+        firstName: "B2B",
+        lastName: "Shipping",
+        address1: "123 Business Street",
+        city: city,
+        provinceCode: addressInfo.provinceCode,
+        countryCode: "IN",
+        zip: addressInfo.zip,
+      },
+    },
+    options: {
+      sendReceipt: false,
+      sendFulfillmentReceipt: false,
+      inventoryBehaviour: "BYPASS",
+    },
   };
 }
 
@@ -1244,101 +1556,41 @@ export async function createOrder(
     expectedTermsDays: number;
   }
 ): Promise<{ id: string; name: string } | null> {
-  // Mutations must not retry on network errors (may have executed)
-  const mutation = `
-    mutation CreateOrder($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
-      orderCreate(order: $order, options: $options) {
-        order {
-          id
-          name
-          financialStatus
-          totalPriceSet {
-            shopMoney { amount currencyCode }
-          }
-          paymentTerms {
-            paymentTermsName
-            paymentTermsType
-            dueInDays
-            paymentSchedules(first: 1) {
-              nodes {
-                dueAt
-              }
-            }
-          }
-        }
-        userErrors { field message code }
-      }
-    }
-  `;
+  const variables = buildB2BOrderInput({
+    orderKey: options.orderKey,
+    companyLocationId: options.companyLocationId,
+    customerId: options.customerId,
+    productTitle: options.productTitle,
+    amount: options.amount,
+    processedAt: options.processedAt,
+    currencyCode: state.currencyCode,
+  });
 
   const result = await graphql<{
     orderCreate: {
       order: {
         id: string;
         name: string;
-        financialStatus: string;
+        displayFinancialStatus: string;
         totalPriceSet: { shopMoney: { amount: string; currencyCode: string } };
         paymentTerms: OrderPaymentTerms | null;
       } | null;
       userErrors: UserError[];
     };
-  }>(state, mutation, {
-    // OrderCreateCustomerInput in 2026-10 requires toAssociate or toUpsert, not direct id
-    // @see https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateCustomerInput
-    order: {
-      tags: [SEED_TAG, options.orderKey],
-      companyLocationId: options.companyLocationId,
-      customer: { toAssociate: { id: options.customerId } },
-      currency: state.currencyCode,
-      financialStatus: "PENDING",
-      processedAt: options.processedAt,
-      lineItems: [{
-        title: options.productTitle,
-        quantity: 1,
-        priceSet: {
-          shopMoney: {
-            amount: String(options.amount),
-            currencyCode: state.currencyCode,
-          },
-        },
-      }],
-      billingAddress: {
-        firstName: "B2B",
-        lastName: "Billing",
-        address1: "123 Business Street",
-        city: "Mumbai",
-        countryCode: "IN",
-        zip: "400001",
-      },
-      shippingAddress: {
-        firstName: "B2B",
-        lastName: "Shipping",
-        address1: "123 Business Street",
-        city: "Mumbai",
-        countryCode: "IN",
-        zip: "400001",
-      },
-    },
-    options: {
-      sendReceipt: false,
-      sendFulfillmentReceipt: false,
-      inventoryBehaviour: "BYPASS",
-    },
-  }, { isMutation: true });
+  }>(state, B2B_ORDER_CREATE_MUTATION, variables, { isMutation: true, mutationName: "orderCreate" });
 
   if (result.errors) {
-    console.error(`    ❌ GraphQL errors:`, result.errors);
     return null;
   }
 
   if (result.data?.orderCreate.userErrors.length) {
-    console.error(`    ❌ Error creating order:`, result.data.orderCreate.userErrors);
+    logUserErrors(result.data.orderCreate.userErrors, "createOrder");
     return null;
   }
 
   const order = result.data?.orderCreate.order;
   if (!order) {
-    console.error(`    ❌ No order returned`);
+    console.error(`    ❌ No order returned from createOrder`);
     return null;
   }
 
@@ -1574,6 +1826,7 @@ export async function main(): Promise<void> {
     createdCount: { companies: 0, locations: 0, orders: 0, dbRules: 0, dbAccounts: 0 },
     skippedCount: { companies: 0, orders: 0 },
     deletedCount: { companies: 0, orders: 0 },
+    failedCount: { locations: 0, orders: 0 },
     ordersWithShopifyTerms: 0,
     ordersWithoutShopifyTerms: 0,
     overdueOrdersCount: 0,
@@ -1639,6 +1892,13 @@ export async function main(): Promise<void> {
   console.log(`    Companies:    ${state.skippedCount.companies}`);
   console.log(`    Orders:       ${state.skippedCount.orders}`);
 
+  const totalFailures = state.failedCount.locations + state.failedCount.orders;
+  if (totalFailures > 0) {
+    console.log("\n  ❌ Failed:");
+    console.log(`    Locations:    ${state.failedCount.locations}`);
+    console.log(`    Orders:       ${state.failedCount.orders}`);
+  }
+
   if (!dryRun && state.createdCount.orders > 0) {
     console.log("\n  Payment Terms (WARNING if counts differ):");
     console.log(`    Inherited from Shopify: ${state.ordersWithShopifyTerms}`);
@@ -1669,6 +1929,11 @@ export async function main(): Promise<void> {
     for (const err of state.errors) {
       console.log(`    ❌ ${err}`);
     }
+  }
+
+  // Exit non-zero if any failures occurred
+  if (totalFailures > 0 || state.errors.length > 0) {
+    console.log(`\n❌ Seed completed with ${totalFailures} failure(s) and ${state.errors.length} error(s)`);
     process.exit(1);
   }
 
