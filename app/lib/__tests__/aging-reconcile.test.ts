@@ -330,7 +330,7 @@ describeWithDb("shop totals = sum of ledger (gating test)", () => {
 
   it("shop totals equal sum of ledger rows with PLAN_GATING_ENFORCED=true", async () => {
     const originalEnv = process.env.PLAN_GATING_ENFORCED;
-    process.env.PLAN_GATING_ENFORCED = "true";
+    (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "true";
 
     try {
       const asOf = new Date();
@@ -365,11 +365,7 @@ describeWithDb("shop totals = sum of ledger (gating test)", () => {
       expect(totals.totalByCurrency["INR"]).toBe("500000");
     } finally {
       // Restore original environment
-      if (originalEnv === undefined) {
-        delete process.env.PLAN_GATING_ENFORCED;
-      } else {
-        process.env.PLAN_GATING_ENFORCED = originalEnv;
-      }
+      (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = originalEnv;
     }
   });
 });
