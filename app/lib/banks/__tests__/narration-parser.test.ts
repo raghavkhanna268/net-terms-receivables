@@ -152,7 +152,6 @@ describe("narration-parser", () => {
       it("does NOT extract cheque number as UTR", () => {
         const result = parseNarration("CHQ PAID-000123");
         expect(result.rail).toBe("CHEQUE");
-        // Cheque number is NOT a UTR
         expect(result.utr).toBeUndefined();
       });
 
@@ -166,6 +165,49 @@ describe("narration-parser", () => {
         const result = parseNarration("CHEQUE DEPOSIT-SYNTHETIC COMPANY LTD");
         expect(result.rail).toBe("CHEQUE");
         expect(result.utr).toBeUndefined();
+      });
+
+      it("extracts payer name from cheque narration", () => {
+        const result = parseNarration("CHQ DEP-SYNTHETIC VENDOR LTD-000123");
+        expect(result.rail).toBe("CHEQUE");
+        expect(result.payerName).toBe("SYNTHETIC VENDOR");
+      });
+
+      it("extracts payer name - CLG format", () => {
+        const result = parseNarration("CLG-000456-SYNTHETIC PAYEE CORP");
+        expect(result.rail).toBe("CHEQUE");
+        // "CORP" is cleaned by cleanPayerName (common suffix removal)
+        expect(result.payerName).toBe("SYNTHETIC PAYEE");
+      });
+
+      it("does NOT capture junk as payer name - pure numbers", () => {
+        const result = parseNarration("CHQ PAID-000123-456789");
+        expect(result.rail).toBe("CHEQUE");
+        expect(result.payerName).toBeUndefined();
+      });
+
+      it("does NOT capture keywords as payer name", () => {
+        const result = parseNarration("CHQ DEP PAID");
+        expect(result.rail).toBe("CHEQUE");
+        expect(result.payerName).toBeUndefined();
+      });
+
+      it("does NOT capture short tokens as payer name", () => {
+        const result = parseNarration("CHQ-AB-CD-123456");
+        expect(result.rail).toBe("CHEQUE");
+        expect(result.payerName).toBeUndefined();
+      });
+
+      it("handles HDFC cheque format from synthetic fixture", () => {
+        const result = parseNarration("CHQ DEP-SYNTHETIC RETAILER-000654");
+        expect(result.rail).toBe("CHEQUE");
+        expect(result.payerName).toBe("SYNTHETIC RETAILER");
+      });
+
+      it("handles ICICI cheque format from synthetic fixture", () => {
+        const result = parseNarration("CLG/CHQ/SYNTHETIC VENDOR PVT LTD/CHEQUE DEPOSIT");
+        expect(result.rail).toBe("CHEQUE");
+        expect(result.payerName).toBe("SYNTHETIC VENDOR");
       });
     });
 

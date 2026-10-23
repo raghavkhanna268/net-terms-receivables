@@ -316,15 +316,36 @@ function parseAch(text: string, _textUpper: string, _bank?: BankId): ParsedNarra
  * Parse cheque narration.
  *
  * NOTE: Cheque numbers are NOT UTRs. They go in refNo, not parsed.utr.
+ *
+ * Common formats:
+ * - "CHQ 000123 ACME CORP" -> payerName: "ACME CORP"
+ * - "CLG-000123-VENDOR NAME" -> payerName: "VENDOR NAME"
+ * - "CHEQUE DEP-CUSTOMER PVT LTD" -> payerName: "CUSTOMER"
  */
 function parseCheque(text: string, _textUpper: string, _bank?: BankId): ParsedNarration {
   const result: ParsedNarration = { rail: "CHEQUE" };
-  // Note: We do NOT extract cheque number as UTR - it's not a UTR
 
-  // Try to extract payee/drawer name if present
-  const nameMatch = text.match(/(?:CHQ|CHEQUE|CLG)[^\d]*\d*[^\d]+([A-Za-z\s]+)/i);
-  if (nameMatch && nameMatch[1].trim().length > 2) {
-    result.payerName = cleanPayerName(nameMatch[1]);
+  // Split by common separators and look for name-like parts
+  const parts = text.split(/[-/\s]+/);
+  const candidateNames: string[] = [];
+
+  for (const part of parts) {
+    const p = part.trim();
+    // Skip empty, keywords, and numeric parts
+    if (!p) continue;
+    if (/^(CHQ|CHEQUE|CLG|DEP|DEPOSIT|RETN|RETURN|PAID|TRF|REF|CR|DR)$/i.test(p)) continue;
+    if (/^\d+$/.test(p)) continue;
+    // Skip parts that are mostly digits (like cheque numbers with letters)
+    if (/^\d+[A-Za-z]?$/.test(p) || /^[A-Za-z]?\d+$/.test(p)) continue;
+
+    // Accept parts with at least 3 letters
+    if (/[A-Za-z]{3,}/.test(p)) {
+      candidateNames.push(p);
+    }
+  }
+
+  if (candidateNames.length > 0) {
+    result.payerName = cleanPayerName(candidateNames.join(" "));
   }
 
   return result;

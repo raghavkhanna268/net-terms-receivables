@@ -452,6 +452,40 @@ describe("dedupe", () => {
       expect(arePossibleDuplicates(a, b)).toBe(false);
     });
 
+    it("requires same direction for UTR match to be duplicate", async () => {
+      // Same valid UTR, same date, same amount, but different direction = NOT duplicates
+      const credit = await createMockTxnAsync(
+        "2026-10-15",
+        5000000,
+        "CR",
+        "NEFT-SYNTN26296000001-PAYMENT",
+        "NEFT",
+        "SYNTN26296000001"
+      );
+      const debit = await createMockTxnAsync(
+        "2026-10-15",
+        5000000,
+        "DR",
+        "NEFT-SYNTN26296000001-RETURN",
+        "NEFT",
+        "SYNTN26296000001"
+      );
+
+      // Even with matching valid UTR, different direction means not duplicates
+      expect(arePossibleDuplicates(credit, debit)).toBe(false);
+
+      // Same direction + same UTR = duplicates
+      const credit2 = await createMockTxnAsync(
+        "2026-10-15",
+        5000000,
+        "CR",
+        "NEFT-SYNTN26296000001-PAYMENT REF",
+        "NEFT",
+        "SYNTN26296000001"
+      );
+      expect(arePossibleDuplicates(credit, credit2)).toBe(true);
+    });
+
     it("returns false for different balances (without UTR)", async () => {
       const a = await createMockTxnAsync("2026-10-01", 50000, "CR", "CASH DEPOSIT", "OTHER", undefined, 100000);
       const b = await createMockTxnAsync("2026-10-01", 50000, "CR", "CASH DEPOSIT", "OTHER", undefined, 150000);

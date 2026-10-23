@@ -95,19 +95,20 @@ async function loadWithSheetJS(
   // Dynamic import for lazy loading - keeps SheetJS out of main bundle
   const XLSX = await import("xlsx");
 
+  const isTextFormat = fileType === "csv" || fileType === "txt";
+
   // Options for reading
+  // For CSV/TXT: raw:true keeps all values as strings (no type guessing)
+  // This preserves leading zeros (000123), prevents scientific notation (123456789012),
+  // and keeps date strings verbatim (05/03/2026 stays as "05/03/2026")
+  // For XLSX/XLS: cellDates:true parses Excel dates, cellText:true keeps formatted text
   const readOptions: Parameters<typeof XLSX.read>[1] = {
     type: "array",
-    cellDates: true, // Parse dates as Date objects
-    cellNF: false, // Don't parse number formats
-    cellText: false, // Don't generate formatted text
-    raw: true, // Get raw values
+    raw: isTextFormat, // CSV/TXT: no type guessing; XLSX/XLS: parse types
+    cellDates: !isTextFormat, // Only for XLSX/XLS
+    cellText: !isTextFormat, // Keep formatted text for XLSX/XLS (for refs with leading zeros)
+    cellNF: false,
   };
-
-  // For CSV/TXT, we want all cells as strings to preserve leading zeros
-  if (fileType === "csv" || fileType === "txt") {
-    readOptions.raw = false; // Parse values
-  }
 
   const workbook = XLSX.read(content, readOptions);
 
@@ -120,10 +121,11 @@ async function loadWithSheetJS(
   const sheet = workbook.Sheets[sheetName];
 
   // Convert sheet to array of arrays
-  // For CSV, keep everything as strings to preserve leading zeros (e.g., cheque numbers like 000123)
+  // For CSV/TXT: raw:true keeps strings as-is
+  // For XLSX/XLS: raw:false uses formatted text (preserves leading zeros in refs)
   const toJsonOptions: Parameters<typeof XLSX.utils.sheet_to_json>[1] = {
     header: 1,
-    raw: fileType !== "csv" && fileType !== "txt", // CSV: formatted strings; XLS/XLSX: raw values
+    raw: isTextFormat, // CSV/TXT: already strings; XLSX/XLS: use formatted text
     defval: null,
   };
 
@@ -139,7 +141,7 @@ async function loadWithSheetJS(
         if (cell === null || cell === undefined) return null;
         if (typeof cell === "boolean") return cell;
 
-        // Handle Date objects - convert to ISO string using UTC to avoid timezone shifts
+        // Handle Date objects (XLSX/XLS only - CSV returns strings)
         if (cell instanceof Date) {
           if (isNaN(cell.getTime())) return null;
           // Return the Date object; the normaliser will use UTC getters
