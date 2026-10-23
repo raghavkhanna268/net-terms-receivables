@@ -36,10 +36,17 @@ type WaitUntilFn = (promise: Promise<unknown>) => void;
 const setupCompletedShops = new Set<string>();
 
 /**
+ * In-flight setup promises by shop. Concurrent first loads share one
+ * ensureValidation call. Entry is deleted on settle (success or failure).
+ */
+const inFlightSetups = new Map<string, Promise<void>>();
+
+/**
  * Runs after-authentication hooks for a shop using ctx.waitUntil.
  *
  * This function is idempotent and safe to call on every request:
  * - Uses in-memory cache to skip already-processed shops
+ * - Concurrent first loads share one ensureValidation call
  * - Runs setup via ctx.waitUntil to stay off critical path
  * - Marks shop complete only after success
  * - Allows retry on failure (shop not marked as complete)
@@ -58,7 +65,14 @@ export function runAfterAuth(
     return;
   }
 
+  const existingPromise = inFlightSetups.get(shop);
+  if (existingPromise) {
+    waitUntil(existingPromise);
+    return;
+  }
+
   const setupPromise = runSetup(shop, admin);
+  inFlightSetups.set(shop, setupPromise);
   waitUntil(setupPromise);
 }
 
@@ -71,15 +85,18 @@ async function runSetup(
     setupCompletedShops.add(shop);
   } catch (error) {
     console.error(`[afterAuth] Failed to setup validation for ${shop}:`, error);
+  } finally {
+    inFlightSetups.delete(shop);
   }
 }
 
 /**
- * Reset the setup cache - only for testing purposes.
+ * Reset the setup cache and in-flight map - only for testing purposes.
  * @internal
  */
 export function _resetSetupCacheForTesting(): void {
   setupCompletedShops.clear();
+  inFlightSetups.clear();
 }
 
 /**
@@ -88,4 +105,12 @@ export function _resetSetupCacheForTesting(): void {
  */
 export function _isShopSetupComplete(shop: string): boolean {
   return setupCompletedShops.has(shop);
+}
+
+/**
+ * Check if a shop has an in-flight setup - only for testing purposes.
+ * @internal
+ */
+export function _isShopSetupInFlight(shop: string): boolean {
+  return inFlightSetups.has(shop);
 }

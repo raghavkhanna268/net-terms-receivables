@@ -10,7 +10,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   const { admin, session } = await shopify.authenticate.admin(request);
 
-  runAfterAuth(session.shop, admin, cloudflare.ctx.waitUntil);
+  // Bind waitUntil to ctx to avoid "Illegal invocation" on workerd
+  runAfterAuth(session.shop, admin, (p) => cloudflare.ctx.waitUntil(p));
 
   return { apiKey: process.env.SHOPIFY_API_KEY || "" };
 };
