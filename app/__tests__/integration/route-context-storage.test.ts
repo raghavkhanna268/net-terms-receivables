@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "fs";
 import { join } from "path";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
@@ -16,6 +16,13 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
  * a real database or Shopify credentials.
  */
 
+// Mock verifyWebhook for webhook routes (they now use lightweight verification)
+const mockVerifyWebhook = vi.fn();
+vi.mock("~/lib/webhook-verify.server", () => ({
+  verifyWebhook: (...args: unknown[]) => mockVerifyWebhook(...args),
+  normalizeWebhookTopic: (topic: string) => topic.replace(/\//g, "_").toUpperCase(),
+}));
+
 // Mock session storage that tracks method calls (matches PrismaSessionStorage interface)
 function createMockSessionStorage() {
   return {
@@ -29,7 +36,7 @@ function createMockSessionStorage() {
   };
 }
 
-// Mock Shopify app that tracks authenticate calls
+// Mock Shopify app that tracks authenticate calls (still needed for non-webhook routes)
 function createMockShopify() {
   return {
     authenticate: {
@@ -70,24 +77,32 @@ function createMockArgs(
 }
 
 describe("Route context storage verification", () => {
+  const originalEnv = process.env;
+
   beforeEach(() => {
     vi.clearAllMocks();
+    process.env = { ...originalEnv, SHOPIFY_API_SECRET: "test-secret" };
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
   });
 
   describe("webhooks.app.uninstalled route", () => {
     it("uses sessionStorage.deleteAllForShop (bypasses 25-session limit)", async () => {
       const sessionStorage = createMockSessionStorage();
-      const shopify = createMockShopify();
       sessionStorage.deleteAllForShop.mockResolvedValue(5);
 
-      shopify.authenticate.webhook.mockResolvedValue({
+      mockVerifyWebhook.mockResolvedValue({
         shop: "uninstall-test.myshopify.com",
-        topic: "APP_UNINSTALLED",
+        topic: "app/uninstalled",
         webhookId: "webhook-456",
         payload: {},
+        apiVersion: "2026-10",
+        rawBody: "{}",
       });
 
-      const args = createMockArgs({ sessionStorage, shopify });
+      const args = createMockArgs({ sessionStorage });
 
       const { action } = await import(
         "../../routes/webhooks.app.uninstalled"
@@ -100,28 +115,31 @@ describe("Route context storage verification", () => {
     });
 
     it("uses context.sessionStorage, not a module-level import", async () => {
-      const shopify1 = createMockShopify();
-      const shopify2 = createMockShopify();
       const storage1 = createMockSessionStorage();
       const storage2 = createMockSessionStorage();
       storage1.deleteAllForShop.mockResolvedValue(3);
       storage2.deleteAllForShop.mockResolvedValue(7);
 
-      shopify1.authenticate.webhook.mockResolvedValue({
-        shop: "shop1.myshopify.com",
-        topic: "APP_UNINSTALLED",
-        webhookId: "w1",
-        payload: {},
-      });
-      shopify2.authenticate.webhook.mockResolvedValue({
-        shop: "shop2.myshopify.com",
-        topic: "APP_UNINSTALLED",
-        webhookId: "w2",
-        payload: {},
-      });
+      mockVerifyWebhook
+        .mockResolvedValueOnce({
+          shop: "shop1.myshopify.com",
+          topic: "app/uninstalled",
+          webhookId: "w1",
+          payload: {},
+          apiVersion: "2026-10",
+          rawBody: "{}",
+        })
+        .mockResolvedValueOnce({
+          shop: "shop2.myshopify.com",
+          topic: "app/uninstalled",
+          webhookId: "w2",
+          payload: {},
+          apiVersion: "2026-10",
+          rawBody: "{}",
+        });
 
-      const args1 = createMockArgs({ sessionStorage: storage1, shopify: shopify1 });
-      const args2 = createMockArgs({ sessionStorage: storage2, shopify: shopify2 });
+      const args1 = createMockArgs({ sessionStorage: storage1 });
+      const args2 = createMockArgs({ sessionStorage: storage2 });
 
       const { action } = await import(
         "../../routes/webhooks.app.uninstalled"
@@ -137,17 +155,18 @@ describe("Route context storage verification", () => {
   describe("webhooks.app.scopes_update route", () => {
     it("uses sessionStorage.updateScopeForShop to update all sessions", async () => {
       const sessionStorage = createMockSessionStorage();
-      const shopify = createMockShopify();
       sessionStorage.updateScopeForShop.mockResolvedValue(2);
 
-      shopify.authenticate.webhook.mockResolvedValue({
+      mockVerifyWebhook.mockResolvedValue({
         shop: "scopes-test.myshopify.com",
-        topic: "APP_SCOPES_UPDATE",
+        topic: "app/scopes_update",
         webhookId: "webhook-789",
         payload: { current: ["read_orders", "read_customers", "write_orders"] },
+        apiVersion: "2026-10",
+        rawBody: "{}",
       });
 
-      const args = createMockArgs({ sessionStorage, shopify });
+      const args = createMockArgs({ sessionStorage });
 
       const { action } = await import(
         "../../routes/webhooks.app.scopes_update"
@@ -164,17 +183,18 @@ describe("Route context storage verification", () => {
   describe("webhooks.compliance route", () => {
     it("uses sessionStorage.deleteAllForShop for shop/redact (idempotent)", async () => {
       const sessionStorage = createMockSessionStorage();
-      const shopify = createMockShopify();
       sessionStorage.deleteAllForShop.mockResolvedValue(2);
 
-      shopify.authenticate.webhook.mockResolvedValue({
+      mockVerifyWebhook.mockResolvedValue({
         shop: "compliance-test.myshopify.com",
-        topic: "SHOP_REDACT",
+        topic: "shop/redact",
         webhookId: "compliance-webhook-123",
         payload: {},
+        apiVersion: "2026-10",
+        rawBody: "{}",
       });
 
-      const args = createMockArgs({ sessionStorage, shopify });
+      const args = createMockArgs({ sessionStorage });
 
       const { action } = await import("../../routes/webhooks.compliance");
       await action(args);
@@ -186,17 +206,18 @@ describe("Route context storage verification", () => {
 
     it("returns 200 even when no sessions exist (idempotent)", async () => {
       const sessionStorage = createMockSessionStorage();
-      const shopify = createMockShopify();
       sessionStorage.deleteAllForShop.mockResolvedValue(0);
 
-      shopify.authenticate.webhook.mockResolvedValue({
+      mockVerifyWebhook.mockResolvedValue({
         shop: "empty-shop.myshopify.com",
-        topic: "SHOP_REDACT",
+        topic: "shop/redact",
         webhookId: "compliance-webhook-empty",
         payload: {},
+        apiVersion: "2026-10",
+        rawBody: "{}",
       });
 
-      const args = createMockArgs({ sessionStorage, shopify });
+      const args = createMockArgs({ sessionStorage });
 
       const { action } = await import("../../routes/webhooks.compliance");
       const response = await action(args);
