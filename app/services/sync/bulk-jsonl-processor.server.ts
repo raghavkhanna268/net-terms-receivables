@@ -35,8 +35,17 @@ import {
   mapCompanyLocationToBuyerAccount,
   bulkUpsertBuyerAccounts,
 } from "./company-location.server";
-import { mapOrderToInvoice, bulkUpsertInvoices } from "./order.server";
+import {
+  mapOrderToInvoiceWithEligibility,
+  bulkUpsertInvoices,
+  type InvoiceData,
+} from "./order.server";
 import { processBulkCustomer } from "./customer.server";
+import {
+  checkOrderEligibility,
+  getEligibilityContext,
+  type EligibilityContext,
+} from "~/lib/invoice-eligibility";
 import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
 import { adminGraphQL, BULK_OPERATION_STATUS_QUERY } from "../drain/admin-client.server";
 import {
@@ -395,41 +404,53 @@ async function processCompanyLines(
 
 /**
  * Process a batch of JSONL lines for orders.
+ * Uses eligibility rules to determine which orders become Invoices.
  */
 async function processOrderLines(
   sql: Sql,
   shopId: string,
-  lines: string[]
+  lines: string[],
+  context?: EligibilityContext
 ): Promise<number> {
   const jsonl = lines.join("\n");
-  const { orders, errors, skippedNoTerms } = parseOrderBulkJsonl(jsonl);
+  const { orders, errors } = parseOrderBulkJsonl(jsonl);
 
   if (errors.length > 0) {
     console.warn(`[bulk-jsonl] ${errors.length} parse errors in orders batch`);
   }
 
-  if (skippedNoTerms > 0) {
-    console.log(
-      `[bulk-jsonl] ${skippedNoTerms} orders skipped (no payment terms)`
-    );
+  // Get eligibility context if not provided
+  const eligibilityContext = context ?? await getEligibilityContext(sql, shopId);
+  if (!eligibilityContext) {
+    console.warn(`[bulk-jsonl] No eligibility context for shop ${shopId}`);
+    return 0;
   }
 
-  // Map orders to invoices
-  const invoices: ReturnType<typeof mapOrderToInvoice>[] = [];
+  // Check eligibility and map eligible orders to invoices
+  const invoices: InvoiceData[] = [];
+  let skippedCount = 0;
 
   for (const order of orders) {
     const shopifyOrder = bulkOrderToShopifyOrder(order);
+    const eligibility = await checkOrderEligibility(sql, shopifyOrder, eligibilityContext);
 
-    // Resolve buyer account
-    const buyerAccountId = await resolveBuyerAccountForBulkOrder(
-      sql,
-      shopId,
-      shopifyOrder
-    );
-
-    if (buyerAccountId) {
-      invoices.push(mapOrderToInvoice(shopId, buyerAccountId, shopifyOrder));
+    if (!eligibility.eligible) {
+      skippedCount++;
+      continue;
     }
+
+    invoices.push(
+      mapOrderToInvoiceWithEligibility(
+        shopId,
+        eligibility.buyerAccountId!,
+        shopifyOrder,
+        eligibility
+      )
+    );
+  }
+
+  if (skippedCount > 0) {
+    console.log(`[bulk-jsonl] ${skippedCount} orders skipped (not eligible)`);
   }
 
   return await bulkUpsertInvoices(sql, invoices);
@@ -464,57 +485,6 @@ async function processCustomerLines(
   return processed;
 }
 
-/**
- * Resolve buyer account for an order in bulk processing.
- * Similar to order.server.ts but without webhook context.
- */
-async function resolveBuyerAccountForBulkOrder(
-  sql: Sql,
-  shopId: string,
-  order: {
-    purchasingEntity?: {
-      company?: { id: string };
-      location?: { id: string };
-      id?: string;
-    } | null;
-    customer?: { id: string } | null;
-  }
-): Promise<string | null> {
-  const purchasingEntity = order.purchasingEntity;
-
-  // Try CompanyLocation first
-  if (purchasingEntity?.location?.id) {
-    const [account] = await sql<{ id: string }[]>`
-      SELECT id FROM "BuyerAccount"
-      WHERE "shopId" = ${shopId}
-        AND "companyLocationId" = ${purchasingEntity.location.id}
-    `;
-    if (account) return account.id;
-  }
-
-  // Try Company
-  if (purchasingEntity?.company?.id) {
-    const [account] = await sql<{ id: string }[]>`
-      SELECT id FROM "BuyerAccount"
-      WHERE "shopId" = ${shopId}
-        AND "companyId" = ${purchasingEntity.company.id}
-      LIMIT 1
-    `;
-    if (account) return account.id;
-  }
-
-  // Try customer
-  if (order.customer?.id) {
-    const [account] = await sql<{ id: string }[]>`
-      SELECT id FROM "BuyerAccount"
-      WHERE "shopId" = ${shopId}
-        AND "customerId" = ${order.customer.id}
-    `;
-    if (account) return account.id;
-  }
-
-  return null;
-}
 
 /**
  * Load bulk operation progress from database.
