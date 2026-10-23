@@ -1463,7 +1463,8 @@ describeWithDb("Split payment confirmation (P1)", () => {
     `;
     expect(matchOtherState.state).toBe("unmatched");
 
-    // Cleanup
+    // Cleanup - delete matches first (FK constraint)
+    await sql`DELETE FROM "Match" WHERE "invoiceId" = ${otherInvoice.id}`;
     await sql`DELETE FROM "Invoice" WHERE id = ${otherInvoice.id}`;
     await sql`DELETE FROM "BuyerAccount" WHERE id = ${otherBuyer.id}`;
   });
@@ -1694,7 +1695,8 @@ describeWithDb("Concurrent confirms without deadlock (P2)", () => {
     const successes = results.filter((r) => r.success);
     expect(successes.length).toBe(1);
 
-    // Cleanup
+    // Cleanup - delete matches first (FK constraint)
+    await sql1`DELETE FROM "Match" WHERE "invoiceId" = ${invoice2.id}`;
     await sql1`DELETE FROM "Invoice" WHERE id = ${invoice2.id}`;
     await sql1`DELETE FROM "BuyerAccount" WHERE id = ${buyer2.id}`;
   });
