@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS "rejected_matches" (
     "paymentId" TEXT NOT NULL,
     "invoiceId" TEXT NOT NULL,
     "rejectedBy" TEXT NOT NULL,
-    "rejectedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    "rejectedAt" TIMESTAMPTZ(3) NOT NULL DEFAULT NOW(),
     CONSTRAINT "rejected_matches_pkey" PRIMARY KEY ("id")
 );
 
