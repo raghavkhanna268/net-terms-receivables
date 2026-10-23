@@ -356,4 +356,62 @@ describeWithDb("Prisma Session Storage Integration", () => {
     expect(loaded!.onlineAccessInfo!.associated_user.collaborator).toBe(false);
     expect(loaded!.onlineAccessInfo!.associated_user.email_verified).toBe(true);
   });
+
+  /**
+   * P1-2 REGRESSION TEST: storeSession must clear needsReauth flag.
+   *
+   * When a session is stored (upsert), needsReauth should always be reset to false.
+   * This prevents a stale needsReauth=true flag from persisting after a successful
+   * token refresh or session update.
+   *
+   * Scenario:
+   * 1. Create a session in the database with needsReauth=true (simulating previous
+   *    invalid_grant that marked the shop as needing re-auth)
+   * 2. Call storeSession (simulating a successful OAuth flow or token update)
+   * 3. Verify needsReauth is cleared to false
+   */
+  it("P1-2: storeSession clears needsReauth flag (Prisma storage)", async () => {
+    // First, insert a session directly with needsReauth=true
+    await prisma.session.create({
+      data: {
+        id: TEST_SESSION_ID,
+        shop: TEST_SHOP,
+        state: "test-state",
+        isOnline: false,
+        scope: "read_products",
+        accessToken: "shpat_old_token",
+        accountOwner: false,
+        collaborator: false,
+        emailVerified: false,
+        needsReauth: true,
+      },
+    });
+
+    // Verify needsReauth is true
+    const beforeSession = await prisma.session.findUnique({
+      where: { id: TEST_SESSION_ID },
+      select: { needsReauth: true },
+    });
+    expect(beforeSession?.needsReauth).toBe(true);
+
+    // Create a Session object and call storeSession (upsert)
+    const session = new Session({
+      id: TEST_SESSION_ID,
+      shop: TEST_SHOP,
+      state: "updated-state",
+      isOnline: false,
+      accessToken: "shpat_new_token",
+      scope: "read_products",
+    });
+
+    await sessionStorage.storeSession(session);
+
+    // CRITICAL: needsReauth must be cleared to false
+    const afterSession = await prisma.session.findUnique({
+      where: { id: TEST_SESSION_ID },
+      select: { needsReauth: true, accessToken: true },
+    });
+    expect(afterSession?.needsReauth).toBe(false);
+    expect(afterSession?.accessToken).toBe("shpat_new_token");
+  });
 });
