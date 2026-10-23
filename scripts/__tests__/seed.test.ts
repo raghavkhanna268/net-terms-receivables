@@ -26,6 +26,11 @@ import {
   TAGGED_CUSTOMER_ORDER_CREATE_MUTATION,
   COMPANY_CREATE_MUTATION,
   COMPANY_LOCATION_CREATE_MUTATION,
+  buildCompanyCreateInput,
+  buildCompanyLocationCreateInput,
+  buildTaggedCustomerOrderInput,
+  buildB2BOrderInput,
+  getIndiaProvinceCode,
   type SeedState,
   type GraphQLResponse,
   type UserError,
@@ -33,7 +38,7 @@ import {
 import { inferDueDate } from "~/lib/due-date";
 import { readFileSync } from "fs";
 import { resolve } from "path";
-import { buildClientSchema, parse, validate, type GraphQLSchema } from "graphql";
+import { buildClientSchema, parse, validate, coerceInputValue, type GraphQLSchema, type GraphQLInputType } from "graphql";
 
 /**
  * Unit tests for the seed script (orderCreate with processedAt version).
@@ -1260,31 +1265,175 @@ describe("Error Logging Helpers", () => {
   });
 });
 
-describe("India Address Requirements", () => {
-  it("Company addresses include zoneCode MH for Maharashtra", async () => {
-    const fs = await import("fs/promises");
-    const path = await import("path");
-
-    const seedPath = path.resolve(__dirname, "../seed.ts");
-    const seedContent = await fs.readFile(seedPath, "utf-8");
-
-    // Verify shippingAddress blocks include zoneCode: "MH"
-    // For companyCreate
-    expect(seedContent).toMatch(/shippingAddress:\s*\{[\s\S]*?zoneCode:\s*["']MH["']/);
-
-    // For companyLocationCreate
-    expect(seedContent).toMatch(/city:\s*["']Mumbai["'][\s\S]*?zoneCode:\s*["']MH["']/);
+describe("India Province Code Helper", () => {
+  it("maps Mumbai to MH (Maharashtra)", () => {
+    expect(getIndiaProvinceCode("Mumbai")).toBe("MH");
   });
 
-  it("Order addresses include zoneCode MH for Maharashtra", async () => {
-    const fs = await import("fs/promises");
-    const path = await import("path");
+  it("maps Pune to MH (Maharashtra)", () => {
+    expect(getIndiaProvinceCode("Pune")).toBe("MH");
+  });
 
-    const seedPath = path.resolve(__dirname, "../seed.ts");
-    const seedContent = await fs.readFile(seedPath, "utf-8");
+  it("maps Delhi to DL", () => {
+    expect(getIndiaProvinceCode("Delhi")).toBe("DL");
+  });
 
-    // Verify billingAddress and shippingAddress in orders include zoneCode
-    const orderAddressMatches = seedContent.match(/billingAddress:\s*\{[^}]+zoneCode:\s*["']MH["']/g);
-    expect(orderAddressMatches?.length).toBeGreaterThanOrEqual(2);
+  it("maps Kolkata to WB (West Bengal)", () => {
+    expect(getIndiaProvinceCode("Kolkata")).toBe("WB");
+  });
+
+  it("maps Ahmedabad to GJ (Gujarat)", () => {
+    expect(getIndiaProvinceCode("Ahmedabad")).toBe("GJ");
+  });
+
+  it("throws on unknown city", () => {
+    expect(() => getIndiaProvinceCode("UnknownCity")).toThrow("Unknown Indian city");
+    expect(() => getIndiaProvinceCode("UnknownCity")).toThrow("INDIA_CITY_TO_PROVINCE_CODE");
+  });
+
+  it("COMPANY_SEEDS uses diverse cities", () => {
+    const cities = COMPANY_SEEDS.map(s => s.city);
+    const uniqueCities = new Set(cities);
+    expect(uniqueCities.size).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe("Variable Builder Input Coercion against Schema", () => {
+  let schema: GraphQLSchema;
+
+  function getInputType(typeName: string): GraphQLInputType {
+    const type = schema.getType(typeName);
+    if (!type) throw new Error(`Type ${typeName} not found in schema`);
+    return type as GraphQLInputType;
+  }
+
+  function coerceAndCollectErrors(value: unknown, typeName: string): string[] {
+    const errors: string[] = [];
+    const inputType = getInputType(typeName);
+    coerceInputValue(value, inputType, (path, _invalidValue, error) => {
+      errors.push(`${path.join(".")}: ${error.message}`);
+    });
+    return errors;
+  }
+
+  beforeAll(() => {
+    const schemaPath = resolve(__dirname, "../../test/fixtures/admin-2026-10.schema.json");
+    const schemaJson = JSON.parse(readFileSync(schemaPath, "utf-8"));
+    schema = buildClientSchema(schemaJson.data);
+  });
+
+  it("buildCompanyCreateInput produces valid CompanyCreateInput", () => {
+    const seed = COMPANY_SEEDS[0];
+    const variables = buildCompanyCreateInput(seed, "ntr-seed-test", "Net-15", "gid://template/1");
+    const errors = coerceAndCollectErrors(variables.input, "CompanyCreateInput");
+    expect(errors).toEqual([]);
+  });
+
+  it("buildCompanyLocationCreateInput produces valid CompanyLocationInput", () => {
+    const variables = buildCompanyLocationCreateInput(
+      "gid://company/1",
+      "Test Company",
+      "Delhi",
+      { suffix: "Net-30", dueInDays: 30 },
+      "gid://template/2"
+    );
+    const errors = coerceAndCollectErrors(variables.input, "CompanyLocationInput");
+    expect(errors).toEqual([]);
+  });
+
+  it("buildTaggedCustomerOrderInput produces valid OrderCreateOrderInput", () => {
+    const variables = buildTaggedCustomerOrderInput({
+      orderKey: "ntr-seed-order-1",
+      customerId: "gid://customer/1",
+      productTitle: "Test Product",
+      amount: 50000,
+      processedAt: new Date().toISOString(),
+      currencyCode: "INR",
+    });
+    const errors = coerceAndCollectErrors(variables.order, "OrderCreateOrderInput");
+    expect(errors).toEqual([]);
+  });
+
+  it("buildB2BOrderInput produces valid OrderCreateOrderInput", () => {
+    const variables = buildB2BOrderInput({
+      orderKey: "ntr-seed-order-2",
+      companyLocationId: "gid://location/1",
+      customerId: "gid://customer/2",
+      productTitle: "B2B Product",
+      amount: 100000,
+      processedAt: new Date().toISOString(),
+      currencyCode: "INR",
+    });
+    const errors = coerceAndCollectErrors(variables.order, "OrderCreateOrderInput");
+    expect(errors).toEqual([]);
+  });
+
+  it("rejects zoneCode on MailingAddressInput (order addresses)", () => {
+    const invalidOrderInput = {
+      tags: ["test"],
+      customer: { toAssociate: { id: "gid://customer/1" } },
+      currency: "INR",
+      financialStatus: "PENDING",
+      processedAt: new Date().toISOString(),
+      lineItems: [{ title: "Test", quantity: 1, priceSet: { shopMoney: { amount: "100", currencyCode: "INR" } } }],
+      billingAddress: {
+        firstName: "Test",
+        lastName: "User",
+        address1: "123 Street",
+        city: "Mumbai",
+        zoneCode: "MH",
+        countryCode: "IN",
+        zip: "400001",
+      },
+    };
+
+    const errors = coerceAndCollectErrors(invalidOrderInput, "OrderCreateOrderInput");
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors.some(e => e.includes("zoneCode"))).toBe(true);
+  });
+
+  it("accepts provinceCode on MailingAddressInput (order addresses)", () => {
+    const validOrderInput = {
+      tags: ["test"],
+      customer: { toAssociate: { id: "gid://customer/1" } },
+      currency: "INR",
+      financialStatus: "PENDING",
+      processedAt: new Date().toISOString(),
+      lineItems: [{ title: "Test", quantity: 1, priceSet: { shopMoney: { amount: "100", currencyCode: "INR" } } }],
+      billingAddress: {
+        firstName: "Test",
+        lastName: "User",
+        address1: "123 Street",
+        city: "Mumbai",
+        provinceCode: "MH",
+        countryCode: "IN",
+        zip: "400001",
+      },
+    };
+
+    const errors = coerceAndCollectErrors(validOrderInput, "OrderCreateOrderInput");
+    expect(errors).toEqual([]);
+  });
+
+  it("accepts zoneCode on CompanyAddressInput (company addresses)", () => {
+    const validCompanyInput = {
+      company: { name: "Test Co" },
+      companyLocation: {
+        name: "HQ",
+        shippingAddress: {
+          firstName: "Test",
+          lastName: "User",
+          address1: "123 Street",
+          city: "Mumbai",
+          zoneCode: "MH",
+          countryCode: "IN",
+          zip: "400001",
+        },
+      },
+      companyContact: { email: "test@example.com", firstName: "Test", lastName: "User" },
+    };
+
+    const errors = coerceAndCollectErrors(validCompanyInput, "CompanyCreateInput");
+    expect(errors).toEqual([]);
   });
 });

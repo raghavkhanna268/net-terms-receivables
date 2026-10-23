@@ -6,20 +6,15 @@ The `admin-2026-10.schema.json` file contains the GraphQL introspection schema f
 
 ### Source
 
-This schema is fetched from Shopify's public GraphQL introspection proxy:
+- **URL**: `https://shopify.dev/admin-graphql-direct-proxy/2026-10`
+- **Fetched**: 2026-10-23
+- **Size**: ~6.6 MB (3716 types)
 
-```bash
-curl -s -H "Content-Type: application/json" -X POST \
-  "https://shopify.dev/admin-graphql-direct-proxy/2026-10" \
-  -d '{"query":"<introspection-query>"}' \
-  > test/fixtures/admin-2026-10.schema.json
-```
-
-No authentication is required for fetching the schema.
+This schema is fetched from Shopify's public GraphQL introspection proxy. No authentication is required.
 
 ### Refreshing the Schema
 
-To refresh the schema (e.g., when a new API version is released or to update to the latest 2026-10 schema):
+To refresh the schema (e.g., when Shopify updates the 2026-10 version):
 
 ```bash
 # Standard GraphQL introspection query
@@ -31,11 +26,20 @@ curl -s -H "Content-Type: application/json" -X POST \
   > test/fixtures/admin-2026-10.schema.json
 ```
 
+After refreshing, update the "Fetched" date above.
+
 ### Usage in Tests
 
-The schema is used by `scripts/__tests__/seed.test.ts` to validate that the GraphQL documents in `scripts/seed.ts` conform to the Admin API 2026-10 schema using `graphql-js` `validate()` function.
+The schema is used by `scripts/__tests__/seed.test.ts` to:
 
-This ensures that:
-- All field selections are valid (e.g., `displayFinancialStatus` instead of `financialStatus`)
-- All input types have the correct shape
-- Mutations and queries reference existing types
+1. **Validate GraphQL documents** - Uses `graphql-js` `validate()` to ensure mutations are syntactically valid against the 2026-10 schema (e.g., `displayFinancialStatus` instead of `financialStatus`).
+
+2. **Coerce input variables** - Uses `graphql-js` `coerceInputValue()` to validate that the variable builder functions produce payloads that conform to the expected input types:
+   - `CompanyCreateInput` (uses `CompanyAddressInput.zoneCode`)
+   - `CompanyLocationInput` (uses `CompanyAddressInput.zoneCode`)
+   - `OrderCreateOrderInput` (uses `MailingAddressInput.provinceCode`)
+
+Key schema differences:
+- `CompanyAddressInput` has `zoneCode` for company/location addresses
+- `MailingAddressInput` has `provinceCode` for order billing/shipping addresses
+- Both use ISO 3166-2:IN codes (e.g., MH, DL, KA) for Indian states

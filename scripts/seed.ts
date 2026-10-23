@@ -171,12 +171,68 @@ export const LOCATION_TERMS: { suffix: string; dueInDays: number }[] = [
   { suffix: "Net-60", dueInDays: 60 },
 ];
 
+/**
+ * ISO 3166-2:IN subdivision codes for Indian cities.
+ * @see https://en.wikipedia.org/wiki/ISO_3166-2:IN
+ * 
+ * Used by:
+ * - CompanyAddressInput.zoneCode (company/location addresses)
+ * - MailingAddressInput.provinceCode (order billing/shipping addresses)
+ * 
+ * Both fields use the same ISO 3166-2:IN codes (e.g., MH, DL, KA).
+ */
+export const INDIA_CITY_TO_PROVINCE_CODE: Record<string, string> = {
+  // Maharashtra (MH)
+  "Mumbai": "MH",
+  "Pune": "MH",
+  "Nagpur": "MH",
+  // Delhi (DL)
+  "Delhi": "DL",
+  "New Delhi": "DL",
+  // Karnataka (KA)
+  "Bengaluru": "KA",
+  "Bangalore": "KA",
+  "Mysuru": "KA",
+  // Tamil Nadu (TN)
+  "Chennai": "TN",
+  "Coimbatore": "TN",
+  // Gujarat (GJ)
+  "Ahmedabad": "GJ",
+  "Surat": "GJ",
+  // West Bengal (WB)
+  "Kolkata": "WB",
+  // Telangana (TG)
+  "Hyderabad": "TG",
+  // Rajasthan (RJ)
+  "Jaipur": "RJ",
+  // Uttar Pradesh (UP)
+  "Lucknow": "UP",
+  "Noida": "UP",
+};
+
+/**
+ * Get the ISO 3166-2:IN subdivision code for an Indian city.
+ * Throws if the city is not in the mapping - add it to INDIA_CITY_TO_PROVINCE_CODE.
+ * 
+ * @returns The province/zone code (e.g., "MH" for Mumbai)
+ */
+export function getIndiaProvinceCode(city: string): string {
+  const code = INDIA_CITY_TO_PROVINCE_CODE[city];
+  if (!code) {
+    throw new Error(
+      `Unknown Indian city "${city}" - add it to INDIA_CITY_TO_PROVINCE_CODE in scripts/seed.ts. ` +
+      `See https://en.wikipedia.org/wiki/ISO_3166-2:IN for valid codes.`
+    );
+  }
+  return code;
+}
+
 export const COMPANY_SEEDS = [
-  { key: "company-1", name: "Acme Wholesale Pvt Ltd", contact: { firstName: "Raj", lastName: "Sharma", email: "raj.sharma@acme-wholesale.example" } },
-  { key: "company-2", name: "Bharat Traders Co", contact: { firstName: "Priya", lastName: "Patel", email: "priya@bharat-traders.example" } },
-  { key: "company-3", name: "Delhi Distributors LLP", contact: { firstName: "Amit", lastName: "Singh", email: "amit.singh@delhi-dist.example" } },
-  { key: "company-4", name: "Mumbai Merchants Pvt Ltd", contact: { firstName: "Sneha", lastName: "Desai", email: "sneha@mumbai-merchants.example" } },
-  { key: "company-5", name: "Kolkata Commerce House", contact: { firstName: "Arjun", lastName: "Das", email: "arjun.das@kolkata-commerce.example" } },
+  { key: "company-1", name: "Acme Wholesale Pvt Ltd", city: "Mumbai", contact: { firstName: "Raj", lastName: "Sharma", email: "raj.sharma@acme-wholesale.example" } },
+  { key: "company-2", name: "Bharat Traders Co", city: "Ahmedabad", contact: { firstName: "Priya", lastName: "Patel", email: "priya@bharat-traders.example" } },
+  { key: "company-3", name: "Delhi Distributors LLP", city: "Delhi", contact: { firstName: "Amit", lastName: "Singh", email: "amit.singh@delhi-dist.example" } },
+  { key: "company-4", name: "Mumbai Merchants Pvt Ltd", city: "Pune", contact: { firstName: "Sneha", lastName: "Desai", email: "sneha@mumbai-merchants.example" } },
+  { key: "company-5", name: "Kolkata Commerce House", city: "Kolkata", contact: { firstName: "Arjun", lastName: "Das", email: "arjun.das@kolkata-commerce.example" } },
 ] as const;
 
 // B2B order distribution - each company gets orders from different locations (different terms)
@@ -614,7 +670,7 @@ export async function seedCompanies(state: SeedState): Promise<void> {
             locations.set(loc.dueInDays, `dry-run-location-${seed.key}-${loc.dueInDays}`);
             state.createdCount.locations++;
           } else {
-            const locationId = await createCompanyLocation(state, existing.id, seed.name, loc, template?.id);
+            const locationId = await createCompanyLocation(state, existing.id, seed.name, seed.city, loc, template?.id);
             if (locationId) {
               locations.set(loc.dueInDays, locationId);
               console.log(`    ✅ Created location ${loc.suffix}`);
@@ -713,6 +769,44 @@ export const COMPANY_CREATE_MUTATION = `
   }
 `;
 
+/**
+ * Build CompanyCreateInput variables for the companyCreate mutation.
+ * Exported for schema validation testing.
+ */
+export function buildCompanyCreateInput(
+  seed: { name: string; city: string; contact: { firstName: string; lastName: string; email: string } },
+  externalId: string,
+  locationSuffix: string,
+  paymentTermsTemplateId?: string
+): { input: Record<string, unknown> } {
+  return {
+    input: {
+      company: { name: seed.name, externalId },
+      companyLocation: {
+        name: `${seed.name} - ${locationSuffix}`,
+        shippingAddress: {
+          firstName: seed.contact.firstName,
+          lastName: seed.contact.lastName,
+          address1: "123 Business Street",
+          city: seed.city,
+          zoneCode: getIndiaProvinceCode(seed.city),
+          countryCode: "IN",
+          zip: "400001",
+        },
+        billingSameAsShipping: true,
+        buyerExperienceConfiguration: paymentTermsTemplateId ? {
+          paymentTermsTemplateId,
+        } : undefined,
+      },
+      companyContact: {
+        email: seed.contact.email,
+        firstName: seed.contact.firstName,
+        lastName: seed.contact.lastName,
+      },
+    },
+  };
+}
+
 export async function createCompanyWithLocations(
   state: SeedState,
   seed: (typeof COMPANY_SEEDS)[number],
@@ -723,34 +817,11 @@ export async function createCompanyWithLocations(
     (t) => t.paymentTermsType === "NET" && t.dueInDays === firstLoc.dueInDays
   );
 
+  const variables = buildCompanyCreateInput(seed, externalId, firstLoc.suffix, firstTemplate?.id);
+
   const createResult = await graphql<{
     companyCreate: { company: CompanyNode | null; userErrors: UserError[] };
-  }>(state, COMPANY_CREATE_MUTATION, {
-    input: {
-      company: { name: seed.name, externalId },
-      companyLocation: {
-        name: `${seed.name} - ${firstLoc.suffix}`,
-        shippingAddress: {
-          firstName: seed.contact.firstName,
-          lastName: seed.contact.lastName,
-          address1: "123 Business Street",
-          city: "Mumbai",
-          zoneCode: "MH",
-          countryCode: "IN",
-          zip: "400001",
-        },
-        billingSameAsShipping: true,
-        buyerExperienceConfiguration: firstTemplate ? {
-          paymentTermsTemplateId: firstTemplate.id,
-        } : undefined,
-      },
-      companyContact: {
-        email: seed.contact.email,
-        firstName: seed.contact.firstName,
-        lastName: seed.contact.lastName,
-      },
-    },
-  }, { isMutation: true, mutationName: "companyCreate" });
+  }>(state, COMPANY_CREATE_MUTATION, variables, { isMutation: true, mutationName: "companyCreate" });
 
   if (createResult.errors) {
     console.error(`    ❌ Failed to create company ${seed.name}: GraphQL errors`);
@@ -783,7 +854,7 @@ export async function createCompanyWithLocations(
       (t) => t.paymentTermsType === "NET" && t.dueInDays === loc.dueInDays
     );
 
-    const locationId = await createCompanyLocation(state, company.id, seed.name, loc, template?.id);
+    const locationId = await createCompanyLocation(state, company.id, seed.name, seed.city, loc, template?.id);
     if (locationId) {
       locations.set(loc.dueInDays, locationId);
       console.log(`    → Location ${loc.suffix}: created`);
@@ -817,19 +888,18 @@ export const COMPANY_LOCATION_CREATE_MUTATION = `
   }
 `;
 
-async function createCompanyLocation(
-  state: SeedState,
+/**
+ * Build CompanyLocationInput variables for the companyLocationCreate mutation.
+ * Exported for schema validation testing.
+ */
+export function buildCompanyLocationCreateInput(
   companyId: string,
   companyName: string,
+  city: string,
   loc: { suffix: string; dueInDays: number },
   paymentTermsTemplateId?: string
-): Promise<string | null> {
-  const result = await graphql<{
-    companyLocationCreate: {
-      companyLocation: { id: string; name: string } | null;
-      userErrors: UserError[];
-    };
-  }>(state, COMPANY_LOCATION_CREATE_MUTATION, {
+): { companyId: string; input: Record<string, unknown> } {
+  return {
     companyId,
     input: {
       name: `${companyName} - ${loc.suffix}`,
@@ -837,8 +907,8 @@ async function createCompanyLocation(
         firstName: "Branch",
         lastName: loc.suffix,
         address1: `${loc.dueInDays} Payment Lane`,
-        city: "Mumbai",
-        zoneCode: "MH",
+        city: city,
+        zoneCode: getIndiaProvinceCode(city),
         countryCode: "IN",
         zip: "400002",
       },
@@ -847,7 +917,25 @@ async function createCompanyLocation(
         paymentTermsTemplateId,
       } : undefined,
     },
-  }, { isMutation: true, mutationName: "companyLocationCreate" });
+  };
+}
+
+async function createCompanyLocation(
+  state: SeedState,
+  companyId: string,
+  companyName: string,
+  city: string,
+  loc: { suffix: string; dueInDays: number },
+  paymentTermsTemplateId?: string
+): Promise<string | null> {
+  const variables = buildCompanyLocationCreateInput(companyId, companyName, city, loc, paymentTermsTemplateId);
+
+  const result = await graphql<{
+    companyLocationCreate: {
+      companyLocation: { id: string; name: string } | null;
+      userErrors: UserError[];
+    };
+  }>(state, COMPANY_LOCATION_CREATE_MUTATION, variables, { isMutation: true, mutationName: "companyLocationCreate" });
 
   if (result.errors) {
     console.error(`    ❌ Failed to create location ${loc.suffix}: GraphQL errors`);
@@ -1205,6 +1293,65 @@ export const TAGGED_CUSTOMER_ORDER_CREATE_MUTATION = `
   }
 `;
 
+/**
+ * Build OrderCreateOrderInput variables for tagged customer orders.
+ * Uses MailingAddressInput which has provinceCode (not zoneCode).
+ * Exported for schema validation testing.
+ */
+export function buildTaggedCustomerOrderInput(
+  options: {
+    orderKey: string;
+    customerId: string;
+    productTitle: string;
+    amount: number;
+    processedAt: string;
+    currencyCode: string;
+  }
+): { order: Record<string, unknown>; options: Record<string, unknown> } {
+  return {
+    order: {
+      tags: [SEED_TAG, options.orderKey],
+      customer: { toAssociate: { id: options.customerId } },
+      currency: options.currencyCode,
+      financialStatus: "PENDING",
+      processedAt: options.processedAt,
+      lineItems: [{
+        title: options.productTitle,
+        quantity: 1,
+        priceSet: {
+          shopMoney: {
+            amount: String(options.amount),
+            currencyCode: options.currencyCode,
+          },
+        },
+      }],
+      billingAddress: {
+        firstName: "Tagged",
+        lastName: "Customer",
+        address1: "123 Test Street",
+        city: "Mumbai",
+        provinceCode: getIndiaProvinceCode("Mumbai"),
+        countryCode: "IN",
+        zip: "400001",
+      },
+      shippingAddress: {
+        firstName: "Tagged",
+        lastName: "Customer",
+        address1: "123 Test Street",
+        city: "Mumbai",
+        provinceCode: getIndiaProvinceCode("Mumbai"),
+        countryCode: "IN",
+        zip: "400001",
+      },
+    },
+    options: {
+      sendReceipt: false,
+      sendFulfillmentReceipt: false,
+      inventoryBehaviour: "BYPASS",
+    },
+  };
+}
+
 async function createTaggedCustomerOrder(
   state: SeedState,
   options: {
@@ -1216,6 +1363,15 @@ async function createTaggedCustomerOrder(
     expectedTermsDays: number;
   }
 ): Promise<{ id: string; name: string } | null> {
+  const variables = buildTaggedCustomerOrderInput({
+    orderKey: options.orderKey,
+    customerId: options.customerId,
+    productTitle: options.productTitle,
+    amount: options.amount,
+    processedAt: options.processedAt,
+    currencyCode: state.currencyCode,
+  });
+
   const result = await graphql<{
     orderCreate: {
       order: {
@@ -1226,48 +1382,7 @@ async function createTaggedCustomerOrder(
       } | null;
       userErrors: UserError[];
     };
-  }>(state, TAGGED_CUSTOMER_ORDER_CREATE_MUTATION, {
-    order: {
-      tags: [SEED_TAG, options.orderKey],
-      customer: { toAssociate: { id: options.customerId } },
-      currency: state.currencyCode,
-      financialStatus: "PENDING",
-      processedAt: options.processedAt,
-      lineItems: [{
-        title: options.productTitle,
-        quantity: 1,
-        priceSet: {
-          shopMoney: {
-            amount: String(options.amount),
-            currencyCode: state.currencyCode,
-          },
-        },
-      }],
-      billingAddress: {
-        firstName: "Tagged",
-        lastName: "Customer",
-        address1: "123 Test Street",
-        city: "Mumbai",
-        zoneCode: "MH",
-        countryCode: "IN",
-        zip: "400001",
-      },
-      shippingAddress: {
-        firstName: "Tagged",
-        lastName: "Customer",
-        address1: "123 Test Street",
-        city: "Mumbai",
-        zoneCode: "MH",
-        countryCode: "IN",
-        zip: "400001",
-      },
-    },
-    options: {
-      sendReceipt: false,
-      sendFulfillmentReceipt: false,
-      inventoryBehaviour: "BYPASS",
-    },
-  }, { isMutation: true, mutationName: "orderCreate" });
+  }>(state, TAGGED_CUSTOMER_ORDER_CREATE_MUTATION, variables, { isMutation: true, mutationName: "orderCreate" });
 
   if (result.errors) {
     return null;
@@ -1325,6 +1440,67 @@ export const B2B_ORDER_CREATE_MUTATION = `
 `;
 
 /**
+ * Build OrderCreateOrderInput variables for B2B orders.
+ * Uses MailingAddressInput which has provinceCode (not zoneCode).
+ * Exported for schema validation testing.
+ */
+export function buildB2BOrderInput(
+  options: {
+    orderKey: string;
+    companyLocationId: string;
+    customerId: string;
+    productTitle: string;
+    amount: number;
+    processedAt: string;
+    currencyCode: string;
+  }
+): { order: Record<string, unknown>; options: Record<string, unknown> } {
+  return {
+    order: {
+      tags: [SEED_TAG, options.orderKey],
+      companyLocationId: options.companyLocationId,
+      customer: { toAssociate: { id: options.customerId } },
+      currency: options.currencyCode,
+      financialStatus: "PENDING",
+      processedAt: options.processedAt,
+      lineItems: [{
+        title: options.productTitle,
+        quantity: 1,
+        priceSet: {
+          shopMoney: {
+            amount: String(options.amount),
+            currencyCode: options.currencyCode,
+          },
+        },
+      }],
+      billingAddress: {
+        firstName: "B2B",
+        lastName: "Billing",
+        address1: "123 Business Street",
+        city: "Mumbai",
+        provinceCode: getIndiaProvinceCode("Mumbai"),
+        countryCode: "IN",
+        zip: "400001",
+      },
+      shippingAddress: {
+        firstName: "B2B",
+        lastName: "Shipping",
+        address1: "123 Business Street",
+        city: "Mumbai",
+        provinceCode: getIndiaProvinceCode("Mumbai"),
+        countryCode: "IN",
+        zip: "400001",
+      },
+    },
+    options: {
+      sendReceipt: false,
+      sendFulfillmentReceipt: false,
+      inventoryBehaviour: "BYPASS",
+    },
+  };
+}
+
+/**
  * Create a B2B order using orderCreate with custom line items.
  * 
  * Key features:
@@ -1351,6 +1527,16 @@ export async function createOrder(
     expectedTermsDays: number;
   }
 ): Promise<{ id: string; name: string } | null> {
+  const variables = buildB2BOrderInput({
+    orderKey: options.orderKey,
+    companyLocationId: options.companyLocationId,
+    customerId: options.customerId,
+    productTitle: options.productTitle,
+    amount: options.amount,
+    processedAt: options.processedAt,
+    currencyCode: state.currencyCode,
+  });
+
   const result = await graphql<{
     orderCreate: {
       order: {
@@ -1362,51 +1548,7 @@ export async function createOrder(
       } | null;
       userErrors: UserError[];
     };
-  }>(state, B2B_ORDER_CREATE_MUTATION, {
-    // OrderCreateCustomerInput in 2026-10 requires toAssociate or toUpsert, not direct id
-    // @see https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateCustomerInput
-    order: {
-      tags: [SEED_TAG, options.orderKey],
-      companyLocationId: options.companyLocationId,
-      customer: { toAssociate: { id: options.customerId } },
-      currency: state.currencyCode,
-      financialStatus: "PENDING",
-      processedAt: options.processedAt,
-      lineItems: [{
-        title: options.productTitle,
-        quantity: 1,
-        priceSet: {
-          shopMoney: {
-            amount: String(options.amount),
-            currencyCode: state.currencyCode,
-          },
-        },
-      }],
-      billingAddress: {
-        firstName: "B2B",
-        lastName: "Billing",
-        address1: "123 Business Street",
-        city: "Mumbai",
-        zoneCode: "MH",
-        countryCode: "IN",
-        zip: "400001",
-      },
-      shippingAddress: {
-        firstName: "B2B",
-        lastName: "Shipping",
-        address1: "123 Business Street",
-        city: "Mumbai",
-        zoneCode: "MH",
-        countryCode: "IN",
-        zip: "400001",
-      },
-    },
-    options: {
-      sendReceipt: false,
-      sendFulfillmentReceipt: false,
-      inventoryBehaviour: "BYPASS",
-    },
-  }, { isMutation: true, mutationName: "orderCreate" });
+  }>(state, B2B_ORDER_CREATE_MUTATION, variables, { isMutation: true, mutationName: "orderCreate" });
 
   if (result.errors) {
     return null;
