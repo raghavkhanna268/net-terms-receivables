@@ -122,15 +122,14 @@ describe("refreshOfflineTokenIfNeeded AbortError handling (mocked)", () => {
       return fn;
     };
 
-    const mockSql = createMockQuery();
-
-    // Add begin() method that returns the callback result with the same mock
-    (mockSql as unknown as { begin: typeof mockSql.begin }).begin = vi.fn().mockImplementation(
-      async (callback: (tx: ReturnType<typeof createMockQuery>) => Promise<unknown>) => {
-        const txMock = createMockQuery();
-        return callback(txMock);
-      }
-    );
+    const mockSql = Object.assign(createMockQuery(), {
+      begin: vi.fn().mockImplementation(
+        async (callback: (tx: ReturnType<typeof createMockQuery>) => Promise<unknown>) => {
+          const txMock = createMockQuery();
+          return callback(txMock);
+        }
+      ),
+    });
 
     // Mock fetch to throw AbortError (simulates timeout)
     const abortError = new Error("The operation was aborted");
