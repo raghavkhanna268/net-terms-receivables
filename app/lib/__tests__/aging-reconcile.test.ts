@@ -327,6 +327,51 @@ describeWithDb("shop totals = sum of ledger (gating test)", () => {
       expect(ledgerSumByCurrency[currency]).toBe(BigInt(totalAmount));
     }
   });
+
+  it("shop totals equal sum of ledger rows with PLAN_GATING_ENFORCED=true", async () => {
+    const originalEnv = process.env.PLAN_GATING_ENFORCED;
+    process.env.PLAN_GATING_ENFORCED = "true";
+
+    try {
+      const asOf = new Date();
+
+      const totals = await getShopAgingTotals(sql, testShopId, asOf);
+      const ledger = await getBuyerLedger(sql, testShopId, asOf, {
+        limit: 100,
+        offset: 0,
+        sortBy: "outstanding",
+        sortOrder: "desc",
+      });
+
+      // With gating enforced, the gated buyer should be excluded
+      // Only the active buyer's invoice (5000.00 = 500000 paise) should be counted
+      expect(ledger.rows.length).toBe(1);
+      expect(ledger.rows[0].buyer_name).toBe("Active Buyer");
+
+      // Sum ledger outstanding amounts by currency
+      const ledgerSumByCurrency: Record<string, bigint> = {};
+      for (const row of ledger.rows) {
+        const currency = row.currency;
+        const amount = BigInt(row.outstanding_paise);
+        ledgerSumByCurrency[currency] = (ledgerSumByCurrency[currency] ?? 0n) + amount;
+      }
+
+      // Verify totals match ledger (both should exclude gated buyer)
+      for (const [currency, totalAmount] of Object.entries(totals.totalByCurrency)) {
+        expect(ledgerSumByCurrency[currency]).toBe(BigInt(totalAmount));
+      }
+
+      // Verify the amount is only the active buyer's invoice
+      expect(totals.totalByCurrency["INR"]).toBe("500000");
+    } finally {
+      // Restore original environment
+      if (originalEnv === undefined) {
+        delete process.env.PLAN_GATING_ENFORCED;
+      } else {
+        process.env.PLAN_GATING_ENFORCED = originalEnv;
+      }
+    }
+  });
 });
 
 /**

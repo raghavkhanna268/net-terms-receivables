@@ -286,11 +286,7 @@ function BuyerLedgerTable({
 
   return (
     <s-stack>
-      <s-table
-        paginate={totalPages > 1}
-        hasNextPage={hasNextPage}
-        hasPreviousPage={hasPreviousPage}
-      >
+      <s-table>
         <s-table-header-row>
           <s-table-header>
             <s-link href={buildSortUrl("name")}>Buyer{getSortIndicator("name")}</s-link>
