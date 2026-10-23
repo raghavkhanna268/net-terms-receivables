@@ -69,8 +69,8 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 |---------------|--------|---------|
 | Audit Events | Actor, action type, timestamp, event data | Compliance and debugging |
 | Reminder Logs | Rule ID, invoice ID, sent timestamp | Prevent duplicate reminders |
-| s6_processed_webhooks | Webhook ID, shop, topic, resource GID | Idempotent webhook processing |
-| s6_dead_letter | Shop, queue, message, error | Failed message tracking |
+| s6_processed_webhooks | Webhook ID, topic, resource GID | Idempotent webhook processing |
+| s6_dead_letter | Queue, message, error | Failed message tracking |
 
 ---
 
@@ -131,7 +131,7 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | OAuth Sessions | Until logout, expiry, or uninstall | `app/uninstalled` webhook or session expiry |
 | Shop and Account Data | Until 48 hours after uninstall | `shop/redact` webhook (sent by Shopify 48h after uninstall) |
 | Tagged Customer Data | Until customers/redact or shop/redact | Compliance webhooks |
-| Invoices | Retained for legal/tax compliance | Anonymized on customers/redact |
+| Invoices | Retained (no customer-identifying fields) | Buyer relationship anonymized on customers/redact |
 | Payments | Until shop/redact | Redacted on customers/redact if linked to customer via Match→Invoice→BuyerAccount |
 | Data Request Records | 30 days (DPDP minimisation) | Purged on next access, and nightly where pg_cron is enabled; also on customers/redact or shop/redact (CASCADE) |
 | Audit Events | Until shop/redact | Automatic cascade |
