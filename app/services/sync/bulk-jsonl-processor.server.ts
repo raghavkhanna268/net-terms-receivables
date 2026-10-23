@@ -47,11 +47,6 @@ import {
   isTerminalFinancialStatus,
   type EligibilityContext,
 } from "~/lib/invoice-eligibility";
-import {
-  inferDueDate,
-  type InferDueDateInput,
-  type InferDueDateResult,
-} from "~/lib/due-date";
 import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
 import { adminGraphQL, BULK_OPERATION_STATUS_QUERY } from "../drain/admin-client.server";
 import {
@@ -505,24 +500,37 @@ async function processOrderLines(
     return orphansUpdated;
   }
 
-  // Batch lookup: find existing invoices for these orders FIRST (P2 optimization)
+  // Batch lookup: find existing invoices with their buyer account IDs and merchant overrides
   const orderIds = orders.map((o) => o.id);
-  const existingInvoices = await sql<{ orderId: string; buyerAccountId: string }[]>`
-    SELECT "orderId", "buyerAccountId" FROM "Invoice"
+  const existingInvoices = await sql<{
+    orderId: string;
+    buyerAccountId: string;
+    dueOverrideAt: Date | null;
+    dueSource: string;
+    dueAt: Date | null;
+  }[]>`
+    SELECT "orderId", "buyerAccountId", "dueOverrideAt", "dueSource", "dueAt"
+    FROM "Invoice"
     WHERE "shopId" = ${shopId} AND "orderId" = ANY(${orderIds})
   `;
-  const existingByOrderId = new Map(existingInvoices.map((i) => [i.orderId, i.buyerAccountId]));
+  const existingByOrderId = new Map(existingInvoices.map((i) => [i.orderId, i]));
 
-  // Get eligibility context for:
-  // 1. Orders without existing invoices (for creation eligibility)
-  // 2. Existing invoices (for due date computation)
-  // Only skip context load for orders WITHOUT invoice that have terminal status
+  // Separate orders into existing and new for different processing paths
+  const ordersWithExisting: typeof orders = [];
+  const ordersWithoutExisting: typeof orders = [];
+  for (const order of orders) {
+    if (existingByOrderId.has(order.id)) {
+      ordersWithExisting.push(order);
+    } else {
+      ordersWithoutExisting.push(order);
+    }
+  }
+
+  // Get eligibility context if needed (for new orders or context resolution)
   let eligibilityContext: EligibilityContext | null = context ?? null;
-  const needsContext = orders.some((o) => {
-    const hasExisting = existingByOrderId.has(o.id);
-    // Need context for existing invoices (due date) or non-terminal new orders
-    return hasExisting || !isTerminalFinancialStatus(o.displayFinancialStatus);
-  });
+  const needsContext = ordersWithoutExisting.some(
+    (o) => !isTerminalFinancialStatus(o.displayFinancialStatus)
+  ) || ordersWithExisting.length > 0;
   
   if (needsContext && !eligibilityContext) {
     eligibilityContext = await getEligibilityContext(sql, shopId);
@@ -534,33 +542,79 @@ async function processOrderLines(
   const invoices: InvoiceData[] = [];
   let skippedCount = 0;
 
-  for (const order of orders) {
+  // Process existing invoices: mirror webhook path (order.server.ts:111-118)
+  // Call checkOrderEligibility with full context for due-date precedence
+  for (const order of ordersWithExisting) {
     const shopifyOrder = bulkOrderToShopifyOrder(order);
-    const existingBuyerAccountId = existingByOrderId.get(shopifyOrder.id);
+    const existing = existingByOrderId.get(shopifyOrder.id)!;
 
-    if (existingBuyerAccountId) {
-      // Invoice exists - ALWAYS update it (eligibility only gates creation)
-      // Compute due date using S9 precedence (including attached schedule dueAt)
-      const dueDate = eligibilityContext
-        ? computeOrderDueDate(shopifyOrder, eligibilityContext)
-        : computeOrderDueDateMinimal(shopifyOrder);
+    // Mirror webhook path: call checkOrderEligibility for proper due-date precedence
+    // This ensures account defaults, tag rules, and merchant overrides are respected
+    if (eligibilityContext) {
+      const eligibility = await checkOrderEligibility(sql, shopifyOrder, eligibilityContext);
+      
+      // Check if invoice has a merchant override that should be preserved
+      // A schedule dueAt beats merchant override, but merchant override beats inferred
+      const hasScheduleDueAt = hasOrderScheduleDueAt(shopifyOrder);
+      const hasMerchantOverride = existing.dueOverrideAt !== null;
+      
+      let finalDueDate = eligibility.dueDate;
+      
+      // If no schedule dueAt and merchant override exists, use the existing dueAt
+      // (merchant override was already applied to existing.dueAt)
+      if (!hasScheduleDueAt && hasMerchantOverride) {
+        finalDueDate = {
+          dueAt: existing.dueAt,
+          dueSource: "override" as const,
+          basis: null,
+          reason: "Merchant override preserved during reconcile",
+        };
+      }
       
       invoices.push(
         mapOrderToInvoiceWithEligibility(
           shopId,
-          existingBuyerAccountId,
+          eligibility.buyerAccountId ?? existing.buyerAccountId,
+          shopifyOrder,
+          {
+            ...eligibility,
+            eligible: true,
+            buyerAccountId: eligibility.buyerAccountId ?? existing.buyerAccountId,
+            dueDate: finalDueDate,
+          }
+        )
+      );
+    } else {
+      // No eligibility context - preserve existing dueAt (don't overwrite with shop default)
+      invoices.push(
+        mapOrderToInvoiceWithEligibility(
+          shopId,
+          existing.buyerAccountId,
           shopifyOrder,
           {
             eligible: true,
             reason: "shopify_payment_terms",
-            explanation: "Updating existing invoice",
-            buyerAccountId: existingBuyerAccountId,
-            dueDate,
+            explanation: "Updating existing invoice (no context, preserving dueAt)",
+            buyerAccountId: existing.buyerAccountId,
+            dueDate: existing.dueAt
+              ? {
+                  dueAt: existing.dueAt,
+                  dueSource: existing.dueSource as "schedule" | "override" | "inferred" | "none",
+                  basis: null,
+                  reason: "Preserved during reconcile (no context)",
+                }
+              : undefined,
           }
         )
       );
-    } else if (eligibilityContext) {
-      // No existing Invoice - check eligibility for creation
+    }
+  }
+
+  // Process new orders: check eligibility for creation
+  for (const order of ordersWithoutExisting) {
+    const shopifyOrder = bulkOrderToShopifyOrder(order);
+    
+    if (eligibilityContext) {
       const eligibility = await checkOrderEligibility(sql, shopifyOrder, eligibilityContext);
       if (eligibility.eligible) {
         invoices.push(
@@ -589,70 +643,13 @@ async function processOrderLines(
 }
 
 /**
- * Compute due date for an order using S9 precedence.
- * Uses attached PaymentSchedule dueAt if present.
+ * Check if an order has a PaymentSchedule with dueAt set.
  */
-function computeOrderDueDate(
-  order: import("./types").ShopifyOrder,
-  context: EligibilityContext
-): InferDueDateResult {
-  const input: InferDueDateInput = {
-    paymentTerms: order.paymentTerms
-      ? {
-          type: order.paymentTerms.paymentTermsType as "NET" | "FIXED" | "FULFILLMENT" | "RECEIPT",
-          dueInDays: order.paymentTerms.dueInDays ?? null,
-          schedules:
-            order.paymentTerms.paymentSchedules?.edges.map((e) => ({
-              dueAt: e.node.dueAt ? new Date(e.node.dueAt) : null,
-              completedAt: e.node.completedAt ? new Date(e.node.completedAt) : null,
-            })) ?? [],
-        }
-      : null,
-    orderCreatedAt: new Date(order.processedAt ?? order.createdAt),
-    fulfilledAt: null,
-    accountDefaultTermsDays: null,
-    accountDefaultTermsSource: null,
-    tagRules: context.tagRules,
-    customerTags: [],
-    shopDefaultTermsDays: context.shopDefaultTermsDays,
-    merchantOverrideDueAt: null,
-    shopTimezone: context.shopTimezone,
-  };
-
-  return inferDueDate(input);
+function hasOrderScheduleDueAt(order: import("./types").ShopifyOrder): boolean {
+  const schedules = order.paymentTerms?.paymentSchedules?.edges ?? [];
+  return schedules.some((e) => e.node.dueAt != null);
 }
 
-/**
- * Compute due date for an order without eligibility context.
- * Only uses Shopify PaymentSchedule (no inferred sources).
- */
-function computeOrderDueDateMinimal(
-  order: import("./types").ShopifyOrder
-): InferDueDateResult {
-  const input: InferDueDateInput = {
-    paymentTerms: order.paymentTerms
-      ? {
-          type: order.paymentTerms.paymentTermsType as "NET" | "FIXED" | "FULFILLMENT" | "RECEIPT",
-          dueInDays: order.paymentTerms.dueInDays ?? null,
-          schedules:
-            order.paymentTerms.paymentSchedules?.edges.map((e) => ({
-              dueAt: e.node.dueAt ? new Date(e.node.dueAt) : null,
-              completedAt: e.node.completedAt ? new Date(e.node.completedAt) : null,
-            })) ?? [],
-        }
-      : null,
-    orderCreatedAt: new Date(order.processedAt ?? order.createdAt),
-    fulfilledAt: null,
-    accountDefaultTermsDays: null,
-    accountDefaultTermsSource: null,
-    tagRules: [],
-    customerTags: [],
-    shopDefaultTermsDays: null,
-    merchantOverrideDueAt: null,
-  };
-
-  return inferDueDate(input);
-}
 
 /**
  * Process a batch of JSONL lines for customers.
@@ -1010,6 +1007,10 @@ export async function processBulkOperation(
   // top-level (no __parentId), drop just that final line. Children immediately
   // follow their parent, so if the final line is a child, its parent is in the batch.
   // A 1-line batch always processes (to avoid stall).
+  //
+  // NOTE: Ending on a child line assumes it is the last sibling for that parent.
+  // This is valid because BULK_ORDERS_QUERY requests paymentSchedules(first: 1),
+  // so each Order has at most one PaymentSchedule child line in the bulk export.
   const isNonEofBatch = !chunkResult.isEof || linesToProcess.length < allLines.length;
   if (bulkType === "orders" && isNonEofBatch && linesToProcess.length > 1) {
     const finalLine = linesToProcess[linesToProcess.length - 1];
