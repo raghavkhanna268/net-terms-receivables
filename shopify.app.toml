@@ -6,15 +6,26 @@ application_url = "https://net-terms-receivables.raghavkhanna.workers.dev"
 embedded = true
 
 [access_scopes]
-# S6: Scopes for company/order sync
-# - read_companies: Access B2B companies and company locations
-# - read_orders: Access orders (last 60 days without read_all_orders)
-# - read_payment_terms: Access payment terms on orders and company locations
-# S8 (pre-granted): Tagged customer and draft order scopes for customer sync
-# - read_customers: Access customers with net-terms tags
-# - read_draft_orders: Access draft orders for payment terms
-# Pre-granting avoids a second scope re-approval when S8 ships.
-scopes = "read_companies,read_orders,read_payment_terms,read_customers,read_draft_orders"
+# See docs/scopes.md for the complete scope audit with justifications and reference URLs.
+#
+# Read scopes (S6 sync + S8 pre-grant):
+# - read_companies: B2B company/location sync
+# - read_customers: Tagged customer sync (S8 pre-grant)
+# - read_draft_orders: Draft order payment terms (S8 pre-grant)
+# - read_orders: Order sync, webhooks
+# - read_payment_terms: Payment terms on orders and company locations
+#
+# Write scopes (S11-S17 features):
+# - write_companies: metafieldsSet on Company/CompanyLocation (S11 credit/hold)
+# - write_customers: metafieldsSet on Customer (S11 credit/hold)
+# - write_merchant_managed_fulfillment_orders: fulfillmentOrderHold/Release (S13)
+# - write_orders: orderMarkAsPaid (S17), tagsAdd (S13/S17)
+# - write_payment_customizations: paymentCustomizationCreate (S13)
+# - write_payment_terms: paymentTermsCreate (S4 seed)
+# - write_validations: validationCreate (S12)
+#
+# NOT included: write_draft_orders (seed uses orderCreate + paymentTermsCreate instead)
+scopes = "read_companies,read_customers,read_draft_orders,read_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_payment_terms,write_validations"
 
 [webhooks]
 api_version = "2026-10"

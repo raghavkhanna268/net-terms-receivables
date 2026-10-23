@@ -130,6 +130,10 @@ export const SEED_PREFIX = "ntr-seed-";
 const MAX_RETRIES = 3;
 const INITIAL_RETRY_DELAY_MS = 1000;
 
+// Security: hardcoded allowed dev store domain. Seed refuses to run on any other shop.
+// This prevents accidental mutation of production data if someone misconfigures SHOP.
+const ALLOWED_DEV_STORE = "net-terms-receivables.myshopify.com";
+
 export const COMPANY_SEEDS = [
   { key: "company-1", name: "Acme Wholesale Pvt Ltd", contact: { firstName: "Raj", lastName: "Sharma", email: "raj.sharma@acme-wholesale.example" } },
   { key: "company-2", name: "Bharat Traders Co", contact: { firstName: "Priya", lastName: "Patel", email: "priya@bharat-traders.example" } },
@@ -1131,6 +1135,14 @@ function validateEnv(): { shop: string; token: string } | null {
   if (!shop) {
     console.error("❌ Missing SHOP environment variable");
     console.error("   Set it to your shop domain, e.g.: export SHOP=my-store.myshopify.com");
+    return null;
+  }
+
+  // Security: enforce hardcoded dev store domain
+  if (shop !== ALLOWED_DEV_STORE) {
+    console.error(`❌ Security: seed script only runs on ${ALLOWED_DEV_STORE}`);
+    console.error(`   Received SHOP=${shop}`);
+    console.error("   This guard prevents accidental mutation of production data.");
     return null;
   }
 
