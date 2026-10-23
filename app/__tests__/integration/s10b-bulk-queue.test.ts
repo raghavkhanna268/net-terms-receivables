@@ -36,7 +36,6 @@ describeWithDb("S10b processBulkQueue Integration", () => {
     // Clean up test data
     await sql`DELETE FROM s6_dead_letter WHERE original_msg_id LIKE ${"test-" + TEST_SUFFIX + "%"}`;
     await sql`DELETE FROM s6_bulk_operations WHERE shop = ${TEST_SHOP}`;
-    await sql`DELETE FROM s6_processed_webhooks WHERE shop = ${TEST_SHOP}`;
 
     // Purge test messages from bulk queue
     try {
