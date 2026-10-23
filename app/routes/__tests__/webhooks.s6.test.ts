@@ -41,11 +41,27 @@ vi.mock("~/lib/pgmq.server", () => ({
 // Mock webhook receipts for S20 idempotency
 const mockRecordWebhookReceipt = vi.fn().mockResolvedValue(true);
 const mockParseTriggeredAt = vi.fn().mockReturnValue(null);
+const mockRecordAndEnqueueSync = vi.fn().mockImplementation(
+  async (_sql, params: { webhookId: string; topic: string; shop: string; resourceGid: string }) => {
+    await mockSendSyncMessage(
+      {},
+      {
+        topic: params.topic,
+        shop: params.shop,
+        webhookId: params.webhookId,
+        resourceGid: params.resourceGid,
+        enqueuedAt: new Date().toISOString(),
+      }
+    );
+    return { status: "enqueued" as const, msgId: "msg-123" };
+  }
+);
 
 vi.mock("~/lib/webhook-receipts.server", () => ({
   recordWebhookReceipt: (...args: unknown[]) => mockRecordWebhookReceipt(...args),
   parseTriggeredAt: (...args: unknown[]) => mockParseTriggeredAt(...args),
   deleteWebhookReceiptsForShop: vi.fn().mockResolvedValue(0),
+  recordAndEnqueueSync: (...args: unknown[]) => mockRecordAndEnqueueSync(...args),
 }));
 
 // Mock shopify context for bulk_operations.finish (still uses authenticate.webhook)
@@ -223,6 +239,24 @@ describe("S6 Webhook Handlers", () => {
 
       expect(response.status).toBe(200);
       expect(mockSendSyncMessage).not.toHaveBeenCalled();
+    });
+
+    it("throws when recordAndEnqueueSync returns error", async () => {
+      mockRecordAndEnqueueSync.mockResolvedValueOnce({
+        status: "error",
+        error: new Error("Simulated enqueue failure"),
+      });
+
+      const { action } = await import("../webhooks.companies");
+      const request = createMockRequest(
+        "https://example.com/webhooks/companies",
+        { admin_graphql_api_id: TEST_GID },
+        "companies/create"
+      );
+
+      await expect(action(createActionArgs(request))).rejects.toThrow(
+        "Simulated enqueue failure"
+      );
     });
   });
 

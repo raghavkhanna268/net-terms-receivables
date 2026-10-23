@@ -26,10 +26,12 @@ describeWithDb("S6 pgmq Queue Operations", () => {
   });
 
   afterAll(async () => {
-    // Clean up test messages
+    // Clean up only THIS file's messages (filter by TEST_SUFFIX shop pattern)
+    // Never use pgmq.purge on shared queues - other test files run in parallel
+    const testShopPattern = `test-${TEST_SUFFIX}.myshopify.com`;
     try {
-      await sql`SELECT pgmq.purge('s6_sync')`;
-      await sql`SELECT pgmq.purge('s6_bulk')`;
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${testShopPattern}`;
+      await sql`DELETE FROM pgmq.q_s6_bulk WHERE message->>'shop' = ${testShopPattern}`;
     } catch {
       // Queues may not exist if migration hasn't run
     }
