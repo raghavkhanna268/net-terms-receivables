@@ -222,25 +222,36 @@ export async function shopifyGraphQL<T = unknown>(
   const clientId = process.env.SHOPIFY_API_KEY;
   const clientSecret = process.env.SHOPIFY_API_SECRET;
   
-  if (clientId && clientSecret) {
-    const sql = getRequestSql();
-    const refreshResult = await refreshOfflineTokenIfNeeded(
-      sql,
-      shop,
-      clientId,
-      clientSecret
+  if (!clientId || !clientSecret) {
+    // P2: Fail loudly - this is a configuration error that should be fixed
+    console.error(
+      `[shopify-client] SHOPIFY_API_KEY or SHOPIFY_API_SECRET missing for shop=${shop}`
     );
-    
-    if (!refreshResult.success) {
-      // Token refresh failed - return non-retryable error
-      // This includes invalid_grant (needs re-auth) and no_refresh_token
-      return {
-        success: false,
-        error: refreshResult.error ?? `Token refresh failed for ${shop}`,
-        retryable: false,
-        retriesAttempted: 0,
-      };
-    }
+    return {
+      success: false,
+      error: `Shopify credentials not configured. SHOPIFY_API_KEY or SHOPIFY_API_SECRET is missing.`,
+      retryable: false,
+      retriesAttempted: 0,
+    };
+  }
+
+  const sql = getRequestSql();
+  const refreshResult = await refreshOfflineTokenIfNeeded(
+    sql,
+    shop,
+    clientId,
+    clientSecret
+  );
+  
+  if (!refreshResult.success) {
+    // Token refresh failed - return non-retryable error
+    // This includes invalid_grant (needs re-auth) and no_refresh_token
+    return {
+      success: false,
+      error: refreshResult.error ?? `Token refresh failed for ${shop}`,
+      retryable: false,
+      retriesAttempted: 0,
+    };
   }
 
   // Hoist admin client outside retry loop - the session doesn't change between retries

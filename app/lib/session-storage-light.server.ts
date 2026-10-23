@@ -75,7 +75,8 @@ export class LightSessionStorage {
       INSERT INTO "Session" (
         id, shop, state, "isOnline", scope, expires, "accessToken",
         "userId", "firstName", "lastName", email, "accountOwner",
-        locale, collaborator, "emailVerified", "refreshToken", "refreshTokenExpires"
+        locale, collaborator, "emailVerified", "refreshToken", "refreshTokenExpires",
+        "needsReauth"
       ) VALUES (
         ${session.id}, ${data.shop}, ${data.state}, ${data.isOnline},
         ${data.scope},
@@ -84,7 +85,8 @@ export class LightSessionStorage {
         ${data.firstName}, ${data.lastName}, ${data.email}, ${data.accountOwner},
         ${data.locale}, ${data.collaborator}, ${data.emailVerified},
         ${data.refreshToken},
-        ${refreshTokenExpiresStr}::timestamptz AT TIME ZONE 'UTC'
+        ${refreshTokenExpiresStr}::timestamptz AT TIME ZONE 'UTC',
+        false
       )
       ON CONFLICT (id) DO UPDATE SET
         shop = EXCLUDED.shop,
@@ -102,7 +104,8 @@ export class LightSessionStorage {
         collaborator = EXCLUDED.collaborator,
         "emailVerified" = EXCLUDED."emailVerified",
         "refreshToken" = EXCLUDED."refreshToken",
-        "refreshTokenExpires" = EXCLUDED."refreshTokenExpires"
+        "refreshTokenExpires" = EXCLUDED."refreshTokenExpires",
+        "needsReauth" = false
     `;
 
     return true;
