@@ -27,7 +27,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "benchmark:cpu": "node scripts/benchmark-cpu.mjs"
+    "benchmark:cpu": "node scripts/benchmark-cpu.mjs",
+    "seed": "npx tsx scripts/seed.ts"
   },
   "dependencies": {
     "@prisma/adapter-pg": "7.10.1",
@@ -64,6 +65,7 @@
     "luxon": "^3.7.2",
     "preact": "^11.0.1",
     "prettier": "^3.6.2",
+    "tsx": "^4.19.4",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.32.1",
     "vite": "^7.3.1",

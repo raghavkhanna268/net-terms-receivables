@@ -155,6 +155,73 @@ If conditions aren't met yet, the run skips with a notice (not a failure). If th
 | `npm run typecheck` | Run TypeScript type checking |
 | `npm run lint` | Run ESLint |
 | `npm run preview` | Build and preview locally |
+| `npm run seed` | Seed dev store with test data |
+
+## Dev Store Seed Script
+
+The seed script (`scripts/seed.ts`) creates test data for development:
+
+- **5 B2B companies** with locations and contacts
+- **5 customers** tagged as net-terms buyers
+- **~30 orders** with payment terms (NET 15/30/60 and fixed dates, some overdue)
+
+All amounts are in INR with varied values across the seed data.
+
+### Prerequisites
+
+The seed script requires a **custom app** on your dev store (separate from the production app) with Admin API access.
+
+#### 1. Create a Custom App on Your Dev Store
+
+1. In your dev store admin, go to **Settings → Apps and sales channels**
+2. Click **Develop apps** (enable custom app development if prompted)
+3. Click **Create an app** → name it something like "NTR Seed Script"
+4. Click **Configure Admin API scopes** and select:
+   - `read_companies`, `write_companies`
+   - `read_customers`, `write_customers`
+   - `read_draft_orders`, `write_draft_orders`
+   - `read_products`
+   - `read_payment_terms`, `write_payment_terms`
+5. Click **Save**, then **Install app**
+6. Under **API credentials**, click **Reveal token once** and copy the Admin API access token
+
+#### 2. Run the Seed Script
+
+```bash
+# Set environment variables
+export SHOP=your-dev-store.myshopify.com
+export SHOPIFY_ADMIN_TOKEN=shpat_xxxxxxxxxxxxx
+
+# Preview what will be created (no changes)
+npm run seed -- --dry-run
+
+# Run the seed
+npm run seed
+
+# Reset and re-seed (deletes seed data first)
+npm run seed -- --reset
+```
+
+### Idempotency
+
+The script is idempotent—running it twice creates nothing new:
+
+- Companies are keyed by `externalId` (e.g., `ntr-seed-company-1`)
+- Customers and orders are keyed by tags (e.g., `ntr-seed`, `ntr-seed-customer-1`)
+
+A second run reports what already exists and skips creation.
+
+### Reset / Cleanup
+
+The `--reset` flag deletes only records created by the seed script:
+
+- Companies with `externalId` starting with `ntr-seed-`
+- Customers and draft orders with the `ntr-seed` tag
+- Completed orders cannot be deleted via API but remain tagged for identification
+
+### B2B Requirement
+
+The script requires B2B to be available on the dev store. It performs a preflight check and exits with a clear message if B2B is not supported. Dev stores typically have B2B enabled; if not, you may need to enable it in your Partner Dashboard dev store settings.
 
 ## Project Structure
 
