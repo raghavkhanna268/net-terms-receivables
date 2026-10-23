@@ -124,27 +124,30 @@ describe("parseCompanyBulkJsonl", () => {
 });
 
 describe("parseOrderBulkJsonl", () => {
-  it("filters orders with payment terms", () => {
+  it("parses all orders without filtering by paymentTerms", () => {
     const jsonl = `{"id":"gid://shopify/Order/1","name":"#1001","createdAt":"2025-01-01T00:00:00Z","paymentTerms":{"id":"pt1","paymentTermsName":"Net 30"}}
 {"id":"gid://shopify/Order/2","name":"#1002","createdAt":"2025-01-02T00:00:00Z"}
 {"id":"gid://shopify/Order/3","name":"#1003","createdAt":"2025-01-03T00:00:00Z","paymentTerms":{"id":"pt2","paymentTermsName":"Net 60"}}`;
 
     const result = parseOrderBulkJsonl(jsonl);
 
-    expect(result.orders).toHaveLength(2);
+    // All orders returned - eligibility filtering happens via checkOrderEligibility
+    expect(result.orders).toHaveLength(3);
     expect(result.orders[0].name).toBe("#1001");
-    expect(result.orders[1].name).toBe("#1003");
-    expect(result.skippedNoTerms).toBe(1);
+    expect(result.orders[1].name).toBe("#1002");
+    expect(result.orders[2].name).toBe("#1003");
   });
 
-  it("skips orders without payment terms", () => {
+  it("returns orders without payment terms for eligibility check", () => {
     const jsonl = `{"id":"gid://shopify/Order/1","name":"#1001","createdAt":"2025-01-01T00:00:00Z"}
 {"id":"gid://shopify/Order/2","name":"#1002","createdAt":"2025-01-02T00:00:00Z"}`;
 
     const result = parseOrderBulkJsonl(jsonl);
 
-    expect(result.orders).toHaveLength(0);
-    expect(result.skippedNoTerms).toBe(2);
+    // Orders without paymentTerms are returned - eligibility rules (b) and (c) may apply
+    expect(result.orders).toHaveLength(2);
+    expect(result.orders[0].paymentTerms).toBeUndefined();
+    expect(result.orders[1].paymentTerms).toBeUndefined();
   });
 
   it("handles null payment terms", () => {
@@ -152,8 +155,9 @@ describe("parseOrderBulkJsonl", () => {
 
     const result = parseOrderBulkJsonl(jsonl);
 
-    expect(result.orders).toHaveLength(0);
-    expect(result.skippedNoTerms).toBe(1);
+    // Orders with null paymentTerms are returned for eligibility check
+    expect(result.orders).toHaveLength(1);
+    expect(result.orders[0].paymentTerms).toBeNull();
   });
 });
 

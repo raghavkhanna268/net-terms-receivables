@@ -32,8 +32,6 @@ import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
 import {
   checkOrderEligibility,
   getEligibilityContextByDomain,
-  isTerminalFinancialStatus,
-  type EligibilityContext,
   type EligibilityResult,
 } from "~/lib/invoice-eligibility";
 
@@ -100,10 +98,44 @@ export async function processOrderWebhook(
     return await markInvoicePaid(sql, shopId, order.id, webhookId);
   }
 
-  // Check eligibility for Invoice creation
+  // Check if Invoice already exists for this order
+  // If it exists, ALWAYS update it regardless of eligibility (for status changes,
+  // tag/terms changes, etc.) - eligibility only gates CREATION
+  const [existingInvoice] = await sql<{ id: string; buyerAccountId: string }[]>`
+    SELECT id, "buyerAccountId" FROM "Invoice"
+    WHERE "shopId" = ${shopId} AND "orderId" = ${order.id}
+  `;
+
+  if (existingInvoice) {
+    // Invoice exists - update it with latest order data
+    const eligibility = await checkOrderEligibility(sql, order, context);
+    const invoiceData = mapOrderToInvoiceWithEligibility(
+      shopId,
+      eligibility.buyerAccountId ?? existingInvoice.buyerAccountId,
+      order,
+      eligibility
+    );
+    const result = await upsertInvoice(sql, invoiceData);
+    await markWebhookProcessed(sql, webhookId, topic, order.id, shopDomain);
+    return result;
+  }
+
+  // No existing Invoice - check eligibility for CREATION
   const eligibility = await checkOrderEligibility(sql, order, context);
 
   if (!eligibility.eligible) {
+    // Check if this is a retryable failure (no_buyer_account)
+    if (eligibility.retryable) {
+      // Do NOT mark webhook as processed - let it retry
+      return {
+        success: false,
+        action: "skipped",
+        error: eligibility.explanation,
+        retryable: true,
+      };
+    }
+
+    // Permanent skip (retail, ineligible status)
     await markWebhookProcessed(sql, webhookId, topic, order.id, shopDomain);
     return {
       success: true,
@@ -112,7 +144,7 @@ export async function processOrderWebhook(
     };
   }
 
-  // Eligible - create/update Invoice
+  // Eligible - create Invoice
   const invoiceData = mapOrderToInvoiceWithEligibility(
     shopId,
     eligibility.buyerAccountId!,
@@ -124,66 +156,6 @@ export async function processOrderWebhook(
   await markWebhookProcessed(sql, webhookId, topic, order.id, shopDomain);
 
   return result;
-}
-
-/**
- * Process an order with pre-fetched eligibility context.
- * Used by bulk processing where context is fetched once for all orders.
- *
- * @param sql - postgres.js SQL client
- * @param shopId - Internal shop ID
- * @param order - Order data
- * @param context - Pre-fetched eligibility context
- */
-export async function processOrderWithContext(
-  sql: Sql,
-  shopId: string,
-  order: ShopifyOrder,
-  context: EligibilityContext
-): Promise<SyncResult> {
-  // Handle terminal statuses (PAID, REFUNDED, etc.) - update existing invoice
-  if (isTerminalFinancialStatus(order.displayFinancialStatus)) {
-    if (order.displayFinancialStatus === "PAID") {
-      // Try to mark existing invoice as paid
-      const [existing] = await sql<{ id: string }[]>`
-        SELECT id FROM "Invoice" WHERE "orderId" = ${order.id}
-      `;
-      if (existing) {
-        await sql`
-          UPDATE "Invoice"
-          SET status = 'paid', outstanding = '0.00', "updatedAt" = NOW()
-          WHERE id = ${existing.id}
-        `;
-        return { success: true, action: "updated", entityId: existing.id };
-      }
-    }
-    return {
-      success: true,
-      action: "skipped",
-      skipReason: `Order has terminal status '${order.displayFinancialStatus}'`,
-    };
-  }
-
-  // Check eligibility
-  const eligibility = await checkOrderEligibility(sql, order, context);
-
-  if (!eligibility.eligible) {
-    return {
-      success: true,
-      action: "skipped",
-      skipReason: eligibility.explanation,
-    };
-  }
-
-  // Create/update Invoice
-  const invoiceData = mapOrderToInvoiceWithEligibility(
-    shopId,
-    eligibility.buyerAccountId!,
-    order,
-    eligibility
-  );
-
-  return await upsertInvoice(sql, invoiceData);
 }
 
 /**

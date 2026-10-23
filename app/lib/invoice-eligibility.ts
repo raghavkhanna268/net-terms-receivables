@@ -77,6 +77,12 @@ export interface EligibilityResult {
   reason: EligibilityReason;
   /** Human-readable explanation */
   explanation: string;
+  /**
+   * Whether this ineligible result is retryable.
+   * true = transient failure (no_buyer_account) - retry may succeed later
+   * false/undefined = permanent (retail, ineligible status) - skip
+   */
+  retryable?: boolean;
   /** Buyer account ID if found (for eligible orders) */
   buyerAccountId?: string;
   /** For eligible orders, the due date inference result */
@@ -239,7 +245,9 @@ async function findCompanyAccountWithTerms(
 
 /**
  * Find a buyer account by Company (any location) for condition (b) fallback.
- * Only returns active accounts with explicit defaultTermsDays.
+ * Only returns a result if there is EXACTLY ONE active account with explicit terms
+ * for this company. If there are multiple, returns null to avoid ambiguity
+ * (different locations may have different terms/credit limits).
  *
  * @param sql - postgres.js SQL client
  * @param shopId - Internal shop ID
@@ -254,7 +262,8 @@ async function findCompanyAccountByCompanyWithTerms(
   defaultTermsDays: number;
   defaultTermsSource: "explicit" | "tag" | null;
 } | null> {
-  const [account] = await sql<{
+  // Query for ALL active accounts with explicit terms for this company
+  const accounts = await sql<{
     id: string;
     defaultTermsDays: number | null;
     defaultTermsSource: string | null;
@@ -263,15 +272,19 @@ async function findCompanyAccountByCompanyWithTerms(
     FROM "BuyerAccount"
     WHERE "shopId" = ${shopId}
       AND "companyId" = ${companyId}
+      AND "defaultTermsDays" IS NOT NULL
+      AND "defaultTermsSource" = 'explicit'
       AND ${activeAccountFragment(sql)}
-    LIMIT 1
+    ORDER BY id
   `;
 
-  if (!account || account.defaultTermsDays === null) return null;
+  // Only use fallback if exactly one account exists (no ambiguity)
+  if (accounts.length !== 1) return null;
 
+  const account = accounts[0];
   return {
     id: account.id,
-    defaultTermsDays: account.defaultTermsDays,
+    defaultTermsDays: account.defaultTermsDays!,
     defaultTermsSource: account.defaultTermsSource as "explicit" | "tag" | null,
   };
 }
@@ -434,6 +447,7 @@ export async function checkOrderEligibility(
         eligible: false,
         reason: "no_buyer_account",
         explanation: "Order has payment terms but no matching buyer account found",
+        retryable: true,
       };
     }
 
@@ -475,6 +489,7 @@ export async function checkOrderEligibility(
   const purchasingEntity = order.purchasingEntity;
 
   if (purchasingEntity?.location?.id) {
+    // Condition (b): CompanyLocation has active account with explicit terms
     const companyAccount = await findCompanyAccountWithTerms(
       sql,
       shopId,
@@ -500,10 +515,10 @@ export async function checkOrderEligibility(
         accountDefaultTermsSource: companyAccount.defaultTermsSource,
       };
     }
-  }
-
-  // Try Company (any location) as fallback for condition (b)
-  if (purchasingEntity?.company?.id) {
+    // Location exists but no explicit terms - do NOT fall back to company level
+    // (that would leak another location's terms/credit)
+  } else if (purchasingEntity?.company?.id) {
+    // No location but has company - try company-wide fallback (only if exactly one account)
     const companyAccount = await findCompanyAccountByCompanyWithTerms(
       sql,
       shopId,
@@ -522,7 +537,7 @@ export async function checkOrderEligibility(
       return {
         eligible: true,
         reason: "company_account_terms",
-        explanation: `Company account has explicit default terms: Net ${companyAccount.defaultTermsDays} days`,
+        explanation: `Company account has explicit default terms: Net ${companyAccount.defaultTermsDays} days (single location)`,
         buyerAccountId: companyAccount.id,
         dueDate,
         accountDefaultTermsDays: companyAccount.defaultTermsDays,
@@ -568,10 +583,12 @@ export async function checkOrderEligibility(
 
       // Customer matches tag rule but no BuyerAccount exists yet
       // This shouldn't happen if customer sync is working, but handle gracefully
+      // Return retryable so the order can be processed once customer is synced
       return {
         eligible: false,
         reason: "no_buyer_account",
         explanation: `Customer matches tag rule '${matchedRule.tag}' but no BuyerAccount found - customer may not be synced yet`,
+        retryable: true,
         matchedTagRule: matchedRule,
         customerTags,
       };

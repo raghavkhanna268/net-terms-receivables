@@ -130,32 +130,21 @@ function isCompanyLocation(
 /**
  * Parse order bulk JSONL.
  *
- * Filters to only orders with payment terms.
+ * Returns all orders - eligibility is determined by the shared eligibility
+ * function which considers paymentTerms (a), company account terms (b),
+ * and tag rules (c).
  *
  * @param jsonl - Raw JSONL from bulk order query
- * @returns Parsed orders with payment terms
+ * @returns All parsed orders for eligibility check
  */
 export function parseOrderBulkJsonl(jsonl: string): {
   orders: BulkOrderLine[];
-  skippedNoTerms: number;
   errors: ParsedBulkResult<unknown>["errors"];
 } {
   const parsed = parseJsonl<BulkOrderLine>(jsonl);
 
-  const orders: BulkOrderLine[] = [];
-  let skippedNoTerms = 0;
-
-  for (const item of parsed.items) {
-    if (item.paymentTerms) {
-      orders.push(item);
-    } else {
-      skippedNoTerms++;
-    }
-  }
-
   return {
-    orders,
-    skippedNoTerms,
+    orders: parsed.items,
     errors: parsed.errors,
   };
 }

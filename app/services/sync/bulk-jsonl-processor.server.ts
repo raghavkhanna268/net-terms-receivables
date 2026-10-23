@@ -404,7 +404,9 @@ async function processCompanyLines(
 
 /**
  * Process a batch of JSONL lines for orders.
- * Uses eligibility rules to determine which orders become Invoices.
+ *
+ * Eligibility gates CREATION only. If an Invoice already exists for an order,
+ * it is ALWAYS updated (to heal status changes like PAID, REFUNDED, etc.).
  */
 async function processOrderLines(
   sql: Sql,
@@ -419,6 +421,10 @@ async function processOrderLines(
     console.warn(`[bulk-jsonl] ${errors.length} parse errors in orders batch`);
   }
 
+  if (orders.length === 0) {
+    return 0;
+  }
+
   // Get eligibility context if not provided
   const eligibilityContext = context ?? await getEligibilityContext(sql, shopId);
   if (!eligibilityContext) {
@@ -426,31 +432,51 @@ async function processOrderLines(
     return 0;
   }
 
-  // Check eligibility and map eligible orders to invoices
+  // Batch lookup: find existing invoices for these orders
+  const orderIds = orders.map((o) => o.id);
+  const existingInvoices = await sql<{ orderId: string; buyerAccountId: string }[]>`
+    SELECT "orderId", "buyerAccountId" FROM "Invoice"
+    WHERE "shopId" = ${shopId} AND "orderId" = ANY(${orderIds})
+  `;
+  const existingByOrderId = new Map(existingInvoices.map((i) => [i.orderId, i.buyerAccountId]));
+
   const invoices: InvoiceData[] = [];
   let skippedCount = 0;
 
   for (const order of orders) {
     const shopifyOrder = bulkOrderToShopifyOrder(order);
+    const existingBuyerAccountId = existingByOrderId.get(shopifyOrder.id);
+
+    // Check eligibility
     const eligibility = await checkOrderEligibility(sql, shopifyOrder, eligibilityContext);
 
-    if (!eligibility.eligible) {
+    if (existingBuyerAccountId) {
+      // Invoice exists - ALWAYS update it (eligibility only gates creation)
+      invoices.push(
+        mapOrderToInvoiceWithEligibility(
+          shopId,
+          eligibility.buyerAccountId ?? existingBuyerAccountId,
+          shopifyOrder,
+          eligibility
+        )
+      );
+    } else if (eligibility.eligible) {
+      // No existing Invoice and eligible - create it
+      invoices.push(
+        mapOrderToInvoiceWithEligibility(
+          shopId,
+          eligibility.buyerAccountId!,
+          shopifyOrder,
+          eligibility
+        )
+      );
+    } else {
       skippedCount++;
-      continue;
     }
-
-    invoices.push(
-      mapOrderToInvoiceWithEligibility(
-        shopId,
-        eligibility.buyerAccountId!,
-        shopifyOrder,
-        eligibility
-      )
-    );
   }
 
   if (skippedCount > 0) {
-    console.log(`[bulk-jsonl] ${skippedCount} orders skipped (not eligible)`);
+    console.log(`[bulk-jsonl] ${skippedCount} orders skipped (not eligible, no existing invoice)`);
   }
 
   return await bulkUpsertInvoices(sql, invoices);
