@@ -10,7 +10,11 @@ embedded = true
 # - read_companies: Access B2B companies and company locations
 # - read_orders: Access orders (last 60 days without read_all_orders)
 # - read_payment_terms: Access payment terms on orders and company locations
-scopes = "read_companies,read_orders,read_payment_terms"
+# S8 (pre-granted): Tagged customer and draft order scopes for customer sync
+# - read_customers: Access customers with net-terms tags
+# - read_draft_orders: Access draft orders for payment terms
+# Pre-granting avoids a second scope re-approval when S8 ships.
+scopes = "read_companies,read_orders,read_payment_terms,read_customers,read_draft_orders"
 
 [webhooks]
 api_version = "2026-10"

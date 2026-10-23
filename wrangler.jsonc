@@ -26,7 +26,8 @@
   // Public environment variables (non-sensitive, ok to commit placeholders)
   "vars": {
     // S6: Scopes for company/order sync (must match shopify.app.toml)
-    "SCOPES": "read_companies,read_orders,read_payment_terms",
+    // S8 scopes (read_customers, read_draft_orders) pre-granted to avoid second re-approval
+    "SCOPES": "read_companies,read_orders,read_payment_terms,read_customers,read_draft_orders",
     "SHOPIFY_APP_URL": "https://net-terms-receivables.raghavkhanna.workers.dev"
   },
 
