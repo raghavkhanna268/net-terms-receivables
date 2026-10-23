@@ -6,11 +6,15 @@
  *
  * Idempotent: Uses upsert with ON CONFLICT to handle duplicates.
  * Webhook dedupe: Checks processed webhooks table before processing.
+ *
+ * S21 gating: Enforces company limit before creating new BuyerAccounts.
+ * Updates to existing accounts are always allowed (downgrade-safe).
  */
 
 import type { Sql } from "~/lib/db-light.server";
 import type { ShopifyCompanyLocation, SyncResult } from "./types";
 import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
+import { checkCompanyLimit, isGatingEnforced } from "../gating.server";
 
 /**
  * Process a CompanyLocation webhook event.
@@ -78,8 +82,21 @@ export async function processCompanyLocationWebhook(
     location.billingAddress?.company ||
     `Location ${location.id.split("/").pop()}`;
 
-  // Upsert BuyerAccount
-  const [result] = await sql<{ id: string; action: string }[]>`
+  // S21: Check if this is a new account (for gating)
+  const [existingAccount] = await sql<{ id: string; gated_at: Date | null }[]>`
+    SELECT id, gated_at FROM "BuyerAccount"
+    WHERE "shopId" = ${shopId} AND "companyLocationId" = ${location.id}
+  `;
+
+  // Determine if we need to gate this account
+  let shouldGate = false;
+  if (!existingAccount && isGatingEnforced()) {
+    const limitCheck = await checkCompanyLimit(sql, shopId);
+    shouldGate = !limitCheck.allowed;
+  }
+
+  // Upsert BuyerAccount (gated if over limit, or preserve existing gated state)
+  const [result] = await sql<{ id: string; action: string; gated_at: Date | null }[]>`
     INSERT INTO "BuyerAccount" (
       "shopId",
       kind,
@@ -88,6 +105,7 @@ export async function processCompanyLocationWebhook(
       name,
       "defaultTermsDays",
       "defaultTermsSource",
+      gated_at,
       "createdAt",
       "updatedAt"
     ) VALUES (
@@ -98,6 +116,7 @@ export async function processCompanyLocationWebhook(
       ${displayName},
       ${defaultTermsDays},
       ${defaultTermsDays !== null ? "explicit" : null},
+      ${shouldGate ? new Date() : null},
       NOW(),
       NOW()
     )
@@ -107,10 +126,15 @@ export async function processCompanyLocationWebhook(
       name = EXCLUDED.name,
       "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
       "updatedAt" = NOW()
-    RETURNING id, (xmax = 0)::text as action
+    RETURNING id, (xmax = 0)::text as action, gated_at
   `;
 
-  const action = result.action === "true" ? "created" : "updated";
+  let action: "created" | "updated" | "gated";
+  if (result.action === "true") {
+    action = shouldGate ? "gated" : "created";
+  } else {
+    action = "updated";
+  }
 
   await markWebhookProcessed(sql, webhookId, topic, location.id);
 

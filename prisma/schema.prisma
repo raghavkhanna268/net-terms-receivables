@@ -133,7 +133,7 @@ model Shop {
   domain           String    @unique
   /// Default currency for the shop
   currency         String    @default("INR")
-  /// Subscription plan
+  /// Subscription plan (legacy, superseded by plan_key)
   plan             String    @default("free")
   /// Shop-level default terms days (last fallback in S9 inference)
   defaultTermsDays Int?
@@ -148,6 +148,18 @@ model Shop {
   /// Full data deletion happens on shop/redact (48h later per Shopify docs).
   uninstalledAt    DateTime? @db.Timestamptz(3)
 
+  // S21: Plan cache columns
+  /// Cached plan key (free, starter, growth, scale). Defaults to free.
+  planKey          String    @default("free") @map("plan_key")
+  /// Shopify subscription GID from activeSubscriptions query.
+  subscriptionId   String?   @map("subscription_id")
+  /// Subscription name from Shopify (maps to plan_key).
+  subscriptionName String?   @map("subscription_name")
+  /// Whether this is a test/development subscription.
+  isTest           Boolean   @default(false) @map("is_test")
+  /// When the plan cache was last refreshed. TTL ~6h.
+  planCachedAt     DateTime? @map("plan_cached_at") @db.Timestamptz(3)
+
   // Relations - direct children with CASCADE
   accounts     BuyerAccount[]
   sources      AccountSource[]
@@ -160,6 +172,9 @@ model Shop {
   payments     Payment[]
   matches      Match[]
   reminderLogs ReminderLog[]
+
+  // S21: Index for finding shops by plan (analytics, batch operations)
+  @@index([planKey])
 }
 
 /// Tag rule for non-B2B wholesale (tagged customer accounts)
@@ -218,6 +233,9 @@ model BuyerAccount {
   createdAt           DateTime           @default(now()) @db.Timestamptz(3)
   /// When the account was last updated (set by trigger)
   updatedAt           DateTime           @default(now()) @db.Timestamptz(3)
+  /// S21: When this account was gated due to plan limits. NULL means active.
+  /// Gated accounts are excluded from limit count and enforcement.
+  gatedAt             DateTime?          @map("gated_at") @db.Timestamptz(3)
 
   // Relations (onDelete: CASCADE - accounts are shop-specific)
   shop     Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
@@ -235,6 +253,8 @@ model BuyerAccount {
   @@unique([shopId, customerId])
   @@index([shopId, kind])
   @@index([shopId, holdState])
+  // S21: Index for finding gated accounts for reactivation on upgrade
+  @@index([gatedAt])
 }
 
 // =============================================================================

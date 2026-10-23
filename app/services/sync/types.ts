@@ -169,8 +169,8 @@ export interface ShopifyOrder {
 export interface SyncResult {
   /** Whether the sync was successful */
   success: boolean;
-  /** Action taken: created, updated, deleted, skipped */
-  action: "created" | "updated" | "deleted" | "skipped";
+  /** Action taken: created, updated, deleted, skipped, gated (S21: over-limit) */
+  action: "created" | "updated" | "deleted" | "skipped" | "gated";
   /** ID of the affected BuyerAccount or Invoice */
   entityId?: string;
   /** Reason for skipping (if action is skipped) */

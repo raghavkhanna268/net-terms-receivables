@@ -39,7 +39,16 @@
     // Protected Customer Data: Level 1 + Name + Email (confirmed 2026-10-23).
     // Enables fetching email and displayName in customer queries.
     // Phone and address are NEVER fetched regardless of this setting.
-    "CUSTOMER_PII_FIELDS": "1"
+    "CUSTOMER_PII_FIELDS": "1",
+    // S21: App handle for managed pricing page URL.
+    // Must match the app name in Partner Dashboard exactly (lowercase, hyphens).
+    // Used to build upgrade URL: https://admin.shopify.com/store/{store}/charges/{app_handle}/pricing_plans
+    "APP_HANDLE": "net-terms-receivables",
+    // S21: Plan gating enforcement. Set to "1" or "true" to enable.
+    // When OFF (default): Plan resolution, banner, usage work but limits are not enforced.
+    // When ON: Over-limit accounts are gated (gated_at set) and blocked from operations.
+    // Expected Partner Dashboard plan names: Free, Starter, Growth, Scale (case-insensitive)
+    "PLAN_GATING_ENFORCED": "false"
   },
 
   "observability": {
