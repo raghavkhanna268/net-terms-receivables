@@ -537,13 +537,17 @@ model S6ProcessedWebhook {
 /// Records the type of each bulk operation at launch so the finish webhook
 /// knows how to process the JSONL result.
 ///
+/// S10 additions: byte_offset for chunked JSONL processing, completed_at.
+///
 /// Note: This table is created by the S6 migration, not Prisma.
 /// It's included here to keep schema.prisma in sync with the database.
 model S6BulkOperation {
-  bulkOperationId String   @id @map("bulk_operation_id")
+  bulkOperationId String    @id @map("bulk_operation_id")
   shop            String
-  bulkType        String   @map("bulk_type")
-  startedAt       DateTime @default(now()) @map("started_at") @db.Timestamptz(3)
+  bulkType        String    @map("bulk_type")
+  startedAt       DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  byteOffset      BigInt    @default(0) @map("byte_offset")
+  completedAt     DateTime? @map("completed_at") @db.Timestamptz(6)
 
   @@map("s6_bulk_operations")
 }
@@ -642,4 +646,26 @@ model S8DraftOrder {
   @@index([shopId, buyerAccountId])
   @@index([shopId, hasPaymentTerms])
   @@map("s8_draft_orders")
+}
+
+// =============================================================================
+// S10 DEAD-LETTER QUEUE
+// =============================================================================
+
+/// Dead-letter queue for failed messages (S10)
+/// Stores messages that exceeded max retry attempts for later review
+/// and potential reprocessing.
+///
+/// Note: This table is created by the S10 migration.
+/// It's included here to keep schema.prisma in sync with the database.
+model S6DeadLetter {
+  id             BigInt   @id @default(autoincrement())
+  originalQueue  String   @map("original_queue")
+  originalMsgId  String   @map("original_msg_id")
+  message        Json
+  error          String
+  deadLetteredAt DateTime @default(now()) @map("dead_lettered_at") @db.Timestamptz(6)
+
+  @@index([originalQueue, deadLetteredAt(sort: Desc)], map: "idx_s6_dead_letter_queue_time")
+  @@map("s6_dead_letter")
 }

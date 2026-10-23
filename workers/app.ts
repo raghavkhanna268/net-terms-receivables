@@ -4,6 +4,7 @@ import type { Sql } from "../app/lib/db-light.server";
 import { createSql } from "../app/lib/db-light.server";
 import { requestContext } from "../app/lib/request-context.server";
 import { getShopifyApp, sessionStorage } from "../app/shopify.server";
+import { runDrain } from "../app/services/drain/processor.server";
 
 const requestHandler = createRequestHandler(
   () => import("virtual:react-router/server-build"),
@@ -42,5 +43,57 @@ export default wrapWithSentry({
         shopify,
       });
     });
+  },
+
+  /**
+   * Workers Cron scheduled handler (S10).
+   *
+   * Runs every 5 minutes as a keep-alive and fallback drain.
+   * The primary drain is via pg_cron + pg_net every minute.
+   * This provides redundancy in case pg_net requests fail.
+   *
+   * IMPORTANT: Runs inside requestContext.run() so that:
+   * 1. Session storage (LightSessionStorage) can access the SQL client
+   * 2. unauthenticated.admin() can load and refresh offline sessions
+   * 3. Token refresh persists back through session storage
+   *
+   * @param event - Cron trigger event with scheduled time
+   * @param env - Worker environment bindings
+   * @param ctx - Execution context for waitUntil
+   */
+  async scheduled(event, env, ctx) {
+    let sql: Sql | null = null;
+    const getSql = (): Sql => {
+      if (!sql) {
+        sql = createSql(env.HYPERDRIVE.connectionString);
+      }
+      return sql;
+    };
+
+    try {
+      console.log(`[scheduled] cron trigger at ${new Date(event.scheduledTime).toISOString()}`);
+
+      // Run inside ALS context so session storage works for unauthenticated.admin()
+      const result = await requestContext.run({ getSql }, async () => {
+        return runDrain(getSql(), {
+          batchSize: 10,
+        });
+      });
+
+      console.log(
+        `[scheduled] drain complete: processed=${result.processed} ` +
+          `skipped=${result.skipped} failed=${result.failed} ` +
+          `dlq=${result.deadLettered} noHandler=${result.noHandler} ` +
+          `timedOut=${result.timedOut} elapsed=${result.elapsedMs}ms`
+      );
+    } catch (error) {
+      console.error("[scheduled] drain error:", error);
+    } finally {
+      if (sql !== null) {
+        // Use type assertion because TypeScript's flow analysis doesn't track
+        // mutation in the closure (getSql assigns to sql)
+        ctx.waitUntil((sql as Sql).end());
+      }
+    }
   },
 } satisfies ExportedHandler<Env>);

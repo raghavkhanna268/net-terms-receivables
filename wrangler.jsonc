@@ -5,6 +5,13 @@
   "compatibility_flags": ["nodejs_compat"],
   "main": "./workers/app.ts",
 
+  // S10: Cron triggers for queue drain keep-alive
+  // Primary drain is via pg_cron + pg_net every minute.
+  // This Workers Cron acts as a fallback and keep-alive (every 5 min).
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+
   // Explicit region placement: run Worker near Supabase Postgres in AWS Mumbai.
   "placement": {
     "region": "aws:ap-south-1"
