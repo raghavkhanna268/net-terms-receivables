@@ -73,8 +73,8 @@ describeWithDb("SQL-vs-TS parity (DB-backed)", () => {
 
     // Create test shop
     const [shop] = await sql<{ id: string }[]>`
-      INSERT INTO "Shop" (domain, currency, timezone, "accessToken", "createdAt", "updatedAt")
-      VALUES (${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'test-token', NOW(), NOW())
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', NOW(), NOW())
       RETURNING id
     `;
     testShopId = shop.id;
@@ -82,10 +82,10 @@ describeWithDb("SQL-vs-TS parity (DB-backed)", () => {
     // Create test buyer account
     const [buyer] = await sql<{ id: string }[]>`
       INSERT INTO "BuyerAccount" (
-        id, "shopId", "shopifyCompanyId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+        id, "shopId", kind, "companyId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
       )
       VALUES (
-        gen_random_uuid()::text, ${testShopId}, 'gid://shopify/Company/parity-test',
+        gen_random_uuid()::text, ${testShopId}, 'COMPANY', 'gid://shopify/Company/parity-test',
         'Parity Test Buyer', 100000, 'OK', NOW(), NOW()
       )
       RETURNING id
@@ -232,8 +232,8 @@ describeWithDb("shop totals = sum of ledger (gating test)", () => {
 
     // Create test shop
     const [shop] = await sql<{ id: string }[]>`
-      INSERT INTO "Shop" (domain, currency, timezone, "accessToken", "createdAt", "updatedAt")
-      VALUES (${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'test-token', NOW(), NOW())
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', NOW(), NOW())
       RETURNING id
     `;
     testShopId = shop.id;
@@ -241,10 +241,10 @@ describeWithDb("shop totals = sum of ledger (gating test)", () => {
     // Create active buyer
     const [activeBuyer] = await sql<{ id: string }[]>`
       INSERT INTO "BuyerAccount" (
-        id, "shopId", "shopifyCompanyId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+        id, "shopId", kind, "companyId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
       )
       VALUES (
-        gen_random_uuid()::text, ${testShopId}, 'gid://shopify/Company/active-test',
+        gen_random_uuid()::text, ${testShopId}, 'COMPANY', 'gid://shopify/Company/active-test',
         'Active Buyer', 100000, 'OK', NOW(), NOW()
       )
       RETURNING id
@@ -254,10 +254,10 @@ describeWithDb("shop totals = sum of ledger (gating test)", () => {
     // Create gated buyer
     const [gatedBuyer] = await sql<{ id: string }[]>`
       INSERT INTO "BuyerAccount" (
-        id, "shopId", "shopifyCompanyId", name, "creditLimit", "holdState", gated_at, "createdAt", "updatedAt"
+        id, "shopId", kind, "companyId", name, "creditLimit", "holdState", gated_at, "createdAt", "updatedAt"
       )
       VALUES (
-        gen_random_uuid()::text, ${testShopId}, 'gid://shopify/Company/gated-test',
+        gen_random_uuid()::text, ${testShopId}, 'COMPANY', 'gid://shopify/Company/gated-test',
         'Gated Buyer', 100000, 'OK', NOW(), NOW(), NOW()
       )
       RETURNING id
