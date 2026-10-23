@@ -291,7 +291,7 @@ export function verifyPayloadShopMatch(
 
   if (payloadShop !== headerShop) {
     throw new Response(null, {
-      status: 400,
+      status: 401,
       statusText: "Payload shop_domain does not match header shop",
     });
   }

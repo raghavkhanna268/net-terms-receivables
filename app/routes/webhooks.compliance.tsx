@@ -5,7 +5,43 @@ import {
   normalizeWebhookTopic,
 } from "~/lib/webhook-verify.server";
 import { getRequestSql } from "~/lib/request-context.server";
-import { redactCustomerData, redactShopData } from "~/services/sync/customer.server";
+import {
+  deleteShop,
+  purgePgmqMessages,
+  redactCustomer,
+  generateCustomerDataExport,
+  persistDataRequest,
+  purgeExpiredDataRequests,
+  sendDataRequestNotification,
+} from "~/services/compliance";
+import { getShopifyApp } from "~/shopify.server";
+
+/**
+ * Fetch shop owner email using the offline session admin client.
+ * Returns null if email cannot be fetched (no session, API error, etc.)
+ */
+async function fetchShopOwnerEmail(shop: string): Promise<string | null> {
+  try {
+    const shopify = getShopifyApp();
+    const { admin } = await shopify.unauthenticated.admin(shop);
+    
+    const response = await admin.graphql(`
+      query {
+        shop {
+          email
+          contactEmail
+        }
+      }
+    `);
+    
+    const json = await response.json() as { data?: { shop?: { email?: string; contactEmail?: string } } };
+    const shopData = json.data?.shop;
+    
+    return shopData?.email || shopData?.contactEmail || null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Compliance webhook handler for GDPR/CCPA mandatory webhooks.
@@ -13,14 +49,18 @@ import { redactCustomerData, redactShopData } from "~/services/sync/customer.ser
  *
  * OPTIMIZATION: Uses lightweight verifyWebhook() instead of authenticate.webhook()
  * to avoid unnecessary session lookups. Most compliance handlers don't need DB access
- * for session management, only for S8 data purges.
+ * for session management, only for S8/S22 data operations.
  *
  * CPU savings: ~5-10ms by avoiding session DB round-trip on every webhook.
  * HMAC verification uses Web Crypto (crypto.subtle) with constant-time comparison.
  *
- * S8 data handling:
- * - customers/redact: Deletes s8_tagged_customers and s8_draft_orders for the customer
- * - shop/redact: Deletes all s8_tagged_customers and s8_draft_orders for the shop
+ * S22 data handling:
+ * - customers/data_request: Generate data export, persist s22_data_requests row
+ * - customers/redact: Deletes s8 data, anonymizes BuyerAccount/Invoice/Payment
+ * - shop/redact: Deletes Shop row (CASCADE removes all shop data)
+ *
+ * Security: All handlers verify payload shop_domain matches header shop.
+ * This prevents attackers from forging payloads to delete wrong shop's data.
  */
 export const action = async ({ request, context }: ActionFunctionArgs) => {
   const apiSecret = process.env.SHOPIFY_API_SECRET;
@@ -42,35 +82,99 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   switch (normalizedTopic) {
     case "CUSTOMERS_DATA_REQUEST": {
-      // Verify payload shop_domain matches header shop for security.
       const payloadShop = verifyPayloadShopMatch(shop, payload);
 
       const typedPayload = payload as {
         customer?: { id?: number };
+        data_request?: { id?: number };
       };
-      const customerGid = typedPayload.customer?.id
-        ? `gid://shopify/Customer/${typedPayload.customer.id}`
-        : "unknown";
 
-      // S8 stores: GID, tags, email, displayName, tag_active, and s8_draft_orders refs.
-      // Data export fulfilment is implemented in S22 (#44).
-      // Log carries no PII - only topic, shop, and customer GID.
-      console.log(
-        `[Compliance] customers/data_request for shop=${payloadShop} customer=${customerGid}`
+      if (!typedPayload.customer?.id) {
+        console.log(
+          `[Compliance] customers/data_request: No customer ID in payload for shop=${payloadShop}`
+        );
+        break;
+      }
+
+      if (!typedPayload.data_request?.id) {
+        console.log(
+          `[Compliance] customers/data_request: No data_request.id in payload for shop=${payloadShop}`
+        );
+        break;
+      }
+
+      const [shopRecord] = await sql<{ id: string }[]>`
+        SELECT id FROM "Shop" WHERE domain = ${payloadShop}
+      `;
+
+      if (!shopRecord) {
+        console.log(
+          `[Compliance] customers/data_request: Shop not found for domain=${payloadShop}`
+        );
+        break;
+      }
+
+      // Purge expired data requests on access (in-app purge for databases without pg_cron)
+      await purgeExpiredDataRequests(sql, shopRecord.id);
+
+      const customerGid = `gid://shopify/Customer/${typedPayload.customer.id}`;
+      const requestId = String(typedPayload.data_request.id);
+
+      const exportData = await generateCustomerDataExport(
+        sql,
+        shopRecord.id,
+        customerGid,
+        requestId
       );
+
+      const { id, alreadyExists } = await persistDataRequest(
+        sql,
+        shopRecord.id,
+        customerGid,
+        requestId,
+        exportData
+      );
+
+      console.log(
+        `[Compliance] customers/data_request: ${alreadyExists ? "Duplicate" : "Created"} ` +
+          `data request id=${id} shop=${payloadShop}`
+      );
+
+      // Send email notification to shop owner (gated on RESEND_API_KEY)
+      // Fetch shop owner email via Admin API using offline session
+      const shopOwnerEmail = await fetchShopOwnerEmail(payloadShop);
+
+      if (shopOwnerEmail) {
+        const emailResult = await sendDataRequestNotification(
+          payloadShop,
+          shopOwnerEmail,
+          requestId
+        );
+        if (emailResult.sent) {
+          console.log(
+            `[Compliance] customers/data_request: Email notification sent for shop=${payloadShop}`
+          );
+        } else if (emailResult.error) {
+          console.log(
+            `[Compliance] customers/data_request: Email notification failed for shop=${payloadShop} error=${emailResult.error}`
+          );
+        }
+        // Note: skipped emails are logged inside sendDataRequestNotification
+      } else {
+        console.log(
+          `data_request_email_skipped shop=${payloadShop} request_id=${requestId} reason=no_shop_email`
+        );
+      }
       break;
     }
 
     case "CUSTOMERS_REDACT": {
-      // Verify payload shop_domain matches header shop for security.
-      // The shop to purge comes from the signed payload, not just the header.
       const payloadShop = verifyPayloadShopMatch(shop, payload);
 
       const typedPayload = payload as {
         customer?: { id?: number };
       };
 
-      // Missing customer.id is a safe no-op (return 200)
       if (!typedPayload.customer?.id) {
         console.log(
           `[Compliance] customers/redact: No customer ID in payload for shop=${payloadShop}`
@@ -78,17 +182,18 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         break;
       }
 
-      // Get shop ID for S8 data deletion using the verified payload shop
       const [shopRecord] = await sql<{ id: string }[]>`
         SELECT id FROM "Shop" WHERE domain = ${payloadShop}
       `;
 
       if (shopRecord) {
-        // Customer GID format: gid://shopify/Customer/123
         const customerGid = `gid://shopify/Customer/${typedPayload.customer.id}`;
-        const counts = await redactCustomerData(sql, shopRecord.id, customerGid);
+        const counts = await redactCustomer(sql, shopRecord.id, customerGid);
         console.log(
-          `[Compliance] customers/redact: Deleted ${counts.taggedCustomers} tagged customer(s), ${counts.draftOrders} draft order(s) for customer=${customerGid} shop=${payloadShop}`
+          `[Compliance] customers/redact: Deleted tagged=${counts.taggedCustomersDeleted} ` +
+            `draft_orders=${counts.draftOrdersDeleted} data_requests=${counts.dataRequestsDeleted}, ` +
+            `anonymized account=${counts.buyerAccountAnonymized}, ` +
+            `redacted payments=${counts.paymentsRedacted} shop=${payloadShop}`
         );
       } else {
         console.log(
@@ -99,27 +204,30 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     }
 
     case "SHOP_REDACT": {
-      // Verify payload shop_domain matches header shop for security.
-      // The shop to purge comes from the signed payload, not just the header.
       const payloadShop = verifyPayloadShopMatch(shop, payload);
 
-      // Delete all session data for this shop via deleteAllForShop.
-      // Idempotent: returns 200 even when no sessions exist.
       const { sessionStorage } = context;
-      const count = await sessionStorage.deleteAllForShop(payloadShop);
+      const sessionCount = await sessionStorage.deleteAllForShop(payloadShop);
       console.log(
-        `[Compliance] shop/redact: Deleted ${count} session(s) for shop=${payloadShop}`
+        `[Compliance] shop/redact: Deleted ${sessionCount} session(s) for shop=${payloadShop}`
       );
 
-      // S8: Delete all s8_tagged_customers and s8_draft_orders for this shop
-      const [shopRecord] = await sql<{ id: string }[]>`
-        SELECT id FROM "Shop" WHERE domain = ${payloadShop}
-      `;
+      const pgmqResult = await purgePgmqMessages(sql, payloadShop);
+      console.log(
+        `[Compliance] shop/redact: pgmq purge - ${pgmqResult.reason}`
+      );
 
-      if (shopRecord) {
-        const s8Counts = await redactShopData(sql, shopRecord.id);
+      const { deleted, shopId } = await deleteShop(sql, payloadShop);
+
+      if (deleted) {
         console.log(
-          `[Compliance] shop/redact: Deleted ${s8Counts.taggedCustomers} tagged customer(s), ${s8Counts.draftOrders} draft order(s) for shop=${payloadShop}`
+          `[Compliance] shop/redact: Deleted Shop id=${shopId} domain=${payloadShop} ` +
+            `(all data cascaded via FKs)`
+        );
+      } else {
+        console.log(
+          `[Compliance] shop/redact: Shop not found for domain=${payloadShop} ` +
+            `(may have been deleted already or never installed)`
         );
       }
       break;

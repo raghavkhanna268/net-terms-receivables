@@ -34,6 +34,7 @@
 import type { Sql } from "~/lib/db-light.server";
 import type { ShopifyCustomer, SyncResult } from "./types";
 import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
+import { minimiseCustomerPiiIfInactive } from "~/services/compliance";
 
 /**
  * Process a Customer webhook event.
@@ -305,10 +306,16 @@ async function syncTaggedCustomerBuyerAccount(
   if (!hasTag) {
     // Tag removed: we already updated tag_active in the tracking table
     // DO NOT touch BuyerAccount.holdState - that belongs to credit logic
+
+    // S22 PII minimisation: null email/displayName if no open invoices
+    const piiNulled = await minimiseCustomerPiiIfInactive(sql, shopId, customerId);
+    
     return {
       success: true,
-      action: "skipped",
-      skipReason: "Tag removed; tag_active set to false (holdState unchanged)",
+      action: piiNulled ? "updated" : "skipped",
+      skipReason: piiNulled
+        ? "Tag removed; tag_active set to false; PII nulled (no open invoices)"
+        : "Tag removed; tag_active set to false (holdState unchanged)",
     };
   }
 

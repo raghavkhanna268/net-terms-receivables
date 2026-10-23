@@ -7,6 +7,16 @@ vi.mock("~/lib/webhook-verify.server", () => ({
   normalizeWebhookTopic: (topic: string) => topic.replace(/\//g, "_").toUpperCase(),
 }));
 
+const mockMarkShopUninstalled = vi.fn();
+vi.mock("~/services/compliance", () => ({
+  markShopUninstalled: (...args: unknown[]) => mockMarkShopUninstalled(...args),
+}));
+
+const mockSql = vi.fn();
+vi.mock("~/lib/request-context.server", () => ({
+  getRequestSql: vi.fn(() => mockSql),
+}));
+
 import { action } from "../webhooks.app.uninstalled";
 
 describe("webhooks.app.uninstalled", () => {
@@ -53,6 +63,7 @@ describe("webhooks.app.uninstalled", () => {
       apiVersion: "2026-10",
       rawBody: new ArrayBuffer(0),
     });
+    mockMarkShopUninstalled.mockResolvedValue(true);
   });
 
   afterEach(() => {
@@ -68,6 +79,14 @@ describe("webhooks.app.uninstalled", () => {
     expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledWith(TEST_SHOP);
   });
 
+  it("marks shop as uninstalled (S22)", async () => {
+    mockSessionStorage.deleteAllForShop.mockResolvedValue(1);
+
+    await action(createActionArgs());
+
+    expect(mockMarkShopUninstalled).toHaveBeenCalledWith(expect.anything(), TEST_SHOP);
+  });
+
   it("handles shops with no sessions gracefully", async () => {
     mockSessionStorage.deleteAllForShop.mockResolvedValue(0);
 
@@ -75,6 +94,7 @@ describe("webhooks.app.uninstalled", () => {
 
     expect(response).toBeInstanceOf(Response);
     expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledWith(TEST_SHOP);
+    expect(mockMarkShopUninstalled).toHaveBeenCalled();
   });
 
   it("deletes more than 25 sessions (bypasses findSessionsByShop limit)", async () => {
@@ -87,9 +107,21 @@ describe("webhooks.app.uninstalled", () => {
     expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledWith(TEST_SHOP);
   });
 
-  it("logs but does not fail on database errors", async () => {
+  it("logs but does not fail on session database errors", async () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     mockSessionStorage.deleteAllForShop.mockRejectedValue(new Error("DB error"));
+
+    const response = await action(createActionArgs());
+
+    expect(response).toBeInstanceOf(Response);
+    expect(consoleSpy).toHaveBeenCalled();
+    consoleSpy.mockRestore();
+  });
+
+  it("logs but does not fail on mark uninstalled database errors", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockSessionStorage.deleteAllForShop.mockResolvedValue(1);
+    mockMarkShopUninstalled.mockRejectedValue(new Error("DB error"));
 
     const response = await action(createActionArgs());
 
@@ -131,6 +163,7 @@ describe("webhooks.app.uninstalled", () => {
 
       expect(response).toBeInstanceOf(Response);
       expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
+      expect(mockMarkShopUninstalled).not.toHaveBeenCalled();
     });
 
     it("does NOT delete sessions when topic is shop/redact", async () => {
@@ -147,6 +180,7 @@ describe("webhooks.app.uninstalled", () => {
 
       expect(response).toBeInstanceOf(Response);
       expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
+      expect(mockMarkShopUninstalled).not.toHaveBeenCalled();
     });
 
     it("returns 200 even for unexpected topics (logs and no-ops)", async () => {
@@ -164,6 +198,7 @@ describe("webhooks.app.uninstalled", () => {
 
       expect(response).toBeInstanceOf(Response);
       expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
+      expect(mockMarkShopUninstalled).not.toHaveBeenCalled();
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining("Ignoring unexpected topic")
       );

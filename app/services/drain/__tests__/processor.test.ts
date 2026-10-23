@@ -468,6 +468,82 @@ describe("Order null refetch behavior", () => {
   });
 });
 
+describe("Deleted shop handling", () => {
+  let mockAdminGraphQL: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.resetModules();
+
+    const { adminGraphQL } = await import("../admin-client.server");
+    mockAdminGraphQL = adminGraphQL as ReturnType<typeof vi.fn>;
+  });
+
+  it("messages for deleted shops fail with non-retryable error (no session)", async () => {
+    // When a shop is deleted, its session is deleted too.
+    // adminGraphQL returns a non-retryable error for missing sessions.
+    mockAdminGraphQL.mockResolvedValue({
+      success: false,
+      error: "No offline session found for deleted-shop.myshopify.com. Shop may need to reinstall the app.",
+      retryable: false,
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("COMPANIES_CREATE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "COMPANIES_CREATE",
+      shop: "deleted-shop.myshopify.com",
+      webhookId: "wh-deleted-1",
+      resourceGid: "gid://shopify/Company/123",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    // Handler returns failure (non-retryable after max retries -> DLQ)
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("No offline session");
+  });
+
+  it("auth failure (401/403) is non-retryable, leading to eventual DLQ", async () => {
+    // If somehow the shop exists but token is revoked, 401/403 is non-retryable
+    mockAdminGraphQL.mockResolvedValue({
+      success: false,
+      error: "Authentication failed for revoked-shop.myshopify.com (401). Token may be revoked.",
+      retryable: false,
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("ORDERS_CREATE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "ORDERS_CREATE",
+      shop: "revoked-shop.myshopify.com",
+      webhookId: "wh-revoked-1",
+      resourceGid: "gid://shopify/Order/456",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    // Handler returns failure with non-retryable error from adminGraphQL
+    // After maxRetries, processor moves message to DLQ
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("401");
+  });
+});
+
 describe("Customer bulk query PII fields", () => {
   // Import directly from customer-fields to avoid mock interference
   it("includes email and displayName with CUSTOMER_PII_FIELDS=1", async () => {
