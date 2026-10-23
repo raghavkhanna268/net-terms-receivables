@@ -51,7 +51,7 @@ export {
   bulkOrderToShopifyOrder,
 } from "./bulk-parser.server";
 
-// Bulk operation queries
+// Bulk operation queries and registration
 export {
   BULK_COMPANIES_QUERY,
   BULK_ORDERS_QUERY,
@@ -59,4 +59,6 @@ export {
   getCompaniesExportMutation,
   getOrdersExportMutation,
   parseBulkOperationResult,
+  registerBulkOperation,
 } from "./bulk-operations.server";
+export type { BulkOperationType } from "./bulk-operations.server";

@@ -21,8 +21,6 @@ export const S6_QUEUES = {
   BULK: "s6_bulk",
 } as const;
 
-export type S6QueueName = (typeof S6_QUEUES)[keyof typeof S6_QUEUES];
-
 /**
  * Base message payload with common fields.
  */
@@ -120,30 +118,3 @@ export async function sendBulkMessage(
   return { msgId: result.send };
 }
 
-/**
- * Check if a webhook has already been processed (dedupe check).
- *
- * Queries recent messages in the queue to see if a message with the same
- * webhookId already exists. This prevents duplicate processing when
- * Shopify retries a webhook.
- *
- * @param sql - postgres.js SQL client
- * @param queue - Queue name
- * @param webhookId - Webhook ID to check
- * @returns true if the webhook was already enqueued
- */
-export async function isWebhookEnqueued(
-  sql: Sql,
-  queue: S6QueueName,
-  webhookId: string
-): Promise<boolean> {
-  const tableName = `pgmq.q_${queue}`;
-  const [result] = await sql<{ exists: boolean }[]>`
-    SELECT EXISTS(
-      SELECT 1 FROM ${sql(tableName)}
-      WHERE message->>'webhookId' = ${webhookId}
-      AND enqueued_at > NOW() - INTERVAL '24 hours'
-    ) as exists
-  `;
-  return result.exists;
-}

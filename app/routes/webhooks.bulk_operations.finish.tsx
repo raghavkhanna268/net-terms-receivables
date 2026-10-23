@@ -12,14 +12,14 @@ import { sendBulkMessage } from "~/lib/pgmq.server";
  *
  * Processing:
  * 1. HMAC verification via authenticate.webhook (returns 401 on failure)
- * 2. Extract bulk operation ID and infer type from admin_graphql_api_id pattern
+ * 2. Look up bulk operation type from s6_bulk_operations tracking table
  * 3. Enqueue to s6_bulk for async JSONL download/processing
  * 4. Return 200 immediately (within 10ms CPU budget)
  *
  * The JSONL download and parsing happens in the drain (S10), not here.
  * This keeps the webhook handler lightweight and within CPU budget.
  *
- * Bulk operation types (inferred from context):
+ * Bulk operation types (stored at launch time in s6_bulk_operations):
  * - companies: Company/CompanyLocation backfill
  * - orders: Orders with payment terms backfill
  */
@@ -53,10 +53,15 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   const sql = getRequestSql();
 
-  // Infer bulk type from the operation type field or default to 'companies'
-  // The actual type is determined when processing the JSONL in the drain
-  const bulkType =
-    typedPayload.type === "query" ? inferBulkType(bulkOperationId) : "companies";
+  // Look up bulk type from tracking table (set when operation was started)
+  const bulkType = await lookupBulkOperationType(sql, bulkOperationId);
+
+  if (!bulkType) {
+    console.warn(
+      `[webhooks.bulk_operations.finish] Unknown bulk operation ${bulkOperationId} for ${shop}, skipping`
+    );
+    return new Response(null, { status: 200 });
+  }
 
   await sendBulkMessage(sql, {
     topic,
@@ -75,12 +80,21 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 };
 
 /**
- * Infer bulk operation type from the operation ID or other context.
- * In practice, the drain will determine the actual type from the JSONL content.
+ * Look up the bulk operation type from the tracking table.
+ * Returns null if the operation is not found (not started by our app).
  */
-function inferBulkType(
-  _bulkOperationId: string
-): "companies" | "orders" {
-  // Default to companies; the drain will verify from JSONL content
-  return "companies";
+async function lookupBulkOperationType(
+  sql: ReturnType<typeof getRequestSql>,
+  bulkOperationId: string
+): Promise<"companies" | "orders" | null> {
+  const [row] = await sql<{ bulk_type: string }[]>`
+    SELECT bulk_type FROM s6_bulk_operations
+    WHERE bulk_operation_id = ${bulkOperationId}
+  `;
+
+  if (!row) {
+    return null;
+  }
+
+  return row.bulk_type as "companies" | "orders";
 }

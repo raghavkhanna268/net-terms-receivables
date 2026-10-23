@@ -20,11 +20,13 @@
 CREATE EXTENSION IF NOT EXISTS pgmq;
 
 -- Enable pg_cron (optional - used by S10 drain scheduler)
--- Gracefully skip if not available (CI doesn't have pg_cron)
+-- Per Supabase docs: pg_cron must be installed in pg_catalog schema.
+-- Gracefully skip if not available (CI doesn't have pg_cron).
+-- No cron jobs are scheduled here; that's S10.
 DO $$
 BEGIN
-    CREATE EXTENSION IF NOT EXISTS pg_cron;
-    RAISE NOTICE 'pg_cron extension enabled';
+    CREATE EXTENSION IF NOT EXISTS pg_cron WITH SCHEMA pg_catalog;
+    RAISE NOTICE 'pg_cron extension enabled in pg_catalog schema';
 EXCEPTION
     WHEN OTHERS THEN
         RAISE NOTICE 'pg_cron extension not available (OK for CI): %', SQLERRM;
@@ -32,23 +34,15 @@ END;
 $$;
 
 -- Enable pg_net (optional - used for HTTP callbacks)
--- Gracefully skip if not available (CI doesn't have pg_net)
--- Note: pg_net requires schema specification on Supabase
+-- Per Supabase docs: pg_net goes in extensions schema.
+-- Gracefully skip if not available (CI doesn't have pg_net).
 DO $$
 BEGIN
-    -- Try with extensions schema first (Supabase convention)
     CREATE EXTENSION IF NOT EXISTS pg_net WITH SCHEMA extensions;
     RAISE NOTICE 'pg_net extension enabled in extensions schema';
 EXCEPTION
     WHEN OTHERS THEN
-        BEGIN
-            -- Fallback: try without schema specification
-            CREATE EXTENSION IF NOT EXISTS pg_net;
-            RAISE NOTICE 'pg_net extension enabled in public schema';
-        EXCEPTION
-            WHEN OTHERS THEN
-                RAISE NOTICE 'pg_net extension not available (OK for CI): %', SQLERRM;
-        END;
+        RAISE NOTICE 'pg_net extension not available (OK for CI): %', SQLERRM;
 END;
 $$;
 
@@ -62,11 +56,8 @@ SELECT pgmq.create('s6_sync');
 -- The drain will download JSONL and process results
 SELECT pgmq.create('s6_bulk');
 
--- Create index on pgmq queue tables for efficient polling
--- pgmq creates tables named pgmq.q_<queue_name>
--- These indexes help the drain find unprocessed messages quickly
-CREATE INDEX IF NOT EXISTS idx_q_s6_sync_vt ON pgmq.q_s6_sync(vt) WHERE vt <= now();
-CREATE INDEX IF NOT EXISTS idx_q_s6_bulk_vt ON pgmq.q_s6_bulk(vt) WHERE vt <= now();
+-- Note: pgmq already creates an index on the vt column for each queue table,
+-- so no additional indexes are needed for efficient polling.
 
 -- Add comment documenting queue purposes
 COMMENT ON TABLE pgmq.q_s6_sync IS 'S6 webhook events: companies, company_locations, orders with payment terms';
@@ -80,6 +71,16 @@ CREATE TABLE IF NOT EXISTS s6_processed_webhooks (
     topic TEXT NOT NULL,
     resource_gid TEXT NOT NULL,
     processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Create bulk operations tracking table
+-- Records the type of each bulk operation at launch so the finish webhook
+-- knows how to process the JSONL result.
+CREATE TABLE IF NOT EXISTS s6_bulk_operations (
+    bulk_operation_id TEXT PRIMARY KEY,
+    shop TEXT NOT NULL,
+    bulk_type TEXT NOT NULL CHECK (bulk_type IN ('companies', 'orders')),
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- Index for cleanup of old entries (pg_cron job in S10 will purge >7 days)
