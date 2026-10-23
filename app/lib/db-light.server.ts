@@ -40,6 +40,7 @@ export interface SessionRow {
   emailVerified: boolean;
   refreshToken: string | null;
   refreshTokenExpires: Date | null;
+  needsReauth: boolean;
 }
 
 /**

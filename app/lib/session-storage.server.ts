@@ -116,6 +116,7 @@ export class PrismaSessionStorage {
         session.onlineAccessInfo?.associated_user?.email_verified ?? false,
       refreshToken: session.refreshToken ?? null,
       refreshTokenExpires: session.refreshTokenExpires ?? null,
+      needsReauth: false,
     };
   }
 

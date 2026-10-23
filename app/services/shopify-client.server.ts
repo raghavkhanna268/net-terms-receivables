@@ -2,22 +2,25 @@
  * Shopify Admin GraphQL client with rate limit handling (S20).
  *
  * Provides a wrapper for Admin API calls that handles:
+ * - Token refresh: Checks expiry and refreshes before each call (5 min skew)
  * - THROTTLED responses: Uses extensions.cost.throttleStatus to compute wait
  * - HTTP 429: Honours Retry-After header, else exponential backoff with jitter
  * - 5xx and network errors: Bounded exponential backoff
+ *
+ * Token refresh uses CAS (compare-and-swap) for safe concurrent refreshes.
+ * On invalid refresh token, marks session as needing re-auth and returns
+ * a non-retryable error.
  *
  * NOT retried (caller must handle):
  * - HTTP 4xx (except 429): 400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found
  * - GraphQL userErrors: Application-level validation errors (e.g., invalid input)
  * - GraphQL errors without THROTTLED code: Query syntax errors, field errors
  * - InvalidSession: Token revoked, shop needs to reinstall
+ * - Invalid refresh token: Re-authentication required (non-retryable)
  *
  * Worker budget awareness:
  * - Request-path code: At most 1 short retry, 1s max wait
  * - Queue/job paths: Up to 3 retries, 25s max wait (< 30s pgmq visibility timeout)
- *
- * Uses the existing admin client from drain/admin-client.server.ts as the
- * underlying implementation.
  */
 
 import { getShopifyApp } from "~/shopify.server";
@@ -28,6 +31,8 @@ import {
   GraphqlQueryError,
   InvalidSession,
 } from "@shopify/shopify-api";
+import { getRequestSql } from "~/lib/request-context.server";
+import { refreshOfflineTokenIfNeeded } from "~/lib/offline-token.server";
 
 /**
  * Execution context: determines retry budget.
@@ -211,6 +216,43 @@ export async function shopifyGraphQL<T = unknown>(
   let attempt = 0;
   let totalWaitTime = 0;
   let wasRateLimited = false;
+
+  // Refresh token if near expiry before getting admin client
+  // This ensures all Admin API calls use a valid token
+  const clientId = process.env.SHOPIFY_API_KEY;
+  const clientSecret = process.env.SHOPIFY_API_SECRET;
+  
+  if (!clientId || !clientSecret) {
+    // P2: Fail loudly - this is a configuration error that should be fixed
+    console.error(
+      `[shopify-client] SHOPIFY_API_KEY or SHOPIFY_API_SECRET missing for shop=${shop}`
+    );
+    return {
+      success: false,
+      error: `Shopify credentials not configured. SHOPIFY_API_KEY or SHOPIFY_API_SECRET is missing.`,
+      retryable: false,
+      retriesAttempted: 0,
+    };
+  }
+
+  const sql = getRequestSql();
+  const refreshResult = await refreshOfflineTokenIfNeeded(
+    sql,
+    shop,
+    clientId,
+    clientSecret
+  );
+  
+  if (!refreshResult.success) {
+    // Token refresh failed - return non-retryable error
+    // This includes invalid_grant (needs re-auth) and no_refresh_token
+    return {
+      success: false,
+      error: refreshResult.error ?? `Token refresh failed for ${shop}`,
+      retryable: false,
+      retriesAttempted: 0,
+    };
+  }
 
   // Hoist admin client outside retry loop - the session doesn't change between retries
   // Wrap in try/catch to handle InvalidSession (missing/revoked offline session)

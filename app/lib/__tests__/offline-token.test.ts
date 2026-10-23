@@ -116,13 +116,14 @@ describeWithDb("refreshOfflineTokenIfNeeded with real database", () => {
     await sql`
       INSERT INTO "Session" (
         id, shop, state, "isOnline", scope, expires, "accessToken",
-        "refreshToken", "refreshTokenExpires"
+        "refreshToken", "refreshTokenExpires", "needsReauth"
       ) VALUES (
         ${TEST_SESSION_ID}, ${TEST_SHOP}, 'state', false, 'read_products',
         ${oneHourFromNow.toISOString()}::timestamptz AT TIME ZONE 'UTC',
         'shpat_valid_token',
         'shprt_refresh_token',
-        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC'
+        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        false
       )
     `;
 
@@ -145,13 +146,14 @@ describeWithDb("refreshOfflineTokenIfNeeded with real database", () => {
     await sql`
       INSERT INTO "Session" (
         id, shop, state, "isOnline", scope, expires, "accessToken",
-        "refreshToken", "refreshTokenExpires"
+        "refreshToken", "refreshTokenExpires", "needsReauth"
       ) VALUES (
         ${TEST_SESSION_ID}, ${TEST_SHOP}, 'state', false, 'read_products',
         ${twoMinutesFromNow.toISOString()}::timestamptz AT TIME ZONE 'UTC',
         'shpat_old_token',
         'shprt_old_refresh_token',
-        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC'
+        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        false
       )
     `;
 
@@ -200,19 +202,20 @@ describeWithDb("refreshOfflineTokenIfNeeded with real database", () => {
     expect(updatedRows[0].refreshToken).toBe("shprt_new_refresh_token");
   });
 
-  it("handles invalid_grant error gracefully", async () => {
+  it("handles invalid_grant error and sets needsReauth flag", async () => {
     // Create a session with an expired token
     const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
     await sql`
       INSERT INTO "Session" (
         id, shop, state, "isOnline", scope, expires, "accessToken",
-        "refreshToken", "refreshTokenExpires"
+        "refreshToken", "refreshTokenExpires", "needsReauth"
       ) VALUES (
         ${TEST_SESSION_ID}, ${TEST_SHOP}, 'state', false, 'read_products',
         ${twoMinutesAgo.toISOString()}::timestamptz AT TIME ZONE 'UTC',
         'shpat_old_token',
         'shprt_revoked_refresh_token',
-        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC'
+        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        false
       )
     `;
 
@@ -238,28 +241,59 @@ describeWithDb("refreshOfflineTokenIfNeeded with real database", () => {
     expect(result.error).toContain("invalid_grant");
     expect(result.error).toContain(TEST_SHOP);
 
-    // Verify original token was NOT modified
-    const rows = await sql<Array<{ accessToken: string }>>`
-      SELECT "accessToken"
+    // Verify needsReauth was set to true
+    const rows = await sql<Array<{ accessToken: string; needsReauth: boolean }>>`
+      SELECT "accessToken", "needsReauth"
       FROM "Session"
       WHERE id = ${TEST_SESSION_ID}
     `;
     expect(rows[0].accessToken).toBe("shpat_old_token");
+    expect(rows[0].needsReauth).toBe(true);
   });
 
-  it("returns no_refresh_token error when refresh token is missing", async () => {
+  it("returns error immediately if session is already marked needsReauth", async () => {
+    // Create a session already marked as needing re-auth
+    const oneHourFromNow = new Date(Date.now() + 60 * 60 * 1000);
+    await sql`
+      INSERT INTO "Session" (
+        id, shop, state, "isOnline", scope, expires, "accessToken",
+        "refreshToken", "refreshTokenExpires", "needsReauth"
+      ) VALUES (
+        ${TEST_SESSION_ID}, ${TEST_SHOP}, 'state', false, 'read_products',
+        ${oneHourFromNow.toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        'shpat_token',
+        'shprt_refresh_token',
+        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        true
+      )
+    `;
+
+    const result = await refreshOfflineTokenIfNeeded(
+      sql,
+      TEST_SHOP,
+      TEST_CLIENT_ID,
+      TEST_CLIENT_SECRET
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe("invalid_grant");
+    expect(result.error).toContain("needing re-authentication");
+  });
+
+  it("returns no_refresh_token error and sets needsReauth when refresh token is missing", async () => {
     // Create a session without a refresh token (legacy non-expiring token)
     const twoMinutesFromNow = new Date(Date.now() + 2 * 60 * 1000);
     await sql`
       INSERT INTO "Session" (
         id, shop, state, "isOnline", scope, expires, "accessToken",
-        "refreshToken", "refreshTokenExpires"
+        "refreshToken", "refreshTokenExpires", "needsReauth"
       ) VALUES (
         ${TEST_SESSION_ID}, ${TEST_SHOP}, 'state', false, 'read_products',
         ${twoMinutesFromNow.toISOString()}::timestamptz AT TIME ZONE 'UTC',
         'shpat_legacy_token',
         NULL,
-        NULL
+        NULL,
+        false
       )
     `;
 
@@ -274,6 +308,14 @@ describeWithDb("refreshOfflineTokenIfNeeded with real database", () => {
     expect(result.errorCode).toBe("no_refresh_token");
     expect(result.error).toContain("No refresh token available");
     expect(result.error).toContain(TEST_SHOP);
+
+    // Verify needsReauth was set
+    const rows = await sql<Array<{ needsReauth: boolean }>>`
+      SELECT "needsReauth"
+      FROM "Session"
+      WHERE id = ${TEST_SESSION_ID}
+    `;
+    expect(rows[0].needsReauth).toBe(true);
   });
 
   it("handles network error gracefully", async () => {
@@ -282,13 +324,14 @@ describeWithDb("refreshOfflineTokenIfNeeded with real database", () => {
     await sql`
       INSERT INTO "Session" (
         id, shop, state, "isOnline", scope, expires, "accessToken",
-        "refreshToken", "refreshTokenExpires"
+        "refreshToken", "refreshTokenExpires", "needsReauth"
       ) VALUES (
         ${TEST_SESSION_ID}, ${TEST_SHOP}, 'state', false, 'read_products',
         ${twoMinutesAgo.toISOString()}::timestamptz AT TIME ZONE 'UTC',
         'shpat_old_token',
         'shprt_refresh_token',
-        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC'
+        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        false
       )
     `;
 
@@ -313,13 +356,14 @@ describeWithDb("refreshOfflineTokenIfNeeded with real database", () => {
     await sql`
       INSERT INTO "Session" (
         id, shop, state, "isOnline", scope, expires, "accessToken",
-        "refreshToken", "refreshTokenExpires"
+        "refreshToken", "refreshTokenExpires", "needsReauth"
       ) VALUES (
         ${TEST_SESSION_ID}, ${TEST_SHOP}, 'state', false, 'read_products',
         ${twoMinutesAgo.toISOString()}::timestamptz AT TIME ZONE 'UTC',
         'shpat_old_token',
         'shprt_refresh_token',
-        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC'
+        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        false
       )
     `;
 
@@ -349,13 +393,14 @@ describeWithDb("refreshOfflineTokenIfNeeded with real database", () => {
     await sql`
       INSERT INTO "Session" (
         id, shop, state, "isOnline", scope, expires, "accessToken",
-        "refreshToken", "refreshTokenExpires"
+        "refreshToken", "refreshTokenExpires", "needsReauth"
       ) VALUES (
         ${TEST_SESSION_ID}, ${TEST_SHOP}, 'state', false, 'read_products',
         ${twoMinutesAgo.toISOString()}::timestamptz AT TIME ZONE 'UTC',
         'shpat_old_token',
         'shprt_refresh_token',
-        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC'
+        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        false
       )
     `;
 
@@ -385,13 +430,14 @@ describeWithDb("refreshOfflineTokenIfNeeded with real database", () => {
     await sql`
       INSERT INTO "Session" (
         id, shop, state, "isOnline", scope, expires, "accessToken",
-        "refreshToken", "refreshTokenExpires"
+        "refreshToken", "refreshTokenExpires", "needsReauth"
       ) VALUES (
         ${TEST_SESSION_ID}, ${TEST_SHOP}, 'state', false, 'read_products',
         ${twoMinutesAgo.toISOString()}::timestamptz AT TIME ZONE 'UTC',
         'shpat_old_token',
         'shprt_refresh_token',
-        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC'
+        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        false
       )
     `;
 
@@ -420,13 +466,14 @@ describeWithDb("refreshOfflineTokenIfNeeded with real database", () => {
     await sql`
       INSERT INTO "Session" (
         id, shop, state, "isOnline", scope, expires, "accessToken",
-        "refreshToken", "refreshTokenExpires"
+        "refreshToken", "refreshTokenExpires", "needsReauth"
       ) VALUES (
         ${TEST_SESSION_ID}, ${TEST_SHOP}, 'state', false, 'read_products,write_products',
         ${twoMinutesAgo.toISOString()}::timestamptz AT TIME ZONE 'UTC',
         'shpat_old_token',
         'shprt_old_refresh_token',
-        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC'
+        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        false
       )
     `;
 
@@ -467,7 +514,7 @@ describeWithDb("refreshOfflineTokenIfNeeded with real database", () => {
   });
 });
 
-describeWithDb("concurrent refresh safety", () => {
+describeWithDb("concurrent refresh safety (CAS)", () => {
   let sql: ReturnType<typeof postgres>;
   let fetchCallCount: number;
 
@@ -490,33 +537,36 @@ describeWithDb("concurrent refresh safety", () => {
     await sql.end();
   });
 
-  it("exactly one refresh HTTP call with concurrent callers", async () => {
+  it("CAS race: winner's token is used by all callers", async () => {
     // Create a session with an expired token
     const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
     await sql`
       INSERT INTO "Session" (
         id, shop, state, "isOnline", scope, expires, "accessToken",
-        "refreshToken", "refreshTokenExpires"
+        "refreshToken", "refreshTokenExpires", "needsReauth"
       ) VALUES (
         ${TEST_SESSION_ID}, ${TEST_SHOP}, 'state', false, 'read_products',
         ${twoMinutesAgo.toISOString()}::timestamptz AT TIME ZONE 'UTC',
         'shpat_old_token',
         'shprt_refresh_token',
-        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC'
+        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        false
       )
     `;
 
-    // Mock fetch to return a successful response and track call count
-    // Add a small delay to simulate network latency
+    // Mock fetch to return a successful response
+    // Each call gets a unique token, but only the CAS winner's token will be persisted
     global.fetch = vi.fn().mockImplementation(async () => {
       fetchCallCount++;
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      const myCallNumber = fetchCallCount;
+      // Add delay to allow concurrent execution
+      await new Promise((resolve) => setTimeout(resolve, 10));
       return {
         ok: true,
         json: () => Promise.resolve({
-          access_token: `shpat_new_token_${fetchCallCount}`,
+          access_token: `shpat_new_token_${myCallNumber}`,
           expires_in: 3600,
-          refresh_token: `shprt_new_refresh_token_${fetchCallCount}`,
+          refresh_token: `shprt_new_refresh_token_${myCallNumber}`,
           refresh_token_expires_in: 7776000,
           scope: "read_products",
         }),
@@ -530,15 +580,90 @@ describeWithDb("concurrent refresh safety", () => {
       refreshOfflineTokenIfNeeded(sql, TEST_SHOP, TEST_CLIENT_ID, TEST_CLIENT_SECRET),
     ]);
 
-    // All should succeed
+    // All should succeed (either by winning CAS or by re-reading winner's token)
     expect(results.every((r) => r.success)).toBe(true);
 
-    // Due to row-level locking, only ONE refresh HTTP call should be made
-    // The other callers wait for the lock, then find the token already refreshed
-    expect(fetchCallCount).toBe(1);
+    // With CAS (no lock), multiple refresh HTTP calls may be made
+    // But only one CAS write succeeds; others re-read and use winner's token
+    expect(fetchCallCount).toBeGreaterThanOrEqual(1);
+    expect(fetchCallCount).toBeLessThanOrEqual(3);
 
-    // All results should have the same token (the one from the winning refresh)
+    // All results should have the same token (the CAS winner's token)
     const tokens = results.map((r) => r.accessToken);
     expect(new Set(tokens).size).toBe(1);
+
+    // The persisted token should match what all callers returned
+    const rows = await sql<Array<{ accessToken: string }>>`
+      SELECT "accessToken"
+      FROM "Session"
+      WHERE id = ${TEST_SESSION_ID}
+    `;
+    expect(tokens[0]).toBe(rows[0].accessToken);
+  });
+
+  it("CAS loss re-reads winner token instead of failing", async () => {
+    // Create a session with an expired token
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
+    await sql`
+      INSERT INTO "Session" (
+        id, shop, state, "isOnline", scope, expires, "accessToken",
+        "refreshToken", "refreshTokenExpires", "needsReauth"
+      ) VALUES (
+        ${TEST_SESSION_ID}, ${TEST_SHOP}, 'state', false, 'read_products',
+        ${twoMinutesAgo.toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        'shpat_old_token',
+        'shprt_refresh_token',
+        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        false
+      )
+    `;
+
+    // Simulate CAS loss by having the first caller win
+    let firstCallDone = false;
+    global.fetch = vi.fn().mockImplementation(async () => {
+      fetchCallCount++;
+      const myCallNumber = fetchCallCount;
+      
+      // First caller gets a small delay, second caller gets longer delay
+      // This ensures first caller wins the CAS
+      if (!firstCallDone) {
+        firstCallDone = true;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      
+      return {
+        ok: true,
+        json: () => Promise.resolve({
+          access_token: `shpat_token_${myCallNumber}`,
+          expires_in: 3600,
+          refresh_token: `shprt_refresh_${myCallNumber}`,
+          refresh_token_expires_in: 7776000,
+          scope: "read_products",
+        }),
+      };
+    }) as unknown as typeof fetch;
+
+    // Two concurrent refresh attempts
+    const results = await Promise.all([
+      refreshOfflineTokenIfNeeded(sql, TEST_SHOP, TEST_CLIENT_ID, TEST_CLIENT_SECRET),
+      refreshOfflineTokenIfNeeded(sql, TEST_SHOP, TEST_CLIENT_ID, TEST_CLIENT_SECRET),
+    ]);
+
+    // Both should succeed
+    expect(results[0].success).toBe(true);
+    expect(results[1].success).toBe(true);
+
+    // Both should return the same token (winner's token)
+    expect(results[0].accessToken).toBe(results[1].accessToken);
+
+    // Token in DB should match
+    const rows = await sql<Array<{ accessToken: string }>>`
+      SELECT "accessToken"
+      FROM "Session"
+      WHERE id = ${TEST_SESSION_ID}
+    `;
+    expect(results[0].accessToken).toBe(rows[0].accessToken);
   });
 });

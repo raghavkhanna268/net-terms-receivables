@@ -1,37 +1,27 @@
 /**
  * Offline token refresh helper for expiring offline access tokens.
  *
- * This module provides token refresh functionality for code paths that operate
- * outside the @shopify/shopify-app-react-router library, such as:
- * - Node scripts (scripts/)
- * - CI workflows (.github/workflows/prod-diagnostics.yml)
- *
- * For in-app routes, the library's `unauthenticated.admin(shop)` and
- * `authenticate.*` methods already handle refresh automatically via
- * `ensureOfflineTokenIsNotExpired`. Use those paths instead of this helper
- * when possible.
+ * This module provides token refresh functionality for all Admin API calls,
+ * including queue processing, webhooks, and scripts.
  *
  * Token Refresh Flow:
- * 1. Check if token is within 5 minutes of expiry
- * 2. Acquire row lock via SELECT ... FOR UPDATE
- * 3. Re-check expiry (another caller may have refreshed)
- * 4. POST to https://{shop}/admin/oauth/access_token with grant_type=refresh_token
- * 5. Write new accessToken, expires, refreshToken, refreshTokenExpires to Session
- * 6. Return the refreshed session
+ * 1. Acquire advisory lock per shop (serializes refreshes)
+ * 2. Re-check expiry (another caller may have refreshed)
+ * 3. POST to https://{shop}/admin/oauth/access_token with grant_type=refresh_token
+ * 4. Write new tokens with guarded UPDATE (check refreshToken matches)
+ * 5. On invalid_grant, re-read to see if another process won; if not, mark needsReauth
  *
  * Concurrency Safety:
- * Uses row-level locking (SELECT ... FOR UPDATE) to prevent concurrent callers
- * of THIS helper from burning the single-use refresh token. A caller that loses
- * the race re-reads the row and gets the winner's refreshed token.
+ * Uses pg_advisory_xact_lock(hashtext(shop)) in a short transaction to serialize
+ * refresh attempts per shop. After acquiring the lock, we re-check if refresh is
+ * still needed (another caller may have already refreshed).
  *
- * IMPORTANT: This lock does NOT coordinate with the library's in-app refresh
- * (via `ensureOfflineTokenIsNotExpired`), which takes no lock. If a CI script
- * and an in-app request both attempt to refresh at the same moment, one will
- * succeed and the other will get `invalid_grant`. This is acceptable for CI
- * diagnostics - the probe can be re-run after the token settles.
+ * Re-auth Required:
+ * When refresh fails with invalid_grant AND no concurrent winner:
+ * - Set needsReauth=true with guarded UPDATE (WHERE refreshToken=$usedToken)
+ * - Return a non-retryable error (queue should dead-letter, not loop)
  *
  * @see https://shopify.dev/docs/apps/build/authentication-authorization/access-tokens#token-refresh
- * @see node_modules/@shopify/shopify-app-react-router/src/server/helpers/ensure-offline-token-is-not-expired.ts
  */
 
 import type { Sql } from "./db-light.server";
@@ -52,6 +42,7 @@ export type RefreshErrorCode =
   | "invalid_response"
   | "refresh_persist_failed"
   | "network_error"
+  | "missing_credentials"
   | "unknown";
 
 /**
@@ -74,9 +65,6 @@ export interface RefreshResult {
 
 /**
  * Response from Shopify's token refresh endpoint.
- * Per Shopify docs, access_token and expires_in are required.
- * refresh_token, refresh_token_expires_in, and scope may be missing in edge cases.
- * @see https://shopify.dev/docs/apps/build/authentication-authorization/access-tokens#token-refresh
  */
 interface TokenRefreshResponse {
   access_token?: string;
@@ -109,6 +97,19 @@ interface TokenRefreshResult {
 }
 
 /**
+ * Session row type for refresh operations.
+ */
+interface SessionForRefresh {
+  id: string;
+  accessToken: string;
+  expires: Date | null;
+  scope: string | null;
+  refreshToken: string | null;
+  refreshTokenExpires: Date | null;
+  needsReauth: boolean;
+}
+
+/**
  * Check if a token is expired or near expiry.
  * Matches the library's logic in ensureOfflineTokenIsNotExpired.
  */
@@ -123,15 +124,35 @@ export function isTokenExpiredOrNearExpiry(
 }
 
 /**
+ * Read a session by ID.
+ */
+async function readSession(
+  sql: Sql,
+  sessionId: string
+): Promise<SessionForRefresh | null> {
+  const rows = await sql<SessionForRefresh[]>`
+    SELECT
+      id,
+      "accessToken",
+      ("expires" AT TIME ZONE 'UTC') AS "expires",
+      scope,
+      "refreshToken",
+      ("refreshTokenExpires" AT TIME ZONE 'UTC') AS "refreshTokenExpires",
+      "needsReauth"
+    FROM "Session"
+    WHERE id = ${sessionId}
+  `;
+  return rows.length > 0 ? rows[0] : null;
+}
+
+/**
  * Refresh an offline access token if expired or near expiry.
  *
- * Uses row-level locking to prevent concurrent refreshes from burning
- * the single-use refresh token. If another caller wins the race, this
- * function re-reads the row and returns the winner's refreshed token.
+ * Uses pg_advisory_xact_lock to serialize refresh attempts per shop.
+ * This prevents concurrent callers from burning single-use refresh tokens.
  *
- * Note: This lock only coordinates callers of this helper. The library's
- * in-app refresh (ensureOfflineTokenIsNotExpired) does not take a lock,
- * so a race is possible between CI and in-app refreshes.
+ * On invalid_grant error, checks if another process already refreshed.
+ * Only marks needsReauth if the refresh token we used is still current.
  *
  * @param sql - postgres.js SQL client
  * @param shop - Shop domain (e.g., "example.myshopify.com")
@@ -149,32 +170,45 @@ export async function refreshOfflineTokenIfNeeded(
 ): Promise<RefreshResult> {
   const sessionId = `offline_${shop}`;
 
-  // Use a transaction with row-level locking
-  return await sql.begin(async (tx) => {
-    // Acquire exclusive lock on the session row
-    const lockedRows = await tx<
-      Array<{
-        id: string;
-        accessToken: string;
-        expires: Date | null;
-        scope: string | null;
-        refreshToken: string | null;
-        refreshTokenExpires: Date | null;
-      }>
-    >`
-      SELECT
-        id,
-        "accessToken",
-        ("expires" AT TIME ZONE 'UTC') AS "expires",
-        scope,
-        "refreshToken",
-        ("refreshTokenExpires" AT TIME ZONE 'UTC') AS "refreshTokenExpires"
-      FROM "Session"
-      WHERE id = ${sessionId}
-      FOR UPDATE
-    `;
+  // Quick check without lock first (optimization)
+  const initialSession = await readSession(sql, sessionId);
 
-    if (lockedRows.length === 0) {
+  if (!initialSession) {
+    return {
+      success: false,
+      errorCode: "no_session",
+      error: `No offline session found for shop ${shop}`,
+    };
+  }
+
+  // If session is already marked as needing re-auth, fail immediately
+  if (initialSession.needsReauth) {
+    return {
+      success: false,
+      errorCode: "invalid_grant",
+      error: `Session for shop ${shop} is marked as needing re-authentication.`,
+    };
+  }
+
+  // If token is still valid, return it without acquiring lock
+  if (!isTokenExpiredOrNearExpiry(initialSession.expires, thresholdMs)) {
+    return {
+      success: true,
+      accessToken: initialSession.accessToken,
+      expires: initialSession.expires ?? undefined,
+      wasRefreshed: false,
+    };
+  }
+
+  // Token needs refresh - use transaction with advisory lock
+  return await sql.begin(async (tx) => {
+    // Acquire advisory lock per shop (serializes refreshes)
+    await tx`SELECT pg_advisory_xact_lock(hashtext(${shop}))`;
+
+    // Re-read session after acquiring lock (another caller may have refreshed)
+    const session = await readSessionInTx(tx, sessionId);
+
+    if (!session) {
       return {
         success: false,
         errorCode: "no_session",
@@ -182,11 +216,8 @@ export async function refreshOfflineTokenIfNeeded(
       };
     }
 
-    const session = lockedRows[0];
-
-    // Check if refresh is needed
+    // Check if another caller already refreshed while we waited for lock
     if (!isTokenExpiredOrNearExpiry(session.expires, thresholdMs)) {
-      // Token is still valid
       return {
         success: true,
         accessToken: session.accessToken,
@@ -195,8 +226,23 @@ export async function refreshOfflineTokenIfNeeded(
       };
     }
 
+    // Re-check needsReauth after lock
+    if (session.needsReauth) {
+      return {
+        success: false,
+        errorCode: "invalid_grant",
+        error: `Session for shop ${shop} is marked as needing re-authentication.`,
+      };
+    }
+
+    // Store the refresh token we're about to use (for guarded updates)
+    const usedRefreshToken = session.refreshToken;
+
     // Check if we have a refresh token
-    if (!session.refreshToken) {
+    if (!usedRefreshToken) {
+      // Mark session as needing re-auth with guarded update
+      await markSessionNeedsReauthGuarded(tx, sessionId, null);
+      console.error(`[offline-token] no_refresh_token shop=${shop}`);
       return {
         success: false,
         errorCode: "no_refresh_token",
@@ -209,6 +255,9 @@ export async function refreshOfflineTokenIfNeeded(
       session.refreshTokenExpires &&
       session.refreshTokenExpires.getTime() < Date.now()
     ) {
+      // Mark session as needing re-auth with guarded update
+      await markSessionNeedsReauthGuarded(tx, sessionId, usedRefreshToken);
+      console.error(`[offline-token] refresh_token_expired shop=${shop}`);
       return {
         success: false,
         errorCode: "invalid_grant",
@@ -219,12 +268,41 @@ export async function refreshOfflineTokenIfNeeded(
     // Perform the token refresh
     const refreshResult = await performTokenRefresh(
       shop,
-      session.refreshToken,
+      usedRefreshToken,
       clientId,
       clientSecret
     );
 
     if (!refreshResult.success) {
+      // On invalid_grant, check if another process already refreshed
+      if (refreshResult.errorCode === "invalid_grant") {
+        // Re-read session to see if tokens changed
+        const currentSession = await readSessionInTx(tx, sessionId);
+
+        if (currentSession) {
+          // If tokens changed, another process won - use their token
+          if (
+            currentSession.accessToken !== session.accessToken ||
+            currentSession.refreshToken !== usedRefreshToken
+          ) {
+            // Another process refreshed successfully - use winner's token
+            if (!currentSession.needsReauth) {
+              return {
+                success: true,
+                accessToken: currentSession.accessToken,
+                expires: currentSession.expires ?? undefined,
+                wasRefreshed: true,
+              };
+            }
+          }
+        }
+
+        // No concurrent winner - mark session as needing re-auth
+        // Use guarded update to only mark if our refresh token is still current
+        await markSessionNeedsReauthGuarded(tx, sessionId, usedRefreshToken);
+        console.error(`[offline-token] invalid_grant shop=${shop}`);
+      }
+
       return {
         success: false,
         errorCode: refreshResult.errorCode,
@@ -232,7 +310,7 @@ export async function refreshOfflineTokenIfNeeded(
       };
     }
 
-    // TypeScript doesn't narrow from success check, so validate accessToken
+    // Validate access token from result
     const newAccessToken = refreshResult.accessToken;
     if (!newAccessToken) {
       return {
@@ -242,8 +320,7 @@ export async function refreshOfflineTokenIfNeeded(
       };
     }
 
-    // Calculate new expiry times with validation
-    const now = new Date();
+    // Validate expires_in
     const expiresIn = refreshResult.expiresIn;
     if (typeof expiresIn !== "number" || !Number.isFinite(expiresIn) || expiresIn <= 0) {
       return {
@@ -252,9 +329,11 @@ export async function refreshOfflineTokenIfNeeded(
         error: `Invalid expires_in from Shopify for shop ${shop}`,
       };
     }
+
+    const now = new Date();
     const newExpires = new Date(now.getTime() + expiresIn * 1000);
 
-    // Refresh token expiry is optional - may be null
+    // Refresh token expiry is optional
     let newRefreshTokenExpires: Date | null = null;
     const rtExpiresIn = refreshResult.refreshTokenExpiresIn;
     if (typeof rtExpiresIn === "number" && Number.isFinite(rtExpiresIn) && rtExpiresIn > 0) {
@@ -262,44 +341,120 @@ export async function refreshOfflineTokenIfNeeded(
     }
 
     // Use new refresh token if provided, otherwise keep the old one
-    const newRefreshToken = refreshResult.refreshToken ?? session.refreshToken;
+    const newRefreshToken = refreshResult.refreshToken ?? usedRefreshToken;
 
     // Use new scope if provided, otherwise keep the old one
     const newScope = refreshResult.scope ?? session.scope;
 
-    // Persist the refreshed tokens
-    try {
-      const refreshTokenExpiresStr = newRefreshTokenExpires
-        ? newRefreshTokenExpires.toISOString()
-        : null;
+    // Write new tokens with guarded update (check refreshToken matches)
+    const refreshTokenExpiresStr = newRefreshTokenExpires
+      ? newRefreshTokenExpires.toISOString()
+      : null;
 
-      await tx`
-        UPDATE "Session"
-        SET
-          "accessToken" = ${newAccessToken},
-          expires = ${newExpires.toISOString()}::timestamptz AT TIME ZONE 'UTC',
-          "refreshToken" = ${newRefreshToken},
-          "refreshTokenExpires" = ${refreshTokenExpiresStr}::timestamptz AT TIME ZONE 'UTC',
-          scope = ${newScope}
-        WHERE id = ${sessionId}
-      `;
-    } catch {
-      // Log only shop and error code (no tokens)
-      console.error(`[offline-token] refresh_persist_failed shop=${shop}`);
+    const updateResult = await tx`
+      UPDATE "Session"
+      SET
+        "accessToken" = ${newAccessToken},
+        expires = ${newExpires.toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        "refreshToken" = ${newRefreshToken},
+        "refreshTokenExpires" = ${refreshTokenExpiresStr}::timestamptz AT TIME ZONE 'UTC',
+        scope = ${newScope},
+        "needsReauth" = false
+      WHERE id = ${sessionId}
+        AND "refreshToken" = ${usedRefreshToken}
+    `;
+
+    if (updateResult.count > 0) {
+      return {
+        success: true,
+        accessToken: newAccessToken,
+        expires: newExpires,
+        wasRefreshed: true,
+      };
+    }
+
+    // Guard failed - another process updated the refresh token
+    // This shouldn't happen with advisory lock, but handle defensively
+    console.debug(`[offline-token] write guard failed for shop=${shop}, re-reading`);
+    const finalSession = await readSessionInTx(tx, sessionId);
+
+    if (!finalSession) {
       return {
         success: false,
-        errorCode: "refresh_persist_failed",
-        error: `Failed to persist refreshed token for shop ${shop}. The refresh token may have been consumed.`,
+        errorCode: "no_session",
+        error: `Session disappeared for shop ${shop}`,
+      };
+    }
+
+    if (finalSession.needsReauth) {
+      return {
+        success: false,
+        errorCode: "invalid_grant",
+        error: `Session for shop ${shop} is marked as needing re-authentication.`,
       };
     }
 
     return {
       success: true,
-      accessToken: newAccessToken,
-      expires: newExpires,
+      accessToken: finalSession.accessToken,
+      expires: finalSession.expires ?? undefined,
       wasRefreshed: true,
     };
   });
+}
+
+/**
+ * Read a session within a transaction.
+ */
+async function readSessionInTx(
+  tx: Sql,
+  sessionId: string
+): Promise<SessionForRefresh | null> {
+  const rows = await tx<SessionForRefresh[]>`
+    SELECT
+      id,
+      "accessToken",
+      ("expires" AT TIME ZONE 'UTC') AS "expires",
+      scope,
+      "refreshToken",
+      ("refreshTokenExpires" AT TIME ZONE 'UTC') AS "refreshTokenExpires",
+      "needsReauth"
+    FROM "Session"
+    WHERE id = ${sessionId}
+  `;
+  return rows.length > 0 ? rows[0] : null;
+}
+
+/**
+ * Mark a session as needing re-authentication with guarded update.
+ * Only marks if the refresh token matches (prevents poisoning winner's token).
+ *
+ * @param sql - SQL client (can be transaction)
+ * @param sessionId - Session ID
+ * @param usedRefreshToken - The refresh token that was used (null to skip guard)
+ */
+async function markSessionNeedsReauthGuarded(
+  sql: Sql,
+  sessionId: string,
+  usedRefreshToken: string | null
+): Promise<void> {
+  if (usedRefreshToken === null) {
+    // No guard needed - session has no refresh token
+    await sql`
+      UPDATE "Session"
+      SET "needsReauth" = true
+      WHERE id = ${sessionId}
+        AND "refreshToken" IS NULL
+    `;
+  } else {
+    // Guard: only mark if refresh token hasn't changed
+    await sql`
+      UPDATE "Session"
+      SET "needsReauth" = true
+      WHERE id = ${sessionId}
+        AND "refreshToken" = ${usedRefreshToken}
+    `;
+  }
 }
 
 /**

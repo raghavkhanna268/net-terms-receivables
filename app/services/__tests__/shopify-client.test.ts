@@ -25,6 +25,21 @@ vi.mock("~/shopify.server", () => ({
   getShopifyApp: () => mockShopifyApp,
 }));
 
+// Mock request context (for getRequestSql)
+vi.mock("~/lib/request-context.server", () => ({
+  getRequestSql: vi.fn(() => ({})),
+}));
+
+// Mock offline-token module - returns success by default
+vi.mock("~/lib/offline-token.server", () => ({
+  refreshOfflineTokenIfNeeded: vi.fn().mockResolvedValue({
+    success: true,
+    accessToken: "shpat_test_token",
+    expires: new Date(Date.now() + 60 * 60 * 1000),
+    wasRefreshed: false,
+  }),
+}));
+
 // Import after mocks
 import {
   shopifyGraphQL,
@@ -33,13 +48,22 @@ import {
 } from "../shopify-client.server";
 
 describe("shopify-client.server", () => {
+  const originalEnv = process.env;
+
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers({ shouldAdvanceTime: true });
+    // Set required environment variables for token refresh
+    process.env = {
+      ...originalEnv,
+      SHOPIFY_API_KEY: "test-api-key",
+      SHOPIFY_API_SECRET: "test-api-secret",
+    };
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    process.env = originalEnv;
   });
 
   describe("Successful requests", () => {
