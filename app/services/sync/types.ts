@@ -3,7 +3,56 @@
  *
  * These types represent the minimal fields we extract from Shopify payloads
  * for syncing to our BuyerAccount and Invoice tables.
+ *
+ * DPDP compliance notes:
+ * - ShopifyCustomer: Only id and tags are stored; no names, emails, phones, addresses
+ * - ShopifyDraftOrder: Only order metadata; no customer PII
  */
+
+/**
+ * Shopify Customer from webhook or bulk export.
+ *
+ * DPDP compliance: Only id and tags are stored.
+ * The webhook payload contains PII, but we only extract minimal fields.
+ */
+export interface ShopifyCustomer {
+  id: string; // GID: gid://shopify/Customer/123
+  tags?: string[]; // Array of customer tags
+}
+
+/**
+ * Shopify DraftOrder from webhook or bulk export.
+ *
+ * Tracked when payment terms are present for pending credit exposure.
+ */
+export interface ShopifyDraftOrder {
+  id: string; // GID: gid://shopify/DraftOrder/123
+  name: string; // Display name, e.g., "#D1"
+  createdAt: string;
+  updatedAt?: string;
+  status?: string; // "open", "invoice_sent", "completed"
+  totalPriceSet?: {
+    shopMoney: {
+      amount: string;
+      currencyCode: string;
+    };
+  };
+  paymentTerms?: {
+    id: string;
+    paymentTermsName: string;
+    paymentTermsType: string;
+    dueInDays?: number | null;
+  } | null;
+  purchasingEntity?: {
+    __typename: string;
+    company?: { id: string };
+    location?: { id: string };
+    id?: string; // For Customer
+  } | null;
+  customer?: {
+    id: string;
+  } | null;
+}
 
 /**
  * Shopify Company from webhook or bulk export.
@@ -160,6 +209,16 @@ export interface BulkOrderLine {
   paymentTerms?: ShopifyOrder["paymentTerms"];
   purchasingEntity?: ShopifyOrder["purchasingEntity"];
   customer?: ShopifyOrder["customer"];
+}
+
+/**
+ * Bulk JSONL line for customer export (S8).
+ *
+ * DPDP compliance: Only id and tags are requested in the bulk query.
+ */
+export interface BulkCustomerLine {
+  id: string;
+  tags?: string[];
 }
 
 /**

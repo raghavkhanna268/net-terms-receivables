@@ -217,8 +217,9 @@ export interface BulkOperationResult {
 
 /**
  * Bulk operation type for tracking.
+ * S8 adds "customers" for tagged customer backfill.
  */
-export type BulkOperationType = "companies" | "orders";
+export type BulkOperationType = "companies" | "orders" | "customers";
 
 /**
  * Start a bulk companies export.
@@ -247,6 +248,9 @@ export function getCompaniesExportMutation(): string {
 export function getOrdersExportMutation(): string {
   return BULK_ORDERS_QUERY;
 }
+
+// Re-export customer bulk query from the centralized field module
+export { getBulkCustomersQuery as getCustomersExportMutation } from "./customer-fields.server";
 
 /**
  * Parse the result of a bulkOperationRunQuery mutation.
