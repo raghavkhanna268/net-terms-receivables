@@ -44,8 +44,14 @@ import { processBulkCustomer } from "./customer.server";
 import {
   checkOrderEligibility,
   getEligibilityContext,
+  isTerminalFinancialStatus,
   type EligibilityContext,
 } from "~/lib/invoice-eligibility";
+import {
+  inferDueDate,
+  type InferDueDateInput,
+  type InferDueDateResult,
+} from "~/lib/due-date";
 import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
 import { adminGraphQL, BULK_OPERATION_STATUS_QUERY } from "../drain/admin-client.server";
 import {
@@ -442,30 +448,56 @@ async function processOrderLines(
     console.log(`[bulk-jsonl] PaymentSchedule children: ${attachedChildCount} attached, ${orphanChildCount} orphaned`);
   }
 
-  // Handle orphan schedules by updating existing invoices' dueAt (P1 safety net)
+  // Handle orphan schedules by updating existing invoices (P1 safety net)
+  // Skip paid/cancelled/closed invoices. Batch updates using SQL arrays.
   let orphansUpdated = 0;
   if (orphanSchedules.length > 0) {
     const orphanParentIds = orphanSchedules.map((s) => s.__parentId);
-    // Batch lookup existing invoices for orphan parents
+    // Batch lookup existing open invoices for orphan parents (skip paid/cancelled/closed)
     const existingOrphanInvoices = await sql<{ id: string; orderId: string }[]>`
       SELECT id, "orderId" FROM "Invoice"
-      WHERE "shopId" = ${shopId} AND "orderId" = ANY(${orphanParentIds})
+      WHERE "shopId" = ${shopId}
+        AND "orderId" = ANY(${orphanParentIds})
+        AND status = 'open'
     `;
     const invoiceByOrderId = new Map(existingOrphanInvoices.map((i) => [i.orderId, i.id]));
+
+    // Build arrays for batched UPDATE
+    const updateIds: string[] = [];
+    const updateDueAts: string[] = [];
+    const updateReasons: string[] = [];
 
     for (const schedule of orphanSchedules) {
       const invoiceId = invoiceByOrderId.get(schedule.__parentId);
       if (invoiceId && schedule.dueAt) {
-        // Update the existing invoice's dueAt
-        await sql`
-          UPDATE "Invoice" SET "dueAt" = ${schedule.dueAt}
-          WHERE id = ${invoiceId} AND ("dueAt" IS NULL OR "dueAt" != ${schedule.dueAt})
-        `;
-        orphansUpdated++;
+        updateIds.push(invoiceId);
+        updateDueAts.push(schedule.dueAt);
+        updateReasons.push("Payment schedule from Shopify (orphan reconcile)");
       }
     }
+
+    // Batch UPDATE using unnest
+    if (updateIds.length > 0) {
+      const result = await sql`
+        UPDATE "Invoice" AS i
+        SET
+          "dueAt" = v."dueAt"::timestamptz,
+          "dueSource" = 'schedule',
+          "dueBasis" = NULL,
+          "dueReason" = v."dueReason"
+        FROM unnest(
+          ${updateIds}::text[],
+          ${updateDueAts}::timestamptz[],
+          ${updateReasons}::text[]
+        ) AS v(id, "dueAt", "dueReason")
+        WHERE i.id = v.id
+          AND (i."dueAt" IS DISTINCT FROM v."dueAt"::timestamptz)
+      `;
+      orphansUpdated = result.count;
+    }
+
     if (orphansUpdated > 0) {
-      console.log(`[bulk-jsonl] ${orphansUpdated} orphan schedules updated existing invoices' dueAt`);
+      console.log(`[bulk-jsonl] ${orphansUpdated} orphan schedules updated existing invoices`);
     }
   }
 
@@ -481,15 +513,21 @@ async function processOrderLines(
   `;
   const existingByOrderId = new Map(existingInvoices.map((i) => [i.orderId, i.buyerAccountId]));
 
-  // Get eligibility context only if we have orders without existing invoices
-  // (orders with existing invoices always update, eligibility only gates creation)
-  const ordersNeedingEligibility = orders.filter((o) => !existingByOrderId.has(o.id));
-  let eligibilityContext: EligibilityContext | null = null;
-  if (ordersNeedingEligibility.length > 0) {
-    eligibilityContext = context ?? await getEligibilityContext(sql, shopId);
+  // Get eligibility context for:
+  // 1. Orders without existing invoices (for creation eligibility)
+  // 2. Existing invoices (for due date computation)
+  // Only skip context load for orders WITHOUT invoice that have terminal status
+  let eligibilityContext: EligibilityContext | null = context ?? null;
+  const needsContext = orders.some((o) => {
+    const hasExisting = existingByOrderId.has(o.id);
+    // Need context for existing invoices (due date) or non-terminal new orders
+    return hasExisting || !isTerminalFinancialStatus(o.displayFinancialStatus);
+  });
+  
+  if (needsContext && !eligibilityContext) {
+    eligibilityContext = await getEligibilityContext(sql, shopId);
     if (!eligibilityContext) {
       console.warn(`[bulk-jsonl] No eligibility context for shop ${shopId}`);
-      // Can still update existing invoices, but can't create new ones
     }
   }
 
@@ -501,8 +539,12 @@ async function processOrderLines(
     const existingBuyerAccountId = existingByOrderId.get(shopifyOrder.id);
 
     if (existingBuyerAccountId) {
-      // Invoice exists - ALWAYS update it (skip eligibility check entirely)
-      // Use a minimal eligibility result for updates - eligibility only gates creation
+      // Invoice exists - ALWAYS update it (eligibility only gates creation)
+      // Compute due date using S9 precedence (including attached schedule dueAt)
+      const dueDate = eligibilityContext
+        ? computeOrderDueDate(shopifyOrder, eligibilityContext)
+        : computeOrderDueDateMinimal(shopifyOrder);
+      
       invoices.push(
         mapOrderToInvoiceWithEligibility(
           shopId,
@@ -513,6 +555,7 @@ async function processOrderLines(
             reason: "shopify_payment_terms",
             explanation: "Updating existing invoice",
             buyerAccountId: existingBuyerAccountId,
+            dueDate,
           }
         )
       );
@@ -543,6 +586,72 @@ async function processOrderLines(
 
   const upserted = await bulkUpsertInvoices(sql, invoices);
   return upserted + orphansUpdated;
+}
+
+/**
+ * Compute due date for an order using S9 precedence.
+ * Uses attached PaymentSchedule dueAt if present.
+ */
+function computeOrderDueDate(
+  order: import("./types").ShopifyOrder,
+  context: EligibilityContext
+): InferDueDateResult {
+  const input: InferDueDateInput = {
+    paymentTerms: order.paymentTerms
+      ? {
+          type: order.paymentTerms.paymentTermsType as "NET" | "FIXED" | "FULFILLMENT" | "RECEIPT",
+          dueInDays: order.paymentTerms.dueInDays ?? null,
+          schedules:
+            order.paymentTerms.paymentSchedules?.edges.map((e) => ({
+              dueAt: e.node.dueAt ? new Date(e.node.dueAt) : null,
+              completedAt: e.node.completedAt ? new Date(e.node.completedAt) : null,
+            })) ?? [],
+        }
+      : null,
+    orderCreatedAt: new Date(order.processedAt ?? order.createdAt),
+    fulfilledAt: null,
+    accountDefaultTermsDays: null,
+    accountDefaultTermsSource: null,
+    tagRules: context.tagRules,
+    customerTags: [],
+    shopDefaultTermsDays: context.shopDefaultTermsDays,
+    merchantOverrideDueAt: null,
+    shopTimezone: context.shopTimezone,
+  };
+
+  return inferDueDate(input);
+}
+
+/**
+ * Compute due date for an order without eligibility context.
+ * Only uses Shopify PaymentSchedule (no inferred sources).
+ */
+function computeOrderDueDateMinimal(
+  order: import("./types").ShopifyOrder
+): InferDueDateResult {
+  const input: InferDueDateInput = {
+    paymentTerms: order.paymentTerms
+      ? {
+          type: order.paymentTerms.paymentTermsType as "NET" | "FIXED" | "FULFILLMENT" | "RECEIPT",
+          dueInDays: order.paymentTerms.dueInDays ?? null,
+          schedules:
+            order.paymentTerms.paymentSchedules?.edges.map((e) => ({
+              dueAt: e.node.dueAt ? new Date(e.node.dueAt) : null,
+              completedAt: e.node.completedAt ? new Date(e.node.completedAt) : null,
+            })) ?? [],
+        }
+      : null,
+    orderCreatedAt: new Date(order.processedAt ?? order.createdAt),
+    fulfilledAt: null,
+    accountDefaultTermsDays: null,
+    accountDefaultTermsSource: null,
+    tagRules: [],
+    customerTags: [],
+    shopDefaultTermsDays: null,
+    merchantOverrideDueAt: null,
+  };
+
+  return inferDueDate(input);
 }
 
 /**
@@ -897,37 +1006,20 @@ export async function processBulkOperation(
   // This prevents splitting parent Orders from their PaymentSchedule children.
   let linesToProcess = allLines.slice(0, maxLines);
   
-  // P1 approach (a): Only apply parent-grouping logic for orders and non-EOF batches
+  // P1 approach (a): On non-EOF order batches with >1 line, if the final line is
+  // top-level (no __parentId), drop just that final line. Children immediately
+  // follow their parent, so if the final line is a child, its parent is in the batch.
+  // A 1-line batch always processes (to avoid stall).
   const isNonEofBatch = !chunkResult.isEof || linesToProcess.length < allLines.length;
-  if (bulkType === "orders" && isNonEofBatch && linesToProcess.length > 0) {
-    // Find safe cut point: don't end on a top-level line (a line without __parentId)
-    // A safe cut is after a child line, or after a parent whose children all follow it in this batch
-    let safeCutIndex = linesToProcess.length;
-    
-    // Walk backwards from the end to find a child line to end on
-    for (let i = linesToProcess.length - 1; i >= 0; i--) {
-      const line = linesToProcess[i];
-      if (lineHasParentId(line)) {
-        // This is a child line - safe to end here
-        safeCutIndex = i + 1;
-        break;
-      }
-      // This is a top-level (parent) line - not safe to end here
-      // unless it's the last remaining line (to avoid infinite loop)
-      if (i === 0) {
-        // All lines from 0 to linesToProcess.length-1 are top-level
-        // Must process at least one to make progress
-        safeCutIndex = 1;
-        console.log(`[bulk-jsonl] Warning: all ${linesToProcess.length} lines are top-level orders; processing first one to avoid stall`);
-        break;
-      }
-      safeCutIndex = i;
+  if (bulkType === "orders" && isNonEofBatch && linesToProcess.length > 1) {
+    const finalLine = linesToProcess[linesToProcess.length - 1];
+    if (!lineHasParentId(finalLine)) {
+      // Final line is top-level (a parent Order) - its children may be in the next batch
+      // Drop just this final line and move offset back to its start
+      console.log(`[bulk-jsonl] Dropping final top-level line to keep parent/child together (${linesToProcess.length} -> ${linesToProcess.length - 1})`);
+      linesToProcess = linesToProcess.slice(0, -1);
     }
-    
-    if (safeCutIndex < linesToProcess.length) {
-      console.log(`[bulk-jsonl] Adjusting batch cut from ${linesToProcess.length} to ${safeCutIndex} lines to keep parent/child together`);
-      linesToProcess = linesToProcess.slice(0, safeCutIndex);
-    }
+    // If final line is a child (__parentId), its parent is already in this batch - keep all
   }
 
   // Process lines
