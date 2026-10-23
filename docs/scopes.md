@@ -107,15 +107,21 @@ This document lists all OAuth scopes requested by the Net Terms Receivables app,
 
 ## Dev Seed Script
 
-The seed script (`scripts/seed.ts`) now runs with **the same 11 production scopes** — no separate dev app needed. This was achieved by switching from draft orders to `orderCreate` with custom line items.
+The seed script (`scripts/seed.ts`) runs with **the same 11 production scopes** — no separate dev app needed. It uses **only the dev-store token** (`SHOPIFY_ADMIN_TOKEN` env var) and refuses to run on any shop other than `net-terms-receivables.myshopify.com`.
 
 ### How the Seed Uses Production Scopes
 
 | Feature | Scope | Mutation | Reference |
 |---------|-------|----------|-----------|
 | Create B2B companies | write_companies | `companyCreate` | [companyCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyCreate) |
+| Create company locations (Net 15/30/60) | write_companies | `companyLocationCreate` | [companyLocationCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyLocationCreate) |
 | Set payment terms on location | write_companies | `companyLocationUpdate` with `buyerExperienceConfiguration.paymentTermsTemplateId` | [companyLocationUpdate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyLocationUpdate) |
 | Create orders with custom line items | write_orders | `orderCreate` with title + priceSet (no variantId needed) | [orderCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/orderCreate) |
+| Backdate orders | write_orders | `orderCreate` with `processedAt` | [OrderCreateOrderInput.processedAt](https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateOrderInput) |
+
+### Backdating with processedAt
+
+Orders are backdated using `processedAt` from [OrderCreateOrderInput](https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateOrderInput): *"The date and time when the order was created."* This creates overdue invoices for testing S9 due date inference.
 
 ### Why No Additional Scopes Are Needed
 
@@ -123,7 +129,16 @@ The seed script (`scripts/seed.ts`) now runs with **the same 11 production scope
 
 **No `read_products`**: Custom line items bypass the product catalog entirely. See [OrderCreateLineItemInput](https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateLineItemInput).
 
-**No `write_payment_terms`**: Payment terms are set via `companyLocationUpdate` with `buyerExperienceConfiguration.paymentTermsTemplateId`, which only requires `write_companies`. B2B orders for that location inherit the terms automatically. See [BuyerExperienceConfigurationInput](https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/BuyerExperienceConfigurationInput).
+**No `write_payment_terms`**: Payment terms are configured on company locations via `companyLocationUpdate` with `buyerExperienceConfiguration.paymentTermsTemplateId` (requires `write_companies`). If Shopify doesn't inherit these terms to orders created via API, S9 inference uses DB defaults instead (BuyerAccount.defaultTermsDays or AccountSource tag rules).
+
+**FIXED terms not supported**: FIXED payment terms require a specific `dueAt` date per order, which cannot be expressed through location templates. The seed only creates NET terms (15, 30, 60 days).
+
+### Payment Terms Inheritance (Warning, Not Failure)
+
+`OrderCreateOrderInput` does not have a `paymentTerms` field. We rely on Shopify inheriting terms from `companyLocationId`. If orders come back with null `paymentTerms`:
+- The seed logs a **warning** (not a failure) with counts of inherited vs inferred
+- S9 inference computes due dates from DB defaults seeded by this script
+- **No `write_payment_terms` scope is added** (Team Lead scope decision)
 
 ## Final Production Scope List (11)
 

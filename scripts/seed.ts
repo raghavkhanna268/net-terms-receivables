@@ -3,10 +3,12 @@
  * Seed script for Net Terms Receivables dev store.
  *
  * Creates B2B companies and orders with payment terms for testing the app's
- * receivables tracking features.
+ * receivables tracking features. Also seeds the database with tag rules and
+ * buyer account defaults so S9 inference can compute due dates.
  *
  * SCOPE REQUIREMENTS:
- * This script runs with the 11 PRODUCTION scopes only - no separate dev app needed:
+ * This script runs with the 11 PRODUCTION scopes only - no separate dev app needed.
+ * Uses only the dev-store token (SHOPIFY_ADMIN_TOKEN env var).
  *   - read_companies, write_companies  - Create companies, set payment terms on locations
  *   - read_customers, write_customers  - Create test customers (for future use)
  *   - read_orders, write_orders        - Create orders via orderCreate
@@ -15,13 +17,27 @@
  *     (pre-granted for S12/S13, not used by seed)
  *
  * HOW PAYMENT TERMS WORK:
- * 1. Payment terms templates are configured on CompanyLocations via companyLocationUpdate
- *    with buyerExperienceConfiguration.paymentTermsTemplateId (requires write_companies)
- * 2. Orders created for B2B company locations inherit these payment terms
- * 3. Orders are created with financialStatus: PENDING to mark them as unpaid
+ * 1. Each company has 3 locations configured with Net 15, Net 30, Net 60 via companyLocationUpdate
+ * 2. Orders use processedAt to backdate, creating overdue invoices for testing
+ *    @see https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateOrderInput
+ *    "processedAt: The date and time when the order was created."
+ * 3. If Shopify returns paymentTerms on the order, those are used (inherited path)
+ * 4. If Shopify returns null paymentTerms, S9 inference uses DB defaults (inferred path):
+ *    - BuyerAccount.defaultTermsDays (explicit) from company location sync
+ *    - AccountSource tag rules for tagged customers
+ *    - Shop.defaultTermsDays as fallback
  *
- * NO DRAFT ORDERS: This script uses orderCreate with custom line items instead of
- * draft orders, eliminating the need for write_draft_orders and read_products.
+ * SHOPIFY TERMS INHERITANCE (WARNING, NOT FAILURE):
+ * OrderCreateOrderInput does NOT have a paymentTerms field. We rely on Shopify
+ * inheriting terms from companyLocationId. If this doesn't work, orders get
+ * null paymentTerms and we log a warning. S9 inference handles due dates via
+ * DB defaults seeded by this script.
+ * 
+ * NO write_payment_terms: Team Lead scope decision - we do NOT use paymentTermsCreate.
+ *
+ * FIXED TERMS NOT SUPPORTED:
+ * FIXED payment terms require a specific dueAt date per order, which can't be
+ * expressed through location templates. This seed only creates NET terms orders.
  *
  * Usage:
  *   npm run seed                              # Run seed against dev store
@@ -31,13 +47,15 @@
  * Environment:
  *   SHOP                 - Shop domain (must be net-terms-receivables.myshopify.com)
  *   SHOPIFY_ADMIN_TOKEN  - Admin API access token with production scopes
+ *   DATABASE_URL         - Direct Postgres connection for DB seeding (optional)
  *
  * @see https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/orderCreate
+ * @see https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateOrderInput
  * @see https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyLocationUpdate
- * @see https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/BuyerExperienceConfigurationInput
  */
 
 import { pathToFileURL } from "node:url";
+import postgres from "postgres";
 
 // -- Types --
 
@@ -108,6 +126,17 @@ export interface ShopInfo {
   currencyCode: string;
 }
 
+export interface OrderPaymentTerms {
+  paymentTermsName: string;
+  paymentTermsType: string;
+  dueInDays: number | null;
+  paymentSchedules: {
+    nodes: Array<{
+      dueAt: string | null;
+    }>;
+  };
+}
+
 // -- Constants --
 
 export const API_VERSION = "2026-10";
@@ -120,6 +149,13 @@ const INITIAL_RETRY_DELAY_MS = 1000;
 // This prevents accidental mutation of production data if someone misconfigures SHOP.
 const ALLOWED_DEV_STORE = "net-terms-receivables.myshopify.com";
 
+// Location suffixes for different payment terms (Net 15, Net 30, Net 60)
+export const LOCATION_TERMS: { suffix: string; dueInDays: number }[] = [
+  { suffix: "Net-15", dueInDays: 15 },
+  { suffix: "Net-30", dueInDays: 30 },
+  { suffix: "Net-60", dueInDays: 60 },
+];
+
 export const COMPANY_SEEDS = [
   { key: "company-1", name: "Acme Wholesale Pvt Ltd", contact: { firstName: "Raj", lastName: "Sharma", email: "raj.sharma@acme-wholesale.example" } },
   { key: "company-2", name: "Bharat Traders Co", contact: { firstName: "Priya", lastName: "Patel", email: "priya@bharat-traders.example" } },
@@ -128,12 +164,19 @@ export const COMPANY_SEEDS = [
   { key: "company-5", name: "Kolkata Commerce House", contact: { firstName: "Arjun", lastName: "Das", email: "arjun.das@kolkata-commerce.example" } },
 ] as const;
 
-// B2B order distribution - each company gets multiple orders with different payment terms
+// B2B order distribution - each company gets orders from different locations (different terms)
+// daysAgo creates backdated orders via processedAt, some will be overdue
+// locationTermsDays determines which location (and thus which payment terms) to use
 export const ORDER_DISTRIBUTION = COMPANY_SEEDS.flatMap((c, i) => [
-  { entityKey: c.key, termsType: "NET" as const, dueInDays: 15, daysAgo: i * 5 + 2 },
-  { entityKey: c.key, termsType: "NET" as const, dueInDays: 30, daysAgo: i * 3 + 10 },
-  { entityKey: c.key, termsType: "NET" as const, dueInDays: 60, daysAgo: i * 2 + 5 },
-  { entityKey: c.key, termsType: "FIXED" as const, fixedDaysFromNow: -10 + i * 5, daysAgo: 15 + i },
+  // Net 15 orders - some overdue (daysAgo > 15)
+  { entityKey: c.key, locationTermsDays: 15, daysAgo: 20 + i * 2 },  // Overdue
+  { entityKey: c.key, locationTermsDays: 15, daysAgo: 10 + i },       // Not yet due
+  // Net 30 orders - some overdue (daysAgo > 30)
+  { entityKey: c.key, locationTermsDays: 30, daysAgo: 35 + i * 3 },  // Overdue
+  { entityKey: c.key, locationTermsDays: 30, daysAgo: 15 + i * 2 },  // Not yet due
+  // Net 60 orders - none overdue yet
+  { entityKey: c.key, locationTermsDays: 60, daysAgo: 45 + i },      // Not yet due
+  { entityKey: c.key, locationTermsDays: 60, daysAgo: 20 + i * 2 },  // Not yet due
 ]);
 
 const AMOUNT_RANGES_INR = [
@@ -143,7 +186,6 @@ const AMOUNT_RANGES_INR = [
   { min: 150000, max: 500000 },
 ];
 
-// Sample product names for custom line items (no real products needed)
 const SAMPLE_PRODUCTS = [
   "Industrial Fasteners - Bulk Pack",
   "Steel Pipes - 20ft Bundle",
@@ -157,17 +199,26 @@ const SAMPLE_PRODUCTS = [
 
 // -- State --
 
+export interface CompanyData {
+  id: string;
+  contactCustomerId: string;
+  locations: Map<number, string>;  // dueInDays -> locationId
+}
+
 export interface SeedState {
   shop: string;
   token: string;
+  databaseUrl: string | null;
   dryRun: boolean;
   reset: boolean;
   currencyCode: string;
-  companies: Map<string, { id: string; locationId: string; contactCustomerId: string }>;
+  companies: Map<string, CompanyData>;
   paymentTermsTemplates: PaymentTermsTemplate[];
-  createdCount: { companies: number; orders: number };
+  createdCount: { companies: number; locations: number; orders: number; dbRules: number; dbAccounts: number };
   skippedCount: { companies: number; orders: number };
   deletedCount: { companies: number; orders: number };
+  ordersWithShopifyTerms: number;
+  ordersWithoutShopifyTerms: number;
   errors: string[];
 }
 
@@ -206,6 +257,7 @@ export async function graphql<T>(
         body: JSON.stringify({ query, variables }),
       });
 
+      // 429 is safe to retry: the request was rejected before execution
       if (response.status === 429) {
         const delay = INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt);
         console.log(`  ⏳ Rate limited (429), retrying in ${delay}ms...`);
@@ -219,6 +271,7 @@ export async function graphql<T>(
 
       const json = (await response.json()) as GraphQLResponse<T>;
 
+      // THROTTLED error is safe to retry: the request was rejected before execution
       const throttledError = json.errors?.find((e) => e.extensions?.code === "THROTTLED");
       if (throttledError) {
         const delay = INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt);
@@ -241,10 +294,13 @@ export async function graphql<T>(
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
       
+      // Mutations must NOT retry on network errors: the request may have executed.
+      // Only 429/THROTTLED are safe to retry (request rejected before execution).
       if (isMutation) {
         throw lastError;
       }
       
+      // Queries can safely retry on network errors
       if (attempt < MAX_RETRIES - 1) {
         const delay = INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt);
         console.log(`  ⏳ Request failed, retrying in ${delay}ms...`);
@@ -374,6 +430,17 @@ export async function fetchPaymentTermsTemplates(state: SeedState): Promise<bool
     console.log(`     - ${t.name} (${t.paymentTermsType}${t.dueInDays ? `, ${t.dueInDays} days` : ""})`);
   }
 
+  // Verify we have the required NET templates
+  for (const loc of LOCATION_TERMS) {
+    const template = state.paymentTermsTemplates.find(
+      (t) => t.paymentTermsType === "NET" && t.dueInDays === loc.dueInDays
+    );
+    if (!template) {
+      console.error(`  ❌ Missing required template: NET ${loc.dueInDays} days`);
+      return false;
+    }
+  }
+
   return true;
 }
 
@@ -392,7 +459,7 @@ export async function resetSeedData(state: SeedState): Promise<void> {
 
   console.log("\n  Reset summary:");
   console.log(`    Companies deleted: ${state.deletedCount.companies}`);
-  console.log(`    Orders: ${state.deletedCount.orders} (cannot delete via API, tagged for identification)`);
+  console.log(`    Orders found: ${state.deletedCount.orders} (cannot delete via API, remain tagged)`);
 }
 
 async function deleteSeededOrders(state: SeedState): Promise<void> {
@@ -408,10 +475,11 @@ async function deleteSeededOrders(state: SeedState): Promise<void> {
 
   const orders = result.data?.orders.nodes ?? [];
   console.log(`  Found ${orders.length} seeded orders`);
+  // Note: orders cannot be deleted via Admin API
   state.deletedCount.orders = orders.length;
 
   if (orders.length > 0) {
-    console.log("  ⚠️  Orders cannot be deleted via API. They will remain tagged for identification.");
+    console.log("  ⚠️  Orders cannot be deleted via API. They remain tagged for identification.");
   }
 }
 
@@ -430,6 +498,7 @@ async function deleteSeededCompanies(state: SeedState): Promise<void> {
   console.log(`  Found ${companies.length} seeded companies`);
 
   for (const company of companies) {
+    // Mutations must not retry on network errors (may have executed)
     const deleteResult = await graphql<{ companyDelete: { deletedCompanyId: string; userErrors: UserError[] } }>(
       state,
       `mutation DeleteCompany($id: ID!) {
@@ -453,7 +522,7 @@ async function deleteSeededCompanies(state: SeedState): Promise<void> {
 // -- Seeding: Companies --
 
 export async function seedCompanies(state: SeedState): Promise<void> {
-  console.log("\n🏢 Seeding B2B companies...");
+  console.log("\n🏢 Seeding B2B companies with multiple locations...");
 
   for (const seed of COMPANY_SEEDS) {
     const externalId = `${SEED_PREFIX}${seed.key}`;
@@ -461,40 +530,44 @@ export async function seedCompanies(state: SeedState): Promise<void> {
 
     if (existing) {
       console.log(`  ⏭️  ${seed.name} already exists (${externalId})`);
+      // Build locations map from existing data
+      const locations = new Map<number, string>();
+      for (const edge of existing.locations.edges) {
+        for (const loc of LOCATION_TERMS) {
+          if (edge.node.name.includes(loc.suffix)) {
+            locations.set(loc.dueInDays, edge.node.id);
+          }
+        }
+      }
       state.companies.set(seed.key, {
         id: existing.id,
-        locationId: existing.locations.edges[0]?.node.id ?? "",
         contactCustomerId: existing.contacts.edges[0]?.node.customer.id ?? "",
+        locations,
       });
       state.skippedCount.companies++;
       continue;
     }
 
     if (state.dryRun) {
-      console.log(`  [dry-run] Would create: ${seed.name} (${externalId})`);
+      console.log(`  [dry-run] Would create: ${seed.name} (${externalId}) with 3 locations`);
+      const locations = new Map<number, string>();
+      for (const loc of LOCATION_TERMS) {
+        locations.set(loc.dueInDays, `dry-run-location-${seed.key}-${loc.dueInDays}`);
+      }
       state.companies.set(seed.key, {
         id: `dry-run-company-${seed.key}`,
-        locationId: `dry-run-location-${seed.key}`,
         contactCustomerId: `dry-run-customer-${seed.key}`,
+        locations,
       });
       state.createdCount.companies++;
       continue;
     }
 
-    const result = await createCompany(state, seed, externalId);
+    const result = await createCompanyWithLocations(state, seed, externalId);
     if (result) {
       state.companies.set(seed.key, result);
       state.createdCount.companies++;
-      console.log(`  ✅ Created: ${seed.name}`);
-      
-      // Set default payment terms on the company location.
-      // Orders for this location will inherit these payment terms.
-      const defaultTemplate = state.paymentTermsTemplates.find((t) => t.paymentTermsType === "NET" && t.dueInDays === 30)
-        ?? state.paymentTermsTemplates.find((t) => t.paymentTermsType === "NET")
-        ?? state.paymentTermsTemplates[0];
-      if (defaultTemplate && result.locationId) {
-        await updateCompanyLocationPaymentTerms(state, result.locationId, defaultTemplate.id);
-      }
+      console.log(`  ✅ Created: ${seed.name} with ${result.locations.size} locations`);
     } else {
       state.errors.push(`Failed to create company: ${seed.name}`);
     }
@@ -512,7 +585,7 @@ export async function findCompanyByExternalId(
           id
           name
           externalId
-          locations(first: 1) {
+          locations(first: 10) {
             edges { node { id name } }
           }
           contacts(first: 1) {
@@ -530,12 +603,18 @@ export async function findCompanyByExternalId(
   return result.data?.companies.nodes[0] ?? null;
 }
 
-export async function createCompany(
+export async function createCompanyWithLocations(
   state: SeedState,
   seed: (typeof COMPANY_SEEDS)[number],
   externalId: string
-): Promise<{ id: string; locationId: string; contactCustomerId: string } | null> {
-  const mutation = `
+): Promise<CompanyData | null> {
+  const firstLoc = LOCATION_TERMS[0];
+  const firstTemplate = state.paymentTermsTemplates.find(
+    (t) => t.paymentTermsType === "NET" && t.dueInDays === firstLoc.dueInDays
+  );
+
+  // Mutations must not retry on network errors (may have executed)
+  const createMutation = `
     mutation CreateCompany($input: CompanyCreateInput!) {
       companyCreate(input: $input) {
         company {
@@ -553,13 +632,13 @@ export async function createCompany(
     }
   `;
 
-  const result = await graphql<{
+  const createResult = await graphql<{
     companyCreate: { company: CompanyNode | null; userErrors: UserError[] };
-  }>(state, mutation, {
+  }>(state, createMutation, {
     input: {
       company: { name: seed.name, externalId },
       companyLocation: {
-        name: `${seed.name} - Head Office`,
+        name: `${seed.name} - ${firstLoc.suffix}`,
         shippingAddress: {
           firstName: seed.contact.firstName,
           lastName: seed.contact.lastName,
@@ -569,6 +648,9 @@ export async function createCompany(
           zip: "400001",
         },
         billingSameAsShipping: true,
+        buyerExperienceConfiguration: firstTemplate ? {
+          paymentTermsTemplateId: firstTemplate.id,
+        } : undefined,
       },
       companyContact: {
         email: seed.contact.email,
@@ -578,50 +660,61 @@ export async function createCompany(
     },
   }, { isMutation: true });
 
-  if (result.data?.companyCreate.userErrors.length) {
-    console.error(`    ❌ Error creating ${seed.name}:`, result.data.companyCreate.userErrors);
+  if (createResult.data?.companyCreate.userErrors.length) {
+    console.error(`    ❌ Error creating ${seed.name}:`, createResult.data.companyCreate.userErrors);
     return null;
   }
 
-  const company = result.data?.companyCreate.company;
+  const company = createResult.data?.companyCreate.company;
   if (!company) {
     console.error(`    ❌ No company returned for ${seed.name}`);
     return null;
   }
 
+  const locations = new Map<number, string>();
+  const firstLocationId = company.locations.edges[0]?.node.id;
+  if (firstLocationId) {
+    locations.set(firstLoc.dueInDays, firstLocationId);
+    console.log(`    → Location ${firstLoc.suffix}: created`);
+    state.createdCount.locations++;
+  }
+
+  // Create additional locations for remaining terms
+  for (let i = 1; i < LOCATION_TERMS.length; i++) {
+    const loc = LOCATION_TERMS[i];
+    const template = state.paymentTermsTemplates.find(
+      (t) => t.paymentTermsType === "NET" && t.dueInDays === loc.dueInDays
+    );
+
+    const locationId = await createCompanyLocation(state, company.id, seed.name, loc, template?.id);
+    if (locationId) {
+      locations.set(loc.dueInDays, locationId);
+      console.log(`    → Location ${loc.suffix}: created`);
+      state.createdCount.locations++;
+    }
+  }
+
   return {
     id: company.id,
-    locationId: company.locations.edges[0]?.node.id ?? "",
     contactCustomerId: company.contacts.edges[0]?.node.customer.id ?? "",
+    locations,
   };
 }
 
-/**
- * Update a company location's payment terms template.
- * 
- * This uses companyLocationUpdate with buyerExperienceConfiguration.paymentTermsTemplateId,
- * which requires write_companies (NOT write_payment_terms).
- * B2B orders for this location will inherit these payment terms.
- * 
- * @see https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyLocationUpdate
- * @see https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/BuyerExperienceConfigurationInput
- */
-export async function updateCompanyLocationPaymentTerms(
+async function createCompanyLocation(
   state: SeedState,
-  locationId: string,
-  paymentTermsTemplateId: string
-): Promise<boolean> {
+  companyId: string,
+  companyName: string,
+  loc: { suffix: string; dueInDays: number },
+  paymentTermsTemplateId?: string
+): Promise<string | null> {
+  // Mutations must not retry on network errors (may have executed)
   const mutation = `
-    mutation UpdateCompanyLocationPaymentTerms($companyLocationId: ID!, $input: CompanyLocationUpdateInput!) {
-      companyLocationUpdate(companyLocationId: $companyLocationId, input: $input) {
+    mutation CreateCompanyLocation($companyId: ID!, $input: CompanyLocationInput!) {
+      companyLocationCreate(companyId: $companyId, companyLocation: $input) {
         companyLocation {
           id
-          buyerExperienceConfiguration {
-            paymentTermsTemplate {
-              id
-              name
-            }
-          }
+          name
         }
         userErrors { field message code }
       }
@@ -629,36 +722,42 @@ export async function updateCompanyLocationPaymentTerms(
   `;
 
   const result = await graphql<{
-    companyLocationUpdate: {
-      companyLocation: { id: string; buyerExperienceConfiguration: { paymentTermsTemplate: { id: string; name: string } | null } } | null;
+    companyLocationCreate: {
+      companyLocation: { id: string; name: string } | null;
       userErrors: UserError[];
     };
   }>(state, mutation, {
-    companyLocationId: locationId,
+    companyId,
     input: {
-      buyerExperienceConfiguration: {
-        paymentTermsTemplateId,
+      name: `${companyName} - ${loc.suffix}`,
+      shippingAddress: {
+        firstName: "Branch",
+        lastName: loc.suffix,
+        address1: `${loc.dueInDays} Payment Lane`,
+        city: "Mumbai",
+        countryCode: "IN",
+        zip: "400002",
       },
+      billingSameAsShipping: true,
+      buyerExperienceConfiguration: paymentTermsTemplateId ? {
+        paymentTermsTemplateId,
+      } : undefined,
     },
   }, { isMutation: true });
 
-  if (result.data?.companyLocationUpdate.userErrors.length) {
-    console.error(`    ⚠️  Error setting payment terms:`, result.data.companyLocationUpdate.userErrors);
-    return false;
+  if (result.data?.companyLocationCreate.userErrors.length) {
+    console.error(`    ⚠️  Error creating location ${loc.suffix}:`, result.data.companyLocationCreate.userErrors);
+    return null;
   }
 
-  const template = result.data?.companyLocationUpdate.companyLocation?.buyerExperienceConfiguration?.paymentTermsTemplate;
-  if (template) {
-    console.log(`    → Payment terms: ${template.name}`);
-  }
-  
-  return true;
+  return result.data?.companyLocationCreate.companyLocation?.id ?? null;
 }
 
 // -- Seeding: Orders --
 
 export async function seedOrders(state: SeedState): Promise<void> {
-  console.log("\n📝 Seeding B2B orders...");
+  console.log("\n📝 Seeding B2B orders with backdated processedAt...");
+  console.log("   (processedAt per OrderCreateOrderInput: 'The date and time when the order was created')");
 
   let orderIndex = 0;
   for (const orderSpec of ORDER_DISTRIBUTION) {
@@ -676,6 +775,15 @@ export async function seedOrders(state: SeedState): Promise<void> {
     const company = state.companies.get(orderSpec.entityKey);
     if (!company) {
       console.error(`  ❌ Company ${orderSpec.entityKey} not found`);
+      state.errors.push(`Company ${orderSpec.entityKey} not found for order ${orderIndex}`);
+      continue;
+    }
+
+    // Get the location for the specified payment terms
+    const locationId = company.locations.get(orderSpec.locationTermsDays);
+    if (!locationId) {
+      console.error(`  ❌ Location for Net ${orderSpec.locationTermsDays} not found for ${orderSpec.entityKey}`);
+      state.errors.push(`Location Net ${orderSpec.locationTermsDays} not found for ${orderSpec.entityKey}`);
       continue;
     }
 
@@ -686,10 +794,15 @@ export async function seedOrders(state: SeedState): Promise<void> {
     // Pick a sample product name for the custom line item
     const productTitle = SAMPLE_PRODUCTS[orderIndex % SAMPLE_PRODUCTS.length];
 
+    // Calculate processedAt date (backdated)
+    const processedAt = new Date();
+    processedAt.setDate(processedAt.getDate() - orderSpec.daysAgo);
+
     if (state.dryRun) {
+      const isOverdue = orderSpec.daysAgo > orderSpec.locationTermsDays;
       console.log(
         `  [dry-run] Would create order ${orderIndex}: ${orderSpec.entityKey}, ` +
-          `${orderSpec.termsType} ${orderSpec.termsType === "NET" ? orderSpec.dueInDays + " days" : "fixed"}, ` +
+          `Net ${orderSpec.locationTermsDays}, ${orderSpec.daysAgo} days ago${isOverdue ? " (OVERDUE)" : ""}, ` +
           formatCurrency(amount, state.currencyCode)
       );
       state.createdCount.orders++;
@@ -699,10 +812,12 @@ export async function seedOrders(state: SeedState): Promise<void> {
     // Create B2B order using orderCreate with custom line items
     const order = await createOrder(state, {
       orderKey,
-      companyLocationId: company.locationId,
+      companyLocationId: locationId,
       customerId: company.contactCustomerId,
       productTitle,
       amount,
+      processedAt: processedAt.toISOString(),
+      expectedTermsDays: orderSpec.locationTermsDays,
     });
 
     if (!order) {
@@ -711,9 +826,10 @@ export async function seedOrders(state: SeedState): Promise<void> {
     }
 
     state.createdCount.orders++;
+    const isOverdue = orderSpec.daysAgo > orderSpec.locationTermsDays;
     console.log(
       `  ✅ Created ${order.name}: ${orderSpec.entityKey}, ` +
-        `${orderSpec.termsType} ${orderSpec.termsType === "NET" ? orderSpec.dueInDays + " days" : "fixed"}, ` +
+        `Net ${orderSpec.locationTermsDays}, ${orderSpec.daysAgo} days ago${isOverdue ? " (OVERDUE)" : ""}, ` +
         formatCurrency(amount, state.currencyCode)
     );
   }
@@ -735,13 +851,16 @@ export async function findOrderByTag(state: SeedState, tag: string): Promise<Ord
  * Create a B2B order using orderCreate with custom line items.
  * 
  * Key features:
- * - Custom line items with title + priceSet (no product variants needed, no read_products required)
- * - companyLocationId for B2B association (order inherits payment terms from location)
+ * - Custom line items with title + priceSet (no product variants needed)
+ * - companyLocationId for B2B association
  * - financialStatus: PENDING to mark as unpaid
- * - sendReceipt: false, sendFulfillmentReceipt: false to suppress customer emails
+ * - processedAt for backdating orders
+ *   @see https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateOrderInput
+ *   "processedAt: The date and time when the order was created."
+ * - sendReceipt: false to suppress customer emails
  * 
- * @see https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/orderCreate
- * @see https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateLineItemInput
+ * If Shopify returns null paymentTerms, logs a warning but does not fail.
+ * S9 inference will use DB defaults instead.
  */
 export async function createOrder(
   state: SeedState,
@@ -751,8 +870,11 @@ export async function createOrder(
     customerId: string;
     productTitle: string;
     amount: number;
+    processedAt: string;
+    expectedTermsDays: number;
   }
 ): Promise<{ id: string; name: string } | null> {
+  // Mutations must not retry on network errors (may have executed)
   const mutation = `
     mutation CreateOrder($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
       orderCreate(order: $order, options: $options) {
@@ -765,7 +887,13 @@ export async function createOrder(
           }
           paymentTerms {
             paymentTermsName
+            paymentTermsType
             dueInDays
+            paymentSchedules(first: 1) {
+              nodes {
+                dueAt
+              }
+            }
           }
         }
         userErrors { field message code }
@@ -780,7 +908,7 @@ export async function createOrder(
         name: string;
         financialStatus: string;
         totalPriceSet: { shopMoney: { amount: string; currencyCode: string } };
-        paymentTerms: { paymentTermsName: string; dueInDays: number | null } | null;
+        paymentTerms: OrderPaymentTerms | null;
       } | null;
       userErrors: UserError[];
     };
@@ -791,6 +919,7 @@ export async function createOrder(
       customer: { id: options.customerId },
       currency: state.currencyCode,
       financialStatus: "PENDING",
+      processedAt: options.processedAt,
       lineItems: [{
         title: options.productTitle,
         quantity: 1,
@@ -841,15 +970,159 @@ export async function createOrder(
     return null;
   }
 
-  // Log payment terms if inherited from the company location
+  // Log the actual terms from the response (not the spec)
   if (order.paymentTerms) {
-    console.log(`    → Payment terms: ${order.paymentTerms.paymentTermsName} (${order.paymentTerms.dueInDays ?? 0} days)`);
+    state.ordersWithShopifyTerms++;
+    const terms = order.paymentTerms;
+    const dueAt = terms.paymentSchedules.nodes[0]?.dueAt;
+    console.log(
+      `    → Shopify terms: ${terms.paymentTermsName} ` +
+      `(${terms.paymentTermsType}, ${terms.dueInDays ?? 0} days` +
+      `${dueAt ? `, due ${dueAt.split("T")[0]}` : ""})`
+    );
+  } else {
+    state.ordersWithoutShopifyTerms++;
+    console.log(
+      `    → No Shopify terms (will use DB default: Net ${options.expectedTermsDays})`
+    );
   }
 
   return {
     id: order.id,
     name: order.name,
   };
+}
+
+// -- Database Seeding --
+
+/**
+ * Seed the database with tag rules and buyer account defaults.
+ * This enables S9 inference to compute due dates even when Shopify
+ * doesn't return paymentTerms on orders.
+ * 
+ * Creates (idempotently):
+ * - Shop record with default terms
+ * - AccountSource tag rules for Net 15/30/60
+ * - BuyerAccount records with explicit defaultTermsDays
+ */
+export async function seedDatabase(state: SeedState): Promise<void> {
+  if (!state.databaseUrl) {
+    console.log("\n💾 Database seeding skipped (DATABASE_URL not set)");
+    console.log("   To enable S9 inference for orders without Shopify terms, run:");
+    console.log("   export DATABASE_URL=postgres://...");
+    console.log("   ");
+    console.log("   Or manually run this SQL:");
+    console.log("   ---");
+    printDatabaseSeedSQL(state);
+    console.log("   ---");
+    return;
+  }
+
+  console.log("\n💾 Seeding database for S9 inference...");
+
+  if (state.dryRun) {
+    console.log("  [dry-run] Would seed Shop, AccountSource, and BuyerAccount records");
+    return;
+  }
+
+  const sql = postgres(state.databaseUrl, { max: 1 });
+
+  try {
+    // Upsert Shop record
+    const shopResult = await sql`
+      INSERT INTO "Shop" (id, domain, currency, plan, "defaultTermsDays", timezone, "createdAt", "updatedAt")
+      VALUES (
+        ${`seed-shop-${state.shop}`},
+        ${state.shop},
+        ${state.currencyCode},
+        'development',
+        30,
+        'Asia/Kolkata',
+        NOW(),
+        NOW()
+      )
+      ON CONFLICT (domain) DO UPDATE SET
+        currency = EXCLUDED.currency,
+        "updatedAt" = NOW()
+      RETURNING id
+    `;
+    const shopId = shopResult[0]?.id;
+    console.log(`  ✅ Shop record: ${state.shop}`);
+
+    // Upsert AccountSource tag rules for Net 15/30/60
+    for (const loc of LOCATION_TERMS) {
+      const tag = `${SEED_TAG}-net${loc.dueInDays}`;
+      await sql`
+        INSERT INTO "AccountSource" (id, "shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")
+        VALUES (
+          ${`seed-source-${tag}`},
+          ${shopId},
+          ${tag},
+          ${loc.dueInDays},
+          NOW(),
+          NOW()
+        )
+        ON CONFLICT ("shopId", tag) DO UPDATE SET
+          "defaultTermsDays" = EXCLUDED."defaultTermsDays",
+          "updatedAt" = NOW()
+      `;
+      state.createdCount.dbRules++;
+      console.log(`  ✅ Tag rule: ${tag} → Net ${loc.dueInDays}`);
+    }
+
+    // Upsert BuyerAccount records for each company location
+    for (const [companyKey, company] of state.companies) {
+      for (const [dueInDays, locationId] of company.locations) {
+        const accountName = `${COMPANY_SEEDS.find(c => c.key === companyKey)?.name ?? companyKey} - Net ${dueInDays}`;
+        await sql`
+          INSERT INTO "BuyerAccount" (
+            id, "shopId", kind, "companyId", "companyLocationId", name,
+            "defaultTermsDays", "defaultTermsSource", "holdState", "createdAt", "updatedAt"
+          )
+          VALUES (
+            ${`seed-account-${locationId}`},
+            ${shopId},
+            'COMPANY',
+            ${company.id},
+            ${locationId},
+            ${accountName},
+            ${dueInDays},
+            'explicit',
+            'OK',
+            NOW(),
+            NOW()
+          )
+          ON CONFLICT ("shopId", "companyLocationId") DO UPDATE SET
+            "defaultTermsDays" = EXCLUDED."defaultTermsDays",
+            "defaultTermsSource" = EXCLUDED."defaultTermsSource",
+            "updatedAt" = NOW()
+        `;
+        state.createdCount.dbAccounts++;
+      }
+    }
+    console.log(`  ✅ BuyerAccounts: ${state.createdCount.dbAccounts} with explicit default terms`);
+
+  } finally {
+    await sql.end();
+  }
+}
+
+function printDatabaseSeedSQL(state: SeedState): void {
+  const shopId = `seed-shop-${state.shop}`;
+  
+  console.log(`-- Upsert Shop`);
+  console.log(`INSERT INTO "Shop" (id, domain, currency, plan, "defaultTermsDays", timezone, "createdAt", "updatedAt")`);
+  console.log(`VALUES ('${shopId}', '${state.shop}', '${state.currencyCode || "INR"}', 'development', 30, 'Asia/Kolkata', NOW(), NOW())`);
+  console.log(`ON CONFLICT (domain) DO UPDATE SET currency = EXCLUDED.currency, "updatedAt" = NOW();`);
+  console.log();
+
+  console.log(`-- Upsert AccountSource tag rules`);
+  for (const loc of LOCATION_TERMS) {
+    const tag = `${SEED_TAG}-net${loc.dueInDays}`;
+    console.log(`INSERT INTO "AccountSource" (id, "shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")`);
+    console.log(`VALUES ('seed-source-${tag}', '${shopId}', '${tag}', ${loc.dueInDays}, NOW(), NOW())`);
+    console.log(`ON CONFLICT ("shopId", tag) DO UPDATE SET "defaultTermsDays" = EXCLUDED."defaultTermsDays", "updatedAt" = NOW();`);
+  }
 }
 
 // -- Main --
@@ -862,9 +1135,10 @@ function parseArgs(): { dryRun: boolean; reset: boolean } {
   };
 }
 
-function validateEnv(): { shop: string; token: string } | null {
+function validateEnv(): { shop: string; token: string; databaseUrl: string | null } | null {
   const shop = process.env.SHOP;
   const token = process.env.SHOPIFY_ADMIN_TOKEN;
+  const databaseUrl = process.env.DATABASE_URL ?? null;
 
   if (!shop) {
     console.error("❌ Missing SHOP environment variable");
@@ -886,13 +1160,14 @@ function validateEnv(): { shop: string; token: string } | null {
     return null;
   }
 
-  return { shop, token };
+  // Security: never log the token value
+  return { shop, token, databaseUrl };
 }
 
 export async function main(): Promise<void> {
   console.log("═══════════════════════════════════════════════════════════════");
   console.log("  Net Terms Receivables - Dev Store Seed Script");
-  console.log("  (Using orderCreate - no draft orders, no read_products)");
+  console.log("  (Using orderCreate with processedAt - no draft orders)");
   console.log("═══════════════════════════════════════════════════════════════");
 
   const { dryRun, reset } = parseArgs();
@@ -905,19 +1180,23 @@ export async function main(): Promise<void> {
   const state: SeedState = {
     shop: env.shop,
     token: env.token,
+    databaseUrl: env.databaseUrl,
     dryRun,
     reset,
     currencyCode: "",
     companies: new Map(),
     paymentTermsTemplates: [],
-    createdCount: { companies: 0, orders: 0 },
+    createdCount: { companies: 0, locations: 0, orders: 0, dbRules: 0, dbAccounts: 0 },
     skippedCount: { companies: 0, orders: 0 },
     deletedCount: { companies: 0, orders: 0 },
+    ordersWithShopifyTerms: 0,
+    ordersWithoutShopifyTerms: 0,
     errors: [],
   };
 
   console.log(`\nShop: ${state.shop}`);
   console.log(`Mode: ${dryRun ? "DRY RUN (read-only lookups, no mutations)" : reset ? "RESET + SEED" : "SEED"}`);
+  console.log(`Database: ${env.databaseUrl ? "Connected" : "Not configured (will print SQL)"}`);
 
   // Preflight checks
   const devStoreOk = await checkDevStore(state);
@@ -942,9 +1221,12 @@ export async function main(): Promise<void> {
     await resetSeedData(state);
   }
 
-  // Seed data
+  // Seed Shopify data
   await seedCompanies(state);
   await seedOrders(state);
+
+  // Seed database for S9 inference
+  await seedDatabase(state);
 
   // Summary
   console.log("\n═══════════════════════════════════════════════════════════════");
@@ -955,13 +1237,31 @@ export async function main(): Promise<void> {
     console.log("\n  [DRY RUN - No mutations performed]");
   }
 
-  console.log("\n  Created:");
+  console.log("\n  Shopify Created:");
   console.log(`    Companies:    ${state.createdCount.companies}`);
+  console.log(`    Locations:    ${state.createdCount.locations}`);
   console.log(`    Orders:       ${state.createdCount.orders}`);
 
   console.log("\n  Skipped (already exist):");
   console.log(`    Companies:    ${state.skippedCount.companies}`);
   console.log(`    Orders:       ${state.skippedCount.orders}`);
+
+  if (!dryRun && state.createdCount.orders > 0) {
+    console.log("\n  Payment Terms (WARNING if counts differ):");
+    console.log(`    Inherited from Shopify: ${state.ordersWithShopifyTerms}`);
+    console.log(`    Will use DB defaults:   ${state.ordersWithoutShopifyTerms}`);
+    
+    if (state.ordersWithoutShopifyTerms > 0) {
+      console.log(`\n  ⚠️  ${state.ordersWithoutShopifyTerms} orders did not inherit Shopify terms.`);
+      console.log("     S9 inference will use BuyerAccount.defaultTermsDays from DB.");
+    }
+  }
+
+  if (state.databaseUrl && !dryRun) {
+    console.log("\n  Database Seeded:");
+    console.log(`    Tag rules:      ${state.createdCount.dbRules}`);
+    console.log(`    BuyerAccounts:  ${state.createdCount.dbAccounts}`);
+  }
 
   if (state.errors.length > 0) {
     console.log("\n  Errors:");
