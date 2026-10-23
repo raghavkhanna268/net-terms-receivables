@@ -1,11 +1,28 @@
+"""
+Cart and Checkout Validation Function API schema for api_version 2026-10.
+Target: cart.validations.generate.run
+
+Source: Shopify documentation at https://shopify.dev/docs/api/functions/2026-10/cart-and-checkout-validation
+Adapted from Shopify/function-examples checkout/rust/cart-checkout-validation/default/schema.graphql
+(commit 19ccafceda1d0052c2c90c0a1e4db3fe37b16c27, api_version 2025-01) with updates for 2026-10 output format.
+"""
+
 schema {
   query: Input
   mutation: MutationRoot
 }
 
+"""
+A GraphQL directive that marks an input type as a union where exactly one field must be set.
+"""
+directive @oneOf on INPUT_OBJECT
+
 scalar Decimal
 scalar JSON
 
+"""
+ISO 4217 currency codes.
+"""
 enum CurrencyCode {
   INR
   USD
@@ -28,26 +45,44 @@ enum CurrencyCode {
 }
 
 type MutationRoot {
-  handleResult(result: CartValidationsGenerateRunResult!): Void
+  """
+  Handles the Function result for the cart.validations.generate.run target.
+  """
+  run(result: CartValidationsGenerateRunResult!): Void!
 }
 
 scalar Void
 
+"""
+The Input object is the complete GraphQL schema that your function receives as input.
+"""
 type Input {
   cart: Cart!
   buyerJourney: BuyerJourney!
 }
 
+"""
+Information about the current step in the buyer's purchasing process.
+"""
 type BuyerJourney {
-  step: BuyerJourneyStep!
+  """
+  The current step in the buyer's journey. May be null for admin/draft order checkouts.
+  """
+  step: BuyerJourneyStep
 }
 
+"""
+A specific stage in the customer's purchasing journey.
+"""
 enum BuyerJourneyStep {
   CART_INTERACTION
   CHECKOUT_INTERACTION
   CHECKOUT_COMPLETION
 }
 
+"""
+The cart where the Function is running.
+"""
 type Cart {
   cost: CartCost!
   buyerIdentity: BuyerIdentity
@@ -62,6 +97,9 @@ type MoneyV2 {
   currencyCode: CurrencyCode!
 }
 
+"""
+Information about the customer interacting with the cart.
+"""
 type BuyerIdentity {
   customer: Customer
   purchasingCompany: PurchasingCompany
@@ -83,19 +121,38 @@ type Metafield {
   jsonValue: JSON
 }
 
+"""
+The output of the cart.validations.generate.run target.
+Contains validation operations to apply to cart/checkout.
+"""
 input CartValidationsGenerateRunResult {
   operations: [Operation!]!
 }
 
-input Operation {
+"""
+A validation operation. Exactly one field must be set (@oneOf).
+"""
+input Operation @oneOf {
   validationAdd: ValidationAddOperation
 }
 
+"""
+An operation that adds validations to the cart and checkout.
+"""
 input ValidationAddOperation {
   errors: [ValidationError!]!
 }
 
+"""
+A validation error that blocks checkout.
+"""
 input ValidationError {
+  """
+  A description of the validation error displayed to the customer.
+  """
   message: String!
+  """
+  The target field in checkout (e.g., "$.cart").
+  """
   target: String!
 }

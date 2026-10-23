@@ -111,15 +111,14 @@ fn parse_decimal_to_paise(amount_str: &str) -> Option<u64> {
 }
 
 fn create_validation_error(message: &str) -> schema::CartValidationsGenerateRunResult {
-    schema::CartValidationsGenerateRunResult {
-        operations: vec![schema::Operation {
-            validation_add: Some(schema::ValidationAddOperation {
-                errors: vec![schema::ValidationError {
-                    message: message.to_string(),
-                    target: "$.cart".to_string(),
-                }],
-            }),
+    let operation = schema::ValidationAddOperation {
+        errors: vec![schema::ValidationError {
+            message: message.to_string(),
+            target: "$.cart".to_string(),
         }],
+    };
+    schema::CartValidationsGenerateRunResult {
+        operations: vec![schema::Operation::ValidationAdd(operation)],
     }
 }
 
@@ -181,8 +180,11 @@ fn evaluate_credit_status(
 #[shopify_function]
 fn cart_validations_generate_run(input: schema::cart_validations_generate_run::Input) -> Result<schema::CartValidationsGenerateRunResult> {
     let step = input.buyer_journey().step();
-    if step != "CHECKOUT_INTERACTION" && step != "CHECKOUT_COMPLETION" {
-        return Ok(pass());
+    
+    if let Some(s) = step {
+        if s == "CART_INTERACTION" {
+            return Ok(pass());
+        }
     }
 
     let cart = input.cart();
@@ -243,7 +245,7 @@ mod tests {
         run_function_with_input(cart_validations_generate_run, input_json)
     }
 
-    fn make_input(cart_amount: &str, currency: &str, metafield_json: Option<&str>, has_b2b: bool, buyer_journey_step: &str) -> String {
+    fn make_input_with_step(cart_amount: &str, currency: &str, metafield_json: Option<&str>, has_b2b: bool, buyer_journey_step: Option<&str>) -> String {
         let customer_metafield = match metafield_json {
             Some(mf) if !has_b2b => format!(r#"{{ "jsonValue": {} }}"#, mf),
             _ => "null".to_string(),
@@ -259,6 +261,11 @@ mod tests {
             format!(r#"{{ "location": {} }}"#, b2b_metafield)
         } else {
             "null".to_string()
+        };
+
+        let step_value = match buyer_journey_step {
+            Some(s) => format!(r#""{}""#, s),
+            None => "null".to_string(),
         };
 
         format!(
@@ -278,11 +285,15 @@ mod tests {
                     }}
                 }},
                 "buyerJourney": {{
-                    "step": "{}"
+                    "step": {}
                 }}
             }}"#,
-            cart_amount, currency, customer_metafield, purchasing_company, buyer_journey_step
+            cart_amount, currency, customer_metafield, purchasing_company, step_value
         )
+    }
+
+    fn make_input(cart_amount: &str, currency: &str, metafield_json: Option<&str>, has_b2b: bool, buyer_journey_step: &str) -> String {
+        make_input_with_step(cart_amount, currency, metafield_json, has_b2b, Some(buyer_journey_step))
     }
 
     #[test]
@@ -330,6 +341,24 @@ mod tests {
     }
 
     #[test]
+    fn test_null_step_validates() {
+        let input = make_input_with_step(
+            "100.00",
+            "INR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": true, "holdReasonCode": "PAYMENT_OVERDUE", "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#),
+            false,
+            None
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "Null step (admin/draft-order checkout) should validate and block on hold");
+        match &result.operations[0] {
+            schema::Operation::ValidationAdd(op) => {
+                assert!(op.errors[0].message.contains("on hold"));
+            }
+        }
+    }
+
+    #[test]
     fn test_no_metafield_passes() {
         let input = make_input("100.00", "INR", None, false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
@@ -369,8 +398,11 @@ mod tests {
         );
         let result = run_test(&input).unwrap();
         assert_eq!(result.operations.len(), 1, "Hold should block");
-        let validation = result.operations[0].validation_add.as_ref().unwrap();
-        assert!(validation.errors[0].message.contains("on hold"));
+        match &result.operations[0] {
+            schema::Operation::ValidationAdd(op) => {
+                assert!(op.errors[0].message.contains("on hold"));
+            }
+        }
     }
 
     #[test]
@@ -397,8 +429,11 @@ mod tests {
         );
         let result = run_test(&input).unwrap();
         assert_eq!(result.operations.len(), 1, "Over limit should block");
-        let validation = result.operations[0].validation_add.as_ref().unwrap();
-        assert!(validation.errors[0].message.contains("credit limit"));
+        match &result.operations[0] {
+            schema::Operation::ValidationAdd(op) => {
+                assert!(op.errors[0].message.contains("credit limit"));
+            }
+        }
     }
 
     #[test]
@@ -489,8 +524,11 @@ mod tests {
         "#;
         let result = run_test(input).unwrap();
         assert_eq!(result.operations.len(), 1, "B2B location metafield should take precedence (hold=true)");
-        let validation = result.operations[0].validation_add.as_ref().unwrap();
-        assert!(validation.errors[0].message.contains("on hold"));
+        match &result.operations[0] {
+            schema::Operation::ValidationAdd(op) => {
+                assert!(op.errors[0].message.contains("on hold"));
+            }
+        }
     }
 
     #[test]
@@ -504,8 +542,11 @@ mod tests {
         );
         let result = run_test(&input).unwrap();
         assert_eq!(result.operations.len(), 1, "Customer metafield should be used when no B2B");
-        let validation = result.operations[0].validation_add.as_ref().unwrap();
-        assert!(validation.errors[0].message.contains("on hold"));
+        match &result.operations[0] {
+            schema::Operation::ValidationAdd(op) => {
+                assert!(op.errors[0].message.contains("on hold"));
+            }
+        }
     }
 
     #[test]

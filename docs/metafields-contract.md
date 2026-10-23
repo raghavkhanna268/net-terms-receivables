@@ -172,31 +172,13 @@ These messages:
 
 ## Metafield Definitions
 
-> **Note**: As of October 2026, TOML-based declarative metafield definitions support `company_location` and `customer` owner types. However, if deployment fails due to unsupported owner types, S11 must create them programmatically via `metafieldDefinitionCreate`.
->
-> @see https://shopify.dev/docs/apps/build/metafields/definitions
+S11 is responsible for creating the metafield definitions programmatically during shop setup.
 
-### Option A: TOML Declarations (Preferred)
+> **Note**: The Shopify TOML format ([shopify.dev/docs/apps/build/metafields/definitions](https://shopify.dev/docs/apps/build/metafields/definitions)) documents `[<owner_type>.metafields.app.<key>]` and references MetafieldOwnerType for the full list. However, the documentation does not explicitly confirm that `company_location` and `customer` owner types deploy successfully via TOML. To ensure reliable deployment, S11 creates these definitions via `metafieldDefinitionCreate`.
 
-If `company_location` and `customer` are supported in TOML declarations, add to `shopify.app.toml`:
+### Programmatic Creation (S11 Responsibility)
 
-```toml
-[company_location.metafields.app.credit_status]
-name = "Credit Status"
-description = "Net terms credit status including hold flag, limit, and exposure"
-type = "json"
-access.admin = "merchant_read"
-
-[customer.metafields.app.credit_status]
-name = "Credit Status"
-description = "Net terms credit status for tagged non-B2B customers"
-type = "json"
-access.admin = "merchant_read"
-```
-
-### Option B: Programmatic Creation (Fallback)
-
-If TOML declarations fail for these owner types, S11 must create the definitions via GraphQL:
+S11 must create the definitions via GraphQL during shop setup (idempotent):
 
 ```graphql
 mutation CreateCreditStatusDefinition($ownerType: MetafieldOwnerType!) {
@@ -216,6 +198,7 @@ mutation CreateCreditStatusDefinition($ownerType: MetafieldOwnerType!) {
 ```
 
 Call this mutation twice during shop setup: once for `COMPANY_LOCATION` and once for `CUSTOMER`.
+The operation is idempotent - if the definition already exists, the mutation returns a userError that S11 should handle gracefully.
 
 ## Implementation Checklist
 

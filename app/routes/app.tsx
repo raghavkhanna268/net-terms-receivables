@@ -10,7 +10,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   const { admin, session } = await shopify.authenticate.admin(request);
 
-  await runAfterAuth(session.shop, admin);
+  runAfterAuth(session.shop, admin);
 
   return { apiKey: process.env.SHOPIFY_API_KEY || "" };
 };

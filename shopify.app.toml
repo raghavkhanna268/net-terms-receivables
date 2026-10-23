@@ -74,16 +74,8 @@ embedded = false
 [build]
 automatically_update_urls_on_dev = false
 
-# S12/S11: Credit status metafield definitions for net-terms validation
+# Note: Metafield definitions for credit_status on CompanyLocation and Customer
+# are created programmatically in S11 via metafieldDefinitionCreate, not via TOML.
+# The TOML format's supported owner_type list at shopify.dev does not explicitly
+# confirm company_location and customer as deployable.
 # @see docs/metafields-contract.md
-[company_location.metafields.app.credit_status]
-name = "Credit Status"
-description = "Net terms credit status including hold flag, limit, and exposure"
-type = "json"
-access.admin = "merchant_read"
-
-[customer.metafields.app.credit_status]
-name = "Credit Status"
-description = "Net terms credit status for tagged non-B2B customers"
-type = "json"
-access.admin = "merchant_read"
