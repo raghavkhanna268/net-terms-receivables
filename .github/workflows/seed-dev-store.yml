@@ -1,0 +1,79 @@
+# Seed dev store with test data for Net Terms Receivables.
+#
+# SECURITY CONSTRAINTS (do not weaken):
+# - Token is NEVER logged, echoed, written to files, or uploaded
+# - Token is masked with ::add-mask:: immediately
+# - Secrets are passed via env:, never inline in run:
+# - Hardcoded dev-store guard in seed.ts refuses any shop other than the allowed domain
+#
+# Run via GitHub Actions UI: Actions > Seed Dev Store > Run workflow
+
+name: Seed Dev Store
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (preview only, no mutations)'
+        type: boolean
+        default: false
+      reset:
+        description: 'Reset existing seed data before seeding'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  seed:
+    name: Seed dev store
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      # Pass secrets via env:, never inline in run: blocks.
+      # The seed script validates SHOP against a hardcoded allowlist.
+      SHOP: net-terms-receivables.myshopify.com
+      SHOPIFY_ADMIN_TOKEN: ${{ secrets.DEV_STORE_ADMIN_TOKEN }}
+
+    steps:
+      - name: Mask token
+        # Mask the token FIRST, before any other step could accidentally log it.
+        # This uses GitHub Actions' built-in secret masking.
+        run: |
+          if [ -n "$SHOPIFY_ADMIN_TOKEN" ]; then
+            echo "::add-mask::$SHOPIFY_ADMIN_TOKEN"
+          fi
+
+      - name: Validate secrets
+        run: |
+          if [ -z "$SHOPIFY_ADMIN_TOKEN" ]; then
+            echo "❌ DEV_STORE_ADMIN_TOKEN secret is not set"
+            echo "   Add it in Settings > Secrets and variables > Actions"
+            exit 1
+          fi
+          echo "✅ Token is set (masked)"
+
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run seed script
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ "${{ inputs.reset }}" = "true" ]; then
+            ARGS="$ARGS --reset"
+          fi
+          npx tsx scripts/seed.ts $ARGS
