@@ -1,0 +1,67 @@
+{
+  "valid": {
+    "notOnHold": {
+      "schemaVersion": 1,
+      "currencyCode": "INR",
+      "hold": false,
+      "holdReasonCode": null,
+      "limitPaise": "10000000",
+      "exposurePaise": "5000000",
+      "updatedAt": "2026-10-23T00:00:00Z"
+    },
+    "onHold": {
+      "schemaVersion": 1,
+      "currencyCode": "INR",
+      "hold": true,
+      "holdReasonCode": "PAYMENT_OVERDUE",
+      "limitPaise": "10000000",
+      "exposurePaise": "5000000",
+      "updatedAt": "2026-10-23T00:00:00Z"
+    },
+    "atLimit": {
+      "schemaVersion": 1,
+      "currencyCode": "INR",
+      "hold": false,
+      "holdReasonCode": null,
+      "limitPaise": "10000000",
+      "exposurePaise": "10000000",
+      "updatedAt": "2026-10-23T00:00:00Z"
+    },
+    "usdCurrency": {
+      "schemaVersion": 1,
+      "currencyCode": "USD",
+      "hold": false,
+      "holdReasonCode": null,
+      "limitPaise": "500000",
+      "exposurePaise": "100000",
+      "updatedAt": "2026-10-23T00:00:00Z"
+    }
+  },
+  "invalid": {
+    "wrongSchemaVersion": {
+      "schemaVersion": 999,
+      "currencyCode": "INR",
+      "hold": true,
+      "holdReasonCode": "PAYMENT_OVERDUE",
+      "limitPaise": "10000000",
+      "exposurePaise": "0",
+      "updatedAt": "2026-10-23T00:00:00Z"
+    },
+    "missingFields": {
+      "schemaVersion": 1,
+      "currencyCode": "INR"
+    },
+    "invalidPaise": {
+      "schemaVersion": 1,
+      "currencyCode": "INR",
+      "hold": false,
+      "holdReasonCode": null,
+      "limitPaise": "not-a-number",
+      "exposurePaise": "5000000",
+      "updatedAt": "2026-10-23T00:00:00Z"
+    },
+    "malformed": {
+      "notARealField": "garbage"
+    }
+  }
+}

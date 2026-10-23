@@ -1,0 +1,82 @@
+schema {
+  query: Input
+  mutation: MutationRoot
+}
+
+scalar Decimal
+scalar JSON
+
+enum CurrencyCode {
+  INR
+  USD
+  EUR
+  GBP
+  AED
+  AUD
+  CAD
+  CHF
+  CNY
+  JPY
+  SGD
+  HKD
+  MYR
+  NZD
+  PKR
+  BDT
+  LKR
+  NPR
+}
+
+type MutationRoot {
+  run(result: FunctionRunResult!): Void
+}
+
+scalar Void
+
+type Input {
+  cart: Cart!
+}
+
+type Cart {
+  cost: CartCost!
+  buyerIdentity: BuyerIdentity
+}
+
+type CartCost {
+  totalAmount: MoneyV2!
+}
+
+type MoneyV2 {
+  amount: Decimal!
+  currencyCode: CurrencyCode!
+}
+
+type BuyerIdentity {
+  customer: Customer
+  purchasingCompany: PurchasingCompany
+}
+
+type Customer {
+  metafield(namespace: String!, key: String!): Metafield
+}
+
+type PurchasingCompany {
+  location: CompanyLocation
+}
+
+type CompanyLocation {
+  metafield(namespace: String!, key: String!): Metafield
+}
+
+type Metafield {
+  jsonValue: JSON
+}
+
+input FunctionRunResult {
+  errors: [FunctionError!]!
+}
+
+input FunctionError {
+  localizedMessage: String!
+  target: String!
+}
