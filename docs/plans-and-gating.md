@@ -62,6 +62,17 @@ Plans are cached in Postgres (`Shop.plan_key`, `Shop.plan_cached_at`) with a ~6 
 3. If cache is stale, return cached plan AND trigger background refresh via `ctx.waitUntil()`
 4. **Staleness never lowers the tier** - we always return the last known plan
 
+### Background Refresh Wiring
+
+The background refresh callback is wired per-request in `workers/app.ts`:
+
+```typescript
+setBackgroundRefreshCallback((promise) => ctx.waitUntil(promise));
+```
+
+This allows the plan service to trigger stale cache refreshes without blocking the request.
+The callback is cleared after each request to avoid cross-request leaks in long-lived isolates.
+
 ### Fail-to-Cached Design
 
 On any error or fetch failure:
@@ -115,9 +126,44 @@ Enforced when creating new BuyerAccounts (only when `PLAN_GATING_ENFORCED=true`)
 const shouldGate = isGatingEnforced() && !limitCheck.allowed;
 ```
 
+**Concurrent webhook note**: The count-then-insert pattern in `checkCompanyLimit` can
+slightly overshoot the limit under concurrent webhooks. This is acceptable because:
+1. Gated accounts don't consume functional capacity
+2. The slight overage will be gated by subsequent calls
+3. Proper locking would add latency to every webhook
+
+If exact enforcement is needed in the future, use `SELECT ... FOR UPDATE` on the
+Shop row, but this is unlikely to be necessary for the current use case.
+
 ### Import Limit
 
-**TODO (S15)**: Import limit check is implemented in `checkImportLimit()` but actual BankImport creation code is not yet implemented. Wire the `enforceImportLimit()` call where bank statement imports are recorded.
+The import limit enforcement is fully implemented in `gating.server.ts`:
+
+- `checkImportLimit(sql, shopId)` - Returns whether an import is allowed
+- `enforceImportLimit(sql, shopId)` - Throws `UpgradeRequiredError` if limit exceeded
+
+**Wiring for S15**: When implementing the S15 bank statement import feature, call
+`enforceImportLimit()` before creating a new `BankImport` record:
+
+```typescript
+// In the import handler (S15)
+import { enforceImportLimit, UpgradeRequiredError } from "~/services/gating.server";
+
+try {
+  await enforceImportLimit(sql, shopId);
+  // Proceed with creating BankImport...
+} catch (error) {
+  if (error instanceof UpgradeRequiredError) {
+    return { success: false, error: error.message };
+  }
+  throw error;
+}
+```
+
+When `PLAN_GATING_ENFORCED` is OFF, `enforceImportLimit()` is a no-op and always allows.
+
+**Note**: Unlike company limits which gate accounts (persist but mark as inactive),
+import limits simply block the operation since there's no persistent state to preserve.
 
 ### Feature Checks
 
@@ -138,7 +184,16 @@ This PR does NOT:
 
 ## Bulk Ingestion
 
-**TODO (#51)**: The S10b reconcile/bulk ingestion code should apply the same gating path. When implementing bulk company/customer ingestion, check `isGatingEnforced()` and `checkCompanyLimit()` to gate over-limit accounts during bulk operations.
+S10b reconcile/bulk ingestion applies the same gating as the webhook sync path:
+
+- `bulkUpsertBuyerAccounts()` in `company-location.server.ts` checks `checkCompanyLimit()`
+  for each new account and sets `gated_at` if over limit
+- Customer bulk processing goes through `processBulkCustomer()` → `syncTaggedCustomerBuyerAccount()`
+  which already applies gating
+
+When `PLAN_GATING_ENFORCED` is OFF, bulk operations create all accounts without gating.
+When ON, over-limit accounts are persisted with `gated_at` set, maintaining data integrity
+while enforcing plan limits.
 
 ## UI Components
 

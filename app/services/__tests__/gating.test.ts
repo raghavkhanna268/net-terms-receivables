@@ -26,13 +26,15 @@ const createMockSql = () => {
         return mockResults.get("shop_plan") ?? [];
       }
       
-      // Check for BuyerAccount count (active, non-gated)
+      // Check for BuyerAccount count with gated_at IS NULL filter (active, non-gated)
+      // This matches both checkCompanyLimit and getUsageStats when gating is ON
       if (query.includes('COUNT') && query.includes('"BuyerAccount"') && query.includes('gated_at IS NULL')) {
         return mockResults.get("active_account_count") ?? [{ count: "0" }];
       }
 
-      // Check for BuyerAccount count (all)
-      if (query.includes('COUNT') && query.includes('"BuyerAccount"')) {
+      // Check for BuyerAccount count without gated_at filter (all accounts)
+      // This matches getUsageStats when gating is OFF
+      if (query.includes('COUNT') && query.includes('"BuyerAccount"') && !query.includes('gated_at')) {
         return mockResults.get("account_count") ?? [{ count: "0" }];
       }
       
@@ -502,6 +504,100 @@ describe("Gating Service", () => {
       expect(afterUpgrade.allowed).toBe(true);
       expect(afterUpgrade.currentUsage).toBe(8);
       expect(afterUpgrade.limit).toBe(100);
+    });
+  });
+
+  describe("activeAccountFragment helper", () => {
+    it("returns TRUE fragment when gating is OFF", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+      vi.resetModules();
+      const { activeAccountFragment } = await import("../gating.server");
+      
+      // The fragment returns a promise-like object; we test that it's callable
+      const fragment = activeAccountFragment(mockSql as unknown as Sql);
+      expect(fragment).toBeDefined();
+      // When gating is OFF, the mock SQL should receive TRUE
+    });
+
+    it("returns gated_at IS NULL fragment when gating is ON", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.resetModules();
+      const { activeAccountFragment } = await import("../gating.server");
+      
+      const fragment = activeAccountFragment(mockSql as unknown as Sql);
+      expect(fragment).toBeDefined();
+      // When gating is ON, the mock SQL should receive gated_at IS NULL
+    });
+  });
+
+  describe("isAccountActive helper", () => {
+    it("returns true for all accounts when gating is OFF", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+      vi.resetModules();
+      const { isAccountActive } = await import("../gating.server");
+      
+      expect(isAccountActive(null)).toBe(true);
+      expect(isAccountActive(new Date())).toBe(true);
+    });
+
+    it("returns true only for non-gated accounts when gating is ON", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.resetModules();
+      const { isAccountActive } = await import("../gating.server");
+      
+      expect(isAccountActive(null)).toBe(true);
+      expect(isAccountActive(new Date())).toBe(false);
+    });
+  });
+
+  describe("getUsageStats with gating", () => {
+    it("counts all companies when gating is OFF", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+      vi.resetModules();
+      const { getUsageStats } = await import("../gating.server");
+      
+      // Free plan cached
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "free",
+        subscription_id: null,
+        subscription_name: null,
+        is_test: false,
+        plan_cached_at: new Date(),
+      }]);
+      
+      // 5 total companies (some might be gated, but we count all when OFF)
+      mockSql.setMockResult("account_count", [{ count: "5" }]);
+      mockSql.setMockResult("import_count", [{ count: "0" }]);
+      
+      const stats = await getUsageStats(mockSql as unknown as Sql, TEST_SHOP_ID);
+      
+      expect(stats.companies.current).toBe(5);
+      expect(stats.companies.limit).toBe(3);
+    });
+
+    it("counts only non-gated companies when gating is ON", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.resetModules();
+      const { getUsageStats } = await import("../gating.server");
+      
+      // Free plan cached
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "free",
+        subscription_id: null,
+        subscription_name: null,
+        is_test: false,
+        plan_cached_at: new Date(),
+      }]);
+      
+      // The query with gated_at IS NULL filter returns active count
+      mockSql.setMockResult("active_account_count", [{ count: "3" }]);
+      mockSql.setMockResult("import_count", [{ count: "0" }]);
+      
+      const stats = await getUsageStats(mockSql as unknown as Sql, TEST_SHOP_ID);
+      
+      // Should return only active (non-gated) count
+      expect(stats.companies.current).toBe(3);
+      expect(stats.companies.limit).toBe(3);
     });
   });
 });

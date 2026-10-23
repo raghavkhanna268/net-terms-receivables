@@ -43,6 +43,55 @@ export function isGatingEnforced(): boolean {
 }
 
 /**
+ * SQL fragment type for composable WHERE clauses.
+ * This is a tagged template result from postgres.js.
+ */
+export type SqlFragment = ReturnType<Sql>;
+
+/**
+ * Get a SQL fragment for filtering active (non-gated) buyer accounts.
+ * Use this in WHERE clauses to consistently exclude gated accounts.
+ *
+ * When PLAN_GATING_ENFORCED is OFF, returns a tautology (TRUE) so all accounts are included.
+ * When PLAN_GATING_ENFORCED is ON, returns "gated_at IS NULL" to exclude gated accounts.
+ *
+ * Usage:
+ * ```typescript
+ * const accounts = await sql`
+ *   SELECT * FROM "BuyerAccount"
+ *   WHERE "shopId" = ${shopId}
+ *   AND ${activeAccountFragment(sql)}
+ * `;
+ * ```
+ *
+ * @param sql - The postgres.js SQL client (needed to create the fragment)
+ * @returns A SQL fragment that can be composed into queries
+ */
+export function activeAccountFragment(sql: Sql): SqlFragment {
+  if (!isGatingEnforced()) {
+    return sql`TRUE`;
+  }
+  return sql`gated_at IS NULL`;
+}
+
+/**
+ * Check if a buyer account is active (not gated).
+ * Respects PLAN_GATING_ENFORCED flag.
+ *
+ * Use this for in-memory checks on already-fetched accounts.
+ * For database queries, use activeAccountFragment() instead.
+ *
+ * @param gatedAt - The gated_at timestamp from the account (null means active)
+ * @returns true if the account is active, false if gated
+ */
+export function isAccountActive(gatedAt: Date | null): boolean {
+  if (!isGatingEnforced()) {
+    return true;
+  }
+  return gatedAt === null;
+}
+
+/**
  * Error thrown when a plan limit is exceeded.
  */
 export class UpgradeRequiredError extends Error {
@@ -259,6 +308,9 @@ export async function checkFeature(
  * Get usage statistics for a shop's plan.
  * Useful for UI display of current usage.
  *
+ * When PLAN_GATING_ENFORCED is ON, excludes gated accounts from the company count.
+ * This reflects the "active" usage that counts toward the plan limit.
+ *
  * @param sql - postgres.js SQL client
  * @param shopId - Internal shop ID
  */
@@ -271,13 +323,21 @@ export async function getUsageStats(
 }> {
   const plan = await getPlanByShopId(sql, shopId);
 
-  // Count companies
-  const [companyResult] = await sql<{ count: string }[]>`
-    SELECT COUNT(*)::text as count
-    FROM "BuyerAccount"
-    WHERE "shopId" = ${shopId}
-  `;
-  const companyCount = parseInt(companyResult?.count ?? "0", 10);
+  // Count companies (exclude gated when PLAN_GATING_ENFORCED is ON)
+  // Using raw SQL with the gating predicate
+  const companyResult = isGatingEnforced()
+    ? await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text as count
+        FROM "BuyerAccount"
+        WHERE "shopId" = ${shopId}
+          AND gated_at IS NULL
+      `
+    : await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text as count
+        FROM "BuyerAccount"
+        WHERE "shopId" = ${shopId}
+      `;
+  const companyCount = parseInt(companyResult[0]?.count ?? "0", 10);
 
   // Count imports this month (IST)
   const now = DateTime.now().setZone("Asia/Kolkata");

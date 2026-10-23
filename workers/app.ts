@@ -36,7 +36,11 @@ export default wrapWithSentry({
     // No explicit sql.end() needed: Hyperdrive automatically cleans up
     // Worker-to-edge connections when the request ends.
     // @see https://developers.cloudflare.com/hyperdrive/concepts/connection-lifecycle/
-    return requestContext.run({ getSql }, async () => {
+    //
+    // S21: Pass ctx.waitUntil via ALS for background tasks (e.g., stale plan
+    // cache refresh). This avoids module-global state that could leak across
+    // requests in long-lived isolates.
+    return requestContext.run({ getSql, waitUntil: (p) => ctx.waitUntil(p) }, async () => {
       return requestHandler(request, {
         cloudflare: { env, ctx },
         sessionStorage,
