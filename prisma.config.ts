@@ -8,6 +8,10 @@ import { defineConfig } from "prisma/config";
  *
  * In CI, set DATABASE_URL via env: from the DATABASE_URL_MIGRATIONS secret.
  * For local dev, set DATABASE_URL in environment or .dev.vars.
+ *
+ * SHADOW_DATABASE_URL is used by `prisma migrate diff --from-migrations` to
+ * apply migrations to a throwaway database and compare against the schema.
+ * In CI, this is a separate database on the same Postgres service.
  */
 export default defineConfig({
   schema: "prisma/schema.prisma",
@@ -16,5 +20,6 @@ export default defineConfig({
   },
   datasource: {
     url: process.env.DATABASE_URL ?? "",
+    shadowDatabaseUrl: process.env.SHADOW_DATABASE_URL,
   },
 });
