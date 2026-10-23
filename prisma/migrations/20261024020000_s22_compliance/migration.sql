@@ -1,11 +1,9 @@
--- S22: GDPR/CCPA Compliance - Cascade FKs, Data Requests, Atomic Dedupe
+-- S22: GDPR/CCPA Compliance - Cascade FKs, Data Requests
 --
 -- This migration:
 -- 1. Adds ON DELETE CASCADE FKs from s8 tables to Shop (enables shop/redact)
--- 2. Adds shop column and unique index to s6_processed_webhooks (atomic dedupe)
--- 3. Adds shop column and FK to s6_dead_letter
--- 4. Creates s22_data_requests table for customers/data_request
--- 5. Adds uninstalled_at column to Shop (for app/uninstalled webhook)
+-- 2. Creates s22_data_requests table for customers/data_request
+-- 3. Adds uninstalled_at column to Shop (for app/uninstalled webhook)
 --
 -- Idempotent: All operations are guarded with IF NOT EXISTS/IF EXISTS.
 --
@@ -67,57 +65,7 @@ BEGIN
 END$$;
 
 -- =============================================================================
--- 3. S6_PROCESSED_WEBHOOKS - ADD SHOP COLUMN FOR ATOMIC DEDUPE
--- =============================================================================
--- S20 atomic dedupe: Add shop column + unique index on (shop, webhook_id)
--- This enables INSERT ... ON CONFLICT DO NOTHING RETURNING for atomic claim.
-
--- Add shop column (nullable initially for existing data)
-ALTER TABLE s6_processed_webhooks
-  ADD COLUMN IF NOT EXISTS shop TEXT;
-
--- For existing rows, shop is NULL (legacy data). New inserts will require shop.
--- We can't backfill shop for existing rows because we don't have that info.
--- The dedupe logic will check both legacy (webhook_id only) and new (shop+webhook_id).
-
--- Create unique index for atomic dedupe (shop + webhook_id)
--- Note: This index includes NULLs as distinct, so legacy rows (shop=NULL) won't conflict
--- with new rows that have the same webhook_id but different shops.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_s6_processed_webhooks_shop_webhook
-  ON s6_processed_webhooks(shop, webhook_id) WHERE shop IS NOT NULL;
-
-COMMENT ON COLUMN s6_processed_webhooks.shop IS 'Shop domain for per-shop webhook deduplication. NULL for legacy rows. New rows require this for atomic INSERT ... ON CONFLICT.';
-
--- =============================================================================
--- 4. S6_DEAD_LETTER - ADD SHOP COLUMN AND FK
--- =============================================================================
-
--- Add shop column (nullable, as some messages may not be shop-scoped)
-ALTER TABLE s6_dead_letter
-  ADD COLUMN IF NOT EXISTS shop TEXT;
-
--- Add FK from s6_dead_letter to Shop with CASCADE (for shop-scoped messages)
--- Note: No orphan cleanup needed because shop can be NULL
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM information_schema.table_constraints
-    WHERE constraint_name = 's6_dead_letter_shop_fkey'
-    AND table_name = 's6_dead_letter'
-  ) THEN
-    ALTER TABLE s6_dead_letter
-      ADD CONSTRAINT s6_dead_letter_shop_fkey
-      FOREIGN KEY (shop) REFERENCES "Shop"(domain) ON DELETE CASCADE;
-  END IF;
-END$$;
-
-CREATE INDEX IF NOT EXISTS idx_s6_dead_letter_shop
-  ON s6_dead_letter(shop) WHERE shop IS NOT NULL;
-
-COMMENT ON COLUMN s6_dead_letter.shop IS 'Shop domain for shop-scoped dead-letter messages. Enables CASCADE deletion on shop/redact.';
-
--- =============================================================================
--- 5. S22_DATA_REQUESTS TABLE
+-- 3. S22_DATA_REQUESTS TABLE
 -- =============================================================================
 -- Stores GDPR/CCPA data export requests for customers/data_request webhook.
 -- Merchant downloads pending exports via admin route.
@@ -176,7 +124,7 @@ COMMENT ON COLUMN s22_data_requests.expires_at IS 'Expiration timestamp (30 days
 ALTER TABLE s22_data_requests ENABLE ROW LEVEL SECURITY;
 
 -- =============================================================================
--- 6. PG_CRON: PURGE EXPIRED DATA REQUESTS
+-- 4. PG_CRON: PURGE EXPIRED DATA REQUESTS
 -- =============================================================================
 -- Scheduled job to delete expired data request exports (DPDP minimisation).
 -- Runs daily at 03:00 UTC (off-peak for most regions).
@@ -200,7 +148,7 @@ BEGIN
 END$do$;
 
 -- =============================================================================
--- 7. UPDATE PRISMA SCHEMA SYNC COMMENTS
+-- 5. UPDATE PRISMA SCHEMA SYNC COMMENTS
 -- =============================================================================
 
 COMMENT ON COLUMN s8_tagged_customers.shop_id IS 'Shop ID (FK to Shop with CASCADE). Enables automatic deletion on shop/redact.';

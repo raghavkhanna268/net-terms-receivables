@@ -11,6 +11,7 @@ import {
   redactCustomer,
   generateCustomerDataExport,
   persistDataRequest,
+  purgeExpiredDataRequests,
   sendDataRequestNotification,
 } from "~/services/compliance";
 import { getShopifyApp } from "~/shopify.server";
@@ -112,6 +113,9 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         );
         break;
       }
+
+      // Purge expired data requests on access (in-app purge for databases without pg_cron)
+      await purgeExpiredDataRequests(sql, shopRecord.id);
 
       const customerGid = `gid://shopify/Customer/${typedPayload.customer.id}`;
       const requestId = String(typedPayload.data_request.id);

@@ -17,6 +17,7 @@ import {
   redactCustomer,
   generateCustomerDataExport,
   persistDataRequest,
+  purgeExpiredDataRequests,
   sendDataRequestNotification,
   minimiseInactiveCustomerPii,
   minimiseCustomerPiiIfInactive,
@@ -281,6 +282,25 @@ describe("compliance.server", () => {
 
       expect(result.id).toBe("dr-existing");
       expect(result.alreadyExists).toBe(true);
+    });
+  });
+
+  describe("purgeExpiredDataRequests", () => {
+    it("deletes expired data requests for a shop", async () => {
+      mockSql.mockResolvedValueOnce(Object.assign([], { count: 5 }));
+
+      const result = await purgeExpiredDataRequests(mockSql, "shop-123");
+
+      expect(result).toBe(5);
+      expect(mockSql).toHaveBeenCalled();
+    });
+
+    it("returns 0 when no expired requests", async () => {
+      mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+
+      const result = await purgeExpiredDataRequests(mockSql, "shop-123");
+
+      expect(result).toBe(0);
     });
   });
 

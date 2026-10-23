@@ -28,6 +28,7 @@ const mockPurgePgmqMessages = vi.fn();
 const mockRedactCustomer = vi.fn();
 const mockGenerateCustomerDataExport = vi.fn();
 const mockPersistDataRequest = vi.fn();
+const mockPurgeExpiredDataRequests = vi.fn();
 const mockSendDataRequestNotification = vi.fn();
 
 vi.mock("~/services/compliance", () => ({
@@ -36,6 +37,7 @@ vi.mock("~/services/compliance", () => ({
   redactCustomer: (...args: unknown[]) => mockRedactCustomer(...args),
   generateCustomerDataExport: (...args: unknown[]) => mockGenerateCustomerDataExport(...args),
   persistDataRequest: (...args: unknown[]) => mockPersistDataRequest(...args),
+  purgeExpiredDataRequests: (...args: unknown[]) => mockPurgeExpiredDataRequests(...args),
   sendDataRequestNotification: (...args: unknown[]) => mockSendDataRequestNotification(...args),
 }));
 
@@ -96,6 +98,7 @@ describe("webhooks.compliance", () => {
       data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [] },
     });
     mockPersistDataRequest.mockResolvedValue({ id: "dr-1", alreadyExists: false });
+    mockPurgeExpiredDataRequests.mockResolvedValue(0);
     mockSendDataRequestNotification.mockResolvedValue({ sent: false, skippedReason: "no_api_key" });
     process.env = { ...originalEnv, SHOPIFY_API_SECRET: "test-secret" };
   });

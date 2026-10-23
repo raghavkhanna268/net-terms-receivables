@@ -8,6 +8,7 @@ export {
   redactCustomer,
   generateCustomerDataExport,
   persistDataRequest,
+  purgeExpiredDataRequests,
   getPendingDataRequests,
   getDataRequestExport,
   markDataRequestDownloaded,

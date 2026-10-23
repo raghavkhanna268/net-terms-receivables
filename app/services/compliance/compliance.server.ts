@@ -398,6 +398,28 @@ export async function persistDataRequest(
 }
 
 /**
+ * Purge expired data request exports for a shop.
+ * Called on access to /app/data-requests and in customers/data_request handler.
+ * This provides in-app purge for databases without pg_cron.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopId - Shop ID
+ * @returns Number of expired requests purged
+ */
+export async function purgeExpiredDataRequests(
+  sql: Sql,
+  shopId: string
+): Promise<number> {
+  const result = await sql`
+    DELETE FROM s22_data_requests
+    WHERE shop_id = ${shopId}
+      AND expires_at IS NOT NULL
+      AND expires_at < NOW()
+  `;
+  return result.count;
+}
+
+/**
  * Get pending data requests for a shop (for admin download route).
  *
  * @param sql - postgres.js SQL client

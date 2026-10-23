@@ -520,14 +520,9 @@ model AuditEvent {
 // S6 QUEUE SUPPORT TABLES
 // =============================================================================
 
-/// Webhook dedupe table for idempotent processing (S6/S20)
+/// Webhook dedupe table for idempotent processing (S6)
 /// Stores processed webhook IDs to prevent duplicate processing when
 /// Shopify retries webhooks or the drain reprocesses messages.
-///
-/// S22: Added shop column for per-shop atomic dedupe.
-/// Note: The unique index on (shop, webhook_id) WHERE shop IS NOT NULL is
-/// created in the migration, not via Prisma @@unique (which would create
-/// a non-partial index that drifts from the migration's partial index).
 ///
 /// Note: This table is created by the S6 migration, not Prisma.
 /// It's included here to keep schema.prisma in sync with the database.
@@ -536,8 +531,6 @@ model S6ProcessedWebhook {
   topic       String
   resourceGid String   @map("resource_gid")
   processedAt DateTime @default(now()) @map("processed_at") @db.Timestamptz(3)
-  /// Shop domain for per-shop deduplication (S22). NULL for legacy rows.
-  shop        String?
 
   @@index([processedAt])
   @@map("s6_processed_webhooks")
@@ -670,8 +663,6 @@ model S8DraftOrder {
 /// Stores messages that exceeded max retry attempts for later review
 /// and potential reprocessing.
 ///
-/// S22: Added shop column for shop-scoped messages (enables CASCADE on shop/redact).
-///
 /// Note: This table is created by the S10 migration.
 /// It's included here to keep schema.prisma in sync with the database.
 model S6DeadLetter {
@@ -681,11 +672,8 @@ model S6DeadLetter {
   message        Json
   error          String
   deadLetteredAt DateTime @default(now()) @map("dead_lettered_at") @db.Timestamptz(6)
-  /// Shop domain for shop-scoped dead-letter messages (S22)
-  shop           String?
 
   @@index([originalQueue, deadLetteredAt(sort: Desc)], map: "idx_s6_dead_letter_queue_time")
-  @@index([shop])
   @@map("s6_dead_letter")
 }
 

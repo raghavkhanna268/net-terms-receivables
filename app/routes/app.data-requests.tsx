@@ -2,7 +2,7 @@ import type { LoaderFunctionArgs, HeadersFunction } from "react-router";
 import { useLoaderData, useNavigation } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
-import { getPendingDataRequests } from "~/services/compliance";
+import { getPendingDataRequests, purgeExpiredDataRequests } from "~/services/compliance";
 import { useState } from "react";
 
 /**
@@ -41,6 +41,9 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       error: "Shop not found. Please ensure the app is properly installed.",
     };
   }
+
+  // Purge expired data requests on access (in-app purge for databases without pg_cron)
+  await purgeExpiredDataRequests(sql, shop.id);
 
   const dataRequests = await getPendingDataRequests(sql, shop.id);
 
