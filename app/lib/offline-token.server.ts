@@ -33,7 +33,18 @@ import type { Sql } from "./db-light.server";
 export const REFRESH_THRESHOLD_MS = 5 * 60 * 1000;
 
 /**
+ * Timeout for token refresh HTTP request in milliseconds.
+ * Prevents slow Shopify calls from holding the advisory lock.
+ * On timeout, the error is treated as retryable (network_error).
+ */
+export const TOKEN_REFRESH_TIMEOUT_MS = 5000;
+
+/**
  * Error codes for token refresh failures.
+ *
+ * Note: Missing credentials are handled upstream in shopify-client.server.ts
+ * before calling refreshOfflineTokenIfNeeded, so no "missing_credentials" code
+ * is needed here.
  */
 export type RefreshErrorCode =
   | "no_session"
@@ -42,7 +53,6 @@ export type RefreshErrorCode =
   | "invalid_response"
   | "refresh_persist_failed"
   | "network_error"
-  | "missing_credentials"
   | "unknown";
 
 /**
@@ -458,8 +468,12 @@ async function markSessionNeedsReauthGuarded(
 }
 
 /**
- * Perform the actual token refresh HTTP request.
+ * Perform the actual token refresh HTTP request with timeout.
  * Validates required fields (access_token, expires_in) before returning.
+ *
+ * Uses AbortController to enforce TOKEN_REFRESH_TIMEOUT_MS timeout.
+ * On timeout, returns network_error (retryable) to release the advisory lock
+ * quickly instead of blocking other callers.
  *
  * @see https://shopify.dev/docs/apps/build/authentication-authorization/access-tokens#token-refresh
  */
@@ -467,7 +481,8 @@ async function performTokenRefresh(
   shop: string,
   refreshToken: string,
   clientId: string,
-  clientSecret: string
+  clientSecret: string,
+  timeoutMs: number = TOKEN_REFRESH_TIMEOUT_MS
 ): Promise<TokenRefreshResult> {
   const url = `https://${shop}/admin/oauth/access_token`;
 
@@ -478,6 +493,9 @@ async function performTokenRefresh(
     refresh_token: refreshToken,
   });
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
   try {
     const response = await fetch(url, {
       method: "POST",
@@ -486,7 +504,10 @@ async function performTokenRefresh(
         Accept: "application/json",
       },
       body: body.toString(),
+      signal: controller.signal,
     });
+
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const errorBody = (await response.json().catch(() => ({}))) as TokenErrorResponse;
@@ -536,6 +557,17 @@ async function performTokenRefresh(
       scope: typeof data.scope === "string" ? data.scope : null,
     };
   } catch (err) {
+    clearTimeout(timeoutId);
+
+    // Check if this was an abort (timeout)
+    if (err instanceof Error && err.name === "AbortError") {
+      return {
+        success: false,
+        errorCode: "network_error",
+        error: `Token refresh timed out for shop ${shop} (>${timeoutMs}ms). Retryable.`,
+      };
+    }
+
     return {
       success: false,
       errorCode: "network_error",

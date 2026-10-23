@@ -537,6 +537,91 @@ describeWithDb("concurrent refresh safety (CAS)", () => {
     await sql.end();
   });
 
+  /**
+   * P1-1 REGRESSION TEST: CAS loser getting invalid_grant must NOT set needsReauth
+   * on a healthy shop. Both callers should end up with the winner's token.
+   *
+   * Scenario:
+   * 1. Two concurrent callers attempt to refresh the same session
+   * 2. First caller wins and successfully refreshes the token
+   * 3. Second caller gets invalid_grant (refresh token was single-use)
+   * 4. Second caller should detect that tokens changed and use winner's token
+   * 5. needsReauth should NOT be set (shop is healthy)
+   */
+  it("P1-1: CAS loser getting invalid_grant must not set needsReauth (uses winner's token)", async () => {
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
+    await sql`
+      INSERT INTO "Session" (
+        id, shop, state, "isOnline", scope, expires, "accessToken",
+        "refreshToken", "refreshTokenExpires", "needsReauth"
+      ) VALUES (
+        ${TEST_SESSION_ID}, ${TEST_SHOP}, 'state', false, 'read_products',
+        ${twoMinutesAgo.toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        'shpat_old_token',
+        'shprt_single_use_refresh_token',
+        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        false
+      )
+    `;
+
+    let callCount = 0;
+    // First call succeeds, second call gets invalid_grant (single-use token already used)
+    global.fetch = vi.fn().mockImplementation(async () => {
+      callCount++;
+      const myCallNumber = callCount;
+
+      // Add delay to simulate concurrent execution
+      await new Promise((resolve) => setTimeout(resolve, myCallNumber === 1 ? 10 : 50));
+
+      if (myCallNumber === 1) {
+        // First caller wins
+        return {
+          ok: true,
+          json: () => Promise.resolve({
+            access_token: "shpat_winner_token",
+            expires_in: 3600,
+            refresh_token: "shprt_new_refresh_token",
+            refresh_token_expires_in: 7776000,
+            scope: "read_products",
+          }),
+        };
+      } else {
+        // Second caller gets invalid_grant because refresh token was single-use
+        return {
+          ok: false,
+          status: 400,
+          json: () => Promise.resolve({
+            error: "invalid_grant",
+            error_description: "The refresh token is invalid or expired",
+          }),
+        };
+      }
+    }) as unknown as typeof fetch;
+
+    // Launch two concurrent refresh attempts
+    const results = await Promise.all([
+      refreshOfflineTokenIfNeeded(sql, TEST_SHOP, TEST_CLIENT_ID, TEST_CLIENT_SECRET),
+      refreshOfflineTokenIfNeeded(sql, TEST_SHOP, TEST_CLIENT_ID, TEST_CLIENT_SECRET),
+    ]);
+
+    // CRITICAL: Both should succeed - loser should detect winner and use their token
+    expect(results[0].success).toBe(true);
+    expect(results[1].success).toBe(true);
+
+    // Both should return the winner's token
+    expect(results[0].accessToken).toBe("shpat_winner_token");
+    expect(results[1].accessToken).toBe("shpat_winner_token");
+
+    // CRITICAL: needsReauth must NOT be set (shop is healthy, winner refreshed successfully)
+    const rows = await sql<Array<{ accessToken: string; needsReauth: boolean }>>`
+      SELECT "accessToken", "needsReauth"
+      FROM "Session"
+      WHERE id = ${TEST_SESSION_ID}
+    `;
+    expect(rows[0].accessToken).toBe("shpat_winner_token");
+    expect(rows[0].needsReauth).toBe(false);
+  });
+
   it("CAS race: winner's token is used by all callers", async () => {
     // Create a session with an expired token
     const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);

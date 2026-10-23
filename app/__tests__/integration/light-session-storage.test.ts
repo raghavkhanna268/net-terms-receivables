@@ -402,6 +402,61 @@ describeWithDb("Light Session Storage Integration", () => {
     const result = await sessionStorage.deleteSessions([]);
     expect(result).toBe(true);
   });
+
+  /**
+   * P1-2 REGRESSION TEST: storeSession must clear needsReauth flag.
+   *
+   * When a session is stored (upsert), needsReauth should always be reset to false.
+   * This prevents a stale needsReauth=true flag from persisting after a successful
+   * token refresh or session update.
+   *
+   * Scenario:
+   * 1. Create a session in the database with needsReauth=true (simulating previous
+   *    invalid_grant that marked the shop as needing re-auth)
+   * 2. Call storeSession (simulating a successful OAuth flow or token update)
+   * 3. Verify needsReauth is cleared to false
+   */
+  it("P1-2: storeSession clears needsReauth flag (light storage)", async () => {
+    // First, insert a session directly with needsReauth=true
+    await sql`
+      INSERT INTO "Session" (
+        id, shop, state, "isOnline", scope, "accessToken", "needsReauth"
+      ) VALUES (
+        ${TEST_SESSION_ID},
+        ${TEST_SHOP},
+        'test-state',
+        false,
+        'read_products',
+        'shpat_old_token',
+        true
+      )
+    `;
+
+    // Verify needsReauth is true
+    const beforeRows = await sql<Array<{ needsReauth: boolean }>>`
+      SELECT "needsReauth" FROM "Session" WHERE id = ${TEST_SESSION_ID}
+    `;
+    expect(beforeRows[0].needsReauth).toBe(true);
+
+    // Create a Session object and call storeSession (upsert)
+    const session = new Session({
+      id: TEST_SESSION_ID,
+      shop: TEST_SHOP,
+      state: "updated-state",
+      isOnline: false,
+      accessToken: "shpat_new_token",
+      scope: "read_products",
+    });
+
+    await sessionStorage.storeSession(session);
+
+    // CRITICAL: needsReauth must be cleared to false
+    const afterRows = await sql<Array<{ needsReauth: boolean; accessToken: string }>>`
+      SELECT "needsReauth", "accessToken" FROM "Session" WHERE id = ${TEST_SESSION_ID}
+    `;
+    expect(afterRows[0].needsReauth).toBe(false);
+    expect(afterRows[0].accessToken).toBe("shpat_new_token");
+  });
 });
 
 /**
