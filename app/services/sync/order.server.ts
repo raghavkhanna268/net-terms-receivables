@@ -184,7 +184,8 @@ export function mapOrderToInvoice(
   status: "open" | "paid" | "cancelled";
 } {
   const total = order.totalPriceSet?.shopMoney.amount ?? "0.00";
-  const issuedAt = new Date(order.createdAt);
+  // Use processedAt if available (for backdated orders via orderCreate), else createdAt
+  const issuedAt = new Date(order.processedAt ?? order.createdAt);
 
   // Extract due date from payment schedule
   let dueAt: Date | null = null;

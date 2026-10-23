@@ -191,6 +191,7 @@ export function bulkOrderToShopifyOrder(order: BulkOrderLine): ShopifyOrder {
     id: order.id,
     name: order.name,
     createdAt: order.createdAt,
+    processedAt: order.processedAt,
     cancelledAt: order.cancelledAt,
     closedAt: order.closedAt,
     displayFinancialStatus: order.displayFinancialStatus,

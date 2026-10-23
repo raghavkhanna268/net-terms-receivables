@@ -703,18 +703,39 @@ describe("Idempotency", () => {
 });
 
 describe("(2) DB seeding idempotent - no duplicate rows", () => {
-  it("SQL uses ON CONFLICT DO UPDATE (idempotent upsert)", () => {
-    // The seedDatabase function uses ON CONFLICT clauses
-    // We can't easily test actual DB here, but we verify the SQL pattern is correct
-    // by checking that the function exists and would use upsert logic
+  it("SQL uses ON CONFLICT DO UPDATE (idempotent upsert)", async () => {
+    // Read seed.ts and verify it contains ON CONFLICT DO UPDATE patterns
+    // This ensures the idempotency requirement is met
+    const fs = await import("fs/promises");
+    const path = await import("path");
     
-    // The seed.ts file contains these patterns (verified by reading the source):
-    // - INSERT INTO "Shop" ... ON CONFLICT (domain) DO UPDATE SET
-    // - INSERT INTO "AccountSource" ... ON CONFLICT ("shopId", tag) DO UPDATE SET
-    // - INSERT INTO "BuyerAccount" ... ON CONFLICT ("shopId", "companyLocationId") DO UPDATE SET
+    const seedPath = path.resolve(__dirname, "../seed.ts");
+    const seedContent = await fs.readFile(seedPath, "utf-8");
+
+    // Verify Shop upsert uses ON CONFLICT (domain)
+    expect(seedContent).toMatch(/ON CONFLICT \(domain\) DO UPDATE SET/);
+
+    // Verify AccountSource upsert uses ON CONFLICT ("shopId", tag)
+    expect(seedContent).toMatch(/ON CONFLICT \("shopId", tag\) DO UPDATE SET/);
+
+    // Verify BuyerAccount upsert uses ON CONFLICT ("shopId", "companyLocationId")
+    expect(seedContent).toMatch(/ON CONFLICT \("shopId", "companyLocationId"\) DO UPDATE SET/);
+  });
+
+  it("printed SQL also uses ON CONFLICT (for --dry-run idempotency)", async () => {
+    // The printSqlStatements function also generates idempotent SQL
+    const fs = await import("fs/promises");
+    const path = await import("path");
     
-    // This test documents the requirement and will fail if someone removes the ON CONFLICT
-    expect(true).toBe(true);
+    const seedPath = path.resolve(__dirname, "../seed.ts");
+    const seedContent = await fs.readFile(seedPath, "utf-8");
+
+    // Count ON CONFLICT occurrences - at least 5:
+    // - 3 in seedDatabase (Shop, AccountSource, BuyerAccount)
+    // - 2 in printSqlStatements (Shop, AccountSource for each location term)
+    const onConflictMatches = seedContent.match(/ON CONFLICT/g);
+    expect(onConflictMatches).not.toBeNull();
+    expect(onConflictMatches!.length).toBeGreaterThanOrEqual(5);
   });
 });
 
