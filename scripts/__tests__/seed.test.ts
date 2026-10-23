@@ -16,7 +16,6 @@ import {
   findCompanyByExternalId,
   findOrderByTag,
   formatCurrency,
-  seedDatabase,
   printDatabaseSeedSQL,
   seedTaggedCustomerOrders,
   TAGGED_CUSTOMER_SEEDS,
