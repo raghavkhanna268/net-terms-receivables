@@ -232,6 +232,16 @@ export async function refreshOfflineTokenIfNeeded(
       };
     }
 
+    // TypeScript doesn't narrow from success check, so validate accessToken
+    const newAccessToken = refreshResult.accessToken;
+    if (!newAccessToken) {
+      return {
+        success: false,
+        errorCode: "invalid_response",
+        error: `Token refresh returned empty access_token for shop ${shop}`,
+      };
+    }
+
     // Calculate new expiry times with validation
     const now = new Date();
     const expiresIn = refreshResult.expiresIn;
@@ -266,7 +276,7 @@ export async function refreshOfflineTokenIfNeeded(
       await tx`
         UPDATE "Session"
         SET
-          "accessToken" = ${refreshResult.accessToken},
+          "accessToken" = ${newAccessToken},
           expires = ${newExpires.toISOString()}::timestamptz AT TIME ZONE 'UTC',
           "refreshToken" = ${newRefreshToken},
           "refreshTokenExpires" = ${refreshTokenExpiresStr}::timestamptz AT TIME ZONE 'UTC',
@@ -285,7 +295,7 @@ export async function refreshOfflineTokenIfNeeded(
 
     return {
       success: true,
-      accessToken: refreshResult.accessToken,
+      accessToken: newAccessToken,
       expires: newExpires,
       wasRefreshed: true,
     };
