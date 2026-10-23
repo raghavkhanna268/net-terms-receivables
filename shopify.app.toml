@@ -6,10 +6,11 @@ application_url = "https://net-terms-receivables.raghavkhanna.workers.dev"
 embedded = true
 
 [access_scopes]
-# Start with no scopes - add only when features require them
-# B2B wholesale net-terms will eventually need: read_orders, read_customers
-# Request protected customer data scopes only after filing DPDP form
-scopes = ""
+# S6: Scopes for company/order sync
+# - read_companies: Access B2B companies and company locations
+# - read_orders: Access orders (last 60 days without read_all_orders)
+# - read_payment_terms: Access payment terms on orders and company locations
+scopes = "read_companies,read_orders,read_payment_terms"
 
 [webhooks]
 api_version = "2026-10"
@@ -27,6 +28,28 @@ api_version = "2026-10"
   [[webhooks.subscriptions]]
   uri = "/webhooks/compliance"
   compliance_topics = ["customers/data_request", "customers/redact", "shop/redact"]
+
+  # S6: Company sync webhooks (B2B buyer accounts)
+  # Maps Company/CompanyLocation to BuyerAccount (kind=COMPANY)
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/companies"
+  topics = ["companies/create", "companies/update", "companies/delete"]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/company_locations"
+  topics = ["company_locations/create", "company_locations/update", "company_locations/delete"]
+
+  # S6: Order sync webhooks (net-terms invoices)
+  # Tracks orders with payment terms for invoice management
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/orders"
+  topics = ["orders/create", "orders/updated", "orders/cancelled", "orders/paid"]
+
+  # S6: Bulk operations webhook (backfill completion)
+  # Triggers JSONL download/processing for company and order backfills
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/bulk_operations/finish"
+  topics = ["bulk_operations/finish"]
 
 [auth]
 redirect_urls = ["https://net-terms-receivables.raghavkhanna.workers.dev/auth/callback"]
