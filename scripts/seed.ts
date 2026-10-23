@@ -71,7 +71,12 @@ import postgres from "postgres";
 
 export interface GraphQLResponse<T> {
   data?: T;
-  errors?: Array<{ message: string; extensions?: { code?: string }; locations?: Array<{ line: number; column: number }> }>;
+  errors?: Array<{
+    message: string;
+    path?: Array<string | number>;
+    extensions?: { code?: string };
+    locations?: Array<{ line: number; column: number }>;
+  }>;
   extensions?: {
     cost?: {
       requestedQueryCost: number;
@@ -227,6 +232,7 @@ export interface SeedState {
   createdCount: { companies: number; locations: number; orders: number; dbRules: number; dbAccounts: number };
   skippedCount: { companies: number; orders: number };
   deletedCount: { companies: number; orders: number };
+  failedCount: { locations: number; orders: number };
   ordersWithShopifyTerms: number;
   ordersWithoutShopifyTerms: number;
   overdueOrdersCount: number;
@@ -243,19 +249,56 @@ export function formatCurrency(amount: number, currencyCode: string): string {
   return `${currencyCode} ${amount.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
 }
 
-export interface GraphQLOptions {
+
+export interface GraphQLHelperOptions {
   isMutation?: boolean;
+  mutationName?: string;
+}
+
+export function logGraphQLErrors<T>(
+  response: GraphQLResponse<T>,
+  mutationName?: string
+): void {
+  if (response.errors && response.errors.length > 0) {
+    console.error(`  ❌ GraphQL errors${mutationName ? ` in ${mutationName}` : ""}:`);
+    for (const err of response.errors) {
+      const pathStr = err.path?.join(".") ?? "";
+      const codeStr = err.extensions?.code ? ` [${err.extensions.code}]` : "";
+      console.error(`     - ${err.message}${pathStr ? ` (path: ${pathStr})` : ""}${codeStr}`);
+    }
+  }
+
+  if (response.data === null || response.data === undefined) {
+    console.error(`  ❌ GraphQL response data is null${mutationName ? ` for ${mutationName}` : ""}`);
+  } else if (mutationName && typeof response.data === "object") {
+    const data = response.data as Record<string, unknown>;
+    if (data[mutationName] === null || data[mutationName] === undefined) {
+      console.error(`  ❌ Mutation root field '${mutationName}' is null`);
+    }
+  }
+}
+
+export function logUserErrors(userErrors: UserError[], context?: string): void {
+  if (userErrors.length > 0) {
+    console.error(`  ❌ User errors${context ? ` in ${context}` : ""}:`);
+    for (const err of userErrors) {
+      const fieldStr = err.field?.join(".") ?? "";
+      const codeStr = err.code ? ` [${err.code}]` : "";
+      console.error(`     - ${err.message}${fieldStr ? ` (field: ${fieldStr})` : ""}${codeStr}`);
+    }
+  }
 }
 
 export async function graphql<T>(
   state: SeedState,
   query: string,
   variables?: Record<string, unknown>,
-  options?: GraphQLOptions
+  options?: GraphQLHelperOptions
 ): Promise<GraphQLResponse<T>> {
   const url = `https://${state.shop}/admin/api/${API_VERSION}/graphql.json`;
   let lastError: Error | null = null;
   const isMutation = options?.isMutation ?? false;
+  const mutationName = options?.mutationName;
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
@@ -290,6 +333,9 @@ export async function graphql<T>(
         await sleep(delay);
         continue;
       }
+
+      // Log errors and data issues for better debugging
+      logGraphQLErrors(json, mutationName);
 
       const cost = json.extensions?.cost;
       if (cost) {
@@ -574,7 +620,8 @@ export async function seedCompanies(state: SeedState): Promise<void> {
               console.log(`    ✅ Created location ${loc.suffix}`);
               state.createdCount.locations++;
             } else {
-              console.error(`    ❌ Failed to create location ${loc.suffix}`);
+              state.failedCount.locations++;
+              state.errors.push(`Failed to create location ${loc.suffix} for ${seed.name}`);
             }
           }
         }
@@ -644,6 +691,28 @@ export async function findCompanyByExternalId(
   return result.data?.companies.nodes[0] ?? null;
 }
 
+/**
+ * Company creation mutation.
+ * Note: India addresses require zoneCode (state code like MH for Maharashtra).
+ */
+export const COMPANY_CREATE_MUTATION = `
+  mutation CreateCompany($input: CompanyCreateInput!) {
+    companyCreate(input: $input) {
+      company {
+        id
+        name
+        locations(first: 1) {
+          edges { node { id name } }
+        }
+        contacts(first: 1) {
+          edges { node { id customer { id email } } }
+        }
+      }
+      userErrors { field message code }
+    }
+  }
+`;
+
 export async function createCompanyWithLocations(
   state: SeedState,
   seed: (typeof COMPANY_SEEDS)[number],
@@ -654,28 +723,9 @@ export async function createCompanyWithLocations(
     (t) => t.paymentTermsType === "NET" && t.dueInDays === firstLoc.dueInDays
   );
 
-  // Mutations must not retry on network errors (may have executed)
-  const createMutation = `
-    mutation CreateCompany($input: CompanyCreateInput!) {
-      companyCreate(input: $input) {
-        company {
-          id
-          name
-          locations(first: 1) {
-            edges { node { id name } }
-          }
-          contacts(first: 1) {
-            edges { node { id customer { id email } } }
-          }
-        }
-        userErrors { field message code }
-      }
-    }
-  `;
-
   const createResult = await graphql<{
     companyCreate: { company: CompanyNode | null; userErrors: UserError[] };
-  }>(state, createMutation, {
+  }>(state, COMPANY_CREATE_MUTATION, {
     input: {
       company: { name: seed.name, externalId },
       companyLocation: {
@@ -685,6 +735,7 @@ export async function createCompanyWithLocations(
           lastName: seed.contact.lastName,
           address1: "123 Business Street",
           city: "Mumbai",
+          zoneCode: "MH",
           countryCode: "IN",
           zip: "400001",
         },
@@ -699,16 +750,21 @@ export async function createCompanyWithLocations(
         lastName: seed.contact.lastName,
       },
     },
-  }, { isMutation: true });
+  }, { isMutation: true, mutationName: "companyCreate" });
+
+  if (createResult.errors) {
+    console.error(`    ❌ Failed to create company ${seed.name}: GraphQL errors`);
+    return null;
+  }
 
   if (createResult.data?.companyCreate.userErrors.length) {
-    console.error(`    ❌ Error creating ${seed.name}:`, createResult.data.companyCreate.userErrors);
+    logUserErrors(createResult.data.companyCreate.userErrors, `createCompanyWithLocations(${seed.name})`);
     return null;
   }
 
   const company = createResult.data?.companyCreate.company;
   if (!company) {
-    console.error(`    ❌ No company returned for ${seed.name}`);
+    console.error(`    ❌ No company returned for ${seed.name} (companyCreate returned null)`);
     return null;
   }
 
@@ -732,6 +788,9 @@ export async function createCompanyWithLocations(
       locations.set(loc.dueInDays, locationId);
       console.log(`    → Location ${loc.suffix}: created`);
       state.createdCount.locations++;
+    } else {
+      state.failedCount.locations++;
+      state.errors.push(`Failed to create location ${loc.suffix} for ${seed.name}`);
     }
   }
 
@@ -742,6 +801,22 @@ export async function createCompanyWithLocations(
   };
 }
 
+/**
+ * Company location creation mutation.
+ * Note: India addresses require zoneCode (state code like MH for Maharashtra).
+ */
+export const COMPANY_LOCATION_CREATE_MUTATION = `
+  mutation CreateCompanyLocation($companyId: ID!, $input: CompanyLocationInput!) {
+    companyLocationCreate(companyId: $companyId, input: $input) {
+      companyLocation {
+        id
+        name
+      }
+      userErrors { field message code }
+    }
+  }
+`;
+
 async function createCompanyLocation(
   state: SeedState,
   companyId: string,
@@ -749,25 +824,12 @@ async function createCompanyLocation(
   loc: { suffix: string; dueInDays: number },
   paymentTermsTemplateId?: string
 ): Promise<string | null> {
-  // Mutations must not retry on network errors (may have executed)
-  const mutation = `
-    mutation CreateCompanyLocation($companyId: ID!, $input: CompanyLocationInput!) {
-      companyLocationCreate(companyId: $companyId, companyLocation: $input) {
-        companyLocation {
-          id
-          name
-        }
-        userErrors { field message code }
-      }
-    }
-  `;
-
   const result = await graphql<{
     companyLocationCreate: {
       companyLocation: { id: string; name: string } | null;
       userErrors: UserError[];
     };
-  }>(state, mutation, {
+  }>(state, COMPANY_LOCATION_CREATE_MUTATION, {
     companyId,
     input: {
       name: `${companyName} - ${loc.suffix}`,
@@ -776,6 +838,7 @@ async function createCompanyLocation(
         lastName: loc.suffix,
         address1: `${loc.dueInDays} Payment Lane`,
         city: "Mumbai",
+        zoneCode: "MH",
         countryCode: "IN",
         zip: "400002",
       },
@@ -784,14 +847,25 @@ async function createCompanyLocation(
         paymentTermsTemplateId,
       } : undefined,
     },
-  }, { isMutation: true });
+  }, { isMutation: true, mutationName: "companyLocationCreate" });
 
-  if (result.data?.companyLocationCreate.userErrors.length) {
-    console.error(`    ⚠️  Error creating location ${loc.suffix}:`, result.data.companyLocationCreate.userErrors);
+  if (result.errors) {
+    console.error(`    ❌ Failed to create location ${loc.suffix}: GraphQL errors`);
     return null;
   }
 
-  return result.data?.companyLocationCreate.companyLocation?.id ?? null;
+  if (result.data?.companyLocationCreate.userErrors.length) {
+    logUserErrors(result.data.companyLocationCreate.userErrors, `createCompanyLocation(${loc.suffix})`);
+    return null;
+  }
+
+  const location = result.data?.companyLocationCreate.companyLocation;
+  if (!location) {
+    console.error(`    ❌ No location returned for ${loc.suffix} (companyLocationCreate returned null)`);
+    return null;
+  }
+
+  return location.id;
 }
 
 // -- Seeding: Orders --
@@ -871,6 +945,7 @@ export async function seedOrders(state: SeedState): Promise<void> {
     });
 
     if (!order) {
+      state.failedCount.orders++;
       state.errors.push(`Failed to create order ${orderIndex}`);
       continue;
     }
@@ -1094,6 +1169,7 @@ export async function seedTaggedCustomerOrders(state: SeedState): Promise<void> 
     });
 
     if (!order) {
+      state.failedCount.orders++;
       state.errors.push(`Failed to create tagged order ${orderIndex}`);
       continue;
     }
@@ -1113,6 +1189,22 @@ export async function seedTaggedCustomerOrders(state: SeedState): Promise<void> 
  * Create an order for a tagged (non-B2B) customer.
  * Similar to createOrder but without companyLocationId.
  */
+export const TAGGED_CUSTOMER_ORDER_CREATE_MUTATION = `
+  mutation CreateOrder($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
+    orderCreate(order: $order, options: $options) {
+      order {
+        id
+        name
+        displayFinancialStatus
+        totalPriceSet {
+          shopMoney { amount currencyCode }
+        }
+      }
+      userErrors { field message code }
+    }
+  }
+`;
+
 async function createTaggedCustomerOrder(
   state: SeedState,
   options: {
@@ -1124,33 +1216,17 @@ async function createTaggedCustomerOrder(
     expectedTermsDays: number;
   }
 ): Promise<{ id: string; name: string } | null> {
-  const mutation = `
-    mutation CreateOrder($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
-      orderCreate(order: $order, options: $options) {
-        order {
-          id
-          name
-          financialStatus
-          totalPriceSet {
-            shopMoney { amount currencyCode }
-          }
-        }
-        userErrors { field message code }
-      }
-    }
-  `;
-
   const result = await graphql<{
     orderCreate: {
       order: {
         id: string;
         name: string;
-        financialStatus: string;
+        displayFinancialStatus: string;
         totalPriceSet: { shopMoney: { amount: string; currencyCode: string } };
       } | null;
       userErrors: UserError[];
     };
-  }>(state, mutation, {
+  }>(state, TAGGED_CUSTOMER_ORDER_CREATE_MUTATION, {
     order: {
       tags: [SEED_TAG, options.orderKey],
       customer: { toAssociate: { id: options.customerId } },
@@ -1172,6 +1248,7 @@ async function createTaggedCustomerOrder(
         lastName: "Customer",
         address1: "123 Test Street",
         city: "Mumbai",
+        zoneCode: "MH",
         countryCode: "IN",
         zip: "400001",
       },
@@ -1180,6 +1257,7 @@ async function createTaggedCustomerOrder(
         lastName: "Customer",
         address1: "123 Test Street",
         city: "Mumbai",
+        zoneCode: "MH",
         countryCode: "IN",
         zip: "400001",
       },
@@ -1189,21 +1267,20 @@ async function createTaggedCustomerOrder(
       sendFulfillmentReceipt: false,
       inventoryBehaviour: "BYPASS",
     },
-  }, { isMutation: true });
+  }, { isMutation: true, mutationName: "orderCreate" });
 
   if (result.errors) {
-    console.log(`    ⚠️  GraphQL error: ${result.errors.map(e => e.message).join(", ")}`);
     return null;
   }
 
   if (result.data?.orderCreate.userErrors.length) {
-    console.error(`    ❌ Error creating order:`, result.data.orderCreate.userErrors);
+    logUserErrors(result.data.orderCreate.userErrors, "createTaggedCustomerOrder");
     return null;
   }
 
   const order = result.data?.orderCreate.order;
   if (!order) {
-    console.error(`    ❌ No order returned`);
+    console.error(`    ❌ No order returned from createTaggedCustomerOrder`);
     return null;
   }
 
@@ -1216,6 +1293,36 @@ async function createTaggedCustomerOrder(
     name: order.name,
   };
 }
+
+/**
+ * B2B order creation mutation.
+ * Uses displayFinancialStatus (2026-10 schema) instead of financialStatus.
+ */
+export const B2B_ORDER_CREATE_MUTATION = `
+  mutation CreateOrder($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
+    orderCreate(order: $order, options: $options) {
+      order {
+        id
+        name
+        displayFinancialStatus
+        totalPriceSet {
+          shopMoney { amount currencyCode }
+        }
+        paymentTerms {
+          paymentTermsName
+          paymentTermsType
+          dueInDays
+          paymentSchedules(first: 1) {
+            nodes {
+              dueAt
+            }
+          }
+        }
+      }
+      userErrors { field message code }
+    }
+  }
+`;
 
 /**
  * Create a B2B order using orderCreate with custom line items.
@@ -1244,45 +1351,18 @@ export async function createOrder(
     expectedTermsDays: number;
   }
 ): Promise<{ id: string; name: string } | null> {
-  // Mutations must not retry on network errors (may have executed)
-  const mutation = `
-    mutation CreateOrder($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
-      orderCreate(order: $order, options: $options) {
-        order {
-          id
-          name
-          financialStatus
-          totalPriceSet {
-            shopMoney { amount currencyCode }
-          }
-          paymentTerms {
-            paymentTermsName
-            paymentTermsType
-            dueInDays
-            paymentSchedules(first: 1) {
-              nodes {
-                dueAt
-              }
-            }
-          }
-        }
-        userErrors { field message code }
-      }
-    }
-  `;
-
   const result = await graphql<{
     orderCreate: {
       order: {
         id: string;
         name: string;
-        financialStatus: string;
+        displayFinancialStatus: string;
         totalPriceSet: { shopMoney: { amount: string; currencyCode: string } };
         paymentTerms: OrderPaymentTerms | null;
       } | null;
       userErrors: UserError[];
     };
-  }>(state, mutation, {
+  }>(state, B2B_ORDER_CREATE_MUTATION, {
     // OrderCreateCustomerInput in 2026-10 requires toAssociate or toUpsert, not direct id
     // @see https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateCustomerInput
     order: {
@@ -1307,6 +1387,7 @@ export async function createOrder(
         lastName: "Billing",
         address1: "123 Business Street",
         city: "Mumbai",
+        zoneCode: "MH",
         countryCode: "IN",
         zip: "400001",
       },
@@ -1315,6 +1396,7 @@ export async function createOrder(
         lastName: "Shipping",
         address1: "123 Business Street",
         city: "Mumbai",
+        zoneCode: "MH",
         countryCode: "IN",
         zip: "400001",
       },
@@ -1324,21 +1406,20 @@ export async function createOrder(
       sendFulfillmentReceipt: false,
       inventoryBehaviour: "BYPASS",
     },
-  }, { isMutation: true });
+  }, { isMutation: true, mutationName: "orderCreate" });
 
   if (result.errors) {
-    console.error(`    ❌ GraphQL errors:`, result.errors);
     return null;
   }
 
   if (result.data?.orderCreate.userErrors.length) {
-    console.error(`    ❌ Error creating order:`, result.data.orderCreate.userErrors);
+    logUserErrors(result.data.orderCreate.userErrors, "createOrder");
     return null;
   }
 
   const order = result.data?.orderCreate.order;
   if (!order) {
-    console.error(`    ❌ No order returned`);
+    console.error(`    ❌ No order returned from createOrder`);
     return null;
   }
 
@@ -1574,6 +1655,7 @@ export async function main(): Promise<void> {
     createdCount: { companies: 0, locations: 0, orders: 0, dbRules: 0, dbAccounts: 0 },
     skippedCount: { companies: 0, orders: 0 },
     deletedCount: { companies: 0, orders: 0 },
+    failedCount: { locations: 0, orders: 0 },
     ordersWithShopifyTerms: 0,
     ordersWithoutShopifyTerms: 0,
     overdueOrdersCount: 0,
@@ -1639,6 +1721,13 @@ export async function main(): Promise<void> {
   console.log(`    Companies:    ${state.skippedCount.companies}`);
   console.log(`    Orders:       ${state.skippedCount.orders}`);
 
+  const totalFailures = state.failedCount.locations + state.failedCount.orders;
+  if (totalFailures > 0) {
+    console.log("\n  ❌ Failed:");
+    console.log(`    Locations:    ${state.failedCount.locations}`);
+    console.log(`    Orders:       ${state.failedCount.orders}`);
+  }
+
   if (!dryRun && state.createdCount.orders > 0) {
     console.log("\n  Payment Terms (WARNING if counts differ):");
     console.log(`    Inherited from Shopify: ${state.ordersWithShopifyTerms}`);
@@ -1669,6 +1758,11 @@ export async function main(): Promise<void> {
     for (const err of state.errors) {
       console.log(`    ❌ ${err}`);
     }
+  }
+
+  // Exit non-zero if any failures occurred
+  if (totalFailures > 0 || state.errors.length > 0) {
+    console.log(`\n❌ Seed completed with ${totalFailures} failure(s) and ${state.errors.length} error(s)`);
     process.exit(1);
   }
 

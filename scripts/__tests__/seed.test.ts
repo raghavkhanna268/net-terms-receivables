@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from "vitest";
 import {
   SEED_TAG,
   SEED_PREFIX,
@@ -7,6 +7,8 @@ import {
   LOCATION_TERMS,
   API_VERSION,
   graphql,
+  logGraphQLErrors,
+  logUserErrors,
   checkDevStore,
   checkB2BSupport,
   fetchPaymentTermsTemplates,
@@ -20,10 +22,18 @@ import {
   seedTaggedCustomerOrders,
   TAGGED_CUSTOMER_SEEDS,
   TAGGED_ORDER_DISTRIBUTION,
+  B2B_ORDER_CREATE_MUTATION,
+  TAGGED_CUSTOMER_ORDER_CREATE_MUTATION,
+  COMPANY_CREATE_MUTATION,
+  COMPANY_LOCATION_CREATE_MUTATION,
   type SeedState,
   type GraphQLResponse,
+  type UserError,
 } from "../seed";
 import { inferDueDate } from "~/lib/due-date";
+import { readFileSync } from "fs";
+import { resolve } from "path";
+import { buildClientSchema, parse, validate, type GraphQLSchema } from "graphql";
 
 /**
  * Unit tests for the seed script (orderCreate with processedAt version).
@@ -66,6 +76,7 @@ function createMockState(overrides: Partial<SeedState> = {}): SeedState {
     createdCount: { companies: 0, locations: 0, orders: 0, dbRules: 0, dbAccounts: 0 },
     skippedCount: { companies: 0, orders: 0 },
     deletedCount: { companies: 0, orders: 0 },
+    failedCount: { locations: 0, orders: 0 },
     ordersWithShopifyTerms: 0,
     ordersWithoutShopifyTerms: 0,
     overdueOrdersCount: 0,
@@ -1114,5 +1125,166 @@ describe("Dynamic Currency", () => {
   it("formatCurrency formats amounts with currency code", () => {
     expect(formatCurrency(50000, "USD")).toBe("USD 50,000");
     expect(formatCurrency(100000, "INR")).toBe("INR 100,000");
+  });
+});
+
+describe("GraphQL Document Validation against Admin API 2026-10 Schema", () => {
+  let schema: GraphQLSchema;
+
+  beforeAll(() => {
+    const schemaPath = resolve(__dirname, "../../test/fixtures/admin-2026-10.schema.json");
+    const schemaJson = JSON.parse(readFileSync(schemaPath, "utf-8"));
+    schema = buildClientSchema(schemaJson.data);
+  });
+
+  it("B2B_ORDER_CREATE_MUTATION is valid against 2026-10 schema", () => {
+    const document = parse(B2B_ORDER_CREATE_MUTATION);
+    const errors = validate(schema, document);
+    expect(errors).toEqual([]);
+  });
+
+  it("TAGGED_CUSTOMER_ORDER_CREATE_MUTATION is valid against 2026-10 schema", () => {
+    const document = parse(TAGGED_CUSTOMER_ORDER_CREATE_MUTATION);
+    const errors = validate(schema, document);
+    expect(errors).toEqual([]);
+  });
+
+  it("COMPANY_CREATE_MUTATION is valid against 2026-10 schema", () => {
+    const document = parse(COMPANY_CREATE_MUTATION);
+    const errors = validate(schema, document);
+    expect(errors).toEqual([]);
+  });
+
+  it("COMPANY_LOCATION_CREATE_MUTATION is valid against 2026-10 schema", () => {
+    const document = parse(COMPANY_LOCATION_CREATE_MUTATION);
+    const errors = validate(schema, document);
+    expect(errors).toEqual([]);
+  });
+
+  it("rejects the old financialStatus field (pre-fix validation)", () => {
+    const OLD_INVALID_MUTATION = `
+      mutation CreateOrder($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
+        orderCreate(order: $order, options: $options) {
+          order {
+            id
+            name
+            financialStatus
+            totalPriceSet {
+              shopMoney { amount currencyCode }
+            }
+          }
+          userErrors { field message code }
+        }
+      }
+    `;
+
+    const document = parse(OLD_INVALID_MUTATION);
+    const errors = validate(schema, document);
+
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors.some(e => e.message.includes("financialStatus"))).toBe(true);
+  });
+});
+
+describe("Error Logging Helpers", () => {
+  it("logGraphQLErrors logs top-level errors with path and code", () => {
+    const logSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response: GraphQLResponse<unknown> = {
+      data: null,
+      errors: [
+        { message: "Field does not exist", path: ["orderCreate", "order", "financialStatus"], extensions: { code: "INVALID_FIELD" } },
+      ],
+    };
+
+    logGraphQLErrors(response, "orderCreate");
+
+    expect(logSpy).toHaveBeenCalled();
+    const calls = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    expect(calls).toContain("GraphQL errors");
+    expect(calls).toContain("financialStatus");
+    expect(calls).toContain("INVALID_FIELD");
+
+    logSpy.mockRestore();
+  });
+
+  it("logGraphQLErrors logs when data is null", () => {
+    const logSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response: GraphQLResponse<unknown> = {
+      data: null,
+    };
+
+    logGraphQLErrors(response, "testMutation");
+
+    expect(logSpy).toHaveBeenCalled();
+    const calls = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    expect(calls).toContain("data is null");
+
+    logSpy.mockRestore();
+  });
+
+  it("logGraphQLErrors logs when mutation root field is null", () => {
+    const logSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response: GraphQLResponse<{ orderCreate: null }> = {
+      data: { orderCreate: null },
+    };
+
+    logGraphQLErrors(response, "orderCreate");
+
+    expect(logSpy).toHaveBeenCalled();
+    const calls = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    expect(calls).toContain("'orderCreate' is null");
+
+    logSpy.mockRestore();
+  });
+
+  it("logUserErrors logs user errors with field and code", () => {
+    const logSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const userErrors: UserError[] = [
+      { field: ["input", "companyLocation", "shippingAddress"], message: "Zone code required for IN addresses", code: "INVALID" },
+    ];
+
+    logUserErrors(userErrors, "companyLocationCreate");
+
+    expect(logSpy).toHaveBeenCalled();
+    const calls = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    expect(calls).toContain("User errors");
+    expect(calls).toContain("Zone code required");
+    expect(calls).toContain("input.companyLocation.shippingAddress");
+    expect(calls).toContain("INVALID");
+
+    logSpy.mockRestore();
+  });
+});
+
+describe("India Address Requirements", () => {
+  it("Company addresses include zoneCode MH for Maharashtra", async () => {
+    const fs = await import("fs/promises");
+    const path = await import("path");
+
+    const seedPath = path.resolve(__dirname, "../seed.ts");
+    const seedContent = await fs.readFile(seedPath, "utf-8");
+
+    // Verify shippingAddress blocks include zoneCode: "MH"
+    // For companyCreate
+    expect(seedContent).toMatch(/shippingAddress:\s*\{[\s\S]*?zoneCode:\s*["']MH["']/);
+
+    // For companyLocationCreate
+    expect(seedContent).toMatch(/city:\s*["']Mumbai["'][\s\S]*?zoneCode:\s*["']MH["']/);
+  });
+
+  it("Order addresses include zoneCode MH for Maharashtra", async () => {
+    const fs = await import("fs/promises");
+    const path = await import("path");
+
+    const seedPath = path.resolve(__dirname, "../seed.ts");
+    const seedContent = await fs.readFile(seedPath, "utf-8");
+
+    // Verify billingAddress and shippingAddress in orders include zoneCode
+    const orderAddressMatches = seedContent.match(/billingAddress:\s*\{[^}]+zoneCode:\s*["']MH["']/g);
+    expect(orderAddressMatches?.length).toBeGreaterThanOrEqual(2);
   });
 });
