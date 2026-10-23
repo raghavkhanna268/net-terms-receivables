@@ -1772,11 +1772,13 @@ describeWithDb("Cross-payment invoice over-allocation prevention (P1)", () => {
     // Create invoice with 1000 paise outstanding
     const [invoice] = await sql<{ id: string }[]>`
       INSERT INTO "Invoice" (
-        id, "shopId", "buyerAccountId", "orderId", name, outstanding, status, "createdAt", "updatedAt"
+        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+        "issuedAt", "dueAt", "createdAt", "updatedAt"
       )
       VALUES (
         gen_random_uuid()::text, ${testShopId}, ${testBuyerId},
-        gen_random_uuid()::text, 'INV-CROSS-1', 10.00, 'open', NOW(), NOW()
+        gen_random_uuid()::text, 'INV-CROSS-1', 10.00, 'open', 10.00,
+        NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
       )
       RETURNING id
     `;
@@ -1853,11 +1855,13 @@ describeWithDb("Cross-payment invoice over-allocation prevention (P1)", () => {
     // Create invoice with 1000 paise outstanding
     const [invoice] = await sql<{ id: string }[]>`
       INSERT INTO "Invoice" (
-        id, "shopId", "buyerAccountId", "orderId", name, outstanding, status, "createdAt", "updatedAt"
+        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+        "issuedAt", "dueAt", "createdAt", "updatedAt"
       )
       VALUES (
         gen_random_uuid()::text, ${testShopId}, ${testBuyerId},
-        gen_random_uuid()::text, 'INV-CONCURRENT-CROSS', 10.00, 'open', NOW(), NOW()
+        gen_random_uuid()::text, 'INV-CONCURRENT-CROSS', 10.00, 'open', 10.00,
+        NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
       )
       RETURNING id
     `;
@@ -2006,11 +2010,13 @@ describeWithDb("Pushed allocation handling (P2)", () => {
     // If we had started at 3000 and pushed 1000, outstanding would now be 2000
     const [invoice] = await sql<{ id: string }[]>`
       INSERT INTO "Invoice" (
-        id, "shopId", "buyerAccountId", "orderId", name, outstanding, status, "createdAt", "updatedAt"
+        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+        "issuedAt", "dueAt", "createdAt", "updatedAt"
       )
       VALUES (
         gen_random_uuid()::text, ${testShopId}, ${testBuyerId},
-        gen_random_uuid()::text, 'INV-PUSHED-1', 20.00, 'open', NOW(), NOW()
+        gen_random_uuid()::text, 'INV-PUSHED-1', 30.00, 'open', 20.00,
+        NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
       )
       RETURNING id
     `;
@@ -2085,22 +2091,26 @@ describeWithDb("Pushed allocation handling (P2)", () => {
     // Create two invoices
     const [invoice1] = await sql<{ id: string }[]>`
       INSERT INTO "Invoice" (
-        id, "shopId", "buyerAccountId", "orderId", name, outstanding, status, "createdAt", "updatedAt"
+        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+        "issuedAt", "dueAt", "createdAt", "updatedAt"
       )
       VALUES (
         gen_random_uuid()::text, ${testShopId}, ${testBuyerId},
-        gen_random_uuid()::text, 'INV-PAYMENT-SIDE-1', 10.00, 'open', NOW(), NOW()
+        gen_random_uuid()::text, 'INV-PAYMENT-SIDE-1', 10.00, 'open', 10.00,
+        NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
       )
       RETURNING id
     `;
 
     const [invoice2] = await sql<{ id: string }[]>`
       INSERT INTO "Invoice" (
-        id, "shopId", "buyerAccountId", "orderId", name, outstanding, status, "createdAt", "updatedAt"
+        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+        "issuedAt", "dueAt", "createdAt", "updatedAt"
       )
       VALUES (
         gen_random_uuid()::text, ${testShopId}, ${testBuyerId},
-        gen_random_uuid()::text, 'INV-PAYMENT-SIDE-2', 10.00, 'open', NOW(), NOW()
+        gen_random_uuid()::text, 'INV-PAYMENT-SIDE-2', 10.00, 'open', 10.00,
+        NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
       )
       RETURNING id
     `;
@@ -2225,11 +2235,13 @@ describeWithDb("Already confirmed match error (P3)", () => {
     // Create invoice
     const [invoice] = await sql<{ id: string }[]>`
       INSERT INTO "Invoice" (
-        id, "shopId", "buyerAccountId", "orderId", name, outstanding, status, "createdAt", "updatedAt"
+        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+        "issuedAt", "dueAt", "createdAt", "updatedAt"
       )
       VALUES (
         gen_random_uuid()::text, ${testShopId}, ${testBuyerId},
-        gen_random_uuid()::text, 'INV-ALREADY-CONFIRMED', 10.00, 'open', NOW(), NOW()
+        gen_random_uuid()::text, 'INV-ALREADY-CONFIRMED', 10.00, 'open', 10.00,
+        NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
       )
       RETURNING id
     `;
