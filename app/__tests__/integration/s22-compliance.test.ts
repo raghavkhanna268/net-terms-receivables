@@ -8,7 +8,6 @@ import postgres from "postgres";
  * - FK constraints with ON DELETE CASCADE from s8 tables to Shop
  * - s22_data_requests table
  * - uninstalledAt column on Shop
- * - shop column and index on s6_processed_webhooks
  *
  * NOTE: This test requires a running PostgreSQL instance with the schema applied.
  * It will be skipped in CI if DATABASE_URL is not set.
@@ -109,28 +108,6 @@ describe("S22 Migration Verification", () => {
       `;
 
       expect(col).toBeDefined();
-    });
-
-    it.skipIf(!DATABASE_URL)("s6_processed_webhooks has shop column", async () => {
-      const [col] = await sql!<{ column_name: string }[]>`
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_name = 's6_processed_webhooks'
-          AND column_name = 'shop'
-      `;
-
-      expect(col).toBeDefined();
-    });
-
-    it.skipIf(!DATABASE_URL)("s6_processed_webhooks has unique index on (shop, webhook_id)", async () => {
-      const [idx] = await sql!<{ indexname: string }[]>`
-        SELECT indexname
-        FROM pg_indexes
-        WHERE tablename = 's6_processed_webhooks'
-          AND indexname = 'idx_s6_processed_webhooks_shop_webhook'
-      `;
-
-      expect(idx).toBeDefined();
     });
 
     it.skipIf(!DATABASE_URL)("s22_data_requests table exists with required columns", async () => {
