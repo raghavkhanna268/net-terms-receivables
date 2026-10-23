@@ -10,6 +10,8 @@ import {
   validateCustomerQuery,
   getCustomerQuery,
   getBulkCustomersQuery,
+  escapeTagValue,
+  buildTagFilterQuery,
 } from "../customer-fields.server";
 
 /**
@@ -229,11 +231,105 @@ describe("getCustomerQuery", () => {
   });
 });
 
+describe("escapeTagValue", () => {
+  it("returns simple tags unchanged", () => {
+    expect(escapeTagValue("net-terms")).toBe("net-terms");
+  });
+
+  it("escapes single quotes by doubling them", () => {
+    expect(escapeTagValue("buyer's-special")).toBe("buyer''s-special");
+  });
+
+  it("handles multiple quotes", () => {
+    expect(escapeTagValue("it's-a-buyer's-tag")).toBe("it''s-a-buyer''s-tag");
+  });
+
+  it("handles tags with only a quote", () => {
+    expect(escapeTagValue("'")).toBe("''");
+  });
+
+  it("preserves spaces (Shopify handles quoted tags)", () => {
+    expect(escapeTagValue("net terms")).toBe("net terms");
+  });
+});
+
+describe("buildTagFilterQuery", () => {
+  it("returns null for empty tag rules array", () => {
+    expect(buildTagFilterQuery([])).toBeNull();
+  });
+
+  it("builds query for single tag rule", () => {
+    const query = buildTagFilterQuery([{ tag: "net-terms" }]);
+    expect(query).toBe("tag:'net-terms'");
+  });
+
+  it("builds query for multiple tag rules with OR", () => {
+    const query = buildTagFilterQuery([
+      { tag: "net-terms" },
+      { tag: "gold-tier" },
+    ]);
+    expect(query).toBe("tag:'net-terms' OR tag:'gold-tier'");
+  });
+
+  it("escapes quotes in tag values", () => {
+    const query = buildTagFilterQuery([{ tag: "buyer's" }]);
+    expect(query).toBe("tag:'buyer''s'");
+  });
+
+  it("handles tags with spaces", () => {
+    const query = buildTagFilterQuery([{ tag: "net terms" }]);
+    expect(query).toBe("tag:'net terms'");
+  });
+
+  it("builds complex query with quotes and spaces", () => {
+    const query = buildTagFilterQuery([
+      { tag: "net-terms" },
+      { tag: "buyer's special" },
+      { tag: "gold tier" },
+    ]);
+    expect(query).toBe("tag:'net-terms' OR tag:'buyer''s special' OR tag:'gold tier'");
+  });
+});
+
 describe("getBulkCustomersQuery", () => {
-  it("generates bulk mutation with only base fields by default", () => {
-    const query = getBulkCustomersQuery();
+  const singleTagRule = [{ tag: "net-terms" }];
+  const multipleTagRules = [{ tag: "net-terms" }, { tag: "gold-tier" }];
+
+  it("returns null when no tag rules (skip backfill)", () => {
+    const query = getBulkCustomersQuery([]);
+    expect(query).toBeNull();
+  });
+
+  it("generates bulk mutation with tag filter for single rule", () => {
+    const query = getBulkCustomersQuery(singleTagRule);
+    expect(query).not.toBeNull();
     expect(query).toContain("bulkOperationRunQuery");
-    expect(query).toContain("customers");
+    expect(query).toContain("customers(query: \"tag:'net-terms'\")");
+    expect(query).toContain("id");
+    expect(query).toContain("tags");
+  });
+
+  it("generates bulk mutation with tag filter for multiple rules", () => {
+    const query = getBulkCustomersQuery(multipleTagRules);
+    expect(query).not.toBeNull();
+    expect(query).toContain("customers(query: \"tag:'net-terms' OR tag:'gold-tier'\")");
+  });
+
+  it("escapes quotes in tag values", () => {
+    const query = getBulkCustomersQuery([{ tag: "buyer's-tag" }]);
+    expect(query).not.toBeNull();
+    expect(query).toContain("customers(query: \"tag:'buyer''s-tag'\")");
+  });
+
+  it("handles tags with spaces", () => {
+    const query = getBulkCustomersQuery([{ tag: "net terms" }]);
+    expect(query).not.toBeNull();
+    expect(query).toContain("customers(query: \"tag:'net terms'\")");
+  });
+
+  it("generates bulk mutation with only base fields by default", () => {
+    const query = getBulkCustomersQuery(singleTagRule);
+    expect(query).not.toBeNull();
     expect(query).toContain("id");
     expect(query).toContain("tags");
     expect(query).not.toContain("email");
@@ -241,16 +337,18 @@ describe("getBulkCustomersQuery", () => {
   });
 
   it("includes PII fields when flag is on", () => {
-    const query = getBulkCustomersQuery({ CUSTOMER_PII_FIELDS: "1" });
+    const query = getBulkCustomersQuery(singleTagRule, { CUSTOMER_PII_FIELDS: "1" });
+    expect(query).not.toBeNull();
     expect(query).toContain("email");
     expect(query).toContain("displayName");
   });
 
   it("NEVER includes forbidden fields in bulk query", () => {
-    const queryOff = getBulkCustomersQuery();
-    const queryOn = getBulkCustomersQuery({ CUSTOMER_PII_FIELDS: "1" });
+    const queryOff = getBulkCustomersQuery(singleTagRule);
+    const queryOn = getBulkCustomersQuery(singleTagRule, { CUSTOMER_PII_FIELDS: "1" });
 
     for (const query of [queryOff, queryOn]) {
+      expect(query).not.toBeNull();
       expect(query).not.toContain("phone");
       expect(query).not.toContain("addresses");
       expect(query).not.toContain("firstName");
@@ -260,7 +358,8 @@ describe("getBulkCustomersQuery", () => {
   });
 
   it("is a valid bulk operation mutation structure", () => {
-    const query = getBulkCustomersQuery();
+    const query = getBulkCustomersQuery(singleTagRule);
+    expect(query).not.toBeNull();
     expect(query).toContain("mutation BulkCustomersExport");
     expect(query).toContain("bulkOperation {");
     expect(query).toContain("userErrors {");

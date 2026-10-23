@@ -148,23 +148,69 @@ export function getCustomerQuery(env?: { CUSTOMER_PII_FIELDS?: string }): string
 }
 
 /**
- * GraphQL mutation for bulk customer export.
- * Uses the same field selection as per-customer queries.
+ * Escape a tag value for use in Shopify's search query syntax.
  *
- * Note: This fetches ALL customers. The sync processor filters
- * to only those matching AccountSource tag rules.
+ * Shopify search uses single quotes around tag values. Internal quotes
+ * need to be escaped by doubling them (Shopify uses '' for literal quote).
  *
- * @param env - Environment object to check PII flag
- * @returns GraphQL mutation string for bulkOperationRunQuery
+ * @param tag - Raw tag value
+ * @returns Escaped tag value safe for use in query
  */
-export function getBulkCustomersQuery(env?: { CUSTOMER_PII_FIELDS?: string }): string {
+export function escapeTagValue(tag: string): string {
+  // Escape single quotes by doubling them
+  return tag.replace(/'/g, "''");
+}
+
+/**
+ * Build a Shopify search query filter for tag rules.
+ *
+ * Creates a query like: tag:'net-terms' OR tag:'gold-tier'
+ * Tags with spaces or special characters are properly quoted.
+ *
+ * @param tagRules - Array of tag rules from AccountSource
+ * @returns Query filter string, or null if no tag rules
+ */
+export function buildTagFilterQuery(tagRules: Array<{ tag: string }>): string | null {
+  if (tagRules.length === 0) {
+    return null;
+  }
+
+  const tagConditions = tagRules.map((rule) => {
+    const escaped = escapeTagValue(rule.tag);
+    return `tag:'${escaped}'`;
+  });
+
+  return tagConditions.join(" OR ");
+}
+
+/**
+ * GraphQL mutation for bulk customer export filtered by tag rules.
+ *
+ * Only exports customers matching the shop's configured tag rules.
+ * This ensures we don't fetch data for customers we don't need.
+ *
+ * @param tagRules - Array of tag rules from AccountSource
+ * @param env - Environment object to check PII flag
+ * @returns GraphQL mutation string, or null if no tag rules (skip backfill)
+ */
+export function getBulkCustomersQuery(
+  tagRules: Array<{ tag: string }>,
+  env?: { CUSTOMER_PII_FIELDS?: string }
+): string | null {
+  const tagFilter = buildTagFilterQuery(tagRules);
+
+  if (!tagFilter) {
+    // No tag rules configured - skip customer backfill entirely
+    return null;
+  }
+
   const fields = buildCustomerFieldSelection(env);
   return `
     mutation BulkCustomersExport {
       bulkOperationRunQuery(
         query: """
         {
-          customers {
+          customers(query: "${tagFilter}") {
             edges {
               node {
                 ${fields}
