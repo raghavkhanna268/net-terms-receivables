@@ -187,17 +187,17 @@ ALTER TABLE s22_data_requests ENABLE ROW LEVEL SECURITY;
 -- The cron.schedule call is idempotent: it uses a named job that gets replaced
 -- if it already exists.
 
-DO $$
+DO $do$
 BEGIN
   -- Only create the cron job if pg_cron extension is available
   IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
     PERFORM cron.schedule(
       's22_purge_expired_data_requests',
       '0 3 * * *',
-      $$DELETE FROM s22_data_requests WHERE expires_at IS NOT NULL AND expires_at < NOW()$$
+      'DELETE FROM s22_data_requests WHERE expires_at IS NOT NULL AND expires_at < NOW()'
     );
   END IF;
-END$$;
+END$do$;
 
 -- =============================================================================
 -- 7. UPDATE PRISMA SCHEMA SYNC COMMENTS
