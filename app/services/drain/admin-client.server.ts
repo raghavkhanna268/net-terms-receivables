@@ -132,6 +132,67 @@ export const BULK_OPERATION_STATUS_QUERY = `
 `;
 
 /**
+ * Fetch a Customer by GID (S8).
+ * Only fetches id, tags, and optional PII fields when CUSTOMER_PII_FIELDS=1.
+ * DPDP compliance: Never fetches phone, addresses, firstName, lastName, defaultAddress.
+ */
+export const CUSTOMER_QUERY = `
+  query CustomerById($id: ID!) {
+    node(id: $id) {
+      ... on Customer {
+        id
+        tags
+        ${process.env.CUSTOMER_PII_FIELDS === "1" ? `email\ndisplayName` : ""}
+      }
+    }
+  }
+`;
+
+/**
+ * Fetch a DraftOrder by GID (S8).
+ * Fetches payment terms and purchasing entity for credit exposure tracking.
+ * No customer PII.
+ */
+export const DRAFT_ORDER_QUERY = `
+  query DraftOrderById($id: ID!) {
+    node(id: $id) {
+      ... on DraftOrder {
+        id
+        name
+        createdAt
+        updatedAt
+        status
+        totalPriceSet {
+          shopMoney {
+            amount
+            currencyCode
+          }
+        }
+        paymentTerms {
+          id
+          paymentTermsName
+          paymentTermsType
+          dueInDays
+        }
+        purchasingEntity {
+          ... on PurchasingCompany {
+            company {
+              id
+            }
+            location {
+              id
+            }
+          }
+        }
+        customer {
+          id
+        }
+      }
+    }
+  }
+`;
+
+/**
  * Fetch an Order by GID.
  * Fetches ids, amounts, statuses, payment terms - no customer PII.
  *
