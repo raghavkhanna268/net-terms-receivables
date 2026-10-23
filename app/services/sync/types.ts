@@ -139,10 +139,8 @@ export interface ShopifyOrder {
           issuedAt?: string | null;
           completedAt?: string | null;
           amount: {
-            shopMoney: {
-              amount: string;
-              currencyCode: string;
-            };
+            amount: string;
+            currencyCode: string;
           };
         };
       }>;

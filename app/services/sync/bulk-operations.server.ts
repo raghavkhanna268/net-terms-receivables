@@ -143,10 +143,8 @@ export const BULK_ORDERS_QUERY = `
                       issuedAt
                       completedAt
                       amount {
-                        shopMoney {
-                          amount
-                          currencyCode
-                        }
+                        amount
+                        currencyCode
                       }
                     }
                   }

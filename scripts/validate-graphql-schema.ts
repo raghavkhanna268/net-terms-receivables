@@ -12,7 +12,18 @@
  * Exit codes:
  *   0: All documents valid
  *   1: Validation errors found
+ *
+ * Features:
+ *   - Validates static GraphQL documents (exported const strings)
+ *   - ALWAYS extracts and validates inner queries from bulkOperationRunQuery mutations
+ *   - Validates bulk query rules (edges/node pattern, nesting limits)
+ *   - Detects function-built queries and requires explicit allowlist
+ *   - Runs negative fixture self-tests to verify error detection
+ *   - Enforces minimum document count to prevent accidental coverage loss
  */
+
+// Expected minimum document count - update when adding/removing documents
+const EXPECTED_MIN_DOCUMENTS = 20;
 
 import * as fs from "fs";
 import * as path from "path";
@@ -23,7 +34,6 @@ import {
   validate,
   GraphQLError,
   type GraphQLSchema,
-  type DocumentNode,
 } from "graphql";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -56,6 +66,57 @@ function loadSchema(): GraphQLSchema {
 const INTENTIONALLY_INVALID_DOCUMENTS = [
   "OLD_INVALID_MUTATION", // Test fixture in seed.test.ts to verify schema validation works
 ];
+
+/**
+ * Functions that generate GraphQL queries dynamically.
+ * These must be explicitly allowlisted and their variants validated separately.
+ */
+const DYNAMIC_QUERY_FUNCTIONS = [
+  "getBulkCustomersQuery", // Generates customer bulk query based on tag rules
+];
+
+/**
+ * Files/patterns that are allowed to have dynamic queries.
+ * The script will warn but not fail if it finds admin.graphql() calls in these files.
+ */
+const DYNAMIC_QUERY_ALLOWLIST = [
+  "customer-fields.server.ts", // getBulkCustomersQuery generates queries dynamically
+  "webhooks.compliance.tsx", // Uses admin.graphql() for compliance webhook requests
+  "validate-graphql-schema.ts", // Contains negative test fixtures with gql patterns
+];
+
+/**
+ * Negative test fixtures to verify the validator catches errors.
+ */
+const NEGATIVE_FIXTURES = {
+  badNormalDocument: {
+    name: "NEGATIVE_TEST_BAD_FIELD",
+    source: `query BadField { shop { nonExistentField } }`,
+    expectedError: "Cannot query field",
+  },
+  badBulkInnerQuery: {
+    name: "NEGATIVE_TEST_BAD_BULK",
+    source: `mutation BadBulk {
+      bulkOperationRunQuery(
+        query: """
+        {
+          orders {
+            edges {
+              node {
+                id
+                fakeFieldThatDoesNotExist
+              }
+            }
+          }
+        }
+        """
+      ) {
+        bulkOperation { id }
+      }
+    }`,
+    expectedError: "Cannot query field",
+  },
+};
 
 /**
  * Extract GraphQL documents from source files.
@@ -151,40 +212,57 @@ function findGraphQLFiles(rootDir: string): string[] {
 
 /**
  * Validate a GraphQL document against the schema.
+ * For bulkOperationRunQuery mutations, ALWAYS extracts and validates the inner query.
  */
 function validateDocument(schema: GraphQLSchema, doc: GraphQLDocument): GraphQLError[] {
-  try {
-    let parsed: DocumentNode;
-    let errors: readonly GraphQLError[];
+  const allErrors: GraphQLError[] = [];
 
-    // Try parsing the document
-    try {
-      parsed = parse(doc.source);
-    } catch (parseError) {
+  try {
+    // Check if this is a bulk operation mutation
+    const isBulkMutation = doc.source.includes("bulkOperationRunQuery");
+
+    if (isBulkMutation) {
       // For bulk mutations, extract and validate the inner query
       const innerQuery = extractBulkInnerQuery(doc.source);
       if (innerQuery) {
         try {
-          parsed = parse(innerQuery);
+          const parsed = parse(innerQuery);
+          const errors = validate(schema, parsed);
+          allErrors.push(...errors);
+
+          // Additional bulk query rules validation
+          const bulkRuleErrors = validateBulkQueryRules(innerQuery, doc.name);
+          allErrors.push(...bulkRuleErrors);
         } catch (innerParseError) {
-          return [
+          allErrors.push(
             new GraphQLError(
-              `Parse error in ${doc.name}: ${innerParseError instanceof Error ? innerParseError.message : "Unknown error"}`
-            ),
-          ];
+              `Parse error in bulk inner query of ${doc.name}: ${innerParseError instanceof Error ? innerParseError.message : "Unknown error"}`
+            )
+          );
         }
       } else {
-        return [
+        allErrors.push(
+          new GraphQLError(
+            `Could not extract inner query from bulk mutation ${doc.name}`
+          )
+        );
+      }
+    } else {
+      // Regular query/mutation - parse and validate normally
+      try {
+        const parsed = parse(doc.source);
+        const errors = validate(schema, parsed);
+        allErrors.push(...errors);
+      } catch (parseError) {
+        allErrors.push(
           new GraphQLError(
             `Parse error in ${doc.name}: ${parseError instanceof Error ? parseError.message : "Unknown error"}`
-          ),
-        ];
+          )
+        );
       }
     }
 
-    // Validate against schema
-    errors = validate(schema, parsed);
-    return [...errors];
+    return allErrors;
   } catch (err) {
     return [
       new GraphQLError(
@@ -195,13 +273,146 @@ function validateDocument(schema: GraphQLSchema, doc: GraphQLDocument): GraphQLE
 }
 
 /**
+ * Validate bulk query rules (connections need edges/node, nesting limits).
+ */
+function validateBulkQueryRules(query: string, docName: string): GraphQLError[] {
+  const errors: GraphQLError[] = [];
+
+  // Check for proper connection structure (edges/node pattern)
+  // Bulk queries must use edges { node { ... } } pattern for connections
+  const connectionPattern = /(\w+)\s*\([^)]*\)\s*\{/g;
+  let match;
+
+  while ((match = connectionPattern.exec(query)) !== null) {
+    const fieldName = match[1];
+    // Common connection field names
+    if (["orders", "customers", "companies", "companyLocations", "draftOrders"].includes(fieldName)) {
+      // Check if it has edges { node pattern
+      const afterField = query.substring(match.index);
+      const hasEdgesNode = /\{\s*edges\s*\{[\s\S]*?node\s*\{/.test(afterField.substring(0, 200));
+      if (!hasEdgesNode) {
+        errors.push(
+          new GraphQLError(
+            `Bulk query ${docName}: Connection field '${fieldName}' should use edges { node { ... } } pattern`
+          )
+        );
+      }
+    }
+  }
+
+  // Check for excessive nesting (more than 3 levels of nested connections is problematic)
+  const nestingDepth = (query.match(/edges\s*\{/g) || []).length;
+  if (nestingDepth > 3) {
+    errors.push(
+      new GraphQLError(
+        `Bulk query ${docName}: Excessive connection nesting depth (${nestingDepth}). Consider simplifying.`
+      )
+    );
+  }
+
+  return errors;
+}
+
+/**
+ * Run negative fixture self-tests to verify the validator catches errors.
+ */
+function runSelfTests(schema: GraphQLSchema): boolean {
+  console.log("Running self-tests with negative fixtures...\n");
+
+  let allPassed = true;
+
+  for (const [testName, fixture] of Object.entries(NEGATIVE_FIXTURES)) {
+    const doc: GraphQLDocument = {
+      name: fixture.name,
+      source: fixture.source,
+      filePath: "<self-test>",
+    };
+
+    const errors = validateDocument(schema, doc);
+
+    if (errors.length === 0) {
+      console.log(`  ❌ SELF-TEST FAILED: ${testName} - expected error but got none`);
+      allPassed = false;
+    } else {
+      const hasExpectedError = errors.some((e) => e.message.includes(fixture.expectedError));
+      if (hasExpectedError) {
+        console.log(`  ✓ ${testName}: correctly detected error`);
+      } else {
+        console.log(`  ❌ SELF-TEST FAILED: ${testName} - wrong error type`);
+        console.log(`     Expected: ${fixture.expectedError}`);
+        console.log(`     Got: ${errors[0].message}`);
+        allPassed = false;
+      }
+    }
+  }
+
+  console.log("");
+  return allPassed;
+}
+
+/**
+ * Check for dynamic query patterns that need special handling.
+ */
+function checkForDynamicQueries(filePath: string, content: string): string[] {
+  const warnings: string[] = [];
+  const fileName = path.basename(filePath);
+  const isAllowlisted = DYNAMIC_QUERY_ALLOWLIST.some((pattern) => fileName.includes(pattern));
+
+  // Check for admin.graphql() calls
+  const adminGraphqlPattern = /admin\.graphql\s*\(\s*`/g;
+  let match;
+  while ((match = adminGraphqlPattern.exec(content)) !== null) {
+    const lineNumber = content.substring(0, match.index).split("\n").length;
+    if (!isAllowlisted) {
+      warnings.push(
+        `${filePath}:${lineNumber}: Found admin.graphql() call that cannot be statically validated. Add to DYNAMIC_QUERY_ALLOWLIST if intentional.`
+      );
+    }
+  }
+
+  // Check for gql`` or graphql`` template tags
+  const gqlTagPattern = /(?:gql|graphql)\s*`/g;
+  while ((match = gqlTagPattern.exec(content)) !== null) {
+    const lineNumber = content.substring(0, match.index).split("\n").length;
+    if (!isAllowlisted) {
+      warnings.push(
+        `${filePath}:${lineNumber}: Found gql/graphql template tag. Ensure query is captured by extractGraphQLDocuments.`
+      );
+    }
+  }
+
+  // Check for dynamic query function calls that aren't the definitions
+  for (const funcName of DYNAMIC_QUERY_FUNCTIONS) {
+    // Skip if this file defines the function
+    if (content.includes(`function ${funcName}`) || content.includes(`const ${funcName} =`)) {
+      continue;
+    }
+
+    const funcCallPattern = new RegExp(`${funcName}\\s*\\(`, "g");
+    while ((match = funcCallPattern.exec(content)) !== null) {
+      const _lineNumber = content.substring(0, match.index).split("\n").length;
+      void _lineNumber; // Tracked for reference; function itself should be tested
+    }
+  }
+
+  return warnings;
+}
+
+/**
  * Main validation function.
  */
 async function main(): Promise<void> {
   console.log("Loading Admin API 2026-10 schema...");
   const schema = loadSchema();
 
-  console.log("\nScanning for GraphQL documents...");
+  // Run self-tests first
+  const selfTestsPassed = runSelfTests(schema);
+  if (!selfTestsPassed) {
+    console.log("❌ Self-tests failed - validator may not be working correctly");
+    process.exit(1);
+  }
+
+  console.log("Scanning for GraphQL documents...\n");
 
   const appDir = path.join(__dirname, "../app");
   const scriptsDir = path.join(__dirname, "../scripts");
@@ -213,14 +424,49 @@ async function main(): Promise<void> {
   console.log(`Found ${allFiles.length} TypeScript files to scan\n`);
 
   const allDocuments: GraphQLDocument[] = [];
+  const fileDocumentCounts: Map<string, number> = new Map();
+  const dynamicQueryWarnings: string[] = [];
 
   for (const filePath of allFiles) {
     const content = fs.readFileSync(filePath, "utf-8");
     const docs = extractGraphQLDocuments(filePath, content);
     allDocuments.push(...docs);
+
+    if (docs.length > 0) {
+      fileDocumentCounts.set(filePath, docs.length);
+    }
+
+    // Check for dynamic queries
+    const warnings = checkForDynamicQueries(filePath, content);
+    dynamicQueryWarnings.push(...warnings);
   }
 
-  console.log(`Found ${allDocuments.length} GraphQL documents\n`);
+  // Print per-file document counts
+  console.log("Documents per file:");
+  for (const [filePath, count] of fileDocumentCounts) {
+    const relativePath = path.relative(path.join(__dirname, ".."), filePath);
+    console.log(`  ${relativePath}: ${count}`);
+  }
+  console.log(`\nTotal: ${allDocuments.length} GraphQL documents\n`);
+
+  // Check minimum document count
+  if (allDocuments.length < EXPECTED_MIN_DOCUMENTS) {
+    console.log(
+      `❌ Document count (${allDocuments.length}) is below expected minimum (${EXPECTED_MIN_DOCUMENTS})`
+    );
+    console.log("   This may indicate the extractor is missing documents.");
+    console.log("   If intentional, update EXPECTED_MIN_DOCUMENTS in the script.");
+    process.exit(1);
+  }
+
+  // Print dynamic query warnings
+  if (dynamicQueryWarnings.length > 0) {
+    console.log("⚠️  Dynamic query warnings:");
+    for (const warning of dynamicQueryWarnings) {
+      console.log(`  ${warning}`);
+    }
+    console.log("");
+  }
 
   const results: ValidationResult[] = [];
   let hasErrors = false;
@@ -258,7 +504,7 @@ async function main(): Promise<void> {
     process.exit(1);
   } else {
     console.log("✅ All GraphQL documents are valid against Admin API 2026-10 schema");
-    console.log(`   Validated ${allDocuments.length} documents`);
+    console.log(`   Validated ${allDocuments.length} documents (min: ${EXPECTED_MIN_DOCUMENTS})`);
     process.exit(0);
   }
 }

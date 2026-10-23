@@ -535,12 +535,12 @@ describe("Deleted shop handling", () => {
     expect(result.error).toContain("No offline session");
   });
 
-  it("auth failure (401/403) is non-retryable, leading to eventual DLQ", async () => {
-    // If somehow the shop exists but token is revoked, 401/403 is non-retryable
+  it("auth failure (401/403) is retryable - session refresh can recover", async () => {
+    // P3: 401/403 is now RETRYABLE because #76 session refresh can recover the token
     mockAdminGraphQL.mockResolvedValue({
       success: false,
-      error: "Authentication failed for revoked-shop.myshopify.com (401). Token may be revoked.",
-      retryable: false,
+      error: "Authentication failed for revoked-shop.myshopify.com (401). Token may need refresh.",
+      retryable: true, // Retryable: session refresh can recover
     });
 
     const { getSyncHandler } = await import("../processor.server");
@@ -561,9 +561,10 @@ describe("Deleted shop handling", () => {
 
     const result = await handler!(mockSql as never, message);
 
-    // Handler returns failure with non-retryable error from adminGraphQL
-    // After maxRetries, processor moves message to DLQ
+    // Handler returns failure with retryable error from adminGraphQL
+    // Processor will retry on next drain run (session refresh may recover)
     expect(result.success).toBe(false);
+    expect(result.retryable).toBe(true);
     expect(result.error).toContain("401");
   });
 });
@@ -1099,4 +1100,3 @@ describe("S10b MUST-FIX #2: Transaction ordering (send before archive)", () => {
     expect(mockProcessBulkOperation).toHaveBeenCalled();
   });
 });
-
