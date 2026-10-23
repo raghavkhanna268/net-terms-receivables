@@ -677,13 +677,13 @@ describeWithDb("Customer Sync", () => {
   });
 
   describe("Compliance redaction (customers/redact and shop/redact)", () => {
-    it("redactCustomerData deletes s8_tagged_customers and s8_draft_orders for customer", async () => {
+    it("redactCustomerData deletes s8_tagged_customers including email/displayName", async () => {
       const customerId = `gid://shopify/Customer/cust-${TEST_SUFFIX}-redact`;
 
-      // Create tagged customer record
+      // Create tagged customer record with PII fields
       await sql`
-        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active)
-        VALUES (${TEST_SHOP_ID}, ${customerId}, '["net-terms"]'::jsonb, true)
+        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, email, display_name)
+        VALUES (${TEST_SHOP_ID}, ${customerId}, '["net-terms"]'::jsonb, true, 'test@example.com', 'Test Customer')
       `;
 
       // Create a buyer account for this customer
@@ -704,11 +704,13 @@ describeWithDb("Customer Sync", () => {
           (${TEST_SHOP_ID}, 'gid://shopify/DraftOrder/redact-2', ${buyerAccount.id}, '#D2', 2000.00, NOW())
       `;
 
-      // Verify records exist
-      const customersBefore = await sql`
-        SELECT * FROM s8_tagged_customers WHERE customer_id = ${customerId}
+      // Verify records exist with PII
+      const customersBefore = await sql<{ email: string | null; display_name: string | null }[]>`
+        SELECT email, display_name FROM s8_tagged_customers WHERE customer_id = ${customerId}
       `;
       expect(customersBefore).toHaveLength(1);
+      expect(customersBefore[0].email).toBe("test@example.com");
+      expect(customersBefore[0].display_name).toBe("Test Customer");
 
       const draftsBefore = await sql`
         SELECT * FROM s8_draft_orders WHERE buyer_account_id = ${buyerAccount.id}

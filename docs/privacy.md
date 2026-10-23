@@ -37,17 +37,23 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | Invoice | Order/draft order GID, invoice name, amounts, due date, status | Receivables tracking | Synced from Shopify orders |
 | PayerAlias | Normalized payer key | Payment matching | Derived from bank statements |
 
-**Customer PII currently stored in main branch:** None. The current production schema does not store customer email, phone, or address fields.
+**Protected Customer Data (2026-10-23):** Level 1 + Name + Email fields approved. No phone, no address.
 
-**⚠️ Pending PR #32 (S8):** When merged, the app will store:
+Customer PII stored in `s8_tagged_customers`:
 - Customer GID (Shopify identifier)
 - Customer tags (for net-terms eligibility matching)
-- **Optional:** Customer email and display name — only when `CUSTOMER_PII_FIELDS=1` is enabled (requires Shopify PCD approval for Name and Email fields)
-- **Never stored:** Phone, addresses, firstName, lastName, defaultAddress (blocked by code)
+- Email and display name (`CUSTOMER_PII_FIELDS=1` enabled in production)
+- **Never stored:** Phone, addresses, firstName, lastName, defaultAddress (blocked in code, regardless of PCD level)
 
-**⚠️ Pending PR #28 (S6):** When merged, the app will sync:
+**Uses for PII fields:**
+- S8: Labels in buyer account UI
+- S16: Payment matching against bank statement payer names
+- S18: Payment reminder emails
+
+**Merged (S6/S8):** The app syncs:
 - Company and CompanyLocation data (B2B accounts)
 - Order data with payment terms for Invoice creation
+- Tagged customers with email/displayName for payment matching
 
 ### 2.3 Bank Statement Data
 
@@ -141,15 +147,15 @@ When a merchant uninstalls the app:
 ### 7.2 `customers/data_request`
 
 When a customer requests their data:
-- **Current behavior:** Returns 200 (no customer data stored in main branch)
-- **⚠️ After PR #32:** S8 stores only customer GID and tags (no PII to export unless `CUSTOMER_PII_FIELDS=1`)
+- Returns HTTP 200 with customer GID, tags, email, and displayName from `s8_tagged_customers`
+- Exports only the S8 record; no other customer data is stored
 
 ### 7.3 `customers/redact`
 
 When a customer must be deleted (GDPR/CCPA request):
-- **Current behavior:** Returns 200 (no customer data stored in main branch)
-- **⚠️ After PR #32:** Deletes `s8_tagged_customers` row for the affected customer
-- **⚠️ Pending:** Payment.narration/payerText redaction for matched payments
+- Deletes the `s8_tagged_customers` row for the affected customer (including email and displayName)
+- Deletes any `s8_draft_orders` linked to that customer's BuyerAccount
+- **Pending:** Payment.narration/payerText redaction for matched payments
 
 ### 7.4 `shop/redact`
 
@@ -196,12 +202,10 @@ For privacy inquiries:
 
 ## Appendix: Shopify OAuth Scopes
 
-**Current scopes (main branch):** None (`scopes = ""` in `shopify.app.toml`)
+**Current scopes:** `read_companies`, `read_orders`, `read_payment_terms`, `read_customers`, `read_draft_orders`, `write_companies`, `write_customers`, `write_orders`, `write_validations`, `write_payment_customizations`, `write_merchant_managed_fulfillment_orders`
 
-**⚠️ After PR #28 (S6):** `read_companies`, `read_orders`, `read_payment_terms`, `read_customers`, `read_draft_orders`
-
-**Protected Customer Data:** The `read_customers` and `read_orders` scopes require Shopify's Protected Customer Data (PCD) approval form. See launch checklist.
+**Protected Customer Data (2026-10-23):** Level 1 + Name + Email approved. No phone, no address.
 
 ---
 
-*This privacy policy draft is generated from code inspection as of the main branch commit. Statements marked with ⚠️ depend on unmerged PRs. All **TBD** items require product/legal decisions before publication.*
+*This privacy policy draft is generated from code inspection. All **TBD** items require product/legal decisions before publication.*

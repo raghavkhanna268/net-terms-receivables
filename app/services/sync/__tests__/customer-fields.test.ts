@@ -45,6 +45,33 @@ describe("Customer Fields Configuration", () => {
       expect(CUSTOMER_FORBIDDEN_FIELDS).toContain("lastName");
       expect(CUSTOMER_FORBIDDEN_FIELDS).toContain("defaultAddress");
     });
+
+    it("NEVER appears in field lists regardless of PII flag", () => {
+      // Test with flag off
+      const fieldsOff = getCustomerFields();
+      for (const forbidden of CUSTOMER_FORBIDDEN_FIELDS) {
+        expect(fieldsOff).not.toContain(forbidden);
+      }
+
+      // Test with flag on - still forbidden
+      const fieldsOn = getCustomerFields({ CUSTOMER_PII_FIELDS: "1" });
+      for (const forbidden of CUSTOMER_FORBIDDEN_FIELDS) {
+        expect(fieldsOn).not.toContain(forbidden);
+      }
+    });
+
+    it("NEVER appears in generated queries regardless of PII flag", () => {
+      const queryOff = getCustomerQuery();
+      const queryOn = getCustomerQuery({ CUSTOMER_PII_FIELDS: "1" });
+
+      for (const query of [queryOff, queryOn]) {
+        expect(query).not.toMatch(/\bphone\b/);
+        expect(query).not.toMatch(/\baddresses\b/);
+        expect(query).not.toMatch(/\bfirstName\b/);
+        expect(query).not.toMatch(/\blastName\b/);
+        expect(query).not.toMatch(/\bdefaultAddress\b/);
+      }
+    });
   });
 });
 
@@ -82,12 +109,10 @@ describe("getCustomerFields", () => {
     expect(fields).not.toContain("displayName");
   });
 
-  it("includes PII fields when CUSTOMER_PII_FIELDS=1", () => {
+  it("returns exactly [id, tags, email, displayName] when CUSTOMER_PII_FIELDS=1", () => {
     const fields = getCustomerFields({ CUSTOMER_PII_FIELDS: "1" });
-    expect(fields).toContain("id");
-    expect(fields).toContain("tags");
-    expect(fields).toContain("email");
-    expect(fields).toContain("displayName");
+    // Exact list - no firstName, no lastName, no phone, no addresses
+    expect(fields).toEqual(["id", "tags", "email", "displayName"]);
   });
 
   it("NEVER includes forbidden fields even with PII flag on", () => {
@@ -181,18 +206,22 @@ describe("validateCustomerQuery", () => {
     );
   });
 
+  it("still throws for forbidden fields even when PII flag is on", () => {
+    // Each forbidden field should throw regardless of PII flag
+    const forbiddenFields = ["phone", "addresses", "firstName", "lastName", "defaultAddress"];
+    for (const field of forbiddenFields) {
+      expect(() =>
+        validateCustomerQuery(`{ customer { id ${field} } }`, { CUSTOMER_PII_FIELDS: "1" })
+      ).toThrow(/forbidden customer field/i);
+    }
+  });
+
   it("allows email and displayName when PII flag is on", () => {
     expect(() =>
       validateCustomerQuery("{ customer { id email displayName } }", {
         CUSTOMER_PII_FIELDS: "1",
       })
     ).not.toThrow();
-  });
-
-  it("still throws for forbidden fields even when PII flag is on", () => {
-    expect(() =>
-      validateCustomerQuery("{ customer { id phone } }", { CUSTOMER_PII_FIELDS: "1" })
-    ).toThrow(/forbidden customer field "phone"/i);
   });
 });
 

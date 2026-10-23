@@ -5,18 +5,19 @@
  * fetched from Shopify's GraphQL API, both for per-customer queries
  * and bulk exports.
  *
+ * Protected Customer Data approval (confirmed 2026-10-23):
+ * - Level 1 + Name + Email fields approved
+ * - No phone, no address
+ *
  * Data minimization design:
  * - Base fields (always fetched): id, tags
- * - Optional PII fields (email, displayName): gated by CUSTOMER_PII_FIELDS env var
- * - Forbidden fields (NEVER fetched): phone, addresses, firstName, lastName
+ * - Optional PII fields (CUSTOMER_PII_FIELDS=1): email, displayName
+ * - Forbidden fields (NEVER fetched): phone, addresses, firstName, lastName, defaultAddress
  *
- * The CUSTOMER_PII_FIELDS flag requires:
- * 1. Shopify Protected Customer Data approval (Level 1 + Email and Name fields)
- * 2. Environment variable CUSTOMER_PII_FIELDS=1 set on the Worker
- *
- * Current state: CUSTOMER_PII_FIELDS is off by default; we fetch neither
- * email nor name. When the approval is granted and the flag is enabled,
- * email and displayName will be included in queries.
+ * Uses for PII fields:
+ * - S8: Labels in buyer account UI
+ * - S16: Payment matching against bank statement payer names
+ * - S18: Payment reminder emails
  *
  * Phone and address are NEVER fetched, regardless of approval level.
  */
@@ -49,7 +50,7 @@ export const CUSTOMER_FORBIDDEN_FIELDS = [
  * Check if optional PII fields should be included in queries.
  *
  * Returns true only when CUSTOMER_PII_FIELDS environment variable is set to "1".
- * This should only be enabled after Protected Customer Data Level 2 approval.
+ * This is enabled after Protected Customer Data Level 1 + Name + Email approval.
  *
  * @param env - Environment object (from Cloudflare Worker context)
  * @returns Whether to include email and displayName in queries
@@ -122,7 +123,7 @@ export function validateCustomerQuery(query: string, env?: { CUSTOMER_PII_FIELDS
       if (regex.test(query)) {
         throw new Error(
           `DPDP violation: PII field "${field}" found in query but CUSTOMER_PII_FIELDS is not enabled. ` +
-            `Set CUSTOMER_PII_FIELDS=1 after Protected Customer Data Level 2 approval.`
+            `Set CUSTOMER_PII_FIELDS=1 after Protected Customer Data (Level 1 + Name + Email) approval.`
         );
       }
     }

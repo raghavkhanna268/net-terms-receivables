@@ -12,12 +12,16 @@
 /**
  * Shopify Customer from webhook or bulk export.
  *
- * DPDP compliance: Only id and tags are stored.
- * The webhook payload contains PII, but we only extract minimal fields.
+ * DPDP compliance (Level 1 + Name + Email, confirmed 2026-10-23):
+ * - Always fetched: id, tags
+ * - Optional PII (CUSTOMER_PII_FIELDS=1): email, displayName
+ * - NEVER fetched: phone, addresses, firstName, lastName, defaultAddress
  */
 export interface ShopifyCustomer {
   id: string; // GID: gid://shopify/Customer/123
   tags?: string[]; // Array of customer tags
+  email?: string | null; // Optional: requires CUSTOMER_PII_FIELDS=1
+  displayName?: string | null; // Optional: requires CUSTOMER_PII_FIELDS=1
 }
 
 /**
@@ -214,11 +218,16 @@ export interface BulkOrderLine {
 /**
  * Bulk JSONL line for customer export (S8).
  *
- * DPDP compliance: Only id and tags are requested in the bulk query.
+ * DPDP compliance (Level 1 + Name + Email, confirmed 2026-10-23):
+ * - Always fetched: id, tags
+ * - Optional PII (CUSTOMER_PII_FIELDS=1): email, displayName
+ * - NEVER fetched: phone, addresses, firstName, lastName, defaultAddress
  */
 export interface BulkCustomerLine {
   id: string;
   tags?: string[];
+  email?: string | null; // Optional: requires CUSTOMER_PII_FIELDS=1
+  displayName?: string | null; // Optional: requires CUSTOMER_PII_FIELDS=1
 }
 
 /**
