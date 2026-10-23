@@ -231,10 +231,11 @@ export async function bulkUpsertBuyerAccounts(
     }
 
     // Check which accounts already exist (updates don't consume slots)
+    // Note: use IN ${sql(ids)} instead of ANY(${ids}) for fetch_types:false compatibility
     const locationIds = shopAccounts.map(a => a.companyLocationId);
     const existingAccounts = await sql<{ companyLocationId: string }[]>`
       SELECT "companyLocationId" FROM "BuyerAccount"
-      WHERE "shopId" = ${shopId} AND "companyLocationId" = ANY(${locationIds})
+      WHERE "shopId" = ${shopId} AND "companyLocationId" IN ${sql(locationIds)}
     `;
     const existingSet = new Set(existingAccounts.map(e => e.companyLocationId));
 
