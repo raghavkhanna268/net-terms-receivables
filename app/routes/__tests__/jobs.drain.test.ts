@@ -49,12 +49,7 @@ vi.mock("~/services/drain/processor.server", () => ({
   },
 }));
 
-// Mock reconcile
-const mockEnqueueReconcile = vi.fn().mockResolvedValue(4);
-
-vi.mock("~/services/drain/reconcile.server", () => ({
-  enqueueReconcileForAllShops: mockEnqueueReconcile,
-}));
+// NOTE: reconcile.server is not mocked because reconcile is disabled (returns 501)
 
 describe("jobs.drain route", () => {
   const VALID_SECRET = "test-drain-secret-12345";
@@ -303,32 +298,32 @@ describe("jobs.drain route", () => {
   });
 
   describe("reconcile mode", () => {
-    it("enqueues reconcile messages when reconcile=true", async () => {
+    it("returns 501 when reconcile=true (deferred to S10b)", async () => {
       const { action } = await import("../jobs.drain");
       const request = createRequest({ queryParams: { reconcile: "true" } });
 
       const response = await action(createActionArgs(request));
 
-      expect(mockEnqueueReconcile).toHaveBeenCalledWith(mockSql);
-      expect(response.status).toBe(200);
-
-      const result = (await response.json()) as { reconcileEnqueued: number };
-      expect(result.reconcileEnqueued).toBe(4);
+      expect(response.status).toBe(501);
+      const result = (await response.json()) as { error: string };
+      expect(result.error).toBe("Reconcile is not implemented. Deferred to S10b.");
     });
 
-    it("does not enqueue reconcile when reconcile is not true", async () => {
+    it("runs drain normally when reconcile is not true", async () => {
       const { action } = await import("../jobs.drain");
 
-      // No param
+      // No param - runs drain
       const request1 = createRequest();
-      await action(createActionArgs(request1));
-      expect(mockEnqueueReconcile).not.toHaveBeenCalled();
+      const response1 = await action(createActionArgs(request1));
+      expect(response1.status).toBe(200);
+      expect(mockRunDrain).toHaveBeenCalled();
 
-      // false value
-      mockEnqueueReconcile.mockClear();
+      // false value - runs drain
+      mockRunDrain.mockClear();
       const request2 = createRequest({ queryParams: { reconcile: "false" } });
-      await action(createActionArgs(request2));
-      expect(mockEnqueueReconcile).not.toHaveBeenCalled();
+      const response2 = await action(createActionArgs(request2));
+      expect(response2.status).toBe(200);
+      expect(mockRunDrain).toHaveBeenCalled();
     });
   });
 });

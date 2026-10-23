@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 /**
  * Tests for S10 drain processor.
@@ -242,5 +242,228 @@ describe("Order handlers", () => {
     expect(handler).toBeDefined();
 
     // Handler is registered - actual GraphQL call tested in integration tests
+  });
+});
+
+describe("Order null refetch behavior", () => {
+  let mockAdminGraphQL: ReturnType<typeof vi.fn>;
+  let mockProcessOrderWebhook: ReturnType<typeof vi.fn>;
+  let mockMarkWebhookProcessed: ReturnType<typeof vi.fn>;
+  let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // Get mocked functions
+    const { adminGraphQL } = await import("../admin-client.server");
+    const { processOrderWebhook } = await import("~/services/sync/order.server");
+    const { markWebhookProcessed } = await import("~/services/sync/company.server");
+
+    mockAdminGraphQL = adminGraphQL as ReturnType<typeof vi.fn>;
+    mockProcessOrderWebhook = processOrderWebhook as ReturnType<typeof vi.fn>;
+    mockMarkWebhookProcessed = markWebhookProcessed as ReturnType<typeof vi.fn>;
+  });
+
+  afterEach(() => {
+    consoleWarnSpy.mockRestore();
+  });
+
+  it("ORDERS_PAID with null refetch uses processOrderWebhook with minimal order", async () => {
+    // Set up null refetch
+    mockAdminGraphQL.mockResolvedValue({
+      success: true,
+      data: { node: null },
+      retryable: false,
+    });
+
+    mockProcessOrderWebhook.mockResolvedValue({
+      success: true,
+      action: "updated",
+      entityId: "invoice-123",
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("ORDERS_PAID");
+    expect(handler).toBeDefined();
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "ORDERS_PAID",
+      shop: "test.myshopify.com",
+      webhookId: "wh-123",
+      resourceGid: "gid://shopify/Order/456",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    // Should log order_refetch_null warning
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[order_refetch_null]")
+    );
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("shop=test.myshopify.com")
+    );
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("order=gid://shopify/Order/456")
+    );
+
+    // Should call processOrderWebhook with minimal order (goes through markInvoicePaid)
+    expect(mockProcessOrderWebhook).toHaveBeenCalledWith(
+      mockSql,
+      "test.myshopify.com",
+      "ORDERS_PAID",
+      expect.objectContaining({
+        id: "gid://shopify/Order/456",
+        paymentTerms: expect.any(Object),
+      }),
+      "wh-123"
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("updated");
+  });
+
+  it("ORDERS_CANCELLED with null refetch uses processOrderWebhook with minimal order", async () => {
+    mockAdminGraphQL.mockResolvedValue({
+      success: true,
+      data: { node: null },
+      retryable: false,
+    });
+
+    mockProcessOrderWebhook.mockResolvedValue({
+      success: true,
+      action: "updated",
+      entityId: "invoice-456",
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("ORDERS_CANCELLED");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "ORDERS_CANCELLED",
+      shop: "test.myshopify.com",
+      webhookId: "wh-789",
+      resourceGid: "gid://shopify/Order/999",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    // Should log warning
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[order_refetch_null]")
+    );
+
+    // Should call processOrderWebhook (goes through cancelInvoice)
+    expect(mockProcessOrderWebhook).toHaveBeenCalledWith(
+      mockSql,
+      "test.myshopify.com",
+      "ORDERS_CANCELLED",
+      expect.objectContaining({ id: "gid://shopify/Order/999" }),
+      "wh-789"
+    );
+
+    expect(result.success).toBe(true);
+  });
+
+  it("ORDERS_CREATE with null refetch leaves invoice unchanged and logs warning", async () => {
+    mockAdminGraphQL.mockResolvedValue({
+      success: true,
+      data: { node: null },
+      retryable: false,
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("ORDERS_CREATE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "ORDERS_CREATE",
+      shop: "test.myshopify.com",
+      webhookId: "wh-create-1",
+      resourceGid: "gid://shopify/Order/111",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    // Should log warning
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[order_refetch_null]")
+    );
+
+    // Should NOT call processOrderWebhook (can't create invoice without data)
+    expect(mockProcessOrderWebhook).not.toHaveBeenCalled();
+
+    // Should mark webhook as processed to avoid reprocessing
+    expect(mockMarkWebhookProcessed).toHaveBeenCalledWith(
+      mockSql,
+      "wh-create-1",
+      "ORDERS_CREATE",
+      "gid://shopify/Order/111"
+    );
+
+    // Result should indicate skipped with explanation
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("skipped");
+    expect(result.skipReason).toContain("null");
+    expect(result.skipReason).toContain("Ledger state unchanged");
+  });
+
+  it("ORDERS_UPDATED with null refetch leaves invoice unchanged and logs warning", async () => {
+    mockAdminGraphQL.mockResolvedValue({
+      success: true,
+      data: { node: null },
+      retryable: false,
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("ORDERS_UPDATED");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "ORDERS_UPDATED",
+      shop: "test.myshopify.com",
+      webhookId: "wh-update-1",
+      resourceGid: "gid://shopify/Order/222",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    // Should log warning
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[order_refetch_null]")
+    );
+
+    // Should NOT call processOrderWebhook
+    expect(mockProcessOrderWebhook).not.toHaveBeenCalled();
+
+    // Should mark as processed
+    expect(mockMarkWebhookProcessed).toHaveBeenCalled();
+
+    // Result indicates skipped
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("skipped");
   });
 });

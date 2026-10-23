@@ -10,12 +10,13 @@
  *
  * Reads messages from s6_sync and s6_bulk queues, processes them
  * via registered topic handlers, and handles retry/DLQ.
+ *
+ * NOTE: The ?reconcile=true path is disabled until S10b reconcile handlers exist.
  */
 
 import type { ActionFunctionArgs } from "react-router";
 import { getRequestSql } from "~/lib/request-context.server";
 import { runDrain, type DrainConfig } from "~/services/drain/processor.server";
-import { enqueueReconcileForAllShops } from "~/services/drain/reconcile.server";
 
 /**
  * Constant-time comparison using byte lengths (Web Crypto style).
@@ -61,17 +62,9 @@ function extractBearerToken(authHeader: string | null): string | null {
 }
 
 /**
- * Parsed options from query parameters.
+ * Parse drain configuration from query parameters.
  */
-interface ParsedOptions {
-  config: Partial<DrainConfig>;
-  reconcile: boolean;
-}
-
-/**
- * Parse drain configuration and options from query parameters.
- */
-function parseOptions(url: URL): ParsedOptions {
+function parseConfig(url: URL): Partial<DrainConfig> {
   const config: Partial<DrainConfig> = {};
 
   const batchSize = url.searchParams.get("batchSize");
@@ -90,9 +83,7 @@ function parseOptions(url: URL): ParsedOptions {
     }
   }
 
-  const reconcile = url.searchParams.get("reconcile") === "true";
-
-  return { config, reconcile };
+  return config;
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
@@ -126,19 +117,26 @@ export async function action({ request, context }: ActionFunctionArgs) {
 
   // Parse optional configuration from query params
   const url = new URL(request.url);
-  const { config, reconcile } = parseOptions(url);
+
+  // Reconcile is disabled until S10b handlers exist
+  if (url.searchParams.get("reconcile") === "true") {
+    return new Response(
+      JSON.stringify({
+        error: "Reconcile is not implemented. Deferred to S10b.",
+      }),
+      {
+        status: 501,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+
+  const config = parseConfig(url);
 
   // Run the drain
   const sql = getRequestSql();
 
   try {
-    // If reconcile mode, enqueue reconcile messages for all shops first
-    let reconcileCount = 0;
-    if (reconcile) {
-      reconcileCount = await enqueueReconcileForAllShops(sql);
-      console.log(`[drain] reconcile mode: enqueued ${reconcileCount} messages`);
-    }
-
     const result = await runDrain(sql, config);
 
     // Log summary (avoid PII - just stats)
@@ -149,16 +147,10 @@ export async function action({ request, context }: ActionFunctionArgs) {
     );
 
     // Return result as JSON
-    return new Response(
-      JSON.stringify({
-        ...result,
-        reconcileEnqueued: reconcileCount,
-      }),
-      {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }
-    );
+    return new Response(JSON.stringify(result), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
   } catch (error) {
     // Log the full error details server-side
     console.error("[drain] error:", error);

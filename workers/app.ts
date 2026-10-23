@@ -90,7 +90,9 @@ export default wrapWithSentry({
       console.error("[scheduled] drain error:", error);
     } finally {
       if (sql !== null) {
-        ctx.waitUntil(closeSql(sql));
+        // Use type assertion because TypeScript's flow analysis doesn't track
+        // mutation in the closure (getSql assigns to sql)
+        ctx.waitUntil((sql as Sql).end());
       }
     }
   },

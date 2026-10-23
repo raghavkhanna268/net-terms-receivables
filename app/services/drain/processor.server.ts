@@ -235,6 +235,16 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
 /**
  * Handler for ORDERS_* topics.
  * Fetches the order via GraphQL and processes it.
+ *
+ * Null refetch handling:
+ * Without read_all_orders, Shopify returns null for orders >60 days old.
+ * Net 60/90 invoices live in that territory, so null must NOT be treated as deleted.
+ *
+ * On null refetch:
+ * - ORDERS_PAID: Use topic as evidence of paid state, call markInvoicePaid via processOrderWebhook
+ * - ORDERS_CANCELLED: Use topic as evidence of cancelled state, call cancelInvoice via processOrderWebhook
+ * - ORDERS_CREATE/UPDATED: Keep ledger state unchanged (can't process without data)
+ * - Always log order_refetch_null warning
  */
 async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> {
   // Idempotency check
@@ -259,48 +269,50 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
     };
   }
 
-  // If node is null, order was deleted
-  // For PAID/CANCELLED, we should still update the invoice
+  // If node is null, order may be >60 days old (without read_all_orders)
+  // NEVER assume deleted - this would break Net 60/90 invoices
   if (!result.data?.node) {
-    // Try to close/cancel the invoice even if order is gone
+    // Log distinct warning (shop and order GID only, no PII)
+    console.warn(
+      `[order_refetch_null] shop=${message.shop} order=${message.resourceGid} topic=${message.topic}`
+    );
+
+    // For PAID/CANCELLED, the topic itself tells us the state
+    // Use processOrderWebhook with minimal order data to go through S6 functions
     if (message.topic === "ORDERS_PAID" || message.topic === "ORDERS_CANCELLED") {
-      // Get shop ID
-      const [shop] = await sql<{ id: string }[]>`
-        SELECT id FROM "Shop" WHERE domain = ${message.shop}
-      `;
-
-      if (shop) {
-        if (message.topic === "ORDERS_PAID") {
-          // Mark invoice as paid
-          await sql`
-            UPDATE "Invoice"
-            SET status = 'paid', outstanding = '0.00', "updatedAt" = NOW()
-            WHERE "shopId" = ${shop.id} AND "orderId" = ${message.resourceGid}
-          `;
-        } else {
-          // Mark invoice as cancelled
-          await sql`
-            UPDATE "Invoice"
-            SET status = 'cancelled', "updatedAt" = NOW()
-            WHERE "shopId" = ${shop.id} AND "orderId" = ${message.resourceGid}
-          `;
-        }
-      }
-
-      await markWebhookProcessed(sql, message.webhookId, message.topic, message.resourceGid);
-      return {
-        success: true,
-        action: "updated",
-        skipReason: "Order deleted, invoice status updated directly",
+      // Create minimal order with just the ID for markInvoicePaid/cancelInvoice
+      // These functions only need shopId and orderId, which we have
+      const minimalOrder: ShopifyOrder = {
+        id: message.resourceGid,
+        name: "", // Not used by paid/cancelled handlers
+        createdAt: new Date().toISOString(),
+        // paymentTerms required for processOrderWebhook to not skip
+        // For PAID/CANCELLED, it's only used to check if we should process
+        // The actual handlers (markInvoicePaid, cancelInvoice) don't need it
+        paymentTerms: {
+          id: "unknown",
+          paymentTermsName: "unknown",
+          paymentTermsType: "UNKNOWN",
+          dueInDays: 0,
+        },
       };
+
+      return processOrderWebhook(
+        sql,
+        message.shop,
+        message.topic,
+        minimalOrder,
+        message.webhookId
+      );
     }
 
-    // For CREATE/UPDATED on deleted orders, just mark processed
+    // For CREATE/UPDATED, we can't process without full order data
+    // Keep ledger state unchanged, mark webhook processed
     await markWebhookProcessed(sql, message.webhookId, message.topic, message.resourceGid);
     return {
       success: true,
       action: "skipped",
-      skipReason: "Order not found (may have been deleted)",
+      skipReason: "Order refetch returned null (may be >60 days old). Ledger state unchanged.",
     };
   }
 

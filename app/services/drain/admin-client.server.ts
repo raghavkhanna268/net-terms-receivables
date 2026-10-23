@@ -17,6 +17,13 @@
  */
 
 import { getShopifyApp } from "~/shopify.server";
+import {
+  HttpResponseError,
+  HttpRetriableError,
+  HttpThrottlingError,
+  GraphqlQueryError,
+  InvalidSession,
+} from "@shopify/shopify-api";
 
 export const API_VERSION = "2026-10";
 
@@ -31,19 +38,6 @@ export interface AdminClientResult<T = unknown> {
 }
 
 /**
- * Execute a GraphQL query against the Shopify Admin API.
- *
- * Uses unauthenticated.admin(shop) which:
- * 1. Loads the offline session (offline_{shop})
- * 2. Automatically refreshes expired tokens
- * 3. Persists refreshed tokens back to session storage
- *
- * @param shop - Shop domain (e.g., "example.myshopify.com")
- * @param query - GraphQL query string
- * @param variables - Optional query variables
- * @returns Result with data or error
- */
-/**
  * GraphQL response shape from the Admin API.
  */
 interface GraphQLResponse<T> {
@@ -54,6 +48,26 @@ interface GraphQLResponse<T> {
   }>;
 }
 
+/**
+ * Execute a GraphQL query against the Shopify Admin API.
+ *
+ * Uses unauthenticated.admin(shop) which:
+ * 1. Loads the offline session (offline_{shop})
+ * 2. Automatically refreshes expired tokens
+ * 3. Persists refreshed tokens back to session storage
+ *
+ * Error handling uses instanceof checks on @shopify/shopify-api error types:
+ * - HttpThrottlingError (429): retryable
+ * - HttpRetriableError (5xx): retryable
+ * - HttpResponseError (other HTTP errors): not retryable
+ * - GraphqlQueryError: check for THROTTLED code
+ * - InvalidSession: not retryable, shop needs reinstall
+ *
+ * @param shop - Shop domain (e.g., "example.myshopify.com")
+ * @param query - GraphQL query string
+ * @param variables - Optional query variables
+ * @returns Result with data or error
+ */
 export async function adminGraphQL<T = unknown>(
   shop: string,
   query: string,
@@ -90,9 +104,65 @@ export async function adminGraphQL<T = unknown>(
       retryable: false,
     };
   } catch (err) {
+    // Use instanceof checks on Shopify API error types
+
+    // 429 rate limiting - retryable
+    if (err instanceof HttpThrottlingError) {
+      return {
+        success: false,
+        error: `Rate limited (429). Retry after ${err.response.retryAfter ?? "unknown"}s.`,
+        retryable: true,
+      };
+    }
+
+    // 5xx server errors - retryable (HttpRetriableError is parent of HttpThrottlingError and HttpInternalError)
+    if (err instanceof HttpRetriableError) {
+      return {
+        success: false,
+        error: `Server error (${err.response.code}). Will retry.`,
+        retryable: true,
+      };
+    }
+
+    // Other HTTP errors (4xx except 429) - not retryable
+    if (err instanceof HttpResponseError) {
+      const code = err.response.code;
+      if (code === 401 || code === 403) {
+        return {
+          success: false,
+          error: `Authentication failed for ${shop} (${code}). Token may be revoked.`,
+          retryable: false,
+        };
+      }
+      return {
+        success: false,
+        error: `HTTP error ${code}: ${err.message}`,
+        retryable: false,
+      };
+    }
+
+    // GraphQL query errors
+    if (err instanceof GraphqlQueryError) {
+      return {
+        success: false,
+        error: `GraphQL query error: ${err.message}`,
+        retryable: false,
+      };
+    }
+
+    // Session errors - shop needs to reinstall
+    if (err instanceof InvalidSession) {
+      return {
+        success: false,
+        error: `Invalid session for ${shop}. Shop may need to reinstall the app.`,
+        retryable: false,
+      };
+    }
+
+    // Fallback for unknown errors
     const message = err instanceof Error ? err.message : "Unknown error";
 
-    // Check for specific error types
+    // Check for session-related messages
     if (message.includes("No session found") || message.includes("offline_")) {
       return {
         success: false,
@@ -101,26 +171,13 @@ export async function adminGraphQL<T = unknown>(
       };
     }
 
-    // 401/403 from token issues - the library should have refreshed, but if it failed...
-    if (message.includes("401") || message.includes("403") || message.includes("Unauthorized")) {
-      return {
-        success: false,
-        error: `Authentication failed for ${shop}. Token may be revoked.`,
-        retryable: false,
-      };
-    }
-
-    // 429 rate limiting
-    if (message.includes("429") || message.includes("rate limit")) {
-      return {
-        success: false,
-        error: "Rate limited (429). Will retry after visibility timeout.",
-        retryable: true,
-      };
-    }
-
     // Network errors are retryable
-    if (message.includes("fetch") || message.includes("network") || message.includes("ECONNREFUSED")) {
+    if (
+      err instanceof TypeError ||
+      message.includes("fetch") ||
+      message.includes("network") ||
+      message.includes("ECONNREFUSED")
+    ) {
       return {
         success: false,
         error: `Network error: ${message}`,
