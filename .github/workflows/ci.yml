@@ -30,7 +30,7 @@ jobs:
           # Pin to specific version for reproducibility
           ACTIONLINT_VERSION: "1.7.4"
           # SHA256 of actionlint_1.7.4_linux_amd64.tar.gz
-          ACTIONLINT_SHA256: "adf70860cf7587314d4bbec714d7e3cd4e26adfa3da06c12cfc7ba7058121f12"
+          ACTIONLINT_SHA256: "fc0a6886bbb9a23a39eeec4b176193cadb54ddbe77cdbb19b637933919545395"
         run: |
           set -euo pipefail
           TARBALL="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
