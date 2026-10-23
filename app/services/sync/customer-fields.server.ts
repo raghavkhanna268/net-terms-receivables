@@ -150,15 +150,32 @@ export function getCustomerQuery(env?: { CUSTOMER_PII_FIELDS?: string }): string
 /**
  * Escape a tag value for use in Shopify's search query syntax.
  *
- * Shopify search uses single quotes around tag values. Internal quotes
- * need to be escaped by doubling them (Shopify uses '' for literal quote).
+ * Shopify search uses backslash escaping for special characters.
+ * @see https://shopify.dev/docs/api/usage/search-syntax#special-characters
+ *
+ * Special characters that need escaping: : \ ( )
+ * When using single-quoted values like tag:'value', single quotes also need escaping.
+ *
+ * This function handles TWO levels of escaping:
+ * 1. Shopify search syntax: ' → \' and \ → \\
+ * 2. GraphQL string literal: \ → \\ (the result is embedded in a GraphQL string)
+ *
+ * Example: tag "buyer's" becomes "buyer\\'s" in the GraphQL string,
+ * which GraphQL parses to "buyer\'s", which Shopify parses as "buyer's".
  *
  * @param tag - Raw tag value
- * @returns Escaped tag value safe for use in query
+ * @returns Escaped tag value safe for embedding in a GraphQL string containing a Shopify query
  */
 export function escapeTagValue(tag: string): string {
-  // Escape single quotes by doubling them
-  return tag.replace(/'/g, "''");
+  // First, escape for Shopify search syntax (backslash and single quote)
+  // Then, escape backslashes again for the GraphQL string literal
+  //
+  // Order matters: escape backslashes first, then quotes
+  // 1. \ → \\ (Shopify) → \\\\ (GraphQL)
+  // 2. ' → \' (Shopify) → \\' (GraphQL)
+  return tag
+    .replace(/\\/g, "\\\\\\\\") // \ → \\\\ (one backslash becomes four)
+    .replace(/'/g, "\\\\'");     // ' → \\' (quote becomes backslash-backslash-quote)
 }
 
 /**

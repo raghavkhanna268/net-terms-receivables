@@ -232,24 +232,39 @@ describe("getCustomerQuery", () => {
 });
 
 describe("escapeTagValue", () => {
+  // @see https://shopify.dev/docs/api/usage/search-syntax#special-characters
+  // Shopify uses backslash escaping. The result is embedded in a GraphQL string,
+  // so backslashes are doubled again for that nesting level.
+
   it("returns simple tags unchanged", () => {
     expect(escapeTagValue("net-terms")).toBe("net-terms");
   });
 
-  it("escapes single quotes by doubling them", () => {
-    expect(escapeTagValue("buyer's-special")).toBe("buyer''s-special");
+  it("escapes single quotes with backslash (doubled for GraphQL)", () => {
+    // Shopify needs: buyer\'s → GraphQL string needs: buyer\\'s
+    expect(escapeTagValue("buyer's-special")).toBe("buyer\\\\'s-special");
   });
 
   it("handles multiple quotes", () => {
-    expect(escapeTagValue("it's-a-buyer's-tag")).toBe("it''s-a-buyer''s-tag");
+    expect(escapeTagValue("it's-a-buyer's-tag")).toBe("it\\\\'s-a-buyer\\\\'s-tag");
   });
 
   it("handles tags with only a quote", () => {
-    expect(escapeTagValue("'")).toBe("''");
+    expect(escapeTagValue("'")).toBe("\\\\'");
   });
 
   it("preserves spaces (Shopify handles quoted tags)", () => {
     expect(escapeTagValue("net terms")).toBe("net terms");
+  });
+
+  it("escapes backslashes (quadrupled for two nesting levels)", () => {
+    // Shopify needs: a\\b → GraphQL string needs: a\\\\b
+    expect(escapeTagValue("a\\b")).toBe("a\\\\\\\\b");
+  });
+
+  it("handles both quotes and backslashes", () => {
+    // tag: it\'s\a → Shopify: it\\'s\\a → GraphQL: it\\\\'s\\\\a
+    expect(escapeTagValue("it's\\a")).toBe("it\\\\'s\\\\\\\\a");
   });
 });
 
@@ -271,9 +286,10 @@ describe("buildTagFilterQuery", () => {
     expect(query).toBe("tag:'net-terms' OR tag:'gold-tier'");
   });
 
-  it("escapes quotes in tag values", () => {
+  it("escapes quotes in tag values (backslash doubled for GraphQL)", () => {
     const query = buildTagFilterQuery([{ tag: "buyer's" }]);
-    expect(query).toBe("tag:'buyer''s'");
+    // Shopify: tag:'buyer\'s' → GraphQL: tag:'buyer\\'s'
+    expect(query).toBe("tag:'buyer\\\\'s'");
   });
 
   it("handles tags with spaces", () => {
@@ -287,7 +303,7 @@ describe("buildTagFilterQuery", () => {
       { tag: "buyer's special" },
       { tag: "gold tier" },
     ]);
-    expect(query).toBe("tag:'net-terms' OR tag:'buyer''s special' OR tag:'gold tier'");
+    expect(query).toBe("tag:'net-terms' OR tag:'buyer\\\\'s special' OR tag:'gold tier'");
   });
 });
 
@@ -315,16 +331,24 @@ describe("getBulkCustomersQuery", () => {
     expect(query).toContain("customers(query: \"tag:'net-terms' OR tag:'gold-tier'\")");
   });
 
-  it("escapes quotes in tag values", () => {
+  it("escapes quotes in tag values (backslash doubled for GraphQL)", () => {
     const query = getBulkCustomersQuery([{ tag: "buyer's-tag" }]);
     expect(query).not.toBeNull();
-    expect(query).toContain("customers(query: \"tag:'buyer''s-tag'\")");
+    // Shopify: tag:'buyer\'s-tag' → GraphQL: tag:'buyer\\'s-tag'
+    expect(query).toContain("customers(query: \"tag:'buyer\\\\'s-tag'\")");
   });
 
   it("handles tags with spaces", () => {
     const query = getBulkCustomersQuery([{ tag: "net terms" }]);
     expect(query).not.toBeNull();
     expect(query).toContain("customers(query: \"tag:'net terms'\")");
+  });
+
+  it("escapes backslashes in tag values (quadrupled for two nesting levels)", () => {
+    const query = getBulkCustomersQuery([{ tag: "path\\tag" }]);
+    expect(query).not.toBeNull();
+    // Shopify: tag:'path\\tag' → GraphQL: tag:'path\\\\tag'
+    expect(query).toContain("customers(query: \"tag:'path\\\\\\\\tag'\")");
   });
 
   it("generates bulk mutation with only base fields by default", () => {
