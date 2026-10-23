@@ -77,16 +77,18 @@ vi.mock("~/services/sync/bulk-jsonl-processor.server", () => ({
     success: true,
     action: "updated",
     entityId: "gid://shopify/BulkOperation/123",
+    status: "complete",
   }),
 }));
 
-vi.mock("./reconcile-handlers.server", () => ({
+vi.mock("../reconcile-handlers.server", () => ({
   startReconcileBulkOperation: vi.fn().mockResolvedValue({
     success: true,
     action: "created",
     entityId: "gid://shopify/BulkOperation/123",
   }),
   incrementOrderRefetchNull: vi.fn().mockResolvedValue(undefined),
+  enqueueReconcileOrders: vi.fn().mockResolvedValue(true),
 }));
 
 describe("Drain Processor", () => {
@@ -704,7 +706,7 @@ describe("S10b order refetch null recording", () => {
     vi.clearAllMocks();
     vi.resetModules();
 
-    const module = await import("./reconcile-handlers.server");
+    const module = await import("../reconcile-handlers.server");
     mockIncrementOrderRefetchNull = module.incrementOrderRefetchNull as ReturnType<typeof vi.fn>;
   });
 

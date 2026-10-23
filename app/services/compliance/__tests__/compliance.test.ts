@@ -46,20 +46,34 @@ describe("compliance.server", () => {
 
   describe("deleteShop", () => {
     it("deletes shop and returns deleted=true with shopId", async () => {
+      // 1. DELETE s10b_order_refetch_null
+      mockSql.mockResolvedValueOnce(Object.assign([], { count: 5 }));
+      // 2. DELETE Shop
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
 
       const result = await deleteShop(mockSql, "test-shop.myshopify.com");
 
-      expect(result).toEqual({ deleted: true, shopId: "shop-123" });
-      expect(mockSql).toHaveBeenCalled();
+      expect(result).toEqual({
+        deleted: true,
+        shopId: "shop-123",
+        refetchNullPurged: 5,
+      });
+      expect(mockSql).toHaveBeenCalledTimes(2);
     });
 
     it("returns deleted=false when shop not found", async () => {
+      // 1. DELETE s10b_order_refetch_null (may have rows even if shop doesn't exist)
+      mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 2. DELETE Shop (no rows)
       mockSql.mockResolvedValueOnce([]);
 
       const result = await deleteShop(mockSql, "nonexistent.myshopify.com");
 
-      expect(result).toEqual({ deleted: false, shopId: null });
+      expect(result).toEqual({
+        deleted: false,
+        shopId: null,
+        refetchNullPurged: 0,
+      });
     });
   });
 

@@ -8,15 +8,15 @@
  * Key features:
  * - HTTP Range chunking: Downloads in bounded chunks (default 512KB)
  * - Byte-accurate offsets: Tracks position at end of last complete line
- * - Partial line carry-over: Preserves incomplete trailing lines across chunks
- * - UTF-8 safe: Offsets are in bytes, not characters
+ * - UTF-8 safe: Split on byte 0x0A, decode with TextDecoder(fatal)
  * - Resumable: Can resume from saved offset after budget cut
+ * - No partial_line storage: byte_offset is end of last PROCESSED line
  *
  * Design notes:
  * - Uses fetch with Range header (supported by Shopify's S3-backed URLs)
- * - Processes complete lines only, buffering partial lines
- * - Upserts via S6 services for consistency with webhook processing
- * - Marks operation complete only at true EOF
+ * - Processes complete lines only, partial trailing bytes are re-fetched
+ * - EOF detection from Content-Range total or 416 response
+ * - Returns {status:'progress'} for partial progress with continuation
  */
 
 import type { Sql } from "~/lib/db-light.server";
@@ -52,23 +52,12 @@ export const DEFAULT_CHUNK_SIZE = 512 * 1024;
 export const DEFAULT_MAX_LINES = 100;
 
 /**
- * Result of a chunk processing operation.
+ * Result of a bulk operation processing.
+ * Extends SyncResult with a status field for progress tracking.
  */
-export interface ChunkResult {
-  /** Whether processing was successful */
-  success: boolean;
-  /** Number of complete lines processed */
-  linesProcessed: number;
-  /** New byte offset (end of last complete line) */
-  newByteOffset: number;
-  /** Partial line to carry over (if any) */
-  partialLine: string;
-  /** Whether we reached EOF */
-  isEof: boolean;
-  /** Number of entities upserted */
-  upsertedCount: number;
-  /** Error message if failed */
-  error?: string;
+export interface BulkProcessResult extends SyncResult {
+  /** Processing status: 'complete', 'progress', or 'error' */
+  status?: "complete" | "progress" | "error";
 }
 
 /**
@@ -106,24 +95,35 @@ export async function getBulkOperationStatus(
 }
 
 /**
+ * Result of fetching a JSONL chunk.
+ */
+export interface ChunkFetchResult {
+  /** Whether the fetch succeeded */
+  success: boolean;
+  /** Raw bytes from the response */
+  bytes?: Uint8Array;
+  /** Whether we've reached EOF */
+  isEof: boolean;
+  /** Total file size from Content-Range (if available) */
+  totalSize?: number;
+  /** Error message if failed */
+  error?: string;
+}
+
+/**
  * Fetch a chunk of the JSONL file using HTTP Range request.
+ * Returns raw bytes (Uint8Array) for proper byte-accurate processing.
  *
  * @param url - JSONL result URL from Shopify
  * @param startByte - Starting byte offset (inclusive)
  * @param chunkSize - Number of bytes to fetch
- * @returns Chunk data with content-range info
+ * @returns Chunk data with bytes and EOF detection
  */
 export async function fetchJsonlChunk(
   url: string,
   startByte: number,
   chunkSize: number = DEFAULT_CHUNK_SIZE
-): Promise<{
-  success: boolean;
-  data?: string;
-  isEof: boolean;
-  contentLength?: number;
-  error?: string;
-}> {
+): Promise<ChunkFetchResult> {
   const endByte = startByte + chunkSize - 1;
   const rangeHeader = `bytes=${startByte}-${endByte}`;
 
@@ -135,13 +135,13 @@ export async function fetchJsonlChunk(
       },
     });
 
-    // 206 Partial Content = more data available
-    // 200 OK = server ignored Range header, returned whole file
-    // 416 Range Not Satisfiable = offset past EOF
+    // 416 Range Not Satisfiable = offset at or past EOF
     if (response.status === 416) {
-      return { success: true, data: "", isEof: true };
+      return { success: true, bytes: new Uint8Array(0), isEof: true };
     }
 
+    // 200 OK = server ignored Range header, returned whole file
+    // 206 Partial Content = range request worked
     if (!response.ok && response.status !== 206) {
       return {
         success: false,
@@ -150,32 +150,38 @@ export async function fetchJsonlChunk(
       };
     }
 
-    const data = await response.text();
+    // Get raw bytes via arrayBuffer
+    const buffer = await response.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
 
-    // Check if we've reached EOF
+    // Parse Content-Range header for EOF detection
+    // Format: "bytes 0-999/5000" or "bytes 0-999/*"
     const contentRange = response.headers.get("Content-Range");
     let isEof = false;
-    let contentLength: number | undefined;
+    let totalSize: number | undefined;
 
     if (contentRange) {
-      // Format: "bytes 0-999/5000" or "bytes 0-999/*"
-      const match = contentRange.match(/bytes \d+-\d+\/(\d+|\*)/);
-      if (match && match[1] !== "*") {
-        contentLength = parseInt(match[1], 10);
-        isEof = startByte + data.length >= contentLength;
+      const match = contentRange.match(/bytes (\d+)-(\d+)\/(\d+|\*)/);
+      if (match && match[3] !== "*") {
+        totalSize = parseInt(match[3], 10);
+        const rangeEnd = parseInt(match[2], 10);
+        // EOF if the end of the returned range equals or exceeds the total minus 1
+        isEof = rangeEnd >= totalSize - 1;
       }
-    } else {
-      // If server returned 200 (whole file), we have everything
-      isEof = response.status === 200;
-      contentLength = data.length;
     }
 
-    // Also check if response is smaller than requested (indicates EOF)
-    if (data.length < chunkSize) {
+    // Also check: if server returned 200 (whole file), we have everything
+    if (response.status === 200) {
+      isEof = true;
+      totalSize = bytes.length;
+    }
+
+    // Smaller-than-requested response also indicates EOF
+    if (bytes.length < chunkSize && !isEof) {
       isEof = true;
     }
 
-    return { success: true, data, isEof, contentLength };
+    return { success: true, bytes, isEof, totalSize };
   } catch (err) {
     return {
       success: false,
@@ -186,53 +192,46 @@ export async function fetchJsonlChunk(
 }
 
 /**
- * Split chunk data into complete lines, preserving partial trailing line.
- * Returns byte offsets, not character offsets (UTF-8 safe).
+ * Split bytes into complete lines at byte 0x0A (newline).
+ * Returns decoded strings for complete lines and the byte offset to resume from.
  *
- * @param data - Raw chunk data
- * @param previousPartial - Partial line from previous chunk
- * @returns Complete lines and remaining partial
+ * @param bytes - Raw bytes from chunk
+ * @param decoder - TextDecoder instance with fatal=true
+ * @returns Complete lines and byte position after last newline
  */
-export function splitChunkIntoLines(
-  data: string,
-  previousPartial: string = ""
-): { lines: string[]; partial: string; bytesConsumed: number } {
-  // Prepend any partial line from previous chunk
-  const combined = previousPartial + data;
-
-  // Find all complete lines (ending with \n)
+export function splitBytesIntoLines(
+  bytes: Uint8Array,
+  decoder: TextDecoder
+): { lines: string[]; bytesConsumed: number } {
+  const NEWLINE = 0x0a;
   const lines: string[] = [];
-  let lastNewlineIndex = -1;
+  let lastNewlinePos = -1;
 
-  for (let i = 0; i < combined.length; i++) {
-    if (combined[i] === "\n") {
-      const line = combined.substring(lastNewlineIndex + 1, i);
-      if (line.trim().length > 0) {
-        lines.push(line);
+  // Find all newlines and decode complete lines
+  for (let i = 0; i < bytes.length; i++) {
+    if (bytes[i] === NEWLINE) {
+      // Extract bytes from after last newline to this newline (exclusive)
+      const lineBytes = bytes.slice(lastNewlinePos + 1, i);
+      if (lineBytes.length > 0) {
+        try {
+          const line = decoder.decode(lineBytes, { stream: false });
+          const trimmed = line.trim();
+          if (trimmed.length > 0) {
+            lines.push(trimmed);
+          }
+        } catch {
+          // Invalid UTF-8 - skip this line, but continue processing
+          console.warn("[bulk-jsonl] Invalid UTF-8 in line, skipping");
+        }
       }
-      lastNewlineIndex = i;
+      lastNewlinePos = i;
     }
   }
 
-  // Calculate bytes consumed from the new data only
-  // This is the offset within `data` where the partial line begins
-  const partialStartInCombined = lastNewlineIndex + 1;
-  const partial = combined.substring(partialStartInCombined);
+  // bytesConsumed is position after last newline (or 0 if no newlines)
+  const bytesConsumed = lastNewlinePos >= 0 ? lastNewlinePos + 1 : 0;
 
-  // Bytes consumed is the position in data where we left off
-  // If previousPartial was consumed, we need to account for it
-  const encoder = new TextEncoder();
-  const previousPartialBytes = encoder.encode(previousPartial).length;
-  const bytesFromDataConsumed =
-    lastNewlineIndex >= 0
-      ? encoder.encode(combined.substring(0, lastNewlineIndex + 1)).length -
-        previousPartialBytes
-      : 0;
-
-  // If no newlines found, we consumed 0 bytes of data (everything is partial)
-  const bytesConsumed = lastNewlineIndex >= 0 ? bytesFromDataConsumed : 0;
-
-  return { lines, partial, bytesConsumed };
+  return { lines, bytesConsumed };
 }
 
 /**
@@ -281,7 +280,9 @@ async function processOrderLines(
   }
 
   if (skippedNoTerms > 0) {
-    console.log(`[bulk-jsonl] ${skippedNoTerms} orders skipped (no payment terms)`);
+    console.log(
+      `[bulk-jsonl] ${skippedNoTerms} orders skipped (no payment terms)`
+    );
   }
 
   // Map orders to invoices
@@ -341,7 +342,14 @@ async function processCustomerLines(
 async function resolveBuyerAccountForBulkOrder(
   sql: Sql,
   shopId: string,
-  order: { purchasingEntity?: { company?: { id: string }; location?: { id: string }; id?: string } | null; customer?: { id: string } | null }
+  order: {
+    purchasingEntity?: {
+      company?: { id: string };
+      location?: { id: string };
+      id?: string;
+    } | null;
+    customer?: { id: string } | null;
+  }
 ): Promise<string | null> {
   const purchasingEntity = order.purchasingEntity;
 
@@ -385,13 +393,12 @@ async function resolveBuyerAccountForBulkOrder(
 export async function loadBulkOperationProgress(
   sql: Sql,
   bulkOperationId: string
-): Promise<{ byteOffset: number; partialLine: string; completedAt: Date | null } | null> {
+): Promise<{ byteOffset: number; completedAt: Date | null } | null> {
   const [row] = await sql<{
     byte_offset: string;
-    partial_line: string;
     completed_at: Date | null;
   }[]>`
-    SELECT byte_offset, partial_line, completed_at
+    SELECT byte_offset, completed_at
     FROM s6_bulk_operations
     WHERE bulk_operation_id = ${bulkOperationId}
   `;
@@ -400,233 +407,26 @@ export async function loadBulkOperationProgress(
 
   return {
     byteOffset: parseInt(row.byte_offset, 10),
-    partialLine: row.partial_line,
     completedAt: row.completed_at,
   };
 }
 
 /**
  * Save bulk operation progress to database.
+ * byte_offset is the end of the last fully processed line.
  */
 export async function saveBulkOperationProgress(
   sql: Sql,
   bulkOperationId: string,
   byteOffset: number,
-  partialLine: string,
   completedAt: Date | null = null
 ): Promise<void> {
   await sql`
     UPDATE s6_bulk_operations
     SET byte_offset = ${byteOffset},
-        partial_line = ${partialLine},
         completed_at = ${completedAt}
     WHERE bulk_operation_id = ${bulkOperationId}
   `;
-}
-
-/**
- * Process a BULK_OPERATIONS_FINISH message.
- *
- * Downloads JSONL in chunks, processes lines, and tracks progress for
- * resumption after CPU budget cuts.
- *
- * @param sql - postgres.js SQL client
- * @param message - Bulk message from queue
- * @param chunkSize - Bytes to fetch per chunk (default 512KB)
- * @param maxLines - Max lines to process per invocation (default 100)
- * @returns Sync result
- */
-export async function processBulkOperation(
-  sql: Sql,
-  message: BulkMessage,
-  chunkSize: number = DEFAULT_CHUNK_SIZE,
-  maxLines: number = DEFAULT_MAX_LINES
-): Promise<SyncResult> {
-  const { shop, webhookId, bulkOperationId, bulkType } = message;
-
-  // Idempotency check
-  if (await isWebhookProcessed(sql, webhookId)) {
-    return {
-      success: true,
-      action: "skipped",
-      skipReason: "Webhook already processed (idempotent)",
-    };
-  }
-
-  // Get shop ID
-  const [shopRow] = await sql<{ id: string }[]>`
-    SELECT id FROM "Shop" WHERE domain = ${shop}
-  `;
-
-  if (!shopRow) {
-    return {
-      success: false,
-      action: "skipped",
-      error: `Shop not found: ${shop}`,
-    };
-  }
-
-  const shopId = shopRow.id;
-
-  // Load existing progress
-  const progress = await loadBulkOperationProgress(sql, bulkOperationId);
-
-  if (!progress) {
-    return {
-      success: false,
-      action: "skipped",
-      error: `Bulk operation not found: ${bulkOperationId}`,
-    };
-  }
-
-  // If already completed, skip
-  if (progress.completedAt) {
-    await markWebhookProcessed(sql, webhookId, "BULK_OPERATIONS_FINISH", bulkOperationId);
-    return {
-      success: true,
-      action: "skipped",
-      skipReason: "Bulk operation already completed",
-    };
-  }
-
-  // Get result URL from Shopify
-  const statusResult = await getBulkOperationStatus(shop, bulkOperationId);
-
-  if (!statusResult.success || !statusResult.data?.url) {
-    return {
-      success: false,
-      action: "skipped",
-      error: statusResult.error || "No result URL available",
-    };
-  }
-
-  const resultUrl = statusResult.data.url;
-  const startByteOffset = progress.byteOffset;
-  let partialLine = progress.partialLine;
-  let totalUpserted = 0;
-  let totalLinesProcessed = 0;
-
-  // Fetch and process one chunk
-  const chunkResult = await fetchJsonlChunk(resultUrl, startByteOffset, chunkSize);
-
-  if (!chunkResult.success) {
-    return {
-      success: false,
-      action: "skipped",
-      error: chunkResult.error,
-    };
-  }
-
-  // Handle empty chunk (EOF with no data)
-  if (!chunkResult.data || chunkResult.data.length === 0) {
-    if (chunkResult.isEof) {
-      // Process any remaining partial line
-      if (partialLine.trim().length > 0) {
-        try {
-          const lineResult = await processLines(sql, shop, shopId, bulkType, [partialLine]);
-          totalUpserted += lineResult;
-        } catch {
-          // Ignore parse errors on final partial
-        }
-      }
-
-      // Mark as completed
-      await saveBulkOperationProgress(sql, bulkOperationId, startByteOffset, "", new Date());
-      await markWebhookProcessed(sql, webhookId, "BULK_OPERATIONS_FINISH", bulkOperationId);
-
-      return {
-        success: true,
-        action: "updated",
-        entityId: bulkOperationId,
-      };
-    }
-
-    return {
-      success: false,
-      action: "skipped",
-      error: "Empty chunk returned but not EOF",
-    };
-  }
-
-  // Split chunk into complete lines
-  const { lines, partial, bytesConsumed } = splitChunkIntoLines(
-    chunkResult.data,
-    partialLine
-  );
-
-  // Limit lines processed per invocation
-  const linesToProcess = lines.slice(0, maxLines);
-  const encoder = new TextEncoder();
-
-  // Process lines
-  if (linesToProcess.length > 0) {
-    try {
-      totalUpserted = await processLines(sql, shop, shopId, bulkType, linesToProcess);
-      totalLinesProcessed = linesToProcess.length;
-    } catch (err) {
-      return {
-        success: false,
-        action: "skipped",
-        error: err instanceof Error ? err.message : "Processing error",
-      };
-    }
-  }
-
-  // Calculate new byte offset
-  // We only advance the offset for fully processed lines
-  let newByteOffset = startByteOffset;
-
-  if (linesToProcess.length === lines.length) {
-    // All lines processed, advance by bytesConsumed
-    newByteOffset = startByteOffset + bytesConsumed;
-    // Carry over the partial line from this chunk
-    partialLine = partial;
-  } else {
-    // Not all lines processed, need to recalculate
-    // Only advance by the bytes of the lines we actually processed
-    const processedText = linesToProcess.join("\n") + "\n";
-    const processedBytes = encoder.encode(processedText).length;
-    newByteOffset = startByteOffset + processedBytes - encoder.encode(progress.partialLine).length;
-    // Remaining lines become the new partial (prepended with their text)
-    const remainingLines = lines.slice(linesToProcess.length);
-    partialLine = remainingLines.join("\n") + (partial ? "\n" + partial : "");
-  }
-
-  // Check if we've reached EOF and processed everything
-  const isComplete =
-    chunkResult.isEof &&
-    linesToProcess.length === lines.length &&
-    partial.trim().length === 0;
-
-  if (isComplete) {
-    await saveBulkOperationProgress(sql, bulkOperationId, newByteOffset, "", new Date());
-    await markWebhookProcessed(sql, webhookId, "BULK_OPERATIONS_FINISH", bulkOperationId);
-
-    console.log(
-      `[bulk-jsonl] Completed ${bulkType} for ${shop}: ${totalLinesProcessed} lines, ${totalUpserted} upserted`
-    );
-
-    return {
-      success: true,
-      action: "updated",
-      entityId: bulkOperationId,
-    };
-  }
-
-  // Save progress for next iteration
-  await saveBulkOperationProgress(sql, bulkOperationId, newByteOffset, partialLine);
-
-  console.log(
-    `[bulk-jsonl] Progress ${bulkType} for ${shop}: offset=${newByteOffset}, lines=${totalLinesProcessed}, upserted=${totalUpserted}`
-  );
-
-  // Return success=false to keep message in queue for retry
-  // This allows the drain to process more messages before coming back
-  return {
-    success: false,
-    action: "skipped",
-    error: "Partial chunk processed, more data remaining",
-  };
 }
 
 /**
@@ -650,4 +450,232 @@ async function processLines(
       console.warn(`[bulk-jsonl] Unknown bulk type: ${bulkType}`);
       return 0;
   }
+}
+
+/**
+ * Process a BULK_OPERATIONS_FINISH message.
+ *
+ * Downloads JSONL in chunks, processes lines, and tracks progress for
+ * resumption after CPU budget cuts.
+ *
+ * @param sql - postgres.js SQL client
+ * @param message - Bulk message from queue
+ * @param chunkSize - Bytes to fetch per chunk (default 512KB)
+ * @param maxLines - Max lines to process per invocation (default 100)
+ * @returns Sync result with status field
+ */
+export async function processBulkOperation(
+  sql: Sql,
+  message: BulkMessage,
+  chunkSize: number = DEFAULT_CHUNK_SIZE,
+  maxLines: number = DEFAULT_MAX_LINES
+): Promise<BulkProcessResult> {
+  const { shop, webhookId, bulkOperationId, bulkType } = message;
+
+  // Idempotency check
+  if (await isWebhookProcessed(sql, webhookId)) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Webhook already processed (idempotent)",
+      status: "complete",
+    };
+  }
+
+  // Get shop ID
+  const [shopRow] = await sql<{ id: string }[]>`
+    SELECT id FROM "Shop" WHERE domain = ${shop}
+  `;
+
+  if (!shopRow) {
+    return {
+      success: false,
+      action: "skipped",
+      error: `Shop not found: ${shop}`,
+      status: "error",
+    };
+  }
+
+  const shopId = shopRow.id;
+
+  // Load existing progress
+  const progress = await loadBulkOperationProgress(sql, bulkOperationId);
+
+  if (!progress) {
+    return {
+      success: false,
+      action: "skipped",
+      error: `Bulk operation not found: ${bulkOperationId}`,
+      status: "error",
+    };
+  }
+
+  // If already completed, skip
+  if (progress.completedAt) {
+    await markWebhookProcessed(
+      sql,
+      webhookId,
+      "BULK_OPERATIONS_FINISH",
+      bulkOperationId
+    );
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Bulk operation already completed",
+      status: "complete",
+    };
+  }
+
+  // Get result URL from Shopify
+  const statusResult = await getBulkOperationStatus(shop, bulkOperationId);
+
+  if (!statusResult.success || !statusResult.data?.url) {
+    return {
+      success: false,
+      action: "skipped",
+      error: statusResult.error || "No result URL available",
+      status: "error",
+    };
+  }
+
+  const resultUrl = statusResult.data.url;
+  const startByteOffset = progress.byteOffset;
+
+  // Fetch chunk starting from saved offset
+  const chunkResult = await fetchJsonlChunk(
+    resultUrl,
+    startByteOffset,
+    chunkSize
+  );
+
+  if (!chunkResult.success || !chunkResult.bytes) {
+    return {
+      success: false,
+      action: "skipped",
+      error: chunkResult.error || "Failed to fetch chunk",
+      status: "error",
+    };
+  }
+
+  const bytes = chunkResult.bytes;
+
+  // Handle empty response at EOF
+  if (bytes.length === 0 && chunkResult.isEof) {
+    // Mark as completed
+    await saveBulkOperationProgress(
+      sql,
+      bulkOperationId,
+      startByteOffset,
+      new Date()
+    );
+    await markWebhookProcessed(
+      sql,
+      webhookId,
+      "BULK_OPERATIONS_FINISH",
+      bulkOperationId
+    );
+
+    console.log(`[bulk-jsonl] Completed ${bulkType} for ${shop}: EOF reached`);
+
+    return {
+      success: true,
+      action: "updated",
+      entityId: bulkOperationId,
+      status: "complete",
+    };
+  }
+
+  // Split bytes into complete lines using TextDecoder with fatal mode
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const { lines, bytesConsumed } = splitBytesIntoLines(bytes, decoder);
+
+  // Limit lines processed per invocation
+  const linesToProcess = lines.slice(0, maxLines);
+
+  // Process lines
+  let totalUpserted = 0;
+  if (linesToProcess.length > 0) {
+    try {
+      totalUpserted = await processLines(
+        sql,
+        shop,
+        shopId,
+        bulkType,
+        linesToProcess
+      );
+    } catch (err) {
+      return {
+        success: false,
+        action: "skipped",
+        error: err instanceof Error ? err.message : "Processing error",
+        status: "error",
+      };
+    }
+  }
+
+  // Calculate new byte offset
+  // If we processed all lines from the chunk, advance by bytesConsumed
+  // Otherwise, we need to re-calculate for partial processing
+  let newByteOffset: number;
+
+  if (linesToProcess.length === lines.length) {
+    // Processed all complete lines in chunk
+    newByteOffset = startByteOffset + bytesConsumed;
+  } else {
+    // Processed only some lines - need to compute offset for processed lines
+    // Re-encode processed lines to count their bytes
+    const encoder = new TextEncoder();
+    let processedBytes = 0;
+    for (let i = 0; i < linesToProcess.length; i++) {
+      processedBytes += encoder.encode(linesToProcess[i]).length + 1; // +1 for newline
+    }
+    newByteOffset = startByteOffset + processedBytes;
+  }
+
+  // Check if we've reached EOF and processed everything
+  const isComplete =
+    chunkResult.isEof &&
+    linesToProcess.length === lines.length &&
+    bytesConsumed === bytes.length;
+
+  if (isComplete) {
+    await saveBulkOperationProgress(
+      sql,
+      bulkOperationId,
+      newByteOffset,
+      new Date()
+    );
+    await markWebhookProcessed(
+      sql,
+      webhookId,
+      "BULK_OPERATIONS_FINISH",
+      bulkOperationId
+    );
+
+    console.log(
+      `[bulk-jsonl] Completed ${bulkType} for ${shop}: ${linesToProcess.length} lines, ${totalUpserted} upserted`
+    );
+
+    return {
+      success: true,
+      action: "updated",
+      entityId: bulkOperationId,
+      status: "complete",
+    };
+  }
+
+  // Save progress for next iteration
+  await saveBulkOperationProgress(sql, bulkOperationId, newByteOffset);
+
+  console.log(
+    `[bulk-jsonl] Progress ${bulkType} for ${shop}: offset=${newByteOffset}, lines=${linesToProcess.length}, upserted=${totalUpserted}`
+  );
+
+  // Return progress status - message stays in queue for continuation
+  return {
+    success: true,
+    action: "updated",
+    entityId: bulkOperationId,
+    status: "progress",
+  };
 }

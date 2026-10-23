@@ -6,7 +6,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
  * Tests verify:
  * 1. Enqueues reconcile messages for all installed shops
  * 2. Returns 0 when no shops installed
- * 3. Enqueues both RECONCILE_COMPANIES and RECONCILE_ORDERS per shop
+ * 3. Enqueues RECONCILE_COMPANIES per shop (orders enqueued after completion)
  * 4. isReconcileMessage type guard works correctly
  */
 
@@ -71,7 +71,7 @@ describe("Reconcile", () => {
       expect(count).toBe(0);
     });
 
-    it("enqueues 2 messages per shop (companies + orders)", async () => {
+    it("enqueues 1 RECONCILE_COMPANIES message per shop (orders enqueued after completion)", async () => {
       const { enqueueReconcileForAllShops } = await import("../reconcile.server");
       shopResults = [
         { domain: "shop1.myshopify.com" },
@@ -82,11 +82,12 @@ describe("Reconcile", () => {
         mockSql as unknown as Parameters<typeof enqueueReconcileForAllShops>[0]
       );
 
-      // 2 shops × 2 messages each = 4 total
-      expect(count).toBe(4);
+      // 2 shops × 1 RECONCILE_COMPANIES each = 2 total
+      // RECONCILE_ORDERS is enqueued after companies complete (in processor.server.ts)
+      expect(count).toBe(2);
     });
 
-    it("creates messages with correct topics", async () => {
+    it("creates messages with RECONCILE_COMPANIES topic only", async () => {
       const { enqueueReconcileForAllShops } = await import("../reconcile.server");
       shopResults = [{ domain: "test.myshopify.com" }];
       enqueuedMessages = [];
@@ -100,17 +101,18 @@ describe("Reconcile", () => {
         (m) => typeof m === "object" && m !== null && "topic" in m
       ) as Array<{ topic: string; shop: string }>;
 
-      expect(messages).toHaveLength(2);
-      expect(messages.map((m) => m.topic).sort()).toEqual([
-        "RECONCILE_COMPANIES",
-        "RECONCILE_ORDERS",
-      ]);
+      // Only RECONCILE_COMPANIES - orders are enqueued after companies complete
+      expect(messages).toHaveLength(1);
+      expect(messages[0].topic).toBe("RECONCILE_COMPANIES");
       expect(messages[0].shop).toBe("test.myshopify.com");
     });
 
     it("creates unique webhookIds for each message", async () => {
       const { enqueueReconcileForAllShops } = await import("../reconcile.server");
-      shopResults = [{ domain: "test.myshopify.com" }];
+      shopResults = [
+        { domain: "shop1.myshopify.com" },
+        { domain: "shop2.myshopify.com" },
+      ];
       enqueuedMessages = [];
 
       await enqueueReconcileForAllShops(
