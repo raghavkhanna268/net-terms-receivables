@@ -25,10 +25,12 @@
  * 3. S6 order sync maps processedAt ?? createdAt to issuedAt
  *    @see app/services/sync/order.server.ts:188 - const issuedAt = new Date(order.processedAt ?? order.createdAt);
  * 4. If Shopify returns paymentTerms on the order, those are used (inherited path)
- * 5. If Shopify returns null paymentTerms, S9 inference uses DB defaults (inferred path):
- *    - BuyerAccount.defaultTermsDays (explicit) from company location sync
- *    - AccountSource tag rules for tagged customers
- *    - Shop.defaultTermsDays as fallback
+ *    and the order sync (S6) creates an Invoice.
+ * 5. If Shopify returns null paymentTerms, the order sync SKIPS the order - no Invoice
+ *    is created. This is intentional: the product tracks orders WITH net terms.
+ *    NOTE: Shopify does NOT automatically inherit paymentTerms from company location's
+ *    buyerExperienceConfiguration.paymentTermsTemplateId on orderCreate. This is a
+ *    Shopify API limitation, not a bug in our code.
  *
  * TAGGING STRATEGY:
  * - B2B contacts are NOT tagged; their terms come from location buyerExperienceConfiguration
@@ -1774,9 +1776,9 @@ async function createTaggedCustomerOrder(
       return null;
     }
 
-    // No Shopify terms for non-B2B orders - S9 inference will use tag rules
+    // No Shopify terms for non-B2B orders - order sync will skip these
     state.ordersWithoutShopifyTerms++;
-    console.log(`    → No Shopify terms (will use tag rule: Net ${options.expectedTermsDays})`);
+    console.log(`    ⚠️  No Shopify terms (order sync will SKIP - no Invoice created)`);
 
     return {
       id: order.id,
@@ -1979,7 +1981,7 @@ export async function createOrder(
     } else {
       state.ordersWithoutShopifyTerms++;
       console.log(
-        `    → No Shopify terms (will use DB default: Net ${options.expectedTermsDays})`
+        `    ⚠️  No Shopify terms (order sync will SKIP - no Invoice created)`
       );
     }
 
@@ -2298,9 +2300,18 @@ export async function main(): Promise<void> {
   console.log(`    B2B orders:             ${b2bOrdersCount}`);
   console.log(`    Tagged customer orders: ${state.taggedCustomerOrdersCount}`);
   console.log(`    Orders with payment terms (from Shopify): ${state.ordersWithShopifyTerms}`);
-  console.log(`    Orders without payment terms (use DB):    ${state.ordersWithoutShopifyTerms}`);
+  console.log(`    Orders without payment terms (SKIPPED):   ${state.ordersWithoutShopifyTerms}`);
   console.log(`    Overdue orders:         ${state.overdueOrdersCount}`);
   console.log(`    Has overdue orders:     ${state.overdueOrdersCount > 0}`);
+
+  // Warn if all orders lack Shopify terms - likely a Shopify API limitation
+  if (state.ordersWithoutShopifyTerms > 0 && state.ordersWithShopifyTerms === 0 && !dryRun) {
+    console.log(`\n  ⚠️  WARNING: All ${state.ordersWithoutShopifyTerms} orders created without Shopify paymentTerms!`);
+    console.log("     Shopify does NOT inherit terms from company location on orderCreate.");
+    console.log("     These orders will be SKIPPED by order sync - no Invoices created.");
+    console.log("     This is expected behavior (product tracks orders with Shopify terms).");
+    console.log("     To create orders with terms, use draft orders or manual order creation in Admin.");
+  }
     
   if (state.overdueOrdersCount === 0 && !dryRun) {
     console.log(`\n  ⚠️  WARNING: No orders have effective due date in the past!`);
