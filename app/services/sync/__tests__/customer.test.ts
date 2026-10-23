@@ -677,7 +677,7 @@ describeWithDb("Customer Sync", () => {
   });
 
   describe("Compliance redaction (customers/redact and shop/redact)", () => {
-    it("redactCustomerData deletes s8_tagged_customers row for customer", async () => {
+    it("redactCustomerData deletes s8_tagged_customers and s8_draft_orders for customer", async () => {
       const customerId = `gid://shopify/Customer/cust-${TEST_SUFFIX}-redact`;
 
       // Create tagged customer record
@@ -686,30 +686,63 @@ describeWithDb("Customer Sync", () => {
         VALUES (${TEST_SHOP_ID}, ${customerId}, '["net-terms"]'::jsonb, true)
       `;
 
-      // Verify it exists
-      const before = await sql`
+      // Create a buyer account for this customer
+      const [buyerAccount] = await sql<{ id: string }[]>`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "customerId", name, "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, 'TAGGED_CUSTOMER', ${customerId}, 'Test Customer', NOW(), NOW()
+        )
+        RETURNING id
+      `;
+
+      // Create draft orders linked to this buyer account
+      await sql`
+        INSERT INTO s8_draft_orders (shop_id, draft_order_id, buyer_account_id, name, total, created_at)
+        VALUES 
+          (${TEST_SHOP_ID}, 'gid://shopify/DraftOrder/redact-1', ${buyerAccount.id}, '#D1', 1000.00, NOW()),
+          (${TEST_SHOP_ID}, 'gid://shopify/DraftOrder/redact-2', ${buyerAccount.id}, '#D2', 2000.00, NOW())
+      `;
+
+      // Verify records exist
+      const customersBefore = await sql`
         SELECT * FROM s8_tagged_customers WHERE customer_id = ${customerId}
       `;
-      expect(before).toHaveLength(1);
+      expect(customersBefore).toHaveLength(1);
+
+      const draftsBefore = await sql`
+        SELECT * FROM s8_draft_orders WHERE buyer_account_id = ${buyerAccount.id}
+      `;
+      expect(draftsBefore).toHaveLength(2);
 
       // Redact
-      const count = await redactCustomerData(sql, TEST_SHOP_ID, customerId);
-      expect(count).toBe(1);
+      const counts = await redactCustomerData(sql, TEST_SHOP_ID, customerId);
+      expect(counts.taggedCustomers).toBe(1);
+      expect(counts.draftOrders).toBe(2);
 
-      // Verify it's gone
-      const after = await sql`
+      // Verify both are gone
+      const customersAfter = await sql`
         SELECT * FROM s8_tagged_customers WHERE customer_id = ${customerId}
       `;
-      expect(after).toHaveLength(0);
+      expect(customersAfter).toHaveLength(0);
+
+      const draftsAfter = await sql`
+        SELECT * FROM s8_draft_orders WHERE buyer_account_id = ${buyerAccount.id}
+      `;
+      expect(draftsAfter).toHaveLength(0);
+
+      // Cleanup buyer account
+      await sql`DELETE FROM "BuyerAccount" WHERE id = ${buyerAccount.id}`;
     });
 
     it("redactCustomerData is idempotent (no error on missing customer)", async () => {
-      const count = await redactCustomerData(
+      const counts = await redactCustomerData(
         sql,
         TEST_SHOP_ID,
         `gid://shopify/Customer/nonexistent-${TEST_SUFFIX}`
       );
-      expect(count).toBe(0);
+      expect(counts.taggedCustomers).toBe(0);
+      expect(counts.draftOrders).toBe(0);
     });
 
     it("redactShopData deletes all s8_tagged_customers for shop", async () => {

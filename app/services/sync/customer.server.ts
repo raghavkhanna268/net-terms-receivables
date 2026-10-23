@@ -434,24 +434,44 @@ export function findMatchingTagRule(
 }
 
 /**
- * Delete all S8 tagged customer data for a specific customer (customers/redact).
+ * Delete all S8 data for a specific customer (customers/redact).
  * Called by the compliance webhook handler.
+ *
+ * Deletes from both:
+ * - s8_tagged_customers: Customer tag tracking
+ * - s8_draft_orders: Draft orders linked to this customer's buyer account
  *
  * @param sql - postgres.js SQL client
  * @param shopId - Shop ID
  * @param customerId - Customer GID to redact
- * @returns Number of rows deleted
+ * @returns Object with counts of deleted rows from each table
  */
 export async function redactCustomerData(
   sql: Sql,
   shopId: string,
   customerId: string
-): Promise<number> {
-  const result = await sql`
+): Promise<{ taggedCustomers: number; draftOrders: number }> {
+  // Delete tagged customer record
+  const taggedResult = await sql`
     DELETE FROM s8_tagged_customers
     WHERE shop_id = ${shopId} AND customer_id = ${customerId}
   `;
-  return result.count;
+
+  // Delete draft orders linked to this customer's buyer account
+  // First find the buyer account for this customer, then delete its draft orders
+  const draftResult = await sql`
+    DELETE FROM s8_draft_orders
+    WHERE shop_id = ${shopId}
+      AND buyer_account_id IN (
+        SELECT id FROM "BuyerAccount"
+        WHERE "shopId" = ${shopId} AND "customerId" = ${customerId}
+      )
+  `;
+
+  return {
+    taggedCustomers: taggedResult.count,
+    draftOrders: draftResult.count,
+  };
 }
 
 /**

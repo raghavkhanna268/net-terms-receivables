@@ -19,7 +19,7 @@ import { redactCustomerData, redactShopData } from "~/services/sync/customer.ser
  * HMAC verification uses Web Crypto (crypto.subtle) with constant-time comparison.
  *
  * S8 data handling:
- * - customers/redact: Deletes s8_tagged_customers rows for the customer
+ * - customers/redact: Deletes s8_tagged_customers and s8_draft_orders for the customer
  * - shop/redact: Deletes all s8_tagged_customers and s8_draft_orders for the shop
  */
 export const action = async ({ request, context }: ActionFunctionArgs) => {
@@ -50,27 +50,37 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       break;
 
     case "CUSTOMERS_REDACT": {
-      // S8: Delete s8_tagged_customers rows for this customer
+      // Verify payload shop_domain matches header shop for security.
+      // The shop to purge comes from the signed payload, not just the header.
+      const payloadShop = verifyPayloadShopMatch(shop, payload);
+
       const typedPayload = payload as {
-        shop_domain?: string;
         customer?: { id?: number };
       };
 
-      // Get shop ID for S8 data deletion
+      // Missing customer.id is a safe no-op (return 200)
+      if (!typedPayload.customer?.id) {
+        console.log(
+          `[Compliance] customers/redact: No customer ID in payload for shop=${payloadShop}`
+        );
+        break;
+      }
+
+      // Get shop ID for S8 data deletion using the verified payload shop
       const [shopRecord] = await sql<{ id: string }[]>`
-        SELECT id FROM "Shop" WHERE domain = ${shop}
+        SELECT id FROM "Shop" WHERE domain = ${payloadShop}
       `;
 
-      if (shopRecord && typedPayload.customer?.id) {
+      if (shopRecord) {
         // Customer GID format: gid://shopify/Customer/123
         const customerGid = `gid://shopify/Customer/${typedPayload.customer.id}`;
-        const count = await redactCustomerData(sql, shopRecord.id, customerGid);
+        const counts = await redactCustomerData(sql, shopRecord.id, customerGid);
         console.log(
-          `[Compliance] customers/redact: Deleted ${count} S8 row(s) for customer=${customerGid} shop=${shop}`
+          `[Compliance] customers/redact: Deleted ${counts.taggedCustomers} tagged customer(s), ${counts.draftOrders} draft order(s) for customer=${customerGid} shop=${payloadShop}`
         );
       } else {
         console.log(
-          `[Compliance] customers/redact: No shop or customer ID for shop=${shop}`
+          `[Compliance] customers/redact: Shop not found for domain=${payloadShop}`
         );
       }
       break;
