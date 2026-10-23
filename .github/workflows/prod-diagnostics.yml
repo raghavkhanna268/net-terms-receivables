@@ -1,4 +1,4 @@
-# Read-only production diagnostics workflow
+# Production diagnostics workflow with optional token refresh
 #
 # Checks OAuth session state, protected customer data access, and database
 # extensions/jobs for a shop.
@@ -7,7 +7,8 @@
 # SAFETY:
 #   - Manual trigger only (workflow_dispatch)
 #   - Runs only from main branch
-#   - Read-only database queries (SELECT only, PGOPTIONS enforced)
+#   - Read-only by default (PGOPTIONS enforced for session check)
+#   - Token refresh requires explicit opt-in via refresh_if_expired input
 #   - No artifacts uploaded
 #   - Access token is masked in logs and kept off argv
 #   - No customer PII is printed
@@ -16,6 +17,11 @@
 #
 # Required secrets:
 #   DATABASE_URL_MIGRATIONS - Supabase SESSION pooler connection string
+#
+# For token refresh (optional):
+#   DATABASE_URL_SESSION    - Supabase SESSION pooler for token refresh (write access)
+#   SHOPIFY_API_KEY         - App's API key (client_id) for token refresh
+#   SHOPIFY_API_SECRET      - App's API secret (client_secret) for token refresh
 #
 # Optional:
 #   Configure a GitHub Environment named "production" to require approval
@@ -33,6 +39,11 @@ on:
         type: string
       fail_on_expired:
         description: "Fail if offline token has expired (strict mode)"
+        required: false
+        default: false
+        type: boolean
+      refresh_if_expired:
+        description: "Attempt to refresh expired token before probe"
         required: false
         default: false
         type: boolean
@@ -146,6 +157,90 @@ jobs:
             fi
           fi
 
+      - name: Checkout (for token refresh)
+        if: ${{ inputs.refresh_if_expired && steps.session.outputs.token_expired == 'true' && steps.session.outputs.has_refresh_token == 'true' }}
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Node (for token refresh)
+        if: ${{ inputs.refresh_if_expired && steps.session.outputs.token_expired == 'true' && steps.session.outputs.has_refresh_token == 'true' }}
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies (for token refresh)
+        if: ${{ inputs.refresh_if_expired && steps.session.outputs.token_expired == 'true' && steps.session.outputs.has_refresh_token == 'true' }}
+        run: npm ci --ignore-scripts
+
+      - name: Refresh expired token
+        id: refresh
+        if: ${{ inputs.refresh_if_expired && steps.session.outputs.token_expired == 'true' && steps.session.outputs.has_refresh_token == 'true' }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_SESSION }}
+          SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
+          SHOPIFY_API_SECRET: ${{ secrets.SHOPIFY_API_SECRET }}
+          SHOP_DOMAIN: ${{ inputs.shop }}
+        run: |
+          set -euo pipefail
+
+          # Mask secrets immediately
+          if [ -n "$SHOPIFY_API_KEY" ]; then echo "::add-mask::$SHOPIFY_API_KEY"; fi
+          if [ -n "$SHOPIFY_API_SECRET" ]; then echo "::add-mask::$SHOPIFY_API_SECRET"; fi
+
+          # Check required secrets
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL_SESSION secret not set (required for token refresh)"
+            echo "refresh_success=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "$SHOPIFY_API_KEY" ] || [ -z "$SHOPIFY_API_SECRET" ]; then
+            echo "::error::SHOPIFY_API_KEY or SHOPIFY_API_SECRET secret not set (required for token refresh)"
+            echo "refresh_success=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Attempting to refresh expired token for shop: $SHOP_DOMAIN"
+          echo ""
+
+          # Run the refresh script (never outputs tokens - probe re-reads from DB)
+          # Capture stdout separately so stderr doesn't break jq parsing
+          if ! REFRESH_RESULT=$(npx tsx scripts/lib/refresh-offline-token.ts \
+            --shop "$SHOP_DOMAIN" \
+            --threshold-minutes 0); then
+            # Script failed - try to parse output anyway
+            true
+          fi
+
+          # Guard against non-JSON output breaking jq
+          if ! echo "$REFRESH_RESULT" | jq -e . >/dev/null 2>&1; then
+            echo "::warning::Refresh script returned non-JSON output"
+            {
+              echo "refresh_success=false"
+              echo "refresh_error_code=script_error"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Parse result - script outputs only {success, wasRefreshed, expires, errorCode, error}
+          # Guard each jq call so non-JSON or jq errors set refresh_success=false
+          REFRESH_SUCCESS=$(echo "$REFRESH_RESULT" | jq -r '.success // false' 2>/dev/null || echo false)
+          REFRESH_ERROR_CODE=$(echo "$REFRESH_RESULT" | jq -r '.errorCode // ""' 2>/dev/null || echo "")
+          WAS_REFRESHED=$(echo "$REFRESH_RESULT" | jq -r '.wasRefreshed // false' 2>/dev/null || echo false)
+
+          if [ "$REFRESH_SUCCESS" = "true" ]; then
+            echo "::notice::Token refresh successful (wasRefreshed: $WAS_REFRESHED)"
+            {
+              echo "refresh_success=true"
+              echo "was_refreshed=$WAS_REFRESHED"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Token refresh failed: $REFRESH_ERROR_CODE"
+            {
+              echo "refresh_success=false"
+              echo "refresh_error_code=$REFRESH_ERROR_CODE"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Protected customer data probe
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
@@ -153,6 +248,9 @@ jobs:
           TOKEN_EXPIRED: ${{ steps.session.outputs.token_expired }}
           OFFLINE_SESSION_EXISTS: ${{ steps.session.outputs.offline_session_exists }}
           FAIL_ON_EXPIRED: ${{ inputs.fail_on_expired }}
+          REFRESH_REQUESTED: ${{ inputs.refresh_if_expired }}
+          REFRESH_SUCCESS: ${{ steps.refresh.outputs.refresh_success }}
+          HAS_REFRESH_TOKEN: ${{ steps.session.outputs.has_refresh_token }}
           PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
           set -euo pipefail
@@ -176,18 +274,25 @@ jobs:
             exit 1
           fi
 
-          # Check if token is expired
-          if [ "$TOKEN_EXPIRED" = "true" ]; then
+          # Check if token is expired and refresh was not successful
+          if [ "$TOKEN_EXPIRED" = "true" ] && [ "$REFRESH_SUCCESS" != "true" ]; then
             echo "::notice::Offline access token has expired."
             echo ""
             echo "The offline access token for this shop has expired."
-            echo "To renew it, either:"
-            echo "  1. Open the app in the Shopify admin (triggers automatic token refresh)"
-            echo "  2. Implement and trigger a refresh token flow"
-            echo ""
-            echo "Note: This workflow is read-only and cannot refresh the token."
-            echo "Refreshing would rotate the refresh token, and without writing"
-            echo "the new tokens back to the database, the app's session would break."
+
+            if [ "$REFRESH_REQUESTED" = "true" ]; then
+              if [ "$HAS_REFRESH_TOKEN" != "true" ]; then
+                echo "Token refresh was requested but no refresh token is available."
+                echo "The shop needs to re-authenticate with the app."
+              else
+                echo "Token refresh was attempted but failed."
+                echo "See the 'Refresh expired token' step for details."
+              fi
+            else
+              echo "To renew it, either:"
+              echo "  1. Open the app in the Shopify admin (triggers automatic token refresh)"
+              echo "  2. Re-run this workflow with 'refresh_if_expired' enabled"
+            fi
             echo ""
             echo "Skipping Admin API probe (token expired)."
             echo ""
