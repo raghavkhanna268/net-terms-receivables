@@ -15,6 +15,7 @@ import {
   sendDataRequestNotification,
 } from "~/services/compliance";
 import { getShopifyApp } from "~/shopify.server";
+import { recordWebhookReceipt, parseTriggeredAt, deleteWebhookReceiptsForShop } from "~/lib/webhook-receipts.server";
 
 /**
  * Fetch shop owner email using the offline session admin client.
@@ -69,6 +70,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     return new Response(null, { status: 500 });
   }
 
+  const triggeredAt = parseTriggeredAt(request);
   const { shop, topic, webhookId, payload } = await verifyWebhook(request, apiSecret, {
     requireValidJson: true,
   });
@@ -79,6 +81,13 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   );
 
   const sql = getRequestSql();
+
+  // Edge idempotency: record receipt, skip if duplicate (S20)
+  const isNew = await recordWebhookReceipt(sql, shop, webhookId, normalizedTopic, triggeredAt);
+  if (!isNew) {
+    console.log(`[Compliance] Duplicate ${normalizedTopic} for ${shop}, skipping`);
+    return new Response(null, { status: 200 });
+  }
 
   switch (normalizedTopic) {
     case "CUSTOMERS_DATA_REQUEST": {
@@ -215,6 +224,12 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       const pgmqResult = await purgePgmqMessages(sql, payloadShop);
       console.log(
         `[Compliance] shop/redact: pgmq purge - ${pgmqResult.reason}`
+      );
+
+      // Purge webhook receipts for the shop (S20 compliance)
+      const receiptsDeleted = await deleteWebhookReceiptsForShop(sql, payloadShop);
+      console.log(
+        `[Compliance] shop/redact: Deleted ${receiptsDeleted} webhook receipts for shop=${payloadShop}`
       );
 
       const { deleted, shopId } = await deleteShop(sql, payloadShop);

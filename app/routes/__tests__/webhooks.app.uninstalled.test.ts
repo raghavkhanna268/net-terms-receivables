@@ -7,6 +7,15 @@ vi.mock("~/lib/webhook-verify.server", () => ({
   normalizeWebhookTopic: (topic: string) => topic.replace(/\//g, "_").toUpperCase(),
 }));
 
+const mockRecordWebhookReceipt = vi.fn();
+const mockParseTriggeredAt = vi.fn();
+const mockDeleteWebhookReceiptsForShop = vi.fn();
+vi.mock("~/lib/webhook-receipts.server", () => ({
+  recordWebhookReceipt: (...args: unknown[]) => mockRecordWebhookReceipt(...args),
+  parseTriggeredAt: (...args: unknown[]) => mockParseTriggeredAt(...args),
+  deleteWebhookReceiptsForShop: (...args: unknown[]) => mockDeleteWebhookReceiptsForShop(...args),
+}));
+
 const mockMarkShopUninstalled = vi.fn();
 vi.mock("~/services/compliance", () => ({
   markShopUninstalled: (...args: unknown[]) => mockMarkShopUninstalled(...args),
@@ -64,6 +73,9 @@ describe("webhooks.app.uninstalled", () => {
       rawBody: new ArrayBuffer(0),
     });
     mockMarkShopUninstalled.mockResolvedValue(true);
+    mockRecordWebhookReceipt.mockResolvedValue(true);
+    mockParseTriggeredAt.mockReturnValue(null);
+    mockDeleteWebhookReceiptsForShop.mockResolvedValue(0);
   });
 
   afterEach(() => {

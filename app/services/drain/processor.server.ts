@@ -132,8 +132,8 @@ export function getBulkHandler(topic: string): BulkHandler | undefined {
  * Fetches the company via GraphQL and processes it.
  */
 async function handleCompany(sql: Sql, message: SyncMessage): Promise<SyncResult> {
-  // Idempotency check first
-  if (await isWebhookProcessed(sql, message.webhookId)) {
+  // Idempotency check first (S20: use shop for new table)
+  if (await isWebhookProcessed(sql, message.webhookId, message.shop)) {
     return {
       success: true,
       action: "skipped",
@@ -187,8 +187,8 @@ async function handleCompany(sql: Sql, message: SyncMessage): Promise<SyncResult
  * Fetches the location via GraphQL and processes it.
  */
 async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<SyncResult> {
-  // Idempotency check
-  if (await isWebhookProcessed(sql, message.webhookId)) {
+  // Idempotency check (S20: use shop for new table)
+  if (await isWebhookProcessed(sql, message.webhookId, message.shop)) {
     return {
       success: true,
       action: "skipped",
@@ -251,10 +251,15 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
  * - ORDERS_CANCELLED: Use topic as evidence of cancelled state, call cancelInvoice via processOrderWebhook
  * - ORDERS_CREATE/UPDATED: Keep ledger state unchanged (can't process without data)
  * - Always increment order_refetch_null counter (no PII)
+ *
+ * Ordering guard (S20): Uses triggeredAt to prevent older events overwriting newer data.
  */
 async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> {
+  // Parse triggeredAt from message for ordering guards (S20)
+  const triggeredAt = message.triggeredAt ? new Date(message.triggeredAt) : null;
+
   // Idempotency check
-  if (await isWebhookProcessed(sql, message.webhookId)) {
+  if (await isWebhookProcessed(sql, message.webhookId, message.shop)) {
     return {
       success: true,
       action: "skipped",
@@ -311,13 +316,14 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
         message.shop,
         message.topic,
         minimalOrder,
-        message.webhookId
+        message.webhookId,
+        triggeredAt
       );
     }
 
     // For CREATE/UPDATED, we can't process without full order data
     // Keep ledger state unchanged, mark webhook processed
-    await markWebhookProcessed(sql, message.webhookId, message.topic, message.resourceGid);
+    await markWebhookProcessed(sql, message.webhookId, message.topic, message.resourceGid, message.shop);
     return {
       success: true,
       action: "skipped",
@@ -330,7 +336,8 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
     message.shop,
     message.topic,
     result.data.node,
-    message.webhookId
+    message.webhookId,
+    triggeredAt
   );
 }
 
@@ -384,7 +391,7 @@ registerBulkHandler("BULK_OPERATIONS_FINISH", handleBulkOperationsFinish);
  * Starts a bulk companies export for the shop.
  */
 async function handleReconcileCompanies(sql: Sql, message: SyncMessage): Promise<SyncResult> {
-  if (await isWebhookProcessed(sql, message.webhookId)) {
+  if (await isWebhookProcessed(sql, message.webhookId, message.shop)) {
     return {
       success: true,
       action: "skipped",
@@ -400,7 +407,7 @@ async function handleReconcileCompanies(sql: Sql, message: SyncMessage): Promise
  * Starts a bulk orders export for the shop.
  */
 async function handleReconcileOrders(sql: Sql, message: SyncMessage): Promise<SyncResult> {
-  if (await isWebhookProcessed(sql, message.webhookId)) {
+  if (await isWebhookProcessed(sql, message.webhookId, message.shop)) {
     return {
       success: true,
       action: "skipped",

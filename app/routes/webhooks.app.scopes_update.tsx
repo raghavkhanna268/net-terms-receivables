@@ -3,6 +3,8 @@ import {
   verifyWebhook,
   normalizeWebhookTopic,
 } from "~/lib/webhook-verify.server";
+import { getRequestSql } from "~/lib/request-context.server";
+import { recordWebhookReceipt, parseTriggeredAt } from "~/lib/webhook-receipts.server";
 
 /**
  * Scopes update webhook handler.
@@ -20,10 +22,20 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     return new Response(null, { status: 500 });
   }
 
-  const { shop, topic, payload } = await verifyWebhook(request, apiSecret);
+  const triggeredAt = parseTriggeredAt(request);
+  const { shop, topic, webhookId, payload } = await verifyWebhook(request, apiSecret);
   const normalizedTopic = normalizeWebhookTopic(topic);
 
   console.log(`Received ${normalizedTopic} webhook for ${shop}`);
+
+  const sql = getRequestSql();
+
+  // Edge idempotency: record receipt, skip if duplicate (S20)
+  const isNew = await recordWebhookReceipt(sql, shop, webhookId, normalizedTopic, triggeredAt);
+  if (!isNew) {
+    console.log(`[scopes_update] Duplicate ${normalizedTopic} for ${shop}, skipping`);
+    return new Response();
+  }
 
   if (normalizedTopic !== "APP_SCOPES_UPDATE") {
     console.log(
@@ -45,7 +57,6 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     }
   } catch (error) {
     console.error(`Error updating scopes for ${shop}:`, error);
-    // Don't fail the webhook - Shopify will retry
   }
 
   return new Response();

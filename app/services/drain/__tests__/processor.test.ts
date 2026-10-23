@@ -344,7 +344,8 @@ describe("Order null refetch behavior", () => {
         id: "gid://shopify/Order/456",
         paymentTerms: expect.any(Object),
       }),
-      "wh-123"
+      "wh-123",
+      null // triggeredAt
     );
 
     expect(result.success).toBe(true);
@@ -393,7 +394,8 @@ describe("Order null refetch behavior", () => {
       "test.myshopify.com",
       "ORDERS_CANCELLED",
       expect.objectContaining({ id: "gid://shopify/Order/999" }),
-      "wh-789"
+      "wh-789",
+      null // triggeredAt
     );
 
     expect(result.success).toBe(true);
@@ -437,7 +439,8 @@ describe("Order null refetch behavior", () => {
       mockSql,
       "wh-create-1",
       "ORDERS_CREATE",
-      "gid://shopify/Order/111"
+      "gid://shopify/Order/111",
+      "test.myshopify.com"
     );
 
     // Result should indicate skipped with explanation
@@ -635,7 +638,7 @@ describe("Order processedAt in drain path", () => {
 
     await handler!(mockSql as never, message);
 
-    // Verify processOrderWebhook receives the order with processedAt
+    // Verify processOrderWebhook receives the order with processedAt (6th arg is triggeredAt)
     expect(mockProcessOrderWebhook).toHaveBeenCalledWith(
       mockSql,
       "test.myshopify.com",
@@ -645,7 +648,8 @@ describe("Order processedAt in drain path", () => {
         createdAt,
         processedAt, // Must include processedAt
       }),
-      "wh-backdated-1"
+      "wh-backdated-1",
+      null // triggeredAt is null when not in message
     );
 
     // The order passed to processOrderWebhook should have processedAt != createdAt

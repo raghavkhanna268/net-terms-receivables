@@ -11,27 +11,32 @@
 
 import type { Sql } from "~/lib/db-light.server";
 import type { ShopifyCompany, SyncResult } from "./types";
-
-/**
- * Webhook-id based dedupe table name.
- * Stores processed webhook IDs to prevent duplicate processing.
- */
-const DEDUPE_TABLE = "s6_processed_webhooks";
+import { isWebhookReceived, markWebhookReceived } from "~/lib/webhook-receipts.server";
 
 /**
  * Check if a webhook has already been processed (idempotency check).
+ * Uses the new webhook_receipts table (S20).
  *
  * @param sql - postgres.js SQL client
+ * @param shop - Shop domain
  * @param webhookId - Shopify webhook ID
  * @returns true if already processed
  */
 export async function isWebhookProcessed(
   sql: Sql,
-  webhookId: string
+  webhookId: string,
+  shop?: string
 ): Promise<boolean> {
+  // For backwards compatibility, check both old and new tables
+  // New table requires shop, old table doesn't have it
+  if (shop) {
+    return isWebhookReceived(sql, shop, webhookId);
+  }
+  
+  // Fallback: check old table (deprecated, for migration period)
   const [result] = await sql<{ exists: boolean }[]>`
     SELECT EXISTS(
-      SELECT 1 FROM ${sql(DEDUPE_TABLE)}
+      SELECT 1 FROM s6_processed_webhooks
       WHERE webhook_id = ${webhookId}
     ) as exists
   `;
@@ -40,20 +45,29 @@ export async function isWebhookProcessed(
 
 /**
  * Mark a webhook as processed (for idempotency).
+ * Uses the new webhook_receipts table (S20).
  *
  * @param sql - postgres.js SQL client
  * @param webhookId - Shopify webhook ID
  * @param topic - Webhook topic
  * @param resourceGid - Resource GID that was processed
+ * @param shop - Shop domain (required for new table)
  */
 export async function markWebhookProcessed(
   sql: Sql,
   webhookId: string,
   topic: string,
-  resourceGid: string
+  resourceGid: string,
+  shop?: string
 ): Promise<void> {
+  if (shop) {
+    // Use new table
+    await markWebhookReceived(sql, shop, webhookId, topic);
+  }
+  
+  // Also write to old table for backwards compatibility during migration
   await sql`
-    INSERT INTO ${sql(DEDUPE_TABLE)} (webhook_id, topic, resource_gid, processed_at)
+    INSERT INTO s6_processed_webhooks (webhook_id, topic, resource_gid, processed_at)
     VALUES (${webhookId}, ${topic}, ${resourceGid}, NOW())
     ON CONFLICT (webhook_id) DO NOTHING
   `;

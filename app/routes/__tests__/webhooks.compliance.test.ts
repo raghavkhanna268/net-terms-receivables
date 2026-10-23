@@ -9,6 +9,15 @@ vi.mock("~/lib/webhook-verify.server", () => ({
   normalizeWebhookTopic: (topic: string) => topic.replace(/\//g, "_").toUpperCase(),
 }));
 
+const mockRecordWebhookReceipt = vi.fn();
+const mockParseTriggeredAt = vi.fn();
+const mockDeleteWebhookReceiptsForShop = vi.fn();
+vi.mock("~/lib/webhook-receipts.server", () => ({
+  recordWebhookReceipt: (...args: unknown[]) => mockRecordWebhookReceipt(...args),
+  parseTriggeredAt: (...args: unknown[]) => mockParseTriggeredAt(...args),
+  deleteWebhookReceiptsForShop: (...args: unknown[]) => mockDeleteWebhookReceiptsForShop(...args),
+}));
+
 const mockSessionStorage = {
   deleteAllForShop: vi.fn(),
 };
@@ -77,6 +86,9 @@ describe("webhooks.compliance", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockDeleteAllForShop.mockResolvedValue(0);
+    mockRecordWebhookReceipt.mockResolvedValue(true);
+    mockParseTriggeredAt.mockReturnValue(null);
+    mockDeleteWebhookReceiptsForShop.mockResolvedValue(0);
     // Mock unauthenticated.admin to return shop email
     mockGraphql.mockResolvedValue({
       json: async () => ({ data: { shop: { email: "owner@shop.com", contactEmail: null } } }),

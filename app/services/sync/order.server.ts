@@ -13,6 +13,7 @@
  * - dueSource: 'schedule' if from Shopify payment schedule
  *
  * Idempotent: Uses upsert with ON CONFLICT on orderId.
+ * Ordering guard (S20): Uses triggeredAt to prevent older events overwriting newer data.
  */
 
 import type { Sql } from "~/lib/db-light.server";
@@ -27,11 +28,14 @@ import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
  * CANCELLED: Marks Invoice as cancelled
  * PAID: Marks Invoice as paid, sets outstanding to 0
  *
+ * Ordering guard (S20): Uses triggeredAt to prevent older events overwriting newer data.
+ *
  * @param sql - postgres.js SQL client
  * @param shopDomain - Shop domain
  * @param topic - Webhook topic
  * @param order - Order data from webhook
  * @param webhookId - Webhook ID for idempotency
+ * @param triggeredAt - X-Shopify-Triggered-At for ordering guards (optional)
  * @returns Sync result
  */
 export async function processOrderWebhook(
@@ -39,10 +43,11 @@ export async function processOrderWebhook(
   shopDomain: string,
   topic: string,
   order: ShopifyOrder,
-  webhookId: string
+  webhookId: string,
+  triggeredAt?: Date | null
 ): Promise<SyncResult> {
   // Idempotency check
-  if (await isWebhookProcessed(sql, webhookId)) {
+  if (await isWebhookProcessed(sql, webhookId, shopDomain)) {
     return {
       success: true,
       action: "skipped",
@@ -99,11 +104,11 @@ export async function processOrderWebhook(
     };
   }
 
-  // CREATE or UPDATED: Upsert invoice
+  // CREATE or UPDATED: Upsert invoice with ordering guard
   const invoiceData = mapOrderToInvoice(shopId, buyerAccountId, order);
-  const result = await upsertInvoice(sql, invoiceData);
+  const result = await upsertInvoice(sql, invoiceData, triggeredAt);
 
-  await markWebhookProcessed(sql, webhookId, topic, order.id);
+  await markWebhookProcessed(sql, webhookId, topic, order.id, shopDomain);
 
   return result;
 }
@@ -236,11 +241,32 @@ export function mapOrderToInvoice(
 
 /**
  * Upsert an Invoice from order data.
+ * 
+ * Ordering guard (S20): If triggeredAt is provided and the existing record's
+ * updatedAt is newer, the update is skipped to prevent older events overwriting.
  */
 async function upsertInvoice(
   sql: Sql,
-  data: ReturnType<typeof mapOrderToInvoice>
+  data: ReturnType<typeof mapOrderToInvoice>,
+  triggeredAt?: Date | null
 ): Promise<SyncResult> {
+  // If triggeredAt is provided, check ordering guard first
+  if (triggeredAt) {
+    const [existing] = await sql<{ id: string; updated_at: Date }[]>`
+      SELECT id, "updatedAt" as updated_at FROM "Invoice"
+      WHERE "orderId" = ${data.orderId}
+    `;
+    
+    if (existing && existing.updated_at > triggeredAt) {
+      return {
+        success: true,
+        action: "skipped",
+        skipReason: "Ordering guard: existing record is newer",
+        entityId: existing.id,
+      };
+    }
+  }
+
   const [result] = await sql<{ id: string; action: string }[]>`
     INSERT INTO "Invoice" (
       "shopId",

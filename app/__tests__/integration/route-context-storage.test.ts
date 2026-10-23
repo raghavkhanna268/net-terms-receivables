@@ -38,6 +38,16 @@ vi.mock("~/lib/webhook-verify.server", () => ({
   normalizeWebhookTopic: (topic: string) => topic.replace(/\//g, "_").toUpperCase(),
 }));
 
+// Mock webhook receipts for S20 idempotency
+const mockRecordWebhookReceipt = vi.fn().mockResolvedValue(true);
+const mockParseTriggeredAt = vi.fn().mockReturnValue(null);
+const mockDeleteWebhookReceiptsForShop = vi.fn().mockResolvedValue(0);
+vi.mock("~/lib/webhook-receipts.server", () => ({
+  recordWebhookReceipt: (...args: unknown[]) => mockRecordWebhookReceipt(...args),
+  parseTriggeredAt: (...args: unknown[]) => mockParseTriggeredAt(...args),
+  deleteWebhookReceiptsForShop: (...args: unknown[]) => mockDeleteWebhookReceiptsForShop(...args),
+}));
+
 // Mock session storage that tracks method calls (matches PrismaSessionStorage interface)
 function createMockSessionStorage() {
   return {

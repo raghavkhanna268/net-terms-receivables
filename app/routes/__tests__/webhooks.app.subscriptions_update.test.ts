@@ -29,6 +29,16 @@ vi.mock("~/services/plan.server", () => ({
   refreshPlanCache: mockRefreshPlanCache,
 }));
 
+// Mock webhook receipts for S20 idempotency
+const mockRecordWebhookReceipt = vi.fn().mockResolvedValue(true);
+const mockParseTriggeredAt = vi.fn().mockReturnValue(null);
+
+vi.mock("~/lib/webhook-receipts.server", () => ({
+  recordWebhookReceipt: (...args: unknown[]) => mockRecordWebhookReceipt(...args),
+  parseTriggeredAt: (...args: unknown[]) => mockParseTriggeredAt(...args),
+  deleteWebhookReceiptsForShop: vi.fn().mockResolvedValue(0),
+}));
+
 describe("webhooks.app.subscriptions_update", () => {
   const TEST_SHOP = "test-shop.myshopify.com";
   const TEST_WEBHOOK_ID = "wh-test-sub-123";

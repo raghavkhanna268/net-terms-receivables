@@ -6,7 +6,7 @@
  *
  * Idempotent: Uses upsert with ON CONFLICT to handle duplicates.
  * Webhook dedupe: Checks processed webhooks table before processing.
- *
+ * Ordering guard (S20): Uses triggeredAt to prevent older events overwriting newer data.
  * S21 gating: Enforces company limit before creating new BuyerAccounts.
  * Updates to existing accounts are always allowed (downgrade-safe).
  */

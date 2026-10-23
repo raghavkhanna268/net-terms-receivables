@@ -5,6 +5,7 @@ import {
 } from "~/lib/webhook-verify.server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { markShopUninstalled } from "~/services/compliance";
+import { recordWebhookReceipt, parseTriggeredAt, deleteWebhookReceiptsForShop } from "~/lib/webhook-receipts.server";
 
 /**
  * App uninstalled webhook handler.
@@ -12,6 +13,7 @@ import { markShopUninstalled } from "~/services/compliance";
  * When a merchant uninstalls the app:
  * 1. Delete all sessions immediately (required for logout)
  * 2. Mark the shop as uninstalled (sets uninstalledAt timestamp)
+ * 3. Purge webhook receipts for the shop (S20 compliance)
  *
  * Full data deletion happens later on shop/redact webhook.
  * Per Shopify docs, shop/redact is sent 48 hours after uninstall:
@@ -33,10 +35,20 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     return new Response(null, { status: 500 });
   }
 
-  const { shop, topic } = await verifyWebhook(request, apiSecret);
+  const triggeredAt = parseTriggeredAt(request);
+  const { shop, topic, webhookId } = await verifyWebhook(request, apiSecret);
   const normalizedTopic = normalizeWebhookTopic(topic);
 
   console.log(`Received ${normalizedTopic} webhook for ${shop}`);
+
+  const sql = getRequestSql();
+
+  // Edge idempotency: record receipt, skip if duplicate (S20)
+  const isNew = await recordWebhookReceipt(sql, shop, webhookId, normalizedTopic, triggeredAt);
+  if (!isNew) {
+    console.log(`[uninstalled] Duplicate ${normalizedTopic} for ${shop}, skipping`);
+    return new Response();
+  }
 
   if (normalizedTopic !== "APP_UNINSTALLED") {
     console.log(
@@ -54,7 +66,6 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   }
 
   try {
-    const sql = getRequestSql();
     const marked = await markShopUninstalled(sql, shop);
     if (marked) {
       console.log(`[uninstalled] Marked shop ${shop} as uninstalled`);
@@ -65,6 +76,14 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     }
   } catch (error) {
     console.error(`Error marking shop ${shop} as uninstalled:`, error);
+  }
+
+  // Purge webhook receipts for the shop (S20 compliance)
+  try {
+    const receiptsDeleted = await deleteWebhookReceiptsForShop(sql, shop);
+    console.log(`[uninstalled] Deleted ${receiptsDeleted} webhook receipts for ${shop}`);
+  } catch (error) {
+    console.error(`Error deleting webhook receipts for ${shop}:`, error);
   }
 
   return new Response();

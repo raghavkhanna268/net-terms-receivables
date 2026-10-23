@@ -30,6 +30,16 @@ vi.mock("~/lib/pgmq.server", () => ({
   sendSyncMessage: mockSendSyncMessage,
 }));
 
+// Mock the webhook receipts module (S20)
+const mockRecordWebhookReceipt = vi.fn().mockResolvedValue(true);
+const mockParseTriggeredAt = vi.fn().mockReturnValue(null);
+
+vi.mock("~/lib/webhook-receipts.server", () => ({
+  recordWebhookReceipt: (...args: unknown[]) => mockRecordWebhookReceipt(...args),
+  parseTriggeredAt: (...args: unknown[]) => mockParseTriggeredAt(...args),
+  deleteWebhookReceiptsForShop: vi.fn().mockResolvedValue(0),
+}));
+
 describe("S8 Webhook Handlers", () => {
   const TEST_SHOP = "test-shop.myshopify.com";
   const TEST_WEBHOOK_ID = "wh-test-s8-123";

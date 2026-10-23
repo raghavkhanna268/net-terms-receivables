@@ -1,6 +1,7 @@
 import type { ActionFunctionArgs } from "react-router";
 import { getRequestSql } from "~/lib/request-context.server";
 import { sendBulkMessage } from "~/lib/pgmq.server";
+import { recordWebhookReceipt, parseTriggeredAt } from "~/lib/webhook-receipts.server";
 
 /**
  * Webhook handler for bulk operation completion.
@@ -12,9 +13,10 @@ import { sendBulkMessage } from "~/lib/pgmq.server";
  *
  * Processing:
  * 1. HMAC verification via authenticate.webhook (returns 401 on failure)
- * 2. Look up bulk operation type from s6_bulk_operations tracking table
- * 3. Enqueue to s6_bulk for async JSONL download/processing
- * 4. Return 200 immediately (within 10ms CPU budget)
+ * 2. Edge idempotency: record receipt, skip if duplicate (S20)
+ * 3. Look up bulk operation type from s6_bulk_operations tracking table
+ * 4. Enqueue to s6_bulk for async JSONL download/processing
+ * 5. Return 200 immediately (within 10ms CPU budget)
  *
  * The JSONL download and parsing happens in the drain (S10), not here.
  * This keeps the webhook handler lightweight and within CPU budget.
@@ -26,8 +28,18 @@ import { sendBulkMessage } from "~/lib/pgmq.server";
 export const action = async ({ request, context }: ActionFunctionArgs) => {
   const { shopify } = context;
 
+  const triggeredAt = parseTriggeredAt(request);
   const { shop, topic, payload, webhookId } =
     await shopify.authenticate.webhook(request);
+
+  const sql = getRequestSql();
+
+  // Edge idempotency: record receipt, skip if duplicate (S20)
+  const isNew = await recordWebhookReceipt(sql, shop, webhookId, "BULK_OPERATIONS_FINISH", triggeredAt);
+  if (!isNew) {
+    console.log(`[webhooks.bulk_operations.finish] Duplicate for ${shop}, skipping`);
+    return new Response(null, { status: 200 });
+  }
 
   const typedPayload = payload as {
     admin_graphql_api_id?: string;
@@ -50,8 +62,6 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     );
     return new Response(null, { status: 200 });
   }
-
-  const sql = getRequestSql();
 
   // Look up bulk type from tracking table (set when operation was started)
   const bulkType = await lookupBulkOperationType(sql, bulkOperationId);
