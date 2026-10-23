@@ -13,6 +13,8 @@
 
 import { ensureMetafieldDefinitions } from "./metafield-definitions.server";
 import { ensureValidation } from "./validation-registration.server";
+import { getRequestSql } from "./request-context.server";
+import { validateTimezone } from "./aging-dates.server";
 
 /**
  * Minimal type for the admin GraphQL client.
@@ -77,6 +79,73 @@ export function runAfterAuth(
   waitUntil(setupPromise);
 }
 
+/**
+ * GraphQL query to fetch shop timezone.
+ * Only fetches the ianaTimezone field to minimize data transfer.
+ */
+const SHOP_TIMEZONE_QUERY = `
+  query ShopTimezone {
+    shop {
+      ianaTimezone
+    }
+  }
+`;
+
+/**
+ * Fetch the shop's timezone from Admin API and update the database.
+ * Uses validateTimezone to ensure the value is a valid IANA timezone.
+ */
+async function syncShopTimezone(
+  shop: string,
+  admin: AdminGraphqlClient,
+): Promise<void> {
+  try {
+    const response = await admin.graphql(SHOP_TIMEZONE_QUERY);
+    const result = await response.json() as {
+      data?: { shop?: { ianaTimezone?: string } };
+      errors?: Array<{ message: string }>;
+    };
+
+    if (result.errors) {
+      console.warn(
+        `[afterAuth] GraphQL errors fetching timezone for ${shop}:`,
+        result.errors.map((e) => e.message).join(", ")
+      );
+      return;
+    }
+
+    const ianaTimezone = result.data?.shop?.ianaTimezone;
+    if (!ianaTimezone) {
+      console.warn(`[afterAuth] No timezone returned for ${shop}`);
+      return;
+    }
+
+    // Validate the timezone before storing - this ensures the DB only has valid zones
+    const validatedTimezone = validateTimezone(ianaTimezone);
+    if (validatedTimezone !== ianaTimezone) {
+      console.warn(
+        `[afterAuth] Invalid timezone from Shopify for ${shop}: "${ianaTimezone}", ` +
+        `using fallback: "${validatedTimezone}"`
+      );
+    }
+
+    // Get SQL client from request context
+    const sql = getRequestSql();
+
+    // Update the shop's timezone in the database
+    await sql`
+      UPDATE "Shop"
+      SET timezone = ${validatedTimezone}
+      WHERE domain = ${shop}
+    `;
+
+    console.log(`[afterAuth] Updated timezone for ${shop}: ${validatedTimezone}`);
+  } catch (error) {
+    // Non-fatal: timezone sync failure shouldn't break app access
+    console.error(`[afterAuth] Failed to sync timezone for ${shop}:`, error);
+  }
+}
+
 async function runSetup(
   shop: string,
   admin: AdminGraphqlClient,
@@ -85,6 +154,10 @@ async function runSetup(
     // Definitions run before validation so the Function input query can resolve them.
     await ensureMetafieldDefinitions(admin);
     await ensureValidation(admin);
+    
+    // Sync shop timezone from Shopify Admin API
+    await syncShopTimezone(shop, admin);
+    
     setupCompletedShops.add(shop);
   } catch (error) {
     console.error(`[afterAuth] Failed to setup for ${shop}:`, error);
