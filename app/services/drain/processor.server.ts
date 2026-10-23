@@ -687,14 +687,14 @@ async function processBulkQueue(
       if (bulkResult.success) {
         // Check status for progress vs complete
         if (bulkResult.status === "progress") {
-          // Send fresh continuation message FIRST (new msg_id, read_ct starts at 0)
-          // Then archive the old one. This order ensures we never strand an op:
-          // - If crash after send but before archive: duplicate message, handled by idempotency
-          // - If crash before send: old message retried normally
-          await sql`
-            SELECT pgmq.send(${S6_QUEUES.BULK}, ${sql.json(msg.message)})
-          `;
-          await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
+          // Atomically send continuation and archive old message in one transaction.
+          // This eliminates the duplicate-message window entirely:
+          // - If transaction commits: new message exists, old is archived
+          // - If transaction fails/crashes: old message retries normally
+          await sql.begin(async (tx) => {
+            await tx`SELECT pgmq.send(${S6_QUEUES.BULK}, ${tx.json(msg.message)})`;
+            await tx`SELECT pgmq.archive(${S6_QUEUES.BULK}, ${msg.msg_id}::bigint)`;
+          });
 
           result.processed++; // Count as progress
         } else {
