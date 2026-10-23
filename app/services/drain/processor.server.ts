@@ -394,6 +394,7 @@ async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResul
       success: false,
       action: "skipped",
       error: result.error,
+      retryable: result.retryable,
     };
   }
 
@@ -449,6 +450,7 @@ async function handleDraftOrder(sql: Sql, message: SyncMessage): Promise<SyncRes
       success: false,
       action: "skipped",
       error: result.error,
+      retryable: result.retryable,
     };
   }
 

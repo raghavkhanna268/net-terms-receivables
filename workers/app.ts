@@ -40,7 +40,8 @@ export default wrapWithSentry({
     // S21: Pass ctx.waitUntil via ALS for background tasks (e.g., stale plan
     // cache refresh). This avoids module-global state that could leak across
     // requests in long-lived isolates.
-    return requestContext.run({ getSql, waitUntil: (p) => ctx.waitUntil(p) }, async () => {
+    // S8: Pass env for feature flags (e.g., CUSTOMER_PII_FIELDS for drain handlers).
+    return requestContext.run({ getSql, waitUntil: (p) => ctx.waitUntil(p), env }, async () => {
       return requestHandler(request, {
         cloudflare: { env, ctx },
         sessionStorage,
@@ -78,7 +79,8 @@ export default wrapWithSentry({
       console.log(`[scheduled] cron trigger at ${new Date(event.scheduledTime).toISOString()}`);
 
       // Run inside ALS context so session storage works for unauthenticated.admin()
-      const result = await requestContext.run({ getSql }, async () => {
+      // S8: Pass env for feature flags (e.g., CUSTOMER_PII_FIELDS for drain handlers).
+      const result = await requestContext.run({ getSql, env }, async () => {
         return runDrain(getSql(), {
           batchSize: 10,
         });
