@@ -49,10 +49,11 @@ describe("Bulk Operations GraphQL", () => {
       expect(BULK_COMPANIES_QUERY).toContain("locations");
     });
 
-    it("only requests billingAddress.company (DPDP compliance)", () => {
-      // Should have billingAddress { company } but not full address
+    it("only requests billingAddress.companyName (DPDP compliance)", () => {
+      // Should have billingAddress { companyName } but not full address
+      // Note: CompanyAddress.company was renamed to companyName in 2026-10
       expect(BULK_COMPANIES_QUERY).toContain("billingAddress");
-      expect(BULK_COMPANIES_QUERY).toContain("company");
+      expect(BULK_COMPANIES_QUERY).toContain("companyName");
       expect(BULK_COMPANIES_QUERY).not.toContain("firstName");
       expect(BULK_COMPANIES_QUERY).not.toContain("lastName");
       expect(BULK_COMPANIES_QUERY).not.toContain("address1");

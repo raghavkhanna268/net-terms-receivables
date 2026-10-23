@@ -2,7 +2,8 @@
  * Validation Registration Service
  *
  * Idempotent registration of the credit-check-validation Shopify Function.
- * Uses validationCreate mutation with functionHandle (per 2026-10 docs).
+ * Uses validationCreate mutation with functionHandle (per 2026-10 schema).
+ * Query results use shopifyFunction { handle } (functionHandle is input-only).
  * write_validations scope is already granted.
  *
  * @see https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/validationCreate
@@ -25,7 +26,9 @@ const VALIDATION_TITLE = "Net Terms Credit Check";
 
 interface ValidationNode {
   id: string;
-  functionHandle: string;
+  shopifyFunction: {
+    handle: string;
+  };
   title: string;
   enabled: boolean;
 }
@@ -46,7 +49,9 @@ interface ValidationCreateResult {
     validationCreate?: {
       validation?: {
         id: string;
-        functionHandle: string;
+        shopifyFunction: {
+          handle: string;
+        };
         title: string;
         enabled: boolean;
       };
@@ -65,7 +70,9 @@ const VALIDATIONS_QUERY = `#graphql
       edges {
         node {
           id
-          functionHandle
+          shopifyFunction {
+            handle
+          }
           title
           enabled
         }
@@ -84,7 +91,9 @@ const VALIDATION_CREATE_MUTATION = `#graphql
     }) {
       validation {
         id
-        functionHandle
+        shopifyFunction {
+          handle
+        }
         title
         enabled
       }
@@ -117,7 +126,7 @@ export async function ensureValidation(
   }
 
   const existingValidation = existingData.data?.validations?.edges.find(
-    (edge) => edge.node.functionHandle === VALIDATION_FUNCTION_HANDLE,
+    (edge) => edge.node.shopifyFunction.handle === VALIDATION_FUNCTION_HANDLE,
   );
 
   if (existingValidation) {

@@ -637,7 +637,7 @@ describeWithDb("Order Sync", () => {
                   id: "ps1",
                   dueAt: "2025-08-14T23:59:59.999Z",
                   issuedAt: "2025-07-15T10:00:00.000Z",
-                  amount: { shopMoney: { amount: "100000.00", currencyCode: "INR" } },
+                  amount: { amount: "100000.00", currencyCode: "INR" },
                 },
               },
             ],

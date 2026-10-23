@@ -241,7 +241,7 @@ describe("shopify-client.server", () => {
   });
 
   describe("4xx errors (not 429)", () => {
-    it("does not retry 401 errors", async () => {
+    it("401 errors are retryable (session refresh can recover)", async () => {
       const { HttpResponseError } = await import("@shopify/shopify-api");
       const error = new HttpResponseError({
         message: "Unauthorized",
@@ -256,16 +256,37 @@ describe("shopify-client.server", () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.retryable).toBe(false);
+      // P3: 401 should be retryable - session refresh (#76) can recover
+      expect(result.retryable).toBe(true);
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(1);
     });
 
-    it("does not retry 403 errors", async () => {
+    it("403 errors are non-retryable (scope not granted)", async () => {
       const { HttpResponseError } = await import("@shopify/shopify-api");
       const error = new HttpResponseError({
         message: "Forbidden",
         code: 403,
         statusText: "Forbidden",
+      });
+      mockAdmin.graphql.mockRejectedValueOnce(error);
+
+      const result = await shopifyGraphQL(
+        "test.myshopify.com",
+        "query { shop { name } }"
+      );
+
+      expect(result.success).toBe(false);
+      // 403 is non-retryable - scope not granted, needs reinstall
+      expect(result.retryable).toBe(false);
+      expect(mockAdmin.graphql).toHaveBeenCalledTimes(1);
+    });
+
+    it("400 Bad Request is non-retryable", async () => {
+      const { HttpResponseError } = await import("@shopify/shopify-api");
+      const error = new HttpResponseError({
+        message: "Bad Request",
+        code: 400,
+        statusText: "Bad Request",
       });
       mockAdmin.graphql.mockRejectedValueOnce(error);
 
@@ -316,7 +337,7 @@ describe("shopify-client.server", () => {
   });
 
   describe("InvalidSession errors (hoisted admin client)", () => {
-    it("returns non-retryable error when unauthenticated.admin rejects with InvalidSession", async () => {
+    it("returns retryable error when unauthenticated.admin rejects with InvalidSession", async () => {
       const { InvalidSession } = await import("@shopify/shopify-api");
 
       // Make unauthenticated.admin reject with InvalidSession
@@ -330,15 +351,16 @@ describe("shopify-client.server", () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.retryable).toBe(false);
+      // P3: InvalidSession should be retryable - session refresh (#76) can recover
+      expect(result.retryable).toBe(true);
       expect(result.retriesAttempted).toBe(0);
-      expect(result.error).toContain("Invalid session");
+      expect(result.error).toContain("session");
       // graphql should never be called since we failed at the admin client level
       expect(mockAdmin.graphql).not.toHaveBeenCalled();
     });
 
-    it("returns non-retryable error when unauthenticated.admin rejects with session error message", async () => {
-      // Make unauthenticated.admin reject with a generic session error
+    it("returns non-retryable error when 'No session found' (shop uninstalled)", async () => {
+      // 'No session found' means shop uninstalled or never installed - no recovery possible
       mockShopifyApp.unauthenticated.admin.mockRejectedValueOnce(
         new Error("No session found for shop")
       );
@@ -349,11 +371,83 @@ describe("shopify-client.server", () => {
       );
 
       expect(result.success).toBe(false);
+      // 'No session found' is non-retryable - shop uninstalled, no session to refresh
       expect(result.retryable).toBe(false);
       expect(result.retriesAttempted).toBe(0);
-      expect(result.error).toContain("session");
+      expect(result.error).toContain("No session");
       // graphql should never be called since we failed at the admin client level
       expect(mockAdmin.graphql).not.toHaveBeenCalled();
+    });
+
+    it("returns retryable error for other session errors", async () => {
+      // Generic session errors (not 'No session found') may be recoverable
+      mockShopifyApp.unauthenticated.admin.mockRejectedValueOnce(
+        new Error("Session expired")
+      );
+
+      const result = await shopifyGraphQL(
+        "expired-session.myshopify.com",
+        "query { shop { name } }"
+      );
+
+      expect(result.success).toBe(false);
+      // Other session errors are retryable - session refresh may recover
+      expect(result.retryable).toBe(true);
+      expect(result.retriesAttempted).toBe(0);
+      expect(result.error).toContain("session");
+      expect(mockAdmin.graphql).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("ACCESS_DENIED (GraphQL-level)", () => {
+    it("returns non-retryable error for ACCESS_DENIED", async () => {
+      mockAdmin.graphql.mockResolvedValueOnce({
+        json: async () => ({
+          errors: [
+            {
+              message: "Access denied. Required scope: read_orders",
+              extensions: { code: "ACCESS_DENIED" },
+            },
+          ],
+        }),
+      });
+
+      const result = await shopifyGraphQL(
+        "test.myshopify.com",
+        "query { orders { edges { node { id } } } }"
+      );
+
+      expect(result.success).toBe(false);
+      // P3: ACCESS_DENIED is non-retryable - scope not granted, permanent until reinstall
+      expect(result.retryable).toBe(false);
+      expect(result.error).toContain("Access denied");
+      expect(mockAdmin.graphql).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("GraphQL validation/schema errors", () => {
+    it("returns non-retryable error for schema errors", async () => {
+      mockAdmin.graphql.mockResolvedValueOnce({
+        json: async () => ({
+          errors: [
+            {
+              message: "Field 'nonExistentField' doesn't exist on type 'Shop'",
+              extensions: { code: "GRAPHQL_VALIDATION_FAILED" },
+            },
+          ],
+        }),
+      });
+
+      const result = await shopifyGraphQL(
+        "test.myshopify.com",
+        "query { shop { nonExistentField } }"
+      );
+
+      expect(result.success).toBe(false);
+      // P3: GraphQL validation errors are non-retryable - schema mismatch
+      expect(result.retryable).toBe(false);
+      expect(result.error).toContain("nonExistentField");
+      expect(mockAdmin.graphql).toHaveBeenCalledTimes(1);
     });
   });
 });

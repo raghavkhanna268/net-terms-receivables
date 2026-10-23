@@ -79,8 +79,10 @@ export const COMPANY_QUERY = `
 
 /**
  * Fetch a CompanyLocation by GID.
- * Fetches id, name, company, billingAddress.company (name fallback), payment terms.
+ * Fetches id, name, company, billingAddress.companyName (name fallback), payment terms.
  * No PII fields.
+ *
+ * Note: CompanyAddress.company was renamed to companyName in 2026-10.
  */
 export const COMPANY_LOCATION_QUERY = `
   query CompanyLocationById($id: ID!) {
@@ -92,7 +94,7 @@ export const COMPANY_LOCATION_QUERY = `
           id
         }
         billingAddress {
-          company
+          companyName
         }
         buyerExperienceConfiguration {
           paymentTermsTemplate {
@@ -132,6 +134,10 @@ export const BULK_OPERATION_STATUS_QUERY = `
 /**
  * Fetch an Order by GID.
  * Fetches ids, amounts, statuses, payment terms - no customer PII.
+ *
+ * Note: PaymentSchedule.amount returns MoneyV2 directly (not MoneyBag).
+ * The deprecated amount field is still used for compatibility; consider
+ * migrating to balanceDue/totalBalance in a future update.
  */
 export const ORDER_QUERY = `
   query OrderById($id: ID!) {
@@ -163,10 +169,8 @@ export const ORDER_QUERY = `
                 issuedAt
                 completedAt
                 amount {
-                  shopMoney {
-                    amount
-                    currencyCode
-                  }
+                  amount
+                  currencyCode
                 }
               }
             }

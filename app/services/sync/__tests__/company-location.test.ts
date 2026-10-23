@@ -274,12 +274,13 @@ describeWithDb("CompanyLocation Sync", () => {
     });
 
     it("uses billing address company name as fallback", () => {
+      // Note: CompanyAddress.company was renamed to companyName in 2026-10
       const location: ShopifyCompanyLocation = {
         id: "gid://shopify/CompanyLocation/101",
         name: "",
         company: { id: "gid://shopify/Company/456" },
         billingAddress: {
-          company: "Billing Corp",
+          companyName: "Billing Corp",
         },
       };
 

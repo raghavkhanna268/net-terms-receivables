@@ -57,6 +57,20 @@ on:
         required: false
         default: false
         type: boolean
+      redrive_dlq:
+        description: "NOT read-only: redrive dead-letter queue messages back to original queues"
+        required: false
+        default: false
+        type: boolean
+      redrive_topic:
+        description: "Topic filter for DLQ redrive (required when redrive_dlq=true, e.g. ORDERS_UPDATED)"
+        required: false
+        type: string
+      redrive_limit:
+        description: "Maximum messages to redrive (default: 100)"
+        required: false
+        default: "100"
+        type: string
 
 permissions:
   contents: read
@@ -751,6 +765,91 @@ jobs:
           FROM "Shop" s
           WHERE s."uninstalledAt" IS NULL;
           EOSQL
+
+      - name: DLQ Redrive
+        if: ${{ inputs.redrive_dlq }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_SESSION }}
+          REDRIVE_TOPIC: ${{ inputs.redrive_topic }}
+          REDRIVE_LIMIT: ${{ inputs.redrive_limit }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL_SESSION secret not set (required for DLQ redrive - needs write access)"
+            exit 1
+          fi
+
+          if [ -z "$REDRIVE_TOPIC" ]; then
+            echo "::error::redrive_topic is required when redrive_dlq=true"
+            exit 1
+          fi
+
+          # Validate limit is numeric
+          if ! [[ "$REDRIVE_LIMIT" =~ ^[0-9]+$ ]]; then
+            echo "::error::redrive_limit must be a positive integer"
+            exit 1
+          fi
+
+          echo "=== DLQ Redrive ==="
+          echo ""
+          echo "Topic: $REDRIVE_TOPIC"
+          echo "Limit: $REDRIVE_LIMIT"
+          echo ""
+
+          # First, show how many messages match
+          MATCH_COUNT=$(psql -v ON_ERROR_STOP=1 -v topic="$REDRIVE_TOPIC" -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT COUNT(*)
+          FROM s6_dead_letter
+          WHERE message->>'topic' = :'topic';
+          EOSQL
+          )
+
+          echo "Messages matching topic '$REDRIVE_TOPIC': $MATCH_COUNT"
+          echo ""
+
+          if [ "$MATCH_COUNT" = "0" ]; then
+            echo "No messages to redrive."
+            exit 0
+          fi
+
+          # Redrive messages in a single transaction:
+          # 1. Select matching DLQ rows (limited)
+          # 2. For each, call pgmq.send to re-enqueue
+          # 3. Delete from s6_dead_letter
+          # This is idempotent: if the workflow is re-run, rows already deleted won't be processed again.
+          REDRIVE_RESULT=$(psql -v ON_ERROR_STOP=1 -v topic="$REDRIVE_TOPIC" -v lim="$REDRIVE_LIMIT" -t -A "$DATABASE_URL" <<'EOSQL'
+          WITH to_redrive AS (
+            SELECT id, original_queue, message
+            FROM s6_dead_letter
+            WHERE message->>'topic' = :'topic'
+            ORDER BY dead_lettered_at ASC
+            LIMIT :lim
+          ),
+          requeued AS (
+            SELECT
+              tr.id,
+              tr.original_queue,
+              pgmq.send(tr.original_queue, tr.message) AS new_msg_id
+            FROM to_redrive tr
+          ),
+          deleted AS (
+            DELETE FROM s6_dead_letter
+            WHERE id IN (SELECT id FROM requeued)
+            RETURNING id
+          )
+          SELECT json_build_object(
+            'redriven_count', (SELECT COUNT(*) FROM deleted),
+            'sample_queues', (SELECT array_agg(DISTINCT original_queue) FROM requeued)
+          );
+          EOSQL
+          )
+
+          echo "Redrive result:"
+          echo "$REDRIVE_RESULT" | jq .
+
+          echo ""
+          echo "::notice::DLQ redrive completed"
 
       - name: Invoices
         env:

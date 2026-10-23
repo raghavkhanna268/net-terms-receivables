@@ -14,7 +14,9 @@ describe("validation-registration", () => {
                     {
                       node: {
                         id: "gid://shopify/Validation/123",
-                        functionHandle: "credit-check-validation",
+                        shopifyFunction: {
+                          handle: "credit-check-validation",
+                        },
                         title: "Net Terms Credit Check",
                         enabled: true,
                       },
@@ -56,7 +58,9 @@ describe("validation-registration", () => {
                   validationCreate: {
                     validation: {
                       id: "gid://shopify/Validation/456",
-                      functionHandle: "credit-check-validation",
+                      shopifyFunction: {
+                        handle: "credit-check-validation",
+                      },
                       title: "Net Terms Credit Check",
                       enabled: true,
                     },
@@ -176,7 +180,9 @@ describe("validation-registration", () => {
                       {
                         node: {
                           id: "gid://shopify/Validation/999",
-                          functionHandle: "other-function",
+                          shopifyFunction: {
+                            handle: "other-function",
+                          },
                           title: "Other Validation",
                           enabled: true,
                         },
@@ -193,7 +199,9 @@ describe("validation-registration", () => {
                   validationCreate: {
                     validation: {
                       id: "gid://shopify/Validation/456",
-                      functionHandle: "credit-check-validation",
+                      shopifyFunction: {
+                        handle: "credit-check-validation",
+                      },
                       title: "Net Terms Credit Check",
                       enabled: true,
                     },

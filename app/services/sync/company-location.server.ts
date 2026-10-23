@@ -77,9 +77,10 @@ export async function processCompanyLocationWebhook(
   const defaultTermsDays = paymentTerms?.dueInDays ?? null;
 
   // Build display name: location name or company name from billing address
+  // Note: CompanyAddress.company was renamed to companyName in 2026-10
   const displayName =
     location.name ||
-    location.billingAddress?.company ||
+    location.billingAddress?.companyName ||
     `Location ${location.id.split("/").pop()}`;
 
   // S21: Check if this is a new account (for gating)
@@ -170,7 +171,7 @@ export function mapCompanyLocationToBuyerAccount(
 
   const displayName =
     location.name ||
-    location.billingAddress?.company ||
+    location.billingAddress?.companyName ||
     `Location ${location.id.split("/").pop()}`;
 
   return {

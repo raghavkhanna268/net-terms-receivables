@@ -11,12 +11,22 @@
  * On invalid refresh token, marks session as needing re-auth and returns
  * a non-retryable error.
  *
- * NOT retried (caller must handle):
- * - HTTP 4xx (except 429): 400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found
- * - GraphQL userErrors: Application-level validation errors (e.g., invalid input)
- * - GraphQL errors without THROTTLED code: Query syntax errors, field errors
- * - InvalidSession: Token revoked, shop needs to reinstall
+ * Error classification for drain retry logic:
+ *
+ * RETRYABLE (drain should retry or leave for next read_ct):
+ * - HTTP 401: Token expired → #76 session refresh can recover on next drain run
+ * - HTTP 429: Rate limited, backoff and retry
+ * - HTTP 5xx: Server errors, transient
+ * - Network errors: Connection failures, timeouts
+ * - InvalidSession: Token expired → refresh can recover
+ *
+ * NON-RETRYABLE (drain should DLQ immediately):
+ * - HTTP 403: Scope not granted, permanent until app reinstall
+ * - 'No session found': Shop uninstalled or never installed, no recovery possible
  * - Invalid refresh token: Re-authentication required (non-retryable)
+ * - GraphQL validation errors: Schema mismatch, invalid query syntax, field errors
+ * - GraphQL ACCESS_DENIED: Scope not granted, permanent until app reinstall
+ * - GraphQL userErrors: Invalid input data
  *
  * Worker budget awareness:
  * - Request-path code: At most 1 short retry, 1s max wait
@@ -262,22 +272,32 @@ export async function shopifyGraphQL<T = unknown>(
     const result = await shopify.unauthenticated.admin(shop);
     admin = result.admin;
   } catch (err) {
-    // InvalidSession or 'No session found' - non-retryable, drain should archive
+    // InvalidSession - RETRYABLE (#76 session refresh can recover expired tokens)
     if (err instanceof InvalidSession) {
       return {
         success: false,
-        error: `Invalid session for ${shop}. Shop may need to reinstall the app.`,
-        retryable: false,
+        error: `Invalid session for ${shop}. Session may need refresh.`,
+        retryable: true, // Retryable: #76 session refresh can recover
         retriesAttempted: 0,
       };
     }
-    // Other session errors (e.g., 'No session found')
+    // 'No session found' - NON-RETRYABLE (shop uninstalled or never installed)
     const message = err instanceof Error ? err.message : "Unknown error";
+    if (message.includes("No session found") || message.includes("no session")) {
+      return {
+        success: false,
+        error: `No session found for ${shop}. Shop may have uninstalled or never installed.`,
+        retryable: false, // Non-retryable: no session to refresh
+        retriesAttempted: 0,
+      };
+    }
+    // Other session errors - check if they indicate missing vs expired
     if (message.includes("session") || message.includes("Session")) {
+      // Session exists but may be expired - retryable
       return {
         success: false,
         error: `Session error for ${shop}: ${message}`,
-        retryable: false,
+        retryable: true, // Retryable: may be recoverable
         retriesAttempted: 0,
       };
     }
@@ -321,6 +341,20 @@ export async function shopifyGraphQL<T = unknown>(
           };
         }
 
+        // Check for ACCESS_DENIED - scope not granted, permanent until reinstall
+        const hasAccessDenied = json.errors.some((e) =>
+          e.extensions?.code === "ACCESS_DENIED"
+        );
+
+        if (hasAccessDenied) {
+          return {
+            success: false,
+            error: `Access denied: ${json.errors.map((e) => e.message).join("; ")}`,
+            retryable: false, // Non-retryable: scope not granted
+            retriesAttempted: attempt,
+          };
+        }
+
         // Check for user errors (never retry)
         const hasUserErrors = json.errors.some((e) =>
           e.message.toLowerCase().includes("user error") ||
@@ -331,16 +365,16 @@ export async function shopifyGraphQL<T = unknown>(
           return {
             success: false,
             error: `User errors: ${json.errors.map((e) => e.message).join("; ")}`,
-            retryable: false,
+            retryable: false, // Non-retryable: invalid input
             retriesAttempted: attempt,
           };
         }
 
-        // Other GraphQL errors - not retryable
+        // Other GraphQL errors (schema/validation) - not retryable
         return {
           success: false,
           error: `GraphQL errors: ${json.errors.map((e) => e.message).join("; ")}`,
-          retryable: false,
+          retryable: false, // Non-retryable: schema mismatch or query syntax error
           retriesAttempted: attempt,
         };
       }
@@ -404,17 +438,28 @@ export async function shopifyGraphQL<T = unknown>(
         };
       }
 
-      // Other HTTP errors (4xx except 429) - not retryable
+      // HTTP 4xx errors
       if (err instanceof HttpResponseError) {
         const code = err.response.code;
-        if (code === 401 || code === 403) {
+        // 401: Token expired - RETRYABLE (#76 session refresh can recover)
+        if (code === 401) {
           return {
             success: false,
-            error: `Authentication failed for ${shop} (${code}). Token may be revoked.`,
-            retryable: false,
+            error: `Authentication failed for ${shop} (401). Token may need refresh.`,
+            retryable: true, // Retryable: session refresh can recover expired token
             retriesAttempted: attempt,
           };
         }
+        // 403: Forbidden - NON-RETRYABLE (scope not granted, needs reinstall)
+        if (code === 403) {
+          return {
+            success: false,
+            error: `Forbidden for ${shop} (403). Scope may not be granted.`,
+            retryable: false, // Non-retryable: needs app reinstall with correct scopes
+            retriesAttempted: attempt,
+          };
+        }
+        // Other 4xx (400 Bad Request, 404 Not Found) - not retryable
         return {
           success: false,
           error: `HTTP error ${code}: ${err.message}`,
@@ -433,12 +478,12 @@ export async function shopifyGraphQL<T = unknown>(
         };
       }
 
-      // Session errors - not retryable
+      // Session errors - RETRYABLE (#76 refresh can recover expired tokens)
       if (err instanceof InvalidSession) {
         return {
           success: false,
-          error: `Invalid session for ${shop}. Shop may need to reinstall the app.`,
-          retryable: false,
+          error: `Invalid session for ${shop}. Session may need refresh.`,
+          retryable: true, // Retryable: #76 session refresh can recover
           retriesAttempted: attempt,
         };
       }
@@ -516,4 +561,3 @@ export async function shopifyGraphQLQueue<T = unknown>(
 ): Promise<ShopifyClientResult<T>> {
   return shopifyGraphQL<T>(shop, query, variables, "queue");
 }
-

@@ -535,12 +535,12 @@ describe("Deleted shop handling", () => {
     expect(result.error).toContain("No offline session");
   });
 
-  it("auth failure (401/403) is non-retryable, leading to eventual DLQ", async () => {
-    // If somehow the shop exists but token is revoked, 401/403 is non-retryable
+  it("401 auth failure is retryable - session refresh can recover", async () => {
+    // 401 is RETRYABLE because #76 session refresh can recover the token
     mockAdminGraphQL.mockResolvedValue({
       success: false,
-      error: "Authentication failed for revoked-shop.myshopify.com (401). Token may be revoked.",
-      retryable: false,
+      error: "Authentication failed for revoked-shop.myshopify.com (401). Token may need refresh.",
+      retryable: true, // Retryable: session refresh can recover
     });
 
     const { getSyncHandler } = await import("../processor.server");
@@ -561,10 +561,44 @@ describe("Deleted shop handling", () => {
 
     const result = await handler!(mockSql as never, message);
 
-    // Handler returns failure with non-retryable error from adminGraphQL
-    // After maxRetries, processor moves message to DLQ
+    // Handler returns failure with retryable error from adminGraphQL
+    // Processor will retry on next drain run (session refresh may recover)
     expect(result.success).toBe(false);
+    expect(result.retryable).toBe(true);
     expect(result.error).toContain("401");
+  });
+
+  it("403 forbidden is non-retryable - scope not granted", async () => {
+    // 403 is NON-RETRYABLE because it means scope not granted, needs reinstall
+    mockAdminGraphQL.mockResolvedValue({
+      success: false,
+      error: "Forbidden for revoked-shop.myshopify.com (403). Scope may not be granted.",
+      retryable: false, // Non-retryable: needs app reinstall
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("ORDERS_CREATE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "ORDERS_CREATE",
+      shop: "revoked-shop.myshopify.com",
+      webhookId: "wh-revoked-2",
+      resourceGid: "gid://shopify/Order/789",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    // Handler returns failure with non-retryable error from adminGraphQL
+    // Processor should DLQ this immediately
+    expect(result.success).toBe(false);
+    expect(result.retryable).toBe(false);
+    expect(result.error).toContain("403");
   });
 });
 
