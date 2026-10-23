@@ -19,6 +19,7 @@ import {
   type SeedState,
   type GraphQLResponse,
 } from "../seed";
+import { inferDueDate } from "~/lib/due-date";
 
 /**
  * Unit tests for the seed script (orderCreate with processedAt version).
@@ -271,8 +272,8 @@ describe("Seed Script Constants", () => {
   });
 });
 
-describe("(3) At least one seeded order is overdue", () => {
-  it("ORDER_DISTRIBUTION contains overdue orders (daysAgo > locationTermsDays)", () => {
+describe("(3) At least one seeded order is overdue under S9 inference", () => {
+  it("ORDER_DISTRIBUTION contains orders where daysAgo > locationTermsDays", () => {
     const overdueOrders = ORDER_DISTRIBUTION.filter(
       (o) => o.daysAgo > o.locationTermsDays
     );
@@ -291,24 +292,61 @@ describe("(3) At least one seeded order is overdue", () => {
     expect(hasNet30Overdue).toBe(true);
   });
 
-  it("calculates correct due dates that result in overdue invoices", () => {
+  it("inferDueDate produces overdue dueAt for Net 30 order processed 35 days ago", () => {
+    // Simulate: order processed 35 days ago with Net 30 terms from BuyerAccount default
+    // S6 sync maps processedAt → order.createdAt → issuedAt (order.server.ts:187)
     const now = new Date();
-    
-    // Find an overdue order
-    const overdueOrder = ORDER_DISTRIBUTION.find(
-      (o) => o.daysAgo > o.locationTermsDays
-    )!;
-    
-    // Calculate processedAt (backdated)
     const processedAt = new Date(now);
-    processedAt.setDate(processedAt.getDate() - overdueOrder.daysAgo);
-    
-    // Calculate due date (processedAt + terms)
-    const dueDate = new Date(processedAt);
-    dueDate.setDate(dueDate.getDate() + overdueOrder.locationTermsDays);
+    processedAt.setDate(processedAt.getDate() - 35);
+
+    // No Shopify paymentTerms (null) - S9 inference uses BuyerAccount default
+    const result = inferDueDate({
+      paymentTerms: null,
+      orderCreatedAt: processedAt,  // S6 uses order.createdAt which = processedAt when backdated
+      fulfilledAt: null,
+      accountDefaultTermsDays: 30,  // BuyerAccount.defaultTermsDays seeded by this script
+      accountDefaultTermsSource: "explicit",
+      tagRules: [],
+      customerTags: [],
+      shopDefaultTermsDays: null,
+      merchantOverrideDueAt: null,
+      shopTimezone: "Asia/Kolkata",
+    });
+
+    expect(result.dueSource).toBe("inferred");
+    expect(result.basis).toBe("accountDefault");
+    expect(result.dueAt).not.toBeNull();
     
     // Due date should be in the past (overdue)
-    expect(dueDate.getTime()).toBeLessThan(now.getTime());
+    // processedAt (35 days ago) + Net 30 = 5 days ago
+    expect(result.dueAt!.getTime()).toBeLessThan(now.getTime());
+  });
+
+  it("inferDueDate produces future dueAt for Net 60 order processed 45 days ago", () => {
+    // Order processed 45 days ago with Net 60 terms - should NOT be overdue yet
+    const now = new Date();
+    const processedAt = new Date(now);
+    processedAt.setDate(processedAt.getDate() - 45);
+
+    const result = inferDueDate({
+      paymentTerms: null,
+      orderCreatedAt: processedAt,
+      fulfilledAt: null,
+      accountDefaultTermsDays: 60,
+      accountDefaultTermsSource: "explicit",
+      tagRules: [],
+      customerTags: [],
+      shopDefaultTermsDays: null,
+      merchantOverrideDueAt: null,
+      shopTimezone: "Asia/Kolkata",
+    });
+
+    expect(result.dueSource).toBe("inferred");
+    expect(result.dueAt).not.toBeNull();
+    
+    // Due date should be in the future (not overdue)
+    // processedAt (45 days ago) + Net 60 = 15 days from now
+    expect(result.dueAt!.getTime()).toBeGreaterThan(now.getTime());
   });
 });
 
@@ -444,6 +482,34 @@ describe("(1) processedAt and companyLocationId reach the payload", () => {
     expect(lineItems[0].priceSet).toEqual({
       shopMoney: { amount: "75000", currencyCode: "INR" },
     });
+  });
+
+  it("createOrder sends customer.toAssociate.id (not customer.id)", async () => {
+    // OrderCreateCustomerInput in 2026-10 requires toAssociate or toUpsert, not direct id
+    // @see https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateCustomerInput
+    const state = createMockState();
+    const customerId = "gid://shopify/Customer/789";
+
+    await createOrder(state, {
+      orderKey: `${SEED_PREFIX}order-customer`,
+      companyLocationId: "gid://shopify/CompanyLocation/123",
+      customerId,
+      productTitle: "Test Product",
+      amount: 50000,
+      processedAt: new Date().toISOString(),
+      expectedTermsDays: 30,
+    });
+
+    const createCall = capturedRequests.find(
+      (r) => r.query.includes("orderCreate") && r.query.includes("OrderCreateOrderInput")
+    );
+    const order = createCall?.variables?.order as Record<string, unknown>;
+    const customer = order.customer as Record<string, unknown>;
+
+    // Must use toAssociate.id, NOT direct id
+    expect(customer.id).toBeUndefined();
+    expect(customer.toAssociate).toBeDefined();
+    expect((customer.toAssociate as Record<string, unknown>).id).toBe(customerId);
   });
 });
 

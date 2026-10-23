@@ -21,8 +21,10 @@
  * 2. Orders use processedAt to backdate, creating overdue invoices for testing
  *    @see https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateOrderInput
  *    "processedAt: The date and time when the order was created."
- * 3. If Shopify returns paymentTerms on the order, those are used (inherited path)
- * 4. If Shopify returns null paymentTerms, S9 inference uses DB defaults (inferred path):
+ * 3. S6 order sync maps order.createdAt (which equals processedAt when backdated) to issuedAt
+ *    @see app/services/sync/order.server.ts:187 - const issuedAt = new Date(order.createdAt);
+ * 4. If Shopify returns paymentTerms on the order, those are used (inherited path)
+ * 5. If Shopify returns null paymentTerms, S9 inference uses DB defaults (inferred path):
  *    - BuyerAccount.defaultTermsDays (explicit) from company location sync
  *    - AccountSource tag rules for tagged customers
  *    - Shop.defaultTermsDays as fallback
@@ -460,6 +462,12 @@ export async function resetSeedData(state: SeedState): Promise<void> {
   console.log("\n  Reset summary:");
   console.log(`    Companies deleted: ${state.deletedCount.companies}`);
   console.log(`    Orders found: ${state.deletedCount.orders} (cannot delete via API, remain tagged)`);
+  
+  if (state.deletedCount.orders > 0 && state.deletedCount.companies === 0) {
+    console.log("\n  ⚠️  Note: companyDelete fails while orders exist for that company.");
+    console.log("     To fully reset, cancel the seeded orders in Shopify Admin first,");
+    console.log("     or manually delete companies after orders are archived.");
+  }
 }
 
 async function deleteSeededOrders(state: SeedState): Promise<void> {
@@ -787,6 +795,12 @@ export async function seedOrders(state: SeedState): Promise<void> {
       continue;
     }
 
+    // Guard against empty or missing contactCustomerId
+    if (!company.contactCustomerId) {
+      console.log(`  ⚠️  Skipping order ${orderIndex}: no contactCustomerId for ${orderSpec.entityKey}`);
+      continue;
+    }
+
     // Generate random amount
     const amountRange = AMOUNT_RANGES_INR[orderIndex % AMOUNT_RANGES_INR.length];
     const amount = Math.floor(Math.random() * (amountRange.max - amountRange.min) + amountRange.min);
@@ -913,10 +927,12 @@ export async function createOrder(
       userErrors: UserError[];
     };
   }>(state, mutation, {
+    // OrderCreateCustomerInput in 2026-10 requires toAssociate or toUpsert, not direct id
+    // @see https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateCustomerInput
     order: {
       tags: [SEED_TAG, options.orderKey],
       companyLocationId: options.companyLocationId,
-      customer: { id: options.customerId },
+      customer: { toAssociate: { id: options.customerId } },
       currency: state.currencyCode,
       financialStatus: "PENDING",
       processedAt: options.processedAt,
