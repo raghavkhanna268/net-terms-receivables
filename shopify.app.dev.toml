@@ -3,9 +3,14 @@
 # This config is used by the dev store seed script and includes additional scopes
 # that are NOT needed in the production app.
 #
-# Usage: Create a separate Dev Dashboard app with these scopes for seeding.
+# Usage:
+# 1. Create a separate app in the Shopify Partners Dashboard for dev seeding
+# 2. Run `shopify app config link` in this directory to set the client_id
+# 3. Install the dev app on your dev store
+# 4. Use the access token from the dev app for the seed script
 
-client_id = "" # Set to your Dev Dashboard app client ID
+# Set via `shopify app config link` — each developer has their own dev app
+client_id = ""
 name = "Net Terms Receivables (Dev Seed)"
 application_url = "https://localhost:3000"
 embedded = false
@@ -13,17 +18,21 @@ embedded = false
 [access_scopes]
 # All production scopes plus dev-only scopes for seeding.
 #
-# Production scopes (8):
+# Production scopes (11):
 # - 5 read: read_companies, read_customers, read_draft_orders, read_orders, read_payment_terms
-# - 3 write: write_companies, write_customers, write_orders
+# - 6 write: write_companies, write_customers, write_merchant_managed_fulfillment_orders,
+#            write_orders, write_payment_customizations, write_validations
 #
 # Dev-only scopes (for seed script):
-# - write_payment_terms: paymentTermsCreate for setting payment terms on orders
-#   (Production uses companyLocationUpdate instead, which only needs write_companies)
+# - read_products: Get product variants for seed order line items
 # - write_draft_orders: draftOrderCreate for non-B2B customer orders in seed
 #
+# Note: write_payment_terms is NOT needed. The seed sets payment terms on B2B
+# CompanyLocations via companyLocationUpdate (under write_companies), and orders
+# inherit the terms automatically. See scripts/seed.ts header for details.
+#
 # See docs/scopes.md for full audit.
-scopes = "read_companies,read_customers,read_draft_orders,read_orders,read_payment_terms,read_products,write_companies,write_customers,write_draft_orders,write_orders,write_payment_terms"
+scopes = "read_companies,read_customers,read_draft_orders,read_orders,read_payment_terms,read_products,write_companies,write_customers,write_draft_orders,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations"
 
 [auth]
 redirect_urls = ["https://localhost:3000/auth/callback"]

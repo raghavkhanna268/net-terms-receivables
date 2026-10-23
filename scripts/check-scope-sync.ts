@@ -12,27 +12,27 @@
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { parse as parseJsonc } from "jsonc-parser";
 
 const ROOT = resolve(import.meta.dirname, "..");
 
-function extractTomlScopes(content: string): string | null {
+export function extractTomlScopes(content: string): string | null {
   // Match: scopes = "..." (with optional whitespace)
   const match = content.match(/^scopes\s*=\s*"([^"]*)"/m);
   return match ? match[1] : null;
 }
 
-function extractJsoncScopes(content: string): string | null {
-  // Remove comments (// ... and /* ... */)
-  const withoutComments = content
-    .replace(/\/\/.*$/gm, "")
-    .replace(/\/\*[\s\S]*?\*\//g, "");
-  
-  // Match: "SCOPES": "..."
-  const match = withoutComments.match(/"SCOPES"\s*:\s*"([^"]*)"/);
-  return match ? match[1] : null;
+export function extractJsoncScopes(content: string): string | null {
+  // Use jsonc-parser for proper JSONC parsing (handles comments in strings correctly)
+  try {
+    const parsed = parseJsonc(content) as { vars?: { SCOPES?: string } };
+    return parsed?.vars?.SCOPES ?? null;
+  } catch {
+    return null;
+  }
 }
 
-function normalizeScopes(scopes: string): string {
+export function normalizeScopes(scopes: string): string {
   // Sort scopes alphabetically for comparison
   return scopes.split(",").sort().join(",");
 }
