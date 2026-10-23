@@ -165,13 +165,14 @@ async function upsertTaggedCustomer(
   tags: string[],
   hasTag: boolean
 ): Promise<void> {
+  const tagsJson = sql.json(tags);
   await sql`
     INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, has_tag)
-    VALUES (${shopId}, ${customerId}, ${sql.json(tags)}, ${hasTag})
+    VALUES (${shopId}, ${customerId}, ${tagsJson}, ${hasTag})
     ON CONFLICT (shop_id, customer_id)
     DO UPDATE SET
-      tags = ${sql.json(tags)},
-      has_tag = ${hasTag},
+      tags = EXCLUDED.tags,
+      has_tag = EXCLUDED.has_tag,
       updated_at = NOW()
   `;
 }
@@ -256,6 +257,9 @@ async function syncTaggedCustomerBuyerAccount(
   const customerId_numeric = customerId.split("/").pop() ?? customerId;
   const displayName = `Customer ${customerId_numeric}`;
 
+  // Pre-compute derived values to avoid parameter type issues in SQL
+  const termsSource = defaultTermsDays !== null ? "tag" : null;
+
   const [result] = await sql<{ id: string; action: string; wasHeld: boolean }[]>`
     INSERT INTO "BuyerAccount" (
       "shopId",
@@ -273,18 +277,15 @@ async function syncTaggedCustomerBuyerAccount(
       ${customerId},
       ${displayName},
       ${defaultTermsDays},
-      ${defaultTermsDays !== null ? "tag" : null},
+      ${termsSource},
       'OK',
       NOW(),
       NOW()
     )
     ON CONFLICT ("shopId", "customerId")
     DO UPDATE SET
-      "defaultTermsDays" = COALESCE(${defaultTermsDays}, "BuyerAccount"."defaultTermsDays"),
-      "defaultTermsSource" = CASE
-        WHEN ${defaultTermsDays} IS NOT NULL THEN 'tag'
-        ELSE "BuyerAccount"."defaultTermsSource"
-      END,
+      "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
+      "defaultTermsSource" = COALESCE(EXCLUDED."defaultTermsSource", "BuyerAccount"."defaultTermsSource"),
       "holdState" = 'OK',
       "updatedAt" = NOW()
     RETURNING id, (xmax = 0)::text as action, ("holdState" = 'HELD') as "wasHeld"
@@ -343,13 +344,14 @@ export async function bulkUpsertTaggedCustomers(
 
   let count = 0;
   for (const c of customers) {
+    const tagsJson = sql.json(c.tags);
     const result = await sql`
       INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, has_tag)
-      VALUES (${c.shopId}, ${c.customerId}, ${sql.json(c.tags)}, ${c.hasTag})
+      VALUES (${c.shopId}, ${c.customerId}, ${tagsJson}, ${c.hasTag})
       ON CONFLICT (shop_id, customer_id)
       DO UPDATE SET
-        tags = ${sql.json(c.tags)},
-        has_tag = ${c.hasTag},
+        tags = EXCLUDED.tags,
+        has_tag = EXCLUDED.has_tag,
         updated_at = NOW()
     `;
     count += result.count;
