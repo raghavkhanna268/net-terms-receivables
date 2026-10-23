@@ -41,9 +41,13 @@ All amounts are stored and calculated in **integer minor units** (paise for INR,
 - TypeScript: Use `bigint` for all arithmetic
 - Display: Convert back to major units for formatting
 
-### Multi-Currency
+### Shop Currency
 
-Amounts are **never summed across currencies**. Each currency is tracked separately in all totals:
+Each shop has a single currency configured at setup. All invoices for a shop are in that currency. The dashboard displays amounts in the shop's configured currency.
+
+### Multi-Currency Support
+
+The data model supports multiple currencies in case a shop changes currency or for future multi-currency features. Amounts are **never summed across currencies** - each currency is tracked separately in all totals:
 
 ```typescript
 interface AgingTotals {
@@ -82,26 +86,29 @@ When gating is not enforced, all accounts are shown with an `is_gated` flag.
 
 ### Equivalent Admin Filter
 
-To verify our outstanding totals match Shopify's data, use this Admin Orders filter:
+To verify our outstanding totals match Shopify's data, use this Admin Orders search query:
 
 ```
-financial_status:pending,partially_paid payment_terms:any
+financial_status:pending OR financial_status:partially_paid
 ```
+
+Then further filter manually for orders with payment terms (not all orders have net terms).
 
 Or in the Admin UI:
 1. Go to Orders
 2. Filter by: **Payment status** = "Pending" or "Partially paid"
-3. Filter by: **Payment terms** = any value (has payment terms)
+3. Manually check that orders have **Payment terms** set (Net 15, Net 30, etc.)
 
 ### What This Filters
 
-- `financial_status:pending` - Orders awaiting payment
-- `financial_status:partially_paid` - Orders with partial payments
-- `payment_terms:any` - Only orders with net terms (excludes immediate payment orders)
+- `financial_status:pending` - Orders awaiting full payment
+- `financial_status:partially_paid` - Orders with partial payments received
+
+Note: Shopify Admin search does not have a direct `payment_terms:any` filter. You can add it in GraphQL queries but not in the Admin search bar. The reconciliation helper uses GraphQL with a `paymentTerms` filter.
 
 ### Expected Match
 
-Our `Invoice` records with `status = 'open'` and `outstanding > 0` should correspond to orders matching the above filter. The sum of `outstanding` amounts should match.
+Our `Invoice` records with `status = 'open'` and `outstanding > 0` should correspond to orders matching the above filter that have payment terms. The sum of `outstanding` amounts should match.
 
 ### Known Differences
 

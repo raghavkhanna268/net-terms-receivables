@@ -1,5 +1,5 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useLoaderData, Link } from "react-router";
+import { useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { resolvePlan, type ResolvedPlan } from "~/services/plan.server";
@@ -21,6 +21,33 @@ import {
 
 const PAGE_SIZE = 20;
 
+const VALID_SORT_BY = ["outstanding", "overdue", "name"] as const;
+type SortBy = (typeof VALID_SORT_BY)[number];
+
+const VALID_SORT_ORDER = ["asc", "desc"] as const;
+type SortOrder = (typeof VALID_SORT_ORDER)[number];
+
+function parsePositiveInt(value: string | null, defaultValue: number): number {
+  if (value === null) return defaultValue;
+  const parsed = parseInt(value, 10);
+  if (Number.isNaN(parsed) || parsed < 1) return defaultValue;
+  return parsed;
+}
+
+function parseSortBy(value: string | null): SortBy {
+  if (value && VALID_SORT_BY.includes(value as SortBy)) {
+    return value as SortBy;
+  }
+  return "outstanding";
+}
+
+function parseSortOrder(value: string | null): SortOrder {
+  if (value && VALID_SORT_ORDER.includes(value as SortOrder)) {
+    return value as SortOrder;
+  }
+  return "desc";
+}
+
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { shopify } = context;
   const { session } = await shopify.authenticate.admin(request);
@@ -28,14 +55,9 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const shopDomain = session.shop;
 
   const url = new URL(request.url);
-  const page = Math.max(1, parseInt(url.searchParams.get("page") ?? "1", 10));
-  const sortBy = (url.searchParams.get("sortBy") ?? "outstanding") as
-    | "outstanding"
-    | "overdue"
-    | "name";
-  const sortOrder = (url.searchParams.get("sortOrder") ?? "desc") as
-    | "asc"
-    | "desc";
+  const page = parsePositiveInt(url.searchParams.get("page"), 1);
+  const sortBy = parseSortBy(url.searchParams.get("sortBy"));
+  const sortOrder = parseSortOrder(url.searchParams.get("sortOrder"));
   const selectedBuyerId = url.searchParams.get("buyer") ?? null;
 
   const [shop] = await sql<{ id: string; currency: string; timezone: string }[]>`
@@ -193,12 +215,10 @@ function AgingBucketSummary({
         <s-text type="strong">Aging Breakdown:</s-text>
       </s-paragraph>
       <s-table>
-        <s-table-header>
-          <s-table-header-row>
-            <s-table-cell>Bucket</s-table-cell>
-            <s-table-cell>Amount</s-table-cell>
-          </s-table-header-row>
-        </s-table-header>
+        <s-table-header-row>
+          <s-table-header>Bucket</s-table-header>
+          <s-table-header format="currency">Amount</s-table-header>
+        </s-table-header-row>
         <s-table-body>
           {bucketData.map((bucket) => (
             <s-table-row key={bucket.key}>
@@ -227,7 +247,8 @@ function BuyerLedgerTable({
   page,
   totalCount,
   pageSize,
-  selectedBuyerId,
+  onNextPage,
+  onPreviousPage,
 }: {
   rows: BuyerLedgerRow[];
   sortBy: string;
@@ -235,9 +256,12 @@ function BuyerLedgerTable({
   page: number;
   totalCount: number;
   pageSize: number;
-  selectedBuyerId: string | null;
+  onNextPage: string;
+  onPreviousPage: string;
 }) {
   const totalPages = Math.ceil(totalCount / pageSize);
+  const hasNextPage = page < totalPages;
+  const hasPreviousPage = page > 1;
 
   const buildSortUrl = (newSortBy: string) => {
     const newOrder =
@@ -262,27 +286,29 @@ function BuyerLedgerTable({
 
   return (
     <s-stack>
-      <s-table>
-        <s-table-header>
-          <s-table-header-row>
-            <s-table-cell>
-              <Link to={buildSortUrl("name")}>Buyer{getSortIndicator("name")}</Link>
-            </s-table-cell>
-            <s-table-cell>Credit Limit</s-table-cell>
-            <s-table-cell>
-              <Link to={buildSortUrl("outstanding")}>
-                Outstanding{getSortIndicator("outstanding")}
-              </Link>
-            </s-table-cell>
-            <s-table-cell>
-              <Link to={buildSortUrl("overdue")}>
-                Overdue{getSortIndicator("overdue")}
-              </Link>
-            </s-table-cell>
-            <s-table-cell>Oldest Overdue</s-table-cell>
-            <s-table-cell>Hold Status</s-table-cell>
-          </s-table-header-row>
-        </s-table-header>
+      <s-table
+        paginate={totalPages > 1}
+        hasNextPage={hasNextPage}
+        hasPreviousPage={hasPreviousPage}
+      >
+        <s-table-header-row>
+          <s-table-header>
+            <s-link href={buildSortUrl("name")}>Buyer{getSortIndicator("name")}</s-link>
+          </s-table-header>
+          <s-table-header format="currency">Credit Limit</s-table-header>
+          <s-table-header format="currency">
+            <s-link href={buildSortUrl("outstanding")}>
+              Outstanding{getSortIndicator("outstanding")}
+            </s-link>
+          </s-table-header>
+          <s-table-header format="currency">
+            <s-link href={buildSortUrl("overdue")}>
+              Overdue{getSortIndicator("overdue")}
+            </s-link>
+          </s-table-header>
+          <s-table-header>Oldest Overdue</s-table-header>
+          <s-table-header>Hold Status</s-table-header>
+        </s-table-header-row>
         <s-table-body>
           {rows.map((row) => {
             const outstanding = BigInt(row.outstanding_paise);
@@ -294,11 +320,11 @@ function BuyerLedgerTable({
             return (
               <s-table-row key={`${row.buyer_account_id}-${row.currency}`}>
                 <s-table-cell>
-                  <Link
-                    to={`?buyer=${row.buyer_account_id}&sortBy=${sortBy}&sortOrder=${sortOrder}&page=${page}`}
+                  <s-link
+                    href={`?buyer=${row.buyer_account_id}&sortBy=${sortBy}&sortOrder=${sortOrder}&page=${page}`}
                   >
                     {row.buyer_name}
-                  </Link>
+                  </s-link>
                   {row.is_gated && <s-text tone="critical"> (gated)</s-text>}
                 </s-table-cell>
                 <s-table-cell>
@@ -341,25 +367,17 @@ function BuyerLedgerTable({
       </s-table>
 
       {totalPages > 1 && (
-        <s-horizontal-stack gap="tight" align="center">
-          {page > 1 && (
-            <Link
-              to={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${page - 1}${selectedBuyerId ? `&buyer=${selectedBuyerId}` : ""}`}
-            >
-              <s-button>Previous</s-button>
-            </Link>
+        <s-stack direction="inline">
+          {hasPreviousPage && (
+            <s-button href={onPreviousPage}>Previous</s-button>
           )}
           <s-text>
             Page {page} of {totalPages} ({totalCount} buyers)
           </s-text>
-          {page < totalPages && (
-            <Link
-              to={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${page + 1}${selectedBuyerId ? `&buyer=${selectedBuyerId}` : ""}`}
-            >
-              <s-button>Next</s-button>
-            </Link>
+          {hasNextPage && (
+            <s-button href={onNextPage}>Next</s-button>
           )}
-        </s-horizontal-stack>
+        </s-stack>
       )}
     </s-stack>
   );
@@ -368,12 +386,10 @@ function BuyerLedgerTable({
 function BuyerInvoiceList({
   invoices,
   buyerName,
-  shopDomain,
   onClose,
 }: {
   invoices: BuyerInvoiceRow[];
   buyerName: string;
-  shopDomain: string;
   onClose: string;
 }) {
   if (invoices.length === 0) {
@@ -384,9 +400,7 @@ function BuyerInvoiceList({
             This buyer has no outstanding invoices.
           </s-text>
         </s-empty-state>
-        <Link to={onClose}>
-          <s-button>Back to Ledger</s-button>
-        </Link>
+        <s-button href={onClose}>Back to Ledger</s-button>
       </s-section>
     );
   }
@@ -395,19 +409,17 @@ function BuyerInvoiceList({
     <s-section heading={`Open Invoices for ${buyerName}`}>
       <s-stack>
         <s-table>
-          <s-table-header>
-            <s-table-header-row>
-              <s-table-cell>Invoice</s-table-cell>
-              <s-table-cell>Due Date</s-table-cell>
-              <s-table-cell>Outstanding</s-table-cell>
-              <s-table-cell>Days Past Due</s-table-cell>
-              <s-table-cell>Order</s-table-cell>
-            </s-table-header-row>
-          </s-table-header>
+          <s-table-header-row>
+            <s-table-header>Invoice</s-table-header>
+            <s-table-header>Due Date</s-table-header>
+            <s-table-header format="currency">Outstanding</s-table-header>
+            <s-table-header>Days Past Due</s-table-header>
+            <s-table-header>Order</s-table-header>
+          </s-table-header-row>
           <s-table-body>
             {invoices.map((inv) => {
               const outstanding = BigInt(inv.outstanding_paise);
-              const orderUrl = buildOrderAdminUrl(shopDomain, inv.order_id);
+              const orderUrl = buildOrderAdminUrl(inv.order_id);
 
               return (
                 <s-table-row key={inv.id}>
@@ -433,9 +445,7 @@ function BuyerInvoiceList({
                   </s-table-cell>
                   <s-table-cell>
                     {orderUrl ? (
-                      <s-link href={orderUrl} target="_top">
-                        View Order
-                      </s-link>
+                      <s-link href={orderUrl}>View Order</s-link>
                     ) : (
                       "—"
                     )}
@@ -445,9 +455,7 @@ function BuyerInvoiceList({
             })}
           </s-table-body>
         </s-table>
-        <Link to={onClose}>
-          <s-button>Back to Ledger</s-button>
-        </Link>
+        <s-button href={onClose}>Back to Ledger</s-button>
       </s-stack>
     </s-section>
   );
@@ -455,7 +463,6 @@ function BuyerInvoiceList({
 
 export default function Index() {
   const {
-    shopDomain,
     storeHandle,
     plan,
     usage,
@@ -463,7 +470,6 @@ export default function Index() {
     agingTotals,
     buyerLedger,
     selectedBuyerInvoices,
-    selectedBuyerId,
     pagination,
     sortBy,
     sortOrder,
@@ -568,7 +574,6 @@ export default function Index() {
             <BuyerInvoiceList
               invoices={selectedBuyerInvoices.rows}
               buyerName={selectedBuyerInvoices.buyerName}
-              shopDomain={shopDomain}
               onClose={closeInvoiceListUrl}
             />
           )}
@@ -584,7 +589,8 @@ export default function Index() {
                   page={pagination.page}
                   totalCount={pagination.totalCount}
                   pageSize={pagination.pageSize}
-                  selectedBuyerId={selectedBuyerId}
+                  onNextPage={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page + 1}`}
+                  onPreviousPage={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page - 1}`}
                 />
               ) : (
                 <s-empty-state heading="No buyer accounts">

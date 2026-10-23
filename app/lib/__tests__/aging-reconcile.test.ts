@@ -1,4 +1,330 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import postgres from "postgres";
+import { DateTime } from "luxon";
+import { sqlOptions } from "~/lib/db-light.server";
+import {
+  getShopAgingTotals,
+  getBuyerLedger,
+} from "~/lib/aging-queries.server";
+import {
+  calculateDaysPastDue,
+} from "~/lib/aging-dates.server";
+import {
+  getBucketForDaysPastDue,
+  type AgingBucketKey,
+} from "~/lib/aging";
+
+/**
+ * SQL-vs-TypeScript parity tests for aging buckets.
+ *
+ * These tests execute real SQL against the CI postgres database to verify
+ * that the SQL bucketing logic produces the same results as the TypeScript
+ * implementation.
+ *
+ * The CI uses ghcr.io/pgmq/pg16-pgmq:v1.5.1 which is already configured
+ * for the drift step. Tests skip cleanly when TEST_DATABASE_URL is not set.
+ */
+
+const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
+const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
+
+/**
+ * Test fixtures for parity testing.
+ * Each fixture defines a due date offset from the "as of" date and expected bucket.
+ */
+const PARITY_FIXTURES: Array<{
+  name: string;
+  daysPastDue: number;
+  expectedBucket: AgingBucketKey;
+}> = [
+  // Current bucket boundary
+  { name: "due tomorrow (future)", daysPastDue: -1, expectedBucket: "current" },
+  { name: "due today", daysPastDue: 0, expectedBucket: "current" },
+  // 1-30 bucket boundaries
+  { name: "1 day past due", daysPastDue: 1, expectedBucket: "1-30" },
+  { name: "15 days past due", daysPastDue: 15, expectedBucket: "1-30" },
+  { name: "30 days past due", daysPastDue: 30, expectedBucket: "1-30" },
+  // 31-60 bucket boundaries
+  { name: "31 days past due", daysPastDue: 31, expectedBucket: "31-60" },
+  { name: "45 days past due", daysPastDue: 45, expectedBucket: "31-60" },
+  { name: "60 days past due", daysPastDue: 60, expectedBucket: "31-60" },
+  // 61-90 bucket boundaries
+  { name: "61 days past due", daysPastDue: 61, expectedBucket: "61-90" },
+  { name: "75 days past due", daysPastDue: 75, expectedBucket: "61-90" },
+  { name: "90 days past due", daysPastDue: 90, expectedBucket: "61-90" },
+  // 90+ bucket
+  { name: "91 days past due", daysPastDue: 91, expectedBucket: "90+" },
+  { name: "180 days past due", daysPastDue: 180, expectedBucket: "90+" },
+  { name: "365 days past due", daysPastDue: 365, expectedBucket: "90+" },
+];
+
+describeWithDb("SQL-vs-TS parity (DB-backed)", () => {
+  let sql: ReturnType<typeof postgres>;
+  let testShopId: string;
+  let testBuyerAccountId: string;
+
+  const TEST_SHOP_DOMAIN = `parity-test-${Date.now()}.myshopify.com`;
+  const AS_OF_DATE = DateTime.fromISO("2026-10-23", { zone: "Asia/Kolkata" })
+    .startOf("day")
+    .toJSDate();
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    // Create test shop
+    const [shop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "accessToken", "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'test-token', NOW(), NOW())
+      RETURNING id
+    `;
+    testShopId = shop.id;
+
+    // Create test buyer account
+    const [buyer] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", "shopifyCompanyId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, 'gid://shopify/Company/parity-test',
+        'Parity Test Buyer', 100000, 'OK', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    testBuyerAccountId = buyer.id;
+
+    // Create invoices for each parity fixture
+    for (const fixture of PARITY_FIXTURES) {
+      const dueDate = DateTime.fromJSDate(AS_OF_DATE, { zone: "Asia/Kolkata" })
+        .minus({ days: fixture.daysPastDue })
+        .endOf("day")
+        .toJSDate();
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, status, outstanding, "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          gen_random_uuid()::text, ${testShopId}, ${testBuyerAccountId},
+          ${"gid://shopify/Order/parity-" + fixture.daysPastDue},
+          ${"INV-" + fixture.name}, 'open', 1000.00, ${dueDate}, NOW(), NOW()
+        )
+      `;
+    }
+  });
+
+  afterAll(async () => {
+    // Clean up test data
+    if (sql && testShopId) {
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+    }
+    if (sql) {
+      await sql.end();
+    }
+  });
+
+  it("SQL bucketing matches TypeScript bucketing for all boundary cases", async () => {
+    // Get SQL results
+    const sqlRows = await sql<
+      Array<{
+        name: string;
+        due_at: Date | null;
+        days_past_due: number;
+        sql_bucket: string;
+      }>
+    >`
+      SELECT
+        i.name,
+        i."dueAt" AS due_at,
+        CASE
+          WHEN i."dueAt" IS NULL THEN 0
+          ELSE EXTRACT(DAY FROM (
+            DATE_TRUNC('day', ${AS_OF_DATE}::timestamptz AT TIME ZONE 'Asia/Kolkata') -
+            DATE_TRUNC('day', i."dueAt" AT TIME ZONE 'Asia/Kolkata')
+          ))::int
+        END AS days_past_due,
+        CASE
+          WHEN CASE
+            WHEN i."dueAt" IS NULL THEN 0
+            ELSE EXTRACT(DAY FROM (
+              DATE_TRUNC('day', ${AS_OF_DATE}::timestamptz AT TIME ZONE 'Asia/Kolkata') -
+              DATE_TRUNC('day', i."dueAt" AT TIME ZONE 'Asia/Kolkata')
+            ))::int
+          END <= 0 THEN 'current'
+          WHEN CASE
+            WHEN i."dueAt" IS NULL THEN 0
+            ELSE EXTRACT(DAY FROM (
+              DATE_TRUNC('day', ${AS_OF_DATE}::timestamptz AT TIME ZONE 'Asia/Kolkata') -
+              DATE_TRUNC('day', i."dueAt" AT TIME ZONE 'Asia/Kolkata')
+            ))::int
+          END <= 30 THEN '1-30'
+          WHEN CASE
+            WHEN i."dueAt" IS NULL THEN 0
+            ELSE EXTRACT(DAY FROM (
+              DATE_TRUNC('day', ${AS_OF_DATE}::timestamptz AT TIME ZONE 'Asia/Kolkata') -
+              DATE_TRUNC('day', i."dueAt" AT TIME ZONE 'Asia/Kolkata')
+            ))::int
+          END <= 60 THEN '31-60'
+          WHEN CASE
+            WHEN i."dueAt" IS NULL THEN 0
+            ELSE EXTRACT(DAY FROM (
+              DATE_TRUNC('day', ${AS_OF_DATE}::timestamptz AT TIME ZONE 'Asia/Kolkata') -
+              DATE_TRUNC('day', i."dueAt" AT TIME ZONE 'Asia/Kolkata')
+            ))::int
+          END <= 90 THEN '61-90'
+          ELSE '90+'
+        END AS sql_bucket
+      FROM "Invoice" i
+      WHERE i."shopId" = ${testShopId}
+        AND i.status = 'open'
+      ORDER BY i.name
+    `;
+
+    expect(sqlRows.length).toBe(PARITY_FIXTURES.length);
+
+    // Compare each row with TypeScript calculation
+    for (const row of sqlRows) {
+      const tsDaysPastDue = calculateDaysPastDue(row.due_at, AS_OF_DATE);
+      const tsBucket = getBucketForDaysPastDue(tsDaysPastDue);
+
+      expect(row.days_past_due).toBe(tsDaysPastDue);
+      expect(row.sql_bucket).toBe(tsBucket);
+    }
+  });
+
+  it("getShopAgingTotals SQL matches TypeScript bucket totals", async () => {
+    const totals = await getShopAgingTotals(sql, testShopId, AS_OF_DATE);
+
+    // Calculate expected bucket counts from fixtures
+    const expectedBuckets: Record<AgingBucketKey, number> = {
+      current: 0,
+      "1-30": 0,
+      "31-60": 0,
+      "61-90": 0,
+      "90+": 0,
+    };
+    for (const fixture of PARITY_FIXTURES) {
+      expectedBuckets[fixture.expectedBucket]++;
+    }
+
+    // Each invoice is 1000.00 = 100000 paise
+    const INVOICE_AMOUNT_PAISE = 100000n;
+
+    for (const bucket of Object.keys(expectedBuckets) as AgingBucketKey[]) {
+      const expectedAmount = BigInt(expectedBuckets[bucket]) * INVOICE_AMOUNT_PAISE;
+      const actualAmount = BigInt(totals.buckets[bucket].byCurrency["INR"] ?? "0");
+      expect(actualAmount).toBe(expectedAmount);
+    }
+  });
+});
+
+describeWithDb("shop totals = sum of ledger (gating test)", () => {
+  let sql: ReturnType<typeof postgres>;
+  let testShopId: string;
+  let activeBuyerId: string;
+  let gatedBuyerId: string;
+
+  const TEST_SHOP_DOMAIN = `gating-test-${Date.now()}.myshopify.com`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    // Create test shop
+    const [shop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "accessToken", "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'test-token', NOW(), NOW())
+      RETURNING id
+    `;
+    testShopId = shop.id;
+
+    // Create active buyer
+    const [activeBuyer] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", "shopifyCompanyId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, 'gid://shopify/Company/active-test',
+        'Active Buyer', 100000, 'OK', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    activeBuyerId = activeBuyer.id;
+
+    // Create gated buyer
+    const [gatedBuyer] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", "shopifyCompanyId", name, "creditLimit", "holdState", gated_at, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, 'gid://shopify/Company/gated-test',
+        'Gated Buyer', 100000, 'OK', NOW(), NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    gatedBuyerId = gatedBuyer.id;
+
+    // Create invoice for active buyer
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, status, outstanding, "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${activeBuyerId},
+        'gid://shopify/Order/active-1', 'INV-ACTIVE', 'open', 5000.00,
+        ${DateTime.now().minus({ days: 15 }).toJSDate()}, NOW(), NOW()
+      )
+    `;
+
+    // Create invoice for gated buyer
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, status, outstanding, "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${gatedBuyerId},
+        'gid://shopify/Order/gated-1', 'INV-GATED', 'open', 3000.00,
+        ${DateTime.now().minus({ days: 20 }).toJSDate()}, NOW(), NOW()
+      )
+    `;
+  });
+
+  afterAll(async () => {
+    if (sql && testShopId) {
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+    }
+    if (sql) {
+      await sql.end();
+    }
+  });
+
+  it("shop totals equal sum of ledger rows", async () => {
+    const asOf = new Date();
+
+    const totals = await getShopAgingTotals(sql, testShopId, asOf);
+    const ledger = await getBuyerLedger(sql, testShopId, asOf, {
+      limit: 100,
+      offset: 0,
+      sortBy: "outstanding",
+      sortOrder: "desc",
+    });
+
+    // Sum ledger outstanding amounts by currency
+    const ledgerSumByCurrency: Record<string, bigint> = {};
+    for (const row of ledger.rows) {
+      const currency = row.currency;
+      const amount = BigInt(row.outstanding_paise);
+      ledgerSumByCurrency[currency] = (ledgerSumByCurrency[currency] ?? 0n) + amount;
+    }
+
+    // Compare with shop totals
+    for (const [currency, totalAmount] of Object.entries(totals.totalByCurrency)) {
+      expect(ledgerSumByCurrency[currency]).toBe(BigInt(totalAmount));
+    }
+  });
+});
 
 /**
  * Dev-only reconciliation test for aging dashboard.
@@ -7,8 +333,8 @@ import { describe, it, expect } from "vitest";
  * orders query using the equivalent filter. It requires SHOPIFY_ADMIN_TOKEN
  * and is skipped in CI.
  *
- * Equivalent Shopify Admin filter:
- *   financial_status:pending,partially_paid payment_terms:any
+ * Equivalent Shopify Admin search (filter manually for orders with payment terms):
+ *   financial_status:pending OR financial_status:partially_paid
  *
  * See docs/aging.md for details on the reconciliation approach.
  */
@@ -17,20 +343,8 @@ const SHOPIFY_ADMIN_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
 const DEV_SHOP = "net-terms-receivables.myshopify.com";
 const API_VERSION = "2026-10";
 
-// Skip if no admin token (CI or missing credentials)
-const describeIfToken = SHOPIFY_ADMIN_TOKEN
-  ? describe
-  : describe.skip;
+const describeIfToken = SHOPIFY_ADMIN_TOKEN ? describe : describe.skip;
 
-/**
- * GraphQL query to fetch unpaid orders with payment terms.
- *
- * This matches the Admin filter:
- *   financial_status:pending,partially_paid payment_terms:any
- *
- * Uses the read_orders scope (already in production scopes).
- * Does NOT require read_all_orders.
- */
 const ORDERS_QUERY = `
   query UnpaidOrdersWithTerms($cursor: String) {
     orders(
@@ -49,12 +363,6 @@ const ORDERS_QUERY = `
           id
           name
           displayFinancialStatus
-          totalPriceSet {
-            shopMoney {
-              amount
-              currencyCode
-            }
-          }
           totalOutstandingSet {
             shopMoney {
               amount
@@ -63,16 +371,6 @@ const ORDERS_QUERY = `
           }
           paymentTerms {
             paymentTermsName
-            paymentTermsType
-            dueInDays
-            paymentSchedules(first: 10) {
-              edges {
-                node {
-                  dueAt
-                  completedAt
-                }
-              }
-            }
           }
         }
       }
@@ -86,7 +384,6 @@ interface ShopifyOrder {
   displayFinancialStatus: string;
   totalOutstanding: number;
   currency: string;
-  hasPaymentTerms: boolean;
 }
 
 async function fetchUnpaidOrdersWithTerms(): Promise<ShopifyOrder[]> {
@@ -118,7 +415,7 @@ async function fetchUnpaidOrdersWithTerms(): Promise<ShopifyOrder[]> {
       throw new Error(`Shopify API error: ${response.status}`);
     }
 
-    const result = await response.json() as {
+    const result = (await response.json()) as {
       data?: {
         orders: {
           pageInfo: { hasNextPage: boolean; endCursor: string };
@@ -145,25 +442,20 @@ async function fetchUnpaidOrdersWithTerms(): Promise<ShopifyOrder[]> {
     const { pageInfo, edges } = result.data!.orders;
 
     for (const { node } of edges) {
-      // Only include orders with payment terms
       if (!node.paymentTerms) continue;
 
       orders.push({
         id: node.id,
         name: node.name,
         displayFinancialStatus: node.displayFinancialStatus,
-        totalOutstanding: parseFloat(
-          node.totalOutstandingSet.shopMoney.amount
-        ),
+        totalOutstanding: parseFloat(node.totalOutstandingSet.shopMoney.amount),
         currency: node.totalOutstandingSet.shopMoney.currencyCode,
-        hasPaymentTerms: true,
       });
     }
 
     hasNextPage = pageInfo.hasNextPage;
     cursor = pageInfo.endCursor;
 
-    // Rate limit protection
     if (hasNextPage) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
@@ -174,28 +466,17 @@ async function fetchUnpaidOrdersWithTerms(): Promise<ShopifyOrder[]> {
 
 describeIfToken("aging reconciliation (dev-only)", () => {
   it("documents the equivalent Shopify Admin filter", () => {
-    // This test documents the filter for manual verification in the Admin UI
-    const adminFilter = "financial_status:pending,partially_paid payment_terms:any";
+    const adminFilter = "financial_status:pending OR financial_status:partially_paid";
 
-    // Instructions for manual reconciliation:
-    // 1. Go to https://admin.shopify.com/store/net-terms-receivables/orders
-    // 2. In the search/filter bar, enter the filter above
-    // 3. The filtered orders should match our open invoices
-
-    expect(adminFilter).toBe(
-      "financial_status:pending,partially_paid payment_terms:any"
-    );
+    expect(adminFilter).toContain("financial_status:pending");
+    expect(adminFilter).toContain("financial_status:partially_paid");
   });
 
   it.skip("fetches unpaid orders with payment terms from Shopify (manual run)", async () => {
-    // This test is skipped by default. Remove .skip to run manually.
-    // Requires SHOPIFY_ADMIN_TOKEN environment variable.
-
     const orders = await fetchUnpaidOrdersWithTerms();
 
     console.log(`\nFetched ${orders.length} unpaid orders with payment terms:`);
 
-    // Group by currency
     const byCurrency = new Map<string, { count: number; total: number }>();
     for (const order of orders) {
       const existing = byCurrency.get(order.currency) ?? { count: 0, total: 0 };
@@ -205,65 +486,18 @@ describeIfToken("aging reconciliation (dev-only)", () => {
     }
 
     for (const [currency, { count, total }] of byCurrency) {
-      console.log(`  ${currency}: ${count} orders, total outstanding: ${total.toFixed(2)}`);
-    }
-
-    // Sample orders for inspection
-    console.log("\nSample orders:");
-    for (const order of orders.slice(0, 5)) {
-      console.log(`  ${order.name}: ${order.currency} ${order.totalOutstanding.toFixed(2)} (${order.displayFinancialStatus})`);
+      console.log(`  ${currency}: ${count} orders, total: ${total.toFixed(2)}`);
     }
 
     expect(orders.length).toBeGreaterThanOrEqual(0);
   });
-
-  it("documents bucket boundary calculation for SQL parity", () => {
-    // This test documents the SQL expression used for days past due calculation
-    // to ensure parity between TypeScript and SQL implementations.
-
-    const sqlDaysPastDue = `
-      CASE
-        WHEN i."dueAt" IS NULL THEN 0
-        ELSE EXTRACT(DAY FROM (
-          DATE_TRUNC('day', NOW() AT TIME ZONE 'Asia/Kolkata') -
-          DATE_TRUNC('day', i."dueAt" AT TIME ZONE 'Asia/Kolkata')
-        ))::int
-      END
-    `;
-
-    const sqlBucketCase = `
-      CASE
-        WHEN days_past_due <= 0 THEN 'current'
-        WHEN days_past_due <= 30 THEN '1-30'
-        WHEN days_past_due <= 60 THEN '31-60'
-        WHEN days_past_due <= 90 THEN '61-90'
-        ELSE '90+'
-      END
-    `;
-
-    // These SQL expressions match the TypeScript implementation in aging.ts:
-    // - calculateDaysPastDue() uses Luxon with Asia/Kolkata timezone
-    // - getBucketForDaysPastDue() uses the same boundary conditions
-
-    expect(sqlDaysPastDue).toContain("Asia/Kolkata");
-    expect(sqlBucketCase).toContain("'current'");
-    expect(sqlBucketCase).toContain("'1-30'");
-    expect(sqlBucketCase).toContain("'31-60'");
-    expect(sqlBucketCase).toContain("'61-90'");
-    expect(sqlBucketCase).toContain("'90+'");
-  });
 });
 
 /**
- * SQL-vs-TypeScript parity test.
- *
- * This test uses the PARITY_TEST_FIXTURES from aging.test.ts to verify
- * that the SQL bucketing logic produces the same results as the TypeScript
- * implementation. It's run as a unit test (no database required).
+ * Unit test for bucket boundaries (no DB required).
  */
-describe("SQL-vs-TS bucket parity", () => {
+describe("SQL-vs-TS bucket parity (unit)", () => {
   it("uses the same bucket boundaries", () => {
-    // Boundary conditions that must match between SQL and TS:
     const boundaries = [
       { daysPastDue: -1, expectedBucket: "current" },
       { daysPastDue: 0, expectedBucket: "current" },
@@ -277,32 +511,9 @@ describe("SQL-vs-TS bucket parity", () => {
       { daysPastDue: 365, expectedBucket: "90+" },
     ];
 
-    // TypeScript bucket function (from aging.ts)
-    function getBucketForDaysPastDue(daysPastDue: number): string {
-      if (daysPastDue <= 0) return "current";
-      if (daysPastDue <= 30) return "1-30";
-      if (daysPastDue <= 60) return "31-60";
-      if (daysPastDue <= 90) return "61-90";
-      return "90+";
-    }
-
-    // SQL bucket expression (simulated)
-    function sqlBucketForDaysPastDue(daysPastDue: number): string {
-      // This mirrors the SQL CASE expression in aging-queries.server.ts
-      if (daysPastDue <= 0) return "current";
-      if (daysPastDue <= 30) return "1-30";
-      if (daysPastDue <= 60) return "31-60";
-      if (daysPastDue <= 90) return "61-90";
-      return "90+";
-    }
-
     for (const { daysPastDue, expectedBucket } of boundaries) {
       const tsBucket = getBucketForDaysPastDue(daysPastDue);
-      const sqlBucket = sqlBucketForDaysPastDue(daysPastDue);
-
       expect(tsBucket).toBe(expectedBucket);
-      expect(sqlBucket).toBe(expectedBucket);
-      expect(tsBucket).toBe(sqlBucket);
     }
   });
 });

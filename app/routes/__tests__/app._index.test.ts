@@ -39,13 +39,6 @@ vi.mock("~/lib/aging-queries.server", () => ({
   getShopAgingTotals: vi.fn(),
   getBuyerLedger: vi.fn(),
   getBuyerInvoices: vi.fn(),
-  buildOrderAdminUrl: vi.fn((domain, orderId) => {
-    if (!orderId) return null;
-    const id = orderId.match(/gid:\/\/shopify\/Order\/(\d+)/)?.[1];
-    if (!id) return null;
-    const store = domain.replace(".myshopify.com", "");
-    return `https://admin.shopify.com/store/${store}/orders/${id}`;
-  }),
 }));
 
 import {
@@ -241,6 +234,76 @@ describe("app._index loader", () => {
         expect.objectContaining({
           sortBy: "name",
           sortOrder: "asc",
+        })
+      );
+    });
+
+    it("defaults page to 1 for NaN values", async () => {
+      const { loader } = await import("../app._index");
+      await loader(createLoaderArgs({ page: "invalid" }));
+
+      expect(mockGetBuyerLedger).toHaveBeenCalledWith(
+        expect.anything(),
+        TEST_SHOP_ID,
+        expect.any(Date),
+        expect.objectContaining({
+          offset: 0, // page 1
+        })
+      );
+    });
+
+    it("defaults page to 1 for negative values", async () => {
+      const { loader } = await import("../app._index");
+      await loader(createLoaderArgs({ page: "-5" }));
+
+      expect(mockGetBuyerLedger).toHaveBeenCalledWith(
+        expect.anything(),
+        TEST_SHOP_ID,
+        expect.any(Date),
+        expect.objectContaining({
+          offset: 0, // page 1
+        })
+      );
+    });
+
+    it("defaults page to 1 for zero", async () => {
+      const { loader } = await import("../app._index");
+      await loader(createLoaderArgs({ page: "0" }));
+
+      expect(mockGetBuyerLedger).toHaveBeenCalledWith(
+        expect.anything(),
+        TEST_SHOP_ID,
+        expect.any(Date),
+        expect.objectContaining({
+          offset: 0, // page 1
+        })
+      );
+    });
+
+    it("defaults sortBy to outstanding for invalid values", async () => {
+      const { loader } = await import("../app._index");
+      await loader(createLoaderArgs({ sortBy: "invalid" }));
+
+      expect(mockGetBuyerLedger).toHaveBeenCalledWith(
+        expect.anything(),
+        TEST_SHOP_ID,
+        expect.any(Date),
+        expect.objectContaining({
+          sortBy: "outstanding",
+        })
+      );
+    });
+
+    it("defaults sortOrder to desc for invalid values", async () => {
+      const { loader } = await import("../app._index");
+      await loader(createLoaderArgs({ sortOrder: "invalid" }));
+
+      expect(mockGetBuyerLedger).toHaveBeenCalledWith(
+        expect.anything(),
+        TEST_SHOP_ID,
+        expect.any(Date),
+        expect.objectContaining({
+          sortOrder: "desc",
         })
       );
     });

@@ -24,18 +24,6 @@ declare global {
         React.HTMLAttributes<HTMLElement>,
         HTMLElement
       >;
-      "s-table-header-row": React.DetailedHTMLProps<
-        React.HTMLAttributes<HTMLElement>,
-        HTMLElement
-      >;
-      "s-inline-stack": React.DetailedHTMLProps<
-        React.HTMLAttributes<HTMLElement> & { gap?: string },
-        HTMLElement
-      >;
-      "s-horizontal-stack": React.DetailedHTMLProps<
-        React.HTMLAttributes<HTMLElement> & { gap?: string; align?: string },
-        HTMLElement
-      >;
     }
   }
 }

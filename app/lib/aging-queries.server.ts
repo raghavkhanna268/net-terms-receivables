@@ -61,6 +61,9 @@ function gatedAccountFilter(sql: Sql, tableAlias: string): ReturnType<Sql> {
  * Returns one row per currency per bucket with the total outstanding amount.
  * Empty buckets are not returned (filter them client-side).
  *
+ * When gating is enforced (PLAN_GATING_ENFORCED=true), invoices for gated
+ * accounts are excluded from the totals.
+ *
  * @param sql - postgres.js SQL client
  * @param shopId - Shop ID to query
  * @param asOf - "As of" date for aging calculation
@@ -71,6 +74,9 @@ export async function getShopAgingTotals(
   shopId: string,
   asOf: Date
 ): Promise<SerializableAgingTotals> {
+  // TODO(#67): Use activeAccountPredicate from PR #67 once merged
+  const gatedFilter = gatedAccountFilter(sql, "ba");
+
   // Query aggregates invoices by currency and bucket
   // Uses DATE_TRUNC for IST timezone day boundaries to match TS implementation
   const rows = await sql<ShopTotalRow[]>`
@@ -87,9 +93,11 @@ export async function getShopAgingTotals(
         END AS days_past_due
       FROM "Invoice" i
       JOIN "Shop" s ON s.id = i."shopId"
+      JOIN "BuyerAccount" ba ON ba.id = i."buyerAccountId"
       WHERE i."shopId" = ${shopId}
         AND i.status = 'open'
         AND i.outstanding > 0
+        ${gatedFilter}
     )
     SELECT
       currency,
@@ -169,9 +177,11 @@ export async function getShopAgingTotals(
       END > 0
     ) AS oldest_days
     FROM "Invoice" i
+    JOIN "BuyerAccount" ba ON ba.id = i."buyerAccountId"
     WHERE i."shopId" = ${shopId}
       AND i.status = 'open'
       AND i.outstanding > 0
+      ${gatedFilter}
   `;
 
   result.oldestOverdueDays = oldestRow?.oldest_days ?? null;
@@ -302,6 +312,9 @@ export async function getBuyerLedger(
 /**
  * Get open invoices for a specific buyer, sorted by due date.
  *
+ * When gating is enforced (PLAN_GATING_ENFORCED=true), invoices for gated
+ * accounts are excluded. This prevents viewing invoices for gated buyers.
+ *
  * @param sql - postgres.js SQL client
  * @param shopId - Shop ID to query
  * @param buyerAccountId - Buyer account ID
@@ -321,6 +334,9 @@ export async function getBuyerInvoices(
 ): Promise<{ rows: BuyerInvoiceRow[]; totalCount: number }> {
   const { limit, offset } = options;
 
+  // TODO(#67): Use activeAccountPredicate from PR #67 once merged
+  const gatedFilter = gatedAccountFilter(sql, "ba");
+
   const rows = await sql<BuyerInvoiceRow[]>`
     SELECT
       i.id,
@@ -338,10 +354,12 @@ export async function getBuyerInvoices(
       END AS days_past_due
     FROM "Invoice" i
     JOIN "Shop" s ON s.id = i."shopId"
+    JOIN "BuyerAccount" ba ON ba.id = i."buyerAccountId"
     WHERE i."shopId" = ${shopId}
       AND i."buyerAccountId" = ${buyerAccountId}
       AND i.status = 'open'
       AND i.outstanding > 0
+      ${gatedFilter}
     ORDER BY i."dueAt" ASC NULLS LAST, i.name ASC
     LIMIT ${limit}
     OFFSET ${offset}
@@ -350,10 +368,12 @@ export async function getBuyerInvoices(
   const [countRow] = await sql<{ count: string }[]>`
     SELECT COUNT(*)::text AS count
     FROM "Invoice" i
+    JOIN "BuyerAccount" ba ON ba.id = i."buyerAccountId"
     WHERE i."shopId" = ${shopId}
       AND i."buyerAccountId" = ${buyerAccountId}
       AND i.status = 'open'
       AND i.outstanding > 0
+      ${gatedFilter}
   `;
 
   return {
