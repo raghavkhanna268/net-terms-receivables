@@ -1,5 +1,5 @@
 // Prisma schema for Net Terms Receivables Shopify App
-// Uses Supabase Postgres Free (Seoul, ap-northeast-2) via Cloudflare Hyperdrive
+// Uses Supabase Postgres Free (Mumbai, ap-south-1) via Cloudflare Hyperdrive
 //
 // IMPORTANT: Prisma is used ONLY for schema definition and migrations.
 // Runtime queries use postgres.js directly (app/lib/db-light.server.ts) to keep
