@@ -538,6 +538,220 @@ jobs:
             echo '{"s6_sync_queue_exists": false, "s6_bulk_queue_exists": false, "s6_dead_letter_table_exists": false}' | jq .
           fi
 
+      - name: Queue and webhook counts
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          SHOP_DOMAIN: ${{ inputs.shop }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
+        run: |
+          set -euo pipefail
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL_MIGRATIONS secret not set"
+            exit 1
+          fi
+
+          echo "=== Queue and Webhook Counts (last 24h) ==="
+          echo ""
+
+          # Check if pgmq extension is installed
+          PGMQ_EXISTS=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pgmq');
+          EOSQL
+          )
+
+          if [ "$PGMQ_EXISTS" = "t" ]; then
+            echo "--- pgmq Queue Metrics ---"
+            echo ""
+            echo "Queue depth and archive counts (via pgmq.metrics):"
+            psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          SELECT
+            queue_name,
+            queue_length AS pending,
+            total_messages AS total_ever,
+            newest_msg_age_sec,
+            oldest_msg_age_sec
+          FROM pgmq.metrics_all()
+          ORDER BY queue_name;
+          EOSQL
+
+            echo ""
+            echo "Queue metrics as JSON:"
+            psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          SELECT json_agg(json_build_object(
+            'queue', queue_name,
+            'pending', queue_length,
+            'total_ever', total_messages,
+            'oldest_msg_age_sec', oldest_msg_age_sec
+          ))
+          FROM pgmq.metrics_all();
+          EOSQL
+          else
+            echo "::notice::pgmq not installed, skipping queue metrics"
+          fi
+
+          echo ""
+          echo "--- Webhook Receipts (last 24h by topic) ---"
+          echo ""
+
+          # Check if webhook_receipts table exists
+          RECEIPTS_EXISTS=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT to_regclass('public.webhook_receipts') IS NOT NULL;
+          EOSQL
+          )
+
+          if [ "$RECEIPTS_EXISTS" = "t" ]; then
+            psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          SELECT
+            topic,
+            COUNT(*) AS count_24h
+          FROM webhook_receipts
+          WHERE received_at > NOW() - INTERVAL '24 hours'
+          GROUP BY topic
+          ORDER BY count_24h DESC;
+          EOSQL
+
+            echo ""
+            echo "Webhook receipts summary (JSON):"
+            psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          SELECT json_build_object(
+            'total_24h', (SELECT COUNT(*) FROM webhook_receipts WHERE received_at > NOW() - INTERVAL '24 hours'),
+            'by_topic', (
+              SELECT json_object_agg(topic, cnt)
+              FROM (
+                SELECT topic, COUNT(*) AS cnt
+                FROM webhook_receipts
+                WHERE received_at > NOW() - INTERVAL '24 hours'
+                GROUP BY topic
+              ) sub
+            )
+          );
+          EOSQL
+          else
+            echo "::notice::webhook_receipts table not found"
+          fi
+
+          echo ""
+          echo "--- Processed Webhooks (last 24h by topic) ---"
+          echo ""
+
+          # Check if s6_processed_webhooks table exists
+          PROCESSED_EXISTS=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT to_regclass('public.s6_processed_webhooks') IS NOT NULL;
+          EOSQL
+          )
+
+          if [ "$PROCESSED_EXISTS" = "t" ]; then
+            psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          SELECT
+            topic,
+            COUNT(*) AS count_24h
+          FROM s6_processed_webhooks
+          WHERE processed_at > NOW() - INTERVAL '24 hours'
+          GROUP BY topic
+          ORDER BY count_24h DESC;
+          EOSQL
+
+            echo ""
+            echo "Processed webhooks summary (JSON):"
+            psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          SELECT json_build_object(
+            'total_24h', (SELECT COUNT(*) FROM s6_processed_webhooks WHERE processed_at > NOW() - INTERVAL '24 hours'),
+            'by_topic', (
+              SELECT json_object_agg(topic, cnt)
+              FROM (
+                SELECT topic, COUNT(*) AS cnt
+                FROM s6_processed_webhooks
+                WHERE processed_at > NOW() - INTERVAL '24 hours'
+                GROUP BY topic
+              ) sub
+            )
+          );
+          EOSQL
+          else
+            echo "::notice::s6_processed_webhooks table not found"
+          fi
+
+          echo ""
+          echo "--- Dead Letter Queue (DLQ) Summary ---"
+          echo ""
+
+          # Check if s6_dead_letter table exists
+          DLQ_EXISTS=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT to_regclass('public.s6_dead_letter') IS NOT NULL;
+          EOSQL
+          )
+
+          if [ "$DLQ_EXISTS" = "t" ]; then
+            echo "DLQ messages by topic/handler (no payloads, truncated error class):"
+            psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          SELECT
+            original_queue,
+            message->>'topic' AS topic,
+            LEFT(
+              REGEXP_REPLACE(error, ':.*$', ''),
+              80
+            ) AS error_class_truncated,
+            COUNT(*) AS count
+          FROM s6_dead_letter
+          GROUP BY original_queue, message->>'topic', LEFT(REGEXP_REPLACE(error, ':.*$', ''), 80)
+          ORDER BY count DESC
+          LIMIT 50;
+          EOSQL
+
+            echo ""
+            echo "DLQ summary (JSON):"
+            psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          SELECT json_build_object(
+            'total', (SELECT COUNT(*) FROM s6_dead_letter),
+            'by_queue', (
+              SELECT json_object_agg(original_queue, cnt)
+              FROM (
+                SELECT original_queue, COUNT(*) AS cnt
+                FROM s6_dead_letter
+                GROUP BY original_queue
+              ) sub
+            ),
+            'by_topic', (
+              SELECT json_object_agg(topic, cnt)
+              FROM (
+                SELECT message->>'topic' AS topic, COUNT(*) AS cnt
+                FROM s6_dead_letter
+                GROUP BY message->>'topic'
+              ) sub
+            )
+          );
+          EOSQL
+          else
+            echo "::notice::s6_dead_letter table not found"
+          fi
+
+          echo ""
+          echo "--- Entity Counts by Shop ---"
+          echo ""
+
+          psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          SELECT
+            s.domain AS shop,
+            (SELECT COUNT(*) FROM "Invoice" i WHERE i."shopId" = s.id) AS invoice_count,
+            (SELECT COUNT(*) FROM "BuyerAccount" ba WHERE ba."shopId" = s.id) AS buyer_account_count
+          FROM "Shop" s
+          WHERE s."uninstalledAt" IS NULL
+          ORDER BY s.domain;
+          EOSQL
+
+          echo ""
+          echo "Entity counts summary (JSON):"
+          psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          SELECT json_agg(json_build_object(
+            'shop', s.domain,
+            'invoices', (SELECT COUNT(*) FROM "Invoice" i WHERE i."shopId" = s.id),
+            'buyer_accounts', (SELECT COUNT(*) FROM "BuyerAccount" ba WHERE ba."shopId" = s.id)
+          ))
+          FROM "Shop" s
+          WHERE s."uninstalledAt" IS NULL;
+          EOSQL
+
       - name: Invoices
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
