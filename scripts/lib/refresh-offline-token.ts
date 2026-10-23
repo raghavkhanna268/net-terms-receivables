@@ -1,9 +1,10 @@
+#!/usr/bin/env tsx
 /**
- * Node-usable offline token refresh helper.
+ * Node CLI for offline token refresh.
  *
- * This script provides token refresh functionality for:
+ * This script wraps app/lib/offline-token.server.ts for use in:
  * - CI workflows (e.g., .github/workflows/prod-diagnostics.yml)
- * - Node scripts that need to use the app's offline access token
+ * - Node scripts that need to refresh the app's offline access token
  *
  * For in-app routes on Cloudflare Workers, use the library's
  * `unauthenticated.admin(shop)` or `authenticate.*` methods instead,
@@ -20,7 +21,7 @@
  *   SHOPIFY_API_SECRET    - App's API secret (client_secret)
  *
  * Output (JSON on stdout):
- *   { "success": true, "accessToken": "shpat_...", "expires": "2024-..." }
+ *   { "success": true, "wasRefreshed": true|false, "expires": "..." }
  *   { "success": false, "errorCode": "...", "error": "..." }
  *
  * Exit codes:
@@ -28,20 +29,22 @@
  *   1 - Error (see JSON output for details)
  *
  * SECURITY:
- * - Access tokens are output only when --output-token is passed
- * - Without --output-token, only success/failure status is output
- * - Tokens are NEVER logged to stderr
+ * - Access tokens are NEVER output or logged
+ * - Only success/failure status is emitted
  *
  * @see https://shopify.dev/docs/apps/build/authentication-authorization/access-tokens#token-refresh
  */
 
 import postgres, { type Options } from "postgres";
 import { pathToFileURL } from "node:url";
+import {
+  refreshOfflineTokenIfNeeded as coreRefresh,
+  type RefreshResult,
+  type RefreshErrorCode,
+} from "../../app/lib/offline-token.server";
 
-/**
- * 5 minutes in milliseconds - matches the library's WITHIN_MILLISECONDS_OF_EXPIRY.
- */
-const DEFAULT_REFRESH_THRESHOLD_MS = 5 * 60 * 1000;
+// Re-export types for consumers
+export type { RefreshResult, RefreshErrorCode };
 
 /**
  * Shared postgres.js options for Node scripts.
@@ -55,237 +58,56 @@ const sqlOptions: Options<Record<string, never>> = {
   fetch_types: false,
 };
 
-interface RefreshResult {
+/**
+ * Script-specific result that includes wasRefreshed and ISO string expires.
+ */
+export interface ScriptRefreshResult {
   success: boolean;
-  accessToken?: string;
-  expires?: string;
-  errorCode?: "no_session" | "no_refresh_token" | "invalid_grant" | "network_error" | "unknown" | "config_error";
-  error?: string;
   wasRefreshed?: boolean;
-}
-
-interface TokenRefreshResponse {
-  access_token: string;
-  expires_in: number;
-  refresh_token: string;
-  refresh_token_expires_in: number;
-  scope: string;
-}
-
-interface TokenErrorResponse {
-  error: string;
-  error_description?: string;
-}
-
-/**
- * Check if a token is expired or near expiry.
- */
-function isTokenExpiredOrNearExpiry(
-  expires: Date | null,
-  thresholdMs: number
-): boolean {
-  if (!expires) {
-    return false;
-  }
-  return expires.getTime() - Date.now() <= thresholdMs;
-}
-
-/**
- * Perform the token refresh HTTP request.
- */
-async function performTokenRefresh(
-  shop: string,
-  refreshToken: string,
-  clientId: string,
-  clientSecret: string
-): Promise<{
-  success: boolean;
-  accessToken?: string;
-  refreshToken?: string;
-  expiresIn?: number;
-  refreshTokenExpiresIn?: number;
-  scope?: string;
-  errorCode?: RefreshResult["errorCode"];
+  expires?: string;
+  errorCode?: RefreshErrorCode | "config_error";
   error?: string;
-}> {
-  const url = `https://${shop}/admin/oauth/access_token`;
-
-  const body = new URLSearchParams({
-    client_id: clientId,
-    client_secret: clientSecret,
-    grant_type: "refresh_token",
-    refresh_token: refreshToken,
-  });
-
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        Accept: "application/json",
-      },
-      body: body.toString(),
-    });
-
-    if (!response.ok) {
-      const errorBody = (await response.json().catch(() => ({}))) as TokenErrorResponse;
-
-      if (response.status === 400 && errorBody.error === "invalid_grant") {
-        return {
-          success: false,
-          errorCode: "invalid_grant",
-          error: `Token refresh failed for shop ${shop}: invalid_grant. Re-authentication required.`,
-        };
-      }
-
-      return {
-        success: false,
-        errorCode: "unknown",
-        error: `Token refresh failed for shop ${shop}: HTTP ${response.status}`,
-      };
-    }
-
-    const data = (await response.json()) as TokenRefreshResponse;
-
-    return {
-      success: true,
-      accessToken: data.access_token,
-      refreshToken: data.refresh_token,
-      expiresIn: data.expires_in,
-      refreshTokenExpiresIn: data.refresh_token_expires_in,
-      scope: data.scope,
-    };
-  } catch (err) {
-    return {
-      success: false,
-      errorCode: "network_error",
-      error: `Token refresh network error for shop ${shop}: ${err instanceof Error ? err.message : "Unknown"}`,
-    };
-  }
 }
 
 /**
  * Refresh an offline access token if expired or near expiry.
  *
- * Uses row-level locking (SELECT ... FOR UPDATE) to prevent concurrent
- * refreshes from burning the single-use refresh token.
+ * This is a Node-friendly wrapper around the core refresh function that:
+ * - Creates and cleans up its own postgres connection
+ * - Converts Date to ISO string for JSON output
+ * - Never returns the access token (for security)
+ *
+ * @param databaseUrl - Postgres connection string (SESSION pooler for writes)
+ * @param shop - Shop domain (e.g., "example.myshopify.com")
+ * @param clientId - Shopify app's API key
+ * @param clientSecret - Shopify app's API secret
+ * @param thresholdMs - Milliseconds before expiry to trigger refresh (default: 5 min)
  */
 export async function refreshOfflineTokenIfNeeded(
   databaseUrl: string,
   shop: string,
   clientId: string,
   clientSecret: string,
-  thresholdMs: number = DEFAULT_REFRESH_THRESHOLD_MS
-): Promise<RefreshResult> {
+  thresholdMs: number = 5 * 60 * 1000
+): Promise<ScriptRefreshResult> {
   const sql = postgres(databaseUrl, sqlOptions);
-  const sessionId = `offline_${shop}`;
 
   try {
-    return await sql.begin(async (tx) => {
-      // Acquire exclusive lock on the session row
-      const lockedRows = await tx<
-        Array<{
-          id: string;
-          accessToken: string;
-          expires: Date | null;
-          refreshToken: string | null;
-          refreshTokenExpires: Date | null;
-        }>
-      >`
-        SELECT
-          id,
-          "accessToken",
-          ("expires" AT TIME ZONE 'UTC') AS "expires",
-          "refreshToken",
-          ("refreshTokenExpires" AT TIME ZONE 'UTC') AS "refreshTokenExpires"
-        FROM "Session"
-        WHERE id = ${sessionId}
-        FOR UPDATE
-      `;
+    const result = await coreRefresh(sql, shop, clientId, clientSecret, thresholdMs);
 
-      if (lockedRows.length === 0) {
-        return {
-          success: false,
-          errorCode: "no_session" as const,
-          error: `No offline session found for shop ${shop}`,
-        };
-      }
-
-      const session = lockedRows[0];
-
-      // Check if refresh is needed
-      if (!isTokenExpiredOrNearExpiry(session.expires, thresholdMs)) {
-        return {
-          success: true,
-          accessToken: session.accessToken,
-          expires: session.expires?.toISOString(),
-          wasRefreshed: false,
-        };
-      }
-
-      // Check if we have a refresh token
-      if (!session.refreshToken) {
-        return {
-          success: false,
-          errorCode: "no_refresh_token" as const,
-          error: `No refresh token available for shop ${shop}. Re-authentication required.`,
-        };
-      }
-
-      // Check if refresh token itself is expired
-      if (
-        session.refreshTokenExpires &&
-        session.refreshTokenExpires.getTime() < Date.now()
-      ) {
-        return {
-          success: false,
-          errorCode: "invalid_grant" as const,
-          error: `Refresh token expired for shop ${shop}. Re-authentication required.`,
-        };
-      }
-
-      // Perform the token refresh
-      const refreshResult = await performTokenRefresh(
-        shop,
-        session.refreshToken,
-        clientId,
-        clientSecret
-      );
-
-      if (!refreshResult.success) {
-        return {
-          success: false,
-          errorCode: refreshResult.errorCode,
-          error: refreshResult.error,
-        };
-      }
-
-      // Calculate new expiry times
-      const now = new Date();
-      const newExpires = new Date(now.getTime() + refreshResult.expiresIn! * 1000);
-      const newRefreshTokenExpires = new Date(
-        now.getTime() + refreshResult.refreshTokenExpiresIn! * 1000
-      );
-
-      // Update the session with new tokens
-      await tx`
-        UPDATE "Session"
-        SET
-          "accessToken" = ${refreshResult.accessToken!},
-          expires = ${newExpires.toISOString()}::timestamptz AT TIME ZONE 'UTC',
-          "refreshToken" = ${refreshResult.refreshToken!},
-          "refreshTokenExpires" = ${newRefreshTokenExpires.toISOString()}::timestamptz AT TIME ZONE 'UTC',
-          scope = ${refreshResult.scope!}
-        WHERE id = ${sessionId}
-      `;
-
+    if (result.success) {
       return {
         success: true,
-        accessToken: refreshResult.accessToken,
-        expires: newExpires.toISOString(),
-        wasRefreshed: true,
+        wasRefreshed: result.wasRefreshed ?? false,
+        expires: result.expires?.toISOString(),
       };
-    });
+    } else {
+      return {
+        success: false,
+        errorCode: result.errorCode,
+        error: result.error,
+      };
+    }
   } finally {
     await sql.end();
   }
@@ -297,13 +119,11 @@ export async function refreshOfflineTokenIfNeeded(
 function parseArgs(): {
   shop: string;
   thresholdMinutes: number;
-  outputToken: boolean;
   help: boolean;
 } {
   const args = process.argv.slice(2);
   let shop = "";
   let thresholdMinutes = 5;
-  let outputToken = false;
   let help = false;
 
   for (let i = 0; i < args.length; i++) {
@@ -314,12 +134,11 @@ function parseArgs(): {
       shop = args[++i] || "";
     } else if (arg === "--threshold-minutes" || arg === "-t") {
       thresholdMinutes = parseInt(args[++i] || "5", 10);
-    } else if (arg === "--output-token") {
-      outputToken = true;
     }
+    // Note: --output-token is intentionally not supported for security
   }
 
-  return { shop, thresholdMinutes, outputToken, help };
+  return { shop, thresholdMinutes, help };
 }
 
 function printHelp(): void {
@@ -329,7 +148,6 @@ Usage: npx tsx scripts/lib/refresh-offline-token.ts [options]
 Options:
   --shop, -s <domain>        Shop domain (e.g., example.myshopify.com)
   --threshold-minutes, -t    Minutes before expiry to trigger refresh (default: 5)
-  --output-token             Include access token in output (SECURITY: use with care)
   --help, -h                 Show this help message
 
 Environment Variables:
@@ -344,11 +162,13 @@ Output (JSON on stdout):
 Exit codes:
   0 - Success (token valid or refreshed)
   1 - Error (see JSON output for details)
+
+SECURITY: Access tokens are never output. The probe step re-reads from the database.
 `);
 }
 
 async function main(): Promise<void> {
-  const { shop, thresholdMinutes, outputToken, help } = parseArgs();
+  const { shop, thresholdMinutes, help } = parseArgs();
 
   if (help) {
     printHelp();
@@ -395,23 +215,8 @@ async function main(): Promise<void> {
     thresholdMs
   );
 
-  // Output result (optionally excluding access token for security)
-  const output: Record<string, unknown> = {
-    success: result.success,
-  };
-
-  if (result.success) {
-    if (outputToken && result.accessToken) {
-      output.accessToken = result.accessToken;
-    }
-    output.expires = result.expires;
-    output.wasRefreshed = result.wasRefreshed;
-  } else {
-    output.errorCode = result.errorCode;
-    output.error = result.error;
-  }
-
-  console.log(JSON.stringify(output));
+  // Output result (never includes access token)
+  console.log(JSON.stringify(result));
   process.exit(result.success ? 0 : 1);
 }
 

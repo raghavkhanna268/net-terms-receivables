@@ -21,8 +21,14 @@
  *
  * Concurrency Safety:
  * Uses row-level locking (SELECT ... FOR UPDATE) to prevent concurrent callers
- * from burning the single-use refresh token. A caller that loses the race
- * re-reads the row and gets the winner's refreshed token.
+ * of THIS helper from burning the single-use refresh token. A caller that loses
+ * the race re-reads the row and gets the winner's refreshed token.
+ *
+ * IMPORTANT: This lock does NOT coordinate with the library's in-app refresh
+ * (via `ensureOfflineTokenIsNotExpired`), which takes no lock. If a CI script
+ * and an in-app request both attempt to refresh at the same moment, one will
+ * succeed and the other will get `invalid_grant`. This is acceptable for CI
+ * diagnostics - the probe can be re-run after the token settles.
  *
  * @see https://shopify.dev/docs/apps/build/authentication-authorization/access-tokens#token-refresh
  * @see node_modules/@shopify/shopify-app-react-router/src/server/helpers/ensure-offline-token-is-not-expired.ts
@@ -37,6 +43,18 @@ import type { Sql } from "./db-light.server";
 export const REFRESH_THRESHOLD_MS = 5 * 60 * 1000;
 
 /**
+ * Error codes for token refresh failures.
+ */
+export type RefreshErrorCode =
+  | "no_session"
+  | "no_refresh_token"
+  | "invalid_grant"
+  | "invalid_response"
+  | "refresh_persist_failed"
+  | "network_error"
+  | "unknown";
+
+/**
  * Result of a token refresh attempt.
  */
 export interface RefreshResult {
@@ -46,24 +64,26 @@ export interface RefreshResult {
   accessToken?: string;
   /** When the access token expires (on success) */
   expires?: Date;
+  /** Whether the token was refreshed (false if it was already valid) */
+  wasRefreshed?: boolean;
   /** Error code for failures */
-  errorCode?: "no_session" | "no_refresh_token" | "invalid_grant" | "network_error" | "unknown";
+  errorCode?: RefreshErrorCode;
   /** Error message (no secrets included) */
   error?: string;
-  /** Whether the session was refreshed by another concurrent caller */
-  refreshedByConcurrentCaller?: boolean;
 }
 
 /**
  * Response from Shopify's token refresh endpoint.
+ * Per Shopify docs, access_token and expires_in are required.
+ * refresh_token, refresh_token_expires_in, and scope may be missing in edge cases.
  * @see https://shopify.dev/docs/apps/build/authentication-authorization/access-tokens#token-refresh
  */
 interface TokenRefreshResponse {
-  access_token: string;
-  expires_in: number;
-  refresh_token: string;
-  refresh_token_expires_in: number;
-  scope: string;
+  access_token?: string;
+  expires_in?: number;
+  refresh_token?: string;
+  refresh_token_expires_in?: number;
+  scope?: string;
 }
 
 /**
@@ -72,6 +92,20 @@ interface TokenRefreshResponse {
 interface TokenErrorResponse {
   error: string;
   error_description?: string;
+}
+
+/**
+ * Internal result from performTokenRefresh with validated fields.
+ */
+interface TokenRefreshResult {
+  success: boolean;
+  accessToken?: string;
+  expiresIn?: number;
+  refreshToken?: string | null;
+  refreshTokenExpiresIn?: number | null;
+  scope?: string | null;
+  errorCode?: RefreshErrorCode;
+  error?: string;
 }
 
 /**
@@ -94,6 +128,10 @@ export function isTokenExpiredOrNearExpiry(
  * Uses row-level locking to prevent concurrent refreshes from burning
  * the single-use refresh token. If another caller wins the race, this
  * function re-reads the row and returns the winner's refreshed token.
+ *
+ * Note: This lock only coordinates callers of this helper. The library's
+ * in-app refresh (ensureOfflineTokenIsNotExpired) does not take a lock,
+ * so a race is possible between CI and in-app refreshes.
  *
  * @param sql - postgres.js SQL client
  * @param shop - Shop domain (e.g., "example.myshopify.com")
@@ -119,6 +157,7 @@ export async function refreshOfflineTokenIfNeeded(
         id: string;
         accessToken: string;
         expires: Date | null;
+        scope: string | null;
         refreshToken: string | null;
         refreshTokenExpires: Date | null;
       }>
@@ -127,6 +166,7 @@ export async function refreshOfflineTokenIfNeeded(
         id,
         "accessToken",
         ("expires" AT TIME ZONE 'UTC') AS "expires",
+        scope,
         "refreshToken",
         ("refreshTokenExpires" AT TIME ZONE 'UTC') AS "refreshTokenExpires"
       FROM "Session"
@@ -151,6 +191,7 @@ export async function refreshOfflineTokenIfNeeded(
         success: true,
         accessToken: session.accessToken,
         expires: session.expires ?? undefined,
+        wasRefreshed: false,
       };
     }
 
@@ -184,38 +225,76 @@ export async function refreshOfflineTokenIfNeeded(
     );
 
     if (!refreshResult.success) {
-      return refreshResult;
+      return {
+        success: false,
+        errorCode: refreshResult.errorCode,
+        error: refreshResult.error,
+      };
     }
 
-    // Calculate new expiry times
+    // Calculate new expiry times with validation
     const now = new Date();
-    const newExpires = new Date(now.getTime() + refreshResult.expiresIn! * 1000);
-    const newRefreshTokenExpires = new Date(
-      now.getTime() + refreshResult.refreshTokenExpiresIn! * 1000
-    );
+    const expiresIn = refreshResult.expiresIn;
+    if (typeof expiresIn !== "number" || !Number.isFinite(expiresIn) || expiresIn <= 0) {
+      return {
+        success: false,
+        errorCode: "invalid_response",
+        error: `Invalid expires_in from Shopify for shop ${shop}`,
+      };
+    }
+    const newExpires = new Date(now.getTime() + expiresIn * 1000);
 
-    // Update the session with new tokens
-    await tx`
-      UPDATE "Session"
-      SET
-        "accessToken" = ${refreshResult.accessToken!},
-        expires = ${newExpires.toISOString()}::timestamptz AT TIME ZONE 'UTC',
-        "refreshToken" = ${refreshResult.refreshToken!},
-        "refreshTokenExpires" = ${newRefreshTokenExpires.toISOString()}::timestamptz AT TIME ZONE 'UTC',
-        scope = ${refreshResult.scope!}
-      WHERE id = ${sessionId}
-    `;
+    // Refresh token expiry is optional - may be null
+    let newRefreshTokenExpires: Date | null = null;
+    const rtExpiresIn = refreshResult.refreshTokenExpiresIn;
+    if (typeof rtExpiresIn === "number" && Number.isFinite(rtExpiresIn) && rtExpiresIn > 0) {
+      newRefreshTokenExpires = new Date(now.getTime() + rtExpiresIn * 1000);
+    }
+
+    // Use new refresh token if provided, otherwise keep the old one
+    const newRefreshToken = refreshResult.refreshToken ?? session.refreshToken;
+
+    // Use new scope if provided, otherwise keep the old one
+    const newScope = refreshResult.scope ?? session.scope;
+
+    // Persist the refreshed tokens
+    try {
+      const refreshTokenExpiresStr = newRefreshTokenExpires
+        ? newRefreshTokenExpires.toISOString()
+        : null;
+
+      await tx`
+        UPDATE "Session"
+        SET
+          "accessToken" = ${refreshResult.accessToken},
+          expires = ${newExpires.toISOString()}::timestamptz AT TIME ZONE 'UTC',
+          "refreshToken" = ${newRefreshToken},
+          "refreshTokenExpires" = ${refreshTokenExpiresStr}::timestamptz AT TIME ZONE 'UTC',
+          scope = ${newScope}
+        WHERE id = ${sessionId}
+      `;
+    } catch {
+      // Log only shop and error code (no tokens)
+      console.error(`[offline-token] refresh_persist_failed shop=${shop}`);
+      return {
+        success: false,
+        errorCode: "refresh_persist_failed",
+        error: `Failed to persist refreshed token for shop ${shop}. The refresh token may have been consumed.`,
+      };
+    }
 
     return {
       success: true,
       accessToken: refreshResult.accessToken,
       expires: newExpires,
+      wasRefreshed: true,
     };
   });
 }
 
 /**
  * Perform the actual token refresh HTTP request.
+ * Validates required fields (access_token, expires_in) before returning.
  *
  * @see https://shopify.dev/docs/apps/build/authentication-authorization/access-tokens#token-refresh
  */
@@ -224,16 +303,7 @@ async function performTokenRefresh(
   refreshToken: string,
   clientId: string,
   clientSecret: string
-): Promise<{
-  success: boolean;
-  accessToken?: string;
-  refreshToken?: string;
-  expiresIn?: number;
-  refreshTokenExpiresIn?: number;
-  scope?: string;
-  errorCode?: RefreshResult["errorCode"];
-  error?: string;
-}> {
+): Promise<TokenRefreshResult> {
   const url = `https://${shop}/admin/oauth/access_token`;
 
   const body = new URLSearchParams({
@@ -274,13 +344,31 @@ async function performTokenRefresh(
 
     const data = (await response.json()) as TokenRefreshResponse;
 
+    // Validate required fields
+    if (typeof data.access_token !== "string" || data.access_token.length === 0) {
+      return {
+        success: false,
+        errorCode: "invalid_response",
+        error: `Token refresh returned invalid access_token for shop ${shop}`,
+      };
+    }
+
+    if (typeof data.expires_in !== "number" || !Number.isFinite(data.expires_in) || data.expires_in <= 0) {
+      return {
+        success: false,
+        errorCode: "invalid_response",
+        error: `Token refresh returned invalid expires_in for shop ${shop}`,
+      };
+    }
+
     return {
       success: true,
       accessToken: data.access_token,
-      refreshToken: data.refresh_token,
       expiresIn: data.expires_in,
-      refreshTokenExpiresIn: data.refresh_token_expires_in,
-      scope: data.scope,
+      // Optional fields - may be missing
+      refreshToken: typeof data.refresh_token === "string" ? data.refresh_token : null,
+      refreshTokenExpiresIn: typeof data.refresh_token_expires_in === "number" ? data.refresh_token_expires_in : null,
+      scope: typeof data.scope === "string" ? data.scope : null,
     };
   } catch (err) {
     return {
@@ -312,9 +400,9 @@ export async function getValidOfflineToken(
 ): Promise<string> {
   const result = await refreshOfflineTokenIfNeeded(sql, shop, clientId, clientSecret);
 
-  if (!result.success) {
+  if (!result.success || !result.accessToken) {
     throw new Error(result.error ?? "Failed to get valid offline token");
   }
 
-  return result.accessToken!;
+  return result.accessToken;
 }
