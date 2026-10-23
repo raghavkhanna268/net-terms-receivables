@@ -1,4 +1,4 @@
-#!/usr/bin/env npx tsx
+#!/usr/bin/env tsx
 /**
  * Seed script for Net Terms Receivables dev store.
  *
@@ -6,19 +6,20 @@
  * testing the app's receivables tracking features.
  *
  * Usage:
- *   npm run seed                    # Run seed against dev store
- *   npm run seed -- --dry-run       # Preview what would be created
- *   npm run seed -- --reset         # Delete seed data before seeding
+ *   npm run seed                              # Run seed against dev store
+ *   npm run seed -- --dry-run                 # Preview what would be created
+ *   npm run seed -- --reset                   # Delete seed data before seeding
+ *   npm run seed -- --allow-non-dev-store     # Override dev store safety check
  *
  * Environment:
  *   SHOP                 - Shop domain (e.g., my-store.myshopify.com)
- *   SHOPIFY_ADMIN_TOKEN  - Admin API access token from a dev-store custom app
+ *   SHOPIFY_ADMIN_TOKEN  - Admin API access token from a Dev Dashboard app
  *
- * The token must come from a custom app created on the dev store (not from the
- * production Net Terms Receivables app). Create a custom app in the dev store's
- * admin under Settings > Apps and sales channels > Develop apps.
+ * The token must come from an app created in the Dev Dashboard and installed
+ * on your dev store (not from the production Net Terms Receivables app).
+ * See README for setup instructions.
  *
- * Required Admin API scopes for the custom app:
+ * Required Admin API scopes for the Dev Dashboard app:
  *   read_companies, write_companies
  *   read_customers, write_customers
  *   read_draft_orders, write_draft_orders
@@ -26,11 +27,13 @@
  *   read_payment_terms, write_payment_terms
  */
 
+import { pathToFileURL } from "node:url";
+
 // -- Types --
 
-interface GraphQLResponse<T> {
+export interface GraphQLResponse<T> {
   data?: T;
-  errors?: Array<{ message: string; locations?: Array<{ line: number; column: number }> }>;
+  errors?: Array<{ message: string; extensions?: { code?: string }; locations?: Array<{ line: number; column: number }> }>;
   extensions?: {
     cost?: {
       requestedQueryCost: number;
@@ -44,13 +47,13 @@ interface GraphQLResponse<T> {
   };
 }
 
-interface UserError {
+export interface UserError {
   field: string[] | null;
   message: string;
   code?: string;
 }
 
-interface CompanyNode {
+export interface CompanyNode {
   id: string;
   name: string;
   externalId: string | null;
@@ -75,7 +78,7 @@ interface CompanyNode {
   };
 }
 
-interface CustomerNode {
+export interface CustomerNode {
   id: string;
   email: string;
   firstName: string;
@@ -83,14 +86,14 @@ interface CustomerNode {
   tags: string[];
 }
 
-interface PaymentTermsTemplate {
+export interface PaymentTermsTemplate {
   id: string;
   name: string;
   paymentTermsType: "NET" | "FIXED" | "RECEIPT" | "FULFILLMENT";
   dueInDays: number | null;
 }
 
-interface ProductVariantNode {
+export interface ProductVariantNode {
   id: string;
   title: string;
   price: string;
@@ -99,26 +102,35 @@ interface ProductVariantNode {
   };
 }
 
-interface DraftOrderNode {
+export interface DraftOrderNode {
   id: string;
   name: string;
   tags: string[];
   status: string;
 }
 
-interface OrderNode {
+export interface OrderNode {
   id: string;
   name: string;
   tags: string[];
 }
 
+export interface ShopInfo {
+  plan: {
+    partnerDevelopment: boolean;
+  };
+  currencyCode: string;
+}
+
 // -- Constants --
 
-const API_VERSION = "2026-10";
-const SEED_TAG = "ntr-seed";
-const SEED_PREFIX = "ntr-seed-";
+export const API_VERSION = "2026-10";
+export const SEED_TAG = "ntr-seed";
+export const SEED_PREFIX = "ntr-seed-";
+const MAX_RETRIES = 3;
+const INITIAL_RETRY_DELAY_MS = 1000;
 
-const COMPANY_SEEDS = [
+export const COMPANY_SEEDS = [
   { key: "company-1", name: "Acme Wholesale Pvt Ltd", contact: { firstName: "Raj", lastName: "Sharma", email: "raj.sharma@acme-wholesale.example" } },
   { key: "company-2", name: "Bharat Traders Co", contact: { firstName: "Priya", lastName: "Patel", email: "priya@bharat-traders.example" } },
   { key: "company-3", name: "Delhi Distributors LLP", contact: { firstName: "Amit", lastName: "Singh", email: "amit.singh@delhi-dist.example" } },
@@ -126,7 +138,7 @@ const COMPANY_SEEDS = [
   { key: "company-5", name: "Kolkata Commerce House", contact: { firstName: "Arjun", lastName: "Das", email: "arjun.das@kolkata-commerce.example" } },
 ] as const;
 
-const CUSTOMER_SEEDS = [
+export const CUSTOMER_SEEDS = [
   { key: "customer-1", firstName: "Vikram", lastName: "Reddy", email: "vikram.reddy@example.com" },
   { key: "customer-2", firstName: "Meera", lastName: "Nair", email: "meera.nair@example.com" },
   { key: "customer-3", firstName: "Sanjay", lastName: "Gupta", email: "sanjay.gupta@example.com" },
@@ -134,24 +146,19 @@ const CUSTOMER_SEEDS = [
   { key: "customer-5", firstName: "Rahul", lastName: "Verma", email: "rahul.verma@example.com" },
 ] as const;
 
-// Order distribution: ~30 orders across companies and customers
-// Mix of NET 15/30/60 and FIXED payment terms
-const ORDER_DISTRIBUTION = [
-  // Company orders (4-5 per company = 20-25)
+export const ORDER_DISTRIBUTION = [
   ...COMPANY_SEEDS.flatMap((c, i) => [
     { entityType: "company" as const, entityKey: c.key, termsType: "NET" as const, dueInDays: 15, daysAgo: i * 5 + 2 },
     { entityType: "company" as const, entityKey: c.key, termsType: "NET" as const, dueInDays: 30, daysAgo: i * 3 + 10 },
     { entityType: "company" as const, entityKey: c.key, termsType: "NET" as const, dueInDays: 60, daysAgo: i * 2 + 5 },
     { entityType: "company" as const, entityKey: c.key, termsType: "FIXED" as const, fixedDaysFromNow: -10 + i * 5, daysAgo: 15 + i },
   ]),
-  // Customer orders (1-2 per customer = 5-10)
   ...CUSTOMER_SEEDS.flatMap((c, i) => [
     { entityType: "customer" as const, entityKey: c.key, termsType: "NET" as const, dueInDays: 15, daysAgo: i * 4 + 3 },
     ...(i % 2 === 0 ? [{ entityType: "customer" as const, entityKey: c.key, termsType: "NET" as const, dueInDays: 30, daysAgo: i * 2 + 8 }] : []),
   ]),
 ];
 
-// Amount ranges in INR (paisa precision not needed for seed data)
 const AMOUNT_RANGES_INR = [
   { min: 5000, max: 15000 },
   { min: 15000, max: 50000 },
@@ -161,11 +168,12 @@ const AMOUNT_RANGES_INR = [
 
 // -- State --
 
-interface SeedState {
+export interface SeedState {
   shop: string;
   token: string;
   dryRun: boolean;
   reset: boolean;
+  allowNonDevStore: boolean;
   companies: Map<string, { id: string; locationId: string; contactId: string; contactCustomerId: string }>;
   customers: Map<string, { id: string }>;
   paymentTermsTemplates: PaymentTermsTemplate[];
@@ -176,58 +184,126 @@ interface SeedState {
   errors: string[];
 }
 
-// -- GraphQL Client --
-
-async function graphql<T>(
-  state: SeedState,
-  query: string,
-  variables?: Record<string, unknown>
-): Promise<GraphQLResponse<T>> {
-  const url = `https://${state.shop}/admin/api/${API_VERSION}/graphql.json`;
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Shopify-Access-Token": state.token,
-    },
-    body: JSON.stringify({ query, variables }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`GraphQL request failed: ${response.status} ${response.statusText}`);
-  }
-
-  const json = (await response.json()) as GraphQLResponse<T>;
-
-  // Handle rate limiting
-  const cost = json.extensions?.cost;
-  if (cost) {
-    const { currentlyAvailable, restoreRate } = cost.throttleStatus;
-    // If we're getting low on points, wait for restore
-    if (currentlyAvailable < 100) {
-      const waitMs = Math.ceil((100 - currentlyAvailable) / restoreRate) * 1000;
-      console.log(`  ⏳ Rate limit: waiting ${waitMs}ms for points to restore...`);
-      await sleep(waitMs);
-    }
-  }
-
-  return json;
-}
+// -- GraphQL Client with Retry --
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export async function graphql<T>(
+  state: SeedState,
+  query: string,
+  variables?: Record<string, unknown>
+): Promise<GraphQLResponse<T>> {
+  const url = `https://${state.shop}/admin/api/${API_VERSION}/graphql.json`;
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": state.token,
+        },
+        body: JSON.stringify({ query, variables }),
+      });
+
+      // Retry on 429 with exponential backoff
+      if (response.status === 429) {
+        const delay = INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt);
+        console.log(`  ⏳ Rate limited (429), retrying in ${delay}ms...`);
+        await sleep(delay);
+        continue;
+      }
+
+      if (!response.ok) {
+        throw new Error(`GraphQL request failed: ${response.status} ${response.statusText}`);
+      }
+
+      const json = (await response.json()) as GraphQLResponse<T>;
+
+      // Check for THROTTLED error in response
+      const throttledError = json.errors?.find((e) => e.extensions?.code === "THROTTLED");
+      if (throttledError) {
+        const delay = INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt);
+        console.log(`  ⏳ Throttled, retrying in ${delay}ms...`);
+        await sleep(delay);
+        continue;
+      }
+
+      // Handle cost-based rate limiting
+      const cost = json.extensions?.cost;
+      if (cost) {
+        const { currentlyAvailable, restoreRate } = cost.throttleStatus;
+        if (currentlyAvailable < 100) {
+          const waitMs = Math.ceil((100 - currentlyAvailable) / restoreRate) * 1000;
+          console.log(`  ⏳ Rate limit: waiting ${waitMs}ms for points to restore...`);
+          await sleep(waitMs);
+        }
+      }
+
+      return json;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (attempt < MAX_RETRIES - 1) {
+        const delay = INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt);
+        console.log(`  ⏳ Request failed, retrying in ${delay}ms...`);
+        await sleep(delay);
+      }
+    }
+  }
+
+  throw lastError ?? new Error("GraphQL request failed after retries");
+}
+
 // -- Preflight Checks --
 
-async function checkB2BSupport(state: SeedState): Promise<boolean> {
-  console.log("\n🔍 Checking B2B support...");
+export async function checkDevStore(state: SeedState): Promise<boolean> {
+  console.log("\n🏪 Checking store type...");
 
-  if (state.dryRun) {
-    console.log("  [dry-run] Would check B2B support via companies query");
-    return true;
+  const query = `
+    query GetShopInfo {
+      shop {
+        plan {
+          partnerDevelopment
+        }
+        currencyCode
+      }
+    }
+  `;
+
+  const result = await graphql<{ shop: ShopInfo }>(state, query);
+
+  if (result.errors) {
+    console.error("  ❌ Failed to get shop info:", result.errors.map((e) => e.message).join(", "));
+    return false;
   }
+
+  const shop = result.data?.shop;
+  if (!shop) {
+    console.error("  ❌ No shop info returned");
+    return false;
+  }
+
+  if (!shop.plan.partnerDevelopment) {
+    if (state.allowNonDevStore) {
+      console.log("  ⚠️  This is NOT a development store, but --allow-non-dev-store was passed");
+      return true;
+    }
+    console.error("  ❌ This is NOT a development store");
+    console.error("     The seed script only runs on development stores by default.");
+    console.error("     Pass --allow-non-dev-store to override (use with caution!).");
+    return false;
+  }
+
+  console.log("  ✅ Development store confirmed");
+  console.log(`     Currency: ${shop.currencyCode}`);
+  return true;
+}
+
+export async function checkB2BSupport(state: SeedState): Promise<boolean> {
+  console.log("\n🔍 Checking B2B support...");
 
   const query = `
     query CheckB2B {
@@ -257,7 +333,6 @@ async function checkB2BSupport(state: SeedState): Promise<boolean> {
         console.error("     B2B requires Shopify Plus or a dev store with B2B enabled.");
         return false;
       }
-      // Other errors might be scope-related
       console.error("  ❌ GraphQL errors:", result.errors.map((e) => e.message).join(", "));
       return false;
     }
@@ -270,19 +345,8 @@ async function checkB2BSupport(state: SeedState): Promise<boolean> {
   }
 }
 
-async function fetchPaymentTermsTemplates(state: SeedState): Promise<boolean> {
+export async function fetchPaymentTermsTemplates(state: SeedState): Promise<boolean> {
   console.log("\n📋 Fetching payment terms templates...");
-
-  if (state.dryRun) {
-    console.log("  [dry-run] Would fetch payment terms templates");
-    state.paymentTermsTemplates = [
-      { id: "gid://shopify/PaymentTermsTemplate/3", name: "Net 15", paymentTermsType: "NET", dueInDays: 15 },
-      { id: "gid://shopify/PaymentTermsTemplate/4", name: "Net 30", paymentTermsType: "NET", dueInDays: 30 },
-      { id: "gid://shopify/PaymentTermsTemplate/5", name: "Net 60", paymentTermsType: "NET", dueInDays: 60 },
-      { id: "gid://shopify/PaymentTermsTemplate/7", name: "Fixed", paymentTermsType: "FIXED", dueInDays: null },
-    ];
-    return true;
-  }
 
   const query = `
     query GetPaymentTermsTemplates {
@@ -317,16 +381,8 @@ async function fetchPaymentTermsTemplates(state: SeedState): Promise<boolean> {
   return true;
 }
 
-async function fetchProductVariants(state: SeedState): Promise<boolean> {
+export async function fetchProductVariants(state: SeedState): Promise<boolean> {
   console.log("\n📦 Fetching product variants for orders...");
-
-  if (state.dryRun) {
-    console.log("  [dry-run] Would fetch product variants");
-    state.productVariants = [
-      { id: "gid://shopify/ProductVariant/1", title: "Default", price: "1000.00", product: { title: "Test Product" } },
-    ];
-    return true;
-  }
 
   const query = `
     query GetProductVariants {
@@ -363,7 +419,7 @@ async function fetchProductVariants(state: SeedState): Promise<boolean> {
 
 // -- Reset / Cleanup --
 
-async function resetSeedData(state: SeedState): Promise<void> {
+export async function resetSeedData(state: SeedState): Promise<void> {
   console.log("\n🗑️  Resetting seed data...");
 
   if (state.dryRun) {
@@ -371,16 +427,9 @@ async function resetSeedData(state: SeedState): Promise<void> {
     return;
   }
 
-  // Delete orders with seed tag first (they reference customers/companies)
   await deleteSeededOrders(state);
-
-  // Delete draft orders with seed tag
   await deleteSeededDraftOrders(state);
-
-  // Delete customers with seed tag (only those without orders)
   await deleteSeededCustomers(state);
-
-  // Delete companies with seed tag (externalId starts with seed prefix)
   await deleteSeededCompanies(state);
 
   console.log("\n  Reset summary:");
@@ -393,27 +442,17 @@ async function resetSeedData(state: SeedState): Promise<void> {
 async function deleteSeededOrders(state: SeedState): Promise<void> {
   console.log("  Searching for seeded orders...");
 
-  const query = `
+  const result = await graphql<{ orders: { nodes: OrderNode[] } }>(state, `
     query FindSeededOrders($query: String!) {
       orders(first: 50, query: $query) {
-        nodes {
-          id
-          name
-          tags
-        }
+        nodes { id name tags }
       }
     }
-  `;
-
-  const result = await graphql<{ orders: { nodes: OrderNode[] } }>(state, query, {
-    query: `tag:${SEED_TAG}`,
-  });
+  `, { query: `tag:${SEED_TAG}` });
 
   const orders = result.data?.orders.nodes ?? [];
   console.log(`  Found ${orders.length} seeded orders`);
 
-  // Note: Orders cannot be deleted via API, only cancelled. We'll skip deletion.
-  // The seed creates draft orders and completes them, so we focus on draft orders for cleanup.
   if (orders.length > 0) {
     console.log("  ⚠️  Orders cannot be deleted via API. They will remain tagged for identification.");
   }
@@ -422,39 +461,27 @@ async function deleteSeededOrders(state: SeedState): Promise<void> {
 async function deleteSeededDraftOrders(state: SeedState): Promise<void> {
   console.log("  Searching for seeded draft orders...");
 
-  const query = `
+  const result = await graphql<{ draftOrders: { nodes: DraftOrderNode[] } }>(state, `
     query FindSeededDraftOrders($query: String!) {
       draftOrders(first: 100, query: $query) {
-        nodes {
-          id
-          name
-          tags
-          status
-        }
+        nodes { id name tags status }
       }
     }
-  `;
-
-  const result = await graphql<{ draftOrders: { nodes: DraftOrderNode[] } }>(state, query, {
-    query: `tag:${SEED_TAG}`,
-  });
+  `, { query: `tag:${SEED_TAG}` });
 
   const draftOrders = result.data?.draftOrders.nodes ?? [];
   console.log(`  Found ${draftOrders.length} seeded draft orders`);
 
   for (const draft of draftOrders) {
-    // Only delete drafts that are still in OPEN status
     if (draft.status !== "COMPLETED") {
       const deleteResult = await graphql<{ draftOrderDelete: { deletedId: string; userErrors: UserError[] } }>(
         state,
-        `
-        mutation DeleteDraftOrder($input: DraftOrderDeleteInput!) {
+        `mutation DeleteDraftOrder($input: DraftOrderDeleteInput!) {
           draftOrderDelete(input: $input) {
             deletedId
             userErrors { field message }
           }
-        }
-      `,
+        }`,
         { input: { id: draft.id } }
       );
 
@@ -470,21 +497,13 @@ async function deleteSeededDraftOrders(state: SeedState): Promise<void> {
 async function deleteSeededCustomers(state: SeedState): Promise<void> {
   console.log("  Searching for seeded customers...");
 
-  const query = `
+  const result = await graphql<{ customers: { nodes: CustomerNode[] } }>(state, `
     query FindSeededCustomers($query: String!) {
       customers(first: 50, query: $query) {
-        nodes {
-          id
-          email
-          tags
-        }
+        nodes { id email tags }
       }
     }
-  `;
-
-  const result = await graphql<{ customers: { nodes: CustomerNode[] } }>(state, query, {
-    query: `tag:${SEED_TAG}`,
-  });
+  `, { query: `tag:${SEED_TAG}` });
 
   const customers = result.data?.customers.nodes ?? [];
   console.log(`  Found ${customers.length} seeded customers`);
@@ -492,19 +511,16 @@ async function deleteSeededCustomers(state: SeedState): Promise<void> {
   for (const customer of customers) {
     const deleteResult = await graphql<{ customerDelete: { deletedCustomerId: string; userErrors: UserError[] } }>(
       state,
-      `
-      mutation DeleteCustomer($input: CustomerDeleteInput!) {
+      `mutation DeleteCustomer($input: CustomerDeleteInput!) {
         customerDelete(input: $input) {
           deletedCustomerId
           userErrors { field message }
         }
-      }
-    `,
+      }`,
       { input: { id: customer.id } }
     );
 
     if (deleteResult.data?.customerDelete.userErrors.length) {
-      // Customers with orders can't be deleted - that's expected
       const err = deleteResult.data.customerDelete.userErrors[0];
       if (!err.message.includes("orders")) {
         console.log(`    ⚠️  Failed to delete ${customer.email}: ${err.message}`);
@@ -518,21 +534,13 @@ async function deleteSeededCustomers(state: SeedState): Promise<void> {
 async function deleteSeededCompanies(state: SeedState): Promise<void> {
   console.log("  Searching for seeded companies...");
 
-  const query = `
+  const result = await graphql<{ companies: { nodes: CompanyNode[] } }>(state, `
     query FindSeededCompanies($query: String!) {
       companies(first: 50, query: $query) {
-        nodes {
-          id
-          name
-          externalId
-        }
+        nodes { id name externalId }
       }
     }
-  `;
-
-  const result = await graphql<{ companies: { nodes: CompanyNode[] } }>(state, query, {
-    query: `external_id:${SEED_PREFIX}*`,
-  });
+  `, { query: `external_id:${SEED_PREFIX}*` });
 
   const companies = result.data?.companies.nodes ?? [];
   console.log(`  Found ${companies.length} seeded companies`);
@@ -540,14 +548,12 @@ async function deleteSeededCompanies(state: SeedState): Promise<void> {
   for (const company of companies) {
     const deleteResult = await graphql<{ companyDelete: { deletedCompanyId: string; userErrors: UserError[] } }>(
       state,
-      `
-      mutation DeleteCompany($id: ID!) {
+      `mutation DeleteCompany($id: ID!) {
         companyDelete(id: $id) {
           deletedCompanyId
           userErrors { field message }
         }
-      }
-    `,
+      }`,
       { id: company.id }
     );
 
@@ -561,13 +567,11 @@ async function deleteSeededCompanies(state: SeedState): Promise<void> {
 
 // -- Seeding: Companies --
 
-async function seedCompanies(state: SeedState): Promise<void> {
+export async function seedCompanies(state: SeedState): Promise<void> {
   console.log("\n🏢 Seeding B2B companies...");
 
   for (const seed of COMPANY_SEEDS) {
     const externalId = `${SEED_PREFIX}${seed.key}`;
-
-    // Check if company already exists
     const existing = await findCompanyByExternalId(state, externalId);
 
     if (existing) {
@@ -605,12 +609,10 @@ async function seedCompanies(state: SeedState): Promise<void> {
   }
 }
 
-async function findCompanyByExternalId(
+export async function findCompanyByExternalId(
   state: SeedState,
   externalId: string
 ): Promise<CompanyNode | null> {
-  if (state.dryRun) return null;
-
   const query = `
     query FindCompany($query: String!) {
       companies(first: 1, query: $query) {
@@ -619,23 +621,10 @@ async function findCompanyByExternalId(
           name
           externalId
           locations(first: 1) {
-            edges {
-              node {
-                id
-                name
-              }
-            }
+            edges { node { id name } }
           }
           contacts(first: 1) {
-            edges {
-              node {
-                id
-                customer {
-                  id
-                  email
-                }
-              }
-            }
+            edges { node { id customer { id email } } }
           }
         }
       }
@@ -649,7 +638,7 @@ async function findCompanyByExternalId(
   return result.data?.companies.nodes[0] ?? null;
 }
 
-async function createCompany(
+export async function createCompany(
   state: SeedState,
   seed: (typeof COMPANY_SEEDS)[number],
   externalId: string
@@ -661,45 +650,22 @@ async function createCompany(
           id
           name
           locations(first: 1) {
-            edges {
-              node {
-                id
-                name
-              }
-            }
+            edges { node { id name } }
           }
           contacts(first: 1) {
-            edges {
-              node {
-                id
-                customer {
-                  id
-                  email
-                }
-              }
-            }
+            edges { node { id customer { id email } } }
           }
         }
-        userErrors {
-          field
-          message
-          code
-        }
+        userErrors { field message code }
       }
     }
   `;
 
   const result = await graphql<{
-    companyCreate: {
-      company: CompanyNode | null;
-      userErrors: UserError[];
-    };
+    companyCreate: { company: CompanyNode | null; userErrors: UserError[] };
   }>(state, mutation, {
     input: {
-      company: {
-        name: seed.name,
-        externalId,
-      },
+      company: { name: seed.name, externalId },
       companyLocation: {
         name: `${seed.name} - Head Office`,
         shippingAddress: {
@@ -741,13 +707,11 @@ async function createCompany(
 
 // -- Seeding: Customers --
 
-async function seedCustomers(state: SeedState): Promise<void> {
+export async function seedCustomers(state: SeedState): Promise<void> {
   console.log("\n👤 Seeding net-terms customers...");
 
   for (const seed of CUSTOMER_SEEDS) {
     const seedKey = `${SEED_PREFIX}${seed.key}`;
-
-    // Check if customer already exists by tag
     const existing = await findCustomerByTag(state, seedKey);
 
     if (existing) {
@@ -775,19 +739,11 @@ async function seedCustomers(state: SeedState): Promise<void> {
   }
 }
 
-async function findCustomerByTag(state: SeedState, tag: string): Promise<CustomerNode | null> {
-  if (state.dryRun) return null;
-
+export async function findCustomerByTag(state: SeedState, tag: string): Promise<CustomerNode | null> {
   const query = `
     query FindCustomer($query: String!) {
       customers(first: 1, query: $query) {
-        nodes {
-          id
-          email
-          firstName
-          lastName
-          tags
-        }
+        nodes { id email firstName lastName tags }
       }
     }
   `;
@@ -799,7 +755,7 @@ async function findCustomerByTag(state: SeedState, tag: string): Promise<Custome
   return result.data?.customers.nodes[0] ?? null;
 }
 
-async function createCustomer(
+export async function createCustomer(
   state: SeedState,
   seed: (typeof CUSTOMER_SEEDS)[number],
   seedKey: string
@@ -807,39 +763,28 @@ async function createCustomer(
   const mutation = `
     mutation CreateCustomer($input: CustomerInput!) {
       customerCreate(input: $input) {
-        customer {
-          id
-          email
-        }
-        userErrors {
-          field
-          message
-        }
+        customer { id email }
+        userErrors { field message }
       }
     }
   `;
 
   const result = await graphql<{
-    customerCreate: {
-      customer: { id: string; email: string } | null;
-      userErrors: UserError[];
-    };
+    customerCreate: { customer: { id: string; email: string } | null; userErrors: UserError[] };
   }>(state, mutation, {
     input: {
       email: seed.email,
       firstName: seed.firstName,
       lastName: seed.lastName,
       tags: [SEED_TAG, seedKey, "net-terms-buyer"],
-      addresses: [
-        {
-          firstName: seed.firstName,
-          lastName: seed.lastName,
-          address1: "456 Customer Lane",
-          city: "Delhi",
-          countryCode: "IN",
-          zip: "110001",
-        },
-      ],
+      addresses: [{
+        firstName: seed.firstName,
+        lastName: seed.lastName,
+        address1: "456 Customer Lane",
+        city: "Delhi",
+        countryCode: "IN",
+        zip: "110001",
+      }],
     },
   });
 
@@ -848,18 +793,12 @@ async function createCustomer(
     return null;
   }
 
-  const customer = result.data?.customerCreate.customer;
-  if (!customer) {
-    console.error(`    ❌ No customer returned for ${seed.email}`);
-    return null;
-  }
-
-  return { id: customer.id };
+  return result.data?.customerCreate.customer ? { id: result.data.customerCreate.customer.id } : null;
 }
 
 // -- Seeding: Orders with Payment Terms --
 
-async function seedOrders(state: SeedState): Promise<void> {
+export async function seedOrders(state: SeedState): Promise<void> {
   console.log("\n📝 Seeding orders with payment terms...");
 
   const netTemplates = state.paymentTermsTemplates.filter((t) => t.paymentTermsType === "NET");
@@ -875,16 +814,7 @@ async function seedOrders(state: SeedState): Promise<void> {
     orderIndex++;
     const orderKey = `${SEED_PREFIX}order-${orderIndex}`;
 
-    if (state.dryRun) {
-      console.log(
-        `  [dry-run] Would create order ${orderIndex}: ${orderSpec.entityType} ${orderSpec.entityKey}, ` +
-          `${orderSpec.termsType} ${orderSpec.termsType === "NET" ? orderSpec.dueInDays + " days" : "fixed date"}`
-      );
-      state.createdCount.draftOrders++;
-      continue;
-    }
-
-    // Check if order already exists (by tag)
+    // Check if order already exists (perform lookup even in dry-run for accurate preview)
     const existingOrder = await findOrderByTag(state, orderKey);
     if (existingOrder) {
       console.log(`  ⏭️  Order ${orderIndex} already exists`);
@@ -892,7 +822,6 @@ async function seedOrders(state: SeedState): Promise<void> {
       continue;
     }
 
-    // Also check draft orders
     const existingDraft = await findDraftOrderByTag(state, orderKey);
     if (existingDraft) {
       console.log(`  ⏭️  Draft order ${orderIndex} already exists`);
@@ -919,7 +848,6 @@ async function seedOrders(state: SeedState): Promise<void> {
         paymentSchedules: [{ dueAt: dueAt.toISOString() }],
       };
     } else {
-      // Fallback to NET 30
       const template = netTemplates.find((t) => t.dueInDays === 30) ?? netTemplates[0];
       paymentTermsInput = {
         paymentTermsTemplateId: template.id,
@@ -958,9 +886,7 @@ async function seedOrders(state: SeedState): Promise<void> {
         console.error(`  ❌ Customer ${orderSpec.entityKey} not found`);
         continue;
       }
-      purchasingEntity = {
-        customerId: customer.id,
-      };
+      purchasingEntity = { customerId: customer.id };
       billingAddress = {
         firstName: "Customer",
         lastName: "Billing",
@@ -975,10 +901,20 @@ async function seedOrders(state: SeedState): Promise<void> {
     const amountRange = AMOUNT_RANGES_INR[orderIndex % AMOUNT_RANGES_INR.length];
     const amount = Math.floor(Math.random() * (amountRange.max - amountRange.min) + amountRange.min);
 
-    // Pick a product variant
+    // Pick a product variant for line item (we'll override its price)
     const variant = state.productVariants[orderIndex % state.productVariants.length];
 
-    // Create draft order
+    if (state.dryRun) {
+      console.log(
+        `  [dry-run] Would create order ${orderIndex}: ${orderSpec.entityType} ${orderSpec.entityKey}, ` +
+          `${orderSpec.termsType} ${orderSpec.termsType === "NET" ? orderSpec.dueInDays + " days" : "fixed"}, ` +
+          `₹${amount.toLocaleString("en-IN")}`
+      );
+      state.createdCount.draftOrders++;
+      continue;
+    }
+
+    // Create draft order with price override so total equals intended amount
     const draftOrder = await createDraftOrder(state, {
       orderKey,
       purchasingEntity,
@@ -995,62 +931,47 @@ async function seedOrders(state: SeedState): Promise<void> {
 
     state.createdCount.draftOrders++;
     console.log(
-      `  ✅ Created draft order ${orderIndex}: ${orderSpec.entityType} ${orderSpec.entityKey}, ` +
+      `  ✅ Created draft ${draftOrder.name}: ${orderSpec.entityType} ${orderSpec.entityKey}, ` +
         `${orderSpec.termsType} ${orderSpec.termsType === "NET" ? orderSpec.dueInDays + " days" : "fixed"}, ` +
-        `₹${amount.toLocaleString("en-IN")}`
+        `₹${draftOrder.totalPrice.toLocaleString("en-IN")}`
     );
 
-    // Complete draft order with payment pending
+    // Complete draft order - payment terms automatically create it as payment pending
+    // Per Shopify docs: "Set the order as payment pending using payment terms"
+    // When a draft has payment terms, draftOrderComplete creates the order with balance due
     const completed = await completeDraftOrder(state, draftOrder.id);
     if (completed) {
       state.createdCount.orders++;
-      console.log(`    → Completed as order ${completed.name}`);
+      console.log(`    → Completed as order ${completed.name} (total: ₹${completed.totalPrice.toLocaleString("en-IN")})`);
     }
   }
 }
 
-async function findOrderByTag(state: SeedState, tag: string): Promise<OrderNode | null> {
-  const query = `
+export async function findOrderByTag(state: SeedState, tag: string): Promise<OrderNode | null> {
+  const result = await graphql<{ orders: { nodes: OrderNode[] } }>(state, `
     query FindOrder($query: String!) {
       orders(first: 1, query: $query) {
-        nodes {
-          id
-          name
-          tags
-        }
+        nodes { id name tags }
       }
     }
-  `;
-
-  const result = await graphql<{ orders: { nodes: OrderNode[] } }>(state, query, {
-    query: `tag:'${tag}'`,
-  });
+  `, { query: `tag:'${tag}'` });
 
   return result.data?.orders.nodes[0] ?? null;
 }
 
-async function findDraftOrderByTag(state: SeedState, tag: string): Promise<DraftOrderNode | null> {
-  const query = `
+export async function findDraftOrderByTag(state: SeedState, tag: string): Promise<DraftOrderNode | null> {
+  const result = await graphql<{ draftOrders: { nodes: DraftOrderNode[] } }>(state, `
     query FindDraftOrder($query: String!) {
       draftOrders(first: 1, query: $query) {
-        nodes {
-          id
-          name
-          tags
-          status
-        }
+        nodes { id name tags status }
       }
     }
-  `;
-
-  const result = await graphql<{ draftOrders: { nodes: DraftOrderNode[] } }>(state, query, {
-    query: `tag:'${tag}'`,
-  });
+  `, { query: `tag:'${tag}'` });
 
   return result.data?.draftOrders.nodes[0] ?? null;
 }
 
-async function createDraftOrder(
+export async function createDraftOrder(
   state: SeedState,
   options: {
     orderKey: string;
@@ -1060,26 +981,26 @@ async function createDraftOrder(
     variantId: string;
     amount: number;
   }
-): Promise<{ id: string; name: string } | null> {
+): Promise<{ id: string; name: string; totalPrice: number } | null> {
+  // Use price override to set exact order total (quantity 1, price = amount)
   const mutation = `
     mutation CreateDraftOrder($input: DraftOrderInput!) {
       draftOrderCreate(input: $input) {
         draftOrder {
           id
           name
+          totalPriceSet {
+            shopMoney { amount }
+          }
         }
-        userErrors {
-          field
-          message
-          code
-        }
+        userErrors { field message code }
       }
     }
   `;
 
   const result = await graphql<{
     draftOrderCreate: {
-      draftOrder: { id: string; name: string } | null;
+      draftOrder: { id: string; name: string; totalPriceSet: { shopMoney: { amount: string } } } | null;
       userErrors: UserError[];
     };
   }>(state, mutation, {
@@ -1089,12 +1010,14 @@ async function createDraftOrder(
       paymentTerms: options.paymentTermsInput,
       billingAddress: options.billingAddress,
       shippingAddress: options.billingAddress,
-      lineItems: [
-        {
-          variantId: options.variantId,
-          quantity: Math.max(1, Math.floor(options.amount / 1000)), // Approximate quantity
+      lineItems: [{
+        variantId: options.variantId,
+        quantity: 1,
+        priceOverride: {
+          amount: String(options.amount),
+          currencyCode: "INR",
         },
-      ],
+      }],
       presentmentCurrencyCode: "INR",
     },
   });
@@ -1104,13 +1027,22 @@ async function createDraftOrder(
     return null;
   }
 
-  return result.data?.draftOrderCreate.draftOrder ?? null;
+  const draft = result.data?.draftOrderCreate.draftOrder;
+  if (!draft) return null;
+
+  return {
+    id: draft.id,
+    name: draft.name,
+    totalPrice: parseFloat(draft.totalPriceSet.shopMoney.amount),
+  };
 }
 
-async function completeDraftOrder(
+export async function completeDraftOrder(
   state: SeedState,
   draftOrderId: string
-): Promise<{ id: string; name: string } | null> {
+): Promise<{ id: string; name: string; totalPrice: number } | null> {
+  // Per Shopify 2026-10 docs, draftOrderComplete with payment terms creates order as payment pending.
+  // The paymentPending argument is deprecated; payment terms automatically determine payment status.
   const mutation = `
     mutation CompleteDraftOrder($id: ID!) {
       draftOrderComplete(id: $id) {
@@ -1120,19 +1052,23 @@ async function completeDraftOrder(
           order {
             id
             name
+            totalPriceSet {
+              shopMoney { amount }
+            }
           }
         }
-        userErrors {
-          field
-          message
-        }
+        userErrors { field message }
       }
     }
   `;
 
   const result = await graphql<{
     draftOrderComplete: {
-      draftOrder: { id: string; name: string; order: { id: string; name: string } | null } | null;
+      draftOrder: {
+        id: string;
+        name: string;
+        order: { id: string; name: string; totalPriceSet: { shopMoney: { amount: string } } } | null;
+      } | null;
       userErrors: UserError[];
     };
   }>(state, mutation, { id: draftOrderId });
@@ -1142,16 +1078,24 @@ async function completeDraftOrder(
     return null;
   }
 
-  return result.data?.draftOrderComplete.draftOrder?.order ?? null;
+  const order = result.data?.draftOrderComplete.draftOrder?.order;
+  if (!order) return null;
+
+  return {
+    id: order.id,
+    name: order.name,
+    totalPrice: parseFloat(order.totalPriceSet.shopMoney.amount),
+  };
 }
 
 // -- Main --
 
-function parseArgs(): { dryRun: boolean; reset: boolean } {
+function parseArgs(): { dryRun: boolean; reset: boolean; allowNonDevStore: boolean } {
   const args = process.argv.slice(2);
   return {
     dryRun: args.includes("--dry-run"),
     reset: args.includes("--reset"),
+    allowNonDevStore: args.includes("--allow-non-dev-store"),
   };
 }
 
@@ -1167,22 +1111,20 @@ function validateEnv(): { shop: string; token: string } | null {
 
   if (!token) {
     console.error("❌ Missing SHOPIFY_ADMIN_TOKEN environment variable");
-    console.error("   Set it to the Admin API access token from a dev-store custom app.");
-    console.error("   Create a custom app in your dev store's admin:");
-    console.error("   Settings > Apps and sales channels > Develop apps");
-    console.error("   Then reveal and copy the Admin API access token.");
+    console.error("   Set it to the Admin API access token from a Dev Dashboard app.");
+    console.error("   See README for setup instructions.");
     return null;
   }
 
   return { shop, token };
 }
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   console.log("═══════════════════════════════════════════════════════════════");
   console.log("  Net Terms Receivables - Dev Store Seed Script");
   console.log("═══════════════════════════════════════════════════════════════");
 
-  const { dryRun, reset } = parseArgs();
+  const { dryRun, reset, allowNonDevStore } = parseArgs();
   const env = validateEnv();
 
   if (!env) {
@@ -1194,6 +1136,7 @@ async function main(): Promise<void> {
     token: env.token,
     dryRun,
     reset,
+    allowNonDevStore,
     companies: new Map(),
     customers: new Map(),
     paymentTermsTemplates: [],
@@ -1205,9 +1148,14 @@ async function main(): Promise<void> {
   };
 
   console.log(`\nShop: ${state.shop}`);
-  console.log(`Mode: ${dryRun ? "DRY RUN (no changes)" : reset ? "RESET + SEED" : "SEED"}`);
+  console.log(`Mode: ${dryRun ? "DRY RUN (read-only lookups, no mutations)" : reset ? "RESET + SEED" : "SEED"}`);
 
-  // Preflight checks
+  // Preflight checks (always run, even in dry-run)
+  const devStoreOk = await checkDevStore(state);
+  if (!devStoreOk) {
+    process.exit(1);
+  }
+
   const b2bOk = await checkB2BSupport(state);
   if (!b2bOk) {
     console.error("\n❌ Preflight failed: B2B not available");
@@ -1242,7 +1190,7 @@ async function main(): Promise<void> {
   console.log("═══════════════════════════════════════════════════════════════");
 
   if (dryRun) {
-    console.log("\n  [DRY RUN - No changes made]");
+    console.log("\n  [DRY RUN - No mutations performed]");
   }
 
   console.log("\n  Created:");
@@ -1268,27 +1216,10 @@ async function main(): Promise<void> {
 }
 
 // Only run main() when executed directly (not when imported for testing)
-const isMainModule = import.meta.url === `file://${process.argv[1]}`;
+const isMainModule = import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMainModule) {
   main().catch((err) => {
     console.error("\n❌ Fatal error:", err);
     process.exit(1);
   });
 }
-
-// Export for testing
-export {
-  main,
-  SEED_TAG,
-  SEED_PREFIX,
-  COMPANY_SEEDS,
-  CUSTOMER_SEEDS,
-  ORDER_DISTRIBUTION,
-  type SeedState,
-  type GraphQLResponse,
-  type UserError,
-  type CompanyNode,
-  type CustomerNode,
-  type PaymentTermsTemplate,
-  type ProductVariantNode,
-};

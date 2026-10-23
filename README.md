@@ -169,30 +169,42 @@ All amounts are in INR with varied values across the seed data.
 
 ### Prerequisites
 
-The seed script requires a **custom app** on your dev store (separate from the production app) with Admin API access.
+The seed script requires an Admin API access token with the following scopes:
 
-#### 1. Create a Custom App on Your Dev Store
+| Scope | Purpose |
+|-------|---------|
+| `read_companies`, `write_companies` | Create B2B companies |
+| `read_customers`, `write_customers` | Create net-terms customers |
+| `read_draft_orders`, `write_draft_orders` | Create and complete draft orders |
+| `read_products` | Fetch product variants for line items |
+| `read_payment_terms`, `write_payment_terms` | Apply payment terms to orders |
 
-1. In your dev store admin, go to **Settings → Apps and sales channels**
-2. Click **Develop apps** (enable custom app development if prompted)
-3. Click **Create an app** → name it something like "NTR Seed Script"
-4. Click **Configure Admin API scopes** and select:
-   - `read_companies`, `write_companies`
-   - `read_customers`, `write_customers`
-   - `read_draft_orders`, `write_draft_orders`
-   - `read_products`
-   - `read_payment_terms`, `write_payment_terms`
-5. Click **Save**, then **Install app**
-6. Under **API credentials**, click **Reveal token once** and copy the Admin API access token
+**Important:** As of 2026, admin-created custom apps (via "Develop apps" in the store admin) can no longer be created for new apps. Use the **Dev Dashboard** instead.
 
-#### 2. Run the Seed Script
+#### Create a Dev Dashboard App
+
+1. Go to the [Dev Dashboard](https://dev.shopify.com/) and sign in with your Partner account
+2. Click **Create an app** → choose a name like "NTR Seed Script"
+3. Create a **version** with the required Admin API scopes listed above
+4. Click **Release** to make the version installable
+5. Click **Install app** and select your dev store
+6. Complete the OAuth flow to install the app
+7. After installation, retrieve the access token:
+   - For Dev Dashboard apps, you'll need to capture the token from your app's OAuth callback
+   - Alternatively, use `shopify app token` if you've linked the app via Shopify CLI
+
+For detailed instructions, see [Create apps using the Dev Dashboard](https://shopify.dev/docs/apps/build/dev-dashboard/create-apps-using-dev-dashboard).
+
+**Note:** Existing admin-created custom apps continue to work. If you have one, you can still use its token.
+
+#### Run the Seed Script
 
 ```bash
 # Set environment variables
 export SHOP=your-dev-store.myshopify.com
 export SHOPIFY_ADMIN_TOKEN=shpat_xxxxxxxxxxxxx
 
-# Preview what will be created (no changes)
+# Preview what will be created (performs read-only lookups)
 npm run seed -- --dry-run
 
 # Run the seed
@@ -200,7 +212,14 @@ npm run seed
 
 # Reset and re-seed (deletes seed data first)
 npm run seed -- --reset
+
+# Override dev store safety check (use with caution!)
+npm run seed -- --allow-non-dev-store
 ```
+
+### Safety
+
+The script refuses to run on non-development stores by default. It checks `shop.plan.partnerDevelopment` and exits with an error if the store is not a dev store. Pass `--allow-non-dev-store` to override (not recommended for production stores).
 
 ### Idempotency
 
@@ -209,7 +228,7 @@ The script is idempotent—running it twice creates nothing new:
 - Companies are keyed by `externalId` (e.g., `ntr-seed-company-1`)
 - Customers and orders are keyed by tags (e.g., `ntr-seed`, `ntr-seed-customer-1`)
 
-A second run reports what already exists and skips creation.
+A second run reports what already exists and skips creation. The `--dry-run` mode performs all read-only lookups to show an accurate preview.
 
 ### Reset / Cleanup
 
@@ -222,6 +241,10 @@ The `--reset` flag deletes only records created by the seed script:
 ### B2B Requirement
 
 The script requires B2B to be available on the dev store. It performs a preflight check and exits with a clear message if B2B is not supported. Dev stores typically have B2B enabled; if not, you may need to enable it in your Partner Dashboard dev store settings.
+
+### Payment Terms
+
+Orders are created with payment terms using `draftOrderCreate` with `paymentTerms` input. When completed via `draftOrderComplete`, orders with payment terms are automatically created as payment pending (unpaid, with balance due). The `paymentPending` argument is deprecated in API version 2026-10; the presence of payment terms on the draft determines the payment status.
 
 ## Project Structure
 
