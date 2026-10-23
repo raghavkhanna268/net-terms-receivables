@@ -5,27 +5,11 @@ import {
   buildClientSchema,
   parse,
   validate,
-  visit,
-  GraphQLError,
-  Kind,
   type GraphQLSchema,
-  type DocumentNode,
-  type FieldNode,
 } from "graphql";
+import { validateBulkQueryRulesAST } from "../validate-graphql-schema";
 
 const SCHEMA_PATH = path.join(__dirname, "../../test/fixtures/admin-2026-10.schema.json");
-
-/**
- * Connection field names that must use edges { node { ... } } pattern in bulk queries.
- */
-const CONNECTION_FIELDS = [
-  "orders",
-  "customers",
-  "companies",
-  "companyLocations",
-  "draftOrders",
-  "paymentSchedules",
-];
 
 /**
  * Load the Admin API schema from the fixture file.
@@ -33,70 +17,6 @@ const CONNECTION_FIELDS = [
 function loadSchema(): GraphQLSchema {
   const schemaJson = JSON.parse(fs.readFileSync(SCHEMA_PATH, "utf-8"));
   return buildClientSchema(schemaJson.data);
-}
-
-/**
- * Validate bulk query rules using AST traversal (same logic as the main script).
- */
-function validateBulkQueryRulesAST(doc: DocumentNode, docName: string): GraphQLError[] {
-  const errors: GraphQLError[] = [];
-  let nestingDepth = 0;
-
-  visit(doc, {
-    Field: {
-      enter(node: FieldNode) {
-        const fieldName = node.name.value;
-
-        if (CONNECTION_FIELDS.includes(fieldName)) {
-          if (node.selectionSet) {
-            const selections = node.selectionSet.selections;
-            const hasEdges = selections.some(
-              (sel) => sel.kind === Kind.FIELD && sel.name.value === "edges"
-            );
-
-            if (hasEdges) {
-              const edgesField = selections.find(
-                (sel): sel is FieldNode => sel.kind === Kind.FIELD && sel.name.value === "edges"
-              );
-
-              if (edgesField?.selectionSet) {
-                const edgeSelections = edgesField.selectionSet.selections;
-                const hasNode = edgeSelections.some(
-                  (sel) => sel.kind === Kind.FIELD && sel.name.value === "node"
-                );
-
-                if (!hasNode) {
-                  errors.push(
-                    new GraphQLError(
-                      `Bulk query ${docName}: Connection field '${fieldName}' has 'edges' but missing 'node'. Use edges { node { ... } } pattern.`
-                    )
-                  );
-                }
-
-                nestingDepth++;
-              }
-            } else {
-              errors.push(
-                new GraphQLError(
-                  `Bulk query ${docName}: Connection field '${fieldName}' should use edges { node { ... } } pattern.`
-                )
-              );
-            }
-          }
-        }
-      },
-    },
-  });
-
-  if (nestingDepth > 3) {
-    errors.push(
-      new GraphQLError(
-        `Bulk query ${docName}: Excessive connection nesting depth (${nestingDepth}). Consider simplifying.`
-      )
-    );
-  }
-
-  return errors;
 }
 
 describe("validate-graphql-schema AST validation", () => {

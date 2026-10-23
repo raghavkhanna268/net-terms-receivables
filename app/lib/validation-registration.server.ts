@@ -2,7 +2,8 @@
  * Validation Registration Service
  *
  * Idempotent registration of the credit-check-validation Shopify Function.
- * Uses validationCreate mutation with functionId (per 2026-10 schema).
+ * Uses validationCreate mutation with functionHandle (per 2026-10 schema).
+ * Query results use shopifyFunction { handle } (functionHandle is input-only).
  * write_validations scope is already granted.
  *
  * @see https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/validationCreate

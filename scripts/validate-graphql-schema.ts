@@ -84,7 +84,7 @@ const SKIP_FILES = [
 /**
  * Connection field names that must use edges { node { ... } } pattern in bulk queries.
  */
-const CONNECTION_FIELDS = [
+export const CONNECTION_FIELDS = [
   "orders",
   "customers",
   "companies",
@@ -348,7 +348,7 @@ function validateDocument(schema: GraphQLSchema, doc: GraphQLDocument): GraphQLE
  * Validate bulk query rules using AST traversal.
  * Checks that connection fields use edges { node { ... } } pattern.
  */
-function validateBulkQueryRulesAST(doc: DocumentNode, docName: string): GraphQLError[] {
+export function validateBulkQueryRulesAST(doc: DocumentNode, docName: string): GraphQLError[] {
   const errors: GraphQLError[] = [];
   let nestingDepth = 0;
 
@@ -545,27 +545,45 @@ function checkForUnvalidatableQueries(filePath: string, content: string): GraphQ
 }
 
 /**
- * Generate and validate all variants of getBulkCustomersQuery.
+ * Generate and validate all variants of getBulkCustomersQuery and getCustomerQuery.
+ * Imports the REAL functions from customer-fields.server.ts - no copies.
  */
-function validateDynamicQueryBuilders(schema: GraphQLSchema): ValidationResult[] {
+async function validateDynamicQueryBuilders(schema: GraphQLSchema): Promise<{ results: ValidationResult[], count: number }> {
   const results: ValidationResult[] = [];
-
-  // Import the customer-fields module to evaluate getBulkCustomersQuery
-  // We can't actually import it since this is a validation script,
-  // so we'll read the file and extract what we need
+  let validatedCount = 0;
   const customerFieldsPath = path.join(__dirname, "../app/services/sync/customer-fields.server.ts");
 
+  // Fail hard if the module doesn't exist
   if (!fs.existsSync(customerFieldsPath)) {
-    console.log("  ⚠️ customer-fields.server.ts not found, skipping dynamic query validation");
-    return results;
+    console.error("❌ FATAL: customer-fields.server.ts not found at", customerFieldsPath);
+    process.exit(1);
   }
 
-  console.log("Validating dynamic query builders...\n");
+  console.log("Validating dynamic query builders (real imports)...\n");
+
+  // Dynamically import the real module
+  let getBulkCustomersQuery: (tagRules: Array<{ tag: string }>, env: { CUSTOMER_PII_FIELDS?: string }) => string | null;
+  let getCustomerQuery: (env: { CUSTOMER_PII_FIELDS?: string }) => string;
+
+  try {
+    const module = await import("../app/services/sync/customer-fields.server");
+    if (!module.getBulkCustomersQuery || !module.getCustomerQuery) {
+      console.error("❌ FATAL: getBulkCustomersQuery or getCustomerQuery not exported from customer-fields.server.ts");
+      process.exit(1);
+    }
+    getBulkCustomersQuery = module.getBulkCustomersQuery;
+    getCustomerQuery = module.getCustomerQuery;
+  } catch (err) {
+    console.error("❌ FATAL: Failed to import customer-fields.server.ts:", err);
+    process.exit(1);
+  }
+
+  // ===== getBulkCustomersQuery variants =====
+  const tagRules = [{ tag: "net-terms" }];
 
   // Variant 1: With tag rules, no PII fields
-  const tagRules = [{ tag: "net-terms" }];
   const envNoPii = {};
-  const queryNoPii = buildBulkCustomersQueryVariant(tagRules, envNoPii);
+  const queryNoPii = getBulkCustomersQuery(tagRules, envNoPii);
 
   if (queryNoPii) {
     const doc: GraphQLDocument = {
@@ -576,13 +594,15 @@ function validateDynamicQueryBuilders(schema: GraphQLSchema): ValidationResult[]
     const errors = validateDocument(schema, doc);
     if (errors.length > 0) {
       results.push({ document: doc, errors });
+    } else {
+      validatedCount++;
     }
     console.log(`  ✓ getBulkCustomersQuery (no PII): validated`);
   }
 
   // Variant 2: With tag rules, with PII fields
   const envWithPii = { CUSTOMER_PII_FIELDS: "1" };
-  const queryWithPii = buildBulkCustomersQueryVariant(tagRules, envWithPii);
+  const queryWithPii = getBulkCustomersQuery(tagRules, envWithPii);
 
   if (queryWithPii) {
     const doc: GraphQLDocument = {
@@ -593,12 +613,14 @@ function validateDynamicQueryBuilders(schema: GraphQLSchema): ValidationResult[]
     const errors = validateDocument(schema, doc);
     if (errors.length > 0) {
       results.push({ document: doc, errors });
+    } else {
+      validatedCount++;
     }
     console.log(`  ✓ getBulkCustomersQuery (with PII): validated`);
   }
 
   // Variant 3: Empty tag rules (should return null - no validation needed)
-  const queryEmpty = buildBulkCustomersQueryVariant([], envNoPii);
+  const queryEmpty = getBulkCustomersQuery([], envNoPii);
   if (queryEmpty === null) {
     console.log(`  ✓ getBulkCustomersQuery (empty tags): correctly returns null`);
   } else {
@@ -607,7 +629,7 @@ function validateDynamicQueryBuilders(schema: GraphQLSchema): ValidationResult[]
 
   // Variant 4: Special characters in tag
   const tagRulesSpecial = [{ tag: "buyer's choice" }];
-  const querySpecial = buildBulkCustomersQueryVariant(tagRulesSpecial, envNoPii);
+  const querySpecial = getBulkCustomersQuery(tagRulesSpecial, envNoPii);
 
   if (querySpecial) {
     const doc: GraphQLDocument = {
@@ -618,70 +640,46 @@ function validateDynamicQueryBuilders(schema: GraphQLSchema): ValidationResult[]
     const errors = validateDocument(schema, doc);
     if (errors.length > 0) {
       results.push({ document: doc, errors });
+    } else {
+      validatedCount++;
     }
     console.log(`  ✓ getBulkCustomersQuery (special chars): validated`);
   }
 
+  // ===== getCustomerQuery variants =====
+
+  // Variant 5: getCustomerQuery without PII
+  const customerQueryNoPii = getCustomerQuery(envNoPii);
+  const customerDocNoPii: GraphQLDocument = {
+    name: "getCustomerQuery({})",
+    source: customerQueryNoPii,
+    filePath: customerFieldsPath,
+  };
+  const customerErrorsNoPii = validateDocument(schema, customerDocNoPii);
+  if (customerErrorsNoPii.length > 0) {
+    results.push({ document: customerDocNoPii, errors: customerErrorsNoPii });
+  } else {
+    validatedCount++;
+  }
+  console.log(`  ✓ getCustomerQuery (no PII): validated`);
+
+  // Variant 6: getCustomerQuery with PII
+  const customerQueryWithPii = getCustomerQuery(envWithPii);
+  const customerDocWithPii: GraphQLDocument = {
+    name: "getCustomerQuery({CUSTOMER_PII_FIELDS:'1'})",
+    source: customerQueryWithPii,
+    filePath: customerFieldsPath,
+  };
+  const customerErrorsWithPii = validateDocument(schema, customerDocWithPii);
+  if (customerErrorsWithPii.length > 0) {
+    results.push({ document: customerDocWithPii, errors: customerErrorsWithPii });
+  } else {
+    validatedCount++;
+  }
+  console.log(`  ✓ getCustomerQuery (with PII): validated`);
+
   console.log("");
-  return results;
-}
-
-/**
- * Build getBulkCustomersQuery variant without importing the module.
- * This mirrors the logic from customer-fields.server.ts.
- */
-function buildBulkCustomersQueryVariant(
-  tagRules: Array<{ tag: string }>,
-  env: { CUSTOMER_PII_FIELDS?: string }
-): string | null {
-  if (tagRules.length === 0) {
-    return null;
-  }
-
-  // Build tag filter
-  const tagConditions = tagRules.map((rule) => {
-    const escaped = rule.tag
-      .replace(/\\/g, "\\\\\\\\")
-      .replace(/'/g, "\\\\'")
-      .replace(/"/g, '\\"');
-    return `tag:'${escaped}'`;
-  });
-  const tagFilter = tagConditions.join(" OR ");
-
-  // Build fields
-  const fields = ["id", "tags"];
-  if (env.CUSTOMER_PII_FIELDS === "1") {
-    fields.push("email", "displayName");
-  }
-  const fieldSelection = fields.join("\n                ");
-
-  return `
-    mutation BulkCustomersExport {
-      bulkOperationRunQuery(
-        query: """
-        {
-          customers(query: "${tagFilter}") {
-            edges {
-              node {
-                ${fieldSelection}
-              }
-            }
-          }
-        }
-        """
-      ) {
-        bulkOperation {
-          id
-          status
-          url
-        }
-        userErrors {
-          field
-          message
-        }
-      }
-    }
-  `;
+  return { results, count: validatedCount };
 }
 
 /**
@@ -745,8 +743,8 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Validate dynamic query builders (getBulkCustomersQuery variants)
-  const dynamicResults = validateDynamicQueryBuilders(schema);
+  // Validate dynamic query builders (getBulkCustomersQuery and getCustomerQuery variants)
+  const { results: dynamicResults, count: dynamicValidatedCount } = await validateDynamicQueryBuilders(schema);
 
   // Fail if any unvalidatable queries were found
   if (unvalidatableErrors.length > 0) {
@@ -794,12 +792,15 @@ async function main(): Promise<void> {
     process.exit(1);
   } else {
     console.log("✅ All GraphQL documents are valid against Admin API 2026-10 schema");
-    console.log(`   Validated ${allDocuments.length} static + ${dynamicResults.length === 0 ? "4" : "0"} dynamic documents (min: ${EXPECTED_MIN_DOCUMENTS})`);
+    console.log(`   Validated ${allDocuments.length} static + ${dynamicValidatedCount} dynamic documents (min: ${EXPECTED_MIN_DOCUMENTS})`);
     process.exit(0);
   }
 }
 
-main().catch((err) => {
-  console.error("Fatal error:", err);
-  process.exit(1);
-});
+// Only run main() if this file is executed directly (not imported as a module)
+if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("validate-graphql-schema.ts")) {
+  main().catch((err) => {
+    console.error("Fatal error:", err);
+    process.exit(1);
+  });
+}
