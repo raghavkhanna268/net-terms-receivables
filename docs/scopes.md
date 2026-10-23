@@ -2,9 +2,9 @@
 
 This document lists all OAuth scopes requested by the Net Terms Receivables app, the features that use them, and the exact API calls that require them.
 
-**Scope bar policy**: Production config (`shopify.app.toml` and `wrangler.jsonc` SCOPES) may only include scopes that a planned, shipped feature uses. Before S24: any scope unused by merged code is dropped.
+**Scope bar policy**: Production config (`shopify.app.toml` and `wrangler.jsonc` SCOPES) may only include scopes that merged code uses. Before S24: audit and drop any unused scopes.
 
-## Production Scopes (11 total)
+## Production Scopes (8 total)
 
 ### Read Scopes (5)
 
@@ -47,7 +47,7 @@ This document lists all OAuth scopes requested by the Net Terms Receivables app,
 
 > **Pre-granted for S8**: This scope is not used by S6 but is included now to avoid a second OAuth re-approval when S8 ships.
 
-### Write Scopes (6)
+### Write Scopes (3)
 
 #### write_companies
 
@@ -55,8 +55,6 @@ This document lists all OAuth scopes requested by the Net Terms Receivables app,
 |---------|------|----------|-----------|
 | Credit/hold metafields on Company | S11 | `metafieldsSet` with Company ownerId | [metafieldsSet](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/metafieldsSet) |
 | Credit/hold metafields on CompanyLocation | S11 | `metafieldsSet` with CompanyLocation ownerId | [metafieldsSet](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/metafieldsSet) |
-| Dev store seed: create companies | S4 | `companyCreate` | [companyCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyCreate) |
-| Dev store seed: set payment terms on location | S4 | `companyLocationUpdate` with `buyerExperienceConfiguration.paymentTermsTemplateId` | [companyLocationUpdate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyLocationUpdate) |
 
 > **Note**: `metafieldsSet` requires write access to the owner resource. For Company/CompanyLocation metafields, this requires `write_companies`.
 
@@ -73,11 +71,14 @@ This document lists all OAuth scopes requested by the Net Terms Receivables app,
 | Feature | Step | Mutation | Reference |
 |---------|------|----------|-----------|
 | Mark order as paid after bank match | S17 | `orderMarkAsPaid` | [orderMarkAsPaid](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/orderMarkAsPaid) |
-| Add tags to orders (overdue, hold, etc.) | S13 | `tagsAdd` with Order gid | [tagsAdd](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/tagsAdd) |
+| Add tags to orders (overdue, hold, etc.) | S17 | `tagsAdd` with Order gid | [tagsAdd](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/tagsAdd) |
 | Remove tags from orders | S17 | `tagsRemove` with Order gid | [tagsRemove](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/tagsRemove) |
-| Dev store seed: create orders | S4 | `orderCreate` | [orderCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/orderCreate) |
 
-#### write_validations
+## Planned: Add with S12/S13 PRs
+
+These scopes will be added when their respective features ship. The app is not live yet, so there is no merchant re-consent cost.
+
+### write_validations (S12)
 
 | Feature | Step | Mutation | Reference |
 |---------|------|----------|-----------|
@@ -87,7 +88,7 @@ This document lists all OAuth scopes requested by the Net Terms Receivables app,
 
 > **S12 feature**: Shopify Functions validation to block checkout for accounts on hold or over credit limit.
 
-#### write_payment_customizations
+### write_payment_customizations (S13)
 
 | Feature | Step | Mutation | Reference |
 |---------|------|----------|-----------|
@@ -97,7 +98,7 @@ This document lists all OAuth scopes requested by the Net Terms Receivables app,
 
 > **S13 feature**: Shopify Functions payment customization to hide/show payment methods based on account status.
 
-#### write_merchant_managed_fulfillment_orders
+### write_merchant_managed_fulfillment_orders (S13)
 
 | Feature | Step | Mutation | Reference |
 |---------|------|----------|-----------|
@@ -108,28 +109,32 @@ This document lists all OAuth scopes requested by the Net Terms Receivables app,
 
 ## Scopes NOT in Production Config
 
+These scopes are used only by the dev store seed script and are configured in `shopify.app.dev.toml` for a separate Dev Dashboard app.
+
 ### write_draft_orders
 
-**Not required.** The dev store seed creates orders directly with `orderCreate` (which supports `companyLocationId` for B2B orders) and sets payment terms on the CompanyLocation via `companyLocationUpdate` with `buyerExperienceConfiguration.paymentTermsTemplateId`. Orders for that location automatically inherit the payment terms.
-
-References:
-- [orderCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/orderCreate) — supports `companyLocationId` in [OrderCreateOrderInput](https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateOrderInput)
-- [companyLocationUpdate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyLocationUpdate) — accepts `buyerExperienceConfiguration.paymentTermsTemplateId`
-- [BuyerExperienceConfigurationInput](https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/BuyerExperienceConfigurationInput) — `paymentTermsTemplateId` field
+**Seed-only.** Used by the seed script to create draft orders for non-B2B customers. The production app never creates draft orders.
 
 ### write_payment_terms
 
-**Not required.** Payment terms are set on CompanyLocations via `companyLocationUpdate` (under `write_companies`), not via the `paymentTermsCreate` mutation. Orders created for B2B company locations inherit the payment terms from the location's `buyerExperienceConfiguration.paymentTermsTemplate`.
+**Seed-only.** The seed script can use `paymentTermsCreate` to set payment terms on orders. However, for B2B orders in production, payment terms are set on the CompanyLocation via `companyLocationUpdate` with `buyerExperienceConfiguration.paymentTermsTemplateId`, which only requires `write_companies`.
 
-Per [companyLocationUpdate docs](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyLocationUpdate):
-> "You can also configure the B2B checkout experience through `BuyerExperienceConfiguration` settings that control whether orders require merchant review, `PaymentTermsTemplate` settings..."
+References:
+- [companyLocationUpdate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyLocationUpdate) — "configure the B2B checkout experience through `BuyerExperienceConfiguration` settings that control... `PaymentTermsTemplate` settings"
+- [BuyerExperienceConfigurationInput](https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/BuyerExperienceConfigurationInput) — `paymentTermsTemplateId` field
 
-This approach requires only `write_companies` (or `write_customers`), which we already have.
-
-## Final Scope List
+## Final Production Scope List
 
 ```
-read_companies,read_customers,read_draft_orders,read_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations
+read_companies,read_customers,read_draft_orders,read_orders,read_payment_terms,write_companies,write_customers,write_orders
+```
+
+## Dev Seed Scope List
+
+See `shopify.app.dev.toml`:
+
+```
+read_companies,read_customers,read_draft_orders,read_orders,read_payment_terms,read_products,write_companies,write_customers,write_draft_orders,write_orders,write_payment_terms
 ```
 
 ## Audit Reminder
