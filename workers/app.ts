@@ -4,6 +4,7 @@ import type { Sql } from "../app/lib/db-light.server";
 import { createSql } from "../app/lib/db-light.server";
 import { requestContext } from "../app/lib/request-context.server";
 import { getShopifyApp, sessionStorage } from "../app/shopify.server";
+import { runDrain } from "../app/services/drain/processor.server";
 
 const requestHandler = createRequestHandler(
   () => import("virtual:react-router/server-build"),
@@ -42,5 +43,41 @@ export default wrapWithSentry({
         shopify,
       });
     });
+  },
+
+  /**
+   * Workers Cron scheduled handler (S10).
+   *
+   * Runs every 5 minutes as a keep-alive and fallback drain.
+   * The primary drain is via pg_cron + pg_net every minute.
+   * This provides redundancy in case pg_net requests fail.
+   *
+   * @param event - Cron trigger event with scheduled time
+   * @param env - Worker environment bindings
+   * @param ctx - Execution context for waitUntil
+   */
+  async scheduled(event, env, ctx) {
+    const sql = createSql(env.HYPERDRIVE.connectionString);
+
+    try {
+      console.log(`[scheduled] cron trigger at ${new Date(event.scheduledTime).toISOString()}`);
+
+      // Run the drain
+      const result = await runDrain(sql, {
+        batchSize: 10,
+        timeBudgetMs: 25000, // 25s for cron (more generous than HTTP)
+      });
+
+      console.log(
+        `[scheduled] drain complete: processed=${result.processed} ` +
+          `skipped=${result.skipped} failed=${result.failed} ` +
+          `dlq=${result.deadLettered} timedOut=${result.timedOut} ` +
+          `elapsed=${result.elapsedMs}ms`
+      );
+    } catch (error) {
+      console.error("[scheduled] drain error:", error);
+    } finally {
+      ctx.waitUntil(closeSql(sql));
+    }
   },
 } satisfies ExportedHandler<Env>);

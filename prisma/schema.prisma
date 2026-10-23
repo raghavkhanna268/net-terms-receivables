@@ -643,3 +643,25 @@ model S8DraftOrder {
   @@index([shopId, hasPaymentTerms])
   @@map("s8_draft_orders")
 }
+
+// =============================================================================
+// S10 DEAD-LETTER QUEUE
+// =============================================================================
+
+/// Dead-letter queue for failed messages (S10)
+/// Stores messages that exceeded max retry attempts for later review
+/// and potential reprocessing.
+///
+/// Note: This table is created by the S10 migration.
+/// It's included here to keep schema.prisma in sync with the database.
+model S6DeadLetter {
+  id             BigInt   @id @default(autoincrement())
+  originalQueue  String   @map("original_queue")
+  originalMsgId  String   @map("original_msg_id")
+  message        Json
+  error          String
+  deadLetteredAt DateTime @default(now()) @map("dead_lettered_at") @db.Timestamptz(6)
+
+  @@index([originalQueue, deadLetteredAt(sort: Desc)], map: "idx_s6_dead_letter_queue_time")
+  @@map("s6_dead_letter")
+}
