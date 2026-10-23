@@ -1,0 +1,183 @@
+# Launch Checklist — Net Terms Receivables
+
+> **Status:** Pre-launch checklist for App Store review and production readiness.
+> Items marked ⚠️ are blocking. Items marked **TBD** require decisions.
+
+---
+
+## Infrastructure
+
+### Cloudflare Workers
+
+- [ ] **⚠️ Upgrade to Cloudflare Workers Paid ($5/month)** — Before App Store review or first real merchant, whichever comes first
+  - Free tier: 100k requests/day, 10ms CPU limit
+  - Paid tier: 10M requests/month, 30ms CPU limit
+  - **Why:** Production traffic may exceed free tier; paid tier provides better CPU headroom
+
+### Supabase
+
+- [ ] **⚠️ Supabase Free tier pausing risk** — Free projects pause after 1 week of inactivity
+  - [ ] Implement keep-alive cron job (S10 tracker item)
+  - [ ] **TBD:** Consider upgrading to Supabase Pro ($25/month) for SLA and no pausing
+  
+- [ ] **⚠️ Configure Supabase backups**
+  - Free tier: Daily backups, 7-day retention
+  - **TBD:** Verify backup configuration in Supabase dashboard
+  - **TBD:** Test backup restoration procedure
+
+- [ ] Verify database is in Mumbai region (ap-south-1)
+  - **Current:** Confirmed in wrangler.jsonc and README
+
+---
+
+## Shopify App Store Requirements
+
+### App Listing
+
+- [ ] **⚠️ App name and tagline finalized** — See `listing/app-store-listing.md`
+- [ ] **⚠️ App description written** — Feature bullets, use cases
+- [ ] **TBD** Screenshots (minimum 3)
+- [ ] **TBD** Demo video (recommended)
+- [ ] **TBD** App icon (square, meets Shopify requirements)
+- [ ] **TBD** Support contact email
+
+### Scopes and Permissions
+
+- [ ] **⚠️ Request `read_all_orders` scope (if needed)**
+  - Current: `read_orders` limited to 60-day order window
+  - **Justification:** Historical invoice backfill for existing merchants
+  - **Decision needed:** Is 60-day window sufficient for launch?
+
+- [ ] **⚠️ Protected Customer Data (PCD) Access Request**
+  - Required for: `read_customers`, `read_orders` scopes (after PR #28)
+  - [ ] **Level 1 PCD** — Customer email, phone, address in API responses
+    - [ ] File PCD access request form in Partner Dashboard
+    - [ ] Justify data collection and storage
+  - [ ] **Level 2 PCD** — Customer data storage and retention
+    - Only needed if `CUSTOMER_PII_FIELDS=1` is enabled in production
+    - **TBD:** Decide if email/displayName storage is needed
+  - **Reference:** [Shopify Protected Customer Data](https://shopify.dev/docs/apps/store/data-protection/protected-customer-data)
+
+### Privacy Policy
+
+- [ ] **⚠️ Privacy policy URL hosted and accessible**
+  - Draft: `docs/privacy.md`
+  - [ ] **TBD:** Host on public URL (e.g., /privacy route in app, or external URL)
+  - [ ] Fill in all **TBD** items in privacy policy
+  - [ ] Legal review of privacy policy
+
+### GDPR Webhooks
+
+- [ ] **⚠️ GDPR webhooks verified with real Shopify deliveries**
+  - Webhooks registered: `customers/data_request`, `customers/redact`, `shop/redact`
+  - [ ] Verify `app/uninstalled` webhook works in test store
+  - [ ] Verify `shop/redact` deletes all shop data (cascade)
+  - [ ] Verify `customers/redact` returns 200 (no customer data stored yet)
+  - [ ] After PR #32: Verify `customers/redact` deletes s8_tagged_customers
+
+### Embedded App Requirements
+
+- [x] App uses session tokens (no third-party cookies)
+- [x] App is embedded (`embedded = true` in shopify.app.toml)
+- [ ] **TBD** Verify App Bridge integration works across all routes
+- [ ] **TBD** Test on mobile (responsive design)
+
+### Performance
+
+- [ ] **⚠️ Lighthouse/Web Vitals audit**
+  - [ ] Target: LCP < 2.5s, FID < 100ms, CLS < 0.1
+  - [ ] Run Lighthouse on embedded app pages
+  - **Reference:** [Shopify App Performance Requirements](https://shopify.dev/docs/apps/store/requirements)
+
+- [ ] Verify Worker CPU time stays under limits
+  - Current estimates: 2-3ms per webhook (well under 10ms)
+  - [ ] Test with `wrangler tail` in production
+
+### Billing (if paid app)
+
+- [ ] **TBD** Implement Shopify Billing API for paid plans
+- [ ] **TBD** Define pricing tiers
+- [ ] **TBD** Test billing flow in dev store
+- **Reference:** [Shopify Billing API](https://shopify.dev/docs/apps/billing)
+
+---
+
+## Error Monitoring
+
+- [ ] **⚠️ Wire Sentry error monitoring**
+  - Package installed: `@sentry/cloudflare`
+  - Wrapper implemented: `app/lib/sentry.ts`
+  - [ ] Create Sentry project
+  - [ ] Set `SENTRY_DSN` secret in Cloudflare Workers
+  - [ ] Verify errors are captured in dev store testing
+
+---
+
+## Data Retention (Issue #22)
+
+- [ ] **TBD** Define retention policy for Payment.narration/payerText
+  - Contains raw bank statement data with potential PII
+  - Options:
+    - [ ] Retain indefinitely (document in privacy policy)
+    - [ ] Purge after X days via pg_cron job
+    - [ ] Redact PII but keep match-relevant tokens
+  - [ ] Implement pg_cron retention job (if applicable)
+  - [ ] Document retention period in privacy policy
+
+---
+
+## Security
+
+- [x] HMAC-SHA256 webhook verification with constant-time comparison
+- [x] TLS for all connections (Cloudflare + Supabase enforce)
+- [x] OAuth 2.0 for Shopify authentication
+- [x] Shop domain validation on webhooks
+- [ ] **⚠️ Secrets rotation plan**
+  - [ ] Document rotation procedure for SHOPIFY_API_SECRET
+  - [ ] Document rotation procedure for database credentials
+  - [ ] **TBD:** Schedule first rotation
+- [ ] **TBD** Security audit / penetration testing
+
+---
+
+## Dependencies on Unmerged PRs
+
+### PR #28 (S6 — Company & Order Sync)
+
+Must merge before:
+- [ ] Scope requests (read_companies, read_orders, etc.)
+- [ ] PCD access request
+- [ ] Invoice creation feature claims in listing
+
+### PR #32 (S8 — Tag Rules & Customer Sync)
+
+Must merge before:
+- [ ] Tag-based buyer account claims in listing
+- [ ] Customer sync feature claims
+
+---
+
+## Pre-Submission Checklist
+
+- [ ] All ⚠️ blocking items resolved
+- [ ] All **TBD** items have decisions
+- [ ] Privacy policy hosted at public URL
+- [ ] App tested on dev store with real Shopify data
+- [ ] GDPR webhooks tested with Shopify's test tool
+- [ ] Lighthouse audit passing
+- [ ] Sentry wired and receiving errors
+- [ ] CI/CD pipeline green
+
+---
+
+## App Store Review Reference
+
+- [App Store listing requirements](https://shopify.dev/docs/apps/store/requirements)
+- [Protected Customer Data requirements](https://shopify.dev/docs/apps/store/data-protection/protected-customer-data)
+- [GDPR compliance requirements](https://shopify.dev/docs/apps/store/gdpr)
+- [App performance requirements](https://shopify.dev/docs/apps/store/requirements#performance)
+- [Billing API requirements](https://shopify.dev/docs/apps/billing) (if paid app)
+
+---
+
+*This checklist reflects the state of the codebase as of main branch. Update as PRs merge and decisions are made.*
