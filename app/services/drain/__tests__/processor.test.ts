@@ -129,12 +129,15 @@ describe("Drain Processor", () => {
       expect(getSyncHandler("ORDERS_CANCELLED")).toBeDefined();
       expect(getSyncHandler("ORDERS_PAID")).toBeDefined();
 
-      // Bulk handler
-      expect(getBulkHandler("BULK_OPERATIONS_FINISH")).toBeDefined();
+      // NOTE: BULK_OPERATIONS_FINISH handler is NOT registered yet.
+      // Bulk JSONL processing requires byte-accurate HTTP Range chunking.
+      // Messages will go through no-handler path (set_vt 3600s, eventual DLQ).
+      expect(getBulkHandler("BULK_OPERATIONS_FINISH")).toBeUndefined();
 
-      // Reconcile handlers
-      expect(getSyncHandler("RECONCILE_COMPANIES")).toBeDefined();
-      expect(getSyncHandler("RECONCILE_ORDERS")).toBeDefined();
+      // NOTE: RECONCILE_* handlers are NOT registered yet.
+      // Reconcile depends on bulk operations working. Will be added in follow-up PR.
+      expect(getSyncHandler("RECONCILE_COMPANIES")).toBeUndefined();
+      expect(getSyncHandler("RECONCILE_ORDERS")).toBeUndefined();
     });
   });
 
@@ -148,7 +151,7 @@ describe("Drain Processor", () => {
         timeBudgetMs: 15000, // 15 seconds
         maxRetries: 5,
         noHandlerMaxReads: 48, // ~2 days
-        bulkChunkSize: 500,
+        // NOTE: bulkChunkSize removed - bulk JSONL parsing not yet implemented
       });
     });
   });

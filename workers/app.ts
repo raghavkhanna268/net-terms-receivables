@@ -52,20 +52,32 @@ export default wrapWithSentry({
    * The primary drain is via pg_cron + pg_net every minute.
    * This provides redundancy in case pg_net requests fail.
    *
+   * IMPORTANT: Runs inside requestContext.run() so that:
+   * 1. Session storage (LightSessionStorage) can access the SQL client
+   * 2. unauthenticated.admin() can load and refresh offline sessions
+   * 3. Token refresh persists back through session storage
+   *
    * @param event - Cron trigger event with scheduled time
    * @param env - Worker environment bindings
    * @param ctx - Execution context for waitUntil
    */
   async scheduled(event, env, ctx) {
-    const sql = createSql(env.HYPERDRIVE.connectionString);
+    let sql: Sql | null = null;
+    const getSql = (): Sql => {
+      if (!sql) {
+        sql = createSql(env.HYPERDRIVE.connectionString);
+      }
+      return sql;
+    };
 
     try {
       console.log(`[scheduled] cron trigger at ${new Date(event.scheduledTime).toISOString()}`);
 
-      // Run the drain with generous batch size for cron
-      // Time budget is 15s default (configurable in DrainConfig)
-      const result = await runDrain(sql, {
-        batchSize: 10,
+      // Run inside ALS context so session storage works for unauthenticated.admin()
+      const result = await requestContext.run({ getSql }, async () => {
+        return runDrain(getSql(), {
+          batchSize: 10,
+        });
       });
 
       console.log(
@@ -77,7 +89,9 @@ export default wrapWithSentry({
     } catch (error) {
       console.error("[scheduled] drain error:", error);
     } finally {
-      ctx.waitUntil(closeSql(sql));
+      if (sql !== null) {
+        ctx.waitUntil(closeSql(sql));
+      }
     }
   },
 } satisfies ExportedHandler<Env>);

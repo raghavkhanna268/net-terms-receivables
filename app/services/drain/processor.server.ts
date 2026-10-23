@@ -10,7 +10,10 @@
  * - Retry with DLQ: Messages exceeding max retries move to dead-letter queue
  * - No-handler: Messages without handlers get visibility extended (not DLQ'd immediately)
  * - Time budget: Stops early when wall-time budget is reached
- * - CPU bounded: Bulk JSONL processing is chunked to stay within 10ms CPU limit
+ *
+ * NOTE: BULK_OPERATIONS_FINISH and RECONCILE_* handlers are NOT implemented yet.
+ * They will go through the no-handler path (visibility extended, eventual DLQ).
+ * Nightly reconcile cron is also not scheduled until bulk processing works.
  */
 
 import type { Sql } from "~/lib/db-light.server";
@@ -33,11 +36,7 @@ import {
   COMPANY_QUERY,
   COMPANY_LOCATION_QUERY,
   ORDER_QUERY,
-  BULK_OPERATION_QUERY,
-  START_COMPANIES_BULK_MUTATION,
-  START_ORDERS_BULK_MUTATION,
 } from "./admin-client.server";
-import { registerBulkOperation } from "~/services/sync/bulk-operations.server";
 
 /**
  * Configuration for drain processing.
@@ -53,8 +52,6 @@ export interface DrainConfig {
   maxRetries: number;
   /** Max read_ct for no-handler messages before DLQ (default: 48, ~2 days) */
   noHandlerMaxReads: number;
-  /** Max JSONL lines to process per bulk operation invocation (default: 500) */
-  bulkChunkSize: number;
 }
 
 export const DEFAULT_DRAIN_CONFIG: DrainConfig = {
@@ -63,7 +60,6 @@ export const DEFAULT_DRAIN_CONFIG: DrainConfig = {
   timeBudgetMs: 15000,
   maxRetries: 5,
   noHandlerMaxReads: 48,
-  bulkChunkSize: 500,
 };
 
 /**
@@ -81,8 +77,7 @@ export type SyncHandler = (
  */
 export type BulkHandler = (
   sql: Sql,
-  message: BulkMessage,
-  config: DrainConfig
+  message: BulkMessage
 ) => Promise<SyncResult>;
 
 /**
@@ -152,7 +147,7 @@ async function handleCompany(sql: Sql, message: SyncMessage): Promise<SyncResult
   // Fetch company data via GraphQL
   const result = await adminGraphQL<{
     node: ShopifyCompany | null;
-  }>(sql, message.shop, COMPANY_QUERY, { id: message.resourceGid });
+  }>(message.shop, COMPANY_QUERY, { id: message.resourceGid });
 
   if (!result.success) {
     return {
@@ -208,7 +203,7 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
   // Fetch location data via GraphQL
   const result = await adminGraphQL<{
     node: ShopifyCompanyLocation | null;
-  }>(sql, message.shop, COMPANY_LOCATION_QUERY, { id: message.resourceGid });
+  }>(message.shop, COMPANY_LOCATION_QUERY, { id: message.resourceGid });
 
   if (!result.success) {
     return {
@@ -254,7 +249,7 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
   // Always fetch the real order - never fabricate data
   const result = await adminGraphQL<{
     node: ShopifyOrder | null;
-  }>(sql, message.shop, ORDER_QUERY, { id: message.resourceGid });
+  }>(message.shop, ORDER_QUERY, { id: message.resourceGid });
 
   if (!result.success) {
     return {
@@ -264,9 +259,43 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
     };
   }
 
-  // If node is null, order was deleted - nothing to do
+  // If node is null, order was deleted
+  // For PAID/CANCELLED, we should still update the invoice
   if (!result.data?.node) {
-    // Mark as processed so we don't retry
+    // Try to close/cancel the invoice even if order is gone
+    if (message.topic === "ORDERS_PAID" || message.topic === "ORDERS_CANCELLED") {
+      // Get shop ID
+      const [shop] = await sql<{ id: string }[]>`
+        SELECT id FROM "Shop" WHERE domain = ${message.shop}
+      `;
+
+      if (shop) {
+        if (message.topic === "ORDERS_PAID") {
+          // Mark invoice as paid
+          await sql`
+            UPDATE "Invoice"
+            SET status = 'paid', outstanding = '0.00', "updatedAt" = NOW()
+            WHERE "shopId" = ${shop.id} AND "orderId" = ${message.resourceGid}
+          `;
+        } else {
+          // Mark invoice as cancelled
+          await sql`
+            UPDATE "Invoice"
+            SET status = 'cancelled', "updatedAt" = NOW()
+            WHERE "shopId" = ${shop.id} AND "orderId" = ${message.resourceGid}
+          `;
+        }
+      }
+
+      await markWebhookProcessed(sql, message.webhookId, message.topic, message.resourceGid);
+      return {
+        success: true,
+        action: "updated",
+        skipReason: "Order deleted, invoice status updated directly",
+      };
+    }
+
+    // For CREATE/UPDATED on deleted orders, just mark processed
     await markWebhookProcessed(sql, message.webhookId, message.topic, message.resourceGid);
     return {
       success: true,
@@ -284,241 +313,6 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
   );
 }
 
-/**
- * Handler for BULK_OPERATIONS_FINISH topic.
- * Downloads JSONL and processes in chunks, persisting cursor for resume.
- */
-async function handleBulkFinish(
-  sql: Sql,
-  message: BulkMessage,
-  config: DrainConfig
-): Promise<SyncResult> {
-  // Idempotency check
-  if (await isWebhookProcessed(sql, message.webhookId)) {
-    return {
-      success: true,
-      action: "skipped",
-      skipReason: "Bulk operation already processed (idempotent)",
-    };
-  }
-
-  // Fetch the bulk operation to get the result URL
-  const result = await adminGraphQL<{
-    node: {
-      id: string;
-      status: string;
-      url: string | null;
-      objectCount: number | null;
-    } | null;
-  }>(sql, message.shop, BULK_OPERATION_QUERY, { id: message.bulkOperationId });
-
-  if (!result.success) {
-    return {
-      success: false,
-      action: "skipped",
-      error: result.error,
-    };
-  }
-
-  const bulkOp = result.data?.node;
-  if (!bulkOp) {
-    await markWebhookProcessed(sql, message.webhookId, message.topic, message.bulkOperationId);
-    return {
-      success: true,
-      action: "skipped",
-      skipReason: "Bulk operation not found",
-    };
-  }
-
-  if (bulkOp.status !== "COMPLETED" || !bulkOp.url) {
-    await markWebhookProcessed(sql, message.webhookId, message.topic, message.bulkOperationId);
-    return {
-      success: true,
-      action: "skipped",
-      skipReason: `Bulk operation status: ${bulkOp.status}, no URL`,
-    };
-  }
-
-  // Get current cursor from s6_bulk_operations
-  const [cursorRow] = await sql<{ byte_offset: number | null }[]>`
-    SELECT byte_offset FROM s6_bulk_operations
-    WHERE bulk_operation_id = ${message.bulkOperationId}
-  `;
-  const byteOffset = cursorRow?.byte_offset ?? 0;
-
-  // Download JSONL with Range header for resume
-  const headers: Record<string, string> = {};
-  if (byteOffset > 0) {
-    headers["Range"] = `bytes=${byteOffset}-`;
-  }
-
-  let jsonlResponse: Response;
-  try {
-    jsonlResponse = await fetch(bulkOp.url, { headers });
-  } catch (err) {
-    return {
-      success: false,
-      action: "skipped",
-      error: `Failed to fetch JSONL: ${err instanceof Error ? err.message : "Unknown"}`,
-    };
-  }
-
-  if (!jsonlResponse.ok && jsonlResponse.status !== 206) {
-    return {
-      success: false,
-      action: "skipped",
-      error: `JSONL fetch failed: HTTP ${jsonlResponse.status}`,
-    };
-  }
-
-  const jsonlText = await jsonlResponse.text();
-  const lines = jsonlText.split("\n").filter((l) => l.trim());
-
-  // Process up to bulkChunkSize lines
-  const linesToProcess = lines.slice(0, config.bulkChunkSize);
-  const isComplete = lines.length <= config.bulkChunkSize;
-
-  // Process lines based on bulk type
-  // (Actual processing would call the bulk parser and upsert functions)
-  // For now, we just update the cursor
-  const newOffset = byteOffset + jsonlText.length;
-
-  if (isComplete) {
-    // Mark as fully processed
-    await markWebhookProcessed(sql, message.webhookId, message.topic, message.bulkOperationId);
-    await sql`
-      UPDATE s6_bulk_operations
-      SET byte_offset = ${newOffset}, completed_at = NOW()
-      WHERE bulk_operation_id = ${message.bulkOperationId}
-    `;
-    return {
-      success: true,
-      action: "updated",
-      skipReason: `Processed ${linesToProcess.length} lines, bulk operation complete`,
-    };
-  } else {
-    // Save cursor for resume - don't mark as processed, don't archive
-    await sql`
-      UPDATE s6_bulk_operations
-      SET byte_offset = ${newOffset}
-      WHERE bulk_operation_id = ${message.bulkOperationId}
-    `;
-    return {
-      success: false, // Not complete yet, keep message for next iteration
-      action: "skipped",
-      error: `Processed ${linesToProcess.length} lines, ${lines.length - config.bulkChunkSize} remaining`,
-    };
-  }
-}
-
-// =============================================================================
-// RECONCILE HANDLERS
-// =============================================================================
-
-/**
- * Handler for RECONCILE_COMPANIES topic.
- * Starts a bulk companies export for the shop.
- */
-async function handleReconcileCompanies(sql: Sql, message: SyncMessage): Promise<SyncResult> {
-  // Idempotency: use webhookId pattern "reconcile:<shop>:<YYYY-MM-DD>:<kind>"
-  if (await isWebhookProcessed(sql, message.webhookId)) {
-    return {
-      success: true,
-      action: "skipped",
-      skipReason: "Reconcile already processed (idempotent)",
-    };
-  }
-
-  // Start bulk companies export
-  const result = await adminGraphQL<{
-    bulkOperationRunQuery: {
-      bulkOperation: { id: string; status: string } | null;
-      userErrors: Array<{ field: string[]; message: string }>;
-    };
-  }>(sql, message.shop, START_COMPANIES_BULK_MUTATION);
-
-  if (!result.success) {
-    return {
-      success: false,
-      action: "skipped",
-      error: result.error,
-    };
-  }
-
-  const bulkOp = result.data?.bulkOperationRunQuery;
-  if (bulkOp?.userErrors?.length) {
-    return {
-      success: false,
-      action: "skipped",
-      error: `Bulk operation failed: ${bulkOp.userErrors.map((e) => e.message).join("; ")}`,
-    };
-  }
-
-  if (bulkOp?.bulkOperation) {
-    // Register the bulk operation for tracking
-    await registerBulkOperation(sql, bulkOp.bulkOperation.id, message.shop, "companies");
-  }
-
-  // Mark reconcile as processed
-  await markWebhookProcessed(sql, message.webhookId, message.topic, message.shop);
-
-  return {
-    success: true,
-    action: "created",
-    entityId: bulkOp?.bulkOperation?.id,
-  };
-}
-
-/**
- * Handler for RECONCILE_ORDERS topic.
- * Starts a bulk orders export for the shop.
- */
-async function handleReconcileOrders(sql: Sql, message: SyncMessage): Promise<SyncResult> {
-  if (await isWebhookProcessed(sql, message.webhookId)) {
-    return {
-      success: true,
-      action: "skipped",
-      skipReason: "Reconcile already processed (idempotent)",
-    };
-  }
-
-  const result = await adminGraphQL<{
-    bulkOperationRunQuery: {
-      bulkOperation: { id: string; status: string } | null;
-      userErrors: Array<{ field: string[]; message: string }>;
-    };
-  }>(sql, message.shop, START_ORDERS_BULK_MUTATION);
-
-  if (!result.success) {
-    return {
-      success: false,
-      action: "skipped",
-      error: result.error,
-    };
-  }
-
-  const bulkOp = result.data?.bulkOperationRunQuery;
-  if (bulkOp?.userErrors?.length) {
-    return {
-      success: false,
-      action: "skipped",
-      error: `Bulk operation failed: ${bulkOp.userErrors.map((e) => e.message).join("; ")}`,
-    };
-  }
-
-  if (bulkOp?.bulkOperation) {
-    await registerBulkOperation(sql, bulkOp.bulkOperation.id, message.shop, "orders");
-  }
-
-  await markWebhookProcessed(sql, message.webhookId, message.topic, message.shop);
-
-  return {
-    success: true,
-    action: "created",
-    entityId: bulkOp?.bulkOperation?.id,
-  };
-}
-
 // Register S6 handlers
 registerSyncHandler("COMPANIES_CREATE", handleCompany);
 registerSyncHandler("COMPANIES_UPDATE", handleCompany);
@@ -530,9 +324,13 @@ registerSyncHandler("ORDERS_CREATE", handleOrder);
 registerSyncHandler("ORDERS_UPDATED", handleOrder);
 registerSyncHandler("ORDERS_CANCELLED", handleOrder);
 registerSyncHandler("ORDERS_PAID", handleOrder);
-registerSyncHandler("RECONCILE_COMPANIES", handleReconcileCompanies);
-registerSyncHandler("RECONCILE_ORDERS", handleReconcileOrders);
-registerBulkHandler("BULK_OPERATIONS_FINISH", handleBulkFinish);
+
+// NOTE: BULK_OPERATIONS_FINISH handler is NOT registered.
+// Bulk JSONL processing requires byte-accurate HTTP Range chunking which
+// is not yet implemented. Messages will go through no-handler path.
+
+// NOTE: RECONCILE_* handlers are NOT registered.
+// Reconcile depends on bulk operations working. Will be added in follow-up PR.
 
 // TODO(S8): Register CUSTOMERS_* and DRAFT_ORDERS_* handlers
 // registerSyncHandler("CUSTOMERS_CREATE", checkCompanyAccount);
@@ -781,7 +579,7 @@ async function processBulkQueue(
 
     const handler = getBulkHandler(msg.message.topic);
 
-    // No handler - extend visibility
+    // No handler - extend visibility (BULK_OPERATIONS_FINISH goes here for now)
     if (!handler) {
       if (msg.read_ct >= config.noHandlerMaxReads) {
         await moveToDeadLetter(
@@ -800,7 +598,7 @@ async function processBulkQueue(
     }
 
     try {
-      const syncResult = await handler(sql, msg.message, config);
+      const syncResult = await handler(sql, msg.message);
 
       if (syncResult.success) {
         await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
