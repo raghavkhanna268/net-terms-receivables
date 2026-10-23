@@ -8,6 +8,7 @@ import {
 } from "~/lib/aging-queries.server";
 import {
   calculateDaysPastDue,
+  DEFAULT_TIMEZONE,
 } from "~/lib/aging-dates.server";
 import {
   getBucketForDaysPastDue,
@@ -186,7 +187,7 @@ describeWithDb("SQL-vs-TS parity (DB-backed)", () => {
 
     // Compare each row with TypeScript calculation
     for (const row of sqlRows) {
-      const tsDaysPastDue = calculateDaysPastDue(row.due_at, AS_OF_DATE);
+      const tsDaysPastDue = calculateDaysPastDue(row.due_at, AS_OF_DATE, DEFAULT_TIMEZONE);
       const tsBucket = getBucketForDaysPastDue(tsDaysPastDue);
 
       expect(row.days_past_due).toBe(tsDaysPastDue);
