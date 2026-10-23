@@ -85,9 +85,9 @@ describeWithDb("S6 pgmq Queue Operations", () => {
       expect(readResult.message.topic).toBe("COMPANIES_CREATE");
       expect(readResult.message.shop).toBe(testMessage.shop);
 
-      // Delete message
+      // Delete message (cast to bigint to avoid function overload ambiguity)
       const [deleteResult] = await sql<{ delete: boolean }[]>`
-        SELECT pgmq.delete('s6_sync', ${msgId}) as delete
+        SELECT pgmq.delete('s6_sync', ${msgId}::bigint) as delete
       `;
       expect(deleteResult.delete).toBe(true);
     });
@@ -119,7 +119,7 @@ describeWithDb("S6 pgmq Queue Operations", () => {
       expect(readResult.message.metadata.nested.value).toBe(123);
       expect(readResult.message.metadata.nested.array).toEqual([1, 2, 3]);
 
-      await sql`SELECT pgmq.delete('s6_sync', ${msgId})`;
+      await sql`SELECT pgmq.delete('s6_sync', ${msgId}::bigint)`;
     });
   });
 
@@ -155,7 +155,7 @@ describeWithDb("S6 pgmq Queue Operations", () => {
       expect(readResult.message.bulkType).toBe("companies");
       expect(readResult.message.bulkOperationId).toBe(bulkMessage.bulkOperationId);
 
-      await sql`SELECT pgmq.delete('s6_bulk', ${msgId})`;
+      await sql`SELECT pgmq.delete('s6_bulk', ${msgId}::bigint)`;
     });
   });
 
