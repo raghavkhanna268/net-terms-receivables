@@ -43,10 +43,16 @@ export function isGatingEnforced(): boolean {
 }
 
 /**
- * SQL predicate for filtering active (non-gated) buyer accounts.
+ * SQL fragment type for composable WHERE clauses.
+ * This is a tagged template result from postgres.js.
+ */
+export type SqlFragment = ReturnType<Sql>;
+
+/**
+ * Get a SQL fragment for filtering active (non-gated) buyer accounts.
  * Use this in WHERE clauses to consistently exclude gated accounts.
  *
- * When PLAN_GATING_ENFORCED is OFF, returns a tautology (1=1) so all accounts are included.
+ * When PLAN_GATING_ENFORCED is OFF, returns a tautology (TRUE) so all accounts are included.
  * When PLAN_GATING_ENFORCED is ON, returns "gated_at IS NULL" to exclude gated accounts.
  *
  * Usage:
@@ -54,23 +60,26 @@ export function isGatingEnforced(): boolean {
  * const accounts = await sql`
  *   SELECT * FROM "BuyerAccount"
  *   WHERE "shopId" = ${shopId}
- *   AND ${activeAccountPredicate()}
+ *   AND ${activeAccountFragment(sql)}
  * `;
  * ```
  *
- * Note: This returns a raw SQL fragment. For complex queries you may need to
- * use it with proper escaping or construct the query differently.
+ * @param sql - The postgres.js SQL client (needed to create the fragment)
+ * @returns A SQL fragment that can be composed into queries
  */
-export function activeAccountPredicate(): string {
+export function activeAccountFragment(sql: Sql): SqlFragment {
   if (!isGatingEnforced()) {
-    return "1=1";
+    return sql`TRUE`;
   }
-  return "gated_at IS NULL";
+  return sql`gated_at IS NULL`;
 }
 
 /**
  * Check if a buyer account is active (not gated).
  * Respects PLAN_GATING_ENFORCED flag.
+ *
+ * Use this for in-memory checks on already-fetched accounts.
+ * For database queries, use activeAccountFragment() instead.
  *
  * @param gatedAt - The gated_at timestamp from the account (null means active)
  * @returns true if the account is active, false if gated

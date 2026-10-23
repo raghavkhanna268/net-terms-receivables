@@ -5,7 +5,6 @@ import { createSql } from "../app/lib/db-light.server";
 import { requestContext } from "../app/lib/request-context.server";
 import { getShopifyApp, sessionStorage } from "../app/shopify.server";
 import { runDrain } from "../app/services/drain/processor.server";
-import { setBackgroundRefreshCallback } from "../app/services/plan.server";
 
 const requestHandler = createRequestHandler(
   () => import("virtual:react-router/server-build"),
@@ -37,23 +36,16 @@ export default wrapWithSentry({
     // No explicit sql.end() needed: Hyperdrive automatically cleans up
     // Worker-to-edge connections when the request ends.
     // @see https://developers.cloudflare.com/hyperdrive/concepts/connection-lifecycle/
-    return requestContext.run({ getSql }, async () => {
-      // S21: Wire plan cache background refresh per-request.
-      // setBackgroundRefreshCallback binds ctx.waitUntil for the plan service
-      // to trigger stale cache refreshes without blocking the request.
-      // The callback is cleared after the request to avoid cross-request leaks.
-      setBackgroundRefreshCallback((promise) => ctx.waitUntil(promise));
-      try {
-        return await requestHandler(request, {
-          cloudflare: { env, ctx },
-          sessionStorage,
-          shopify,
-        });
-      } finally {
-        // Clear the callback after the request to avoid cross-request leaks
-        // in case the isolate serves multiple requests.
-        setBackgroundRefreshCallback(null);
-      }
+    //
+    // S21: Pass ctx.waitUntil via ALS for background tasks (e.g., stale plan
+    // cache refresh). This avoids module-global state that could leak across
+    // requests in long-lived isolates.
+    return requestContext.run({ getSql, waitUntil: (p) => ctx.waitUntil(p) }, async () => {
+      return requestHandler(request, {
+        cloudflare: { env, ctx },
+        sessionStorage,
+        shopify,
+      });
     });
   },
 

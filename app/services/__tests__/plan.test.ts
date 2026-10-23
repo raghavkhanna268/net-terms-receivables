@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { Sql } from "~/lib/db-light.server";
+import { requestContext, type RequestStore } from "~/lib/request-context.server";
 
 /**
  * Tests for plan resolution service (S21).
@@ -10,8 +11,19 @@ import type { Sql } from "~/lib/db-light.server";
  * 3. Unknown subscription name defaults to 'free'
  * 4. API error uses cached plan (fail-to-cached), only free when no cache
  * 5. Cache is used when fresh
- * 6. Stale cache returns cached plan and triggers background refresh
+ * 6. Stale cache returns cached plan and triggers background refresh (via ALS waitUntil)
  */
+
+// Mock adminGraphQL before importing plan.server
+vi.mock("../drain/admin-client.server", () => ({
+  adminGraphQL: vi.fn(),
+}));
+
+// Import after mock is set up
+import { adminGraphQL as _adminGraphQL } from "../drain/admin-client.server";
+import { resolvePlan, getPlanByShopId } from "../plan.server";
+
+const adminGraphQL = _adminGraphQL as ReturnType<typeof vi.fn>;
 
 // Mock SQL client
 const createMockSql = () => {
@@ -56,29 +68,20 @@ const createMockSql = () => {
   return sql;
 };
 
-// Mock adminGraphQL
-vi.mock("../drain/admin-client.server", () => ({
-  adminGraphQL: vi.fn(),
-}));
-
 describe("Plan Resolution Service", () => {
   const TEST_SHOP = "test-shop.myshopify.com";
   const TEST_SHOP_ID = "shop-123";
   
   let mockSql: ReturnType<typeof createMockSql>;
-  let adminGraphQL: ReturnType<typeof vi.fn>;
   
-  beforeEach(async () => {
-    vi.clearAllMocks();
-    vi.resetModules();
+  beforeEach(() => {
+    // Use resetAllMocks to clear both calls and pending mockResolvedValueOnce
+    vi.resetAllMocks();
     mockSql = createMockSql();
-    
-    const adminClient = await import("../drain/admin-client.server");
-    adminGraphQL = adminClient.adminGraphQL as ReturnType<typeof vi.fn>;
   });
   
   afterEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   describe("mapSubscriptionToPlanKey", () => {
@@ -169,7 +172,7 @@ describe("Plan Resolution Service", () => {
 
   describe("resolvePlan", () => {
     it("returns free plan when shop not found", async () => {
-      const { resolvePlan } = await import("../plan.server");
+      // resolvePlan imported at module scope
       
       // Shop not found
       mockSql.setMockResult("shop_id", []);
@@ -181,7 +184,7 @@ describe("Plan Resolution Service", () => {
     });
 
     it("returns cached plan when cache is fresh", async () => {
-      const { resolvePlan } = await import("../plan.server");
+      // resolvePlan imported at module scope
       
       // Shop exists
       mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
@@ -203,12 +206,15 @@ describe("Plan Resolution Service", () => {
       expect(adminGraphQL).not.toHaveBeenCalled();
     });
 
-    it("returns cached plan when stale and triggers background refresh", async () => {
-      const { resolvePlan, setBackgroundRefreshCallback } = await import("../plan.server");
+    it("returns cached plan when stale and triggers background refresh via ALS", async () => {
+      // resolvePlan imported at module scope
       
-      // Set up background refresh callback
+      // Set up mock waitUntil via ALS
       const mockWaitUntil = vi.fn();
-      setBackgroundRefreshCallback(mockWaitUntil);
+      const store: RequestStore = {
+        getSql: () => mockSql as unknown as Sql,
+        waitUntil: mockWaitUntil,
+      };
       
       // Shop exists
       mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
@@ -239,21 +245,21 @@ describe("Plan Resolution Service", () => {
         },
       });
       
-      const result = await resolvePlan(mockSql as unknown as Sql, TEST_SHOP);
+      // Run within request context so waitUntil is available
+      const result = await requestContext.run(store, async () => {
+        return resolvePlan(mockSql as unknown as Sql, TEST_SHOP);
+      });
       
       // Should return stale cached plan immediately
       expect(result.plan.key).toBe("growth");
       expect(result.fromCache).toBe(true);
       
-      // Should have triggered background refresh
+      // Should have triggered background refresh via ALS waitUntil
       expect(mockWaitUntil).toHaveBeenCalledTimes(1);
-      
-      // Clean up
-      setBackgroundRefreshCallback(null);
     });
 
     it("returns free plan when no active subscription and no cache", async () => {
-      const { resolvePlan } = await import("../plan.server");
+      // resolvePlan imported at module scope
       
       // Shop exists, no plan_key
       mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
@@ -282,7 +288,7 @@ describe("Plan Resolution Service", () => {
     });
 
     it("returns free plan for unknown subscription name", async () => {
-      const { resolvePlan } = await import("../plan.server");
+      // resolvePlan imported at module scope
       
       // Shop exists, no cache
       mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
@@ -317,7 +323,7 @@ describe("Plan Resolution Service", () => {
     });
 
     it("returns cached plan on API error when cache exists (fail-to-cached)", async () => {
-      const { resolvePlan } = await import("../plan.server");
+      // resolvePlan imported at module scope
       
       // Shop exists
       mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
@@ -347,7 +353,7 @@ describe("Plan Resolution Service", () => {
     });
 
     it("returns free plan on API error when NO cache exists", async () => {
-      const { resolvePlan } = await import("../plan.server");
+      // resolvePlan imported at module scope
       
       // Shop exists, no cache
       mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
@@ -374,7 +380,7 @@ describe("Plan Resolution Service", () => {
     });
 
     it("returns cached plan on exception when cache exists", async () => {
-      const { resolvePlan } = await import("../plan.server");
+      // resolvePlan imported at module scope
       
       // Shop exists
       mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
@@ -400,7 +406,7 @@ describe("Plan Resolution Service", () => {
     });
 
     it("correctly identifies test subscriptions", async () => {
-      const { resolvePlan } = await import("../plan.server");
+      // resolvePlan imported at module scope
       
       // Shop exists, no cache
       mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
@@ -437,7 +443,7 @@ describe("Plan Resolution Service", () => {
 
   describe("getPlanByShopId", () => {
     it("returns cached plan regardless of staleness", async () => {
-      const { getPlanByShopId } = await import("../plan.server");
+      // getPlanByShopId imported at module scope
       
       // Stale cache (7 hours old)
       const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
@@ -456,7 +462,7 @@ describe("Plan Resolution Service", () => {
     });
 
     it("returns free plan only when no cache ever existed", async () => {
-      const { getPlanByShopId } = await import("../plan.server");
+      // getPlanByShopId imported at module scope
       
       // No cache
       mockSql.setMockResult("shop_plan", [{
@@ -472,12 +478,11 @@ describe("Plan Resolution Service", () => {
       expect(plan.key).toBe("free");
     });
 
-    it("triggers background refresh when stale", async () => {
-      const { getPlanByShopId, setBackgroundRefreshCallback } = await import("../plan.server");
+    it("triggers background refresh when stale via ALS", async () => {
+      // getPlanByShopId imported at module scope
       
-      // Set up background refresh callback
+      // Set up mock waitUntil via ALS
       const mockWaitUntil = vi.fn();
-      setBackgroundRefreshCallback(mockWaitUntil);
       
       // Create a new mock that handles both queries
       const specialMockSql = Object.assign(
@@ -521,16 +526,21 @@ describe("Plan Resolution Service", () => {
         },
       });
       
-      const plan = await getPlanByShopId(specialMockSql as unknown as Sql, TEST_SHOP_ID);
+      const store: RequestStore = {
+        getSql: () => specialMockSql as unknown as Sql,
+        waitUntil: mockWaitUntil,
+      };
+      
+      // Run within request context so waitUntil is available
+      const plan = await requestContext.run(store, async () => {
+        return getPlanByShopId(specialMockSql as unknown as Sql, TEST_SHOP_ID);
+      });
       
       // Should return cached plan
       expect(plan.key).toBe("starter");
       
-      // Should trigger background refresh
+      // Should trigger background refresh via ALS waitUntil
       expect(mockWaitUntil).toHaveBeenCalledTimes(1);
-      
-      // Clean up
-      setBackgroundRefreshCallback(null);
     });
   });
 });

@@ -4,10 +4,13 @@ import type { Sql } from "./db-light.server";
 
 export type PrismaClientGetter = () => PrismaClient;
 export type SqlGetter = () => Sql;
+export type WaitUntilFn = (promise: Promise<unknown>) => void;
 
 export interface RequestStore {
   getSql: SqlGetter;
   getPrisma?: PrismaClientGetter;
+  /** ctx.waitUntil for background tasks that outlive the request response */
+  waitUntil?: WaitUntilFn;
 }
 
 /**
@@ -67,4 +70,17 @@ export function getRequestPrisma(): PrismaClient {
     );
   }
   return store.getPrisma();
+}
+
+/**
+ * Get the waitUntil function for the current request.
+ * Used for background tasks that should outlive the response.
+ *
+ * Returns undefined if called outside request context or waitUntil not available.
+ * This is intentional - callers should handle the case gracefully (e.g., skip
+ * background refresh when waitUntil is not available).
+ */
+export function getRequestWaitUntil(): WaitUntilFn | undefined {
+  const store = requestContext.getStore();
+  return store?.waitUntil;
 }

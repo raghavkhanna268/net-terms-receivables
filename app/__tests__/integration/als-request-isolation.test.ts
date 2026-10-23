@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { requestContext, getRequestPrisma, type PrismaClientGetter, type RequestStore } from "../../lib/request-context.server";
+import { requestContext, getRequestPrisma, getRequestWaitUntil, type PrismaClientGetter, type RequestStore } from "../../lib/request-context.server";
 import { PrismaSessionStorage } from "../../lib/session-storage.server";
 import type { PrismaClient } from "~/generated/prisma/client";
 import type { Sql } from "../../lib/db-light.server";
@@ -319,6 +319,122 @@ describe("AsyncLocalStorage Request Isolation", () => {
         expect(createCount.value).toBe(1);
         expect((c1 as unknown as MockPrismaClient).id).toBe("lazy-1");
       });
+    });
+  });
+
+  describe("waitUntil isolation (S21 plan refresh)", () => {
+    it("returns undefined when waitUntil is not provided", async () => {
+      await requestContext.run(createStoreWithSqlOnly(), async () => {
+        const waitUntil = getRequestWaitUntil();
+        expect(waitUntil).toBeUndefined();
+      });
+    });
+
+    it("returns the waitUntil function from the current request context", async () => {
+      const mockWaitUntil = vi.fn();
+      const store: RequestStore = {
+        getSql: () => createMockSql(),
+        waitUntil: mockWaitUntil,
+      };
+
+      await requestContext.run(store, async () => {
+        const waitUntil = getRequestWaitUntil();
+        expect(waitUntil).toBeDefined();
+        expect(waitUntil).toBe(mockWaitUntil);
+      });
+    });
+
+    it("isolates waitUntil between overlapping requests", async () => {
+      const waitUntil1Calls: Promise<unknown>[] = [];
+      const waitUntil2Calls: Promise<unknown>[] = [];
+
+      const store1: RequestStore = {
+        getSql: () => createMockSql(),
+        waitUntil: (p) => waitUntil1Calls.push(p),
+      };
+      const store2: RequestStore = {
+        getSql: () => createMockSql(),
+        waitUntil: (p) => waitUntil2Calls.push(p),
+      };
+
+      // Simulate overlapping requests where both trigger background tasks
+      const request1 = requestContext.run(store1, async () => {
+        await new Promise((r) => setTimeout(r, 5));
+        const waitUntil = getRequestWaitUntil();
+        waitUntil?.(Promise.resolve("task-1a"));
+        await new Promise((r) => setTimeout(r, 10));
+        waitUntil?.(Promise.resolve("task-1b"));
+        return "request-1";
+      });
+
+      const request2 = requestContext.run(store2, async () => {
+        await new Promise((r) => setTimeout(r, 3));
+        const waitUntil = getRequestWaitUntil();
+        waitUntil?.(Promise.resolve("task-2a"));
+        await new Promise((r) => setTimeout(r, 15));
+        waitUntil?.(Promise.resolve("task-2b"));
+        return "request-2";
+      });
+
+      const [result1, result2] = await Promise.all([request1, request2]);
+
+      expect(result1).toBe("request-1");
+      expect(result2).toBe("request-2");
+
+      // Each request's waitUntil should only have its own tasks
+      expect(waitUntil1Calls).toHaveLength(2);
+      expect(waitUntil2Calls).toHaveLength(2);
+
+      // Verify no cross-contamination
+      const resolved1 = await Promise.all(waitUntil1Calls);
+      const resolved2 = await Promise.all(waitUntil2Calls);
+      expect(resolved1).toEqual(["task-1a", "task-1b"]);
+      expect(resolved2).toEqual(["task-2a", "task-2b"]);
+    });
+
+    it("prevents waitUntil leakage when requests have different lifetimes", async () => {
+      const shortRequestCalls: Promise<unknown>[] = [];
+      const longRequestCalls: Promise<unknown>[] = [];
+
+      const shortStore: RequestStore = {
+        getSql: () => createMockSql(),
+        waitUntil: (p) => shortRequestCalls.push(p),
+      };
+      const longStore: RequestStore = {
+        getSql: () => createMockSql(),
+        waitUntil: (p) => longRequestCalls.push(p),
+      };
+
+      // Short request completes first
+      const shortRequest = requestContext.run(shortStore, async () => {
+        const waitUntil = getRequestWaitUntil();
+        waitUntil?.(Promise.resolve("short-task"));
+        return "short-done";
+      });
+
+      // Long request spans the entire test
+      const longRequest = requestContext.run(longStore, async () => {
+        const waitUntil = getRequestWaitUntil();
+        waitUntil?.(Promise.resolve("long-task-1"));
+        await new Promise((r) => setTimeout(r, 20));
+        waitUntil?.(Promise.resolve("long-task-2"));
+        return "long-done";
+      });
+
+      // Short request finishes
+      const shortResult = await shortRequest;
+      expect(shortResult).toBe("short-done");
+      expect(shortRequestCalls).toHaveLength(1);
+
+      // Long request continues and adds another task
+      const longResult = await longRequest;
+      expect(longResult).toBe("long-done");
+      expect(longRequestCalls).toHaveLength(2);
+
+      // Verify isolation - short request didn't receive long request's tasks
+      expect(shortRequestCalls).toHaveLength(1);
+      const shortResolved = await Promise.all(shortRequestCalls);
+      expect(shortResolved).toEqual(["short-task"]);
     });
   });
 

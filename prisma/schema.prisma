@@ -258,7 +258,8 @@ model BuyerAccount {
   @@index([shopId, kind])
   @@index([shopId, holdState])
   // S21: Index for finding gated accounts for reactivation on upgrade
-  @@index([gatedAt])
+  // Uses map to match the snake_case index name from the migration
+  @@index([gatedAt], map: "BuyerAccount_gated_at_idx")
 }
 
 // =============================================================================

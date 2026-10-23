@@ -19,6 +19,7 @@
  */
 
 import type { Sql } from "~/lib/db-light.server";
+import { getRequestWaitUntil } from "~/lib/request-context.server";
 import { captureException, captureMessage } from "~/lib/sentry";
 import {
   type PlanKey,
@@ -37,21 +38,6 @@ import { adminGraphQL } from "./drain/admin-client.server";
  * Cache TTL in milliseconds (~6 hours).
  */
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-
-/**
- * Background refresh callback type for ctx.waitUntil binding.
- * Set via setBackgroundRefreshCallback() from worker context.
- */
-type BackgroundRefreshCallback = (promise: Promise<unknown>) => void;
-let backgroundRefreshCallback: BackgroundRefreshCallback | null = null;
-
-/**
- * Set the background refresh callback (bound waitUntil).
- * Call this from worker context: setBackgroundRefreshCallback((p) => ctx.waitUntil(p))
- */
-export function setBackgroundRefreshCallback(cb: BackgroundRefreshCallback | null): void {
-  backgroundRefreshCallback = cb;
-}
 
 /**
  * GraphQL query for current app installation subscriptions.
@@ -345,8 +331,9 @@ export async function resolvePlan(
     // If cache is stale (but exists) and not forcing refresh,
     // return cached value and trigger background refresh
     if (cachedPlan && cachedPlan.isStale && !forceRefresh) {
-      // Trigger background refresh via waitUntil if available
-      if (backgroundRefreshCallback) {
+      // Trigger background refresh via waitUntil if available (from request context ALS)
+      const waitUntil = getRequestWaitUntil();
+      if (waitUntil) {
         const refreshPromise = (async () => {
           try {
             const fetched = await fetchPlanFromShopify(shopDomain);
@@ -365,7 +352,7 @@ export async function resolvePlan(
             console.error(`[plan.server] Background refresh failed for ${shopDomain}:`, err);
           }
         })();
-        backgroundRefreshCallback(refreshPromise);
+        waitUntil(refreshPromise);
       }
 
       // Return stale cache immediately (staleness never lowers tier)
@@ -505,8 +492,9 @@ export async function getPlanByShopId(
     return getDefaultPlan();
   }
   
-  // If stale, try to trigger background refresh
-  if (cached.isStale && backgroundRefreshCallback) {
+  // If stale, try to trigger background refresh via ALS waitUntil
+  const waitUntil = getRequestWaitUntil();
+  if (cached.isStale && waitUntil) {
     // Get shop domain for background refresh
     const [shopRow] = await sql<{ domain: string }[]>`
       SELECT domain FROM "Shop" WHERE id = ${shopId}
@@ -531,7 +519,7 @@ export async function getPlanByShopId(
           console.error(`[plan.server] Background refresh (by shopId) failed:`, err);
         }
       })();
-      backgroundRefreshCallback(refreshPromise);
+      waitUntil(refreshPromise);
     }
   }
   

@@ -1,17 +1,16 @@
--- Fix S21 gated_at index to match Prisma schema expectations.
+-- Fix S21 gated_at index: convert partial index to regular index.
 -- The original migration (20261025000000_s21_plan_cache) created a partial index
--- with snake_case naming that doesn't match Prisma's expected index name.
+-- with WHERE gated_at IS NOT NULL, which Prisma doesn't support natively.
 --
--- Changes:
--- 1. Drop the partial index (BuyerAccount_gated_at_idx)
--- 2. Create a regular index with the name Prisma expects (BuyerAccount_gatedAt_idx)
+-- This migration:
+-- 1. Drops the partial index
+-- 2. Creates a regular index with the same name (BuyerAccount_gated_at_idx)
 --
--- Note: A regular index is slightly less efficient than a partial index for
--- finding gated accounts, but it ensures Prisma schema drift checks pass.
--- For a boolean-like nullable column, the overhead is minimal.
+-- The Prisma schema uses @@index([gatedAt], map: "BuyerAccount_gated_at_idx")
+-- to reference this index, avoiding drift.
 
 -- Drop the old partial index
 DROP INDEX IF EXISTS "BuyerAccount_gated_at_idx";
 
--- Create a regular index with the name Prisma expects
-CREATE INDEX IF NOT EXISTS "BuyerAccount_gatedAt_idx" ON "BuyerAccount" (gated_at);
+-- Create a regular index with the same name
+CREATE INDEX IF NOT EXISTS "BuyerAccount_gated_at_idx" ON "BuyerAccount" (gated_at);

@@ -193,6 +193,10 @@ export function mapCompanyLocationToBuyerAccount(
  * always allowed (downgrade-safe). Gated accounts are excluded from the
  * limit count and can be reactivated on upgrade.
  *
+ * Performance: Uses per-batch count check instead of per-account to minimize
+ * database queries. Computes which accounts need gating upfront based on the
+ * current count and plan limit.
+ *
  * @param sql - postgres.js SQL client
  * @param accounts - Array of mapped BuyerAccount data
  * @returns Number of accounts upserted
@@ -203,57 +207,85 @@ export async function bulkUpsertBuyerAccounts(
 ): Promise<number> {
   if (accounts.length === 0) return 0;
 
-  let count = 0;
+  // Group accounts by shopId for batch limit checking
+  const accountsByShop = new Map<string, typeof accounts>();
   for (const a of accounts) {
-    // S21: Check if this is a new account and if we need to gate it
-    let shouldGate = false;
+    const existing = accountsByShop.get(a.shopId) ?? [];
+    existing.push(a);
+    accountsByShop.set(a.shopId, existing);
+  }
+
+  let totalCount = 0;
+
+  for (const [shopId, shopAccounts] of accountsByShop) {
+    // S21: Per-batch limit check - determine how many new accounts we can create
+    let slotsAvailable = Infinity;
+    let shouldGateAll = false;
+
     if (isGatingEnforced()) {
-      // Check if account already exists
-      const [existing] = await sql<{ id: string }[]>`
-        SELECT id FROM "BuyerAccount"
-        WHERE "shopId" = ${a.shopId} AND "companyLocationId" = ${a.companyLocationId}
-      `;
-      
-      // Only check limit for new accounts
-      if (!existing) {
-        const limitCheck = await checkCompanyLimit(sql, a.shopId);
-        shouldGate = !limitCheck.allowed;
+      const limitCheck = await checkCompanyLimit(sql, shopId);
+      if (limitCheck.limit !== -1) {
+        slotsAvailable = Math.max(0, limitCheck.limit - limitCheck.currentUsage);
+        shouldGateAll = slotsAvailable === 0;
       }
     }
 
-    const result = await sql`
-      INSERT INTO "BuyerAccount" (
-        "shopId",
-        kind,
-        "companyId",
-        "companyLocationId",
-        name,
-        "defaultTermsDays",
-        "defaultTermsSource",
-        gated_at,
-        "createdAt",
-        "updatedAt"
-      ) VALUES (
-        ${a.shopId},
-        ${a.kind},
-        ${a.companyId},
-        ${a.companyLocationId},
-        ${a.name},
-        ${a.defaultTermsDays},
-        ${a.defaultTermsSource},
-        ${shouldGate ? new Date() : null},
-        NOW(),
-        NOW()
-      )
-      ON CONFLICT ("shopId", "companyLocationId")
-      DO UPDATE SET
-        "companyId" = EXCLUDED."companyId",
-        name = EXCLUDED.name,
-        "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
-        "updatedAt" = NOW()
+    // Check which accounts already exist (updates don't consume slots)
+    const locationIds = shopAccounts.map(a => a.companyLocationId);
+    const existingAccounts = await sql<{ companyLocationId: string }[]>`
+      SELECT "companyLocationId" FROM "BuyerAccount"
+      WHERE "shopId" = ${shopId} AND "companyLocationId" = ANY(${locationIds})
     `;
-    count += result.count;
+    const existingSet = new Set(existingAccounts.map(e => e.companyLocationId));
+
+    // Count new accounts to determine gating
+    let newAccountsProcessed = 0;
+
+    for (const a of shopAccounts) {
+      const isNew = !existingSet.has(a.companyLocationId);
+      let shouldGate = false;
+
+      if (isNew && isGatingEnforced()) {
+        if (shouldGateAll || newAccountsProcessed >= slotsAvailable) {
+          shouldGate = true;
+        }
+        newAccountsProcessed++;
+      }
+
+      const result = await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId",
+          kind,
+          "companyId",
+          "companyLocationId",
+          name,
+          "defaultTermsDays",
+          "defaultTermsSource",
+          gated_at,
+          "createdAt",
+          "updatedAt"
+        ) VALUES (
+          ${a.shopId},
+          ${a.kind},
+          ${a.companyId},
+          ${a.companyLocationId},
+          ${a.name},
+          ${a.defaultTermsDays},
+          ${a.defaultTermsSource},
+          ${shouldGate ? new Date() : null},
+          NOW(),
+          NOW()
+        )
+        ON CONFLICT ("shopId", "companyLocationId")
+        DO UPDATE SET
+          "companyId" = EXCLUDED."companyId",
+          name = EXCLUDED.name,
+          "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
+          "updatedAt" = NOW()
+      `;
+      totalCount += result.count;
+    }
   }
 
-  return count;
+  return totalCount;
 }
