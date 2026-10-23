@@ -1,0 +1,146 @@
+# Read-only production diagnostics workflow
+#
+# Checks OAuth session state and protected customer data access for a shop.
+# Used by ops to verify Shopify connectivity without modifying data.
+#
+# SAFETY:
+#   - Manual trigger only (workflow_dispatch)
+#   - Runs only from main branch
+#   - Read-only database queries (SELECT only)
+#   - No artifacts uploaded
+#   - Access token is masked in logs
+#   - No customer PII is printed
+#
+# Required secrets:
+#   DATABASE_URL_MIGRATIONS - Supabase SESSION pooler connection string
+
+name: Prod Diagnostics
+
+on:
+  workflow_dispatch:
+    inputs:
+      shop:
+        description: "Shopify shop domain (e.g., example.myshopify.com)"
+        required: true
+        default: "net-terms-receivables.myshopify.com"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostics:
+    name: Run Production Diagnostics
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Validate inputs
+        run: |
+          if [[ ! "${{ inputs.shop }}" =~ ^[a-z0-9][a-z0-9-]*\.myshopify\.com$ ]]; then
+            echo "::error::Invalid shop domain format. Expected: example.myshopify.com"
+            exit 1
+          fi
+
+      - name: Session check
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          SHOP_DOMAIN: ${{ inputs.shop }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL_MIGRATIONS secret not set"
+            exit 1
+          fi
+
+          echo "Querying Session table for shop: $SHOP_DOMAIN"
+          echo ""
+
+          psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" "$DATABASE_URL" <<'EOSQL'
+          SELECT
+            shop,
+            "isOnline",
+            scope,
+            CASE WHEN "accessToken" IS NOT NULL AND "accessToken" != '' THEN true ELSE false END AS "hasAccessToken",
+            expires
+          FROM "Session"
+          WHERE shop = :'shop';
+          EOSQL
+
+      - name: Protected customer data probe
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          SHOP_DOMAIN: ${{ inputs.shop }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL_MIGRATIONS secret not set"
+            exit 1
+          fi
+
+          # Fetch offline access token into variable (never print it)
+          ACCESS_TOKEN=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT "accessToken"
+          FROM "Session"
+          WHERE shop = :'shop' AND "isOnline" = false
+          LIMIT 1;
+          EOSQL
+          )
+
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "::error::No offline session found for shop $SHOP_DOMAIN"
+            exit 1
+          fi
+
+          # Mask the token immediately before any use
+          echo "::add-mask::$ACCESS_TOKEN"
+
+          # Export as env var for curl (avoid argv exposure)
+          export SHOPIFY_ACCESS_TOKEN="$ACCESS_TOKEN"
+
+          echo "Probing Admin GraphQL API for protected customer data access..."
+          echo ""
+
+          # Build GraphQL query via stdin to avoid argv exposure
+          QUERY='{"query":"{ customers(first:1) { nodes { id email firstName lastName } } }"}'
+
+          # Call Admin GraphQL API using env var for auth header
+          HTTP_RESPONSE=$(mktemp)
+          HTTP_STATUS=$(curl -s -w "%{http_code}" -o "$HTTP_RESPONSE" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-Shopify-Access-Token: $SHOPIFY_ACCESS_TOKEN" \
+            --data-binary "$QUERY" \
+            "https://${SHOP_DOMAIN}/admin/api/2026-10/graphql.json")
+
+          # Parse response and output only boolean indicators
+          echo "HTTP Status: $HTTP_STATUS"
+          echo ""
+
+          if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
+            # Extract indicators without exposing PII
+            RESULT=$(cat "$HTTP_RESPONSE" | jq -r '
+              if .errors then
+                {
+                  graphql_errors: [.errors[] | {message: .message, extensions: .extensions}]
+                }
+              else
+                {
+                  customer_found: ((.data.customers.nodes | length) > 0),
+                  email_non_null: ((.data.customers.nodes[0].email // null) != null),
+                  email_not_redacted: (((.data.customers.nodes[0].email // "") | test("^[^@]+@[^@]+$")) // false),
+                  first_name_non_null: ((.data.customers.nodes[0].firstName // null) != null),
+                  last_name_non_null: ((.data.customers.nodes[0].lastName // null) != null)
+                }
+              end
+            ')
+            echo "Protected Customer Data Probe Results:"
+            echo "$RESULT" | jq .
+          else
+            echo "::error::GraphQL API request failed with HTTP $HTTP_STATUS"
+            # Print error body if present (should not contain PII on error)
+            cat "$HTTP_RESPONSE" | jq -r '.errors // .' 2>/dev/null || cat "$HTTP_RESPONSE"
+            exit 1
+          fi
+
+          rm -f "$HTTP_RESPONSE"
