@@ -11,7 +11,8 @@
  * 3. Provides getPlan(), hasFeature(), and limit() helpers
  *
  * Design decisions:
- * - Fail-to-free: Any error, unknown name, or missing subscription = 'free'
+ * - Staleness never lowers tier: Always use last known plan, trigger background refresh
+ * - Fail-to-cached: On error, use cached plan if one exists; only Free when no cache
  * - Never calls Shopify when cache is fresh (respects 10ms CPU budget)
  * - Cache refresh happens via APP_SUBSCRIPTIONS_UPDATE webhook
  * - Background refresh uses ctx.waitUntil() to avoid blocking requests
@@ -36,6 +37,21 @@ import { adminGraphQL } from "./drain/admin-client.server";
  * Cache TTL in milliseconds (~6 hours).
  */
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Background refresh callback type for ctx.waitUntil binding.
+ * Set via setBackgroundRefreshCallback() from worker context.
+ */
+type BackgroundRefreshCallback = (promise: Promise<unknown>) => void;
+let backgroundRefreshCallback: BackgroundRefreshCallback | null = null;
+
+/**
+ * Set the background refresh callback (bound waitUntil).
+ * Call this from worker context: setBackgroundRefreshCallback((p) => ctx.waitUntil(p))
+ */
+export function setBackgroundRefreshCallback(cb: BackgroundRefreshCallback | null): void {
+  backgroundRefreshCallback = cb;
+}
 
 /**
  * GraphQL query for current app installation subscriptions.
@@ -102,6 +118,7 @@ interface CachedPlanRow {
   subscriptionName: string | null;
   isTest: boolean;
   cachedAt: Date;
+  isStale: boolean;
 }
 
 /**
@@ -117,7 +134,8 @@ export interface ResolvedPlan {
 
 /**
  * Get the cached plan for a shop.
- * Returns null if no cache or cache is expired.
+ * Returns the cached plan with staleness flag. Returns null only if no cache exists.
+ * Staleness never lowers the tier - we always return the last known plan.
  */
 async function getCachedPlan(
   sql: Sql,
@@ -125,10 +143,10 @@ async function getCachedPlan(
 ): Promise<CachedPlanRow | null> {
   const [row] = await sql<
     {
-      plan_key: PlanKey;
+      plan_key: PlanKey | null;
       subscription_id: string | null;
       subscription_name: string | null;
-      is_test: boolean;
+      is_test: boolean | null;
       plan_cached_at: Date | null;
     }[]
   >`
@@ -142,22 +160,24 @@ async function getCachedPlan(
     WHERE id = ${shopId}
   `;
 
-  if (!row || !row.plan_cached_at) {
+  // No row or no plan_key means no cache exists
+  if (!row || !row.plan_key) {
     return null;
   }
 
-  // Check if cache is still valid
-  const cacheAge = Date.now() - row.plan_cached_at.getTime();
-  if (cacheAge > CACHE_TTL_MS) {
-    return null;
-  }
+  // Check if cache is stale (but still return it)
+  const cacheAge = row.plan_cached_at 
+    ? Date.now() - row.plan_cached_at.getTime()
+    : Infinity;
+  const isStale = cacheAge > CACHE_TTL_MS;
 
   return {
-    planKey: row.plan_key ?? "free",
+    planKey: row.plan_key,
     subscriptionId: row.subscription_id,
     subscriptionName: row.subscription_name,
     isTest: row.is_test ?? false,
-    cachedAt: row.plan_cached_at,
+    cachedAt: row.plan_cached_at ?? new Date(0),
+    isStale,
   };
 }
 
@@ -272,8 +292,12 @@ async function getShopId(sql: Sql, shopDomain: string): Promise<string | null> {
 /**
  * Resolve the current plan for a shop.
  *
- * Uses cached value if fresh, otherwise fetches from Shopify.
- * On any error, returns 'free' plan (fail-to-free).
+ * Design:
+ * - Fresh cache: Return cached plan immediately
+ * - Stale cache: Return cached plan, trigger background refresh (staleness never lowers tier)
+ * - No cache: Fetch from Shopify, cache result
+ * - Fetch failure with cache: Return cached plan (fail-to-cached)
+ * - Fetch failure without cache: Return free plan (only case we default to free)
  *
  * @param sql - postgres.js SQL client
  * @param shopDomain - Shop domain (e.g., "example.myshopify.com")
@@ -293,33 +317,83 @@ export async function resolvePlan(
     fromCache: false,
   };
 
+  let shopId: string | null = null;
+  let cachedPlan: CachedPlanRow | null = null;
+
   try {
-    const shopId = await getShopId(sql, shopDomain);
+    shopId = await getShopId(sql, shopDomain);
 
     if (!shopId) {
       console.warn(`[plan.server] Shop not found: ${shopDomain}`);
       return defaultResult;
     }
 
-    // Check cache first (unless force refresh)
-    if (!forceRefresh) {
-      const cached = await getCachedPlan(sql, shopId);
-      if (cached) {
-        return {
-          plan: getPlanConfig(cached.planKey),
-          subscriptionId: cached.subscriptionId,
-          subscriptionName: cached.subscriptionName,
-          isTest: cached.isTest,
-          fromCache: true,
-        };
-      }
+    // Always get cached plan first (for fail-to-cached behavior)
+    cachedPlan = await getCachedPlan(sql, shopId);
+
+    // If we have a fresh cache and not forcing refresh, return it
+    if (cachedPlan && !cachedPlan.isStale && !forceRefresh) {
+      return {
+        plan: getPlanConfig(cachedPlan.planKey),
+        subscriptionId: cachedPlan.subscriptionId,
+        subscriptionName: cachedPlan.subscriptionName,
+        isTest: cachedPlan.isTest,
+        fromCache: true,
+      };
     }
 
-    // Fetch from Shopify
+    // If cache is stale (but exists) and not forcing refresh,
+    // return cached value and trigger background refresh
+    if (cachedPlan && cachedPlan.isStale && !forceRefresh) {
+      // Trigger background refresh via waitUntil if available
+      if (backgroundRefreshCallback) {
+        const refreshPromise = (async () => {
+          try {
+            const fetched = await fetchPlanFromShopify(shopDomain);
+            if (fetched && shopId) {
+              await setCachedPlan(
+                sql,
+                shopId,
+                fetched.planKey,
+                fetched.subscriptionId,
+                fetched.subscriptionName,
+                fetched.isTest
+              );
+              console.log(`[plan.server] Background refresh completed for ${shopDomain}`);
+            }
+          } catch (err) {
+            console.error(`[plan.server] Background refresh failed for ${shopDomain}:`, err);
+          }
+        })();
+        backgroundRefreshCallback(refreshPromise);
+      }
+
+      // Return stale cache immediately (staleness never lowers tier)
+      return {
+        plan: getPlanConfig(cachedPlan.planKey),
+        subscriptionId: cachedPlan.subscriptionId,
+        subscriptionName: cachedPlan.subscriptionName,
+        isTest: cachedPlan.isTest,
+        fromCache: true,
+      };
+    }
+
+    // Fetch from Shopify (no cache or force refresh)
     const fetched = await fetchPlanFromShopify(shopDomain);
 
     if (!fetched) {
-      // Fetch failed - default to free, don't cache failure
+      // Fetch failed - use cached plan if available (fail-to-cached)
+      if (cachedPlan) {
+        console.warn(`[plan.server] Fetch failed for ${shopDomain}, using cached plan`);
+        return {
+          plan: getPlanConfig(cachedPlan.planKey),
+          subscriptionId: cachedPlan.subscriptionId,
+          subscriptionName: cachedPlan.subscriptionName,
+          isTest: cachedPlan.isTest,
+          fromCache: true,
+        };
+      }
+      // No cache exists - only now default to free
       return defaultResult;
     }
 
@@ -343,6 +417,20 @@ export async function resolvePlan(
   } catch (error) {
     console.error("[plan.server] Error resolving plan:", error);
     captureException(error);
+    
+    // Fail-to-cached: use cached plan if available
+    if (cachedPlan) {
+      console.warn(`[plan.server] Exception for ${shopDomain}, using cached plan`);
+      return {
+        plan: getPlanConfig(cachedPlan.planKey),
+        subscriptionId: cachedPlan.subscriptionId,
+        subscriptionName: cachedPlan.subscriptionName,
+        isTest: cachedPlan.isTest,
+        fromCache: true,
+      };
+    }
+    
+    // No cache - only now default to free
     return defaultResult;
   }
 }
@@ -402,20 +490,53 @@ export async function limit(
 
 /**
  * Get the shop's plan by shopId (used internally).
- * Returns default plan if not found.
+ * Always returns the last known plan regardless of staleness.
+ * Triggers background refresh if stale and domain is available.
+ * Returns default plan only if no plan was ever cached.
  */
 export async function getPlanByShopId(
   sql: Sql,
   shopId: string
 ): Promise<PlanConfig> {
   const cached = await getCachedPlan(sql, shopId);
-  if (cached) {
-    return getPlanConfig(cached.planKey);
+  
+  if (!cached) {
+    // No cache ever existed - return free plan
+    return getDefaultPlan();
   }
   
-  // No cache - return free plan
-  // Don't fetch from Shopify here as we don't have the domain
-  return getDefaultPlan();
+  // If stale, try to trigger background refresh
+  if (cached.isStale && backgroundRefreshCallback) {
+    // Get shop domain for background refresh
+    const [shopRow] = await sql<{ domain: string }[]>`
+      SELECT domain FROM "Shop" WHERE id = ${shopId}
+    `;
+    
+    if (shopRow) {
+      const refreshPromise = (async () => {
+        try {
+          const fetched = await fetchPlanFromShopify(shopRow.domain);
+          if (fetched) {
+            await setCachedPlan(
+              sql,
+              shopId,
+              fetched.planKey,
+              fetched.subscriptionId,
+              fetched.subscriptionName,
+              fetched.isTest
+            );
+            console.log(`[plan.server] Background refresh (by shopId) completed for ${shopRow.domain}`);
+          }
+        } catch (err) {
+          console.error(`[plan.server] Background refresh (by shopId) failed:`, err);
+        }
+      })();
+      backgroundRefreshCallback(refreshPromise);
+    }
+  }
+  
+  // Always return the cached plan (staleness never lowers tier)
+  return getPlanConfig(cached.planKey);
 }
 
 /**

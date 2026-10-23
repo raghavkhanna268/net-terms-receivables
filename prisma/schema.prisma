@@ -150,7 +150,7 @@ model Shop {
 
   // S21: Plan cache columns
   /// Cached plan key (free, starter, growth, scale). Defaults to free.
-  planKey          String?   @default("free") @map("plan_key")
+  planKey          String    @default("free") @map("plan_key")
   /// Shopify subscription GID from activeSubscriptions query.
   subscriptionId   String?   @map("subscription_id")
   /// Subscription name from Shopify (maps to plan_key).
@@ -233,6 +233,9 @@ model BuyerAccount {
   createdAt           DateTime           @default(now()) @db.Timestamptz(3)
   /// When the account was last updated (set by trigger)
   updatedAt           DateTime           @default(now()) @db.Timestamptz(3)
+  /// S21: When this account was gated due to plan limits. NULL means active.
+  /// Gated accounts are excluded from limit count and enforcement.
+  gatedAt             DateTime?          @map("gated_at") @db.Timestamptz(3)
 
   // Relations (onDelete: CASCADE - accounts are shop-specific)
   shop     Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
@@ -250,6 +253,8 @@ model BuyerAccount {
   @@unique([shopId, customerId])
   @@index([shopId, kind])
   @@index([shopId, holdState])
+  // S21: Index for finding gated accounts for reactivation on upgrade
+  @@index([gatedAt])
 }
 
 // =============================================================================

@@ -8,9 +8,9 @@ import type { Sql } from "~/lib/db-light.server";
  * 1. No subscription returns 'free' plan
  * 2. Active subscription maps to correct plan
  * 3. Unknown subscription name defaults to 'free'
- * 4. API error defaults to 'free' (fail-to-free)
+ * 4. API error uses cached plan (fail-to-cached), only free when no cache
  * 5. Cache is used when fresh
- * 6. Cache is bypassed when expired
+ * 6. Stale cache returns cached plan and triggers background refresh
  */
 
 // Mock SQL client
@@ -34,6 +34,11 @@ const createMockSql = () => {
       // Check for SELECT id from Shop
       if (query.includes('SELECT') && query.includes('"Shop"') && query.includes('id')) {
         return mockResults.get("shop_id") ?? [];
+      }
+
+      // Check for SELECT domain from Shop
+      if (query.includes('SELECT') && query.includes('domain')) {
+        return mockResults.get("shop_domain") ?? [];
       }
       
       return [];
@@ -198,30 +203,34 @@ describe("Plan Resolution Service", () => {
       expect(adminGraphQL).not.toHaveBeenCalled();
     });
 
-    it("fetches from Shopify when cache is expired", async () => {
-      const { resolvePlan } = await import("../plan.server");
+    it("returns cached plan when stale and triggers background refresh", async () => {
+      const { resolvePlan, setBackgroundRefreshCallback } = await import("../plan.server");
+      
+      // Set up background refresh callback
+      const mockWaitUntil = vi.fn();
+      setBackgroundRefreshCallback(mockWaitUntil);
       
       // Shop exists
       mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
       
-      // Expired cache (cached 7 hours ago)
-      const expiredCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
+      // Stale cache (cached 7 hours ago)
+      const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "free",
-        subscription_id: null,
-        subscription_name: null,
+        plan_key: "growth",
+        subscription_id: "sub-123",
+        subscription_name: "Growth",
         is_test: false,
-        plan_cached_at: expiredCacheTime,
+        plan_cached_at: staleCacheTime,
       }]);
       
-      // Mock Shopify response with active subscription
+      // Mock Shopify response for background refresh
       adminGraphQL.mockResolvedValueOnce({
         success: true,
         data: {
           currentAppInstallation: {
             activeSubscriptions: [{
-              id: "gid://shopify/AppSubscription/123",
-              name: "Starter",
+              id: "gid://shopify/AppSubscription/456",
+              name: "Scale",
               status: "ACTIVE",
               test: false,
               lineItems: [],
@@ -232,17 +241,29 @@ describe("Plan Resolution Service", () => {
       
       const result = await resolvePlan(mockSql as unknown as Sql, TEST_SHOP);
       
-      expect(result.plan.key).toBe("starter");
-      expect(result.fromCache).toBe(false);
-      expect(adminGraphQL).toHaveBeenCalled();
+      // Should return stale cached plan immediately
+      expect(result.plan.key).toBe("growth");
+      expect(result.fromCache).toBe(true);
+      
+      // Should have triggered background refresh
+      expect(mockWaitUntil).toHaveBeenCalledTimes(1);
+      
+      // Clean up
+      setBackgroundRefreshCallback(null);
     });
 
-    it("returns free plan when no active subscription", async () => {
+    it("returns free plan when no active subscription and no cache", async () => {
       const { resolvePlan } = await import("../plan.server");
       
-      // Shop exists, no cache
+      // Shop exists, no plan_key
       mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
-      mockSql.setMockResult("shop_plan", []);
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: null,
+        subscription_id: null,
+        subscription_name: null,
+        is_test: null,
+        plan_cached_at: null,
+      }]);
       
       // No subscriptions
       adminGraphQL.mockResolvedValueOnce({
@@ -265,7 +286,13 @@ describe("Plan Resolution Service", () => {
       
       // Shop exists, no cache
       mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
-      mockSql.setMockResult("shop_plan", []);
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: null,
+        subscription_id: null,
+        subscription_name: null,
+        is_test: null,
+        plan_cached_at: null,
+      }]);
       
       // Unknown subscription name
       adminGraphQL.mockResolvedValueOnce({
@@ -289,12 +316,21 @@ describe("Plan Resolution Service", () => {
       expect(result.subscriptionName).toBe("Unknown Plan");
     });
 
-    it("returns free plan on API error (fail-to-free)", async () => {
+    it("returns cached plan on API error when cache exists (fail-to-cached)", async () => {
       const { resolvePlan } = await import("../plan.server");
       
-      // Shop exists, no cache
+      // Shop exists
       mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
-      mockSql.setMockResult("shop_plan", []);
+      
+      // Cached growth plan
+      const cachedTime = new Date(Date.now() - 60 * 60 * 1000);
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "growth",
+        subscription_id: "sub-123",
+        subscription_name: "Growth",
+        is_test: false,
+        plan_cached_at: cachedTime,
+      }]);
       
       // API error
       adminGraphQL.mockResolvedValueOnce({
@@ -305,8 +341,62 @@ describe("Plan Resolution Service", () => {
       
       const result = await resolvePlan(mockSql as unknown as Sql, TEST_SHOP, true);
       
+      // Should return cached plan, not free
+      expect(result.plan.key).toBe("growth");
+      expect(result.fromCache).toBe(true);
+    });
+
+    it("returns free plan on API error when NO cache exists", async () => {
+      const { resolvePlan } = await import("../plan.server");
+      
+      // Shop exists, no cache
+      mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: null,
+        subscription_id: null,
+        subscription_name: null,
+        is_test: null,
+        plan_cached_at: null,
+      }]);
+      
+      // API error
+      adminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "Network error",
+        retryable: true,
+      });
+      
+      const result = await resolvePlan(mockSql as unknown as Sql, TEST_SHOP, true);
+      
+      // No cache exists, so free is correct
       expect(result.plan.key).toBe("free");
       expect(result.fromCache).toBe(false);
+    });
+
+    it("returns cached plan on exception when cache exists", async () => {
+      const { resolvePlan } = await import("../plan.server");
+      
+      // Shop exists
+      mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+      
+      // Cached starter plan
+      const cachedTime = new Date(Date.now() - 60 * 60 * 1000);
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "starter",
+        subscription_id: "sub-456",
+        subscription_name: "Starter",
+        is_test: false,
+        plan_cached_at: cachedTime,
+      }]);
+      
+      // Throw exception
+      adminGraphQL.mockRejectedValueOnce(new Error("Connection failed"));
+      
+      const result = await resolvePlan(mockSql as unknown as Sql, TEST_SHOP, true);
+      
+      // Should return cached plan
+      expect(result.plan.key).toBe("starter");
+      expect(result.fromCache).toBe(true);
     });
 
     it("correctly identifies test subscriptions", async () => {
@@ -314,7 +404,13 @@ describe("Plan Resolution Service", () => {
       
       // Shop exists, no cache
       mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
-      mockSql.setMockResult("shop_plan", []);
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: null,
+        subscription_id: null,
+        subscription_name: null,
+        is_test: null,
+        plan_cached_at: null,
+      }]);
       
       // Test subscription
       adminGraphQL.mockResolvedValueOnce({
@@ -336,6 +432,105 @@ describe("Plan Resolution Service", () => {
       
       expect(result.plan.key).toBe("growth");
       expect(result.isTest).toBe(true);
+    });
+  });
+
+  describe("getPlanByShopId", () => {
+    it("returns cached plan regardless of staleness", async () => {
+      const { getPlanByShopId } = await import("../plan.server");
+      
+      // Stale cache (7 hours old)
+      const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "growth",
+        subscription_id: "sub-123",
+        subscription_name: "Growth",
+        is_test: false,
+        plan_cached_at: staleCacheTime,
+      }]);
+      
+      const plan = await getPlanByShopId(mockSql as unknown as Sql, TEST_SHOP_ID);
+      
+      // Should return growth even though cache is stale
+      expect(plan.key).toBe("growth");
+    });
+
+    it("returns free plan only when no cache ever existed", async () => {
+      const { getPlanByShopId } = await import("../plan.server");
+      
+      // No cache
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: null,
+        subscription_id: null,
+        subscription_name: null,
+        is_test: null,
+        plan_cached_at: null,
+      }]);
+      
+      const plan = await getPlanByShopId(mockSql as unknown as Sql, TEST_SHOP_ID);
+      
+      expect(plan.key).toBe("free");
+    });
+
+    it("triggers background refresh when stale", async () => {
+      const { getPlanByShopId, setBackgroundRefreshCallback } = await import("../plan.server");
+      
+      // Set up background refresh callback
+      const mockWaitUntil = vi.fn();
+      setBackgroundRefreshCallback(mockWaitUntil);
+      
+      // Create a new mock that handles both queries
+      const specialMockSql = Object.assign(
+        vi.fn(async (strings: TemplateStringsArray) => {
+          const query = strings.join("?");
+          
+          // First call: getCachedPlan - returns stale cache
+          if (query.includes("plan_key") && query.includes("plan_cached_at")) {
+            const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
+            return [{
+              plan_key: "starter",
+              subscription_id: "sub-123",
+              subscription_name: "Starter",
+              is_test: false,
+              plan_cached_at: staleCacheTime,
+            }];
+          }
+          
+          // Second call: get domain for background refresh
+          if (query.includes("domain") && query.includes('"Shop"')) {
+            return [{ domain: TEST_SHOP }];
+          }
+          
+          // Third call: UPDATE for cache refresh
+          if (query.includes("UPDATE")) {
+            return [];
+          }
+          
+          return [];
+        }),
+        { json: vi.fn((v) => v) }
+      );
+      
+      // Mock Shopify response
+      adminGraphQL.mockResolvedValueOnce({
+        success: true,
+        data: {
+          currentAppInstallation: {
+            activeSubscriptions: [],
+          },
+        },
+      });
+      
+      const plan = await getPlanByShopId(specialMockSql as unknown as Sql, TEST_SHOP_ID);
+      
+      // Should return cached plan
+      expect(plan.key).toBe("starter");
+      
+      // Should trigger background refresh
+      expect(mockWaitUntil).toHaveBeenCalledTimes(1);
+      
+      // Clean up
+      setBackgroundRefreshCallback(null);
     });
   });
 });

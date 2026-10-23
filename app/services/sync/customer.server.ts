@@ -38,7 +38,7 @@ import type { Sql } from "~/lib/db-light.server";
 import type { ShopifyCustomer, SyncResult } from "./types";
 import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
 import { minimiseCustomerPiiIfInactive } from "~/services/compliance";
-import { checkCompanyLimit } from "../gating.server";
+import { checkCompanyLimit, isGatingEnforced } from "../gating.server";
 
 /**
  * Process a Customer webhook event.
@@ -329,21 +329,16 @@ async function syncTaggedCustomerBuyerAccount(
   const displayName = `Customer ${customerId_numeric}`;
 
   // S21: Check if this is a new account (for gating)
-  const [existingAccount] = await sql<{ id: string }[]>`
-    SELECT id FROM "BuyerAccount"
+  const [existingAccount] = await sql<{ id: string; gated_at: Date | null }[]>`
+    SELECT id, gated_at FROM "BuyerAccount"
     WHERE "shopId" = ${shopId} AND "customerId" = ${customerId}
   `;
 
-  // Only enforce limit for NEW accounts (updates always allowed for downgrade safety)
-  if (!existingAccount) {
+  // Determine if we need to gate this account
+  let shouldGate = false;
+  if (!existingAccount && isGatingEnforced()) {
     const limitCheck = await checkCompanyLimit(sql, shopId);
-    if (!limitCheck.allowed) {
-      return {
-        success: false,
-        action: "skipped",
-        error: `Upgrade required: company limit reached (${limitCheck.currentUsage}/${limitCheck.limit})`,
-      };
-    }
+    shouldGate = !limitCheck.allowed;
   }
 
   // Pre-compute derived values
@@ -351,7 +346,7 @@ async function syncTaggedCustomerBuyerAccount(
 
   // Must-fix #2: Only apply defaultTermsDays when existing source is NULL or 'tag'
   // Never overwrite 'explicit' (merchant-set) terms
-  const [result] = await sql<{ id: string; isNew: string }[]>`
+  const [result] = await sql<{ id: string; isNew: string; gated_at: Date | null }[]>`
     INSERT INTO "BuyerAccount" (
       "shopId",
       kind,
@@ -359,6 +354,7 @@ async function syncTaggedCustomerBuyerAccount(
       name,
       "defaultTermsDays",
       "defaultTermsSource",
+      gated_at,
       "createdAt",
       "updatedAt"
     ) VALUES (
@@ -368,6 +364,7 @@ async function syncTaggedCustomerBuyerAccount(
       ${displayName},
       ${defaultTermsDays},
       ${termsSource},
+      ${shouldGate ? new Date() : null},
       NOW(),
       NOW()
     )
@@ -385,14 +382,19 @@ async function syncTaggedCustomerBuyerAccount(
       END,
       -- NEVER touch holdState - that belongs to credit logic
       "updatedAt" = NOW()
-    RETURNING id, (xmax = 0)::text as "isNew"
+    RETURNING id, (xmax = 0)::text as "isNew", gated_at
   `;
 
-  const wasNew = result.isNew === "true";
+  let action: "created" | "updated" | "gated";
+  if (result.isNew === "true") {
+    action = shouldGate ? "gated" : "created";
+  } else {
+    action = "updated";
+  }
 
   return {
     success: true,
-    action: wasNew ? "created" : "updated",
+    action,
     entityId: result.id,
   };
 }

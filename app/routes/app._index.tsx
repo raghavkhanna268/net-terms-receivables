@@ -96,7 +96,7 @@ export default function Index() {
             )}
           </s-paragraph>
           {planKey !== "scale" && (
-            <s-button href={upgradeUrl} target="_blank">
+            <s-button href={upgradeUrl} target="_top">
               Upgrade Plan
             </s-button>
           )}
