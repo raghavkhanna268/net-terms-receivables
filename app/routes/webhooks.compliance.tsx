@@ -52,8 +52,9 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         ? `gid://shopify/Customer/${typedPayload.customer.id}`
         : "unknown";
 
-      // S8 stores customer GID, tags, email, and displayName.
-      // Automated data export ships in S22 (#44); until then, export is out of band.
+      // S8 stores: GID, tags, email, displayName, tag_active, and s8_draft_orders refs.
+      // Data export fulfilment is implemented in S22 (#44).
+      // Log carries no PII - only topic, shop, and customer GID.
       console.log(
         `[Compliance] customers/data_request for shop=${payloadShop} customer=${customerGid}`
       );

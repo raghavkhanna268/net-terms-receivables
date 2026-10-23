@@ -46,7 +46,7 @@ import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
  * @param sql - postgres.js SQL client
  * @param shopDomain - Shop domain
  * @param topic - Webhook topic
- * @param customer - Customer data (id and tags only)
+ * @param customer - Customer data (id, tags, and optional email/displayName when CUSTOMER_PII_FIELDS=1)
  * @param webhookId - Webhook ID for idempotency
  * @returns Sync result
  */

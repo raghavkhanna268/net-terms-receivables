@@ -146,7 +146,20 @@ When a merchant uninstalls the app:
 
 ### 7.2 `customers/data_request`
 
-The customers/data_request webhook is verified (HMAC plus the signed shop_domain) and acknowledged with HTTP 200. The data we hold for a customer (Shopify customer GID, tags, email, displayName, tag_active, and s8_draft_orders references) is exported to the merchant out of band until automated fulfilment ships in S22 (#44).
+The customers/data_request webhook is verified (HMAC plus the signed shop_domain) and acknowledged with HTTP 200.
+
+**Data stored for a customer (s8_tagged_customers):**
+- `customer_id`: Shopify customer GID
+- `tags`: Array of customer tags
+- `email`: Customer email (when CUSTOMER_PII_FIELDS=1)
+- `display_name`: Customer display name (when CUSTOMER_PII_FIELDS=1)
+- `tag_active`: Whether customer currently has a matching tag
+- `tag_deactivated_at`: When the tag was removed (if applicable)
+
+**Related data (s8_draft_orders):**
+- Draft orders linked to the customer's BuyerAccount (shop_id, draft_order_id, buyer_account_id, name, total, has_payment_terms, status)
+
+**Data export:** Automated data_request fulfilment is being implemented in S22 (#44). The webhook currently acknowledges receipt but does not return data.
 
 ### 7.3 `customers/redact`
 

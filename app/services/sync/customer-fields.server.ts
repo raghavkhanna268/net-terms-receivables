@@ -139,6 +139,10 @@ export function validateCustomerQuery(query: string, env: PiiEnv): void {
  * GraphQL query to fetch a single customer's minimal data.
  * Built dynamically based on CUSTOMER_PII_FIELDS configuration.
  *
+ * IMPORTANT: Callers MUST pass the Worker env object. If env is omitted or
+ * CUSTOMER_PII_FIELDS is not set, the PCD fields (email, displayName) are
+ * silently omitted from the query. TypeScript enforces this via required param.
+ *
  * @param env - Environment object to check PII flag (required)
  * @returns GraphQL query string
  */
@@ -213,6 +217,10 @@ export function buildTagFilterQuery(tagRules: Array<{ tag: string }>): string | 
  *
  * Only exports customers matching the shop's configured tag rules.
  * This ensures we don't fetch data for customers we don't need.
+ *
+ * IMPORTANT: Callers MUST pass the Worker env object. If env is omitted or
+ * CUSTOMER_PII_FIELDS is not set, the PCD fields (email, displayName) are
+ * silently omitted from the query. TypeScript enforces this via required param.
  *
  * @param tagRules - Array of tag rules from AccountSource
  * @param env - Environment object to check PII flag (required)
