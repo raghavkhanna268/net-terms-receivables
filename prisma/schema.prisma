@@ -175,6 +175,7 @@ model Shop {
   payments     Payment[]
   matches      Match[]
   reminderLogs ReminderLog[]
+  rejectedMatches RejectedMatch[]
   // S22: CASCADE FKs for shop/redact cleanup (created by S22 migration)
   taggedCustomers S8TaggedCustomer[]
   draftOrders     S8DraftOrder[]
@@ -323,6 +324,8 @@ model Invoice {
   allocations Match[]
   // ReminderLogs use NoAction to prevent silent deletion
   reminders   ReminderLog[]
+  // Rejected matches cascade delete (helper data)
+  rejectedMatches RejectedMatch[]
 
   // Composite unique for cross-shop integrity (enables composite FKs)
   @@unique([id, shopId])
@@ -396,6 +399,8 @@ model Payment {
   import  BankImport @relation(fields: [importId, shopId], references: [id, shopId], onDelete: NoAction)
   // Matches use NoAction to prevent silent deletion of allocations
   matches Match[]
+  // Rejected matches cascade delete (helper data)
+  rejectedMatches RejectedMatch[]
 
   // Composite unique for cross-shop integrity (enables composite FKs)
   @@unique([id, shopId])
@@ -465,6 +470,31 @@ model PayerAlias {
   // One alias per payer key per account
   @@unique([buyerAccountId, payerKey])
   @@index([payerKey])
+}
+
+/// Rejected match: persists merchant rejections so they're never re-suggested
+/// When a merchant rejects a payment-invoice match, we record it here
+model RejectedMatch {
+  id         String   @id @default(dbgenerated("(gen_random_uuid())::text"))
+  shopId     String
+  paymentId  String
+  invoiceId  String
+  /// Who rejected the match
+  rejectedBy String
+  /// When the match was rejected
+  rejectedAt DateTime @default(now()) @db.Timestamptz(3)
+
+  // Relations (onDelete: CASCADE - rejections are helper data)
+  shop    Shop    @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  payment Payment @relation(fields: [paymentId, shopId], references: [id, shopId], onDelete: Cascade, onUpdate: NoAction)
+  invoice Invoice @relation(fields: [invoiceId, shopId], references: [id, shopId], onDelete: Cascade, onUpdate: NoAction)
+
+  // One rejection per payment-invoice pair per shop
+  @@unique([paymentId, invoiceId])
+  @@index([shopId])
+  @@index([paymentId])
+  @@index([invoiceId])
+  @@map("rejected_matches")
 }
 
 // =============================================================================
