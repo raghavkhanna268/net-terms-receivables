@@ -362,5 +362,105 @@ describeWithDb("CompanyLocation Sync", () => {
       `;
       expect(updated.name).toBe("Updated via Bulk");
     });
+
+    it("gates new accounts when over limit with PLAN_GATING_ENFORCED=1", async () => {
+      const originalEnv = process.env.PLAN_GATING_ENFORCED;
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      
+      try {
+        // Set up free plan (limit 3)
+        await sql`
+          UPDATE "Shop" 
+          SET plan_key = 'free', plan_cached_at = NOW()
+          WHERE id = ${TEST_SHOP_ID}
+        `;
+
+        // Create 3 existing accounts to hit the limit
+        for (let i = 1; i <= 3; i++) {
+          await sql`
+            INSERT INTO "BuyerAccount" 
+            ("shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+            VALUES (${TEST_SHOP_ID}, 'COMPANY', ${`gid://shopify/Company/existing${i}`}, 
+                    ${`gid://shopify/CompanyLocation/existing${i}`}, ${`Existing ${i}`}, NOW(), NOW())
+          `;
+        }
+
+        // Now try to bulk insert a 4th account - should be gated
+        const newLocationId = `gid://shopify/CompanyLocation/${Date.now()}`;
+        const newCompanyId = `gid://shopify/Company/${Date.now()}`;
+        const accounts = [
+          mapCompanyLocationToBuyerAccount(TEST_SHOP_ID, {
+            id: newLocationId,
+            name: "Over Limit Account",
+            company: { id: newCompanyId },
+          }),
+        ];
+
+        await bulkUpsertBuyerAccounts(sql, accounts);
+
+        const [newAccount] = await sql`
+          SELECT * FROM "BuyerAccount" WHERE "companyLocationId" = ${newLocationId}
+        `;
+        expect(newAccount).toBeDefined();
+        expect(newAccount.name).toBe("Over Limit Account");
+        expect(newAccount.gated_at).not.toBeNull(); // Should be gated
+      } finally {
+        if (originalEnv !== undefined) {
+          (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
+        } else {
+          delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
+        }
+      }
+    });
+
+    it("does not gate new accounts when PLAN_GATING_ENFORCED=false", async () => {
+      const originalEnv = process.env.PLAN_GATING_ENFORCED;
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+      
+      try {
+        // Set up free plan (limit 3)
+        await sql`
+          UPDATE "Shop" 
+          SET plan_key = 'free', plan_cached_at = NOW()
+          WHERE id = ${TEST_SHOP_ID}
+        `;
+
+        // Create 3 existing accounts to hit the limit
+        for (let i = 1; i <= 3; i++) {
+          await sql`
+            INSERT INTO "BuyerAccount" 
+            ("shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+            VALUES (${TEST_SHOP_ID}, 'COMPANY', ${`gid://shopify/Company/off${i}`}, 
+                    ${`gid://shopify/CompanyLocation/off${i}`}, ${`Off ${i}`}, NOW(), NOW())
+          `;
+        }
+
+        // Bulk insert a 4th account - should NOT be gated when flag is off
+        const newLocationId = `gid://shopify/CompanyLocation/nogate-${Date.now()}`;
+        const newCompanyId = `gid://shopify/Company/nogate-${Date.now()}`;
+        const accounts = [
+          mapCompanyLocationToBuyerAccount(TEST_SHOP_ID, {
+            id: newLocationId,
+            name: "Not Gated Account",
+            company: { id: newCompanyId },
+          }),
+        ];
+
+        await bulkUpsertBuyerAccounts(sql, accounts);
+
+        const [newAccount] = await sql`
+          SELECT * FROM "BuyerAccount" WHERE "companyLocationId" = ${newLocationId}
+        `;
+        expect(newAccount).toBeDefined();
+        expect(newAccount.name).toBe("Not Gated Account");
+        expect(newAccount.gated_at).toBeNull(); // Should NOT be gated
+      } finally {
+        if (originalEnv !== undefined) {
+          (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
+        } else {
+          delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
+        }
+      }
+    });
   });
 });

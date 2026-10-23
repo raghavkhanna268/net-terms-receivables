@@ -188,6 +188,11 @@ export function mapCompanyLocationToBuyerAccount(
  * Bulk upsert BuyerAccounts from CompanyLocations.
  * Used by bulk operation processor for efficient batch inserts.
  *
+ * S21: When PLAN_GATING_ENFORCED is ON, new accounts that exceed the plan
+ * limit are created with gated_at set. Updates to existing accounts are
+ * always allowed (downgrade-safe). Gated accounts are excluded from the
+ * limit count and can be reactivated on upgrade.
+ *
  * @param sql - postgres.js SQL client
  * @param accounts - Array of mapped BuyerAccount data
  * @returns Number of accounts upserted
@@ -200,6 +205,22 @@ export async function bulkUpsertBuyerAccounts(
 
   let count = 0;
   for (const a of accounts) {
+    // S21: Check if this is a new account and if we need to gate it
+    let shouldGate = false;
+    if (isGatingEnforced()) {
+      // Check if account already exists
+      const [existing] = await sql<{ id: string }[]>`
+        SELECT id FROM "BuyerAccount"
+        WHERE "shopId" = ${a.shopId} AND "companyLocationId" = ${a.companyLocationId}
+      `;
+      
+      // Only check limit for new accounts
+      if (!existing) {
+        const limitCheck = await checkCompanyLimit(sql, a.shopId);
+        shouldGate = !limitCheck.allowed;
+      }
+    }
+
     const result = await sql`
       INSERT INTO "BuyerAccount" (
         "shopId",
@@ -209,6 +230,7 @@ export async function bulkUpsertBuyerAccounts(
         name,
         "defaultTermsDays",
         "defaultTermsSource",
+        gated_at,
         "createdAt",
         "updatedAt"
       ) VALUES (
@@ -219,6 +241,7 @@ export async function bulkUpsertBuyerAccounts(
         ${a.name},
         ${a.defaultTermsDays},
         ${a.defaultTermsSource},
+        ${shouldGate ? new Date() : null},
         NOW(),
         NOW()
       )
