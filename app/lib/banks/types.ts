@@ -25,10 +25,10 @@ export interface DetectionResult {
 
 /** Raw parsed row before normalization (bank-specific) */
 export interface RawTxnRow {
-  /** Original date string as found in the statement */
-  dateRaw: string;
-  /** Value date string if present */
-  valueDateRaw?: string;
+  /** Original date as string or Date object from Excel */
+  dateRaw: string | Date;
+  /** Value date as string or Date object if present */
+  valueDateRaw?: string | Date;
   /** Full narration text */
   narration: string;
   /** Cheque or reference number */

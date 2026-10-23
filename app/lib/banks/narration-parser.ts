@@ -4,28 +4,24 @@
  *
  * Part of S14/S15: Net Terms Receivables bank statement parsing.
  *
- * Narration formats vary by bank and payment rail:
+ * UTR/RRN formats:
+ * - NEFT: [A-Z]{4}N\d{11,17} (bank code + N + digits, e.g., HDFCN26296123456)
+ * - RTGS: [A-Z]{4}R\d{11,17} (bank code + R + digits, e.g., HDFCR26296123456)
+ * - IMPS/UPI: 12 digits (RRN)
  *
- * NEFT:
- * - HDFC: "NEFT CR-ACME TECHNOLOGIES PVT LTD-SALARY SEP"
- * - HDFC: "NEFT-N123456789012345-ACME CORP-HDFC0001234"
- * - ICICI: "NEFT/123456789012/SENDER NAME/REF"
- *
- * RTGS:
- * - "RTGS CR-COMPANY NAME-REF"
- * - "RTGS-R123456789012345-COMPANY-BANK"
- *
- * IMPS:
- * - "IMPS-123456789012-SENDER NAME-HDFC-REF"
- * - "IMPS/P2A/123456789012/SENDER/REF"
- *
- * UPI:
- * - HDFC: "UPI-SWIGGY-SWIGGY@ICICI-ICIC0DC0099-123456789012-UPI"
- * - HDFC: "UPI/CR/123456789012/sender@bank/SENDER NAME"
- * - ICICI: "UPI/123456789012/sender@okaxis/SENDER NAME"
+ * Cheque, ACH, and NACH numbers are NOT extracted as UTR.
  */
 
 import type { ParsedNarration, PaymentRail, BankId } from "./types.js";
+
+/** NEFT UTR pattern: 4-letter bank code + N + 11-17 digits */
+const NEFT_UTR_PATTERN = /\b([A-Z]{4}N\d{11,17})\b/;
+
+/** RTGS UTR pattern: 4-letter bank code + R + 11-17 digits */
+const RTGS_UTR_PATTERN = /\b([A-Z]{4}R\d{11,17})\b/;
+
+/** IMPS/UPI RRN pattern: exactly 12 digits, typically between separators */
+const RRN_PATTERN = /(?:^|[/-])(\d{12})(?:[/-]|$)/;
 
 /**
  * Parse narration text to extract structured payment information.
@@ -106,8 +102,7 @@ function detectRail(textUpper: string): PaymentRail {
 function parseUpi(text: string, textUpper: string, _bank?: BankId): ParsedNarration {
   const result: ParsedNarration = { rail: "UPI" };
 
-  // Extract UPI ID (VPA) - pattern: word@word, but must be a standalone segment
-  // VPA format: alphanumeric/dot/underscore @ alphanumeric (no hyphens in VPA itself)
+  // Extract UPI ID (VPA) - pattern: word@word, must be standalone
   const vpaMatch = text.match(/\b([a-zA-Z0-9._]+@[a-zA-Z0-9]+)\b/);
   if (vpaMatch) {
     result.upiId = vpaMatch[1].toLowerCase();
@@ -118,8 +113,8 @@ function parseUpi(text: string, textUpper: string, _bank?: BankId): ParsedNarrat
     }
   }
 
-  // Extract RRN (12 digits typically)
-  const rrnMatch = textUpper.match(/(?:^|[/-])(\d{12})(?:[/-]|$)/);
+  // Extract RRN (exactly 12 digits)
+  const rrnMatch = textUpper.match(RRN_PATTERN);
   if (rrnMatch) {
     result.utr = rrnMatch[1];
   }
@@ -164,33 +159,27 @@ function parseUpi(text: string, textUpper: string, _bank?: BankId): ParsedNarrat
  * Parse NEFT narration.
  * Formats:
  * - "NEFT CR-ACME TECHNOLOGIES PVT LTD-SALARY SEP"
- * - "NEFT-N123456789012345-ACME CORP-HDFC0001234"
- * - "NEFT/N123456789012345/SENDER NAME/REF"
+ * - "NEFT-HDFCN26296123456-ACME CORP-HDFC0001234"
+ * - "NEFT/HDFCN26296123456/SENDER NAME/REF"
  */
 function parseNeft(text: string, textUpper: string, _bank?: BankId): ParsedNarration {
   const result: ParsedNarration = { rail: "NEFT" };
 
-  // Extract UTR (starts with N or similar, 16-22 chars alphanumeric)
-  // NEFT UTR format: BANKYYYYMMDDNNNNNN (e.g., HDFC20261015123456)
-  const utrMatch = textUpper.match(/\b([A-Z]{4}\d{12,16}|N\d{15,20})\b/);
+  // Extract NEFT UTR: bank code + N + 11-17 digits (e.g., HDFCN26296123456)
+  const utrMatch = textUpper.match(NEFT_UTR_PATTERN);
   if (utrMatch) {
     result.utr = utrMatch[1];
     // Extract bank from UTR prefix
-    const bankCode = utrMatch[1].slice(0, 4);
-    if (bankCode.match(/^[A-Z]{4}$/)) {
-      result.payerBank = bankCode;
-    }
+    result.payerBank = utrMatch[1].slice(0, 4);
   }
 
-  // Extract IFSC (4 letters + 0 + 6 alphanumeric)
+  // Extract IFSC (4 letters + 0 + 6 alphanumeric) - more specific than bank code
   const ifscMatch = textUpper.match(/\b([A-Z]{4}0[A-Z0-9]{6})\b/);
   if (ifscMatch) {
-    // IFSC is more specific than bank code from UTR
     result.payerBank = ifscMatch[1];
   }
 
   // Extract payer name - collect all name-like parts
-  // Format: NEFT CR-COMPANY NAME-REFERENCE or NEFT/UTR/COMPANY/REF
   const parts = text.split(/[/-]/);
   const nameParts: string[] = [];
 
@@ -199,7 +188,7 @@ function parseNeft(text: string, textUpper: string, _bank?: BankId): ParsedNarra
     // Skip empty, NEFT prefix, UTRs, IFSCs, pure numbers
     if (!p) continue;
     if (p.toUpperCase().match(/^NEFT|^CR$|^DR$/)) continue;
-    if (p.match(/^[A-Z]{4}\d{12,16}$|^N\d{15,20}$/i)) continue;
+    if (p.toUpperCase().match(NEFT_UTR_PATTERN)) continue;
     if (p.match(/^[A-Z]{4}0[A-Z0-9]{6}$/)) continue;
     if (p.match(/^\d+$/)) continue;
 
@@ -223,14 +212,11 @@ function parseNeft(text: string, textUpper: string, _bank?: BankId): ParsedNarra
 function parseRtgs(text: string, textUpper: string, _bank?: BankId): ParsedNarration {
   const result: ParsedNarration = { rail: "RTGS" };
 
-  // RTGS UTR format: similar to NEFT but may start with R
-  const utrMatch = textUpper.match(/\b([A-Z]{4}\d{12,16}|R\d{15,20})\b/);
+  // Extract RTGS UTR: bank code + R + 11-17 digits (e.g., HDFCR26296123456)
+  const utrMatch = textUpper.match(RTGS_UTR_PATTERN);
   if (utrMatch) {
     result.utr = utrMatch[1];
-    const bankCode = utrMatch[1].slice(0, 4);
-    if (bankCode.match(/^[A-Z]{4}$/)) {
-      result.payerBank = bankCode;
-    }
+    result.payerBank = utrMatch[1].slice(0, 4);
   }
 
   // Extract IFSC (4 letters + 0 + 6 alphanumeric)
@@ -247,7 +233,7 @@ function parseRtgs(text: string, textUpper: string, _bank?: BankId): ParsedNarra
     const p = part.trim();
     if (!p) continue;
     if (p.toUpperCase().match(/^RTGS|^CR$|^DR$/)) continue;
-    if (p.match(/^[A-Z]{4}\d{12,16}$|^R\d{15,20}$/i)) continue;
+    if (p.toUpperCase().match(RTGS_UTR_PATTERN)) continue;
     if (p.match(/^[A-Z]{4}0[A-Z0-9]{6}$/)) continue;
     if (p.match(/^\d+$/)) continue;
 
@@ -270,22 +256,15 @@ function parseRtgs(text: string, textUpper: string, _bank?: BankId): ParsedNarra
 function parseImps(text: string, textUpper: string, _bank?: BankId): ParsedNarration {
   const result: ParsedNarration = { rail: "IMPS" };
 
-  // IMPS RRN is 12 digits
-  const rrnMatch = textUpper.match(/(?:^|[/-])(\d{12})(?:[/-]|$)/);
+  // IMPS RRN is exactly 12 digits
+  const rrnMatch = textUpper.match(RRN_PATTERN);
   if (rrnMatch) {
     result.utr = rrnMatch[1];
   }
 
-  // Also look for longer UTR formats
-  const utrMatch = textUpper.match(/\b([A-Z]{4}\d{12,16})\b/);
-  if (utrMatch && !result.utr) {
-    result.utr = utrMatch[1];
-    result.payerBank = utrMatch[1].slice(0, 4);
-  }
-
   // Extract IFSC
   const ifscMatch = textUpper.match(/\b([A-Z]{4}0[A-Z0-9]{6})\b/);
-  if (ifscMatch && !result.payerBank) {
+  if (ifscMatch) {
     result.payerBank = ifscMatch[1];
   }
 
@@ -296,7 +275,7 @@ function parseImps(text: string, textUpper: string, _bank?: BankId): ParsedNarra
     if (
       !p ||
       p.toUpperCase().startsWith("IMPS") ||
-      p.match(/^\d+$/) ||
+      p.match(/^\d{12}$/) ||
       p.match(/^[A-Z]{4}0/) ||
       ["P2A", "P2M", "P2P"].includes(p.toUpperCase())
     ) {
@@ -314,9 +293,12 @@ function parseImps(text: string, textUpper: string, _bank?: BankId): ParsedNarra
 /**
  * Parse ACH/NACH narration.
  * Format: "ACH D- TP ACH ICICIPRULIFE-123456"
+ *
+ * NOTE: ACH/NACH reference numbers are NOT UTRs. They go in refNo, not parsed.utr.
  */
 function parseAch(text: string, _textUpper: string, _bank?: BankId): ParsedNarration {
   const result: ParsedNarration = { rail: "ACH" };
+  // Note: We do NOT extract ACH reference as UTR - it's not globally unique
 
   // ACH often has the company name after ACH D- or ACH C-
   const achMatch = text.match(/ACH\s*[DC]-\s*(?:TP ACH\s*)?([^-]+)/i);
@@ -324,25 +306,25 @@ function parseAch(text: string, _textUpper: string, _bank?: BankId): ParsedNarra
     result.payerName = cleanPayerName(achMatch[1]);
   }
 
-  // Look for reference number
-  const refMatch = text.match(/-(\d{6,12})$/);
-  if (refMatch) {
-    result.utr = refMatch[1];
-  }
+  // Reference number is kept in refNo field, NOT in parsed.utr
+  // The caller should use the row's refNo column for this
 
   return result;
 }
 
 /**
  * Parse cheque narration.
+ *
+ * NOTE: Cheque numbers are NOT UTRs. They go in refNo, not parsed.utr.
  */
 function parseCheque(text: string, _textUpper: string, _bank?: BankId): ParsedNarration {
   const result: ParsedNarration = { rail: "CHEQUE" };
+  // Note: We do NOT extract cheque number as UTR - it's not a UTR
 
-  // Cheque number is usually 6 digits
-  const chqMatch = text.match(/(?:CHQ|CHEQUE|CLG)[^\d]*(\d{6})/i);
-  if (chqMatch) {
-    result.utr = chqMatch[1];
+  // Try to extract payee/drawer name if present
+  const nameMatch = text.match(/(?:CHQ|CHEQUE|CLG)[^\d]*\d*[^\d]+([A-Za-z\s]+)/i);
+  if (nameMatch && nameMatch[1].trim().length > 2) {
+    result.payerName = cleanPayerName(nameMatch[1]);
   }
 
   return result;
@@ -360,47 +342,54 @@ function cleanPayerName(name: string): string {
 
 /**
  * Extract UTR from narration for deduplication purposes.
- * Returns the most reliable unique identifier.
+ * Returns the reference ONLY if it matches a valid UTR format for the rail.
+ *
+ * @param narration Narration text
+ * @param rail Payment rail
+ * @param refNo Reference number from statement column
+ * @returns Valid UTR/RRN or null
  */
-export function extractUtrForDedupe(narration: string, refNo?: string): string | null {
+export function extractUtrForDedupe(
+  narration: string,
+  rail: PaymentRail,
+  refNo?: string
+): string | null {
   const textUpper = narration.toUpperCase();
 
-  // Check ref number first (often contains UTR)
+  // Only extract UTR for valid rails
+  if (!["NEFT", "RTGS", "IMPS", "UPI"].includes(rail)) {
+    return null;
+  }
+
+  // Check ref number first - it often contains the UTR
   if (refNo) {
-    const ref = refNo.trim();
-    // 12-digit RRN (UPI/IMPS)
-    if (ref.match(/^\d{12}$/)) {
+    const ref = refNo.toUpperCase().trim();
+
+    if (rail === "NEFT" && NEFT_UTR_PATTERN.test(ref)) {
       return ref;
     }
-    // NEFT/RTGS style UTR
-    if (ref.match(/^[A-Z]{4}\d{12,16}$/)) {
+    if (rail === "RTGS" && RTGS_UTR_PATTERN.test(ref)) {
       return ref;
     }
-    // UTR with prefix
-    if (ref.match(/^[NR]\d{15,20}$/)) {
+    if ((rail === "IMPS" || rail === "UPI") && /^\d{12}$/.test(ref)) {
       return ref;
     }
   }
 
-  // Extract from narration
-  // Priority: NEFT/RTGS UTR > IMPS RRN > UPI RRN
-
-  // NEFT/RTGS UTR: BANK + 12-16 digits
-  const bankUtrMatch = textUpper.match(/\b([A-Z]{4}\d{12,16})\b/);
-  if (bankUtrMatch) {
-    return bankUtrMatch[1];
+  // Extract from narration based on rail
+  if (rail === "NEFT") {
+    const match = textUpper.match(NEFT_UTR_PATTERN);
+    return match ? match[1] : null;
   }
 
-  // N/R prefix UTR
-  const prefixUtrMatch = textUpper.match(/\b([NR]\d{15,20})\b/);
-  if (prefixUtrMatch) {
-    return prefixUtrMatch[1];
+  if (rail === "RTGS") {
+    const match = textUpper.match(RTGS_UTR_PATTERN);
+    return match ? match[1] : null;
   }
 
-  // 12-digit RRN
-  const rrnMatch = textUpper.match(/(?:^|[/-])(\d{12})(?:[/-]|$)/);
-  if (rrnMatch) {
-    return rrnMatch[1];
+  if (rail === "IMPS" || rail === "UPI") {
+    const match = textUpper.match(RRN_PATTERN);
+    return match ? match[1] : null;
   }
 
   return null;

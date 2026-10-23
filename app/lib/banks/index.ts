@@ -50,6 +50,7 @@ export {
   dedupeTransactions,
   extractDedupeKeys,
   arePossibleDuplicates,
+  isValidUtrForRail,
 } from "./dedupe.js";
 export { detectFileType, loadSpreadsheet, getSheetNames } from "./spreadsheet-loader.js";
 

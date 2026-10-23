@@ -1,21 +1,26 @@
 /**
  * Spreadsheet loader for bank statements.
- * Lazy-loads parsers to avoid bloating the main bundle.
+ * Lazy-loads SheetJS to avoid bloating the main bundle.
  *
  * Part of S14/S15: Net Terms Receivables bank statement parsing.
  *
  * Supported formats:
- * - XLSX (.xlsx, .xlsm) - via datareader-excel (~5KB)
- * - XLS (.xls) - via xls-reader (~4KB)
- * - CSV (.csv) - built-in parser
- * - Delimited text (.txt) - built-in parser
+ * - XLSX (.xlsx, .xlsm) - via SheetJS
+ * - XLS (.xls) - via SheetJS (BIFF8 format, common HDFC export)
+ * - CSV (.csv) - via SheetJS (handles quoted multi-line fields)
+ * - Delimited text (.txt) - via SheetJS
  *
- * Parser choice rationale:
- * - datareader-excel: Zero dependencies, browser-safe, read-only, ~5KB gzipped.
- *   Uses Web APIs (DecompressionStream, TextDecoder). Handles dates correctly.
- * - xls-reader: Zero dependencies, ~3.8KB gzipped, handles legacy BIFF8 format.
- *   Required for HDFC which exports .xls (not .xlsx).
- * - Built-in CSV: Simple parser, no dependency needed for comma/tab delimited.
+ * Library:
+ * - SheetJS Community Edition 0.20.3 from official CDN
+ * - Source: https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz
+ * - NOT using npm xlsx@0.18.5 which has known CVEs
+ *
+ * Why SheetJS:
+ * - Handles XLS (BIFF8) which HDFC commonly exports
+ * - Handles XLSX
+ * - Handles CSV with proper quoted field support (multi-line, commas in values)
+ * - Well-maintained, widely used, official CDN distribution
+ * - Single dependency for all formats
  */
 
 import type { SheetData, FileType } from "./types.js";
@@ -60,7 +65,7 @@ export function detectFileType(fileName: string, content?: ArrayBuffer): FileTyp
 
 /**
  * Load a spreadsheet file and return parsed sheet data.
- * Lazy-loads the appropriate parser.
+ * Lazy-loads SheetJS for all formats.
  *
  * @param content File content as ArrayBuffer
  * @param fileType File type
@@ -72,190 +77,94 @@ export async function loadSpreadsheet(
   fileType: FileType,
   sheetIndex: number = 0
 ): Promise<SheetData> {
-  switch (fileType) {
-    case "xlsx":
-      return loadXlsx(content, sheetIndex);
-    case "xls":
-      return loadXls(content, sheetIndex);
-    case "csv":
-      return loadCsv(content, ",");
-    case "txt":
-      return loadCsv(content, "\t");
-    default:
-      throw new Error(`Unsupported file type: ${fileType}`);
-  }
+  // Use SheetJS for all formats - it handles CSV quoted fields properly
+  return loadWithSheetJS(content, fileType, sheetIndex);
 }
 
 /**
- * Load XLSX file using datareader-excel.
- * Dynamically imported to enable tree-shaking.
+ * Load file using SheetJS.
+ * Dynamically imported to enable tree-shaking and lazy loading.
+ *
+ * SheetJS 0.20.3 from official CDN (not npm xlsx@0.18.5 with CVEs).
  */
-async function loadXlsx(content: ArrayBuffer, sheetIndex: number): Promise<SheetData> {
-  // Dynamic import for lazy loading
-  const { readXlsx } = await import("datareader-excel");
+async function loadWithSheetJS(
+  content: ArrayBuffer,
+  fileType: FileType,
+  sheetIndex: number
+): Promise<SheetData> {
+  // Dynamic import for lazy loading - keeps SheetJS out of main bundle
+  const XLSX = await import("xlsx");
 
-  const { sheets } = await readXlsx(content);
-
-  if (sheets.length === 0) {
-    throw new Error("No sheets found in XLSX file");
-  }
-
-  const idx = Math.min(sheetIndex, sheets.length - 1);
-  const sheet = sheets[idx];
-
-  return {
-    name: sheet.name,
-    rows: sheet.rows.map((row) =>
-      row.map((cell) => {
-        // Normalize cell values
-        if (cell === null || cell === undefined) return null;
-        if (typeof cell === "boolean") return cell;
-        if (cell instanceof Date) return cell;
-        if (typeof cell === "number") return cell;
-        return String(cell);
-      })
-    ),
+  // Options for reading
+  const readOptions: Parameters<typeof XLSX.read>[1] = {
+    type: "array",
+    cellDates: true, // Parse dates as Date objects
+    cellNF: false, // Don't parse number formats
+    cellText: false, // Don't generate formatted text
+    raw: true, // Get raw values
   };
-}
 
-/**
- * Load XLS file using xls-reader.
- * Dynamically imported to enable tree-shaking.
- */
-async function loadXls(content: ArrayBuffer, sheetIndex: number): Promise<SheetData> {
-  // Dynamic import for lazy loading
-  const { readXls } = await import("xls-reader");
-
-  const workbook = readXls(new Uint8Array(content));
-
-  if (!workbook.sheets || workbook.sheets.length === 0) {
-    throw new Error("No sheets found in XLS file");
+  // For CSV/TXT, we want all cells as strings to preserve leading zeros
+  if (fileType === "csv" || fileType === "txt") {
+    readOptions.raw = false; // Parse values
   }
 
-  const idx = Math.min(sheetIndex, workbook.sheets.length - 1);
-  const sheet = workbook.sheets[idx];
+  const workbook = XLSX.read(content, readOptions);
+
+  if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
+    throw new Error("No sheets found in spreadsheet file");
+  }
+
+  const idx = Math.min(sheetIndex, workbook.SheetNames.length - 1);
+  const sheetName = workbook.SheetNames[idx];
+  const sheet = workbook.Sheets[sheetName];
+
+  // Convert sheet to array of arrays
+  // For CSV, keep everything as strings to preserve leading zeros (e.g., cheque numbers like 000123)
+  const toJsonOptions: Parameters<typeof XLSX.utils.sheet_to_json>[1] = {
+    header: 1,
+    raw: fileType !== "csv" && fileType !== "txt", // CSV: formatted strings; XLS/XLSX: raw values
+    defval: null,
+  };
+
+  const rows = XLSX.utils.sheet_to_json<(string | number | Date | boolean | null)[]>(
+    sheet,
+    toJsonOptions
+  );
 
   return {
-    name: sheet.name || `Sheet${idx + 1}`,
-    rows: sheet.rows.map((row) =>
+    name: sheetName,
+    rows: rows.map((row) =>
       row.map((cell) => {
         if (cell === null || cell === undefined) return null;
         if (typeof cell === "boolean") return cell;
-        if (cell instanceof Date) return cell;
-        if (typeof cell === "number") return cell;
-        return String(cell);
-      })
-    ),
-  };
-}
 
-/**
- * Load CSV/delimited text file.
- * Built-in parser, no external dependency.
- */
-async function loadCsv(content: ArrayBuffer, delimiter: string): Promise<SheetData> {
-  const text = new TextDecoder("utf-8").decode(content);
-  const rows = parseCsv(text, delimiter);
-
-  return {
-    name: "Sheet1",
-    rows,
-  };
-}
-
-/**
- * Parse CSV text with proper handling of quoted fields.
- */
-function parseCsv(
-  text: string,
-  delimiter: string
-): (string | number | Date | boolean | null)[][] {
-  const rows: (string | number | Date | boolean | null)[][] = [];
-  const lines = text.split(/\r?\n/);
-
-  for (const line of lines) {
-    if (!line.trim()) continue;
-
-    const row: (string | number | Date | boolean | null)[] = [];
-    let current = "";
-    let inQuotes = false;
-    let i = 0;
-
-    while (i < line.length) {
-      const char = line[i];
-
-      if (char === '"') {
-        if (inQuotes && line[i + 1] === '"') {
-          // Escaped quote
-          current += '"';
-          i += 2;
-        } else {
-          // Toggle quote state
-          inQuotes = !inQuotes;
-          i++;
+        // Handle Date objects - convert to ISO string using UTC to avoid timezone shifts
+        if (cell instanceof Date) {
+          if (isNaN(cell.getTime())) return null;
+          // Return the Date object; the normaliser will use UTC getters
+          return cell;
         }
-      } else if (char === delimiter && !inQuotes) {
-        // Field separator
-        row.push(parseCell(current.trim()));
-        current = "";
-        i++;
-      } else {
-        current += char;
-        i++;
-      }
-    }
 
-    // Don't forget the last field
-    row.push(parseCell(current.trim()));
-    rows.push(row);
-  }
-
-  return rows;
-}
-
-/**
- * Parse a CSV cell value to appropriate type.
- */
-function parseCell(value: string): string | number | Date | boolean | null {
-  if (!value) return null;
-
-  // Remove surrounding quotes
-  if (value.startsWith('"') && value.endsWith('"')) {
-    value = value.slice(1, -1);
-  }
-
-  // Check for boolean
-  const lower = value.toLowerCase();
-  if (lower === "true") return true;
-  if (lower === "false") return false;
-
-  // Check for number (but not Indian formatted numbers with commas)
-  // Only convert if it's a simple number without Indian grouping
-  if (value.match(/^-?\d+\.?\d*$/) && !value.includes(",")) {
-    const num = parseFloat(value);
-    if (!isNaN(num)) return num;
-  }
-
-  return value;
+        if (typeof cell === "number") return cell;
+        return String(cell);
+      })
+    ),
+  };
 }
 
 /**
  * Get sheet names from a spreadsheet file.
  * Useful for showing a sheet selector UI.
  */
-export async function getSheetNames(content: ArrayBuffer, fileType: FileType): Promise<string[]> {
-  switch (fileType) {
-    case "xlsx": {
-      const { readXlsx } = await import("datareader-excel");
-      const { sheets } = await readXlsx(content);
-      return sheets.map((s) => s.name);
-    }
-    case "xls": {
-      const { readXls } = await import("xls-reader");
-      const workbook = readXls(new Uint8Array(content));
-      return (workbook.sheets || []).map((s, i: number) => s.name || `Sheet${i + 1}`);
-    }
-    default:
-      return ["Sheet1"];
-  }
+export async function getSheetNames(content: ArrayBuffer, _fileType: FileType): Promise<string[]> {
+  const XLSX = await import("xlsx");
+
+  const readOptions: Parameters<typeof XLSX.read>[1] = {
+    type: "array",
+    bookSheets: true, // Only read sheet names, not data
+  };
+
+  const workbook = XLSX.read(content, readOptions);
+  return workbook.SheetNames || [];
 }

@@ -42,11 +42,11 @@ interface HdfcColumnMap {
 /**
  * Parse HDFC bank statement.
  */
-export function parseHdfcStatement(
+export async function parseHdfcStatement(
   sheet: SheetData,
   detection: DetectionResult,
   existingKeys?: Set<string>
-): ParseResult {
+): Promise<ParseResult> {
   const transactions: NormalisedTxn[] = [];
   const errors: ParseError[] = [];
   let skippedRows = 0;
@@ -110,7 +110,7 @@ export function parseHdfcStatement(
       if (pendingNarration.length > 0) {
         lastValidRow.narration = [lastValidRow.narration, ...pendingNarration].join(" ");
       }
-      const normalized = normalizeHdfcRow(lastValidRow);
+      const normalized = await normalizeHdfcRow(lastValidRow);
       if (normalized) {
         transactions.push(normalized);
       } else {
@@ -141,7 +141,7 @@ export function parseHdfcStatement(
     if (pendingNarration.length > 0) {
       lastValidRow.narration = [lastValidRow.narration, ...pendingNarration].join(" ");
     }
-    const normalized = normalizeHdfcRow(lastValidRow);
+    const normalized = await normalizeHdfcRow(lastValidRow);
     if (normalized) {
       transactions.push(normalized);
     } else {
@@ -154,7 +154,7 @@ export function parseHdfcStatement(
   }
 
   // Deduplicate
-  const deduped = dedupeTransactions(transactions, existingKeys);
+  const deduped = await dedupeTransactions(transactions, existingKeys);
 
   return {
     detection,
@@ -246,14 +246,22 @@ function extractHdfcRow(
   }
 
   // Check if date looks valid
-  const dateStr = String(dateRaw);
+  const dateStr = dateRaw instanceof Date ? dateRaw.toISOString() : String(dateRaw);
   if (!dateStr.match(/\d/) || dateStr.length < 6) {
     return null;
   }
 
+  const valueDateCell = row[columns.valueDateCol];
+  const valueDateRaw: string | Date | undefined =
+    valueDateCell != null
+      ? valueDateCell instanceof Date
+        ? valueDateCell
+        : String(valueDateCell)
+      : undefined;
+
   return {
-    dateRaw: dateStr,
-    valueDateRaw: row[columns.valueDateCol] ? String(row[columns.valueDateCol]) : undefined,
+    dateRaw: dateRaw instanceof Date ? dateRaw : dateStr,
+    valueDateRaw,
     narration,
     refNo: row[columns.refCol] ? String(row[columns.refCol]).trim() : undefined,
     debitRaw: row[columns.withdrawalCol] ? String(row[columns.withdrawalCol]) : undefined,
@@ -266,14 +274,16 @@ function extractHdfcRow(
 /**
  * Normalize a raw HDFC row to standard format.
  */
-function normalizeHdfcRow(raw: RawTxnRow): NormalisedTxn | null {
+async function normalizeHdfcRow(raw: RawTxnRow): Promise<NormalisedTxn | null> {
   // Parse date
-  const date = parseIndianDate(raw.dateRaw);
+  const date = parseIndianDate(raw.dateRaw as string | Date);
   if (!date) {
     return null;
   }
 
-  const valueDate = raw.valueDateRaw ? parseIndianDate(raw.valueDateRaw) ?? undefined : undefined;
+  const valueDate = raw.valueDateRaw
+    ? parseIndianDate(raw.valueDateRaw as string | Date) ?? undefined
+    : undefined;
 
   // Determine amount and direction
   const debitParsed = parseIndianAmount(raw.debitRaw);
@@ -300,14 +310,24 @@ function normalizeHdfcRow(raw: RawTxnRow): NormalisedTxn | null {
   // Parse narration
   const parsed = parseNarration(raw.narration, "HDFC");
 
-  // Generate dedupe key
-  const utr = extractUtrForDedupe(raw.narration, raw.refNo);
-  const dedupeKey = generateDedupeKey(date, amountPaise, direction, raw.narration, utr ?? undefined);
-
-  // If we found a UTR from narration, add it to parsed
-  if (utr && !parsed.utr) {
+  // Extract UTR only for valid rails
+  const utr = extractUtrForDedupe(raw.narration, parsed.rail, raw.refNo);
+  if (utr) {
     parsed.utr = utr;
   }
+
+  // Generate dedupe key with all relevant fields
+  const dedupeKey = await generateDedupeKey(
+    date,
+    amountPaise,
+    direction,
+    raw.narration,
+    parsed.rail,
+    utr ?? undefined,
+    balancePaise,
+    valueDate,
+    raw.refNo
+  );
 
   return {
     date,

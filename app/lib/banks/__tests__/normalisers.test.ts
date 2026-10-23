@@ -115,6 +115,56 @@ describe("normalisers", () => {
         expect(parseIndianDate("INVALID")).toBeNull();
       });
     });
+
+    describe("date validation (month lengths and leap years)", () => {
+      it("rejects 31/02/26 (February has no 31st)", () => {
+        expect(parseIndianDate("31/02/26")).toBeNull();
+      });
+
+      it("rejects 30/02/26 (February has no 30th)", () => {
+        expect(parseIndianDate("30/02/26")).toBeNull();
+      });
+
+      it("rejects 29/02/26 (2026 is not a leap year)", () => {
+        expect(parseIndianDate("29/02/26")).toBeNull();
+      });
+
+      it("accepts 29/02/24 (2024 is a leap year)", () => {
+        expect(parseIndianDate("29/02/24")).toBe("2024-02-29");
+      });
+
+      it("rejects 31/04/26 (April has 30 days)", () => {
+        expect(parseIndianDate("31/04/26")).toBeNull();
+      });
+
+      it("accepts 30/04/26 (April has 30 days)", () => {
+        expect(parseIndianDate("30/04/26")).toBe("2026-04-30");
+      });
+
+      it("rejects 31/06/26 (June has 30 days)", () => {
+        expect(parseIndianDate("31/06/26")).toBeNull();
+      });
+
+      it("accepts 31/01/26 (January has 31 days)", () => {
+        expect(parseIndianDate("31/01/26")).toBe("2026-01-31");
+      });
+
+      it("accepts 31/03/26 (March has 31 days)", () => {
+        expect(parseIndianDate("31/03/26")).toBe("2026-03-31");
+      });
+
+      it("rejects 31/09/26 (September has 30 days)", () => {
+        expect(parseIndianDate("31/09/26")).toBeNull();
+      });
+
+      it("rejects 31/11/26 (November has 30 days)", () => {
+        expect(parseIndianDate("31/11/26")).toBeNull();
+      });
+
+      it("accepts 29/02/2000 (2000 is a leap year - divisible by 400)", () => {
+        expect(parseIndianDate("29/02/00")).toBe("2000-02-29");
+      });
+    });
   });
 
   describe("parseIndianAmount", () => {

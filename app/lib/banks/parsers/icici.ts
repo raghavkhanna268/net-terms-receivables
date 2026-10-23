@@ -43,11 +43,11 @@ interface IciciColumnMap {
 /**
  * Parse ICICI bank statement.
  */
-export function parseIciciStatement(
+export async function parseIciciStatement(
   sheet: SheetData,
   detection: DetectionResult,
   existingKeys?: Set<string>
-): ParseResult {
+): Promise<ParseResult> {
   const transactions: NormalisedTxn[] = [];
   const errors: ParseError[] = [];
   let skippedRows = 0;
@@ -123,7 +123,7 @@ export function parseIciciStatement(
       if (pendingNarration.length > 0) {
         lastValidRow.narration = [lastValidRow.narration, ...pendingNarration].join(" ");
       }
-      const normalized = normalizeIciciRow(lastValidRow);
+      const normalized = await normalizeIciciRow(lastValidRow);
       if (normalized) {
         transactions.push(normalized);
       } else {
@@ -152,7 +152,7 @@ export function parseIciciStatement(
     if (pendingNarration.length > 0) {
       lastValidRow.narration = [lastValidRow.narration, ...pendingNarration].join(" ");
     }
-    const normalized = normalizeIciciRow(lastValidRow);
+    const normalized = await normalizeIciciRow(lastValidRow);
     if (normalized) {
       transactions.push(normalized);
     } else {
@@ -165,7 +165,7 @@ export function parseIciciStatement(
   }
 
   // Deduplicate
-  const deduped = dedupeTransactions(transactions, existingKeys);
+  const deduped = await dedupeTransactions(transactions, existingKeys);
 
   return {
     detection,
@@ -263,7 +263,7 @@ function extractIciciRow(
   }
 
   // Check if date looks valid (contains digits)
-  const dateStr = String(dateRaw);
+  const dateStr = dateRaw instanceof Date ? dateRaw.toISOString() : String(dateRaw);
   if (!dateStr.match(/\d/) || dateStr.length < 6) {
     return null;
   }
@@ -273,11 +273,17 @@ function extractIciciRow(
     return null;
   }
 
+  const valueDateCell = columns.valueDateCol !== undefined ? row[columns.valueDateCol] : undefined;
+  const valueDateRaw: string | Date | undefined =
+    valueDateCell != null
+      ? valueDateCell instanceof Date
+        ? valueDateCell
+        : String(valueDateCell)
+      : undefined;
+
   return {
-    dateRaw: dateStr,
-    valueDateRaw: columns.valueDateCol !== undefined && row[columns.valueDateCol]
-      ? String(row[columns.valueDateCol])
-      : undefined,
+    dateRaw: dateRaw instanceof Date ? dateRaw : dateStr,
+    valueDateRaw,
     narration,
     refNo: row[columns.refCol] ? String(row[columns.refCol]).trim() : undefined,
     debitRaw: row[columns.withdrawalCol] ? String(row[columns.withdrawalCol]) : undefined,
@@ -290,14 +296,16 @@ function extractIciciRow(
 /**
  * Normalize a raw ICICI row to standard format.
  */
-function normalizeIciciRow(raw: RawTxnRow): NormalisedTxn | null {
+async function normalizeIciciRow(raw: RawTxnRow): Promise<NormalisedTxn | null> {
   // Parse date
-  const date = parseIndianDate(raw.dateRaw);
+  const date = parseIndianDate(raw.dateRaw as string | Date);
   if (!date) {
     return null;
   }
 
-  const valueDate = raw.valueDateRaw ? parseIndianDate(raw.valueDateRaw) ?? undefined : undefined;
+  const valueDate = raw.valueDateRaw
+    ? parseIndianDate(raw.valueDateRaw as string | Date) ?? undefined
+    : undefined;
 
   // Determine amount and direction
   const debitParsed = parseIndianAmount(raw.debitRaw);
@@ -329,13 +337,24 @@ function normalizeIciciRow(raw: RawTxnRow): NormalisedTxn | null {
   // Parse narration
   const parsed = parseNarration(raw.narration, "ICICI");
 
-  // Generate dedupe key
-  const utr = extractUtrForDedupe(raw.narration, raw.refNo);
-  const dedupeKey = generateDedupeKey(date, amountPaise, direction, raw.narration, utr ?? undefined);
-
-  if (utr && !parsed.utr) {
+  // Extract UTR only for valid rails
+  const utr = extractUtrForDedupe(raw.narration, parsed.rail, raw.refNo);
+  if (utr) {
     parsed.utr = utr;
   }
+
+  // Generate dedupe key with all relevant fields
+  const dedupeKey = await generateDedupeKey(
+    date,
+    amountPaise,
+    direction,
+    raw.narration,
+    parsed.rail,
+    utr ?? undefined,
+    balancePaise,
+    valueDate,
+    raw.refNo
+  );
 
   return {
     date,

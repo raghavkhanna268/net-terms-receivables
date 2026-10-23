@@ -11,18 +11,17 @@ describe("narration-parser", () => {
     describe("UPI transactions", () => {
       it("extracts UPI with VPA and RRN - HDFC format", () => {
         const result = parseNarration(
-          "UPI-FAKE VENDOR-fakevendor@synthetic-SYNT0000001-987654321098-UPI"
+          "UPI-SYNTHETIC VENDOR-fakevendor@synthetic-SYNT0000001-987654321098-UPI"
         );
         expect(result.rail).toBe("UPI");
         expect(result.upiId).toBe("fakevendor@synthetic");
         expect(result.utr).toBe("987654321098");
-        // Payer name extracted from first segment after UPI-
         expect(result.payerName).toBeDefined();
         expect(result.payerBank).toBe("SYNTHETIC");
       });
 
       it("extracts UPI - ICICI format", () => {
-        const result = parseNarration("UPI/543210987654/fakeuser@synthetic/FAKE VENDOR LTD");
+        const result = parseNarration("UPI/543210987654/fakeuser@synthetic/SYNTHETIC VENDOR LTD");
         expect(result.rail).toBe("UPI");
         expect(result.utr).toBe("543210987654");
         expect(result.upiId).toBe("fakeuser@synthetic");
@@ -47,31 +46,34 @@ describe("narration-parser", () => {
       it("extracts NEFT CR with company name - HDFC format", () => {
         const result = parseNarration("NEFT CR-SYNTHETIC CORP PVT LTD-SALARY OCT");
         expect(result.rail).toBe("NEFT");
-        // payerName includes multiple parts from the narration
         expect(result.payerName).toContain("SYNTHETIC");
         expect(result.payerName).toContain("SALARY");
       });
 
-      it("extracts NEFT with UTR and IFSC", () => {
-        const result = parseNarration("NEFT-HDFC2026100800001-FAKE SERVICES LTD-HDFC0001234");
+      it("extracts NEFT with UTR in IFSC-prefixed format (SYNTN26296...)", () => {
+        const result = parseNarration("NEFT-SYNTN26296000001-SYNTHETIC SERVICES LTD-SYNT0000003");
         expect(result.rail).toBe("NEFT");
-        expect(result.utr).toBe("HDFC2026100800001");
-        // IFSC takes precedence over bank code from UTR
-        expect(result.payerBank).toBe("HDFC0001234");
+        expect(result.utr).toBe("SYNTN26296000001");
+        expect(result.payerBank).toBe("SYNT0000003"); // IFSC takes precedence
+      });
+
+      it("extracts NEFT with real-shaped UTR (HDFCN...)", () => {
+        const result = parseNarration("NEFT CR-COMPANY-HDFCN26296123456");
+        expect(result.rail).toBe("NEFT");
+        expect(result.utr).toBe("HDFCN26296123456");
+        expect(result.payerBank).toBe("HDFC"); // From UTR prefix
       });
 
       it("extracts NEFT - ICICI format", () => {
-        const result = parseNarration("NEFT/SYNT2026100100002/SYNTHETIC PAYROLL/SALARY OCT");
+        const result = parseNarration("NEFT/SYNTN26296000002/SYNTHETIC PAYROLL/SALARY OCT");
         expect(result.rail).toBe("NEFT");
-        expect(result.utr).toBe("SYNT2026100100002");
+        expect(result.utr).toBe("SYNTN26296000002");
       });
 
-      it("extracts UTR starting with bank code", () => {
-        const result = parseNarration("NEFT CR-COMPANY-ICIC2026101500001");
+      it("does NOT extract invalid UTR format", () => {
+        const result = parseNarration("NEFT CR-COMPANY-123456"); // Too short, no prefix
         expect(result.rail).toBe("NEFT");
-        expect(result.utr).toBe("ICIC2026101500001");
-        // Bank code extracted from UTR prefix
-        expect(result.payerBank).toBe("ICIC");
+        expect(result.utr).toBeUndefined();
       });
     });
 
@@ -79,23 +81,33 @@ describe("narration-parser", () => {
       it("extracts RTGS CR with company name", () => {
         const result = parseNarration("RTGS CR-SYNTHETIC WHOLESALE LTD-INV OCT");
         expect(result.rail).toBe("RTGS");
-        // payerName includes parts after CR-
         expect(result.payerName).toContain("SYNTHETIC");
         expect(result.payerName).toContain("WHOLESALE");
       });
 
-      it("extracts RTGS with UTR and IFSC", () => {
-        const result = parseNarration("RTGS-SYNT2026102200001-SYNTHETIC WHOLESALE-SYNT0000006");
+      it("extracts RTGS with UTR in IFSC-prefixed format (SYNTR26296...)", () => {
+        const result = parseNarration("RTGS-SYNTR26296000001-SYNTHETIC WHOLESALE-SYNT0000006");
         expect(result.rail).toBe("RTGS");
-        expect(result.utr).toBe("SYNT2026102200001");
-        // IFSC detected
+        expect(result.utr).toBe("SYNTR26296000001");
         expect(result.payerBank).toBe("SYNT0000006");
       });
 
-      it("extracts RTGS - ICICI format", () => {
-        const result = parseNarration("RTGS/SYNT2026100700002/SYNTHETIC WHOLESALE/INVOICE 12345");
+      it("extracts RTGS with real-shaped UTR (HDFCR...)", () => {
+        const result = parseNarration("RTGS CR-COMPANY-HDFCR26296123456");
         expect(result.rail).toBe("RTGS");
-        expect(result.utr).toBe("SYNT2026100700002");
+        expect(result.utr).toBe("HDFCR26296123456");
+      });
+
+      it("extracts RTGS - ICICI format", () => {
+        const result = parseNarration("RTGS/SYNTR26296000002/SYNTHETIC WHOLESALE/INVOICE 12345");
+        expect(result.rail).toBe("RTGS");
+        expect(result.utr).toBe("SYNTR26296000002");
+      });
+
+      it("does NOT extract NEFT UTR for RTGS rail", () => {
+        const result = parseNarration("RTGS CR-COMPANY-HDFCN26296123456"); // NEFT format
+        expect(result.rail).toBe("RTGS");
+        expect(result.utr).toBeUndefined(); // Should not match
       });
     });
 
@@ -121,34 +133,39 @@ describe("narration-parser", () => {
     });
 
     describe("ACH/NACH transactions", () => {
-      it("extracts ACH debit with company", () => {
+      it("extracts ACH debit with company - NO UTR", () => {
         const result = parseNarration("ACH D- TP ACH SYNTHETIC INSURANCE-654321");
         expect(result.rail).toBe("ACH");
         expect(result.payerName).toBe("SYNTHETIC INSURANCE");
-        expect(result.utr).toBe("654321");
+        // ACH reference is NOT a UTR
+        expect(result.utr).toBeUndefined();
       });
 
-      it("detects NACH", () => {
+      it("detects NACH - NO UTR", () => {
         const result = parseNarration("NACH/ACH/SYNTHETIC LIFE INS/PREMIUM");
         expect(result.rail).toBe("ACH");
+        expect(result.utr).toBeUndefined();
       });
     });
 
     describe("Cheque transactions", () => {
-      it("extracts cheque number", () => {
+      it("does NOT extract cheque number as UTR", () => {
         const result = parseNarration("CHQ PAID-000123");
         expect(result.rail).toBe("CHEQUE");
-        expect(result.utr).toBe("000123");
+        // Cheque number is NOT a UTR
+        expect(result.utr).toBeUndefined();
       });
 
-      it("detects CLG clearing", () => {
+      it("detects CLG clearing - NO UTR", () => {
         const result = parseNarration("CLG CHQ DEP 000456");
         expect(result.rail).toBe("CHEQUE");
+        expect(result.utr).toBeUndefined();
       });
 
-      it("detects CHEQUE in text", () => {
-        const result = parseNarration("CHEQUE DEPOSIT-FAKE COMPANY LTD");
+      it("detects CHEQUE in text - NO UTR", () => {
+        const result = parseNarration("CHEQUE DEPOSIT-SYNTHETIC COMPANY LTD");
         expect(result.rail).toBe("CHEQUE");
+        expect(result.utr).toBeUndefined();
       });
     });
 
@@ -166,40 +183,60 @@ describe("narration-parser", () => {
   });
 
   describe("extractUtrForDedupe", () => {
-    it("returns refNo if it looks like 12-digit RRN", () => {
-      expect(extractUtrForDedupe("some narration", "987654321098")).toBe("987654321098");
+    describe("NEFT", () => {
+      it("returns refNo if it matches NEFT format", () => {
+        expect(extractUtrForDedupe("some narration", "NEFT", "SYNTN26296000001")).toBe("SYNTN26296000001");
+      });
+
+      it("extracts UTR from narration if refNo is not valid", () => {
+        expect(
+          extractUtrForDedupe("NEFT CR-COMPANY-HDFCN26296123456", "NEFT", "REF123")
+        ).toBe("HDFCN26296123456");
+      });
+
+      it("returns null for invalid NEFT UTR", () => {
+        expect(extractUtrForDedupe("NEFT CR-COMPANY-123456", "NEFT", undefined)).toBeNull();
+      });
     });
 
-    it("returns refNo if it looks like NEFT UTR", () => {
-      expect(extractUtrForDedupe("some narration", "HDFC2026100800001")).toBe("HDFC2026100800001");
+    describe("RTGS", () => {
+      it("returns refNo if it matches RTGS format", () => {
+        expect(extractUtrForDedupe("some narration", "RTGS", "SYNTR26296000001")).toBe("SYNTR26296000001");
+      });
+
+      it("extracts UTR from narration", () => {
+        expect(
+          extractUtrForDedupe("RTGS CR-COMPANY-HDFCR26296123456", "RTGS", undefined)
+        ).toBe("HDFCR26296123456");
+      });
     });
 
-    it("extracts UTR from narration if refNo is not UTR", () => {
-      expect(
-        extractUtrForDedupe("NEFT CR-COMPANY-ICIC2026101500001", "REF123")
-      ).toBe("ICIC2026101500001");
+    describe("IMPS/UPI", () => {
+      it("returns 12-digit RRN for IMPS", () => {
+        expect(extractUtrForDedupe("IMPS/123456789012/SENDER", "IMPS", undefined)).toBe("123456789012");
+      });
+
+      it("returns 12-digit RRN for UPI", () => {
+        expect(extractUtrForDedupe("UPI/987654321098/user@bank", "UPI", undefined)).toBe("987654321098");
+      });
+
+      it("returns refNo if it's 12 digits", () => {
+        expect(extractUtrForDedupe("some narration", "UPI", "123456789012")).toBe("123456789012");
+      });
     });
 
-    it("extracts 12-digit RRN from narration", () => {
-      expect(
-        extractUtrForDedupe("UPI/123456789012/user@bank/NAME", undefined)
-      ).toBe("123456789012");
-    });
+    describe("ACH/CHEQUE - no valid UTR", () => {
+      it("returns null for ACH", () => {
+        expect(extractUtrForDedupe("ACH D-INSURANCE-654321", "ACH", "654321")).toBeNull();
+      });
 
-    it("extracts N-prefix UTR from narration", () => {
-      expect(
-        extractUtrForDedupe("NEFT-N12345678901234567-COMPANY", undefined)
-      ).toBe("N12345678901234567");
-    });
+      it("returns null for CHEQUE", () => {
+        expect(extractUtrForDedupe("CHQ PAID-000123", "CHEQUE", "000123")).toBeNull();
+      });
 
-    it("returns null if no UTR found", () => {
-      expect(extractUtrForDedupe("CASH DEPOSIT", undefined)).toBeNull();
-    });
-
-    it("prefers bank UTR over RRN when both present", () => {
-      expect(
-        extractUtrForDedupe("NEFT-HDFC2026100100001-123456789012-COMPANY", undefined)
-      ).toBe("HDFC2026100100001");
+      it("returns null for OTHER", () => {
+        expect(extractUtrForDedupe("CASH DEPOSIT", "OTHER", undefined)).toBeNull();
+      });
     });
   });
 });

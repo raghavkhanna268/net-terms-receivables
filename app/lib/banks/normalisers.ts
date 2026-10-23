@@ -15,22 +15,30 @@
  * - dd.mm.yyyy (ICICI retail: 15.03.2026)
  * - dd-MMM-yyyy (ICICI corporate: 15-Mar-2026)
  * - dd-MMM-yy (15-Mar-26)
- * - Date objects from Excel
+ * - Date objects from Excel (converted using UTC to avoid timezone shifts)
  *
  * @param input Date string or Date object
- * @returns ISO 8601 date string (YYYY-MM-DD) or null if unparseable
+ * @returns ISO 8601 date string (YYYY-MM-DD) or null if unparseable/invalid
  */
 export function parseIndianDate(input: string | Date | null | undefined): string | null {
   if (input === null || input === undefined) {
     return null;
   }
 
-  // Handle Date objects (from Excel parser)
+  // Handle Date objects (from Excel parser) - use UTC getters to avoid timezone shifts
   if (input instanceof Date) {
     if (isNaN(input.getTime())) {
       return null;
     }
-    return formatIsoDate(input.getFullYear(), input.getMonth() + 1, input.getDate());
+    // Use UTC getters to avoid timezone-related date shifts
+    const year = input.getUTCFullYear();
+    const month = input.getUTCMonth() + 1;
+    const day = input.getUTCDate();
+
+    if (!isValidDate(year, month, day)) {
+      return null;
+    }
+    return formatIsoDate(year, month, day);
   }
 
   const str = String(input).trim();
@@ -94,6 +102,7 @@ function parseMonthName(name: string): number | null {
 
 /**
  * Parse day, month, year string components to ISO date.
+ * Validates the date is real (e.g., rejects 31/02).
  */
 function parseComponents(dayStr: string, monthStr: string, yearStr: string): string | null {
   const day = parseInt(dayStr, 10);
@@ -105,21 +114,52 @@ function parseComponents(dayStr: string, monthStr: string, yearStr: string): str
     year = year < 50 ? 2000 + year : 1900 + year;
   }
 
-  // Validate ranges
-  if (isNaN(day) || isNaN(month) || isNaN(year)) {
-    return null;
-  }
-  if (month < 1 || month > 12) {
-    return null;
-  }
-  if (day < 1 || day > 31) {
-    return null;
-  }
-  if (year < 1900 || year > 2100) {
+  // Validate ranges and actual date validity
+  if (!isValidDate(year, month, day)) {
     return null;
   }
 
   return formatIsoDate(year, month, day);
+}
+
+/**
+ * Validate if a date is real (handles month lengths and leap years).
+ */
+function isValidDate(year: number, month: number, day: number): boolean {
+  // Basic range checks
+  if (isNaN(year) || isNaN(month) || isNaN(day)) {
+    return false;
+  }
+  if (year < 1900 || year > 2100) {
+    return false;
+  }
+  if (month < 1 || month > 12) {
+    return false;
+  }
+  if (day < 1) {
+    return false;
+  }
+
+  // Days in each month (0-indexed by month-1)
+  const daysInMonth = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+  // Adjust February for leap years
+  if (isLeapYear(year)) {
+    daysInMonth[1] = 29;
+  }
+
+  if (day > daysInMonth[month - 1]) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Check if a year is a leap year.
+ */
+function isLeapYear(year: number): boolean {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
 }
 
 /**
