@@ -38,8 +38,10 @@ The box can't reach Postgres ports. The Management API SQL endpoint (`POST /v1/p
 1. Go to **Actions** → **Sync Vault Secrets**
 2. Click **Run workflow**
 3. Select **main** branch (required—workflow skips on other branches)
-4. Optionally override the drain URL (defaults to `https://net-terms-receivables.raghavkhanna.workers.dev/jobs/drain`)
+4. Optionally override the drain URL (defaults to `https://net-terms-receivables.raghavkhanna.workers.dev/jobs/drain`, 65 characters)
 5. Click **Run workflow**
+
+**URL validation:** The `jobs_drain_url` input must match `^https://[a-z0-9.-]+/jobs/drain$`. The workflow validates the format before writing to Vault.
 
 The workflow outputs:
 - `created secret: jobs_drain_secret` or `updated secret: jobs_drain_secret`

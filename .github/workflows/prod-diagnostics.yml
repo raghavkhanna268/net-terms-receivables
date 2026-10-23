@@ -1,7 +1,8 @@
 # Read-only production diagnostics workflow
 #
-# Checks OAuth session state and protected customer data access for a shop.
-# Used by ops to verify Shopify connectivity without modifying data.
+# Checks OAuth session state, protected customer data access, and database
+# extensions/jobs for a shop.
+# Used by ops to verify Shopify connectivity and infrastructure without modifying data.
 #
 # SAFETY:
 #   - Manual trigger only (workflow_dispatch)
@@ -10,9 +11,15 @@
 #   - No artifacts uploaded
 #   - Access token is masked in logs and kept off argv
 #   - No customer PII is printed
+#   - Never prints cron.job.command (may contain URLs/secrets)
+#   - Never selects vault.decrypted_secrets (only checks name existence)
 #
 # Required secrets:
 #   DATABASE_URL_MIGRATIONS - Supabase SESSION pooler connection string
+#
+# Optional:
+#   Configure a GitHub Environment named "production" to require approval
+#   before running diagnostics against prod.
 
 name: Prod Diagnostics
 
@@ -38,6 +45,8 @@ jobs:
     name: Run Production Diagnostics
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Uncomment to require approval via GitHub Environment:
+    # environment: production
 
     if: github.ref == 'refs/heads/main'
 
@@ -86,7 +95,7 @@ jobs:
           # Fetch offline session expiry and refresh token presence
           OFFLINE_DATA=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A -F '|' "$DATABASE_URL" <<'EOSQL'
           SELECT
-            expires,
+            expires AT TIME ZONE 'UTC',
             CASE WHEN "refreshToken" IS NOT NULL AND "refreshToken" != '' THEN 'true' ELSE 'false' END
           FROM "Session"
           WHERE shop = :'shop' AND "isOnline" = false
@@ -113,14 +122,14 @@ jobs:
             echo "token_expired: false (no expiry set - legacy non-expiring token)"
             echo "token_expired=false" >> "$GITHUB_OUTPUT"
           else
-            # Compare expiry to current UTC time
-            EXPIRES_EPOCH=$(date -d "$EXPIRES_RAW" +%s 2>/dev/null || echo "0")
+            # Compare expiry to current UTC time (expires is already in UTC from query)
+            EXPIRES_EPOCH=$(date -u -d "$EXPIRES_RAW" +%s 2>/dev/null || echo "0")
             NOW_EPOCH=$(date -u +%s)
             if [ "$EXPIRES_EPOCH" -le "$NOW_EPOCH" ]; then
-              echo "token_expired: true (expired at $EXPIRES_RAW)"
+              echo "token_expired: true (expired at ${EXPIRES_RAW} UTC)"
               echo "token_expired=true" >> "$GITHUB_OUTPUT"
             else
-              echo "token_expired: false (expires at $EXPIRES_RAW)"
+              echo "token_expired: false (expires at ${EXPIRES_RAW} UTC)"
               echo "token_expired=false" >> "$GITHUB_OUTPUT"
             fi
           fi
@@ -227,10 +236,10 @@ jobs:
           if [ "$HTTP_STATUS" = "401" ] || [ "$HTTP_STATUS" = "403" ]; then
             echo "::warning::Admin API returned HTTP $HTTP_STATUS (authentication/authorization failed)"
             echo ""
-            # Extract only error codes, never raw content
+            # Extract only error codes, never messages or raw content
             ERROR_CODES=$(cat "$HTTP_RESPONSE" | jq -r '
               if .errors then
-                {error_codes: [.errors[] | .extensions.code // .message | select(. != null)]}
+                {error_codes: [.errors[] | .extensions.code // "UNKNOWN" | select(. != null)]}
               else
                 {error_code: "unknown"}
               end
@@ -275,4 +284,103 @@ jobs:
 
             echo "Protected Customer Data Probe Results:"
             echo "{\"status\": \"error\", \"http_status\": $HTTP_STATUS, \"error_codes\": $ERROR_CODES}" | jq .
+          fi
+
+      - name: Database extensions and jobs check
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
+        run: |
+          set -euo pipefail
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL_MIGRATIONS secret not set"
+            exit 1
+          fi
+
+          echo "=== Database Extensions ==="
+          echo ""
+
+          # Check extensions: pgmq, pg_cron, pg_net, supabase_vault
+          psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          SELECT
+            e.extname AS extension,
+            true AS installed,
+            e.extversion AS version
+          FROM pg_extension e
+          WHERE e.extname IN ('pgmq', 'pg_cron', 'pg_net', 'supabase_vault')
+          ORDER BY e.extname;
+          EOSQL
+
+          # Check which extensions are missing
+          echo ""
+          echo "Extensions status (boolean check):"
+          psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          SELECT json_build_object(
+            'pgmq_installed', EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pgmq'),
+            'pg_cron_installed', EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pg_cron'),
+            'pg_net_installed', EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pg_net'),
+            'supabase_vault_installed', EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'supabase_vault')
+          );
+          EOSQL
+
+          echo ""
+          echo "=== Cron Jobs ==="
+          echo ""
+
+          # Check if cron schema exists before querying
+          CRON_EXISTS=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = 'cron');
+          EOSQL
+          )
+
+          if [ "$CRON_EXISTS" = "t" ]; then
+            # List cron jobs (jobname, schedule, active only - never command)
+            echo "Cron jobs (command column omitted for security):"
+            psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+            SELECT
+              jobid,
+              jobname,
+              schedule,
+              active
+            FROM cron.job
+            ORDER BY jobname;
+            EOSQL
+
+            echo ""
+            echo "S10 drain job status:"
+            psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+            SELECT json_build_object(
+              's10_drain_job_exists', EXISTS(SELECT 1 FROM cron.job WHERE jobname = 's10_drain_every_minute'),
+              's10_drain_job_active', COALESCE((SELECT active FROM cron.job WHERE jobname = 's10_drain_every_minute'), false)
+            );
+            EOSQL
+          else
+            echo "::notice::cron schema does not exist (pg_cron not installed or not configured)"
+            echo '{"cron_schema_exists": false, "s10_drain_job_exists": false, "s10_drain_job_active": false}' | jq .
+          fi
+
+          echo ""
+          echo "=== Vault Secrets ==="
+          echo ""
+
+          # Check if vault schema exists before querying
+          VAULT_EXISTS=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = 'vault');
+          EOSQL
+          )
+
+          if [ "$VAULT_EXISTS" = "t" ]; then
+            # Check if required secrets exist (query names only, never decrypted_secret)
+            echo "Vault secrets existence check (names only, never values):"
+            psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+            SELECT json_build_object(
+              'vault_schema_exists', true,
+              'jobs_drain_secret_exists', EXISTS(SELECT 1 FROM vault.secrets WHERE name = 'jobs_drain_secret'),
+              'jobs_drain_url_exists', EXISTS(SELECT 1 FROM vault.secrets WHERE name = 'jobs_drain_url')
+            );
+            EOSQL
+          else
+            echo "::notice::vault schema does not exist (supabase_vault not installed or not configured)"
+            echo '{"vault_schema_exists": false, "jobs_drain_secret_exists": false, "jobs_drain_url_exists": false}' | jq .
           fi
