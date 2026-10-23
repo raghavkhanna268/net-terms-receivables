@@ -5,10 +5,9 @@
   "compatibility_flags": ["nodejs_compat"],
   "main": "./workers/app.ts",
 
-  // Explicit region placement: run Worker near Supabase Postgres in AWS Seoul.
-  // If the DB moves to Mumbai, switch the hint to aws:ap-south-1.
+  // Explicit region placement: run Worker near Supabase Postgres in AWS Mumbai.
   "placement": {
-    "region": "aws:ap-northeast-2"
+    "region": "aws:ap-south-1"
   },
 
   // Hyperdrive binding for Supabase Postgres connection pooling
@@ -17,7 +16,7 @@
   "hyperdrive": [
     {
       "binding": "HYPERDRIVE",
-      "id": "dd3bb958bfd844cda0ab39126f0154fb",
+      "id": "df513d372cfe4171a3f27ec48079e4e2",
       // For local dev, point to Supabase session pooler or local Postgres
       // wrangler dev uses this instead of Hyperdrive
       "localConnectionString": "postgresql://postgres:password@localhost:5432/net_terms"
