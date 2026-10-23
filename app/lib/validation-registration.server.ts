@@ -2,7 +2,10 @@
  * Validation Registration Service
  *
  * Idempotent registration of the credit-check-validation Shopify Function.
- * Uses validationCreate mutation (write_validations scope is already granted).
+ * Uses validationCreate mutation with functionHandle (per 2026-10 docs).
+ * write_validations scope is already granted.
+ *
+ * @see https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/validationCreate
  */
 
 /**
@@ -17,13 +20,14 @@ interface AdminGraphqlClient {
   ) => Promise<{ json: () => Promise<unknown> }>;
 }
 
-const VALIDATION_FUNCTION_ID = "credit-check-validation";
+const VALIDATION_FUNCTION_HANDLE = "credit-check-validation";
 const VALIDATION_TITLE = "Net Terms Credit Check";
 
 interface ValidationNode {
   id: string;
-  functionId: string;
+  functionHandle: string;
   title: string;
+  enabled: boolean;
 }
 
 interface ValidationsQueryResult {
@@ -42,8 +46,9 @@ interface ValidationCreateResult {
     validationCreate?: {
       validation?: {
         id: string;
-        functionId: string;
+        functionHandle: string;
         title: string;
+        enabled: boolean;
       };
       userErrors?: Array<{
         field?: string[];
@@ -60,8 +65,9 @@ const VALIDATIONS_QUERY = `#graphql
       edges {
         node {
           id
-          functionId
+          functionHandle
           title
+          enabled
         }
       }
     }
@@ -69,16 +75,18 @@ const VALIDATIONS_QUERY = `#graphql
 `;
 
 const VALIDATION_CREATE_MUTATION = `#graphql
-  mutation ValidationCreate($functionId: String!, $title: String!) {
+  mutation ValidationCreate($functionHandle: String!, $title: String!) {
     validationCreate(validation: {
-      functionId: $functionId,
+      functionHandle: $functionHandle,
       title: $title,
-      blockOnFailure: false
+      blockOnFailure: false,
+      enable: true
     }) {
       validation {
         id
-        functionId
+        functionHandle
         title
+        enabled
       }
       userErrors {
         field
@@ -90,7 +98,7 @@ const VALIDATION_CREATE_MUTATION = `#graphql
 
 /**
  * Ensures the credit check validation function is registered for the shop.
- * This is idempotent - if the validation already exists, it returns the existing one.
+ * This is idempotent - if the validation already exists (matched by handle), it returns the existing one.
  *
  * @param admin - The Shopify Admin API context
  * @returns The validation ID (existing or newly created)
@@ -109,7 +117,7 @@ export async function ensureValidation(
   }
 
   const existingValidation = existingData.data?.validations?.edges.find(
-    (edge) => edge.node.functionId === VALIDATION_FUNCTION_ID,
+    (edge) => edge.node.functionHandle === VALIDATION_FUNCTION_HANDLE,
   );
 
   if (existingValidation) {
@@ -118,7 +126,7 @@ export async function ensureValidation(
 
   const createResult = await admin.graphql(VALIDATION_CREATE_MUTATION, {
     variables: {
-      functionId: VALIDATION_FUNCTION_ID,
+      functionHandle: VALIDATION_FUNCTION_HANDLE,
       title: VALIDATION_TITLE,
     },
   });

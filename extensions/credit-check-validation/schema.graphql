@@ -28,13 +28,24 @@ enum CurrencyCode {
 }
 
 type MutationRoot {
-  run(result: FunctionRunResult!): Void
+  handleResult(result: CartValidationsGenerateRunResult!): Void
 }
 
 scalar Void
 
 type Input {
   cart: Cart!
+  buyerJourney: BuyerJourney!
+}
+
+type BuyerJourney {
+  step: BuyerJourneyStep!
+}
+
+enum BuyerJourneyStep {
+  CART_INTERACTION
+  CHECKOUT_INTERACTION
+  CHECKOUT_COMPLETION
 }
 
 type Cart {
@@ -72,11 +83,19 @@ type Metafield {
   jsonValue: JSON
 }
 
-input FunctionRunResult {
-  errors: [FunctionError!]!
+input CartValidationsGenerateRunResult {
+  operations: [Operation!]!
 }
 
-input FunctionError {
-  localizedMessage: String!
+input Operation {
+  validationAdd: ValidationAddOperation
+}
+
+input ValidationAddOperation {
+  errors: [ValidationError!]!
+}
+
+input ValidationError {
+  message: String!
   target: String!
 }

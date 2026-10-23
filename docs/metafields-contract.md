@@ -170,12 +170,18 @@ These messages:
 - Do not expose specific amounts or internal reason codes
 - Direct the buyer to contact the merchant
 
-## Metafield Definitions at Install
+## Metafield Definitions
 
-The metafield definitions are declared in `shopify.app.toml` to be created automatically at app install/deploy:
+> **Note**: As of October 2026, TOML-based declarative metafield definitions support `company_location` and `customer` owner types. However, if deployment fails due to unsupported owner types, S11 must create them programmatically via `metafieldDefinitionCreate`.
+>
+> @see https://shopify.dev/docs/apps/build/metafields/definitions
+
+### Option A: TOML Declarations (Preferred)
+
+If `company_location` and `customer` are supported in TOML declarations, add to `shopify.app.toml`:
 
 ```toml
-[companyLocation.metafields.app.credit_status]
+[company_location.metafields.app.credit_status]
 name = "Credit Status"
 description = "Net terms credit status including hold flag, limit, and exposure"
 type = "json"
@@ -187,6 +193,29 @@ description = "Net terms credit status for tagged non-B2B customers"
 type = "json"
 access.admin = "merchant_read"
 ```
+
+### Option B: Programmatic Creation (Fallback)
+
+If TOML declarations fail for these owner types, S11 must create the definitions via GraphQL:
+
+```graphql
+mutation CreateCreditStatusDefinition($ownerType: MetafieldOwnerType!) {
+  metafieldDefinitionCreate(definition: {
+    namespace: "$app"
+    key: "credit_status"
+    name: "Credit Status"
+    description: "Net terms credit status including hold flag, limit, and exposure"
+    type: "json"
+    ownerType: $ownerType
+    access: { admin: MERCHANT_READ }
+  }) {
+    createdDefinition { id }
+    userErrors { field message }
+  }
+}
+```
+
+Call this mutation twice during shop setup: once for `COMPANY_LOCATION` and once for `CUSTOMER`.
 
 ## Implementation Checklist
 

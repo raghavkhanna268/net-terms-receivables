@@ -1,7 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { ensureValidation } from "../validation-registration.server";
 
-
 describe("validation-registration", () => {
   describe("ensureValidation", () => {
     it("returns existing validation when already registered", async () => {
@@ -15,8 +14,9 @@ describe("validation-registration", () => {
                     {
                       node: {
                         id: "gid://shopify/Validation/123",
-                        functionId: "credit-check-validation",
+                        functionHandle: "credit-check-validation",
                         title: "Net Terms Credit Check",
+                        enabled: true,
                       },
                     },
                   ],
@@ -26,7 +26,9 @@ describe("validation-registration", () => {
         }),
       };
 
-      const result = await ensureValidation(mockAdmin as Parameters<typeof ensureValidation>[0]);
+      const result = await ensureValidation(
+        mockAdmin as Parameters<typeof ensureValidation>[0],
+      );
 
       expect(result.id).toBe("gid://shopify/Validation/123");
       expect(result.created).toBe(false);
@@ -54,8 +56,9 @@ describe("validation-registration", () => {
                   validationCreate: {
                     validation: {
                       id: "gid://shopify/Validation/456",
-                      functionId: "credit-check-validation",
+                      functionHandle: "credit-check-validation",
                       title: "Net Terms Credit Check",
+                      enabled: true,
                     },
                     userErrors: [],
                   },
@@ -64,11 +67,21 @@ describe("validation-registration", () => {
           }),
       };
 
-      const result = await ensureValidation(mockAdmin as Parameters<typeof ensureValidation>[0]);
+      const result = await ensureValidation(
+        mockAdmin as Parameters<typeof ensureValidation>[0],
+      );
 
       expect(result.id).toBe("gid://shopify/Validation/456");
       expect(result.created).toBe(true);
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(2);
+
+      const createCall = mockAdmin.graphql.mock.calls[1];
+      expect(createCall[1]).toEqual({
+        variables: {
+          functionHandle: "credit-check-validation",
+          title: "Net Terms Credit Check",
+        },
+      });
     });
 
     it("throws on query error", async () => {
@@ -81,9 +94,9 @@ describe("validation-registration", () => {
         }),
       };
 
-      await expect(ensureValidation(mockAdmin as Parameters<typeof ensureValidation>[0])).rejects.toThrow(
-        "Failed to query validations: Access denied",
-      );
+      await expect(
+        ensureValidation(mockAdmin as Parameters<typeof ensureValidation>[0]),
+      ).rejects.toThrow("Failed to query validations: Access denied");
     });
 
     it("throws on mutation user error", async () => {
@@ -107,7 +120,10 @@ describe("validation-registration", () => {
                   validationCreate: {
                     validation: null,
                     userErrors: [
-                      { field: ["functionId"], message: "Function not found" },
+                      {
+                        field: ["functionHandle"],
+                        message: "Function not found",
+                      },
                     ],
                   },
                 },
@@ -115,9 +131,9 @@ describe("validation-registration", () => {
           }),
       };
 
-      await expect(ensureValidation(mockAdmin as Parameters<typeof ensureValidation>[0])).rejects.toThrow(
-        "Validation creation failed: Function not found",
-      );
+      await expect(
+        ensureValidation(mockAdmin as Parameters<typeof ensureValidation>[0]),
+      ).rejects.toThrow("Validation creation failed: Function not found");
     });
 
     it("throws on mutation GraphQL error", async () => {
@@ -142,12 +158,12 @@ describe("validation-registration", () => {
           }),
       };
 
-      await expect(ensureValidation(mockAdmin as Parameters<typeof ensureValidation>[0])).rejects.toThrow(
-        "Failed to create validation: Internal error",
-      );
+      await expect(
+        ensureValidation(mockAdmin as Parameters<typeof ensureValidation>[0]),
+      ).rejects.toThrow("Failed to create validation: Internal error");
     });
 
-    it("skips creation when different validation exists", async () => {
+    it("creates validation when different function handle exists", async () => {
       const mockAdmin = {
         graphql: vi
           .fn()
@@ -160,8 +176,9 @@ describe("validation-registration", () => {
                       {
                         node: {
                           id: "gid://shopify/Validation/999",
-                          functionId: "other-function",
+                          functionHandle: "other-function",
                           title: "Other Validation",
+                          enabled: true,
                         },
                       },
                     ],
@@ -176,8 +193,9 @@ describe("validation-registration", () => {
                   validationCreate: {
                     validation: {
                       id: "gid://shopify/Validation/456",
-                      functionId: "credit-check-validation",
+                      functionHandle: "credit-check-validation",
                       title: "Net Terms Credit Check",
+                      enabled: true,
                     },
                     userErrors: [],
                   },
@@ -186,7 +204,9 @@ describe("validation-registration", () => {
           }),
       };
 
-      const result = await ensureValidation(mockAdmin as Parameters<typeof ensureValidation>[0]);
+      const result = await ensureValidation(
+        mockAdmin as Parameters<typeof ensureValidation>[0],
+      );
 
       expect(result.id).toBe("gid://shopify/Validation/456");
       expect(result.created).toBe(true);

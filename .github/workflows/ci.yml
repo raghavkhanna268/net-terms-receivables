@@ -244,16 +244,27 @@ jobs:
         run: |
           cargo build --release --target wasm32-unknown-unknown
           
-          # Report WASM size
+          # Report WASM size and enforce limits
+          # Shopify Functions have a 256KB limit
+          # @see https://shopify.dev/docs/apps/build/functions/programming-languages/rust-for-functions
           WASM_FILE="target/wasm32-unknown-unknown/release/credit_check_validation.wasm"
           if [ -f "$WASM_FILE" ]; then
             SIZE=$(stat -c%s "$WASM_FILE")
             SIZE_KB=$((SIZE / 1024))
-            echo "✓ WASM built: ${SIZE_KB} KB ($SIZE bytes)"
+            echo "WASM size: ${SIZE_KB} KB ($SIZE bytes)"
             
-            # Warn if over 200KB (Shopify Functions typically have limits around 256KB-1MB)
+            # Fail if over 256KB (Shopify Functions hard limit)
+            if [ $SIZE_KB -gt 256 ]; then
+              echo "✗ WASM size exceeds 256 KB limit (${SIZE_KB} KB)"
+              echo "See: https://shopify.dev/docs/apps/build/functions/programming-languages/rust-for-functions#binary-size-tips"
+              exit 1
+            fi
+            
+            # Warn if over 200KB
             if [ $SIZE_KB -gt 200 ]; then
-              echo "⚠ Warning: WASM size is ${SIZE_KB} KB, consider optimization"
+              echo "⚠ Warning: WASM size is ${SIZE_KB} KB, approaching 256 KB limit"
+            else
+              echo "✓ WASM size is within limits"
             fi
           else
             echo "✗ WASM file not found"

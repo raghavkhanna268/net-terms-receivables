@@ -73,3 +73,17 @@ embedded = false
 
 [build]
 automatically_update_urls_on_dev = false
+
+# S12/S11: Credit status metafield definitions for net-terms validation
+# @see docs/metafields-contract.md
+[company_location.metafields.app.credit_status]
+name = "Credit Status"
+description = "Net terms credit status including hold flag, limit, and exposure"
+type = "json"
+access.admin = "merchant_read"
+
+[customer.metafields.app.credit_status]
+name = "Credit Status"
+description = "Net terms credit status for tagged non-B2B customers"
+type = "json"
+access.admin = "merchant_read"

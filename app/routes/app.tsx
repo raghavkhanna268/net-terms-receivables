@@ -2,12 +2,15 @@ import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { Outlet, useLoaderData, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
+import { runAfterAuth } from "~/lib/after-auth.server";
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   // Session storage is injected per-request via loadContext in workers/app.ts
   const { shopify } = context;
 
-  await shopify.authenticate.admin(request);
+  const { admin, session } = await shopify.authenticate.admin(request);
+
+  await runAfterAuth(session.shop, admin);
 
   return { apiKey: process.env.SHOPIFY_API_KEY || "" };
 };

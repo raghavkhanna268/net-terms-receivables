@@ -1,11 +1,11 @@
 use shopify_function::prelude::*;
 
-pub mod run;
+pub mod cart_validations_generate_run;
 
-pub use run::CreditStatus;
+pub use cart_validations_generate_run::CreditStatus;
 
-#[typegen("./schema.graphql", enums_as_str = ["CurrencyCode"])]
+#[typegen("./schema.graphql", enums_as_str = ["CurrencyCode", "BuyerJourneyStep"])]
 pub mod schema {
-    #[query("src/run.graphql")]
-    pub mod run {}
+    #[query("src/cart_validations_generate_run.graphql")]
+    pub mod cart_validations_generate_run {}
 }
