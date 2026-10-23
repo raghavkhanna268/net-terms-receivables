@@ -65,6 +65,7 @@ describeWithDb("Order Sync", () => {
         id: `gid://shopify/Order/ord-${TEST_SUFFIX}-1`,
         name: "#1001",
         createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
         totalPriceSet: {
           shopMoney: { amount: "50000.00", currencyCode: "INR" },
         },
@@ -130,8 +131,10 @@ describeWithDb("Order Sync", () => {
 
       expect(result.success).toBe(true);
       expect(result.action).toBe("skipped");
-      expect(result.skipReason).toContain("retail");
+      // The message explains why it was skipped (retail order)
+      expect(result.skipReason).toContain("Retail order");
       // Retryable should be undefined (permanent skip)
+      expect(result.retryable).toBeUndefined();
 
       // No invoice should be created
       const invoices = await sql`
@@ -176,6 +179,7 @@ describeWithDb("Order Sync", () => {
 
       expect(result.success).toBe(false);
       expect(result.retryable).toBe(true);
+      // The error message explains why it failed (BuyerAccount not found)
       expect(result.error).toContain("BuyerAccount");
     });
 
@@ -307,6 +311,7 @@ describeWithDb("Order Sync", () => {
         id: `gid://shopify/Order/ord-${TEST_SUFFIX}-6`,
         name: "#1006",
         createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
         totalPriceSet: {
           shopMoney: { amount: "5000.00", currencyCode: "INR" },
         },
@@ -632,6 +637,7 @@ describeWithDb("Order Sync", () => {
         name: "#OPEN-DATES",
         createdAt: "2025-08-01T00:00:00.000Z",
         processedAt: newProcessedAt, // New processedAt
+        displayFinancialStatus: "PENDING",
         totalPriceSet: {
           shopMoney: { amount: "15000.00", currencyCode: "INR" },
         },
@@ -663,9 +669,12 @@ describeWithDb("Order Sync", () => {
       // issuedAt SHOULD be updated for open invoices
       expect(new Date(invoice.issuedAt).toISOString()).toBe(new Date(newProcessedAt).toISOString());
       // dueAt should be recalculated: processedAt + 30 days
-      const expectedDueAt = new Date(newProcessedAt);
-      expectedDueAt.setDate(expectedDueAt.getDate() + 30);
-      expect(new Date(invoice.dueAt).toISOString()).toBe(expectedDueAt.toISOString());
+      // The exact time depends on shop timezone (end-of-day in that timezone)
+      // so we just verify the date portion is correct
+      const actualDueAt = new Date(invoice.dueAt);
+      expect(actualDueAt.getUTCFullYear()).toBe(2025);
+      expect(actualDueAt.getUTCMonth()).toBe(7); // August (0-indexed)
+      expect(actualDueAt.getUTCDate()).toBe(14); // 14th
     });
   });
 

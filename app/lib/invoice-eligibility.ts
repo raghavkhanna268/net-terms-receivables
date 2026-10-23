@@ -468,7 +468,7 @@ export async function checkOrderEligibility(
       return {
         eligible: false,
         reason: "no_buyer_account",
-        explanation: "Order has payment terms but no matching buyer account found",
+        explanation: "Order has payment terms but no matching BuyerAccount found",
         retryable: true,
       };
     }
@@ -640,7 +640,7 @@ export async function checkOrderEligibility(
   return {
     eligible: false,
     reason: "retail_order",
-    explanation: "Order has no payment terms, no company account with explicit terms, and customer does not match any tag rule",
+    explanation: "Retail order: no payment terms, no company account with explicit terms, and customer does not match any tag rule",
   };
 }
 
