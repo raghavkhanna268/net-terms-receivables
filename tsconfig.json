@@ -5,6 +5,7 @@
     "app/**/.server/**/*",
     "app/**/.client/**/*",
     "workers/**/*",
+    "scripts/**/*",
     "worker-configuration.d.ts",
     "vite.config.ts",
     "vitest.config.ts",
