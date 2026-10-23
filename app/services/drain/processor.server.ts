@@ -22,6 +22,8 @@ import {
   isWebhookProcessed,
   markWebhookProcessed,
 } from "~/services/sync/company.server";
+import { processCustomerWebhook } from "~/services/sync/customer.server";
+import { processDraftOrderWebhook } from "~/services/sync/draft-order.server";
 import { processCompanyLocationWebhook } from "~/services/sync/company-location.server";
 import { processOrderWebhook } from "~/services/sync/order.server";
 import type {
@@ -29,12 +31,16 @@ import type {
   ShopifyCompany,
   ShopifyCompanyLocation,
   ShopifyOrder,
+  ShopifyCustomer,
+  ShopifyDraftOrder,
 } from "~/services/sync/types";
 import {
   adminGraphQL,
   COMPANY_QUERY,
   COMPANY_LOCATION_QUERY,
   ORDER_QUERY,
+  getCustomerQueryForDrain,
+  DRAFT_ORDER_QUERY,
 } from "./admin-client.server";
 import {
   processBulkOperation,
@@ -346,6 +352,125 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
   );
 }
 
+// =============================================================================
+// S8 HANDLER IMPLEMENTATIONS
+// =============================================================================
+
+/**
+ * Handler for CUSTOMERS_* topics.
+ * Fetches the customer via GraphQL and processes it.
+ *
+ * DPDP compliance (Level 1 + Name + Email):
+ * - Always fetches: id, tags
+ * - Optional PII (CUSTOMER_PII_FIELDS=1): email, displayName
+ * - NEVER fetches: phone, addresses
+ */
+async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResult> {
+  // Idempotency check (S20: use shop for new table)
+  if (await isWebhookProcessed(sql, message.webhookId, message.shop)) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Webhook already processed (idempotent)",
+    };
+  }
+
+  // For DELETE, we don't need to fetch - just process
+  if (message.topic === "CUSTOMERS_DELETE") {
+    const customer: ShopifyCustomer = {
+      id: message.resourceGid,
+      tags: [],
+    };
+    return processCustomerWebhook(sql, message.shop, message.topic, customer, message.webhookId);
+  }
+
+  // Fetch customer data via GraphQL
+  const result = await adminGraphQL<{
+    node: ShopifyCustomer | null;
+  }>(message.shop, getCustomerQueryForDrain(), { id: message.resourceGid });
+
+  if (!result.success) {
+    return {
+      success: false,
+      action: "skipped",
+      error: result.error,
+    };
+  }
+
+  // If node is null, the resource was deleted
+  if (!result.data?.node) {
+    const customer: ShopifyCustomer = {
+      id: message.resourceGid,
+      tags: [],
+    };
+    return processCustomerWebhook(sql, message.shop, "CUSTOMERS_DELETE", customer, message.webhookId);
+  }
+
+  return processCustomerWebhook(
+    sql,
+    message.shop,
+    message.topic,
+    result.data.node,
+    message.webhookId
+  );
+}
+
+/**
+ * Handler for DRAFT_ORDERS_* topics.
+ * Fetches the draft order via GraphQL and processes it.
+ */
+async function handleDraftOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> {
+  // Idempotency check (S20: use shop for new table)
+  if (await isWebhookProcessed(sql, message.webhookId, message.shop)) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Webhook already processed (idempotent)",
+    };
+  }
+
+  // For DELETE, we don't need to fetch - just process
+  if (message.topic === "DRAFT_ORDERS_DELETE") {
+    const draftOrder: ShopifyDraftOrder = {
+      id: message.resourceGid,
+      name: "",
+      createdAt: new Date().toISOString(),
+    };
+    return processDraftOrderWebhook(sql, message.shop, message.topic, draftOrder, message.webhookId);
+  }
+
+  // Fetch draft order data via GraphQL
+  const result = await adminGraphQL<{
+    node: ShopifyDraftOrder | null;
+  }>(message.shop, DRAFT_ORDER_QUERY, { id: message.resourceGid });
+
+  if (!result.success) {
+    return {
+      success: false,
+      action: "skipped",
+      error: result.error,
+    };
+  }
+
+  // If node is null, the resource was deleted
+  if (!result.data?.node) {
+    const draftOrder: ShopifyDraftOrder = {
+      id: message.resourceGid,
+      name: "",
+      createdAt: new Date().toISOString(),
+    };
+    return processDraftOrderWebhook(sql, message.shop, "DRAFT_ORDERS_DELETE", draftOrder, message.webhookId);
+  }
+
+  return processDraftOrderWebhook(
+    sql,
+    message.shop,
+    message.topic,
+    result.data.node,
+    message.webhookId
+  );
+}
+
 // Register S6 handlers
 registerSyncHandler("COMPANIES_CREATE", handleCompany);
 registerSyncHandler("COMPANIES_UPDATE", handleCompany);
@@ -357,6 +482,14 @@ registerSyncHandler("ORDERS_CREATE", handleOrder);
 registerSyncHandler("ORDERS_UPDATED", handleOrder);
 registerSyncHandler("ORDERS_CANCELLED", handleOrder);
 registerSyncHandler("ORDERS_PAID", handleOrder);
+
+// Register S8 handlers
+registerSyncHandler("CUSTOMERS_CREATE", handleCustomer);
+registerSyncHandler("CUSTOMERS_UPDATE", handleCustomer);
+registerSyncHandler("CUSTOMERS_DELETE", handleCustomer);
+registerSyncHandler("DRAFT_ORDERS_CREATE", handleDraftOrder);
+registerSyncHandler("DRAFT_ORDERS_UPDATE", handleDraftOrder);
+registerSyncHandler("DRAFT_ORDERS_DELETE", handleDraftOrder);
 
 // =============================================================================
 // S10b BULK OPERATIONS HANDLER

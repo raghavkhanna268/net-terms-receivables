@@ -18,6 +18,7 @@
  */
 
 import { shopifyGraphQLQueue, type ShopifyClientResult } from "~/services/shopify-client.server";
+import { getCustomerByNodeQuery } from "~/services/sync/customer-fields.server";
 
 export const API_VERSION = "2026-10";
 
@@ -126,6 +127,62 @@ export const BULK_OPERATION_STATUS_QUERY = `
         partialDataUrl
         createdAt
         completedAt
+      }
+    }
+  }
+`;
+
+/**
+ * Get the customer query for S8 drain processor.
+ *
+ * Uses the shared getCustomerByNodeQuery from customer-fields.server.ts to ensure
+ * DPDP compliance and schema validation coverage.
+ *
+ * @returns GraphQL query string for fetching customer by GID
+ */
+export function getCustomerQueryForDrain(): string {
+  return getCustomerByNodeQuery({ CUSTOMER_PII_FIELDS: process.env.CUSTOMER_PII_FIELDS });
+}
+
+/**
+ * Fetch a DraftOrder by GID (S8).
+ * Fetches payment terms and purchasing entity for credit exposure tracking.
+ * No customer PII.
+ */
+export const DRAFT_ORDER_QUERY = `
+  query DraftOrderById($id: ID!) {
+    node(id: $id) {
+      ... on DraftOrder {
+        id
+        name
+        createdAt
+        updatedAt
+        status
+        totalPriceSet {
+          shopMoney {
+            amount
+            currencyCode
+          }
+        }
+        paymentTerms {
+          id
+          paymentTermsName
+          paymentTermsType
+          dueInDays
+        }
+        purchasingEntity {
+          ... on PurchasingCompany {
+            company {
+              id
+            }
+            location {
+              id
+            }
+          }
+        }
+        customer {
+          id
+        }
       }
     }
   }
