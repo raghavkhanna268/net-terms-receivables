@@ -1,0 +1,20 @@
+# SYNTHETIC MALFORMED TEST DATA - NOT REAL BANK DATA
+# Source: Public ICICI format documentation (see README.md)
+# Contains intentionally malformed rows for error handling tests
+
+ICICI BANK LIMITED
+Statement of Transactions
+Saving Account no.: 001234567890
+
+S No.,Transaction Date,Cheque Number,Remarks,Withdrawal,Deposit,Balance
+,,,B/F,,,50,000.00 Cr
+1,01.10.2026,,NEFT/SYNT2026100100004/VALID ROW,,25,000.00,75,000.00 Cr
+2,INVALID_DATE,,Missing proper date format,100.00,,
+3,,,Empty date and narration,500.00,,
+4,01.10.2026,,Valid after malformed,,5,000.00,80,000.00 Cr
+5,45.15.2026,,Impossible date values,200.00,,
+6,05.10.2026,,0.00,NA,NA,80,000.00 Cr
+7,05.10.2026,,Row with weird amounts,NaN,NaN,
+8,10.10.2026,,Another valid row,,10,000.00,90,000.00 Cr
+9,10.10.2026,,Row with text balance,1,000.00,,INVALID Cr
+10,15.10.2026,,Final valid row,5,000.00,,85,000.00 Cr
