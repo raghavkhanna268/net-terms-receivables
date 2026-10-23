@@ -1,13 +1,15 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ActionFunctionArgs } from "react-router";
+import crypto from "node:crypto";
 
 /**
  * Tests for S6 webhook handlers.
  *
  * Tests verify:
- * 1. HMAC rejection (401) when authentication fails
- * 2. Enqueue-and-200 for each topic
- * 3. Graceful handling of missing payload fields
+ * 1. Valid HMAC enqueues and returns 200
+ * 2. Bad HMAC returns 401
+ * 3. Unexpected topic enqueues nothing and returns 200
+ * 4. Missing GID returns 200 without enqueue
  */
 
 // Mock SQL client that returns bulk operation type
@@ -30,76 +32,108 @@ vi.mock("~/lib/pgmq.server", () => ({
   sendBulkMessage: mockSendBulkMessage,
 }));
 
+// Mock shopify context for bulk_operations.finish (still uses authenticate.webhook)
+const mockShopify = {
+  authenticate: {
+    webhook: vi.fn(),
+  },
+};
+
+const mockSessionStorage = {
+  deleteAllForShop: vi.fn(),
+};
+
 describe("S6 Webhook Handlers", () => {
   const TEST_SHOP = "test-shop.myshopify.com";
   const TEST_WEBHOOK_ID = "wh-test-123";
   const TEST_GID = "gid://shopify/Company/123";
-
-  const mockShopify = {
-    authenticate: {
-      webhook: vi.fn(),
-    },
-  };
-
-  const mockSessionStorage = {
-    deleteAllForShop: vi.fn(),
-  };
-
-  const createMockContext = () => ({
-    shopify: mockShopify,
-    sessionStorage: mockSessionStorage,
-    cloudflare: { env: {}, ctx: {} },
-  });
-
-  const createMockRequest = (url: string, body: object = {}) =>
-    new Request(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Shopify-Hmac-Sha256": "test-hmac",
-        "X-Shopify-Shop-Domain": TEST_SHOP,
-        "X-Shopify-Webhook-Id": TEST_WEBHOOK_ID,
-      },
-      body: JSON.stringify(body),
-    });
-
-  const createActionArgs = (url: string, body?: object): ActionFunctionArgs => ({
-    request: createMockRequest(url, body),
-    context: createMockContext(),
-    params: {},
-    url: new URL(url),
-    pattern: new URL(url).pathname,
-  });
+  const API_SECRET = "test-api-secret";
+  const originalEnv = process.env;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.resetModules();
+    process.env = { ...originalEnv, SHOPIFY_API_SECRET: API_SECRET };
   });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  function computeHmac(secret: string, body: string): string {
+    return crypto.createHmac("sha256", secret).update(body).digest("base64");
+  }
+
+  function createMockRequest(
+    url: string,
+    body: object,
+    topic: string,
+    options: { validHmac?: boolean; shop?: string; webhookId?: string } = {}
+  ): Request {
+    const {
+      validHmac = true,
+      shop = TEST_SHOP,
+      webhookId = TEST_WEBHOOK_ID,
+    } = options;
+    const bodyStr = JSON.stringify(body);
+    const hmac = validHmac ? computeHmac(API_SECRET, bodyStr) : "invalid-hmac";
+
+    return new Request(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Hmac-Sha256": hmac,
+        "X-Shopify-Shop-Domain": shop,
+        "X-Shopify-Topic": topic,
+        "X-Shopify-Webhook-Id": webhookId,
+        "X-Shopify-API-Version": "2026-10",
+      },
+      body: bodyStr,
+    });
+  }
+
+  function createActionArgs(request: Request): ActionFunctionArgs {
+    return {
+      request,
+      context: {
+        shopify: mockShopify,
+        sessionStorage: mockSessionStorage,
+        cloudflare: { env: {}, ctx: {} },
+      },
+      params: {},
+      url: new URL(request.url),
+      pattern: new URL(request.url).pathname,
+    };
+  }
 
   describe("webhooks.companies", () => {
     it("returns 401 when HMAC validation fails", async () => {
       const { action } = await import("../webhooks.companies");
-      const hmacError = new Response("Unauthorized", { status: 401 });
-      mockShopify.authenticate.webhook.mockRejectedValue(hmacError);
+      const request = createMockRequest(
+        "https://example.com/webhooks/companies",
+        { admin_graphql_api_id: TEST_GID },
+        "companies/create",
+        { validHmac: false }
+      );
 
-      await expect(
-        action(createActionArgs("https://example.com/webhooks/companies", {}))
-      ).rejects.toEqual(hmacError);
+      try {
+        await action(createActionArgs(request));
+        expect.fail("Expected action to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(401);
+      }
     });
 
     it("enqueues COMPANIES_CREATE and returns 200", async () => {
       const { action } = await import("../webhooks.companies");
-      mockShopify.authenticate.webhook.mockResolvedValue({
-        shop: TEST_SHOP,
-        topic: "COMPANIES_CREATE",
-        payload: { admin_graphql_api_id: TEST_GID },
-        webhookId: TEST_WEBHOOK_ID,
-      });
-
-      const response = await action(
-        createActionArgs("https://example.com/webhooks/companies", {
-          admin_graphql_api_id: TEST_GID,
-        })
+      const request = createMockRequest(
+        "https://example.com/webhooks/companies",
+        { admin_graphql_api_id: TEST_GID },
+        "companies/create"
       );
+
+      const response = await action(createActionArgs(request));
 
       expect(response.status).toBe(200);
       expect(mockSendSyncMessage).toHaveBeenCalledWith(
@@ -115,16 +149,13 @@ describe("S6 Webhook Handlers", () => {
 
     it("enqueues COMPANIES_UPDATE and returns 200", async () => {
       const { action } = await import("../webhooks.companies");
-      mockShopify.authenticate.webhook.mockResolvedValue({
-        shop: TEST_SHOP,
-        topic: "COMPANIES_UPDATE",
-        payload: { admin_graphql_api_id: TEST_GID },
-        webhookId: TEST_WEBHOOK_ID,
-      });
-
-      const response = await action(
-        createActionArgs("https://example.com/webhooks/companies")
+      const request = createMockRequest(
+        "https://example.com/webhooks/companies",
+        { admin_graphql_api_id: TEST_GID },
+        "companies/update"
       );
+
+      const response = await action(createActionArgs(request));
 
       expect(response.status).toBe(200);
       expect(mockSendSyncMessage).toHaveBeenCalledWith(
@@ -135,16 +166,13 @@ describe("S6 Webhook Handlers", () => {
 
     it("enqueues COMPANIES_DELETE and returns 200", async () => {
       const { action } = await import("../webhooks.companies");
-      mockShopify.authenticate.webhook.mockResolvedValue({
-        shop: TEST_SHOP,
-        topic: "COMPANIES_DELETE",
-        payload: { admin_graphql_api_id: TEST_GID },
-        webhookId: TEST_WEBHOOK_ID,
-      });
-
-      const response = await action(
-        createActionArgs("https://example.com/webhooks/companies")
+      const request = createMockRequest(
+        "https://example.com/webhooks/companies",
+        { admin_graphql_api_id: TEST_GID },
+        "companies/delete"
       );
+
+      const response = await action(createActionArgs(request));
 
       expect(response.status).toBe(200);
       expect(mockSendSyncMessage).toHaveBeenCalledWith(
@@ -153,18 +181,29 @@ describe("S6 Webhook Handlers", () => {
       );
     });
 
+    it("returns 200 without enqueue for unexpected topic", async () => {
+      const { action } = await import("../webhooks.companies");
+      const request = createMockRequest(
+        "https://example.com/webhooks/companies",
+        { admin_graphql_api_id: TEST_GID },
+        "orders/create" // Wrong topic for this handler
+      );
+
+      const response = await action(createActionArgs(request));
+
+      expect(response.status).toBe(200);
+      expect(mockSendSyncMessage).not.toHaveBeenCalled();
+    });
+
     it("returns 200 without enqueue when missing GID", async () => {
       const { action } = await import("../webhooks.companies");
-      mockShopify.authenticate.webhook.mockResolvedValue({
-        shop: TEST_SHOP,
-        topic: "COMPANIES_CREATE",
-        payload: {}, // Missing admin_graphql_api_id
-        webhookId: TEST_WEBHOOK_ID,
-      });
-
-      const response = await action(
-        createActionArgs("https://example.com/webhooks/companies")
+      const request = createMockRequest(
+        "https://example.com/webhooks/companies",
+        {}, // Missing admin_graphql_api_id
+        "companies/create"
       );
+
+      const response = await action(createActionArgs(request));
 
       expect(response.status).toBe(200);
       expect(mockSendSyncMessage).not.toHaveBeenCalled();
@@ -174,27 +213,32 @@ describe("S6 Webhook Handlers", () => {
   describe("webhooks.company_locations", () => {
     it("returns 401 when HMAC validation fails", async () => {
       const { action } = await import("../webhooks.company_locations");
-      const hmacError = new Response("Unauthorized", { status: 401 });
-      mockShopify.authenticate.webhook.mockRejectedValue(hmacError);
+      const request = createMockRequest(
+        "https://example.com/webhooks/company_locations",
+        { admin_graphql_api_id: "gid://shopify/CompanyLocation/456" },
+        "company_locations/create",
+        { validHmac: false }
+      );
 
-      await expect(
-        action(createActionArgs("https://example.com/webhooks/company_locations"))
-      ).rejects.toEqual(hmacError);
+      try {
+        await action(createActionArgs(request));
+        expect.fail("Expected action to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(401);
+      }
     });
 
     it("enqueues COMPANY_LOCATIONS_CREATE and returns 200", async () => {
       const { action } = await import("../webhooks.company_locations");
       const locationGid = "gid://shopify/CompanyLocation/456";
-      mockShopify.authenticate.webhook.mockResolvedValue({
-        shop: TEST_SHOP,
-        topic: "COMPANY_LOCATIONS_CREATE",
-        payload: { admin_graphql_api_id: locationGid },
-        webhookId: TEST_WEBHOOK_ID,
-      });
-
-      const response = await action(
-        createActionArgs("https://example.com/webhooks/company_locations")
+      const request = createMockRequest(
+        "https://example.com/webhooks/company_locations",
+        { admin_graphql_api_id: locationGid },
+        "company_locations/create"
       );
+
+      const response = await action(createActionArgs(request));
 
       expect(response.status).toBe(200);
       expect(mockSendSyncMessage).toHaveBeenCalledWith(
@@ -208,16 +252,13 @@ describe("S6 Webhook Handlers", () => {
 
     it("enqueues COMPANY_LOCATIONS_UPDATE and returns 200", async () => {
       const { action } = await import("../webhooks.company_locations");
-      mockShopify.authenticate.webhook.mockResolvedValue({
-        shop: TEST_SHOP,
-        topic: "COMPANY_LOCATIONS_UPDATE",
-        payload: { admin_graphql_api_id: "gid://shopify/CompanyLocation/789" },
-        webhookId: TEST_WEBHOOK_ID,
-      });
-
-      const response = await action(
-        createActionArgs("https://example.com/webhooks/company_locations")
+      const request = createMockRequest(
+        "https://example.com/webhooks/company_locations",
+        { admin_graphql_api_id: "gid://shopify/CompanyLocation/789" },
+        "company_locations/update"
       );
+
+      const response = await action(createActionArgs(request));
 
       expect(response.status).toBe(200);
       expect(mockSendSyncMessage).toHaveBeenCalledWith(
@@ -225,32 +266,51 @@ describe("S6 Webhook Handlers", () => {
         expect.objectContaining({ topic: "COMPANY_LOCATIONS_UPDATE" })
       );
     });
+
+    it("returns 200 without enqueue for unexpected topic", async () => {
+      const { action } = await import("../webhooks.company_locations");
+      const request = createMockRequest(
+        "https://example.com/webhooks/company_locations",
+        { admin_graphql_api_id: "gid://shopify/CompanyLocation/456" },
+        "companies/create" // Wrong topic for this handler
+      );
+
+      const response = await action(createActionArgs(request));
+
+      expect(response.status).toBe(200);
+      expect(mockSendSyncMessage).not.toHaveBeenCalled();
+    });
   });
 
   describe("webhooks.orders", () => {
     it("returns 401 when HMAC validation fails", async () => {
       const { action } = await import("../webhooks.orders");
-      const hmacError = new Response("Unauthorized", { status: 401 });
-      mockShopify.authenticate.webhook.mockRejectedValue(hmacError);
+      const request = createMockRequest(
+        "https://example.com/webhooks/orders",
+        { admin_graphql_api_id: "gid://shopify/Order/1001" },
+        "orders/create",
+        { validHmac: false }
+      );
 
-      await expect(
-        action(createActionArgs("https://example.com/webhooks/orders"))
-      ).rejects.toEqual(hmacError);
+      try {
+        await action(createActionArgs(request));
+        expect.fail("Expected action to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(401);
+      }
     });
 
     it("enqueues ORDERS_CREATE and returns 200", async () => {
       const { action } = await import("../webhooks.orders");
       const orderGid = "gid://shopify/Order/1001";
-      mockShopify.authenticate.webhook.mockResolvedValue({
-        shop: TEST_SHOP,
-        topic: "ORDERS_CREATE",
-        payload: { admin_graphql_api_id: orderGid },
-        webhookId: TEST_WEBHOOK_ID,
-      });
-
-      const response = await action(
-        createActionArgs("https://example.com/webhooks/orders")
+      const request = createMockRequest(
+        "https://example.com/webhooks/orders",
+        { admin_graphql_api_id: orderGid },
+        "orders/create"
       );
+
+      const response = await action(createActionArgs(request));
 
       expect(response.status).toBe(200);
       expect(mockSendSyncMessage).toHaveBeenCalledWith(
@@ -264,16 +324,13 @@ describe("S6 Webhook Handlers", () => {
 
     it("enqueues ORDERS_UPDATED and returns 200", async () => {
       const { action } = await import("../webhooks.orders");
-      mockShopify.authenticate.webhook.mockResolvedValue({
-        shop: TEST_SHOP,
-        topic: "ORDERS_UPDATED",
-        payload: { admin_graphql_api_id: "gid://shopify/Order/1002" },
-        webhookId: TEST_WEBHOOK_ID,
-      });
-
-      const response = await action(
-        createActionArgs("https://example.com/webhooks/orders")
+      const request = createMockRequest(
+        "https://example.com/webhooks/orders",
+        { admin_graphql_api_id: "gid://shopify/Order/1002" },
+        "orders/updated"
       );
+
+      const response = await action(createActionArgs(request));
 
       expect(response.status).toBe(200);
       expect(mockSendSyncMessage).toHaveBeenCalledWith(
@@ -284,16 +341,13 @@ describe("S6 Webhook Handlers", () => {
 
     it("enqueues ORDERS_CANCELLED and returns 200", async () => {
       const { action } = await import("../webhooks.orders");
-      mockShopify.authenticate.webhook.mockResolvedValue({
-        shop: TEST_SHOP,
-        topic: "ORDERS_CANCELLED",
-        payload: { admin_graphql_api_id: "gid://shopify/Order/1003" },
-        webhookId: TEST_WEBHOOK_ID,
-      });
-
-      const response = await action(
-        createActionArgs("https://example.com/webhooks/orders")
+      const request = createMockRequest(
+        "https://example.com/webhooks/orders",
+        { admin_graphql_api_id: "gid://shopify/Order/1003" },
+        "orders/cancelled"
       );
+
+      const response = await action(createActionArgs(request));
 
       expect(response.status).toBe(200);
       expect(mockSendSyncMessage).toHaveBeenCalledWith(
@@ -304,22 +358,33 @@ describe("S6 Webhook Handlers", () => {
 
     it("enqueues ORDERS_PAID and returns 200", async () => {
       const { action } = await import("../webhooks.orders");
-      mockShopify.authenticate.webhook.mockResolvedValue({
-        shop: TEST_SHOP,
-        topic: "ORDERS_PAID",
-        payload: { admin_graphql_api_id: "gid://shopify/Order/1004" },
-        webhookId: TEST_WEBHOOK_ID,
-      });
-
-      const response = await action(
-        createActionArgs("https://example.com/webhooks/orders")
+      const request = createMockRequest(
+        "https://example.com/webhooks/orders",
+        { admin_graphql_api_id: "gid://shopify/Order/1004" },
+        "orders/paid"
       );
+
+      const response = await action(createActionArgs(request));
 
       expect(response.status).toBe(200);
       expect(mockSendSyncMessage).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({ topic: "ORDERS_PAID" })
       );
+    });
+
+    it("returns 200 without enqueue for unexpected topic", async () => {
+      const { action } = await import("../webhooks.orders");
+      const request = createMockRequest(
+        "https://example.com/webhooks/orders",
+        { admin_graphql_api_id: "gid://shopify/Order/1001" },
+        "companies/create" // Wrong topic for this handler
+      );
+
+      const response = await action(createActionArgs(request));
+
+      expect(response.status).toBe(200);
+      expect(mockSendSyncMessage).not.toHaveBeenCalled();
     });
   });
 
@@ -329,8 +394,13 @@ describe("S6 Webhook Handlers", () => {
       const hmacError = new Response("Unauthorized", { status: 401 });
       mockShopify.authenticate.webhook.mockRejectedValue(hmacError);
 
+      const request = new Request(
+        "https://example.com/webhooks/bulk_operations/finish",
+        { method: "POST" }
+      );
+
       await expect(
-        action(createActionArgs("https://example.com/webhooks/bulk_operations/finish"))
+        action(createActionArgs(request))
       ).rejects.toEqual(hmacError);
     });
 
@@ -348,9 +418,12 @@ describe("S6 Webhook Handlers", () => {
         webhookId: TEST_WEBHOOK_ID,
       });
 
-      const response = await action(
-        createActionArgs("https://example.com/webhooks/bulk_operations/finish")
+      const request = new Request(
+        "https://example.com/webhooks/bulk_operations/finish",
+        { method: "POST" }
       );
+
+      const response = await action(createActionArgs(request));
 
       expect(response.status).toBe(200);
       expect(mockSendBulkMessage).toHaveBeenCalledWith(
@@ -374,9 +447,12 @@ describe("S6 Webhook Handlers", () => {
         webhookId: TEST_WEBHOOK_ID,
       });
 
-      const response = await action(
-        createActionArgs("https://example.com/webhooks/bulk_operations/finish")
+      const request = new Request(
+        "https://example.com/webhooks/bulk_operations/finish",
+        { method: "POST" }
       );
+
+      const response = await action(createActionArgs(request));
 
       expect(response.status).toBe(200);
       expect(mockSendBulkMessage).not.toHaveBeenCalled();
@@ -391,9 +467,12 @@ describe("S6 Webhook Handlers", () => {
         webhookId: TEST_WEBHOOK_ID,
       });
 
-      const response = await action(
-        createActionArgs("https://example.com/webhooks/bulk_operations/finish")
+      const request = new Request(
+        "https://example.com/webhooks/bulk_operations/finish",
+        { method: "POST" }
       );
+
+      const response = await action(createActionArgs(request));
 
       expect(response.status).toBe(200);
       expect(mockSendBulkMessage).not.toHaveBeenCalled();
