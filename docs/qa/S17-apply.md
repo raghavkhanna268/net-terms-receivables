@@ -51,7 +51,8 @@ This plan verifies that:
 | S17-01 | Apply M1 (full match) to INV-001. | `Invoice.outstanding=₹0`, `Invoice.status=paid`. `orderMarkAsPaid` called for Order 9001. `Match.state=pushed`. |
 | S17-02 | Verify `orderMarkAsPaid` mutation payload. | Contains `id=gid://shopify/Order/9001`. Optional: `reason` or `note` field if API supports. |
 | S17-03 | Shopify returns success for `orderMarkAsPaid`. | Transaction commits. DB and Shopify are consistent. |
-| S17-04 | Shopify returns error for `orderMarkAsPaid` (e.g., order already paid). | Transaction rolls back. `Invoice.outstanding` unchanged. `Match.state` stays `confirmed`. Error logged. |
+| S17-04 | `orderMarkAsPaid` returns a userError because the order is **already paid** in Shopify (for example the merchant marked it paid by hand, or a retry after a lost response). | Treat as **idempotent success, not a failure**. Mark the invoice paid: `Invoice.outstanding = 0` and `status = 'paid'`. `Match.state` moves to the applied/pushed state. Write one `AuditEvent` (actor, matchId, invoiceId, and a reason code such as `ALREADY_PAID_IN_SHOPIFY`, with no PII). The apply is **not** undone or rolled back. Re-running produces no second AuditEvent and no double reduction. |
+| S17-04b | `orderMarkAsPaid` returns any **other** error (for example ACCESS_DENIED, order not found, throttled after retries, or 5xx). | Transaction rolls back. `Invoice.outstanding` is unchanged. `Match.state` stays `confirmed`. The error is logged with codes and GIDs only. |
 | S17-05 | Shopify returns error but partial DB write committed (split-brain). | **Must not happen.** Verify DB write is inside a transaction that commits only after Shopify success, OR apply is retryable/idempotent. |
 
 ### B. Partial apply
