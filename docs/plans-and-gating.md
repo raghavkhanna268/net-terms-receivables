@@ -64,14 +64,32 @@ Plans are cached in Postgres (`Shop.plan_key`, `Shop.plan_cached_at`) with a ~6 
 
 ### Background Refresh Wiring
 
-The background refresh callback is wired per-request in `workers/app.ts`:
+The background refresh uses AsyncLocalStorage (ALS) to access `ctx.waitUntil()` per-request.
+This is wired in `workers/app.ts`:
 
 ```typescript
-setBackgroundRefreshCallback((promise) => ctx.waitUntil(promise));
+// In the fetch handler:
+return requestContext.run({ getSql, waitUntil: (p) => ctx.waitUntil(p) }, async () => {
+  return requestHandler(request, { ... });
+});
 ```
 
-This allows the plan service to trigger stale cache refreshes without blocking the request.
-The callback is cleared after each request to avoid cross-request leaks in long-lived isolates.
+The plan service retrieves `waitUntil` from the ALS context:
+
+```typescript
+// In plan.server.ts:
+import { getRequestWaitUntil } from "~/lib/request-context.server";
+
+const waitUntil = getRequestWaitUntil();
+if (waitUntil) {
+  waitUntil(refreshCacheInBackground());
+}
+```
+
+This approach:
+- Isolates each request's background tasks (no cross-request leaks)
+- Works correctly with Cloudflare Workers' per-request lifecycle
+- Avoids module-global state that could persist across requests in long-lived isolates
 
 ### Fail-to-Cached Design
 

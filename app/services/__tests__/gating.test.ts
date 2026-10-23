@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
 import type { Sql } from "~/lib/db-light.server";
 
 /**
@@ -390,6 +390,105 @@ describe("Gating Service", () => {
     });
   });
 
+  describe("enforceImportLimit (S21 item 4 wiring)", () => {
+    it("succeeds when import is allowed", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.resetModules();
+      const { enforceImportLimit } = await import("../gating.server");
+      
+      // Starter plan (unlimited imports)
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "starter",
+        subscription_id: "sub-123",
+        subscription_name: "Starter",
+        is_test: false,
+        plan_cached_at: new Date(),
+      }]);
+      
+      // Should not throw
+      await expect(enforceImportLimit(mockSql as unknown as Sql, TEST_SHOP_ID)).resolves.toBeUndefined();
+    });
+
+    it("throws UpgradeRequiredError when import limit exceeded", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.resetModules();
+      const { enforceImportLimit, UpgradeRequiredError } = await import("../gating.server");
+      
+      // Free plan (1 import/month limit)
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "free",
+        subscription_id: null,
+        subscription_name: null,
+        is_test: false,
+        plan_cached_at: new Date(),
+      }]);
+      mockSql.setMockResult("import_count", [{ count: "1" }]); // Already at limit
+      
+      await expect(enforceImportLimit(mockSql as unknown as Sql, TEST_SHOP_ID))
+        .rejects.toThrow(UpgradeRequiredError);
+      
+      // Verify error details
+      try {
+        await enforceImportLimit(mockSql as unknown as Sql, TEST_SHOP_ID);
+      } catch (error) {
+        expect(error).toBeInstanceOf(UpgradeRequiredError);
+        expect((error as InstanceType<typeof UpgradeRequiredError>).limitType).toBe("importsPerMonth");
+        expect((error as InstanceType<typeof UpgradeRequiredError>).currentUsage).toBe(1);
+        expect((error as InstanceType<typeof UpgradeRequiredError>).limit).toBe(1);
+      }
+    });
+
+    it("succeeds when gating is OFF (no enforcement)", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+      vi.resetModules();
+      const { enforceImportLimit } = await import("../gating.server");
+      
+      // Should not throw even with free plan and imports at limit
+      await expect(enforceImportLimit(mockSql as unknown as Sql, TEST_SHOP_ID)).resolves.toBeUndefined();
+    });
+  });
+
+  describe("enforceCompanyLimit", () => {
+    it("succeeds when under limit", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.resetModules();
+      const { enforceCompanyLimit } = await import("../gating.server");
+      
+      // Free plan with 2 active accounts (limit 3)
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "free",
+        subscription_id: null,
+        subscription_name: null,
+        is_test: false,
+        plan_cached_at: new Date(),
+      }]);
+      // checkCompanyLimit uses gated_at IS NULL, so set active_account_count
+      mockSql.setMockResult("active_account_count", [{ count: "2" }]);
+      
+      await expect(enforceCompanyLimit(mockSql as unknown as Sql, TEST_SHOP_ID)).resolves.toBeUndefined();
+    });
+
+    it("throws UpgradeRequiredError when limit exceeded", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.resetModules();
+      const { enforceCompanyLimit, UpgradeRequiredError } = await import("../gating.server");
+      
+      // Free plan at limit (3 active accounts, limit is 3)
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "free",
+        subscription_id: null,
+        subscription_name: null,
+        is_test: false,
+        plan_cached_at: new Date(),
+      }]);
+      // checkCompanyLimit uses gated_at IS NULL, so set active_account_count
+      mockSql.setMockResult("active_account_count", [{ count: "3" }]);
+      
+      await expect(enforceCompanyLimit(mockSql as unknown as Sql, TEST_SHOP_ID))
+        .rejects.toThrow(UpgradeRequiredError);
+    });
+  });
+
   describe("checkFeature", () => {
     it("returns true for features in plan", async () => {
       const { checkFeature } = await import("../gating.server");
@@ -599,5 +698,98 @@ describe("Gating Service", () => {
       expect(stats.companies.current).toBe(3);
       expect(stats.companies.limit).toBe(3);
     });
+  });
+});
+
+/**
+ * DB-backed tests for activeAccountFragment.
+ * These tests verify that the SQL fragment actually excludes gated accounts.
+ */
+import postgres from "postgres";
+import { sqlOptions } from "~/lib/db-light.server";
+
+const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
+const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
+
+describeWithDb("activeAccountFragment DB integration", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-gating";
+  const TEST_SHOP_ID = `shop-gating-${TEST_SUFFIX}`;
+  const TEST_SHOP_DOMAIN = `gating-test-${TEST_SUFFIX}.myshopify.com`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    // Create test shop
+    await sql`
+      INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, NOW(), NOW())
+    `;
+
+    // Create test accounts: 2 active (gated_at IS NULL), 2 gated (gated_at IS NOT NULL)
+    // COMPANY kind requires both companyId and companyLocationId (BuyerAccount_kind_consistency constraint)
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, gated_at, "createdAt", "updatedAt")
+      VALUES 
+        (${"acc-active-1-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, 'COMPANY', ${"co-1-" + TEST_SUFFIX}, ${"loc-1-" + TEST_SUFFIX}, 'Active Account 1', NULL, NOW(), NOW()),
+        (${"acc-active-2-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, 'COMPANY', ${"co-2-" + TEST_SUFFIX}, ${"loc-2-" + TEST_SUFFIX}, 'Active Account 2', NULL, NOW(), NOW()),
+        (${"acc-gated-1-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, 'COMPANY', ${"co-3-" + TEST_SUFFIX}, ${"loc-3-" + TEST_SUFFIX}, 'Gated Account 1', NOW(), NOW(), NOW()),
+        (${"acc-gated-2-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, 'COMPANY', ${"co-4-" + TEST_SUFFIX}, ${"loc-4-" + TEST_SUFFIX}, 'Gated Account 2', NOW(), NOW(), NOW())
+    `;
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+    await sql.end();
+  });
+
+  it("returns all accounts when gating is OFF", async () => {
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+    vi.resetModules();
+    const { activeAccountFragment } = await import("../gating.server");
+
+    const accounts = await sql<{ id: string }[]>`
+      SELECT id FROM "BuyerAccount"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+        AND ${activeAccountFragment(sql)}
+    `;
+
+    // When gating is OFF, all 4 accounts should be returned
+    expect(accounts.length).toBe(4);
+  });
+
+  it("excludes gated accounts when gating is ON", async () => {
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+    vi.resetModules();
+    const { activeAccountFragment } = await import("../gating.server");
+
+    const accounts = await sql<{ id: string; name: string }[]>`
+      SELECT id, name FROM "BuyerAccount"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+        AND ${activeAccountFragment(sql)}
+    `;
+
+    // When gating is ON, only 2 active accounts should be returned
+    expect(accounts.length).toBe(2);
+    expect(accounts.every(a => a.name.includes("Active"))).toBe(true);
+  });
+
+  it("isAccountActive returns correct values with DB data", async () => {
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+    vi.resetModules();
+    const { isAccountActive } = await import("../gating.server");
+
+    // Fetch accounts with gated_at
+    const accounts = await sql<{ id: string; gated_at: Date | null }[]>`
+      SELECT id, gated_at FROM "BuyerAccount"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+    `;
+
+    const activeAccounts = accounts.filter(a => isAccountActive(a.gated_at));
+    const gatedAccounts = accounts.filter(a => !isAccountActive(a.gated_at));
+
+    expect(activeAccounts.length).toBe(2);
+    expect(gatedAccounts.length).toBe(2);
   });
 });

@@ -218,9 +218,11 @@ export async function bulkUpsertBuyerAccounts(
   let totalCount = 0;
 
   for (const [shopId, shopAccounts] of accountsByShop) {
-    // S21: Per-batch limit check - determine how many new accounts we can create
+    // S21: Per-batch limit check - only when gating is enforced
+    // When gating is OFF, we skip all gating-related queries for performance
     let slotsAvailable = Infinity;
     let shouldGateAll = false;
+    let existingSet = new Set<string>();
 
     if (isGatingEnforced()) {
       const limitCheck = await checkCompanyLimit(sql, shopId);
@@ -228,16 +230,19 @@ export async function bulkUpsertBuyerAccounts(
         slotsAvailable = Math.max(0, limitCheck.limit - limitCheck.currentUsage);
         shouldGateAll = slotsAvailable === 0;
       }
-    }
 
-    // Check which accounts already exist (updates don't consume slots)
-    // Note: use IN ${sql(ids)} instead of ANY(${ids}) for fetch_types:false compatibility
-    const locationIds = shopAccounts.map(a => a.companyLocationId);
-    const existingAccounts = await sql<{ companyLocationId: string }[]>`
-      SELECT "companyLocationId" FROM "BuyerAccount"
-      WHERE "shopId" = ${shopId} AND "companyLocationId" IN ${sql(locationIds)}
-    `;
-    const existingSet = new Set(existingAccounts.map(e => e.companyLocationId));
+      // Check which accounts already exist (updates don't consume slots)
+      // Only needed when gating is ON to distinguish new accounts from updates
+      // Note: use IN ${sql(ids)} instead of ANY(${ids}) for fetch_types:false compatibility
+      if (shopAccounts.length > 0) {
+        const locationIds = shopAccounts.map(a => a.companyLocationId);
+        const existingAccounts = await sql<{ companyLocationId: string }[]>`
+          SELECT "companyLocationId" FROM "BuyerAccount"
+          WHERE "shopId" = ${shopId} AND "companyLocationId" IN ${sql(locationIds)}
+        `;
+        existingSet = new Set(existingAccounts.map(e => e.companyLocationId));
+      }
+    }
 
     // Count new accounts to determine gating
     let newAccountsProcessed = 0;
