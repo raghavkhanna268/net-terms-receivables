@@ -3,9 +3,22 @@ import {
   verifyWebhook,
   normalizeWebhookTopic,
 } from "~/lib/webhook-verify.server";
+import { getRequestSql } from "~/lib/request-context.server";
+import { markShopUninstalled } from "~/services/compliance";
 
 /**
  * App uninstalled webhook handler.
+ *
+ * When a merchant uninstalls the app:
+ * 1. Delete all sessions immediately (required for logout)
+ * 2. Mark the shop as uninstalled (sets uninstalledAt timestamp)
+ *
+ * Full data deletion happens later on shop/redact webhook.
+ * Per Shopify docs, shop/redact is sent 48 hours after uninstall:
+ * https://shopify.dev/docs/apps/build/privacy-law-compliance
+ *
+ * This gives merchants a grace period if they reinstall, and ensures
+ * we meet GDPR/CCPA requirements for data deletion timing.
  *
  * OPTIMIZATION: Uses lightweight verifyWebhook() instead of authenticate.webhook()
  * to avoid unnecessary session loading. This webhook only needs to DELETE sessions,
@@ -32,17 +45,26 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     return new Response();
   }
 
-  // Delete ALL sessions for this shop (DPDP compliance).
-  // Uses deleteAllForShop which calls deleteMany internally, avoiding
-  // the 25-session limit of findSessionsByShop.
-  // Idempotent: returns count=0 if no sessions exist (already uninstalled).
   try {
     const { sessionStorage } = context;
     const count = await sessionStorage.deleteAllForShop(shop);
     console.log(`Deleted ${count} session(s) for ${shop}`);
   } catch (error) {
-    // Log but don't fail - the shop is already uninstalled
     console.error(`Error deleting sessions for ${shop}:`, error);
+  }
+
+  try {
+    const sql = getRequestSql();
+    const marked = await markShopUninstalled(sql, shop);
+    if (marked) {
+      console.log(`[uninstalled] Marked shop ${shop} as uninstalled`);
+    } else {
+      console.log(
+        `[uninstalled] Shop ${shop} not found in database (may not have completed install)`
+      );
+    }
+  } catch (error) {
+    console.error(`Error marking shop ${shop} as uninstalled:`, error);
   }
 
   return new Response();

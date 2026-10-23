@@ -23,7 +23,7 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 
 | Data Category | Fields | Purpose | Source |
 |---------------|--------|---------|--------|
-| Shop Configuration | Domain, currency, timezone, default terms | App functionality | Shopify OAuth / Admin API |
+| Shop Configuration | Domain, currency, timezone, default terms, uninstalled_at | App functionality | Shopify OAuth / Admin API |
 | OAuth Sessions | Shop domain, access token, scopes, session state | Authentication | Shopify OAuth |
 | Online Session User Info | First name, last name, email (staff user only) | Session context for logged-in staff | Shopify OAuth (online sessions) |
 
@@ -37,39 +37,40 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | Invoice | Order/draft order GID, invoice name, amounts, due date, status | Receivables tracking | Synced from Shopify orders |
 | PayerAlias | Normalized payer key | Payment matching | Derived from bank statements |
 
-**Protected Customer Data (2026-10-23):** Level 1 + Name + Email fields approved. No phone, no address.
-
-Customer PII stored in `s8_tagged_customers`:
-- Customer GID (Shopify identifier)
-- Customer tags (for net-terms eligibility matching)
-- Email and display name (`CUSTOMER_PII_FIELDS=1` enabled in production)
-- **Never stored:** Phone, addresses, firstName, lastName, defaultAddress (blocked in code, regardless of PCD level)
-
-**Uses for PII fields:**
-- S8: Labels in buyer account UI
-- S16: Payment matching against bank statement payer names
-- S18: Payment reminder emails
-
-**Merged (S6/S8):** The app syncs:
-- Company and CompanyLocation data (B2B accounts)
-- Order data with payment terms for Invoice creation
-- Tagged customers with email/displayName for payment matching
-
-### 2.3 Bank Statement Data
+### 2.3 Tagged Customer Data (S8)
 
 | Data Category | Fields | Purpose | Retention |
 |---------------|--------|---------|-----------|
-| Payment | Value date, amount, rail (NEFT/RTGS/IMPS/UPI), UTR | Payment reconciliation | **TBD** |
-| Payment (PII) | Payer name/text, narration | Payment matching | **TBD** — may contain payer names and identifiers |
+| s8_tagged_customers | Customer GID, tags, tag_active, email*, displayName* | Tag-based buyer accounts | Until customers/redact or shop/redact |
+| s8_draft_orders | Draft order GID, buyer account ref, total, status | Pending credit exposure | Until draft completed/deleted |
 
-**Retention Policy:** **TBD** — A retention policy for `Payment.narration` and `Payment.payerText` fields (which may contain personal data from bank statements) is pending.
+*Email and displayName are **gated** by `CUSTOMER_PII_FIELDS=1` env var, which requires Shopify Protected Customer Data approval (Level 1 + Email/Name fields). Always NULL until approval.
 
-### 2.4 Operational Data
+**PII Minimisation (S22):** When a tagged customer becomes `tag_active=false` and has no open invoices, their email and displayName are automatically nulled.
+
+### 2.4 Bank Statement Data
+
+| Data Category | Fields | Purpose | Retention |
+|---------------|--------|---------|-----------|
+| Payment | Value date, amount, rail (NEFT/RTGS/IMPS/UPI), UTR | Payment reconciliation | Until shop/redact |
+| Payment (PII) | Payer name/text, narration | Payment matching | Until shop/redact or customers/redact |
+
+**Note:** `Payment.narration` and `Payment.payerText` may contain personal data from bank statements. These fields are anonymized during customers/redact if they contain the customer's identifier.
+
+### 2.5 Data Request Records (S22)
+
+| Data Category | Fields | Purpose | Retention |
+|---------------|--------|---------|-----------|
+| s22_data_requests | Shop ID, customer GID, request ID, status, export JSON | GDPR/CCPA compliance | Until shop/redact |
+
+### 2.6 Operational Data
 
 | Data Category | Fields | Purpose |
 |---------------|--------|---------|
 | Audit Events | Actor, action type, timestamp, event data | Compliance and debugging |
 | Reminder Logs | Rule ID, invoice ID, sent timestamp | Prevent duplicate reminders |
+| s6_processed_webhooks | Webhook ID, shop, topic, resource GID | Idempotent webhook processing |
+| s6_dead_letter | Shop, queue, message, error | Failed message tracking |
 
 ---
 
@@ -77,10 +78,11 @@ Customer PII stored in `s8_tagged_customers`:
 
 | Purpose | Legal Basis |
 |---------|-------------|
-| Provide core app functionality (invoicing, credit management, payment matching) | **TBD** — Contract performance / Legitimate interest |
-| Send payment reminders to buyers | **TBD** — Contract performance / Consent |
-| Error monitoring and debugging | **TBD** — Legitimate interest |
-| Comply with Shopify App Store requirements | **TBD** — Legal obligation |
+| Provide core app functionality (invoicing, credit management, payment matching) | Contract performance |
+| Send payment reminders to buyers | Contract performance |
+| Error monitoring and debugging | Legitimate interest |
+| Comply with Shopify App Store requirements | Legal obligation |
+| Respond to GDPR/CCPA data requests | Legal obligation |
 
 ---
 
@@ -94,19 +96,15 @@ Customer PII stored in `s8_tagged_customers`:
 | Database | Supabase Postgres | AWS ap-south-1 (Mumbai, India) |
 | Database Connection | Cloudflare Hyperdrive | Pooled connection to Supabase |
 
-### 4.2 Security Measures In Place
+### 4.2 Security Measures
 
-- **HMAC-SHA256 Webhook Verification:** All Shopify webhooks are verified using HMAC-SHA256 with constant-time comparison (see `app/lib/webhook-verify.server.ts`)
-- **TLS Encryption:** All data in transit uses TLS (Cloudflare and Supabase enforce HTTPS/TLS)
+- **HMAC-SHA256 Webhook Verification:** All Shopify webhooks are verified using HMAC-SHA256 with constant-time comparison
+- **Payload Shop Verification:** Compliance webhooks verify payload `shop_domain` matches header shop to prevent forged deletions
+- **TLS Encryption:** All data in transit uses TLS
 - **OAuth 2.0:** Authentication with Shopify uses OAuth 2.0 with secure token storage
 - **Session Isolation:** Sessions are isolated per shop with proper scoping
 - **Input Validation:** Shop domain format validation on all webhook handlers
-
-### 4.3 Planned Security Measures
-
-- **Sentry Error Monitoring:** Package installed (`@sentry/cloudflare`), DSN configuration pending (no-op without DSN)
-- **⚠️ Pending:** Supabase keep-alive cron (S10) to prevent Free tier pausing
-- **⚠️ Pending:** Supabase backup configuration
+- **No PII in Logs:** Compliance webhook handlers do not log customer identifiers or personal data
 
 ---
 
@@ -116,8 +114,13 @@ Customer PII stored in `s8_tagged_customers`:
 |--------------|---------|----------|-----|
 | Cloudflare, Inc. | Application hosting (Workers), connection pooling (Hyperdrive) | Global (Worker placed ap-south-1) | **TBD** |
 | Supabase, Inc. | Database hosting (Postgres) | AWS ap-south-1 (Mumbai) | **TBD** |
-| Resend, Inc. | Email delivery (payment reminders) | **TBD** | **TBD** — Not wired yet |
-| Sentry (Functional Software, Inc.) | Error monitoring | **TBD** | **TBD** — Planned, not wired yet |
+| Resend, Inc. | Email delivery (data request notifications, payment reminders) | US | **TBD** |
+
+**Resend data handling:**
+- Data request notification emails contain **no customer PII** — only a notice and download link
+- Shop owner email is fetched at send time from Shopify Admin API and passed directly to Resend
+- Shop owner email is **never stored** in our database or logged
+- Resend setup (secrets) is handled in S18; S22 only uses the API if configured
 
 ---
 
@@ -127,53 +130,87 @@ Customer PII stored in `s8_tagged_customers`:
 |---------------|------------------|------------------|
 | OAuth Sessions | Until logout, expiry, or uninstall | `app/uninstalled` webhook or session expiry |
 | Shop and Account Data | Until 48 hours after uninstall | `shop/redact` webhook (sent by Shopify 48h after uninstall) |
-| Invoices and Payments | **TBD** | **TBD** |
-| Audit Events | **TBD** | **TBD** |
-| Payment narration/payerText (raw bank data) | **TBD** | **TBD** |
+| Tagged Customer Data | Until customers/redact or shop/redact | Compliance webhooks |
+| Invoices | Retained for legal/tax compliance | Anonymized on customers/redact |
+| Payments | Until shop/redact | Anonymized on customers/redact if customer-related |
+| Data Request Records | Until shop/redact | Automatic cascade |
+| Audit Events | Until shop/redact | Automatic cascade |
 
 ---
 
-## 7. Data Deletion and GDPR Webhooks
+## 7. GDPR/CCPA Compliance Webhooks (S22)
 
-The app handles Shopify's mandatory compliance webhooks:
+The app handles Shopify's mandatory compliance webhooks with full data purge and export capabilities:
 
 ### 7.1 `app/uninstalled`
 
 When a merchant uninstalls the app:
-- All OAuth sessions for the shop are deleted (`Session` table)
-- Shop configuration and business data (accounts, invoices, payments) remain until `shop/redact`
-- **Verified:** Handler in `app/routes/webhooks.app.uninstalled.tsx`
+1. All OAuth sessions for the shop are **immediately deleted** (`Session` table)
+2. The shop is marked as uninstalled (`Shop.uninstalledAt` timestamp)
+3. Shop configuration and business data remain until `shop/redact`
+
+**Handler:** `app/routes/webhooks.app.uninstalled.tsx`
+
+**Timing note:** Per [Shopify docs](https://shopify.dev/docs/apps/build/privacy-law-compliance), `shop/redact` is sent 48 hours after uninstall. This grace period allows merchants to reinstall without data loss.
 
 ### 7.2 `customers/data_request`
 
-The customers/data_request webhook is verified (HMAC plus the signed shop_domain) and acknowledged with HTTP 200.
+When a customer requests their data:
+1. **Verify** payload `shop_domain` matches header shop (returns 401 on mismatch)
+2. **Look up** all customer data scoped to that shop:
+   - `s8_tagged_customers`: GID, tags, tag_active, email, displayName
+   - `s8_draft_orders`: Draft orders linked to customer's buyer account
+   - `BuyerAccount`: Account details (kind=TAGGED_CUSTOMER)
+   - `Invoice`: Invoice history linked to buyer account
+3. **Generate** JSON export with all found data
+4. **Persist** `s22_data_requests` record with status and export data
+5. **Notify** shop owner via email (if configured)
+6. **Return** 200 (export available for merchant download)
 
-**Data stored for a customer (s8_tagged_customers):**
-- `customer_id`: Shopify customer GID
-- `tags`: Array of customer tags
-- `email`: Customer email (when CUSTOMER_PII_FIELDS=1)
-- `display_name`: Customer display name (when CUSTOMER_PII_FIELDS=1)
-- `tag_active`: Whether customer currently has a matching tag
-- `tag_deactivated_at`: When the tag was removed (if applicable)
+**Data delivery:**
+- **Primary:** In-admin download via `/app/data-requests` route
+- **Notification:** Email to shop owner via Resend API (gated on `RESEND_API_KEY` and `RESEND_FROM` env vars)
 
-**Related data (s8_draft_orders):**
-- Draft orders linked to the customer's BuyerAccount (shop_id, draft_order_id, buyer_account_id, name, total, has_payment_terms, status)
+**Email notification details:**
+- Email contains ONLY a notice and link to the in-admin download page
+- **NO customer PII** is included in the email (no GID, email, name, or tags)
+- Shop owner email is fetched via Admin API (`shop { email contactEmail }`) at send time and **never stored or logged**
+- If `RESEND_API_KEY` or `RESEND_FROM` is not set, email is skipped and logged as `data_request_email_skipped`
+- Resend API failures do not fail the webhook (still returns 200, logs error, export still available)
 
-**Data export:** Automated data_request fulfilment is being implemented in S22 (#44). The webhook currently acknowledges receipt but does not return data.
+**Handler:** `app/routes/webhooks.compliance.tsx`
 
 ### 7.3 `customers/redact`
 
-When a customer must be deleted (GDPR/CCPA request):
-- Deletes the `s8_tagged_customers` row matching (shop_id, customer_id), which includes email and displayName
-- Deletes `s8_draft_orders` rows matching (shop_id, buyer_account_id) where buyer_account_id is linked to the customer via BuyerAccount(shopId, customerId)
-- **Pending:** Payment.narration/payerText redaction for matched payments
+When a customer must be deleted (GDPR/CCPA erasure request):
+1. **Verify** payload `shop_domain` matches header shop (returns 401 on mismatch)
+2. **Delete** `s8_tagged_customers` row for the customer
+3. **Delete** `s8_draft_orders` linked to customer's buyer account
+4. **Anonymize** `BuyerAccount`:
+   - Set `name` to "Redacted Customer"
+   - Append timestamp to `customerId` to prevent FK conflicts
+5. **Anonymize** `Payment` fields (`payerText`, `narration`) if they contain customer identifier
+6. **Preserve** `Invoice` records for legal/tax compliance (updated timestamp only)
+
+**Legal retention reasoning:** Invoices must be retained for tax compliance (typically 7+ years in India). The invoice itself is a business record; only customer PII is anonymized.
+
+**Handler:** `app/routes/webhooks.compliance.tsx`
 
 ### 7.4 `shop/redact`
 
-When 48 hours have passed after uninstall and shop data must be fully purged:
-- All OAuth sessions for the shop are deleted
-- All Shop-related data cascades on delete (Shop → BuyerAccount, Invoice, Payment, etc.)
-- **Verified:** Handler in `app/routes/webhooks.compliance.tsx`
+When 48 hours have passed after uninstall:
+1. **Verify** payload `shop_domain` matches header shop (returns 401 on mismatch)
+2. **Delete** all OAuth sessions for the shop
+3. **Delete** `Shop` row — **all shop data cascades via ON DELETE CASCADE FKs**:
+   - `AccountSource`, `BuyerAccount`, `BankImport`, `ReminderRule`, `AuditEvent`
+   - `Invoice`, `Payment`, `Match`, `ReminderLog` (direct Shop FKs)
+   - `s8_tagged_customers`, `s8_draft_orders` (S22 FKs)
+   - `s22_data_requests` (S22 FK)
+   - `s6_dead_letter` (shop-scoped messages)
+
+**pgmq messages:** Cannot be purged per-shop (documented limitation). Messages for deleted shops are safely ignored by the drain processor.
+
+**Handler:** `app/routes/webhooks.compliance.tsx`
 
 ---
 
@@ -183,11 +220,11 @@ Merchants and their customers have the following rights:
 
 | Right | How to Exercise |
 |-------|-----------------|
-| Access | Contact **TBD** |
-| Rectification | Contact **TBD** |
-| Erasure | Uninstall the app, or contact **TBD** |
-| Portability | Contact **TBD** |
-| Objection | Contact **TBD** |
+| Access | Customers: via Shopify's data request flow → merchants download from `/app/data-requests`. Merchants: contact support. |
+| Rectification | Contact support |
+| Erasure | Customers: via Shopify's erasure request flow. Merchants: uninstall the app. |
+| Portability | Download via data request export (JSON format) |
+| Objection | Contact support |
 
 ---
 
@@ -211,12 +248,40 @@ For privacy inquiries:
 
 ---
 
-## Appendix: Shopify OAuth Scopes
+## Appendix A: Shopify OAuth Scopes
 
-**Current scopes:** `read_companies`, `read_orders`, `read_payment_terms`, `read_customers`, `read_draft_orders`, `write_companies`, `write_customers`, `write_orders`, `write_validations`, `write_payment_customizations`, `write_merchant_managed_fulfillment_orders`
+**Current scopes:** `read_companies`, `read_orders`, `read_payment_terms`, `read_customers`, `read_draft_orders`
 
-**Protected Customer Data (2026-10-23):** Level 1 + Name + Email approved. No phone, no address.
+**Protected Customer Data:** The `read_customers` scope requires Shopify's Protected Customer Data (PCD) approval form. See launch checklist.
 
 ---
 
-*This privacy policy draft is generated from code inspection. All **TBD** items require product/legal decisions before publication.*
+## Appendix B: Launch Checklist
+
+### Pre-Launch
+
+- [ ] Complete Shopify Protected Customer Data (PCD) approval form
+- [ ] Fill in **TBD** sections with actual company details
+- [ ] Set up DPAs with Cloudflare and Supabase
+- [ ] Configure data retention policies for audit events
+- [ ] Decide on email delivery for data requests (currently in-admin only)
+- [ ] Verify CUSTOMER_PII_FIELDS flag is off in production until PCD approval
+
+### Technical Verification
+
+- [ ] Run S22 migration on production database
+- [ ] Verify FK constraints are in place (see `s22-compliance.test.ts`)
+- [ ] Test all compliance webhooks with Shopify's compliance test tool
+- [ ] Verify no PII appears in application logs
+- [ ] Confirm pgmq message handling for deleted shops
+
+### Post-Launch Monitoring
+
+- [ ] Monitor compliance webhook success rates
+- [ ] Review data request exports for completeness
+- [ ] Set up alerts for failed shop/redact operations
+- [ ] Periodic audit of data retention compliance
+
+---
+
+*This privacy policy reflects the implemented S22 compliance code. All **TBD** items require product/legal decisions before publication.*

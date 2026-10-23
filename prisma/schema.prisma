@@ -128,22 +128,25 @@ model Session {
 /// Merchant shop configuration
 /// Created when a shop installs the app; deleted on uninstall (S22)
 model Shop {
-  id               String   @id @default(dbgenerated("gen_random_uuid()::text"))
+  id               String    @id @default(dbgenerated("gen_random_uuid()::text"))
   /// Shopify shop domain (e.g. "example.myshopify.com")
-  domain           String   @unique
+  domain           String    @unique
   /// Default currency for the shop
-  currency         String   @default("INR")
+  currency         String    @default("INR")
   /// Subscription plan
-  plan             String   @default("free")
+  plan             String    @default("free")
   /// Shop-level default terms days (last fallback in S9 inference)
   defaultTermsDays Int?
   /// IANA timezone for calendar-day calculations (e.g. "Asia/Kolkata")
   /// Used by due-date.ts for computing end-of-day and adding calendar days
-  timezone         String   @default("Asia/Kolkata")
+  timezone         String    @default("Asia/Kolkata")
   /// When the shop installed the app
-  createdAt        DateTime @default(now()) @db.Timestamptz(3)
+  createdAt        DateTime  @default(now()) @db.Timestamptz(3)
   /// When shop settings were last updated (set by trigger)
-  updatedAt        DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime  @default(now()) @db.Timestamptz(3)
+  /// When the shop uninstalled the app (S22). NULL means still installed.
+  /// Full data deletion happens on shop/redact (48h later per Shopify docs).
+  uninstalledAt    DateTime? @db.Timestamptz(3)
 
   // Relations - direct children with CASCADE
   accounts     BuyerAccount[]
@@ -517,9 +520,12 @@ model AuditEvent {
 // S6 QUEUE SUPPORT TABLES
 // =============================================================================
 
-/// Webhook dedupe table for idempotent processing (S6)
+/// Webhook dedupe table for idempotent processing (S6/S20)
 /// Stores processed webhook IDs to prevent duplicate processing when
 /// Shopify retries webhooks or the drain reprocesses messages.
+///
+/// S22: Added shop column for per-shop atomic dedupe using
+/// INSERT ... ON CONFLICT DO NOTHING RETURNING.
 ///
 /// Note: This table is created by the S6 migration, not Prisma.
 /// It's included here to keep schema.prisma in sync with the database.
@@ -528,7 +534,10 @@ model S6ProcessedWebhook {
   topic       String
   resourceGid String   @map("resource_gid")
   processedAt DateTime @default(now()) @map("processed_at") @db.Timestamptz(3)
+  /// Shop domain for per-shop deduplication (S22). NULL for legacy rows.
+  shop        String?
 
+  @@unique([shop, webhookId])
   @@index([processedAt])
   @@map("s6_processed_webhooks")
 }
@@ -579,6 +588,8 @@ model S6BulkOperation {
 /// Precedence rule: When a customer is both a B2B company contact AND tagged,
 /// the COMPANY BuyerAccount takes precedence for order mapping. The tagged
 /// customer record is still tracked but won't create a duplicate BuyerAccount.
+///
+/// S22: FK to Shop with ON DELETE CASCADE enables automatic deletion on shop/redact.
 model S8TaggedCustomer {
   id              String    @id @default(dbgenerated("gen_random_uuid()::text"))
   shopId          String    @map("shop_id")
@@ -621,6 +632,8 @@ model S8TaggedCustomer {
 ///
 /// The pending exposure (sum of tracked draft orders) is used by the credit
 /// limit calculation to include uncommitted orders.
+///
+/// S22: FK to Shop with ON DELETE CASCADE enables automatic deletion on shop/redact.
 model S8DraftOrder {
   id             String   @id @default(dbgenerated("gen_random_uuid()::text"))
   shopId         String   @map("shop_id")
@@ -656,6 +669,8 @@ model S8DraftOrder {
 /// Stores messages that exceeded max retry attempts for later review
 /// and potential reprocessing.
 ///
+/// S22: Added shop column for shop-scoped messages (enables CASCADE on shop/redact).
+///
 /// Note: This table is created by the S10 migration.
 /// It's included here to keep schema.prisma in sync with the database.
 model S6DeadLetter {
@@ -665,7 +680,43 @@ model S6DeadLetter {
   message        Json
   error          String
   deadLetteredAt DateTime @default(now()) @map("dead_lettered_at") @db.Timestamptz(6)
+  /// Shop domain for shop-scoped dead-letter messages (S22)
+  shop           String?
 
   @@index([originalQueue, deadLetteredAt(sort: Desc)], map: "idx_s6_dead_letter_queue_time")
+  @@index([shop])
   @@map("s6_dead_letter")
+}
+
+// =============================================================================
+// S22 DATA REQUESTS
+// =============================================================================
+
+/// GDPR/CCPA data request tracking (S22)
+/// Stores customer data export requests from customers/data_request webhook.
+/// Merchant downloads pending exports via embedded admin route.
+///
+/// Delivery path: In-admin download (email delivery requires product decision).
+model S22DataRequest {
+  id           String    @id @default(dbgenerated("gen_random_uuid()::text"))
+  shopId       String    @map("shop_id")
+  /// Customer GID (e.g., "gid://shopify/Customer/123")
+  customerGid  String    @map("customer_gid")
+  /// Shopify's unique request ID from the webhook
+  requestId    String    @unique @map("request_id")
+  /// When the data request webhook was received
+  receivedAt   DateTime  @default(now()) @map("received_at") @db.Timestamptz(3)
+  /// Request status: pending, completed, downloaded, expired
+  status       String    @default("pending")
+  /// JSON export of all customer data. NULL before export is generated.
+  exportData   Json?     @map("export_data")
+  /// When export was generated
+  completedAt  DateTime? @map("completed_at") @db.Timestamptz(3)
+  /// When merchant downloaded the export
+  downloadedAt DateTime? @map("downloaded_at") @db.Timestamptz(3)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([shopId, status])
+  @@index([shopId, customerGid])
+  @@map("s22_data_requests")
 }
