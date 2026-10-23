@@ -1,22 +1,24 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ActionFunctionArgs } from "react-router";
+
+const mockVerifyWebhook = vi.fn();
+vi.mock("~/lib/webhook-verify.server", () => ({
+  verifyWebhook: (...args: unknown[]) => mockVerifyWebhook(...args),
+  normalizeWebhookTopic: (topic: string) => topic.replace(/\//g, "_").toUpperCase(),
+}));
+
 import { action } from "../webhooks.app.uninstalled";
 
 describe("webhooks.app.uninstalled", () => {
   const TEST_SHOP = "test-shop.myshopify.com";
+  const originalEnv = process.env;
 
   const mockSessionStorage = {
     deleteAllForShop: vi.fn(),
   };
 
-  const mockShopify = {
-    authenticate: {
-      webhook: vi.fn(),
-    },
-  };
-
   const createMockContext = () => ({
-    shopify: mockShopify,
+    shopify: {},
     sessionStorage: mockSessionStorage,
     cloudflare: { env: {}, ctx: {} },
   });
@@ -42,10 +44,19 @@ describe("webhooks.app.uninstalled", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mockShopify.authenticate.webhook.mockResolvedValue({
+    process.env = { ...originalEnv, SHOPIFY_API_SECRET: "test-secret" };
+    mockVerifyWebhook.mockResolvedValue({
       shop: TEST_SHOP,
-      topic: "APP_UNINSTALLED",
+      topic: "app/uninstalled",
+      webhookId: "test-webhook-id",
+      payload: {},
+      apiVersion: "2026-10",
+      rawBody: new ArrayBuffer(0),
     });
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
   });
 
   it("deletes all sessions for the shop using deleteAllForShop", async () => {
@@ -67,8 +78,6 @@ describe("webhooks.app.uninstalled", () => {
   });
 
   it("deletes more than 25 sessions (bypasses findSessionsByShop limit)", async () => {
-    // deleteAllForShop uses deleteMany internally, avoiding the 25-session
-    // limit of findSessionsByShop. All sessions are deleted in one query.
     mockSessionStorage.deleteAllForShop.mockResolvedValue(50);
 
     const response = await action(createActionArgs());
@@ -87,5 +96,78 @@ describe("webhooks.app.uninstalled", () => {
     expect(response).toBeInstanceOf(Response);
     expect(consoleSpy).toHaveBeenCalled();
     consoleSpy.mockRestore();
+  });
+
+  it("returns 500 when SHOPIFY_API_SECRET is not configured", async () => {
+    delete process.env.SHOPIFY_API_SECRET;
+
+    const response = await action(createActionArgs());
+
+    expect(response.status).toBe(500);
+    expect(mockVerifyWebhook).not.toHaveBeenCalled();
+  });
+
+  it("uses lightweight verifyWebhook instead of authenticate.webhook", async () => {
+    mockSessionStorage.deleteAllForShop.mockResolvedValue(1);
+    const args = createActionArgs();
+
+    await action(args);
+
+    expect(mockVerifyWebhook).toHaveBeenCalledWith(args.request, "test-secret");
+  });
+
+  describe("topic guard", () => {
+    it("does NOT delete sessions when topic is app/scopes_update", async () => {
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "app/scopes_update",
+        webhookId: "test-webhook-id",
+        payload: {},
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const response = await action(createActionArgs());
+
+      expect(response).toBeInstanceOf(Response);
+      expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
+    });
+
+    it("does NOT delete sessions when topic is shop/redact", async () => {
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "shop/redact",
+        webhookId: "test-webhook-id",
+        payload: {},
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const response = await action(createActionArgs());
+
+      expect(response).toBeInstanceOf(Response);
+      expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
+    });
+
+    it("returns 200 even for unexpected topics (logs and no-ops)", async () => {
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "orders/create",
+        webhookId: "test-webhook-id",
+        payload: {},
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const response = await action(createActionArgs());
+
+      expect(response).toBeInstanceOf(Response);
+      expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Ignoring unexpected topic")
+      );
+      consoleSpy.mockRestore();
+    });
   });
 });
