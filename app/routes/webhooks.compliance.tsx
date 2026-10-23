@@ -24,7 +24,9 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     return new Response(null, { status: 500 });
   }
 
-  const { shop, topic, webhookId } = await verifyWebhook(request, apiSecret);
+  const { shop, topic, webhookId } = await verifyWebhook(request, apiSecret, {
+    requireValidJson: true,
+  });
   const normalizedTopic = normalizeWebhookTopic(topic);
 
   console.log(
@@ -33,18 +35,26 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   switch (normalizedTopic) {
     case "CUSTOMERS_DATA_REQUEST":
+      // TODO(S22): When customer data is stored, respond with data export.
+      // Currently the app stores no customer data, so this is a no-op.
+      // S8 PR #32 will add a purge of s8_tagged_customers.
       console.log(
         `[Compliance] customers/data_request: No customer data stored for shop=${shop}`
       );
       break;
 
     case "CUSTOMERS_REDACT":
+      // TODO(S22): When customer data is stored, delete it here.
+      // Currently the app stores no customer data, so this is a no-op.
+      // S8 PR #32 will add a purge of s8_tagged_customers.
       console.log(
         `[Compliance] customers/redact: No customer data to delete for shop=${shop}`
       );
       break;
 
     case "SHOP_REDACT": {
+      // Delete all session data for this shop via deleteAllForShop.
+      // Idempotent: returns 200 even when no sessions exist.
       const { sessionStorage } = context;
       const count = await sessionStorage.deleteAllForShop(shop);
       console.log(

@@ -10,9 +10,10 @@ const TEST_SHOP = "test-shop.myshopify.com";
 const encoder = new TextEncoder();
 
 /**
- * Generate HMAC-SHA256 signature using Web Crypto (same as production code).
+ * Generate HMAC-SHA256 signature over raw bytes using Web Crypto.
+ * This matches how production code signs payloads.
  */
-async function generateHmac(secret: string, body: string): Promise<string> {
+async function generateHmacFromBytes(secret: string, bodyBytes: ArrayBuffer): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
     encoder.encode(secret),
@@ -20,13 +21,20 @@ async function generateHmac(secret: string, body: string): Promise<string> {
     false,
     ["sign"]
   );
-  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(body));
+  const signature = await crypto.subtle.sign("HMAC", key, bodyBytes);
   const bytes = new Uint8Array(signature);
   let binary = "";
   for (let i = 0; i < bytes.length; i++) {
     binary += String.fromCharCode(bytes[i]);
   }
   return btoa(binary);
+}
+
+/**
+ * Generate HMAC from a string body (convenience wrapper).
+ */
+async function generateHmac(secret: string, body: string): Promise<string> {
+  return generateHmacFromBytes(secret, encoder.encode(body).buffer as ArrayBuffer);
 }
 
 /**
@@ -108,6 +116,33 @@ describe("verifyWebhook", () => {
         expect((error as Response).status).toBe(401);
       }
     });
+
+    it("correctly handles non-ASCII payload (Hindi company name)", async () => {
+      const payload = {
+        shop_id: 456,
+        company_name: "भारतीय कंपनी",
+        customer: { name: "राहुल शर्मा" },
+      };
+      const body = JSON.stringify(payload);
+      const hmac = await generateHmac(TEST_API_SECRET, body);
+      const request = createWebhookRequest(body, "customers/data_request", hmac);
+
+      const result = await verifyWebhook(request, TEST_API_SECRET);
+
+      expect(result.payload).toEqual(payload);
+      expect((result.payload as typeof payload).company_name).toBe("भारतीय कंपनी");
+    });
+
+    it("verifies HMAC over raw bytes to avoid UTF-8 round-trip mismatch", async () => {
+      const body = JSON.stringify({ emoji: "🎉", japanese: "日本語" });
+      const bodyBytes = encoder.encode(body);
+      const hmac = await generateHmacFromBytes(TEST_API_SECRET, bodyBytes.buffer as ArrayBuffer);
+      const request = createWebhookRequest(body, "shop/redact", hmac);
+
+      const result = await verifyWebhook(request, TEST_API_SECRET);
+
+      expect(result.payload).toEqual({ emoji: "🎉", japanese: "日本語" });
+    });
   });
 
   describe("method validation", () => {
@@ -127,7 +162,7 @@ describe("verifyWebhook", () => {
   });
 
   describe("header validation", () => {
-    it("rejects request missing HMAC header with 400", async () => {
+    it("rejects request missing HMAC header with 401 (Shopify compliance)", async () => {
       const body = JSON.stringify({ shop_id: 123 });
       const request = new Request("https://example.com/webhooks/compliance", {
         method: "POST",
@@ -145,7 +180,7 @@ describe("verifyWebhook", () => {
         expect.fail("Expected verifyWebhook to throw");
       } catch (error) {
         expect(error).toBeInstanceOf(Response);
-        expect((error as Response).status).toBe(400);
+        expect((error as Response).status).toBe(401);
       }
     });
 
@@ -185,14 +220,29 @@ describe("verifyWebhook", () => {
       expect(result.payload).toEqual(payload);
     });
 
-    it("returns empty object for invalid JSON", async () => {
+    it("returns empty object for invalid JSON when requireValidJson is false", async () => {
       const body = "not-valid-json";
       const hmac = await generateHmac(TEST_API_SECRET, body);
-      const request = createWebhookRequest(body, "shop/redact", hmac);
+      const request = createWebhookRequest(body, "app/uninstalled", hmac);
 
       const result = await verifyWebhook(request, TEST_API_SECRET);
 
       expect(result.payload).toEqual({});
+    });
+
+    it("throws 400 for invalid JSON when requireValidJson is true", async () => {
+      const body = "not-valid-json";
+      const hmac = await generateHmac(TEST_API_SECRET, body);
+      const request = createWebhookRequest(body, "customers/redact", hmac);
+
+      try {
+        await verifyWebhook(request, TEST_API_SECRET, { requireValidJson: true });
+        expect.fail("Expected verifyWebhook to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(400);
+        expect((error as Response).statusText).toBe("Invalid JSON payload");
+      }
     });
   });
 });

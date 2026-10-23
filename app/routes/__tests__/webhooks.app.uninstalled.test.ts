@@ -51,7 +51,7 @@ describe("webhooks.app.uninstalled", () => {
       webhookId: "test-webhook-id",
       payload: {},
       apiVersion: "2026-10",
-      rawBody: "{}",
+      rawBody: new ArrayBuffer(0),
     });
   });
 

@@ -52,7 +52,7 @@ describe("webhooks.compliance", () => {
         webhookId: "test-webhook-123",
         payload: {},
         apiVersion: "2026-10",
-        rawBody: "{}",
+        rawBody: new ArrayBuffer(0),
       });
 
       const request = new Request("https://example.com/webhooks/compliance", {
@@ -64,7 +64,11 @@ describe("webhooks.compliance", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-      expect(mockVerifyWebhook).toHaveBeenCalledWith(request, "test-secret");
+      expect(mockVerifyWebhook).toHaveBeenCalledWith(
+        request,
+        "test-secret",
+        { requireValidJson: true }
+      );
     });
 
     it("returns 200 for valid HMAC (customers/redact)", async () => {
@@ -74,7 +78,7 @@ describe("webhooks.compliance", () => {
         webhookId: "test-webhook-456",
         payload: {},
         apiVersion: "2026-10",
-        rawBody: "{}",
+        rawBody: new ArrayBuffer(0),
       });
 
       const request = new Request("https://example.com/webhooks/compliance", {
@@ -113,6 +117,50 @@ describe("webhooks.compliance", () => {
       }
     });
 
+    it("returns 401 for missing HMAC header (Shopify App Store compliance)", async () => {
+      const unauthorizedResponse = new Response(undefined, {
+        status: 401,
+        statusText: "Unauthorized",
+      });
+      mockVerifyWebhook.mockRejectedValue(unauthorizedResponse);
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify({ shop_id: 123 }),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      try {
+        await action(createMockActionArgs(request));
+        expect.fail("Expected action to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(401);
+      }
+    });
+
+    it("returns 400 for invalid JSON payload (could hide redact)", async () => {
+      const badRequestResponse = new Response(undefined, {
+        status: 400,
+        statusText: "Invalid JSON payload",
+      });
+      mockVerifyWebhook.mockRejectedValue(badRequestResponse);
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: "not-valid-json",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      try {
+        await action(createMockActionArgs(request));
+        expect.fail("Expected action to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(400);
+      }
+    });
+
     it("returns 500 when SHOPIFY_API_SECRET is not configured", async () => {
       delete process.env.SHOPIFY_API_SECRET;
 
@@ -136,7 +184,7 @@ describe("webhooks.compliance", () => {
         webhookId: "test-webhook",
         payload: {},
         apiVersion: "2026-10",
-        rawBody: "{}",
+        rawBody: new ArrayBuffer(0),
       });
 
       const request = new Request("https://example.com/webhooks/compliance", {
@@ -157,7 +205,7 @@ describe("webhooks.compliance", () => {
         webhookId: "test-webhook",
         payload: {},
         apiVersion: "2026-10",
-        rawBody: "{}",
+        rawBody: new ArrayBuffer(0),
       });
 
       const request = new Request("https://example.com/webhooks/compliance", {
@@ -182,7 +230,7 @@ describe("webhooks.compliance", () => {
         webhookId: "test-webhook-789",
         payload: {},
         apiVersion: "2026-10",
-        rawBody: "{}",
+        rawBody: new ArrayBuffer(0),
       });
 
       const request = new Request("https://example.com/webhooks/compliance", {
@@ -206,7 +254,7 @@ describe("webhooks.compliance", () => {
         webhookId: "test-webhook-idempotent",
         payload: {},
         apiVersion: "2026-10",
-        rawBody: "{}",
+        rawBody: new ArrayBuffer(0),
       });
 
       const request = new Request("https://example.com/webhooks/compliance", {
@@ -230,7 +278,7 @@ describe("webhooks.compliance", () => {
         webhookId: "test-webhook-multi",
         payload: {},
         apiVersion: "2026-10",
-        rawBody: "{}",
+        rawBody: new ArrayBuffer(0),
       });
 
       const request = new Request("https://example.com/webhooks/compliance", {
@@ -255,7 +303,7 @@ describe("webhooks.compliance", () => {
         webhookId: "context-webhook",
         payload: {},
         apiVersion: "2026-10",
-        rawBody: "{}",
+        rawBody: new ArrayBuffer(0),
       });
 
       const request = new Request("https://example.com/webhooks/compliance", {

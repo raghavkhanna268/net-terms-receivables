@@ -22,10 +22,14 @@ export interface WebhookVerifyResult {
   webhookId: string;
   payload: unknown;
   apiVersion: string;
-  rawBody: string;
+  rawBody: ArrayBuffer;
 }
 
-const encoder = new TextEncoder();
+export interface WebhookVerifyOptions {
+  requireValidJson?: boolean;
+}
+
+const decoder = new TextDecoder();
 
 /**
  * Shopify webhook header names (matches library constants).
@@ -39,10 +43,23 @@ const WEBHOOK_HEADERS = {
 } as const;
 
 /**
- * Compute HMAC-SHA256 using Web Crypto and return as base64.
- * Uses crypto.subtle for native performance on Cloudflare Workers.
+ * Isolate-scoped cache for CryptoKey instances.
+ * Keyed by API secret to avoid re-importing the key on every request.
+ * importKey is relatively expensive (~0.5-1ms), so caching saves CPU.
  */
-async function computeHmac(secret: string, body: string): Promise<string> {
+const cryptoKeyCache = new Map<string, CryptoKey>();
+
+/**
+ * Get or create a cached CryptoKey for HMAC-SHA256 signing.
+ * The key is cached at isolate scope, keyed by the secret.
+ */
+async function getCryptoKey(secret: string): Promise<CryptoKey> {
+  const cached = cryptoKeyCache.get(secret);
+  if (cached) {
+    return cached;
+  }
+
+  const encoder = new TextEncoder();
   const key = await crypto.subtle.importKey(
     "raw",
     encoder.encode(secret),
@@ -50,7 +67,19 @@ async function computeHmac(secret: string, body: string): Promise<string> {
     false,
     ["sign"]
   );
-  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(body));
+
+  cryptoKeyCache.set(secret, key);
+  return key;
+}
+
+/**
+ * Compute HMAC-SHA256 over raw bytes using Web Crypto and return as base64.
+ * Uses crypto.subtle for native performance on Cloudflare Workers.
+ * Signs the raw bytes directly to avoid UTF-8 encoding mismatches.
+ */
+async function computeHmac(secret: string, rawBody: ArrayBuffer): Promise<string> {
+  const key = await getCryptoKey(secret);
+  const signature = await crypto.subtle.sign("HMAC", key, rawBody);
   return arrayBufferToBase64(signature);
 }
 
@@ -83,6 +112,21 @@ function timingSafeEqual(a: string, b: string): boolean {
 }
 
 /**
+ * Get HMAC header or throw 401 Unauthorized.
+ * Shopify's App Store compliance check expects 401 for unauthenticated webhook calls.
+ */
+function getHmacHeader(request: Request): string {
+  const value = request.headers.get(WEBHOOK_HEADERS.hmac);
+  if (!value) {
+    throw new Response(null, {
+      status: 401,
+      statusText: "Unauthorized",
+    });
+  }
+  return value;
+}
+
+/**
  * Extract required header or throw 400 Bad Request.
  */
 function getRequiredHeader(request: Request, name: string): string {
@@ -101,12 +145,14 @@ function getRequiredHeader(request: Request, name: string): string {
  *
  * @param request - The incoming webhook request
  * @param apiSecret - The Shopify API secret for HMAC verification
+ * @param options - Optional settings (requireValidJson for compliance topics)
  * @returns Verified webhook data including shop, topic, webhookId, and parsed payload
- * @throws Response with 401 if HMAC is invalid, 400 if headers are missing, 405 if not POST
+ * @throws Response with 401 if HMAC is invalid or missing, 400 if other headers missing or invalid JSON (when required), 405 if not POST
  */
 export async function verifyWebhook(
   request: Request,
-  apiSecret: string
+  apiSecret: string,
+  options: WebhookVerifyOptions = {}
 ): Promise<WebhookVerifyResult> {
   if (request.method !== "POST") {
     throw new Response(null, {
@@ -115,13 +161,13 @@ export async function verifyWebhook(
     });
   }
 
-  const providedHmac = getRequiredHeader(request, WEBHOOK_HEADERS.hmac);
+  const providedHmac = getHmacHeader(request);
   const topic = getRequiredHeader(request, WEBHOOK_HEADERS.topic);
   const shop = getRequiredHeader(request, WEBHOOK_HEADERS.domain);
   const webhookId = getRequiredHeader(request, WEBHOOK_HEADERS.webhookId);
   const apiVersion = getRequiredHeader(request, WEBHOOK_HEADERS.apiVersion);
 
-  const rawBody = await request.text();
+  const rawBody = await request.arrayBuffer();
   const expectedHmac = await computeHmac(apiSecret, rawBody);
 
   if (!timingSafeEqual(providedHmac, expectedHmac)) {
@@ -131,10 +177,17 @@ export async function verifyWebhook(
     });
   }
 
+  const bodyText = decoder.decode(new Uint8Array(rawBody));
   let payload: unknown;
   try {
-    payload = JSON.parse(rawBody);
+    payload = JSON.parse(bodyText);
   } catch {
+    if (options.requireValidJson) {
+      throw new Response(null, {
+        status: 400,
+        statusText: "Invalid JSON payload",
+      });
+    }
     payload = {};
   }
 

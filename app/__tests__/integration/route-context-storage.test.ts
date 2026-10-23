@@ -99,7 +99,7 @@ describe("Route context storage verification", () => {
         webhookId: "webhook-456",
         payload: {},
         apiVersion: "2026-10",
-        rawBody: "{}",
+        rawBody: new ArrayBuffer(0),
       });
 
       const args = createMockArgs({ sessionStorage });
@@ -127,7 +127,7 @@ describe("Route context storage verification", () => {
           webhookId: "w1",
           payload: {},
           apiVersion: "2026-10",
-          rawBody: "{}",
+          rawBody: new ArrayBuffer(0),
         })
         .mockResolvedValueOnce({
           shop: "shop2.myshopify.com",
@@ -135,7 +135,7 @@ describe("Route context storage verification", () => {
           webhookId: "w2",
           payload: {},
           apiVersion: "2026-10",
-          rawBody: "{}",
+          rawBody: new ArrayBuffer(0),
         });
 
       const args1 = createMockArgs({ sessionStorage: storage1 });
@@ -163,7 +163,7 @@ describe("Route context storage verification", () => {
         webhookId: "webhook-789",
         payload: { current: ["read_orders", "read_customers", "write_orders"] },
         apiVersion: "2026-10",
-        rawBody: "{}",
+        rawBody: new ArrayBuffer(0),
       });
 
       const args = createMockArgs({ sessionStorage });
@@ -191,7 +191,7 @@ describe("Route context storage verification", () => {
         webhookId: "compliance-webhook-123",
         payload: {},
         apiVersion: "2026-10",
-        rawBody: "{}",
+        rawBody: new ArrayBuffer(0),
       });
 
       const args = createMockArgs({ sessionStorage });
@@ -214,7 +214,7 @@ describe("Route context storage verification", () => {
         webhookId: "compliance-webhook-empty",
         payload: {},
         apiVersion: "2026-10",
-        rawBody: "{}",
+        rawBody: new ArrayBuffer(0),
       });
 
       const args = createMockArgs({ sessionStorage });

@@ -25,11 +25,16 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   console.log(`Received ${normalizedTopic} webhook for ${shop}`);
 
+  // Delete ALL sessions for this shop (DPDP compliance).
+  // Uses deleteAllForShop which calls deleteMany internally, avoiding
+  // the 25-session limit of findSessionsByShop.
+  // Idempotent: returns count=0 if no sessions exist (already uninstalled).
   try {
     const { sessionStorage } = context;
     const count = await sessionStorage.deleteAllForShop(shop);
     console.log(`Deleted ${count} session(s) for ${shop}`);
   } catch (error) {
+    // Log but don't fail - the shop is already uninstalled
     console.error(`Error deleting sessions for ${shop}:`, error);
   }
 

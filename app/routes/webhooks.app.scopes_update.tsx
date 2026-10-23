@@ -25,6 +25,9 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   console.log(`Received ${normalizedTopic} webhook for ${shop}`);
 
+  // Update session scopes when the merchant changes app permissions.
+  // The payload contains the current scopes granted to the app.
+  // Uses updateScopeForShop which calls updateMany in a single query.
   try {
     const currentScopes = (payload as { current?: string[] })?.current?.join(",");
 
@@ -35,6 +38,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     }
   } catch (error) {
     console.error(`Error updating scopes for ${shop}:`, error);
+    // Don't fail the webhook - Shopify will retry
   }
 
   return new Response();
