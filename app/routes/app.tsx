@@ -2,12 +2,16 @@ import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { Outlet, useLoaderData, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
+import { runAfterAuth } from "~/lib/after-auth.server";
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   // Session storage is injected per-request via loadContext in workers/app.ts
-  const { shopify } = context;
+  const { shopify, cloudflare } = context;
 
-  await shopify.authenticate.admin(request);
+  const { admin, session } = await shopify.authenticate.admin(request);
+
+  // Bind waitUntil to ctx to avoid "Illegal invocation" on workerd
+  runAfterAuth(session.shop, admin, (p) => cloudflare.ctx.waitUntil(p));
 
   return { apiKey: process.env.SHOPIFY_API_KEY || "" };
 };

@@ -86,3 +86,9 @@ embedded = false
 
 [build]
 automatically_update_urls_on_dev = false
+
+# Note: Metafield definitions for credit_status on CompanyLocation and Customer
+# are created programmatically in S11 via metafieldDefinitionCreate, not via TOML.
+# The TOML format's supported owner_type list at shopify.dev does not explicitly
+# confirm company_location and customer as deployable.
+# @see docs/metafields-contract.md

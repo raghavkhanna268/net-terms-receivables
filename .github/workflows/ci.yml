@@ -237,3 +237,77 @@ jobs:
           # Assert success (any 2xx, 3xx, or 4xx is acceptable for boot test)
           echo "✓ Worker booted successfully (HTTP $RESPONSE)"
           kill $WRANGLER_PID 2>/dev/null || true
+
+  rust-functions:
+    name: Rust functions (test, build WASM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            extensions/credit-check-validation/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('extensions/credit-check-validation/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run Rust tests
+        working-directory: extensions/credit-check-validation
+        run: |
+          cargo test --verbose 2>&1 | tee test-output.txt
+          echo ""
+          echo "=== Test Summary ==="
+          grep -E "^test result:|^running [0-9]+ test" test-output.txt || true
+
+      - name: Build WASM (release)
+        working-directory: extensions/credit-check-validation
+        run: |
+          cargo build --release --target wasm32-unknown-unknown
+          
+          # Report WASM size and enforce limits
+          # Shopify Functions have a 256KB limit
+          # @see https://shopify.dev/docs/apps/build/functions/programming-languages/rust-for-functions
+          WASM_FILE="target/wasm32-unknown-unknown/release/credit_check_validation.wasm"
+          if [ -f "$WASM_FILE" ]; then
+            SIZE=$(stat -c%s "$WASM_FILE")
+            SIZE_KB=$((SIZE / 1024))
+            echo "WASM size: ${SIZE_KB} KB ($SIZE bytes)"
+            
+            # Fail if over 256KB (Shopify Functions hard limit)
+            if [ $SIZE_KB -gt 256 ]; then
+              echo "✗ WASM size exceeds 256 KB limit (${SIZE_KB} KB)"
+              echo "See: https://shopify.dev/docs/apps/build/functions/programming-languages/rust-for-functions#binary-size-tips"
+              exit 1
+            fi
+            
+            # Warn if over 200KB
+            if [ $SIZE_KB -gt 200 ]; then
+              echo "⚠ Warning: WASM size is ${SIZE_KB} KB, approaching 256 KB limit"
+            else
+              echo "✓ WASM size is within limits"
+            fi
+          else
+            echo "✗ WASM file not found"
+            exit 1
+          fi
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: credit-check-validation-wasm
+          path: extensions/credit-check-validation/target/wasm32-unknown-unknown/release/credit_check_validation.wasm
+          retention-days: 7

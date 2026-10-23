@@ -1,0 +1,27 @@
+query Input {
+  cart {
+    cost {
+      totalAmount {
+        amount
+        currencyCode
+      }
+    }
+    buyerIdentity {
+      customer {
+        metafield(namespace: "$app", key: "credit_status") {
+          jsonValue
+        }
+      }
+      purchasingCompany {
+        location {
+          metafield(namespace: "$app", key: "credit_status") {
+            jsonValue
+          }
+        }
+      }
+    }
+  }
+  buyerJourney {
+    step
+  }
+}

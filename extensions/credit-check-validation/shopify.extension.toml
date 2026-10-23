@@ -1,0 +1,17 @@
+api_version = "2026-10"
+
+[[extensions]]
+name = "Credit Check Validation"
+handle = "credit-check-validation"
+type = "function"
+uid = "754b2ca1-3024-e66e-c786-64a075e4f9b8ca734feb"
+
+  [[extensions.targeting]]
+  target = "cart.validations.generate.run"
+  input_query = "src/cart_validations_generate_run.graphql"
+  export = "cart_validations_generate_run"
+
+[extensions.build]
+command = "cargo build --target=wasm32-unknown-unknown --release"
+path = "target/wasm32-unknown-unknown/release/credit_check_validation.wasm"
+watch = ["src/**/*.rs"]
