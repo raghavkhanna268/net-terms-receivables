@@ -17,6 +17,8 @@ All metafields use the **app-reserved namespace `$app`**, which ensures only thi
 
 ### `$app.credit_status`
 
+**Implemented**: [#50](https://github.com/raghavkhanna268/net-terms-receivables/issues/50)
+
 Stores the credit status for a buyer account (B2B company location or tagged customer).
 
 | Property | Value |
@@ -87,6 +89,34 @@ The `credit_status` metafield value is a JSON object with the following structur
 | `limitPaise` | string | Credit limit in paise (integer as string). E.g., `"10000000"` = ₹100,000.00. |
 | `exposurePaise` | string | Current outstanding amount in paise (integer as string). |
 | `updatedAt` | string | ISO 8601 timestamp of when this status was last computed. |
+
+### `$app.hold`
+
+**Implemented**: [#50](https://github.com/raghavkhanna268/net-terms-receivables/issues/50)
+
+A simple boolean metafield for the fulfillment-hold path (S13) to quickly check if a buyer is on hold without parsing the full `credit_status` JSON.
+
+| Property | Value |
+|----------|-------|
+| **Namespace** | `$app` |
+| **Key** | `hold` |
+| **Type** | `boolean` |
+| **Owner Types** | `CompanyLocation`, `Customer` |
+| **Admin Access** | `merchant_read` (merchants can view but not edit) |
+
+#### Usage
+
+- **Written by**: S11 credit status writer when updating credit status. The value should mirror `credit_status.hold`.
+- **Read by**: S13 fulfillment-hold path for quick hold checks before placing/releasing fulfillment holds.
+
+#### Why a Separate Metafield?
+
+While `credit_status.hold` contains the authoritative hold state, this separate boolean metafield provides:
+1. **Simpler access**: No JSON parsing required for S13 fulfillment functions
+2. **Better performance**: Faster lookups for high-frequency hold checks
+3. **Explicit semantics**: Clear signal that this buyer should have fulfillment holds
+
+The S11 writer is responsible for keeping this field in sync with `credit_status.hold`.
 
 ### Why Amounts Are Strings
 
@@ -170,13 +200,28 @@ These messages:
 - Do not expose specific amounts or internal reason codes
 - Direct the buyer to contact the merchant
 
-## Metafield Definitions
+## Metafield Definition Creation
 
-S11 is responsible for creating the metafield definitions programmatically during shop setup.
+S11 creates the metafield definitions programmatically during shop setup via `metafieldDefinitionCreate`.
 
 > **Note**: The Shopify TOML format ([shopify.dev/docs/apps/build/metafields/definitions](https://shopify.dev/docs/apps/build/metafields/definitions)) documents `[<owner_type>.metafields.app.<key>]` and references MetafieldOwnerType for the full list. However, the documentation does not explicitly confirm that `company_location` and `customer` owner types deploy successfully via TOML. To ensure reliable deployment, S11 creates these definitions via `metafieldDefinitionCreate`.
 
-**Tracking Issue**: [#50 - S11: credit_status metafield definitions](https://github.com/raghavkhanna268/net-terms-receivables/issues/50)
+**Implementation**: [#50](https://github.com/raghavkhanna268/net-terms-receivables/issues/50)
+
+### Definitions Created
+
+| Namespace | Key | Type | Owner Types | Admin Access |
+|-----------|-----|------|-------------|--------------|
+| `$app` | `credit_status` | `json` | `COMPANY_LOCATION`, `CUSTOMER` | `MERCHANT_READ` |
+| `$app` | `hold` | `boolean` | `COMPANY_LOCATION`, `CUSTOMER` | `MERCHANT_READ` |
+
+### Scopes Required
+
+Creating metafield definitions uses `metafieldDefinitionCreate` which requires write access to the owner resource:
+- `write_companies` for `COMPANY_LOCATION` owner type
+- `write_customers` for `CUSTOMER` owner type
+
+Both scopes are already granted (see `docs/scopes.md`).
 
 ### Programmatic Creation (S11 Responsibility)
 
@@ -204,11 +249,22 @@ The operation is idempotent - if the definition already exists, the mutation ret
 
 ## Implementation Checklist
 
+### S11 (Metafield Definitions)
+- [x] Create `credit_status` definition for `COMPANY_LOCATION` via `metafieldDefinitionCreate`
+- [x] Create `credit_status` definition for `CUSTOMER` via `metafieldDefinitionCreate`
+- [x] Create `hold` definition for `COMPANY_LOCATION` via `metafieldDefinitionCreate`
+- [x] Create `hold` definition for `CUSTOMER` via `metafieldDefinitionCreate`
+- [x] Handle TAKEN error code as success (idempotent)
+- [x] Run during afterAuth alongside validation registration
+- [x] Log userErrors without PII
+- [x] Mark shop done only after success
+
 ### S11 (Credit Status Writer)
 - [ ] Use `metafieldsSet` mutation with owner GID
 - [ ] Serialize using `serializeCreditStatus()` from `app/lib/metafields-contract.ts`
 - [ ] Always include all required fields
 - [ ] Use `$app:credit_status` as namespace:key
+- [ ] Set `$app:hold` boolean metafield to match `credit_status.hold`
 
 ### S12 (Cart/Checkout Validation)
 - [ ] Read `purchasingCompany.location.metafield` and `customer.metafield`
@@ -218,9 +274,11 @@ The operation is idempotent - if the definition already exists, the mutation ret
 - [ ] Log currency mismatches without blocking
 
 ### S13 (Payment Customization / Fulfillment Holds)
-- [ ] Read the same metafield structure
-- [ ] Apply same precedence rules
+- [ ] Read `$app:hold` boolean for quick hold checks
+- [ ] Read `$app:credit_status` for full credit evaluation
+- [ ] Apply same precedence rules (B2B first, then Customer)
 - [ ] Consider hold status when customizing payment options
+- [ ] Place fulfillment holds on orders from accounts where `hold` is `true`
 
 ### S8 (Tagged Customers)
 - [ ] Write `credit_status` to Customer metafield for tagged buyers

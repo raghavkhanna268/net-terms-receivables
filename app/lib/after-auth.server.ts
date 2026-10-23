@@ -11,6 +11,7 @@
  * Note: Running on Cloudflare Workers with CPU limits.
  */
 
+import { ensureMetafieldDefinitions } from "./metafield-definitions.server";
 import { ensureValidation } from "./validation-registration.server";
 
 /**
@@ -81,10 +82,11 @@ async function runSetup(
   admin: AdminGraphqlClient,
 ): Promise<void> {
   try {
+    await ensureMetafieldDefinitions(admin);
     await ensureValidation(admin);
     setupCompletedShops.add(shop);
   } catch (error) {
-    console.error(`[afterAuth] Failed to setup validation for ${shop}:`, error);
+    console.error(`[afterAuth] Failed to setup for ${shop}:`, error);
   } finally {
     inFlightSetups.delete(shop);
   }

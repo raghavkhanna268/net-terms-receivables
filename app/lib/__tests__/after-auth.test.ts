@@ -6,12 +6,19 @@ import {
   _isShopSetupInFlight,
 } from "../after-auth.server";
 
+vi.mock("../metafield-definitions.server", () => ({
+  ensureMetafieldDefinitions: vi.fn(),
+}));
+
 vi.mock("../validation-registration.server", () => ({
   ensureValidation: vi.fn(),
 }));
 
+import { ensureMetafieldDefinitions } from "../metafield-definitions.server";
 import { ensureValidation } from "../validation-registration.server";
 
+const mockEnsureMetafieldDefinitions =
+  ensureMetafieldDefinitions as ReturnType<typeof vi.fn>;
 const mockEnsureValidation = ensureValidation as ReturnType<typeof vi.fn>;
 
 /**
@@ -35,6 +42,7 @@ describe("after-auth", () => {
   beforeEach(() => {
     _resetSetupCacheForTesting();
     vi.clearAllMocks();
+    mockEnsureMetafieldDefinitions.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -138,7 +146,7 @@ describe("after-auth", () => {
 
       await vi.waitFor(() => {
         expect(consoleSpy).toHaveBeenCalledWith(
-          expect.stringContaining("[afterAuth] Failed to setup validation"),
+          expect.stringContaining("[afterAuth] Failed to setup for"),
           expect.any(Error),
         );
       });
@@ -291,8 +299,6 @@ describe("after-auth", () => {
         mockWaitUntil,
       );
 
-      // Should only call ensureValidation once
-      expect(mockEnsureValidation).toHaveBeenCalledTimes(1);
       // But waitUntil should be called for each concurrent request
       expect(mockWaitUntil).toHaveBeenCalledTimes(3);
       // All should receive the same promise
@@ -303,6 +309,14 @@ describe("after-auth", () => {
       // Shop should be in-flight
       expect(_isShopSetupInFlight("concurrent-shop.myshopify.com")).toBe(true);
       expect(_isShopSetupComplete("concurrent-shop.myshopify.com")).toBe(false);
+
+      // Wait for ensureMetafieldDefinitions to resolve before checking ensureValidation
+      await vi.waitFor(() => {
+        expect(mockEnsureValidation).toHaveBeenCalledTimes(1);
+      });
+
+      // Should only call metafield definitions once too
+      expect(mockEnsureMetafieldDefinitions).toHaveBeenCalledTimes(1);
 
       // Complete setup
       resolveSetup();
