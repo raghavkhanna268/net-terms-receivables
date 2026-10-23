@@ -29,12 +29,16 @@
  * - Tag added: Create BuyerAccount (kind=TAGGED_CUSTOMER), set tag_active=true
  * - Tag removed: Set tag_active=false, DO NOT touch holdState
  * - Tag re-added: Set tag_active=true, DO NOT touch holdState
+ *
+ * S21 gating: Enforces company limit before creating new BuyerAccounts.
+ * Updates to existing accounts are always allowed (downgrade-safe).
  */
 
 import type { Sql } from "~/lib/db-light.server";
 import type { ShopifyCustomer, SyncResult } from "./types";
 import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
 import { minimiseCustomerPiiIfInactive } from "~/services/compliance";
+import { checkCompanyLimit } from "../gating.server";
 
 /**
  * Process a Customer webhook event.
@@ -323,6 +327,24 @@ async function syncTaggedCustomerBuyerAccount(
   // Build display name from customer ID (we don't have name due to DPDP)
   const customerId_numeric = customerId.split("/").pop() ?? customerId;
   const displayName = `Customer ${customerId_numeric}`;
+
+  // S21: Check if this is a new account (for gating)
+  const [existingAccount] = await sql<{ id: string }[]>`
+    SELECT id FROM "BuyerAccount"
+    WHERE "shopId" = ${shopId} AND "customerId" = ${customerId}
+  `;
+
+  // Only enforce limit for NEW accounts (updates always allowed for downgrade safety)
+  if (!existingAccount) {
+    const limitCheck = await checkCompanyLimit(sql, shopId);
+    if (!limitCheck.allowed) {
+      return {
+        success: false,
+        action: "skipped",
+        error: `Upgrade required: company limit reached (${limitCheck.currentUsage}/${limitCheck.limit})`,
+      };
+    }
+  }
 
   // Pre-compute derived values
   const termsSource = defaultTermsDays !== null ? "tag" : null;

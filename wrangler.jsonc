@@ -39,7 +39,9 @@
     // Protected Customer Data: Level 1 + Name + Email (confirmed 2026-10-23).
     // Enables fetching email and displayName in customer queries.
     // Phone and address are NEVER fetched regardless of this setting.
-    "CUSTOMER_PII_FIELDS": "1"
+    "CUSTOMER_PII_FIELDS": "1",
+    // S21: App handle for managed pricing page URL (matches shopify.app.toml name)
+    "APP_HANDLE": "net-terms-receivables"
   },
 
   "observability": {

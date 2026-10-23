@@ -6,11 +6,15 @@
  *
  * Idempotent: Uses upsert with ON CONFLICT to handle duplicates.
  * Webhook dedupe: Checks processed webhooks table before processing.
+ *
+ * S21 gating: Enforces company limit before creating new BuyerAccounts.
+ * Updates to existing accounts are always allowed (downgrade-safe).
  */
 
 import type { Sql } from "~/lib/db-light.server";
 import type { ShopifyCompanyLocation, SyncResult } from "./types";
 import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
+import { checkCompanyLimit } from "../gating.server";
 
 /**
  * Process a CompanyLocation webhook event.
@@ -77,6 +81,25 @@ export async function processCompanyLocationWebhook(
     location.name ||
     location.billingAddress?.company ||
     `Location ${location.id.split("/").pop()}`;
+
+  // S21: Check if this is a new account (for gating)
+  const [existingAccount] = await sql<{ id: string }[]>`
+    SELECT id FROM "BuyerAccount"
+    WHERE "shopId" = ${shopId} AND "companyLocationId" = ${location.id}
+  `;
+
+  // Only enforce limit for NEW accounts (updates always allowed for downgrade safety)
+  if (!existingAccount) {
+    const limitCheck = await checkCompanyLimit(sql, shopId);
+    if (!limitCheck.allowed) {
+      await markWebhookProcessed(sql, webhookId, topic, location.id);
+      return {
+        success: false,
+        action: "skipped",
+        error: `Upgrade required: company limit reached (${limitCheck.currentUsage}/${limitCheck.limit})`,
+      };
+    }
+  }
 
   // Upsert BuyerAccount
   const [result] = await sql<{ id: string; action: string }[]>`
