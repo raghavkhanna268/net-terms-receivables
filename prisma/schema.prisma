@@ -116,6 +116,9 @@ model Session {
   emailVerified       Boolean   @default(false)
   refreshToken        String?
   refreshTokenExpires DateTime?
+  /// Whether the session needs re-authentication (refresh token invalid/expired).
+  /// Set to true when token refresh fails with invalid_grant.
+  needsReauth         Boolean   @default(false)
 
   // Index for efficient lookup when deleting all sessions for a shop (DPDP compliance)
   @@index([shop])

@@ -41,7 +41,8 @@ const SELECT_COLUMNS = `
   "accessToken", "userId", "firstName", "lastName", email,
   "accountOwner", locale, collaborator, "emailVerified",
   "refreshToken",
-  ("refreshTokenExpires" AT TIME ZONE 'UTC') AS "refreshTokenExpires"
+  ("refreshTokenExpires" AT TIME ZONE 'UTC') AS "refreshTokenExpires",
+  "needsReauth"
 `;
 
 /**
@@ -192,6 +193,7 @@ export class LightSessionStorage {
         session.onlineAccessInfo?.associated_user?.email_verified ?? false,
       refreshToken: session.refreshToken ?? null,
       refreshTokenExpires: session.refreshTokenExpires ?? null,
+      needsReauth: false,
     };
   }
 
