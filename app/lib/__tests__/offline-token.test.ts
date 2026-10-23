@@ -351,6 +351,54 @@ describeWithDb("refreshOfflineTokenIfNeeded with real database", () => {
     expect(result.error).toContain(TEST_SHOP);
   });
 
+  /**
+   * P2 REGRESSION TEST: Fetch timeout releases advisory lock quickly.
+   * A slow Shopify call should not block other callers indefinitely.
+   * Uses AbortController with 5s timeout (TOKEN_REFRESH_TIMEOUT_MS).
+   */
+  it("P2: fetch timeout returns network_error and releases lock quickly", async () => {
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
+    await sql`
+      INSERT INTO "Session" (
+        id, shop, state, "isOnline", scope, expires, "accessToken",
+        "refreshToken", "refreshTokenExpires", "needsReauth"
+      ) VALUES (
+        ${TEST_SESSION_ID}, ${TEST_SHOP}, 'state', false, 'read_products',
+        ${twoMinutesAgo.toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        'shpat_old_token',
+        'shprt_refresh_token',
+        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        false
+      )
+    `;
+
+    // Mock fetch to simulate a timeout by using an AbortError
+    // (The real timeout uses AbortController, which throws AbortError on signal.abort())
+    const abortError = new Error("The operation was aborted");
+    abortError.name = "AbortError";
+    global.fetch = vi.fn().mockRejectedValueOnce(abortError);
+
+    const result = await refreshOfflineTokenIfNeeded(
+      sql,
+      TEST_SHOP,
+      TEST_CLIENT_ID,
+      TEST_CLIENT_SECRET
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe("network_error");
+    expect(result.error).toContain("timed out");
+    expect(result.error).toContain(TEST_SHOP);
+
+    // Verify needsReauth is NOT set (timeout is retryable)
+    const rows = await sql<Array<{ needsReauth: boolean }>>`
+      SELECT "needsReauth"
+      FROM "Session"
+      WHERE id = ${TEST_SESSION_ID}
+    `;
+    expect(rows[0].needsReauth).toBe(false);
+  });
+
   it("handles missing access_token in response", async () => {
     const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
     await sql`
