@@ -697,6 +697,105 @@ describe("S10b BULK_OPERATIONS_FINISH handler", () => {
     const { getBulkHandler } = await import("../processor.server");
     expect(getBulkHandler("BULK_OPERATIONS_FINISH")).toBeDefined();
   });
+
+  it("chains to orders when chainToOrders flag is set (based on origin/stage, not webhookId)", async () => {
+    const { processBulkOperation } = await import(
+      "~/services/sync/bulk-jsonl-processor.server"
+    );
+    const { enqueueReconcileOrders } = await import(
+      "../reconcile-handlers.server"
+    );
+
+    const mockProcessBulkOperation = processBulkOperation as ReturnType<
+      typeof vi.fn
+    >;
+    const mockEnqueueReconcileOrders = enqueueReconcileOrders as ReturnType<
+      typeof vi.fn
+    >;
+
+    // Simulate a completed companies reconcile - chainToOrders=true
+    mockProcessBulkOperation.mockResolvedValue({
+      success: true,
+      action: "updated",
+      entityId: "gid://shopify/BulkOperation/123",
+      status: "complete",
+      chainToOrders: true, // Set based on origin/stage, not webhookId
+    });
+
+    const { getBulkHandler } = await import("../processor.server");
+    const handler = getBulkHandler("BULK_OPERATIONS_FINISH");
+
+    const mockSql = Object.assign(vi.fn().mockResolvedValue([]), {
+      json: vi.fn((v: unknown) => v),
+    });
+
+    // Use a non-reconcile webhookId to prove we're using chainToOrders, not webhookId
+    const message = {
+      topic: "BULK_OPERATIONS_FINISH",
+      shop: "test.myshopify.com",
+      webhookId: "shopify-webhook-123", // NOT starting with 'reconcile:'
+      bulkOperationId: "gid://shopify/BulkOperation/123",
+      bulkType: "companies" as const,
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(result.success).toBe(true);
+    expect(result.status).toBe("complete");
+    // Should chain because chainToOrders=true, not because of webhookId
+    expect(mockEnqueueReconcileOrders).toHaveBeenCalledWith(
+      mockSql,
+      "test.myshopify.com"
+    );
+  });
+
+  it("does NOT chain to orders when chainToOrders is false (even if bulkType is companies)", async () => {
+    const { processBulkOperation } = await import(
+      "~/services/sync/bulk-jsonl-processor.server"
+    );
+    const { enqueueReconcileOrders } = await import(
+      "../reconcile-handlers.server"
+    );
+
+    const mockProcessBulkOperation = processBulkOperation as ReturnType<
+      typeof vi.fn
+    >;
+    const mockEnqueueReconcileOrders = enqueueReconcileOrders as ReturnType<
+      typeof vi.fn
+    >;
+
+    // Simulate a completed companies export from webhook (not reconcile)
+    mockProcessBulkOperation.mockResolvedValue({
+      success: true,
+      action: "updated",
+      entityId: "gid://shopify/BulkOperation/123",
+      status: "complete",
+      chainToOrders: false, // Not a reconcile operation
+    });
+
+    const { getBulkHandler } = await import("../processor.server");
+    const handler = getBulkHandler("BULK_OPERATIONS_FINISH");
+
+    const mockSql = Object.assign(vi.fn().mockResolvedValue([]), {
+      json: vi.fn((v: unknown) => v),
+    });
+
+    const message = {
+      topic: "BULK_OPERATIONS_FINISH",
+      shop: "test.myshopify.com",
+      webhookId: "reconcile:test.myshopify.com:2026-10-23:companies", // Even with reconcile webhookId
+      bulkOperationId: "gid://shopify/BulkOperation/123",
+      bulkType: "companies" as const,
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(result.success).toBe(true);
+    // Should NOT chain because chainToOrders=false
+    expect(mockEnqueueReconcileOrders).not.toHaveBeenCalled();
+  });
 });
 
 describe("S10b order refetch null recording", () => {

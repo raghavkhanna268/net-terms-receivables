@@ -357,17 +357,15 @@ registerSyncHandler("ORDERS_PAID", handleOrder);
  * For reconcile operations (companies bulk type):
  * - When companies reconcile completes, enqueue RECONCILE_ORDERS
  * - This ensures companies exist before order-to-account mapping
+ * - Uses chainToOrders flag from result (based on origin/stage in s6_bulk_operations)
  */
 async function handleBulkOperationsFinish(sql: Sql, message: BulkMessage): Promise<BulkProcessResult> {
   const result = await processBulkOperation(sql, message);
 
-  // If companies reconcile completed successfully, enqueue orders reconcile
-  if (
-    result.status === "complete" &&
-    result.success &&
-    message.bulkType === "companies" &&
-    message.webhookId?.startsWith("reconcile:")
-  ) {
+  // If companies reconcile completed successfully, chain to orders reconcile
+  // The chainToOrders flag is set based on origin='reconcile' and reconcile_stage='companies'
+  // from the s6_bulk_operations row, not from webhookId
+  if (result.chainToOrders) {
     await enqueueReconcileOrders(sql, message.shop);
   }
 
@@ -682,9 +680,15 @@ async function processBulkQueue(
       if (bulkResult.success) {
         // Check status for progress vs complete
         if (bulkResult.status === "progress") {
-          // Leave message in queue for continuation (don't archive)
-          // Extend visibility to allow retry soon
-          await extendVisibility(sql, S6_QUEUES.BULK, msg.msg_id, 5);
+          // Archive this message and send a fresh continuation with read_ct=0
+          // This prevents progress iterations from counting toward DLQ threshold
+          await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
+
+          // Send fresh continuation message (new msg_id, read_ct starts at 0)
+          await sql`
+            SELECT pgmq.send(${S6_QUEUES.BULK}, ${sql.json(msg.message)})
+          `;
+
           result.processed++; // Count as progress
         } else {
           // Complete or other success - archive
@@ -696,7 +700,17 @@ async function processBulkQueue(
           }
         }
       } else {
-        if (msg.read_ct >= config.maxRetries) {
+        // Failure - the failure_count in s6_bulk_operations tracks real failures
+        // We still use read_ct for catastrophic errors (handler threw exception)
+        // but bulk operation failures are tracked via failure_count by the processor
+        // The processBulkOperation increments failure_count on errors and checks it
+        // If status is 'error', the failure was already counted
+        if (bulkResult.status === "error") {
+          // Failure was tracked in s6_bulk_operations.failure_count by the processor
+          // Archive this message - a continuation was not needed
+          await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
+          result.failed++;
+        } else if (msg.read_ct >= config.maxRetries) {
           await moveToDeadLetter(
             sql,
             S6_QUEUES.BULK,

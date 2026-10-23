@@ -541,6 +541,9 @@ model S6ProcessedWebhook {
 /// knows how to process the JSONL result.
 ///
 /// S10 additions: byte_offset for chunked JSONL processing, completed_at.
+/// S10b additions: origin, reconcile_stage for sequential reconcile chaining,
+///                 failure_count for DLQ threshold (not progress iterations),
+///                 chunk_size for growing range window.
 ///
 /// Note: This table is created by the S6 migration, not Prisma.
 /// It's included here to keep schema.prisma in sync with the database.
@@ -551,6 +554,10 @@ model S6BulkOperation {
   startedAt       DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
   byteOffset      BigInt    @default(0) @map("byte_offset")
   completedAt     DateTime? @map("completed_at") @db.Timestamptz(6)
+  origin          String    @default("webhook")
+  reconcileStage  String?   @map("reconcile_stage")
+  failureCount    Int       @default(0) @map("failure_count")
+  chunkSize       Int       @default(524288) @map("chunk_size")
 
   @@map("s6_bulk_operations")
 }

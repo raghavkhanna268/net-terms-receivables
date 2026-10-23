@@ -81,9 +81,15 @@ export async function startReconcileBulkOperation(
     };
   }
 
-  // Register the bulk operation for tracking
-  // Mark it as a reconcile operation by prefixing bulkType
-  await registerBulkOperation(sql, parsed.bulkOperationId, shop, kind);
+  // Register the bulk operation for tracking with origin and stage
+  await registerBulkOperation(
+    sql,
+    parsed.bulkOperationId,
+    shop,
+    kind,
+    "reconcile", // origin
+    kind // reconcile_stage
+  );
 
   // Mark webhook as processed
   await markWebhookProcessed(
