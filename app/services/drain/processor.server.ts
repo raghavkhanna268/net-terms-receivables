@@ -8,6 +8,8 @@
  * - Extensible handler registry: S8 topics can register handlers later
  * - Idempotency: Uses webhook dedupe table to skip already-processed messages
  * - Retry with DLQ: Messages exceeding max retries move to dead-letter queue
+ * - Schema errors: GraphQL schema validation errors are non-retryable → DLQ immediately
+ * - Per-message isolation: One bad message never aborts the batch
  * - No-handler: Messages without handlers get visibility extended (not DLQ'd immediately)
  * - Time budget: Stops early when wall-time budget is reached
  * - Progress status: Bulk operations can return {status:'progress'} for continuation
@@ -160,6 +162,7 @@ async function handleCompany(sql: Sql, message: SyncMessage): Promise<SyncResult
       success: false,
       action: "skipped",
       error: result.error,
+      retryable: result.retryable,
     };
   }
 
@@ -216,6 +219,7 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
       success: false,
       action: "skipped",
       error: result.error,
+      retryable: result.retryable,
     };
   }
 
@@ -277,6 +281,7 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
       success: false,
       action: "skipped",
       error: result.error,
+      retryable: result.retryable,
     };
   }
 
@@ -592,14 +597,23 @@ async function processSyncQueue(
           result.processed++;
         }
       } else {
-        // Failed - check if should move to DLQ
-        if (msg.read_ct >= config.maxRetries) {
+        // Failed - determine if DLQ based on retryable flag
+        // Non-retryable errors (schema/auth) go to DLQ immediately on first read
+        // Retryable errors use read_ct threshold
+        const shouldDlq =
+          syncResult.retryable === false || msg.read_ct >= config.maxRetries;
+
+        if (shouldDlq) {
+          const dlqReason =
+            syncResult.retryable === false
+              ? `Non-retryable error: ${syncResult.error || "Unknown"}`
+              : syncResult.error || "Max retries exceeded";
           await moveToDeadLetter(
             sql,
             S6_QUEUES.SYNC,
             msg.msg_id,
             msg.message,
-            syncResult.error || "Max retries exceeded"
+            dlqReason
           );
           result.deadLettered++;
         } else {
@@ -613,6 +627,8 @@ async function processSyncQueue(
         });
       }
     } catch (err) {
+      // Uncaught exceptions are treated as retryable (transient failures)
+      // Only DLQ after max retries to avoid losing messages on transient issues
       const errorMsg = err instanceof Error ? err.message : "Unknown error";
       if (msg.read_ct >= config.maxRetries) {
         await moveToDeadLetter(sql, S6_QUEUES.SYNC, msg.msg_id, msg.message, errorMsg);

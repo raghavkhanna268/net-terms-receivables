@@ -125,6 +125,9 @@ jobs:
       - name: Check scope sync
         run: npx tsx scripts/check-scope-sync.ts
 
+      - name: Validate Admin GraphQL schema
+        run: npx tsx scripts/validate-graphql-schema.ts
+
       - name: Typecheck
         run: npm run typecheck
 

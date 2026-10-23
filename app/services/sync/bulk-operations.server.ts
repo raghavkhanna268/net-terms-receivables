@@ -25,8 +25,10 @@
  * configuration. The JSONL output will contain Company and CompanyLocation
  * objects linked by __parentId.
  *
- * DPDP note: Only billingAddress.company is fetched (name fallback for BuyerAccount).
+ * DPDP note: Only billingAddress.companyName is fetched (name fallback for BuyerAccount).
  * No PII fields (names, addresses, phones) are requested.
+ *
+ * Note: CompanyAddress.company was renamed to companyName in 2026-10.
  */
 export const BULK_COMPANIES_QUERY = `
   mutation BulkCompaniesExport {
@@ -50,7 +52,7 @@ export const BULK_COMPANIES_QUERY = `
                     createdAt
                     updatedAt
                     billingAddress {
-                      company
+                      companyName
                     }
                     buyerExperienceConfiguration {
                       paymentTermsTemplate {

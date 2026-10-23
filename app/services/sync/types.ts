@@ -73,8 +73,10 @@ export interface ShopifyCompany {
 /**
  * Shopify CompanyLocation from webhook or bulk export.
  *
- * DPDP note: billingAddress only includes company (name fallback).
+ * DPDP note: billingAddress only includes companyName (name fallback).
  * No PII fields (names, addresses, phones) are stored.
+ *
+ * Note: CompanyAddress.company was renamed to companyName in 2026-10.
  */
 export interface ShopifyCompanyLocation {
   id: string; // GID: gid://shopify/CompanyLocation/456
@@ -83,7 +85,7 @@ export interface ShopifyCompanyLocation {
     id: string; // Parent company GID
   };
   billingAddress?: {
-    company?: string | null;
+    companyName?: string | null;
   } | null;
   buyerExperienceConfiguration?: {
     paymentTermsTemplate?: {
@@ -177,6 +179,13 @@ export interface SyncResult {
   skipReason?: string;
   /** Error message if success is false */
   error?: string;
+  /**
+   * Whether the error is retryable (for failed results).
+   * false = schema/validation/auth error → DLQ immediately
+   * true = transient error (5xx, timeout) → retry with read_ct
+   * undefined = legacy handler, use read_ct fallback
+   */
+  retryable?: boolean;
 }
 
 /**

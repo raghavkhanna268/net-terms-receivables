@@ -159,12 +159,13 @@ describe("parseOrderBulkJsonl", () => {
 
 describe("bulkLocationToShopifyLocation", () => {
   it("converts bulk line to ShopifyCompanyLocation", () => {
+    // Note: CompanyAddress.company was renamed to companyName in 2026-10
     const bulkLine: BulkCompanyLocationLine = {
       id: "gid://shopify/CompanyLocation/123",
       name: "Headquarters",
       __parentId: "gid://shopify/Company/456",
       billingAddress: {
-        company: "Acme Corp",
+        companyName: "Acme Corp",
       },
       buyerExperienceConfiguration: {
         paymentTermsTemplate: {
@@ -181,7 +182,7 @@ describe("bulkLocationToShopifyLocation", () => {
     expect(result.id).toBe("gid://shopify/CompanyLocation/123");
     expect(result.name).toBe("Headquarters");
     expect(result.company.id).toBe("gid://shopify/Company/456");
-    expect(result.billingAddress?.company).toBe("Acme Corp");
+    expect(result.billingAddress?.companyName).toBe("Acme Corp");
     expect(result.buyerExperienceConfiguration?.paymentTermsTemplate?.dueInDays).toBe(30);
   });
 });
