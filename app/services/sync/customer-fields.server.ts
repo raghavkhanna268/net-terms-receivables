@@ -158,7 +158,7 @@ export function getCustomerQuery(env?: { CUSTOMER_PII_FIELDS?: string }): string
  *
  * This function handles TWO levels of escaping:
  * 1. Shopify search syntax: ' → \' and \ → \\
- * 2. GraphQL string literal: \ → \\ (the result is embedded in a GraphQL string)
+ * 2. GraphQL string literal: \ → \\ and " → \" (the result is embedded in a GraphQL double-quoted string)
  *
  * Example: tag "buyer's" becomes "buyer\\'s" in the GraphQL string,
  * which GraphQL parses to "buyer\'s", which Shopify parses as "buyer's".
@@ -168,14 +168,16 @@ export function getCustomerQuery(env?: { CUSTOMER_PII_FIELDS?: string }): string
  */
 export function escapeTagValue(tag: string): string {
   // First, escape for Shopify search syntax (backslash and single quote)
-  // Then, escape backslashes again for the GraphQL string literal
+  // Then, escape for the GraphQL string literal (backslashes doubled, double quotes escaped)
   //
   // Order matters: escape backslashes first, then quotes
   // 1. \ → \\ (Shopify) → \\\\ (GraphQL)
   // 2. ' → \' (Shopify) → \\' (GraphQL)
+  // 3. " → \" (GraphQL only - not a Shopify special char but breaks the GraphQL string)
   return tag
     .replace(/\\/g, "\\\\\\\\") // \ → \\\\ (one backslash becomes four)
-    .replace(/'/g, "\\\\'");     // ' → \\' (quote becomes backslash-backslash-quote)
+    .replace(/'/g, "\\\\'")     // ' → \\' (single quote: backslash-backslash-quote)
+    .replace(/"/g, '\\"');      // " → \" (double quote: backslash-quote for GraphQL string)
 }
 
 /**

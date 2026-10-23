@@ -266,6 +266,18 @@ describe("escapeTagValue", () => {
     // tag: it\'s\a → Shopify: it\\'s\\a → GraphQL: it\\\\'s\\\\a
     expect(escapeTagValue("it's\\a")).toBe("it\\\\'s\\\\\\\\a");
   });
+
+  it("escapes double quotes for GraphQL string literal", () => {
+    // Double quotes need escaping for the GraphQL string literal (not for Shopify)
+    // tag: test"value → GraphQL: test\"value
+    expect(escapeTagValue('test"value')).toBe('test\\"value');
+  });
+
+  it("handles double quotes mixed with single quotes and backslashes", () => {
+    // Complex case: tag with all special chars
+    // tag: it's"a\test → Shopify escaping: it\'s"a\\test → GraphQL: it\\'s\"a\\\\test
+    expect(escapeTagValue("it's\"a\\test")).toBe("it\\\\'s\\\"a\\\\\\\\test");
+  });
 });
 
 describe("buildTagFilterQuery", () => {
@@ -304,6 +316,12 @@ describe("buildTagFilterQuery", () => {
       { tag: "gold tier" },
     ]);
     expect(query).toBe("tag:'net-terms' OR tag:'buyer\\\\'s special' OR tag:'gold tier'");
+  });
+
+  it("escapes double quotes in tag values (for GraphQL string)", () => {
+    const query = buildTagFilterQuery([{ tag: 'test"tag' }]);
+    // Double quote only needs GraphQL escaping: " → \"
+    expect(query).toBe("tag:'test\\\"tag'");
   });
 });
 
@@ -349,6 +367,13 @@ describe("getBulkCustomersQuery", () => {
     expect(query).not.toBeNull();
     // Shopify: tag:'path\\tag' → GraphQL: tag:'path\\\\tag'
     expect(query).toContain("customers(query: \"tag:'path\\\\\\\\tag'\")");
+  });
+
+  it("escapes double quotes in tag values (for GraphQL string literal)", () => {
+    const query = getBulkCustomersQuery([{ tag: 'test"tag' }]);
+    expect(query).not.toBeNull();
+    // Double quote needs GraphQL escaping: " → \"
+    expect(query).toContain('customers(query: "tag:\'test\\"tag\'")');
   });
 
   it("generates bulk mutation with only base fields by default", () => {
