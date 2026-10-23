@@ -216,13 +216,14 @@ describeWithDb("S10 Drain Integration", () => {
       await sql`SELECT * FROM pgmq.read('s6_sync', 5, 1)`;
 
       // Extend visibility by 3600 seconds (1 hour)
-      const [vtResult] = await sql<{ set_vt: Date }[]>`
-        SELECT pgmq.set_vt('s6_sync', ${msgId}::bigint, 3600) as set_vt
+      // pgmq.set_vt returns a message_record with columns: msg_id, read_ct, enqueued_at, vt, message
+      const [vtResult] = await sql<{ vt: Date }[]>`
+        SELECT vt FROM pgmq.set_vt('s6_sync', ${msgId}::bigint, 3600)
       `;
-      expect(vtResult.set_vt).toBeDefined();
+      expect(vtResult.vt).toBeDefined();
 
       // The new vt should be approximately 1 hour from now
-      const newVt = new Date(vtResult.set_vt);
+      const newVt = new Date(vtResult.vt);
       const oneHourFromNow = new Date(Date.now() + 3600 * 1000);
       const diffMs = Math.abs(newVt.getTime() - oneHourFromNow.getTime());
       expect(diffMs).toBeLessThan(5000); // Within 5 seconds
