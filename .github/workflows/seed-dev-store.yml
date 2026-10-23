@@ -1,10 +1,17 @@
 # Seed dev store with test data for Net Terms Receivables.
 #
 # SECURITY CONSTRAINTS (do not weaken):
-# - Token is NEVER logged, echoed, written to files, or uploaded
-# - Token is masked with ::add-mask:: immediately
-# - Secrets are passed via env:, never inline in run:
+# - Access token is NEVER logged, echoed, written to files, or uploaded
+# - Access token is read from the DB and masked with ::add-mask:: immediately
+# - Refresh token is NEVER logged or echoed
+# - Secrets are passed via env:, never inline in run: blocks
 # - Hardcoded dev-store guard in seed.ts refuses any shop other than the allowed domain
+# - Only booleans are printed: has_token, refreshed, expired
+#
+# Token source:
+# - Reads the offline session token for the dev store from Mumbai DB
+# - If expired or within 5 minutes of expiry, refreshes via Shopify OAuth
+# - Offline tokens expire hourly with future.expiringOfflineAccessTokens: true
 #
 # Run via GitHub Actions UI: Actions > Seed Dev Store > Run workflow
 
@@ -32,29 +39,13 @@ jobs:
     timeout-minutes: 10
 
     env:
-      # Pass secrets via env:, never inline in run: blocks.
-      # The seed script validates SHOP against a hardcoded allowlist.
+      # Fixed shop domain - hardcoded guard in seed.ts enforces this
       SHOP: net-terms-receivables.myshopify.com
-      SHOPIFY_ADMIN_TOKEN: ${{ secrets.DEV_STORE_ADMIN_TOKEN }}
+      # Pass inputs via env, not interpolated into run blocks
+      INPUT_DRY_RUN: ${{ inputs.dry_run }}
+      INPUT_RESET: ${{ inputs.reset }}
 
     steps:
-      - name: Mask token
-        # Mask the token FIRST, before any other step could accidentally log it.
-        # This uses GitHub Actions' built-in secret masking.
-        run: |
-          if [ -n "$SHOPIFY_ADMIN_TOKEN" ]; then
-            echo "::add-mask::$SHOPIFY_ADMIN_TOKEN"
-          fi
-
-      - name: Validate secrets
-        run: |
-          if [ -z "$SHOPIFY_ADMIN_TOKEN" ]; then
-            echo "❌ DEV_STORE_ADMIN_TOKEN secret is not set"
-            echo "   Add it in Settings > Secrets and variables > Actions"
-            exit 1
-          fi
-          echo "✅ Token is set (masked)"
-
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -67,13 +58,164 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run seed script
+      - name: Read and refresh offline token
+        id: token
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          DATABASE_URL_SESSION: ${{ secrets.DATABASE_URL_SESSION }}
+          SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
+          SHOPIFY_API_SECRET: ${{ secrets.SHOPIFY_API_SECRET }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
+          set -euo pipefail
+
+          # Mask API credentials immediately
+          if [ -n "$SHOPIFY_API_KEY" ]; then
+            echo "::add-mask::$SHOPIFY_API_KEY"
+          fi
+          if [ -n "$SHOPIFY_API_SECRET" ]; then
+            echo "::add-mask::$SHOPIFY_API_SECRET"
+          fi
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL_MIGRATIONS secret is not set"
+            exit 1
+          fi
+
+          # Read offline session from DB
+          SESSION_DATA=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP" -t -A -F '|' "$DATABASE_URL" <<'EOSQL'
+          SELECT
+            "accessToken",
+            expires AT TIME ZONE 'UTC',
+            CASE WHEN "refreshToken" IS NOT NULL AND "refreshToken" != '' THEN 'true' ELSE 'false' END
+          FROM "Session"
+          WHERE shop = :'shop' AND "isOnline" = false
+          LIMIT 1;
+          EOSQL
+          )
+
+          if [ -z "$SESSION_DATA" ]; then
+            echo "::error::No offline session found for $SHOP"
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          ACCESS_TOKEN=$(echo "$SESSION_DATA" | cut -d'|' -f1)
+          EXPIRES_RAW=$(echo "$SESSION_DATA" | cut -d'|' -f2)
+          HAS_REFRESH=$(echo "$SESSION_DATA" | cut -d'|' -f3)
+
+          # Check if we have a token
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "::error::Offline session has no access token"
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # Mask the token immediately before any other use
+          echo "::add-mask::$ACCESS_TOKEN"
+          echo "has_token=true"
+
+          # Check if token is expired or within 5 minutes of expiry
+          NEEDS_REFRESH=false
+          TOKEN_EXPIRED=false
+          if [ -n "$EXPIRES_RAW" ] && [ "$EXPIRES_RAW" != "" ]; then
+            EXPIRES_EPOCH=$(date -u -d "$EXPIRES_RAW" +%s 2>/dev/null || echo "0")
+            NOW_EPOCH=$(date -u +%s)
+            THRESHOLD_EPOCH=$((NOW_EPOCH + 300)) # 5 minutes from now
+
+            if [ "$EXPIRES_EPOCH" -le "$NOW_EPOCH" ]; then
+              NEEDS_REFRESH=true
+              TOKEN_EXPIRED=true
+            elif [ "$EXPIRES_EPOCH" -le "$THRESHOLD_EPOCH" ]; then
+              NEEDS_REFRESH=true
+            fi
+          fi
+          echo "expired=$TOKEN_EXPIRED"
+
+          # Refresh if needed and we have a refresh token
+          if [ "$NEEDS_REFRESH" = "true" ]; then
+            if [ "$HAS_REFRESH" = "true" ]; then
+              echo "Refreshing token..."
+
+              # Use DATABASE_URL_SESSION for writes (as #49 does)
+              if [ -z "$DATABASE_URL_SESSION" ]; then
+                echo "::error::DATABASE_URL_SESSION secret is not set (required for token refresh)"
+                exit 1
+              fi
+
+              # Capture stdout only (not stderr), validate JSON
+              # Use env -u to unset PGOPTIONS so refresh helper can write to DB
+              REFRESH_RESULT=$(env -u PGOPTIONS DATABASE_URL="$DATABASE_URL_SESSION" npx tsx scripts/lib/refresh-offline-token.ts \
+                --shop "$SHOP" \
+                --threshold-minutes 5) || true
+
+              # Validate JSON output
+              if ! echo "$REFRESH_RESULT" | jq -e . >/dev/null 2>&1; then
+                echo "::error::Token refresh returned invalid JSON"
+                exit 1
+              fi
+
+              # Parse result with guarded jq calls
+              REFRESH_SUCCESS=$(echo "$REFRESH_RESULT" | jq -r '.success // false' 2>/dev/null || echo "false")
+              WAS_REFRESHED=$(echo "$REFRESH_RESULT" | jq -r '.wasRefreshed // false' 2>/dev/null || echo "false")
+
+              if [ "$REFRESH_SUCCESS" = "true" ]; then
+                echo "refreshed=$WAS_REFRESHED"
+                if [ "$WAS_REFRESHED" = "true" ]; then
+                  # Re-read the new token from DB
+                  export PGOPTIONS="-c default_transaction_read_only=on"
+                  ACCESS_TOKEN=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP" -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT "accessToken"
+          FROM "Session"
+          WHERE shop = :'shop' AND "isOnline" = false
+          LIMIT 1;
+          EOSQL
+                  )
+
+                  # Verify we got a token after refresh
+                  if [ -z "$ACCESS_TOKEN" ]; then
+                    echo "::error::No access token found after refresh"
+                    exit 1
+                  fi
+
+                  # Mask the new token
+                  echo "::add-mask::$ACCESS_TOKEN"
+                fi
+              else
+                ERROR_CODE=$(echo "$REFRESH_RESULT" | jq -r '.errorCode // "unknown"' 2>/dev/null || echo "unknown")
+                echo "::error::Token refresh failed: $ERROR_CODE"
+                exit 1
+              fi
+            else
+              echo "::error::Token expired but no refresh token available"
+              exit 1
+            fi
+          else
+            echo "refreshed=false"
+          fi
+
+          # Output token to GITHUB_ENV (masked, never echoed)
+          # Using a delimiter to safely handle multi-line or special chars
+          {
+            echo "SHOPIFY_ADMIN_TOKEN<<EOF_TOKEN"
+            echo "$ACCESS_TOKEN"
+            echo "EOF_TOKEN"
+          } >> "$GITHUB_ENV"
+
+          echo "has_token=true" >> "$GITHUB_OUTPUT"
+
+      - name: Run seed script
+        env:
+          SHOPIFY_ADMIN_TOKEN: ${{ env.SHOPIFY_ADMIN_TOKEN }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+        run: |
+          set -euo pipefail
+
           ARGS=()
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
+          if [ "$INPUT_DRY_RUN" = "true" ]; then
             ARGS+=("--dry-run")
           fi
-          if [ "${{ inputs.reset }}" = "true" ]; then
+          if [ "$INPUT_RESET" = "true" ]; then
             ARGS+=("--reset")
           fi
           npx tsx scripts/seed.ts "${ARGS[@]}"
