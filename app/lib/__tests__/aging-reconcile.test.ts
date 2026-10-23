@@ -5,9 +5,11 @@ import { sqlOptions } from "~/lib/db-light.server";
 import {
   getShopAgingTotals,
   getBuyerLedger,
+  getAgingBucketsForParity,
 } from "~/lib/aging-queries.server";
 import {
   calculateDaysPastDue,
+  DEFAULT_TIMEZONE,
 } from "~/lib/aging-dates.server";
 import {
   getBucketForDaysPastDue,
@@ -186,7 +188,7 @@ describeWithDb("SQL-vs-TS parity (DB-backed)", () => {
 
     // Compare each row with TypeScript calculation
     for (const row of sqlRows) {
-      const tsDaysPastDue = calculateDaysPastDue(row.due_at, AS_OF_DATE);
+      const tsDaysPastDue = calculateDaysPastDue(row.due_at, AS_OF_DATE, DEFAULT_TIMEZONE);
       const tsBucket = getBucketForDaysPastDue(tsDaysPastDue);
 
       expect(row.days_past_due).toBe(tsDaysPastDue);
@@ -217,6 +219,294 @@ describeWithDb("SQL-vs-TS parity (DB-backed)", () => {
       const actualAmount = BigInt(totals.buckets[bucket].byCurrency["INR"] ?? "0");
       expect(actualAmount).toBe(expectedAmount);
     }
+  });
+});
+
+/**
+ * Non-IST timezone parity test.
+ *
+ * Verifies that SQL and TypeScript aging calculations produce the same results
+ * for a shop in America/New_York timezone. This catches timezone-related bugs
+ * where day boundaries differ between IST and other timezones.
+ *
+ * CRITICAL: This test uses due times that land on DIFFERENT calendar days in
+ * IST vs NY, so the test would FAIL if the query used IST instead of the shop's
+ * timezone. This was verified by temporarily hardcoding 'Asia/Kolkata' in the
+ * production query - the test failed as expected.
+ *
+ * Uses the real getAgingBucketsForParity function to ensure we're testing
+ * the actual production query, not a hand-written copy.
+ */
+describeWithDb("SQL-vs-TS parity (non-IST timezone)", () => {
+  let sql: ReturnType<typeof postgres>;
+  let testShopId: string;
+  let testBuyerAccountId: string;
+
+  const TEST_SHOP_DOMAIN = `parity-ny-${Date.now()}.myshopify.com`;
+  const TEST_TIMEZONE = "America/New_York";
+  
+  // AS_OF: 2026-10-23T02:00:00Z
+  // In NY (EDT, UTC-4): Oct 22 at 22:00 (still Oct 22)
+  // In IST (UTC+5:30): Oct 23 at 07:30 (already Oct 23)
+  const AS_OF_DATE = DateTime.fromISO("2026-10-23T02:00:00", { zone: "UTC" }).toJSDate();
+
+  // Fixtures with EXPLICIT due dates that differ between IST and NY.
+  // Each fixture stores the dueAt timestamp directly so we can match by ID.
+  //
+  // Key insight: A due date of Oct 22 16:00 UTC is:
+  // - In NY: Oct 22 at 12:00 (noon) -> same day as asOf (Oct 22) -> 0 days past due
+  // - In IST: Oct 22 at 21:30 -> day before asOf (Oct 23) -> 1 day past due
+  //
+  // This means the SAME invoice has DIFFERENT days_past_due in different timezones!
+  interface NYParityFixture {
+    id: string;
+    name: string;
+    dueAt: Date;
+    expectedDaysPastDueNY: number;
+    expectedBucketNY: AgingBucketKey;
+    expectedDaysPastDueIST: number;
+    expectedBucketIST: AgingBucketKey;
+  }
+
+  const NY_PARITY_FIXTURES: NYParityFixture[] = [
+    // Due Oct 22 12:00 NY (16:00 UTC) - same day as asOf in NY, day before in IST
+    {
+      id: "fixture-tz-edge-0",
+      name: "INV-NY-tz-edge-0",
+      dueAt: DateTime.fromISO("2026-10-22T16:00:00", { zone: "UTC" }).toJSDate(),
+      expectedDaysPastDueNY: 0,
+      expectedBucketNY: "current",
+      expectedDaysPastDueIST: 1, // Oct 22 -> Oct 23 = 1 day
+      expectedBucketIST: "1-30",
+    },
+    // Due Sep 22 12:00 NY (16:00 UTC) - 30 days in NY, 31 days in IST (crosses bucket boundary!)
+    {
+      id: "fixture-tz-edge-30",
+      name: "INV-NY-tz-edge-30",
+      dueAt: DateTime.fromISO("2026-09-22T16:00:00", { zone: "UTC" }).toJSDate(),
+      expectedDaysPastDueNY: 30,
+      expectedBucketNY: "1-30",
+      expectedDaysPastDueIST: 31, // Crosses into 31-60 bucket!
+      expectedBucketIST: "31-60",
+    },
+    // Standard boundary fixtures (due at end of day in NY)
+    {
+      id: "fixture-ny-1",
+      name: "INV-NY-1day",
+      dueAt: DateTime.fromISO("2026-10-21", { zone: TEST_TIMEZONE }).endOf("day").toJSDate(),
+      expectedDaysPastDueNY: 1,
+      expectedBucketNY: "1-30",
+      expectedDaysPastDueIST: 1,
+      expectedBucketIST: "1-30",
+    },
+    {
+      id: "fixture-ny-31",
+      name: "INV-NY-31day",
+      dueAt: DateTime.fromISO("2026-09-21", { zone: TEST_TIMEZONE }).endOf("day").toJSDate(),
+      expectedDaysPastDueNY: 31,
+      expectedBucketNY: "31-60",
+      expectedDaysPastDueIST: 31,
+      expectedBucketIST: "31-60",
+    },
+    {
+      id: "fixture-ny-60",
+      name: "INV-NY-60day",
+      dueAt: DateTime.fromISO("2026-08-23", { zone: TEST_TIMEZONE }).endOf("day").toJSDate(),
+      expectedDaysPastDueNY: 60,
+      expectedBucketNY: "31-60",
+      expectedDaysPastDueIST: 60,
+      expectedBucketIST: "31-60",
+    },
+    {
+      id: "fixture-ny-61",
+      name: "INV-NY-61day",
+      dueAt: DateTime.fromISO("2026-08-22", { zone: TEST_TIMEZONE }).endOf("day").toJSDate(),
+      expectedDaysPastDueNY: 61,
+      expectedBucketNY: "61-90",
+      expectedDaysPastDueIST: 61,
+      expectedBucketIST: "61-90",
+    },
+    {
+      id: "fixture-ny-90",
+      name: "INV-NY-90day",
+      dueAt: DateTime.fromISO("2026-07-24", { zone: TEST_TIMEZONE }).endOf("day").toJSDate(),
+      expectedDaysPastDueNY: 90,
+      expectedBucketNY: "61-90",
+      expectedDaysPastDueIST: 90,
+      expectedBucketIST: "61-90",
+    },
+    {
+      id: "fixture-ny-91",
+      name: "INV-NY-91day",
+      dueAt: DateTime.fromISO("2026-07-23", { zone: TEST_TIMEZONE }).endOf("day").toJSDate(),
+      expectedDaysPastDueNY: 91,
+      expectedBucketNY: "90+",
+      expectedDaysPastDueIST: 91,
+      expectedBucketIST: "90+",
+    },
+  ];
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    // Create test shop with New York timezone
+    const [shop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_DOMAIN}, 'USD', ${TEST_TIMEZONE}, NOW(), NOW())
+      RETURNING id
+    `;
+    testShopId = shop.id;
+
+    // Create test buyer account
+    const [buyer] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, 'COMPANY',
+        'gid://shopify/Company/parity-ny-test', 'gid://shopify/CompanyLocation/parity-ny-test',
+        'NY Parity Test Buyer', 100000, 'OK', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    testBuyerAccountId = buyer.id;
+
+    // Create invoices for each parity fixture with explicit IDs for matching
+    for (const fixture of NY_PARITY_FIXTURES) {
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${fixture.id}, ${testShopId}, ${testBuyerAccountId},
+          ${"gid://shopify/Order/" + fixture.id},
+          ${fixture.name}, 1000.00, 'open', 1000.00, NOW(), ${fixture.dueAt}, NOW(), NOW()
+        )
+      `;
+    }
+  });
+
+  afterAll(async () => {
+    // Clean up test data
+    if (sql && testShopId) {
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+    }
+    if (sql) {
+      await sql.end();
+    }
+  });
+
+  it("SQL bucketing matches TypeScript bucketing for New York timezone", async () => {
+    // Use the real production query via getAgingBucketsForParity
+    const sqlRows = await getAgingBucketsForParity(sql, testShopId, AS_OF_DATE);
+
+    expect(sqlRows.length).toBe(NY_PARITY_FIXTURES.length);
+
+    // Build a map of fixtures by ID for matching
+    const fixtureById = new Map(NY_PARITY_FIXTURES.map((f) => [f.id, f]));
+
+    // Compare each SQL row to its fixture
+    for (const row of sqlRows) {
+      const fixture = fixtureById.get(row.id);
+      expect(fixture).toBeDefined();
+
+      // Compute TS result from the fixture's stored dueAt (not from SQL's days_past_due)
+      const tsDaysPastDue = calculateDaysPastDue(fixture!.dueAt, AS_OF_DATE, TEST_TIMEZONE);
+      const tsBucket = getBucketForDaysPastDue(tsDaysPastDue);
+
+      // Assert all three match the fixture's expected values
+      expect(row.days_past_due).toBe(fixture!.expectedDaysPastDueNY);
+      expect(row.bucket).toBe(fixture!.expectedBucketNY);
+      expect(tsBucket).toBe(fixture!.expectedBucketNY);
+    }
+  });
+
+  it("timezone edge cases: invoices differ by 1 day between NY and IST", async () => {
+    // Verify our test setup: asOf is different days in NY vs IST
+    const asOfInNY = DateTime.fromJSDate(AS_OF_DATE, { zone: TEST_TIMEZONE });
+    const asOfInIST = DateTime.fromJSDate(AS_OF_DATE, { zone: DEFAULT_TIMEZONE });
+    expect(asOfInNY.day).toBe(22); // Oct 22 in NY
+    expect(asOfInIST.day).toBe(23); // Oct 23 in IST
+
+    // The edge case fixtures should show the timezone difference
+    const edgeFixture0 = NY_PARITY_FIXTURES.find((f) => f.id === "fixture-tz-edge-0")!;
+    const edgeFixture30 = NY_PARITY_FIXTURES.find((f) => f.id === "fixture-tz-edge-30")!;
+
+    // Verify the TypeScript calculations differ between timezones
+    const tsNY0 = calculateDaysPastDue(edgeFixture0.dueAt, AS_OF_DATE, TEST_TIMEZONE);
+    const tsIST0 = calculateDaysPastDue(edgeFixture0.dueAt, AS_OF_DATE, DEFAULT_TIMEZONE);
+    expect(tsNY0).toBe(0);  // Same day in NY
+    expect(tsIST0).toBe(1); // Day before in IST
+
+    const tsNY30 = calculateDaysPastDue(edgeFixture30.dueAt, AS_OF_DATE, TEST_TIMEZONE);
+    const tsIST30 = calculateDaysPastDue(edgeFixture30.dueAt, AS_OF_DATE, DEFAULT_TIMEZONE);
+    expect(tsNY30).toBe(30); // 1-30 bucket in NY
+    expect(tsIST30).toBe(31); // 31-60 bucket in IST - crosses bucket boundary!
+
+    // Verify buckets differ at the boundary
+    expect(getBucketForDaysPastDue(tsNY30)).toBe("1-30");
+    expect(getBucketForDaysPastDue(tsIST30)).toBe("31-60");
+  });
+
+  it("NEGATIVE: same invoices with IST shop timezone yield different results", async () => {
+    // Create a second shop with IST timezone using the same invoices
+    const IST_SHOP_DOMAIN = `parity-ist-${Date.now()}.myshopify.com`;
+    
+    const [istShop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${IST_SHOP_DOMAIN}, 'USD', ${DEFAULT_TIMEZONE}, NOW(), NOW())
+      RETURNING id
+    `;
+
+    const [istBuyer] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${istShop.id}, 'COMPANY',
+        'gid://shopify/Company/parity-ist-test', 'gid://shopify/CompanyLocation/parity-ist-test',
+        'IST Parity Test Buyer', 100000, 'OK', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+
+    // Insert the same invoice dueAt values but for the IST shop
+    for (const fixture of NY_PARITY_FIXTURES) {
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${"ist-" + fixture.id}, ${istShop.id}, ${istBuyer.id},
+          ${"gid://shopify/Order/ist-" + fixture.id},
+          ${"IST-" + fixture.name}, 1000.00, 'open', 1000.00, NOW(), ${fixture.dueAt}, NOW(), NOW()
+        )
+      `;
+    }
+
+    // Get results for IST shop
+    const istRows = await getAgingBucketsForParity(sql, istShop.id, AS_OF_DATE);
+    const istRowById = new Map(istRows.map((r) => [r.id.replace("ist-", ""), r]));
+
+    // The edge case fixtures should yield DIFFERENT results for IST shop
+    const edgeFixture0 = NY_PARITY_FIXTURES.find((f) => f.id === "fixture-tz-edge-0")!;
+    const istRow0 = istRowById.get(edgeFixture0.id);
+    expect(istRow0).toBeDefined();
+    expect(istRow0!.days_past_due).toBe(edgeFixture0.expectedDaysPastDueIST); // 1, not 0
+    expect(istRow0!.bucket).toBe(edgeFixture0.expectedBucketIST); // "1-30", not "current"
+
+    const edgeFixture30 = NY_PARITY_FIXTURES.find((f) => f.id === "fixture-tz-edge-30")!;
+    const istRow30 = istRowById.get(edgeFixture30.id);
+    expect(istRow30).toBeDefined();
+    expect(istRow30!.days_past_due).toBe(edgeFixture30.expectedDaysPastDueIST); // 31, not 30
+    expect(istRow30!.bucket).toBe(edgeFixture30.expectedBucketIST); // "31-60", not "1-30"
+
+    // Cleanup IST shop
+    await sql`DELETE FROM "Invoice" WHERE "shopId" = ${istShop.id}`;
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${istShop.id}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${istShop.id}`;
   });
 });
 

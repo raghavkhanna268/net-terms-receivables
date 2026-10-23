@@ -3,9 +3,14 @@
  *
  * Uses luxon for timezone-aware date math. This module is kept separate
  * from aging.ts to avoid bundling luxon in the client.
+ *
+ * Timezone handling:
+ * All aging calculations use the shop's IANA timezone (stored in Shop.timezone)
+ * to determine calendar-day boundaries. This ensures accurate aging buckets
+ * for shops in different timezones (e.g., "America/New_York", "Europe/London").
  */
 
-import { DateTime } from "luxon";
+import { DateTime, IANAZone } from "luxon";
 import type {
   OpenInvoice,
   AgingTotals,
@@ -14,38 +19,98 @@ import type {
 } from "./aging";
 import { getBucketForDaysPastDue } from "./aging";
 
+/** Default timezone for backward compatibility */
+export const DEFAULT_TIMEZONE = "Asia/Kolkata";
+
 /**
- * Get the local date at start of day in Asia/Kolkata for a given Date.
- * Used to calculate "as of" date for consistent day boundaries.
+ * Validate an IANA timezone string.
+ *
+ * Uses luxon's IANAZone.isValidZone() for validation.
+ * Returns the timezone if valid, otherwise returns DEFAULT_TIMEZONE.
+ *
+ * This MUST be called:
+ * - When writing Shop.timezone to the database
+ * - When reading Shop.timezone before passing to luxon or Postgres AT TIME ZONE
+ *
+ * @param timezone - The timezone string to validate (may be null/undefined)
+ * @returns A valid IANA timezone string (either the input or DEFAULT_TIMEZONE)
  */
-export function getAsOfDateIST(asOf: Date): DateTime {
-  return DateTime.fromJSDate(asOf, { zone: "Asia/Kolkata" }).startOf("day");
+export function validateTimezone(timezone: string | null | undefined): string {
+  if (!timezone) {
+    return DEFAULT_TIMEZONE;
+  }
+
+  // luxon's IANAZone.isValidZone is the authoritative check
+  if (IANAZone.isValidZone(timezone)) {
+    return timezone;
+  }
+
+  // Log invalid timezone for observability but don't throw
+  console.warn(
+    `[aging-dates] Invalid timezone "${timezone}", falling back to ${DEFAULT_TIMEZONE}`
+  );
+  return DEFAULT_TIMEZONE;
 }
 
 /**
- * Get the local date at start of day for a due date in Asia/Kolkata.
- * Null due dates are handled by the caller.
+ * Get the local date at start of day in the specified timezone.
+ * Used to calculate "as of" date for consistent day boundaries.
+ *
+ * IMPORTANT: Always pass a validated timezone from validateTimezone().
+ *
+ * @param asOf - The "as of" date
+ * @param timezone - Validated IANA timezone (e.g., "America/New_York")
  */
-function getDueDateIST(dueAt: Date): DateTime {
-  return DateTime.fromJSDate(dueAt, { zone: "Asia/Kolkata" }).startOf("day");
+export function getAsOfDate(asOf: Date, timezone: string): DateTime {
+  return DateTime.fromJSDate(asOf, { zone: timezone }).startOf("day");
+}
+
+/**
+ * @deprecated Use getAsOfDate(asOf, timezone) instead
+ */
+export function getAsOfDateIST(asOf: Date): DateTime {
+  return getAsOfDate(asOf, DEFAULT_TIMEZONE);
+}
+
+/**
+ * Get the local date at start of day for a due date in the specified timezone.
+ * Null due dates are handled by the caller.
+ *
+ * IMPORTANT: Always pass a validated timezone from validateTimezone().
+ *
+ * @param dueAt - The due date
+ * @param timezone - Validated IANA timezone (e.g., "America/New_York")
+ */
+function getDueDate(dueAt: Date, timezone: string): DateTime {
+  return DateTime.fromJSDate(dueAt, { zone: timezone }).startOf("day");
 }
 
 /**
  * Calculate days past due for an invoice.
  *
+ * IMPORTANT: The timezone parameter is required. Always pass shop.timezone
+ * validated through validateTimezone() to ensure accurate calculations.
+ *
  * @param dueAt - Invoice due date (null = not yet due, returns 0)
  * @param asOf - "As of" date for calculation
+ * @param timezone - Validated IANA timezone for day boundary calculations (REQUIRED)
  * @returns Days past due (0 or negative means not yet due)
  */
-export function calculateDaysPastDue(dueAt: Date | null, asOf: Date): number {
+export function calculateDaysPastDue(
+  dueAt: Date | null,
+  asOf: Date,
+  timezone: string
+): number {
   if (dueAt === null) {
     return 0;
   }
 
-  const asOfIST = getAsOfDateIST(asOf);
-  const dueIST = getDueDateIST(dueAt);
+  // Validate timezone at runtime as a safety net
+  const validTz = validateTimezone(timezone);
+  const asOfLocal = getAsOfDate(asOf, validTz);
+  const dueLocal = getDueDate(dueAt, validTz);
 
-  const diffDays = Math.floor(asOfIST.diff(dueIST, "days").days);
+  const diffDays = Math.floor(asOfLocal.diff(dueLocal, "days").days);
   return diffDays;
 }
 
@@ -92,14 +157,21 @@ function addToCurrencyMap(
  * All calculations use integer paise (minor units) to avoid floating-point issues.
  * Amounts are never summed across currencies - each currency is tracked separately.
  *
+ * IMPORTANT: The timezone parameter is required. Always pass shop.timezone
+ * validated through validateTimezone() to ensure accurate calculations.
+ *
  * @param invoices - List of open invoices with outstanding amounts
- * @param asOf - "As of" date for calculating days past due (in Asia/Kolkata timezone)
+ * @param asOf - "As of" date for calculating days past due
+ * @param timezone - Validated IANA timezone for day boundary calculations (REQUIRED)
  * @returns Shop-wide totals and per-buyer breakdown
  */
 export function calculateAging(
   invoices: OpenInvoice[],
-  asOf: Date
+  asOf: Date,
+  timezone: string
 ): ShopAgingResult {
+  // Validate timezone at runtime as a safety net
+  const validTz = validateTimezone(timezone);
   const shopTotals = emptyAgingTotals();
   const byBuyer = new Map<string, AgingTotals>();
 
@@ -110,7 +182,7 @@ export function calculateAging(
       continue;
     }
 
-    const daysPastDue = calculateDaysPastDue(dueAt, asOf);
+    const daysPastDue = calculateDaysPastDue(dueAt, asOf, validTz);
     const bucket = getBucketForDaysPastDue(daysPastDue);
     const isOverdue = daysPastDue > 0;
 

@@ -3,6 +3,7 @@ import { DateTime } from "luxon";
 import {
   calculateDaysPastDue,
   calculateAging,
+  DEFAULT_TIMEZONE,
 } from "./aging-dates.server";
 import {
   getBucketForDaysPastDue,
@@ -14,6 +15,9 @@ import {
   type OpenInvoice,
   type AgingBucketKey,
 } from "./aging";
+
+/** Test timezone - matches the default IST timezone used by the app */
+const TEST_TZ = DEFAULT_TIMEZONE;
 
 /**
  * Helper to create an "as of" date in Asia/Kolkata timezone.
@@ -51,73 +55,153 @@ describe("aging", () => {
     describe("boundary conditions", () => {
       it("returns 0 for null due date (not yet due)", () => {
         const asOf = asOfDate("2026-10-23");
-        expect(calculateDaysPastDue(null, asOf)).toBe(0);
+        expect(calculateDaysPastDue(null, asOf, TEST_TZ)).toBe(0);
       });
 
       it("returns 0 when due today (due date = as of date)", () => {
         const asOf = asOfDate("2026-10-23");
         const due = dueDate("2026-10-23");
-        expect(calculateDaysPastDue(due, asOf)).toBe(0);
+        expect(calculateDaysPastDue(due, asOf, TEST_TZ)).toBe(0);
       });
 
       it("returns 1 when 1 day past due", () => {
         const asOf = asOfDate("2026-10-24");
         const due = dueDate("2026-10-23");
-        expect(calculateDaysPastDue(due, asOf)).toBe(1);
+        expect(calculateDaysPastDue(due, asOf, TEST_TZ)).toBe(1);
       });
 
       it("returns -1 when due tomorrow (not yet due)", () => {
         const asOf = asOfDate("2026-10-22");
         const due = dueDate("2026-10-23");
-        expect(calculateDaysPastDue(due, asOf)).toBe(-1);
+        expect(calculateDaysPastDue(due, asOf, TEST_TZ)).toBe(-1);
       });
 
       it("returns 30 for 30 days past due", () => {
         const asOf = asOfDate("2026-11-22");
         const due = dueDate("2026-10-23");
-        expect(calculateDaysPastDue(due, asOf)).toBe(30);
+        expect(calculateDaysPastDue(due, asOf, TEST_TZ)).toBe(30);
       });
 
       it("returns 31 for 31 days past due", () => {
         const asOf = asOfDate("2026-11-23");
         const due = dueDate("2026-10-23");
-        expect(calculateDaysPastDue(due, asOf)).toBe(31);
+        expect(calculateDaysPastDue(due, asOf, TEST_TZ)).toBe(31);
       });
 
       it("returns 60 for 60 days past due", () => {
         const asOf = asOfDate("2026-12-22");
         const due = dueDate("2026-10-23");
-        expect(calculateDaysPastDue(due, asOf)).toBe(60);
+        expect(calculateDaysPastDue(due, asOf, TEST_TZ)).toBe(60);
       });
 
       it("returns 61 for 61 days past due", () => {
         const asOf = asOfDate("2026-12-23");
         const due = dueDate("2026-10-23");
-        expect(calculateDaysPastDue(due, asOf)).toBe(61);
+        expect(calculateDaysPastDue(due, asOf, TEST_TZ)).toBe(61);
       });
 
       it("returns 90 for 90 days past due", () => {
         const asOf = asOfDate("2027-01-21");
         const due = dueDate("2026-10-23");
-        expect(calculateDaysPastDue(due, asOf)).toBe(90);
+        expect(calculateDaysPastDue(due, asOf, TEST_TZ)).toBe(90);
       });
 
       it("returns 91 for 91 days past due", () => {
         const asOf = asOfDate("2027-01-22");
         const due = dueDate("2026-10-23");
-        expect(calculateDaysPastDue(due, asOf)).toBe(91);
+        expect(calculateDaysPastDue(due, asOf, TEST_TZ)).toBe(91);
       });
     });
 
     describe("timezone handling", () => {
-      it("uses Asia/Kolkata timezone for calculations", () => {
+      it("calculates correctly in Asia/Kolkata timezone", () => {
         // Create dates that would differ in different timezones
         // At UTC midnight Oct 23, it's 5:30 AM Oct 23 in IST
         const asOfUtcMidnight = new Date("2026-10-23T00:00:00.000Z");
         const dueUtcMidnight = new Date("2026-10-22T00:00:00.000Z");
 
         // In IST, both are the same day ahead, so difference should be 1 day
-        expect(calculateDaysPastDue(dueUtcMidnight, asOfUtcMidnight)).toBe(1);
+        expect(calculateDaysPastDue(dueUtcMidnight, asOfUtcMidnight, "Asia/Kolkata")).toBe(1);
+      });
+
+      it("respects custom timezone parameter", () => {
+        // At UTC midnight Oct 23, it's still Oct 22 in New York (EDT, UTC-4)
+        const asOfUtcMidnight = new Date("2026-10-23T00:00:00.000Z");
+        const dueUtcMidnight = new Date("2026-10-22T00:00:00.000Z");
+
+        // In New York (EDT), UTC midnight Oct 23 is 8:00 PM Oct 22
+        // So due date Oct 22 00:00 UTC is 8:00 PM Oct 21 in NY
+        // asOf is Oct 22 8:00 PM, due is Oct 21 8:00 PM = 1 day difference
+        expect(calculateDaysPastDue(dueUtcMidnight, asOfUtcMidnight, "America/New_York")).toBe(1);
+      });
+
+      describe("around midnight in different timezones", () => {
+        it("same UTC instant is different days in different timezones", () => {
+          // UTC 2026-10-23 01:00:00
+          // In IST (UTC+5:30): 2026-10-23 06:30:00 (Oct 23)
+          // In New York (UTC-4): 2026-10-22 21:00:00 (Oct 22)
+          const instant = new Date("2026-10-23T01:00:00.000Z");
+          
+          // Due: 2026-10-22 01:00:00 UTC
+          // In IST: 2026-10-22 06:30:00 (Oct 22)
+          // In New York: 2026-10-21 21:00:00 (Oct 21)
+          const dueInstant = new Date("2026-10-22T01:00:00.000Z");
+
+          // In IST: Oct 23 - Oct 22 = 1 day past due
+          expect(calculateDaysPastDue(dueInstant, instant, "Asia/Kolkata")).toBe(1);
+
+          // In New York: Oct 22 - Oct 21 = 1 day past due (same relative difference)
+          expect(calculateDaysPastDue(dueInstant, instant, "America/New_York")).toBe(1);
+        });
+
+        it("invoice due at local midnight transitions bucket at correct time", () => {
+          // Invoice due 2026-10-22 at end of day in each timezone
+          // Check what happens just before and after midnight
+
+          // For Asia/Kolkata (IST, UTC+5:30):
+          // Midnight Oct 23 IST = 2026-10-22T18:30:00.000Z
+          const justBeforeMidnightIST = new Date("2026-10-22T18:29:00.000Z");
+          const justAfterMidnightIST = new Date("2026-10-22T18:31:00.000Z");
+          const dueOct22 = new Date("2026-10-22T18:29:00.000Z"); // End of Oct 22 IST
+
+          // Just before midnight: Oct 22 -> Oct 22 = 0 days (current)
+          expect(calculateDaysPastDue(dueOct22, justBeforeMidnightIST, "Asia/Kolkata")).toBe(0);
+          // Just after midnight: Oct 23 -> Oct 22 = 1 day (1-30 bucket)
+          expect(calculateDaysPastDue(dueOct22, justAfterMidnightIST, "Asia/Kolkata")).toBe(1);
+
+          // For America/New_York (EDT, UTC-4 in October):
+          // Midnight Oct 23 EDT = 2026-10-23T04:00:00.000Z
+          const justBeforeMidnightNY = new Date("2026-10-23T03:59:00.000Z");
+          const justAfterMidnightNY = new Date("2026-10-23T04:01:00.000Z");
+          const dueOct22NY = new Date("2026-10-23T03:59:00.000Z"); // End of Oct 22 NY time
+
+          // Just before midnight: Oct 22 -> Oct 22 = 0 days (current)
+          expect(calculateDaysPastDue(dueOct22NY, justBeforeMidnightNY, "America/New_York")).toBe(0);
+          // Just after midnight: Oct 23 -> Oct 22 = 1 day (1-30 bucket)
+          expect(calculateDaysPastDue(dueOct22NY, justAfterMidnightNY, "America/New_York")).toBe(1);
+        });
+
+        it("Europe/London timezone around midnight", () => {
+          // Europe/London in October is BST (UTC+1)
+          // Midnight Oct 23 BST = 2026-10-22T23:00:00.000Z
+          const justBeforeMidnightLondon = new Date("2026-10-22T22:59:00.000Z");
+          const justAfterMidnightLondon = new Date("2026-10-22T23:01:00.000Z");
+          const dueOct22London = new Date("2026-10-22T22:59:00.000Z");
+
+          expect(calculateDaysPastDue(dueOct22London, justBeforeMidnightLondon, "Europe/London")).toBe(0);
+          expect(calculateDaysPastDue(dueOct22London, justAfterMidnightLondon, "Europe/London")).toBe(1);
+        });
+
+        it("Pacific/Auckland timezone (ahead of UTC)", () => {
+          // New Zealand in October is NZDT (UTC+13)
+          // Midnight Oct 23 NZDT = 2026-10-22T11:00:00.000Z
+          const justBeforeMidnightAuckland = new Date("2026-10-22T10:59:00.000Z");
+          const justAfterMidnightAuckland = new Date("2026-10-22T11:01:00.000Z");
+          const dueOct22Auckland = new Date("2026-10-22T10:59:00.000Z");
+
+          expect(calculateDaysPastDue(dueOct22Auckland, justBeforeMidnightAuckland, "Pacific/Auckland")).toBe(0);
+          expect(calculateDaysPastDue(dueOct22Auckland, justAfterMidnightAuckland, "Pacific/Auckland")).toBe(1);
+        });
       });
     });
   });
@@ -174,7 +258,7 @@ describe("aging", () => {
   describe("calculateAging", () => {
     describe("empty and edge cases", () => {
       it("returns empty totals for empty invoice list", () => {
-        const result = calculateAging([], asOfDate("2026-10-23"));
+        const result = calculateAging([], asOfDate("2026-10-23"), TEST_TZ);
 
         expect(result.shopTotals.totalByCurrency.size).toBe(0);
         expect(result.byBuyer.size).toBe(0);
@@ -187,7 +271,7 @@ describe("aging", () => {
           invoice("inv-2", -100n, dueDate("2026-10-20")),
         ];
 
-        const result = calculateAging(invoices, asOfDate("2026-10-23"));
+        const result = calculateAging(invoices, asOfDate("2026-10-23"), TEST_TZ);
         expect(result.shopTotals.totalByCurrency.size).toBe(0);
       });
     });
@@ -198,7 +282,7 @@ describe("aging", () => {
           invoice("inv-1", 100000n, dueDate("2026-10-25")), // Due in future
         ];
 
-        const result = calculateAging(invoices, asOfDate("2026-10-23"));
+        const result = calculateAging(invoices, asOfDate("2026-10-23"), TEST_TZ);
 
         expect(result.shopTotals.buckets.current.byCurrency.get("INR")).toBe(
           100000n
@@ -212,7 +296,7 @@ describe("aging", () => {
           invoice("inv-1", 100000n, dueDate("2026-10-08")), // 15 days ago
         ];
 
-        const result = calculateAging(invoices, asOfDate("2026-10-23"));
+        const result = calculateAging(invoices, asOfDate("2026-10-23"), TEST_TZ);
 
         expect(result.shopTotals.buckets["1-30"].byCurrency.get("INR")).toBe(
           100000n
@@ -226,7 +310,7 @@ describe("aging", () => {
           invoice("inv-1", 100000n, dueDate("2026-09-08")), // 45 days ago
         ];
 
-        const result = calculateAging(invoices, asOfDate("2026-10-23"));
+        const result = calculateAging(invoices, asOfDate("2026-10-23"), TEST_TZ);
 
         expect(result.shopTotals.buckets["31-60"].byCurrency.get("INR")).toBe(
           100000n
@@ -239,7 +323,7 @@ describe("aging", () => {
           invoice("inv-1", 100000n, dueDate("2026-08-09")), // 75 days ago
         ];
 
-        const result = calculateAging(invoices, asOfDate("2026-10-23"));
+        const result = calculateAging(invoices, asOfDate("2026-10-23"), TEST_TZ);
 
         expect(result.shopTotals.buckets["61-90"].byCurrency.get("INR")).toBe(
           100000n
@@ -252,7 +336,7 @@ describe("aging", () => {
           invoice("inv-1", 100000n, dueDate("2026-07-15")), // 100 days ago
         ];
 
-        const result = calculateAging(invoices, asOfDate("2026-10-23"));
+        const result = calculateAging(invoices, asOfDate("2026-10-23"), TEST_TZ);
 
         expect(result.shopTotals.buckets["90+"].byCurrency.get("INR")).toBe(
           100000n
@@ -269,7 +353,7 @@ describe("aging", () => {
           invoice("inv-3", 300000n, dueDate("2026-10-12"), "INR", "buyer-2"),
         ];
 
-        const result = calculateAging(invoices, asOfDate("2026-10-23"));
+        const result = calculateAging(invoices, asOfDate("2026-10-23"), TEST_TZ);
 
         // All are 1-30 days overdue
         expect(result.shopTotals.buckets["1-30"].byCurrency.get("INR")).toBe(
@@ -293,7 +377,7 @@ describe("aging", () => {
           invoice("inv-3", 100000n, dueDate("2026-07-15"), "INR", "buyer-1"), // 100 days
         ];
 
-        const result = calculateAging(invoices, asOfDate("2026-10-23"));
+        const result = calculateAging(invoices, asOfDate("2026-10-23"), TEST_TZ);
 
         expect(result.shopTotals.oldestOverdueDays).toBe(100);
         expect(result.byBuyer.get("buyer-1")?.oldestOverdueDays).toBe(100);
@@ -309,7 +393,7 @@ describe("aging", () => {
           invoice("inv-3", 25000n, dueDate("2026-10-08"), "EUR", "buyer-2"),
         ];
 
-        const result = calculateAging(invoices, asOfDate("2026-10-23"));
+        const result = calculateAging(invoices, asOfDate("2026-10-23"), TEST_TZ);
 
         // Shop totals - each currency separate
         expect(result.shopTotals.totalByCurrency.get("INR")).toBe(100000n);
@@ -334,7 +418,7 @@ describe("aging", () => {
           invoice("inv-2", 50000n, dueDate("2026-10-30"), "USD", "buyer-1"), // Current
         ];
 
-        const result = calculateAging(invoices, asOfDate("2026-10-23"));
+        const result = calculateAging(invoices, asOfDate("2026-10-23"), TEST_TZ);
 
         expect(result.shopTotals.overdueByCurrency.get("INR")).toBe(100000n);
         expect(result.shopTotals.overdueByCurrency.has("USD")).toBe(false);
@@ -346,7 +430,7 @@ describe("aging", () => {
           invoice("inv-2", 50000n, dueDate("2026-10-08"), "USD", "buyer-1"),
         ];
 
-        const result = calculateAging(invoices, asOfDate("2026-10-23"));
+        const result = calculateAging(invoices, asOfDate("2026-10-23"), TEST_TZ);
         const buyer1 = result.byBuyer.get("buyer-1");
 
         expect(buyer1?.totalByCurrency.get("INR")).toBe(100000n);
@@ -360,7 +444,7 @@ describe("aging", () => {
           invoice("inv-1", 100000n, null, "INR", "buyer-1"),
         ];
 
-        const result = calculateAging(invoices, asOfDate("2026-10-23"));
+        const result = calculateAging(invoices, asOfDate("2026-10-23"), TEST_TZ);
 
         expect(result.shopTotals.buckets.current.byCurrency.get("INR")).toBe(
           100000n
@@ -379,7 +463,7 @@ describe("aging", () => {
         invoice("inv-3", 50000n, dueDate("2026-10-08"), "USD", "buyer-2"),
       ];
 
-      const result = calculateAging(invoices, asOfDate("2026-10-23"));
+      const result = calculateAging(invoices, asOfDate("2026-10-23"), TEST_TZ);
       const serialized = serializeAgingTotals(result.shopTotals);
       const deserialized = deserializeAgingTotals(serialized);
 
@@ -399,7 +483,7 @@ describe("aging", () => {
         invoice("inv-1", 999999999999999n, dueDate("2026-10-08"), "INR"),
       ];
 
-      const result = calculateAging(invoices, asOfDate("2026-10-23"));
+      const result = calculateAging(invoices, asOfDate("2026-10-23"), TEST_TZ);
       const serialized = serializeAgingTotals(result.shopTotals);
 
       // Should not throw
@@ -749,7 +833,7 @@ describe("parity test fixtures", () => {
       buyerAccountId: inv.buyerAccountId,
     }));
 
-    const result = calculateAging(invoices, asOf);
+    const result = calculateAging(invoices, asOf, TEST_TZ);
     const serialized = serializeAgingTotals(result.shopTotals);
 
     // Compare totals
