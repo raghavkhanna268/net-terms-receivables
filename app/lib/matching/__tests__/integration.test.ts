@@ -1022,11 +1022,11 @@ describeWithDb("No PII in match reasons (P1.3)", () => {
     // Create tagged customer with email
     await sql`
       INSERT INTO "s8_tagged_customers" (
-        id, shop_id, customer_id, email, name, tags, "createdAt"
+        id, shop_id, customer_id, email, display_name, tags, created_at
       )
       VALUES (
         gen_random_uuid()::text, ${testShopId}, 'gid://shopify/Customer/pii-test',
-        ${TEST_EMAIL}, 'Test Buyer', ARRAY['wholesale']::text[], NOW()
+        ${TEST_EMAIL}, 'Test Buyer', '[]'::json, NOW()
       )
     `;
 
