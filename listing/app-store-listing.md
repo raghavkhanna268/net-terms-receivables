@@ -95,7 +95,9 @@ Planned screenshots:
 
 ## App Categories
 
-Suggested categories for Shopify App Store:
+**TBD** — Verify category names against current Shopify App Store taxonomy before submission.
+
+Suggested categories (to be verified):
 - **Primary:** Orders and shipping → Invoicing
 - **Secondary:** Store management → Finances
 
@@ -103,9 +105,9 @@ Suggested categories for Shopify App Store:
 
 ## Merchant Requirements
 
-- **Shopify Plan:** Standard or higher (for B2B features, requires Shopify Plus or B2B on Shopify)
+- **Shopify Plan:** Basic, Grow, Advanced, or Shopify Plus ([B2B features by plan](https://help.shopify.com/en/manual/b2b))
 - **Region:** Optimized for Indian merchants (bank statement formats, INR currency, IST timezone)
-- **B2B:** B2B features require B2B to be enabled on the store
+- **B2B:** B2B features require B2B to be enabled on the store (not available on Starter or Retail plans)
 
 ---
 

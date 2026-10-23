@@ -11,8 +11,8 @@
 
 - [ ] **⚠️ Upgrade to Cloudflare Workers Paid ($5/month)** — Before App Store review or first real merchant, whichever comes first
   - Free tier: 100k requests/day, 10ms CPU limit
-  - Paid tier: 10M requests/month, 30ms CPU limit
-  - **Why:** Production traffic may exceed free tier; paid tier provides better CPU headroom
+  - Paid tier: 10M requests/month, 30 seconds CPU limit
+  - **Why:** Production traffic may exceed free tier; paid tier provides significantly better CPU headroom
 
 ### Supabase
 
@@ -21,8 +21,9 @@
   - [ ] **TBD:** Consider upgrading to Supabase Pro ($25/month) for SLA and no pausing
   
 - [ ] **⚠️ Configure Supabase backups**
-  - Free tier: Daily backups, 7-day retention
-  - **TBD:** Verify backup configuration in Supabase dashboard
+  - Free tier: No automatic backups ([source: Supabase pricing](https://supabase.com/pricing))
+  - Pro tier: Daily backups, 7-day retention
+  - **Decision needed:** Upgrade to Pro for backups, or implement manual backup strategy
   - **TBD:** Test backup restoration procedure
 
 - [ ] Verify database is in Mumbai region (ap-south-1)
@@ -50,12 +51,12 @@
 
 - [ ] **⚠️ Protected Customer Data (PCD) Access Request**
   - Required for: `read_customers`, `read_orders` scopes (after PR #28)
-  - [ ] **Level 1 PCD** — Customer email, phone, address in API responses
+  - [ ] **PCD Level 1** — Access to protected customer data in API responses
     - [ ] File PCD access request form in Partner Dashboard
-    - [ ] Justify data collection and storage
-  - [ ] **Level 2 PCD** — Customer data storage and retention
-    - Only needed if `CUSTOMER_PII_FIELDS=1` is enabled in production
-    - **TBD:** Decide if email/displayName storage is needed
+    - [ ] Justify data access requirements
+  - [ ] **Name and Email fields** — App policy: only Name and Email fields are stored
+    - Phone, addresses, and other PII fields are never stored (blocked by code)
+    - When `CUSTOMER_PII_FIELDS=1` is enabled, only `email` and `displayName` are persisted
   - **Reference:** [Shopify Protected Customer Data](https://shopify.dev/docs/apps/store/data-protection/protected-customer-data)
 
 ### Privacy Policy
@@ -85,7 +86,7 @@
 ### Performance
 
 - [ ] **⚠️ Lighthouse/Web Vitals audit**
-  - [ ] Target: LCP < 2.5s, FID < 100ms, CLS < 0.1
+  - [ ] Target: LCP < 2.5s, INP < 200ms, CLS < 0.1
   - [ ] Run Lighthouse on embedded app pages
   - **Reference:** [Shopify App Performance Requirements](https://shopify.dev/docs/apps/store/requirements)
 

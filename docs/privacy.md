@@ -42,7 +42,7 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 **⚠️ Pending PR #32 (S8):** When merged, the app will store:
 - Customer GID (Shopify identifier)
 - Customer tags (for net-terms eligibility matching)
-- **Optional:** Customer email and display name — only when `CUSTOMER_PII_FIELDS=1` is enabled (requires DPDP Level 2 approval)
+- **Optional:** Customer email and display name — only when `CUSTOMER_PII_FIELDS=1` is enabled (requires Shopify PCD approval for Name and Email fields)
 - **Never stored:** Phone, addresses, firstName, lastName, defaultAddress (blocked by code)
 
 **⚠️ Pending PR #28 (S6):** When merged, the app will sync:
@@ -53,10 +53,10 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 
 | Data Category | Fields | Purpose | Retention |
 |---------------|--------|---------|-----------|
-| Payment | Value date, amount, rail (NEFT/RTGS/IMPS/UPI), UTR | Payment reconciliation | **TBD** (see [#22](https://github.com/issues/22)) |
+| Payment | Value date, amount, rail (NEFT/RTGS/IMPS/UPI), UTR | Payment reconciliation | **TBD** |
 | Payment (PII) | Payer name/text, narration | Payment matching | **TBD** — may contain payer names and identifiers |
 
-**⚠️ Retention Policy TBD:** Issue [#22](https://github.com/issues/22) tracks the decision on retention periods for `Payment.narration` and `Payment.payerText` fields, which may contain personal data from bank statements.
+**Retention Policy:** **TBD** — A retention policy for `Payment.narration` and `Payment.payerText` fields (which may contain personal data from bank statements) is pending.
 
 ### 2.4 Operational Data
 
@@ -120,10 +120,10 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | Data Category | Retention Period | Deletion Trigger |
 |---------------|------------------|------------------|
 | OAuth Sessions | Until logout, expiry, or uninstall | `app/uninstalled` webhook or session expiry |
-| Shop and Account Data | Until app uninstall | `shop/redact` webhook or `app/uninstalled` |
-| Invoices and Payments | **TBD** ([#22](https://github.com/issues/22)) | **TBD** — Policy decision pending |
+| Shop and Account Data | Until 48 hours after uninstall | `shop/redact` webhook (sent by Shopify 48h after uninstall) |
+| Invoices and Payments | **TBD** | **TBD** |
 | Audit Events | **TBD** | **TBD** |
-| Payment narration/payerText (raw bank data) | **TBD** ([#22](https://github.com/issues/22)) | **TBD** — pg_cron job planned |
+| Payment narration/payerText (raw bank data) | **TBD** | **TBD** |
 
 ---
 
@@ -135,6 +135,7 @@ The app handles Shopify's mandatory compliance webhooks:
 
 When a merchant uninstalls the app:
 - All OAuth sessions for the shop are deleted (`Session` table)
+- Shop configuration and business data (accounts, invoices, payments) remain until `shop/redact`
 - **Verified:** Handler in `app/routes/webhooks.app.uninstalled.tsx`
 
 ### 7.2 `customers/data_request`
@@ -148,7 +149,7 @@ When a customer requests their data:
 When a customer must be deleted (GDPR/CCPA request):
 - **Current behavior:** Returns 200 (no customer data stored in main branch)
 - **⚠️ After PR #32:** Deletes `s8_tagged_customers` row for the affected customer
-- **⚠️ Pending (#22):** Payment.narration/payerText redaction for matched payments
+- **⚠️ Pending:** Payment.narration/payerText redaction for matched payments
 
 ### 7.4 `shop/redact`
 
