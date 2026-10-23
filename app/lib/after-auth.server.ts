@@ -4,10 +4,9 @@
  * These operations are idempotent and wrapped to never break authentication.
  * Failures are logged but don't prevent the user from accessing the app.
  *
- * The setup runs fire-and-forget (not awaited) to stay off the loader's
- * critical path. This means the first request after install may complete
- * before validation is registered, but the registration is idempotent and
- * will complete on a subsequent request.
+ * Uses ctx.waitUntil to run setup in the background, keeping it off the
+ * loader's critical path while ensuring the Worker doesn't terminate before
+ * the async work completes.
  *
  * Note: Running on Cloudflare Workers with CPU limits.
  */
@@ -25,45 +24,54 @@ interface AdminGraphqlClient {
 }
 
 /**
- * In-memory cache for shops that have started afterAuth setup.
+ * Type for ctx.waitUntil function from Cloudflare Workers.
+ */
+type WaitUntilFn = (promise: Promise<unknown>) => void;
+
+/**
+ * In-memory cache for shops that have completed afterAuth setup.
  * This is per-isolate on Workers, so shops may be set up multiple times
  * across different isolates, but ensureValidation is idempotent.
  */
-const setupStartedShops = new Set<string>();
+const setupCompletedShops = new Set<string>();
 
 /**
- * Runs after-authentication hooks for a shop (fire-and-forget).
+ * Runs after-authentication hooks for a shop using ctx.waitUntil.
  *
  * This function is idempotent and safe to call on every request:
  * - Uses in-memory cache to skip already-processed shops
- * - Runs setup in background (not awaited) to stay off critical path
- * - Wraps all operations in try-catch to never break auth
+ * - Runs setup via ctx.waitUntil to stay off critical path
+ * - Marks shop complete only after success
+ * - Allows retry on failure (shop not marked as complete)
  * - Logs errors for observability without affecting user experience
  *
  * @param shop - The shop domain (e.g., "example.myshopify.com")
  * @param admin - The authenticated admin GraphQL client
+ * @param waitUntil - The ctx.waitUntil function from Cloudflare Workers context
  */
 export function runAfterAuth(
   shop: string,
   admin: AdminGraphqlClient,
+  waitUntil: WaitUntilFn,
 ): void {
-  if (setupStartedShops.has(shop)) {
+  if (setupCompletedShops.has(shop)) {
     return;
   }
 
-  setupStartedShops.add(shop);
-
-  runSetup(shop, admin).catch((error) => {
-    setupStartedShops.delete(shop);
-    console.error(`[afterAuth] Failed to setup validation for ${shop}:`, error);
-  });
+  const setupPromise = runSetup(shop, admin);
+  waitUntil(setupPromise);
 }
 
 async function runSetup(
   shop: string,
   admin: AdminGraphqlClient,
 ): Promise<void> {
-  await ensureValidation(admin);
+  try {
+    await ensureValidation(admin);
+    setupCompletedShops.add(shop);
+  } catch (error) {
+    console.error(`[afterAuth] Failed to setup validation for ${shop}:`, error);
+  }
 }
 
 /**
@@ -71,13 +79,13 @@ async function runSetup(
  * @internal
  */
 export function _resetSetupCacheForTesting(): void {
-  setupStartedShops.clear();
+  setupCompletedShops.clear();
 }
 
 /**
- * Check if a shop has started setup - only for testing purposes.
+ * Check if a shop has completed setup - only for testing purposes.
  * @internal
  */
-export function _isShopSetupStarted(shop: string): boolean {
-  return setupStartedShops.has(shop);
+export function _isShopSetupComplete(shop: string): boolean {
+  return setupCompletedShops.has(shop);
 }

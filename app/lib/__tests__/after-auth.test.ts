@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   runAfterAuth,
   _resetSetupCacheForTesting,
-  _isShopSetupStarted,
+  _isShopSetupComplete,
 } from "../after-auth.server";
 
 vi.mock("../validation-registration.server", () => ({
@@ -24,45 +24,81 @@ describe("after-auth", () => {
   });
 
   describe("runAfterAuth", () => {
-    it("calls ensureValidation for new shop (fire-and-forget)", async () => {
-      mockEnsureValidation.mockResolvedValue({
+    it("passes setup promise to waitUntil", async () => {
+      const setupPromise = Promise.resolve({
         id: "gid://shopify/Validation/123",
         created: true,
       });
+      mockEnsureValidation.mockReturnValue(setupPromise);
 
       const mockAdmin = { graphql: vi.fn() };
+      const mockWaitUntil = vi.fn();
+
       runAfterAuth(
         "test-shop.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
       );
 
-      expect(_isShopSetupStarted("test-shop.myshopify.com")).toBe(true);
+      expect(mockWaitUntil).toHaveBeenCalledTimes(1);
+      expect(mockWaitUntil).toHaveBeenCalledWith(expect.any(Promise));
 
       await vi.waitFor(() => {
         expect(mockEnsureValidation).toHaveBeenCalledWith(mockAdmin);
       });
     });
 
-    it("skips setup for already-started shop", async () => {
+    it("marks shop complete only after successful setup", async () => {
+      let resolveSetup!: () => void;
+      const setupPromise = new Promise<void>((resolve) => {
+        resolveSetup = resolve;
+      });
+      mockEnsureValidation.mockReturnValue(setupPromise);
+
+      const mockAdmin = { graphql: vi.fn() };
+      const mockWaitUntil = vi.fn();
+
+      runAfterAuth(
+        "test-shop.myshopify.com",
+        mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
+      );
+
+      expect(_isShopSetupComplete("test-shop.myshopify.com")).toBe(false);
+
+      resolveSetup();
+      await vi.waitFor(() => {
+        expect(_isShopSetupComplete("test-shop.myshopify.com")).toBe(true);
+      });
+    });
+
+    it("skips setup for already-completed shop", async () => {
       mockEnsureValidation.mockResolvedValue({
         id: "gid://shopify/Validation/123",
         created: true,
       });
 
       const mockAdmin = { graphql: vi.fn() };
+      const mockWaitUntil = vi.fn();
 
       runAfterAuth(
         "test-shop.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
-      );
-      runAfterAuth(
-        "test-shop.myshopify.com",
-        mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
       );
 
       await vi.waitFor(() => {
-        expect(mockEnsureValidation).toHaveBeenCalledTimes(1);
+        expect(_isShopSetupComplete("test-shop.myshopify.com")).toBe(true);
       });
+
+      runAfterAuth(
+        "test-shop.myshopify.com",
+        mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
+      );
+
+      expect(mockWaitUntil).toHaveBeenCalledTimes(1);
+      expect(mockEnsureValidation).toHaveBeenCalledTimes(1);
     });
 
     it("does not throw on ensureValidation failure", async () => {
@@ -72,11 +108,13 @@ describe("after-auth", () => {
       mockEnsureValidation.mockRejectedValue(new Error("API error"));
 
       const mockAdmin = { graphql: vi.fn() };
+      const mockWaitUntil = vi.fn();
 
       expect(() =>
         runAfterAuth(
           "failing-shop.myshopify.com",
           mockAdmin as Parameters<typeof runAfterAuth>[1],
+          mockWaitUntil,
         ),
       ).not.toThrow();
 
@@ -87,12 +125,12 @@ describe("after-auth", () => {
         );
       });
 
-      expect(_isShopSetupStarted("failing-shop.myshopify.com")).toBe(false);
+      expect(_isShopSetupComplete("failing-shop.myshopify.com")).toBe(false);
 
       consoleSpy.mockRestore();
     });
 
-    it("retries setup for shop after failure", async () => {
+    it("allows retry after failure (shop not marked complete)", async () => {
       const consoleSpy = vi
         .spyOn(console, "error")
         .mockImplementation(() => {});
@@ -105,26 +143,32 @@ describe("after-auth", () => {
         });
 
       const mockAdmin = { graphql: vi.fn() };
+      const mockWaitUntil = vi.fn();
 
       runAfterAuth(
         "retry-shop.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
       );
 
       await vi.waitFor(() => {
-        expect(_isShopSetupStarted("retry-shop.myshopify.com")).toBe(false);
+        expect(consoleSpy).toHaveBeenCalled();
       });
 
+      expect(_isShopSetupComplete("retry-shop.myshopify.com")).toBe(false);
+
       runAfterAuth(
         "retry-shop.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
       );
 
       await vi.waitFor(() => {
-        expect(_isShopSetupStarted("retry-shop.myshopify.com")).toBe(true);
+        expect(_isShopSetupComplete("retry-shop.myshopify.com")).toBe(true);
       });
 
       expect(mockEnsureValidation).toHaveBeenCalledTimes(2);
+      expect(mockWaitUntil).toHaveBeenCalledTimes(2);
       consoleSpy.mockRestore();
     });
 
@@ -135,22 +179,26 @@ describe("after-auth", () => {
       });
 
       const mockAdmin = { graphql: vi.fn() };
+      const mockWaitUntil = vi.fn();
 
       runAfterAuth(
         "shop-a.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
       );
       runAfterAuth(
         "shop-b.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
       );
 
       await vi.waitFor(() => {
         expect(mockEnsureValidation).toHaveBeenCalledTimes(2);
       });
 
-      expect(_isShopSetupStarted("shop-a.myshopify.com")).toBe(true);
-      expect(_isShopSetupStarted("shop-b.myshopify.com")).toBe(true);
+      expect(_isShopSetupComplete("shop-a.myshopify.com")).toBe(true);
+      expect(_isShopSetupComplete("shop-b.myshopify.com")).toBe(true);
+      expect(mockWaitUntil).toHaveBeenCalledTimes(2);
     });
   });
 });

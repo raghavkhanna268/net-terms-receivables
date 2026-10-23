@@ -71,7 +71,7 @@ function createMockArgs(
     request: new Request("https://example.com/test"),
     params: {},
     context: {
-      cloudflare: { env: {}, ctx: {} },
+      cloudflare: { env: {}, ctx: { waitUntil: vi.fn() } },
       sessionStorage,
       shopify,
     },

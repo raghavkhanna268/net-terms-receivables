@@ -4,6 +4,7 @@ api_version = "2026-10"
 name = "Credit Check Validation"
 handle = "credit-check-validation"
 type = "function"
+uid = "754b2ca1-3024-e66e-c786-64a075e4f9b8ca734feb"
 
   [[extensions.targeting]]
   target = "cart.validations.generate.run"

@@ -6,11 +6,11 @@ import { runAfterAuth } from "~/lib/after-auth.server";
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   // Session storage is injected per-request via loadContext in workers/app.ts
-  const { shopify } = context;
+  const { shopify, cloudflare } = context;
 
   const { admin, session } = await shopify.authenticate.admin(request);
 
-  runAfterAuth(session.shop, admin);
+  runAfterAuth(session.shop, admin, cloudflare.ctx.waitUntil);
 
   return { apiKey: process.env.SHOPIFY_API_KEY || "" };
 };

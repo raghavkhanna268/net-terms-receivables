@@ -176,6 +176,8 @@ S11 is responsible for creating the metafield definitions programmatically durin
 
 > **Note**: The Shopify TOML format ([shopify.dev/docs/apps/build/metafields/definitions](https://shopify.dev/docs/apps/build/metafields/definitions)) documents `[<owner_type>.metafields.app.<key>]` and references MetafieldOwnerType for the full list. However, the documentation does not explicitly confirm that `company_location` and `customer` owner types deploy successfully via TOML. To ensure reliable deployment, S11 creates these definitions via `metafieldDefinitionCreate`.
 
+**TODO**: Create tracking issue "S11: create $app credit_status metafield definitions (metafieldDefinitionCreate)" to implement the programmatic creation.
+
 ### Programmatic Creation (S11 Responsibility)
 
 S11 must create the definitions via GraphQL during shop setup (idempotent):

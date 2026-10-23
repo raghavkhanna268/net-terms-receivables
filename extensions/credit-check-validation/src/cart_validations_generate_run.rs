@@ -203,31 +203,28 @@ fn cart_validations_generate_run(input: schema::cart_validations_generate_run::I
     };
 
     if let Some(purchasing_company) = buyer_identity.purchasing_company() {
-        if let Some(location) = purchasing_company.location() {
-            if let Some(metafield) = location.metafield() {
-                if let Some(json_value) = metafield.json_value() {
-                    let credit_status = CreditStatus::from_json_value(json_value);
-                    return Ok(evaluate_credit_status(
-                        &credit_status,
-                        &cart_currency,
-                        cart_total_paise,
-                    ));
-                }
-            }
+        let location = purchasing_company.location();
+        if let Some(metafield) = location.metafield() {
+            let json_value = metafield.json_value();
+            let credit_status = CreditStatus::from_json_value(json_value);
+            return Ok(evaluate_credit_status(
+                &credit_status,
+                &cart_currency,
+                cart_total_paise,
+            ));
         }
         return Ok(pass());
     }
 
     if let Some(customer) = buyer_identity.customer() {
         if let Some(metafield) = customer.metafield() {
-            if let Some(json_value) = metafield.json_value() {
-                let credit_status = CreditStatus::from_json_value(json_value);
-                return Ok(evaluate_credit_status(
-                    &credit_status,
-                    &cart_currency,
-                    cart_total_paise,
-                ));
-            }
+            let json_value = metafield.json_value();
+            let credit_status = CreditStatus::from_json_value(json_value);
+            return Ok(evaluate_credit_status(
+                &credit_status,
+                &cart_currency,
+                cart_total_paise,
+            ));
         }
     }
 
@@ -238,11 +235,22 @@ fn cart_validations_generate_run(input: schema::cart_validations_generate_run::I
 mod tests {
     use super::*;
     use shopify_function::{run_function_with_input, Result};
+    use serde_json::Value;
 
     const FIXTURES: &str = include_str!("../../../tests/fixtures/credit-status.json");
 
     fn run_test(input_json: &str) -> Result<schema::CartValidationsGenerateRunResult> {
         run_function_with_input(cart_validations_generate_run, input_json)
+    }
+
+    fn load_fixture(path: &str) -> String {
+        let fixtures: Value = serde_json::from_str(FIXTURES).expect("Failed to parse fixtures JSON");
+        let parts: Vec<&str> = path.split('.').collect();
+        let mut current = &fixtures;
+        for part in parts {
+            current = &current[part];
+        }
+        serde_json::to_string(current).expect("Failed to serialize fixture")
     }
 
     fn make_input_with_step(cart_amount: &str, currency: &str, metafield_json: Option<&str>, has_b2b: bool, buyer_journey_step: Option<&str>) -> String {
@@ -297,9 +305,85 @@ mod tests {
     }
 
     #[test]
-    fn test_fixtures_loaded() {
-        assert!(!FIXTURES.is_empty());
-        assert!(FIXTURES.contains("schemaVersion"));
+    fn test_fixtures_valid_not_on_hold_passes() {
+        let fixture = load_fixture("valid.notOnHold");
+        let input = make_input("1000.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "valid.notOnHold should pass: under limit, not on hold");
+    }
+
+    #[test]
+    fn test_fixtures_valid_on_hold_blocks() {
+        let fixture = load_fixture("valid.onHold");
+        let input = make_input("1000.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "valid.onHold should block");
+        match &result.operations[0] {
+            schema::Operation::ValidationAdd(op) => {
+                assert!(op.errors[0].message.contains("on hold"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_fixtures_valid_at_limit_blocks() {
+        let fixture = load_fixture("valid.atLimit");
+        let input = make_input("100.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "valid.atLimit + any cart amount should exceed limit");
+        match &result.operations[0] {
+            schema::Operation::ValidationAdd(op) => {
+                assert!(op.errors[0].message.contains("credit limit"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_fixtures_valid_usd_currency_with_matching_cart() {
+        let fixture = load_fixture("valid.usdCurrency");
+        let input = make_input("1000.00", "USD", Some(&fixture), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "USD fixture with USD cart should pass (under limit)");
+    }
+
+    #[test]
+    fn test_fixtures_valid_usd_currency_mismatch_passes() {
+        let fixture = load_fixture("valid.usdCurrency");
+        let input = make_input("1000.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "USD fixture with INR cart should fail-open (currency mismatch)");
+    }
+
+    #[test]
+    fn test_fixtures_invalid_wrong_schema_version_passes() {
+        let fixture = load_fixture("invalid.wrongSchemaVersion");
+        let input = make_input("100.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "invalid.wrongSchemaVersion should fail-open");
+    }
+
+    #[test]
+    fn test_fixtures_invalid_missing_fields_passes() {
+        let fixture = load_fixture("invalid.missingFields");
+        let input = make_input("100.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "invalid.missingFields should fail-open");
+    }
+
+    #[test]
+    fn test_fixtures_invalid_paise_passes() {
+        let fixture = load_fixture("invalid.invalidPaise");
+        let input = make_input("100.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "invalid.invalidPaise should fail-open");
+    }
+
+    #[test]
+    fn test_fixtures_invalid_malformed_passes() {
+        let fixture = load_fixture("invalid.malformed");
+        let input = make_input("100.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "invalid.malformed should fail-open");
     }
 
     #[test]
