@@ -133,13 +133,19 @@ async function syncShopTimezone(
     const sql = getRequestSql();
 
     // Update the shop's timezone in the database
-    await sql`
+    // Note: Shop row may not exist yet if this is the first auth - that's OK, row count will be 0
+    const updateResult = await sql`
       UPDATE "Shop"
       SET timezone = ${validatedTimezone}
       WHERE domain = ${shop}
     `;
 
-    console.log(`[afterAuth] Updated timezone for ${shop}: ${validatedTimezone}`);
+    const rowCount = updateResult.count ?? 0;
+    if (rowCount === 0) {
+      console.log(`[afterAuth] No Shop row found for ${shop}, skipping timezone update`);
+    } else {
+      console.log(`[afterAuth] Updated timezone for ${shop}: ${validatedTimezone} (${rowCount} row)`);
+    }
   } catch (error) {
     // Non-fatal: timezone sync failure shouldn't break app access
     console.error(`[afterAuth] Failed to sync timezone for ${shop}:`, error);
@@ -150,20 +156,37 @@ async function runSetup(
   shop: string,
   admin: AdminGraphqlClient,
 ): Promise<void> {
+  let hasError = false;
+  
   try {
     // Definitions run before validation so the Function input query can resolve them.
     await ensureMetafieldDefinitions(admin);
-    await ensureValidation(admin);
-    
-    // Sync shop timezone from Shopify Admin API
-    await syncShopTimezone(shop, admin);
-    
-    setupCompletedShops.add(shop);
   } catch (error) {
-    console.error(`[afterAuth] Failed to setup for ${shop}:`, error);
-  } finally {
-    inFlightSetups.delete(shop);
+    hasError = true;
+    console.error(`[afterAuth] Failed to ensure metafield definitions for ${shop}:`, error);
   }
+  
+  try {
+    await ensureValidation(admin);
+  } catch (error) {
+    hasError = true;
+    console.error(`[afterAuth] Failed to ensure validation for ${shop}:`, error);
+  }
+  
+  // Timezone sync runs even if earlier steps fail - it's independent
+  try {
+    await syncShopTimezone(shop, admin);
+  } catch (error) {
+    hasError = true;
+    console.error(`[afterAuth] Failed to sync timezone for ${shop}:`, error);
+  }
+  
+  // Only mark complete if all steps succeeded
+  if (!hasError) {
+    setupCompletedShops.add(shop);
+  }
+  
+  inFlightSetups.delete(shop);
 }
 
 /**

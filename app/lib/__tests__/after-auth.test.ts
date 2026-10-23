@@ -145,8 +145,9 @@ describe("after-auth", () => {
       ).not.toThrow();
 
       await vi.waitFor(() => {
+        // With separate try/catch blocks, each step logs its own error
         expect(consoleSpy).toHaveBeenCalledWith(
-          expect.stringContaining("[afterAuth] Failed to setup for"),
+          expect.stringContaining("[afterAuth] Failed to ensure validation for"),
           expect.any(Error),
         );
       });
