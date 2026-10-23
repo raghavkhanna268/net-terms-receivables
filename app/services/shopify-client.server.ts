@@ -213,8 +213,35 @@ export async function shopifyGraphQL<T = unknown>(
   let wasRateLimited = false;
 
   // Hoist admin client outside retry loop - the session doesn't change between retries
-  const shopify = getShopifyApp();
-  const { admin } = await shopify.unauthenticated.admin(shop);
+  // Wrap in try/catch to handle InvalidSession (missing/revoked offline session)
+  let admin: Awaited<ReturnType<ReturnType<typeof getShopifyApp>["unauthenticated"]["admin"]>>["admin"];
+  try {
+    const shopify = getShopifyApp();
+    const result = await shopify.unauthenticated.admin(shop);
+    admin = result.admin;
+  } catch (err) {
+    // InvalidSession or 'No session found' - non-retryable, drain should archive
+    if (err instanceof InvalidSession) {
+      return {
+        success: false,
+        error: `Invalid session for ${shop}. Shop may need to reinstall the app.`,
+        retryable: false,
+        retriesAttempted: 0,
+      };
+    }
+    // Other session errors (e.g., 'No session found')
+    const message = err instanceof Error ? err.message : "Unknown error";
+    if (message.includes("session") || message.includes("Session")) {
+      return {
+        success: false,
+        error: `Session error for ${shop}: ${message}`,
+        retryable: false,
+        retriesAttempted: 0,
+      };
+    }
+    // Re-throw unexpected errors
+    throw err;
+  }
 
   while (attempt <= maxRetries) {
     try {

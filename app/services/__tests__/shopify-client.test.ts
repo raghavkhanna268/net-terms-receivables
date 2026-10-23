@@ -290,4 +290,46 @@ describe("shopify-client.server", () => {
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(2);
     });
   });
+
+  describe("InvalidSession errors (hoisted admin client)", () => {
+    it("returns non-retryable error when unauthenticated.admin rejects with InvalidSession", async () => {
+      const { InvalidSession } = await import("@shopify/shopify-api");
+
+      // Make unauthenticated.admin reject with InvalidSession
+      mockShopifyApp.unauthenticated.admin.mockRejectedValueOnce(
+        new InvalidSession("No session found for shop")
+      );
+
+      const result = await shopifyGraphQL(
+        "revoked-shop.myshopify.com",
+        "query { shop { name } }"
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.retryable).toBe(false);
+      expect(result.retriesAttempted).toBe(0);
+      expect(result.error).toContain("Invalid session");
+      // graphql should never be called since we failed at the admin client level
+      expect(mockAdmin.graphql).not.toHaveBeenCalled();
+    });
+
+    it("returns non-retryable error when unauthenticated.admin rejects with session error message", async () => {
+      // Make unauthenticated.admin reject with a generic session error
+      mockShopifyApp.unauthenticated.admin.mockRejectedValueOnce(
+        new Error("No session found for shop")
+      );
+
+      const result = await shopifyGraphQL(
+        "missing-session.myshopify.com",
+        "query { shop { name } }"
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.retryable).toBe(false);
+      expect(result.retriesAttempted).toBe(0);
+      expect(result.error).toContain("session");
+      // graphql should never be called since we failed at the admin client level
+      expect(mockAdmin.graphql).not.toHaveBeenCalled();
+    });
+  });
 });

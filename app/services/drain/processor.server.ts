@@ -252,10 +252,10 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
  * - ORDERS_CREATE/UPDATED: Keep ledger state unchanged (can't process without data)
  * - Always increment order_refetch_null counter (no PII)
  *
- * Ordering guard (S20): Uses triggeredAt to prevent older events overwriting newer data.
+ * S20: triggeredAt is stored for audit, not used for ordering (re-fetch gets latest state).
  */
 async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> {
-  // Parse triggeredAt from message for ordering guards (S20)
+  // Parse triggeredAt from message (S20: stored for audit, not used for ordering)
   const triggeredAt = message.triggeredAt ? new Date(message.triggeredAt) : null;
 
   // Idempotency check
