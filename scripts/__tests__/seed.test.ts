@@ -31,6 +31,8 @@ import {
   buildTaggedCustomerOrderInput,
   buildB2BOrderInput,
   getIndiaProvinceCode,
+  getIndiaAddressInfo,
+  INDIA_CITY_ADDRESS_INFO,
   type SeedState,
   type GraphQLResponse,
   type UserError,
@@ -1265,36 +1267,89 @@ describe("Error Logging Helpers", () => {
   });
 });
 
-describe("India Province Code Helper", () => {
-  it("maps Mumbai to MH (Maharashtra)", () => {
-    expect(getIndiaProvinceCode("Mumbai")).toBe("MH");
+describe("India Address Info Helper", () => {
+  it("returns provinceCode and zip for Mumbai", () => {
+    const info = getIndiaAddressInfo("Mumbai");
+    expect(info.provinceCode).toBe("MH");
+    expect(info.zip).toBe("400001");
   });
 
-  it("maps Pune to MH (Maharashtra)", () => {
-    expect(getIndiaProvinceCode("Pune")).toBe("MH");
+  it("returns provinceCode and zip for Delhi", () => {
+    const info = getIndiaAddressInfo("Delhi");
+    expect(info.provinceCode).toBe("DL");
+    expect(info.zip).toBe("110001");
   });
 
-  it("maps Delhi to DL", () => {
-    expect(getIndiaProvinceCode("Delhi")).toBe("DL");
+  it("returns provinceCode and zip for Kolkata", () => {
+    const info = getIndiaAddressInfo("Kolkata");
+    expect(info.provinceCode).toBe("WB");
+    expect(info.zip).toBe("700001");
   });
 
-  it("maps Kolkata to WB (West Bengal)", () => {
-    expect(getIndiaProvinceCode("Kolkata")).toBe("WB");
+  it("returns provinceCode and zip for Ahmedabad", () => {
+    const info = getIndiaAddressInfo("Ahmedabad");
+    expect(info.provinceCode).toBe("GJ");
+    expect(info.zip).toBe("380001");
   });
 
-  it("maps Ahmedabad to GJ (Gujarat)", () => {
-    expect(getIndiaProvinceCode("Ahmedabad")).toBe("GJ");
+  it("returns provinceCode and zip for Pune", () => {
+    const info = getIndiaAddressInfo("Pune");
+    expect(info.provinceCode).toBe("MH");
+    expect(info.zip).toBe("411001");
   });
 
   it("throws on unknown city", () => {
-    expect(() => getIndiaProvinceCode("UnknownCity")).toThrow("Unknown Indian city");
-    expect(() => getIndiaProvinceCode("UnknownCity")).toThrow("INDIA_CITY_TO_PROVINCE_CODE");
+    expect(() => getIndiaAddressInfo("UnknownCity")).toThrow("Unknown Indian city");
+    expect(() => getIndiaAddressInfo("UnknownCity")).toThrow("INDIA_CITY_ADDRESS_INFO");
+  });
+
+  it("getIndiaProvinceCode returns just the provinceCode", () => {
+    expect(getIndiaProvinceCode("Mumbai")).toBe("MH");
+    expect(getIndiaProvinceCode("Delhi")).toBe("DL");
   });
 
   it("COMPANY_SEEDS uses diverse cities", () => {
     const cities = COMPANY_SEEDS.map(s => s.city);
     const uniqueCities = new Set(cities);
     expect(uniqueCities.size).toBeGreaterThanOrEqual(4);
+  });
+
+  it("each city's PIN prefix matches its state's PIN range", () => {
+    const statePinPrefixes: Record<string, string[]> = {
+      "MH": ["40", "41", "42", "43", "44"],
+      "DL": ["11"],
+      "KA": ["56", "57", "58", "59"],
+      "TN": ["60", "61", "62", "63", "64"],
+      "GJ": ["36", "37", "38", "39"],
+      "WB": ["70", "71", "72", "73", "74"],
+      "TG": ["50", "51"],
+      "RJ": ["30", "31", "32", "33", "34"],
+      "UP": ["20", "21", "22", "23", "24", "25", "26", "27", "28"],
+    };
+
+    for (const [_city, info] of Object.entries(INDIA_CITY_ADDRESS_INFO)) {
+      const validPrefixes = statePinPrefixes[info.provinceCode];
+      expect(validPrefixes).toBeDefined();
+      const pinPrefix = info.zip.slice(0, 2);
+      expect(validPrefixes).toContain(pinPrefix);
+    }
+  });
+
+  it("all COMPANY_SEEDS cities have valid address info with matching PIN", () => {
+    const statePinPrefixes: Record<string, string[]> = {
+      "MH": ["40", "41", "42", "43", "44"],
+      "DL": ["11"],
+      "GJ": ["36", "37", "38", "39"],
+      "WB": ["70", "71", "72", "73", "74"],
+    };
+
+    for (const seed of COMPANY_SEEDS) {
+      const info = getIndiaAddressInfo(seed.city);
+      const validPrefixes = statePinPrefixes[info.provinceCode];
+      expect(validPrefixes).toBeDefined();
+      const pinPrefix = info.zip.slice(0, 2);
+      expect(validPrefixes).toContain(pinPrefix);
+    }
   });
 });
 
@@ -1350,8 +1405,10 @@ describe("Variable Builder Input Coercion against Schema", () => {
       processedAt: new Date().toISOString(),
       currencyCode: "INR",
     });
-    const errors = coerceAndCollectErrors(variables.order, "OrderCreateOrderInput");
-    expect(errors).toEqual([]);
+    const orderErrors = coerceAndCollectErrors(variables.order, "OrderCreateOrderInput");
+    expect(orderErrors).toEqual([]);
+    const optionsErrors = coerceAndCollectErrors(variables.options, "OrderCreateOptionsInput");
+    expect(optionsErrors).toEqual([]);
   });
 
   it("buildB2BOrderInput produces valid OrderCreateOrderInput", () => {
@@ -1364,8 +1421,27 @@ describe("Variable Builder Input Coercion against Schema", () => {
       processedAt: new Date().toISOString(),
       currencyCode: "INR",
     });
-    const errors = coerceAndCollectErrors(variables.order, "OrderCreateOrderInput");
-    expect(errors).toEqual([]);
+    const orderErrors = coerceAndCollectErrors(variables.order, "OrderCreateOrderInput");
+    expect(orderErrors).toEqual([]);
+    const optionsErrors = coerceAndCollectErrors(variables.options, "OrderCreateOptionsInput");
+    expect(optionsErrors).toEqual([]);
+  });
+
+  it("buildTaggedCustomerOrderInput respects custom city", () => {
+    const variables = buildTaggedCustomerOrderInput({
+      orderKey: "ntr-seed-order-3",
+      customerId: "gid://customer/3",
+      productTitle: "Delhi Product",
+      amount: 25000,
+      processedAt: new Date().toISOString(),
+      currencyCode: "INR",
+      city: "Delhi",
+    });
+    const order = variables.order as Record<string, unknown>;
+    const billingAddress = order.billingAddress as Record<string, unknown>;
+    expect(billingAddress.city).toBe("Delhi");
+    expect(billingAddress.provinceCode).toBe("DL");
+    expect(billingAddress.zip).toBe("110001");
   });
 
   it("rejects zoneCode on MailingAddressInput (order addresses)", () => {

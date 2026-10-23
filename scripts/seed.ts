@@ -172,59 +172,75 @@ export const LOCATION_TERMS: { suffix: string; dueInDays: number }[] = [
 ];
 
 /**
- * ISO 3166-2:IN subdivision codes for Indian cities.
+ * Indian city address data: ISO 3166-2:IN zone/province code and PIN code prefix.
  * @see https://en.wikipedia.org/wiki/ISO_3166-2:IN
+ * @see https://en.wikipedia.org/wiki/Postal_Index_Number
  * 
  * Used by:
  * - CompanyAddressInput.zoneCode (company/location addresses)
  * - MailingAddressInput.provinceCode (order billing/shipping addresses)
  * 
  * Both fields use the same ISO 3166-2:IN codes (e.g., MH, DL, KA).
+ * PIN codes are 6 digits; we store a valid prefix for each city.
  */
-export const INDIA_CITY_TO_PROVINCE_CODE: Record<string, string> = {
-  // Maharashtra (MH)
-  "Mumbai": "MH",
-  "Pune": "MH",
-  "Nagpur": "MH",
-  // Delhi (DL)
-  "Delhi": "DL",
-  "New Delhi": "DL",
-  // Karnataka (KA)
-  "Bengaluru": "KA",
-  "Bangalore": "KA",
-  "Mysuru": "KA",
-  // Tamil Nadu (TN)
-  "Chennai": "TN",
-  "Coimbatore": "TN",
-  // Gujarat (GJ)
-  "Ahmedabad": "GJ",
-  "Surat": "GJ",
-  // West Bengal (WB)
-  "Kolkata": "WB",
-  // Telangana (TG)
-  "Hyderabad": "TG",
-  // Rajasthan (RJ)
-  "Jaipur": "RJ",
-  // Uttar Pradesh (UP)
-  "Lucknow": "UP",
-  "Noida": "UP",
+export interface IndiaAddressInfo {
+  provinceCode: string;
+  zip: string;
+}
+
+export const INDIA_CITY_ADDRESS_INFO: Record<string, IndiaAddressInfo> = {
+  // Maharashtra (MH) - PIN 40xxxx-44xxxx
+  "Mumbai": { provinceCode: "MH", zip: "400001" },
+  "Pune": { provinceCode: "MH", zip: "411001" },
+  "Nagpur": { provinceCode: "MH", zip: "440001" },
+  // Delhi (DL) - PIN 11xxxx
+  "Delhi": { provinceCode: "DL", zip: "110001" },
+  "New Delhi": { provinceCode: "DL", zip: "110001" },
+  // Karnataka (KA) - PIN 56xxxx-59xxxx
+  "Bengaluru": { provinceCode: "KA", zip: "560001" },
+  "Bangalore": { provinceCode: "KA", zip: "560001" },
+  "Mysuru": { provinceCode: "KA", zip: "570001" },
+  // Tamil Nadu (TN) - PIN 60xxxx-64xxxx
+  "Chennai": { provinceCode: "TN", zip: "600001" },
+  "Coimbatore": { provinceCode: "TN", zip: "641001" },
+  // Gujarat (GJ) - PIN 36xxxx-39xxxx
+  "Ahmedabad": { provinceCode: "GJ", zip: "380001" },
+  "Surat": { provinceCode: "GJ", zip: "395001" },
+  // West Bengal (WB) - PIN 70xxxx-74xxxx
+  "Kolkata": { provinceCode: "WB", zip: "700001" },
+  // Telangana (TG) - PIN 50xxxx-51xxxx
+  "Hyderabad": { provinceCode: "TG", zip: "500001" },
+  // Rajasthan (RJ) - PIN 30xxxx-34xxxx
+  "Jaipur": { provinceCode: "RJ", zip: "302001" },
+  // Uttar Pradesh (UP) - PIN 20xxxx-28xxxx
+  "Lucknow": { provinceCode: "UP", zip: "226001" },
+  "Noida": { provinceCode: "UP", zip: "201301" },
 };
 
 /**
- * Get the ISO 3166-2:IN subdivision code for an Indian city.
- * Throws if the city is not in the mapping - add it to INDIA_CITY_TO_PROVINCE_CODE.
+ * Get address info (province/zone code and ZIP) for an Indian city.
+ * Throws if the city is not in the mapping - add it to INDIA_CITY_ADDRESS_INFO.
  * 
- * @returns The province/zone code (e.g., "MH" for Mumbai)
+ * @returns Object with provinceCode (e.g., "MH") and zip (e.g., "400001")
  */
-export function getIndiaProvinceCode(city: string): string {
-  const code = INDIA_CITY_TO_PROVINCE_CODE[city];
-  if (!code) {
+export function getIndiaAddressInfo(city: string): IndiaAddressInfo {
+  const info = INDIA_CITY_ADDRESS_INFO[city];
+  if (!info) {
     throw new Error(
-      `Unknown Indian city "${city}" - add it to INDIA_CITY_TO_PROVINCE_CODE in scripts/seed.ts. ` +
-      `See https://en.wikipedia.org/wiki/ISO_3166-2:IN for valid codes.`
+      `Unknown Indian city "${city}" - add it to INDIA_CITY_ADDRESS_INFO in scripts/seed.ts. ` +
+      `See https://en.wikipedia.org/wiki/ISO_3166-2:IN for province codes and ` +
+      `https://en.wikipedia.org/wiki/Postal_Index_Number for PIN codes.`
     );
   }
-  return code;
+  return info;
+}
+
+/**
+ * Get the ISO 3166-2:IN subdivision code for an Indian city.
+ * @deprecated Use getIndiaAddressInfo() to get both provinceCode and zip together.
+ */
+export function getIndiaProvinceCode(city: string): string {
+  return getIndiaAddressInfo(city).provinceCode;
 }
 
 export const COMPANY_SEEDS = [
@@ -779,6 +795,7 @@ export function buildCompanyCreateInput(
   locationSuffix: string,
   paymentTermsTemplateId?: string
 ): { input: Record<string, unknown> } {
+  const addressInfo = getIndiaAddressInfo(seed.city);
   return {
     input: {
       company: { name: seed.name, externalId },
@@ -789,9 +806,9 @@ export function buildCompanyCreateInput(
           lastName: seed.contact.lastName,
           address1: "123 Business Street",
           city: seed.city,
-          zoneCode: getIndiaProvinceCode(seed.city),
+          zoneCode: addressInfo.provinceCode,
           countryCode: "IN",
-          zip: "400001",
+          zip: addressInfo.zip,
         },
         billingSameAsShipping: true,
         buyerExperienceConfiguration: paymentTermsTemplateId ? {
@@ -899,6 +916,7 @@ export function buildCompanyLocationCreateInput(
   loc: { suffix: string; dueInDays: number },
   paymentTermsTemplateId?: string
 ): { companyId: string; input: Record<string, unknown> } {
+  const addressInfo = getIndiaAddressInfo(city);
   return {
     companyId,
     input: {
@@ -908,9 +926,9 @@ export function buildCompanyLocationCreateInput(
         lastName: loc.suffix,
         address1: `${loc.dueInDays} Payment Lane`,
         city: city,
-        zoneCode: getIndiaProvinceCode(city),
+        zoneCode: addressInfo.provinceCode,
         countryCode: "IN",
-        zip: "400002",
+        zip: addressInfo.zip,
       },
       billingSameAsShipping: true,
       buyerExperienceConfiguration: paymentTermsTemplateId ? {
@@ -1294,6 +1312,11 @@ export const TAGGED_CUSTOMER_ORDER_CREATE_MUTATION = `
 `;
 
 /**
+ * Default city for orders without company association (tagged customer orders).
+ */
+const DEFAULT_ORDER_CITY = "Mumbai";
+
+/**
  * Build OrderCreateOrderInput variables for tagged customer orders.
  * Uses MailingAddressInput which has provinceCode (not zoneCode).
  * Exported for schema validation testing.
@@ -1306,8 +1329,11 @@ export function buildTaggedCustomerOrderInput(
     amount: number;
     processedAt: string;
     currencyCode: string;
+    city?: string;
   }
 ): { order: Record<string, unknown>; options: Record<string, unknown> } {
+  const city = options.city ?? DEFAULT_ORDER_CITY;
+  const addressInfo = getIndiaAddressInfo(city);
   return {
     order: {
       tags: [SEED_TAG, options.orderKey],
@@ -1329,19 +1355,19 @@ export function buildTaggedCustomerOrderInput(
         firstName: "Tagged",
         lastName: "Customer",
         address1: "123 Test Street",
-        city: "Mumbai",
-        provinceCode: getIndiaProvinceCode("Mumbai"),
+        city: city,
+        provinceCode: addressInfo.provinceCode,
         countryCode: "IN",
-        zip: "400001",
+        zip: addressInfo.zip,
       },
       shippingAddress: {
         firstName: "Tagged",
         lastName: "Customer",
         address1: "123 Test Street",
-        city: "Mumbai",
-        provinceCode: getIndiaProvinceCode("Mumbai"),
+        city: city,
+        provinceCode: addressInfo.provinceCode,
         countryCode: "IN",
-        zip: "400001",
+        zip: addressInfo.zip,
       },
     },
     options: {
@@ -1453,8 +1479,11 @@ export function buildB2BOrderInput(
     amount: number;
     processedAt: string;
     currencyCode: string;
+    city?: string;
   }
 ): { order: Record<string, unknown>; options: Record<string, unknown> } {
+  const city = options.city ?? DEFAULT_ORDER_CITY;
+  const addressInfo = getIndiaAddressInfo(city);
   return {
     order: {
       tags: [SEED_TAG, options.orderKey],
@@ -1477,19 +1506,19 @@ export function buildB2BOrderInput(
         firstName: "B2B",
         lastName: "Billing",
         address1: "123 Business Street",
-        city: "Mumbai",
-        provinceCode: getIndiaProvinceCode("Mumbai"),
+        city: city,
+        provinceCode: addressInfo.provinceCode,
         countryCode: "IN",
-        zip: "400001",
+        zip: addressInfo.zip,
       },
       shippingAddress: {
         firstName: "B2B",
         lastName: "Shipping",
         address1: "123 Business Street",
-        city: "Mumbai",
-        provinceCode: getIndiaProvinceCode("Mumbai"),
+        city: city,
+        provinceCode: addressInfo.provinceCode,
         countryCode: "IN",
-        zip: "400001",
+        zip: addressInfo.zip,
       },
     },
     options: {
