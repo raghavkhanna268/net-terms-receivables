@@ -26,7 +26,7 @@
   // Public environment variables (non-sensitive, ok to commit placeholders)
   "vars": {
     // Must match shopify.app.toml access_scopes exactly. See docs/scopes.md for audit.
-    "SCOPES": "read_companies,read_customers,read_draft_orders,read_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_payment_terms,write_validations",
+    "SCOPES": "read_companies,read_customers,read_draft_orders,read_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations",
     "SHOPIFY_APP_URL": "https://net-terms-receivables.raghavkhanna.workers.dev"
   },
 

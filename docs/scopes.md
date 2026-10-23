@@ -2,11 +2,13 @@
 
 This document lists all OAuth scopes requested by the Net Terms Receivables app, the features that use them, and the exact API calls that require them.
 
-**Scope bar policy**: Production config (`shopify.app.toml` and `wrangler.jsonc` SCOPES) may only include scopes that a planned, shipped feature uses.
+**Scope bar policy**: Production config (`shopify.app.toml` and `wrangler.jsonc` SCOPES) may only include scopes that a planned, shipped feature uses. Before S24: any scope unused by merged code is dropped.
 
-## Scopes
+## Production Scopes (11 total)
 
-### read_companies
+### Read Scopes (5)
+
+#### read_companies
 
 | Feature | Step | API Call | Reference |
 |---------|------|----------|-----------|
@@ -14,7 +16,7 @@ This document lists all OAuth scopes requested by the Net Terms Receivables app,
 | Company/location sync | S6 | `companyLocations` query | [companyLocations query](https://shopify.dev/docs/api/admin-graphql/2026-10/queries/companyLocations) |
 | Bulk companies export | S6 | `bulkOperationRunQuery` with companies | [bulkOperationRunQuery](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/bulkOperationRunQuery) |
 
-### read_orders
+#### read_orders
 
 | Feature | Step | API Call | Reference |
 |---------|------|----------|-----------|
@@ -22,98 +24,114 @@ This document lists all OAuth scopes requested by the Net Terms Receivables app,
 | Bulk orders export | S6 | `bulkOperationRunQuery` with orders | [bulkOperationRunQuery](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/bulkOperationRunQuery) |
 | Order webhooks | S6 | orders/create, orders/updated, orders/cancelled, orders/paid | [Webhook topics](https://shopify.dev/docs/api/admin-rest/2026-10/resources/webhook) |
 
-### read_payment_terms
+#### read_payment_terms
 
 | Feature | Step | API Call | Reference |
 |---------|------|----------|-----------|
 | Order payment terms | S6 | `Order.paymentTerms` field | [Order.paymentTerms](https://shopify.dev/docs/api/admin-graphql/2026-10/objects/Order#field-order-paymentterms) |
 | Company location payment terms | S6 | `CompanyLocation.buyerExperienceConfiguration.paymentTermsTemplate` | [buyerExperienceConfiguration](https://shopify.dev/docs/api/admin-graphql/2026-10/objects/CompanyLocation#field-companylocation-buyerexperienceconfiguration) |
 
-### read_customers
+#### read_customers
 
 | Feature | Step | API Call | Reference |
 |---------|------|----------|-----------|
 | Tagged customer sync | S8 | `customers` query with tag filter | [customers query](https://shopify.dev/docs/api/admin-graphql/2026-10/queries/customers) |
 
-### read_draft_orders
+> **Pre-granted for S8**: This scope is not used by S6 but is included now to avoid a second OAuth re-approval when S8 ships.
+
+#### read_draft_orders
 
 | Feature | Step | API Call | Reference |
 |---------|------|----------|-----------|
 | Draft order payment terms | S8 | `draftOrders` query | [draftOrders query](https://shopify.dev/docs/api/admin-graphql/2026-10/queries/draftOrders) |
 
-### write_companies
+> **Pre-granted for S8**: This scope is not used by S6 but is included now to avoid a second OAuth re-approval when S8 ships.
 
-| Feature | Step | API Call | Reference |
+### Write Scopes (6)
+
+#### write_companies
+
+| Feature | Step | Mutation | Reference |
 |---------|------|----------|-----------|
 | Credit/hold metafields on Company | S11 | `metafieldsSet` with Company ownerId | [metafieldsSet](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/metafieldsSet) |
 | Credit/hold metafields on CompanyLocation | S11 | `metafieldsSet` with CompanyLocation ownerId | [metafieldsSet](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/metafieldsSet) |
-| Dev store seed | S4 | `companyCreate`, `companyLocationCreate` | [companyCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyCreate) |
+| Dev store seed: create companies | S4 | `companyCreate` | [companyCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyCreate) |
+| Dev store seed: set payment terms on location | S4 | `companyLocationUpdate` with `buyerExperienceConfiguration.paymentTermsTemplateId` | [companyLocationUpdate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyLocationUpdate) |
 
-> **Note**: `metafieldsSet` requires the same access level needed to mutate the owner resource. For Company/CompanyLocation metafields, this requires `write_companies`.
+> **Note**: `metafieldsSet` requires write access to the owner resource. For Company/CompanyLocation metafields, this requires `write_companies`.
 
-### write_customers
+#### write_customers
 
-| Feature | Step | API Call | Reference |
+| Feature | Step | Mutation | Reference |
 |---------|------|----------|-----------|
 | Credit/hold metafields on Customer | S11 | `metafieldsSet` with Customer ownerId | [metafieldsSet](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/metafieldsSet) |
 
-> **Note**: `metafieldsSet` requires the same access level needed to mutate the owner resource. For Customer metafields, this requires `write_customers`.
+> **Note**: `metafieldsSet` requires write access to the owner resource. For Customer metafields, this requires `write_customers`.
 
-### write_orders
+#### write_orders
 
-| Feature | Step | API Call | Reference |
+| Feature | Step | Mutation | Reference |
 |---------|------|----------|-----------|
 | Mark order as paid after bank match | S17 | `orderMarkAsPaid` | [orderMarkAsPaid](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/orderMarkAsPaid) |
-| Add tags to orders | S13, S17 | `tagsAdd` with Order id | [tagsAdd](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/tagsAdd) |
-| Dev store seed | S4 | `orderCreate` | [orderCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/orderCreate) |
+| Add tags to orders (overdue, hold, etc.) | S13 | `tagsAdd` with Order gid | [tagsAdd](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/tagsAdd) |
+| Remove tags from orders | S17 | `tagsRemove` with Order gid | [tagsRemove](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/tagsRemove) |
+| Dev store seed: create orders | S4 | `orderCreate` | [orderCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/orderCreate) |
 
-### write_payment_terms
+#### write_validations
 
-| Feature | Step | API Call | Reference |
+| Feature | Step | Mutation | Reference |
 |---------|------|----------|-----------|
-| Dev store seed | S4 | `paymentTermsCreate` | [paymentTermsCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/paymentTermsCreate) |
+| Cart/checkout validation function | S12 | `validationCreate` | [validationCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/validationCreate) |
+| Update validation function | S12 | `validationUpdate` | [validationUpdate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/validationUpdate) |
+| Delete validation function | S12 | `validationDelete` | [validationDelete](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/validationDelete) |
 
-> **Note**: Payment terms are added to orders after creation using `paymentTermsCreate`, not as part of `orderCreate`.
+> **S12 feature**: Shopify Functions validation to block checkout for accounts on hold or over credit limit.
 
-### write_merchant_managed_fulfillment_orders
+#### write_payment_customizations
 
-| Feature | Step | API Call | Reference |
+| Feature | Step | Mutation | Reference |
+|---------|------|----------|-----------|
+| Payment method customization function | S13 | `paymentCustomizationCreate` | [paymentCustomizationCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/paymentCustomizationCreate) |
+| Update payment customization | S13 | `paymentCustomizationUpdate` | [paymentCustomizationUpdate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/paymentCustomizationUpdate) |
+| Delete payment customization | S13 | `paymentCustomizationDelete` | [paymentCustomizationDelete](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/paymentCustomizationDelete) |
+
+> **S13 feature**: Shopify Functions payment customization to hide/show payment methods based on account status.
+
+#### write_merchant_managed_fulfillment_orders
+
+| Feature | Step | Mutation | Reference |
 |---------|------|----------|-----------|
 | Fulfillment hold on overdue accounts | S13 | `fulfillmentOrderHold` | [fulfillmentOrderHold](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/fulfillmentOrderHold) |
 | Release fulfillment hold | S13 | `fulfillmentOrderReleaseHold` | [fulfillmentOrderReleaseHold](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/fulfillmentOrderReleaseHold) |
 
-> **Note**: Both mutations require `write_merchant_managed_fulfillment_orders` OR `write_third_party_fulfillment_orders`. Since this app is merchant-facing (not a fulfillment service), we use `write_merchant_managed_fulfillment_orders`.
-
-### write_payment_customizations
-
-| Feature | Step | API Call | Reference |
-|---------|------|----------|-----------|
-| Payment method customization function | S13 | `paymentCustomizationCreate` | [paymentCustomizationCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/paymentCustomizationCreate) |
-
-### write_validations
-
-| Feature | Step | API Call | Reference |
-|---------|------|----------|-----------|
-| Cart/checkout validation function | S12 | `validationCreate` | [validationCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/validationCreate) |
+> **S13 feature**: Hold fulfillment for orders from accounts that are overdue or on credit hold. Both mutations require `write_merchant_managed_fulfillment_orders` OR `write_third_party_fulfillment_orders`. Since this app is merchant-facing (not a fulfillment service), we use `write_merchant_managed_fulfillment_orders`.
 
 ## Scopes NOT in Production Config
 
 ### write_draft_orders
 
-**Not required.** The dev store seed uses `orderCreate` + `paymentTermsCreate` instead of draft orders.
+**Not required.** The dev store seed creates orders directly with `orderCreate` (which supports `companyLocationId` for B2B orders) and sets payment terms on the CompanyLocation via `companyLocationUpdate` with `buyerExperienceConfiguration.paymentTermsTemplateId`. Orders for that location automatically inherit the payment terms.
 
-The `orderCreate` mutation supports:
-- `companyLocationId` for B2B orders (see [OrderCreateOrderInput](https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateOrderInput))
-- Payment terms via separate `paymentTermsCreate` mutation (see [paymentTermsCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/paymentTermsCreate))
+References:
+- [orderCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/orderCreate) — supports `companyLocationId` in [OrderCreateOrderInput](https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateOrderInput)
+- [companyLocationUpdate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyLocationUpdate) — accepts `buyerExperienceConfiguration.paymentTermsTemplateId`
+- [BuyerExperienceConfigurationInput](https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/BuyerExperienceConfigurationInput) — `paymentTermsTemplateId` field
 
-This approach avoids needing `write_draft_orders` in production.
+### write_payment_terms
+
+**Not required.** Payment terms are set on CompanyLocations via `companyLocationUpdate` (under `write_companies`), not via the `paymentTermsCreate` mutation. Orders created for B2B company locations inherit the payment terms from the location's `buyerExperienceConfiguration.paymentTermsTemplate`.
+
+Per [companyLocationUpdate docs](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyLocationUpdate):
+> "You can also configure the B2B checkout experience through `BuyerExperienceConfiguration` settings that control whether orders require merchant review, `PaymentTermsTemplate` settings..."
+
+This approach requires only `write_companies` (or `write_customers`), which we already have.
 
 ## Final Scope List
 
 ```
-read_companies,read_customers,read_draft_orders,read_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_payment_terms,write_validations
+read_companies,read_customers,read_draft_orders,read_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations
 ```
 
 ## Audit Reminder
 
-Before S24: audit requested scopes and drop any that no merged code uses. See `docs/launch-checklist.md`.
+**Before S24**: Audit requested scopes and drop any that no merged code uses.
