@@ -146,15 +146,13 @@ When a merchant uninstalls the app:
 
 ### 7.2 `customers/data_request`
 
-When a customer requests their data:
-- Returns HTTP 200 with customer GID, tags, email, and displayName from `s8_tagged_customers`
-- Exports only the S8 record; no other customer data is stored
+The customers/data_request webhook is verified (HMAC plus the signed shop_domain) and acknowledged with HTTP 200. The data we hold for a customer (Shopify customer GID, tags, email, displayName, tag_active, and s8_draft_orders references) is exported to the merchant out of band until automated fulfilment ships in S22 (#44).
 
 ### 7.3 `customers/redact`
 
 When a customer must be deleted (GDPR/CCPA request):
-- Deletes the `s8_tagged_customers` row for the affected customer (including email and displayName)
-- Deletes any `s8_draft_orders` linked to that customer's BuyerAccount
+- Deletes the `s8_tagged_customers` row matching (shop_id, customer_id), which includes email and displayName
+- Deletes `s8_draft_orders` rows matching (shop_id, buyer_account_id) where buyer_account_id is linked to the customer via BuyerAccount(shopId, customerId)
 - **Pending:** Payment.narration/payerText redaction for matched payments
 
 ### 7.4 `shop/redact`

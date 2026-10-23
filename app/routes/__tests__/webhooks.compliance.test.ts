@@ -191,26 +191,68 @@ describe("webhooks.compliance", () => {
     });
   });
 
-  describe("customers/data_request (no-op)", () => {
-    it("returns 200 without touching sessionStorage", async () => {
+  describe("customers/data_request", () => {
+    beforeEach(() => {
+      mockVerifyPayloadShopMatch.mockImplementation((headerShop: string) => headerShop);
+    });
+
+    it("returns 200 after verifying payload shop_domain", async () => {
+      const payload = { shop_domain: "test-shop.myshopify.com", customer: { id: 123 } };
+
       mockVerifyWebhook.mockResolvedValue({
         shop: "test-shop.myshopify.com",
         topic: "customers/data_request",
         webhookId: "test-webhook",
-        payload: {},
+        payload,
         apiVersion: "2026-10",
         rawBody: new ArrayBuffer(0),
       });
 
       const request = new Request("https://example.com/webhooks/compliance", {
         method: "POST",
-        body: "{}",
+        body: JSON.stringify(payload),
       });
 
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
+      expect(mockVerifyPayloadShopMatch).toHaveBeenCalledWith("test-shop.myshopify.com", payload);
       expect(mockDeleteAllForShop).not.toHaveBeenCalled();
+    });
+
+    it("returns 401 when header shop differs from payload shop_domain", async () => {
+      const badRequestResponse = new Response(undefined, {
+        status: 401,
+        statusText: "Payload shop_domain does not match header shop",
+      });
+      mockVerifyPayloadShopMatch.mockImplementation(() => {
+        throw badRequestResponse;
+      });
+
+      const payload = { shop_domain: "other-shop.myshopify.com", customer: { id: 123 } };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: "test-shop.myshopify.com",
+        topic: "customers/data_request",
+        webhookId: "test-webhook-mismatch",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      try {
+        await action(createMockActionArgs(request));
+        expect.fail("Expected action to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(401);
+      }
     });
   });
 
