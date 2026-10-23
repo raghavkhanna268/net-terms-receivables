@@ -45,14 +45,37 @@ describe("Customer Fields Configuration", () => {
       expect(CUSTOMER_FORBIDDEN_FIELDS).toContain("lastName");
       expect(CUSTOMER_FORBIDDEN_FIELDS).toContain("defaultAddress");
     });
+
+    it("NEVER appears in field lists regardless of PII flag", () => {
+      // Test with flag off
+      const fieldsOff = getCustomerFields({});
+      for (const forbidden of CUSTOMER_FORBIDDEN_FIELDS) {
+        expect(fieldsOff).not.toContain(forbidden);
+      }
+
+      // Test with flag on - still forbidden
+      const fieldsOn = getCustomerFields({ CUSTOMER_PII_FIELDS: "1" });
+      for (const forbidden of CUSTOMER_FORBIDDEN_FIELDS) {
+        expect(fieldsOn).not.toContain(forbidden);
+      }
+    });
+
+    it("NEVER appears in generated queries regardless of PII flag", () => {
+      const queryOff = getCustomerQuery({});
+      const queryOn = getCustomerQuery({ CUSTOMER_PII_FIELDS: "1" });
+
+      for (const query of [queryOff, queryOn]) {
+        expect(query).not.toMatch(/\bphone\b/);
+        expect(query).not.toMatch(/\baddresses\b/);
+        expect(query).not.toMatch(/\bfirstName\b/);
+        expect(query).not.toMatch(/\blastName\b/);
+        expect(query).not.toMatch(/\bdefaultAddress\b/);
+      }
+    });
   });
 });
 
 describe("shouldIncludePiiFields", () => {
-  it("returns false when env is undefined", () => {
-    expect(shouldIncludePiiFields()).toBe(false);
-  });
-
   it("returns false when CUSTOMER_PII_FIELDS is not set", () => {
     expect(shouldIncludePiiFields({})).toBe(false);
   });
@@ -76,18 +99,16 @@ describe("shouldIncludePiiFields", () => {
 
 describe("getCustomerFields", () => {
   it("returns only base fields when PII flag is off", () => {
-    const fields = getCustomerFields();
+    const fields = getCustomerFields({});
     expect(fields).toEqual(["id", "tags"]);
     expect(fields).not.toContain("email");
     expect(fields).not.toContain("displayName");
   });
 
-  it("includes PII fields when CUSTOMER_PII_FIELDS=1", () => {
+  it("returns exactly [id, tags, email, displayName] when CUSTOMER_PII_FIELDS=1", () => {
     const fields = getCustomerFields({ CUSTOMER_PII_FIELDS: "1" });
-    expect(fields).toContain("id");
-    expect(fields).toContain("tags");
-    expect(fields).toContain("email");
-    expect(fields).toContain("displayName");
+    // Exact list - no firstName, no lastName, no phone, no addresses
+    expect(fields).toEqual(["id", "tags", "email", "displayName"]);
   });
 
   it("NEVER includes forbidden fields even with PII flag on", () => {
@@ -102,7 +123,7 @@ describe("getCustomerFields", () => {
 
 describe("buildCustomerFieldSelection", () => {
   it("returns newline-separated fields for GraphQL", () => {
-    const selection = buildCustomerFieldSelection();
+    const selection = buildCustomerFieldSelection({});
     expect(selection).toBe("id\ntags");
   });
 
@@ -166,19 +187,29 @@ describe("validateNoForbiddenFields", () => {
 
 describe("validateCustomerQuery", () => {
   it("allows base-only queries when PII flag is off", () => {
-    expect(() => validateCustomerQuery("{ customer { id tags } }")).not.toThrow();
+    expect(() => validateCustomerQuery("{ customer { id tags } }", {})).not.toThrow();
   });
 
   it("throws for email when PII flag is off", () => {
-    expect(() => validateCustomerQuery("{ customer { id email } }")).toThrow(
+    expect(() => validateCustomerQuery("{ customer { id email } }", {})).toThrow(
       /PII field "email".*CUSTOMER_PII_FIELDS is not enabled/i
     );
   });
 
   it("throws for displayName when PII flag is off", () => {
-    expect(() => validateCustomerQuery("{ customer { id displayName } }")).toThrow(
+    expect(() => validateCustomerQuery("{ customer { id displayName } }", {})).toThrow(
       /PII field "displayName".*CUSTOMER_PII_FIELDS is not enabled/i
     );
+  });
+
+  it("still throws for forbidden fields even when PII flag is on", () => {
+    // Each forbidden field should throw regardless of PII flag
+    const forbiddenFields = ["phone", "addresses", "firstName", "lastName", "defaultAddress"];
+    for (const field of forbiddenFields) {
+      expect(() =>
+        validateCustomerQuery(`{ customer { id ${field} } }`, { CUSTOMER_PII_FIELDS: "1" })
+      ).toThrow(/forbidden customer field/i);
+    }
   });
 
   it("allows email and displayName when PII flag is on", () => {
@@ -188,17 +219,11 @@ describe("validateCustomerQuery", () => {
       })
     ).not.toThrow();
   });
-
-  it("still throws for forbidden fields even when PII flag is on", () => {
-    expect(() =>
-      validateCustomerQuery("{ customer { id phone } }", { CUSTOMER_PII_FIELDS: "1" })
-    ).toThrow(/forbidden customer field "phone"/i);
-  });
 });
 
 describe("getCustomerQuery", () => {
   it("generates query with only base fields by default", () => {
-    const query = getCustomerQuery();
+    const query = getCustomerQuery({});
     expect(query).toContain("id");
     expect(query).toContain("tags");
     expect(query).not.toContain("email");
@@ -212,7 +237,7 @@ describe("getCustomerQuery", () => {
   });
 
   it("NEVER includes forbidden fields", () => {
-    const queryOff = getCustomerQuery();
+    const queryOff = getCustomerQuery({});
     const queryOn = getCustomerQuery({ CUSTOMER_PII_FIELDS: "1" });
 
     for (const query of [queryOff, queryOn]) {
@@ -225,7 +250,7 @@ describe("getCustomerQuery", () => {
   });
 
   it("is a valid GraphQL query structure", () => {
-    const query = getCustomerQuery();
+    const query = getCustomerQuery({});
     expect(query).toContain("query CustomerMinimal");
     expect(query).toContain("customer(id: $id)");
   });
@@ -330,12 +355,12 @@ describe("getBulkCustomersQuery", () => {
   const multipleTagRules = [{ tag: "net-terms" }, { tag: "gold-tier" }];
 
   it("returns null when no tag rules (skip backfill)", () => {
-    const query = getBulkCustomersQuery([]);
+    const query = getBulkCustomersQuery([], {});
     expect(query).toBeNull();
   });
 
   it("generates bulk mutation with tag filter for single rule", () => {
-    const query = getBulkCustomersQuery(singleTagRule);
+    const query = getBulkCustomersQuery(singleTagRule, {});
     expect(query).not.toBeNull();
     expect(query).toContain("bulkOperationRunQuery");
     expect(query).toContain("customers(query: \"tag:'net-terms'\")");
@@ -344,40 +369,40 @@ describe("getBulkCustomersQuery", () => {
   });
 
   it("generates bulk mutation with tag filter for multiple rules", () => {
-    const query = getBulkCustomersQuery(multipleTagRules);
+    const query = getBulkCustomersQuery(multipleTagRules, {});
     expect(query).not.toBeNull();
     expect(query).toContain("customers(query: \"tag:'net-terms' OR tag:'gold-tier'\")");
   });
 
   it("escapes quotes in tag values (backslash doubled for GraphQL)", () => {
-    const query = getBulkCustomersQuery([{ tag: "buyer's-tag" }]);
+    const query = getBulkCustomersQuery([{ tag: "buyer's-tag" }], {});
     expect(query).not.toBeNull();
     // Shopify: tag:'buyer\'s-tag' → GraphQL: tag:'buyer\\'s-tag'
     expect(query).toContain("customers(query: \"tag:'buyer\\\\'s-tag'\")");
   });
 
   it("handles tags with spaces", () => {
-    const query = getBulkCustomersQuery([{ tag: "net terms" }]);
+    const query = getBulkCustomersQuery([{ tag: "net terms" }], {});
     expect(query).not.toBeNull();
     expect(query).toContain("customers(query: \"tag:'net terms'\")");
   });
 
   it("escapes backslashes in tag values (quadrupled for two nesting levels)", () => {
-    const query = getBulkCustomersQuery([{ tag: "path\\tag" }]);
+    const query = getBulkCustomersQuery([{ tag: "path\\tag" }], {});
     expect(query).not.toBeNull();
     // Shopify: tag:'path\\tag' → GraphQL: tag:'path\\\\tag'
     expect(query).toContain("customers(query: \"tag:'path\\\\\\\\tag'\")");
   });
 
   it("escapes double quotes in tag values (for GraphQL string literal)", () => {
-    const query = getBulkCustomersQuery([{ tag: 'test"tag' }]);
+    const query = getBulkCustomersQuery([{ tag: 'test"tag' }], {});
     expect(query).not.toBeNull();
     // Double quote needs GraphQL escaping: " → \"
     expect(query).toContain('customers(query: "tag:\'test\\"tag\'")');
   });
 
   it("generates bulk mutation with only base fields by default", () => {
-    const query = getBulkCustomersQuery(singleTagRule);
+    const query = getBulkCustomersQuery(singleTagRule, {});
     expect(query).not.toBeNull();
     expect(query).toContain("id");
     expect(query).toContain("tags");
@@ -393,7 +418,7 @@ describe("getBulkCustomersQuery", () => {
   });
 
   it("NEVER includes forbidden fields in bulk query", () => {
-    const queryOff = getBulkCustomersQuery(singleTagRule);
+    const queryOff = getBulkCustomersQuery(singleTagRule, {});
     const queryOn = getBulkCustomersQuery(singleTagRule, { CUSTOMER_PII_FIELDS: "1" });
 
     for (const query of [queryOff, queryOn]) {
@@ -407,7 +432,7 @@ describe("getBulkCustomersQuery", () => {
   });
 
   it("is a valid bulk operation mutation structure", () => {
-    const query = getBulkCustomersQuery(singleTagRule);
+    const query = getBulkCustomersQuery(singleTagRule, {});
     expect(query).not.toBeNull();
     expect(query).toContain("mutation BulkCustomersExport");
     expect(query).toContain("bulkOperation {");

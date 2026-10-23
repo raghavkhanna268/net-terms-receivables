@@ -14,17 +14,18 @@ import { verifyWebhook, normalizeWebhookTopic } from "~/lib/webhook-verify.serve
  * Processing:
  * 1. HMAC verification via verifyWebhook (returns 401 on failure)
  * 2. Topic guard: only process expected topics
- * 3. Extract minimal payload (customer GID only - DPDP compliant)
+ * 3. Extract minimal payload (customer GID only)
  * 4. Enqueue to s6_sync for async processing
  * 5. Return 200 immediately (within 10ms CPU budget)
  *
  * OPTIMIZATION: Uses lightweight verifyWebhook() instead of authenticate.webhook()
  * to avoid unnecessary session lookups. Saves ~5-10ms DB round-trip per webhook.
  *
- * DPDP compliance:
+ * Protected Customer Data (Level 1 + Name + Email, confirmed 2026-10-23):
  * - Webhook payloads contain PII, but we only extract the GID here
- * - The sync processor fetches only id and tags via GraphQL
- * - No names, emails, phones, or addresses are stored
+ * - The sync processor fetches: id, tags, email, displayName (when CUSTOMER_PII_FIELDS=1)
+ * - Phone and addresses are NEVER fetched or stored
+ * - PII nulling for inactive customers is tracked in #44
  *
  * The actual customer->BuyerAccount mapping happens in the drain (S10).
  * Tag rules are checked against AccountSource to determine if a customer

@@ -249,8 +249,11 @@ export function getOrdersExportMutation(): string {
   return BULK_ORDERS_QUERY;
 }
 
-// Re-export customer bulk query from the centralized field module
-export { getBulkCustomersQuery as getCustomersExportMutation } from "./customer-fields.server";
+// Re-export customer bulk query and env type from the centralized field module
+export {
+  getBulkCustomersQuery as getCustomersExportMutation,
+  type PiiEnv,
+} from "./customer-fields.server";
 
 /**
  * Parse the result of a bulkOperationRunQuery mutation.

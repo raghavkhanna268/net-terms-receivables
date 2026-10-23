@@ -4,9 +4,10 @@
  * Maps Shopify Customers with matching tags to BuyerAccount (kind=TAGGED_CUSTOMER).
  * Tag rules are stored in AccountSource, specifying which tags denote buyer accounts.
  *
- * DPDP compliance:
- * - Only customer GID and tags are fetched and stored
- * - No names, emails, phones, or addresses (reserved fields are always NULL)
+ * DPDP compliance (Level 1 + Name + Email, confirmed 2026-10-23):
+ * - Always fetched: id, tags
+ * - Optional PII (CUSTOMER_PII_FIELDS=1): email, displayName
+ * - NEVER fetched: phone, addresses, firstName, lastName, defaultAddress
  *
  * Tag activation design:
  * - Tag activation (tag_active) is SEPARATE from credit hold (BuyerAccount.holdState)
@@ -45,7 +46,7 @@ import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
  * @param sql - postgres.js SQL client
  * @param shopDomain - Shop domain
  * @param topic - Webhook topic
- * @param customer - Customer data (id and tags only)
+ * @param customer - Customer data (id, tags, and optional email/displayName when CUSTOMER_PII_FIELDS=1)
  * @param webhookId - Webhook ID for idempotency
  * @returns Sync result
  */
@@ -116,10 +117,26 @@ export async function processCustomerWebhook(
   // Should-fix #5: Don't store tags for customers that match no rule
   // Only upsert if this customer has ever had a matching tag or currently does
   if (hasTag) {
-    await upsertTaggedCustomer(sql, shopId, customer.id, customerTags, true);
+    await upsertTaggedCustomer(
+      sql,
+      shopId,
+      customer.id,
+      customerTags,
+      true,
+      customer.email ?? null,
+      customer.displayName ?? null
+    );
   } else {
     // Only update existing records (don't create new ones for non-matching customers)
-    await updateTaggedCustomerIfExists(sql, shopId, customer.id, customerTags, false);
+    await updateTaggedCustomerIfExists(
+      sql,
+      shopId,
+      customer.id,
+      customerTags,
+      false,
+      customer.email ?? null,
+      customer.displayName ?? null
+    );
   }
 
   // TODO (S10): Full precedence check via CompanyContact lookup
@@ -177,19 +194,25 @@ async function handleCustomerDelete(
 
 /**
  * Upsert the tagged customer tracking record.
+ *
+ * Stores email and displayName when CUSTOMER_PII_FIELDS=1 is set and they are
+ * included in the webhook/query response. These fields are purged by
+ * customers/redact (deletes the entire row).
  */
 async function upsertTaggedCustomer(
   sql: Sql,
   shopId: string,
   customerId: string,
   tags: string[],
-  tagActive: boolean
+  tagActive: boolean,
+  email: string | null,
+  displayName: string | null
 ): Promise<void> {
   const tagsJson = sql.json(tags);
   const deactivatedAt = tagActive ? null : new Date();
   await sql`
-    INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at)
-    VALUES (${shopId}, ${customerId}, ${tagsJson}, ${tagActive}, ${deactivatedAt})
+    INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name)
+    VALUES (${shopId}, ${customerId}, ${tagsJson}, ${tagActive}, ${deactivatedAt}, ${email}, ${displayName})
     ON CONFLICT (shop_id, customer_id)
     DO UPDATE SET
       tags = EXCLUDED.tags,
@@ -198,7 +221,9 @@ async function upsertTaggedCustomer(
         WHEN EXCLUDED.tag_active = true THEN NULL
         WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
         ELSE s8_tagged_customers.tag_deactivated_at
-      END
+      END,
+      email = EXCLUDED.email,
+      display_name = EXCLUDED.display_name
   `;
 }
 
@@ -211,7 +236,9 @@ async function updateTaggedCustomerIfExists(
   shopId: string,
   customerId: string,
   tags: string[],
-  tagActive: boolean
+  tagActive: boolean,
+  email: string | null,
+  displayName: string | null
 ): Promise<void> {
   const tagsJson = sql.json(tags);
   await sql`
@@ -223,7 +250,9 @@ async function updateTaggedCustomerIfExists(
         WHEN ${tagActive} = true THEN NULL
         WHEN tag_active = true AND ${tagActive} = false THEN NOW()
         ELSE tag_deactivated_at
-      END
+      END,
+      email = ${email},
+      display_name = ${displayName}
     WHERE shop_id = ${shopId} AND customer_id = ${customerId}
   `;
 }
@@ -344,7 +373,7 @@ async function syncTaggedCustomerBuyerAccount(
  * Used by bulk processing to prepare batch inserts.
  *
  * @param shopId - Our internal shop ID
- * @param customer - Shopify Customer data (id and tags only)
+ * @param customer - Shopify Customer data (id, tags, and optional PII fields)
  * @param tagActive - Whether the customer has a matching tag
  */
 export function mapCustomerToTaggedCustomer(
@@ -356,12 +385,16 @@ export function mapCustomerToTaggedCustomer(
   customerId: string;
   tags: string[];
   tagActive: boolean;
+  email: string | null;
+  displayName: string | null;
 } {
   return {
     shopId,
     customerId: customer.id,
     tags: customer.tags ?? [],
     tagActive,
+    email: customer.email ?? null,
+    displayName: customer.displayName ?? null,
   };
 }
 
@@ -386,8 +419,8 @@ export async function bulkUpsertTaggedCustomers(
     const tagsJson = sql.json(c.tags);
     const deactivatedAt = c.tagActive ? null : new Date();
     const result = await sql`
-      INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at)
-      VALUES (${c.shopId}, ${c.customerId}, ${tagsJson}, ${c.tagActive}, ${deactivatedAt})
+      INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name)
+      VALUES (${c.shopId}, ${c.customerId}, ${tagsJson}, ${c.tagActive}, ${deactivatedAt}, ${c.email}, ${c.displayName})
       ON CONFLICT (shop_id, customer_id)
       DO UPDATE SET
         tags = EXCLUDED.tags,
@@ -396,7 +429,9 @@ export async function bulkUpsertTaggedCustomers(
           WHEN EXCLUDED.tag_active = true THEN NULL
           WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
           ELSE s8_tagged_customers.tag_deactivated_at
-        END
+        END,
+        email = EXCLUDED.email,
+        display_name = EXCLUDED.display_name
     `;
     count += result.count;
   }

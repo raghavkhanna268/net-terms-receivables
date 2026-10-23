@@ -41,13 +41,25 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const sql = getRequestSql();
 
   switch (normalizedTopic) {
-    case "CUSTOMERS_DATA_REQUEST":
-      // TODO(S22): When customer data is stored, respond with data export.
-      // S8 stores customer GID and tags only (no PII to export).
+    case "CUSTOMERS_DATA_REQUEST": {
+      // Verify payload shop_domain matches header shop for security.
+      const payloadShop = verifyPayloadShopMatch(shop, payload);
+
+      const typedPayload = payload as {
+        customer?: { id?: number };
+      };
+      const customerGid = typedPayload.customer?.id
+        ? `gid://shopify/Customer/${typedPayload.customer.id}`
+        : "unknown";
+
+      // S8 stores: GID, tags, email, displayName, tag_active, and s8_draft_orders refs.
+      // Data export fulfilment is implemented in S22 (#44).
+      // Log carries no PII - only topic, shop, and customer GID.
       console.log(
-        `[Compliance] customers/data_request: No exportable customer data for shop=${shop}`
+        `[Compliance] customers/data_request for shop=${payloadShop} customer=${customerGid}`
       );
       break;
+    }
 
     case "CUSTOMERS_REDACT": {
       // Verify payload shop_domain matches header shop for security.

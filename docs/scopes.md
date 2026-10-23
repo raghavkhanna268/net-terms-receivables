@@ -35,9 +35,10 @@ This document lists all OAuth scopes requested by the Net Terms Receivables app,
 
 | Feature | Step | API Call | Reference |
 |---------|------|----------|-----------|
-| Tagged customer sync | S8 | `customers` query with tag filter | [customers query](https://shopify.dev/docs/api/admin-graphql/2026-10/queries/customers) |
+| Tagged customer sync | S8 | `customers` query with tag filter (id, tags, email, displayName) | [customers query](https://shopify.dev/docs/api/admin-graphql/2026-10/queries/customers) |
+| Bulk customer export | S8 | `bulkOperationRunQuery` with customers | [bulkOperationRunQuery](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/bulkOperationRunQuery) |
 
-> **Pre-granted for S8**: This scope is not used by S6 but is included now to avoid a second OAuth re-approval when S8 ships.
+> **Protected Customer Data (2026-10-23):** Level 1 + Name + Email approved. Fields fetched: `id`, `tags`, `email`, `displayName`. Fields NEVER fetched: `phone`, `addresses`, `firstName`, `lastName`, `defaultAddress`. See "Protected Customer Data" section below.
 
 #### read_draft_orders
 
@@ -135,6 +136,31 @@ read_companies,read_customers,read_draft_orders,read_orders,read_payment_terms,r
 ```
 
 Additional dev-only: `read_products`, `write_draft_orders`
+
+## Protected Customer Data
+
+**Approval date:** 2026-10-23
+
+**Level:** Level 1 + Name + Email
+
+| Field | Fetched | Stored | Purpose |
+|-------|---------|--------|---------|
+| `id` | ✅ | ✅ | Customer GID for account linking |
+| `tags` | ✅ | ✅ | Net-terms eligibility matching |
+| `email` | ✅ | ✅ | S8 labels, S16 payment matching, S18 reminders |
+| `displayName` | ✅ | ✅ | S8 labels, S16 payment matching |
+| `phone` | ❌ | ❌ | Not approved, blocked in code |
+| `addresses` | ❌ | ❌ | Not approved, blocked in code |
+| `firstName` | ❌ | ❌ | Not approved, blocked in code |
+| `lastName` | ❌ | ❌ | Not approved, blocked in code |
+| `defaultAddress` | ❌ | ❌ | Not approved, blocked in code |
+
+**Environment variable:** `CUSTOMER_PII_FIELDS=1` (set in wrangler.jsonc)
+
+**Code enforcement:**
+- `CUSTOMER_FORBIDDEN_FIELDS` in `app/services/sync/customer-fields.server.ts` blocks phone/address fields
+- `validateNoForbiddenFields()` throws on any query containing forbidden fields
+- Tests verify forbidden fields are never included, even with `CUSTOMER_PII_FIELDS=1`
 
 ## Audit Reminder
 
