@@ -18,9 +18,11 @@ import type {
   BulkCompanyLine,
   BulkCompanyLocationLine,
   BulkOrderLine,
+  BulkCustomerLine,
   ParsedBulkResult,
   ShopifyCompanyLocation,
   ShopifyOrder,
+  ShopifyCustomer,
 } from "./types";
 
 /**
@@ -196,5 +198,41 @@ export function bulkOrderToShopifyOrder(order: BulkOrderLine): ShopifyOrder {
     paymentTerms: order.paymentTerms,
     purchasingEntity: order.purchasingEntity,
     customer: order.customer,
+  };
+}
+
+/**
+ * Parse customer bulk JSONL (S8).
+ *
+ * Returns all customers with their tags for tag rule matching.
+ * The sync processor filters to only those matching AccountSource tag rules.
+ *
+ * DPDP note: Only id and tags are present in the bulk export.
+ *
+ * @param jsonl - Raw JSONL from bulk customer query
+ * @returns Parsed customers
+ */
+export function parseCustomerBulkJsonl(jsonl: string): {
+  customers: BulkCustomerLine[];
+  errors: ParsedBulkResult<unknown>["errors"];
+} {
+  const parsed = parseJsonl<BulkCustomerLine>(jsonl);
+
+  return {
+    customers: parsed.items,
+    errors: parsed.errors,
+  };
+}
+
+/**
+ * Convert bulk Customer line to ShopifyCustomer format.
+ *
+ * @param customer - Bulk line data
+ * @returns ShopifyCustomer for sync processing
+ */
+export function bulkCustomerToShopifyCustomer(customer: BulkCustomerLine): ShopifyCustomer {
+  return {
+    id: customer.id,
+    tags: customer.tags ?? [],
   };
 }

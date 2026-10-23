@@ -1,0 +1,86 @@
+import type { ActionFunctionArgs } from "react-router";
+import { getRequestSql } from "~/lib/request-context.server";
+import { sendSyncMessage } from "~/lib/pgmq.server";
+import { verifyWebhook, normalizeWebhookTopic } from "~/lib/webhook-verify.server";
+
+/**
+ * Webhook handler for draft order lifecycle events (S8).
+ *
+ * Topics handled:
+ * - draft_orders/create: New draft order created
+ * - draft_orders/update: Draft order modified (payment terms, amounts, completion)
+ * - draft_orders/delete: Draft order removed
+ *
+ * Processing:
+ * 1. HMAC verification via verifyWebhook (returns 401 on failure)
+ * 2. Topic guard: only process expected topics
+ * 3. Extract minimal payload (draft order GID only)
+ * 4. Enqueue to s6_sync for async processing
+ * 5. Return 200 immediately (within 10ms CPU budget)
+ *
+ * OPTIMIZATION: Uses lightweight verifyWebhook() instead of authenticate.webhook()
+ * to avoid unnecessary session lookups. Saves ~5-10ms DB round-trip per webhook.
+ *
+ * DPDP compliance:
+ * - Only the draft order GID is extracted from the webhook payload
+ * - The sync processor fetches only id, name, total, paymentTerms, purchasingEntity
+ * - No customer PII is stored
+ *
+ * Draft orders are tracked when they have payment terms assigned to a buyer
+ * account. This enables pending credit exposure calculation before the draft
+ * order is completed.
+ *
+ * Note: When a draft order is completed (becomes an Order), Shopify sends
+ * a draft_orders/update webhook with status=completed. The draft order record
+ * is then removed from tracking (pending exposure becomes actual exposure).
+ */
+
+const ALLOWED_TOPICS = new Set([
+  "DRAFT_ORDERS_CREATE",
+  "DRAFT_ORDERS_UPDATE",
+  "DRAFT_ORDERS_DELETE",
+]);
+
+export const action = async ({ request }: ActionFunctionArgs) => {
+  const apiSecret = process.env.SHOPIFY_API_SECRET;
+  if (!apiSecret) {
+    console.error("[webhooks.draft_orders] SHOPIFY_API_SECRET not configured");
+    return new Response(null, { status: 500 });
+  }
+
+  const { shop, topic, webhookId, payload } = await verifyWebhook(request, apiSecret);
+  const normalizedTopic = normalizeWebhookTopic(topic);
+
+  if (!ALLOWED_TOPICS.has(normalizedTopic)) {
+    console.warn(
+      `[webhooks.draft_orders] Unexpected topic ${normalizedTopic} for ${shop}, ignoring`
+    );
+    return new Response(null, { status: 200 });
+  }
+
+  const typedPayload = payload as { admin_graphql_api_id?: string };
+  const resourceGid = typedPayload.admin_graphql_api_id;
+
+  if (!resourceGid) {
+    console.warn(
+      `[webhooks.draft_orders] Missing admin_graphql_api_id in ${normalizedTopic} for ${shop}`
+    );
+    return new Response(null, { status: 200 });
+  }
+
+  const sql = getRequestSql();
+
+  await sendSyncMessage(sql, {
+    topic: normalizedTopic,
+    shop,
+    webhookId,
+    resourceGid,
+    enqueuedAt: new Date().toISOString(),
+  });
+
+  console.log(
+    `[webhooks.draft_orders] Enqueued ${normalizedTopic} for ${shop}: ${resourceGid}`
+  );
+
+  return new Response(null, { status: 200 });
+};

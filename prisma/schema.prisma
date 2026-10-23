@@ -547,3 +547,99 @@ model S6BulkOperation {
 
   @@map("s6_bulk_operations")
 }
+
+// =============================================================================
+// S8 TAGGED CUSTOMER & DRAFT ORDER TRACKING
+// =============================================================================
+
+/// Tagged customer tracking table (S8)
+/// Stores minimal customer data for tag-based buyer account rules.
+///
+/// DPDP compliance: Only stores customer GID and tags array by default.
+/// Phone and address are NEVER stored.
+///
+/// Tag activation design:
+/// - tag_active is separate from BuyerAccount.holdState
+/// - Tag sync NEVER touches holdState - that belongs to credit logic alone
+/// - When tag removed: set tag_active=false, record tag_deactivated_at
+/// - When tag re-added: set tag_active=true, clear tag_deactivated_at
+///
+/// Reserved PII fields (email, displayName):
+/// - Requires Protected Customer Data approval (Level 1 + Email/Name fields)
+/// - Gated by CUSTOMER_PII_FIELDS env var (default: off)
+/// - Always NULL until approval is granted and flag is enabled
+///
+/// When a customer gains or loses the configurable tag (stored in AccountSource),
+/// the corresponding BuyerAccount (kind=TAGGED_CUSTOMER) is created or updated.
+///
+/// Precedence rule: When a customer is both a B2B company contact AND tagged,
+/// the COMPANY BuyerAccount takes precedence for order mapping. The tagged
+/// customer record is still tracked but won't create a duplicate BuyerAccount.
+model S8TaggedCustomer {
+  id              String    @id @default(dbgenerated("gen_random_uuid()::text"))
+  shopId          String    @map("shop_id")
+  /// Shopify Customer GID (e.g., "gid://shopify/Customer/123")
+  customerId      String    @map("customer_id")
+  /// Customer tags as JSON array (e.g., ["net-terms", "wholesale"])
+  /// Only the tags are stored for rule matching; no other customer data
+  tags            Json      @default("[]")
+  /// Whether the customer currently has a matching buyer tag
+  /// Separate from BuyerAccount.holdState - tag sync never touches credit hold
+  tagActive       Boolean   @default(false) @map("tag_active")
+  /// When the customer lost the matching tag (NULL if tagActive=true)
+  tagDeactivatedAt DateTime? @map("tag_deactivated_at") @db.Timestamptz(3)
+  /// Reserved: customer email, requires Protected Customer Data approval
+  /// Always NULL until CUSTOMER_PII_FIELDS=1 is set after approval
+  email           String?
+  /// Reserved: customer display name, requires Protected Customer Data approval
+  /// Always NULL until CUSTOMER_PII_FIELDS=1 is set after approval
+  displayName     String?   @map("display_name")
+  /// When the record was created
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  /// When the record was last updated
+  updatedAt       DateTime  @default(now()) @map("updated_at") @db.Timestamptz(3)
+
+  // One record per customer per shop
+  @@unique([shopId, customerId])
+  @@index([shopId, tagActive])
+  @@map("s8_tagged_customers")
+}
+
+/// Draft order tracking table (S8)
+/// Tracks draft orders with payment terms for pending credit exposure.
+///
+/// DPDP compliance: Only stores draft order GID, buyer account reference,
+/// total amount, and payment terms state. No PII fields.
+///
+/// Draft orders are tracked when they have payment terms assigned to a buyer.
+/// When a draft order is completed (becomes an Order), it's removed from this
+/// table and tracked as an Invoice instead. When deleted, it's removed.
+///
+/// The pending exposure (sum of tracked draft orders) is used by the credit
+/// limit calculation to include uncommitted orders.
+model S8DraftOrder {
+  id             String   @id @default(dbgenerated("gen_random_uuid()::text"))
+  shopId         String   @map("shop_id")
+  /// Shopify DraftOrder GID (e.g., "gid://shopify/DraftOrder/123")
+  draftOrderId   String   @map("draft_order_id")
+  /// Reference to BuyerAccount for credit exposure calculation
+  buyerAccountId String?  @map("buyer_account_id")
+  /// Display name (e.g., "#D1")
+  name           String
+  /// Total amount in shop currency
+  total          Decimal  @db.Decimal(14, 2)
+  /// Whether the draft order has payment terms
+  hasPaymentTerms Boolean @default(false) @map("has_payment_terms")
+  /// Draft order status (open, invoice_sent, completed)
+  status         String   @default("open")
+  /// When the draft order was created in Shopify
+  createdAt      DateTime @map("created_at") @db.Timestamptz(3)
+  /// When the record was last updated
+  updatedAt      DateTime @default(now()) @map("updated_at") @db.Timestamptz(3)
+
+  // One record per draft order per shop
+  @@unique([shopId, draftOrderId])
+  @@index([shopId, buyerAccountId])
+  @@index([shopId, hasPaymentTerms])
+  @@map("s8_draft_orders")
+}

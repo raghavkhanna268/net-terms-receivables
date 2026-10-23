@@ -3,10 +3,12 @@ import {
   parseJsonl,
   parseCompanyBulkJsonl,
   parseOrderBulkJsonl,
+  parseCustomerBulkJsonl,
   bulkLocationToShopifyLocation,
   bulkOrderToShopifyOrder,
+  bulkCustomerToShopifyCustomer,
 } from "../bulk-parser.server";
-import type { BulkCompanyLocationLine, BulkOrderLine } from "../types";
+import type { BulkCompanyLocationLine, BulkOrderLine, BulkCustomerLine } from "../types";
 
 describe("parseJsonl", () => {
   it("parses valid JSONL", () => {
@@ -219,5 +221,87 @@ describe("bulkOrderToShopifyOrder", () => {
     expect(result.paymentTerms?.dueInDays).toBe(30);
     expect(result.purchasingEntity?.company?.id).toBe("gid://shopify/Company/456");
     expect(result.totalPriceSet?.shopMoney.amount).toBe("10000.00");
+  });
+});
+
+describe("parseCustomerBulkJsonl", () => {
+  it("parses customer JSONL with tags", () => {
+    const jsonl = `{"id":"gid://shopify/Customer/1","tags":["net-terms","wholesale"]}
+{"id":"gid://shopify/Customer/2","tags":["retail"]}
+{"id":"gid://shopify/Customer/3"}`;
+
+    const result = parseCustomerBulkJsonl(jsonl);
+
+    expect(result.customers).toHaveLength(3);
+    expect(result.customers[0].id).toBe("gid://shopify/Customer/1");
+    expect(result.customers[0].tags).toEqual(["net-terms", "wholesale"]);
+    expect(result.customers[1].tags).toEqual(["retail"]);
+    expect(result.customers[2].tags).toBeUndefined();
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it("handles empty JSONL", () => {
+    const result = parseCustomerBulkJsonl("");
+
+    expect(result.customers).toHaveLength(0);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it("captures parse errors", () => {
+    const jsonl = `{"id":"gid://shopify/Customer/1","tags":["valid"]}
+invalid json line
+{"id":"gid://shopify/Customer/2"}`;
+
+    const result = parseCustomerBulkJsonl(jsonl);
+
+    expect(result.customers).toHaveLength(2);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0].line).toBe(2);
+    expect(result.errors[0].raw).toBe("invalid json line");
+  });
+
+  it("handles customers with empty tags array", () => {
+    const jsonl = `{"id":"gid://shopify/Customer/1","tags":[]}`;
+
+    const result = parseCustomerBulkJsonl(jsonl);
+
+    expect(result.customers).toHaveLength(1);
+    expect(result.customers[0].tags).toEqual([]);
+  });
+});
+
+describe("bulkCustomerToShopifyCustomer", () => {
+  it("converts bulk line to ShopifyCustomer with tags", () => {
+    const bulkLine: BulkCustomerLine = {
+      id: "gid://shopify/Customer/123",
+      tags: ["net-terms", "gold-tier"],
+    };
+
+    const result = bulkCustomerToShopifyCustomer(bulkLine);
+
+    expect(result.id).toBe("gid://shopify/Customer/123");
+    expect(result.tags).toEqual(["net-terms", "gold-tier"]);
+  });
+
+  it("handles missing tags", () => {
+    const bulkLine: BulkCustomerLine = {
+      id: "gid://shopify/Customer/456",
+    };
+
+    const result = bulkCustomerToShopifyCustomer(bulkLine);
+
+    expect(result.id).toBe("gid://shopify/Customer/456");
+    expect(result.tags).toEqual([]);
+  });
+
+  it("handles null-ish tags", () => {
+    const bulkLine: BulkCustomerLine = {
+      id: "gid://shopify/Customer/789",
+      tags: undefined,
+    };
+
+    const result = bulkCustomerToShopifyCustomer(bulkLine);
+
+    expect(result.tags).toEqual([]);
   });
 });

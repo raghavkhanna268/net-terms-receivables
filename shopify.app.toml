@@ -65,6 +65,19 @@ api_version = "2026-10"
   uri = "/webhooks/bulk_operations/finish"
   topics = ["bulk_operations/finish"]
 
+  # S8: Customer sync webhooks (tagged buyer accounts)
+  # Maps Customers with matching tags to BuyerAccount (kind=TAGGED_CUSTOMER)
+  # DPDP: Only id and tags are extracted; no PII stored
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/customers"
+  topics = ["customers/create", "customers/update", "customers/delete"]
+
+  # S8: Draft order sync webhooks (pending credit exposure)
+  # Tracks draft orders with payment terms for credit limit calculation
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/draft_orders"
+  topics = ["draft_orders/create", "draft_orders/update", "draft_orders/delete"]
+
 [auth]
 redirect_urls = ["https://net-terms-receivables.raghavkhanna.workers.dev/auth/callback"]
 

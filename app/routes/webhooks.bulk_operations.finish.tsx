@@ -86,7 +86,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 async function lookupBulkOperationType(
   sql: ReturnType<typeof getRequestSql>,
   bulkOperationId: string
-): Promise<"companies" | "orders" | null> {
+): Promise<"companies" | "orders" | "customers" | null> {
   const [row] = await sql<{ bulk_type: string }[]>`
     SELECT bulk_type FROM s6_bulk_operations
     WHERE bulk_operation_id = ${bulkOperationId}
@@ -96,5 +96,5 @@ async function lookupBulkOperationType(
     return null;
   }
 
-  return row.bulk_type as "companies" | "orders";
+  return row.bulk_type as "companies" | "orders" | "customers";
 }
