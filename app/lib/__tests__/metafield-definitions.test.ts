@@ -10,22 +10,16 @@ describe("metafield-definitions", () => {
   });
 
   describe("getMetafieldDefinitionSpecs", () => {
-    it("returns credit_status and hold definitions", () => {
+    it("returns credit_status definition only (hold state lives in credit_status.hold)", () => {
       const specs = getMetafieldDefinitionSpecs();
 
-      expect(specs).toHaveLength(2);
+      expect(specs).toHaveLength(1);
 
       const creditStatus = specs.find((s) => s.definition.key === "credit_status");
       expect(creditStatus).toBeDefined();
       expect(creditStatus?.definition.namespace).toBe("$app");
       expect(creditStatus?.definition.type).toBe("json");
       expect(creditStatus?.ownerTypes).toEqual(["COMPANY_LOCATION", "CUSTOMER"]);
-
-      const hold = specs.find((s) => s.definition.key === "hold");
-      expect(hold).toBeDefined();
-      expect(hold?.definition.namespace).toBe("$app");
-      expect(hold?.definition.type).toBe("boolean");
-      expect(hold?.ownerTypes).toEqual(["COMPANY_LOCATION", "CUSTOMER"]);
     });
   });
 
@@ -57,12 +51,12 @@ describe("metafield-definitions", () => {
         mockAdmin as Parameters<typeof ensureMetafieldDefinitions>[0],
       );
 
-      expect(results).toHaveLength(4);
+      expect(results).toHaveLength(2);
       expect(results.every((r) => r.created)).toBe(true);
       expect(results.every((r) => !r.alreadyExists)).toBe(true);
       expect(results.every((r) => !r.error)).toBe(true);
 
-      expect(mockAdmin.graphql).toHaveBeenCalledTimes(4);
+      expect(mockAdmin.graphql).toHaveBeenCalledTimes(2);
 
       const creditStatusCompanyLocation = results.find(
         (r) => r.key === "credit_status" && r.ownerType === "COMPANY_LOCATION",
@@ -73,16 +67,6 @@ describe("metafield-definitions", () => {
         (r) => r.key === "credit_status" && r.ownerType === "CUSTOMER",
       );
       expect(creditStatusCustomer?.created).toBe(true);
-
-      const holdCompanyLocation = results.find(
-        (r) => r.key === "hold" && r.ownerType === "COMPANY_LOCATION",
-      );
-      expect(holdCompanyLocation?.created).toBe(true);
-
-      const holdCustomer = results.find(
-        (r) => r.key === "hold" && r.ownerType === "CUSTOMER",
-      );
-      expect(holdCustomer?.created).toBe(true);
 
       consoleSpy.mockRestore();
     });
@@ -115,7 +99,7 @@ describe("metafield-definitions", () => {
         mockAdmin as Parameters<typeof ensureMetafieldDefinitions>[0],
       );
 
-      expect(results).toHaveLength(4);
+      expect(results).toHaveLength(2);
       expect(results.every((r) => r.alreadyExists)).toBe(true);
       expect(results.every((r) => !r.created)).toBe(true);
       expect(results.every((r) => !r.error)).toBe(true);
@@ -130,7 +114,7 @@ describe("metafield-definitions", () => {
       const mockAdmin = {
         graphql: vi.fn().mockImplementation(() => {
           callIndex++;
-          if (callIndex <= 2) {
+          if (callIndex === 1) {
             return Promise.resolve({
               json: () =>
                 Promise.resolve({
@@ -169,9 +153,9 @@ describe("metafield-definitions", () => {
         mockAdmin as Parameters<typeof ensureMetafieldDefinitions>[0],
       );
 
-      expect(results).toHaveLength(4);
-      expect(results.filter((r) => r.created)).toHaveLength(2);
-      expect(results.filter((r) => r.alreadyExists)).toHaveLength(2);
+      expect(results).toHaveLength(2);
+      expect(results.filter((r) => r.created)).toHaveLength(1);
+      expect(results.filter((r) => r.alreadyExists)).toHaveLength(1);
       expect(results.every((r) => !r.error)).toBe(true);
 
       consoleSpy.mockRestore();
@@ -327,6 +311,8 @@ describe("metafield-definitions", () => {
         mockAdmin as Parameters<typeof ensureMetafieldDefinitions>[0],
       );
 
+      expect(mockAdmin.graphql).toHaveBeenCalledTimes(2);
+
       const firstCall = mockAdmin.graphql.mock.calls[0];
       expect(firstCall[1]).toEqual({
         variables: {
@@ -340,16 +326,16 @@ describe("metafield-definitions", () => {
         },
       });
 
-      const thirdCall = mockAdmin.graphql.mock.calls[2];
-      expect(thirdCall[1]).toEqual({
+      const secondCall = mockAdmin.graphql.mock.calls[1];
+      expect(secondCall[1]).toEqual({
         variables: {
           namespace: "$app",
-          key: "hold",
-          name: "Hold Status",
+          key: "credit_status",
+          name: "Credit Status",
           description:
-            "Simple boolean flag indicating if the buyer is on hold for fulfillment",
-          type: "boolean",
-          ownerType: "COMPANY_LOCATION",
+            "Net terms credit status including hold flag, limit, and exposure",
+          type: "json",
+          ownerType: "CUSTOMER",
         },
       });
 
@@ -368,7 +354,7 @@ describe("metafield-definitions", () => {
       const mockAdmin = {
         graphql: vi.fn().mockImplementation(() => {
           attempt++;
-          if (attempt <= 4) {
+          if (attempt <= 2) {
             return Promise.resolve({
               json: () =>
                 Promise.resolve({
@@ -400,7 +386,7 @@ describe("metafield-definitions", () => {
 
       expect(consoleSpy).toHaveBeenCalled();
 
-      attempt = 4;
+      attempt = 2;
       const results = await ensureMetafieldDefinitions(
         mockAdmin as Parameters<typeof ensureMetafieldDefinitions>[0],
       );

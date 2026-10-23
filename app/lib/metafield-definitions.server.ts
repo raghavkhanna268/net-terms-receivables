@@ -1,11 +1,10 @@
 /**
  * Metafield Definitions Service
  *
- * Idempotent creation of app-owned metafield definitions for:
- * - credit_status (JSON): Credit status including hold flag, limit, and exposure
- * - hold (boolean): Simple hold flag for quick lookups by fulfillment-hold path
+ * Idempotent creation of app-owned metafield definitions for credit_status (JSON).
+ * Hold state lives inside credit_status.hold, not as a separate metafield.
  *
- * Both definitions are created on COMPANY_LOCATION and CUSTOMER owner types.
+ * The definition is created on COMPANY_LOCATION and CUSTOMER owner types.
  * Uses the $app namespace which is app-owned and resolved at deploy time.
  *
  * @see https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/metafieldDefinitionCreate
@@ -50,19 +49,11 @@ const CREDIT_STATUS_DEFINITION: MetafieldDefinitionSpec = {
   type: METAFIELD.type,
 };
 
-const HOLD_DEFINITION: MetafieldDefinitionSpec = {
-  namespace: METAFIELD.namespace,
-  key: "hold",
-  name: "Hold Status",
-  description:
-    "Simple boolean flag indicating if the buyer is on hold for fulfillment",
-  type: "boolean",
-};
-
 /**
  * All metafield definitions that need to be created.
+ * Hold state lives inside credit_status.hold, not as a separate metafield.
  */
-const METAFIELD_DEFINITIONS = [CREDIT_STATUS_DEFINITION, HOLD_DEFINITION];
+const METAFIELD_DEFINITIONS = [CREDIT_STATUS_DEFINITION];
 
 interface MetafieldDefinitionCreateResult {
   data?: {
@@ -192,7 +183,7 @@ async function createMetafieldDefinition(
 
 /**
  * Ensures all metafield definitions exist for the shop.
- * Creates definitions for credit_status and hold on both COMPANY_LOCATION and CUSTOMER.
+ * Creates the credit_status definition on both COMPANY_LOCATION and CUSTOMER.
  * This operation is idempotent - TAKEN errors are treated as success.
  *
  * @param admin - The Shopify Admin API client

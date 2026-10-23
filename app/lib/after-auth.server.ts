@@ -82,6 +82,7 @@ async function runSetup(
   admin: AdminGraphqlClient,
 ): Promise<void> {
   try {
+    // Definitions run before validation so the Function input query can resolve them.
     await ensureMetafieldDefinitions(admin);
     await ensureValidation(admin);
     setupCompletedShops.add(shop);
