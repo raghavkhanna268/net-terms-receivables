@@ -16,6 +16,8 @@ import {
   findCompanyByExternalId,
   findOrderByTag,
   formatCurrency,
+  seedDatabase,
+  printDatabaseSeedSQL,
   type SeedState,
   type GraphQLResponse,
 } from "../seed";
@@ -64,6 +66,7 @@ function createMockState(overrides: Partial<SeedState> = {}): SeedState {
     deletedCount: { companies: 0, orders: 0 },
     ordersWithShopifyTerms: 0,
     ordersWithoutShopifyTerms: 0,
+    overdueOrdersCount: 0,
     errors: [],
     ...overrides,
   };
@@ -161,6 +164,18 @@ function setupMockFetch() {
         data: {
           companyLocationCreate: {
             companyLocation: { id: `gid://shopify/CompanyLocation/new-loc-${Date.now()}`, name: "New Location" },
+            userErrors: [],
+          },
+        },
+        extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
+      };
+    }
+    // Customer update - tag customer with ntr-seed-netNN
+    else if (query.includes("customerUpdate")) {
+      responseData = {
+        data: {
+          customerUpdate: {
+            customer: { id: "gid://shopify/Customer/tagged-1", tags: [SEED_TAG, `${SEED_TAG}-net30`] },
             userErrors: [],
           },
         },
@@ -703,9 +718,41 @@ describe("Idempotency", () => {
 });
 
 describe("(2) DB seeding idempotent - no duplicate rows", () => {
+  let mockPostgresCalls: Array<{ sql: string; values: unknown[] }> = [];
+  let mockPostgresResults: Map<string, unknown[]> = new Map();
+
+  beforeEach(() => {
+    mockPostgresCalls = [];
+    mockPostgresResults = new Map();
+    
+    // Mock the postgres module
+    vi.doMock("postgres", () => {
+      return {
+        default: () => {
+          const taggedTemplate = (strings: TemplateStringsArray, ...values: unknown[]) => {
+            const sql = strings.join("$?");
+            mockPostgresCalls.push({ sql, values });
+            
+            // Return mock results based on the query
+            if (sql.includes("INSERT INTO \"Shop\"")) {
+              return Promise.resolve([{ id: "seed-shop-net-terms-receivables.myshopify.com" }]);
+            }
+            return Promise.resolve([]);
+          };
+          taggedTemplate.end = () => Promise.resolve();
+          return taggedTemplate;
+        },
+      };
+    });
+  });
+
+  afterEach(() => {
+    vi.doUnmock("postgres");
+    mockPostgresCalls = [];
+  });
+
   it("SQL uses ON CONFLICT DO UPDATE (idempotent upsert)", async () => {
     // Read seed.ts and verify it contains ON CONFLICT DO UPDATE patterns
-    // This ensures the idempotency requirement is met
     const fs = await import("fs/promises");
     const path = await import("path");
     
@@ -722,20 +769,89 @@ describe("(2) DB seeding idempotent - no duplicate rows", () => {
     expect(seedContent).toMatch(/ON CONFLICT \("shopId", "companyLocationId"\) DO UPDATE SET/);
   });
 
-  it("printed SQL also uses ON CONFLICT (for --dry-run idempotency)", async () => {
-    // The printSqlStatements function also generates idempotent SQL
+  it("printDatabaseSeedSQL generates idempotent SQL for all tables", () => {
+    const state = createMockState({
+      currencyCode: "INR",
+    });
+    
+    // Add test company data
+    const locations = new Map<number, string>();
+    locations.set(15, "gid://shopify/CompanyLocation/loc-15");
+    locations.set(30, "gid://shopify/CompanyLocation/loc-30");
+    state.companies.set("company-1", {
+      id: "gid://shopify/Company/1",
+      contactCustomerId: "gid://shopify/Customer/1",
+      locations,
+    });
+
+    // Capture console.log output
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    
+    printDatabaseSeedSQL(state);
+    
+    const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    logSpy.mockRestore();
+
+    // Verify all three table upserts are present with ON CONFLICT
+    expect(output).toContain("INSERT INTO \"Shop\"");
+    expect(output).toContain("ON CONFLICT (domain) DO UPDATE SET");
+    
+    expect(output).toContain("INSERT INTO \"AccountSource\"");
+    expect(output).toContain("ON CONFLICT (\"shopId\", tag) DO UPDATE SET");
+    
+    expect(output).toContain("INSERT INTO \"BuyerAccount\"");
+    expect(output).toContain("ON CONFLICT (\"shopId\", \"companyLocationId\") DO UPDATE SET");
+  });
+
+  it("printed SQL includes BuyerAccount upserts for each company location", () => {
+    const state = createMockState({
+      currencyCode: "INR",
+    });
+    
+    // Add multiple companies with locations
+    for (let i = 1; i <= 2; i++) {
+      const locations = new Map<number, string>();
+      locations.set(15, `gid://shopify/CompanyLocation/company-${i}-loc-15`);
+      locations.set(30, `gid://shopify/CompanyLocation/company-${i}-loc-30`);
+      locations.set(60, `gid://shopify/CompanyLocation/company-${i}-loc-60`);
+      state.companies.set(`company-${i}`, {
+        id: `gid://shopify/Company/${i}`,
+        contactCustomerId: `gid://shopify/Customer/${i}`,
+        locations,
+      });
+    }
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    
+    printDatabaseSeedSQL(state);
+    
+    const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    logSpy.mockRestore();
+
+    // Should have BuyerAccount INSERT for each company location (2 companies * 3 locations = 6)
+    const buyerAccountInserts = (output.match(/INSERT INTO "BuyerAccount"/g) || []).length;
+    expect(buyerAccountInserts).toBe(6);
+    
+    // Each should have ON CONFLICT
+    const buyerAccountConflicts = (output.match(/ON CONFLICT \("shopId", "companyLocationId"\)/g) || []).length;
+    expect(buyerAccountConflicts).toBe(6);
+  });
+
+  it("ON CONFLICT targets are correct unique constraints", async () => {
     const fs = await import("fs/promises");
     const path = await import("path");
     
     const seedPath = path.resolve(__dirname, "../seed.ts");
     const seedContent = await fs.readFile(seedPath, "utf-8");
 
-    // Count ON CONFLICT occurrences - at least 5:
-    // - 3 in seedDatabase (Shop, AccountSource, BuyerAccount)
-    // - 2 in printSqlStatements (Shop, AccountSource for each location term)
-    const onConflictMatches = seedContent.match(/ON CONFLICT/g);
-    expect(onConflictMatches).not.toBeNull();
-    expect(onConflictMatches!.length).toBeGreaterThanOrEqual(5);
+    // Shop: unique on domain
+    expect(seedContent).toMatch(/ON CONFLICT \(domain\) DO UPDATE/);
+    
+    // AccountSource: unique on (shopId, tag)
+    expect(seedContent).toMatch(/ON CONFLICT \("shopId", tag\) DO UPDATE/);
+    
+    // BuyerAccount: unique on (shopId, companyLocationId)
+    expect(seedContent).toMatch(/ON CONFLICT \("shopId", "companyLocationId"\) DO UPDATE/);
   });
 });
 

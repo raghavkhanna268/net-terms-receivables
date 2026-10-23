@@ -17,7 +17,8 @@
  *     (pre-granted for S12/S13, not used by seed)
  *
  * HOW PAYMENT TERMS WORK:
- * 1. Each company has 3 locations configured with Net 15, Net 30, Net 60 via companyLocationUpdate
+ * 1. Each company has 3 locations with Net 15, Net 30, Net 60 via buyerExperienceConfiguration
+ *    on companyCreate/companyLocationCreate (paymentTermsTemplateId)
  * 2. Orders use processedAt to backdate, creating overdue invoices for testing
  *    @see https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateOrderInput
  *    "processedAt: The date and time when the order was created."
@@ -221,6 +222,7 @@ export interface SeedState {
   deletedCount: { companies: number; orders: number };
   ordersWithShopifyTerms: number;
   ordersWithoutShopifyTerms: number;
+  overdueOrdersCount: number;
   errors: string[];
 }
 
@@ -547,6 +549,30 @@ export async function seedCompanies(state: SeedState): Promise<void> {
           }
         }
       }
+      
+      // Create any missing Net-XX locations idempotently
+      for (const loc of LOCATION_TERMS) {
+        if (!locations.has(loc.dueInDays)) {
+          console.log(`    → Creating missing location ${loc.suffix}...`);
+          const template = state.paymentTermsTemplates.find(
+            (t) => t.paymentTermsType === "NET" && t.dueInDays === loc.dueInDays
+          );
+          if (state.dryRun) {
+            locations.set(loc.dueInDays, `dry-run-location-${seed.key}-${loc.dueInDays}`);
+            state.createdCount.locations++;
+          } else {
+            const locationId = await createCompanyLocation(state, existing.id, seed.name, loc, template?.id);
+            if (locationId) {
+              locations.set(loc.dueInDays, locationId);
+              console.log(`    ✅ Created location ${loc.suffix}`);
+              state.createdCount.locations++;
+            } else {
+              console.error(`    ❌ Failed to create location ${loc.suffix}`);
+            }
+          }
+        }
+      }
+      
       state.companies.set(seed.key, {
         id: existing.id,
         contactCustomerId: existing.contacts.edges[0]?.node.customer.id ?? "",
@@ -814,6 +840,9 @@ export async function seedOrders(state: SeedState): Promise<void> {
 
     if (state.dryRun) {
       const isOverdue = orderSpec.daysAgo > orderSpec.locationTermsDays;
+      if (isOverdue) {
+        state.overdueOrdersCount++;
+      }
       console.log(
         `  [dry-run] Would create order ${orderIndex}: ${orderSpec.entityKey}, ` +
           `Net ${orderSpec.locationTermsDays}, ${orderSpec.daysAgo} days ago${isOverdue ? " (OVERDUE)" : ""}, ` +
@@ -839,8 +868,16 @@ export async function seedOrders(state: SeedState): Promise<void> {
       continue;
     }
 
+    // Tag the customer with ntr-seed-netNN so AccountSource tag rules apply
+    if (!state.dryRun) {
+      await tagCustomerForTerms(state, company.contactCustomerId, orderSpec.locationTermsDays);
+    }
+
     state.createdCount.orders++;
     const isOverdue = orderSpec.daysAgo > orderSpec.locationTermsDays;
+    if (isOverdue) {
+      state.overdueOrdersCount++;
+    }
     console.log(
       `  ✅ Created ${order.name}: ${orderSpec.entityKey}, ` +
         `Net ${orderSpec.locationTermsDays}, ${orderSpec.daysAgo} days ago${isOverdue ? " (OVERDUE)" : ""}, ` +
@@ -859,6 +896,43 @@ export async function findOrderByTag(state: SeedState, tag: string): Promise<Ord
   `, { query: `tag:'${tag}'` });
 
   return result.data?.orders.nodes[0] ?? null;
+}
+
+/**
+ * Tag a customer with ntr-seed-netNN tag so AccountSource tag rules apply.
+ * Uses customerUpdate to add tags without removing existing ones.
+ */
+async function tagCustomerForTerms(
+  state: SeedState,
+  customerId: string,
+  termsDays: number
+): Promise<void> {
+  const tag = `${SEED_TAG}-net${termsDays}`;
+  
+  const mutation = `
+    mutation TagCustomer($input: CustomerInput!) {
+      customerUpdate(input: $input) {
+        customer { id tags }
+        userErrors { field message }
+      }
+    }
+  `;
+
+  const result = await graphql<{
+    customerUpdate: {
+      customer: { id: string; tags: string[] } | null;
+      userErrors: UserError[];
+    };
+  }>(state, mutation, {
+    input: {
+      id: customerId,
+      tags: [SEED_TAG, tag],
+    },
+  }, { isMutation: true });
+
+  if (result.data?.customerUpdate.userErrors.length) {
+    console.log(`    ⚠️  Failed to tag customer: ${result.data.customerUpdate.userErrors[0].message}`);
+  }
 }
 
 /**
@@ -1123,7 +1197,7 @@ export async function seedDatabase(state: SeedState): Promise<void> {
   }
 }
 
-function printDatabaseSeedSQL(state: SeedState): void {
+export function printDatabaseSeedSQL(state: SeedState): void {
   const shopId = `seed-shop-${state.shop}`;
   
   console.log(`-- Upsert Shop`);
@@ -1138,6 +1212,17 @@ function printDatabaseSeedSQL(state: SeedState): void {
     console.log(`INSERT INTO "AccountSource" (id, "shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")`);
     console.log(`VALUES ('seed-source-${tag}', '${shopId}', '${tag}', ${loc.dueInDays}, NOW(), NOW())`);
     console.log(`ON CONFLICT ("shopId", tag) DO UPDATE SET "defaultTermsDays" = EXCLUDED."defaultTermsDays", "updatedAt" = NOW();`);
+  }
+  console.log();
+
+  console.log(`-- Upsert BuyerAccount records for each company location`);
+  for (const [companyKey, company] of state.companies) {
+    for (const [dueInDays, locationId] of company.locations) {
+      const accountName = `${COMPANY_SEEDS.find(c => c.key === companyKey)?.name ?? companyKey} - Net ${dueInDays}`;
+      console.log(`INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "defaultTermsDays", "defaultTermsSource", "holdState", "createdAt", "updatedAt")`);
+      console.log(`VALUES ('seed-account-${locationId}', '${shopId}', 'COMPANY', '${company.id}', '${locationId}', '${accountName}', ${dueInDays}, 'explicit', 'OK', NOW(), NOW())`);
+      console.log(`ON CONFLICT ("shopId", "companyLocationId") DO UPDATE SET "defaultTermsDays" = EXCLUDED."defaultTermsDays", "defaultTermsSource" = EXCLUDED."defaultTermsSource", "updatedAt" = NOW();`);
+    }
   }
 }
 
@@ -1207,6 +1292,7 @@ export async function main(): Promise<void> {
     deletedCount: { companies: 0, orders: 0 },
     ordersWithShopifyTerms: 0,
     ordersWithoutShopifyTerms: 0,
+    overdueOrdersCount: 0,
     errors: [],
   };
 
@@ -1251,6 +1337,10 @@ export async function main(): Promise<void> {
 
   if (dryRun) {
     console.log("\n  [DRY RUN - No mutations performed]");
+    console.log(`\n  Would create ${state.overdueOrdersCount} overdue orders (daysAgo > termsDays)`);
+    if (state.overdueOrdersCount === 0) {
+      console.log(`  ⚠️  WARNING: No orders would have effective due date in past!`);
+    }
   }
 
   console.log("\n  Shopify Created:");
@@ -1270,6 +1360,14 @@ export async function main(): Promise<void> {
     if (state.ordersWithoutShopifyTerms > 0) {
       console.log(`\n  ⚠️  ${state.ordersWithoutShopifyTerms} orders did not inherit Shopify terms.`);
       console.log("     S9 inference will use BuyerAccount.defaultTermsDays from DB.");
+    }
+
+    console.log("\n  Overdue Orders (effective due date in past):");
+    console.log(`    Overdue count: ${state.overdueOrdersCount}`);
+    
+    if (state.overdueOrdersCount === 0) {
+      console.log(`\n  ⚠️  WARNING: No orders have effective due date in the past!`);
+      console.log("     Expected at least some Net 15/30 orders with daysAgo > termsDays.");
     }
   }
 
