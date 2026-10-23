@@ -159,8 +159,14 @@ export async function redactCustomer(
     `;
     buyerAccountAnonymized = true;
 
-    // Redact payments linked to this buyer via Match→Invoice→BuyerAccount
-    // This is the correct way to find customer's payments, not ILIKE on narration
+    // Redact payments linked to this buyer via Match→Invoice→BuyerAccount.
+    // This is the correct way to find customer's payments, not ILIKE on narration.
+    //
+    // NOTE: A payment matched to multiple buyers (split payment scenario) is FULLY
+    // redacted when ANY linked buyer is redacted. This is the conservative/safe
+    // approach for GDPR compliance: we cannot selectively redact portions of
+    // payerText/narration, and retaining any part risks exposing the redacted
+    // customer's identity through the shared payment context.
     const paymentResult = await sql`
       UPDATE "Payment" p
       SET

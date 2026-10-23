@@ -264,6 +264,7 @@ For privacy inquiries:
 - [ ] Complete Shopify Protected Customer Data (PCD) approval form
 - [ ] Fill in **TBD** sections with actual company details
 - [ ] Set up DPAs with Cloudflare and Supabase
+- [ ] Accept [Resend DPA](https://resend.com/legal/dpa) before enabling email notifications
 - [ ] Configure data retention policies for audit events
 - [ ] Decide on email delivery for data requests (currently in-admin only)
 - [ ] Verify CUSTOMER_PII_FIELDS flag is off in production until PCD approval
