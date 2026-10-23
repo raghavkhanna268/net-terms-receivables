@@ -62,11 +62,20 @@ jobs:
         id: token
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          DATABASE_URL_SESSION: ${{ secrets.DATABASE_URL_SESSION }}
           SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
           SHOPIFY_API_SECRET: ${{ secrets.SHOPIFY_API_SECRET }}
           PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
           set -euo pipefail
+
+          # Mask API credentials immediately
+          if [ -n "$SHOPIFY_API_KEY" ]; then
+            echo "::add-mask::$SHOPIFY_API_KEY"
+          fi
+          if [ -n "$SHOPIFY_API_SECRET" ]; then
+            echo "::add-mask::$SHOPIFY_API_SECRET"
+          fi
 
           if [ -z "$DATABASE_URL" ]; then
             echo "::error::DATABASE_URL_MIGRATIONS secret is not set"
@@ -108,6 +117,7 @@ jobs:
 
           # Check if token is expired or within 5 minutes of expiry
           NEEDS_REFRESH=false
+          TOKEN_EXPIRED=false
           if [ -n "$EXPIRES_RAW" ] && [ "$EXPIRES_RAW" != "" ]; then
             EXPIRES_EPOCH=$(date -u -d "$EXPIRES_RAW" +%s 2>/dev/null || echo "0")
             NOW_EPOCH=$(date -u +%s)
@@ -116,6 +126,7 @@ jobs:
             if [ "$EXPIRES_EPOCH" -le "$NOW_EPOCH" ]; then
               echo "expired=true"
               NEEDS_REFRESH=true
+              TOKEN_EXPIRED=true
             elif [ "$EXPIRES_EPOCH" -le "$THRESHOLD_EPOCH" ]; then
               echo "expired=false (but within 5 min of expiry)"
               NEEDS_REFRESH=true
@@ -130,16 +141,27 @@ jobs:
           if [ "$NEEDS_REFRESH" = "true" ]; then
             if [ "$HAS_REFRESH" = "true" ]; then
               echo "Refreshing token..."
-              # Unset read-only mode for the refresh operation (it writes to DB)
-              unset PGOPTIONS
 
-              REFRESH_RESULT=$(npx tsx scripts/lib/refresh-offline-token.ts \
+              # Use DATABASE_URL_SESSION for writes (as #49 does)
+              if [ -z "$DATABASE_URL_SESSION" ]; then
+                echo "::error::DATABASE_URL_SESSION secret is not set (required for token refresh)"
+                exit 1
+              fi
+
+              # Capture stdout only (not stderr), validate JSON
+              REFRESH_RESULT=$(DATABASE_URL="$DATABASE_URL_SESSION" npx tsx scripts/lib/refresh-offline-token.ts \
                 --shop "$SHOP" \
-                --threshold-minutes 5 2>&1) || true
+                --threshold-minutes 5) || true
 
-              # Parse result
-              WAS_REFRESHED=$(echo "$REFRESH_RESULT" | jq -r '.wasRefreshed // false')
-              REFRESH_SUCCESS=$(echo "$REFRESH_RESULT" | jq -r '.success // false')
+              # Validate JSON output
+              if ! echo "$REFRESH_RESULT" | jq -e . >/dev/null 2>&1; then
+                echo "::error::Token refresh returned invalid JSON"
+                exit 1
+              fi
+
+              # Parse result with guarded jq calls
+              REFRESH_SUCCESS=$(echo "$REFRESH_RESULT" | jq -r '.success // false' 2>/dev/null || echo "false")
+              WAS_REFRESHED=$(echo "$REFRESH_RESULT" | jq -r '.wasRefreshed // false' 2>/dev/null || echo "false")
 
               if [ "$REFRESH_SUCCESS" = "true" ]; then
                 echo "refreshed=$WAS_REFRESHED"
@@ -153,17 +175,24 @@ jobs:
           LIMIT 1;
           EOSQL
                   )
+
+                  # Verify we got a token after refresh
+                  if [ -z "$ACCESS_TOKEN" ]; then
+                    echo "::error::No access token found after refresh"
+                    exit 1
+                  fi
+
                   # Mask the new token
                   echo "::add-mask::$ACCESS_TOKEN"
                 fi
               else
-                ERROR_CODE=$(echo "$REFRESH_RESULT" | jq -r '.errorCode // "unknown"')
-                echo "::warning::Token refresh failed: $ERROR_CODE"
-                echo "refreshed=false"
+                ERROR_CODE=$(echo "$REFRESH_RESULT" | jq -r '.errorCode // "unknown"' 2>/dev/null || echo "unknown")
+                echo "::error::Token refresh failed: $ERROR_CODE"
+                exit 1
               fi
             else
-              echo "::warning::Token expired but no refresh token available"
-              echo "refreshed=false"
+              echo "::error::Token expired but no refresh token available"
+              exit 1
             fi
           else
             echo "refreshed=false"
@@ -172,11 +201,12 @@ jobs:
           # Output token to GITHUB_ENV (masked, never echoed)
           # Using a delimiter to safely handle multi-line or special chars
           {
-            echo "has_token=true"
             echo "SHOPIFY_ADMIN_TOKEN<<EOF_TOKEN"
             echo "$ACCESS_TOKEN"
             echo "EOF_TOKEN"
           } >> "$GITHUB_ENV"
+
+          echo "has_token=true" >> "$GITHUB_OUTPUT"
 
       - name: Run seed script
         env:
