@@ -15,11 +15,13 @@ import {
   findSubsetSum,
   normalizePayerName,
   serializeScoreResult,
+  reasonsContainNoPII,
   MAX_INVOICES_FOR_SUBSET_SUM,
   MAX_SUBSET_SUM_ITERATIONS,
   type InvoiceForScoring,
   type PaymentForScoring,
   type BuyerForScoring,
+  type MatchReason,
 } from "../score";
 
 describe("extractInvoiceRefs", () => {
@@ -39,9 +41,12 @@ describe("extractInvoiceRefs", () => {
     expect(refs).toContain("1001");
   });
 
-  it("extracts standalone numbers (4-10 digits)", () => {
+  it("does NOT extract standalone numbers without prefix (tightened in P2)", () => {
+    // P2: Removed standalone 4-10 digit pattern to avoid false positives
+    // Numbers now require a prefix like #, INV-, D, ORDER-, ORD-, PO-, or REF-
     const refs = extractInvoiceRefs("REF 12345678 PAYMENT");
-    expect(refs).toContain("12345678");
+    // Without the hyphen, "REF 12345678" doesn't match "REF-<number>"
+    expect(refs).not.toContain("12345678");
   });
 
   it("ignores short numbers (< 4 digits)", () => {
@@ -66,6 +71,61 @@ describe("extractInvoiceRefs", () => {
       "NEFT/SYNTN26296000001/SYNTHETIC CORP/ORDER-1001"
     );
     expect(refs).toContain("1001");
+  });
+
+  // P2: False-positive rejection tests for tightened regex
+  it("does NOT extract phone-number-like 10-digit sequences", () => {
+    // Phone numbers should not be extracted as invoice refs
+    const refs = extractInvoiceRefs("Contact: 9876543210 for payment");
+    // Standalone 10-digit number without prefix should not match
+    expect(refs).not.toContain("9876543210");
+  });
+
+  it("does NOT extract date-like 8-digit sequences (YYYYMMDD)", () => {
+    const refs = extractInvoiceRefs("Payment dated 20261023 received");
+    expect(refs).not.toContain("20261023");
+  });
+
+  it("does NOT extract date-like 8-digit sequences (DDMMYYYY)", () => {
+    const refs = extractInvoiceRefs("Date: 19851225 birthday payment");
+    expect(refs).not.toContain("19851225");
+  });
+
+  it("does NOT extract amount-like sequences ending in 00", () => {
+    // Amounts like 500000 (₹5,000.00) should not be matched
+    const refs = extractInvoiceRefs("Amount: 500000 credited");
+    expect(refs).not.toContain("500000");
+  });
+
+  it("DOES extract hash-prefixed amount-like numbers", () => {
+    // But if explicitly prefixed with #, it's probably an invoice number
+    const refs = extractInvoiceRefs("Invoice #500000 paid");
+    expect(refs).toContain("500000");
+  });
+
+  it("does NOT extract year-like 4-digit sequences", () => {
+    const refs = extractInvoiceRefs("Payment for 2026 fiscal year");
+    expect(refs).not.toContain("2026");
+  });
+
+  it("extracts PO- prefixed purchase order numbers", () => {
+    const refs = extractInvoiceRefs("PO-123456 payment received");
+    expect(refs).toContain("123456");
+  });
+
+  it("extracts ORD- prefixed order numbers", () => {
+    const refs = extractInvoiceRefs("ORD-789012 shipped");
+    expect(refs).toContain("789012");
+  });
+
+  it("extracts REF- prefixed reference numbers (5+ digits)", () => {
+    const refs = extractInvoiceRefs("REF-12345 payment");
+    expect(refs).toContain("12345");
+  });
+
+  it("does NOT extract REF- with short numbers (< 5 digits)", () => {
+    const refs = extractInvoiceRefs("REF-1234 payment");
+    expect(refs).not.toContain("1234");
   });
 });
 
@@ -205,17 +265,42 @@ describe("scorePaymentToInvoice", () => {
     expect(result.reasons.some((r) => r.type === "amount_overpayment")).toBe(true);
   });
 
-  it("scores UTR match in narration", () => {
+  it("does NOT award UTR points (UTR is from payment's own narration)", () => {
+    // P1.2: UTR extracted from payment narration gives same score to every candidate
+    // So we no longer award UTR points at the payment-to-candidate level
     const payment = makePayment({
       narration: "NEFT CR-SYNTHETIC CORP-SYNTN26296000001",
+      utr: "SYNTN26296000001",
     });
     const invoice = makeInvoice();
     const buyer = makeBuyer();
 
     const result = scorePaymentToInvoice(payment, invoice, buyer, []);
 
-    expect(result.reasons.some((r) => r.type === "utr_match")).toBe(true);
-    expect(result.score).toBeGreaterThanOrEqual(40);
+    // UTR match should NOT be in reasons anymore (type was removed from MatchReasonType)
+    // Just verify no reason type contains "utr" 
+    expect(result.reasons.every((r) => !r.type.includes("utr"))).toBe(true);
+  });
+
+  it("UTR does not change ranking (same UTR for all candidates)", () => {
+    // P1.2: Since UTR comes from the payment, it's the same for all candidates
+    // This test proves UTR doesn't affect relative ranking
+    const payment = makePayment({
+      narration: "NEFT CR-PAYMENT",
+      utr: "SYNTN26296000001",
+    });
+    const invoice1 = makeInvoice({ id: "inv-1", name: "#1001" });
+    const invoice2 = makeInvoice({ id: "inv-2", name: "#1002", outstandingPaise: 1000000n });
+    const buyer = makeBuyer();
+
+    const result1 = scorePaymentToInvoice(payment, invoice1, buyer, []);
+    const result2 = scorePaymentToInvoice(payment, invoice2, buyer, []);
+
+    // Both should have no UTR-related score (type was removed)
+    const utrReasons1 = result1.reasons.filter(r => r.type.includes("utr"));
+    const utrReasons2 = result2.reasons.filter(r => r.type.includes("utr"));
+    expect(utrReasons1.length).toBe(0);
+    expect(utrReasons2.length).toBe(0);
   });
 
   it("scores invoice reference in narration", () => {
@@ -577,5 +662,96 @@ describe("ambiguous match ties", () => {
     const result = scoreMultiInvoiceMatch(payment, invoices, buyer);
     expect(result).not.toBeNull();
     expect(result?.allocations.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// P1.3: No PII in match reasons tests
+describe("reasonsContainNoPII", () => {
+  it("returns true for reasons with no PII", () => {
+    const reasons: MatchReason[] = [
+      { type: "amount_exact", points: 20, detail: "Exact amount" },
+      { type: "payer_name", points: 10, detail: "Name matched" },
+      { type: "invoice_ref", points: 30, detail: "Invoice ref" },
+    ];
+    expect(reasonsContainNoPII(reasons)).toBe(true);
+  });
+
+  it("returns false if reasons contain email addresses", () => {
+    const reasons: MatchReason[] = [
+      { type: "email_match", points: 6, detail: "Email: test@example.com" },
+    ];
+    expect(reasonsContainNoPII(reasons)).toBe(false);
+  });
+
+  it("returns false if reasons contain phone numbers", () => {
+    const reasons: MatchReason[] = [
+      { type: "payer_name", points: 10, detail: "Phone: 9876543210 matched" },
+    ];
+    expect(reasonsContainNoPII(reasons)).toBe(false);
+  });
+
+  it("returns true for reasons without detail field", () => {
+    const reasons: MatchReason[] = [
+      { type: "amount_exact", points: 20 },
+      { type: "payer_name", points: 10 },
+    ];
+    expect(reasonsContainNoPII(reasons)).toBe(true);
+  });
+
+  it("returns true for empty reasons array", () => {
+    expect(reasonsContainNoPII([])).toBe(true);
+  });
+
+  it("returns true for approved detail patterns", () => {
+    const reasons: MatchReason[] = [
+      { type: "payer_alias", points: 10, detail: "Alias matched" },
+      { type: "email_match", points: 6, detail: "Email prefix matched" },
+      { type: "amount_overpayment", points: 10, detail: "Overpayment (excess flagged)" },
+    ];
+    expect(reasonsContainNoPII(reasons)).toBe(true);
+  });
+});
+
+// P2: Overpayment gives reduced points
+describe("overpayment reduced points", () => {
+  it("gives reduced points (10) for overpayment vs full points (20) for exact match", () => {
+    const payment: PaymentForScoring = {
+      id: "payment-1",
+      amountPaise: 1200000n, // ₹12,000 - more than invoice
+      narration: "Payment",
+      payerText: null,
+      utr: null,
+      rail: null,
+    };
+
+    const invoice: InvoiceForScoring = {
+      id: "invoice-1",
+      name: "#1001",
+      orderId: null,
+      outstandingPaise: 1000000n, // ₹10,000
+      buyerAccountId: "buyer-1",
+      dueAt: null,
+    };
+
+    const buyer: BuyerForScoring = {
+      id: "buyer-1",
+      name: "Test",
+      aliases: [],
+      email: null,
+    };
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+    
+    // Should have overpayment reason with reduced points
+    const overpaymentReason = result.reasons.find(r => r.type === "amount_overpayment");
+    expect(overpaymentReason).toBeDefined();
+    expect(overpaymentReason?.points).toBe(10); // Reduced from 20
+
+    // Compare with exact match
+    const exactPayment = { ...payment, amountPaise: 1000000n };
+    const exactResult = scorePaymentToInvoice(exactPayment, invoice, buyer, []);
+    const exactReason = exactResult.reasons.find(r => r.type === "amount_exact");
+    expect(exactReason).toBeDefined();
+    expect(exactReason?.points).toBe(20); // Full points
   });
 });

@@ -657,3 +657,90 @@ export async function findBuyerByAlias(
     aliases: aliases.map((a) => a.payer_key),
   };
 }
+
+/**
+ * Get rejected payment-invoice pairs for a payment.
+ * These pairs will not be re-suggested by the matcher.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopId - Shop ID
+ * @param paymentId - Payment ID
+ */
+export async function getRejectedPairs(
+  sql: Sql,
+  shopId: string,
+  paymentId: string
+): Promise<Array<{ invoiceId: string }>> {
+  const rows = await sql<{ invoice_id: string }[]>`
+    SELECT "invoiceId" AS invoice_id
+    FROM "rejected_matches"
+    WHERE "shopId" = ${shopId}
+      AND "paymentId" = ${paymentId}
+  `;
+
+  return rows.map((r) => ({ invoiceId: r.invoice_id }));
+}
+
+/**
+ * Create a rejected match record.
+ * Prevents re-suggestion of a payment-invoice pair.
+ *
+ * @param sql - postgres.js SQL client
+ * @param data - Rejection data
+ */
+export async function createRejectedMatch(
+  sql: Sql,
+  data: {
+    shopId: string;
+    paymentId: string;
+    invoiceId: string;
+    rejectedBy: string;
+  }
+): Promise<string> {
+  const [result] = await sql<{ id: string }[]>`
+    INSERT INTO "rejected_matches" (
+      "shopId",
+      "paymentId",
+      "invoiceId",
+      "rejectedBy",
+      "rejectedAt"
+    ) VALUES (
+      ${data.shopId},
+      ${data.paymentId},
+      ${data.invoiceId},
+      ${data.rejectedBy},
+      NOW()
+    )
+    ON CONFLICT ("paymentId", "invoiceId") DO UPDATE
+    SET "rejectedBy" = EXCLUDED."rejectedBy"
+    RETURNING id
+  `;
+
+  return result.id;
+}
+
+/**
+ * Check if a payment-invoice pair is rejected.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopId - Shop ID
+ * @param paymentId - Payment ID
+ * @param invoiceId - Invoice ID
+ */
+export async function isRejectedPair(
+  sql: Sql,
+  shopId: string,
+  paymentId: string,
+  invoiceId: string
+): Promise<boolean> {
+  const [result] = await sql<{ exists: boolean }[]>`
+    SELECT EXISTS(
+      SELECT 1 FROM "rejected_matches"
+      WHERE "shopId" = ${shopId}
+        AND "paymentId" = ${paymentId}
+        AND "invoiceId" = ${invoiceId}
+    ) AS exists
+  `;
+
+  return result?.exists ?? false;
+}

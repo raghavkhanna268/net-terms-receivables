@@ -12,20 +12,21 @@ Each potential match is scored 0-100 based on these factors:
 
 | Factor | Points | Description |
 |--------|--------|-------------|
-| UTR/Reference match | +40 | UTR found in payment matches narration |
 | Invoice/Order ref | +30 | Invoice name or order number in narration |
 | Exact amount match | +20 | Payment amount equals outstanding |
 | Partial amount | +10 | Payment < outstanding (partial payment) |
-| Overpayment | +20 | Payment > outstanding (flags excess) |
+| Overpayment | +10 | Payment > outstanding (reduced, flags excess) |
 | Payer alias match | +10 | Normalized payer matches stored alias |
 | Payer name match | +8 | Fuzzy match on buyer company name |
 | Email match | +6 | Email prefix found in payer text |
 
 **Score capped at 100.**
 
+**NOTE**: UTR matching is NOT awarded at the payment-to-candidate level because the UTR is extracted from the payment's own narration and would give the same score to every candidate. UTR is used for deduplication at import time only.
+
 ## Confidence Thresholds
 
-- **High confidence (≥80)**: UTR match OR invoice ref + amount match. Can be auto-confirmed if enabled.
+- **High confidence (≥80)**: Invoice ref + amount match + name match. Can be auto-confirmed if enabled.
 - **Medium confidence (50-79)**: Amount + name match. Requires merchant review.
 - **Low confidence (<50)**: Ambiguous. Manual review required.
 
@@ -43,7 +44,7 @@ Example: `"M/S. ACME INDUSTRIES PVT. LTD."` → `"acme industries"`
 
 ## Invoice Reference Extraction
 
-The matcher extracts potential invoice references from payment narrations:
+The matcher extracts potential invoice references from payment narrations using **strict patterns** to avoid false positives from phone numbers, dates, or amounts:
 
 | Pattern | Example | Extracted |
 |---------|---------|-----------|
@@ -51,7 +52,15 @@ The matcher extracts potential invoice references from payment narrations:
 | `INV-<number>` | `INV-1001` | `1001` |
 | `D<number>` | `D1001` | `1001` |
 | `ORDER-<number>` | `ORDER-1001` | `1001` |
-| 4-10 digit number | `12345678` | `12345678` |
+| `ORD-<number>` | `ORD-789012` | `789012` |
+| `PO-<number>` | `PO-123456` | `123456` |
+| `REF-<5+ digits>` | `REF-12345` | `12345` |
+
+**Excluded patterns (false positives)**:
+- 10-digit phone numbers (standalone)
+- 8-digit date-like sequences (YYYYMMDD, DDMMYYYY starting with 19/20)
+- 4-digit year-like numbers (1900-2100)
+- Numbers ending in `00` without explicit prefix (amount-like)
 
 ## Multi-Invoice Matching
 
@@ -95,6 +104,22 @@ All matcher actions are idempotent:
 - `confirmMatch`: Only confirms `state: 'suggested'` matches
 - `rejectMatch`: Only rejects `state: 'suggested'` matches
 
+## Over-Allocation Protection
+
+The `confirmMatch` function runs in a **transaction with FOR UPDATE locks** to prevent over-allocation:
+
+1. Locks the payment row and calculates remaining unallocated amount
+2. Locks the invoice row and calculates remaining outstanding
+3. Caps the allocation at the smaller of: requested amount, remaining payment, remaining invoice
+4. **Drops competing suggestions** for the same payment (all buyers, not just the confirmed one)
+5. Updates payment status to `partial` or `matched` based on total allocations
+6. Learns PayerAlias from the confirmed match
+
+This ensures that concurrent confirms cannot:
+- Allocate more than the payment amount across all invoices
+- Allocate more than an invoice's outstanding balance
+- Leave competing suggestions for a fully-allocated payment
+
 ## Gated Account Exclusion
 
 When `PLAN_GATING_ENFORCED=true`:
@@ -105,9 +130,17 @@ When `PLAN_GATING_ENFORCED=true`:
 ## Payer Aliases
 
 The `PayerAlias` table stores normalized payer keys mapped to buyer accounts:
-- Created manually by merchant or auto-generated on high-confidence name match
+- **Created ONLY on merchant confirm** - never from unconfirmed fuzzy matches
 - Used for future lookups to bypass fuzzy matching
-- Key format: normalized payer name (lowercase, suffixes stripped)
+- Key format: normalized payer name (lowercase, suffixes stripped, min 3 characters)
+
+## Rejected Pairs
+
+The `rejected_matches` table persists merchant rejections:
+- When a merchant rejects a suggested match, the payment-invoice pair is recorded
+- Rejected pairs are **never re-suggested** by subsequent matcher runs
+- Prevents the same bad suggestion from reappearing after re-import or matcher re-run
+- Uses UPSERT semantics (rejecting the same pair twice just updates the rejector)
 
 ## Rail-Specific Parsing
 
@@ -166,8 +199,9 @@ For Cloudflare Workers Free tier (10ms CPU budget):
 1. **SQL-prefiltered batches**: Candidate invoices filtered by shop + amount window + open status in SQL
 2. **Amount window**: 0.5x to 2x payment amount
 3. **Bounded combinatorics**: MAX_INVOICES_FOR_SUBSET_SUM and MAX_SUBSET_SUM_ITERATIONS
-4. **Batch processing**: Default 50 payments per matcher run
+4. **Batch processing**: **MAX_PAYMENTS_PER_REQUEST = 10** (hard cap per request)
 5. **Heavy matching via pgmq**: For large imports, run via job queue
+6. **hasMore flag**: Returns true when more payments await processing (use offset for pagination)
 
 ## Data Privacy
 

@@ -81,6 +81,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       pagination: { page: 1, pageSize: PAGE_SIZE, totalCount: 0 },
       view,
       error: "Shop not found",
+      tabCounts: { suggested: 0, unmatched: 0 },
     };
   }
 
@@ -91,6 +92,29 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     matches: MatchSummary[];
   } | null = null;
   let totalCount = 0;
+
+  // P3: Get real tab counts from COUNT queries (not page length)
+  let tabCounts = { suggested: 0, unmatched: 0 };
+  try {
+    const [suggestedCount] = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text AS count
+      FROM "Match"
+      WHERE "shopId" = ${shop.id}
+        AND state = 'suggested'
+    `;
+    const [unmatchedCount] = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text AS count
+      FROM "Payment"
+      WHERE "shopId" = ${shop.id}
+        AND status IN ('unmatched', 'partial')
+    `;
+    tabCounts = {
+      suggested: parseInt(suggestedCount?.count ?? "0", 10),
+      unmatched: parseInt(unmatchedCount?.count ?? "0", 10),
+    };
+  } catch (err) {
+    console.error("[app.reconcile] Error getting tab counts:", err);
+  }
 
   try {
     if (selectedPaymentId) {
@@ -173,6 +197,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       pagination: { page, pageSize: PAGE_SIZE, totalCount: 0 },
       view,
       error: "Failed to load reconciliation data",
+      tabCounts,
     };
   }
 
@@ -184,6 +209,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     pagination: { page, pageSize: PAGE_SIZE, totalCount },
     view,
     error: null,
+    tabCounts,
   };
 };
 
@@ -222,10 +248,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         if (!matchId) {
           return { success: false, error: "Match ID required" };
         }
-        const confirmed = await confirmMatch(sql, shop.id, matchId, userId);
+        const result = await confirmMatch(sql, shop.id, matchId, userId);
+        // P2.6: Return generic error messages, details logged server-side
         return {
-          success: confirmed,
-          error: confirmed ? null : "Failed to confirm match",
+          success: result.success,
+          error: result.success ? null : "Failed to confirm match",
         };
       }
 
@@ -234,10 +261,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         if (!matchId) {
           return { success: false, error: "Match ID required" };
         }
-        const rejected = await rejectMatch(sql, shop.id, matchId, userId);
+        const result = await rejectMatch(sql, shop.id, matchId, userId);
+        // P2.6: Return generic error messages, details logged server-side
         return {
-          success: rejected,
-          error: rejected ? null : "Failed to reject match",
+          success: result.success,
+          error: result.success ? null : "Failed to reject match",
         };
       }
 
@@ -245,10 +273,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         return { success: false, error: "Unknown action" };
     }
   } catch (err) {
+    // P2.6: Log details server-side, return generic message to client
     console.error("[app.reconcile] Action error:", err);
     return {
       success: false,
-      error: err instanceof Error ? err.message : "Action failed",
+      error: "Action failed",
     };
   }
 };
@@ -624,6 +653,7 @@ export default function ReconcilePage() {
     pagination,
     view,
     error,
+    tabCounts,
   } = useLoaderData<typeof loader>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
@@ -651,13 +681,13 @@ export default function ReconcilePage() {
             href="/app/reconcile?view=suggested"
             variant={view === "suggested" ? "primary" : "secondary"}
           >
-            Suggested ({matches.length})
+            Suggested ({tabCounts.suggested})
           </s-button>
           <s-button
             href="/app/reconcile?view=unmatched"
             variant={view === "unmatched" ? "primary" : "secondary"}
           >
-            Unmatched ({payments.length})
+            Unmatched ({tabCounts.unmatched})
           </s-button>
         </s-stack>
       </s-section>
@@ -718,13 +748,13 @@ export default function ReconcilePage() {
         <s-paragraph>Match confidence is scored 0-100:</s-paragraph>
         <s-unordered-list>
           <s-list-item>
-            <s-text type="strong">UTR match:</s-text> +40 points
-          </s-list-item>
-          <s-list-item>
             <s-text type="strong">Invoice/Order ref:</s-text> +30 points
           </s-list-item>
           <s-list-item>
             <s-text type="strong">Exact amount:</s-text> +20 points
+          </s-list-item>
+          <s-list-item>
+            <s-text type="strong">Partial/overpayment:</s-text> +10 points
           </s-list-item>
           <s-list-item>
             <s-text type="strong">Payer name:</s-text> +10 points

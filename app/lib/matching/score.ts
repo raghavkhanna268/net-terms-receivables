@@ -5,13 +5,18 @@
  * All amounts are in integer paise (1/100 of INR) to avoid floating-point errors.
  *
  * Scoring breakdown (0-100):
- * - UTR/Reference match: +40 points (exact reference match)
  * - Invoice/Order number in narration: +30 points
  * - Exact amount match: +20 points
+ * - Partial amount match: +10 points
+ * - Overpayment: +10 points (reduced, flags excess)
  * - Payer name match: +10 points (fuzzy match on normalized name)
  *
+ * NOTE: UTR matching is NOT awarded at the payment-to-candidate level because
+ * the UTR is extracted from the payment's own narration and would give the same
+ * score to every candidate. UTR is only useful for deduplication at import time.
+ *
  * Thresholds:
- * - High confidence (>=80): UTR match or invoice ref + amount match
+ * - High confidence (>=80): Invoice ref + amount match + name match
  * - Medium confidence (50-79): Amount + name match, needs review
  * - Low confidence (<50): Ambiguous, manual review required
  *
@@ -31,21 +36,20 @@ export const MAX_SUBSET_SUM_ITERATIONS = 10000;
 /** Confidence threshold below which matches require manual review */
 export const CONFIDENCE_THRESHOLD = 80;
 
-/** Score weight for UTR/reference match */
-const WEIGHT_UTR_MATCH = 40;
-
 /** Score weight for invoice/order number in narration */
 const WEIGHT_INVOICE_REF = 30;
 
 /** Score weight for exact amount match */
 const WEIGHT_AMOUNT_MATCH = 20;
 
+/** Score weight for partial/overpayment amount match (reduced) */
+const WEIGHT_AMOUNT_PARTIAL = 10;
+
 /** Score weight for payer name match */
 const WEIGHT_NAME_MATCH = 10;
 
 /** Reason types for match explanation */
 export type MatchReasonType =
-  | "utr_match"
   | "invoice_ref"
   | "order_ref"
   | "amount_exact"
@@ -60,6 +64,7 @@ export type MatchReasonType =
 export interface MatchReason {
   type: MatchReasonType;
   points: number;
+  /** Non-PII detail (no emails, phone numbers, or addresses) */
   detail?: string;
 }
 
@@ -115,7 +120,7 @@ export interface BuyerForScoring {
   name: string;
   /** Normalized payer aliases */
   aliases: string[];
-  /** Email if CUSTOMER_PII_FIELDS enabled */
+  /** Email if CUSTOMER_PII_FIELDS enabled (used for matching, NOT persisted in reasons) */
   email: string | null;
 }
 
@@ -138,25 +143,34 @@ export interface MultiInvoiceMatchResult {
 
 /**
  * Extract invoice/order numbers from narration text.
- * Matches patterns like: #1001, INV-1001, D1001, 1001
+ * Only matches patterns with known prefixes or clear context to avoid false positives
+ * from phone numbers, dates, or amount-like sequences.
  */
 export function extractInvoiceRefs(narration: string): string[] {
   const refs: string[] = [];
   const text = narration.toUpperCase();
 
-  // Match patterns: #1001, INV-1001, INV1001, D1001, ORDER-1001
+  // Match patterns with explicit prefixes only (avoids false positives)
   const patterns = [
-    /#(\d{1,10})/g,                        // #1001
+    /#(\d{1,10})/g,                        // #1001 - hash prefix is explicit
     /\bINV[-.]?(\d{1,10})\b/g,             // INV-1001, INV.1001, INV1001
     /\bD(\d{1,10})\b/g,                    // D1001 (draft order)
     /\bORDER[-.]?(\d{1,10})\b/g,           // ORDER-1001
-    /\b(\d{4,10})\b/g,                     // Standalone 4-10 digit numbers
+    /\bORD[-.]?(\d{1,10})\b/g,             // ORD-1001, ORD1001
+    /\bPO[-.]?(\d{1,10})\b/g,              // PO-1001 (purchase order)
+    /\bREF[-.]?(\d{5,10})\b/g,             // REF-12345 (5+ digits to avoid short refs)
   ];
 
   for (const pattern of patterns) {
     let match;
     while ((match = pattern.exec(text)) !== null) {
       const ref = match[1];
+      // Skip numbers that look like dates (DDMMYYYY, YYYYMMDD) or years
+      if (ref.length === 8 && (ref.startsWith("20") || ref.startsWith("19"))) continue;
+      if (ref.length === 4 && parseInt(ref, 10) >= 1900 && parseInt(ref, 10) <= 2100) continue;
+      // Skip numbers that look like amounts (ending in 00)
+      if (ref.length >= 4 && ref.endsWith("00") && !text.includes(`#${ref}`)) continue;
+      
       if (!refs.includes(ref)) {
         refs.push(ref);
       }
@@ -212,20 +226,7 @@ export function scorePaymentToInvoice(
   const reasons: MatchReason[] = [];
   let score = 0;
 
-  // 1. UTR/Reference match (highest confidence)
-  if (payment.utr) {
-    const utrInNarration = payment.narration.toUpperCase().includes(payment.utr.toUpperCase());
-    if (utrInNarration) {
-      score += WEIGHT_UTR_MATCH;
-      reasons.push({
-        type: "utr_match",
-        points: WEIGHT_UTR_MATCH,
-        detail: `UTR: ${payment.utr}`,
-      });
-    }
-  }
-
-  // 2. Invoice/Order reference in narration
+  // 1. Invoice/Order reference in narration (most discriminating factor)
   if (matchInvoiceRef(invoice.name, extractedRefs)) {
     score += WEIGHT_INVOICE_REF;
     reasons.push({
@@ -238,11 +239,11 @@ export function scorePaymentToInvoice(
     reasons.push({
       type: "order_ref",
       points: WEIGHT_INVOICE_REF,
-      detail: `Order: ${invoice.orderId}`,
+      detail: `Order ref matched`,
     });
   }
 
-  // 3. Amount matching
+  // 2. Amount matching
   const paymentAmount = payment.amountPaise;
   const outstandingAmount = invoice.outstandingPaise;
 
@@ -258,32 +259,32 @@ export function scorePaymentToInvoice(
     reasons.push({
       type: "amount_exact",
       points: WEIGHT_AMOUNT_MATCH,
-      detail: `Exact: ${paymentAmount.toString()} paise`,
+      detail: `Exact amount`,
     });
   } else if (paymentAmount < outstandingAmount) {
     // Partial payment
     allocatedPaise = paymentAmount;
     isPartial = true;
-    score += Math.floor(WEIGHT_AMOUNT_MATCH * 0.5); // Half points for partial
+    score += WEIGHT_AMOUNT_PARTIAL;
     reasons.push({
       type: "amount_partial",
-      points: Math.floor(WEIGHT_AMOUNT_MATCH * 0.5),
-      detail: `Partial: ${paymentAmount.toString()} of ${outstandingAmount.toString()} paise`,
+      points: WEIGHT_AMOUNT_PARTIAL,
+      detail: `Partial payment`,
     });
   } else {
-    // Overpayment
+    // Overpayment - reduced points (flags for review)
     allocatedPaise = outstandingAmount;
     excessPaise = paymentAmount - outstandingAmount;
     isOverpayment = true;
-    score += WEIGHT_AMOUNT_MATCH;
+    score += WEIGHT_AMOUNT_PARTIAL; // Reduced from full amount match
     reasons.push({
       type: "amount_overpayment",
-      points: WEIGHT_AMOUNT_MATCH,
-      detail: `Overpayment: excess ${excessPaise.toString()} paise`,
+      points: WEIGHT_AMOUNT_PARTIAL,
+      detail: `Overpayment (excess flagged)`,
     });
   }
 
-  // 4. Payer name matching
+  // 3. Payer name matching
   if (payment.payerText) {
     const nameScore = scorePayerNameMatch(payment.payerText, buyer);
     if (nameScore.matched) {
@@ -319,6 +320,7 @@ interface PayerNameMatchResult {
 
 /**
  * Score payer name match against buyer data.
+ * IMPORTANT: Detail fields must NOT contain PII (no email, phone, address).
  */
 function scorePayerNameMatch(
   payerText: string,
@@ -333,7 +335,7 @@ function scorePayerNameMatch(
         matched: true,
         type: "payer_alias",
         points: WEIGHT_NAME_MATCH,
-        detail: `Alias match: ${alias}`,
+        detail: `Alias matched`, // No PII - just indicate match type
       };
     }
   }
@@ -345,11 +347,11 @@ function scorePayerNameMatch(
       matched: true,
       type: "payer_name",
       points: Math.floor(WEIGHT_NAME_MATCH * 0.8),
-      detail: `Name match: ${buyer.name}`,
+      detail: `Name matched`, // No PII
     };
   }
 
-  // Check email if available
+  // Check email if available (but don't store email in detail)
   if (buyer.email) {
     const emailPrefix = buyer.email.split("@")[0].toLowerCase();
     if (normalizedPayer.includes(emailPrefix) || emailPrefix.includes(normalizedPayer.replace(/\s/g, ""))) {
@@ -357,7 +359,7 @@ function scorePayerNameMatch(
         matched: true,
         type: "email_match",
         points: Math.floor(WEIGHT_NAME_MATCH * 0.6),
-        detail: `Email match: ${buyer.email}`,
+        detail: `Email prefix matched`, // NO email address stored
       };
     }
   }
@@ -611,4 +613,27 @@ export function serializeScoreResult(result: ScoreResult): {
     isPartial: result.isPartial,
     isOverpayment: result.isOverpayment,
   };
+}
+
+/**
+ * Validate that match reasons contain no PII.
+ * Used in tests to ensure compliance.
+ */
+export function reasonsContainNoPII(reasons: MatchReason[]): boolean {
+  const piiPatterns = [
+    /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/, // Email
+    /\b\d{10}\b/, // Phone number (10 digits)
+    /\b\d{5,6}\b.*\b(street|road|lane|avenue|colony)/i, // Address with PIN
+  ];
+  
+  for (const reason of reasons) {
+    if (reason.detail) {
+      for (const pattern of piiPatterns) {
+        if (pattern.test(reason.detail)) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
 }
