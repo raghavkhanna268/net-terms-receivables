@@ -47,6 +47,8 @@ export interface SessionRow {
  *
  * Key behaviors:
  * - fetch_types: false - Required for Hyperdrive, skips type-lookup query
+ * - prepare: true - Required for Hyperdrive's prepared statement caching
+ * - max: 5 - Cloudflare-recommended limit for Worker concurrent connections
  * - Decimal/numeric columns return as strings (no precision loss)
  * - TIMESTAMPTZ returns as Date objects
  * - Bigint (int8) returns as strings
@@ -54,12 +56,18 @@ export interface SessionRow {
  *
  * For JSON writes, use sql.json(obj) to serialize correctly.
  * Use this for all postgres() clients to ensure consistent type handling.
+ *
+ * @see https://developers.cloudflare.com/hyperdrive/examples/connect-to-postgres/postgres-drivers-and-libraries/postgres-js/
  */
 export const sqlOptions: Options<Record<string, never>> = {
-  // Hyperdrive handles pooling at the network level, so we use a single
-  // connection per request. The client is created lazily and closed in
-  // ctx.waitUntil after the response.
-  max: 1,
+  // Cloudflare recommends max: 5 due to Workers' limits on concurrent external
+  // connections. Hyperdrive handles pooling at the network level.
+  // @see https://developers.cloudflare.com/hyperdrive/examples/connect-to-postgres/
+  max: 5,
+  // Use prepared statements for Hyperdrive's statement caching. DO NOT set
+  // prepare: false - it causes extra protocol messages and query hangs.
+  // @see https://developers.cloudflare.com/hyperdrive/examples/connect-to-postgres/
+  prepare: true,
   // Null handling for undefined values in parameters
   transform: { undefined: null },
   // Connection timeout in seconds
@@ -75,17 +83,13 @@ export const sqlOptions: Options<Record<string, never>> = {
 /**
  * Creates a postgres.js SQL client for Cloudflare Workers with Hyperdrive.
  *
+ * No explicit end() call needed: Hyperdrive automatically cleans up
+ * Worker-to-edge connections when the request ends.
+ *
  * @param connectionString - The Hyperdrive connection string from env.HYPERDRIVE.connectionString
  * @returns A configured postgres.js SQL instance
+ * @see https://developers.cloudflare.com/hyperdrive/concepts/connection-lifecycle/
  */
 export function createSql(connectionString: string): Sql {
   return postgres(connectionString, sqlOptions);
-}
-
-/**
- * Closes the SQL client connection.
- * Call this in ctx.waitUntil after the response.
- */
-export async function closeSql(sql: Sql): Promise<void> {
-  await sql.end();
 }

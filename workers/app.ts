@@ -1,7 +1,7 @@
 import { createRequestHandler } from "react-router";
 import { wrapWithSentry } from "~/lib/sentry";
 import type { Sql } from "../app/lib/db-light.server";
-import { createSql, closeSql } from "../app/lib/db-light.server";
+import { createSql } from "../app/lib/db-light.server";
 import { requestContext } from "../app/lib/request-context.server";
 import { getShopifyApp, sessionStorage } from "../app/shopify.server";
 
@@ -32,22 +32,15 @@ export default wrapWithSentry({
 
     // Run the request inside AsyncLocalStorage context so session storage
     // can access this request's SQL client getter.
-    try {
-      return await requestContext.run({ getSql }, async () => {
-        return requestHandler(request, {
-          cloudflare: { env, ctx },
-          sessionStorage,
-          shopify,
-        });
+    // No explicit sql.end() needed: Hyperdrive automatically cleans up
+    // Worker-to-edge connections when the request ends.
+    // @see https://developers.cloudflare.com/hyperdrive/concepts/connection-lifecycle/
+    return requestContext.run({ getSql }, async () => {
+      return requestHandler(request, {
+        cloudflare: { env, ctx },
+        sessionStorage,
+        shopify,
       });
-    } finally {
-      // Close SQL connection in ctx.waitUntil after the response is sent.
-      // This allows graceful cleanup without blocking the response.
-      // Only closes if the SQL client was actually created during this request.
-      // Using finally ensures cleanup even when the handler throws.
-      if (sql !== null) {
-        ctx.waitUntil(closeSql(sql));
-      }
-    }
+    });
   },
 } satisfies ExportedHandler<Env>);
