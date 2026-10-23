@@ -3,20 +3,18 @@ import {
   SEED_TAG,
   SEED_PREFIX,
   COMPANY_SEEDS,
-  CUSTOMER_SEEDS,
   ORDER_DISTRIBUTION,
   API_VERSION,
   graphql,
   checkDevStore,
   checkB2BSupport,
   fetchPaymentTermsTemplates,
-  fetchProductVariants,
   seedCompanies,
-  seedCustomers,
   seedOrders,
-  createDraftOrder,
+  createOrder,
   findCompanyByExternalId,
-  findCustomerByTag,
+  findOrderByTag,
+  updateCompanyLocationPaymentTerms,
   resetSeedData,
   formatCurrency,
   type SeedState,
@@ -24,16 +22,20 @@ import {
 } from "../seed";
 
 /**
- * Unit tests for the seed script.
+ * Unit tests for the seed script (orderCreate version).
  *
  * These tests mock global.fetch to simulate Shopify Admin API responses,
  * testing the real seed.ts functions for:
- * - Idempotency: existing records are skipped on re-run
+ * - Idempotency: existing records are skipped on re-run (via ntr-seed tag)
  * - Preflight failure: B2B unavailable stores are handled gracefully
- * - Payload shapes: draftOrderCreate includes correct payment terms and purchasingEntity
+ * - orderCreate payloads: custom line items (title + priceSet), companyLocationId, financialStatus PENDING
+ * - No product IDs: orders use custom line items, not variantId
+ * - Payment terms: set on CompanyLocation via companyLocationUpdate, inherited by orders
+ * 
+ * @see https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/orderCreate
+ * @see https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyLocationUpdate
  */
 
-// Capture all GraphQL requests made during tests
 interface CapturedRequest {
   query: string;
   variables?: Record<string, unknown>;
@@ -46,26 +48,21 @@ const originalFetch = global.fetch;
 
 function createMockState(overrides: Partial<SeedState> = {}): SeedState {
   return {
-    shop: "test-store.myshopify.com",
+    shop: "net-terms-receivables.myshopify.com",
     token: "shpat_test_token",
     dryRun: false,
     reset: false,
-    allowNonDevStore: false,
     currencyCode: "INR",
     companies: new Map(),
-    customers: new Map(),
     paymentTermsTemplates: [
       { id: "gid://shopify/PaymentTermsTemplate/3", name: "Net 15", paymentTermsType: "NET", dueInDays: 15 },
       { id: "gid://shopify/PaymentTermsTemplate/4", name: "Net 30", paymentTermsType: "NET", dueInDays: 30 },
       { id: "gid://shopify/PaymentTermsTemplate/5", name: "Net 60", paymentTermsType: "NET", dueInDays: 60 },
       { id: "gid://shopify/PaymentTermsTemplate/7", name: "Fixed", paymentTermsType: "FIXED", dueInDays: null },
     ],
-    productVariants: [
-      { id: "gid://shopify/ProductVariant/123", title: "Default", price: "1000.00", product: { title: "Test Product" } },
-    ],
-    createdCount: { companies: 0, customers: 0, draftOrders: 0, orders: 0 },
-    skippedCount: { companies: 0, customers: 0, orders: 0 },
-    deletedCount: { companies: 0, customers: 0, draftOrders: 0, orders: 0 },
+    createdCount: { companies: 0, orders: 0 },
+    skippedCount: { companies: 0, orders: 0 },
+    deletedCount: { companies: 0, orders: 0 },
     errors: [],
     ...overrides,
   };
@@ -111,19 +108,6 @@ function setupMockFetch() {
         extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
       };
     }
-    // Product variants
-    else if (query.includes("productVariants")) {
-      responseData = mockResponses.get("productVariants") as GraphQLResponse<unknown> ?? {
-        data: {
-          productVariants: {
-            nodes: [
-              { id: "gid://shopify/ProductVariant/123", title: "Default", price: "1000.00", product: { title: "Test Product" } },
-            ],
-          },
-        },
-        extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
-      };
-    }
     // Find seeded companies for reset
     else if (query.includes("FindSeededCompanies")) {
       responseData = {
@@ -157,26 +141,6 @@ function setupMockFetch() {
         };
       }
     }
-    // Find customer by tag
-    else if (query.includes("FindCustomer") || (query.includes("customers") && variables?.query)) {
-      const tag = variables?.query as string;
-      const existingCustomers = mockResponses.get("existingCustomers") as string[] | undefined;
-      if (existingCustomers?.some((t) => tag?.includes(t))) {
-        responseData = {
-          data: {
-            customers: {
-              nodes: [{ id: "gid://shopify/Customer/existing-cust-1", email: "existing@example.com", firstName: "Existing", lastName: "Customer", tags: [SEED_TAG] }],
-            },
-          },
-          extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
-        };
-      } else {
-        responseData = {
-          data: { customers: { nodes: [] } },
-          extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
-        };
-      }
-    }
     // Company create
     else if (query.includes("companyCreate")) {
       responseData = mockResponses.get("companyCreate") as GraphQLResponse<unknown> ?? {
@@ -194,46 +158,15 @@ function setupMockFetch() {
         extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
       };
     }
-    // Customer create
-    else if (query.includes("customerCreate")) {
-      responseData = mockResponses.get("customerCreate") as GraphQLResponse<unknown> ?? {
+    // Company location update (payment terms)
+    else if (query.includes("companyLocationUpdate")) {
+      responseData = mockResponses.get("companyLocationUpdate") as GraphQLResponse<unknown> ?? {
         data: {
-          customerCreate: {
-            customer: { id: "gid://shopify/Customer/new-cust-2", email: "newcustomer@example.com" },
-            userErrors: [],
-          },
-        },
-        extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
-      };
-    }
-    // Draft order create
-    else if (query.includes("draftOrderCreate")) {
-      responseData = mockResponses.get("draftOrderCreate") as GraphQLResponse<unknown> ?? {
-        data: {
-          draftOrderCreate: {
-            draftOrder: {
-              id: "gid://shopify/DraftOrder/draft-1",
-              name: "#D1",
-              totalPriceSet: { shopMoney: { amount: "50000.00" } },
-            },
-            userErrors: [],
-          },
-        },
-        extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
-      };
-    }
-    // Draft order complete
-    else if (query.includes("draftOrderComplete")) {
-      responseData = mockResponses.get("draftOrderComplete") as GraphQLResponse<unknown> ?? {
-        data: {
-          draftOrderComplete: {
-            draftOrder: {
-              id: "gid://shopify/DraftOrder/draft-1",
-              name: "#D1",
-              order: {
-                id: "gid://shopify/Order/order-1",
-                name: "#1001",
-                totalPriceSet: { shopMoney: { amount: "50000.00" } },
+          companyLocationUpdate: {
+            companyLocation: {
+              id: "gid://shopify/CompanyLocation/loc-1",
+              buyerExperienceConfiguration: {
+                paymentTermsTemplate: { id: "gid://shopify/PaymentTermsTemplate/4", name: "Net 30" },
               },
             },
             userErrors: [],
@@ -242,8 +175,26 @@ function setupMockFetch() {
         extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
       };
     }
-    // Find order
-    else if (query.includes("FindOrder") || query.includes("orders(first:")) {
+    // Order create (new orderCreate mutation)
+    else if (query.includes("orderCreate") && query.includes("OrderCreateOrderInput")) {
+      responseData = mockResponses.get("orderCreate") as GraphQLResponse<unknown> ?? {
+        data: {
+          orderCreate: {
+            order: {
+              id: "gid://shopify/Order/order-1",
+              name: "#1001",
+              financialStatus: "PENDING",
+              totalPriceSet: { shopMoney: { amount: "50000.00", currencyCode: "INR" } },
+              paymentTerms: { paymentTermsName: "Net 30", dueInDays: 30 },
+            },
+            userErrors: [],
+          },
+        },
+        extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
+      };
+    }
+    // Find order by tag (idempotency check)
+    else if (query.includes("FindOrder") || (query.includes("orders(first:") && variables?.query)) {
       const existingOrders = mockResponses.get("existingOrders") as string[] | undefined;
       const tag = variables?.query as string;
       if (existingOrders?.some((t) => tag?.includes(t))) {
@@ -258,26 +209,7 @@ function setupMockFetch() {
         };
       }
     }
-    // Find draft order
-    else if (query.includes("FindDraftOrder") || query.includes("draftOrders(first:")) {
-      responseData = {
-        data: { draftOrders: { nodes: [] } },
-        extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
-      };
-    }
     // Delete mutations
-    else if (query.includes("draftOrderDelete")) {
-      responseData = {
-        data: { draftOrderDelete: { deletedId: "gid://shopify/DraftOrder/1", userErrors: [] } },
-        extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
-      };
-    }
-    else if (query.includes("customerDelete")) {
-      responseData = {
-        data: { customerDelete: { deletedCustomerId: "gid://shopify/Customer/1", userErrors: [] } },
-        extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
-      };
-    }
     else if (query.includes("companyDelete")) {
       responseData = {
         data: { companyDelete: { deletedCompanyId: "gid://shopify/Company/1", userErrors: [] } },
@@ -325,17 +257,9 @@ describe("Seed Script Constants", () => {
     }
   });
 
-  it("has 5 customer seeds", () => {
-    expect(CUSTOMER_SEEDS).toHaveLength(5);
-    for (const customer of CUSTOMER_SEEDS) {
-      expect(customer.key).toMatch(/^customer-\d+$/);
-      expect(customer.email).toMatch(/@example\.com$/);
-    }
-  });
-
-  it("has ~30 order distributions with both NET and FIXED terms", () => {
-    expect(ORDER_DISTRIBUTION.length).toBeGreaterThanOrEqual(25);
-    expect(ORDER_DISTRIBUTION.length).toBeLessThanOrEqual(35);
+  it("has ~20 B2B order distributions with both NET and FIXED terms", () => {
+    expect(ORDER_DISTRIBUTION.length).toBeGreaterThanOrEqual(15);
+    expect(ORDER_DISTRIBUTION.length).toBeLessThanOrEqual(25);
 
     const netOrders = ORDER_DISTRIBUTION.filter((o) => o.termsType === "NET");
     const fixedOrders = ORDER_DISTRIBUTION.filter((o) => o.termsType === "FIXED");
@@ -346,6 +270,12 @@ describe("Seed Script Constants", () => {
     expect(durations.has(15)).toBe(true);
     expect(durations.has(30)).toBe(true);
     expect(durations.has(60)).toBe(true);
+  });
+
+  it("all order distributions reference B2B companies (no customer orders)", () => {
+    for (const order of ORDER_DISTRIBUTION) {
+      expect(order.entityKey).toMatch(/^company-\d+$/);
+    }
   });
 });
 
@@ -375,17 +305,6 @@ describe("Preflight Checks", () => {
     const state = createMockState();
     const result = await checkDevStore(state);
     expect(result).toBe(false);
-  });
-
-  it("checkDevStore returns true for non-dev store with override flag", async () => {
-    mockResponses.set("shopInfo", {
-      data: { shop: { plan: { partnerDevelopment: false }, currencyCode: "USD" } },
-      extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
-    });
-
-    const state = createMockState({ allowNonDevStore: true });
-    const result = await checkDevStore(state);
-    expect(result).toBe(true);
   });
 
   it("checkB2BSupport returns true when B2B is available", async () => {
@@ -421,25 +340,6 @@ describe("Preflight Checks", () => {
 
     const state = createMockState({ paymentTermsTemplates: [] });
     const result = await fetchPaymentTermsTemplates(state);
-    expect(result).toBe(false);
-  });
-
-  it("fetchProductVariants populates state and returns true", async () => {
-    const state = createMockState({ productVariants: [] });
-    const result = await fetchProductVariants(state);
-
-    expect(result).toBe(true);
-    expect(state.productVariants.length).toBeGreaterThan(0);
-  });
-
-  it("fetchProductVariants returns false when no variants", async () => {
-    mockResponses.set("productVariants", {
-      data: { productVariants: { nodes: [] } },
-      extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
-    });
-
-    const state = createMockState({ productVariants: [] });
-    const result = await fetchProductVariants(state);
     expect(result).toBe(false);
   });
 });
@@ -480,45 +380,28 @@ describe("Idempotency - No Create When Records Exist", () => {
     expect(createCalls).toHaveLength(0);
   });
 
-  it("findCustomerByTag returns existing customer", async () => {
-    mockResponses.set("existingCustomers", [`${SEED_PREFIX}customer-1`]);
+  it("findOrderByTag returns existing order", async () => {
+    mockResponses.set("existingOrders", [`${SEED_PREFIX}order-1`]);
 
     const state = createMockState();
-    const result = await findCustomerByTag(state, `${SEED_PREFIX}customer-1`);
+    const result = await findOrderByTag(state, `${SEED_PREFIX}order-1`);
 
     expect(result).not.toBeNull();
-    expect(result?.id).toBe("gid://shopify/Customer/existing-cust-1");
+    expect(result?.id).toBe("gid://shopify/Order/existing-1");
   });
 
-  it("seedCustomers skips creation when customer exists", async () => {
-    mockResponses.set("existingCustomers", CUSTOMER_SEEDS.map((c) => `${SEED_PREFIX}${c.key}`));
-
-    const state = createMockState();
-    await seedCustomers(state);
-
-    expect(state.skippedCount.customers).toBe(5);
-    expect(state.createdCount.customers).toBe(0);
-
-    const createCalls = capturedRequests.filter((r) => r.query.includes("customerCreate"));
-    expect(createCalls).toHaveLength(0);
-  });
-
-  it("seedOrders skips creation when order exists", async () => {
+  it("seedOrders skips creation when order exists (idempotency via ntr-seed tag)", async () => {
     // Mark first order as existing
     mockResponses.set("existingOrders", [`${SEED_PREFIX}order-1`]);
 
     const state = createMockState();
-    // Add companies and customers to state so order creation can proceed for others
+    // Add companies to state so order creation can proceed for others
     for (const seed of COMPANY_SEEDS) {
       state.companies.set(seed.key, {
         id: `gid://shopify/Company/${seed.key}`,
         locationId: `gid://shopify/CompanyLocation/${seed.key}`,
-        contactId: `gid://shopify/CompanyContact/${seed.key}`,
         contactCustomerId: `gid://shopify/Customer/${seed.key}`,
       });
-    }
-    for (const seed of CUSTOMER_SEEDS) {
-      state.customers.set(seed.key, { id: `gid://shopify/Customer/${seed.key}` });
     }
 
     await seedOrders(state);
@@ -528,7 +411,7 @@ describe("Idempotency - No Create When Records Exist", () => {
   });
 });
 
-describe("Draft Order Create - Payload Structure", () => {
+describe("orderCreate - Payload Structure", () => {
   beforeEach(() => {
     setupMockFetch();
     mockResponses.clear();
@@ -539,115 +422,146 @@ describe("Draft Order Create - Payload Structure", () => {
     capturedRequests = [];
   });
 
-  it("createDraftOrder sends correct payload with price override for exact amount", async () => {
+  it("createOrder sends correct payload with custom line items (no variantId)", async () => {
     const state = createMockState();
     const amount = 75000;
+    const productTitle = "Test Industrial Product";
 
-    await createDraftOrder(state, {
+    await createOrder(state, {
       orderKey: `${SEED_PREFIX}order-test`,
-      purchasingEntity: {
-        purchasingCompany: {
-          companyId: "gid://shopify/Company/123",
-          companyLocationId: "gid://shopify/CompanyLocation/456",
-          companyContactId: "gid://shopify/CompanyContact/789",
-        },
-      },
-      paymentTermsInput: {
-        paymentTermsTemplateId: "gid://shopify/PaymentTermsTemplate/4",
-        paymentSchedules: [{ issuedAt: new Date().toISOString() }],
-      },
-      billingAddress: { firstName: "Test", lastName: "User", address1: "123 St", city: "Mumbai", countryCode: "IN", zip: "400001" },
-      variantId: "gid://shopify/ProductVariant/123",
+      companyLocationId: "gid://shopify/CompanyLocation/456",
+      customerId: "gid://shopify/Customer/789",
+      productTitle,
       amount,
     });
 
-    const createCall = capturedRequests.find((r) => r.query.includes("draftOrderCreate"));
+    const createCall = capturedRequests.find((r) => r.query.includes("orderCreate") && r.query.includes("OrderCreateOrderInput"));
     expect(createCall).toBeDefined();
 
-    const input = createCall?.variables?.input as Record<string, unknown>;
+    const order = createCall?.variables?.order as Record<string, unknown>;
 
-    // Verify tags
-    expect(input.tags).toContain(SEED_TAG);
-    expect(input.tags).toContain(`${SEED_PREFIX}order-test`);
+    // Verify tags include seed tag and order key
+    expect(order.tags).toContain(SEED_TAG);
+    expect(order.tags).toContain(`${SEED_PREFIX}order-test`);
 
-    // Verify paymentTerms
-    expect(input.paymentTerms).toBeDefined();
-    const paymentTerms = input.paymentTerms as Record<string, unknown>;
-    expect(paymentTerms.paymentTermsTemplateId).toBe("gid://shopify/PaymentTermsTemplate/4");
-    expect(paymentTerms.paymentSchedules).toHaveLength(1);
-    expect((paymentTerms.paymentSchedules as Array<{ issuedAt?: string }>)[0].issuedAt).toBeDefined();
+    // Verify companyLocationId for B2B association
+    expect(order.companyLocationId).toBe("gid://shopify/CompanyLocation/456");
 
-    // Verify purchasingEntity for B2B company order
-    expect(input.purchasingEntity).toBeDefined();
-    const purchasingEntity = input.purchasingEntity as Record<string, unknown>;
-    expect(purchasingEntity.purchasingCompany).toBeDefined();
-    const company = purchasingEntity.purchasingCompany as Record<string, unknown>;
-    expect(company.companyId).toBe("gid://shopify/Company/123");
-    expect(company.companyLocationId).toBe("gid://shopify/CompanyLocation/456");
-    expect(company.companyContactId).toBe("gid://shopify/CompanyContact/789");
+    // Verify customer
+    const customer = order.customer as Record<string, unknown>;
+    expect(customer.id).toBe("gid://shopify/Customer/789");
 
-    // Verify line item with price override
-    expect(input.lineItems).toBeDefined();
-    const lineItems = input.lineItems as Array<Record<string, unknown>>;
+    // Verify financialStatus is PENDING (unpaid)
+    expect(order.financialStatus).toBe("PENDING");
+
+    // Verify line items use custom line items (title + priceSet), NOT variantId
+    const lineItems = order.lineItems as Array<Record<string, unknown>>;
     expect(lineItems).toHaveLength(1);
-    expect(lineItems[0].variantId).toBe("gid://shopify/ProductVariant/123");
+    expect(lineItems[0].title).toBe(productTitle);
     expect(lineItems[0].quantity).toBe(1);
-    expect(lineItems[0].priceOverride).toEqual({ amount: String(amount), currencyCode: "INR" });
-
-    // Verify currency
-    expect(input.presentmentCurrencyCode).toBe("INR");
+    expect(lineItems[0].variantId).toBeUndefined(); // No product ID!
+    expect(lineItems[0].priceSet).toEqual({
+      shopMoney: { amount: String(amount), currencyCode: "INR" },
+    });
   });
 
-  it("createDraftOrder sends FIXED payment terms with dueAt", async () => {
+  it("createOrder sends options with sendReceipt: false to suppress emails", async () => {
     const state = createMockState();
-    const dueAt = new Date();
-    dueAt.setDate(dueAt.getDate() + 15);
 
-    await createDraftOrder(state, {
-      orderKey: `${SEED_PREFIX}order-fixed`,
-      purchasingEntity: { customerId: "gid://shopify/Customer/123" },
-      paymentTermsInput: {
-        paymentTermsTemplateId: "gid://shopify/PaymentTermsTemplate/7",
-        paymentSchedules: [{ dueAt: dueAt.toISOString() }],
-      },
-      billingAddress: { firstName: "Test", lastName: "User", address1: "456 St", city: "Delhi", countryCode: "IN", zip: "110001" },
-      variantId: "gid://shopify/ProductVariant/456",
-      amount: 25000,
+    await createOrder(state, {
+      orderKey: `${SEED_PREFIX}order-no-email`,
+      companyLocationId: "gid://shopify/CompanyLocation/123",
+      customerId: "gid://shopify/Customer/456",
+      productTitle: "Test Product",
+      amount: 50000,
     });
 
-    const createCall = capturedRequests.find((r) => r.query.includes("draftOrderCreate"));
+    const createCall = capturedRequests.find((r) => r.query.includes("orderCreate") && r.query.includes("OrderCreateOrderInput"));
     expect(createCall).toBeDefined();
 
-    const input = createCall?.variables?.input as Record<string, unknown>;
-
-    // Verify FIXED payment terms uses dueAt
-    const paymentTerms = input.paymentTerms as Record<string, unknown>;
-    expect(paymentTerms.paymentTermsTemplateId).toBe("gid://shopify/PaymentTermsTemplate/7");
-    const schedules = paymentTerms.paymentSchedules as Array<{ dueAt?: string; issuedAt?: string }>;
-    expect(schedules[0].dueAt).toBeDefined();
-    expect(schedules[0].issuedAt).toBeUndefined();
-
-    // Verify customer purchasingEntity (non-B2B path)
-    const purchasingEntity = input.purchasingEntity as Record<string, unknown>;
-    expect(purchasingEntity.customerId).toBe("gid://shopify/Customer/123");
-    expect(purchasingEntity.purchasingCompany).toBeUndefined();
+    const options = createCall?.variables?.options as Record<string, unknown>;
+    expect(options.sendReceipt).toBe(false);
+    expect(options.sendFulfillmentReceipt).toBe(false);
+    expect(options.inventoryBehaviour).toBe("BYPASS");
   });
 
-  it("createDraftOrder returns totalPrice from API response", async () => {
+  it("createOrder returns order with payment terms inherited from location", async () => {
     const state = createMockState();
 
-    const result = await createDraftOrder(state, {
-      orderKey: `${SEED_PREFIX}order-total`,
-      purchasingEntity: { customerId: "gid://shopify/Customer/123" },
-      paymentTermsInput: { paymentTermsTemplateId: "gid://shopify/PaymentTermsTemplate/4", paymentSchedules: [{ issuedAt: new Date().toISOString() }] },
-      billingAddress: { firstName: "Test", lastName: "User", address1: "789 St", city: "Chennai", countryCode: "IN", zip: "600001" },
-      variantId: "gid://shopify/ProductVariant/789",
+    const result = await createOrder(state, {
+      orderKey: `${SEED_PREFIX}order-terms`,
+      companyLocationId: "gid://shopify/CompanyLocation/456",
+      customerId: "gid://shopify/Customer/789",
+      productTitle: "Test Product",
       amount: 100000,
     });
 
     expect(result).not.toBeNull();
-    expect(result?.totalPrice).toBe(50000); // From mock response
-    expect(result?.name).toBe("#D1");
+    expect(result?.name).toBe("#1001");
+  });
+
+  it("createOrder uses state.currencyCode in priceSet", async () => {
+    const state = createMockState({ currencyCode: "USD" });
+
+    await createOrder(state, {
+      orderKey: `${SEED_PREFIX}order-currency`,
+      companyLocationId: "gid://shopify/CompanyLocation/123",
+      customerId: "gid://shopify/Customer/456",
+      productTitle: "Test Product",
+      amount: 50000,
+    });
+
+    const createCall = capturedRequests.find((r) => r.query.includes("orderCreate") && r.query.includes("OrderCreateOrderInput"));
+    const order = createCall?.variables?.order as Record<string, unknown>;
+
+    expect(order.currency).toBe("USD");
+
+    const lineItems = order.lineItems as Array<Record<string, unknown>>;
+    const priceSet = lineItems[0].priceSet as Record<string, unknown>;
+    const shopMoney = priceSet.shopMoney as Record<string, unknown>;
+    expect(shopMoney.currencyCode).toBe("USD");
+  });
+});
+
+describe("Payment Terms - Set on CompanyLocation", () => {
+  beforeEach(() => {
+    setupMockFetch();
+    mockResponses.clear();
+  });
+
+  afterEach(() => {
+    restoreFetch();
+    capturedRequests = [];
+  });
+
+  it("updateCompanyLocationPaymentTerms sends correct mutation with buyerExperienceConfiguration", async () => {
+    const state = createMockState();
+
+    await updateCompanyLocationPaymentTerms(
+      state,
+      "gid://shopify/CompanyLocation/loc-1",
+      "gid://shopify/PaymentTermsTemplate/4"
+    );
+
+    const updateCall = capturedRequests.find((r) => r.query.includes("companyLocationUpdate"));
+    expect(updateCall).toBeDefined();
+
+    expect(updateCall?.variables?.companyLocationId).toBe("gid://shopify/CompanyLocation/loc-1");
+
+    const input = updateCall?.variables?.input as Record<string, unknown>;
+    const buyerExperience = input.buyerExperienceConfiguration as Record<string, unknown>;
+    expect(buyerExperience.paymentTermsTemplateId).toBe("gid://shopify/PaymentTermsTemplate/4");
+  });
+
+  it("seedCompanies sets payment terms on location after company creation", async () => {
+    const state = createMockState();
+    await seedCompanies(state);
+
+    // Should have called companyLocationUpdate after companyCreate
+    const locationUpdateCalls = capturedRequests.filter((r) => r.query.includes("companyLocationUpdate"));
+    
+    // Each created company should have its location payment terms set
+    expect(locationUpdateCalls.length).toBeGreaterThan(0);
   });
 });
 
@@ -666,7 +580,7 @@ describe("Reset Seed Data", () => {
     const state = createMockState();
     await resetSeedData(state);
 
-    // Should have queried for orders, draft orders, customers, and companies
+    // Should have queried for orders and companies
     const queries = capturedRequests.filter((r) => r.query.includes("query"));
     expect(queries.length).toBeGreaterThan(0);
 
@@ -795,35 +709,6 @@ describe("Mutation Retry Safety", () => {
     expect(fetchCallCount).toBe(2);
     expect(result.data).toEqual({ testCreate: { id: "123" } });
   });
-
-  it("mutations still retry on THROTTLED GraphQL error (safe because request wasn't executed)", async () => {
-    global.fetch = vi.fn(async () => {
-      fetchCallCount++;
-      if (fetchCallCount < 2) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({
-            errors: [{ message: "Throttled", extensions: { code: "THROTTLED" } }],
-          }),
-        } as Response;
-      }
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          data: { testCreate: { id: "456" } },
-          extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
-        }),
-      } as Response;
-    });
-
-    const state = createMockState();
-    const result = await graphql(state, "mutation { testCreate { id } }", {}, { isMutation: true });
-
-    expect(fetchCallCount).toBe(2);
-    expect(result.data).toEqual({ testCreate: { id: "456" } });
-  });
 });
 
 describe("Dynamic Currency", () => {
@@ -847,48 +732,6 @@ describe("Dynamic Currency", () => {
     await checkDevStore(state);
 
     expect(state.currencyCode).toBe("USD");
-  });
-
-  it("createDraftOrder uses state.currencyCode in priceOverride", async () => {
-    const state = createMockState({ currencyCode: "USD" });
-
-    await createDraftOrder(state, {
-      orderKey: `${SEED_PREFIX}order-currency-test`,
-      purchasingEntity: { customerId: "gid://shopify/Customer/123" },
-      paymentTermsInput: { paymentTermsTemplateId: "gid://shopify/PaymentTermsTemplate/4", paymentSchedules: [{ issuedAt: new Date().toISOString() }] },
-      billingAddress: { firstName: "Test", lastName: "User", address1: "123 St", city: "NYC", countryCode: "US", zip: "10001" },
-      variantId: "gid://shopify/ProductVariant/123",
-      amount: 50000,
-    });
-
-    const createCall = capturedRequests.find((r) => r.query.includes("draftOrderCreate"));
-    expect(createCall).toBeDefined();
-
-    const input = createCall?.variables?.input as Record<string, unknown>;
-    expect(input.presentmentCurrencyCode).toBe("USD");
-
-    const lineItems = input.lineItems as Array<Record<string, unknown>>;
-    expect(lineItems[0].priceOverride).toEqual({ amount: "50000", currencyCode: "USD" });
-  });
-
-  it("createDraftOrder uses INR when currencyCode is INR", async () => {
-    const state = createMockState({ currencyCode: "INR" });
-
-    await createDraftOrder(state, {
-      orderKey: `${SEED_PREFIX}order-inr-test`,
-      purchasingEntity: { customerId: "gid://shopify/Customer/456" },
-      paymentTermsInput: { paymentTermsTemplateId: "gid://shopify/PaymentTermsTemplate/3", paymentSchedules: [{ issuedAt: new Date().toISOString() }] },
-      billingAddress: { firstName: "Test", lastName: "User", address1: "456 St", city: "Mumbai", countryCode: "IN", zip: "400001" },
-      variantId: "gid://shopify/ProductVariant/456",
-      amount: 75000,
-    });
-
-    const createCall = capturedRequests.find((r) => r.query.includes("draftOrderCreate"));
-    const input = createCall?.variables?.input as Record<string, unknown>;
-    expect(input.presentmentCurrencyCode).toBe("INR");
-
-    const lineItems = input.lineItems as Array<Record<string, unknown>>;
-    expect(lineItems[0].priceOverride).toEqual({ amount: "75000", currencyCode: "INR" });
   });
 
   it("formatCurrency formats amounts with currency code", () => {

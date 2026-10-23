@@ -2,33 +2,39 @@
 /**
  * Seed script for Net Terms Receivables dev store.
  *
- * Creates B2B companies, customers, and orders with payment terms for
- * testing the app's receivables tracking features.
+ * Creates B2B companies and orders with payment terms for testing the app's
+ * receivables tracking features.
+ *
+ * SCOPE REQUIREMENTS:
+ * This script runs with the 11 PRODUCTION scopes only - no separate dev app needed:
+ *   - read_companies, write_companies  - Create companies, set payment terms on locations
+ *   - read_customers, write_customers  - Create test customers (for future use)
+ *   - read_orders, write_orders        - Create orders via orderCreate
+ *   - read_payment_terms               - Read payment terms templates
+ *   - write_validations, write_payment_customizations, write_merchant_managed_fulfillment_orders
+ *     (pre-granted for S12/S13, not used by seed)
+ *
+ * HOW PAYMENT TERMS WORK:
+ * 1. Payment terms templates are configured on CompanyLocations via companyLocationUpdate
+ *    with buyerExperienceConfiguration.paymentTermsTemplateId (requires write_companies)
+ * 2. Orders created for B2B company locations inherit these payment terms
+ * 3. Orders are created with financialStatus: PENDING to mark them as unpaid
+ *
+ * NO DRAFT ORDERS: This script uses orderCreate with custom line items instead of
+ * draft orders, eliminating the need for write_draft_orders and read_products.
  *
  * Usage:
  *   npm run seed                              # Run seed against dev store
  *   npm run seed -- --dry-run                 # Preview what would be created
  *   npm run seed -- --reset                   # Delete seed data before seeding
- *   npm run seed -- --allow-non-dev-store     # Override dev store safety check
  *
  * Environment:
  *   SHOP                 - Shop domain (must be net-terms-receivables.myshopify.com)
- *   SHOPIFY_ADMIN_TOKEN  - Admin API access token from a Dev Dashboard app
+ *   SHOPIFY_ADMIN_TOKEN  - Admin API access token with production scopes
  *
- * IMPORTANT: The token must come from an app created in the Dev Dashboard and
- * installed on your dev store — NOT from the production Net Terms Receivables app.
- * The production app does NOT have write_draft_orders or write_payment_terms.
- *
- * Required Admin API scopes for the Dev Dashboard app:
- *   read_companies, write_companies    - Create companies, set payment terms on locations
- *   read_customers, write_customers    - Create test customers
- *   read_draft_orders, write_draft_orders - Create draft orders for non-B2B customers
- *   read_products                      - Get product variants for line items
- *   read_payment_terms                 - Read payment terms templates
- *
- * Note: write_payment_terms is NOT required. B2B company locations get payment terms
- * via companyLocationUpdate (under write_companies), and orders inherit from the location.
- * Customer (non-B2B) orders use draft orders, which also set payment terms automatically.
+ * @see https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/orderCreate
+ * @see https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyLocationUpdate
+ * @see https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/BuyerExperienceConfigurationInput
  */
 
 import { pathToFileURL } from "node:url";
@@ -82,35 +88,11 @@ export interface CompanyNode {
   };
 }
 
-export interface CustomerNode {
-  id: string;
-  email: string;
-  firstName: string;
-  lastName: string;
-  tags: string[];
-}
-
 export interface PaymentTermsTemplate {
   id: string;
   name: string;
   paymentTermsType: "NET" | "FIXED" | "RECEIPT" | "FULFILLMENT";
   dueInDays: number | null;
-}
-
-export interface ProductVariantNode {
-  id: string;
-  title: string;
-  price: string;
-  product: {
-    title: string;
-  };
-}
-
-export interface DraftOrderNode {
-  id: string;
-  name: string;
-  tags: string[];
-  status: string;
 }
 
 export interface OrderNode {
@@ -146,32 +128,31 @@ export const COMPANY_SEEDS = [
   { key: "company-5", name: "Kolkata Commerce House", contact: { firstName: "Arjun", lastName: "Das", email: "arjun.das@kolkata-commerce.example" } },
 ] as const;
 
-export const CUSTOMER_SEEDS = [
-  { key: "customer-1", firstName: "Vikram", lastName: "Reddy", email: "vikram.reddy@example.com" },
-  { key: "customer-2", firstName: "Meera", lastName: "Nair", email: "meera.nair@example.com" },
-  { key: "customer-3", firstName: "Sanjay", lastName: "Gupta", email: "sanjay.gupta@example.com" },
-  { key: "customer-4", firstName: "Anita", lastName: "Joshi", email: "anita.joshi@example.com" },
-  { key: "customer-5", firstName: "Rahul", lastName: "Verma", email: "rahul.verma@example.com" },
-] as const;
-
-export const ORDER_DISTRIBUTION = [
-  ...COMPANY_SEEDS.flatMap((c, i) => [
-    { entityType: "company" as const, entityKey: c.key, termsType: "NET" as const, dueInDays: 15, daysAgo: i * 5 + 2 },
-    { entityType: "company" as const, entityKey: c.key, termsType: "NET" as const, dueInDays: 30, daysAgo: i * 3 + 10 },
-    { entityType: "company" as const, entityKey: c.key, termsType: "NET" as const, dueInDays: 60, daysAgo: i * 2 + 5 },
-    { entityType: "company" as const, entityKey: c.key, termsType: "FIXED" as const, fixedDaysFromNow: -10 + i * 5, daysAgo: 15 + i },
-  ]),
-  ...CUSTOMER_SEEDS.flatMap((c, i) => [
-    { entityType: "customer" as const, entityKey: c.key, termsType: "NET" as const, dueInDays: 15, daysAgo: i * 4 + 3 },
-    ...(i % 2 === 0 ? [{ entityType: "customer" as const, entityKey: c.key, termsType: "NET" as const, dueInDays: 30, daysAgo: i * 2 + 8 }] : []),
-  ]),
-];
+// B2B order distribution - each company gets multiple orders with different payment terms
+export const ORDER_DISTRIBUTION = COMPANY_SEEDS.flatMap((c, i) => [
+  { entityKey: c.key, termsType: "NET" as const, dueInDays: 15, daysAgo: i * 5 + 2 },
+  { entityKey: c.key, termsType: "NET" as const, dueInDays: 30, daysAgo: i * 3 + 10 },
+  { entityKey: c.key, termsType: "NET" as const, dueInDays: 60, daysAgo: i * 2 + 5 },
+  { entityKey: c.key, termsType: "FIXED" as const, fixedDaysFromNow: -10 + i * 5, daysAgo: 15 + i },
+]);
 
 const AMOUNT_RANGES_INR = [
   { min: 5000, max: 15000 },
   { min: 15000, max: 50000 },
   { min: 50000, max: 150000 },
   { min: 150000, max: 500000 },
+];
+
+// Sample product names for custom line items (no real products needed)
+const SAMPLE_PRODUCTS = [
+  "Industrial Fasteners - Bulk Pack",
+  "Steel Pipes - 20ft Bundle",
+  "Copper Wire - 500m Spool",
+  "Safety Equipment Kit",
+  "Hydraulic Components Set",
+  "Electrical Panel Assembly",
+  "Conveyor Belt Section",
+  "Industrial Lubricants - 200L",
 ];
 
 // -- State --
@@ -181,15 +162,12 @@ export interface SeedState {
   token: string;
   dryRun: boolean;
   reset: boolean;
-  allowNonDevStore: boolean;
   currencyCode: string;
-  companies: Map<string, { id: string; locationId: string; contactId: string; contactCustomerId: string }>;
-  customers: Map<string, { id: string }>;
+  companies: Map<string, { id: string; locationId: string; contactCustomerId: string }>;
   paymentTermsTemplates: PaymentTermsTemplate[];
-  productVariants: ProductVariantNode[];
-  createdCount: { companies: number; customers: number; draftOrders: number; orders: number };
-  skippedCount: { companies: number; customers: number; orders: number };
-  deletedCount: { companies: number; customers: number; draftOrders: number; orders: number };
+  createdCount: { companies: number; orders: number };
+  skippedCount: { companies: number; orders: number };
+  deletedCount: { companies: number; orders: number };
   errors: string[];
 }
 
@@ -228,7 +206,6 @@ export async function graphql<T>(
         body: JSON.stringify({ query, variables }),
       });
 
-      // Retry on 429 with exponential backoff (safe for mutations: request was throttled, not executed)
       if (response.status === 429) {
         const delay = INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt);
         console.log(`  ⏳ Rate limited (429), retrying in ${delay}ms...`);
@@ -242,7 +219,6 @@ export async function graphql<T>(
 
       const json = (await response.json()) as GraphQLResponse<T>;
 
-      // Retry on THROTTLED (safe for mutations: request was throttled, not executed)
       const throttledError = json.errors?.find((e) => e.extensions?.code === "THROTTLED");
       if (throttledError) {
         const delay = INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt);
@@ -251,7 +227,6 @@ export async function graphql<T>(
         continue;
       }
 
-      // Handle cost-based rate limiting
       const cost = json.extensions?.cost;
       if (cost) {
         const { currentlyAvailable, restoreRate } = cost.throttleStatus;
@@ -266,13 +241,10 @@ export async function graphql<T>(
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
       
-      // For mutations, do NOT auto-retry on network errors: the first request may have
-      // succeeded, and retrying could create duplicates. Callers should re-check existence.
       if (isMutation) {
         throw lastError;
       }
       
-      // For queries, retry with exponential backoff
       if (attempt < MAX_RETRIES - 1) {
         const delay = INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt);
         console.log(`  ⏳ Request failed, retrying in ${delay}ms...`);
@@ -313,17 +285,11 @@ export async function checkDevStore(state: SeedState): Promise<boolean> {
     return false;
   }
 
-  // Store the currency code for use in order creation
   state.currencyCode = shop.currencyCode;
 
   if (!shop.plan.partnerDevelopment) {
-    if (state.allowNonDevStore) {
-      console.log("  ⚠️  This is NOT a development store, but --allow-non-dev-store was passed");
-      return true;
-    }
     console.error("  ❌ This is NOT a development store");
-    console.error("     The seed script only runs on development stores by default.");
-    console.error("     Pass --allow-non-dev-store to override (use with caution!).");
+    console.error("     The seed script only runs on development stores.");
     return false;
   }
 
@@ -411,42 +377,6 @@ export async function fetchPaymentTermsTemplates(state: SeedState): Promise<bool
   return true;
 }
 
-export async function fetchProductVariants(state: SeedState): Promise<boolean> {
-  console.log("\n📦 Fetching product variants for orders...");
-
-  const query = `
-    query GetProductVariants {
-      productVariants(first: 10) {
-        nodes {
-          id
-          title
-          price
-          product {
-            title
-          }
-        }
-      }
-    }
-  `;
-
-  const result = await graphql<{ productVariants: { nodes: ProductVariantNode[] } }>(state, query);
-
-  if (result.errors) {
-    console.error("  ❌ Failed to fetch product variants:", result.errors.map((e) => e.message).join(", "));
-    return false;
-  }
-
-  state.productVariants = result.data?.productVariants.nodes ?? [];
-
-  if (state.productVariants.length === 0) {
-    console.error("  ❌ No product variants available. Please add products to the store first.");
-    return false;
-  }
-
-  console.log(`  ✅ Found ${state.productVariants.length} variants`);
-  return true;
-}
-
 // -- Reset / Cleanup --
 
 export async function resetSeedData(state: SeedState): Promise<void> {
@@ -458,15 +388,11 @@ export async function resetSeedData(state: SeedState): Promise<void> {
   }
 
   await deleteSeededOrders(state);
-  await deleteSeededDraftOrders(state);
-  await deleteSeededCustomers(state);
   await deleteSeededCompanies(state);
 
   console.log("\n  Reset summary:");
   console.log(`    Companies deleted: ${state.deletedCount.companies}`);
-  console.log(`    Customers deleted: ${state.deletedCount.customers}`);
-  console.log(`    Draft orders deleted: ${state.deletedCount.draftOrders}`);
-  console.log(`    Orders deleted: ${state.deletedCount.orders}`);
+  console.log(`    Orders: ${state.deletedCount.orders} (cannot delete via API, tagged for identification)`);
 }
 
 async function deleteSeededOrders(state: SeedState): Promise<void> {
@@ -482,84 +408,10 @@ async function deleteSeededOrders(state: SeedState): Promise<void> {
 
   const orders = result.data?.orders.nodes ?? [];
   console.log(`  Found ${orders.length} seeded orders`);
+  state.deletedCount.orders = orders.length;
 
   if (orders.length > 0) {
     console.log("  ⚠️  Orders cannot be deleted via API. They will remain tagged for identification.");
-  }
-}
-
-async function deleteSeededDraftOrders(state: SeedState): Promise<void> {
-  console.log("  Searching for seeded draft orders...");
-
-  const result = await graphql<{ draftOrders: { nodes: DraftOrderNode[] } }>(state, `
-    query FindSeededDraftOrders($query: String!) {
-      draftOrders(first: 100, query: $query) {
-        nodes { id name tags status }
-      }
-    }
-  `, { query: `tag:${SEED_TAG}` });
-
-  const draftOrders = result.data?.draftOrders.nodes ?? [];
-  console.log(`  Found ${draftOrders.length} seeded draft orders`);
-
-  for (const draft of draftOrders) {
-    if (draft.status !== "COMPLETED") {
-      const deleteResult = await graphql<{ draftOrderDelete: { deletedId: string; userErrors: UserError[] } }>(
-        state,
-        `mutation DeleteDraftOrder($input: DraftOrderDeleteInput!) {
-          draftOrderDelete(input: $input) {
-            deletedId
-            userErrors { field message }
-          }
-        }`,
-        { input: { id: draft.id } },
-        { isMutation: true }
-      );
-
-      if (deleteResult.data?.draftOrderDelete.userErrors.length) {
-        console.log(`    ⚠️  Failed to delete ${draft.name}: ${deleteResult.data.draftOrderDelete.userErrors[0].message}`);
-      } else if (deleteResult.data?.draftOrderDelete.deletedId) {
-        state.deletedCount.draftOrders++;
-      }
-    }
-  }
-}
-
-async function deleteSeededCustomers(state: SeedState): Promise<void> {
-  console.log("  Searching for seeded customers...");
-
-  const result = await graphql<{ customers: { nodes: CustomerNode[] } }>(state, `
-    query FindSeededCustomers($query: String!) {
-      customers(first: 50, query: $query) {
-        nodes { id email tags }
-      }
-    }
-  `, { query: `tag:${SEED_TAG}` });
-
-  const customers = result.data?.customers.nodes ?? [];
-  console.log(`  Found ${customers.length} seeded customers`);
-
-  for (const customer of customers) {
-    const deleteResult = await graphql<{ customerDelete: { deletedCustomerId: string; userErrors: UserError[] } }>(
-      state,
-      `mutation DeleteCustomer($input: CustomerDeleteInput!) {
-        customerDelete(input: $input) {
-          deletedCustomerId
-          userErrors { field message }
-        }
-      }`,
-      { input: { id: customer.id } },
-      { isMutation: true }
-    );
-
-    if (deleteResult.data?.customerDelete.userErrors.length) {
-      const err = deleteResult.data.customerDelete.userErrors[0];
-      if (!err.message.includes("orders")) {
-        console.log(`    ⚠️  Failed to delete ${customer.email}: ${err.message}`);
-      }
-    } else if (deleteResult.data?.customerDelete.deletedCustomerId) {
-      state.deletedCount.customers++;
-    }
   }
 }
 
@@ -612,7 +464,6 @@ export async function seedCompanies(state: SeedState): Promise<void> {
       state.companies.set(seed.key, {
         id: existing.id,
         locationId: existing.locations.edges[0]?.node.id ?? "",
-        contactId: existing.contacts.edges[0]?.node.id ?? "",
         contactCustomerId: existing.contacts.edges[0]?.node.customer.id ?? "",
       });
       state.skippedCount.companies++;
@@ -624,7 +475,6 @@ export async function seedCompanies(state: SeedState): Promise<void> {
       state.companies.set(seed.key, {
         id: `dry-run-company-${seed.key}`,
         locationId: `dry-run-location-${seed.key}`,
-        contactId: `dry-run-contact-${seed.key}`,
         contactCustomerId: `dry-run-customer-${seed.key}`,
       });
       state.createdCount.companies++;
@@ -637,9 +487,8 @@ export async function seedCompanies(state: SeedState): Promise<void> {
       state.createdCount.companies++;
       console.log(`  ✅ Created: ${seed.name}`);
       
-      // Set default payment terms on the company location using companyLocationUpdate.
-      // This requires only write_companies (NOT write_payment_terms).
-      // Orders for this location will inherit these payment terms automatically.
+      // Set default payment terms on the company location.
+      // Orders for this location will inherit these payment terms.
       const defaultTemplate = state.paymentTermsTemplates.find((t) => t.paymentTermsType === "NET" && t.dueInDays === 30)
         ?? state.paymentTermsTemplates.find((t) => t.paymentTermsType === "NET")
         ?? state.paymentTermsTemplates[0];
@@ -685,7 +534,7 @@ export async function createCompany(
   state: SeedState,
   seed: (typeof COMPANY_SEEDS)[number],
   externalId: string
-): Promise<{ id: string; locationId: string; contactId: string; contactCustomerId: string } | null> {
+): Promise<{ id: string; locationId: string; contactCustomerId: string } | null> {
   const mutation = `
     mutation CreateCompany($input: CompanyCreateInput!) {
       companyCreate(input: $input) {
@@ -740,12 +589,9 @@ export async function createCompany(
     return null;
   }
 
-  const locationId = company.locations.edges[0]?.node.id ?? "";
-  
   return {
     id: company.id,
-    locationId,
-    contactId: company.contacts.edges[0]?.node.id ?? "",
+    locationId: company.locations.edges[0]?.node.id ?? "",
     contactCustomerId: company.contacts.edges[0]?.node.customer.id ?? "",
   };
 }
@@ -754,8 +600,8 @@ export async function createCompany(
  * Update a company location's payment terms template.
  * 
  * This uses companyLocationUpdate with buyerExperienceConfiguration.paymentTermsTemplateId,
- * which only requires write_companies (or write_customers) - NOT write_payment_terms.
- * Orders created for this location will inherit the payment terms automatically.
+ * which requires write_companies (NOT write_payment_terms).
+ * B2B orders for this location will inherit these payment terms.
  * 
  * @see https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyLocationUpdate
  * @see https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/BuyerExperienceConfigurationInput
@@ -809,245 +655,67 @@ export async function updateCompanyLocationPaymentTerms(
   return true;
 }
 
-// -- Seeding: Customers --
-
-export async function seedCustomers(state: SeedState): Promise<void> {
-  console.log("\n👤 Seeding net-terms customers...");
-
-  for (const seed of CUSTOMER_SEEDS) {
-    const seedKey = `${SEED_PREFIX}${seed.key}`;
-    const existing = await findCustomerByTag(state, seedKey);
-
-    if (existing) {
-      console.log(`  ⏭️  ${seed.firstName} ${seed.lastName} already exists`);
-      state.customers.set(seed.key, { id: existing.id });
-      state.skippedCount.customers++;
-      continue;
-    }
-
-    if (state.dryRun) {
-      console.log(`  [dry-run] Would create: ${seed.firstName} ${seed.lastName}`);
-      state.customers.set(seed.key, { id: `dry-run-customer-${seed.key}` });
-      state.createdCount.customers++;
-      continue;
-    }
-
-    const result = await createCustomer(state, seed, seedKey);
-    if (result) {
-      state.customers.set(seed.key, result);
-      state.createdCount.customers++;
-      console.log(`  ✅ Created: ${seed.firstName} ${seed.lastName}`);
-    } else {
-      state.errors.push(`Failed to create customer: ${seed.firstName} ${seed.lastName}`);
-    }
-  }
-}
-
-export async function findCustomerByTag(state: SeedState, tag: string): Promise<CustomerNode | null> {
-  const query = `
-    query FindCustomer($query: String!) {
-      customers(first: 1, query: $query) {
-        nodes { id email firstName lastName tags }
-      }
-    }
-  `;
-
-  const result = await graphql<{ customers: { nodes: CustomerNode[] } }>(state, query, {
-    query: `tag:'${tag}'`,
-  });
-
-  return result.data?.customers.nodes[0] ?? null;
-}
-
-export async function createCustomer(
-  state: SeedState,
-  seed: (typeof CUSTOMER_SEEDS)[number],
-  seedKey: string
-): Promise<{ id: string } | null> {
-  const mutation = `
-    mutation CreateCustomer($input: CustomerInput!) {
-      customerCreate(input: $input) {
-        customer { id email }
-        userErrors { field message }
-      }
-    }
-  `;
-
-  const result = await graphql<{
-    customerCreate: { customer: { id: string; email: string } | null; userErrors: UserError[] };
-  }>(state, mutation, {
-    input: {
-      email: seed.email,
-      firstName: seed.firstName,
-      lastName: seed.lastName,
-      tags: [SEED_TAG, seedKey, "net-terms-buyer"],
-      addresses: [{
-        firstName: seed.firstName,
-        lastName: seed.lastName,
-        address1: "456 Customer Lane",
-        city: "Delhi",
-        countryCode: "IN",
-        zip: "110001",
-      }],
-    },
-  }, { isMutation: true });
-
-  if (result.data?.customerCreate.userErrors.length) {
-    console.error(`    ❌ Error creating ${seed.email}:`, result.data.customerCreate.userErrors);
-    return null;
-  }
-
-  return result.data?.customerCreate.customer ? { id: result.data.customerCreate.customer.id } : null;
-}
-
-// -- Seeding: Orders with Payment Terms --
+// -- Seeding: Orders --
 
 export async function seedOrders(state: SeedState): Promise<void> {
-  console.log("\n📝 Seeding orders with payment terms...");
-
-  const netTemplates = state.paymentTermsTemplates.filter((t) => t.paymentTermsType === "NET");
-  const fixedTemplate = state.paymentTermsTemplates.find((t) => t.paymentTermsType === "FIXED");
-
-  if (netTemplates.length === 0) {
-    console.error("  ❌ No NET payment terms templates available");
-    return;
-  }
+  console.log("\n📝 Seeding B2B orders...");
 
   let orderIndex = 0;
   for (const orderSpec of ORDER_DISTRIBUTION) {
     orderIndex++;
     const orderKey = `${SEED_PREFIX}order-${orderIndex}`;
 
-    // Check if order already exists (perform lookup even in dry-run for accurate preview)
+    // Check if order already exists (idempotency)
     const existingOrder = await findOrderByTag(state, orderKey);
     if (existingOrder) {
-      console.log(`  ⏭️  Order ${orderIndex} already exists`);
+      console.log(`  ⏭️  Order ${orderIndex} already exists (${existingOrder.name})`);
       state.skippedCount.orders++;
       continue;
     }
 
-    const existingDraft = await findDraftOrderByTag(state, orderKey);
-    if (existingDraft) {
-      console.log(`  ⏭️  Draft order ${orderIndex} already exists`);
-      state.skippedCount.orders++;
+    const company = state.companies.get(orderSpec.entityKey);
+    if (!company) {
+      console.error(`  ❌ Company ${orderSpec.entityKey} not found`);
       continue;
     }
 
-    // Determine payment terms
-    let paymentTermsInput: Record<string, unknown>;
-    const issuedAt = new Date();
-    issuedAt.setDate(issuedAt.getDate() - orderSpec.daysAgo);
-
-    if (orderSpec.termsType === "NET") {
-      const template = netTemplates.find((t) => t.dueInDays === orderSpec.dueInDays) ?? netTemplates[0];
-      paymentTermsInput = {
-        paymentTermsTemplateId: template.id,
-        paymentSchedules: [{ issuedAt: issuedAt.toISOString() }],
-      };
-    } else if (fixedTemplate && "fixedDaysFromNow" in orderSpec) {
-      const dueAt = new Date();
-      dueAt.setDate(dueAt.getDate() + orderSpec.fixedDaysFromNow);
-      paymentTermsInput = {
-        paymentTermsTemplateId: fixedTemplate.id,
-        paymentSchedules: [{ dueAt: dueAt.toISOString() }],
-      };
-    } else {
-      const template = netTemplates.find((t) => t.dueInDays === 30) ?? netTemplates[0];
-      paymentTermsInput = {
-        paymentTermsTemplateId: template.id,
-        paymentSchedules: [{ issuedAt: issuedAt.toISOString() }],
-      };
-    }
-
-    // Get entity info
-    let purchasingEntity: Record<string, unknown>;
-    let billingAddress: Record<string, unknown>;
-
-    if (orderSpec.entityType === "company") {
-      const company = state.companies.get(orderSpec.entityKey);
-      if (!company) {
-        console.error(`  ❌ Company ${orderSpec.entityKey} not found`);
-        continue;
-      }
-      purchasingEntity = {
-        purchasingCompany: {
-          companyId: company.id,
-          companyLocationId: company.locationId,
-          companyContactId: company.contactId,
-        },
-      };
-      billingAddress = {
-        firstName: "Billing",
-        lastName: "Contact",
-        address1: "123 Business Street",
-        city: "Mumbai",
-        countryCode: "IN",
-        zip: "400001",
-      };
-    } else {
-      const customer = state.customers.get(orderSpec.entityKey);
-      if (!customer) {
-        console.error(`  ❌ Customer ${orderSpec.entityKey} not found`);
-        continue;
-      }
-      purchasingEntity = { customerId: customer.id };
-      billingAddress = {
-        firstName: "Customer",
-        lastName: "Billing",
-        address1: "456 Customer Lane",
-        city: "Delhi",
-        countryCode: "IN",
-        zip: "110001",
-      };
-    }
-
-    // Generate random amount in INR
+    // Generate random amount
     const amountRange = AMOUNT_RANGES_INR[orderIndex % AMOUNT_RANGES_INR.length];
     const amount = Math.floor(Math.random() * (amountRange.max - amountRange.min) + amountRange.min);
 
-    // Pick a product variant for line item (we'll override its price)
-    const variant = state.productVariants[orderIndex % state.productVariants.length];
+    // Pick a sample product name for the custom line item
+    const productTitle = SAMPLE_PRODUCTS[orderIndex % SAMPLE_PRODUCTS.length];
 
     if (state.dryRun) {
       console.log(
-        `  [dry-run] Would create order ${orderIndex}: ${orderSpec.entityType} ${orderSpec.entityKey}, ` +
+        `  [dry-run] Would create order ${orderIndex}: ${orderSpec.entityKey}, ` +
           `${orderSpec.termsType} ${orderSpec.termsType === "NET" ? orderSpec.dueInDays + " days" : "fixed"}, ` +
           formatCurrency(amount, state.currencyCode)
       );
-      state.createdCount.draftOrders++;
+      state.createdCount.orders++;
       continue;
     }
 
-    // Create draft order with price override so total equals intended amount
-    const draftOrder = await createDraftOrder(state, {
+    // Create B2B order using orderCreate with custom line items
+    const order = await createOrder(state, {
       orderKey,
-      purchasingEntity,
-      paymentTermsInput,
-      billingAddress,
-      variantId: variant.id,
+      companyLocationId: company.locationId,
+      customerId: company.contactCustomerId,
+      productTitle,
       amount,
     });
 
-    if (!draftOrder) {
-      state.errors.push(`Failed to create draft order ${orderIndex}`);
+    if (!order) {
+      state.errors.push(`Failed to create order ${orderIndex}`);
       continue;
     }
 
-    state.createdCount.draftOrders++;
+    state.createdCount.orders++;
     console.log(
-      `  ✅ Created draft ${draftOrder.name}: ${orderSpec.entityType} ${orderSpec.entityKey}, ` +
+      `  ✅ Created ${order.name}: ${orderSpec.entityKey}, ` +
         `${orderSpec.termsType} ${orderSpec.termsType === "NET" ? orderSpec.dueInDays + " days" : "fixed"}, ` +
-        formatCurrency(draftOrder.totalPrice, state.currencyCode)
+        formatCurrency(amount, state.currencyCode)
     );
-
-    // Complete draft order - payment terms automatically create it as payment pending
-    // Per Shopify docs: "Set the order as payment pending using payment terms"
-    // When a draft has payment terms, draftOrderComplete creates the order with balance due
-    const completed = await completeDraftOrder(state, draftOrder.id);
-    if (completed) {
-      state.createdCount.orders++;
-      console.log(`    → Completed as order ${completed.name} (total: ${formatCurrency(completed.totalPrice, state.currencyCode)})`);
-    }
   }
 }
 
@@ -1063,38 +731,41 @@ export async function findOrderByTag(state: SeedState, tag: string): Promise<Ord
   return result.data?.orders.nodes[0] ?? null;
 }
 
-export async function findDraftOrderByTag(state: SeedState, tag: string): Promise<DraftOrderNode | null> {
-  const result = await graphql<{ draftOrders: { nodes: DraftOrderNode[] } }>(state, `
-    query FindDraftOrder($query: String!) {
-      draftOrders(first: 1, query: $query) {
-        nodes { id name tags status }
-      }
-    }
-  `, { query: `tag:'${tag}'` });
-
-  return result.data?.draftOrders.nodes[0] ?? null;
-}
-
-export async function createDraftOrder(
+/**
+ * Create a B2B order using orderCreate with custom line items.
+ * 
+ * Key features:
+ * - Custom line items with title + priceSet (no product variants needed, no read_products required)
+ * - companyLocationId for B2B association (order inherits payment terms from location)
+ * - financialStatus: PENDING to mark as unpaid
+ * - sendReceipt: false, sendFulfillmentReceipt: false to suppress customer emails
+ * 
+ * @see https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/orderCreate
+ * @see https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateLineItemInput
+ */
+export async function createOrder(
   state: SeedState,
   options: {
     orderKey: string;
-    purchasingEntity: Record<string, unknown>;
-    paymentTermsInput: Record<string, unknown>;
-    billingAddress: Record<string, unknown>;
-    variantId: string;
+    companyLocationId: string;
+    customerId: string;
+    productTitle: string;
     amount: number;
   }
-): Promise<{ id: string; name: string; totalPrice: number } | null> {
-  // Use price override to set exact order total (quantity 1, price = amount)
+): Promise<{ id: string; name: string } | null> {
   const mutation = `
-    mutation CreateDraftOrder($input: DraftOrderInput!) {
-      draftOrderCreate(input: $input) {
-        draftOrder {
+    mutation CreateOrder($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
+      orderCreate(order: $order, options: $options) {
+        order {
           id
           name
+          financialStatus
           totalPriceSet {
-            shopMoney { amount }
+            shopMoney { amount currencyCode }
+          }
+          paymentTerms {
+            paymentTermsName
+            dueInDays
           }
         }
         userErrors { field message code }
@@ -1103,103 +774,91 @@ export async function createDraftOrder(
   `;
 
   const result = await graphql<{
-    draftOrderCreate: {
-      draftOrder: { id: string; name: string; totalPriceSet: { shopMoney: { amount: string } } } | null;
-      userErrors: UserError[];
-    };
-  }>(state, mutation, {
-    input: {
-      tags: [SEED_TAG, options.orderKey],
-      purchasingEntity: options.purchasingEntity,
-      paymentTerms: options.paymentTermsInput,
-      billingAddress: options.billingAddress,
-      shippingAddress: options.billingAddress,
-      lineItems: [{
-        variantId: options.variantId,
-        quantity: 1,
-        priceOverride: {
-          amount: String(options.amount),
-          currencyCode: state.currencyCode,
-        },
-      }],
-      presentmentCurrencyCode: state.currencyCode,
-    },
-  }, { isMutation: true });
-
-  if (result.data?.draftOrderCreate.userErrors.length) {
-    console.error(`    ❌ Error creating draft order:`, result.data.draftOrderCreate.userErrors);
-    return null;
-  }
-
-  const draft = result.data?.draftOrderCreate.draftOrder;
-  if (!draft) return null;
-
-  return {
-    id: draft.id,
-    name: draft.name,
-    totalPrice: parseFloat(draft.totalPriceSet.shopMoney.amount),
-  };
-}
-
-export async function completeDraftOrder(
-  state: SeedState,
-  draftOrderId: string
-): Promise<{ id: string; name: string; totalPrice: number } | null> {
-  // Per Shopify 2026-10 docs, draftOrderComplete with payment terms creates order as payment pending.
-  // The paymentPending argument is deprecated; payment terms automatically determine payment status.
-  const mutation = `
-    mutation CompleteDraftOrder($id: ID!) {
-      draftOrderComplete(id: $id) {
-        draftOrder {
-          id
-          name
-          order {
-            id
-            name
-            totalPriceSet {
-              shopMoney { amount }
-            }
-          }
-        }
-        userErrors { field message }
-      }
-    }
-  `;
-
-  const result = await graphql<{
-    draftOrderComplete: {
-      draftOrder: {
+    orderCreate: {
+      order: {
         id: string;
         name: string;
-        order: { id: string; name: string; totalPriceSet: { shopMoney: { amount: string } } } | null;
+        financialStatus: string;
+        totalPriceSet: { shopMoney: { amount: string; currencyCode: string } };
+        paymentTerms: { paymentTermsName: string; dueInDays: number | null } | null;
       } | null;
       userErrors: UserError[];
     };
-  }>(state, mutation, { id: draftOrderId }, { isMutation: true });
+  }>(state, mutation, {
+    order: {
+      tags: [SEED_TAG, options.orderKey],
+      companyLocationId: options.companyLocationId,
+      customer: { id: options.customerId },
+      currency: state.currencyCode,
+      financialStatus: "PENDING",
+      lineItems: [{
+        title: options.productTitle,
+        quantity: 1,
+        priceSet: {
+          shopMoney: {
+            amount: String(options.amount),
+            currencyCode: state.currencyCode,
+          },
+        },
+      }],
+      billingAddress: {
+        firstName: "B2B",
+        lastName: "Billing",
+        address1: "123 Business Street",
+        city: "Mumbai",
+        countryCode: "IN",
+        zip: "400001",
+      },
+      shippingAddress: {
+        firstName: "B2B",
+        lastName: "Shipping",
+        address1: "123 Business Street",
+        city: "Mumbai",
+        countryCode: "IN",
+        zip: "400001",
+      },
+    },
+    options: {
+      sendReceipt: false,
+      sendFulfillmentReceipt: false,
+      inventoryBehaviour: "BYPASS",
+    },
+  }, { isMutation: true });
 
-  if (result.data?.draftOrderComplete.userErrors.length) {
-    console.error(`    ⚠️  Error completing draft order:`, result.data.draftOrderComplete.userErrors);
+  if (result.errors) {
+    console.error(`    ❌ GraphQL errors:`, result.errors);
     return null;
   }
 
-  const order = result.data?.draftOrderComplete.draftOrder?.order;
-  if (!order) return null;
+  if (result.data?.orderCreate.userErrors.length) {
+    console.error(`    ❌ Error creating order:`, result.data.orderCreate.userErrors);
+    return null;
+  }
+
+  const order = result.data?.orderCreate.order;
+  if (!order) {
+    console.error(`    ❌ No order returned`);
+    return null;
+  }
+
+  // Log payment terms if inherited from the company location
+  if (order.paymentTerms) {
+    console.log(`    → Payment terms: ${order.paymentTerms.paymentTermsName} (${order.paymentTerms.dueInDays ?? 0} days)`);
+  }
 
   return {
     id: order.id,
     name: order.name,
-    totalPrice: parseFloat(order.totalPriceSet.shopMoney.amount),
   };
 }
 
 // -- Main --
 
-function parseArgs(): { dryRun: boolean; reset: boolean; allowNonDevStore: boolean } {
+function parseArgs(): { dryRun: boolean; reset: boolean } {
   const args = process.argv.slice(2);
   return {
     dryRun: args.includes("--dry-run"),
     reset: args.includes("--reset"),
-    allowNonDevStore: args.includes("--allow-non-dev-store"),
   };
 }
 
@@ -1223,8 +882,7 @@ function validateEnv(): { shop: string; token: string } | null {
 
   if (!token) {
     console.error("❌ Missing SHOPIFY_ADMIN_TOKEN environment variable");
-    console.error("   Set it to the Admin API access token from a Dev Dashboard app.");
-    console.error("   See README for setup instructions.");
+    console.error("   Set it to the Admin API access token with production scopes.");
     return null;
   }
 
@@ -1234,9 +892,10 @@ function validateEnv(): { shop: string; token: string } | null {
 export async function main(): Promise<void> {
   console.log("═══════════════════════════════════════════════════════════════");
   console.log("  Net Terms Receivables - Dev Store Seed Script");
+  console.log("  (Using orderCreate - no draft orders, no read_products)");
   console.log("═══════════════════════════════════════════════════════════════");
 
-  const { dryRun, reset, allowNonDevStore } = parseArgs();
+  const { dryRun, reset } = parseArgs();
   const env = validateEnv();
 
   if (!env) {
@@ -1248,22 +907,19 @@ export async function main(): Promise<void> {
     token: env.token,
     dryRun,
     reset,
-    allowNonDevStore,
-    currencyCode: "", // Set by checkDevStore()
+    currencyCode: "",
     companies: new Map(),
-    customers: new Map(),
     paymentTermsTemplates: [],
-    productVariants: [],
-    createdCount: { companies: 0, customers: 0, draftOrders: 0, orders: 0 },
-    skippedCount: { companies: 0, customers: 0, orders: 0 },
-    deletedCount: { companies: 0, customers: 0, draftOrders: 0, orders: 0 },
+    createdCount: { companies: 0, orders: 0 },
+    skippedCount: { companies: 0, orders: 0 },
+    deletedCount: { companies: 0, orders: 0 },
     errors: [],
   };
 
   console.log(`\nShop: ${state.shop}`);
   console.log(`Mode: ${dryRun ? "DRY RUN (read-only lookups, no mutations)" : reset ? "RESET + SEED" : "SEED"}`);
 
-  // Preflight checks (always run, even in dry-run)
+  // Preflight checks
   const devStoreOk = await checkDevStore(state);
   if (!devStoreOk) {
     process.exit(1);
@@ -1281,12 +937,6 @@ export async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const variantsOk = await fetchProductVariants(state);
-  if (!variantsOk) {
-    console.error("\n❌ Preflight failed: No product variants available");
-    process.exit(1);
-  }
-
   // Reset if requested
   if (reset) {
     await resetSeedData(state);
@@ -1294,7 +944,6 @@ export async function main(): Promise<void> {
 
   // Seed data
   await seedCompanies(state);
-  await seedCustomers(state);
   await seedOrders(state);
 
   // Summary
@@ -1308,13 +957,10 @@ export async function main(): Promise<void> {
 
   console.log("\n  Created:");
   console.log(`    Companies:    ${state.createdCount.companies}`);
-  console.log(`    Customers:    ${state.createdCount.customers}`);
-  console.log(`    Draft Orders: ${state.createdCount.draftOrders}`);
   console.log(`    Orders:       ${state.createdCount.orders}`);
 
   console.log("\n  Skipped (already exist):");
   console.log(`    Companies:    ${state.skippedCount.companies}`);
-  console.log(`    Customers:    ${state.skippedCount.customers}`);
   console.log(`    Orders:       ${state.skippedCount.orders}`);
 
   if (state.errors.length > 0) {
