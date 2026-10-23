@@ -96,6 +96,17 @@ export interface UserError {
   code?: string;
 }
 
+export interface CompanyContactRole {
+  id: string;
+  name: string;
+}
+
+export interface CompanyContactRoleAssignment {
+  id: string;
+  companyContact: { id: string };
+  role: { id: string; name: string };
+}
+
 export interface CompanyNode {
   id: string;
   name: string;
@@ -118,6 +129,9 @@ export interface CompanyNode {
         };
       };
     }>;
+  };
+  contactRoles?: {
+    nodes: CompanyContactRole[];
   };
 }
 
@@ -159,6 +173,15 @@ export const SEED_TAG = "ntr-seed";
 export const SEED_PREFIX = "ntr-seed-";
 const MAX_RETRIES = 3;
 const INITIAL_RETRY_DELAY_MS = 1000;
+
+// Order creation pacing to avoid dev store throttling (configurable via env)
+// Default 12s is safe for dev stores; Shopify returns "Too many attempts" on fast orderCreate
+export const DEFAULT_SEED_ORDER_DELAY_MS = 12000;
+export const SEED_ORDER_DELAY_MS = parseInt(process.env.SEED_ORDER_DELAY_MS ?? String(DEFAULT_SEED_ORDER_DELAY_MS), 10);
+
+// Retry configuration for orderCreate throttle errors
+export const ORDER_CREATE_MAX_ATTEMPTS = 5;
+export const ORDER_CREATE_BACKOFF_DELAYS_MS = [15000, 30000, 60000, 120000]; // After first failure: 15s, 30s, 60s, 120s
 
 // Security: hardcoded allowed dev store domain. Seed refuses to run on any other shop.
 // This prevents accidental mutation of production data if someone misconfigures SHOP.
@@ -288,8 +311,10 @@ const SAMPLE_PRODUCTS = [
 
 export interface CompanyData {
   id: string;
-  contactCustomerId: string;
+  contactId: string;  // CompanyContact ID (for role assignments)
+  contactCustomerId: string;  // Customer ID (for order association)
   locations: Map<number, string>;  // dueInDays -> locationId
+  contactRoles: CompanyContactRole[];  // Available roles on this company
 }
 
 export interface SeedState {
@@ -301,13 +326,14 @@ export interface SeedState {
   currencyCode: string;
   companies: Map<string, CompanyData>;
   paymentTermsTemplates: PaymentTermsTemplate[];
-  createdCount: { companies: number; locations: number; orders: number; dbRules: number; dbAccounts: number };
-  skippedCount: { companies: number; orders: number };
+  createdCount: { companies: number; locations: number; orders: number; roleAssignments: number; dbRules: number; dbAccounts: number };
+  skippedCount: { companies: number; orders: number; roleAssignments: number };
   deletedCount: { companies: number; orders: number };
-  failedCount: { locations: number; orders: number };
+  failedCount: { locations: number; orders: number; roleAssignments: number };
   ordersWithShopifyTerms: number;
   ordersWithoutShopifyTerms: number;
   overdueOrdersCount: number;
+  taggedCustomerOrdersCount: number;
   errors: string[];
 }
 
@@ -315,6 +341,44 @@ export interface SeedState {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Classify whether an error response is a throttle error that should be retried.
+ * Returns true for:
+ * - Top-level errors with THROTTLED code
+ * - userErrors containing "Too many attempts"
+ * - Top-level errors containing "Too many attempts"
+ */
+export function isThrottleError<T>(
+  response: GraphQLResponse<T>,
+  userErrors?: UserError[]
+): boolean {
+  // Check top-level GraphQL errors for THROTTLED code
+  if (response.errors?.some(e => e.extensions?.code === "THROTTLED")) {
+    return true;
+  }
+  // Check top-level errors for "Too many attempts" message
+  if (response.errors?.some(e => e.message.includes("Too many attempts"))) {
+    return true;
+  }
+  // Check userErrors for "Too many attempts" message
+  if (userErrors?.some(e => e.message.includes("Too many attempts"))) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Calculate retry delay with jitter for throttle backoff.
+ * Base delays: 15s, 30s, 60s, 120s (capped at index 3)
+ * Jitter: +/- 20% random variation
+ */
+export function calculateThrottleBackoffDelay(attemptIndex: number): number {
+  const baseDelay = ORDER_CREATE_BACKOFF_DELAYS_MS[Math.min(attemptIndex, ORDER_CREATE_BACKOFF_DELAYS_MS.length - 1)];
+  // Add jitter: +/- 20%
+  const jitter = baseDelay * 0.2 * (Math.random() * 2 - 1);
+  return Math.round(baseDelay + jitter);
 }
 
 export function formatCurrency(amount: number, currencyCode: string): string {
@@ -665,6 +729,11 @@ export async function seedCompanies(state: SeedState): Promise<void> {
 
     if (existing) {
       console.log(`  ⏭️  ${seed.name} already exists (${externalId})`);
+      
+      // Fetch contact roles for role assignment
+      const contactRoles = await fetchCompanyContactRoles(state, existing.id);
+      const contactId = existing.contacts.edges[0]?.node.id ?? "";
+      
       // Build locations map from existing data
       const locations = new Map<number, string>();
       for (const edge of existing.locations.edges) {
@@ -672,6 +741,22 @@ export async function seedCompanies(state: SeedState): Promise<void> {
           if (edge.node.name.includes(loc.suffix)) {
             locations.set(loc.dueInDays, edge.node.id);
           }
+        }
+      }
+      
+      // Store company data early for role assignment
+      const companyData: CompanyData = {
+        id: existing.id,
+        contactId,
+        contactCustomerId: existing.contacts.edges[0]?.node.customer.id ?? "",
+        locations,
+        contactRoles,
+      };
+      
+      // Ensure role assignments on existing locations (idempotent)
+      for (const [_dueInDays, locationId] of locations) {
+        if (contactId && contactRoles.length > 0) {
+          await ensureContactRoleOnLocation(state, companyData, locationId);
         }
       }
       
@@ -683,14 +768,21 @@ export async function seedCompanies(state: SeedState): Promise<void> {
             (t) => t.paymentTermsType === "NET" && t.dueInDays === loc.dueInDays
           );
           if (state.dryRun) {
-            locations.set(loc.dueInDays, `dry-run-location-${seed.key}-${loc.dueInDays}`);
+            const dryRunLocationId = `dry-run-location-${seed.key}-${loc.dueInDays}`;
+            locations.set(loc.dueInDays, dryRunLocationId);
             state.createdCount.locations++;
+            // Dry-run role assignment
+            await ensureContactRoleOnLocation(state, companyData, dryRunLocationId);
           } else {
             const locationId = await createCompanyLocation(state, existing.id, seed.name, seed.city, loc, template?.id);
             if (locationId) {
               locations.set(loc.dueInDays, locationId);
               console.log(`    ✅ Created location ${loc.suffix}`);
               state.createdCount.locations++;
+              // Assign role on the newly created location (required for orders)
+              if (contactId && contactRoles.length > 0) {
+                await ensureContactRoleOnLocation(state, companyData, locationId);
+              }
             } else {
               state.failedCount.locations++;
               state.errors.push(`Failed to create location ${loc.suffix} for ${seed.name}`);
@@ -699,11 +791,7 @@ export async function seedCompanies(state: SeedState): Promise<void> {
         }
       }
       
-      state.companies.set(seed.key, {
-        id: existing.id,
-        contactCustomerId: existing.contacts.edges[0]?.node.customer.id ?? "",
-        locations,
-      });
+      state.companies.set(seed.key, companyData);
       state.skippedCount.companies++;
       continue;
     }
@@ -716,10 +804,13 @@ export async function seedCompanies(state: SeedState): Promise<void> {
       }
       state.companies.set(seed.key, {
         id: `dry-run-company-${seed.key}`,
+        contactId: `dry-run-contact-${seed.key}`,
         contactCustomerId: `dry-run-customer-${seed.key}`,
         locations,
+        contactRoles: [{ id: `dry-run-role-${seed.key}`, name: "Ordering only" }],
       });
       state.createdCount.companies++;
+      state.createdCount.roleAssignments += 3; // 3 locations
       continue;
     }
 
@@ -856,12 +947,30 @@ export async function createCompanyWithLocations(
     return null;
   }
 
+  // Fetch contact roles for role assignment
+  const contactRoles = await fetchCompanyContactRoles(state, company.id);
+  const contactId = company.contacts.edges[0]?.node.id ?? "";
+
   const locations = new Map<number, string>();
   const firstLocationId = company.locations.edges[0]?.node.id;
+  
+  // Build partial company data for role assignment
+  const companyData: CompanyData = {
+    id: company.id,
+    contactId,
+    contactCustomerId: company.contacts.edges[0]?.node.customer.id ?? "",
+    locations,
+    contactRoles,
+  };
+  
   if (firstLocationId) {
     locations.set(firstLoc.dueInDays, firstLocationId);
     console.log(`    → Location ${firstLoc.suffix}: created`);
     state.createdCount.locations++;
+    // Assign role on the first location (required for orders)
+    if (contactId && contactRoles.length > 0) {
+      await ensureContactRoleOnLocation(state, companyData, firstLocationId);
+    }
   }
 
   // Create additional locations for remaining terms
@@ -876,17 +985,17 @@ export async function createCompanyWithLocations(
       locations.set(loc.dueInDays, locationId);
       console.log(`    → Location ${loc.suffix}: created`);
       state.createdCount.locations++;
+      // Assign role on each new location (required for orders)
+      if (contactId && contactRoles.length > 0) {
+        await ensureContactRoleOnLocation(state, companyData, locationId);
+      }
     } else {
       state.failedCount.locations++;
       state.errors.push(`Failed to create location ${loc.suffix} for ${seed.name}`);
     }
   }
 
-  return {
-    id: company.id,
-    contactCustomerId: company.contacts.edges[0]?.node.customer.id ?? "",
-    locations,
-  };
+  return companyData;
 }
 
 /**
@@ -974,13 +1083,211 @@ async function createCompanyLocation(
   return location.id;
 }
 
+// -- Role Assignment --
+
+/**
+ * Query to fetch contact roles available on a company.
+ */
+export const COMPANY_CONTACT_ROLES_QUERY = `
+  query GetCompanyContactRoles($companyId: ID!) {
+    company(id: $companyId) {
+      contactRoles(first: 10) {
+        nodes {
+          id
+          name
+        }
+      }
+    }
+  }
+`;
+
+/**
+ * Query to check existing role assignments on a company location.
+ */
+export const COMPANY_LOCATION_ROLE_ASSIGNMENTS_QUERY = `
+  query GetLocationRoleAssignments($locationId: ID!) {
+    companyLocation(id: $locationId) {
+      roleAssignments(first: 50) {
+        nodes {
+          id
+          companyContact { id }
+          role { id name }
+        }
+      }
+    }
+  }
+`;
+
+/**
+ * Mutation to assign roles on a company location.
+ */
+export const COMPANY_LOCATION_ASSIGN_ROLES_MUTATION = `
+  mutation AssignRolesToLocation($companyLocationId: ID!, $rolesToAssign: [CompanyLocationRoleAssign!]!) {
+    companyLocationAssignRoles(companyLocationId: $companyLocationId, rolesToAssign: $rolesToAssign) {
+      roleAssignments {
+        id
+        companyContact { id }
+        role { id name }
+      }
+      userErrors { field message code }
+    }
+  }
+`;
+
+/**
+ * Build variables for companyLocationAssignRoles mutation.
+ * Exported for schema validation testing.
+ */
+export function buildCompanyLocationAssignRolesInput(
+  companyLocationId: string,
+  companyContactId: string,
+  companyContactRoleId: string
+): { companyLocationId: string; rolesToAssign: Array<{ companyContactRoleId: string; companyContactId: string }> } {
+  return {
+    companyLocationId,
+    rolesToAssign: [{
+      companyContactRoleId,
+      companyContactId,
+    }],
+  };
+}
+
+/**
+ * Fetch available contact roles for a company.
+ */
+export async function fetchCompanyContactRoles(
+  state: SeedState,
+  companyId: string
+): Promise<CompanyContactRole[]> {
+  const result = await graphql<{
+    company: { contactRoles: { nodes: CompanyContactRole[] } } | null;
+  }>(state, COMPANY_CONTACT_ROLES_QUERY, { companyId });
+
+  return result.data?.company?.contactRoles.nodes ?? [];
+}
+
+/**
+ * Check if a contact already has a role assignment on a location.
+ * Returns true if the contact already has ANY role on this location.
+ */
+export async function hasContactRoleOnLocation(
+  state: SeedState,
+  locationId: string,
+  contactId: string
+): Promise<boolean> {
+  const result = await graphql<{
+    companyLocation: { roleAssignments: { nodes: CompanyContactRoleAssignment[] } } | null;
+  }>(state, COMPANY_LOCATION_ROLE_ASSIGNMENTS_QUERY, { locationId });
+
+  const assignments = result.data?.companyLocation?.roleAssignments.nodes ?? [];
+  return assignments.some(a => a.companyContact.id === contactId);
+}
+
+/**
+ * Assign a role to a contact on a company location.
+ * Returns true if successful, false on failure.
+ */
+async function assignRoleToContactOnLocation(
+  state: SeedState,
+  locationId: string,
+  contactId: string,
+  roleId: string,
+  roleName: string
+): Promise<boolean> {
+  const variables = buildCompanyLocationAssignRolesInput(locationId, contactId, roleId);
+
+  const result = await graphql<{
+    companyLocationAssignRoles: {
+      roleAssignments: CompanyContactRoleAssignment[] | null;
+      userErrors: Array<{ field: string[] | null; message: string; code?: string }>;
+    };
+  }>(state, COMPANY_LOCATION_ASSIGN_ROLES_MUTATION, variables, { isMutation: true, mutationName: "companyLocationAssignRoles" });
+
+  if (result.errors) {
+    console.error(`    ❌ Failed to assign role: GraphQL errors`);
+    return false;
+  }
+
+  const payload = result.data?.companyLocationAssignRoles;
+  if (!payload) {
+    console.error(`    ❌ Failed to assign role: no response payload`);
+    return false;
+  }
+
+  if (payload.userErrors.length) {
+    console.error(`    ❌ Failed to assign role: ${payload.userErrors[0].message}${payload.userErrors[0].code ? ` [${payload.userErrors[0].code}]` : ""}`);
+    return false;
+  }
+
+  console.log(`    → Assigned role "${roleName}" to contact on location`);
+  return true;
+}
+
+/**
+ * Ensure the company's main contact has a role on the specified location.
+ * Idempotent: checks existing assignments first.
+ * Prefers "Ordering only" role, falls back to the first available role.
+ * 
+ * @returns true if role is assigned (or was already assigned), false on failure
+ */
+export async function ensureContactRoleOnLocation(
+  state: SeedState,
+  companyData: CompanyData,
+  locationId: string
+): Promise<boolean> {
+  // Check if contact already has a role on this location
+  const alreadyAssigned = await hasContactRoleOnLocation(state, locationId, companyData.contactId);
+  if (alreadyAssigned) {
+    state.skippedCount.roleAssignments++;
+    return true;
+  }
+
+  // Get available roles (prefer "Ordering only", else first)
+  const roles = companyData.contactRoles;
+  if (roles.length === 0) {
+    console.error(`    ❌ No contact roles available on company`);
+    state.failedCount.roleAssignments++;
+    state.errors.push(`No contact roles available for role assignment`);
+    return false;
+  }
+
+  const preferredRole = roles.find(r => r.name === "Ordering only") ?? roles[0];
+
+  if (state.dryRun) {
+    console.log(`    [dry-run] Would assign role "${preferredRole.name}" to contact on location`);
+    state.createdCount.roleAssignments++;
+    return true;
+  }
+
+  const success = await assignRoleToContactOnLocation(
+    state,
+    locationId,
+    companyData.contactId,
+    preferredRole.id,
+    preferredRole.name
+  );
+
+  if (success) {
+    state.createdCount.roleAssignments++;
+  } else {
+    state.failedCount.roleAssignments++;
+    state.errors.push(`Failed to assign role on location`);
+  }
+
+  return success;
+}
+
 // -- Seeding: Orders --
 
 export async function seedOrders(state: SeedState): Promise<void> {
   console.log("\n📝 Seeding B2B orders with backdated processedAt...");
   console.log("   (processedAt per OrderCreateOrderInput: 'The date and time when the order was created')");
+  console.log(`   (Pacing: ${SEED_ORDER_DELAY_MS}ms between orders to avoid dev store throttling)`);
 
+  const totalOrders = ORDER_DISTRIBUTION.length;
   let orderIndex = 0;
+  let isFirstOrder = true;
+  
   for (const orderSpec of ORDER_DISTRIBUTION) {
     orderIndex++;
     const orderKey = `${SEED_PREFIX}order-${orderIndex}`;
@@ -988,14 +1295,14 @@ export async function seedOrders(state: SeedState): Promise<void> {
     // Check if order already exists (idempotency)
     const existingOrder = await findOrderByTag(state, orderKey);
     if (existingOrder) {
-      console.log(`  ⏭️  Order ${orderIndex} already exists (${existingOrder.name})`);
+      console.log(`  ⏭️  [${orderIndex}/${totalOrders}] Order already exists (${existingOrder.name})`);
       state.skippedCount.orders++;
       continue;
     }
 
     const company = state.companies.get(orderSpec.entityKey);
     if (!company) {
-      console.error(`  ❌ Company ${orderSpec.entityKey} not found`);
+      console.error(`  ❌ [${orderIndex}/${totalOrders}] Company ${orderSpec.entityKey} not found`);
       state.errors.push(`Company ${orderSpec.entityKey} not found for order ${orderIndex}`);
       continue;
     }
@@ -1003,16 +1310,23 @@ export async function seedOrders(state: SeedState): Promise<void> {
     // Get the location for the specified payment terms
     const locationId = company.locations.get(orderSpec.locationTermsDays);
     if (!locationId) {
-      console.error(`  ❌ Location for Net ${orderSpec.locationTermsDays} not found for ${orderSpec.entityKey}`);
+      console.error(`  ❌ [${orderIndex}/${totalOrders}] Location for Net ${orderSpec.locationTermsDays} not found for ${orderSpec.entityKey}`);
       state.errors.push(`Location Net ${orderSpec.locationTermsDays} not found for ${orderSpec.entityKey}`);
       continue;
     }
 
     // Guard against empty or missing contactCustomerId
     if (!company.contactCustomerId) {
-      console.log(`  ⚠️  Skipping order ${orderIndex}: no contactCustomerId for ${orderSpec.entityKey}`);
+      console.log(`  ⚠️  [${orderIndex}/${totalOrders}] Skipping: no contactCustomerId for ${orderSpec.entityKey}`);
       continue;
     }
+
+    // Add pacing delay between orders (skip for first order)
+    if (!isFirstOrder && !state.dryRun) {
+      console.log(`  ⏳ Waiting ${SEED_ORDER_DELAY_MS}ms before next order...`);
+      await sleep(SEED_ORDER_DELAY_MS);
+    }
+    isFirstOrder = false;
 
     // Generate random amount
     const amountRange = AMOUNT_RANGES_INR[orderIndex % AMOUNT_RANGES_INR.length];
@@ -1031,7 +1345,7 @@ export async function seedOrders(state: SeedState): Promise<void> {
         state.overdueOrdersCount++;
       }
       console.log(
-        `  [dry-run] Would create order ${orderIndex}: ${orderSpec.entityKey}, ` +
+        `  [dry-run] [${orderIndex}/${totalOrders}] Would create order: ${orderSpec.entityKey}, ` +
           `Net ${orderSpec.locationTermsDays}, ${orderSpec.daysAgo} days ago${isOverdue ? " (OVERDUE)" : ""}, ` +
           formatCurrency(amount, state.currencyCode)
       );
@@ -1062,22 +1376,26 @@ export async function seedOrders(state: SeedState): Promise<void> {
       state.overdueOrdersCount++;
     }
     console.log(
-      `  ✅ Created ${order.name}: ${orderSpec.entityKey}, ` +
+      `  ✅ [${orderIndex}/${totalOrders}] Created ${order.name}: ` +
         `Net ${orderSpec.locationTermsDays}, ${orderSpec.daysAgo} days ago${isOverdue ? " (OVERDUE)" : ""}, ` +
         formatCurrency(amount, state.currencyCode)
     );
   }
 }
 
-export async function findOrderByTag(state: SeedState, tag: string): Promise<OrderNode | null> {
-  const result = await graphql<{ orders: { nodes: OrderNode[] } }>(state, `
-    query FindOrder($query: String!) {
-      orders(first: 1, query: $query) {
-        nodes { id name tags }
-      }
+/**
+ * Query to find an order by tag (used for idempotency check).
+ */
+export const FIND_ORDER_BY_TAG_QUERY = `
+  query FindOrder($query: String!) {
+    orders(first: 1, query: $query) {
+      nodes { id name tags }
     }
-  `, { query: `tag:'${tag}'` });
+  }
+`;
 
+export async function findOrderByTag(state: SeedState, tag: string): Promise<OrderNode | null> {
+  const result = await graphql<{ orders: { nodes: OrderNode[] } }>(state, FIND_ORDER_BY_TAG_QUERY, { query: `tag:'${tag}'` });
   return result.data?.orders.nodes[0] ?? null;
 }
 
@@ -1208,13 +1526,14 @@ async function ensureTaggedCustomer(
 export async function seedTaggedCustomerOrders(state: SeedState): Promise<void> {
   console.log("\n📝 Seeding orders for tagged (non-B2B) customers...");
   console.log("   (These test the AccountSource tag rules path of S9 inference)");
+  console.log(`   (Pacing: ${SEED_ORDER_DELAY_MS}ms between orders to avoid dev store throttling)`);
 
   // Build customer map: termsDays -> customerId
   const customerMap = new Map<number, string>();
 
   for (const seed of TAGGED_CUSTOMER_SEEDS) {
     if (state.dryRun) {
-      console.log(`  [dry-run] Would create/tag customer: ${seed.email} → Net ${seed.termsDays}`);
+      console.log(`  [dry-run] Would create/tag customer for Net ${seed.termsDays}`);
       customerMap.set(seed.termsDays, `dry-run-customer-${seed.termsDays}`);
       continue;
     }
@@ -1222,28 +1541,38 @@ export async function seedTaggedCustomerOrders(state: SeedState): Promise<void> 
     const customerId = await ensureTaggedCustomer(state, seed.email, seed.termsDays);
     if (customerId) {
       customerMap.set(seed.termsDays, customerId);
-      console.log(`  ✅ Customer ${seed.email} tagged with ${SEED_TAG}-net${seed.termsDays}`);
+      console.log(`  ✅ Customer tagged with ${SEED_TAG}-net${seed.termsDays}`);
     }
   }
 
   // Place orders for tagged customers (no B2B, no companyLocationId)
+  const totalTaggedOrders = TAGGED_ORDER_DISTRIBUTION.length;
   let orderIndex = 0;
+  let isFirstOrder = true;
+  
   for (const orderSpec of TAGGED_ORDER_DISTRIBUTION) {
     orderIndex++;
     const orderKey = `${SEED_PREFIX}tagged-order-${orderIndex}`;
 
     const existingOrder = await findOrderByTag(state, orderKey);
     if (existingOrder) {
-      console.log(`  ⏭️  Tagged order ${orderIndex} already exists (${existingOrder.name})`);
+      console.log(`  ⏭️  [${orderIndex}/${totalTaggedOrders}] Tagged order already exists (${existingOrder.name})`);
       state.skippedCount.orders++;
       continue;
     }
 
     const customerId = customerMap.get(orderSpec.customerTermsDays);
     if (!customerId) {
-      console.error(`  ❌ No customer found for Net ${orderSpec.customerTermsDays}`);
+      console.error(`  ❌ [${orderIndex}/${totalTaggedOrders}] No customer found for Net ${orderSpec.customerTermsDays}`);
       continue;
     }
+
+    // Add pacing delay between orders (skip for first order)
+    if (!isFirstOrder && !state.dryRun) {
+      console.log(`  ⏳ Waiting ${SEED_ORDER_DELAY_MS}ms before next order...`);
+      await sleep(SEED_ORDER_DELAY_MS);
+    }
+    isFirstOrder = false;
 
     const amountRange = AMOUNT_RANGES_INR[orderIndex % AMOUNT_RANGES_INR.length];
     const amount = Math.floor(Math.random() * (amountRange.max - amountRange.min) + amountRange.min);
@@ -1256,11 +1585,12 @@ export async function seedTaggedCustomerOrders(state: SeedState): Promise<void> 
       const isOverdue = orderSpec.daysAgo > orderSpec.customerTermsDays;
       if (isOverdue) state.overdueOrdersCount++;
       console.log(
-        `  [dry-run] Would create tagged order ${orderIndex}: ` +
+        `  [dry-run] [${orderIndex}/${totalTaggedOrders}] Would create tagged order: ` +
           `Net ${orderSpec.customerTermsDays}, ${orderSpec.daysAgo} days ago${isOverdue ? " (OVERDUE)" : ""}, ` +
           formatCurrency(amount, state.currencyCode)
       );
       state.createdCount.orders++;
+      state.taggedCustomerOrdersCount++;
       continue;
     }
 
@@ -1281,10 +1611,11 @@ export async function seedTaggedCustomerOrders(state: SeedState): Promise<void> 
     }
 
     state.createdCount.orders++;
+    state.taggedCustomerOrdersCount++;
     const isOverdue = orderSpec.daysAgo > orderSpec.customerTermsDays;
     if (isOverdue) state.overdueOrdersCount++;
     console.log(
-      `  ✅ Created ${order.name}: tagged customer, ` +
+      `  ✅ [${orderIndex}/${totalTaggedOrders}] Created ${order.name}: tagged customer, ` +
         `Net ${orderSpec.customerTermsDays}, ${orderSpec.daysAgo} days ago${isOverdue ? " (OVERDUE)" : ""}, ` +
         formatCurrency(amount, state.currencyCode)
     );
@@ -1398,41 +1729,63 @@ async function createTaggedCustomerOrder(
     currencyCode: state.currencyCode,
   });
 
-  const result = await graphql<{
-    orderCreate: {
-      order: {
-        id: string;
-        name: string;
-        displayFinancialStatus: string;
-        totalPriceSet: { shopMoney: { amount: string; currencyCode: string } };
-      } | null;
-      userErrors: UserError[];
+  // Retry loop with exponential backoff for throttle errors
+  for (let attempt = 0; attempt < ORDER_CREATE_MAX_ATTEMPTS; attempt++) {
+    const result = await graphql<{
+      orderCreate: {
+        order: {
+          id: string;
+          name: string;
+          displayFinancialStatus: string;
+          totalPriceSet: { shopMoney: { amount: string; currencyCode: string } };
+        } | null;
+        userErrors: UserError[];
+      };
+    }>(state, TAGGED_CUSTOMER_ORDER_CREATE_MUTATION, variables, { isMutation: true, mutationName: "orderCreate" });
+
+    const userErrors = result.data?.orderCreate.userErrors ?? [];
+
+    // Check for throttle errors - retry if detected
+    if (isThrottleError(result, userErrors)) {
+      if (attempt < ORDER_CREATE_MAX_ATTEMPTS - 1) {
+        const delay = calculateThrottleBackoffDelay(attempt);
+        console.log(`    ⏳ Throttled (attempt ${attempt + 1}/${ORDER_CREATE_MAX_ATTEMPTS}), retrying in ${Math.round(delay / 1000)}s...`);
+        await sleep(delay);
+        continue;
+      } else {
+        console.error(`    ❌ Throttle limit reached after ${ORDER_CREATE_MAX_ATTEMPTS} attempts`);
+        return null;
+      }
+    }
+
+    // Handle non-throttle errors
+    if (result.errors) {
+      return null;
+    }
+
+    if (userErrors.length) {
+      logUserErrors(userErrors, "createTaggedCustomerOrder");
+      return null;
+    }
+
+    const order = result.data?.orderCreate.order;
+    if (!order) {
+      console.error(`    ❌ No order returned from createTaggedCustomerOrder`);
+      return null;
+    }
+
+    // No Shopify terms for non-B2B orders - S9 inference will use tag rules
+    state.ordersWithoutShopifyTerms++;
+    console.log(`    → No Shopify terms (will use tag rule: Net ${options.expectedTermsDays})`);
+
+    return {
+      id: order.id,
+      name: order.name,
     };
-  }>(state, TAGGED_CUSTOMER_ORDER_CREATE_MUTATION, variables, { isMutation: true, mutationName: "orderCreate" });
-
-  if (result.errors) {
-    return null;
   }
 
-  if (result.data?.orderCreate.userErrors.length) {
-    logUserErrors(result.data.orderCreate.userErrors, "createTaggedCustomerOrder");
-    return null;
-  }
-
-  const order = result.data?.orderCreate.order;
-  if (!order) {
-    console.error(`    ❌ No order returned from createTaggedCustomerOrder`);
-    return null;
-  }
-
-  // No Shopify terms for non-B2B orders - S9 inference will use tag rules
-  state.ordersWithoutShopifyTerms++;
-  console.log(`    → No Shopify terms (will use tag rule: Net ${options.expectedTermsDays})`);
-
-  return {
-    id: order.id,
-    name: order.name,
-  };
+  // Should not reach here, but safety return
+  return null;
 }
 
 /**
@@ -1540,6 +1893,7 @@ export function buildB2BOrderInput(
  *   @see https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateOrderInput
  *   "processedAt: The date and time when the order was created."
  * - sendReceipt: false to suppress customer emails
+ * - Retry with exponential backoff on throttle errors ("Too many attempts")
  * 
  * If Shopify returns null paymentTerms, logs a warning but does not fail.
  * S9 inference will use DB defaults instead.
@@ -1566,55 +1920,77 @@ export async function createOrder(
     currencyCode: state.currencyCode,
   });
 
-  const result = await graphql<{
-    orderCreate: {
-      order: {
-        id: string;
-        name: string;
-        displayFinancialStatus: string;
-        totalPriceSet: { shopMoney: { amount: string; currencyCode: string } };
-        paymentTerms: OrderPaymentTerms | null;
-      } | null;
-      userErrors: UserError[];
+  // Retry loop with exponential backoff for throttle errors
+  for (let attempt = 0; attempt < ORDER_CREATE_MAX_ATTEMPTS; attempt++) {
+    const result = await graphql<{
+      orderCreate: {
+        order: {
+          id: string;
+          name: string;
+          displayFinancialStatus: string;
+          totalPriceSet: { shopMoney: { amount: string; currencyCode: string } };
+          paymentTerms: OrderPaymentTerms | null;
+        } | null;
+        userErrors: UserError[];
+      };
+    }>(state, B2B_ORDER_CREATE_MUTATION, variables, { isMutation: true, mutationName: "orderCreate" });
+
+    const userErrors = result.data?.orderCreate.userErrors ?? [];
+
+    // Check for throttle errors - retry if detected
+    if (isThrottleError(result, userErrors)) {
+      if (attempt < ORDER_CREATE_MAX_ATTEMPTS - 1) {
+        const delay = calculateThrottleBackoffDelay(attempt);
+        console.log(`    ⏳ Throttled (attempt ${attempt + 1}/${ORDER_CREATE_MAX_ATTEMPTS}), retrying in ${Math.round(delay / 1000)}s...`);
+        await sleep(delay);
+        continue;
+      } else {
+        console.error(`    ❌ Throttle limit reached after ${ORDER_CREATE_MAX_ATTEMPTS} attempts`);
+        return null;
+      }
+    }
+
+    // Handle non-throttle errors
+    if (result.errors) {
+      return null;
+    }
+
+    if (userErrors.length) {
+      logUserErrors(userErrors, "createOrder");
+      return null;
+    }
+
+    const order = result.data?.orderCreate.order;
+    if (!order) {
+      console.error(`    ❌ No order returned from createOrder`);
+      return null;
+    }
+
+    // Log the actual terms from the response (not the spec)
+    if (order.paymentTerms) {
+      state.ordersWithShopifyTerms++;
+      const terms = order.paymentTerms;
+      const dueAt = terms.paymentSchedules.nodes[0]?.dueAt;
+      console.log(
+        `    → Shopify terms: ${terms.paymentTermsName} ` +
+        `(${terms.paymentTermsType}, ${terms.dueInDays ?? 0} days` +
+        `${dueAt ? `, due ${dueAt.split("T")[0]}` : ""})`
+      );
+    } else {
+      state.ordersWithoutShopifyTerms++;
+      console.log(
+        `    → No Shopify terms (will use DB default: Net ${options.expectedTermsDays})`
+      );
+    }
+
+    return {
+      id: order.id,
+      name: order.name,
     };
-  }>(state, B2B_ORDER_CREATE_MUTATION, variables, { isMutation: true, mutationName: "orderCreate" });
-
-  if (result.errors) {
-    return null;
   }
 
-  if (result.data?.orderCreate.userErrors.length) {
-    logUserErrors(result.data.orderCreate.userErrors, "createOrder");
-    return null;
-  }
-
-  const order = result.data?.orderCreate.order;
-  if (!order) {
-    console.error(`    ❌ No order returned from createOrder`);
-    return null;
-  }
-
-  // Log the actual terms from the response (not the spec)
-  if (order.paymentTerms) {
-    state.ordersWithShopifyTerms++;
-    const terms = order.paymentTerms;
-    const dueAt = terms.paymentSchedules.nodes[0]?.dueAt;
-    console.log(
-      `    → Shopify terms: ${terms.paymentTermsName} ` +
-      `(${terms.paymentTermsType}, ${terms.dueInDays ?? 0} days` +
-      `${dueAt ? `, due ${dueAt.split("T")[0]}` : ""})`
-    );
-  } else {
-    state.ordersWithoutShopifyTerms++;
-    console.log(
-      `    → No Shopify terms (will use DB default: Net ${options.expectedTermsDays})`
-    );
-  }
-
-  return {
-    id: order.id,
-    name: order.name,
-  };
+  // Should not reach here, but safety return
+  return null;
 }
 
 // -- Database Seeding --
@@ -1823,13 +2199,14 @@ export async function main(): Promise<void> {
     currencyCode: "",
     companies: new Map(),
     paymentTermsTemplates: [],
-    createdCount: { companies: 0, locations: 0, orders: 0, dbRules: 0, dbAccounts: 0 },
-    skippedCount: { companies: 0, orders: 0 },
+    createdCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRules: 0, dbAccounts: 0 },
+    skippedCount: { companies: 0, orders: 0, roleAssignments: 0 },
     deletedCount: { companies: 0, orders: 0 },
-    failedCount: { locations: 0, orders: 0 },
+    failedCount: { locations: 0, orders: 0, roleAssignments: 0 },
     ordersWithShopifyTerms: 0,
     ordersWithoutShopifyTerms: 0,
     overdueOrdersCount: 0,
+    taggedCustomerOrdersCount: 0,
     errors: [],
   };
 
@@ -1870,9 +2247,9 @@ export async function main(): Promise<void> {
   // Seed database for S9 inference
   await seedDatabase(state);
 
-  // Summary
+  // Summary - counts and booleans only, no PII (names, emails, phones, addresses)
   console.log("\n═══════════════════════════════════════════════════════════════");
-  console.log("  Summary");
+  console.log("  Summary (counts only, no PII)");
   console.log("═══════════════════════════════════════════════════════════════");
 
   if (dryRun) {
@@ -1883,52 +2260,68 @@ export async function main(): Promise<void> {
     }
   }
 
+  // Per-company location counts with terms
+  console.log("\n  Companies with Locations:");
+  let companiesWithAllLocations = 0;
+  for (const [companyKey, company] of state.companies) {
+    const net15 = company.locations.has(15);
+    const net30 = company.locations.has(30);
+    const net60 = company.locations.has(60);
+    const locationCount = company.locations.size;
+    console.log(`    ${companyKey}: ${locationCount} locations (Net-15: ${net15}, Net-30: ${net30}, Net-60: ${net60})`);
+    if (net15 && net30 && net60) companiesWithAllLocations++;
+  }
+  console.log(`  Total companies with all 3 locations: ${companiesWithAllLocations}/${state.companies.size}`);
+
   console.log("\n  Shopify Created:");
-  console.log(`    Companies:    ${state.createdCount.companies}`);
-  console.log(`    Locations:    ${state.createdCount.locations}`);
-  console.log(`    Orders:       ${state.createdCount.orders}`);
+  console.log(`    Companies:        ${state.createdCount.companies}`);
+  console.log(`    Locations:        ${state.createdCount.locations}`);
+  console.log(`    Role assignments: ${state.createdCount.roleAssignments}`);
+  console.log(`    Orders (total):   ${state.createdCount.orders}`);
 
   console.log("\n  Skipped (already exist):");
-  console.log(`    Companies:    ${state.skippedCount.companies}`);
-  console.log(`    Orders:       ${state.skippedCount.orders}`);
+  console.log(`    Companies:        ${state.skippedCount.companies}`);
+  console.log(`    Role assignments: ${state.skippedCount.roleAssignments}`);
+  console.log(`    Orders:           ${state.skippedCount.orders}`);
 
-  const totalFailures = state.failedCount.locations + state.failedCount.orders;
+  const totalFailures = state.failedCount.locations + state.failedCount.orders + state.failedCount.roleAssignments;
   if (totalFailures > 0) {
     console.log("\n  ❌ Failed:");
-    console.log(`    Locations:    ${state.failedCount.locations}`);
-    console.log(`    Orders:       ${state.failedCount.orders}`);
+    console.log(`    Locations:        ${state.failedCount.locations}`);
+    console.log(`    Role assignments: ${state.failedCount.roleAssignments}`);
+    console.log(`    Orders:           ${state.failedCount.orders}`);
   }
 
-  if (!dryRun && state.createdCount.orders > 0) {
-    console.log("\n  Payment Terms (WARNING if counts differ):");
-    console.log(`    Inherited from Shopify: ${state.ordersWithShopifyTerms}`);
-    console.log(`    Will use DB defaults:   ${state.ordersWithoutShopifyTerms}`);
+  // Order breakdown
+  const b2bOrdersCount = state.createdCount.orders - state.taggedCustomerOrdersCount;
+  console.log("\n  Order Breakdown:");
+  console.log(`    B2B orders:             ${b2bOrdersCount}`);
+  console.log(`    Tagged customer orders: ${state.taggedCustomerOrdersCount}`);
+  console.log(`    Orders with payment terms (from Shopify): ${state.ordersWithShopifyTerms}`);
+  console.log(`    Orders without payment terms (use DB):    ${state.ordersWithoutShopifyTerms}`);
+  console.log(`    Overdue orders:         ${state.overdueOrdersCount}`);
+  console.log(`    Has overdue orders:     ${state.overdueOrdersCount > 0}`);
     
-    if (state.ordersWithoutShopifyTerms > 0) {
-      console.log(`\n  ⚠️  ${state.ordersWithoutShopifyTerms} orders did not inherit Shopify terms.`);
-      console.log("     S9 inference will use BuyerAccount.defaultTermsDays from DB.");
-    }
-
-    console.log("\n  Overdue Orders (effective due date in past):");
-    console.log(`    Overdue count: ${state.overdueOrdersCount}`);
-    
-    if (state.overdueOrdersCount === 0) {
-      console.log(`\n  ⚠️  WARNING: No orders have effective due date in the past!`);
-      console.log("     Expected at least some Net 15/30 orders with daysAgo > termsDays.");
-    }
+  if (state.overdueOrdersCount === 0 && !dryRun) {
+    console.log(`\n  ⚠️  WARNING: No orders have effective due date in the past!`);
+    console.log("     Expected at least some Net 15/30 orders with daysAgo > termsDays.");
   }
 
+  // Database seeding
   if (state.databaseUrl && !dryRun) {
     console.log("\n  Database Seeded:");
     console.log(`    Tag rules:      ${state.createdCount.dbRules}`);
     console.log(`    BuyerAccounts:  ${state.createdCount.dbAccounts}`);
+  } else if (!dryRun) {
+    console.log("\n  Database Sync:");
+    console.log("    n/a (no DB access)");
   }
 
+  // Error summary (without PII)
   if (state.errors.length > 0) {
     console.log("\n  Errors:");
-    for (const err of state.errors) {
-      console.log(`    ❌ ${err}`);
-    }
+    console.log(`    Error count: ${state.errors.length}`);
+    console.log(`    Has errors:  true`);
   }
 
   // Exit non-zero if any failures occurred

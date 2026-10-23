@@ -26,16 +26,28 @@ import {
   TAGGED_CUSTOMER_ORDER_CREATE_MUTATION,
   COMPANY_CREATE_MUTATION,
   COMPANY_LOCATION_CREATE_MUTATION,
+  COMPANY_CONTACT_ROLES_QUERY,
+  COMPANY_LOCATION_ROLE_ASSIGNMENTS_QUERY,
+  COMPANY_LOCATION_ASSIGN_ROLES_MUTATION,
+  FIND_ORDER_BY_TAG_QUERY,
   buildCompanyCreateInput,
   buildCompanyLocationCreateInput,
+  buildCompanyLocationAssignRolesInput,
   buildTaggedCustomerOrderInput,
   buildB2BOrderInput,
+  isThrottleError,
+  calculateThrottleBackoffDelay,
+  ensureContactRoleOnLocation,
+  DEFAULT_SEED_ORDER_DELAY_MS,
+  ORDER_CREATE_MAX_ATTEMPTS,
+  ORDER_CREATE_BACKOFF_DELAYS_MS,
   getIndiaProvinceCode,
   getIndiaAddressInfo,
   INDIA_CITY_ADDRESS_INFO,
   type SeedState,
   type GraphQLResponse,
   type UserError,
+  type CompanyData,
 } from "../seed";
 import { inferDueDate } from "~/lib/due-date";
 import { readFileSync } from "fs";
@@ -80,14 +92,34 @@ function createMockState(overrides: Partial<SeedState> = {}): SeedState {
       { id: "gid://shopify/PaymentTermsTemplate/30", name: "Net 30", paymentTermsType: "NET", dueInDays: 30 },
       { id: "gid://shopify/PaymentTermsTemplate/60", name: "Net 60", paymentTermsType: "NET", dueInDays: 60 },
     ],
-    createdCount: { companies: 0, locations: 0, orders: 0, dbRules: 0, dbAccounts: 0 },
-    skippedCount: { companies: 0, orders: 0 },
+    createdCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRules: 0, dbAccounts: 0 },
+    skippedCount: { companies: 0, orders: 0, roleAssignments: 0 },
     deletedCount: { companies: 0, orders: 0 },
-    failedCount: { locations: 0, orders: 0 },
+    failedCount: { locations: 0, orders: 0, roleAssignments: 0 },
     ordersWithShopifyTerms: 0,
     ordersWithoutShopifyTerms: 0,
     overdueOrdersCount: 0,
+    taggedCustomerOrdersCount: 0,
     errors: [],
+    ...overrides,
+  };
+}
+
+function createMockCompanyData(overrides: Partial<CompanyData> = {}): CompanyData {
+  const locations = new Map<number, string>();
+  locations.set(15, "gid://shopify/CompanyLocation/loc-15");
+  locations.set(30, "gid://shopify/CompanyLocation/loc-30");
+  locations.set(60, "gid://shopify/CompanyLocation/loc-60");
+  
+  return {
+    id: "gid://shopify/Company/1",
+    contactId: "gid://shopify/CompanyContact/contact-1",
+    contactCustomerId: "gid://shopify/Customer/cust-1",
+    locations,
+    contactRoles: [
+      { id: "gid://shopify/CompanyContactRole/ordering", name: "Ordering only" },
+      { id: "gid://shopify/CompanyContactRole/admin", name: "Location admin" },
+    ],
     ...overrides,
   };
 }
@@ -282,6 +314,60 @@ function setupMockFetch() {
     else if (query.includes("FindSeeded")) {
       responseData = {
         data: { companies: { nodes: [] }, orders: { nodes: [] } },
+        extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
+      };
+    }
+    // Company contact roles query
+    else if (query.includes("contactRoles") && query.includes("GetCompanyContactRoles")) {
+      responseData = {
+        data: {
+          company: {
+            contactRoles: {
+              nodes: [
+                { id: "gid://shopify/CompanyContactRole/ordering", name: "Ordering only" },
+                { id: "gid://shopify/CompanyContactRole/admin", name: "Location admin" },
+              ],
+            },
+          },
+        },
+        extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
+      };
+    }
+    // Location role assignments query
+    else if (query.includes("roleAssignments") && query.includes("GetLocationRoleAssignments")) {
+      const hasExistingAssignment = mockResponses.get("hasExistingRoleAssignment") as boolean ?? false;
+      responseData = {
+        data: {
+          companyLocation: {
+            roleAssignments: {
+              nodes: hasExistingAssignment ? [
+                {
+                  id: "gid://shopify/CompanyContactRoleAssignment/existing",
+                  companyContact: { id: "gid://shopify/CompanyContact/contact-1" },
+                  role: { id: "gid://shopify/CompanyContactRole/ordering", name: "Ordering only" },
+                },
+              ] : [],
+            },
+          },
+        },
+        extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
+      };
+    }
+    // Company location assign roles mutation
+    else if (query.includes("companyLocationAssignRoles")) {
+      responseData = {
+        data: {
+          companyLocationAssignRoles: {
+            roleAssignments: [
+              {
+                id: "gid://shopify/CompanyContactRoleAssignment/new",
+                companyContact: { id: "gid://shopify/CompanyContact/contact-1" },
+                role: { id: "gid://shopify/CompanyContactRole/ordering", name: "Ordering only" },
+              },
+            ],
+            userErrors: [],
+          },
+        },
         extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
       };
     }
@@ -651,11 +737,13 @@ describe("(4) null paymentTerms produces warning, not failure", () => {
 
 describe("Location-to-template mapping", () => {
   beforeEach(() => {
+    vi.useFakeTimers();
     setupMockFetch();
     mockResponses.clear();
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     restoreFetch();
     capturedRequests = [];
   });
@@ -677,19 +765,15 @@ describe("Location-to-template mapping", () => {
     const state = createMockState();
     
     // Set up company with locations
-    const locations = new Map<number, string>();
-    locations.set(15, "gid://shopify/CompanyLocation/loc-15");
-    locations.set(30, "gid://shopify/CompanyLocation/loc-30");
-    locations.set(60, "gid://shopify/CompanyLocation/loc-60");
-    
-    state.companies.set("company-1", {
-      id: "gid://shopify/Company/1",
+    const companyData = createMockCompanyData({
       contactCustomerId: "gid://shopify/Customer/1",
-      locations,
     });
+    state.companies.set("company-1", companyData);
 
-    // Seed first order (Net 15)
-    await seedOrders(state);
+    // Seed orders with fast-forwarded timers
+    const seedPromise = seedOrders(state);
+    await vi.advanceTimersByTimeAsync(600000); // Fast-forward through all delays
+    await seedPromise;
 
     // Find order creation calls
     const orderCalls = capturedRequests.filter(
@@ -709,11 +793,13 @@ describe("Location-to-template mapping", () => {
 
 describe("Idempotency", () => {
   beforeEach(() => {
+    vi.useFakeTimers();
     setupMockFetch();
     mockResponses.clear();
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     restoreFetch();
     capturedRequests = [];
   });
@@ -754,20 +840,17 @@ describe("Idempotency", () => {
     mockResponses.set("existingOrders", [`${SEED_PREFIX}order-1`]);
 
     const state = createMockState();
-    const locations = new Map<number, string>();
-    locations.set(15, "gid://shopify/CompanyLocation/loc-15");
-    locations.set(30, "gid://shopify/CompanyLocation/loc-30");
-    locations.set(60, "gid://shopify/CompanyLocation/loc-60");
     
     for (const seed of COMPANY_SEEDS) {
-      state.companies.set(seed.key, {
+      state.companies.set(seed.key, createMockCompanyData({
         id: `gid://shopify/Company/${seed.key}`,
         contactCustomerId: `gid://shopify/Customer/${seed.key}`,
-        locations,
-      });
+      }));
     }
 
-    await seedOrders(state);
+    const seedPromise = seedOrders(state);
+    await vi.advanceTimersByTimeAsync(600000); // Fast-forward through order delays
+    await seedPromise;
 
     expect(state.skippedCount.orders).toBeGreaterThanOrEqual(1);
   });
@@ -801,11 +884,11 @@ describe("(2) DB seeding idempotent - no duplicate rows", () => {
     const locations = new Map<number, string>();
     locations.set(15, "gid://shopify/CompanyLocation/loc-15");
     locations.set(30, "gid://shopify/CompanyLocation/loc-30");
-    state.companies.set("company-1", {
+    state.companies.set("company-1", createMockCompanyData({
       id: "gid://shopify/Company/1",
       contactCustomerId: "gid://shopify/Customer/1",
       locations,
-    });
+    }));
 
     // Capture console.log output
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -837,11 +920,11 @@ describe("(2) DB seeding idempotent - no duplicate rows", () => {
       locations.set(15, `gid://shopify/CompanyLocation/company-${i}-loc-15`);
       locations.set(30, `gid://shopify/CompanyLocation/company-${i}-loc-30`);
       locations.set(60, `gid://shopify/CompanyLocation/company-${i}-loc-60`);
-      state.companies.set(`company-${i}`, {
+      state.companies.set(`company-${i}`, createMockCompanyData({
         id: `gid://shopify/Company/${i}`,
         contactCustomerId: `gid://shopify/Customer/${i}`,
         locations,
-      });
+      }));
     }
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -868,11 +951,11 @@ describe("(2) DB seeding idempotent - no duplicate rows", () => {
     // Add a company with a name containing a single quote
     const locations = new Map<number, string>();
     locations.set(15, "gid://shopify/CompanyLocation/loc-quote");
-    state.companies.set("company-quote", {
+    state.companies.set("company-quote", createMockCompanyData({
       id: "gid://shopify/Company/quote",
       contactCustomerId: "gid://shopify/Customer/quote",
       locations,
-    });
+    }));
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     
@@ -906,11 +989,13 @@ describe("(2) DB seeding idempotent - no duplicate rows", () => {
 
 describe("Tagging strategy", () => {
   beforeEach(() => {
+    vi.useFakeTimers();
     setupMockFetch();
     mockResponses.clear();
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     restoreFetch();
     capturedRequests = [];
   });
@@ -930,18 +1015,14 @@ describe("Tagging strategy", () => {
     const state = createMockState();
     
     // Set up company with locations
-    const locations = new Map<number, string>();
-    locations.set(15, "gid://shopify/CompanyLocation/loc-15");
-    locations.set(30, "gid://shopify/CompanyLocation/loc-30");
-    locations.set(60, "gid://shopify/CompanyLocation/loc-60");
-    
-    state.companies.set("company-1", {
-      id: "gid://shopify/Company/1",
+    const companyData = createMockCompanyData({
       contactCustomerId: "gid://shopify/Customer/b2b-contact-1",
-      locations,
     });
+    state.companies.set("company-1", companyData);
 
-    await seedOrders(state);
+    const seedPromise = seedOrders(state);
+    await vi.advanceTimersByTimeAsync(600000); // Fast-forward through all order delays
+    await seedPromise;
 
     // Should NOT have any customerUpdate or tagsAdd calls for B2B contacts
     const tagCalls = capturedRequests.filter(
@@ -958,7 +1039,9 @@ describe("Tagging strategy", () => {
   it("tagged customers use tagsAdd (idempotent), not customerUpdate", async () => {
     const state = createMockState();
 
-    await seedTaggedCustomerOrders(state);
+    const seedPromise = seedTaggedCustomerOrders(state);
+    await vi.advanceTimersByTimeAsync(300000); // Fast-forward through order delays
+    await seedPromise;
 
     // Should have tagsAdd calls, not customerUpdate
     const tagsAddCalls = capturedRequests.filter(r => r.query.includes("tagsAdd"));
@@ -971,7 +1054,9 @@ describe("Tagging strategy", () => {
   it("each tagged customer gets exactly one terms tag via tagsAdd", async () => {
     const state = createMockState();
 
-    await seedTaggedCustomerOrders(state);
+    const seedPromise = seedTaggedCustomerOrders(state);
+    await vi.advanceTimersByTimeAsync(300000); // Fast-forward through order delays
+    await seedPromise;
 
     // Find all tagsAdd calls
     const tagsAddCalls = capturedRequests.filter(r => r.query.includes("tagsAdd"));
@@ -1036,10 +1121,12 @@ describe("Mutation Retry Safety", () => {
   let fetchCallCount: number;
 
   beforeEach(() => {
+    vi.useFakeTimers();
     fetchCallCount = 0;
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     restoreFetch();
   });
 
@@ -1057,7 +1144,12 @@ describe("Mutation Retry Safety", () => {
     });
 
     const state = createMockState();
-    const result = await graphql(state, "query { shop { name } }");
+    const resultPromise = graphql(state, "query { shop { name } }");
+    
+    // Fast-forward through retry delays
+    await vi.advanceTimersByTimeAsync(10000);
+    
+    const result = await resultPromise;
 
     expect(fetchCallCount).toBe(3);
     expect(result.data).toEqual({ shop: { name: "Test" } });
@@ -1099,7 +1191,12 @@ describe("Mutation Retry Safety", () => {
     });
 
     const state = createMockState();
-    const result = await graphql(state, "mutation { testCreate { id } }", {}, { isMutation: true });
+    const resultPromise = graphql(state, "mutation { testCreate { id } }", {}, { isMutation: true });
+    
+    // Fast-forward through retry delay
+    await vi.advanceTimersByTimeAsync(5000);
+    
+    const result = await resultPromise;
 
     expect(fetchCallCount).toBe(2);
     expect(result.data).toEqual({ testCreate: { id: "123" } });
@@ -1511,5 +1608,594 @@ describe("Variable Builder Input Coercion against Schema", () => {
 
     const errors = coerceAndCollectErrors(validCompanyInput, "CompanyCreateInput");
     expect(errors).toEqual([]);
+  });
+
+  it("buildCompanyLocationAssignRolesInput produces valid CompanyLocationRoleAssign", () => {
+    const variables = buildCompanyLocationAssignRolesInput(
+      "gid://location/1",
+      "gid://contact/1",
+      "gid://role/1"
+    );
+    
+    // CompanyLocationRoleAssign fields are just IDs, so check structure
+    expect(variables.companyLocationId).toBe("gid://location/1");
+    expect(variables.rolesToAssign).toHaveLength(1);
+    expect(variables.rolesToAssign[0].companyContactId).toBe("gid://contact/1");
+    expect(variables.rolesToAssign[0].companyContactRoleId).toBe("gid://role/1");
+  });
+});
+
+describe("Throttle/Backoff Classification", () => {
+  it("isThrottleError returns true for THROTTLED GraphQL error code", () => {
+    const response: GraphQLResponse<unknown> = {
+      errors: [{ message: "Throttled", extensions: { code: "THROTTLED" } }],
+    };
+    expect(isThrottleError(response)).toBe(true);
+  });
+
+  it("isThrottleError returns true for 'Too many attempts' in top-level error", () => {
+    const response: GraphQLResponse<unknown> = {
+      errors: [{ message: "Too many attempts. Please try again later." }],
+    };
+    expect(isThrottleError(response)).toBe(true);
+  });
+
+  it("isThrottleError returns true for 'Too many attempts' in userErrors", () => {
+    const response: GraphQLResponse<unknown> = { data: {} };
+    const userErrors: UserError[] = [
+      { field: ["order"], message: "Too many attempts. Please try again later.", code: "INVALID" },
+    ];
+    expect(isThrottleError(response, userErrors)).toBe(true);
+  });
+
+  it("isThrottleError returns false for other errors", () => {
+    const response: GraphQLResponse<unknown> = {
+      errors: [{ message: "Order could not be created", extensions: { code: "INVALID" } }],
+    };
+    const userErrors: UserError[] = [
+      { field: ["order"], message: "Customer has no role in this company", code: "INVALID" },
+    ];
+    expect(isThrottleError(response, userErrors)).toBe(false);
+  });
+
+  it("calculateThrottleBackoffDelay uses correct base delays", () => {
+    // Mock Math.random to return 0.5 for predictable jitter
+    const mockRandom = vi.spyOn(Math, "random").mockReturnValue(0.5);
+    
+    // At 0.5 random, jitter = baseDelay * 0.2 * (0.5*2-1) = 0
+    expect(calculateThrottleBackoffDelay(0)).toBe(ORDER_CREATE_BACKOFF_DELAYS_MS[0]); // 15000
+    expect(calculateThrottleBackoffDelay(1)).toBe(ORDER_CREATE_BACKOFF_DELAYS_MS[1]); // 30000
+    expect(calculateThrottleBackoffDelay(2)).toBe(ORDER_CREATE_BACKOFF_DELAYS_MS[2]); // 60000
+    expect(calculateThrottleBackoffDelay(3)).toBe(ORDER_CREATE_BACKOFF_DELAYS_MS[3]); // 120000
+    // Index 4 should cap at index 3
+    expect(calculateThrottleBackoffDelay(4)).toBe(ORDER_CREATE_BACKOFF_DELAYS_MS[3]); // 120000
+    
+    mockRandom.mockRestore();
+  });
+
+  it("calculateThrottleBackoffDelay adds jitter within +/- 20%", () => {
+    const baseDelay = ORDER_CREATE_BACKOFF_DELAYS_MS[0]; // 15000
+    const minExpected = baseDelay * 0.8;
+    const maxExpected = baseDelay * 1.2;
+    
+    for (let i = 0; i < 100; i++) {
+      const delay = calculateThrottleBackoffDelay(0);
+      expect(delay).toBeGreaterThanOrEqual(minExpected);
+      expect(delay).toBeLessThanOrEqual(maxExpected);
+    }
+  });
+
+  it("ORDER_CREATE_MAX_ATTEMPTS is 5", () => {
+    expect(ORDER_CREATE_MAX_ATTEMPTS).toBe(5);
+  });
+
+  it("DEFAULT_SEED_ORDER_DELAY_MS is 12000", () => {
+    expect(DEFAULT_SEED_ORDER_DELAY_MS).toBe(12000);
+  });
+});
+
+describe("Throttle Retry Behavior", () => {
+  let fetchCallCount: number;
+  
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fetchCallCount = 0;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    restoreFetch();
+  });
+
+  it("throttle-then-success: createOrder succeeds after throttle retry", async () => {
+    // First call returns throttle error, second succeeds
+    global.fetch = vi.fn(async () => {
+      fetchCallCount++;
+      if (fetchCallCount === 1) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              orderCreate: {
+                order: null,
+                userErrors: [{ field: ["order"], message: "Too many attempts. Please try again later.", code: "THROTTLED" }],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            orderCreate: {
+              order: {
+                id: "gid://shopify/Order/1",
+                name: "#1001",
+                displayFinancialStatus: "PENDING",
+                totalPriceSet: { shopMoney: { amount: "50000.00", currencyCode: "INR" } },
+                paymentTerms: { paymentTermsName: "Net 30", paymentTermsType: "NET", dueInDays: 30, paymentSchedules: { nodes: [{ dueAt: "2026-11-15" }] } },
+              },
+              userErrors: [],
+            },
+          },
+          extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+        }),
+      } as Response;
+    });
+
+    const state = createMockState();
+    
+    const orderPromise = createOrder(state, {
+      orderKey: `${SEED_PREFIX}order-test`,
+      companyLocationId: "gid://shopify/CompanyLocation/456",
+      customerId: "gid://shopify/Customer/789",
+      productTitle: "Test Product",
+      amount: 50000,
+      processedAt: new Date().toISOString(),
+      expectedTermsDays: 30,
+    });
+
+    // Fast-forward through backoff delay
+    await vi.advanceTimersByTimeAsync(20000);
+
+    const result = await orderPromise;
+    
+    expect(fetchCallCount).toBe(2);
+    expect(result).not.toBeNull();
+    expect(result?.name).toBe("#1001");
+  });
+
+  it("give-up-after-N: createOrder returns null after max throttle attempts", async () => {
+    // All calls return throttle error
+    global.fetch = vi.fn(async () => {
+      fetchCallCount++;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            orderCreate: {
+              order: null,
+              userErrors: [{ field: ["order"], message: "Too many attempts. Please try again later.", code: "THROTTLED" }],
+            },
+          },
+          extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+        }),
+      } as Response;
+    });
+
+    const state = createMockState();
+    
+    const orderPromise = createOrder(state, {
+      orderKey: `${SEED_PREFIX}order-test`,
+      companyLocationId: "gid://shopify/CompanyLocation/456",
+      customerId: "gid://shopify/Customer/789",
+      productTitle: "Test Product",
+      amount: 50000,
+      processedAt: new Date().toISOString(),
+      expectedTermsDays: 30,
+    });
+
+    // Fast-forward through all backoff delays (15s + 30s + 60s + 120s = 225s)
+    await vi.advanceTimersByTimeAsync(300000);
+
+    const result = await orderPromise;
+    
+    // Should have tried ORDER_CREATE_MAX_ATTEMPTS times
+    expect(fetchCallCount).toBe(ORDER_CREATE_MAX_ATTEMPTS);
+    expect(result).toBeNull();
+  });
+});
+
+describe("Role Assignment Idempotency", () => {
+  beforeEach(() => {
+    setupMockFetch();
+    mockResponses.clear();
+  });
+
+  afterEach(() => {
+    restoreFetch();
+    capturedRequests = [];
+  });
+
+  it("ensureContactRoleOnLocation skips if contact already has role", async () => {
+    // Mock hasContactRoleOnLocation to return true (already assigned)
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+
+      // Role assignments query - return existing assignment
+      if (query.includes("GetLocationRoleAssignments") || query.includes("roleAssignments")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyLocation: {
+                roleAssignments: {
+                  nodes: [
+                    {
+                      id: "gid://shopify/CompanyContactRoleAssignment/existing",
+                      companyContact: { id: "gid://shopify/CompanyContact/contact-1" },
+                      role: { id: "gid://shopify/CompanyContactRole/ordering", name: "Ordering only" },
+                    },
+                  ],
+                },
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: {} }),
+      } as Response;
+    });
+
+    const state = createMockState();
+    const companyData = createMockCompanyData();
+
+    const result = await ensureContactRoleOnLocation(state, companyData, "gid://shopify/CompanyLocation/loc-30");
+
+    expect(result).toBe(true);
+    expect(state.skippedCount.roleAssignments).toBe(1);
+    expect(state.createdCount.roleAssignments).toBe(0);
+    
+    // Should NOT have called assign mutation
+    const assignCalls = capturedRequests.filter(r => r.query.includes("companyLocationAssignRoles"));
+    expect(assignCalls).toHaveLength(0);
+  });
+
+  it("ensureContactRoleOnLocation assigns role if not already assigned", async () => {
+    // Don't use setupMockFetch - set up custom mock for this test
+    mockResponses.set("hasExistingRoleAssignment", false); // No existing assignment
+    setupMockFetch();
+
+    const state = createMockState();
+    const companyData = createMockCompanyData();
+
+    const result = await ensureContactRoleOnLocation(state, companyData, "gid://shopify/CompanyLocation/loc-30");
+
+    expect(result).toBe(true);
+    expect(state.createdCount.roleAssignments).toBe(1);
+    expect(state.skippedCount.roleAssignments).toBe(0);
+    
+    // Should have called assign mutation
+    const assignCalls = capturedRequests.filter(r => r.query.includes("companyLocationAssignRoles"));
+    expect(assignCalls).toHaveLength(1);
+  });
+
+  it("role assignment prefers 'Ordering only' role", async () => {
+    mockResponses.set("hasExistingRoleAssignment", false);
+    setupMockFetch();
+
+    const state = createMockState();
+    const companyData = createMockCompanyData({
+      contactRoles: [
+        { id: "gid://shopify/CompanyContactRole/admin", name: "Location admin" },
+        { id: "gid://shopify/CompanyContactRole/ordering", name: "Ordering only" },
+      ],
+    });
+
+    await ensureContactRoleOnLocation(state, companyData, "gid://shopify/CompanyLocation/loc-30");
+
+    const assignCall = capturedRequests.find(r => r.query.includes("companyLocationAssignRoles"));
+    expect(assignCall).toBeDefined();
+    const rolesToAssign = (assignCall?.variables as Record<string, unknown>)?.rolesToAssign as Array<{ companyContactRoleId: string }>;
+    expect(rolesToAssign[0].companyContactRoleId).toBe("gid://shopify/CompanyContactRole/ordering");
+  });
+});
+
+describe("Location Backfill for All Companies", () => {
+  beforeEach(() => {
+    setupMockFetch();
+    mockResponses.clear();
+  });
+
+  afterEach(() => {
+    restoreFetch();
+    capturedRequests = [];
+  });
+
+  it("seedCompanies processes ALL 5 companies in COMPANY_SEEDS", async () => {
+    // All companies exist
+    mockResponses.set("existingCompanies", COMPANY_SEEDS.map((c) => `${SEED_PREFIX}${c.key}`));
+
+    const state = createMockState();
+    await seedCompanies(state);
+
+    // Should have all 5 companies in state
+    expect(state.companies.size).toBe(5);
+    expect(state.skippedCount.companies).toBe(5);
+    
+    // Verify all company keys are present
+    for (const seed of COMPANY_SEEDS) {
+      expect(state.companies.has(seed.key)).toBe(true);
+    }
+  });
+
+  it("backfill creates missing locations for all existing companies (not just company-1)", async () => {
+    // Setup: All companies exist but company-2 and company-4 are missing Net-60 location
+    const existingCompanyIds = COMPANY_SEEDS.map((c) => `${SEED_PREFIX}${c.key}`);
+    
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+      const variables = body.variables as Record<string, unknown>;
+      capturedRequests.push({ query, variables });
+
+      // Find company query
+      if (query.includes("FindCompany") || (query.includes("companies") && variables?.query)) {
+        const externalIdQuery = variables?.query as string;
+        const matchedId = existingCompanyIds.find(id => externalIdQuery?.includes(id));
+        
+        if (matchedId) {
+          const companyKey = matchedId.replace(`${SEED_PREFIX}`, "");
+          const isMissingNet60 = companyKey === "company-2" || companyKey === "company-4";
+          
+          const locations = [
+            { node: { id: `gid://shopify/CompanyLocation/${companyKey}-loc-15`, name: `${companyKey} - Net-15` } },
+            { node: { id: `gid://shopify/CompanyLocation/${companyKey}-loc-30`, name: `${companyKey} - Net-30` } },
+          ];
+          if (!isMissingNet60) {
+            locations.push({ node: { id: `gid://shopify/CompanyLocation/${companyKey}-loc-60`, name: `${companyKey} - Net-60` } });
+          }
+          
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              data: {
+                companies: {
+                  nodes: [{
+                    id: `gid://shopify/Company/${companyKey}`,
+                    name: companyKey,
+                    externalId: matchedId,
+                    locations: { edges: locations },
+                    contacts: { edges: [{ node: { id: `gid://shopify/CompanyContact/${companyKey}-contact`, customer: { id: `gid://shopify/Customer/${companyKey}-cust`, email: "test@example.com" } } }] },
+                  }],
+                },
+              },
+              extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+            }),
+          } as Response;
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ data: { companies: { nodes: [] } } }),
+        } as Response;
+      }
+
+      // Contact roles query
+      if (query.includes("GetCompanyContactRoles") || (query.includes("contactRoles") && !query.includes("companyLocationAssignRoles"))) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              company: {
+                contactRoles: {
+                  nodes: [{ id: "gid://shopify/CompanyContactRole/ordering", name: "Ordering only" }],
+                },
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Role assign mutation - check BEFORE roleAssignments query since mutation body contains "roleAssignments"
+      if (query.includes("companyLocationAssignRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocationAssignRoles: { roleAssignments: [], userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Role assignments query - return empty (need assignment)
+      if (query.includes("GetLocationRoleAssignments") || query.includes("roleAssignments")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocation: { roleAssignments: { nodes: [] } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Location create mutation
+      if (query.includes("companyLocationCreate")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyLocationCreate: {
+                companyLocation: { id: `gid://shopify/CompanyLocation/new-loc-${Date.now()}`, name: "New Location" },
+                userErrors: [],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: {} }),
+      } as Response;
+    });
+
+    const state = createMockState();
+    await seedCompanies(state);
+
+    // Should have created 2 locations (Net-60 for company-2 and company-4)
+    expect(state.createdCount.locations).toBe(2);
+    
+    // Verify companyLocationCreate was called for the missing locations
+    const locationCreateCalls = capturedRequests.filter(r => r.query.includes("companyLocationCreate"));
+    expect(locationCreateCalls.length).toBe(2);
+  });
+
+  it("location backfill is idempotent (rerun creates no duplicates)", async () => {
+    // All companies exist with all locations
+    mockResponses.set("existingCompanies", COMPANY_SEEDS.map((c) => `${SEED_PREFIX}${c.key}`));
+
+    const state = createMockState();
+    await seedCompanies(state);
+
+    // No locations should be created
+    expect(state.createdCount.locations).toBe(0);
+    
+    // Verify NO companyLocationCreate calls
+    const locationCreateCalls = capturedRequests.filter(r => r.query.includes("companyLocationCreate"));
+    expect(locationCreateCalls).toHaveLength(0);
+  });
+});
+
+describe("Role Assignment Must Complete Before Order Creation", () => {
+  beforeEach(() => {
+    setupMockFetch();
+    mockResponses.clear();
+  });
+
+  afterEach(() => {
+    restoreFetch();
+    capturedRequests = [];
+  });
+
+  it("order creation for company uses location with role assignment", async () => {
+    const state = createMockState();
+    
+    // Setup company with locations and contact roles
+    const companyData = createMockCompanyData();
+    state.companies.set("company-1", companyData);
+
+    // Create a single order
+    await createOrder(state, {
+      orderKey: `${SEED_PREFIX}order-test`,
+      companyLocationId: companyData.locations.get(30)!,
+      customerId: companyData.contactCustomerId,
+      productTitle: "Test Product",
+      amount: 50000,
+      processedAt: new Date().toISOString(),
+      expectedTermsDays: 30,
+    });
+
+    // Verify order was created successfully (if mock is set up correctly)
+    const orderCalls = capturedRequests.filter(r => r.query.includes("orderCreate"));
+    expect(orderCalls.length).toBeGreaterThan(0);
+    
+    // Verify the order used the correct company location
+    const orderCall = orderCalls[0];
+    const orderInput = (orderCall.variables as Record<string, unknown>)?.order as Record<string, unknown>;
+    expect(orderInput.companyLocationId).toBe("gid://shopify/CompanyLocation/loc-30");
+  });
+});
+
+describe("New GraphQL Documents Validation against Admin API 2026-10 Schema", () => {
+  let schema: GraphQLSchema;
+
+  beforeAll(() => {
+    const schemaPath = resolve(__dirname, "../../test/fixtures/admin-2026-10.schema.json");
+    const schemaJson = JSON.parse(readFileSync(schemaPath, "utf-8"));
+    schema = buildClientSchema(schemaJson.data);
+  });
+
+  it("COMPANY_CONTACT_ROLES_QUERY is valid against 2026-10 schema", () => {
+    const document = parse(COMPANY_CONTACT_ROLES_QUERY);
+    const errors = validate(schema, document);
+    expect(errors).toEqual([]);
+  });
+
+  it("COMPANY_LOCATION_ROLE_ASSIGNMENTS_QUERY is valid against 2026-10 schema", () => {
+    const document = parse(COMPANY_LOCATION_ROLE_ASSIGNMENTS_QUERY);
+    const errors = validate(schema, document);
+    expect(errors).toEqual([]);
+  });
+
+  it("COMPANY_LOCATION_ASSIGN_ROLES_MUTATION is valid against 2026-10 schema", () => {
+    const document = parse(COMPANY_LOCATION_ASSIGN_ROLES_MUTATION);
+    const errors = validate(schema, document);
+    expect(errors).toEqual([]);
+  });
+
+  it("FIND_ORDER_BY_TAG_QUERY is valid against 2026-10 schema", () => {
+    const document = parse(FIND_ORDER_BY_TAG_QUERY);
+    const errors = validate(schema, document);
+    expect(errors).toEqual([]);
+  });
+});
+
+describe("New Variable Builders Input Coercion", () => {
+  let schema: GraphQLSchema;
+
+  function getInputType(typeName: string): GraphQLInputType {
+    const type = schema.getType(typeName);
+    if (!type) throw new Error(`Type ${typeName} not found in schema`);
+    return type as GraphQLInputType;
+  }
+
+  function coerceAndCollectErrors(value: unknown, typeName: string): string[] {
+    const errors: string[] = [];
+    const inputType = getInputType(typeName);
+    coerceInputValue(value, inputType, (path, _invalidValue, error) => {
+      errors.push(`${path.join(".")}: ${error.message}`);
+    });
+    return errors;
+  }
+
+  beforeAll(() => {
+    const schemaPath = resolve(__dirname, "../../test/fixtures/admin-2026-10.schema.json");
+    const schemaJson = JSON.parse(readFileSync(schemaPath, "utf-8"));
+    schema = buildClientSchema(schemaJson.data);
+  });
+
+  it("buildCompanyLocationAssignRolesInput produces valid CompanyLocationRoleAssign array", () => {
+    const variables = buildCompanyLocationAssignRolesInput(
+      "gid://location/1",
+      "gid://contact/1",
+      "gid://role/1"
+    );
+    
+    // Coerce each role assignment in the array
+    for (const roleAssign of variables.rolesToAssign) {
+      const errors = coerceAndCollectErrors(roleAssign, "CompanyLocationRoleAssign");
+      expect(errors).toEqual([]);
+    }
   });
 });
