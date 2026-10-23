@@ -577,9 +577,10 @@ jobs:
 
           echo ""
           echo "Invoices grouped by dueBasis (how payment terms were determined):"
+          echo "(null means Shopify PaymentSchedule dueAt OR no payment terms)"
           psql -v ON_ERROR_STOP=1 -v shop_id="$SHOP_ID" -t "$DATABASE_URL" <<'EOSQL'
           SELECT json_object_agg(
-            COALESCE("dueBasis", 'schedule'),
+            COALESCE("dueBasis", 'null'),
             cnt
           )
           FROM (
@@ -623,16 +624,18 @@ jobs:
             exit 1
           fi
 
-          # Check if input query references metafield namespace $app key credit_status
+          # Check if repo's input query references metafield namespace $app key credit_status
+          # (deployed function's inputQuery will be checked via API below)
           INPUT_QUERY_FILE="extensions/credit-check-validation/src/cart_validations_generate_run.graphql"
-          INPUT_QUERY_HAS_CREDIT_STATUS=false
+          REPO_INPUT_QUERY_HAS_CREDIT_STATUS=false
           if [ -f "$INPUT_QUERY_FILE" ]; then
+            # shellcheck disable=SC2016
             # Check for: metafield(namespace: "$app", key: "credit_status")
             if grep -qE 'metafield\s*\(\s*namespace:\s*"\$app"\s*,\s*key:\s*"credit_status"' "$INPUT_QUERY_FILE"; then
-              INPUT_QUERY_HAS_CREDIT_STATUS=true
+              REPO_INPUT_QUERY_HAS_CREDIT_STATUS=true
             fi
           fi
-          echo "input_query_has_credit_status: $INPUT_QUERY_HAS_CREDIT_STATUS"
+          echo "repo_input_query_has_credit_status: $REPO_INPUT_QUERY_HAS_CREDIT_STATUS"
           echo ""
 
           # Get offline access token (with refresh if needed, reusing existing refresh logic)
@@ -718,8 +721,8 @@ jobs:
           header = "X-Shopify-Access-Token: $ACCESS_TOKEN"
           EOF
 
-          # Query validations
-          QUERY='{"query":"{ validations(first:50) { nodes { id title enabled blockOnFailure functionHandle } } }"}'
+          # Query validations (use shopifyFunction.handle per 2026-10 schema, not functionHandle)
+          QUERY='{"query":"{ validations(first:50) { nodes { id title enabled blockOnFailure shopifyFunction { handle inputQuery } } } }"}'
 
           HTTP_RESPONSE=$(mktemp)
           HTTP_STATUS=$(curl -s -w "%{http_code}" -o "$HTTP_RESPONSE" \
@@ -740,17 +743,24 @@ jobs:
             exit 1
           fi
 
-          # Find credit-check-validation node
-          VALIDATION_NODE=$(jq -r '.data.validations.nodes[] | select(.functionHandle == "credit-check-validation")' "$HTTP_RESPONSE")
+          # Find credit-check-validation node by shopifyFunction.handle
+          VALIDATION_NODE=$(jq -r '.data.validations.nodes[] | select(.shopifyFunction.handle == "credit-check-validation")' "$HTTP_RESPONSE")
 
           VALIDATION_EXISTS=false
           VALIDATION_ENABLED=false
           VALIDATION_BLOCK_ON_FAILURE=false
+          DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS=false
 
           if [ -n "$VALIDATION_NODE" ] && [ "$VALIDATION_NODE" != "null" ]; then
             VALIDATION_EXISTS=true
             VALIDATION_ENABLED=$(echo "$VALIDATION_NODE" | jq -r '.enabled')
             VALIDATION_BLOCK_ON_FAILURE=$(echo "$VALIDATION_NODE" | jq -r '.blockOnFailure')
+            # Check if deployed function's inputQuery references $app:credit_status metafield
+            INPUT_QUERY=$(echo "$VALIDATION_NODE" | jq -r '.shopifyFunction.inputQuery // ""')
+            # shellcheck disable=SC2016
+            if echo "$INPUT_QUERY" | grep -qE 'metafield.*namespace.*\$app.*key.*credit_status'; then
+              DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS=true
+            fi
           fi
 
           echo "S12 Validation status (read-only):"
@@ -758,8 +768,9 @@ jobs:
             --argjson exists "$VALIDATION_EXISTS" \
             --argjson enabled "$VALIDATION_ENABLED" \
             --argjson block_on_failure "$VALIDATION_BLOCK_ON_FAILURE" \
-            --argjson input_query_has_credit_status "$INPUT_QUERY_HAS_CREDIT_STATUS" \
-            '{exists: $exists, enabled: $enabled, blockOnFailure: $block_on_failure, input_query_has_credit_status: $input_query_has_credit_status}'
+            --argjson repo_input_query_has_credit_status "$REPO_INPUT_QUERY_HAS_CREDIT_STATUS" \
+            --argjson deployed_input_query_has_credit_status "$DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS" \
+            '{exists: $exists, enabled: $enabled, blockOnFailure: $block_on_failure, repo_input_query_has_credit_status: $repo_input_query_has_credit_status, deployed_input_query_has_credit_status: $deployed_input_query_has_credit_status}'
 
           # Handle ensure_validation flag
           if [ "$ENSURE_VALIDATION" = "true" ]; then
