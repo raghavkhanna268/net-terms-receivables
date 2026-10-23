@@ -376,3 +376,51 @@ export const BUCKET_BOUNDARIES = {
   "61-90": { min: 61, max: 90 },
   "90+": { min: 91, max: null },
 } as const;
+
+/** Row returned by buyer ledger query */
+export interface BuyerLedgerRow {
+  buyer_account_id: string;
+  buyer_name: string;
+  credit_limit_paise: string | null;
+  hold_state: string;
+  currency: string;
+  outstanding_paise: string;
+  overdue_paise: string;
+  oldest_overdue_days: number | null;
+  is_gated: boolean;
+}
+
+/** Row returned by buyer invoices query */
+export interface BuyerInvoiceRow {
+  id: string;
+  name: string;
+  order_id: string | null;
+  due_at: Date | null;
+  outstanding_paise: string;
+  currency: string;
+  days_past_due: number;
+}
+
+/**
+ * Extract the Shopify order admin ID from a GID.
+ * e.g., "gid://shopify/Order/123456" -> "123456"
+ */
+export function extractOrderIdFromGid(gid: string | null): string | null {
+  if (!gid) return null;
+  const match = gid.match(/gid:\/\/shopify\/Order\/(\d+)/);
+  return match ? match[1] : null;
+}
+
+/**
+ * Build the Shopify admin URL for an order.
+ */
+export function buildOrderAdminUrl(
+  shopDomain: string,
+  orderId: string | null
+): string | null {
+  if (!orderId) return null;
+  const id = extractOrderIdFromGid(orderId);
+  if (!id) return null;
+  const storeHandle = shopDomain.replace(".myshopify.com", "");
+  return `https://admin.shopify.com/store/${storeHandle}/orders/${id}`;
+}
