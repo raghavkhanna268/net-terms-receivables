@@ -10,6 +10,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
  * 4. No-handler: DLQ after noHandlerMaxReads
  * 5. S6 handlers registered
  * 6. ORDERS_PAID/CANCELLED fetch real order
+ * 7. S10b: BULK_OPERATIONS_FINISH and RECONCILE_* handlers registered
  */
 
 // Mock the pgmq operations
@@ -30,9 +31,7 @@ vi.mock("../admin-client.server", () => ({
   COMPANY_QUERY: "query CompanyById",
   COMPANY_LOCATION_QUERY: "query CompanyLocationById",
   ORDER_QUERY: "query OrderById",
-  BULK_OPERATION_QUERY: "query BulkOperationById",
-  START_COMPANIES_BULK_MUTATION: "mutation BulkCompaniesExport",
-  START_ORDERS_BULK_MUTATION: "mutation BulkOrdersExport",
+  BULK_OPERATION_STATUS_QUERY: "query BulkOperationStatus",
 }));
 
 // Mock the sync processors
@@ -64,6 +63,30 @@ vi.mock("~/services/sync/order.server", () => ({
 
 vi.mock("~/services/sync/bulk-operations.server", () => ({
   registerBulkOperation: vi.fn().mockResolvedValue(undefined),
+  BULK_COMPANIES_QUERY: "mutation BulkCompaniesExport",
+  BULK_ORDERS_QUERY: "mutation BulkOrdersExport",
+  parseBulkOperationResult: vi.fn().mockReturnValue({
+    success: true,
+    bulkOperationId: "gid://shopify/BulkOperation/123",
+    status: "CREATED",
+  }),
+}));
+
+vi.mock("~/services/sync/bulk-jsonl-processor.server", () => ({
+  processBulkOperation: vi.fn().mockResolvedValue({
+    success: true,
+    action: "updated",
+    entityId: "gid://shopify/BulkOperation/123",
+  }),
+}));
+
+vi.mock("./reconcile-handlers.server", () => ({
+  startReconcileBulkOperation: vi.fn().mockResolvedValue({
+    success: true,
+    action: "created",
+    entityId: "gid://shopify/BulkOperation/123",
+  }),
+  incrementOrderRefetchNull: vi.fn().mockResolvedValue(undefined),
 }));
 
 describe("Drain Processor", () => {
@@ -129,15 +152,12 @@ describe("Drain Processor", () => {
       expect(getSyncHandler("ORDERS_CANCELLED")).toBeDefined();
       expect(getSyncHandler("ORDERS_PAID")).toBeDefined();
 
-      // NOTE: BULK_OPERATIONS_FINISH handler is NOT registered yet.
-      // Bulk JSONL processing requires byte-accurate HTTP Range chunking.
-      // Messages will go through no-handler path (set_vt 3600s, eventual DLQ).
-      expect(getBulkHandler("BULK_OPERATIONS_FINISH")).toBeUndefined();
+      // S10b: BULK_OPERATIONS_FINISH handler is registered
+      expect(getBulkHandler("BULK_OPERATIONS_FINISH")).toBeDefined();
 
-      // NOTE: RECONCILE_* handlers are NOT registered yet.
-      // Reconcile depends on bulk operations working. Will be added in follow-up PR.
-      expect(getSyncHandler("RECONCILE_COMPANIES")).toBeUndefined();
-      expect(getSyncHandler("RECONCILE_ORDERS")).toBeUndefined();
+      // S10b: RECONCILE_* handlers are registered
+      expect(getSyncHandler("RECONCILE_COMPANIES")).toBeDefined();
+      expect(getSyncHandler("RECONCILE_ORDERS")).toBeDefined();
     });
   });
 
@@ -151,7 +171,6 @@ describe("Drain Processor", () => {
         timeBudgetMs: 15000, // 15 seconds
         maxRetries: 5,
         noHandlerMaxReads: 48, // ~2 days
-        // NOTE: bulkChunkSize removed - bulk JSONL parsing not yet implemented
       });
     });
   });
@@ -646,6 +665,81 @@ describe("Order processedAt in drain path", () => {
     expect(content).toContain("export const ORDER_QUERY");
     expect(content).toMatch(/ORDER_QUERY[\s\S]*?processedAt/);
     expect(content).toMatch(/ORDER_QUERY[\s\S]*?createdAt/);
+  });
+});
+
+describe("S10b RECONCILE handlers", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.resetModules();
+  });
+
+  it("RECONCILE_COMPANIES handler is registered", async () => {
+    const { getSyncHandler } = await import("../processor.server");
+    expect(getSyncHandler("RECONCILE_COMPANIES")).toBeDefined();
+  });
+
+  it("RECONCILE_ORDERS handler is registered", async () => {
+    const { getSyncHandler } = await import("../processor.server");
+    expect(getSyncHandler("RECONCILE_ORDERS")).toBeDefined();
+  });
+});
+
+describe("S10b BULK_OPERATIONS_FINISH handler", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.resetModules();
+  });
+
+  it("BULK_OPERATIONS_FINISH handler is registered", async () => {
+    const { getBulkHandler } = await import("../processor.server");
+    expect(getBulkHandler("BULK_OPERATIONS_FINISH")).toBeDefined();
+  });
+});
+
+describe("S10b order refetch null recording", () => {
+  let mockIncrementOrderRefetchNull: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.resetModules();
+
+    const module = await import("./reconcile-handlers.server");
+    mockIncrementOrderRefetchNull = module.incrementOrderRefetchNull as ReturnType<typeof vi.fn>;
+  });
+
+  it("increments null refetch count when order re-fetch returns null", async () => {
+    const { adminGraphQL } = await import("../admin-client.server");
+    const mockAdminGraphQL = adminGraphQL as ReturnType<typeof vi.fn>;
+
+    mockAdminGraphQL.mockResolvedValue({
+      success: true,
+      data: { node: null },
+      retryable: false,
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("ORDERS_CREATE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "ORDERS_CREATE",
+      shop: "test.myshopify.com",
+      webhookId: "wh-null-refetch",
+      resourceGid: "gid://shopify/Order/123",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    await handler!(mockSql as never, message);
+
+    expect(mockIncrementOrderRefetchNull).toHaveBeenCalledWith(
+      mockSql,
+      "test.myshopify.com"
+    );
   });
 });
 

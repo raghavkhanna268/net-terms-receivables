@@ -551,6 +551,7 @@ model S6BulkOperation {
   startedAt       DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
   byteOffset      BigInt    @default(0) @map("byte_offset")
   completedAt     DateTime? @map("completed_at") @db.Timestamptz(6)
+  partialLine     String    @default("") @map("partial_line")
 
   @@map("s6_bulk_operations")
 }
@@ -675,6 +676,48 @@ model S6DeadLetter {
 
   @@index([originalQueue, deadLetteredAt(sort: Desc)], map: "idx_s6_dead_letter_queue_time")
   @@map("s6_dead_letter")
+}
+
+// =============================================================================
+// S10b NIGHTLY RECONCILE
+// =============================================================================
+
+/// Drift report: Nightly comparison of Shopify vs local ledger (S10b)
+/// Tracks discrepancies found during reconciliation for monitoring.
+///
+/// Note: This table is created by the S10b migration.
+model S10bReconcileDrift {
+  id              BigInt    @id @default(autoincrement())
+  shop            String
+  reconcileDate   DateTime  @map("reconcile_date") @db.Date
+  kind            String    // 'companies' or 'orders'
+  missingLocal    Int       @default(0) @map("missing_local")
+  missingShopify  Int       @default(0) @map("missing_shopify")
+  statusMismatch  Int       @default(0) @map("status_mismatch")
+  amountMismatch  Int       @default(0) @map("amount_mismatch")
+  totalShopify    Int       @default(0) @map("total_shopify")
+  totalLocal      Int       @default(0) @map("total_local")
+  startedAt       DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  completedAt     DateTime? @map("completed_at") @db.Timestamptz(6)
+  sampleMissingLocal   Json? @map("sample_missing_local")
+  sampleMissingShopify Json? @map("sample_missing_shopify")
+
+  @@unique([shop, reconcileDate, kind])
+  @@index([shop, reconcileDate(sort: Desc)], map: "idx_s10b_reconcile_drift_shop_date")
+  @@map("s10b_reconcile_drift")
+}
+
+/// Order refetch null tracking (S10b)
+/// Records when orders return null on re-fetch (>60 days without read_all_orders).
+model S10bOrderRefetchNull {
+  id         BigInt   @id @default(autoincrement())
+  shop       String
+  orderGid   String   @map("order_gid")
+  topic      String
+  recordedAt DateTime @default(now()) @map("recorded_at") @db.Timestamptz(6)
+
+  @@index([shop, recordedAt(sort: Desc)], map: "idx_s10b_order_refetch_null_shop_date")
+  @@map("s10b_order_refetch_null")
 }
 
 // =============================================================================

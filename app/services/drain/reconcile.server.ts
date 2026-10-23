@@ -60,9 +60,9 @@ function makeReconcileWebhookId(shop: string, kind: "companies" | "orders"): str
  * @returns Number of shops enqueued for reconcile
  */
 export async function enqueueReconcileForAllShops(sql: Sql): Promise<number> {
-  // Get all installed shops
+  // Get all installed shops (exclude uninstalled)
   const shops = await sql<{ domain: string }[]>`
-    SELECT domain FROM "Shop"
+    SELECT domain FROM "Shop" WHERE "uninstalledAt" IS NULL
   `;
 
   if (shops.length === 0) {

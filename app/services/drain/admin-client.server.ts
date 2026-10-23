@@ -245,6 +245,28 @@ export const COMPANY_LOCATION_QUERY = `
 `;
 
 /**
+ * Fetch bulk operation status and result URL.
+ * Used by bulk JSONL processor to get the download URL.
+ */
+export const BULK_OPERATION_STATUS_QUERY = `
+  query BulkOperationStatus($id: ID!) {
+    node(id: $id) {
+      ... on BulkOperation {
+        id
+        status
+        errorCode
+        objectCount
+        fileSize
+        url
+        partialDataUrl
+        createdAt
+        completedAt
+      }
+    }
+  }
+`;
+
+/**
  * Fetch an Order by GID.
  * Fetches ids, amounts, statuses, payment terms - no customer PII.
  */

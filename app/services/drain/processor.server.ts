@@ -277,6 +277,9 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
       `[order_refetch_null] shop=${message.shop} order=${message.resourceGid} topic=${message.topic}`
     );
 
+    // Record metric (S10b)
+    await recordOrderRefetchNull(sql, message.shop, message.resourceGid, message.topic);
+
     // For PAID/CANCELLED, the topic itself tells us the state
     // Use processOrderWebhook with minimal order data to go through S6 functions
     if (message.topic === "ORDERS_PAID" || message.topic === "ORDERS_CANCELLED") {
@@ -337,12 +340,69 @@ registerSyncHandler("ORDERS_UPDATED", handleOrder);
 registerSyncHandler("ORDERS_CANCELLED", handleOrder);
 registerSyncHandler("ORDERS_PAID", handleOrder);
 
-// NOTE: BULK_OPERATIONS_FINISH handler is NOT registered.
-// Bulk JSONL processing requires byte-accurate HTTP Range chunking which
-// is not yet implemented. Messages will go through no-handler path.
+// =============================================================================
+// S10b BULK OPERATIONS HANDLER
+// =============================================================================
 
-// NOTE: RECONCILE_* handlers are NOT registered.
-// Reconcile depends on bulk operations working. Will be added in follow-up PR.
+import { processBulkOperation } from "~/services/sync/bulk-jsonl-processor.server";
+import {
+  startReconcileBulkOperation,
+  recordOrderRefetchNull,
+} from "./reconcile-handlers.server";
+
+/**
+ * Handler for BULK_OPERATIONS_FINISH topic.
+ * Downloads JSONL in chunks using HTTP Range and processes via S6 services.
+ */
+async function handleBulkOperationsFinish(sql: Sql, message: BulkMessage): Promise<SyncResult> {
+  return processBulkOperation(sql, message);
+}
+
+// Register BULK_OPERATIONS_FINISH handler
+registerBulkHandler("BULK_OPERATIONS_FINISH", handleBulkOperationsFinish);
+
+// =============================================================================
+// S10b RECONCILE HANDLERS
+// =============================================================================
+
+/**
+ * Handler for RECONCILE_COMPANIES topic.
+ * Starts a bulk companies export for the shop.
+ */
+async function handleReconcileCompanies(sql: Sql, message: SyncMessage): Promise<SyncResult> {
+  if (await isWebhookProcessed(sql, message.webhookId)) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Reconcile already processed (idempotent)",
+    };
+  }
+
+  return startReconcileBulkOperation(sql, message.shop, "companies", message.webhookId);
+}
+
+/**
+ * Handler for RECONCILE_ORDERS topic.
+ * Starts a bulk orders export for the shop.
+ */
+async function handleReconcileOrders(sql: Sql, message: SyncMessage): Promise<SyncResult> {
+  if (await isWebhookProcessed(sql, message.webhookId)) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Reconcile already processed (idempotent)",
+    };
+  }
+
+  return startReconcileBulkOperation(sql, message.shop, "orders", message.webhookId);
+}
+
+// Register RECONCILE_* handlers
+registerSyncHandler("RECONCILE_COMPANIES", handleReconcileCompanies);
+registerSyncHandler("RECONCILE_ORDERS", handleReconcileOrders);
+
+// Export for use in order handler
+export { recordOrderRefetchNull };
 
 // TODO(S8): Register CUSTOMERS_* and DRAFT_ORDERS_* handlers
 // registerSyncHandler("CUSTOMERS_CREATE", checkCompanyAccount);

@@ -118,17 +118,39 @@ export async function action({ request, context }: ActionFunctionArgs) {
   // Parse optional configuration from query params
   const url = new URL(request.url);
 
-  // Reconcile is disabled until S10b handlers exist
+  // Reconcile mode: enqueue RECONCILE_* messages for all installed shops
   if (url.searchParams.get("reconcile") === "true") {
-    return new Response(
-      JSON.stringify({
-        error: "Reconcile is not implemented. Deferred to S10b.",
-      }),
-      {
-        status: 501,
-        headers: { "Content-Type": "application/json" },
-      }
-    );
+    const reconcileSql = getRequestSql();
+    try {
+      const { enqueueReconcileForAllShops } = await import(
+        "~/services/drain/reconcile.server"
+      );
+      const count = await enqueueReconcileForAllShops(reconcileSql);
+
+      console.log(`[drain] reconcile: enqueued ${count} messages`);
+
+      return new Response(
+        JSON.stringify({
+          mode: "reconcile",
+          messagesEnqueued: count,
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    } catch (error) {
+      console.error("[drain] reconcile error:", error);
+      return new Response(
+        JSON.stringify({
+          error: "Internal server error",
+        }),
+        {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
   }
 
   const config = parseConfig(url);
