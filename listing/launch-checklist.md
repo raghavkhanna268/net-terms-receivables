@@ -45,6 +45,8 @@
 
 ### Scopes and Permissions
 
+- [ ] **Before S24:** Audit requested scopes and drop any that no merged code uses. See `docs/scopes.md` for the current scope list and justifications.
+
 - [ ] **⚠️ Request `read_all_orders` scope (if needed)**
   - Current: `read_orders` limited to 60-day order window
   - **Justification:** Historical invoice backfill for existing merchants

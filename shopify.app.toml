@@ -8,22 +8,22 @@ embedded = true
 [access_scopes]
 # See docs/scopes.md for the complete scope audit with justifications and reference URLs.
 #
-# Read scopes (S6 sync + S8 pre-grant):
-# - read_companies: B2B company/location sync
+# Read scopes (5):
+# - read_companies: B2B company/location sync (S6)
 # - read_customers: Tagged customer sync (S8 pre-grant)
 # - read_draft_orders: Draft order payment terms (S8 pre-grant)
-# - read_orders: Order sync, webhooks
-# - read_payment_terms: Payment terms on orders and company locations
+# - read_orders: Order sync, webhooks (S6)
+# - read_payment_terms: Payment terms on orders and company locations (S6)
 #
-# Write scopes (S11-S13, S17 features):
-# - write_companies: metafieldsSet on Company/CompanyLocation (S11), companyLocationUpdate for payment terms (S4 seed)
+# Write scopes (6):
+# - write_companies: metafieldsSet on Company/CompanyLocation (S11)
 # - write_customers: metafieldsSet on Customer (S11)
-# - write_merchant_managed_fulfillment_orders: fulfillmentOrderHold/Release (S13)
-# - write_orders: orderMarkAsPaid (S17), tagsAdd (S13/S17)
-# - write_payment_customizations: paymentCustomizationCreate (S13)
-# - write_validations: validationCreate (S12)
+# - write_merchant_managed_fulfillment_orders: fulfillmentOrderHold/Release (S13 pre-grant)
+# - write_orders: orderMarkAsPaid, tagsAdd (S17)
+# - write_payment_customizations: paymentCustomizationCreate (S13 pre-grant)
+# - write_validations: validationCreate (S12 pre-grant)
 #
-# NOT included: write_draft_orders, write_payment_terms (seed uses companyLocationUpdate instead)
+# NOT in production: write_draft_orders (seed-only, in shopify.app.dev.toml)
 scopes = "read_companies,read_customers,read_draft_orders,read_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations"
 
 [webhooks]
