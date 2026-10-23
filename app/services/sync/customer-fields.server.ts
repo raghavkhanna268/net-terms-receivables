@@ -47,6 +47,11 @@ export const CUSTOMER_FORBIDDEN_FIELDS = [
 ] as const;
 
 /**
+ * Environment type for PII field configuration.
+ */
+export type PiiEnv = { CUSTOMER_PII_FIELDS?: string };
+
+/**
  * Check if optional PII fields should be included in queries.
  *
  * Returns true only when CUSTOMER_PII_FIELDS environment variable is set to "1".
@@ -55,8 +60,8 @@ export const CUSTOMER_FORBIDDEN_FIELDS = [
  * @param env - Environment object (from Cloudflare Worker context)
  * @returns Whether to include email and displayName in queries
  */
-export function shouldIncludePiiFields(env?: { CUSTOMER_PII_FIELDS?: string }): boolean {
-  return env?.CUSTOMER_PII_FIELDS === "1";
+export function shouldIncludePiiFields(env: PiiEnv): boolean {
+  return env.CUSTOMER_PII_FIELDS === "1";
 }
 
 /**
@@ -65,7 +70,7 @@ export function shouldIncludePiiFields(env?: { CUSTOMER_PII_FIELDS?: string }): 
  * @param env - Environment object (from Cloudflare Worker context)
  * @returns Array of field names to include in GraphQL queries
  */
-export function getCustomerFields(env?: { CUSTOMER_PII_FIELDS?: string }): string[] {
+export function getCustomerFields(env: PiiEnv): string[] {
   const fields: string[] = [...CUSTOMER_BASE_FIELDS];
 
   if (shouldIncludePiiFields(env)) {
@@ -81,7 +86,7 @@ export function getCustomerFields(env?: { CUSTOMER_PII_FIELDS?: string }): strin
  * @param env - Environment object (from Cloudflare Worker context)
  * @returns GraphQL field selection (e.g., "id\ntags" or "id\ntags\nemail\ndisplayName")
  */
-export function buildCustomerFieldSelection(env?: { CUSTOMER_PII_FIELDS?: string }): string {
+export function buildCustomerFieldSelection(env: PiiEnv): string {
   return getCustomerFields(env).join("\n");
 }
 
@@ -112,7 +117,7 @@ export function validateNoForbiddenFields(query: string): void {
  * @param env - Environment object to check PII flag
  * @throws Error if PII fields are present when flag is off, or forbidden fields are present
  */
-export function validateCustomerQuery(query: string, env?: { CUSTOMER_PII_FIELDS?: string }): void {
+export function validateCustomerQuery(query: string, env: PiiEnv): void {
   // Always check for forbidden fields
   validateNoForbiddenFields(query);
 
@@ -134,10 +139,10 @@ export function validateCustomerQuery(query: string, env?: { CUSTOMER_PII_FIELDS
  * GraphQL query to fetch a single customer's minimal data.
  * Built dynamically based on CUSTOMER_PII_FIELDS configuration.
  *
- * @param env - Environment object to check PII flag
+ * @param env - Environment object to check PII flag (required)
  * @returns GraphQL query string
  */
-export function getCustomerQuery(env?: { CUSTOMER_PII_FIELDS?: string }): string {
+export function getCustomerQuery(env: PiiEnv): string {
   const fields = buildCustomerFieldSelection(env);
   return `
     query CustomerMinimal($id: ID!) {
@@ -210,12 +215,12 @@ export function buildTagFilterQuery(tagRules: Array<{ tag: string }>): string | 
  * This ensures we don't fetch data for customers we don't need.
  *
  * @param tagRules - Array of tag rules from AccountSource
- * @param env - Environment object to check PII flag
+ * @param env - Environment object to check PII flag (required)
  * @returns GraphQL mutation string, or null if no tag rules (skip backfill)
  */
 export function getBulkCustomersQuery(
   tagRules: Array<{ tag: string }>,
-  env?: { CUSTOMER_PII_FIELDS?: string }
+  env: PiiEnv
 ): string | null {
   const tagFilter = buildTagFilterQuery(tagRules);
 

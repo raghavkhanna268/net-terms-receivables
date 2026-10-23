@@ -467,3 +467,55 @@ describe("Order null refetch behavior", () => {
     expect(result.action).toBe("skipped");
   });
 });
+
+describe("Customer bulk query PII fields", () => {
+  // Import directly from customer-fields to avoid mock interference
+  it("includes email and displayName with CUSTOMER_PII_FIELDS=1", async () => {
+    const { getBulkCustomersQuery } = await import(
+      "~/services/sync/customer-fields.server"
+    );
+
+    const tagRules = [{ tag: "net-terms" }];
+    const env = { CUSTOMER_PII_FIELDS: "1" };
+
+    const query = getBulkCustomersQuery(tagRules, env);
+
+    expect(query).not.toBeNull();
+    expect(query).toContain("email");
+    expect(query).toContain("displayName");
+  });
+
+  it("excludes email and displayName without flag", async () => {
+    const { getBulkCustomersQuery } = await import(
+      "~/services/sync/customer-fields.server"
+    );
+
+    const tagRules = [{ tag: "net-terms" }];
+    const env = {};
+
+    const query = getBulkCustomersQuery(tagRules, env);
+
+    expect(query).not.toBeNull();
+    expect(query).not.toContain("email");
+    expect(query).not.toContain("displayName");
+  });
+
+  it("NEVER includes phone or addresses regardless of flag", async () => {
+    const { getBulkCustomersQuery } = await import(
+      "~/services/sync/customer-fields.server"
+    );
+
+    const tagRules = [{ tag: "net-terms" }];
+    const queryOff = getBulkCustomersQuery(tagRules, {});
+    const queryOn = getBulkCustomersQuery(tagRules, { CUSTOMER_PII_FIELDS: "1" });
+
+    for (const query of [queryOff, queryOn]) {
+      expect(query).not.toBeNull();
+      expect(query).not.toMatch(/\bphone\b/);
+      expect(query).not.toMatch(/\baddresses\b/);
+      expect(query).not.toMatch(/\bfirstName\b/);
+      expect(query).not.toMatch(/\blastName\b/);
+      expect(query).not.toMatch(/\bdefaultAddress\b/);
+    }
+  });
+});
