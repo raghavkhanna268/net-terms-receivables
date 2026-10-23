@@ -370,6 +370,7 @@ export async function confirmMatch(
   try {
     return await sql.begin(async (tx) => {
       // STEP 1: Lock the payment row FIRST (consistent lock order)
+      // Note: Don't filter by match state here - we check state after locking to give specific error
       const [payment] = await tx<
         { id: string; amount_paise: string; payer_text: string | null }[]
       >`
@@ -380,14 +381,14 @@ export async function confirmMatch(
         FROM "Payment"
         WHERE id = (
           SELECT "paymentId" FROM "Match" 
-          WHERE id = ${matchId} AND "shopId" = ${shopId} AND state = 'suggested'
+          WHERE id = ${matchId} AND "shopId" = ${shopId}
         )
           AND "shopId" = ${shopId}
         FOR UPDATE
       `;
 
       if (!payment) {
-        return { success: false, error: "Payment not found or match not suggested" };
+        return { success: false, error: "Payment not found" };
       }
 
       // STEP 2: Lock ALL match rows for this payment ORDER BY id (consistent lock order)
