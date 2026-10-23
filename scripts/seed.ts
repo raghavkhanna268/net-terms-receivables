@@ -2,7 +2,7 @@
 /**
  * Seed script for Net Terms Receivables dev store.
  *
- * Creates B2B companies, customers, and draft orders with payment terms for
+ * Creates B2B companies, customers, and orders with payment terms for
  * testing the app's receivables tracking features.
  *
  * Usage:
@@ -12,19 +12,23 @@
  *   npm run seed -- --allow-non-dev-store     # Override dev store safety check
  *
  * Environment:
- *   SHOP                 - Shop domain (e.g., my-store.myshopify.com)
+ *   SHOP                 - Shop domain (must be net-terms-receivables.myshopify.com)
  *   SHOPIFY_ADMIN_TOKEN  - Admin API access token from a Dev Dashboard app
  *
- * The token must come from an app created in the Dev Dashboard and installed
- * on your dev store (not from the production Net Terms Receivables app).
- * See README for setup instructions.
+ * IMPORTANT: The token must come from an app created in the Dev Dashboard and
+ * installed on your dev store — NOT from the production Net Terms Receivables app.
+ * The production app does NOT have write_draft_orders or write_payment_terms.
  *
  * Required Admin API scopes for the Dev Dashboard app:
- *   read_companies, write_companies
- *   read_customers, write_customers
- *   read_draft_orders, write_draft_orders
- *   read_products
- *   read_payment_terms, write_payment_terms
+ *   read_companies, write_companies    - Create companies, set payment terms on locations
+ *   read_customers, write_customers    - Create test customers
+ *   read_draft_orders, write_draft_orders - Create draft orders for non-B2B customers
+ *   read_products                      - Get product variants for line items
+ *   read_payment_terms                 - Read payment terms templates
+ *
+ * Note: write_payment_terms is NOT required. B2B company locations get payment terms
+ * via companyLocationUpdate (under write_companies), and orders inherit from the location.
+ * Customer (non-B2B) orders use draft orders, which also set payment terms automatically.
  */
 
 import { pathToFileURL } from "node:url";
@@ -632,6 +636,16 @@ export async function seedCompanies(state: SeedState): Promise<void> {
       state.companies.set(seed.key, result);
       state.createdCount.companies++;
       console.log(`  ✅ Created: ${seed.name}`);
+      
+      // Set default payment terms on the company location using companyLocationUpdate.
+      // This requires only write_companies (NOT write_payment_terms).
+      // Orders for this location will inherit these payment terms automatically.
+      const defaultTemplate = state.paymentTermsTemplates.find((t) => t.paymentTermsType === "NET" && t.dueInDays === 30)
+        ?? state.paymentTermsTemplates.find((t) => t.paymentTermsType === "NET")
+        ?? state.paymentTermsTemplates[0];
+      if (defaultTemplate && result.locationId) {
+        await updateCompanyLocationPaymentTerms(state, result.locationId, defaultTemplate.id);
+      }
     } else {
       state.errors.push(`Failed to create company: ${seed.name}`);
     }
@@ -726,12 +740,73 @@ export async function createCompany(
     return null;
   }
 
+  const locationId = company.locations.edges[0]?.node.id ?? "";
+  
   return {
     id: company.id,
-    locationId: company.locations.edges[0]?.node.id ?? "",
+    locationId,
     contactId: company.contacts.edges[0]?.node.id ?? "",
     contactCustomerId: company.contacts.edges[0]?.node.customer.id ?? "",
   };
+}
+
+/**
+ * Update a company location's payment terms template.
+ * 
+ * This uses companyLocationUpdate with buyerExperienceConfiguration.paymentTermsTemplateId,
+ * which only requires write_companies (or write_customers) - NOT write_payment_terms.
+ * Orders created for this location will inherit the payment terms automatically.
+ * 
+ * @see https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyLocationUpdate
+ * @see https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/BuyerExperienceConfigurationInput
+ */
+export async function updateCompanyLocationPaymentTerms(
+  state: SeedState,
+  locationId: string,
+  paymentTermsTemplateId: string
+): Promise<boolean> {
+  const mutation = `
+    mutation UpdateCompanyLocationPaymentTerms($companyLocationId: ID!, $input: CompanyLocationUpdateInput!) {
+      companyLocationUpdate(companyLocationId: $companyLocationId, input: $input) {
+        companyLocation {
+          id
+          buyerExperienceConfiguration {
+            paymentTermsTemplate {
+              id
+              name
+            }
+          }
+        }
+        userErrors { field message code }
+      }
+    }
+  `;
+
+  const result = await graphql<{
+    companyLocationUpdate: {
+      companyLocation: { id: string; buyerExperienceConfiguration: { paymentTermsTemplate: { id: string; name: string } | null } } | null;
+      userErrors: UserError[];
+    };
+  }>(state, mutation, {
+    companyLocationId: locationId,
+    input: {
+      buyerExperienceConfiguration: {
+        paymentTermsTemplateId,
+      },
+    },
+  }, { isMutation: true });
+
+  if (result.data?.companyLocationUpdate.userErrors.length) {
+    console.error(`    ⚠️  Error setting payment terms:`, result.data.companyLocationUpdate.userErrors);
+    return false;
+  }
+
+  const template = result.data?.companyLocationUpdate.companyLocation?.buyerExperienceConfiguration?.paymentTermsTemplate;
+  if (template) {
+    console.log(`    → Payment terms: ${template.name}`);
+  }
+  
+  return true;
 }
 
 // -- Seeding: Customers --
