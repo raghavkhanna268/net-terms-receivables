@@ -542,20 +542,3 @@ describeWithDb("concurrent refresh safety", () => {
     expect(new Set(tokens).size).toBe(1);
   });
 });
-
-describe("error message security - real function results", () => {
-  it("isTokenExpiredOrNearExpiry does not leak tokens in any code path", () => {
-    // This function doesn't take tokens, but verify it doesn't somehow produce them
-    const result1 = isTokenExpiredOrNearExpiry(null);
-    const result2 = isTokenExpiredOrNearExpiry(new Date());
-    const result3 = isTokenExpiredOrNearExpiry(new Date(Date.now() + 60000), 30000);
-
-    // Results are booleans - cannot contain tokens
-    expect(typeof result1).toBe("boolean");
-    expect(typeof result2).toBe("boolean");
-    expect(typeof result3).toBe("boolean");
-  });
-
-  // Note: Error message content tests with real DB results are in the
-  // describeWithDb blocks above - they verify result.error contains no tokens
-});

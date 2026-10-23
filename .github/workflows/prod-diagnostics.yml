@@ -222,9 +222,10 @@ jobs:
           fi
 
           # Parse result - script outputs only {success, wasRefreshed, expires, errorCode, error}
-          REFRESH_SUCCESS=$(echo "$REFRESH_RESULT" | jq -r '.success // false')
-          REFRESH_ERROR_CODE=$(echo "$REFRESH_RESULT" | jq -r '.errorCode // ""')
-          WAS_REFRESHED=$(echo "$REFRESH_RESULT" | jq -r '.wasRefreshed // false')
+          # Guard each jq call so non-JSON or jq errors set refresh_success=false
+          REFRESH_SUCCESS=$(echo "$REFRESH_RESULT" | jq -r '.success // false' 2>/dev/null || echo false)
+          REFRESH_ERROR_CODE=$(echo "$REFRESH_RESULT" | jq -r '.errorCode // ""' 2>/dev/null || echo "")
+          WAS_REFRESHED=$(echo "$REFRESH_RESULT" | jq -r '.wasRefreshed // false' 2>/dev/null || echo false)
 
           if [ "$REFRESH_SUCCESS" = "true" ]; then
             echo "::notice::Token refresh successful (wasRefreshed: $WAS_REFRESHED)"

@@ -193,25 +193,3 @@ describeWithDb("scripts/lib/refresh-offline-token", () => {
     expect(result.error).toContain("nonexistent-shop.myshopify.com");
   });
 });
-
-describe("script result security", () => {
-  it("ScriptRefreshResult type does not include accessToken field", () => {
-    // This is a compile-time check - if ScriptRefreshResult had accessToken,
-    // this test file would have type errors. The runtime check is:
-    const successResult = {
-      success: true as const,
-      wasRefreshed: true,
-      expires: "2024-01-01T00:00:00.000Z",
-    };
-
-    const errorResult = {
-      success: false as const,
-      errorCode: "no_session" as const,
-      error: "No session found",
-    };
-
-    // Neither result type should have accessToken
-    expect("accessToken" in successResult).toBe(false);
-    expect("accessToken" in errorResult).toBe(false);
-  });
-});
