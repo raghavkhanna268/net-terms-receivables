@@ -128,7 +128,7 @@ model Session {
 /// Merchant shop configuration
 /// Created when a shop installs the app; deleted on uninstall (S22)
 model Shop {
-  id               String    @id @default(dbgenerated("gen_random_uuid()::text"))
+  id               String    @id @default(dbgenerated("(gen_random_uuid())::text"))
   /// Shopify shop domain (e.g. "example.myshopify.com")
   domain           String    @unique
   /// Default currency for the shop
@@ -158,7 +158,7 @@ model Shop {
   /// Whether this is a test/development subscription.
   isTest           Boolean   @default(false) @map("is_test")
   /// When the plan cache was last refreshed. TTL ~6h.
-  planCachedAt     DateTime? @map("plan_cached_at") @db.Timestamptz(3)
+  planCachedAt     DateTime? @map("plan_cached_at") @db.Timestamptz
 
   // Relations - direct children with CASCADE
   accounts     BuyerAccount[]
@@ -172,6 +172,10 @@ model Shop {
   payments     Payment[]
   matches      Match[]
   reminderLogs ReminderLog[]
+  // S22: CASCADE FKs for shop/redact cleanup (created by S22 migration)
+  taggedCustomers S8TaggedCustomer[]
+  draftOrders     S8DraftOrder[]
+  dataRequests    S22DataRequest[]
 
   // S21: Index for finding shops by plan (analytics, batch operations)
   @@index([planKey])
@@ -180,7 +184,7 @@ model Shop {
 /// Tag rule for non-B2B wholesale (tagged customer accounts)
 /// Maps customer tags to default payment terms
 model AccountSource {
-  id               String @id @default(dbgenerated("gen_random_uuid()::text"))
+  id               String @id @default(dbgenerated("(gen_random_uuid())::text"))
   shopId           String
   /// Customer tag to match (e.g. "net30", "wholesale-gold")
   tag              String
@@ -206,7 +210,7 @@ model AccountSource {
 /// - COMPANY requires companyLocationId (and companyId)
 /// - TAGGED_CUSTOMER requires customerId
 model BuyerAccount {
-  id                  String             @id @default(dbgenerated("gen_random_uuid()::text"))
+  id                  String             @id @default(dbgenerated("(gen_random_uuid())::text"))
   shopId              String
   /// Type of buyer: B2B company or tagged customer
   kind                AccountKind
@@ -235,7 +239,7 @@ model BuyerAccount {
   updatedAt           DateTime           @default(now()) @db.Timestamptz(3)
   /// S21: When this account was gated due to plan limits. NULL means active.
   /// Gated accounts are excluded from limit count and enforcement.
-  gatedAt             DateTime?          @map("gated_at") @db.Timestamptz(3)
+  gatedAt             DateTime?          @map("gated_at") @db.Timestamptz
 
   // Relations (onDelete: CASCADE - accounts are shop-specific)
   shop     Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
@@ -268,7 +272,7 @@ model BuyerAccount {
 /// - 0 <= outstanding <= total
 /// - Exactly one of orderId/draftOrderId must be set
 model Invoice {
-  id              String        @id @default(dbgenerated("gen_random_uuid()::text"))
+  id              String        @id @default(dbgenerated("(gen_random_uuid())::text"))
   shopId          String
   buyerAccountId  String
   /// Shopify Order GID (mutually exclusive with draftOrderId)
@@ -327,7 +331,7 @@ model Invoice {
 /// Bank statement import (HDFC, ICICI, or mapped format)
 /// Groups payments from a single import operation
 model BankImport {
-  id        String    @id @default(dbgenerated("gen_random_uuid()::text"))
+  id        String    @id @default(dbgenerated("(gen_random_uuid())::text"))
   shopId    String
   /// Bank type: hdfc, icici, or mapped (normalized format)
   bank      String
@@ -358,7 +362,7 @@ model BankImport {
 /// handler (S22) will need to redact these fields for the affected customer.
 /// See GitHub issue #22 for S22 implementation.
 model Payment {
-  id         String        @id @default(dbgenerated("gen_random_uuid()::text"))
+  id         String        @id @default(dbgenerated("(gen_random_uuid())::text"))
   shopId     String
   importId   String
   /// Value date from the bank statement
@@ -407,7 +411,7 @@ model Payment {
 ///
 /// shopId ensures payment and invoice are from the same shop via composite FKs
 model Match {
-  id          String     @id @default(dbgenerated("gen_random_uuid()::text"))
+  id          String     @id @default(dbgenerated("(gen_random_uuid())::text"))
   shopId      String
   paymentId   String
   invoiceId   String
@@ -444,7 +448,7 @@ model Match {
 /// Payer alias: maps narration tokens to buyer accounts
 /// Used by the matching algorithm to recognize payers
 model PayerAlias {
-  id             String @id @default(dbgenerated("gen_random_uuid()::text"))
+  id             String @id @default(dbgenerated("(gen_random_uuid())::text"))
   buyerAccountId String
   /// Normalized narration token (lowercase, common prefixes stripped)
   payerKey       String
@@ -465,7 +469,7 @@ model PayerAlias {
 
 /// Reminder rule: when to send reminders relative to invoice due date
 model ReminderRule {
-  id         String          @id @default(dbgenerated("gen_random_uuid()::text"))
+  id         String          @id @default(dbgenerated("(gen_random_uuid())::text"))
   shopId     String
   /// Days offset from due date: negative = before, 0 = on due, positive = after
   /// e.g. -3 = 3 days before due, 7 = 7 days overdue
@@ -491,7 +495,7 @@ model ReminderRule {
 
 /// Reminder log: tracks sent reminders to prevent duplicates
 model ReminderLog {
-  id        String   @id @default(dbgenerated("gen_random_uuid()::text"))
+  id        String   @id @default(dbgenerated("(gen_random_uuid())::text"))
   shopId    String
   ruleId    String
   invoiceId String
@@ -518,7 +522,7 @@ model ReminderLog {
 
 /// Audit event: tracks significant actions for compliance
 model AuditEvent {
-  id     String   @id @default(dbgenerated("gen_random_uuid()::text"))
+  id     String   @id @default(dbgenerated("(gen_random_uuid())::text"))
   shopId String
   /// Who performed the action (user ID, "system", "webhook")
   actor  String
@@ -550,9 +554,9 @@ model S6ProcessedWebhook {
   webhookId   String   @id @map("webhook_id")
   topic       String
   resourceGid String   @map("resource_gid")
-  processedAt DateTime @default(now()) @map("processed_at") @db.Timestamptz(3)
+  processedAt DateTime @default(now()) @map("processed_at") @db.Timestamptz
 
-  @@index([processedAt])
+  @@index([processedAt], map: "idx_s6_processed_webhooks_processed_at")
   @@map("s6_processed_webhooks")
 }
 
@@ -572,7 +576,7 @@ model S6BulkOperation {
   shop            String
   bulkType        String    @map("bulk_type")
   startedAt       DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
-  byteOffset      BigInt    @default(0) @map("byte_offset")
+  byteOffset      BigInt?   @default(0) @map("byte_offset")
   completedAt     DateTime? @map("completed_at") @db.Timestamptz(6)
   origin          String    @default("webhook")
   reconcileStage  String?   @map("reconcile_stage")
@@ -610,10 +614,14 @@ model S6BulkOperation {
 /// the COMPANY BuyerAccount takes precedence for order mapping. The tagged
 /// customer record is still tracked but won't create a duplicate BuyerAccount.
 ///
-/// S22: FK to Shop with ON DELETE CASCADE enables automatic deletion on shop/redact.
+/// FK to Shop with ON DELETE CASCADE (S22 migration).
+/// Runtime uses postgres.js directly, but FK exists in DB for cascade delete on shop/redact.
 model S8TaggedCustomer {
-  id              String    @id @default(dbgenerated("gen_random_uuid()::text"))
+  id              String    @id @default(dbgenerated("(gen_random_uuid())::text"))
   shopId          String    @map("shop_id")
+
+  // FK to Shop with CASCADE delete, NO ACTION update (matches migration exactly)
+  shop            Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "s8_tagged_customers_shop_fkey")
   /// Shopify Customer GID (e.g., "gid://shopify/Customer/123")
   customerId      String    @map("customer_id")
   /// Customer tags as JSON array (e.g., ["net-terms", "wholesale"])
@@ -623,7 +631,7 @@ model S8TaggedCustomer {
   /// Separate from BuyerAccount.holdState - tag sync never touches credit hold
   tagActive       Boolean   @default(false) @map("tag_active")
   /// When the customer lost the matching tag (NULL if tagActive=true)
-  tagDeactivatedAt DateTime? @map("tag_deactivated_at") @db.Timestamptz(3)
+  tagDeactivatedAt DateTime? @map("tag_deactivated_at") @db.Timestamptz
   /// Reserved: customer email, requires Protected Customer Data approval
   /// Always NULL until CUSTOMER_PII_FIELDS=1 is set after approval
   email           String?
@@ -631,13 +639,13 @@ model S8TaggedCustomer {
   /// Always NULL until CUSTOMER_PII_FIELDS=1 is set after approval
   displayName     String?   @map("display_name")
   /// When the record was created
-  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz
   /// When the record was last updated
-  updatedAt       DateTime  @default(now()) @map("updated_at") @db.Timestamptz(3)
+  updatedAt       DateTime  @default(now()) @map("updated_at") @db.Timestamptz
 
   // One record per customer per shop
-  @@unique([shopId, customerId])
-  @@index([shopId, tagActive])
+  @@unique([shopId, customerId], map: "s8_tagged_customers_shop_customer_unique")
+  @@index([shopId, tagActive], map: "idx_s8_tagged_customers_shop_tag_active")
   @@map("s8_tagged_customers")
 }
 
@@ -654,10 +662,14 @@ model S8TaggedCustomer {
 /// The pending exposure (sum of tracked draft orders) is used by the credit
 /// limit calculation to include uncommitted orders.
 ///
-/// S22: FK to Shop with ON DELETE CASCADE enables automatic deletion on shop/redact.
+/// FK to Shop with ON DELETE CASCADE (S22 migration).
+/// Runtime uses postgres.js directly, but FK exists in DB for cascade delete on shop/redact.
 model S8DraftOrder {
-  id             String   @id @default(dbgenerated("gen_random_uuid()::text"))
+  id             String   @id @default(dbgenerated("(gen_random_uuid())::text"))
   shopId         String   @map("shop_id")
+
+  // FK to Shop with CASCADE delete, NO ACTION update (matches migration exactly)
+  shop           Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "s8_draft_orders_shop_fkey")
   /// Shopify DraftOrder GID (e.g., "gid://shopify/DraftOrder/123")
   draftOrderId   String   @map("draft_order_id")
   /// Reference to BuyerAccount for credit exposure calculation
@@ -671,14 +683,14 @@ model S8DraftOrder {
   /// Draft order status (open, invoice_sent, completed)
   status         String   @default("open")
   /// When the draft order was created in Shopify
-  createdAt      DateTime @map("created_at") @db.Timestamptz(3)
+  createdAt      DateTime @map("created_at") @db.Timestamptz
   /// When the record was last updated
-  updatedAt      DateTime @default(now()) @map("updated_at") @db.Timestamptz(3)
+  updatedAt      DateTime @default(now()) @map("updated_at") @db.Timestamptz
 
   // One record per draft order per shop
-  @@unique([shopId, draftOrderId])
-  @@index([shopId, buyerAccountId])
-  @@index([shopId, hasPaymentTerms])
+  @@unique([shopId, draftOrderId], map: "s8_draft_orders_shop_draft_unique")
+  @@index([shopId, buyerAccountId], map: "idx_s8_draft_orders_shop_buyer")
+  @@index([shopId, hasPaymentTerms], map: "idx_s8_draft_orders_shop_has_terms")
   @@map("s8_draft_orders")
 }
 
@@ -733,13 +745,19 @@ model S10bOrderRefetchNull {
 ///
 /// Delivery path: In-admin download + email notification to shop owner (if configured).
 /// Exports are retained for 30 days (DPDP minimisation) then auto-purged by pg_cron.
+///
+/// FK to Shop with ON DELETE CASCADE (S22 migration).
+/// Runtime uses postgres.js directly, but FK exists in DB for cascade delete on shop/redact.
 model S22DataRequest {
-  id           String    @id @default(dbgenerated("gen_random_uuid()::text"))
+  id           String    @id @default(dbgenerated("(gen_random_uuid())::text"))
   shopId       String    @map("shop_id")
+
+  // FK to Shop with CASCADE delete, NO ACTION update (matches migration exactly)
+  shop         Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "s22_data_requests_shop_fkey")
   /// Customer GID (e.g., "gid://shopify/Customer/123")
   customerGid  String    @map("customer_gid")
   /// Shopify's unique request ID from the webhook
-  requestId    String    @unique @map("request_id")
+  requestId    String    @map("request_id")
   /// When the data request webhook was received
   receivedAt   DateTime  @default(now()) @map("received_at") @db.Timestamptz(3)
   /// Request status: pending, completed, downloaded, expired
@@ -754,8 +772,9 @@ model S22DataRequest {
   expiresAt    DateTime? @map("expires_at") @db.Timestamptz(3)
   createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  @@index([shopId, status])
-  @@index([shopId, customerGid])
+  @@unique([requestId], map: "idx_s22_data_requests_request_id")
+  @@index([shopId, status], map: "idx_s22_data_requests_shop_status")
+  @@index([shopId, customerGid], map: "idx_s22_data_requests_shop_customer")
   @@map("s22_data_requests")
 }
 

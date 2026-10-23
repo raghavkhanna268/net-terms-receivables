@@ -413,6 +413,33 @@ describe("Bulk JSONL Processor", () => {
       expect(progress!.completedAt).toBeNull();
     });
 
+    it("handles null byte_offset by defaulting to 0", async () => {
+      const { loadBulkOperationProgress } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+
+      const mockSql = vi.fn().mockImplementation(() => {
+        return Promise.resolve([
+          {
+            byte_offset: null,
+            completed_at: null,
+            chunk_size: 524288,
+            failure_count: 0,
+          },
+        ]);
+      });
+
+      const progress = await loadBulkOperationProgress(
+        mockSql as never,
+        "gid://shopify/BulkOperation/123"
+      );
+
+      expect(progress).not.toBeNull();
+      expect(progress!.byteOffset).toBe(0);
+      expect(progress!.chunkSize).toBe(524288);
+      expect(progress!.failureCount).toBe(0);
+    });
+
     it("saves progress with new chunkSize", async () => {
       const { saveBulkOperationProgress } = await import(
         "../bulk-jsonl-processor.server"

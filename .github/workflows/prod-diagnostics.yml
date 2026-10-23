@@ -47,6 +47,11 @@ on:
         required: false
         default: false
         type: boolean
+      invoke_reconcile:
+        description: "NOT read-only: runs a real prod reconcile enqueue for all installed shops"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -501,3 +506,133 @@ jobs:
             echo "::notice::vault schema does not exist (supabase_vault not installed or not configured)"
             echo '{"vault_schema_exists": false, "jobs_drain_secret_exists": false, "jobs_drain_url_exists": false}' | jq .
           fi
+
+          echo ""
+          echo "=== pgmq Queues ==="
+          echo ""
+
+          PGMQ_EXISTS=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pgmq');
+          EOSQL
+          )
+
+          if [ "$PGMQ_EXISTS" = "t" ]; then
+            echo "Queue names from pgmq.list_queues():"
+            psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          SELECT queue_name FROM pgmq.list_queues() ORDER BY queue_name;
+          EOSQL
+
+            echo ""
+            echo "S6 queue and dead letter table status:"
+            psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          SELECT json_build_object(
+            's6_sync_queue_exists', EXISTS(SELECT 1 FROM pgmq.list_queues() WHERE queue_name = 's6_sync'),
+            's6_bulk_queue_exists', EXISTS(SELECT 1 FROM pgmq.list_queues() WHERE queue_name = 's6_bulk'),
+            's6_dead_letter_table_exists', (to_regclass('public.s6_dead_letter') IS NOT NULL)
+          );
+          EOSQL
+          else
+            echo "::notice::pgmq extension is not installed"
+            echo '{"s6_sync_queue_exists": false, "s6_bulk_queue_exists": false, "s6_dead_letter_table_exists": false}' | jq .
+          fi
+
+      - name: Reconcile probe
+        if: ${{ inputs.invoke_reconcile }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL_MIGRATIONS secret not set"
+            exit 1
+          fi
+
+          echo "=== Reconcile Probe ==="
+          echo ""
+
+          echo "Invoking public.s10b_call_reconcile() and capturing request_id..."
+
+          # Call reconcile and get the request_id via currval in the same session.
+          # If currval errors, the function returned early (e.g. missing Vault secret)
+          # and no net.http_post was called, so no nextval occurred.
+          # pg_net 0.20.4: http_request_queue.id uses sequence net.http_request_queue_id_seq
+          REQUEST_ID_OUTPUT=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL' 2>&1
+          SELECT public.s10b_call_reconcile();
+          SELECT currval(pg_get_serial_sequence('net.http_request_queue', 'id'));
+          EOSQL
+          ) || {
+            echo "::error::s10b_call_reconcile or currval failed. If currval error, the function likely returned early (missing Vault secret?)."
+            echo "psql output: $REQUEST_ID_OUTPUT"
+            exit 1
+          }
+
+          # currval output is the second line (first is the function result)
+          REQUEST_ID=$(echo "$REQUEST_ID_OUTPUT" | tail -n1)
+
+          if [ -z "$REQUEST_ID" ] || ! [[ "$REQUEST_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::Failed to get request_id from currval. Function may have returned early (missing Vault secret?)."
+            echo "Output was: $REQUEST_ID_OUTPUT"
+            exit 1
+          fi
+
+          echo "request_id: $REQUEST_ID"
+          echo ""
+          echo "Polling for HTTP response (up to 75s)..."
+
+          POLL_END=$(($(date +%s) + 75))
+          FOUND_ROW=""
+
+          while [ "$(date +%s)" -lt "$POLL_END" ]; do
+            FOUND_ROW=$(psql -v ON_ERROR_STOP=1 -v req_id="$REQUEST_ID" -t -A -F '|' "$DATABASE_URL" <<'EOSQL'
+          SELECT
+            id,
+            COALESCE(status_code::text, 'null'),
+            CASE WHEN timed_out THEN 'true' ELSE 'false' END,
+            CASE WHEN error_msg IS NOT NULL THEN 'true' ELSE 'false' END
+          FROM net._http_response
+          WHERE id = :req_id;
+          EOSQL
+            )
+            if [ -n "$FOUND_ROW" ]; then
+              break
+            fi
+            sleep 3
+          done
+
+          if [ -z "$FOUND_ROW" ]; then
+            echo "::error::No HTTP response received within 75 seconds for request_id=$REQUEST_ID"
+            echo '{"response_received": false}' | jq .
+            exit 1
+          fi
+
+          RESP_ID=$(echo "$FOUND_ROW" | cut -d'|' -f1)
+          STATUS_CODE=$(echo "$FOUND_ROW" | cut -d'|' -f2)
+          TIMED_OUT=$(echo "$FOUND_ROW" | cut -d'|' -f3)
+          HAS_ERROR=$(echo "$FOUND_ROW" | cut -d'|' -f4)
+
+          echo ""
+          echo "Reconcile HTTP response (id=$RESP_ID):"
+          jq -n \
+            --argjson status_code "$STATUS_CODE" \
+            --argjson timed_out "$TIMED_OUT" \
+            --argjson error_msg_present "$HAS_ERROR" \
+            '{status_code: $status_code, timed_out: $timed_out, error_msg_present: $error_msg_present}'
+
+          if [ "$TIMED_OUT" = "true" ]; then
+            echo "::error::Reconcile HTTP request timed out"
+            exit 1
+          fi
+
+          if [ "$STATUS_CODE" = "null" ]; then
+            echo "::error::Reconcile HTTP response has no status code"
+            exit 1
+          fi
+
+          if [ "$STATUS_CODE" -lt 200 ] || [ "$STATUS_CODE" -ge 300 ]; then
+            echo "::error::Reconcile HTTP response status $STATUS_CODE is not 2xx"
+            exit 1
+          fi
+
+          echo ""
+          echo "::notice::Reconcile probe completed successfully (status $STATUS_CODE)"

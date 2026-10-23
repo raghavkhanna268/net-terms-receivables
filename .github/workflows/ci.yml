@@ -100,6 +100,22 @@ jobs:
       - name: Validate Prisma schema
         run: npx prisma validate
 
+      - name: Create shadow database for drift check
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -c "CREATE DATABASE shadow_db;"
+
+      - name: Check Prisma schema drift
+        env:
+          SHADOW_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/shadow_db
+        run: |
+          # Compare migrations to schema.prisma using a shadow database.
+          # Exit code 0 = no drift, 2 = drift detected (fail CI).
+          echo "Checking for schema drift (migrations vs schema.prisma)..."
+          npx prisma migrate diff \
+            --from-migrations prisma/migrations \
+            --to-schema prisma/schema.prisma \
+            --exit-code
+
       - name: Apply database migrations
         run: npx prisma migrate deploy
 

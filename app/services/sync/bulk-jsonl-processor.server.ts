@@ -529,7 +529,7 @@ export async function loadBulkOperationProgress(
   failureCount: number;
 } | null> {
   const [row] = await sql<{
-    byte_offset: string;
+    byte_offset: string | null;
     completed_at: Date | null;
     chunk_size: number;
     failure_count: number;
@@ -542,7 +542,7 @@ export async function loadBulkOperationProgress(
   if (!row) return null;
 
   return {
-    byteOffset: parseInt(row.byte_offset, 10),
+    byteOffset: row.byte_offset !== null ? parseInt(row.byte_offset, 10) : 0,
     completedAt: row.completed_at,
     chunkSize: row.chunk_size,
     failureCount: row.failure_count,

@@ -36,7 +36,9 @@ jobs:
   seed:
     name: Seed dev store
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Timeout increased for ~35 orders at 12s pacing + potential throttle retries with backoff
+    # Base: 35 orders * 12s = 7min, plus company/location/role setup and potential retries
+    timeout-minutes: 20
 
     env:
       # Fixed shop domain - hardcoded guard in seed.ts enforces this
