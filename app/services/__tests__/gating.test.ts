@@ -390,6 +390,105 @@ describe("Gating Service", () => {
     });
   });
 
+  describe("enforceImportLimit (S21 item 4 wiring)", () => {
+    it("succeeds when import is allowed", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.resetModules();
+      const { enforceImportLimit } = await import("../gating.server");
+      
+      // Starter plan (unlimited imports)
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "starter",
+        subscription_id: "sub-123",
+        subscription_name: "Starter",
+        is_test: false,
+        plan_cached_at: new Date(),
+      }]);
+      
+      // Should not throw
+      await expect(enforceImportLimit(mockSql as unknown as Sql, TEST_SHOP_ID)).resolves.toBeUndefined();
+    });
+
+    it("throws UpgradeRequiredError when import limit exceeded", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.resetModules();
+      const { enforceImportLimit, UpgradeRequiredError } = await import("../gating.server");
+      
+      // Free plan (1 import/month limit)
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "free",
+        subscription_id: null,
+        subscription_name: null,
+        is_test: false,
+        plan_cached_at: new Date(),
+      }]);
+      mockSql.setMockResult("import_count", [{ count: "1" }]); // Already at limit
+      
+      await expect(enforceImportLimit(mockSql as unknown as Sql, TEST_SHOP_ID))
+        .rejects.toThrow(UpgradeRequiredError);
+      
+      // Verify error details
+      try {
+        await enforceImportLimit(mockSql as unknown as Sql, TEST_SHOP_ID);
+      } catch (error) {
+        expect(error).toBeInstanceOf(UpgradeRequiredError);
+        expect((error as InstanceType<typeof UpgradeRequiredError>).limitType).toBe("importsPerMonth");
+        expect((error as InstanceType<typeof UpgradeRequiredError>).currentUsage).toBe(1);
+        expect((error as InstanceType<typeof UpgradeRequiredError>).limit).toBe(1);
+      }
+    });
+
+    it("succeeds when gating is OFF (no enforcement)", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+      vi.resetModules();
+      const { enforceImportLimit } = await import("../gating.server");
+      
+      // Should not throw even with free plan and imports at limit
+      await expect(enforceImportLimit(mockSql as unknown as Sql, TEST_SHOP_ID)).resolves.toBeUndefined();
+    });
+  });
+
+  describe("enforceCompanyLimit", () => {
+    it("succeeds when under limit", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.resetModules();
+      const { enforceCompanyLimit } = await import("../gating.server");
+      
+      // Free plan with 2 active accounts (limit 3)
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "free",
+        subscription_id: null,
+        subscription_name: null,
+        is_test: false,
+        plan_cached_at: new Date(),
+      }]);
+      // checkCompanyLimit uses gated_at IS NULL, so set active_account_count
+      mockSql.setMockResult("active_account_count", [{ count: "2" }]);
+      
+      await expect(enforceCompanyLimit(mockSql as unknown as Sql, TEST_SHOP_ID)).resolves.toBeUndefined();
+    });
+
+    it("throws UpgradeRequiredError when limit exceeded", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.resetModules();
+      const { enforceCompanyLimit, UpgradeRequiredError } = await import("../gating.server");
+      
+      // Free plan at limit (3 active accounts, limit is 3)
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "free",
+        subscription_id: null,
+        subscription_name: null,
+        is_test: false,
+        plan_cached_at: new Date(),
+      }]);
+      // checkCompanyLimit uses gated_at IS NULL, so set active_account_count
+      mockSql.setMockResult("active_account_count", [{ count: "3" }]);
+      
+      await expect(enforceCompanyLimit(mockSql as unknown as Sql, TEST_SHOP_ID))
+        .rejects.toThrow(UpgradeRequiredError);
+    });
+  });
+
   describe("checkFeature", () => {
     it("returns true for features in plan", async () => {
       const { checkFeature } = await import("../gating.server");
