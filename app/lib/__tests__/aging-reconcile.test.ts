@@ -102,12 +102,12 @@ describeWithDb("SQL-vs-TS parity (DB-backed)", () => {
 
       await sql`
         INSERT INTO "Invoice" (
-          id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding, "dueAt", "createdAt", "updatedAt"
+          id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding, "issuedAt", "dueAt", "createdAt", "updatedAt"
         )
         VALUES (
           gen_random_uuid()::text, ${testShopId}, ${testBuyerAccountId},
           ${"gid://shopify/Order/parity-" + fixture.daysPastDue},
-          ${"INV-" + fixture.name}, 1000.00, 'open', 1000.00, ${dueDate}, NOW(), NOW()
+          ${"INV-" + fixture.name}, 1000.00, 'open', 1000.00, NOW(), ${dueDate}, NOW(), NOW()
         )
       `;
     }
@@ -270,24 +270,24 @@ describeWithDb("shop totals = sum of ledger (gating test)", () => {
     // Create invoice for active buyer
     await sql`
       INSERT INTO "Invoice" (
-        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding, "dueAt", "createdAt", "updatedAt"
+        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding, "issuedAt", "dueAt", "createdAt", "updatedAt"
       )
       VALUES (
         gen_random_uuid()::text, ${testShopId}, ${activeBuyerId},
         'gid://shopify/Order/active-1', 'INV-ACTIVE', 5000.00, 'open', 5000.00,
-        ${DateTime.now().minus({ days: 15 }).toJSDate()}, NOW(), NOW()
+        NOW(), ${DateTime.now().minus({ days: 15 }).toJSDate()}, NOW(), NOW()
       )
     `;
 
     // Create invoice for gated buyer
     await sql`
       INSERT INTO "Invoice" (
-        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding, "dueAt", "createdAt", "updatedAt"
+        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding, "issuedAt", "dueAt", "createdAt", "updatedAt"
       )
       VALUES (
         gen_random_uuid()::text, ${testShopId}, ${gatedBuyerId},
         'gid://shopify/Order/gated-1', 'INV-GATED', 3000.00, 'open', 3000.00,
-        ${DateTime.now().minus({ days: 20 }).toJSDate()}, NOW(), NOW()
+        NOW(), ${DateTime.now().minus({ days: 20 }).toJSDate()}, NOW(), NOW()
       )
     `;
   });
