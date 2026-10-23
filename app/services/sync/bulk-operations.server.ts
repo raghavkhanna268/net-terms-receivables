@@ -223,6 +223,16 @@ export interface BulkOperationResult {
 export type BulkOperationType = "companies" | "orders" | "customers";
 
 /**
+ * Origin of a bulk operation.
+ */
+export type BulkOperationOrigin = "reconcile" | "webhook" | "manual";
+
+/**
+ * Reconcile stage for sequential processing.
+ */
+export type ReconcileStage = "companies" | "orders";
+
+/**
  * Start a bulk companies export.
  *
  * This is meant to be called from afterAuth or an admin action.
@@ -314,18 +324,109 @@ export function parseBulkOperationResult(
  * @param bulkOperationId - The bulk operation GID from Shopify
  * @param shop - Shop domain
  * @param bulkType - Type of bulk operation (companies or orders)
+ * @param origin - Source of the bulk operation (reconcile, webhook, manual)
+ * @param reconcileStage - For reconcile origin, which stage (companies, orders)
  */
 export async function registerBulkOperation(
   sql: import("~/lib/db-light.server").Sql,
   bulkOperationId: string,
   shop: string,
-  bulkType: BulkOperationType
+  bulkType: BulkOperationType,
+  origin: BulkOperationOrigin = "webhook",
+  reconcileStage?: ReconcileStage
 ): Promise<void> {
   await sql`
-    INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type)
-    VALUES (${bulkOperationId}, ${shop}, ${bulkType})
+    INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage)
+    VALUES (${bulkOperationId}, ${shop}, ${bulkType}, ${origin}, ${reconcileStage ?? null})
     ON CONFLICT (bulk_operation_id) DO UPDATE SET
       shop = EXCLUDED.shop,
-      bulk_type = EXCLUDED.bulk_type
+      bulk_type = EXCLUDED.bulk_type,
+      origin = EXCLUDED.origin,
+      reconcile_stage = EXCLUDED.reconcile_stage
+  `;
+}
+
+/**
+ * Get bulk operation metadata including origin and stage.
+ */
+export async function getBulkOperationMetadata(
+  sql: import("~/lib/db-light.server").Sql,
+  bulkOperationId: string
+): Promise<{
+  shop: string;
+  bulkType: BulkOperationType;
+  origin: BulkOperationOrigin;
+  reconcileStage: ReconcileStage | null;
+  failureCount: number;
+  chunkSize: number;
+} | null> {
+  const [row] = await sql<{
+    shop: string;
+    bulk_type: string;
+    origin: string;
+    reconcile_stage: string | null;
+    failure_count: number;
+    chunk_size: number;
+  }[]>`
+    SELECT shop, bulk_type, origin, reconcile_stage, failure_count, chunk_size
+    FROM s6_bulk_operations
+    WHERE bulk_operation_id = ${bulkOperationId}
+  `;
+
+  if (!row) return null;
+
+  return {
+    shop: row.shop,
+    bulkType: row.bulk_type as BulkOperationType,
+    origin: row.origin as BulkOperationOrigin,
+    reconcileStage: row.reconcile_stage as ReconcileStage | null,
+    failureCount: row.failure_count,
+    chunkSize: row.chunk_size,
+  };
+}
+
+/**
+ * Increment failure count for a bulk operation.
+ */
+export async function incrementBulkOperationFailureCount(
+  sql: import("~/lib/db-light.server").Sql,
+  bulkOperationId: string
+): Promise<number> {
+  const [row] = await sql<{ failure_count: number }[]>`
+    UPDATE s6_bulk_operations
+    SET failure_count = failure_count + 1
+    WHERE bulk_operation_id = ${bulkOperationId}
+    RETURNING failure_count
+  `;
+  return row?.failure_count ?? 0;
+}
+
+/**
+ * Reset failure count to 0 after successful progress.
+ * Called on successful progress to give the operation a clean slate.
+ */
+export async function resetBulkOperationFailureCount(
+  sql: import("~/lib/db-light.server").Sql,
+  bulkOperationId: string
+): Promise<void> {
+  await sql`
+    UPDATE s6_bulk_operations
+    SET failure_count = 0
+    WHERE bulk_operation_id = ${bulkOperationId}
+  `;
+}
+
+/**
+ * Update chunk size for a bulk operation (for growing range window).
+ */
+export async function updateBulkOperationChunkSize(
+  sql: import("~/lib/db-light.server").Sql,
+  bulkOperationId: string,
+  chunkSize: number
+): Promise<void> {
+  await sql`
+    UPDATE s6_bulk_operations
+    SET chunk_size = ${chunkSize}
+    WHERE bulk_operation_id = ${bulkOperationId}
   `;
 }

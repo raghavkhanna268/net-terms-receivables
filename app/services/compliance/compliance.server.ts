@@ -25,6 +25,9 @@ import type { Sql } from "~/lib/db-light.server";
  * - Shop -> s8_tagged_customers, s8_draft_orders (S22 FKs)
  * - Shop -> s22_data_requests (S22 FK)
  *
+ * Also deletes non-FK-linked data:
+ * - s10b_order_refetch_null (aggregate counter, no FK)
+ *
  * Per Shopify docs, shop/redact is sent 48 hours after app/uninstalled.
  * See: https://shopify.dev/docs/apps/build/privacy-law-compliance
  *
@@ -35,7 +38,14 @@ import type { Sql } from "~/lib/db-light.server";
 export async function deleteShop(
   sql: Sql,
   shopDomain: string
-): Promise<{ deleted: boolean; shopId: string | null }> {
+): Promise<{ deleted: boolean; shopId: string | null; refetchNullPurged: number }> {
+  // Delete s10b_order_refetch_null first (not FK-linked)
+  const refetchResult = await sql`
+    DELETE FROM s10b_order_refetch_null
+    WHERE shop = ${shopDomain}
+  `;
+
+  // Delete shop - all FK-linked data cascades
   const [result] = await sql<{ id: string }[]>`
     DELETE FROM "Shop"
     WHERE domain = ${shopDomain}
@@ -45,6 +55,7 @@ export async function deleteShop(
   return {
     deleted: result !== undefined,
     shopId: result?.id ?? null,
+    refetchNullPurged: refetchResult.count,
   };
 }
 

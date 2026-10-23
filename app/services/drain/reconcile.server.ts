@@ -5,10 +5,14 @@
  * the S6 bulk exports to catch any missed webhooks and fix drift.
  *
  * The heavy work happens through the bulk operation flow:
- * 1. This function enqueues RECONCILE_COMPANIES and RECONCILE_ORDERS messages
+ * 1. This function enqueues RECONCILE_COMPANIES messages
  * 2. The drain handler starts bulk operations via Admin API
- * 3. The bulk_operations/finish webhook enqueues completion messages
- * 4. The drain processes the JSONL results in chunks
+ * 3. The bulk_operations/finish webhook triggers JSONL processing
+ * 4. After companies complete, RECONCILE_ORDERS is enqueued
+ * 5. The drain processes orders similarly
+ *
+ * Sequential design: Companies must complete before orders to ensure
+ * BuyerAccounts exist for order-to-account mapping.
  *
  * Idempotency: Uses webhookId pattern "reconcile:<shop>:<YYYY-MM-DD>:<kind>"
  * so a nightly run is idempotent per day.
@@ -44,7 +48,10 @@ function getTodayUTC(): string {
  * - Each shop gets at most one reconcile per kind per day
  * - Re-running the nightly job on the same day is idempotent
  */
-function makeReconcileWebhookId(shop: string, kind: "companies" | "orders"): string {
+function makeReconcileWebhookId(
+  shop: string,
+  kind: "companies" | "orders"
+): string {
   const today = getTodayUTC();
   return `reconcile:${shop}:${today}:${kind}`;
 }
@@ -52,17 +59,20 @@ function makeReconcileWebhookId(shop: string, kind: "companies" | "orders"): str
 /**
  * Enqueue reconcile messages for all installed shops.
  *
+ * Only enqueues RECONCILE_COMPANIES - orders are enqueued after
+ * companies complete to ensure BuyerAccounts exist first.
+ *
  * Called by:
  * - pg_cron nightly job via /jobs/drain?reconcile=true
  * - Manual admin action
  *
  * @param sql - postgres.js SQL client
- * @returns Number of shops enqueued for reconcile
+ * @returns Number of messages enqueued
  */
 export async function enqueueReconcileForAllShops(sql: Sql): Promise<number> {
-  // Get all installed shops
+  // Get all installed shops (exclude uninstalled)
   const shops = await sql<{ domain: string }[]>`
-    SELECT domain FROM "Shop"
+    SELECT domain FROM "Shop" WHERE "uninstalledAt" IS NULL
   `;
 
   if (shops.length === 0) {
@@ -74,7 +84,8 @@ export async function enqueueReconcileForAllShops(sql: Sql): Promise<number> {
   let enqueued = 0;
 
   for (const shop of shops) {
-    // Enqueue companies reconcile
+    // Enqueue companies reconcile only
+    // Orders will be enqueued after companies complete (see processor.server.ts)
     const companiesMsg: ReconcileMessage = {
       topic: "RECONCILE_COMPANIES",
       shop: shop.domain,
@@ -83,19 +94,12 @@ export async function enqueueReconcileForAllShops(sql: Sql): Promise<number> {
     };
     await sql`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sql.json(companiesMsg)})`;
 
-    // Enqueue orders reconcile
-    const ordersMsg: ReconcileMessage = {
-      topic: "RECONCILE_ORDERS",
-      shop: shop.domain,
-      webhookId: makeReconcileWebhookId(shop.domain, "orders"),
-      enqueuedAt: now,
-    };
-    await sql`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sql.json(ordersMsg)})`;
-
-    enqueued += 2;
+    enqueued += 1;
   }
 
-  console.log(`[reconcile] enqueued ${enqueued} messages for ${shops.length} shops`);
+  console.log(
+    `[reconcile] enqueued ${enqueued} RECONCILE_COMPANIES messages for ${shops.length} shops`
+  );
   return enqueued;
 }
 

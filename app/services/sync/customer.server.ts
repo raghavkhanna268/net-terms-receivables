@@ -476,6 +476,92 @@ export function findMatchingTagRule(
 }
 
 /**
+ * Process a single customer from bulk operation.
+ * Similar to processCustomerWebhook but without webhook context.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shop - Shop domain
+ * @param customer - Customer data (id, tags, and optional email/displayName)
+ * @returns Sync result
+ */
+export async function processBulkCustomer(
+  sql: Sql,
+  shop: string,
+  customer: ShopifyCustomer
+): Promise<SyncResult> {
+  // Get shop with its tag rules
+  const [shopRow] = await sql<{ id: string }[]>`
+    SELECT id FROM "Shop" WHERE domain = ${shop}
+  `;
+
+  if (!shopRow) {
+    return {
+      success: false,
+      action: "skipped",
+      error: `Shop not found: ${shop}`,
+    };
+  }
+
+  const shopId = shopRow.id;
+
+  // Get tag rules for this shop
+  const tagRules = await getTagRules(sql, shopId);
+
+  if (tagRules.length === 0) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "No tag rules configured for shop",
+    };
+  }
+
+  // Check if customer has any matching tag
+  const customerTags = customer.tags ?? [];
+  const matchingRule = findMatchingTagRule(customerTags, tagRules);
+  const hasTag = !!matchingRule;
+
+  // Only process customers that match a tag rule
+  if (!hasTag) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Customer does not match any tag rule",
+    };
+  }
+
+  // Upsert tagged customer tracking record
+  await upsertTaggedCustomer(
+    sql,
+    shopId,
+    customer.id,
+    customerTags,
+    true,
+    customer.email ?? null,
+    customer.displayName ?? null
+  );
+
+  // Check if a company account already exists (precedence check)
+  const hasCompanyAccount = await checkCompanyAccount(sql, shopId, customer.id);
+
+  if (hasCompanyAccount) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Customer is a B2B company contact; COMPANY account takes precedence",
+    };
+  }
+
+  // Create or update TAGGED_CUSTOMER buyer account
+  return syncTaggedCustomerBuyerAccount(
+    sql,
+    shopId,
+    customer.id,
+    true,
+    matchingRule.defaultTermsDays
+  );
+}
+
+/**
  * Delete all S8 data for a specific customer (customers/redact).
  * Called by the compliance webhook handler.
  *

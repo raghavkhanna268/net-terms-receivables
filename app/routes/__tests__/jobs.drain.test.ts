@@ -298,15 +298,23 @@ describe("jobs.drain route", () => {
   });
 
   describe("reconcile mode", () => {
-    it("returns 501 when reconcile=true (deferred to S10b)", async () => {
+    it("returns 200 and enqueues messages when reconcile=true", async () => {
+      // Mock the enqueueReconcileForAllShops function
+      vi.doMock("~/services/drain/reconcile.server", () => ({
+        enqueueReconcileForAllShops: vi.fn().mockResolvedValue(4), // 2 shops × 2 messages
+      }));
+
+      // Re-import to get fresh module with mock
+      vi.resetModules();
       const { action } = await import("../jobs.drain");
       const request = createRequest({ queryParams: { reconcile: "true" } });
 
       const response = await action(createActionArgs(request));
 
-      expect(response.status).toBe(501);
-      const result = (await response.json()) as { error: string };
-      expect(result.error).toBe("Reconcile is not implemented. Deferred to S10b.");
+      expect(response.status).toBe(200);
+      const result = (await response.json()) as { mode: string; messagesEnqueued: number };
+      expect(result.mode).toBe("reconcile");
+      expect(result.messagesEnqueued).toBe(4);
     });
 
     it("runs drain normally when reconcile is not true", async () => {
@@ -324,6 +332,23 @@ describe("jobs.drain route", () => {
       const response2 = await action(createActionArgs(request2));
       expect(response2.status).toBe(200);
       expect(mockRunDrain).toHaveBeenCalled();
+    });
+
+    it("handles reconcile errors gracefully", async () => {
+      // Mock the enqueueReconcileForAllShops to throw
+      vi.doMock("~/services/drain/reconcile.server", () => ({
+        enqueueReconcileForAllShops: vi.fn().mockRejectedValue(new Error("DB error")),
+      }));
+
+      vi.resetModules();
+      const { action } = await import("../jobs.drain");
+      const request = createRequest({ queryParams: { reconcile: "true" } });
+
+      const response = await action(createActionArgs(request));
+
+      expect(response.status).toBe(500);
+      const result = (await response.json()) as { error: string };
+      expect(result.error).toBe("Internal server error");
     });
   });
 });

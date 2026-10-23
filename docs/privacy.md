@@ -71,6 +71,8 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | Reminder Logs | Rule ID, invoice ID, sent timestamp | Prevent duplicate reminders |
 | s6_processed_webhooks | Webhook ID, topic, resource GID | Idempotent webhook processing |
 | s6_dead_letter | Queue, message, error | Failed message tracking |
+| s6_bulk_operations | Bulk operation ID, shop, type, byte offset | Chunked JSONL download progress |
+| s10b_order_refetch_null | Shop domain, date, count | Aggregate null-refetch counter (no PII) |
 
 ---
 
@@ -135,6 +137,8 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | Payments | Until shop/redact | Redacted on customers/redact if linked to customer via Match→Invoice→BuyerAccount |
 | Data Request Records | 30 days (DPDP minimisation) | Purged on next access, and nightly where pg_cron is enabled; also on customers/redact or shop/redact (CASCADE) |
 | Audit Events | Until shop/redact | Automatic cascade |
+| Bulk Operation Progress | Until operation completes or shop/redact | Automatic via S6 migration CASCADE |
+| Order Refetch Null Counts | 90 days (rolling) | Purged nightly via pg_cron; all rows deleted on shop/redact |
 
 ---
 
@@ -212,6 +216,29 @@ When 48 hours have passed after uninstall:
 **pgmq messages:** Cannot be purged per-shop (documented limitation). Messages for deleted shops are safely ignored by the drain processor.
 
 **Handler:** `app/routes/webhooks.compliance.tsx`
+
+---
+
+## 7.5 S10b Nightly Reconcile (Operational)
+
+The app performs nightly reconciliation to ensure local ledger consistency with Shopify:
+
+1. **pg_cron** triggers at 02:00 UTC daily
+2. Worker enqueues `RECONCILE_COMPANIES` messages per active shop
+3. Bulk export downloads JSONL via HTTP Range chunking (CPU-safe)
+4. After companies complete, `RECONCILE_ORDERS` is enqueued
+5. Orders are upserted via the same S6 services as webhooks
+
+**Data minimisation:**
+- No drift report is generated or stored (removed in QA review)
+- `s10b_order_refetch_null` stores only aggregate counts (shop, day, count) — **no order IDs or PII**
+- 90-day retention purge via pg_cron job
+- All rows deleted on shop/redact
+
+**Order null-refetch handling:**
+- Orders >60 days old may return null without `read_all_orders` scope
+- These are counted but never marked deleted/paid/cancelled
+- Last known invoice state is preserved
 
 ---
 

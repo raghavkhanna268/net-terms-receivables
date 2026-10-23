@@ -10,10 +10,7 @@
  * - Retry with DLQ: Messages exceeding max retries move to dead-letter queue
  * - No-handler: Messages without handlers get visibility extended (not DLQ'd immediately)
  * - Time budget: Stops early when wall-time budget is reached
- *
- * NOTE: BULK_OPERATIONS_FINISH and RECONCILE_* handlers are NOT implemented yet.
- * They will go through the no-handler path (visibility extended, eventual DLQ).
- * Nightly reconcile cron is also not scheduled until bulk processing works.
+ * - Progress status: Bulk operations can return {status:'progress'} for continuation
  */
 
 import type { Sql } from "~/lib/db-light.server";
@@ -37,6 +34,15 @@ import {
   COMPANY_LOCATION_QUERY,
   ORDER_QUERY,
 } from "./admin-client.server";
+import {
+  processBulkOperation,
+  type BulkProcessResult,
+} from "~/services/sync/bulk-jsonl-processor.server";
+import {
+  startReconcileBulkOperation,
+  incrementOrderRefetchNull,
+  enqueueReconcileOrders,
+} from "./reconcile-handlers.server";
 
 /**
  * Configuration for drain processing.
@@ -73,12 +79,12 @@ export type SyncHandler = (
 
 /**
  * Handler function type for bulk messages.
- * Returns a SyncResult indicating success/failure.
+ * Returns a BulkProcessResult indicating success/failure and status.
  */
 export type BulkHandler = (
   sql: Sql,
   message: BulkMessage
-) => Promise<SyncResult>;
+) => Promise<BulkProcessResult>;
 
 /**
  * Registry for topic handlers.
@@ -244,7 +250,7 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
  * - ORDERS_PAID: Use topic as evidence of paid state, call markInvoicePaid via processOrderWebhook
  * - ORDERS_CANCELLED: Use topic as evidence of cancelled state, call cancelInvoice via processOrderWebhook
  * - ORDERS_CREATE/UPDATED: Keep ledger state unchanged (can't process without data)
- * - Always log order_refetch_null warning
+ * - Always increment order_refetch_null counter (no PII)
  */
 async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> {
   // Idempotency check
@@ -276,6 +282,9 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
     console.warn(
       `[order_refetch_null] shop=${message.shop} order=${message.resourceGid} topic=${message.topic}`
     );
+
+    // Increment metric counter (S10b aggregate table)
+    await incrementOrderRefetchNull(sql, message.shop);
 
     // For PAID/CANCELLED, the topic itself tells us the state
     // Use processOrderWebhook with minimal order data to go through S6 functions
@@ -337,18 +346,74 @@ registerSyncHandler("ORDERS_UPDATED", handleOrder);
 registerSyncHandler("ORDERS_CANCELLED", handleOrder);
 registerSyncHandler("ORDERS_PAID", handleOrder);
 
-// NOTE: BULK_OPERATIONS_FINISH handler is NOT registered.
-// Bulk JSONL processing requires byte-accurate HTTP Range chunking which
-// is not yet implemented. Messages will go through no-handler path.
+// =============================================================================
+// S10b BULK OPERATIONS HANDLER
+// =============================================================================
 
-// NOTE: RECONCILE_* handlers are NOT registered.
-// Reconcile depends on bulk operations working. Will be added in follow-up PR.
+/**
+ * Handler for BULK_OPERATIONS_FINISH topic.
+ * Downloads JSONL in chunks using HTTP Range and processes via S6 services.
+ *
+ * For reconcile operations (companies bulk type):
+ * - When companies reconcile completes, enqueue RECONCILE_ORDERS
+ * - This ensures companies exist before order-to-account mapping
+ * - Uses chainToOrders flag from result (based on origin/stage in s6_bulk_operations)
+ */
+async function handleBulkOperationsFinish(sql: Sql, message: BulkMessage): Promise<BulkProcessResult> {
+  const result = await processBulkOperation(sql, message);
 
-// TODO(S8): Register CUSTOMERS_* and DRAFT_ORDERS_* handlers
-// registerSyncHandler("CUSTOMERS_CREATE", checkCompanyAccount);
-// registerSyncHandler("CUSTOMERS_UPDATE", checkCompanyAccount);
-// registerSyncHandler("DRAFT_ORDERS_CREATE", handleDraftOrder);
-// registerSyncHandler("DRAFT_ORDERS_UPDATE", handleDraftOrder);
+  // If companies reconcile completed successfully, chain to orders reconcile
+  // The chainToOrders flag is set based on origin='reconcile' and reconcile_stage='companies'
+  // from the s6_bulk_operations row, not from webhookId
+  if (result.chainToOrders) {
+    await enqueueReconcileOrders(sql, message.shop);
+  }
+
+  return result;
+}
+
+// Register BULK_OPERATIONS_FINISH handler
+registerBulkHandler("BULK_OPERATIONS_FINISH", handleBulkOperationsFinish);
+
+// =============================================================================
+// S10b RECONCILE HANDLERS
+// =============================================================================
+
+/**
+ * Handler for RECONCILE_COMPANIES topic.
+ * Starts a bulk companies export for the shop.
+ */
+async function handleReconcileCompanies(sql: Sql, message: SyncMessage): Promise<SyncResult> {
+  if (await isWebhookProcessed(sql, message.webhookId)) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Reconcile already processed (idempotent)",
+    };
+  }
+
+  return startReconcileBulkOperation(sql, message.shop, "companies", message.webhookId);
+}
+
+/**
+ * Handler for RECONCILE_ORDERS topic.
+ * Starts a bulk orders export for the shop.
+ */
+async function handleReconcileOrders(sql: Sql, message: SyncMessage): Promise<SyncResult> {
+  if (await isWebhookProcessed(sql, message.webhookId)) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Reconcile already processed (idempotent)",
+    };
+  }
+
+  return startReconcileBulkOperation(sql, message.shop, "orders", message.webhookId);
+}
+
+// Register RECONCILE_* handlers
+registerSyncHandler("RECONCILE_COMPANIES", handleReconcileCompanies);
+registerSyncHandler("RECONCILE_ORDERS", handleReconcileOrders);
 
 // =============================================================================
 // DRAIN RESULT & QUEUE OPERATIONS
@@ -610,32 +675,68 @@ async function processBulkQueue(
     }
 
     try {
-      const syncResult = await handler(sql, msg.message);
+      const bulkResult = await handler(sql, msg.message);
 
-      if (syncResult.success) {
-        await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
-        if (syncResult.action === "skipped") {
-          result.skipped++;
+      if (bulkResult.success) {
+        // Check status for progress vs complete
+        if (bulkResult.status === "progress") {
+          // Send fresh continuation message FIRST (new msg_id, read_ct starts at 0)
+          // Then archive the old one. This order ensures we never strand an op:
+          // - If crash after send but before archive: duplicate message, handled by idempotency
+          // - If crash before send: old message retried normally
+          await sql`
+            SELECT pgmq.send(${S6_QUEUES.BULK}, ${sql.json(msg.message)})
+          `;
+          await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
+
+          result.processed++; // Count as progress
         } else {
-          result.processed++;
+          // Complete or other success - archive
+          await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
+          if (bulkResult.action === "skipped") {
+            result.skipped++;
+          } else {
+            result.processed++;
+          }
         }
       } else {
-        if (msg.read_ct >= config.maxRetries) {
+        // Error handling based on errorType classification
+        const errorType = bulkResult.errorType;
+
+        if (errorType === "permanent") {
+          // Permanent error (4xx, bad data, exhausted retries) - go to DLQ
           await moveToDeadLetter(
             sql,
             S6_QUEUES.BULK,
             msg.msg_id,
             msg.message,
-            syncResult.error || "Max retries exceeded"
+            bulkResult.error || "Permanent error"
           );
           result.deadLettered++;
-        } else {
+        } else if (errorType === "retryable") {
+          // Retryable error - leave message in queue for retry via read_ct
+          // The failure_count was already incremented by processBulkOperation
+          // Message will be retried on next read (visibility timeout reset)
           result.failed++;
+        } else {
+          // Unknown error type or legacy path - use read_ct for DLQ
+          if (msg.read_ct >= config.maxRetries) {
+            await moveToDeadLetter(
+              sql,
+              S6_QUEUES.BULK,
+              msg.msg_id,
+              msg.message,
+              bulkResult.error || "Max retries exceeded"
+            );
+            result.deadLettered++;
+          } else {
+            result.failed++;
+          }
         }
         result.errors.push({
           msgId: msg.msg_id,
           topic: msg.message.topic,
-          error: syncResult.error || "Unknown error",
+          error: bulkResult.error || "Unknown error",
         });
       }
     } catch (err) {
