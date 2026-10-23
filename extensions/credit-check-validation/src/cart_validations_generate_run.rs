@@ -686,4 +686,82 @@ mod tests {
         let result = run_test(input).unwrap();
         assert!(result.operations.is_empty(), "B2B with no location metafield should pass (not a net-terms location)");
     }
+
+    // S11 compatibility tests: verify the JS writer produces JSON that Rust can deserialize
+    // These tests use the same fixtures as the TypeScript tests in app/lib/__tests__/metafields-contract.test.ts
+
+    #[test]
+    fn test_s11_js_writer_format_with_all_hold_reason_codes() {
+        // Test all holdReasonCode values that S11 may write
+        let hold_reasons = vec![
+            "MANUAL_HOLD",
+            "PAYMENT_OVERDUE",
+            "CREDIT_REVIEW",
+            "NEW_ACCOUNT",
+            "FRAUD_SUSPECTED",
+        ];
+
+        for reason in hold_reasons {
+            let metafield = format!(
+                r#"{{"schemaVersion": 1, "currencyCode": "INR", "hold": true, "holdReasonCode": "{}", "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T15:42:00.000Z"}}"#,
+                reason
+            );
+            let input = make_input("100.00", "INR", Some(&metafield), false, "CHECKOUT_COMPLETION");
+            let result = run_test(&input).unwrap();
+            assert_eq!(
+                result.operations.len(),
+                1,
+                "S11 holdReasonCode '{}' should be recognized and hold should block",
+                reason
+            );
+        }
+    }
+
+    #[test]
+    fn test_s11_js_writer_no_limit_format() {
+        // S11 writes "999999999999999" for no limit (very large value)
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "999999999999999", "exposurePaise": "5000000", "updatedAt": "2026-10-23T15:42:00.000Z"}"#;
+        let input = make_input("1000000.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "S11 'no limit' (999999999999999) should allow large carts");
+    }
+
+    #[test]
+    fn test_s11_js_writer_iso_timestamp_format() {
+        // S11 writes ISO 8601 timestamps with milliseconds
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T15:42:00.123Z"}"#;
+        let input = make_input("1000.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "S11 ISO timestamp with milliseconds should parse correctly");
+    }
+
+    #[test]
+    fn test_s11_shared_fixture_roundtrip() {
+        // Verify all valid fixtures from tests/fixtures/credit-status.json can be deserialized
+        // and produce expected results. This proves JS and Rust use the same schema.
+        
+        // valid.notOnHold: hold=false, under limit
+        let fixture = load_fixture("valid.notOnHold");
+        let input = make_input("1000.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Shared fixture notOnHold should pass");
+
+        // valid.onHold: hold=true
+        let fixture = load_fixture("valid.onHold");
+        let input = make_input("0.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "Shared fixture onHold should block");
+
+        // valid.atLimit: exposure equals limit
+        let fixture = load_fixture("valid.atLimit");
+        let input = make_input("0.01", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "Shared fixture atLimit should block on any cart");
+
+        // valid.usdCurrency: USD currency
+        let fixture = load_fixture("valid.usdCurrency");
+        let input = make_input("1000.00", "USD", Some(&fixture), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Shared fixture usdCurrency should pass for USD cart under limit");
+    }
 }
