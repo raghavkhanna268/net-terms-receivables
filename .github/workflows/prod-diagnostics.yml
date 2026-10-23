@@ -52,6 +52,11 @@ on:
         required: false
         default: false
         type: boolean
+      ensure_validation:
+        description: "NOT read-only: creates/enables the credit-check-validation on the shop if missing or disabled"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -162,19 +167,16 @@ jobs:
             fi
           fi
 
-      - name: Checkout (for token refresh)
-        if: ${{ inputs.refresh_if_expired && steps.session.outputs.token_expired == 'true' && steps.session.outputs.has_refresh_token == 'true' }}
+      - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Setup Node (for token refresh)
-        if: ${{ inputs.refresh_if_expired && steps.session.outputs.token_expired == 'true' && steps.session.outputs.has_refresh_token == 'true' }}
+      - name: Setup Node
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
           node-version: 22
           cache: npm
 
-      - name: Install dependencies (for token refresh)
-        if: ${{ inputs.refresh_if_expired && steps.session.outputs.token_expired == 'true' && steps.session.outputs.has_refresh_token == 'true' }}
+      - name: Install dependencies
         run: npm ci --ignore-scripts
 
       - name: Refresh expired token
@@ -536,6 +538,300 @@ jobs:
             echo '{"s6_sync_queue_exists": false, "s6_bulk_queue_exists": false, "s6_dead_letter_table_exists": false}' | jq .
           fi
 
+      - name: Invoices
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          SHOP_DOMAIN: ${{ inputs.shop }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
+        run: |
+          set -euo pipefail
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL_MIGRATIONS secret not set"
+            exit 1
+          fi
+
+          echo "=== Invoices ==="
+          echo ""
+
+          # Get shop id first
+          SHOP_ID=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT id FROM "Shop" WHERE domain = :'shop';
+          EOSQL
+          )
+
+          if [ -z "$SHOP_ID" ]; then
+            echo "::warning::Shop not found in database"
+            echo '{"shop_found": false}' | jq .
+            exit 0
+          fi
+
+          echo "Invoice counts for shop:"
+          psql -v ON_ERROR_STOP=1 -v shop_id="$SHOP_ID" -t "$DATABASE_URL" <<'EOSQL'
+          SELECT json_build_object(
+            'total', (SELECT COUNT(*) FROM "Invoice" WHERE "shopId" = :'shop_id'),
+            'open_unpaid', (SELECT COUNT(*) FROM "Invoice" WHERE "shopId" = :'shop_id' AND status = 'open'),
+            'past_due', (SELECT COUNT(*) FROM "Invoice" WHERE "shopId" = :'shop_id' AND status = 'open' AND "dueAt" IS NOT NULL AND "dueAt" < NOW())
+          );
+          EOSQL
+
+          echo ""
+          echo "Invoices grouped by dueBasis (how payment terms were determined):"
+          psql -v ON_ERROR_STOP=1 -v shop_id="$SHOP_ID" -t "$DATABASE_URL" <<'EOSQL'
+          SELECT json_object_agg(
+            COALESCE("dueBasis", 'schedule'),
+            cnt
+          )
+          FROM (
+            SELECT "dueBasis", COUNT(*) AS cnt
+            FROM "Invoice"
+            WHERE "shopId" = :'shop_id'
+            GROUP BY "dueBasis"
+          ) sub;
+          EOSQL
+
+          echo ""
+          echo "BuyerAccount and tag rule counts:"
+          psql -v ON_ERROR_STOP=1 -v shop_id="$SHOP_ID" -t "$DATABASE_URL" <<'EOSQL'
+          SELECT json_build_object(
+            'buyer_account_count', (SELECT COUNT(*) FROM "BuyerAccount" WHERE "shopId" = :'shop_id'),
+            'tag_rule_count', (SELECT COUNT(*) FROM "AccountSource" WHERE "shopId" = :'shop_id')
+          );
+          EOSQL
+
+      - name: S12 Validation
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          DATABASE_URL_SESSION: ${{ secrets.DATABASE_URL_SESSION }}
+          SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
+          SHOPIFY_API_SECRET: ${{ secrets.SHOPIFY_API_SECRET }}
+          SHOP_DOMAIN: ${{ inputs.shop }}
+          ENSURE_VALIDATION: ${{ inputs.ensure_validation }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
+        run: |
+          set -euo pipefail
+
+          echo "=== S12 Validation ==="
+          echo ""
+
+          # Mask API credentials immediately
+          if [ -n "${SHOPIFY_API_KEY:-}" ]; then echo "::add-mask::$SHOPIFY_API_KEY"; fi
+          if [ -n "${SHOPIFY_API_SECRET:-}" ]; then echo "::add-mask::$SHOPIFY_API_SECRET"; fi
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL_MIGRATIONS secret not set"
+            exit 1
+          fi
+
+          # Check if input query references metafield namespace $app key credit_status
+          INPUT_QUERY_FILE="extensions/credit-check-validation/src/cart_validations_generate_run.graphql"
+          INPUT_QUERY_HAS_CREDIT_STATUS=false
+          if [ -f "$INPUT_QUERY_FILE" ]; then
+            # Check for: metafield(namespace: "$app", key: "credit_status")
+            if grep -qE 'metafield\s*\(\s*namespace:\s*"\$app"\s*,\s*key:\s*"credit_status"' "$INPUT_QUERY_FILE"; then
+              INPUT_QUERY_HAS_CREDIT_STATUS=true
+            fi
+          fi
+          echo "input_query_has_credit_status: $INPUT_QUERY_HAS_CREDIT_STATUS"
+          echo ""
+
+          # Get offline access token (with refresh if needed, reusing existing refresh logic)
+          SESSION_DATA=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A -F '|' "$DATABASE_URL" <<'EOSQL'
+          SELECT
+            "accessToken",
+            expires AT TIME ZONE 'UTC',
+            CASE WHEN "refreshToken" IS NOT NULL AND "refreshToken" != '' THEN 'true' ELSE 'false' END
+          FROM "Session"
+          WHERE shop = :'shop' AND "isOnline" = false
+          LIMIT 1;
+          EOSQL
+          )
+
+          if [ -z "$SESSION_DATA" ]; then
+            echo "::warning::No offline session found for shop"
+            echo '{"offline_session_exists": false}' | jq .
+            exit 0
+          fi
+
+          ACCESS_TOKEN=$(echo "$SESSION_DATA" | cut -d'|' -f1)
+          EXPIRES_RAW=$(echo "$SESSION_DATA" | cut -d'|' -f2)
+          HAS_REFRESH=$(echo "$SESSION_DATA" | cut -d'|' -f3)
+
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "::warning::Offline session has no access token"
+            echo '{"has_access_token": false}' | jq .
+            exit 0
+          fi
+
+          echo "::add-mask::$ACCESS_TOKEN"
+
+          # Check if token is expired and needs refresh
+          NEEDS_REFRESH=false
+          if [ -n "$EXPIRES_RAW" ] && [ "$EXPIRES_RAW" != "" ]; then
+            EXPIRES_EPOCH=$(date -u -d "$EXPIRES_RAW" +%s 2>/dev/null || echo "0")
+            NOW_EPOCH=$(date -u +%s)
+            THRESHOLD_EPOCH=$((NOW_EPOCH + 300))
+            if [ "$EXPIRES_EPOCH" -le "$THRESHOLD_EPOCH" ]; then
+              NEEDS_REFRESH=true
+            fi
+          fi
+
+          if [ "$NEEDS_REFRESH" = "true" ] && [ "$HAS_REFRESH" = "true" ]; then
+            echo "Token expired or near expiry, refreshing..."
+            if [ -z "${DATABASE_URL_SESSION:-}" ] || [ -z "${SHOPIFY_API_KEY:-}" ] || [ -z "${SHOPIFY_API_SECRET:-}" ]; then
+              echo "::warning::Token refresh secrets not configured, using potentially expired token"
+            else
+              REFRESH_RESULT=$(env -u PGOPTIONS DATABASE_URL="$DATABASE_URL_SESSION" npx tsx scripts/lib/refresh-offline-token.ts \
+                --shop "$SHOP_DOMAIN" \
+                --threshold-minutes 5 2>/dev/null) || true
+
+              if echo "$REFRESH_RESULT" | jq -e '.success == true' >/dev/null 2>&1; then
+                echo "Token refreshed successfully"
+                export PGOPTIONS="-c default_transaction_read_only=on"
+                ACCESS_TOKEN=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A "$DATABASE_URL" <<'EOSQL'
+                SELECT "accessToken"
+                FROM "Session"
+                WHERE shop = :'shop' AND "isOnline" = false
+                LIMIT 1;
+          EOSQL
+                )
+                echo "::add-mask::$ACCESS_TOKEN"
+              else
+                echo "::warning::Token refresh failed, using potentially expired token"
+              fi
+            fi
+          fi
+
+          # Temp files for cleanup
+          CURL_CONFIG=""
+          HTTP_RESPONSE=""
+          cleanup() {
+            rm -f "$CURL_CONFIG" "$HTTP_RESPONSE"
+          }
+          trap cleanup EXIT
+
+          # Create curl config file with token
+          CURL_CONFIG=$(mktemp)
+          chmod 600 "$CURL_CONFIG"
+          cat > "$CURL_CONFIG" <<EOF
+          header = "Content-Type: application/json"
+          header = "X-Shopify-Access-Token: $ACCESS_TOKEN"
+          EOF
+
+          # Query validations
+          QUERY='{"query":"{ validations(first:50) { nodes { id title enabled blockOnFailure functionHandle } } }"}'
+
+          HTTP_RESPONSE=$(mktemp)
+          HTTP_STATUS=$(curl -s -w "%{http_code}" -o "$HTTP_RESPONSE" \
+            -X POST \
+            --config "$CURL_CONFIG" \
+            --data-binary "$QUERY" \
+            "https://${SHOP_DOMAIN}/admin/api/2026-10/graphql.json")
+
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "::error::Validations query failed with HTTP $HTTP_STATUS"
+            exit 1
+          fi
+
+          # Check for GraphQL errors
+          if jq -e '.errors | length > 0' "$HTTP_RESPONSE" >/dev/null 2>&1; then
+            ERROR_CODES=$(jq -r '[.errors[] | .extensions.code // "UNKNOWN"] | join(", ")' "$HTTP_RESPONSE")
+            echo "::error::GraphQL errors: $ERROR_CODES"
+            exit 1
+          fi
+
+          # Find credit-check-validation node
+          VALIDATION_NODE=$(jq -r '.data.validations.nodes[] | select(.functionHandle == "credit-check-validation")' "$HTTP_RESPONSE")
+
+          VALIDATION_EXISTS=false
+          VALIDATION_ENABLED=false
+          VALIDATION_BLOCK_ON_FAILURE=false
+
+          if [ -n "$VALIDATION_NODE" ] && [ "$VALIDATION_NODE" != "null" ]; then
+            VALIDATION_EXISTS=true
+            VALIDATION_ENABLED=$(echo "$VALIDATION_NODE" | jq -r '.enabled')
+            VALIDATION_BLOCK_ON_FAILURE=$(echo "$VALIDATION_NODE" | jq -r '.blockOnFailure')
+          fi
+
+          echo "S12 Validation status (read-only):"
+          jq -n \
+            --argjson exists "$VALIDATION_EXISTS" \
+            --argjson enabled "$VALIDATION_ENABLED" \
+            --argjson block_on_failure "$VALIDATION_BLOCK_ON_FAILURE" \
+            --argjson input_query_has_credit_status "$INPUT_QUERY_HAS_CREDIT_STATUS" \
+            '{exists: $exists, enabled: $enabled, blockOnFailure: $block_on_failure, input_query_has_credit_status: $input_query_has_credit_status}'
+
+          # Handle ensure_validation flag
+          if [ "$ENSURE_VALIDATION" = "true" ]; then
+            echo ""
+            echo "ensure_validation=true: checking if action needed..."
+
+            if [ "$VALIDATION_EXISTS" = "false" ]; then
+              echo "Validation missing, creating..."
+              CREATE_MUTATION='{"query":"mutation { validationCreate(validation: { functionHandle: \"credit-check-validation\", title: \"Net Terms Credit Check\", enable: true, blockOnFailure: false }) { validation { id enabled } userErrors { field message } } }"}'
+
+              HTTP_STATUS=$(curl -s -w "%{http_code}" -o "$HTTP_RESPONSE" \
+                -X POST \
+                --config "$CURL_CONFIG" \
+                --data-binary "$CREATE_MUTATION" \
+                "https://${SHOP_DOMAIN}/admin/api/2026-10/graphql.json")
+
+              if [ "$HTTP_STATUS" != "200" ]; then
+                echo "::error::validationCreate failed with HTTP $HTTP_STATUS"
+                exit 1
+              fi
+
+              if jq -e '.errors | length > 0' "$HTTP_RESPONSE" >/dev/null 2>&1; then
+                ERROR_CODES=$(jq -r '[.errors[] | .extensions.code // "UNKNOWN"] | join(", ")' "$HTTP_RESPONSE")
+                echo "::error::GraphQL errors: $ERROR_CODES"
+                exit 1
+              fi
+
+              USER_ERRORS=$(jq -r '.data.validationCreate.userErrors | map(.message) | join(", ")' "$HTTP_RESPONSE")
+              if [ -n "$USER_ERRORS" ] && [ "$USER_ERRORS" != "" ]; then
+                echo "::error::userErrors: $USER_ERRORS"
+                exit 1
+              fi
+
+              FINAL_ENABLED=$(jq -r '.data.validationCreate.validation.enabled' "$HTTP_RESPONSE")
+              echo "Validation created. enabled: $FINAL_ENABLED"
+
+            elif [ "$VALIDATION_ENABLED" = "false" ]; then
+              echo "Validation exists but disabled, enabling..."
+              VALIDATION_ID=$(echo "$VALIDATION_NODE" | jq -r '.id')
+              UPDATE_MUTATION=$(jq -n --arg id "$VALIDATION_ID" '{"query": "mutation($id: ID!) { validationUpdate(id: $id, validation: { enable: true }) { validation { id enabled } userErrors { field message } } }", "variables": {"id": $id}}')
+
+              HTTP_STATUS=$(curl -s -w "%{http_code}" -o "$HTTP_RESPONSE" \
+                -X POST \
+                --config "$CURL_CONFIG" \
+                --data-binary "$UPDATE_MUTATION" \
+                "https://${SHOP_DOMAIN}/admin/api/2026-10/graphql.json")
+
+              if [ "$HTTP_STATUS" != "200" ]; then
+                echo "::error::validationUpdate failed with HTTP $HTTP_STATUS"
+                exit 1
+              fi
+
+              if jq -e '.errors | length > 0' "$HTTP_RESPONSE" >/dev/null 2>&1; then
+                ERROR_CODES=$(jq -r '[.errors[] | .extensions.code // "UNKNOWN"] | join(", ")' "$HTTP_RESPONSE")
+                echo "::error::GraphQL errors: $ERROR_CODES"
+                exit 1
+              fi
+
+              USER_ERRORS=$(jq -r '.data.validationUpdate.userErrors | map(.message) | join(", ")' "$HTTP_RESPONSE")
+              if [ -n "$USER_ERRORS" ] && [ "$USER_ERRORS" != "" ]; then
+                echo "::error::userErrors: $USER_ERRORS"
+                exit 1
+              fi
+
+              FINAL_ENABLED=$(jq -r '.data.validationUpdate.validation.enabled' "$HTTP_RESPONSE")
+              echo "Validation enabled. enabled: $FINAL_ENABLED"
+
+            else
+              echo "Validation already exists and is enabled, no action needed."
+            fi
+          fi
+
       - name: Reconcile probe
         if: ${{ inputs.invoke_reconcile }}
         env:
@@ -554,16 +850,16 @@ jobs:
           echo "Invoking public.s10b_call_reconcile() and capturing request_id..."
 
           # Call reconcile and get the request_id via currval in the same session.
-          # If currval errors, the function returned early (e.g. missing Vault secret)
-          # and no net.http_post was called, so no nextval occurred.
+          # If currval errors, the function may have returned early or currval itself failed.
           # pg_net 0.20.4: http_request_queue.id uses sequence net.http_request_queue_id_seq
-          REQUEST_ID_OUTPUT=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL' 2>&1
+          # Capture stdout only; stderr goes to the log separately.
+          REQUEST_ID_OUTPUT=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
           SELECT public.s10b_call_reconcile();
           SELECT currval(pg_get_serial_sequence('net.http_request_queue', 'id'));
           EOSQL
           ) || {
-            echo "::error::s10b_call_reconcile or currval failed. If currval error, the function likely returned early (missing Vault secret?)."
-            echo "psql output: $REQUEST_ID_OUTPUT"
+            echo "::error::s10b_call_reconcile or currval failed. The function may have returned early or currval failed."
+            echo "psql stdout: $REQUEST_ID_OUTPUT"
             exit 1
           }
 
@@ -571,7 +867,7 @@ jobs:
           REQUEST_ID=$(echo "$REQUEST_ID_OUTPUT" | tail -n1)
 
           if [ -z "$REQUEST_ID" ] || ! [[ "$REQUEST_ID" =~ ^[0-9]+$ ]]; then
-            echo "::error::Failed to get request_id from currval. Function may have returned early (missing Vault secret?)."
+            echo "::error::Failed to get request_id from currval. The function may have returned early or currval failed."
             echo "Output was: $REQUEST_ID_OUTPUT"
             exit 1
           fi
