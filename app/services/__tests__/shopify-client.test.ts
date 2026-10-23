@@ -261,7 +261,7 @@ describe("shopify-client.server", () => {
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(1);
     });
 
-    it("403 errors are retryable (session refresh can recover)", async () => {
+    it("403 errors are non-retryable (scope not granted)", async () => {
       const { HttpResponseError } = await import("@shopify/shopify-api");
       const error = new HttpResponseError({
         message: "Forbidden",
@@ -276,8 +276,8 @@ describe("shopify-client.server", () => {
       );
 
       expect(result.success).toBe(false);
-      // P3: 403 should be retryable - session refresh (#76) can recover
-      expect(result.retryable).toBe(true);
+      // 403 is non-retryable - scope not granted, needs reinstall
+      expect(result.retryable).toBe(false);
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(1);
     });
 
@@ -359,8 +359,8 @@ describe("shopify-client.server", () => {
       expect(mockAdmin.graphql).not.toHaveBeenCalled();
     });
 
-    it("returns retryable error when unauthenticated.admin rejects with session error message", async () => {
-      // Make unauthenticated.admin reject with a generic session error
+    it("returns non-retryable error when 'No session found' (shop uninstalled)", async () => {
+      // 'No session found' means shop uninstalled or never installed - no recovery possible
       mockShopifyApp.unauthenticated.admin.mockRejectedValueOnce(
         new Error("No session found for shop")
       );
@@ -371,11 +371,30 @@ describe("shopify-client.server", () => {
       );
 
       expect(result.success).toBe(false);
-      // P3: Session errors should be retryable - session refresh (#76) can recover
+      // 'No session found' is non-retryable - shop uninstalled, no session to refresh
+      expect(result.retryable).toBe(false);
+      expect(result.retriesAttempted).toBe(0);
+      expect(result.error).toContain("No session");
+      // graphql should never be called since we failed at the admin client level
+      expect(mockAdmin.graphql).not.toHaveBeenCalled();
+    });
+
+    it("returns retryable error for other session errors", async () => {
+      // Generic session errors (not 'No session found') may be recoverable
+      mockShopifyApp.unauthenticated.admin.mockRejectedValueOnce(
+        new Error("Session expired")
+      );
+
+      const result = await shopifyGraphQL(
+        "expired-session.myshopify.com",
+        "query { shop { name } }"
+      );
+
+      expect(result.success).toBe(false);
+      // Other session errors are retryable - session refresh may recover
       expect(result.retryable).toBe(true);
       expect(result.retriesAttempted).toBe(0);
       expect(result.error).toContain("session");
-      // graphql should never be called since we failed at the admin client level
       expect(mockAdmin.graphql).not.toHaveBeenCalled();
     });
   });
