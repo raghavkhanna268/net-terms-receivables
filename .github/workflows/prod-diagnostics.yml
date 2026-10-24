@@ -351,6 +351,8 @@ jobs:
               echo "refresh_success=true"
               echo "was_refreshed=$WAS_REFRESHED"
             } >> "$GITHUB_OUTPUT"
+            # Record in summary when refresh_if_expired was used
+            echo "refresh_token_used=true" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "::warning::Token refresh failed: $REFRESH_ERROR_CODE"
             {
@@ -1074,23 +1076,20 @@ jobs:
           EOSQL
 
       - name: S12 Validation
+        id: s12_validation
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
-          DATABASE_URL_SESSION: ${{ secrets.DATABASE_URL_SESSION }}
-          SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
-          SHOPIFY_API_SECRET: ${{ secrets.SHOPIFY_API_SECRET }}
           ENSURE_VALIDATION: ${{ inputs.ensure_validation }}
           CHECKOUT_FIXTURES: ${{ inputs.checkout_fixtures }}
+          TOKEN_EXPIRED: ${{ steps.session.outputs.token_expired }}
+          OFFLINE_SESSION_EXISTS: ${{ steps.session.outputs.offline_session_exists }}
+          REFRESH_SUCCESS: ${{ steps.refresh.outputs.refresh_success }}
           PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
           set -euo pipefail
 
           echo "=== S12 Validation ==="
           echo ""
-
-          # Mask API credentials immediately
-          if [ -n "${SHOPIFY_API_KEY:-}" ]; then echo "::add-mask::$SHOPIFY_API_KEY"; fi
-          if [ -n "${SHOPIFY_API_SECRET:-}" ]; then echo "::add-mask::$SHOPIFY_API_SECRET"; fi
 
           if [ -z "$DATABASE_URL" ]; then
             echo "::error::DATABASE_URL_MIGRATIONS secret not set"
@@ -1111,72 +1110,47 @@ jobs:
           echo "repo_input_query_has_credit_status: $REPO_INPUT_QUERY_HAS_CREDIT_STATUS"
           echo ""
 
-          # Get offline access token (with refresh if needed, reusing existing refresh logic)
-          SESSION_DATA=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A -F '|' "$DATABASE_URL" <<'EOSQL'
-          SELECT
-            "accessToken",
-            expires AT TIME ZONE 'UTC',
-            CASE WHEN "refreshToken" IS NOT NULL AND "refreshToken" != '' THEN 'true' ELSE 'false' END
+          # Check if offline session exists
+          if [ "$OFFLINE_SESSION_EXISTS" != "true" ]; then
+            echo "::warning::No offline session found for shop"
+            echo '{"offline_session_exists": false, "status": "skipped"}' | jq .
+            exit 0
+          fi
+
+          # Check if token is expired and refresh was not successful
+          # In read-only default mode, skip checks that require a valid token
+          if [ "$TOKEN_EXPIRED" = "true" ] && [ "$REFRESH_SUCCESS" != "true" ]; then
+            echo "::notice::Offline access token has expired, skipping S12 Validation (read-only mode)."
+            echo ""
+            # If ensure_validation was requested but we can't run it, warn and record in summary
+            if [ "$ENSURE_VALIDATION" = "true" ]; then
+              echo "::warning::ensure_validation=true but token is expired; cannot create/enable validation without valid token"
+              echo "ensure_validation_skipped=true" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            echo "S12 Validation status:"
+            jq -n \
+              --argjson repo_input_query_has_credit_status "$REPO_INPUT_QUERY_HAS_CREDIT_STATUS" \
+              --argjson ensure_validation_skipped "$([ "$ENSURE_VALIDATION" = "true" ] && echo true || echo false)" \
+              '{status: "skipped", reason: "token_expired", repo_input_query_has_credit_status: $repo_input_query_has_credit_status, ensure_validation_skipped: $ensure_validation_skipped}'
+            exit 0
+          fi
+
+          # Fetch offline access token (read-only query)
+          ACCESS_TOKEN=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT "accessToken"
           FROM "Session"
           WHERE shop = :'shop' AND "isOnline" = false
           LIMIT 1;
           EOSQL
           )
 
-          if [ -z "$SESSION_DATA" ]; then
-            echo "::warning::No offline session found for shop"
-            echo '{"offline_session_exists": false}' | jq .
-            exit 0
-          fi
-
-          ACCESS_TOKEN=$(echo "$SESSION_DATA" | cut -d'|' -f1)
-          EXPIRES_RAW=$(echo "$SESSION_DATA" | cut -d'|' -f2)
-          HAS_REFRESH=$(echo "$SESSION_DATA" | cut -d'|' -f3)
-
           if [ -z "$ACCESS_TOKEN" ]; then
             echo "::warning::Offline session has no access token"
-            echo '{"has_access_token": false}' | jq .
+            echo '{"has_access_token": false, "status": "skipped"}' | jq .
             exit 0
           fi
 
           echo "::add-mask::$ACCESS_TOKEN"
-
-          # Check if token is expired and needs refresh
-          NEEDS_REFRESH=false
-          if [ -n "$EXPIRES_RAW" ] && [ "$EXPIRES_RAW" != "" ]; then
-            EXPIRES_EPOCH=$(date -u -d "$EXPIRES_RAW" +%s 2>/dev/null || echo "0")
-            NOW_EPOCH=$(date -u +%s)
-            THRESHOLD_EPOCH=$((NOW_EPOCH + 300))
-            if [ "$EXPIRES_EPOCH" -le "$THRESHOLD_EPOCH" ]; then
-              NEEDS_REFRESH=true
-            fi
-          fi
-
-          if [ "$NEEDS_REFRESH" = "true" ] && [ "$HAS_REFRESH" = "true" ]; then
-            echo "Token expired or near expiry, refreshing..."
-            if [ -z "${DATABASE_URL_SESSION:-}" ] || [ -z "${SHOPIFY_API_KEY:-}" ] || [ -z "${SHOPIFY_API_SECRET:-}" ]; then
-              echo "::warning::Token refresh secrets not configured, using potentially expired token"
-            else
-              REFRESH_RESULT=$(env -u PGOPTIONS DATABASE_URL="$DATABASE_URL_SESSION" npx tsx scripts/lib/refresh-offline-token.ts \
-                --shop "$SHOP_DOMAIN" \
-                --threshold-minutes 5 2>/dev/null) || true
-
-              if echo "$REFRESH_RESULT" | jq -e '.success == true' >/dev/null 2>&1; then
-                echo "Token refreshed successfully"
-                export PGOPTIONS="-c default_transaction_read_only=on"
-                ACCESS_TOKEN=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A "$DATABASE_URL" <<'EOSQL'
-                SELECT "accessToken"
-                FROM "Session"
-                WHERE shop = :'shop' AND "isOnline" = false
-                LIMIT 1;
-          EOSQL
-                )
-                echo "::add-mask::$ACCESS_TOKEN"
-              else
-                echo "::warning::Token refresh failed, using potentially expired token"
-              fi
-            fi
-          fi
 
           # Temp files for cleanup
           CURL_CONFIG=""
