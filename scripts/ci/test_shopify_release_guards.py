@@ -82,6 +82,10 @@ if scratch(add_ext) == 0:
 if scratch(lambda d: edit(os.path.join(d, ".github/workflows/shopify-app-release.yml"),
                           "--allow-updates", "--allow-updates --allow-deletes")) == 0:
     fails.append("--allow-deletes not failed")
+# 9b. Preview/allow-updates flags in the shared base args fail (mutually exclusive in CLI 4.9.4).
+if scratch(lambda d: edit(os.path.join(d, ".github/workflows/shopify-app-release.yml"),
+                          "args=(app deploy --config", "args=(app deploy --allow-updates --config")) == 0:
+    fails.append("allow-updates in base deploy args not failed")
 # 10. Missing pipefail default fails.
 if scratch(lambda d: edit(os.path.join(d, ".github/workflows/shopify-app-release.yml"),
                           "        shell: bash", "        shell: sh")) == 0:
@@ -99,4 +103,4 @@ if fails:
     for f in fails:
         print(" -", f)
     sys.exit(1)
-print("shopify release guards self-test: OK (16/16)")
+print("shopify release guards self-test: OK (17/17)")
