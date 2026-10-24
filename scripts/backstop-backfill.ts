@@ -30,6 +30,8 @@
  *
  * SAFETY:
  * - Dry-run by default (no changes without --apply)
+ * - Dry-run runs all reads inside an explicit READ ONLY transaction (protects against
+ *   pooler stripping default_transaction_read_only startup param)
  * - Uses per-shop OFFLINE session from database
  * - Never overwrites pending claims (handled by applyBackstop)
  * - Output contains GIDs and shop IDs only, no PII, no domains in output
@@ -46,6 +48,25 @@ import postgres from "postgres";
 import { pathToFileURL } from "node:url";
 import { requestContext } from "~/lib/request-context.server";
 import { sqlOptions } from "~/lib/db-light.server";
+
+/**
+ * Asserts that the current transaction is read-only.
+ * Throws with a descriptive message if not.
+ * Used by dry-run mode to enforce read-only safety.
+ */
+export async function assertReadOnlyTransaction(
+  tx: ReturnType<typeof postgres>
+): Promise<void> {
+  const [setting] = await tx<{ transaction_read_only: string }[]>`
+    SELECT current_setting('transaction_read_only') AS transaction_read_only
+  `;
+  if (setting?.transaction_read_only !== "on") {
+    throw new Error(
+      "Dry-run safety check failed: transaction_read_only is not 'on'. " +
+        "Database reads must run inside a READ ONLY transaction."
+    );
+  }
+}
 
 interface BackfillCandidate {
   invoiceId: string;
@@ -194,7 +215,7 @@ async function processBackfill(
     }
 
     for (const candidate of shopCandidates) {
-      console.log(`  Order: ${candidate.orderId}`);
+      console.log(`  Order: ${candidate.orderId} account: ${candidate.buyerAccountId}`);
 
       const invoiceInfo = await resolveInvoiceForOrder(
         sql,
@@ -342,35 +363,64 @@ async function main() {
   const sql = postgres(databaseUrl, sqlOptions);
 
   try {
-    console.log("Finding candidates (held accounts with missing backstop)...\n");
-    const candidates = await findCandidates(sql, since, until, shopFilter);
-
-    if (candidates.length === 0) {
-      console.log("✅ No candidates found. All orders from held accounts have been processed.\n");
-      return;
-    }
-
-    console.log(`Found ${candidates.length} candidate(s):`);
-
-    const result = await requestContext.run({ getSql: () => sql }, async () => {
-      return processBackfill(sql, candidates, dryRun);
-    });
-
-    console.log("\n" + "=".repeat(60));
-    console.log("SUMMARY");
-    console.log("=".repeat(60));
-    console.log(`Candidates: ${result.candidates}`);
     if (dryRun) {
-      console.log(`Would hold: ${result.wouldHold}`);
-      console.log(`Would skip: ${result.wouldSkip}`);
+      // Dry-run: all reads inside a single explicit READ ONLY transaction.
+      // This protects against transaction-mode poolers (Supavisor) that strip
+      // the default_transaction_read_only startup parameter.
+      const result = await sql.begin("read only", async (tx) => {
+        await assertReadOnlyTransaction(tx);
+
+        console.log("Finding candidates (held accounts with missing backstop)...\n");
+        const candidates = await findCandidates(tx, since, until, shopFilter);
+
+        if (candidates.length === 0) {
+          console.log("✅ No candidates found. All orders from held accounts have been processed.\n");
+          return null;
+        }
+
+        console.log(`Found ${candidates.length} candidate(s):`);
+
+        return await requestContext.run({ getSql: () => tx }, async () => {
+          return processBackfill(tx, candidates, true);
+        });
+      });
+
+      if (result) {
+        console.log("\n" + "=".repeat(60));
+        console.log("SUMMARY");
+        console.log("=".repeat(60));
+        console.log(`Candidates: ${result.candidates}`);
+        console.log(`Would hold: ${result.wouldHold}`);
+        console.log(`Would skip: ${result.wouldSkip}`);
+        console.log(`Errors: ${result.errors}`);
+
+        if (result.wouldHold > 0) {
+          console.log("\n⚠ This was a dry-run. Run with --apply to actually apply holds.");
+        }
+      }
     } else {
+      // Apply mode: normal transaction behavior (reads and writes allowed)
+      console.log("Finding candidates (held accounts with missing backstop)...\n");
+      const candidates = await findCandidates(sql, since, until, shopFilter);
+
+      if (candidates.length === 0) {
+        console.log("✅ No candidates found. All orders from held accounts have been processed.\n");
+        return;
+      }
+
+      console.log(`Found ${candidates.length} candidate(s):`);
+
+      const result = await requestContext.run({ getSql: () => sql }, async () => {
+        return processBackfill(sql, candidates, false);
+      });
+
+      console.log("\n" + "=".repeat(60));
+      console.log("SUMMARY");
+      console.log("=".repeat(60));
+      console.log(`Candidates: ${result.candidates}`);
       console.log(`Applied: ${result.applied}`);
       console.log(`Skipped: ${result.skipped}`);
-    }
-    console.log(`Errors: ${result.errors}`);
-
-    if (dryRun && result.wouldHold > 0) {
-      console.log("\n⚠ This was a dry-run. Run with --apply to actually apply holds.");
+      console.log(`Errors: ${result.errors}`);
     }
   } finally {
     await sql.end();

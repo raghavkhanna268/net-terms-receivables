@@ -20,6 +20,10 @@ import {
   type HoldReasonCode,
 } from "~/lib/metafields-contract";
 import { shopifyGraphQLRequest, type ShopifyClientResult } from "./shopify-client.server";
+import { hasOverdueInvoices } from "./overdue.server";
+
+// Re-export HoldReasonCode for use by credit-status-recompute.server.ts
+export type { HoldReasonCode };
 
 /**
  * Valid hold reason codes - used for validation.
@@ -302,26 +306,6 @@ async function computeExposure(
 }
 
 /**
- * Check for overdue invoices.
- */
-async function hasOverdueInvoices(
-  sql: Sql,
-  buyerAccountId: string
-): Promise<boolean> {
-  const [result] = await sql<{ has_overdue: boolean }[]>`
-    SELECT EXISTS (
-      SELECT 1 FROM "Invoice"
-      WHERE "buyerAccountId" = ${buyerAccountId}
-        AND status = 'open'
-        AND outstanding > 0
-        AND "dueAt" IS NOT NULL
-        AND "dueAt" < NOW() - INTERVAL '1 day'
-    ) AS has_overdue
-  `;
-  return result?.has_overdue ?? false;
-}
-
-/**
  * Write credit_status metafield via the Admin GraphQL API.
  */
 async function writeMetafield(
@@ -484,10 +468,6 @@ export async function updateCreditStatus(
 
     if (!account) {
       return { success: false, error: "Buyer account not found" } as const;
-    }
-
-    if (account.gatedAt !== null) {
-      return { success: false, error: "Cannot update credit status for gated accounts" } as const;
     }
 
     const [shop] = await tx<ShopData[]>`
@@ -673,11 +653,6 @@ export async function syncCreditStatusMetafield(
 
     if (!account) {
       return { success: false, error: "Buyer account not found" } as const;
-    }
-
-    if (account.gatedAt !== null) {
-      await tx`UPDATE "BuyerAccount" SET "syncPending" = false WHERE id = ${buyerAccountId}`;
-      return { success: true, skipMetafield: true } as const;
     }
 
     const [shop] = await tx<ShopData[]>`

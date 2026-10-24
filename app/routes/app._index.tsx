@@ -3,7 +3,9 @@ import { useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { resolvePlan, type ResolvedPlan } from "~/services/plan.server";
-import { getUsageStats } from "~/services/gating.server";
+import { getUsageStats, isGatingEnforced } from "~/services/gating.server";
+import type { PlanKey } from "~/lib/entitlements";
+import { PlanBanner } from "~/components/UpgradePrompt";
 import {
   getShopAgingTotals,
   getBuyerLedger,
@@ -18,8 +20,127 @@ import {
   type BuyerLedgerRow,
   type BuyerInvoiceRow,
 } from "~/lib/aging";
+import type { Sql } from "~/lib/db-light.server";
 
 const PAGE_SIZE = 20;
+
+/**
+ * Get the count of over-limit (gated) accounts with open outstanding invoices.
+ * Counts the same set that getOverLimitBuyerLedger lists.
+ * Exported for testing.
+ */
+export async function getOverLimitCount(
+  sql: Sql,
+  shopId: string
+): Promise<number> {
+  const [result] = await sql<{ count: string }[]>`
+    SELECT COUNT(DISTINCT i."buyerAccountId")::text AS count
+    FROM "Invoice" i
+    JOIN "BuyerAccount" ba ON ba.id = i."buyerAccountId"
+    WHERE i."shopId" = ${shopId}
+      AND i.status = 'open'
+      AND i.outstanding > 0
+      AND ba.gated_at IS NOT NULL
+  `;
+  return parseInt(result?.count ?? "0", 10);
+}
+
+/**
+ * Get buyer ledger filtered to only over-limit (gated) accounts.
+ * Mirrors getBuyerLedger SQL but adds AND ba.gated_at IS NOT NULL.
+ * Exported for testing.
+ */
+export async function getOverLimitBuyerLedger(
+  sql: Sql,
+  shopId: string,
+  asOf: Date,
+  options: {
+    limit: number;
+    offset: number;
+    sortBy: "outstanding" | "overdue" | "name";
+    sortOrder: "asc" | "desc";
+  }
+): Promise<{ rows: BuyerLedgerRow[]; totalCount: number }> {
+  const { limit, offset, sortBy, sortOrder } = options;
+
+  const baseFilteredQuery = (orderClause: ReturnType<typeof sql>) => sql<BuyerLedgerRow[]>`
+    WITH buyer_invoices AS (
+      SELECT
+        i."buyerAccountId",
+        s.currency,
+        (ROUND(i.outstanding * 100))::bigint AS outstanding_paise,
+        CASE
+          WHEN i."dueAt" IS NULL THEN 0
+          ELSE EXTRACT(DAY FROM (
+            DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE s.timezone) -
+            DATE_TRUNC('day', i."dueAt" AT TIME ZONE s.timezone)
+          ))::int
+        END AS days_past_due
+      FROM "Invoice" i
+      JOIN "Shop" s ON s.id = i."shopId"
+      JOIN "BuyerAccount" ba ON ba.id = i."buyerAccountId"
+      WHERE i."shopId" = ${shopId}
+        AND i.status = 'open'
+        AND i.outstanding > 0
+        AND ba.gated_at IS NOT NULL
+    ),
+    buyer_totals AS (
+      SELECT
+        "buyerAccountId",
+        currency,
+        SUM(outstanding_paise) AS outstanding_paise,
+        COALESCE(SUM(outstanding_paise) FILTER (WHERE days_past_due > 0), 0) AS overdue_paise,
+        MAX(days_past_due) FILTER (WHERE days_past_due > 0) AS oldest_overdue_days
+      FROM buyer_invoices
+      GROUP BY "buyerAccountId", currency
+    )
+    SELECT
+      ba.id AS buyer_account_id,
+      ba.name AS buyer_name,
+      CASE WHEN ba."creditLimit" IS NULL THEN NULL ELSE (ROUND(ba."creditLimit" * 100))::text END AS credit_limit_paise,
+      ba."holdState" AS hold_state,
+      bt.currency,
+      bt.outstanding_paise::text AS outstanding_paise,
+      bt.overdue_paise::text AS overdue_paise,
+      bt.oldest_overdue_days,
+      ba.gated_at IS NOT NULL AS is_gated
+    FROM buyer_totals bt
+    JOIN "BuyerAccount" ba ON ba.id = bt."buyerAccountId"
+    ${orderClause}
+    LIMIT ${limit}
+    OFFSET ${offset}
+  `;
+
+  let rows: BuyerLedgerRow[];
+  if (sortBy === "name") {
+    rows = sortOrder === "asc"
+      ? await baseFilteredQuery(sql`ORDER BY ba.name ASC, bt.outstanding_paise DESC`)
+      : await baseFilteredQuery(sql`ORDER BY ba.name DESC, bt.outstanding_paise DESC`);
+  } else if (sortBy === "overdue") {
+    rows = sortOrder === "asc"
+      ? await baseFilteredQuery(sql`ORDER BY bt.overdue_paise ASC, ba.name ASC`)
+      : await baseFilteredQuery(sql`ORDER BY bt.overdue_paise DESC, ba.name ASC`);
+  } else {
+    rows = sortOrder === "asc"
+      ? await baseFilteredQuery(sql`ORDER BY bt.outstanding_paise ASC, ba.name ASC`)
+      : await baseFilteredQuery(sql`ORDER BY bt.outstanding_paise DESC, ba.name ASC`);
+  }
+
+  const [countResult] = await sql<{ count: string }[]>`
+    SELECT COUNT(DISTINCT i."buyerAccountId")::text AS count
+    FROM "Invoice" i
+    JOIN "BuyerAccount" ba ON ba.id = i."buyerAccountId"
+    WHERE i."shopId" = ${shopId}
+      AND i.status = 'open'
+      AND i.outstanding > 0
+      AND ba.gated_at IS NOT NULL
+  `;
+
+  return {
+    rows,
+    totalCount: parseInt(countResult?.count ?? "0", 10),
+  };
+}
 
 const VALID_SORT_BY = ["outstanding", "overdue", "name"] as const;
 type SortBy = (typeof VALID_SORT_BY)[number];
@@ -48,9 +169,40 @@ function parseSortOrder(value: string | null): SortOrder {
   return "desc";
 }
 
+async function checkOnboardingRedirect(
+  sql: ReturnType<typeof getRequestSql>,
+  shopId: string
+): Promise<boolean> {
+  try {
+    const [shop] = await sql<{ onboarding_dismissed_at: Date | null }[]>`
+      SELECT onboarding_dismissed_at FROM "Shop" WHERE id = ${shopId}
+    `;
+
+    if (shop?.onboarding_dismissed_at !== null) {
+      return false;
+    }
+
+    const buyerCountResult = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+    `;
+    const buyerCount = parseInt(buyerCountResult[0]?.count ?? "0", 10);
+    if (buyerCount > 0) return false;
+
+    const tagRuleCountResult = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "AccountSource" WHERE "shopId" = ${shopId}
+    `;
+    const tagRuleCount = parseInt(tagRuleCountResult[0]?.count ?? "0", 10);
+    if (tagRuleCount > 0) return false;
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { shopify } = context;
-  const { session } = await shopify.authenticate.admin(request);
+  const { session, redirect: shopifyRedirect } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
@@ -59,10 +211,19 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const sortBy = parseSortBy(url.searchParams.get("sortBy"));
   const sortOrder = parseSortOrder(url.searchParams.get("sortOrder"));
   const selectedBuyerId = url.searchParams.get("buyer") ?? null;
+  const skipOnboarding = url.searchParams.get("skipOnboarding") === "true";
+  const onlyOverLimit = url.searchParams.get("overlimit") === "true";
 
   const [shop] = await sql<{ id: string; currency: string; timezone: string }[]>`
     SELECT id, currency, timezone FROM "Shop" WHERE domain = ${shopDomain}
   `;
+
+  if (shop && !skipOnboarding) {
+    const shouldRedirect = await checkOnboardingRedirect(sql, shop.id);
+    if (shouldRedirect) {
+      throw shopifyRedirect("/app/onboarding");
+    }
+  }
 
   let planData: ResolvedPlan | null = null;
   let usage: {
@@ -78,21 +239,45 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   } | null = null;
   let error: string | null = null;
 
+  let overLimitCount = 0;
+
   if (shop) {
     const asOf = new Date();
 
     try {
-      [planData, usage, agingTotals, buyerLedger] = await Promise.all([
+      const ledgerOptions = {
+        limit: PAGE_SIZE,
+        offset: (page - 1) * PAGE_SIZE,
+        sortBy,
+        sortOrder,
+      };
+
+      // Choose ledger function BEFORE Promise.all - never run both
+      const ledgerFn = onlyOverLimit
+        ? getOverLimitBuyerLedger(sql, shop.id, asOf, ledgerOptions)
+        : getBuyerLedger(sql, shop.id, asOf, ledgerOptions);
+
+      // When filtering over-limit, reuse buyerLedger.totalCount as overLimitCount
+      // Otherwise, run getOverLimitCount separately
+      const overLimitCountFn = onlyOverLimit
+        ? Promise.resolve(null) // will use buyerLedger.totalCount
+        : getOverLimitCount(sql, shop.id);
+
+      const [planResult, usageResult, agingResult, ledgerResult, countResult] = await Promise.all([
         resolvePlan(sql, shopDomain),
         getUsageStats(sql, shop.id),
         getShopAgingTotals(sql, shop.id, asOf),
-        getBuyerLedger(sql, shop.id, asOf, {
-          limit: PAGE_SIZE,
-          offset: (page - 1) * PAGE_SIZE,
-          sortBy,
-          sortOrder,
-        }),
+        ledgerFn,
+        overLimitCountFn,
       ]);
+
+      planData = planResult;
+      usage = usageResult;
+      agingTotals = agingResult;
+      buyerLedger = ledgerResult;
+
+      // Use totalCount from ledger when filtering over-limit, otherwise use separate count
+      overLimitCount = onlyOverLimit ? buyerLedger.totalCount : (countResult ?? 0);
 
       if (selectedBuyerId) {
         const buyerInvoices = await getBuyerInvoices(
@@ -128,6 +313,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   }
 
   const storeHandle = shopDomain.replace(".myshopify.com", "");
+  const gatingEnforced = isGatingEnforced();
 
   return {
     shopName: storeHandle,
@@ -146,6 +332,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       importsThisMonth: { current: 0, limit: 1 },
     },
     appHandle: process.env.APP_HANDLE ?? "net-terms-receivables",
+    gatingEnforced,
     agingTotals,
     buyerLedger,
     selectedBuyerInvoices,
@@ -157,13 +344,11 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     },
     sortBy,
     sortOrder,
+    onlyOverLimit,
+    overLimitCount,
     error,
   };
 };
-
-function formatLimit(limit: number): string {
-  return limit === -1 ? "Unlimited" : String(limit);
-}
 
 const BUCKET_LABELS: Record<AgingBucketKey, string> = {
   current: "Current",
@@ -247,6 +432,7 @@ function BuyerLedgerTable({
   page,
   totalCount,
   pageSize,
+  onlyOverLimit,
   onNextPage,
   onPreviousPage,
 }: {
@@ -256,18 +442,13 @@ function BuyerLedgerTable({
   page: number;
   totalCount: number;
   pageSize: number;
+  onlyOverLimit: boolean;
   onNextPage: string;
   onPreviousPage: string;
 }) {
   const totalPages = Math.ceil(totalCount / pageSize);
-  const hasNextPage = page < totalPages;
-  const hasPreviousPage = page > 1;
-
-  const buildSortUrl = (newSortBy: string) => {
-    const newOrder =
-      sortBy === newSortBy && sortOrder === "desc" ? "asc" : "desc";
-    return `?sortBy=${newSortBy}&sortOrder=${newOrder}&page=1`;
-  };
+  const fp = onlyOverLimit ? "&overlimit=true" : "";
+  const buildSortUrl = (col: string) => `?sortBy=${col}&sortOrder=${sortBy === col && sortOrder === "desc" ? "asc" : "desc"}${fp}`;
 
   const getSortIndicator = (column: string) => {
     if (sortBy !== column) return "";
@@ -316,12 +497,10 @@ function BuyerLedgerTable({
             return (
               <s-table-row key={`${row.buyer_account_id}-${row.currency}`}>
                 <s-table-cell>
-                  <s-link
-                    href={`?buyer=${row.buyer_account_id}&sortBy=${sortBy}&sortOrder=${sortOrder}&page=${page}`}
-                  >
+                  <s-link href={`?buyer=${row.buyer_account_id}&sortBy=${sortBy}&sortOrder=${sortOrder}&page=${page}${fp}`}>
                     {row.buyer_name}
                   </s-link>
-                  {row.is_gated && <s-text tone="critical"> (gated)</s-text>}
+                  {row.is_gated && <s-badge tone="warning">over plan limit</s-badge>}
                 </s-table-cell>
                 <s-table-cell>
                   {creditLimit !== null
@@ -364,15 +543,9 @@ function BuyerLedgerTable({
 
       {totalPages > 1 && (
         <s-stack direction="inline">
-          {hasPreviousPage && (
-            <s-button href={onPreviousPage}>Previous</s-button>
-          )}
-          <s-text>
-            Page {page} of {totalPages} ({totalCount} buyers)
-          </s-text>
-          {hasNextPage && (
-            <s-button href={onNextPage}>Next</s-button>
-          )}
+          {page > 1 && <s-button href={onPreviousPage}>Previous</s-button>}
+          <s-text>Page {page} of {totalPages} ({totalCount} buyers)</s-text>
+          {page < totalPages && <s-button href={onNextPage}>Next</s-button>}
         </s-stack>
       )}
     </s-stack>
@@ -463,16 +636,19 @@ export default function Index() {
     plan,
     usage,
     appHandle,
+    gatingEnforced,
     agingTotals,
     buyerLedger,
     selectedBuyerInvoices,
     pagination,
     sortBy,
     sortOrder,
+    onlyOverLimit,
+    overLimitCount,
     error,
   } = useLoaderData<typeof loader>();
 
-  const planKey = plan?.key ?? "free";
+  const planKey = (plan?.key ?? "free") as PlanKey;
   const planName = plan?.name ?? "Free";
   const isTest = plan?.isTest ?? false;
 
@@ -480,14 +656,6 @@ export default function Index() {
 
   const companiesUsed = usage.companies.current;
   const companiesLimit = usage.companies.limit;
-  const companiesText =
-    companiesLimit === -1
-      ? `${companiesUsed} companies`
-      : `${companiesUsed} / ${formatLimit(companiesLimit)} companies`;
-  const companiesAtLimit =
-    companiesLimit !== -1 && companiesUsed >= companiesLimit;
-
-  const displayPlanName = planName.charAt(0).toUpperCase() + planName.slice(1);
 
   const hasInvoices =
     agingTotals && Object.keys(agingTotals.totalByCurrency).length > 0;
@@ -501,27 +669,15 @@ export default function Index() {
     <s-page heading="Net Terms Receivables">
       {/* S21: Plan Banner */}
       <s-section heading="Your Plan">
-        <s-stack>
-          <s-paragraph>
-            <s-text type="strong">Current Plan: </s-text>
-            <s-text>
-              {displayPlanName}
-              {isTest ? " (Test)" : ""}
-            </s-text>
-          </s-paragraph>
-          <s-paragraph>
-            <s-text type="strong">Companies: </s-text>
-            <s-text>{companiesText}</s-text>
-            {companiesAtLimit && (
-              <s-text> — Limit reached, upgrade to add more</s-text>
-            )}
-          </s-paragraph>
-          {planKey !== "scale" && (
-            <s-button href={upgradeUrl} target="_top">
-              Upgrade Plan
-            </s-button>
-          )}
-        </s-stack>
+        <PlanBanner
+          planKey={planKey}
+          planName={planName}
+          isTest={isTest}
+          companiesUsed={companiesUsed}
+          companiesLimit={companiesLimit}
+          gatingEnforced={gatingEnforced}
+          upgradeUrl={upgradeUrl}
+        />
       </s-section>
 
       {/* Error State */}
@@ -577,25 +733,53 @@ export default function Index() {
           {/* Buyer Ledger */}
           {!selectedBuyerInvoices && (
             <s-section heading="Buyer Ledger">
-              {buyerLedger ? (
-                <BuyerLedgerTable
-                  rows={buyerLedger.rows}
-                  sortBy={sortBy}
-                  sortOrder={sortOrder}
-                  page={pagination.page}
-                  totalCount={pagination.totalCount}
-                  pageSize={pagination.pageSize}
-                  onNextPage={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page + 1}`}
-                  onPreviousPage={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page - 1}`}
-                />
-              ) : (
-                <s-empty-state heading="No buyer accounts">
-                  <s-text slot="subheading">
-                    You don&apos;t have any buyer accounts with outstanding
-                    invoices.
-                  </s-text>
-                </s-empty-state>
-              )}
+              <s-stack>
+                {/* Over plan limit banner */}
+                {overLimitCount > 0 && (
+                  <s-banner tone="warning" heading={`${overLimitCount} account${overLimitCount > 1 ? "s" : ""} over your plan limit`}>
+                    <s-text>
+                      These accounts are included in totals but some features may be limited.{" "}
+                      {!onlyOverLimit && (
+                        <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}&overlimit=true`}>
+                          Show only over-limit accounts
+                        </s-link>
+                      )}
+                    </s-text>
+                  </s-banner>
+                )}
+                {/* Filter UI */}
+                <s-paragraph>
+                  <s-text type="strong">Show: </s-text>
+                  {!onlyOverLimit ? "All" : <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}`}>All</s-link>}
+                  {overLimitCount > 0 && (
+                    <>
+                      {" | "}
+                      {onlyOverLimit ? "Over limit only" : <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}&overlimit=true`}>Over limit only</s-link>}
+                    </>
+                  )}
+                </s-paragraph>
+                {buyerLedger ? (
+                  <BuyerLedgerTable
+                    rows={buyerLedger.rows}
+                    sortBy={sortBy}
+                    sortOrder={sortOrder}
+                    page={pagination.page}
+                    totalCount={pagination.totalCount}
+                    pageSize={pagination.pageSize}
+                    onlyOverLimit={onlyOverLimit}
+                    onNextPage={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page + 1}${onlyOverLimit ? "&overlimit=true" : ""}`}
+                    onPreviousPage={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page - 1}${onlyOverLimit ? "&overlimit=true" : ""}`}
+                  />
+                ) : (
+                  <s-empty-state heading="No buyer accounts">
+                    <s-text slot="subheading">
+                      {onlyOverLimit
+                        ? "No accounts over your plan limit."
+                        : "You don\u0027t have any buyer accounts with outstanding invoices."}
+                    </s-text>
+                  </s-empty-state>
+                )}
+              </s-stack>
             </s-section>
           )}
         </>

@@ -11,7 +11,7 @@
  * - No buyer account → retryable failure
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import type { ShopifyOrder } from "~/services/sync/types";
 import {
   checkOrderEligibility,
@@ -20,13 +20,8 @@ import {
   type EligibilityContext,
 } from "../invoice-eligibility";
 
-// Mock the dependencies
-vi.mock("~/services/gating.server", () => ({
-  activeAccountFragment: (sql: unknown) => {
-    // Return SQL fragment that filters for non-gated accounts
-    return (sql as { unsafe: (s: string) => unknown }).unsafe("gated_at IS NULL");
-  },
-}));
+// Note: activeAccountFragment is no longer used in invoice-eligibility.ts
+// Gated accounts are included in eligibility checks (gating applies only to value-add actions)
 
 // Helper to create mock SQL client
 function createMockSql(queryResults: Map<string, unknown[]>) {
@@ -53,9 +48,6 @@ function createMockSql(queryResults: Map<string, unknown[]>) {
 
     return Promise.resolve([]);
   };
-
-  // Add the unsafe method for the gating fragment
-  sql.unsafe = (s: string) => s;
 
   return sql;
 }

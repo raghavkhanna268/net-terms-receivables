@@ -98,11 +98,12 @@ describeWithDb("S10b processBulkQueue Integration", () => {
 
       const result = await runDrain(sql, drainConfig);
 
+      // At least one message processed (might be more from other tests running in parallel)
       expect(result.processed).toBeGreaterThanOrEqual(1);
-      expect(result.failed).toBe(0);
-      expect(result.deadLettered).toBe(0);
+      // Our message-specific assertions (most important)
+      // Don't assert on global failed/deadLettered - other tests' messages may interfere
 
-      // Verify message is archived (not in active queue)
+      // Verify OUR message is archived (not in active queue)
       const [inQueue] = await sql<{ count: string }[]>`
         SELECT COUNT(*) as count FROM pgmq.q_s6_bulk WHERE msg_id = ${msgId}::bigint
       `;
@@ -190,17 +191,16 @@ describeWithDb("S10b processBulkQueue Integration", () => {
 
       const result = await runDrain(sql, drainConfig);
 
+      // At least our message should fail
       expect(result.failed).toBeGreaterThanOrEqual(1);
-      expect(result.deadLettered).toBe(0);
+      // Don't assert on global deadLettered - other tests' messages may interfere
 
-      // Message should still be in queue (not archived, not DLQ'd)
-      // Reset visibility to check
-      await sql`SELECT pgmq.set_vt(${S6_QUEUES.BULK}, ${msgId}::bigint, 0)`;
-
+      // OUR message should still be in queue (not archived, not DLQ'd)
+      // Check directly in queue table
       const [inQueue] = await sql<{ msg_id: string; read_ct: number }[]>`
-        SELECT msg_id, read_ct FROM pgmq.read(${S6_QUEUES.BULK}, 1, 1)
-        WHERE msg_id = ${msgId}::bigint
+        SELECT msg_id, read_ct FROM pgmq.q_s6_bulk WHERE msg_id = ${msgId}::bigint
       `;
+      expect(inQueue).toBeDefined();
       expect(inQueue.msg_id).toBe(msgId);
       expect(inQueue.read_ct).toBeGreaterThanOrEqual(1);
 
@@ -225,10 +225,11 @@ describeWithDb("S10b processBulkQueue Integration", () => {
 
       expect(result.deadLettered).toBeGreaterThanOrEqual(1);
 
-      // Message should be in DLQ
+      // Message should be in DLQ (filter by queue to avoid cross-queue collisions)
       const [dlqResult] = await sql<{ original_msg_id: string; error: string }[]>`
         SELECT original_msg_id, error FROM s6_dead_letter
         WHERE original_msg_id = ${msgId}
+        AND original_queue = ${S6_QUEUES.BULK}
       `;
       expect(dlqResult).toBeDefined();
       expect(dlqResult.error).toContain("404");
@@ -258,10 +259,11 @@ describeWithDb("S10b processBulkQueue Integration", () => {
         await runDrain(sql, { ...drainConfig, maxRetries: 5 });
       }
 
-      // Message should be in DLQ
+      // Message should be in DLQ (filter by queue to avoid cross-queue collisions)
       const [dlqResult] = await sql<{ original_msg_id: string }[]>`
         SELECT original_msg_id FROM s6_dead_letter
         WHERE original_msg_id = ${msgId}
+        AND original_queue = ${S6_QUEUES.BULK}
       `;
       expect(dlqResult).toBeDefined();
     });
@@ -273,23 +275,27 @@ describeWithDb("S10b processBulkQueue Integration", () => {
         throw new Error("Simulated handler crash");
       });
 
+      // Delete any old DLQ entries for this test topic before starting
+      await sql`DELETE FROM s6_dead_letter WHERE message->>'topic' = ${TEST_TOPIC}`;
+
       const { msgId } = await enqueueTestMessage("rollback-1");
 
       // runDrain catches handler errors gracefully
       const result = await runDrain(sql, drainConfig);
       expect(result.failed).toBeGreaterThanOrEqual(1);
 
-      // Message should still be in queue (handler threw, so no archive)
-      await sql`SELECT pgmq.set_vt(${S6_QUEUES.BULK}, ${msgId}::bigint, 0)`;
-
+      // OUR message should still be in queue (handler threw, so no archive)
       const [inQueue] = await sql<{ count: string }[]>`
         SELECT COUNT(*) as count FROM pgmq.q_s6_bulk WHERE msg_id = ${msgId}::bigint
       `;
       expect(Number(inQueue.count)).toBe(1);
 
-      // No DLQ entry yet (read_ct < maxRetries)
+      // OUR message should not be in DLQ yet (read_ct < maxRetries)
+      // Filter by queue to avoid cross-queue collisions
       const [dlqCount] = await sql<{ count: string }[]>`
-        SELECT COUNT(*) as count FROM s6_dead_letter WHERE original_msg_id = ${msgId}
+        SELECT COUNT(*) as count FROM s6_dead_letter 
+        WHERE original_msg_id = ${msgId}
+        AND original_queue = ${S6_QUEUES.BULK}
       `;
       expect(Number(dlqCount.count)).toBe(0);
 
@@ -300,7 +306,15 @@ describeWithDb("S10b processBulkQueue Integration", () => {
     it("sql.begin rollback leaves original message intact with no partial send", async () => {
       const { msgId, message } = await enqueueTestMessage("tx-rollback-1");
 
-      // Read message to simulate processor picking it up
+      // Record count of messages with our topic/shop BEFORE the transaction
+      const [beforeCount] = await sql<{ count: string }[]>`
+        SELECT COUNT(*) as count FROM pgmq.q_s6_bulk
+        WHERE message->>'topic' = ${TEST_TOPIC}
+        AND message->>'shop' = ${TEST_SHOP}
+      `;
+      const msgCountBefore = Number(beforeCount.count);
+
+      // Read message to simulate processor picking it up (makes it invisible)
       await sql`SELECT * FROM pgmq.read(${S6_QUEUES.BULK}, 30, 1)`;
 
       // Attempt a transaction that fails after send
@@ -311,22 +325,21 @@ describeWithDb("S10b processBulkQueue Integration", () => {
         })
       ).rejects.toThrow("Simulated transaction failure");
 
-      // Original message should still be in queue
-      await sql`SELECT pgmq.set_vt(${S6_QUEUES.BULK}, ${msgId}::bigint, 0)`;
-
+      // Original message should still be in queue (check by msg_id)
       const [stillInQueue] = await sql<{ msg_id: string }[]>`
-        SELECT msg_id FROM pgmq.read(${S6_QUEUES.BULK}, 1, 1)
+        SELECT msg_id FROM pgmq.q_s6_bulk WHERE msg_id = ${msgId}::bigint
       `;
+      expect(stillInQueue).toBeDefined();
       expect(stillInQueue.msg_id).toBe(msgId);
 
       // No extra messages from rolled-back transaction
-      // Count only messages with our unique topic/shop
-      const [ourMsgCount] = await sql<{ count: string }[]>`
+      // Count should be same as before (transaction was rolled back)
+      const [afterCount] = await sql<{ count: string }[]>`
         SELECT COUNT(*) as count FROM pgmq.q_s6_bulk
         WHERE message->>'topic' = ${TEST_TOPIC}
         AND message->>'shop' = ${TEST_SHOP}
       `;
-      expect(Number(ourMsgCount.count)).toBe(1);
+      expect(Number(afterCount.count)).toBe(msgCountBefore);
 
       // Clean up
       await sql`SELECT pgmq.delete(${S6_QUEUES.BULK}, ${msgId}::bigint)`;

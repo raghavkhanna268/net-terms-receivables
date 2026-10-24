@@ -66,9 +66,9 @@ jobs:
       - name: Install actionlint
         env:
           # Pin to specific version for reproducibility
-          ACTIONLINT_VERSION: "1.7.4"
-          # SHA256 of actionlint_1.7.4_linux_amd64.tar.gz
-          ACTIONLINT_SHA256: "fc0a6886bbb9a23a39eeec4b176193cadb54ddbe77cdbb19b637933919545395"
+          ACTIONLINT_VERSION: "1.7.12"
+          # SHA256 of actionlint_1.7.12_linux_amd64.tar.gz (1.7.10+ allows 25 workflow_dispatch inputs)
+          ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/actionlint"
@@ -85,6 +85,9 @@ jobs:
         run: |
           # actionlint checks workflow syntax and runs shellcheck on run blocks
           "$RUNNER_TEMP/actionlint/actionlint" -color
+
+      - name: Backfill dry-run log filter self-test
+        run: python3 scripts/ci/test_backfill_dry_run_filter.py
 
       - name: Setup Node
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
@@ -144,6 +147,9 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Test build output (xlsx exclusion, bundle size)
+        run: npm run test:build
 
       - name: Wrangler dry-run and size check
         run: |

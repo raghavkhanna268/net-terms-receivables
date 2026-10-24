@@ -14,6 +14,7 @@
   - Paid tier: 10M requests/month, 30 seconds default CPU limit (max 5 min configurable)
   - **Why:** Production traffic may exceed free tier; paid tier provides significantly better CPU headroom
   - **Reference:** [Cloudflare Workers Limits](https://developers.cloudflare.com/workers/platform/limits/)
+  - **Steps:** [docs/launch-checklist/workers-paid-upgrade.md](../docs/launch-checklist/workers-paid-upgrade.md)
 
 ### Supabase
 
@@ -105,6 +106,21 @@
 - [ ] **TBD** Define pricing tiers
 - [ ] **TBD** Test billing flow in dev store
 - **Reference:** [Shopify Billing API](https://shopify.dev/docs/apps/billing)
+
+---
+
+## Feature Gates (must hold until conditions are met)
+
+- [ ] **⚠️ `PLAN_GATING_ENFORCED` stays `"false"` in every environment** (`wrangler.jsonc` `[vars]` and any env sections)
+  - **Until:** the lead Developer's gating fix (eligibility and aging) has merged **and** Team Lead gives the go
+  - **Why:** enabling it earlier silently stops holds for gated accounts
+  - **Check before every deploy:** the deployed value is `"false"`; if not, do not deploy and escalate
+
+- [ ] **⚠️ Payment reminders (S18): Resend prerequisites before any shop enables reminders**
+  - [ ] `RESEND_API_KEY` set as a Worker secret (names only in tickets and logs; never paste values)
+  - [ ] `RESEND_FROM` set as a Worker secret
+  - [ ] Resend Data Processing Agreement (DPA) accepted by Raghav
+  - **Why:** without both secrets reminder sends are acked as "disabled" (safe no-op); once set, real emails go to buyers of any shop with reminders enabled, so the DPA must be in place first
 
 ---
 

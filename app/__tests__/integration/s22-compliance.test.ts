@@ -155,5 +155,158 @@ describe("S22 Migration Verification", () => {
       `;
       expect(parseInt(after.count, 10)).toBe(0);
     });
+
+    it.skipIf(!DATABASE_URL)("deleting Shop cascades to PayerAlias via BuyerAccount", async () => {
+      const testId = Date.now();
+      const testShopId = `shop-alias-cascade-${testId}`;
+      const testAccountId = `account-alias-cascade-${testId}`;
+      const testAliasId = `alias-cascade-${testId}`;
+      const testShopDomain = `test-alias-cascade-${testId}.myshopify.com`;
+
+      const now = new Date();
+
+      await sql!`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${testShopId}, ${testShopDomain}, ${now}, ${now})
+      `;
+
+      const testCustomerId = `gid://shopify/Customer/${testId}`;
+
+      await sql!`
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, name, "customerId", "createdAt", "updatedAt")
+        VALUES (${testAccountId}, ${testShopId}, 'TAGGED_CUSTOMER', 'Test Buyer', ${testCustomerId}, ${now}, ${now})
+      `;
+
+      await sql!`
+        INSERT INTO "PayerAlias" (id, "buyerAccountId", "payerKey", "createdAt")
+        VALUES (${testAliasId}, ${testAccountId}, 'test-payer-key', ${now})
+      `;
+
+      const [aliasBefore] = await sql!<{ count: string }[]>`
+        SELECT COUNT(*)::text as count FROM "PayerAlias" WHERE id = ${testAliasId}
+      `;
+      expect(parseInt(aliasBefore.count, 10)).toBe(1);
+
+      const [accountBefore] = await sql!<{ count: string }[]>`
+        SELECT COUNT(*)::text as count FROM "BuyerAccount" WHERE id = ${testAccountId}
+      `;
+      expect(parseInt(accountBefore.count, 10)).toBe(1);
+
+      await sql!`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+
+      const [aliasAfter] = await sql!<{ count: string }[]>`
+        SELECT COUNT(*)::text as count FROM "PayerAlias" WHERE id = ${testAliasId}
+      `;
+      expect(parseInt(aliasAfter.count, 10)).toBe(0);
+
+      const [accountAfter] = await sql!<{ count: string }[]>`
+        SELECT COUNT(*)::text as count FROM "BuyerAccount" WHERE id = ${testAccountId}
+      `;
+      expect(parseInt(accountAfter.count, 10)).toBe(0);
+    });
+  });
+
+  describe("Retention Purge Function", () => {
+    it.skipIf(!DATABASE_URL)("s22_purge_unmatched_narration() purges old unmatched, preserves matched and amounts/UTR", async () => {
+      const testId = Date.now();
+      const testShopId = `shop-retention-${testId}`;
+      const testImportId = `import-retention-${testId}`;
+      const testShopDomain = `test-retention-${testId}.myshopify.com`;
+
+      const now = new Date();
+      const oldDate = new Date(now.getTime() - 200 * 24 * 60 * 60 * 1000); // 200 days ago
+      const recentDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000); // 30 days ago
+
+      // Create shop and import
+      await sql!`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${testShopId}, ${testShopDomain}, ${now}, ${now})
+      `;
+
+      await sql!`
+        INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
+        VALUES (${testImportId}, ${testShopId}, 'test', 'test.csv', 3, ${now})
+      `;
+
+      // Payment 1: Old unmatched (should be purged)
+      const oldUnmatchedId = `pay-old-unmatched-${testId}`;
+      await sql!`
+        INSERT INTO public."Payment" (id, "shopId", "importId", "valueDate", amount, utr, narration, "payerText", status, "createdAt", "updatedAt")
+        VALUES (${oldUnmatchedId}, ${testShopId}, ${testImportId}, ${oldDate}, 1000.00, 'UTR001', 'OLD UNMATCHED NARRATION', 'OLD PAYER', 'unmatched', ${now}, ${now})
+      `;
+
+      // Payment 2: Recent unmatched (should NOT be purged)
+      const recentUnmatchedId = `pay-recent-unmatched-${testId}`;
+      await sql!`
+        INSERT INTO public."Payment" (id, "shopId", "importId", "valueDate", amount, utr, narration, "payerText", status, "createdAt", "updatedAt")
+        VALUES (${recentUnmatchedId}, ${testShopId}, ${testImportId}, ${recentDate}, 2000.00, 'UTR002', 'RECENT UNMATCHED NARRATION', 'RECENT PAYER', 'unmatched', ${now}, ${now})
+      `;
+
+      // Payment 3: Old matched (should NOT be purged - matched payments retain narration)
+      const oldMatchedId = `pay-old-matched-${testId}`;
+      await sql!`
+        INSERT INTO public."Payment" (id, "shopId", "importId", "valueDate", amount, utr, narration, "payerText", status, "createdAt", "updatedAt")
+        VALUES (${oldMatchedId}, ${testShopId}, ${testImportId}, ${oldDate}, 3000.00, 'UTR003', 'OLD MATCHED NARRATION', 'MATCHED PAYER', 'matched', ${now}, ${now})
+      `;
+
+      // Payment 4: Old unmatched with empty narration (should NOT be touched)
+      const oldEmptyNarrationId = `pay-old-empty-${testId}`;
+      await sql!`
+        INSERT INTO public."Payment" (id, "shopId", "importId", "valueDate", amount, utr, narration, "payerText", status, "createdAt", "updatedAt")
+        VALUES (${oldEmptyNarrationId}, ${testShopId}, ${testImportId}, ${oldDate}, 4000.00, 'UTR004', '', NULL, 'unmatched', ${now}, ${now})
+      `;
+
+      // Payment 5: Old unmatched already redacted (should NOT be touched)
+      const oldRedactedId = `pay-old-redacted-${testId}`;
+      await sql!`
+        INSERT INTO public."Payment" (id, "shopId", "importId", "valueDate", amount, utr, narration, "payerText", status, "createdAt", "updatedAt")
+        VALUES (${oldRedactedId}, ${testShopId}, ${testImportId}, ${oldDate}, 5000.00, 'UTR005', '[REDACTED]', NULL, 'unmatched', ${now}, ${now})
+      `;
+
+      // Call the same function that pg_cron uses
+      const [result] = await sql!<{ s22_purge_unmatched_narration: number }[]>`
+        SELECT public.s22_purge_unmatched_narration()
+      `;
+      expect(result.s22_purge_unmatched_narration).toBeGreaterThanOrEqual(1);
+
+      // Verify old unmatched was purged
+      const [oldUnmatched] = await sql!<{ narration: string; payerText: string | null; amount: string; utr: string }[]>`
+        SELECT narration, "payerText", amount::text, utr FROM public."Payment" WHERE id = ${oldUnmatchedId}
+      `;
+      expect(oldUnmatched.narration).toBe('[RETENTION_PURGED]');
+      expect(oldUnmatched.payerText).toBeNull();
+      expect(oldUnmatched.amount).toBe('1000.00'); // Amount preserved
+      expect(oldUnmatched.utr).toBe('UTR001'); // UTR preserved
+
+      // Verify recent unmatched was NOT purged
+      const [recentUnmatched] = await sql!<{ narration: string; payerText: string | null }[]>`
+        SELECT narration, "payerText" FROM public."Payment" WHERE id = ${recentUnmatchedId}
+      `;
+      expect(recentUnmatched.narration).toBe('RECENT UNMATCHED NARRATION');
+      expect(recentUnmatched.payerText).toBe('RECENT PAYER');
+
+      // Verify old matched was NOT purged
+      const [oldMatched] = await sql!<{ narration: string; payerText: string | null }[]>`
+        SELECT narration, "payerText" FROM public."Payment" WHERE id = ${oldMatchedId}
+      `;
+      expect(oldMatched.narration).toBe('OLD MATCHED NARRATION');
+      expect(oldMatched.payerText).toBe('MATCHED PAYER');
+
+      // Verify old empty narration was NOT touched
+      const [oldEmpty] = await sql!<{ narration: string; payerText: string | null }[]>`
+        SELECT narration, "payerText" FROM public."Payment" WHERE id = ${oldEmptyNarrationId}
+      `;
+      expect(oldEmpty.narration).toBe('');
+      expect(oldEmpty.payerText).toBeNull();
+
+      // Verify already redacted was NOT touched
+      const [oldRedacted] = await sql!<{ narration: string }[]>`
+        SELECT narration FROM public."Payment" WHERE id = ${oldRedactedId}
+      `;
+      expect(oldRedacted.narration).toBe('[REDACTED]');
+
+      // Cleanup
+      await sql!`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+    });
   });
 });

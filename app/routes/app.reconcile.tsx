@@ -33,6 +33,10 @@ import {
   MAX_PAYMENTS_PER_REQUEST,
 } from "~/services/matcher.server";
 import { formatPaiseAmount } from "~/lib/aging";
+import { resolvePlan } from "~/services/plan.server";
+import { isGatingEnforced } from "~/services/gating.server";
+import type { PlanKey } from "~/lib/entitlements";
+import { UpgradePrompt } from "~/components/UpgradePrompt";
 
 const PAGE_SIZE = 20;
 
@@ -83,8 +87,15 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       view,
       error: "Shop not found",
       tabCounts: { suggested: 0, unmatched: 0 },
+      planKey: "free" as PlanKey,
+      gatingEnforced: false,
+      storeHandle: shopDomain.replace(".myshopify.com", ""),
+      appHandle: process.env.APP_HANDLE ?? "net-terms-receivables",
     };
   }
+
+  const gatingEnforced = isGatingEnforced();
+  const storeHandle = shopDomain.replace(".myshopify.com", "");
 
   let payments: PaymentSummary[] = [];
   let matches: MatchSummary[] = [];
@@ -95,26 +106,32 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   let totalCount = 0;
 
   // P3: Get real tab counts from COUNT queries (not page length)
+  // Run resolvePlan in parallel with tab counts to avoid extra round trip on cache miss
   let tabCounts = { suggested: 0, unmatched: 0 };
+  let planData = { plan: { key: "free" as PlanKey } };
   try {
-    const [suggestedCount] = await sql<{ count: string }[]>`
-      SELECT COUNT(*)::text AS count
-      FROM "Match"
-      WHERE "shopId" = ${shop.id}
-        AND state = 'suggested'
-    `;
-    const [unmatchedCount] = await sql<{ count: string }[]>`
-      SELECT COUNT(*)::text AS count
-      FROM "Payment"
-      WHERE "shopId" = ${shop.id}
-        AND status IN ('unmatched', 'partial')
-    `;
+    const [planResult, suggestedCount, unmatchedCount] = await Promise.all([
+      resolvePlan(sql, shopDomain),
+      sql<{ count: string }[]>`
+        SELECT COUNT(*)::text AS count
+        FROM "Match"
+        WHERE "shopId" = ${shop.id}
+          AND state = 'suggested'
+      `.then(r => r[0]),
+      sql<{ count: string }[]>`
+        SELECT COUNT(*)::text AS count
+        FROM "Payment"
+        WHERE "shopId" = ${shop.id}
+          AND status IN ('unmatched', 'partial')
+      `.then(r => r[0]),
+    ]);
+    planData = planResult;
     tabCounts = {
       suggested: parseInt(suggestedCount?.count ?? "0", 10),
       unmatched: parseInt(unmatchedCount?.count ?? "0", 10),
     };
   } catch (err) {
-    console.error("[app.reconcile] Error getting tab counts:", err);
+    console.error("[app.reconcile] Error getting tab counts or plan:", err);
   }
 
   try {
@@ -199,6 +216,10 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       view,
       error: "Failed to load reconciliation data",
       tabCounts,
+      planKey: planData.plan.key,
+      gatingEnforced,
+      storeHandle,
+      appHandle: process.env.APP_HANDLE ?? "net-terms-receivables",
     };
   }
 
@@ -211,6 +232,10 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     view,
     error: null,
     tabCounts,
+    planKey: planData.plan.key,
+    gatingEnforced,
+    storeHandle,
+    appHandle: process.env.APP_HANDLE ?? "net-terms-receivables",
   };
 };
 
@@ -656,9 +681,15 @@ export default function ReconcilePage() {
     view,
     error,
     tabCounts,
+    planKey,
+    gatingEnforced,
+    storeHandle,
+    appHandle,
   } = useLoaderData<typeof loader>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
+
+  const upgradeUrl = `https://admin.shopify.com/store/${storeHandle}/charges/${appHandle}/pricing_plans`;
 
   return (
     <s-page heading="Payment Reconciliation">
@@ -667,6 +698,18 @@ export default function ReconcilePage() {
           <s-banner tone="critical" heading="Error">
             {error}
           </s-banner>
+        </s-section>
+      )}
+
+      {/* S21: Upgrade prompt for matching feature (requires Starter+) */}
+      {planKey === "free" && (
+        <s-section>
+          <UpgradePrompt
+            currentPlan={planKey}
+            feature="matching"
+            gatingEnforced={gatingEnforced}
+            upgradeUrl={upgradeUrl}
+          />
         </s-section>
       )}
 

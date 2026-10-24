@@ -100,6 +100,7 @@ describe("webhooks.compliance", () => {
       taggedCustomersDeleted: 1,
       draftOrdersDeleted: 0,
       dataRequestsDeleted: 0,
+      payerAliasesDeleted: 0,
       buyerAccountAnonymized: true,
       paymentsRedacted: 0,
     });
