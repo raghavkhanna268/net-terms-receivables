@@ -175,13 +175,15 @@ export async function incrementOrderRefetchNull(
  */
 export async function incrementOrderOutstandingMissing(
   sql: Sql,
-  shop: string
+  shop: string,
+  n: number = 1
 ): Promise<void> {
+  if (n <= 0) return;
   await sql`
     INSERT INTO order_outstanding_missing (shop, day, count)
-    VALUES (${shop}, CURRENT_DATE, 1)
+    VALUES (${shop}, CURRENT_DATE, ${n})
     ON CONFLICT (shop, day)
-    DO UPDATE SET count = order_outstanding_missing.count + 1
+    DO UPDATE SET count = order_outstanding_missing.count + ${n}
   `;
 }
 

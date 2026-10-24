@@ -228,6 +228,7 @@ export interface BulkOrderLine {
   closedAt?: string | null;
   displayFinancialStatus?: string | null;
   totalPriceSet?: ShopifyOrder["totalPriceSet"];
+  totalOutstandingSet?: ShopifyOrder["totalOutstandingSet"];
   paymentTerms?: ShopifyOrder["paymentTerms"];
   purchasingEntity?: ShopifyOrder["purchasingEntity"];
   customer?: ShopifyOrder["customer"];
