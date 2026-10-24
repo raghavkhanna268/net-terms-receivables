@@ -21,10 +21,6 @@ import { sqlOptions } from "~/lib/db-light.server";
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
-// Capture whether env var was originally set (not just its value)
-const originalEnvWasSet = "PLAN_GATING_ENFORCED" in process.env;
-const originalEnv = process.env.PLAN_GATING_ENFORCED;
-
 // Stub fetch globally for Resend API calls
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
@@ -111,13 +107,6 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
   });
 
   afterAll(async () => {
-    // Restore or delete the env var properly
-    if (originalEnvWasSet) {
-      process.env.PLAN_GATING_ENFORCED = originalEnv;
-    } else {
-      delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
-    }
-
     // Clean up in reverse order of creation
     await sql`DELETE FROM "ReminderLog" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "ReminderRule" WHERE "shopId" = ${TEST_SHOP_ID}`;
@@ -160,11 +149,12 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   describe("1. Payment reminders - getInvoiceForReminder returns gated_at", () => {
     it("returns buyerAccountGatedAt for gated account", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
 
       const invoiceId = `inv-reminder-gated-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/reminder-gated-${TEST_SUFFIX}`;
@@ -191,7 +181,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     });
 
     it("returns null buyerAccountGatedAt for non-gated account", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
 
       const invoiceId = `inv-reminder-nongated-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/reminder-nongated-${TEST_SUFFIX}`;
@@ -221,7 +211,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com" };
 
     it("skips gated account with gating ON - NO ReminderLog, NO cap consumed", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
 
       const invoiceId = `inv-send-gated-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/send-gated-${TEST_SUFFIX}`;
@@ -283,7 +273,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     });
 
     it("sends reminder for non-gated account with gating ON - ReminderLog created, cap consumed, fetch called", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
 
       const invoiceId = `inv-send-nongated-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/send-nongated-${TEST_SUFFIX}`;
@@ -350,7 +340,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     });
 
     it("sends reminder for gated account with gating OFF (passes Gate 3)", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "0";
+      vi.stubEnv("PLAN_GATING_ENFORCED", "0");
 
       const invoiceId = `inv-send-gated-off-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/send-gated-off-${TEST_SUFFIX}`;
@@ -433,7 +423,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
 
   describe("3. isAccountActive helper (from gating.server.ts)", () => {
     it("returns false for gated account when gating ON", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
 
       const { isAccountActive } = await import("../gating.server");
 
@@ -446,7 +436,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     });
 
     it("returns true for non-gated account when gating ON", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
 
       const { isAccountActive } = await import("../gating.server");
 
@@ -459,7 +449,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     });
 
     it("returns true for gated account when gating OFF", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "0";
+      vi.stubEnv("PLAN_GATING_ENFORCED", "0");
 
       const { isAccountActive } = await import("../gating.server");
 
@@ -474,7 +464,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
 
   describe("4. Bulk import - checkImportLimit with real DB", () => {
     it("blocks import when at limit with gating ON (free plan)", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
 
       // Create one import this month (free plan limit is 1)
       const importId = `import-limit-test-${TEST_SUFFIX}`;
@@ -493,7 +483,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     });
 
     it("allows import when under limit with gating ON (free plan)", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
 
       // No imports this month
       const { checkImportLimit } = await import("../gating.server");
@@ -505,7 +495,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     });
 
     it("allows import when gating OFF regardless of limit", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "0";
+      vi.stubEnv("PLAN_GATING_ENFORCED", "0");
 
       // Create one import this month
       const importId = `import-limit-off-${TEST_SUFFIX}`;
@@ -522,7 +512,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     });
 
     it("allows unlimited imports for starter+ plans with gating ON", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
 
       // Upgrade shop to starter
       await sql`UPDATE "Shop" SET plan_key = 'starter' WHERE id = ${TEST_SHOP_ID}`;
@@ -602,7 +592,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     }
 
     it("rejects credit-limit edit on gated account when gating ON", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
       vi.resetModules();
 
       // Save original credit limit for verification
@@ -627,7 +617,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     });
 
     it("allows credit-limit edit on non-gated account when gating ON", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
       vi.resetModules();
 
       const result = await callAccountsAction(sql, TEST_SHOP_DOMAIN, TEST_NONGATED_ACCOUNT_ID, {
@@ -651,7 +641,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     });
 
     it("allows credit-limit edit on gated account when gating OFF", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "0";
+      vi.stubEnv("PLAN_GATING_ENFORCED", "0");
       vi.resetModules();
 
       const result = await callAccountsAction(sql, TEST_SHOP_DOMAIN, TEST_GATED_ACCOUNT_ID, {
@@ -669,7 +659,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     });
 
     it("allows hold-only update on gated account when gating ON (holds work on all plans)", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
       vi.resetModules();
 
       // Save original state
@@ -703,11 +693,93 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
         `;
       }
     });
+
+    it("holdOnly=true&noLimit=true on gated account does NOT clear credit limit", async () => {
+      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
+      vi.resetModules();
+
+      // Save original state
+      const [originalAccount] = await sql<{ creditLimit: string; manualHold: boolean; holdState: string }[]>`
+        SELECT "creditLimit"::TEXT, "manualHold", "holdState" FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}
+      `;
+      const originalCreditLimit = originalAccount.creditLimit;
+
+      try {
+        const result = await callAccountsAction(sql, TEST_SHOP_DOMAIN, TEST_GATED_ACCOUNT_ID, {
+          _action: "updateCredit",
+          holdOnly: "true",
+          noLimit: "true",
+          manualHold: "true",
+          holdReasonCode: "MANUAL_HOLD",
+        });
+
+        // Should succeed - holds are NOT gated
+        expect(result.success).toBe(true);
+
+        // DB credit limit should be UNCHANGED (noLimit was ignored)
+        const [afterAccount] = await sql<{ creditLimit: string; manualHold: boolean; holdState: string }[]>`
+          SELECT "creditLimit"::TEXT, "manualHold", "holdState" FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}
+        `;
+        expect(afterAccount.creditLimit).toBe(originalCreditLimit);
+        // But hold was applied
+        expect(afterAccount.manualHold).toBe(true);
+        expect(afterAccount.holdState).toBe("HELD");
+      } finally {
+        // Restore original state
+        await sql`
+          UPDATE "BuyerAccount" 
+          SET "creditLimit" = ${parseFloat(originalCreditLimit)}, "manualHold" = ${originalAccount.manualHold}, "holdState" = ${originalAccount.holdState}
+          WHERE id = ${TEST_GATED_ACCOUNT_ID}
+        `;
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("holdOnly=true&creditLimit=new on gated account does NOT change credit limit", async () => {
+      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
+      vi.resetModules();
+
+      // Save original state
+      const [originalAccount] = await sql<{ creditLimit: string; manualHold: boolean; holdState: string }[]>`
+        SELECT "creditLimit"::TEXT, "manualHold", "holdState" FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}
+      `;
+      const originalCreditLimit = originalAccount.creditLimit;
+
+      try {
+        const result = await callAccountsAction(sql, TEST_SHOP_DOMAIN, TEST_GATED_ACCOUNT_ID, {
+          _action: "updateCredit",
+          holdOnly: "true",
+          creditLimit: "999999",
+          manualHold: "true",
+          holdReasonCode: "MANUAL_HOLD",
+        });
+
+        // Should succeed - holds are NOT gated
+        expect(result.success).toBe(true);
+
+        // DB credit limit should be UNCHANGED (creditLimit was ignored)
+        const [afterAccount] = await sql<{ creditLimit: string; manualHold: boolean; holdState: string }[]>`
+          SELECT "creditLimit"::TEXT, "manualHold", "holdState" FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}
+        `;
+        expect(afterAccount.creditLimit).toBe(originalCreditLimit);
+        // But hold was applied
+        expect(afterAccount.manualHold).toBe(true);
+        expect(afterAccount.holdState).toBe("HELD");
+      } finally {
+        // Restore original state
+        await sql`
+          UPDATE "BuyerAccount" 
+          SET "creditLimit" = ${parseFloat(originalCreditLimit)}, "manualHold" = ${originalAccount.manualHold}, "holdState" = ${originalAccount.holdState}
+          WHERE id = ${TEST_GATED_ACCOUNT_ID}
+        `;
+        vi.unstubAllEnvs();
+      }
+    });
   });
 
   describe("Regression: matching/confirm/paid NOT gated", () => {
     it("matcher suggests match for gated account invoice", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
 
       const invoiceId = `inv-match-gated-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/match-gated-${TEST_SUFFIX}`;
@@ -763,7 +835,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     });
 
     it("confirmMatch succeeds for gated account", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
 
       const invoiceId = `inv-confirm-gated-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/confirm-gated-${TEST_SUFFIX}`;
@@ -827,7 +899,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     });
 
     it("invoice marked paid on gated account triggers hold recompute", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
 
       const invoiceId = `inv-paid-gated-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/paid-gated-${TEST_SUFFIX}`;

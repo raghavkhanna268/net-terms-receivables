@@ -289,7 +289,8 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
 
     // Hold-only updates work on all plans including gated accounts.
     // Only gate credit-limit and account-details edits.
-    if (!holdOnly && !isAccountActive(accountRow.gatedAt)) {
+    const isGated = !isAccountActive(accountRow.gatedAt);
+    if (!holdOnly && isGated) {
       return { success: false, error: "Cannot edit gated accounts" } satisfies ActionData;
     }
     const holdReasonCodeRaw = formData.get("holdReasonCode") as string | null;
@@ -306,9 +307,17 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
     }
 
     let creditLimitAmount: number | null | undefined;
+    let effectiveNoLimit = noLimit;
 
     if (holdOnly) {
+      // For hold-only updates, preserve the current credit limit state.
+      // If account is gated, ensure we don't accidentally modify credit settings
+      // by ignoring any submitted credit-limit fields.
       creditLimitAmount = undefined;
+      if (isGated) {
+        // Force noLimit=false to prevent clearing credit limit via noLimit flag
+        effectiveNoLimit = false;
+      }
     } else if (noLimit) {
       creditLimitAmount = null;
     } else if (creditLimitStr && creditLimitStr.trim() !== "") {
@@ -336,7 +345,7 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
 
     const update: CreditStatusUpdate = {
       creditLimitAmount,
-      noLimit,
+      noLimit: effectiveNoLimit,
       manualHold,
       holdReasonCode: manualHold ? (holdReasonCode || "MANUAL_HOLD") : undefined,
       holdNote: holdNote || null,
@@ -483,7 +492,7 @@ export default function AccountPage() {
 
       {account.isGated && (
         <s-section>
-          <s-banner tone="warning" heading="Gated Account">
+          <s-banner tone="warning" heading="Gated account">
             This account is gated due to plan limits. Credit settings are read-only.
             Upgrade your plan to manage this account.
           </s-banner>
@@ -686,6 +695,61 @@ export default function AccountPage() {
               </s-button>
             </s-stack>
           </Form>
+        </s-section>
+      )}
+
+      {account.isGated && (
+        <s-section heading="Credit Settings">
+          <s-stack gap="base">
+            <s-paragraph>
+              <s-text type="strong">Current Credit Limit: </s-text>
+              <s-text>
+                {creditStatus?.creditLimitAmount !== null && creditStatus?.creditLimitAmount !== undefined
+                  ? `${creditStatus.creditLimitAmount.toLocaleString()} ${currency}`
+                  : "No limit"}
+              </s-text>
+            </s-paragraph>
+            <s-banner tone="info" heading="Upgrade required">
+              Credit limit editing is only available on paid plans.
+              Hold management remains available on all plans.
+            </s-banner>
+            <Form method="post">
+              <input type="hidden" name="_action" value="updateCredit" />
+              <input type="hidden" name="holdOnly" value="true" />
+              <s-stack gap="base">
+                <s-checkbox
+                  label="Place manual hold on this account"
+                  name="manualHold"
+                  value="true"
+                  checked={creditStatus?.manualHold ?? false}
+                ></s-checkbox>
+
+                <s-select 
+                  label="Hold Reason (if held)" 
+                  name="holdReasonCode" 
+                  placeholder="Select reason..."
+                  value={creditStatus?.holdReasonCode ?? ""}
+                >
+                  {HOLD_REASON_OPTIONS.map((opt) => (
+                    <s-option key={opt.value ?? "null"} value={opt.value ?? ""}>
+                      {opt.label}
+                    </s-option>
+                  ))}
+                </s-select>
+
+                <s-text-field
+                  label="Hold Note (optional)"
+                  name="holdNote"
+                  placeholder="Internal note about the hold"
+                  value={creditStatus?.holdNote ?? ""}
+                ></s-text-field>
+
+                <s-button type="submit" variant="primary" disabled={isSubmitting}>
+                  {isSubmitting ? "Saving..." : "Save Hold Settings"}
+                </s-button>
+              </s-stack>
+            </Form>
+          </s-stack>
         </s-section>
       )}
 
