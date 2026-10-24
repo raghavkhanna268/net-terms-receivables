@@ -222,6 +222,12 @@ export const ORDER_QUERY = `
             currencyCode
           }
         }
+        totalOutstandingSet {
+          shopMoney {
+            amount
+            currencyCode
+          }
+        }
         paymentTerms {
           id
           paymentTermsName

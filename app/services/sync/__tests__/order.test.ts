@@ -1,8 +1,14 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
-import { processOrderWebhook, mapOrderToInvoice } from "../order.server";
+import {
+  processOrderWebhook,
+  mapOrderToInvoice,
+  mapOrderToInvoiceWithEligibility,
+  getAndResetOutstandingMissingCounter,
+} from "../order.server";
 import type { ShopifyOrder } from "../types";
+import type { EligibilityResult } from "~/lib/invoice-eligibility";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -676,6 +682,221 @@ describeWithDb("Order Sync", () => {
       expect(actualDueAt.getUTCMonth()).toBe(7); // August (0-indexed)
       expect(actualDueAt.getUTCDate()).toBe(14); // 14th
     });
+
+    it("updates existing invoice when totalOutstandingSet is present", async () => {
+      // Create an open invoice first
+      const orderId = `gid://shopify/Order/ord-${TEST_SUFFIX}-update-present`;
+      await sql`
+        INSERT INTO "Invoice" (
+          "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          "issuedAt", status, "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId}, '#UPDATE', '50000.00', '50000.00',
+          NOW(), 'open', NOW(), NOW()
+        )
+      `;
+
+      // Update with new outstanding from totalOutstandingSet
+      const order: ShopifyOrder = {
+        id: orderId,
+        name: "#UPDATE",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PARTIALLY_PAID",
+        totalPriceSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        totalOutstandingSet: {
+          shopMoney: { amount: "30000.00", currencyCode: "INR" }, // Reduced outstanding
+        },
+        paymentTerms: {
+          id: "pt",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+          dueInDays: 30,
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      const result = await processOrderWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "ORDERS_UPDATED",
+        order,
+        `wh-ord-${TEST_SUFFIX}-update-present`
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("updated");
+
+      const [invoice] = await sql`
+        SELECT * FROM "Invoice" WHERE "orderId" = ${orderId}
+      `;
+      expect(invoice.outstanding).toBe("30000.00");
+      expect(invoice.status).toBe("open");
+    });
+
+    it("preserves paid status and outstanding when totalOutstandingSet is missing", async () => {
+      // Create a PAID invoice
+      const orderId = `gid://shopify/Order/ord-${TEST_SUFFIX}-paid-missing`;
+      await sql`
+        INSERT INTO "Invoice" (
+          "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          "issuedAt", status, "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId}, '#PAID-MISSING', '50000.00', '0.00',
+          NOW(), 'paid', NOW(), NOW()
+        )
+      `;
+
+      // Update with order that has missing totalOutstandingSet
+      const order: ShopifyOrder = {
+        id: orderId,
+        name: "#PAID-MISSING",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING", // Would normally be open
+        totalPriceSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        // totalOutstandingSet intentionally missing
+        paymentTerms: {
+          id: "pt",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+          dueInDays: 30,
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      const result = await processOrderWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "ORDERS_UPDATED",
+        order,
+        `wh-ord-${TEST_SUFFIX}-paid-missing`
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("updated");
+
+      // Invoice should KEEP paid status and 0 outstanding (not revert to open)
+      const [invoice] = await sql`
+        SELECT * FROM "Invoice" WHERE "orderId" = ${orderId}
+      `;
+      expect(invoice.status).toBe("paid");
+      expect(invoice.outstanding).toBe("0.00");
+    });
+
+    it("sets cancelled status with 0 outstanding when cancelledAt is present", async () => {
+      // Create an open invoice first
+      const orderId = `gid://shopify/Order/ord-${TEST_SUFFIX}-cancelled-at`;
+      await sql`
+        INSERT INTO "Invoice" (
+          "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          "issuedAt", status, "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId}, '#CANCELLED-AT', '50000.00', '50000.00',
+          NOW(), 'open', NOW(), NOW()
+        )
+      `;
+
+      // Update with cancelledAt set
+      const order: ShopifyOrder = {
+        id: orderId,
+        name: "#CANCELLED-AT",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        cancelledAt: "2025-07-20T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
+        totalPriceSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        totalOutstandingSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+          dueInDays: 30,
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      const result = await processOrderWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "ORDERS_UPDATED",
+        order,
+        `wh-ord-${TEST_SUFFIX}-cancelled-at`
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("updated");
+
+      const [invoice] = await sql`
+        SELECT * FROM "Invoice" WHERE "orderId" = ${orderId}
+      `;
+      expect(invoice.status).toBe("cancelled");
+      expect(invoice.outstanding).toBe("0.00");
+    });
+
+    it("increments order_outstanding_missing counter when field is missing", async () => {
+      // Table created by migration 20261026010000_order_outstanding_missing
+      // Clean up any existing counter for this shop
+      await sql`DELETE FROM order_outstanding_missing WHERE shop = ${TEST_SHOP_DOMAIN}`;
+
+      // Process an order with missing totalOutstandingSet
+      const order: ShopifyOrder = {
+        id: `gid://shopify/Order/ord-${TEST_SUFFIX}-counter`,
+        name: "#COUNTER",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
+        totalPriceSet: {
+          shopMoney: { amount: "25000.00", currencyCode: "INR" },
+        },
+        // totalOutstandingSet intentionally missing
+        paymentTerms: {
+          id: "pt",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+          dueInDays: 30,
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      const result = await processOrderWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "ORDERS_CREATE",
+        order,
+        `wh-ord-${TEST_SUFFIX}-counter`
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("created");
+
+      // Counter should have been incremented
+      const [counter] = await sql<{ count: number }[]>`
+        SELECT count FROM order_outstanding_missing
+        WHERE shop = ${TEST_SHOP_DOMAIN} AND day = CURRENT_DATE
+      `;
+      expect(counter?.count).toBeGreaterThanOrEqual(1);
+    });
   });
 
   describe("mapOrderToInvoice", () => {
@@ -785,6 +1006,190 @@ describeWithDb("Order Sync", () => {
       expect(result.outstanding).toBe("0.00");
     });
 
+    it("sets status cancelled and outstanding 0 for REFUNDED orders", () => {
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/refunded-1",
+        name: "#REFUNDED",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "REFUNDED",
+        totalPriceSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        totalOutstandingSet: {
+          shopMoney: { amount: "0.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt-refunded",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      const result = mapOrderToInvoice("shop-1", "account-1", order);
+
+      expect(result.status).toBe("cancelled");
+      expect(result.outstanding).toBe("0.00");
+    });
+
+    it("sets status cancelled and outstanding 0 for VOIDED orders", () => {
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/voided-1",
+        name: "#VOIDED",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "VOIDED",
+        totalPriceSet: {
+          shopMoney: { amount: "30000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt-voided",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      const result = mapOrderToInvoice("shop-1", "account-1", order);
+
+      expect(result.status).toBe("cancelled");
+      expect(result.outstanding).toBe("0.00");
+    });
+
+    it("uses totalOutstandingSet for PARTIALLY_REFUNDED orders", () => {
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/partial-refund-1",
+        name: "#PARTIAL_REFUND",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PARTIALLY_REFUNDED",
+        totalPriceSet: {
+          shopMoney: { amount: "100000.00", currencyCode: "INR" },
+        },
+        totalOutstandingSet: {
+          shopMoney: { amount: "75000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt-partial",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      const result = mapOrderToInvoice("shop-1", "account-1", order);
+
+      // Status is open (balance remains)
+      expect(result.status).toBe("open");
+      // Outstanding comes from totalOutstandingSet
+      expect(result.outstanding).toBe("75000.00");
+      // Total should remain unchanged
+      expect(result.total).toBe("100000.00");
+    });
+
+    it("sets status paid when PARTIALLY_REFUNDED has 0 outstanding (paid-then-refunded)", () => {
+      // A paid-then-partially-refunded order should not show a receivable
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/paid-then-refunded-1",
+        name: "#PAID_THEN_REFUNDED",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PARTIALLY_REFUNDED",
+        totalPriceSet: {
+          shopMoney: { amount: "100000.00", currencyCode: "INR" },
+        },
+        totalOutstandingSet: {
+          shopMoney: { amount: "0.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt-paid-refunded",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      const result = mapOrderToInvoice("shop-1", "account-1", order);
+
+      // Outstanding 0 means effectively paid
+      expect(result.status).toBe("paid");
+      expect(result.outstanding).toBe("0.00");
+    });
+
+    it("uses totalOutstandingSet for PARTIALLY_PAID orders", () => {
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/partial-paid-1",
+        name: "#PARTIAL_PAID",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PARTIALLY_PAID",
+        totalPriceSet: {
+          shopMoney: { amount: "100000.00", currencyCode: "INR" },
+        },
+        totalOutstandingSet: {
+          shopMoney: { amount: "40000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt-partial-paid",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      const result = mapOrderToInvoice("shop-1", "account-1", order);
+
+      expect(result.status).toBe("open");
+      expect(result.outstanding).toBe("40000.00");
+    });
+
+    it("sets status cancelled and outstanding 0 when cancelledAt is set", () => {
+      // P3: cancelledAt takes precedence over other statuses
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/cancelled-1",
+        name: "#CANCELLED",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        cancelledAt: "2025-07-16T10:00:00.000Z",
+        displayFinancialStatus: "PENDING", // Even though PENDING, cancelled overrides
+        totalPriceSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        totalOutstandingSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt-cancelled",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      const result = mapOrderToInvoice("shop-1", "account-1", order);
+
+      expect(result.status).toBe("cancelled");
+      expect(result.outstanding).toBe("0.00");
+    });
+
+    it("uses total when totalOutstandingSet is missing (new invoice)", () => {
+      // Reset counter before test
+      getAndResetOutstandingMissingCounter();
+
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/missing-outstanding-1",
+        name: "#MISSING_OUTSTANDING",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
+        totalPriceSet: {
+          shopMoney: { amount: "75000.00", currencyCode: "INR" },
+        },
+        // totalOutstandingSet intentionally missing
+        paymentTerms: {
+          id: "pt-missing",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      const result = mapOrderToInvoice("shop-1", "account-1", order);
+
+      // Falls back to total for new invoices
+      expect(result.outstanding).toBe("75000.00");
+      expect(result.status).toBe("open");
+      // Counter should have incremented
+      expect(getAndResetOutstandingMissingCounter()).toBe(1);
+    });
+
     it("uses processedAt for issuedAt when processedAt is 35 days before createdAt", () => {
       // Simulate a backdated order via orderCreate: processedAt is 35 days before createdAt
       // S6 sync must use processedAt (not createdAt) for issuedAt
@@ -870,5 +1275,538 @@ describeWithDb("Order Sync", () => {
       // issuedAt should fall back to createdAt
       expect(result.issuedAt.toISOString()).toBe(createdAt);
     });
+  });
+
+  describe("mapOrderToInvoiceWithEligibility", () => {
+    const mockEligibility: EligibilityResult = {
+      eligible: true,
+      reason: "shopify_payment_terms",
+      buyerAccountId: "account-1",
+      explanation: "Order has payment terms",
+      dueDate: {
+        dueAt: new Date("2025-08-14T23:59:59.999Z"),
+        dueSource: "schedule",
+        basis: "paymentTermsDueInDays",
+        reason: "Net 30 days",
+      },
+    };
+
+    it("returns outstandingMissing=true when totalOutstandingSet is missing", () => {
+      getAndResetOutstandingMissingCounter();
+
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/missing-elig-1",
+        name: "#MISSING_ELIG",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
+        totalPriceSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        // totalOutstandingSet intentionally missing
+        paymentTerms: {
+          id: "pt",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      const { invoiceData, outstandingMissing } = mapOrderToInvoiceWithEligibility(
+        "shop-1",
+        "account-1",
+        order,
+        mockEligibility
+      );
+
+      expect(outstandingMissing).toBe(true);
+      expect(invoiceData.outstanding).toBe("50000.00");
+      expect(invoiceData.status).toBe("open");
+    });
+
+    it("returns outstandingMissing=false when totalOutstandingSet is present", () => {
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/present-elig-1",
+        name: "#PRESENT_ELIG",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
+        totalPriceSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        totalOutstandingSet: {
+          shopMoney: { amount: "30000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      const { invoiceData, outstandingMissing } = mapOrderToInvoiceWithEligibility(
+        "shop-1",
+        "account-1",
+        order,
+        mockEligibility
+      );
+
+      expect(outstandingMissing).toBe(false);
+      expect(invoiceData.outstanding).toBe("30000.00");
+      expect(invoiceData.status).toBe("open");
+    });
+
+    it("preserves existing paid status when totalOutstandingSet is missing", () => {
+      getAndResetOutstandingMissingCounter();
+
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/preserve-paid-1",
+        name: "#PRESERVE_PAID",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING", // Would normally be open
+        totalPriceSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        // totalOutstandingSet intentionally missing
+        paymentTerms: {
+          id: "pt",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      // Simulate existing paid invoice
+      const { invoiceData, outstandingMissing } = mapOrderToInvoiceWithEligibility(
+        "shop-1",
+        "account-1",
+        order,
+        mockEligibility,
+        { outstanding: "0.00", status: "paid" }
+      );
+
+      expect(outstandingMissing).toBe(true);
+      // Should preserve BOTH existing outstanding AND status
+      expect(invoiceData.outstanding).toBe("0.00");
+      expect(invoiceData.status).toBe("paid");
+    });
+
+    it("preserves existing cancelled status when totalOutstandingSet is missing", () => {
+      getAndResetOutstandingMissingCounter();
+
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/preserve-cancelled-1",
+        name: "#PRESERVE_CANCELLED",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
+        totalPriceSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        // totalOutstandingSet intentionally missing
+        paymentTerms: {
+          id: "pt",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      // Simulate existing cancelled invoice
+      const { invoiceData, outstandingMissing } = mapOrderToInvoiceWithEligibility(
+        "shop-1",
+        "account-1",
+        order,
+        mockEligibility,
+        { outstanding: "25000.00", status: "cancelled" }
+      );
+
+      expect(outstandingMissing).toBe(true);
+      // Should preserve BOTH existing outstanding AND status
+      expect(invoiceData.outstanding).toBe("25000.00");
+      expect(invoiceData.status).toBe("cancelled");
+    });
+
+    it("uses totalOutstandingSet even when existing invoice data is provided", () => {
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/override-existing-1",
+        name: "#OVERRIDE_EXISTING",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PARTIALLY_PAID",
+        totalPriceSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        totalOutstandingSet: {
+          shopMoney: { amount: "20000.00", currencyCode: "INR" }, // New value from Shopify
+        },
+        paymentTerms: {
+          id: "pt",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      // Simulate existing invoice with different outstanding
+      const { invoiceData, outstandingMissing } = mapOrderToInvoiceWithEligibility(
+        "shop-1",
+        "account-1",
+        order,
+        mockEligibility,
+        { outstanding: "50000.00", status: "open" }
+      );
+
+      expect(outstandingMissing).toBe(false);
+      // Should use totalOutstandingSet value, not the existing value
+      expect(invoiceData.outstanding).toBe("20000.00");
+      expect(invoiceData.status).toBe("open");
+    });
+
+    it("sets cancelled status and 0 outstanding when cancelledAt is present regardless of existing data", () => {
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/cancelled-override-1",
+        name: "#CANCELLED_OVERRIDE",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        cancelledAt: "2025-07-20T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
+        totalPriceSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        totalOutstandingSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      // Simulate existing open invoice
+      const { invoiceData, outstandingMissing } = mapOrderToInvoiceWithEligibility(
+        "shop-1",
+        "account-1",
+        order,
+        mockEligibility,
+        { outstanding: "50000.00", status: "open" }
+      );
+
+      // cancelledAt takes precedence over everything
+      expect(outstandingMissing).toBe(false);
+      expect(invoiceData.status).toBe("cancelled");
+      expect(invoiceData.outstanding).toBe("0.00");
+    });
+
+    it("bulk reconcile: preserves existing status=paid when totalOutstandingSet is missing", () => {
+      // P2 fix: bulk-jsonl-processor passes existing invoice data to mapOrderToInvoiceWithEligibility
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/bulk-paid-missing-1",
+        name: "#BULK_PAID_MISSING",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PARTIALLY_PAID",
+        totalPriceSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        // totalOutstandingSet intentionally missing (simulates rare API response)
+        paymentTerms: {
+          id: "pt",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      // Simulate existing paid invoice being updated via bulk reconcile
+      const { invoiceData, outstandingMissing } = mapOrderToInvoiceWithEligibility(
+        "shop-1",
+        "account-1",
+        order,
+        mockEligibility,
+        { outstanding: "0.00", status: "paid" }
+      );
+
+      // Should preserve existing status=paid (not revert to open)
+      expect(outstandingMissing).toBe(true);
+      expect(invoiceData.status).toBe("paid");
+      expect(invoiceData.outstanding).toBe("0.00");
+    });
+
+    it("bulk reconcile: preserves existing status=cancelled when totalOutstandingSet is missing", () => {
+      // P2 fix: bulk-jsonl-processor passes existing invoice data to mapOrderToInvoiceWithEligibility
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/bulk-cancelled-missing-1",
+        name: "#BULK_CANCELLED_MISSING",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PARTIALLY_PAID",
+        totalPriceSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        // totalOutstandingSet intentionally missing
+        paymentTerms: {
+          id: "pt",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      // Simulate existing cancelled invoice being updated via bulk reconcile
+      const { invoiceData, outstandingMissing } = mapOrderToInvoiceWithEligibility(
+        "shop-1",
+        "account-1",
+        order,
+        mockEligibility,
+        { outstanding: "0.00", status: "cancelled" }
+      );
+
+      // Should preserve existing status=cancelled (not revert to open)
+      expect(outstandingMissing).toBe(true);
+      expect(invoiceData.status).toBe("cancelled");
+      expect(invoiceData.outstanding).toBe("0.00");
+    });
+  });
+});
+
+/**
+ * DB-backed tests for bulk JSONL processor's existing invoice handling.
+ * These tests go through the real processOrderLines path to verify the
+ * P2 fix: bulk reconcile passes existing invoice data to mapOrderToInvoiceWithEligibility.
+ */
+import { processOrderLines } from "../bulk-jsonl-processor.server";
+
+describeWithDb("Bulk JSONL Processor - existing invoice handling (DB-backed)", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = `bulk-${Date.now().toString(36)}`;
+  const TEST_SHOP_ID = `shop-bulk-${TEST_SUFFIX}`;
+  const TEST_SHOP_DOMAIN = `bulk-test-${TEST_SUFFIX}.myshopify.com`;
+  const TEST_ACCOUNT_ID = `account-bulk-${TEST_SUFFIX}`;
+  const TEST_COMPANY_ID = `gid://shopify/Company/co-bulk-${TEST_SUFFIX}`;
+  const TEST_LOCATION_ID = `gid://shopify/CompanyLocation/loc-bulk-${TEST_SUFFIX}`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    // Create test shop with payment terms enabled
+    await sql`
+      INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, NOW(), NOW())
+    `;
+
+    // Create test buyer account (COMPANY) with explicit terms
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name,
+        "defaultTermsDays", "defaultTermsSource",
+        "createdAt", "updatedAt"
+      ) VALUES (
+        ${TEST_ACCOUNT_ID}, ${TEST_SHOP_ID}, 'COMPANY', ${TEST_COMPANY_ID}, ${TEST_LOCATION_ID}, 'Bulk Test Company',
+        30, 'explicit',
+        NOW(), NOW()
+      )
+    `;
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM order_outstanding_missing WHERE shop = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+    await sql.end();
+  });
+
+  beforeEach(async () => {
+    await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM order_outstanding_missing WHERE shop = ${TEST_SHOP_DOMAIN}`;
+  });
+
+  it("preserves existing paid invoice when totalOutstandingSet is missing in JSONL", async () => {
+    const orderId = `gid://shopify/Order/bulk-paid-${TEST_SUFFIX}`;
+
+    // Seed existing paid invoice
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, status,
+        "issuedAt", "createdAt", "updatedAt"
+      ) VALUES (
+        gen_random_uuid()::text, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+        '#BULK-PAID', '50000.00', '0.00', 'paid',
+        NOW(), NOW(), NOW()
+      )
+    `;
+
+    // JSONL line for the same order but WITHOUT totalOutstandingSet
+    const jsonlLine = JSON.stringify({
+      id: orderId,
+      name: "#BULK-PAID",
+      createdAt: "2025-07-15T10:00:00.000Z",
+      displayFinancialStatus: "PARTIALLY_PAID",
+      totalPriceSet: { shopMoney: { amount: "50000.00", currencyCode: "INR" } },
+      // totalOutstandingSet intentionally missing
+      purchasingEntity: {
+        __typename: "PurchasingCompany",
+        company: { id: TEST_COMPANY_ID },
+        location: { id: TEST_LOCATION_ID },
+      },
+    });
+
+    // Process through real bulk path
+    const upserted = await processOrderLines(sql, TEST_SHOP_ID, [jsonlLine]);
+    expect(upserted).toBe(1);
+
+    // Verify invoice is still paid with outstanding 0.00
+    const [invoice] = await sql<{ status: string; outstanding: string }[]>`
+      SELECT status, outstanding::text FROM "Invoice"
+      WHERE "shopId" = ${TEST_SHOP_ID} AND "orderId" = ${orderId}
+    `;
+    expect(invoice.status).toBe("paid");
+    expect(invoice.outstanding).toBe("0.00");
+
+    // Verify counter was incremented by exactly 1
+    const [counter] = await sql<{ count: number }[]>`
+      SELECT count FROM order_outstanding_missing
+      WHERE shop = ${TEST_SHOP_DOMAIN} AND day = CURRENT_DATE
+    `;
+    expect(counter.count).toBe(1);
+  });
+
+  it("preserves existing cancelled invoice when totalOutstandingSet is missing in JSONL", async () => {
+    const orderId = `gid://shopify/Order/bulk-cancelled-${TEST_SUFFIX}`;
+
+    // Seed existing cancelled invoice
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, status,
+        "issuedAt", "createdAt", "updatedAt"
+      ) VALUES (
+        gen_random_uuid()::text, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+        '#BULK-CANCELLED', '30000.00', '0.00', 'cancelled',
+        NOW(), NOW(), NOW()
+      )
+    `;
+
+    // JSONL line for the same order but WITHOUT totalOutstandingSet
+    const jsonlLine = JSON.stringify({
+      id: orderId,
+      name: "#BULK-CANCELLED",
+      createdAt: "2025-07-15T10:00:00.000Z",
+      displayFinancialStatus: "PENDING",
+      totalPriceSet: { shopMoney: { amount: "30000.00", currencyCode: "INR" } },
+      // totalOutstandingSet intentionally missing
+      purchasingEntity: {
+        __typename: "PurchasingCompany",
+        company: { id: TEST_COMPANY_ID },
+        location: { id: TEST_LOCATION_ID },
+      },
+    });
+
+    // Process through real bulk path
+    const upserted = await processOrderLines(sql, TEST_SHOP_ID, [jsonlLine]);
+    expect(upserted).toBe(1);
+
+    // Verify invoice is still cancelled with outstanding 0.00
+    const [invoice] = await sql<{ status: string; outstanding: string }[]>`
+      SELECT status, outstanding::text FROM "Invoice"
+      WHERE "shopId" = ${TEST_SHOP_ID} AND "orderId" = ${orderId}
+    `;
+    expect(invoice.status).toBe("cancelled");
+    expect(invoice.outstanding).toBe("0.00");
+
+    // Verify counter was incremented
+    const [counter] = await sql<{ count: number }[]>`
+      SELECT count FROM order_outstanding_missing
+      WHERE shop = ${TEST_SHOP_DOMAIN} AND day = CURRENT_DATE
+    `;
+    expect(counter.count).toBe(1);
+  });
+
+  it("updates existing open invoice normally when totalOutstandingSet is present", async () => {
+    const orderId = `gid://shopify/Order/bulk-open-${TEST_SUFFIX}`;
+
+    // Seed existing open invoice with high outstanding
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, status,
+        "issuedAt", "createdAt", "updatedAt"
+      ) VALUES (
+        gen_random_uuid()::text, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+        '#BULK-OPEN', '50000.00', '50000.00', 'open',
+        NOW(), NOW(), NOW()
+      )
+    `;
+
+    // JSONL line WITH totalOutstandingSet showing partial payment
+    const jsonlLine = JSON.stringify({
+      id: orderId,
+      name: "#BULK-OPEN",
+      createdAt: "2025-07-15T10:00:00.000Z",
+      displayFinancialStatus: "PARTIALLY_PAID",
+      totalPriceSet: { shopMoney: { amount: "50000.00", currencyCode: "INR" } },
+      totalOutstandingSet: { shopMoney: { amount: "25000.00", currencyCode: "INR" } },
+      purchasingEntity: {
+        __typename: "PurchasingCompany",
+        company: { id: TEST_COMPANY_ID },
+        location: { id: TEST_LOCATION_ID },
+      },
+    });
+
+    // Process through real bulk path
+    const upserted = await processOrderLines(sql, TEST_SHOP_ID, [jsonlLine]);
+    expect(upserted).toBe(1);
+
+    // Verify invoice was updated with new outstanding
+    const [invoice] = await sql<{ status: string; outstanding: string }[]>`
+      SELECT status, outstanding::text FROM "Invoice"
+      WHERE "shopId" = ${TEST_SHOP_ID} AND "orderId" = ${orderId}
+    `;
+    expect(invoice.status).toBe("open");
+    expect(invoice.outstanding).toBe("25000.00");
+
+    // Verify counter was NOT incremented (field was present)
+    const counterRows = await sql<{ count: number }[]>`
+      SELECT count FROM order_outstanding_missing
+      WHERE shop = ${TEST_SHOP_DOMAIN} AND day = CURRENT_DATE
+    `;
+    expect(counterRows.length).toBe(0);
+  });
+
+  it("increments counter by exact number of missing orders in batch", async () => {
+    const orderIds = [
+      `gid://shopify/Order/bulk-batch-1-${TEST_SUFFIX}`,
+      `gid://shopify/Order/bulk-batch-2-${TEST_SUFFIX}`,
+      `gid://shopify/Order/bulk-batch-3-${TEST_SUFFIX}`,
+    ];
+
+    // Seed 3 existing paid invoices
+    for (const orderId of orderIds) {
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, status,
+          "issuedAt", "createdAt", "updatedAt"
+        ) VALUES (
+          gen_random_uuid()::text, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+          '#BATCH', '10000.00', '0.00', 'paid',
+          NOW(), NOW(), NOW()
+        )
+      `;
+    }
+
+    // 3 JSONL lines all missing totalOutstandingSet
+    const jsonlLines = orderIds.map((orderId) =>
+      JSON.stringify({
+        id: orderId,
+        name: "#BATCH",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PARTIALLY_PAID",
+        totalPriceSet: { shopMoney: { amount: "10000.00", currencyCode: "INR" } },
+        // totalOutstandingSet intentionally missing
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      })
+    );
+
+    // Process through real bulk path
+    const upserted = await processOrderLines(sql, TEST_SHOP_ID, jsonlLines);
+    expect(upserted).toBe(3);
+
+    // Verify counter was incremented by exactly 3 (not 3 separate increments)
+    const [counter] = await sql<{ count: number }[]>`
+      SELECT count FROM order_outstanding_missing
+      WHERE shop = ${TEST_SHOP_DOMAIN} AND day = CURRENT_DATE
+    `;
+    expect(counter.count).toBe(3);
   });
 });

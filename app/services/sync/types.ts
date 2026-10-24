@@ -126,6 +126,13 @@ export interface ShopifyOrder {
       currencyCode: string;
     };
   };
+  /** Total outstanding amount not yet transacted (from Shopify totalOutstandingSet) */
+  totalOutstandingSet?: {
+    shopMoney: {
+      amount: string;
+      currencyCode: string;
+    };
+  };
   paymentTerms?: {
     id: string;
     paymentTermsName: string;
@@ -223,6 +230,7 @@ export interface BulkOrderLine {
   closedAt?: string | null;
   displayFinancialStatus?: string | null;
   totalPriceSet?: ShopifyOrder["totalPriceSet"];
+  totalOutstandingSet?: ShopifyOrder["totalOutstandingSet"];
   paymentTerms?: ShopifyOrder["paymentTerms"];
   purchasingEntity?: ShopifyOrder["purchasingEntity"];
   customer?: ShopifyOrder["customer"];

@@ -49,6 +49,7 @@ import {
   type EligibilityContext,
 } from "~/lib/invoice-eligibility";
 import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
+import { incrementOrderOutstandingMissing } from "../drain/reconcile-handlers.server";
 import { adminGraphQL, BULK_OPERATION_STATUS_QUERY } from "../drain/admin-client.server";
 import {
   getBulkOperationMetadata,
@@ -504,7 +505,8 @@ export async function processOrderLines(
     return orphansUpdated;
   }
 
-  // Batch lookup: find existing invoices with their buyer account IDs and merchant overrides
+  // Batch lookup: find existing invoices with their buyer account IDs, merchant overrides, and status (P2 fix)
+  // Note: use IN ${sql(ids)} instead of ANY(${ids}) for fetch_types:false compatibility
   const orderIds = orders.map((o) => o.id);
   const existingInvoices = await sql<{
     orderId: string;
@@ -512,10 +514,13 @@ export async function processOrderLines(
     dueOverrideAt: Date | null;
     dueSource: string;
     dueAt: Date | null;
+    outstanding: string;
+    status: "open" | "paid" | "cancelled";
   }[]>`
-    SELECT "orderId", "buyerAccountId", "dueOverrideAt", "dueSource", "dueAt"
+    SELECT "orderId", "buyerAccountId", "dueOverrideAt", "dueSource", "dueAt",
+           outstanding::text, status::"InvoiceStatus"
     FROM "Invoice"
-    WHERE "shopId" = ${shopId} AND "orderId" = ANY(${orderIds})
+    WHERE "shopId" = ${shopId} AND "orderId" IN ${sql(orderIds)}
   `;
   const existingByOrderId = new Map(existingInvoices.map((i) => [i.orderId, i]));
 
@@ -545,6 +550,7 @@ export async function processOrderLines(
 
   const invoices: InvoiceData[] = [];
   let skippedCount = 0;
+  let outstandingMissingCount = 0;
 
   // Process existing invoices: mirror webhook path (order.server.ts:111-118)
   // Call checkOrderEligibility with full context for due-date precedence
@@ -575,42 +581,50 @@ export async function processOrderLines(
         };
       }
       
-      invoices.push(
-        mapOrderToInvoiceWithEligibility(
-          shopId,
-          eligibility.buyerAccountId ?? existing.buyerAccountId,
-          shopifyOrder,
-          {
-            ...eligibility,
-            eligible: true,
-            buyerAccountId: eligibility.buyerAccountId ?? existing.buyerAccountId,
-            dueDate: finalDueDate,
-          }
-        )
+      // Pass existing outstanding/status for fallback when totalOutstandingSet is missing (P2 fix)
+      const { invoiceData, outstandingMissing } = mapOrderToInvoiceWithEligibility(
+        shopId,
+        eligibility.buyerAccountId ?? existing.buyerAccountId,
+        shopifyOrder,
+        {
+          ...eligibility,
+          eligible: true,
+          buyerAccountId: eligibility.buyerAccountId ?? existing.buyerAccountId,
+          dueDate: finalDueDate,
+        },
+        { outstanding: existing.outstanding, status: existing.status }
       );
+      invoices.push(invoiceData);
+      if (outstandingMissing) {
+        outstandingMissingCount++;
+      }
     } else {
       // No eligibility context - preserve existing dueAt (don't overwrite with shop default)
-      invoices.push(
-        mapOrderToInvoiceWithEligibility(
-          shopId,
-          existing.buyerAccountId,
-          shopifyOrder,
-          {
-            eligible: true,
-            reason: "shopify_payment_terms",
-            explanation: "Updating existing invoice (no context, preserving dueAt)",
-            buyerAccountId: existing.buyerAccountId,
-            dueDate: existing.dueAt
-              ? {
-                  dueAt: existing.dueAt,
-                  dueSource: existing.dueSource as "schedule" | "override" | "inferred" | "none",
-                  basis: null,
-                  reason: "Preserved during reconcile (no context)",
-                }
-              : undefined,
-          }
-        )
+      // Also pass existing outstanding/status for fallback (P2 fix)
+      const { invoiceData, outstandingMissing } = mapOrderToInvoiceWithEligibility(
+        shopId,
+        existing.buyerAccountId,
+        shopifyOrder,
+        {
+          eligible: true,
+          reason: "shopify_payment_terms",
+          explanation: "Updating existing invoice (no context, preserving dueAt)",
+          buyerAccountId: existing.buyerAccountId,
+          dueDate: existing.dueAt
+            ? {
+                dueAt: existing.dueAt,
+                dueSource: existing.dueSource as "schedule" | "override" | "inferred" | "none",
+                basis: null,
+                reason: "Preserved during reconcile (no context)",
+              }
+            : undefined,
+        },
+        { outstanding: existing.outstanding, status: existing.status }
       );
+      invoices.push(invoiceData);
+      if (outstandingMissing) {
+        outstandingMissingCount++;
+      }
     }
   }
 
@@ -621,14 +635,16 @@ export async function processOrderLines(
     if (eligibilityContext) {
       const eligibility = await checkOrderEligibility(sql, shopifyOrder, eligibilityContext);
       if (eligibility.eligible) {
-        invoices.push(
-          mapOrderToInvoiceWithEligibility(
-            shopId,
-            eligibility.buyerAccountId!,
-            shopifyOrder,
-            eligibility
-          )
+        const { invoiceData, outstandingMissing } = mapOrderToInvoiceWithEligibility(
+          shopId,
+          eligibility.buyerAccountId!,
+          shopifyOrder,
+          eligibility
         );
+        invoices.push(invoiceData);
+        if (outstandingMissing) {
+          outstandingMissingCount++;
+        }
       } else {
         skippedCount++;
       }
@@ -643,6 +659,22 @@ export async function processOrderLines(
   }
 
   const upserted = await bulkUpsertInvoices(sql, invoices);
+
+  // Best-effort increment of diagnostic counter (single DB round-trip for the batch)
+  if (outstandingMissingCount > 0) {
+    try {
+      // Get shop domain from eligibility context for the counter
+      const [shopRow] = await sql<{ domain: string }[]>`
+        SELECT domain FROM "Shop" WHERE id = ${shopId}
+      `;
+      if (shopRow) {
+        await incrementOrderOutstandingMissing(sql, shopRow.domain, outstandingMissingCount);
+      }
+    } catch (err) {
+      console.warn(`[bulk-jsonl] Failed to increment order_outstanding_missing: ${err}`);
+    }
+  }
+
   return upserted + orphansUpdated;
 }
 
