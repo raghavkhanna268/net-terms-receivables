@@ -571,6 +571,35 @@ describe("after-auth", () => {
       expect(mockEnsureValidation).toHaveBeenCalledTimes(1);
     });
 
+    it("S23-09: reinstall SQL resets onboarding_dismissed_at", async () => {
+      mockEnsureValidation.mockResolvedValue({
+        id: "gid://shopify/Validation/123",
+        created: true,
+      });
+
+      const mockAdmin = createMockAdmin();
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
+
+      runAfterAuth(
+        "onboarding-reset-shop.myshopify.com",
+        mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
+      );
+
+      await Promise.allSettled(waitUntilPromises);
+
+      expect(mockSqlQuery).toHaveBeenCalled();
+
+      const sqlCall = mockSqlQuery.mock.calls[0];
+      const sqlTemplate = sqlCall[0];
+
+      const templateStr = Array.isArray(sqlTemplate) ? sqlTemplate.join("") : String(sqlTemplate);
+      expect(templateStr).toContain('"uninstalledAt" = NULL');
+      expect(templateStr).toContain('onboarding_dismissed_at = NULL');
+      expect(templateStr).toContain('"uninstalledAt" IS NOT NULL');
+    });
+
     it("clearUninstalledAt failure does not break /app load", async () => {
       const consoleSpy = vi
         .spyOn(console, "error")
