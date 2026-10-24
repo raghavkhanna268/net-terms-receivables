@@ -15,28 +15,23 @@ function extractTomlScopes(content: string): string[] {
 }
 
 function extractPrivacyScopes(content: string): string[] {
-  const beginMarker = "<!-- PRIVACY_SCOPES_BEGIN -->";
-  const endMarker = "<!-- PRIVACY_SCOPES_END -->";
-
-  const beginIndex = content.indexOf(beginMarker);
-  const endIndex = content.indexOf(endMarker);
-
-  if (beginIndex === -1 || endIndex === -1) {
+  const appendixMatch = content.match(/## Appendix A: Shopify OAuth Scopes\s*\n([\s\S]*?)(?=\n\*\*|$)/);
+  if (!appendixMatch) {
     throw new Error(
-      "Could not find PRIVACY_SCOPES_BEGIN/END markers in docs/privacy.md"
+      "Could not find '## Appendix A: Shopify OAuth Scopes' section in docs/privacy.md"
     );
   }
 
-  const scopeSection = content.slice(
-    beginIndex + beginMarker.length,
-    endIndex
-  );
-
+  const scopeSection = appendixMatch[1];
   const scopeRegex = /\| `([a-z_]+)` \|/g;
   const scopes: string[] = [];
   let match;
   while ((match = scopeRegex.exec(scopeSection)) !== null) {
     scopes.push(match[1]);
+  }
+
+  if (scopes.length === 0) {
+    throw new Error("No scopes found in Appendix A table");
   }
 
   return scopes.sort();

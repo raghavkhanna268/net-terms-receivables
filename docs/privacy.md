@@ -263,7 +263,6 @@ For privacy inquiries:
 
 ## Appendix A: Shopify OAuth Scopes
 
-<!-- PRIVACY_SCOPES_BEGIN -->
 | Scope | Reason |
 |-------|--------|
 | `read_companies` | Sync B2B company and location data for buyer account management |
@@ -277,8 +276,7 @@ For privacy inquiries:
 | `write_orders` | Mark orders as paid after bank transfer matching; add/remove order tags |
 | `write_payment_customizations` | Register Shopify Function to hide net-terms payment method at checkout |
 | `write_validations` | Register Shopify Function to block checkout for accounts on hold or over limit |
-<!-- PRIVACY_SCOPES_END -->
 
 **Customer data limitation:** Customer data collected is limited to name and email only. The app does not read or store customer phone numbers or addresses.
 
-**Protected Customer Data:** The `read_customers` scope requires Shopify's Protected Customer Data (PCD) approval. Level 1 access plus Name and Email fields have been requested in the Partner Dashboard. Until approval is granted and the PCD feature is enabled, the email and display name fields in tagged customers remain empty.
+**Protected Customer Data:** The `read_customers` scope requires Shopify's Protected Customer Data (PCD) approval. Level 1 + Name + Email fields were approved on 2026-10-23. The app fetches only `id`, `tags`, `email`, and `displayName`; it never fetches phone numbers or addresses.
