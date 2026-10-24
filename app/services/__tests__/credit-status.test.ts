@@ -74,6 +74,7 @@ const createMockSql = () => {
     const tx = Object.assign(
       vi.fn(queryHandler),
       {
+        json: vi.fn((v) => v),
         array: vi.fn((arr: unknown[]) => arr),
       }
     );

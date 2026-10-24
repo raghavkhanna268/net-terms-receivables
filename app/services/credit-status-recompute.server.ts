@@ -24,7 +24,11 @@
  */
 
 import type { Sql } from "~/lib/db-light.server";
-import { syncCreditStatusMetafield, getCreditStatusDisplay } from "./credit-status.server";
+import {
+  syncCreditStatusMetafield,
+  getCreditStatusDisplay,
+  type CreditStatusSource,
+} from "./credit-status.server";
 
 /**
  * Result of a credit status recompute.
@@ -69,11 +73,13 @@ interface BuyerAccountForRecompute {
  *
  * @param sql - Database connection
  * @param buyerAccountId - Buyer account ID to recompute
+ * @param source - Source of the recompute (for audit trail), defaults to 'unknown'
  * @returns Result indicating success and whether metafield was written
  */
 export async function recomputeCreditStatus(
   sql: Sql,
   buyerAccountId: string,
+  source: CreditStatusSource = "unknown",
 ): Promise<RecomputeResult> {
   // Fetch account data to check gated status and current hold
   const [account] = await sql<BuyerAccountForRecompute[]>`
@@ -135,7 +141,7 @@ export async function recomputeCreditStatus(
   // - FOR UPDATE lock on BuyerAccount row
   // - syncVersion increment and guard
   // - Proper metafield write error handling
-  const syncResult = await syncCreditStatusMetafield(sql, buyerAccountId);
+  const syncResult = await syncCreditStatusMetafield(sql, buyerAccountId, source);
 
   if (!syncResult.success) {
     return {
