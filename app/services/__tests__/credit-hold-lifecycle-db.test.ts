@@ -363,8 +363,6 @@ describeWithDb("S17 credit-hold lifecycle (overdue)", () => {
       )
     `;
 
-    // The sweep enqueues for ALL shops with overdue invoices. We archive any messages
-    // it creates for other shops' accounts to avoid leaking into later DB tests.
     const [sweepResult] = await sql<{ accounts_enqueued: number }[]>`
       SELECT * FROM enqueue_credit_status_recomputes()
     `;
@@ -382,17 +380,6 @@ describeWithDb("S17 credit-hold lifecycle (overdue)", () => {
     expect(queueMsg.message.topic).toBe("CREDIT_STATUS_RECOMPUTE");
     expect(queueMsg.message.buyerAccountId).toBe(TEST_ACCOUNT_ID);
     expect(queueMsg.message.source).toBe("daily_sweep");
-
-    // Clean up messages for other shops that the global sweep may have enqueued
-    await sql`
-      WITH archived AS (
-        SELECT pgmq.archive('s6_sync', msg_id)
-        FROM pgmq.q_s6_sync
-        WHERE message->>'shop' != ${TEST_SHOP_DOMAIN}
-          AND message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
-      )
-      SELECT 1
-    `;
   });
 });
 
@@ -797,8 +784,6 @@ describeWithDb("S17 credit-hold lifecycle (gated accounts)", () => {
       )
     `;
 
-    // The sweep enqueues for ALL shops with overdue invoices. We archive any messages
-    // it creates for other shops' accounts to avoid leaking into later DB tests.
     const [sweepResult] = await sql<{ accounts_enqueued: number }[]>`
       SELECT * FROM enqueue_credit_status_recomputes()
     `;
@@ -814,17 +799,6 @@ describeWithDb("S17 credit-hold lifecycle (gated accounts)", () => {
 
     expect(queueMsg).toBeDefined();
     expect(queueMsg.message.buyerAccountId).toBe(TEST_GATED_ACCOUNT_ID);
-
-    // Clean up messages for other shops that the global sweep may have enqueued
-    await sql`
-      WITH archived AS (
-        SELECT pgmq.archive('s6_sync', msg_id)
-        FROM pgmq.q_s6_sync
-        WHERE message->>'shop' != ${TEST_SHOP_DOMAIN}
-          AND message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
-      )
-      SELECT 1
-    `;
   });
 });
 
