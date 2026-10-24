@@ -560,6 +560,49 @@ describe("Plan Resolution Service", () => {
       // Should trigger background refresh via ALS waitUntil
       expect(mockWaitUntil).toHaveBeenCalledTimes(1);
     });
+
+    it("skips domain query when waitUntil is not available", async () => {
+      let domainQueryCalled = false;
+      
+      const specialMockSql = Object.assign(
+        vi.fn(async (strings: TemplateStringsArray) => {
+          const query = strings.join("?");
+          
+          // getCachedPlan - returns stale cache
+          if (query.includes("plan_key") && query.includes("plan_cached_at")) {
+            const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
+            return [{
+              plan_key: "growth",
+              subscription_id: "sub-123",
+              subscription_name: "Growth",
+              is_test: false,
+              plan_cached_at: staleCacheTime,
+            }];
+          }
+          
+          // Domain query - should NOT be called
+          if (query.includes("domain") && query.includes('"Shop"')) {
+            domainQueryCalled = true;
+            return [{ domain: TEST_SHOP }];
+          }
+          
+          return [];
+        }),
+        { json: vi.fn((v) => v) }
+      );
+      
+      // Call without request context - no waitUntil available
+      const plan = await getPlanByShopId(specialMockSql as unknown as Sql, TEST_SHOP_ID);
+      
+      // Should return cached plan
+      expect(plan.key).toBe("growth");
+      
+      // Domain query should NOT have been called (skipped because no waitUntil)
+      expect(domainQueryCalled).toBe(false);
+      
+      // Shopify API should NOT be called
+      expect(adminGraphQL).not.toHaveBeenCalled();
+    });
   });
 
   describe("background refresh deduplication", () => {
@@ -635,12 +678,12 @@ describe("Plan Resolution Service", () => {
       expect(result1.plan.key).toBe("growth");
       expect(result2.plan.key).toBe("growth");
       
-      // waitUntil should be called twice (both requests register the same promise)
-      expect(mockWaitUntil).toHaveBeenCalledTimes(2);
+      // waitUntil should be called exactly once (second request just returns)
+      expect(mockWaitUntil).toHaveBeenCalledTimes(1);
       
       // Wait for background refresh to complete
-      const promises = mockWaitUntil.mock.calls.map(call => call[0]);
-      await Promise.all(promises);
+      const promise = mockWaitUntil.mock.calls[0][0];
+      await promise;
       
       // Shopify API should only be called once due to deduplication
       expect(shopifyCallCount).toBe(1);

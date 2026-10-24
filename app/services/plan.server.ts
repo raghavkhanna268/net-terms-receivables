@@ -321,9 +321,7 @@ function triggerBackgroundRefresh(
     return;
   }
 
-  const existingPromise = inFlightRefreshes.get(shopDomain);
-  if (existingPromise) {
-    waitUntil(existingPromise);
+  if (inFlightRefreshes.has(shopDomain)) {
     return;
   }
 
@@ -547,7 +545,7 @@ export async function getPlanByShopId(
     return getDefaultPlan();
   }
   
-  if (cached.isStale) {
+  if (cached.isStale && getRequestWaitUntil()) {
     const [shopRow] = await sql<{ domain: string }[]>`
       SELECT domain FROM "Shop" WHERE id = ${shopId}
     `;
