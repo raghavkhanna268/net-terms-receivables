@@ -1,6 +1,6 @@
-# Post-redrive verification: S9 / S7 / S16 / S20 (DRAFT, not committed)
+# Post-redrive verification: S9 / S7 / S16 / S20
 
-**Target:** `raghavkhanna268/net-terms-receivables` `main` @ `c11ed11` (c11ed11847bba5aa94bfa0ffb1747cf89a14bd23)
+**Target:** `raghavkhanna268/net-terms-receivables`
 **When to run:** after DevOps phase 2 finishes, in this order: (1) ORDERS DLQ redrive, (2) reconcile (companies, then orders), (3) drains of `s6_sync` and `s6_bulk` until the queues settle.
 **Script:** `scripts/post-redrive-verify.sql`. It is read-only and psql-driven. It prints counts, booleans and enum labels only.
 
@@ -33,7 +33,18 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
   ```
   That is a workflow code change. It is **not made and not committed.** Until someone adds it, DevOps can run the script locally as shown above.
 - **Difference from the existing steps:** the workflow's current DLQ, receipt and processed queries are **global**. Every query in this script is shop-scoped. `s6_processed_webhooks` has no shop column, so the script scopes it through a `webhook_receipts` join, the shop's `Invoice.orderId`, or the `reconcile:<shop>:` id prefix.
-- **Tested locally:** I ran the script under `default_transaction_read_only=on` against a throwaway Postgres 17 instance. It had a hand-built mock of the relevant tables, loaded with synthetic seed-shaped data. It completed end to end with no errors, and the aging numbers matched the table in §2. This checks the syntax and logic only. It is not a prod run.
+- **Tested locally:** The script runs under `default_transaction_read_only=on` against Postgres 16 (matching CI's `ghcr.io/pgmq/pg16-pgmq:v1.5.1`). It can also run against Postgres 17 (Supabase prod). Tested end-to-end with mock tables loaded with synthetic seed-shaped data. This checks the syntax and logic only. It is not a prod run.
+
+## Workflow inputs
+
+The `prod-diagnostics.yml` workflow exposes two inputs relevant to post-redrive verification:
+
+| Input | Type | Description |
+|---|---|---|
+| `post_redrive_verify` | boolean | When `true`, runs `scripts/post-redrive-verify.sql` in read-only mode after checkout. |
+| `redrive_started_at` | string | UTC timestamp when the redrive started (ISO-8601 format: `YYYY-MM-DDTHH:MM:SSZ` or `YYYY-MM-DDTHH:MMZ`). Validated against `^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?Z$`. If empty, the SQL script defaults to `now() - 24h`. |
+
+The workflow passes inputs via environment variables (never inline `${{ inputs.* }}` in `run:` blocks) and builds psql arguments as a bash array to prevent shell injection.
 
 ## 1. Preflight (P0)
 
@@ -43,6 +54,7 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
 | P0-2 / P0-2-summary | Messages still pending in `pgmq.q_s6_sync` and `q_s6_bulk` for this shop, by topic | `pending_not_held = 0`. CUSTOMERS_* and DRAFT_ORDERS_* rows may stay because they are held. |
 | P0-3 | Reconcile bulk ops (`origin='reconcile'`) after the redrive started, for both stages: `companies` and `orders` | Both stages are present with `completed > 0`. Investigate if `max_failure_count > 0`. |
 | P0-3b | Reconcile message ids `reconcile:<shop>:<YYYY-MM-DD UTC>:companies\|orders` are in `s6_processed_webhooks` | Both counts are ≥ 1 and `todays_orders_reconcile_processed = t`. If reconcile ran on a different UTC date than `as_of`, check by hand. |
+| P0-3-summary | BOTH redrive stages (companies AND orders) completed | `pass = t`. This is a **required gate**: P0-1 through P0-3b can pass with partial data, but P0-3-summary **fails unless both stages have at least one completed bulk op**. |
 | P0-4 | Rows in `s10b_order_refetch_null` | Informational. Orders older than 60 days come back null without `read_all_orders`. Seeded Net60 orders backdated 45–49 days pass 60 days around **2026-11-03 to 07 IST**. A null refetch keeps the ledger unchanged for CREATE/UPDATED. |
 
 **Manual steps (M), as in `docs/runbooks/dlq-redrive.md`:**

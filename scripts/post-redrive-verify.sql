@@ -1,6 +1,6 @@
 -- =============================================================================
--- post-redrive-verify.sql: DRAFT, not committed
--- Repo: raghavkhanna268/net-terms-receivables @ c11ed11 (main)
+-- post-redrive-verify.sql
+-- Repo: raghavkhanna268/net-terms-receivables
 -- Purpose: read-only verification after DevOps phase 2
 --          (ORDERS DLQ redrive -> reconcile companies+orders -> drains).
 -- Covers S9 (invoice creation/eligibility), S7 (aging + SQL/TS parity),
@@ -36,7 +36,7 @@
 \if :{?shop}
 \else
   \echo 'ERROR: pass -v shop=<shop>.myshopify.com'
-  \quit
+  DO $$ BEGIN RAISE EXCEPTION 'Missing required variable: shop'; END $$;
 \endif
 \if :{?as_of}
 \else
@@ -54,8 +54,7 @@ SELECT id AS shop_id, timezone AS shop_tz FROM "Shop" WHERE domain = :'shop' \gs
 \if :{?shop_id}
 \else
   \echo 'ERROR: shop not found'
-  ROLLBACK;
-  \quit
+  DO $$ BEGIN RAISE EXCEPTION 'Shop not found: %', current_setting('vars.shop', true); END $$;
 \endif
 
 -- -----------------------------------------------------------------------------
@@ -110,6 +109,29 @@ SELECT 'P0-3b' AS check_id,
 FROM s6_processed_webhooks
 WHERE webhook_id LIKE 'reconcile:' || :'shop' || ':%'
   AND processed_at >= :'redrive_started_at'::timestamptz;
+
+\echo '== P0-3-summary: BOTH redrive stages must be complete (companies AND orders)'
+SELECT 'P0-3-summary' AS check_id,
+       (EXISTS (SELECT 1 FROM s6_bulk_operations b
+                WHERE b.shop = :'shop' AND b.origin = 'reconcile'
+                  AND b.reconcile_stage = 'companies'
+                  AND b.started_at >= :'redrive_started_at'::timestamptz
+                  AND b.completed_at IS NOT NULL))                      AS companies_stage_complete,
+       (EXISTS (SELECT 1 FROM s6_bulk_operations b
+                WHERE b.shop = :'shop' AND b.origin = 'reconcile'
+                  AND b.reconcile_stage = 'orders'
+                  AND b.started_at >= :'redrive_started_at'::timestamptz
+                  AND b.completed_at IS NOT NULL))                      AS orders_stage_complete,
+       (EXISTS (SELECT 1 FROM s6_bulk_operations b
+                WHERE b.shop = :'shop' AND b.origin = 'reconcile'
+                  AND b.reconcile_stage = 'companies'
+                  AND b.started_at >= :'redrive_started_at'::timestamptz
+                  AND b.completed_at IS NOT NULL)
+        AND EXISTS (SELECT 1 FROM s6_bulk_operations b
+                WHERE b.shop = :'shop' AND b.origin = 'reconcile'
+                  AND b.reconcile_stage = 'orders'
+                  AND b.started_at >= :'redrive_started_at'::timestamptz
+                  AND b.completed_at IS NOT NULL))                      AS pass;
 
 \echo '== P0-4 null refetches (order older than 60d without read_all_orders); informational'
 SELECT 'P0-4' AS check_id, day, count AS null_refetches
