@@ -1,0 +1,16 @@
+api_version = "2026-10"
+
+[[extensions]]
+name = "Hide Terms for Held Accounts"
+handle = "hide-terms-payment"
+type = "function"
+
+  [[extensions.targeting]]
+  target = "cart.payment-methods.transform.run"
+  input_query = "src/cart_payment_methods_transform_run.graphql"
+  export = "cart_payment_methods_transform_run"
+
+[extensions.build]
+command = "cargo build --target=wasm32-unknown-unknown --release"
+path = "target/wasm32-unknown-unknown/release/hide_terms_payment.wasm"
+watch = ["src/**/*.rs"]

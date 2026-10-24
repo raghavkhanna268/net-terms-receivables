@@ -1,0 +1,27 @@
+query Input {
+  cart {
+    buyerIdentity {
+      customer {
+        metafield(namespace: "$app", key: "credit_status") {
+          jsonValue
+        }
+      }
+      purchasingCompany {
+        location {
+          metafield(namespace: "$app", key: "credit_status") {
+            jsonValue
+          }
+        }
+      }
+    }
+  }
+  paymentMethods {
+    id
+    name
+  }
+  paymentCustomization {
+    metafield(namespace: "$app", key: "hide-terms-config") {
+      jsonValue
+    }
+  }
+}

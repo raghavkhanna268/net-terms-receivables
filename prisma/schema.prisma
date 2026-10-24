@@ -180,6 +180,8 @@ model Shop {
   taggedCustomers S8TaggedCustomer[]
   draftOrders     S8DraftOrder[]
   dataRequests    S22DataRequest[]
+  // S13: Backstop processed orders
+  backstopProcessedOrders BackstopProcessedOrder[]
 
   // S21: Index for finding shops by plan (analytics, batch operations)
   @@index([planKey])
@@ -883,4 +885,35 @@ model WebhookReceipt {
   @@index([receivedAt], map: "idx_webhook_receipts_received_at")
   @@index([shop], map: "idx_webhook_receipts_shop")
   @@map("webhook_receipts")
+}
+
+// =============================================================================
+// S13 BACKSTOP PROCESSED ORDERS
+// =============================================================================
+
+/// Backstop processed orders (S13).
+/// Tracks orders that have been checked by the backstop service.
+/// Ensures idempotency on webhook redelivery.
+///
+/// 30-day retention via pg_cron purge job.
+/// Purged immediately on shop delete via FK CASCADE.
+model BackstopProcessedOrder {
+  /// Shop ID (references Shop.id)
+  shopId      String   @map("shop_id")
+  /// Shopify Order GID
+  orderGid    String   @map("order_gid")
+  /// Action taken: 'held' or 'skipped'
+  action      String
+  /// Reason for skip (null if held)
+  reason      String?
+  /// When the backstop was processed
+  processedAt DateTime @default(now()) @map("processed_at") @db.Timestamptz
+
+  // FK to Shop with CASCADE delete
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade, map: "backstop_processed_orders_shop_fkey")
+
+  @@id([shopId, orderGid])
+  @@index([processedAt], map: "idx_backstop_processed_orders_processed_at")
+  @@index([shopId], map: "idx_backstop_processed_orders_shop")
+  @@map("backstop_processed_orders")
 }

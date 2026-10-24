@@ -14,12 +14,19 @@ vi.mock("../validation-registration.server", () => ({
   ensureValidation: vi.fn(),
 }));
 
+vi.mock("../payment-customization-registration.server", () => ({
+  ensurePaymentCustomization: vi.fn(),
+}));
+
 import { ensureMetafieldDefinitions } from "../metafield-definitions.server";
 import { ensureValidation } from "../validation-registration.server";
+import { ensurePaymentCustomization } from "../payment-customization-registration.server";
 
 const mockEnsureMetafieldDefinitions =
   ensureMetafieldDefinitions as ReturnType<typeof vi.fn>;
 const mockEnsureValidation = ensureValidation as ReturnType<typeof vi.fn>;
+const mockEnsurePaymentCustomization =
+  ensurePaymentCustomization as ReturnType<typeof vi.fn>;
 
 /**
  * A fake ctx class whose waitUntil method reads `this`.
@@ -43,6 +50,7 @@ describe("after-auth", () => {
     _resetSetupCacheForTesting();
     vi.clearAllMocks();
     mockEnsureMetafieldDefinitions.mockResolvedValue([]);
+    mockEnsurePaymentCustomization.mockResolvedValue({ id: "pc-123", created: false });
   });
 
   afterEach(() => {

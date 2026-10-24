@@ -346,7 +346,7 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
     };
   }
 
-  return processOrderWebhook(
+  const orderResult = await processOrderWebhook(
     sql,
     message.shop,
     message.topic,
@@ -354,6 +354,83 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
     message.webhookId,
     triggeredAt
   );
+
+  // S13: Apply backstop for ORDERS_CREATE on held accounts
+  // Always try to apply backstop on ORDERS_CREATE, even on redelivery when orderResult
+  // indicates the webhook was already processed (no entityId). The webhook marks the
+  // order processed at order.server.ts:156, but backstop must still run on retries.
+  if (message.topic === "ORDERS_CREATE") {
+    const {
+      applyBackstop,
+      RetryableBackstopError,
+      recordBackstopFailure,
+      resolveInvoiceForOrder,
+    } = await import("~/services/backstop.server");
+
+    // Resolve invoice info - either from webhook result or by looking up by order GID
+    let invoiceInfo: { shopId: string; buyerAccountId: string | null; invoiceId: string } | null = null;
+
+    if (orderResult.success && orderResult.entityId) {
+      // First attempt: use the invoice ID from webhook processing
+      const [info] = await sql<{
+        shopId: string;
+        buyerAccountId: string | null;
+        invoiceId: string;
+      }[]>`
+        SELECT "shopId", "buyerAccountId", id AS "invoiceId"
+        FROM "Invoice"
+        WHERE id = ${orderResult.entityId}
+      `;
+      invoiceInfo = info ?? null;
+    } else {
+      // Redelivery or webhook skipped: resolve invoice by shop domain + order GID
+      invoiceInfo = await resolveInvoiceForOrder(sql, message.shop, message.resourceGid);
+    }
+
+    if (invoiceInfo) {
+      try {
+        const backstopResult = await applyBackstop(sql, {
+          shopDomain: message.shop,
+          shopId: invoiceInfo.shopId,
+          orderGid: message.resourceGid,
+          buyerAccountId: invoiceInfo.buyerAccountId,
+          invoiceId: invoiceInfo.invoiceId,
+        });
+
+        if (backstopResult.applied) {
+          console.log(
+            `[backstop] Applied to order ${message.resourceGid}: ${backstopResult.fulfillmentOrdersHeld} fulfillment orders held`
+          );
+        }
+      } catch (e) {
+        if (e instanceof RetryableBackstopError) {
+          // Retryable error: return failure to trigger pgmq retry
+          console.warn(
+            `[backstop] Retryable error for ${message.resourceGid}: ${e.message} (reason: ${e.reason})`
+          );
+
+          return {
+            success: false,
+            action: "skipped" as const,
+            error: `Backstop retryable error: ${e.message}`,
+            retryable: true,
+          };
+        }
+
+        // Non-RetryableBackstopError: log and record failure, but don't block order processing
+        console.error(`[backstop] Unexpected error for ${message.resourceGid}:`, e);
+        await recordBackstopFailure(
+          sql,
+          invoiceInfo.shopId,
+          message.resourceGid,
+          invoiceInfo.buyerAccountId,
+          e instanceof Error ? e.message : String(e),
+        );
+      }
+    }
+  }
+
+  return orderResult;
 }
 
 // =============================================================================
@@ -799,6 +876,28 @@ async function processSyncQueue(
             syncResult.retryable === false
               ? `Non-retryable error: ${syncResult.error || "Unknown"}`
               : syncResult.error || "Max retries exceeded";
+
+          // S13: Record backstop.failed for ORDERS_CREATE when DLQ'ing
+          if (msg.message.topic === "ORDERS_CREATE") {
+            const { recordBackstopFailure, resolveInvoiceForOrder } = await import(
+              "~/services/backstop.server"
+            );
+            const invoiceInfo = await resolveInvoiceForOrder(
+              sql,
+              msg.message.shop,
+              msg.message.resourceGid
+            );
+            if (invoiceInfo) {
+              await recordBackstopFailure(
+                sql,
+                invoiceInfo.shopId,
+                msg.message.resourceGid,
+                invoiceInfo.buyerAccountId,
+                dlqReason
+              );
+            }
+          }
+
           await moveToDeadLetter(
             sql,
             S6_QUEUES.SYNC,
@@ -822,6 +921,27 @@ async function processSyncQueue(
       // Only DLQ after max retries to avoid losing messages on transient issues
       const errorMsg = err instanceof Error ? err.message : "Unknown error";
       if (msg.read_ct >= config.maxRetries) {
+        // S13: Record backstop.failed for ORDERS_CREATE when DLQ'ing
+        if (msg.message.topic === "ORDERS_CREATE") {
+          const { recordBackstopFailure, resolveInvoiceForOrder } = await import(
+            "~/services/backstop.server"
+          );
+          const invoiceInfo = await resolveInvoiceForOrder(
+            sql,
+            msg.message.shop,
+            msg.message.resourceGid
+          );
+          if (invoiceInfo) {
+            await recordBackstopFailure(
+              sql,
+              invoiceInfo.shopId,
+              msg.message.resourceGid,
+              invoiceInfo.buyerAccountId,
+              errorMsg
+            );
+          }
+        }
+
         await moveToDeadLetter(sql, S6_QUEUES.SYNC, msg.msg_id, msg.message, errorMsg);
         result.deadLettered++;
       } else {

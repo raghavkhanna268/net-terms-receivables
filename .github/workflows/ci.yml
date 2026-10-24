@@ -255,3 +255,6 @@ jobs:
           # Assert success (any 2xx, 3xx, or 4xx is acceptable for boot test)
           echo "✓ Worker booted successfully (HTTP $RESPONSE)"
           kill $WRANGLER_PID 2>/dev/null || true
+
+  # Note: Rust functions are tested in rust-functions.yml (separate workflow)
+  # to keep the required check name stable: "Rust functions (test, build WASM)"

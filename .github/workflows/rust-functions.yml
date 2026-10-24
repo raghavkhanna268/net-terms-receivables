@@ -5,6 +5,10 @@ name: Rust Functions
 # REQUIRED status check. Swatinem/rust-cache keeps runs short.
 # The Worker deploy (deploy.yml) does not depend on this workflow; Shopify
 # Functions ship via the Shopify CLI, not the Worker deploy.
+#
+# Covers both extensions:
+# - credit-check-validation (S12): Cart validation function
+# - hide-terms-payment (S13): Payment customization function
 on:
   push:
     branches: [main]
@@ -36,11 +40,13 @@ jobs:
       - name: Cache Cargo (registry, git deps, target)
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          workspaces: extensions/credit-check-validation -> target
+          workspaces: |
+            extensions/credit-check-validation -> target
+            extensions/hide-terms-payment -> target
           # Only save the cache from main so PR runs don't evict it.
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Run Rust tests
+      - name: Run Rust tests (credit-check-validation)
         working-directory: extensions/credit-check-validation
         run: |
           cargo test --verbose 2>&1 | tee test-output.txt
@@ -48,7 +54,15 @@ jobs:
           echo "=== Test Summary ==="
           grep -E "^test result:|^running [0-9]+ test" test-output.txt || true
 
-      - name: Build WASM (release)
+      - name: Run Rust tests (hide-terms-payment)
+        working-directory: extensions/hide-terms-payment
+        run: |
+          cargo test --verbose 2>&1 | tee test-output.txt
+          echo ""
+          echo "=== Test Summary ==="
+          grep -E "^test result:|^running [0-9]+ test" test-output.txt || true
+
+      - name: Build WASM (credit-check-validation)
         working-directory: extensions/credit-check-validation
         run: |
           cargo build --release --target wasm32-unknown-unknown
@@ -80,9 +94,39 @@ jobs:
             exit 1
           fi
 
-      - name: Upload WASM artifact
+      - name: Build WASM (hide-terms-payment)
+        working-directory: extensions/hide-terms-payment
+        run: |
+          cargo build --release --target wasm32-unknown-unknown
+          
+          # Report WASM size and enforce limits
+          WASM_FILE="target/wasm32-unknown-unknown/release/hide_terms_payment.wasm"
+          if [ -f "$WASM_FILE" ]; then
+            SIZE=$(stat -c%s "$WASM_FILE")
+            SIZE_KB=$((SIZE / 1024))
+            echo "WASM size: ${SIZE_KB} KB ($SIZE bytes)"
+            
+            if [ $SIZE_KB -gt 256 ]; then
+              echo "✗ WASM size exceeds 256 KB limit (${SIZE_KB} KB)"
+              echo "See: https://shopify.dev/docs/apps/build/functions/programming-languages/rust-for-functions#binary-size-tips"
+              exit 1
+            fi
+            
+            if [ $SIZE_KB -gt 200 ]; then
+              echo "⚠ Warning: WASM size is ${SIZE_KB} KB, approaching 256 KB limit"
+            else
+              echo "✓ WASM size is within limits"
+            fi
+          else
+            echo "✗ WASM file not found"
+            exit 1
+          fi
+
+      - name: Upload WASM artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: credit-check-validation-wasm
-          path: extensions/credit-check-validation/target/wasm32-unknown-unknown/release/credit_check_validation.wasm
+          name: shopify-functions-wasm
+          path: |
+            extensions/credit-check-validation/target/wasm32-unknown-unknown/release/credit_check_validation.wasm
+            extensions/hide-terms-payment/target/wasm32-unknown-unknown/release/hide_terms_payment.wasm
           retention-days: 7
