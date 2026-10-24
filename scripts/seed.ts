@@ -755,17 +755,21 @@ interface ResetStats {
   ordersSkipped: number;
   customersSkipped: number;
   dbAccountsDeleted: number;
+  dbAccountsFailed: number;
   skipReasons: string[];
+  deletedCompanyIds: Set<string>;
 }
 
 /**
  * Reset seed data. By default (dry-run), discovers and lists leftover records.
- * With --apply flag, actually deletes seed-marked records and verifies.
+ * With --apply flag (and not --dry-run), actually deletes seed-marked records and verifies.
  * 
- * Only deletes records with seed markers (externalId prefix or seed tag).
- * Records matching by name/email without markers are listed as 'suspect'.
+ * Only deletes records with seed markers (externalId prefix ntr-seed- or tag ntr-seed).
+ * Records matching by name without markers are listed as 'suspect'.
+ * 
+ * @returns true if reset completed successfully (or was dry-run), false if verification failed
  */
-export async function resetSeedData(state: SeedState): Promise<void> {
+export async function resetSeedData(state: SeedState): Promise<boolean> {
   console.log("\n🗑️  Reset: Discovering seed data...");
   
   const discovery = await discoverSeedRecords(state);
@@ -773,10 +777,11 @@ export async function resetSeedData(state: SeedState): Promise<void> {
   // Print discovery results (IDs only, no PII)
   printDiscoveryResults(discovery);
   
-  // If not applying, stop here
-  if (!state.resetApply) {
-    console.log("\n  [dry-run] No mutations performed. Use --reset --apply to delete.");
-    return;
+  // If not applying OR dry-run mode, stop here (dry-run takes precedence)
+  if (!state.resetApply || state.dryRun) {
+    const reason = state.dryRun ? "--dry-run prevents mutations" : "use --reset --apply to delete";
+    console.log(`\n  [dry-run] No mutations performed. ${reason}`);
+    return true;
   }
   
   console.log("\n  Applying deletions...");
@@ -785,18 +790,27 @@ export async function resetSeedData(state: SeedState): Promise<void> {
     companiesDeleted: 0,
     companiesSkipped: 0,
     companiesStillPresent: 0,
-    ordersSkipped: discovery.markedOrders.length, // Orders can't be deleted via API
-    customersSkipped: discovery.markedCustomers.length, // Customers not deleted (just tagged)
+    ordersSkipped: discovery.markedOrders.length,
+    customersSkipped: discovery.markedCustomers.length,
     dbAccountsDeleted: 0,
+    dbAccountsFailed: 0,
     skipReasons: [],
+    deletedCompanyIds: new Set<string>(),
   };
   
   // Delete seed-marked companies only
   await deleteMarkedCompanies(state, discovery.markedCompanies, stats);
   
-  // Delete seed-marked DB BuyerAccount rows
+  // Delete DB BuyerAccount rows ONLY for companies that were actually deleted
+  // and scope to this shop's shopId
   if (state.databaseUrl) {
-    await deleteMarkedDbAccounts(state, discovery.markedDbAccounts, stats);
+    const deletedLocationIds = discovery.markedLocations
+      .filter(loc => stats.deletedCompanyIds.has(loc.companyId))
+      .map(loc => loc.id);
+    
+    if (deletedLocationIds.length > 0) {
+      await deleteMarkedDbAccounts(state, deletedLocationIds, stats);
+    }
   }
   
   // Update state counts
@@ -804,12 +818,12 @@ export async function resetSeedData(state: SeedState): Promise<void> {
   state.deletedCount.orders = stats.ordersSkipped;
   state.skippedCount.companies += stats.companiesSkipped;
   state.skippedReasons.push(...stats.skipReasons);
+  state.failedCount.dbRows += stats.dbAccountsFailed;
   
-  // Verify no seed-marked records remain
+  // Verify no seed-marked records remain (only count what we actually delete: companies and DB rows)
   console.log("\n  Verifying no seed-marked records remain...");
   const postVerify = await discoverSeedRecords(state);
-  const remainingMarked = postVerify.markedCompanies.length + postVerify.markedOrders.length + 
-                          postVerify.markedCustomers.length + postVerify.markedDbAccounts.length;
+  const remainingMarked = postVerify.markedCompanies.length + postVerify.markedDbAccounts.length;
   
   console.log("\n  Reset summary:");
   console.log(`    Companies deleted:       ${stats.companiesDeleted}`);
@@ -817,6 +831,9 @@ export async function resetSeedData(state: SeedState): Promise<void> {
   console.log(`    Orders skipped:          ${stats.ordersSkipped} (cannot delete via API)`);
   console.log(`    Customers skipped:       ${stats.customersSkipped} (just tagged, not deleted)`);
   console.log(`    DB accounts deleted:     ${stats.dbAccountsDeleted}`);
+  if (stats.dbAccountsFailed > 0) {
+    console.log(`    DB accounts failed:      ${stats.dbAccountsFailed}`);
+  }
   console.log(`    Suspect (not deleted):   ${discovery.suspectCompanies.length}`);
   
   if (stats.skipReasons.length > 0) {
@@ -826,13 +843,20 @@ export async function resetSeedData(state: SeedState): Promise<void> {
     }
   }
   
+  // Check for failures: remaining marked records OR DB delete failures
+  const hasFailures = remainingMarked > 0 || stats.dbAccountsFailed > 0;
+  
   if (remainingMarked > 0) {
     console.log(`\n  ❌ Verification failed: ${remainingMarked} seed-marked records still present`);
     state.failedCount.companies += postVerify.markedCompanies.length;
-    process.exit(1);
-  } else {
-    console.log("\n  ✅ Verification passed: No seed-marked records remain");
   }
+  
+  if (hasFailures) {
+    return false;
+  }
+  
+  console.log("\n  ✅ Verification passed: No seed-marked records remain");
+  return true;
 }
 
 /**
@@ -1013,6 +1037,7 @@ function printDiscoveryResults(discovery: ResetDiscovery): void {
 
 /**
  * Delete seed-marked companies only.
+ * Tracks which companies were actually deleted for downstream DB cleanup.
  */
 async function deleteMarkedCompanies(
   state: SeedState,
@@ -1039,6 +1064,7 @@ async function deleteMarkedCompanies(
       console.log(`    ⚠️  Skipped ${company.id}: [${code}] ${message}`);
     } else if (deletedId) {
       stats.companiesDeleted++;
+      stats.deletedCompanyIds.add(company.id);
       console.log(`    ✓ Deleted ${company.id}`);
     } else {
       const reason = `${company.id}: No deletedCompanyId returned and no userErrors`;
@@ -1050,30 +1076,44 @@ async function deleteMarkedCompanies(
 }
 
 /**
- * Delete seed-marked DB BuyerAccount rows.
+ * Delete DB BuyerAccount rows for the given location IDs.
+ * Only deletes rows for locations that belong to companies that were actually deleted.
+ * Scoped to the current shop's shopId for safety.
  */
 async function deleteMarkedDbAccounts(
   state: SeedState,
-  accounts: Array<{ id: string; companyLocationId: string | null; termsDays: number | null }>,
+  locationIds: string[],
   stats: ResetStats
 ): Promise<void> {
-  if (!state.databaseUrl || accounts.length === 0) return;
+  if (!state.databaseUrl || locationIds.length === 0) return;
   
-  console.log(`  Deleting ${accounts.length} DB BuyerAccount rows...`);
+  console.log(`  Deleting DB BuyerAccount rows for ${locationIds.length} locations...`);
   
   const sql = (await import("postgres")).default;
   const db = sql(state.databaseUrl);
   try {
-    const accountIds = accounts.map(a => a.id);
+    // First get shopId for this shop domain
+    const [shop] = await db<Array<{ id: string }>>`
+      SELECT id FROM "Shop" WHERE domain = ${state.shop} LIMIT 1
+    `;
+    
+    if (!shop) {
+      console.log(`    ⚠️  Shop not found in DB: ${state.shop}`);
+      return;
+    }
+    
+    // Delete BuyerAccount rows scoped to this shop and the given location IDs
     const result = await db`
       DELETE FROM "BuyerAccount"
-      WHERE id = ANY(${accountIds})
+      WHERE "shopId" = ${shop.id}
+        AND "companyLocationId" = ANY(${locationIds})
     `;
     stats.dbAccountsDeleted = result.count;
     console.log(`    ✓ Deleted ${result.count} BuyerAccount rows`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     stats.skipReasons.push(`DB delete failed: ${msg}`);
+    stats.dbAccountsFailed++;
     console.log(`    ⚠️  Failed to delete DB rows: ${msg}`);
   } finally {
     await db.end();
@@ -3662,7 +3702,16 @@ export async function main(): Promise<void> {
 
   // Reset if requested
   if (reset) {
-    await resetSeedData(state);
+    const resetOk = await resetSeedData(state);
+    if (!resetOk) {
+      // Verification failed or DB errors occurred
+      process.exit(1);
+    }
+    // If --reset without --apply, exit after discovery (don't fall through to seeding)
+    if (!resetApply || dryRun) {
+      process.exit(0);
+    }
+    // --reset --apply succeeded, continue to seeding
   }
 
   // Seed Shopify data

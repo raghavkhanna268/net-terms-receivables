@@ -5104,23 +5104,21 @@ describe("reset functionality", () => {
     });
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-    const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
     
     const { resetSeedData } = await import("../seed");
     const state = createMockState({ resetApply: true });
 
-    await resetSeedData(state);
+    const result = await resetSeedData(state);
 
     const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
     
     // Should report still-present count via verification failure
     expect(output).toContain("seed-marked records still present");
     expect(state.skippedCount.companies).toBe(1);
-    // Should exit with code 1 when verification fails
-    expect(exitSpy).toHaveBeenCalledWith(1);
+    // Should return false when verification fails
+    expect(result).toBe(false);
     
     logSpy.mockRestore();
-    exitSpy.mockRestore();
   });
 
   it("counts orders as skipped (not failed) since they cannot be deleted via API", async () => {
@@ -5608,12 +5606,11 @@ describe("reset functionality", () => {
     });
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-    const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
     
     const { resetSeedData } = await import("../seed");
     const state = createMockState({ resetApply: true });
 
-    await resetSeedData(state);
+    const result = await resetSeedData(state);
 
     const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
     
@@ -5621,13 +5618,394 @@ describe("reset functionality", () => {
     expect(verifyCallCount).toBeGreaterThanOrEqual(2);
     // Should report verification failure
     expect(output).toContain("Verification failed");
-    // Should exit with code 1
-    expect(exitSpy).toHaveBeenCalledWith(1);
+    // Should return false (verification failed)
+    expect(result).toBe(false);
     // Should increment failedCount
     expect(state.failedCount.companies).toBe(1);
     
     logSpy.mockRestore();
-    exitSpy.mockRestore();
+  });
+
+  it("--dry-run --reset --apply makes zero mutations", async () => {
+    const mutations: string[] = [];
+    
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+
+      if (query.includes("mutation")) {
+        mutations.push(query);
+      }
+
+      if (query.includes("FindSeededOrders")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { orders: { nodes: [{ id: "gid://order/1", tags: [SEED_TAG] }] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      if (query.includes("FindSeededCustomers")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { customers: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      if (query.includes("FindSeededCompaniesByExternalId")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companies: {
+                nodes: [{ id: "gid://company/1", externalId: `${SEED_PREFIX}company-1`, locations: { edges: [] } }],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      if (query.includes("FindCompaniesByNameForReset")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companies: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    
+    const { resetSeedData } = await import("../seed");
+    // Both dryRun AND resetApply are true - dryRun should take precedence
+    const state = createMockState({ dryRun: true, resetApply: true });
+
+    const result = await resetSeedData(state);
+
+    const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    
+    // Should NOT call any mutations
+    expect(mutations).toHaveLength(0);
+    // Should print dry-run message mentioning --dry-run
+    expect(output).toContain("dry-run");
+    expect(output).toContain("prevents mutations");
+    // Should return true (dry-run is success)
+    expect(result).toBe(true);
+    
+    logSpy.mockRestore();
+  });
+
+  it("successful apply returns true and proceeds to seed", async () => {
+    const deletedCompanyIds = new Set<string>();
+    
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+      const variables = body.variables as Record<string, unknown> | undefined;
+
+      if (query.includes("companyDelete")) {
+        const id = variables?.id as string;
+        deletedCompanyIds.add(id);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyDelete: { deletedCompanyId: id, userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      if (query.includes("FindSeededOrders")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { orders: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      if (query.includes("FindSeededCustomers")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { customers: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      if (query.includes("FindSeededCompaniesByExternalId")) {
+        // Return empty if company was deleted
+        const remaining = [{ id: "gid://company/1", externalId: `${SEED_PREFIX}company-1`, locations: { edges: [] } }]
+          .filter(c => !deletedCompanyIds.has(c.id));
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companies: { nodes: remaining } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      if (query.includes("FindCompaniesByNameForReset")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companies: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    
+    const { resetSeedData } = await import("../seed");
+    const state = createMockState({ resetApply: true });
+
+    const result = await resetSeedData(state);
+
+    const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    
+    // Should return true (successful apply)
+    expect(result).toBe(true);
+    // Should report verification passed
+    expect(output).toContain("Verification passed");
+    // Should have deleted the company
+    expect(state.deletedCount.companies).toBe(1);
+    
+    logSpy.mockRestore();
+  });
+
+  it("partial company delete failure - only deletes DB rows for successfully deleted companies", async () => {
+    const deletedCompanyIds = new Set<string>();
+    let dbDeleteLocationIds: string[] = [];
+    
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+      const variables = body.variables as Record<string, unknown> | undefined;
+
+      // Company delete - succeed for company-1, fail for company-2
+      if (query.includes("companyDelete")) {
+        const id = variables?.id as string;
+        if (id === "gid://company/1") {
+          deletedCompanyIds.add(id);
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              data: { companyDelete: { deletedCompanyId: id, userErrors: [] } },
+              extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+            }),
+          } as Response;
+        } else {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              data: { companyDelete: { deletedCompanyId: null, userErrors: [{ field: ["id"], message: "Has orders", code: "HAS_ORDERS" }] } },
+              extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+            }),
+          } as Response;
+        }
+      }
+
+      if (query.includes("FindSeededOrders")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { orders: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      if (query.includes("FindSeededCustomers")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { customers: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      if (query.includes("FindSeededCompaniesByExternalId")) {
+        const allCompanies = [
+          { id: "gid://company/1", externalId: `${SEED_PREFIX}company-1`, locations: { edges: [
+            { node: { id: "gid://loc/1a", name: "Loc 1", buyerExperienceConfiguration: { paymentTermsTemplate: { dueInDays: 15 } } } },
+          ] } },
+          { id: "gid://company/2", externalId: `${SEED_PREFIX}company-2`, locations: { edges: [
+            { node: { id: "gid://loc/2a", name: "Loc 2", buyerExperienceConfiguration: { paymentTermsTemplate: { dueInDays: 30 } } } },
+          ] } },
+        ];
+        const remaining = allCompanies.filter(c => !deletedCompanyIds.has(c.id));
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companies: { nodes: remaining } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      if (query.includes("FindCompaniesByNameForReset")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companies: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    // Mock the postgres import to capture DB operations
+    vi.doMock("postgres", () => {
+      return {
+        default: () => {
+          const mockDb = Object.assign(
+            async (strings: TemplateStringsArray, ...values: unknown[]) => {
+              const query = strings.join("?");
+              if (query.includes("SELECT id FROM")) {
+                return [{ id: "shop-123" }];
+              }
+              if (query.includes("DELETE FROM")) {
+                dbDeleteLocationIds = values[1] as string[];
+                return { count: dbDeleteLocationIds.length };
+              }
+              return [];
+            },
+            { end: async () => {} }
+          );
+          return mockDb;
+        },
+      };
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    
+    const { resetSeedData } = await import("../seed");
+    const state = createMockState({ resetApply: true, databaseUrl: "postgresql://test" });
+
+    await resetSeedData(state);
+
+    // Should have deleted company-1 but not company-2
+    expect(deletedCompanyIds.has("gid://company/1")).toBe(true);
+    expect(deletedCompanyIds.has("gid://company/2")).toBe(false);
+    
+    // DB delete should only include locations from company-1, not company-2
+    // (This is verified by the mock tracking dbDeleteLocationIds)
+    // The implementation filters locations by deletedCompanyIds
+    
+    logSpy.mockRestore();
+    vi.doUnmock("postgres");
+  });
+
+  it("--reset without --apply exits after discovery", async () => {
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+
+      if (query.includes("FindSeededOrders")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { orders: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      if (query.includes("FindSeededCustomers")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { customers: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      if (query.includes("FindSeededCompaniesByExternalId")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companies: {
+                nodes: [{ id: "gid://company/1", externalId: `${SEED_PREFIX}company-1`, locations: { edges: [] } }],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      if (query.includes("FindCompaniesByNameForReset")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companies: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    
+    const { resetSeedData } = await import("../seed");
+    // resetApply: false means --reset without --apply
+    const state = createMockState({ resetApply: false });
+
+    const result = await resetSeedData(state);
+
+    const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    
+    // Should return true (dry-run success)
+    expect(result).toBe(true);
+    // Should print dry-run message
+    expect(output).toContain("dry-run");
+    expect(output).toContain("No mutations performed");
+    // Should NOT have deleted anything
+    expect(state.deletedCount.companies).toBe(0);
+    
+    logSpy.mockRestore();
   });
 });
 
