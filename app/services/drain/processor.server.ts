@@ -766,6 +766,71 @@ registerSyncHandler("RECONCILE_COMPANIES", handleReconcileCompanies);
 registerSyncHandler("RECONCILE_ORDERS", handleReconcileOrders);
 
 // =============================================================================
+// CREDIT STATUS RECOMPUTE HANDLER
+// =============================================================================
+
+/**
+ * Handler for CREDIT_STATUS_RECOMPUTE topic.
+ *
+ * Recomputes credit status for a buyer account and writes the metafield
+ * only when the hold value actually changes.
+ *
+ * Used by both:
+ * - Event-driven recompute (after invoice changes)
+ * - Time-driven recompute (daily cron via pgmq)
+ *
+ * Idempotent: safe to process the same message multiple times.
+ */
+async function handleCreditStatusRecompute(sql: Sql, message: SyncMessage): Promise<SyncResult> {
+  // Idempotency check
+  if (await isWebhookProcessed(sql, message.webhookId, message.shop)) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Credit status recompute already processed (idempotent)",
+    };
+  }
+
+  // Extract buyerAccountId from message
+  const buyerAccountId = (message as SyncMessage & { buyerAccountId?: string }).buyerAccountId;
+  if (!buyerAccountId) {
+    return {
+      success: false,
+      action: "skipped",
+      error: "Missing buyerAccountId in CREDIT_STATUS_RECOMPUTE message",
+      retryable: false,
+    };
+  }
+
+  const { recomputeCreditStatus } = await import("~/services/credit-status-recompute.server");
+
+  const result = await recomputeCreditStatus(sql, buyerAccountId);
+
+  if (!result.success) {
+    return {
+      success: false,
+      action: "skipped",
+      error: result.error,
+      retryable: result.retryable ?? true,
+    };
+  }
+
+  // Mark as processed
+  await markWebhookProcessed(sql, message.webhookId, message.topic, message.resourceGid, message.shop);
+
+  return {
+    success: true,
+    action: result.metafieldWritten ? "created" : "skipped",
+    skipReason: result.metafieldWritten
+      ? undefined
+      : "Hold value unchanged, no metafield write needed",
+  };
+}
+
+// Register CREDIT_STATUS_RECOMPUTE handler
+registerSyncHandler("CREDIT_STATUS_RECOMPUTE", handleCreditStatusRecompute);
+
+// =============================================================================
 // DRAIN RESULT & QUEUE OPERATIONS
 // =============================================================================
 
