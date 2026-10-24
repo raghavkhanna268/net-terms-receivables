@@ -804,13 +804,13 @@ async function handleCreditStatusRecompute(sql: Sql, message: SyncMessage): Prom
   }
 
   const { recomputeCreditStatus } = await import("~/services/credit-status-recompute.server");
+  const { CREDIT_STATUS_SOURCES } = await import("~/services/credit-status.server");
+  type CreditStatusSource = (typeof CREDIT_STATUS_SOURCES)[number];
 
   // Map source string from message to CreditStatusSource (defaults to 'unknown')
-  const validSources = ["invoice_change", "daily_sweep", "manual", "sync", "unknown"] as const;
-  type CreditStatusSource = typeof validSources[number];
   const messageSource = extendedMessage.source;
   const source: CreditStatusSource = 
-    messageSource && validSources.includes(messageSource as CreditStatusSource) 
+    messageSource && (CREDIT_STATUS_SOURCES as readonly string[]).includes(messageSource) 
       ? (messageSource as CreditStatusSource) 
       : "unknown";
   const result = await recomputeCreditStatus(sql, buyerAccountId, source);

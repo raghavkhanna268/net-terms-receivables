@@ -37,6 +37,7 @@
 import postgres from "postgres";
 import { pathToFileURL } from "node:url";
 import { sqlOptions } from "~/lib/db-light.server";
+import { verifyReadOnlyTransaction } from "./ci/backfill-dry-run-preflight";
 
 interface BackfillStats {
   shopIndex: number;
@@ -155,6 +156,50 @@ async function getBackfillStats(
 }
 
 /**
+ * Result of a dry-run operation.
+ */
+interface DryRunResult {
+  success: true;
+  stats: BackfillStats[];
+}
+
+/**
+ * Run the dry-run path: preflight check + read-only transaction for counts.
+ * Exported for testing.
+ *
+ * @param sql - Top-level postgres connection (NOT a TransactionSql)
+ * @returns Stats from the read-only query
+ * @throws Error if preflight fails or transaction_read_only is not 'on'
+ */
+async function runDryRun(
+  sql: ReturnType<typeof postgres>,
+): Promise<DryRunResult> {
+  // Step 1: Verify READ ONLY transaction enforcement on the connection first.
+  // This runs in its own transaction and verifies that writes are rejected.
+  // NOTE: verifyReadOnlyTransaction requires a top-level Sql, not TransactionSql.
+  const verifyResult = await verifyReadOnlyTransaction(sql);
+  if (!verifyResult.ok) {
+    throw new Error(`READ ONLY transaction preflight failed: ${verifyResult.error}`);
+  }
+
+  // Step 2: Dry-run: all reads inside a single explicit READ ONLY transaction.
+  const stats = await sql.begin("read only", async (tx) => {
+    // Assert in-place: verifyReadOnlyTransaction() opens its own transaction and
+    // cannot run inside this one (TransactionSql has no begin()).
+    const [setting] = await tx<{ transaction_read_only: string }[]>`
+      SELECT current_setting('transaction_read_only') AS transaction_read_only
+    `;
+    if (setting?.transaction_read_only !== "on") {
+      throw new Error("READ ONLY transaction check failed: transaction_read_only is not 'on'");
+    }
+
+    return getBackfillStats(tx);
+  });
+
+  return { success: true, stats };
+}
+
+/**
  * Get all candidates for backfill, optionally filtered by shop index.
  */
 async function getCandidates(
@@ -268,27 +313,15 @@ async function main() {
 
   try {
     if (dryRun) {
-      // Step 1: Verify READ ONLY transaction enforcement on the connection first.
-      // This runs in its own transaction and verifies that writes are rejected.
-      const verifyResult = await verifyReadOnlyTransaction(sql);
-      if (!verifyResult.ok) {
-        console.error(`ERROR: READ ONLY transaction check failed: ${verifyResult.error}`);
+      // Use the exported runDryRun function for testability
+      let stats: BackfillStats[];
+      try {
+        const result = await runDryRun(sql);
+        stats = result.stats;
+      } catch (err) {
+        console.error(`ERROR: ${err instanceof Error ? err.message : String(err)}`);
         process.exit(1);
       }
-
-      // Step 2: Dry-run: all reads inside a single explicit READ ONLY transaction.
-      const stats = await sql.begin("read only", async (tx) => {
-        // Assert in-place: verifyReadOnlyTransaction() opens its own transaction and
-        // cannot run inside this one (TransactionSql has no begin()).
-        const [setting] = await tx<{ transaction_read_only: string }[]>`
-          SELECT current_setting('transaction_read_only') AS transaction_read_only
-        `;
-        if (setting?.transaction_read_only !== "on") {
-          throw new Error("READ ONLY transaction check failed: transaction_read_only is not 'on'");
-        }
-
-        return getBackfillStats(tx);
-      });
 
       if (stats.length === 0) {
         console.log("No accounts with metafieldSyncedAt IS NULL found.");
@@ -367,4 +400,4 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   });
 }
 
-export { parseArgs, getBackfillStats, getCandidates, enqueueBackfill };
+export { parseArgs, getBackfillStats, getCandidates, enqueueBackfill, runDryRun };

@@ -26,14 +26,22 @@ import { hasOverdueInvoices } from "./overdue.server";
 export type { HoldReasonCode };
 
 /**
- * Source of a credit status change (for audit trail).
+ * Valid sources of a credit status change (for audit trail).
+ * Exported const so processor.server.ts can validate message.source against it.
  */
-export type CreditStatusSource =
-  | "invoice_change"
-  | "daily_sweep"
-  | "manual"
-  | "sync"
-  | "unknown";
+export const CREDIT_STATUS_SOURCES = [
+  "invoice_change",
+  "daily_sweep",
+  "manual",
+  "sync",
+  "unknown",
+] as const;
+
+/**
+ * Source of a credit status change (for audit trail).
+ * Derived from CREDIT_STATUS_SOURCES const.
+ */
+export type CreditStatusSource = (typeof CREDIT_STATUS_SOURCES)[number];
 
 /**
  * Valid hold reason codes - used for validation.
@@ -279,7 +287,6 @@ async function recordHoldTransitionAudit(
   newHoldState: "OK" | "NEAR_LIMIT" | "HELD" | "BYPASS",
   holdReasonCode: HoldReasonCode | null,
   source: CreditStatusSource,
-  wasHeld: boolean,
   isNowHeld: boolean,
 ): Promise<void> {
   const eventType = isNowHeld
@@ -606,7 +613,6 @@ export async function updateCreditStatus(
         holdStateResult.holdState,
         holdStateResult.holdReasonCode,
         "manual",
-        wasHeld,
         isNowHeld,
       );
     }
@@ -794,7 +800,6 @@ export async function syncCreditStatusMetafield(
         holdStateResult.holdState,
         holdStateResult.holdReasonCode,
         source,
-        wasHeld,
         isNowHeld,
       );
     }
