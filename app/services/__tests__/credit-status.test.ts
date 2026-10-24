@@ -33,6 +33,10 @@ const createMockSql = () => {
         return mockResults.get("shop_currency") ?? [];
       }
 
+      if (query.includes('FROM "BuyerAccount"') && query.includes("companyId")) {
+        return mockResults.get("company_locations") ?? [];
+      }
+
       if (query.includes('FROM "BuyerAccount"')) {
         return mockResults.get("account") ?? [];
       }
@@ -394,6 +398,26 @@ describe("credit-status.server", () => {
       const status = await getCreditStatusDisplay(mockSql, "nonexistent");
 
       expect(status).toBeNull();
+    });
+  });
+
+  describe("getCompanyTotals", () => {
+    it("returns null for null companyId", async () => {
+      const { getCompanyTotals } = await import("../credit-status.server");
+
+      const totals = await getCompanyTotals(mockSql, "", "shop-123");
+
+      expect(totals).toBeNull();
+    });
+
+    it("returns null when no locations found", async () => {
+      const { getCompanyTotals } = await import("../credit-status.server");
+
+      mockSql.setMockResult("company_locations", []);
+
+      const totals = await getCompanyTotals(mockSql, "co-123", "shop-123");
+
+      expect(totals).toBeNull();
     });
   });
 });

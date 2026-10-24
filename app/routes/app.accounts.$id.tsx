@@ -28,6 +28,7 @@ import { getRequestSql } from "~/lib/request-context.server";
 import { isAccountActive } from "~/services/gating.server";
 import {
   getCreditStatusDisplay,
+  getCompanyTotals,
   updateCreditStatus,
   type CreditStatusUpdate,
 } from "~/services/credit-status.server";
@@ -51,6 +52,7 @@ interface LoaderData {
     id: string;
     name: string;
     kind: "COMPANY" | "TAGGED_CUSTOMER";
+    companyId: string | null;
     defaultTermsDays: number | null;
     defaultTermsSource: "explicit" | "tag" | null;
     isGated: boolean;
@@ -67,6 +69,16 @@ interface LoaderData {
     isOverLimit: boolean;
     isOverdue: boolean;
     utilizationPercent: number | null;
+  } | null;
+  companyTotals: {
+    locationCount: number;
+    locationsOnHold: number;
+    totalLimitPaise: string | null;
+    totalExposurePaise: string;
+    totalAvailablePaise: string | null;
+    currency: string;
+    hasMixedCurrencies: boolean;
+    excludedLocationCount: number;
   } | null;
   invoices: {
     rows: Array<{
@@ -100,6 +112,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
     return {
       account: null,
       creditStatus: null,
+      companyTotals: null,
       invoices: { rows: [], totalCount: 0 },
       error: "Account ID is required",
     } satisfies LoaderData;
@@ -113,6 +126,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
     return {
       account: null,
       creditStatus: null,
+      companyTotals: null,
       invoices: { rows: [], totalCount: 0 },
       error: "Shop not found",
     } satisfies LoaderData;
@@ -122,6 +136,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
     id: string;
     name: string;
     kind: "COMPANY" | "TAGGED_CUSTOMER";
+    companyId: string | null;
     defaultTermsDays: number | null;
     defaultTermsSource: "explicit" | "tag" | null;
     gatedAt: Date | null;
@@ -130,6 +145,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       id,
       name,
       kind,
+      "companyId",
       "defaultTermsDays",
       "defaultTermsSource",
       gated_at AS "gatedAt"
@@ -141,6 +157,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
     return {
       account: null,
       creditStatus: null,
+      companyTotals: null,
       invoices: { rows: [], totalCount: 0 },
       error: "Account not found",
     } satisfies LoaderData;
@@ -152,6 +169,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
     id: accountRow.id,
     name: accountRow.name,
     kind: accountRow.kind,
+    companyId: accountRow.companyId,
     defaultTermsDays: accountRow.defaultTermsDays,
     defaultTermsSource: accountRow.defaultTermsSource,
     isGated,
@@ -172,6 +190,23 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
         isOverLimit: creditStatusDisplay.isOverLimit,
         isOverdue: creditStatusDisplay.isOverdue,
         utilizationPercent: creditStatusDisplay.utilizationPercent,
+      }
+    : null;
+
+  const companyTotalsData = accountRow.kind === "COMPANY" && accountRow.companyId
+    ? await getCompanyTotals(sql, accountRow.companyId, shop.id)
+    : null;
+
+  const companyTotals = companyTotalsData
+    ? {
+        locationCount: companyTotalsData.locationCount,
+        locationsOnHold: companyTotalsData.locationsOnHold,
+        totalLimitPaise: companyTotalsData.totalLimitPaise?.toString() ?? null,
+        totalExposurePaise: companyTotalsData.totalExposurePaise.toString(),
+        totalAvailablePaise: companyTotalsData.totalAvailablePaise?.toString() ?? null,
+        currency: companyTotalsData.currency,
+        hasMixedCurrencies: companyTotalsData.hasMixedCurrencies,
+        excludedLocationCount: companyTotalsData.excludedLocationCount,
       }
     : null;
 
@@ -197,6 +232,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
   return {
     account,
     creditStatus,
+    companyTotals,
     invoices,
     error: null,
   } satisfies LoaderData;
@@ -353,7 +389,7 @@ function InvoiceTable({
 }
 
 export default function AccountPage() {
-  const { account, creditStatus, invoices, error } = useLoaderData<typeof loader>();
+  const { account, creditStatus, companyTotals, invoices, error } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
@@ -374,7 +410,7 @@ export default function AccountPage() {
 
   return (
     <s-page heading={account.name}>
-      <s-link href="/" slot="breadcrumbactions">Back to Dashboard</s-link>
+      <s-link href="/" slot="breadcrumb-actions">Back to Dashboard</s-link>
 
       {actionData?.success && (
         <s-section>
@@ -475,6 +511,57 @@ export default function AccountPage() {
                 <s-badge tone="info">Bypass Active</s-badge>
               ) : (
                 <s-badge>OK</s-badge>
+              )}
+            </s-paragraph>
+          </s-stack>
+        </s-section>
+      )}
+
+      {companyTotals && companyTotals.locationCount > 1 && (
+        <s-section heading="Company Totals (All Locations)">
+          {companyTotals.hasMixedCurrencies && (
+            <s-banner tone="warning" heading="Mixed Currencies">
+              Some locations use different currencies and are excluded from these totals.
+              {companyTotals.excludedLocationCount > 0 && (
+                <s-text> ({companyTotals.excludedLocationCount} location(s) excluded)</s-text>
+              )}
+            </s-banner>
+          )}
+          <s-stack>
+            <s-paragraph>
+              <s-text type="strong">Locations: </s-text>
+              <s-text>{companyTotals.locationCount}</s-text>
+            </s-paragraph>
+            <s-paragraph>
+              <s-text type="strong">Total Credit Limit: </s-text>
+              <s-text>
+                {companyTotals.totalLimitPaise !== null
+                  ? formatPaiseAmount(BigInt(companyTotals.totalLimitPaise), companyTotals.currency)
+                  : "No limit (at least one location has no limit)"}
+              </s-text>
+            </s-paragraph>
+            <s-paragraph>
+              <s-text type="strong">Total Outstanding: </s-text>
+              <s-text>
+                {formatPaiseAmount(BigInt(companyTotals.totalExposurePaise), companyTotals.currency)}
+              </s-text>
+            </s-paragraph>
+            {companyTotals.totalAvailablePaise !== null && (
+              <s-paragraph>
+                <s-text type="strong">Total Available: </s-text>
+                <s-text
+                  tone={BigInt(companyTotals.totalAvailablePaise) < 0n ? "critical" : undefined}
+                >
+                  {formatPaiseAmount(BigInt(companyTotals.totalAvailablePaise), companyTotals.currency)}
+                </s-text>
+              </s-paragraph>
+            )}
+            <s-paragraph>
+              <s-text type="strong">Locations on Hold: </s-text>
+              {companyTotals.locationsOnHold > 0 ? (
+                <s-badge tone="critical">{companyTotals.locationsOnHold}</s-badge>
+              ) : (
+                <s-text>0</s-text>
               )}
             </s-paragraph>
           </s-stack>

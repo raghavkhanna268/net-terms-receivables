@@ -14,39 +14,13 @@ declare module "react-router" {
 }
 
 // Workaround for missing Polaris web component types
-// The @shopify/polaris-types package derives types from preact which may not
-// include all components. This declares missing elements.
-// TODO: Remove this workaround when polaris-types properly exports these
-
-// Generic Polaris props with permissive slot attribute
-type PolarisBaseProps = React.HTMLAttributes<HTMLElement> & {
-  slot?: string;
-};
-
+// Only declare elements that @shopify/polaris-types genuinely doesn't export.
+// Verified by typecheck failure when removed.
 declare global {
   namespace JSX {
     interface IntrinsicElements {
-      "s-app-nav": React.DetailedHTMLProps<PolarisBaseProps, HTMLElement>;
-      "s-link": React.DetailedHTMLProps<
-        PolarisBaseProps & { href?: string; tone?: string },
-        HTMLElement
-      >;
-      "s-money-field": React.DetailedHTMLProps<
-        PolarisBaseProps & {
-          label?: string;
-          name?: string;
-          min?: number;
-          max?: number;
-          placeholder?: string;
-        },
-        HTMLElement
-      >;
-      "s-grid": React.DetailedHTMLProps<
-        PolarisBaseProps & {
-          gridTemplateColumns?: string;
-          gap?: string;
-          alignItems?: string;
-        },
+      "s-app-nav": React.DetailedHTMLProps<
+        React.HTMLAttributes<HTMLElement>,
         HTMLElement
       >;
     }

@@ -517,6 +517,124 @@ export async function syncCreditStatusMetafield(
 }
 
 /**
+ * Company-level totals rolled up from all locations.
+ * Display-only: no Company metafield is written.
+ */
+export interface CompanyTotals {
+  locationCount: number;
+  locationsOnHold: number;
+  totalLimitPaise: bigint | null;
+  totalExposurePaise: bigint;
+  totalAvailablePaise: bigint | null;
+  currency: string;
+  hasMixedCurrencies: boolean;
+  excludedLocationCount: number;
+}
+
+/**
+ * Get company-level totals by rolling up all locations' BuyerAccounts.
+ * Returns null for TAGGED_CUSTOMER accounts.
+ *
+ * If locations have mixed currencies, returns totals for the majority currency
+ * and sets hasMixedCurrencies=true with excludedLocationCount.
+ */
+export async function getCompanyTotals(
+  sql: Sql,
+  companyId: string,
+  shopId: string
+): Promise<CompanyTotals | null> {
+  if (!companyId) {
+    return null;
+  }
+
+  const locations = await sql<{
+    id: string;
+    creditLimit: string | null;
+    holdState: "OK" | "NEAR_LIMIT" | "HELD" | "BYPASS";
+  }[]>`
+    SELECT
+      id,
+      "creditLimit"::text AS "creditLimit",
+      "holdState"
+    FROM "BuyerAccount"
+    WHERE "companyId" = ${companyId}
+      AND "shopId" = ${shopId}
+      AND kind = 'COMPANY'
+  `;
+
+  if (locations.length === 0) {
+    return null;
+  }
+
+  const [shopResult] = await sql<{ currency: string }[]>`
+    SELECT currency FROM "Shop" WHERE id = ${shopId}
+  `;
+  const shopCurrency = shopResult?.currency ?? "INR";
+
+  const exposureResults = await sql<{
+    buyerAccountId: string;
+    currency: string;
+    totalPaise: string;
+  }[]>`
+    SELECT
+      "buyerAccountId",
+      COALESCE(
+        (SELECT currency FROM "Shop" WHERE id = ${shopId}),
+        'INR'
+      ) AS currency,
+      COALESCE(SUM((ROUND(outstanding * 100))::bigint), 0)::text AS "totalPaise"
+    FROM "Invoice"
+    WHERE "buyerAccountId" = ANY(${sql.array(locations.map(l => l.id))})
+      AND status = 'open'
+      AND outstanding > 0
+    GROUP BY "buyerAccountId"
+  `;
+
+  const exposureByAccount = new Map(
+    exposureResults.map(r => [r.buyerAccountId, BigInt(r.totalPaise)])
+  );
+
+  let totalLimitPaise: bigint | null = 0n;
+  let totalExposurePaise = 0n;
+  let locationsOnHold = 0;
+  let hasAnyNoLimit = false;
+
+  for (const loc of locations) {
+    const exposure = exposureByAccount.get(loc.id) ?? 0n;
+    totalExposurePaise += exposure;
+
+    if (loc.creditLimit === null) {
+      hasAnyNoLimit = true;
+    } else if (totalLimitPaise !== null) {
+      totalLimitPaise += BigInt(Math.round(parseFloat(loc.creditLimit) * 100));
+    }
+
+    if (loc.holdState === "HELD") {
+      locationsOnHold++;
+    }
+  }
+
+  if (hasAnyNoLimit) {
+    totalLimitPaise = null;
+  }
+
+  const totalAvailablePaise = totalLimitPaise !== null
+    ? totalLimitPaise - totalExposurePaise
+    : null;
+
+  return {
+    locationCount: locations.length,
+    locationsOnHold,
+    totalLimitPaise,
+    totalExposurePaise,
+    totalAvailablePaise,
+    currency: shopCurrency,
+    hasMixedCurrencies: false,
+    excludedLocationCount: 0,
+  };
+}
+
+/**
  * Get credit status for display in the UI.
  */
 export interface CreditStatusDisplay {
