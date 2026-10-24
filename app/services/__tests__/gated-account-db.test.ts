@@ -13,6 +13,10 @@
  * 4. The account still appears in aging totals and per-account aging rows
  * 5. Matching suggests and confirmMatch succeeds
  * 6. The hold clears after the invoice is paid and recomputed
+ *
+ * Clock source: Aging tests use the database's NOW() as the single time source.
+ * Both fixture creation and asOf parameters use the same timestamp fetched once
+ * per test, so JS/DB clock differences cannot cause bucket mismatches.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import postgres from "postgres";
@@ -410,7 +414,10 @@ describeWithDb("gated account behavior (PLAN_GATING_ENFORCED=true)", () => {
       const invoiceId = `inv-gated-aging-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/gated-aging-${TEST_SUFFIX}`;
 
-      // Create an open invoice for gated account
+      // Fetch DB's NOW() once as the single clock source for both fixtures and asOf
+      const [{ db_now: dbNow }] = await sql<{ db_now: Date }[]>`SELECT NOW() AS db_now`;
+
+      // Create an open invoice for gated account using dbNow as the reference
       await sql`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
@@ -419,14 +426,14 @@ describeWithDb("gated account behavior (PLAN_GATING_ENFORCED=true)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_GATED_ACCOUNT_ID}, ${orderId},
           '#GATED-AGING-1', 50000.00, 50000.00, 'open',
-          NOW() - INTERVAL '5 days',
-          NOW() + INTERVAL '25 days',
-          NOW(), NOW()
+          ${dbNow}::timestamptz - INTERVAL '5 days',
+          ${dbNow}::timestamptz + INTERVAL '25 days',
+          ${dbNow}, ${dbNow}
         )
       `;
 
-      // Call the real getShopAgingTotals function
-      const totals = await getShopAgingTotals(sql, TEST_SHOP_ID, new Date());
+      // Call the real getShopAgingTotals function with the same timestamp
+      const totals = await getShopAgingTotals(sql, TEST_SHOP_ID, dbNow);
 
       // Gated account's invoice MUST be in the totals (product rule: gated accounts
       // are never hidden from totals)
@@ -441,7 +448,10 @@ describeWithDb("gated account behavior (PLAN_GATING_ENFORCED=true)", () => {
       const invoiceId = `inv-gated-ledger-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/gated-ledger-${TEST_SUFFIX}`;
 
-      // Create an open invoice for gated account
+      // Fetch DB's NOW() once as the single clock source for both fixtures and asOf
+      const [{ db_now: dbNow }] = await sql<{ db_now: Date }[]>`SELECT NOW() AS db_now`;
+
+      // Create an open invoice for gated account using dbNow as the reference
       await sql`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
@@ -450,14 +460,14 @@ describeWithDb("gated account behavior (PLAN_GATING_ENFORCED=true)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_GATED_ACCOUNT_ID}, ${orderId},
           '#GATED-LEDGER-1', 30000.00, 30000.00, 'open',
-          NOW() - INTERVAL '5 days',
-          NOW() + INTERVAL '25 days',
-          NOW(), NOW()
+          ${dbNow}::timestamptz - INTERVAL '5 days',
+          ${dbNow}::timestamptz + INTERVAL '25 days',
+          ${dbNow}, ${dbNow}
         )
       `;
 
-      // Call the real getBuyerLedger function
-      const { rows, totalCount } = await getBuyerLedger(sql, TEST_SHOP_ID, new Date(), {
+      // Call the real getBuyerLedger function with the same timestamp
+      const { rows, totalCount } = await getBuyerLedger(sql, TEST_SHOP_ID, dbNow, {
         limit: 100,
         offset: 0,
         sortBy: "outstanding",
@@ -479,7 +489,10 @@ describeWithDb("gated account behavior (PLAN_GATING_ENFORCED=true)", () => {
       const orderId1 = `gid://shopify/Order/gated-list1-${TEST_SUFFIX}`;
       const orderId2 = `gid://shopify/Order/gated-list2-${TEST_SUFFIX}`;
 
-      // Create multiple open invoices for gated account
+      // Fetch DB's NOW() once as the single clock source for both fixtures and asOf
+      const [{ db_now: dbNow }] = await sql<{ db_now: Date }[]>`SELECT NOW() AS db_now`;
+
+      // Create multiple open invoices for gated account using dbNow as the reference
       await sql`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
@@ -488,18 +501,18 @@ describeWithDb("gated account behavior (PLAN_GATING_ENFORCED=true)", () => {
         VALUES 
           (${invoiceId1}, ${TEST_SHOP_ID}, ${TEST_GATED_ACCOUNT_ID}, ${orderId1},
            '#GATED-LIST-1', 15000.00, 15000.00, 'open',
-           NOW() - INTERVAL '10 days', NOW() + INTERVAL '20 days', NOW(), NOW()),
+           ${dbNow}::timestamptz - INTERVAL '10 days', ${dbNow}::timestamptz + INTERVAL '20 days', ${dbNow}, ${dbNow}),
           (${invoiceId2}, ${TEST_SHOP_ID}, ${TEST_GATED_ACCOUNT_ID}, ${orderId2},
            '#GATED-LIST-2', 25000.00, 25000.00, 'open',
-           NOW() - INTERVAL '5 days', NOW() + INTERVAL '25 days', NOW(), NOW())
+           ${dbNow}::timestamptz - INTERVAL '5 days', ${dbNow}::timestamptz + INTERVAL '25 days', ${dbNow}, ${dbNow})
       `;
 
-      // Call the real getBuyerInvoices function
+      // Call the real getBuyerInvoices function with the same timestamp
       const { rows, totalCount } = await getBuyerInvoices(
         sql,
         TEST_SHOP_ID,
         TEST_GATED_ACCOUNT_ID,
-        new Date(),
+        dbNow,
         { limit: 100, offset: 0 }
       );
 
@@ -521,7 +534,10 @@ describeWithDb("gated account behavior (PLAN_GATING_ENFORCED=true)", () => {
       const invoiceId = `inv-gated-overdue-aging-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/gated-overdue-aging-${TEST_SUFFIX}`;
 
-      // Create an overdue invoice for gated account (31-60 days bucket)
+      // Fetch DB's NOW() once as the single clock source for both fixtures and asOf
+      const [{ db_now: dbNow }] = await sql<{ db_now: Date }[]>`SELECT NOW() AS db_now`;
+
+      // Create an overdue invoice for gated account (31-60 days bucket) using dbNow as the reference
       await sql`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
@@ -530,14 +546,14 @@ describeWithDb("gated account behavior (PLAN_GATING_ENFORCED=true)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_GATED_ACCOUNT_ID}, ${orderId},
           '#GATED-OVERDUE-AGING-1', 45000.00, 45000.00, 'open',
-          NOW() - INTERVAL '60 days',
-          NOW() - INTERVAL '45 days',
-          NOW(), NOW()
+          ${dbNow}::timestamptz - INTERVAL '60 days',
+          ${dbNow}::timestamptz - INTERVAL '45 days',
+          ${dbNow}, ${dbNow}
         )
       `;
 
-      // Call the real getShopAgingTotals function
-      const totals = await getShopAgingTotals(sql, TEST_SHOP_ID, new Date());
+      // Call the real getShopAgingTotals function with the same timestamp
+      const totals = await getShopAgingTotals(sql, TEST_SHOP_ID, dbNow);
 
       // Gated account's overdue invoice MUST be in totals and overdue buckets
       expect(totals.totalByCurrency["INR"]).toBeDefined();
@@ -736,7 +752,10 @@ describeWithDb("gated account behavior (PLAN_GATING_ENFORCED=true)", () => {
       const invoiceId = `inv-nongated-control-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/nongated-control-${TEST_SUFFIX}`;
 
-      // Create overdue invoice for non-gated account
+      // Fetch DB's NOW() once as the single clock source for both fixtures and asOf
+      const [{ db_now: dbNow }] = await sql<{ db_now: Date }[]>`SELECT NOW() AS db_now`;
+
+      // Create overdue invoice for non-gated account using dbNow as the reference
       await sql`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
@@ -745,9 +764,9 @@ describeWithDb("gated account behavior (PLAN_GATING_ENFORCED=true)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_NONGATED_ACCOUNT_ID}, ${orderId},
           '#NONGATED-CONTROL-1', 40000.00, 40000.00, 'open',
-          NOW() - INTERVAL '10 days',
-          NOW() - INTERVAL '5 days',
-          NOW(), NOW()
+          ${dbNow}::timestamptz - INTERVAL '10 days',
+          ${dbNow}::timestamptz - INTERVAL '5 days',
+          ${dbNow}, ${dbNow}
         )
       `;
 
@@ -757,12 +776,12 @@ describeWithDb("gated account behavior (PLAN_GATING_ENFORCED=true)", () => {
       expect(result.newHold).toBe(true);
       expect(result.metafieldWritten).toBe(true);
 
-      // Should appear in aging totals
-      const totals = await getShopAgingTotals(sql, TEST_SHOP_ID, new Date());
+      // Should appear in aging totals (using same dbNow timestamp)
+      const totals = await getShopAgingTotals(sql, TEST_SHOP_ID, dbNow);
       expect(BigInt(totals.totalByCurrency["INR"])).toBe(4000000n);
 
-      // Should appear in buyer ledger
-      const { rows } = await getBuyerLedger(sql, TEST_SHOP_ID, new Date(), {
+      // Should appear in buyer ledger (using same dbNow timestamp)
+      const { rows } = await getBuyerLedger(sql, TEST_SHOP_ID, dbNow, {
         limit: 100,
         offset: 0,
         sortBy: "outstanding",

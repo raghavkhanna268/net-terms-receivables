@@ -24,7 +24,7 @@ describe("getRequiredPlanForFeature", () => {
   it("derives required plan from entitlements.ts", () => {
     expect(getRequiredPlanForFeature("aging_dashboard")).toBe("free");
     expect(getRequiredPlanForFeature("matching")).toBe("starter");
-    expect(getRequiredPlanForFeature("credit_holds")).toBe("growth");
+    expect(getRequiredPlanForFeature("pdf_statements")).toBe("growth");
     expect(getRequiredPlanForFeature("audit_export")).toBe("scale");
   });
 
@@ -33,6 +33,11 @@ describe("getRequiredPlanForFeature", () => {
       const plan = getRequiredPlanForFeature(feature);
       expect(ALL_PLAN_KEYS).toContain(plan);
     }
+  });
+
+  it("credit_holds is available on free plan (all-plans feature)", () => {
+    // credit_holds must never be shown as requiring an upgrade
+    expect(getRequiredPlanForFeature("credit_holds")).toBe("free");
   });
 });
 
