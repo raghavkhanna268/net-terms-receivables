@@ -62,6 +62,7 @@ export type EligibilityReason =
   | "shopify_payment_terms"      // (a) Order has Shopify paymentTerms
   | "company_account_terms"      // (b) CompanyLocation has active account with terms
   | "tagged_customer"            // (c) Customer matches a tag rule
+  | "status_missing"             // Financial status is null/undefined (data incomplete)
   | "ineligible_status"          // Financial status not in eligible list
   | "terminal_status"            // Financial status indicates paid/refunded
   | "no_buyer_account"           // No matching buyer account found
@@ -451,11 +452,19 @@ export async function checkOrderEligibility(
   }
 
   // Check for eligible financial status
+  // Distinguish between null (data incomplete) and actual ineligible status
   if (!isEligibleFinancialStatus(status)) {
+    if (status === null || status === undefined) {
+      return {
+        eligible: false,
+        reason: "status_missing",
+        explanation: "Order has null displayFinancialStatus - data incomplete",
+      };
+    }
     return {
       eligible: false,
       reason: "ineligible_status",
-      explanation: `Order has status '${status ?? "null"}' - not eligible (requires PENDING, PARTIALLY_PAID, or AUTHORIZED)`,
+      explanation: `Order has status '${status}' - not eligible (requires PENDING, PARTIALLY_PAID, or AUTHORIZED)`,
     };
   }
 
