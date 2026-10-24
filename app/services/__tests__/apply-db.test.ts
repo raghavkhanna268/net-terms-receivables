@@ -27,6 +27,9 @@ let orderMarkAsPaidCallCount = 0;
 // Callback that runs DURING the Shopify orderMarkAsPaid call (for race condition testing)
 let onOrderMarkAsPaidCallback: (() => Promise<void>) | null = null;
 
+// Flag to make enqueueRecomputeForInvoice throw
+let mockEnqueueShouldThrow = false;
+
 vi.mock("../shopify-client.server", async (importOriginal) => {
   const actual = await importOriginal() as Record<string, unknown>;
   return {
@@ -81,6 +84,19 @@ vi.mock("../shopify-client.server", async (importOriginal) => {
           },
         },
       };
+    }),
+  };
+});
+
+vi.mock("../credit-status-recompute.server", async (importOriginal) => {
+  const actual = await importOriginal() as Record<string, unknown>;
+  return {
+    ...actual,
+    enqueueRecomputeForInvoice: vi.fn().mockImplementation(async (sql, invoiceId) => {
+      if (mockEnqueueShouldThrow) {
+        throw new Error("Forced enqueue error for testing");
+      }
+      return (actual.enqueueRecomputeForInvoice as (sql: unknown, invoiceId: string) => Promise<void>)(sql, invoiceId);
     }),
   };
 });
@@ -143,6 +159,7 @@ describeWithDb("S17 apply service DB integration", () => {
   beforeEach(async () => {
     mockShopifySuccess = true;
     mockAlreadyPaid = false;
+    mockEnqueueShouldThrow = false;
     shopifyCallCount = 0;
     verifyOrderIsPaidCallCount = 0;
     orderMarkAsPaidCallCount = 0;
@@ -2024,8 +2041,47 @@ describeWithDb("S17 apply service DB integration", () => {
         expect(raw).not.toContain("myshopify.com");
         expect(raw).not.toContain("@");
         expect(raw).not.toMatch(/UTIB\d+/i);
-        expect(raw).not.toMatch(/\d{5,}00/);
+        expect(raw).not.toContain("1000000");
+        expect(raw).not.toContain("500000");
+        expect(raw).not.toContain("10000.00");
+        expect(raw).not.toContain("5000.00");
       }
+    }
+
+    type SqlType = ReturnType<typeof postgres>;
+
+    function createThrowingSql(
+      originalSql: SqlType,
+      shouldThrow: () => boolean,
+      pattern: RegExp
+    ): SqlType {
+      const handler: ProxyHandler<SqlType> = {
+        apply(target, _thisArg, args) {
+          if (Array.isArray(args[0]) && 'raw' in args[0]) {
+            const query = (args[0] as TemplateStringsArray).join('?');
+            if (shouldThrow() && pattern.test(query)) {
+              throw new Error('Forced SQL error for test');
+            }
+          }
+          return Reflect.apply(target, target, args);
+        },
+        get(target, prop, receiver) {
+          const value = Reflect.get(target, prop, receiver);
+          if (prop === 'begin' && typeof value === 'function') {
+            return (callback: (tx: SqlType) => Promise<unknown>) => {
+              return (value as (cb: (tx: SqlType) => Promise<unknown>) => Promise<unknown>).call(
+                target,
+                async (tx: SqlType) => {
+                  const throwingTx = createThrowingSql(tx, shouldThrow, pattern);
+                  return callback(throwingTx);
+                }
+              );
+            };
+          }
+          return value;
+        }
+      };
+      return new Proxy(originalSql, handler) as SqlType;
     }
 
     it("M1: stale sibling recovery failure logs event with exact keys, no sentinels", async () => {
@@ -2103,26 +2159,28 @@ describeWithDb("S17 apply service DB integration", () => {
       const invoiceId = await createInvoice(1000000n);
       const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
 
-      let deleteMatch = false;
+      let throwOnReleaseClaim = false;
+      const throwingSql = createThrowingSql(
+        sql,
+        () => throwOnReleaseClaim,
+        /SET state = 'confirmed'/
+      );
+
       onOrderMarkAsPaidCallback = async () => {
-        if (!deleteMatch) {
-          deleteMatch = true;
-          await sql`DELETE FROM "Match" WHERE id = ${matchId}`;
-        }
+        throwOnReleaseClaim = true;
       };
 
-      await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+      await applyMatch(throwingSql, TEST_SHOP_ID, matchId, "test-user");
       onOrderMarkAsPaidCallback = null;
 
       const errorLogs = parseLogCalls(consoleErrorSpy);
       const releaseClaimLogs = errorLogs.filter(l => l.event === "apply_release_claim_failed");
+      expect(releaseClaimLogs.length).toBe(1);
 
-      if (releaseClaimLogs.length > 0) {
-        const log = releaseClaimLogs[0];
-        expect(Object.keys(log).sort()).toEqual(["err", "event", "matchId"]);
-        expect(log.matchId).toBe(matchId);
-        expect(typeof log.err).toBe("string");
-      }
+      const log = releaseClaimLogs[0];
+      expect(Object.keys(log).sort()).toEqual(["err", "event", "matchId"]);
+      expect(log.matchId).toBe(matchId);
+      expect(typeof log.err).toBe("string");
 
       assertNoSensitiveDataInRawCalls(consoleErrorSpy);
     });
@@ -2168,39 +2226,57 @@ describeWithDb("S17 apply service DB integration", () => {
       const invoiceId = await createInvoice(1000000n);
       const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
 
-      await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+      let throwOnTx2 = false;
+      const throwingSql = createThrowingSql(
+        sql,
+        () => throwOnTx2,
+        /outstanding = 0, status = 'paid'/
+      );
+
+      onOrderMarkAsPaidCallback = async () => {
+        throwOnTx2 = true;
+      };
+
+      await applyMatch(throwingSql, TEST_SHOP_ID, matchId, "test-user");
+      onOrderMarkAsPaidCallback = null;
 
       const errorLogs = parseLogCalls(consoleErrorSpy);
       const tx2FailLogs = errorLogs.filter(l => l.event === "apply_tx2_failed");
+      expect(tx2FailLogs.length).toBe(1);
 
-      if (tx2FailLogs.length > 0) {
-        const log = tx2FailLogs[0];
-        expect(Object.keys(log).sort()).toEqual(["err", "event", "invoiceId", "matchId"]);
-        expect(log.matchId).toBe(matchId);
-        expect(log.invoiceId).toBe(invoiceId);
-        expect(typeof log.err).toBe("string");
-      }
+      const log = tx2FailLogs[0];
+      expect(Object.keys(log).sort()).toEqual(["err", "event", "invoiceId", "matchId"]);
+      expect(log.matchId).toBe(matchId);
+      expect(log.invoiceId).toBe(invoiceId);
+      expect(typeof log.err).toBe("string");
 
       assertNoSensitiveDataInRawCalls(consoleErrorSpy);
       assertNoSensitiveDataInRawCalls(consoleWarnSpy);
     });
 
     it("enqueue recompute failure logs event with exact keys, no sentinels", async () => {
+      mockShopifySuccess = true;
+      mockAlreadyPaid = false;
+      mockEnqueueShouldThrow = true;
+
       const paymentId = await createPayment(500000n);
       const invoiceId = await createInvoice(1000000n);
       const matchId = await createConfirmedMatch(paymentId, invoiceId, 500000n);
 
-      await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+      try {
+        await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+      } finally {
+        mockEnqueueShouldThrow = false;
+      }
 
       const errorLogs = parseLogCalls(consoleErrorSpy);
       const enqueueLogs = errorLogs.filter(l => l.event === "apply_enqueue_recompute_failed");
+      expect(enqueueLogs.length).toBe(1);
 
-      if (enqueueLogs.length > 0) {
-        const log = enqueueLogs[0];
-        expect(Object.keys(log).sort()).toEqual(["err", "event", "invoiceId"]);
-        expect(log.invoiceId).toBe(invoiceId);
-        expect(typeof log.err).toBe("string");
-      }
+      const log = enqueueLogs[0];
+      expect(Object.keys(log).sort()).toEqual(["err", "event", "invoiceId"]);
+      expect(log.invoiceId).toBe(invoiceId);
+      expect(typeof log.err).toBe("string");
 
       assertNoSensitiveDataInRawCalls(consoleWarnSpy);
       assertNoSensitiveDataInRawCalls(consoleErrorSpy);

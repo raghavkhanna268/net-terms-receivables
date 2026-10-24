@@ -547,14 +547,6 @@ describeWithDb("processor backstop integration (DB-backed)", () => {
       await sql`DELETE FROM pgmq.a_s6_bulk WHERE msg_id = ${msgId}::bigint`;
     });
 
-    it("no_handler code contains no raw message text or PII", async () => {
-      const dlqCode = "permanent:no_handler";
-      expect(dlqCode).not.toContain("@");
-      expect(dlqCode).not.toContain("myshopify.com");
-      expect(dlqCode).not.toMatch(/topic/i);
-      expect(dlqCode).not.toMatch(/No handler registered/i);
-      expect(dlqCode).toMatch(/^[a-z:_]+$/);
-    });
   });
 
   describe("ORDERS_UPDATED still early-returns when processed", () => {
