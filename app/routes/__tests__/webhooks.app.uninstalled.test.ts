@@ -264,7 +264,7 @@ describe("webhooks.app.uninstalled", () => {
       expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
       expect(mockMarkShopUninstalled).not.toHaveBeenCalled();
       expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("Ignoring unexpected topic")
+        expect.stringContaining("topic_ignored")
       );
       consoleSpy.mockRestore();
     });
