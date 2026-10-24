@@ -374,7 +374,7 @@ export default function AccountPage() {
 
   return (
     <s-page heading={account.name}>
-      <s-link href="/" slot="backaction">Back to Dashboard</s-link>
+      <s-link href="/" slot="breadcrumbactions">Back to Dashboard</s-link>
 
       {actionData?.success && (
         <s-section>

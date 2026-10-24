@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { Sql } from "~/lib/db-light.server";
 
 /**
@@ -398,86 +398,5 @@ describe("credit-status.server", () => {
   });
 });
 
-/**
- * DB-backed integration tests for credit-status persistence.
- * Uses the CI pgmq Postgres service.
- */
-import postgres from "postgres";
-import { sqlOptions } from "~/lib/db-light.server";
-
-const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
-const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
-
-describeWithDb("credit-status DB integration", () => {
-  let sql: ReturnType<typeof postgres>;
-  const TEST_SUFFIX = Date.now().toString(36) + "-credit";
-  const TEST_SHOP_ID = `shop-credit-${TEST_SUFFIX}`;
-  const TEST_SHOP_DOMAIN = `credit-test-${TEST_SUFFIX}.myshopify.com`;
-  const TEST_ACCOUNT_ID = `acc-credit-${TEST_SUFFIX}`;
-
-  beforeAll(async () => {
-    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
-
-    await sql`
-      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
-      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', NOW(), NOW())
-    `;
-
-    await sql`
-      INSERT INTO "BuyerAccount" (
-        id, "shopId", kind, "companyId", "companyLocationId", name,
-        "creditLimit", "holdState", bypass, "createdAt", "updatedAt"
-      )
-      VALUES (
-        ${TEST_ACCOUNT_ID}, ${TEST_SHOP_ID}, 'COMPANY',
-        ${"co-" + TEST_SUFFIX}, ${"loc-" + TEST_SUFFIX},
-        'Test Credit Account', 100000.00, 'OK', false, NOW(), NOW()
-      )
-    `;
-  });
-
-  afterAll(async () => {
-    await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
-    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
-    await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
-    await sql.end();
-  });
-
-  // TODO(S11): These tests need restructuring to avoid vi.unmock inside test functions
-  // vitest hoists vi.unmock calls to module level, so dynamic unmocking doesn't work
-  // Solution: Create a separate test file without the mock, or use dependency injection
-  it.skip("getCreditStatusDisplay returns correct data from DB", async () => {
-    const { getCreditStatusDisplay } = await import("../credit-status.server");
-
-    const status = await getCreditStatusDisplay(sql as unknown as Sql, TEST_ACCOUNT_ID);
-
-    expect(status).not.toBeNull();
-    expect(status?.creditLimitAmount).toBe(100000);
-    expect(status?.currency).toBe("INR");
-    expect(status?.holdState).toBe("OK");
-    expect(status?.isOnHold).toBe(false);
-  });
-
-  it.skip("exposure calculation includes open invoices", async () => {
-    await sql`
-      INSERT INTO "Invoice" (
-        id, "shopId", "buyerAccountId", name, total, outstanding,
-        status, "issuedAt", "createdAt", "updatedAt"
-      )
-      VALUES (
-        ${"inv-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID},
-        '#TEST-1', 50000.00, 50000.00, 'open', NOW(), NOW(), NOW()
-      )
-    `;
-
-    const { getCreditStatusDisplay } = await import("../credit-status.server");
-
-    const status = await getCreditStatusDisplay(sql as unknown as Sql, TEST_ACCOUNT_ID);
-
-    expect(status).not.toBeNull();
-    expect(status?.exposurePaise.toString()).toBe("5000000");
-    expect(status?.utilizationPercent).toBe(50);
-
-    await sql`DELETE FROM "Invoice" WHERE id = ${"inv-" + TEST_SUFFIX}`;
-  });
-});
+// DB-backed integration tests moved to credit-status-db.test.ts
+// to avoid vitest mock hoisting issues

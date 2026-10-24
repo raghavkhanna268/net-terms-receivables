@@ -338,7 +338,7 @@ export async function updateCreditStatus(
     ? BigInt(Math.round(update.creditLimitAmount * 100))
     : null;
 
-  const { shouldHold: derivedShouldHold, derivedReasonCode, isOverLimit, isOverdue } =
+  const { shouldHold: derivedShouldHold, derivedReasonCode: _derivedReasonCode, isOverLimit, isOverdue } =
     await computeDerivedHoldState(sql, buyerAccountId, creditLimitPaise, exposurePaise);
 
   const effectiveHold = update.manualHold || derivedShouldHold;
