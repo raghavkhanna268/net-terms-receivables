@@ -15,7 +15,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
-import { parseArgs, getBackfillStats, getCandidates, enqueueBackfill, runApply } from "../credit-status-metafield-backfill";
+import { parseArgs, getBackfillStats, getCandidates, enqueueBackfill, runApply, formatFatal, formatDryRunError } from "../credit-status-metafield-backfill";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -65,6 +65,15 @@ describe("parseArgs", () => {
   it("--shop rejects non-numeric value", () => {
     const result = parseArgs(["--apply", "--shop", "abc"]);
     expect(result.error).toContain("must be a positive integer");
+  });
+
+  it("--shop error does not echo the raw value (X3 fix)", () => {
+    const domainLikeValue = "sentinel-shop.myshopify.com";
+    const result = parseArgs(["--apply", "--shop", domainLikeValue]);
+    expect(result.error).toBeDefined();
+    expect(result.error).not.toContain(domainLikeValue);
+    expect(result.error).not.toContain("myshopify");
+    expect(result.error).not.toContain("sentinel");
   });
 
   it("--shop rejects zero or negative", () => {
@@ -605,6 +614,57 @@ describeWithDb("credit-status-metafield-backfill DB integration", () => {
       expect(statsJson).not.toContain(ID_PREFIX);
       expect(statsJson).not.toContain(SEED_ACCOUNT_A_ID);
       expect(statsJson).not.toContain(SEED_ACCOUNT_B_ID);
+    });
+  });
+
+  describe("logging safety (X2, X3)", () => {
+    it("formatFatal returns error type, not message", () => {
+      const sentinelMessage = "SENTINEL_DOMAIN.myshopify.com error with secret@email.com amount=50000";
+      
+      const errorResult = formatFatal(new Error(sentinelMessage));
+      expect(errorResult).toBe("Error");
+      expect(errorResult).not.toContain(sentinelMessage);
+      expect(errorResult).not.toContain("myshopify");
+      expect(errorResult).not.toContain("@");
+      expect(errorResult).not.toContain("amount");
+      
+      class CustomCreditStatusError extends Error {}
+      const customResult = formatFatal(new CustomCreditStatusError(sentinelMessage));
+      expect(customResult).toBe("CustomCreditStatusError");
+      expect(customResult).not.toContain(sentinelMessage);
+      
+      expect(formatFatal("string error")).toBe("string");
+      expect(formatFatal(42)).toBe("number");
+      expect(formatFatal(null)).toBe("object");
+      expect(formatFatal(undefined)).toBe("undefined");
+    });
+
+    it("formatDryRunError returns err=code, not raw message (X3)", () => {
+      const sensitiveError = new Error(
+        "Connection failed for shop sentinel.myshopify.com: secret@example.com amount=999999 ECONNREFUSED"
+      );
+      
+      const output = formatDryRunError(sensitiveError);
+      
+      expect(output).toBe("ERROR: err=connection_refused");
+      expect(output).not.toContain("myshopify");
+      expect(output).not.toContain("@");
+      expect(output).not.toContain("amount");
+      expect(output).not.toContain("999999");
+      expect(output).not.toContain("sentinel");
+      expect(output).not.toContain("Connection failed");
+    });
+
+    it("formatDryRunError produces exactly one ERROR line with err= prefix", () => {
+      const sensitiveError = new Error(
+        "Network error for shop test.myshopify.com: ETIMEDOUT secret@email.com"
+      );
+      
+      const output = formatDryRunError(sensitiveError);
+      const lines = output.split("\n");
+      
+      expect(lines).toHaveLength(1);
+      expect(output).toMatch(/^ERROR: err=[A-Za-z][A-Za-z0-9_]*$/);
     });
   });
 });
