@@ -163,6 +163,7 @@ export async function processOrderWebhook(
         success: false,
         action: "skipped",
         error: eligibility.explanation,
+        errorCode: eligibility.reason,
         retryable: true,
       };
     }

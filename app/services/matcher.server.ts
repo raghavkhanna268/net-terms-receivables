@@ -43,6 +43,7 @@ import {
   getRejectedPairs,
   createRejectedMatch,
 } from "~/lib/matching/queries.server";
+import { safeLog, toErrorCode } from "~/lib/log.server";
 
 /** Amount window multiplier for candidate filtering (0.5x to 2x payment) */
 const AMOUNT_WINDOW_MIN_FACTOR = 0.5;
@@ -142,10 +143,10 @@ export async function runMatcher(
         summary.highConfidenceMatches++;
       }
     } catch (error) {
-      console.error(
-        `[matcher] Error processing payment ${payment.id}:`,
-        error instanceof Error ? error.message : "Unknown error"
-      );
+      safeLog("error", "matcher_payment_processing_failed", {
+        paymentId: payment.id,
+        err: toErrorCode(error),
+      });
       summary.errors++;
       summary.results.push({
         paymentId: payment.id,
@@ -612,10 +613,10 @@ export async function confirmMatch(
       return { success: true };
     });
   } catch (error) {
-    console.error(
-      `[confirmMatch] Error confirming match ${matchId}:`,
-      error instanceof Error ? error.message : "Unknown error"
-    );
+    safeLog("error", "matcher_confirm_failed", {
+      matchId,
+      err: toErrorCode(error),
+    });
     return { success: false, error: "Confirmation failed" };
   }
 }
@@ -712,10 +713,10 @@ export async function rejectMatch(
       return { success: true };
     });
   } catch (error) {
-    console.error(
-      `[rejectMatch] Error rejecting match ${matchId}:`,
-      error instanceof Error ? error.message : "Unknown error"
-    );
+    safeLog("error", "matcher_reject_failed", {
+      matchId,
+      err: toErrorCode(error),
+    });
     return { success: false, error: "Rejection failed" };
   }
 }
@@ -857,10 +858,10 @@ export async function updateMatchAllocation(
       return { success: true };
     });
   } catch (error) {
-    console.error(
-      `[updateMatchAllocation] Error updating match ${matchId}:`,
-      error instanceof Error ? error.message : "Unknown error"
-    );
+    safeLog("error", "matcher_update_allocation_failed", {
+      matchId,
+      err: toErrorCode(error),
+    });
     return { success: false, error: "Update failed" };
   }
 }

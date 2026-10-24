@@ -32,6 +32,7 @@ import type { Sql } from "~/lib/db-light.server";
 import { renderPaymentReminderEmail } from "~/emails/PaymentReminderEmail";
 import { validateTimezone } from "~/lib/aging-dates.server";
 import { DateTime } from "luxon";
+import { safeLog } from "~/lib/log.server";
 
 /**
  * Check if plan gating enforcement is enabled.
@@ -493,7 +494,7 @@ export async function sendPaymentReminder(
   // Gate 1: Check provider config - if missing, ack WITHOUT consuming slot
   // This allows the reminder to fire again once both keys are configured
   if (!isReminderSendingEnabled(env)) {
-    console.info("reminders disabled");
+    safeLog("info", "reminders_disabled", { shopId });
     return {
       success: true, // Ack the message to prevent retry storm
       action: "disabled",
@@ -619,7 +620,7 @@ export async function sendPaymentReminder(
       const isRetryable = isRateLimited || isServerError;
 
       if (isAuthError) {
-        console.error("[reminders] Resend auth error (revoked key?)");
+        safeLog("error", "reminders_auth_error", { shopId, httpStatus: response.status });
       }
 
       // Release reminder slot so it can retry

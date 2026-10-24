@@ -1018,7 +1018,7 @@ async function processSyncQueue(
           S6_QUEUES.SYNC,
           msg.msg_id,
           msg.message,
-          `No handler registered for topic after ${msg.read_ct} reads: ${msg.message.topic}`
+          "no_handler"
         );
         result.deadLettered++;
       } else {
@@ -1173,7 +1173,7 @@ async function processBulkQueue(
           S6_QUEUES.BULK,
           msg.msg_id,
           msg.message,
-          `No handler registered for topic after ${msg.read_ct} reads: ${msg.message.topic}`
+          "no_handler"
         );
         result.deadLettered++;
       } else {

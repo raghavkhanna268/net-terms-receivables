@@ -120,6 +120,7 @@ describe("Payment Reminders (S18)", () => {
   const originalEnv = process.env;
   let mockSql: ReturnType<typeof createMockSql>;
   let consoleInfoSpy: ReturnType<typeof vi.spyOn>;
+  let consoleLogSpy: ReturnType<typeof vi.spyOn>;
   let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
@@ -131,6 +132,7 @@ describe("Payment Reminders (S18)", () => {
     mockFetch.mockReset();
     process.env = { ...originalEnv };
     consoleInfoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
@@ -138,6 +140,7 @@ describe("Payment Reminders (S18)", () => {
     vi.useRealTimers();
     process.env = originalEnv;
     consoleInfoSpy.mockRestore();
+    consoleLogSpy.mockRestore();
     consoleErrorSpy.mockRestore();
   });
 
@@ -227,8 +230,11 @@ describe("Payment Reminders (S18)", () => {
       expect(result.action).toBe("disabled");
       expect(result.skipReason).toContain("reminders disabled");
 
-      // Should log exactly "reminders disabled"
-      expect(consoleInfoSpy).toHaveBeenCalledWith("reminders disabled");
+      // Should log via safeLog (outputs JSON to console.log)
+      // safeLog("info", ...) writes to console.log, not console.info
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("reminders_disabled")
+      );
 
       // Should NOT call fetch (S18-01)
       expect(mockFetch).not.toHaveBeenCalled();
@@ -587,8 +593,9 @@ describe("Payment Reminders (S18)", () => {
 
       expect(result.success).toBe(false);
       expect(result.retryable).toBe(false);
+      // safeLog outputs JSON with event name
       expect(consoleErrorSpy).toHaveBeenCalledWith(
-        expect.stringContaining("Resend auth error")
+        expect.stringContaining("reminders_auth_error")
       );
 
       // Verify cap was released (UPDATE query with GREATEST(0, daily_count - 1))
