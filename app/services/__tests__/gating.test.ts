@@ -612,10 +612,8 @@ describe("Gating Service", () => {
       vi.resetModules();
       const { activeAccountFragment } = await import("../gating.server");
       
-      // The fragment returns a promise-like object; we test that it's callable
       const fragment = activeAccountFragment(mockSql as unknown as Sql);
       expect(fragment).toBeDefined();
-      // When gating is OFF, the mock SQL should receive TRUE
     });
 
     it("returns gated_at IS NULL fragment when gating is ON", async () => {
@@ -625,7 +623,6 @@ describe("Gating Service", () => {
       
       const fragment = activeAccountFragment(mockSql as unknown as Sql);
       expect(fragment).toBeDefined();
-      // When gating is ON, the mock SQL should receive gated_at IS NULL
     });
   });
 
@@ -791,5 +788,58 @@ describeWithDb("activeAccountFragment DB integration", () => {
 
     expect(activeAccounts.length).toBe(2);
     expect(gatedAccounts.length).toBe(2);
+  });
+
+  it("isAccountActive correctly identifies gated accounts with gating ON", async () => {
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+    vi.resetModules();
+    const { isAccountActive } = await import("../gating.server");
+
+    // Fetch accounts with gated_at and verify isAccountActive
+    const accounts = await sql<{ id: string; name: string; gated_at: Date | null }[]>`
+      SELECT id, name, gated_at FROM "BuyerAccount"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+    `;
+
+    // Explicit length assertions: exactly 2 active and 2 gated
+    const activeOnes = accounts.filter(a => a.gated_at === null);
+    const gatedOnes = accounts.filter(a => a.gated_at !== null);
+
+    expect(activeOnes.length).toBe(2);
+    expect(gatedOnes.length).toBe(2);
+
+    // Active accounts (gated_at IS NULL) should return true
+    for (const account of activeOnes) {
+      expect(isAccountActive(account.gated_at)).toBe(true);
+    }
+
+    // Gated accounts (gated_at IS NOT NULL) should return false
+    for (const account of gatedOnes) {
+      expect(isAccountActive(account.gated_at)).toBe(false);
+    }
+  });
+
+  it("isAccountActive treats all accounts as active when gating is OFF", async () => {
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+    vi.resetModules();
+    const { isAccountActive } = await import("../gating.server");
+
+    // Fetch all accounts
+    const accounts = await sql<{ id: string; gated_at: Date | null }[]>`
+      SELECT id, gated_at FROM "BuyerAccount"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+    `;
+
+    // Explicit length assertions: 4 total (2 with gated_at NULL, 2 with gated_at set)
+    const withNullGatedAt = accounts.filter(a => a.gated_at === null);
+    const withSetGatedAt = accounts.filter(a => a.gated_at !== null);
+
+    expect(withNullGatedAt.length).toBe(2);
+    expect(withSetGatedAt.length).toBe(2);
+
+    // When gating is OFF, all accounts should be treated as active
+    for (const account of accounts) {
+      expect(isAccountActive(account.gated_at)).toBe(true);
+    }
   });
 });
