@@ -13,6 +13,10 @@ import {
   CUSTOMER_PII_DENYLIST,
   CUSTOMER_PII_ALLOWLIST,
 } from "../validate-graphql-schema";
+import {
+  CUSTOMER_FORBIDDEN_FIELDS,
+  CUSTOMER_OPTIONAL_PII_FIELDS,
+} from "../../app/services/sync/customer-fields.server";
 
 const SCHEMA_PATH = path.join(__dirname, "../../test/fixtures/admin-2026-10.schema.json");
 
@@ -60,7 +64,7 @@ describe("validate-graphql-schema AST validation", () => {
       const errors = validateBulkQueryRulesAST(parsed, "TEST_QUERY");
 
       expect(errors).toHaveLength(1);
-      expect(errors[0].message).toContain("should use edges { node { ... } } pattern");
+      expect(errors.some(e => e.message.includes("should use edges { node { ... } } pattern"))).toBe(true);
     });
 
     it("rejects bulk query with edges but no node", () => {
@@ -77,7 +81,7 @@ describe("validate-graphql-schema AST validation", () => {
       const errors = validateBulkQueryRulesAST(parsed, "TEST_QUERY");
 
       expect(errors).toHaveLength(1);
-      expect(errors[0].message).toContain("has 'edges' but missing 'node'");
+      expect(errors.some(e => e.message.includes("has 'edges' but missing 'node'"))).toBe(true);
     });
 
     it("validates nested connection fields", () => {
@@ -155,8 +159,8 @@ describe("validate-graphql-schema AST validation", () => {
       const errors = validateBulkQueryRulesAST(parsed, "TEST_QUERY");
 
       expect(errors).toHaveLength(1);
-      expect(errors[0].message).toContain("paymentSchedules");
-      expect(errors[0].message).toContain("should use edges { node { ... } } pattern");
+      expect(errors.some(e => e.message.includes("paymentSchedules"))).toBe(true);
+      expect(errors.some(e => e.message.includes("should use edges { node { ... } } pattern"))).toBe(true);
     });
   });
 
@@ -199,7 +203,7 @@ describe("validate-graphql-schema AST validation", () => {
       const schemaErrors = validate(schema, parsed);
 
       expect(schemaErrors.length).toBeGreaterThan(0);
-      expect(schemaErrors[0].message).toContain("Cannot query field");
+      expect(schemaErrors.some(e => e.message.includes("Cannot query field"))).toBe(true);
     });
   });
 
@@ -211,11 +215,19 @@ describe("validate-graphql-schema AST validation", () => {
       expect(CUSTOMER_PII_DENYLIST.Customer.has("firstName")).toBe(true);
       expect(CUSTOMER_PII_DENYLIST.Customer.has("lastName")).toBe(true);
       expect(CUSTOMER_PII_DENYLIST.Customer.has("defaultAddress")).toBe(true);
+      expect(CUSTOMER_PII_DENYLIST.Customer.has("addressesV2")).toBe(true);
+      expect(CUSTOMER_PII_DENYLIST.Customer.has("defaultPhoneNumber")).toBe(true);
     });
 
     it("does NOT contain allowed PII fields", () => {
       expect(CUSTOMER_PII_DENYLIST.Customer.has("email")).toBe(false);
       expect(CUSTOMER_PII_DENYLIST.Customer.has("displayName")).toBe(false);
+    });
+
+    it("stays in sync with CUSTOMER_FORBIDDEN_FIELDS", () => {
+      const denylistFields = Array.from(CUSTOMER_PII_DENYLIST.Customer).sort();
+      const forbiddenFields = [...CUSTOMER_FORBIDDEN_FIELDS].sort();
+      expect(denylistFields).toEqual(forbiddenFields);
     });
   });
 
@@ -232,6 +244,14 @@ describe("validate-graphql-schema AST validation", () => {
       expect(CUSTOMER_PII_ALLOWLIST.has("firstName")).toBe(false);
       expect(CUSTOMER_PII_ALLOWLIST.has("lastName")).toBe(false);
       expect(CUSTOMER_PII_ALLOWLIST.has("defaultAddress")).toBe(false);
+      expect(CUSTOMER_PII_ALLOWLIST.has("addressesV2")).toBe(false);
+      expect(CUSTOMER_PII_ALLOWLIST.has("defaultPhoneNumber")).toBe(false);
+    });
+
+    it("stays in sync with CUSTOMER_OPTIONAL_PII_FIELDS", () => {
+      const allowlistFields = Array.from(CUSTOMER_PII_ALLOWLIST).sort();
+      const optionalPiiFields = [...CUSTOMER_OPTIONAL_PII_FIELDS].sort();
+      expect(allowlistFields).toEqual(optionalPiiFields);
     });
   });
 
@@ -249,8 +269,8 @@ describe("validate-graphql-schema AST validation", () => {
       const errors = checkScopeDenylist(schema, parsed, "TEST_QUERY");
 
       expect(errors.length).toBeGreaterThan(0);
-      expect(errors[0].message).toContain("forbidden PII field");
-      expect(errors[0].message).toContain("phone");
+      expect(errors.some(e => e.message.includes("forbidden PII field"))).toBe(true);
+      expect(errors.some(e => e.message.includes("phone"))).toBe(true);
     });
 
     it("rejects query with Customer.addresses field", () => {
@@ -268,8 +288,8 @@ describe("validate-graphql-schema AST validation", () => {
       const errors = checkScopeDenylist(schema, parsed, "TEST_QUERY");
 
       expect(errors.length).toBeGreaterThan(0);
-      expect(errors[0].message).toContain("forbidden PII field");
-      expect(errors[0].message).toContain("addresses");
+      expect(errors.some(e => e.message.includes("forbidden PII field"))).toBe(true);
+      expect(errors.some(e => e.message.includes("addresses"))).toBe(true);
     });
 
     it("rejects query with Customer.firstName field", () => {
@@ -285,8 +305,8 @@ describe("validate-graphql-schema AST validation", () => {
       const errors = checkScopeDenylist(schema, parsed, "TEST_QUERY");
 
       expect(errors.length).toBeGreaterThan(0);
-      expect(errors[0].message).toContain("forbidden PII field");
-      expect(errors[0].message).toContain("firstName");
+      expect(errors.some(e => e.message.includes("forbidden PII field"))).toBe(true);
+      expect(errors.some(e => e.message.includes("firstName"))).toBe(true);
     });
 
     it("rejects query with Customer.lastName field", () => {
@@ -302,8 +322,8 @@ describe("validate-graphql-schema AST validation", () => {
       const errors = checkScopeDenylist(schema, parsed, "TEST_QUERY");
 
       expect(errors.length).toBeGreaterThan(0);
-      expect(errors[0].message).toContain("forbidden PII field");
-      expect(errors[0].message).toContain("lastName");
+      expect(errors.some(e => e.message.includes("forbidden PII field"))).toBe(true);
+      expect(errors.some(e => e.message.includes("lastName"))).toBe(true);
     });
 
     it("rejects query with Customer.defaultAddress field", () => {
@@ -321,8 +341,8 @@ describe("validate-graphql-schema AST validation", () => {
       const errors = checkScopeDenylist(schema, parsed, "TEST_QUERY");
 
       expect(errors.length).toBeGreaterThan(0);
-      expect(errors[0].message).toContain("forbidden PII field");
-      expect(errors[0].message).toContain("defaultAddress");
+      expect(errors.some(e => e.message.includes("forbidden PII field"))).toBe(true);
+      expect(errors.some(e => e.message.includes("defaultAddress"))).toBe(true);
     });
 
     it("ALLOWS query with Customer.email field", () => {
@@ -376,7 +396,49 @@ describe("validate-graphql-schema AST validation", () => {
       const errors = checkScopeDenylist(schema, parsed, "BULK_QUERY");
 
       expect(errors.length).toBeGreaterThan(0);
-      expect(errors[0].message).toContain("forbidden PII field");
+      expect(errors.some(e => e.message.includes("forbidden PII field"))).toBe(true);
+    });
+
+    it("rejects query with Customer.addressesV2 field", () => {
+      const query = `
+        query CustomerWithAddressesV2($id: ID!) {
+          customer(id: $id) {
+            id
+            addressesV2(first: 10) {
+              edges {
+                node {
+                  id
+                }
+              }
+            }
+          }
+        }
+      `;
+      const parsed = parse(query);
+      const errors = checkScopeDenylist(schema, parsed, "TEST_QUERY");
+
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors.some(e => e.message.includes("forbidden PII field"))).toBe(true);
+      expect(errors.some(e => e.message.includes("addressesV2"))).toBe(true);
+    });
+
+    it("rejects query with Customer.defaultPhoneNumber field", () => {
+      const query = `
+        query CustomerWithDefaultPhoneNumber($id: ID!) {
+          customer(id: $id) {
+            id
+            defaultPhoneNumber {
+              phoneNumber
+            }
+          }
+        }
+      `;
+      const parsed = parse(query);
+      const errors = checkScopeDenylist(schema, parsed, "TEST_QUERY");
+
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors.some(e => e.message.includes("forbidden PII field"))).toBe(true);
+      expect(errors.some(e => e.message.includes("defaultPhoneNumber"))).toBe(true);
     });
   });
 });

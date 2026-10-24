@@ -101,13 +101,23 @@ export const CONNECTION_FIELDS = [
  *
  * Phone and address fields are NEVER fetched, regardless of approval level.
  * These fields are not needed for net-terms functionality.
+ * Includes V2 API variants (addressesV2, defaultPhoneNumber) that expose
+ * the same PII data under different field names.
  *
  * Uses for allowed PII fields:
  * - S8: Labels in buyer account UI
  * - S16: Payment matching against bank statement payer names
  * - S18: Payment reminder emails
  *
+ * NOTE: This gate covers only the Customer type. Order/DraftOrder/CompanyLocation
+ * address fields (shippingAddress, billingAddress) are allowed when fetching only
+ * non-PII subfields (e.g., billingAddress.companyName for display names).
+ * See bulk-operations.server.ts and admin-client.server.ts for usage.
+ *
  * Format: { parentType: Set<fieldName> }
+ *
+ * IMPORTANT: Must stay in sync with CUSTOMER_FORBIDDEN_FIELDS in customer-fields.server.ts.
+ * The test suite validates these lists are equal.
  *
  * @see app/services/sync/customer-fields.server.ts for the authoritative list
  */
@@ -118,12 +128,17 @@ export const CUSTOMER_PII_DENYLIST: Record<string, Set<string>> = {
     "firstName",
     "lastName",
     "defaultAddress",
+    "addressesV2",
+    "defaultPhoneNumber",
   ]),
 };
 
 /**
  * CUSTOMER PII ALLOWLIST: The ONLY optional PII fields that may be fetched.
  * When CUSTOMER_PII_FIELDS=1, only these fields are allowed in addition to base fields.
+ *
+ * IMPORTANT: Must stay in sync with CUSTOMER_OPTIONAL_PII_FIELDS in customer-fields.server.ts.
+ * The test suite validates these lists are equal.
  *
  * @see app/services/sync/customer-fields.server.ts CUSTOMER_OPTIONAL_PII_FIELDS
  */
@@ -294,6 +309,34 @@ const NEGATIVE_FIXTURES = {
       customer(id: $id) {
         id
         firstName
+      }
+    }`,
+    expectedError: "forbidden PII field",
+  },
+  customerPiiAddressesV2: {
+    name: "NEGATIVE_TEST_CUSTOMER_PII_ADDRESSES_V2",
+    source: `query CustomerWithAddressesV2($id: ID!) {
+      customer(id: $id) {
+        id
+        addressesV2(first: 10) {
+          edges {
+            node {
+              id
+            }
+          }
+        }
+      }
+    }`,
+    expectedError: "forbidden PII field",
+  },
+  customerPiiDefaultPhoneNumber: {
+    name: "NEGATIVE_TEST_CUSTOMER_PII_DEFAULT_PHONE_NUMBER",
+    source: `query CustomerWithDefaultPhoneNumber($id: ID!) {
+      customer(id: $id) {
+        id
+        defaultPhoneNumber {
+          phoneNumber
+        }
       }
     }`,
     expectedError: "forbidden PII field",
@@ -1003,6 +1046,56 @@ function runSelfTests(schema: GraphQLSchema): boolean {
       console.log(`  ❌ SELF-TEST FAILED: customerPiiFirstName - wrong error type`);
       console.log(`     Expected: ${NEGATIVE_FIXTURES.customerPiiFirstName.expectedError}`);
       console.log(`     Got: ${piiFirstNameErrors[0].message}`);
+      allPassed = false;
+    }
+  }
+
+  // Test customer PII denylist: addressesV2 field
+  const piiAddressesV2Doc: GraphQLDocument = {
+    name: NEGATIVE_FIXTURES.customerPiiAddressesV2.name,
+    source: NEGATIVE_FIXTURES.customerPiiAddressesV2.source,
+    filePath: "<self-test>",
+  };
+
+  const piiAddressesV2Errors = validateDocument(schema, piiAddressesV2Doc);
+  if (piiAddressesV2Errors.length === 0) {
+    console.log(`  ❌ SELF-TEST FAILED: customerPiiAddressesV2 - expected error but got none`);
+    allPassed = false;
+  } else {
+    const hasExpectedError = piiAddressesV2Errors.some((e) =>
+      e.message.includes(NEGATIVE_FIXTURES.customerPiiAddressesV2.expectedError)
+    );
+    if (hasExpectedError) {
+      console.log(`  ✓ customerPiiAddressesV2: correctly detected error`);
+    } else {
+      console.log(`  ❌ SELF-TEST FAILED: customerPiiAddressesV2 - wrong error type`);
+      console.log(`     Expected: ${NEGATIVE_FIXTURES.customerPiiAddressesV2.expectedError}`);
+      console.log(`     Got: ${piiAddressesV2Errors[0].message}`);
+      allPassed = false;
+    }
+  }
+
+  // Test customer PII denylist: defaultPhoneNumber field
+  const piiDefaultPhoneNumberDoc: GraphQLDocument = {
+    name: NEGATIVE_FIXTURES.customerPiiDefaultPhoneNumber.name,
+    source: NEGATIVE_FIXTURES.customerPiiDefaultPhoneNumber.source,
+    filePath: "<self-test>",
+  };
+
+  const piiDefaultPhoneNumberErrors = validateDocument(schema, piiDefaultPhoneNumberDoc);
+  if (piiDefaultPhoneNumberErrors.length === 0) {
+    console.log(`  ❌ SELF-TEST FAILED: customerPiiDefaultPhoneNumber - expected error but got none`);
+    allPassed = false;
+  } else {
+    const hasExpectedError = piiDefaultPhoneNumberErrors.some((e) =>
+      e.message.includes(NEGATIVE_FIXTURES.customerPiiDefaultPhoneNumber.expectedError)
+    );
+    if (hasExpectedError) {
+      console.log(`  ✓ customerPiiDefaultPhoneNumber: correctly detected error`);
+    } else {
+      console.log(`  ❌ SELF-TEST FAILED: customerPiiDefaultPhoneNumber - wrong error type`);
+      console.log(`     Expected: ${NEGATIVE_FIXTURES.customerPiiDefaultPhoneNumber.expectedError}`);
+      console.log(`     Got: ${piiDefaultPhoneNumberErrors[0].message}`);
       allPassed = false;
     }
   }
