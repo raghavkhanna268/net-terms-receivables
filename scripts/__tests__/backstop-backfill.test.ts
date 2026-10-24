@@ -13,6 +13,7 @@
  * - Second --apply run is a no-op (already processed)
  * - evaluateBackstop decision equals applyBackstop outcome
  * - parseArgs rejects flag used as value (e.g. --shop --apply)
+ * - Dry-run runs reads inside READ ONLY transaction (assertReadOnlyTransaction)
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import postgres from "postgres";
@@ -20,7 +21,7 @@ import { sqlOptions } from "~/lib/db-light.server";
 import { requestContext } from "~/lib/request-context.server";
 import { _resetShopifyAppForTesting } from "~/shopify.server";
 import { setAbstractFetchFunc } from "@shopify/shopify-api/runtime";
-import { findCandidates, hasOfflineSession, processBackfill, parseArgs } from "../backstop-backfill";
+import { findCandidates, hasOfflineSession, processBackfill, parseArgs, assertReadOnlyTransaction } from "../backstop-backfill";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -938,6 +939,126 @@ describeWithDb("scripts/backstop-backfill", () => {
         WHERE shop_id = ${TEST_SHOP_ID} AND order_gid = ${ORDER_GID}
       `;
       expect(row.action).toBe("held");
+    });
+  });
+
+  describe("assertReadOnlyTransaction", () => {
+    it("passes inside a READ ONLY transaction", async () => {
+      await sql.begin("read only", async (tx) => {
+        await expect(assertReadOnlyTransaction(tx)).resolves.toBeUndefined();
+      });
+    });
+
+    it("throws outside a READ ONLY transaction", async () => {
+      await expect(assertReadOnlyTransaction(sql)).rejects.toThrow(
+        "Dry-run safety check failed: transaction_read_only is not 'on'"
+      );
+    });
+
+    it("throws inside a normal (read-write) transaction", async () => {
+      await sql.begin(async (tx) => {
+        await expect(assertReadOnlyTransaction(tx)).rejects.toThrow(
+          "Dry-run safety check failed: transaction_read_only is not 'on'"
+        );
+      });
+    });
+  });
+
+  describe("dry-run read-only transaction safety", () => {
+    it("writes are rejected inside READ ONLY transaction with SQLSTATE 25006", async () => {
+      let caughtError: { code?: string } | null = null;
+
+      try {
+        await sql.begin("read only", async (tx) => {
+          await tx`CREATE TEMP TABLE _test_dryrun_write (id int)`;
+        });
+      } catch (e) {
+        caughtError = e as { code?: string };
+      }
+
+      expect(caughtError).not.toBeNull();
+      expect(caughtError!.code).toBe("25006");
+    });
+
+    it("findCandidates works inside a READ ONLY transaction", async () => {
+      const WINDOW_START = new Date("2026-10-01T00:00:00Z");
+      const WINDOW_END = new Date("2026-10-31T23:59:59Z");
+
+      await sql.begin("read only", async (tx) => {
+        await assertReadOnlyTransaction(tx);
+        const candidates = await findCandidates(tx, WINDOW_START, WINDOW_END, TEST_SHOP_DOMAIN);
+        expect(Array.isArray(candidates)).toBe(true);
+      });
+    });
+
+    it("hasOfflineSession works inside a READ ONLY transaction", async () => {
+      await sql.begin("read only", async (tx) => {
+        await assertReadOnlyTransaction(tx);
+        const has = await hasOfflineSession(tx, TEST_SHOP_DOMAIN);
+        expect(typeof has).toBe("boolean");
+      });
+    });
+
+    it("processBackfill dry-run works inside a READ ONLY transaction", async () => {
+      const HELD_ACCOUNT_ID = `acc-readonly-test-${Date.now().toString(36)}`;
+      const ORDER_GID = `gid://shopify/Order/readonly-test-${Date.now().toString(36)}`;
+      const INVOICE_ID = `inv-readonly-test-${Date.now().toString(36)}`;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "companyId", "companyLocationId", name,
+          "creditLimit", "holdState", bypass, "manualHold", "holdReasonCode",
+          "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${HELD_ACCOUNT_ID}, ${TEST_SHOP_ID}, 'COMPANY',
+          ${"co-readonly-" + Date.now().toString(36)}, ${"loc-readonly-" + Date.now().toString(36)},
+          'Read Only Test Account', 100000.00, 'HELD', false, true, 'MANUAL_HOLD',
+          NOW(), NOW()
+        )
+      `;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${INVOICE_ID}, ${TEST_SHOP_ID}, ${HELD_ACCOUNT_ID}, ${ORDER_GID},
+          '#READONLY-TEST', 50000.00, 50000.00, 'open', NOW(), NOW(), NOW()
+        )
+      `;
+
+      await sql`
+        INSERT INTO "Session" (id, shop, state, "isOnline", scope, "accessToken", expires)
+        VALUES (${"offline_readonly_" + TEST_SHOP_DOMAIN}, ${TEST_SHOP_DOMAIN}, 'state', false, 'read_products', 'shpat_readonly_token', ${new Date(Date.now() + 3600000).toISOString()})
+        ON CONFLICT (id) DO NOTHING
+      `;
+
+      try {
+        await sql.begin("read only", async (tx) => {
+          await assertReadOnlyTransaction(tx);
+
+          const candidates = [{
+            invoiceId: INVOICE_ID,
+            orderId: ORDER_GID,
+            shopId: TEST_SHOP_ID,
+            shopDomain: TEST_SHOP_DOMAIN,
+            buyerAccountId: HELD_ACCOUNT_ID,
+          }];
+
+          const result = await requestContext.run({ getSql: () => tx }, async () => {
+            return processBackfill(tx, candidates, true);
+          });
+
+          expect(result.candidates).toBe(1);
+          expect(result.wouldHold + result.wouldSkip).toBeGreaterThanOrEqual(1);
+        });
+      } finally {
+        await sql`DELETE FROM "Invoice" WHERE id = ${INVOICE_ID}`;
+        await sql`DELETE FROM "BuyerAccount" WHERE id = ${HELD_ACCOUNT_ID}`;
+        await sql`DELETE FROM "Session" WHERE id = ${"offline_readonly_" + TEST_SHOP_DOMAIN}`;
+      }
     });
   });
 });
