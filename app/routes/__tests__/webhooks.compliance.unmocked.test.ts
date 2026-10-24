@@ -92,7 +92,7 @@ const mockGenerateCustomerDataExport = vi.fn().mockResolvedValue({
   customerGid: "gid://shopify/Customer/456",
   requestId: "req-123",
   requestedAt: new Date().toISOString(),
-  data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [] },
+  data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [], paymentMatches: [] },
 });
 const mockPersistDataRequest = vi.fn().mockResolvedValue({ id: "dr-1", alreadyExists: false });
 const mockPurgeExpiredDataRequests = vi.fn().mockResolvedValue(0);

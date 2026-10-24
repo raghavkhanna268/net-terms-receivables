@@ -190,7 +190,8 @@ describe("compliance.server", () => {
   });
 
   describe("generateCustomerDataExport", () => {
-    it("generates export for known customer with data", async () => {
+    it("generates export for known customer with data including payment matches", async () => {
+      // 1. SELECT s8_tagged_customers
       mockSql.mockResolvedValueOnce([{
         tags: ["net-terms"],
         tag_active: true,
@@ -198,6 +199,7 @@ describe("compliance.server", () => {
         display_name: "Test Customer",
         created_at: new Date("2026-01-01"),
       }]);
+      // 2. SELECT s8_draft_orders
       mockSql.mockResolvedValueOnce([{
         id: "do-1",
         name: "#D1",
@@ -205,6 +207,7 @@ describe("compliance.server", () => {
         status: "open",
         created_at: new Date("2026-01-15"),
       }]);
+      // 3. SELECT BuyerAccount
       mockSql.mockResolvedValueOnce([{
         id: "ba-1",
         name: "Test Customer",
@@ -213,6 +216,7 @@ describe("compliance.server", () => {
         defaultTermsDays: 30,
         holdState: "OK",
       }]);
+      // 4. SELECT Invoice
       mockSql.mockResolvedValueOnce([{
         id: "inv-1",
         name: "#1001",
@@ -221,6 +225,15 @@ describe("compliance.server", () => {
         status: "open",
         issuedAt: new Date("2026-01-10"),
         dueAt: new Date("2026-02-10"),
+      }]);
+      // 5. SELECT Match (payment matches)
+      mockSql.mockResolvedValueOnce([{
+        id: "match-1",
+        invoiceId: "inv-1",
+        amount: "250.00",
+        state: "confirmed",
+        confirmedAt: new Date("2026-01-20"),
+        createdAt: new Date("2026-01-18"),
       }]);
 
       const result = await generateCustomerDataExport(
@@ -237,12 +250,25 @@ describe("compliance.server", () => {
       expect(result.data.draftOrders).toHaveLength(1);
       expect(result.data.buyerAccount).toBeTruthy();
       expect(result.data.invoices).toHaveLength(1);
+      expect(result.data.paymentMatches).toHaveLength(1);
+      expect(result.data.paymentMatches[0]).toEqual({
+        id: "match-1",
+        invoiceId: "inv-1",
+        amount: "250.00",
+        state: "confirmed",
+        confirmedAt: "2026-01-20T00:00:00.000Z",
+        createdAt: "2026-01-18T00:00:00.000Z",
+      });
     });
 
     it("generates empty export for unknown customer", async () => {
+      // 1. SELECT s8_tagged_customers (not found)
       mockSql.mockResolvedValueOnce([]);
+      // 2. SELECT s8_draft_orders (no buyer account, so empty)
       mockSql.mockResolvedValueOnce([]);
+      // 3. SELECT BuyerAccount (not found)
       mockSql.mockResolvedValueOnce([]);
+      // Note: Invoice and Match queries are skipped when no buyerAccount
 
       const result = await generateCustomerDataExport(
         mockSql,
@@ -257,6 +283,206 @@ describe("compliance.server", () => {
       expect(result.data.draftOrders).toHaveLength(0);
       expect(result.data.buyerAccount).toBeNull();
       expect(result.data.invoices).toHaveLength(0);
+      expect(result.data.paymentMatches).toHaveLength(0);
+    });
+
+    it("drops phone and address from DB row even if present (PCD Level 1 compliance)", async () => {
+      // Feed mock data that DOES include phone and address fields.
+      // The export mapping must drop them because they're not in the interface.
+      // Per Shopify Protected Customer Data docs, we only export Level 1 data.
+      //
+      // See: https://shopify.dev/docs/apps/launch/protected-customer-data
+
+      // 1. SELECT s8_tagged_customers - include phone/address in mock row
+      mockSql.mockResolvedValueOnce([{
+        tags: ["wholesale"],
+        tag_active: true,
+        email: "customer@example.com",
+        display_name: "Wholesale Customer",
+        created_at: new Date("2026-01-01"),
+        // These fields are NOT in the schema but we simulate them being returned
+        // to prove the export mapping drops them
+        phone: "+1-555-123-4567",
+        address: "123 Main St, City, ST 12345",
+      }]);
+      // 2. SELECT s8_draft_orders
+      mockSql.mockResolvedValueOnce([]);
+      // 3. SELECT BuyerAccount - include address fields in mock
+      mockSql.mockResolvedValueOnce([{
+        id: "ba-1",
+        name: "Wholesale Customer",
+        kind: "TAGGED_CUSTOMER",
+        creditLimit: null,
+        defaultTermsDays: 30,
+        holdState: "OK",
+        // Simulate extra fields that might leak through
+        billingAddress: "456 Billing Ave",
+        shippingAddress: "789 Shipping Rd",
+      }]);
+      // 4. SELECT Invoice
+      mockSql.mockResolvedValueOnce([]);
+      // 5. SELECT Match
+      mockSql.mockResolvedValueOnce([]);
+
+      const result = await generateCustomerDataExport(
+        mockSql,
+        "shop-123",
+        "gid://shopify/Customer/789",
+        "req-pii-check"
+      );
+
+      // Verify the export structure excludes phone/address
+      const exportJson = JSON.stringify(result);
+      expect(exportJson).not.toContain("phone");
+      expect(exportJson).not.toContain("Phone");
+      expect(exportJson).not.toContain("+1-555");
+      expect(exportJson).not.toContain("address");
+      expect(exportJson).not.toContain("Address");
+      expect(exportJson).not.toContain("123 Main St");
+      expect(exportJson).not.toContain("billingAddress");
+      expect(exportJson).not.toContain("shippingAddress");
+
+      // Verify the export mapping explicitly picks only allowed fields
+      expect(result.data.taggedCustomer).toEqual({
+        tags: ["wholesale"],
+        tagActive: true,
+        email: "customer@example.com",
+        displayName: "Wholesale Customer",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      expect(result.data.buyerAccount).toEqual({
+        id: "ba-1",
+        name: "Wholesale Customer",
+        kind: "TAGGED_CUSTOMER",
+        creditLimit: null,
+        defaultTermsDays: 30,
+        holdState: "OK",
+      });
+    });
+
+    it("drops payerText and narration from Match rows even if present", async () => {
+      // Feed mock data that DOES include payerText/narration in Match rows.
+      // The export mapping must drop them because they contain bank statement PII.
+
+      // 1. SELECT s8_tagged_customers
+      mockSql.mockResolvedValueOnce([{
+        tags: ["net-terms"],
+        tag_active: true,
+        email: null,
+        display_name: null,
+        created_at: new Date("2026-01-01"),
+      }]);
+      // 2. SELECT s8_draft_orders
+      mockSql.mockResolvedValueOnce([]);
+      // 3. SELECT BuyerAccount
+      mockSql.mockResolvedValueOnce([{
+        id: "ba-1",
+        name: "Account Name",
+        kind: "TAGGED_CUSTOMER",
+        creditLimit: null,
+        defaultTermsDays: 30,
+        holdState: "OK",
+      }]);
+      // 4. SELECT Invoice
+      mockSql.mockResolvedValueOnce([{
+        id: "inv-1",
+        name: "#1001",
+        total: "1000.00",
+        outstanding: "0.00",
+        status: "paid",
+        issuedAt: new Date("2026-01-10"),
+        dueAt: new Date("2026-02-10"),
+      }]);
+      // 5. SELECT Match - include payerText/narration in mock to prove they're dropped
+      mockSql.mockResolvedValueOnce([{
+        id: "match-1",
+        invoiceId: "inv-1",
+        amount: "1000.00",
+        state: "confirmed",
+        confirmedAt: new Date("2026-01-15"),
+        createdAt: new Date("2026-01-14"),
+        // Simulate these fields being returned even though the SELECT doesn't request them
+        payerText: "ACME CORP PAYMENT",
+        narration: "NEFT-UTR123456789-ACME CORP-INV1001 PAYMENT",
+      }]);
+
+      const result = await generateCustomerDataExport(
+        mockSql,
+        "shop-123",
+        "gid://shopify/Customer/456",
+        "req-payment-pii"
+      );
+
+      const exportJson = JSON.stringify(result);
+
+      // Payment PII fields must NOT be present in export
+      expect(exportJson).not.toContain("payerText");
+      expect(exportJson).not.toContain("narration");
+      expect(exportJson).not.toContain("ACME CORP");
+      expect(exportJson).not.toContain("UTR123456789");
+
+      // Verify the export mapping explicitly picks only allowed fields
+      expect(result.data.paymentMatches).toHaveLength(1);
+      expect(result.data.paymentMatches[0]).toEqual({
+        id: "match-1",
+        invoiceId: "inv-1",
+        amount: "1000.00",
+        state: "confirmed",
+        confirmedAt: "2026-01-15T00:00:00.000Z",
+        createdAt: "2026-01-14T00:00:00.000Z",
+      });
+    });
+
+    it("Match query SQL does not select payerText or narration", async () => {
+      // Verify the SQL query itself doesn't request PII columns.
+      // This is a belt-and-suspenders check on top of the mapping test.
+
+      // Setup: provide minimal mocks to get to the Match query
+      mockSql.mockResolvedValueOnce([{
+        tags: [],
+        tag_active: true,
+        email: null,
+        display_name: null,
+        created_at: new Date(),
+      }]);
+      mockSql.mockResolvedValueOnce([]);
+      mockSql.mockResolvedValueOnce([{
+        id: "ba-1",
+        name: "Test",
+        kind: "TAGGED_CUSTOMER",
+        creditLimit: null,
+        defaultTermsDays: 30,
+        holdState: "OK",
+      }]);
+      mockSql.mockResolvedValueOnce([]);
+      mockSql.mockResolvedValueOnce([]);
+
+      await generateCustomerDataExport(
+        mockSql,
+        "shop-123",
+        "gid://shopify/Customer/456",
+        "req-sql-check"
+      );
+
+      // The 5th call is the Match query
+      expect(mockSql).toHaveBeenCalledTimes(5);
+      const matchQueryCall = mockSql.mock.calls[4];
+      
+      // The template literal is passed as an array of strings
+      // Convert to string to check what columns are selected
+      const queryTemplateStrings = matchQueryCall[0] as string[];
+      const queryText = queryTemplateStrings.join(" ");
+
+      // Verify payerText and narration are NOT in the SELECT clause
+      expect(queryText).not.toContain("payerText");
+      expect(queryText).not.toContain("narration");
+      expect(queryText).not.toContain('"Payment"');
+
+      // Verify the query DOES select expected fields
+      expect(queryText).toContain("m.id");
+      expect(queryText).toContain('m."invoiceId"');
+      expect(queryText).toContain("m.amount");
+      expect(queryText).toContain("m.state");
     });
   });
 
@@ -269,7 +495,7 @@ describe("compliance.server", () => {
         customerGid: "gid://shopify/Customer/456",
         requestId: "req-789",
         requestedAt: new Date().toISOString(),
-        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [] },
+        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [], paymentMatches: [] },
       };
 
       const result = await persistDataRequest(
@@ -291,7 +517,7 @@ describe("compliance.server", () => {
         customerGid: "gid://shopify/Customer/456",
         requestId: "req-duplicate",
         requestedAt: new Date().toISOString(),
-        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [] },
+        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [], paymentMatches: [] },
       };
 
       const result = await persistDataRequest(
