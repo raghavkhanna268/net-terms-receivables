@@ -1,7 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
-import { processOrderWebhook, mapOrderToInvoice } from "../order.server";
+import {
+  processOrderWebhook,
+  mapOrderToInvoice,
+  getAndResetOutstandingMissingCounter,
+} from "../order.server";
 import type { ShopifyOrder } from "../types";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -794,8 +798,8 @@ describeWithDb("Order Sync", () => {
         totalPriceSet: {
           shopMoney: { amount: "50000.00", currencyCode: "INR" },
         },
-        totalRefundedSet: {
-          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        totalOutstandingSet: {
+          shopMoney: { amount: "0.00", currencyCode: "INR" },
         },
         paymentTerms: {
           id: "pt-refunded",
@@ -832,7 +836,7 @@ describeWithDb("Order Sync", () => {
       expect(result.outstanding).toBe("0.00");
     });
 
-    it("reduces outstanding by refund amount for PARTIALLY_REFUNDED orders", () => {
+    it("uses totalOutstandingSet for PARTIALLY_REFUNDED orders", () => {
       const order: ShopifyOrder = {
         id: "gid://shopify/Order/partial-refund-1",
         name: "#PARTIAL_REFUND",
@@ -841,8 +845,8 @@ describeWithDb("Order Sync", () => {
         totalPriceSet: {
           shopMoney: { amount: "100000.00", currencyCode: "INR" },
         },
-        totalRefundedSet: {
-          shopMoney: { amount: "25000.00", currencyCode: "INR" },
+        totalOutstandingSet: {
+          shopMoney: { amount: "75000.00", currencyCode: "INR" },
         },
         paymentTerms: {
           id: "pt-partial",
@@ -853,12 +857,120 @@ describeWithDb("Order Sync", () => {
 
       const result = mapOrderToInvoice("shop-1", "account-1", order);
 
-      // Status is still open (balance remains)
+      // Status is open (balance remains)
       expect(result.status).toBe("open");
-      // Outstanding = total - refunded = 100000 - 25000 = 75000
+      // Outstanding comes from totalOutstandingSet
       expect(result.outstanding).toBe("75000.00");
       // Total should remain unchanged
       expect(result.total).toBe("100000.00");
+    });
+
+    it("sets status paid when PARTIALLY_REFUNDED has 0 outstanding (paid-then-refunded)", () => {
+      // A paid-then-partially-refunded order should not show a receivable
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/paid-then-refunded-1",
+        name: "#PAID_THEN_REFUNDED",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PARTIALLY_REFUNDED",
+        totalPriceSet: {
+          shopMoney: { amount: "100000.00", currencyCode: "INR" },
+        },
+        totalOutstandingSet: {
+          shopMoney: { amount: "0.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt-paid-refunded",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      const result = mapOrderToInvoice("shop-1", "account-1", order);
+
+      // Outstanding 0 means effectively paid
+      expect(result.status).toBe("paid");
+      expect(result.outstanding).toBe("0.00");
+    });
+
+    it("uses totalOutstandingSet for PARTIALLY_PAID orders", () => {
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/partial-paid-1",
+        name: "#PARTIAL_PAID",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PARTIALLY_PAID",
+        totalPriceSet: {
+          shopMoney: { amount: "100000.00", currencyCode: "INR" },
+        },
+        totalOutstandingSet: {
+          shopMoney: { amount: "40000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt-partial-paid",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      const result = mapOrderToInvoice("shop-1", "account-1", order);
+
+      expect(result.status).toBe("open");
+      expect(result.outstanding).toBe("40000.00");
+    });
+
+    it("sets status cancelled and outstanding 0 when cancelledAt is set", () => {
+      // P3: cancelledAt takes precedence over other statuses
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/cancelled-1",
+        name: "#CANCELLED",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        cancelledAt: "2025-07-16T10:00:00.000Z",
+        displayFinancialStatus: "PENDING", // Even though PENDING, cancelled overrides
+        totalPriceSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        totalOutstandingSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt-cancelled",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      const result = mapOrderToInvoice("shop-1", "account-1", order);
+
+      expect(result.status).toBe("cancelled");
+      expect(result.outstanding).toBe("0.00");
+    });
+
+    it("uses total when totalOutstandingSet is missing (new invoice)", () => {
+      // Reset counter before test
+      getAndResetOutstandingMissingCounter();
+
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/missing-outstanding-1",
+        name: "#MISSING_OUTSTANDING",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
+        totalPriceSet: {
+          shopMoney: { amount: "75000.00", currencyCode: "INR" },
+        },
+        // totalOutstandingSet intentionally missing
+        paymentTerms: {
+          id: "pt-missing",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      const result = mapOrderToInvoice("shop-1", "account-1", order);
+
+      // Falls back to total for new invoices
+      expect(result.outstanding).toBe("75000.00");
+      expect(result.status).toBe("open");
+      // Counter should have incremented
+      expect(getAndResetOutstandingMissingCounter()).toBe(1);
     });
 
     it("uses processedAt for issuedAt when processedAt is 35 days before createdAt", () => {

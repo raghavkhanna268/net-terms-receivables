@@ -130,6 +130,12 @@ export const BULK_ORDERS_QUERY = `
                   currencyCode
                 }
               }
+              totalOutstandingSet {
+                shopMoney {
+                  amount
+                  currencyCode
+                }
+              }
               paymentTerms {
                 id
                 paymentTermsName

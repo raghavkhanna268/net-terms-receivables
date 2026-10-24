@@ -101,19 +101,26 @@ export async function processOrderWebhook(
   // Check if Invoice already exists for this order
   // If it exists, ALWAYS update it regardless of eligibility (for status changes,
   // tag/terms changes, etc.) - eligibility only gates CREATION
-  const [existingInvoice] = await sql<{ id: string; buyerAccountId: string }[]>`
-    SELECT id, "buyerAccountId" FROM "Invoice"
+  const [existingInvoice] = await sql<{
+    id: string;
+    buyerAccountId: string;
+    outstanding: string;
+  }[]>`
+    SELECT id, "buyerAccountId", outstanding::text
+    FROM "Invoice"
     WHERE "shopId" = ${shopId} AND "orderId" = ${order.id}
   `;
 
   if (existingInvoice) {
     // Invoice exists - update it with latest order data
+    // Pass existing outstanding for fallback when totalOutstandingSet is missing
     const eligibility = await checkOrderEligibility(sql, order, context);
     const invoiceData = mapOrderToInvoiceWithEligibility(
       shopId,
       eligibility.buyerAccountId ?? existingInvoice.buyerAccountId,
       order,
-      eligibility
+      eligibility,
+      existingInvoice.outstanding
     );
     const result = await upsertInvoice(sql, invoiceData);
     await markWebhookProcessed(sql, webhookId, topic, order.id, shopDomain);
@@ -176,15 +183,37 @@ export interface InvoiceData {
   status: "open" | "paid" | "cancelled";
 }
 
+/** Diagnostic counter for missing totalOutstandingSet field */
+let orderOutstandingMissingCounter = 0;
+
+/** Get and reset the counter (for testing) */
+export function getAndResetOutstandingMissingCounter(): number {
+  const count = orderOutstandingMissingCounter;
+  orderOutstandingMissingCounter = 0;
+  return count;
+}
+
 /**
  * Map Order to Invoice data using eligibility result.
  * Uses S9 due date inference from the eligibility check.
+ *
+ * Outstanding amount logic:
+ * - Uses totalOutstandingSet.shopMoney.amount from Shopify
+ * - For non-terminal statuses (PENDING, AUTHORIZED, PARTIALLY_PAID, PARTIALLY_REFUNDED):
+ *   - If outstanding is 0, status becomes "paid"
+ *   - If outstanding > 0, status is "open"
+ * - REFUNDED/VOIDED: status "cancelled", outstanding 0
+ * - cancelledAt set: status "cancelled", outstanding 0
+ * - If totalOutstandingSet is missing: new invoice uses total, existing unchanged
+ *
+ * @param existingOutstanding - Pass existing invoice outstanding when updating
  */
 export function mapOrderToInvoiceWithEligibility(
   shopId: string,
   buyerAccountId: string,
   order: ShopifyOrder,
-  eligibility: EligibilityResult
+  eligibility: EligibilityResult,
+  existingOutstanding?: string
 ): InvoiceData {
   const total = order.totalPriceSet?.shopMoney.amount ?? "0.00";
   const issuedAt = new Date(order.processedAt ?? order.createdAt);
@@ -192,37 +221,60 @@ export function mapOrderToInvoiceWithEligibility(
   // Use due date from S9 inference (eligibility result)
   const dueDate = eligibility.dueDate;
 
-  // Determine status and outstanding based on displayFinancialStatus
+  // Determine status and outstanding
   let status: "open" | "paid" | "cancelled" = "open";
-  let outstanding = total;
+  let outstanding: string;
 
+  // P3: cancelledAt takes precedence - cancelled with outstanding 0
   if (order.cancelledAt) {
     status = "cancelled";
-    outstanding = total; // Preserve total for cancelled orders
+    outstanding = "0.00";
   } else {
     switch (order.displayFinancialStatus) {
-      case "PAID":
-        status = "paid";
-        outstanding = "0.00";
-        break;
       case "REFUNDED":
       case "VOIDED":
-        // Fully refunded/voided orders are effectively cancelled
+        // Terminal: cancelled with outstanding 0
         status = "cancelled";
         outstanding = "0.00";
         break;
-      case "PARTIALLY_REFUNDED": {
-        // Reduce outstanding by the refunded amount
-        status = "open"; // Still has balance due
-        const refunded = parseFloat(order.totalRefundedSet?.shopMoney.amount ?? "0.00");
-        const totalAmount = parseFloat(total);
-        outstanding = Math.max(0, totalAmount - refunded).toFixed(2);
+
+      case "PAID":
+        // Explicit PAID status
+        status = "paid";
+        outstanding = "0.00";
+        break;
+
+      case "PENDING":
+      case "AUTHORIZED":
+      case "PARTIALLY_PAID":
+      case "PARTIALLY_REFUNDED":
+      default: {
+        // Use totalOutstandingSet from Shopify
+        const shopifyOutstanding = order.totalOutstandingSet?.shopMoney.amount;
+
+        if (shopifyOutstanding !== undefined) {
+          outstanding = shopifyOutstanding;
+          // When outstanding is 0, order is effectively paid
+          // (handles paid-then-partially-refunded case)
+          if (parseFloat(outstanding) === 0) {
+            status = "paid";
+          } else {
+            status = "open";
+          }
+        } else {
+          // Field missing - log warning and increment counter
+          orderOutstandingMissingCounter++;
+          console.warn(
+            `[order.server] totalOutstandingSet missing for order ${order.id} ` +
+              `(status: ${order.displayFinancialStatus}). ` +
+              `Using ${existingOutstanding !== undefined ? "existing" : "total"} value.`
+          );
+          // New invoice: use total; existing invoice: keep current outstanding
+          outstanding = existingOutstanding ?? total;
+          status = "open";
+        }
         break;
       }
-      default:
-        // PENDING, PARTIALLY_PAID, AUTHORIZED, etc.
-        status = "open";
-        outstanding = total;
     }
   }
 
@@ -275,34 +327,44 @@ export function mapOrderToInvoice(
     dueReason = `${order.paymentTerms.paymentTermsName}: Net ${order.paymentTerms.dueInDays} days`;
   }
 
-  // Determine status and outstanding based on displayFinancialStatus
+  // Determine status and outstanding
   let status: "open" | "paid" | "cancelled" = "open";
-  let outstanding = total;
+  let outstanding: string;
 
+  // P3: cancelledAt takes precedence
   if (order.cancelledAt) {
     status = "cancelled";
-    outstanding = total;
+    outstanding = "0.00";
   } else {
     switch (order.displayFinancialStatus) {
-      case "PAID":
-        status = "paid";
-        outstanding = "0.00";
-        break;
       case "REFUNDED":
       case "VOIDED":
         status = "cancelled";
         outstanding = "0.00";
         break;
-      case "PARTIALLY_REFUNDED": {
-        status = "open";
-        const refunded = parseFloat(order.totalRefundedSet?.shopMoney.amount ?? "0.00");
-        const totalAmount = parseFloat(total);
-        outstanding = Math.max(0, totalAmount - refunded).toFixed(2);
+      case "PAID":
+        status = "paid";
+        outstanding = "0.00";
+        break;
+      case "PENDING":
+      case "AUTHORIZED":
+      case "PARTIALLY_PAID":
+      case "PARTIALLY_REFUNDED":
+      default: {
+        const shopifyOutstanding = order.totalOutstandingSet?.shopMoney.amount;
+        if (shopifyOutstanding !== undefined) {
+          outstanding = shopifyOutstanding;
+          status = parseFloat(outstanding) === 0 ? "paid" : "open";
+        } else {
+          orderOutstandingMissingCounter++;
+          console.warn(
+            `[order.server] totalOutstandingSet missing for order ${order.id} (legacy mapper)`
+          );
+          outstanding = total;
+          status = "open";
+        }
         break;
       }
-      default:
-        status = "open";
-        outstanding = total;
     }
   }
 

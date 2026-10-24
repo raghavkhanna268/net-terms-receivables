@@ -126,8 +126,8 @@ export interface ShopifyOrder {
       currencyCode: string;
     };
   };
-  /** Total refunded amount (for PARTIALLY_REFUNDED/REFUNDED orders) */
-  totalRefundedSet?: {
+  /** Total outstanding amount not yet transacted (from Shopify totalOutstandingSet) */
+  totalOutstandingSet?: {
     shopMoney: {
       amount: string;
       currencyCode: string;
