@@ -32,7 +32,7 @@ import type { Sql } from "~/lib/db-light.server";
 import { renderPaymentReminderEmail } from "~/emails/PaymentReminderEmail";
 import { validateTimezone } from "~/lib/aging-dates.server";
 import { DateTime } from "luxon";
-import { safeLog } from "~/lib/log.server";
+import { safeLog, toErrorCode } from "~/lib/log.server";
 
 /**
  * Check if plan gating enforcement is enabled.
@@ -157,6 +157,7 @@ export interface ReminderSendResult {
   skipReason?: string;
   resendId?: string;
   error?: string;
+  errorCode?: string;
   retryable?: boolean;
 }
 
@@ -630,10 +631,15 @@ export async function sendPaymentReminder(
       // This keeps the cap atomic: reserve before send, release on any failure
       await releaseGlobalSendSlot(sql);
 
+      // R1: Return error code only, no raw provider message
+      const errorCode = isAuthError ? "resend_auth_error"
+        : isRateLimited ? "resend_rate_limited"
+        : isServerError ? "resend_server_error"
+        : "resend_error";
       return {
         success: false,
         action: "skipped",
-        error: `Resend API error: ${response.status}`,
+        errorCode,
         retryable: isRetryable,
       };
     }
@@ -650,11 +656,11 @@ export async function sendPaymentReminder(
     await releaseReminderSlot(sql, ruleId, invoiceId);
     await releaseGlobalSendSlot(sql);
 
-    const errorMsg = err instanceof Error ? err.message : String(err);
+    // R1: Return error code only, no raw provider message
     return {
       success: false,
       action: "skipped",
-      error: `Send failed: ${errorMsg}`,
+      errorCode: toErrorCode(err),
       retryable: true,
     };
   }

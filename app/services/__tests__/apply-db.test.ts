@@ -30,6 +30,9 @@ let onOrderMarkAsPaidCallback: (() => Promise<void>) | null = null;
 // Flag to make enqueueRecomputeForInvoice throw
 let mockEnqueueShouldThrow = false;
 
+// M7: Custom userErrors to inject for testing error code mapping
+let mockUserErrors: Array<{ field: string[]; message: string }> | null = null;
+
 vi.mock("../shopify-client.server", async (importOriginal) => {
   const actual = await importOriginal() as Record<string, unknown>;
   return {
@@ -66,6 +69,19 @@ vi.mock("../shopify-client.server", async (importOriginal) => {
             orderMarkAsPaid: {
               order: null,
               userErrors: [{ field: ["id"], message: "Order has already been paid" }],
+            },
+          },
+        };
+      }
+
+      // M7: Return custom userErrors when set (for testing error code mapping)
+      if (mockUserErrors) {
+        return {
+          success: true,
+          data: {
+            orderMarkAsPaid: {
+              order: null,
+              userErrors: mockUserErrors,
             },
           },
         };
@@ -160,6 +176,7 @@ describeWithDb("S17 apply service DB integration", () => {
     mockShopifySuccess = true;
     mockAlreadyPaid = false;
     mockEnqueueShouldThrow = false;
+    mockUserErrors = null;
     shopifyCallCount = 0;
     verifyOrderIsPaidCallCount = 0;
     orderMarkAsPaidCallCount = 0;
@@ -2285,6 +2302,60 @@ describeWithDb("S17 apply service DB integration", () => {
 
       assertNoSensitiveDataInRawCalls(consoleWarnSpy);
       assertNoSensitiveDataInRawCalls(consoleErrorSpy);
+    });
+
+    /**
+     * M7: Shopify userError returns fixed merchant-facing message, no raw text.
+     * Forces userErrors with sentinel strings (domain, email-like), asserts:
+     * - Returned error is the exact fixed message from RECONCILE_ERROR_MESSAGES
+     * - No sentinel appears in result or logs
+     */
+    it("M7: Shopify userError returns fixed message, no raw text in result or logs", async () => {
+      const SENTINEL_SHOPIFY = "SENTINEL_SHOPIFY_RAW_7f3a";
+      const SENTINEL_EMAIL = "sentinel7f3a@pii-leak.test";
+
+      mockUserErrors = [
+        { field: ["id"], message: `Order validation failed: ${SENTINEL_SHOPIFY}` },
+        { field: ["amount"], message: `Invalid for ${SENTINEL_EMAIL}` },
+      ];
+
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+      const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
+
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      // Result should have fixed message, not raw Shopify text
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("Couldn't update the order in Shopify. Please retry.");
+      expect(result.errorCode).toBeDefined();
+
+      // Sentinel must NOT appear in the result
+      const resultStr = JSON.stringify(result);
+      expect(resultStr).not.toContain(SENTINEL_SHOPIFY);
+      expect(resultStr).not.toContain(SENTINEL_EMAIL);
+      expect(resultStr).not.toContain("pii-leak");
+
+      // Sentinel must NOT appear in any console output
+      for (const spy of [consoleWarnSpy, consoleErrorSpy]) {
+        for (const call of spy.mock.calls) {
+          const raw = String(call[0]);
+          expect(raw).not.toContain(SENTINEL_SHOPIFY);
+          expect(raw).not.toContain(SENTINEL_EMAIL);
+          expect(raw).not.toContain("pii-leak");
+        }
+      }
+
+      // safeLog calls should have only safe keys
+      const allLogs = [
+        ...parseLogCalls(consoleWarnSpy),
+        ...parseLogCalls(consoleErrorSpy),
+      ];
+      for (const log of allLogs) {
+        const logStr = JSON.stringify(log);
+        expect(logStr).not.toContain(SENTINEL_SHOPIFY);
+        expect(logStr).not.toContain(SENTINEL_EMAIL);
+      }
     });
   });
 });

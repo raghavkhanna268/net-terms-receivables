@@ -564,7 +564,8 @@ describe("Payment Reminders (S18)", () => {
 
       expect(result.success).toBe(false);
       expect(result.retryable).toBe(true);
-      expect(result.error).toContain("429");
+      // R1: Now returns errorCode instead of raw message
+      expect(result.errorCode).toBe("resend_rate_limited");
     });
 
     it("handles Resend 401 auth error as non-retryable and releases cap (S18-15)", async () => {
@@ -785,7 +786,8 @@ describe("Payment Reminders (S18)", () => {
 
       expect(result.success).toBe(false);
       expect(result.retryable).toBe(true);
-      expect(result.error).toContain("Network timeout");
+      // R1: Now returns errorCode instead of raw message
+      expect(result.errorCode).toBe("timeout");
 
       // Verify cap WAS released - only successful sends count toward cap
       const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
