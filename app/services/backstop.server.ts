@@ -431,26 +431,8 @@ async function computeExposureExcludingInvoice(
   return invoicePaise + draftPaise;
 }
 
-/**
- * Check if there are overdue invoices for this buyer.
- * Same logic as S11's hasOverdueInvoices.
- */
-async function hasOverdueInvoices(
-  sql: Sql,
-  buyerAccountId: string,
-): Promise<boolean> {
-  const [result] = await sql<{ has_overdue: boolean }[]>`
-    SELECT EXISTS (
-      SELECT 1 FROM "Invoice"
-      WHERE "buyerAccountId" = ${buyerAccountId}
-        AND status = 'open'
-        AND outstanding > 0
-        AND "dueAt" IS NOT NULL
-        AND "dueAt" < NOW() - INTERVAL '1 day'
-    ) AS has_overdue
-  `;
-  return result?.has_overdue ?? false;
-}
+// Import shared overdue predicate (Team Lead ruling: ONE overdue definition)
+import { hasOverdueInvoices } from "./overdue.server";
 
 /**
  * Check if the buyer account was held BEFORE this order.

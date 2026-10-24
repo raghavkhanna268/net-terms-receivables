@@ -21,6 +21,9 @@ import {
 } from "~/lib/metafields-contract";
 import { shopifyGraphQLRequest, type ShopifyClientResult } from "./shopify-client.server";
 
+// Re-export HoldReasonCode for use by credit-status-recompute.server.ts
+export type { HoldReasonCode };
+
 /**
  * Valid hold reason codes - used for validation.
  */
@@ -301,25 +304,8 @@ async function computeExposure(
   };
 }
 
-/**
- * Check for overdue invoices.
- */
-async function hasOverdueInvoices(
-  sql: Sql,
-  buyerAccountId: string
-): Promise<boolean> {
-  const [result] = await sql<{ has_overdue: boolean }[]>`
-    SELECT EXISTS (
-      SELECT 1 FROM "Invoice"
-      WHERE "buyerAccountId" = ${buyerAccountId}
-        AND status = 'open'
-        AND outstanding > 0
-        AND "dueAt" IS NOT NULL
-        AND "dueAt" < NOW() - INTERVAL '1 day'
-    ) AS has_overdue
-  `;
-  return result?.has_overdue ?? false;
-}
+// Import shared overdue predicate (Team Lead ruling: ONE overdue definition)
+import { hasOverdueInvoices } from "./overdue.server";
 
 /**
  * Write credit_status metafield via the Admin GraphQL API.
