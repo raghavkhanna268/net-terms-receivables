@@ -86,7 +86,7 @@ export async function parseAxisStatement(
 
   // Detect footer rows to skip
   const footerRows = detectFooterRows(sheet, headerRow + 1);
-  skippedRows = headerRow + 1 + footerRows.size;
+  skippedRows = headerRow + 1;
 
   // Process data rows
   let pendingNarration: string[] = [];
@@ -102,12 +102,14 @@ export async function parseAxisStatement(
       continue;
     }
 
-    // Check for Opening Balance row
+    // Check for Opening Balance / Closing Balance / B/F rows
     const firstCell = String(row[0] ?? "").trim().toUpperCase();
     const particularsCell = String(row[columns.particularsCol] ?? "").trim().toUpperCase();
     if (
       firstCell.includes("OPENING") ||
+      firstCell.includes("CLOSING") ||
       particularsCell.includes("OPENING BALANCE") ||
+      particularsCell.includes("CLOSING BALANCE") ||
       particularsCell === "B/F" ||
       particularsCell.includes("BROUGHT FORWARD")
     ) {
@@ -147,15 +149,25 @@ export async function parseAxisStatement(
     // Parse this row
     const rawRow = extractAxisRow(row, columns, i + 1);
     if (!rawRow) {
+      const dateCell = String(row[columns.dateCol] ?? "").trim();
       const particularsContent = String(row[columns.particularsCol] ?? "").trim();
-      if (particularsContent && !particularsContent.match(/^[\d.,\s]+$/)) {
+      const debitCell = String(row[columns.debitCol] ?? "").trim();
+      const creditCell = String(row[columns.creditCol] ?? "").trim();
+      const hasAmount = (debitCell && !debitCell.match(/^[\d.,\s]*$/)) ||
+                        (creditCell && !creditCell.match(/^[\d.,\s]*$/)) ||
+                        (debitCell && parseFloat(debitCell.replace(/[,\s]/g, "")) > 0) ||
+                        (creditCell && parseFloat(creditCell.replace(/[,\s]/g, "")) > 0);
+      const hasNonNumericParticulars = particularsContent && !particularsContent.match(/^[\d.,\s]*$/);
+      const hasDate = dateCell.length > 0;
+      if (hasAmount || hasNonNumericParticulars || hasDate) {
         errors.push({
           row: i + 1,
           code: "ROW_PARSE_FAILED",
           message: "Failed to parse row",
         });
+      } else {
+        skippedRows++;
       }
-      skippedRows++;
       continue;
     }
 
