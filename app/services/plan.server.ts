@@ -40,6 +40,29 @@ import { adminGraphQL } from "./drain/admin-client.server";
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 
 /**
+ * In-flight background refresh promises by shop domain.
+ * Prevents concurrent refresh calls from racing when multiple requests
+ * arrive while the cache is stale. Entry is deleted on settle.
+ */
+const inFlightRefreshes = new Map<string, Promise<void>>();
+
+/**
+ * Reset in-flight refreshes map - only for testing purposes.
+ * @internal
+ */
+export function _resetInFlightRefreshesForTesting(): void {
+  inFlightRefreshes.clear();
+}
+
+/**
+ * Check if a refresh is in-flight for a shop - only for testing purposes.
+ * @internal
+ */
+export function _isRefreshInFlight(shopDomain: string): boolean {
+  return inFlightRefreshes.has(shopDomain);
+}
+
+/**
  * GraphQL query for current app installation subscriptions.
  * Uses 2026-10 API version.
  */
@@ -276,6 +299,61 @@ async function getShopId(sql: Sql, shopDomain: string): Promise<string | null> {
 }
 
 /**
+ * Trigger a background refresh for a stale plan cache.
+ *
+ * Features:
+ * - Deduplication: concurrent calls for the same shop share one in-flight promise
+ * - Uses ctx.waitUntil via ALS to run without blocking the response
+ * - Catches and reports errors to Sentry (never throws unhandled)
+ * - Safe no-op when waitUntil is not available (tests, dev)
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopId - Shop ID in database
+ * @param shopDomain - Shop domain for Shopify API call
+ */
+function triggerBackgroundRefresh(
+  sql: Sql,
+  shopId: string,
+  shopDomain: string
+): void {
+  const waitUntil = getRequestWaitUntil();
+  if (!waitUntil) {
+    return;
+  }
+
+  const existingPromise = inFlightRefreshes.get(shopDomain);
+  if (existingPromise) {
+    waitUntil(existingPromise);
+    return;
+  }
+
+  const refreshPromise = (async () => {
+    try {
+      const fetched = await fetchPlanFromShopify(shopDomain);
+      if (fetched) {
+        await setCachedPlan(
+          sql,
+          shopId,
+          fetched.planKey,
+          fetched.subscriptionId,
+          fetched.subscriptionName,
+          fetched.isTest
+        );
+        console.log(`[plan.server] Background refresh completed for ${shopDomain}`);
+      }
+    } catch (err) {
+      console.error(`[plan.server] Background refresh failed for ${shopDomain}:`, err);
+      captureException(err);
+    } finally {
+      inFlightRefreshes.delete(shopDomain);
+    }
+  })();
+
+  inFlightRefreshes.set(shopDomain, refreshPromise);
+  waitUntil(refreshPromise);
+}
+
+/**
  * Resolve the current plan for a shop.
  *
  * Design:
@@ -331,29 +409,7 @@ export async function resolvePlan(
     // If cache is stale (but exists) and not forcing refresh,
     // return cached value and trigger background refresh
     if (cachedPlan && cachedPlan.isStale && !forceRefresh) {
-      // Trigger background refresh via waitUntil if available (from request context ALS)
-      const waitUntil = getRequestWaitUntil();
-      if (waitUntil) {
-        const refreshPromise = (async () => {
-          try {
-            const fetched = await fetchPlanFromShopify(shopDomain);
-            if (fetched && shopId) {
-              await setCachedPlan(
-                sql,
-                shopId,
-                fetched.planKey,
-                fetched.subscriptionId,
-                fetched.subscriptionName,
-                fetched.isTest
-              );
-              console.log(`[plan.server] Background refresh completed for ${shopDomain}`);
-            }
-          } catch (err) {
-            console.error(`[plan.server] Background refresh failed for ${shopDomain}:`, err);
-          }
-        })();
-        waitUntil(refreshPromise);
-      }
+      triggerBackgroundRefresh(sql, shopId, shopDomain);
 
       // Return stale cache immediately (staleness never lowers tier)
       return {
@@ -488,42 +544,19 @@ export async function getPlanByShopId(
   const cached = await getCachedPlan(sql, shopId);
   
   if (!cached) {
-    // No cache ever existed - return free plan
     return getDefaultPlan();
   }
   
-  // If stale, try to trigger background refresh via ALS waitUntil
-  const waitUntil = getRequestWaitUntil();
-  if (cached.isStale && waitUntil) {
-    // Get shop domain for background refresh
+  if (cached.isStale) {
     const [shopRow] = await sql<{ domain: string }[]>`
       SELECT domain FROM "Shop" WHERE id = ${shopId}
     `;
     
     if (shopRow) {
-      const refreshPromise = (async () => {
-        try {
-          const fetched = await fetchPlanFromShopify(shopRow.domain);
-          if (fetched) {
-            await setCachedPlan(
-              sql,
-              shopId,
-              fetched.planKey,
-              fetched.subscriptionId,
-              fetched.subscriptionName,
-              fetched.isTest
-            );
-            console.log(`[plan.server] Background refresh (by shopId) completed for ${shopRow.domain}`);
-          }
-        } catch (err) {
-          console.error(`[plan.server] Background refresh (by shopId) failed:`, err);
-        }
-      })();
-      waitUntil(refreshPromise);
+      triggerBackgroundRefresh(sql, shopId, shopRow.domain);
     }
   }
   
-  // Always return the cached plan (staleness never lowers tier)
   return getPlanConfig(cached.planKey);
 }
 
