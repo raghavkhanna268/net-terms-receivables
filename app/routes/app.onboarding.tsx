@@ -6,6 +6,7 @@
  * Can be dismissed and re-opened from the help menu.
  *
  * S23-02: Added app registration status step with retry functionality.
+ * S23-04: Added initial sync step with progress and retry.
  */
 
 import type {
@@ -13,7 +14,8 @@ import type {
   LoaderFunctionArgs,
   ActionFunctionArgs,
 } from "react-router";
-import { useLoaderData, useActionData, Form, useNavigation } from "react-router";
+import { useLoaderData, useActionData, Form, useNavigation, useRevalidator } from "react-router";
+import { useEffect, useRef } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import {
@@ -31,6 +33,20 @@ import { ensureValidation } from "~/lib/validation-registration.server";
 import { ensurePaymentCustomization } from "~/lib/payment-customization-registration.server";
 import { ensureMetafieldDefinitions, getMetafieldDefinitionSpecs } from "~/lib/metafield-definitions.server";
 import { METAFIELD } from "~/lib/metafields-contract";
+import {
+  getInitialSyncState,
+  enqueueInitialSync,
+  canStartSync as canStartSyncServer,
+  type InitialSyncStatus,
+  type InitialSyncState,
+} from "~/lib/initial-sync.server";
+
+/**
+ * Client-side version of canStartSync to avoid importing server-only module in client code.
+ */
+function canStartSync(status: InitialSyncStatus): boolean {
+  return status === "not_started" || status === "failed";
+}
 
 const VALIDATION_FUNCTION_HANDLE = "credit-check-validation";
 const PAYMENT_CUSTOMIZATION_HANDLE = "hide-terms-payment";
@@ -335,13 +351,15 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       error: "Shop not found",
       state: null,
       registrationStatus: null,
+      initialSyncState: null,
     };
   }
 
-  const [validationResult, paymentCustomizationResult, metafieldStatus] = await Promise.all([
+  const [validationResult, paymentCustomizationResult, metafieldStatus, syncState] = await Promise.all([
     fetchValidationInfo(admin),
     fetchPaymentCustomizationInfo(admin),
     checkMetafieldDefinitionsStatus(admin),
+    getInitialSyncState(sql, shopDomain),
   ]);
 
   const validation = validationResult.info;
@@ -383,6 +401,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     },
     shopId: dbData.shopId,
     registrationStatus,
+    initialSyncState: syncState,
   };
 };
 
@@ -391,6 +410,23 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const { session, admin } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
+
+  const contentType = request.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    try {
+      const body = await request.clone().text();
+      const trimmed = body.trim();
+      if (trimmed === "{}" || trimmed === "" || trimmed === "null") {
+        return Response.json({ success: false, error: "Empty body" }, { status: 400 });
+      }
+      const parsed = JSON.parse(trimmed);
+      if (typeof parsed !== "object" || parsed === null || Object.keys(parsed).length === 0) {
+        return Response.json({ success: false, error: "Empty body" }, { status: 400 });
+      }
+    } catch {
+      return Response.json({ success: false, error: "Invalid body" }, { status: 400 });
+    }
+  }
 
   const formData = await request.formData();
   const actionType = formData.get("_action");
@@ -510,6 +546,43 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     }
   }
 
+  if (actionType === "start_sync") {
+    const syncState = await getInitialSyncState(sql, shopDomain);
+
+    if (!canStartSyncServer(syncState.status)) {
+      return {
+        success: false,
+        error: "Sync already in progress or complete",
+        action: "start_sync",
+        syncStatus: syncState.status,
+      };
+    }
+
+    const hash = await shopHash(shopDomain);
+    const result = await enqueueInitialSync(sql, shopDomain);
+
+    if (!result.enqueued) {
+      safeLog("info", "onboarding.initial_sync_skip", {
+        shopHash: hash,
+        reason: result.reason,
+      });
+      return {
+        success: false,
+        error: `Sync ${result.reason?.replace("_", " ")}`,
+        action: "start_sync",
+        syncStatus: "in_progress" as InitialSyncStatus,
+      };
+    }
+
+    safeLog("info", "onboarding.initial_sync_started", { shopHash: hash });
+
+    return {
+      success: true,
+      action: "start_sync",
+      syncStatus: "in_progress" as InitialSyncStatus,
+    };
+  }
+
   return { success: false, error: "Unknown action" };
 };
 
@@ -593,6 +666,59 @@ function RegistrationStatusSection({
   );
 }
 
+function SyncStatusBadge({ status }: { status: InitialSyncStatus }) {
+  switch (status) {
+    case "done":
+      return <s-badge tone="success">Complete</s-badge>;
+    case "in_progress":
+      return <s-badge tone="info">In progress</s-badge>;
+    case "failed":
+      return <s-badge tone="critical">Failed</s-badge>;
+    default:
+      return <s-badge>Not started</s-badge>;
+  }
+}
+
+function InitialSyncSection({
+  syncState,
+  isStarting,
+}: {
+  syncState: InitialSyncState;
+  isStarting: boolean;
+}) {
+  const canStart = canStartSync(syncState.status);
+  const buttonLabel = syncState.status === "failed" ? "Retry" : "Start sync";
+
+  return (
+    <s-stack gap="base">
+      <s-stack direction="inline" gap="base">
+        <s-text type="strong">Status</s-text>
+        <SyncStatusBadge status={syncState.status} />
+      </s-stack>
+
+      <s-paragraph>
+        {syncState.status === "not_started" &&
+          "Sync your B2B companies and orders to import existing buyer accounts and invoices."}
+        {syncState.status === "in_progress" &&
+          "Syncing B2B companies and orders. This may take a few minutes."}
+        {syncState.status === "done" &&
+          "B2B companies and orders have been synced."}
+        {syncState.status === "failed" &&
+          "Sync failed. You can retry to attempt the sync again."}
+      </s-paragraph>
+
+      {canStart && (
+        <Form method="post">
+          <input type="hidden" name="_action" value="start_sync" />
+          <s-button type="submit" disabled={isStarting}>
+            {isStarting ? "Starting..." : buttonLabel}
+          </s-button>
+        </Form>
+      )}
+    </s-stack>
+  );
+}
+
 function OnboardingChecklist({
   steps,
   completedCount,
@@ -642,18 +768,54 @@ function OnboardingChecklist({
   );
 }
 
+const POLL_INTERVAL_MS = 5000;
+
 export default function OnboardingPage() {
-  const { error, state, registrationStatus } = useLoaderData<typeof loader>();
+  const { error, state, registrationStatus, initialSyncState } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
+  const revalidator = useRevalidator();
   const isSubmitting = navigation.state === "submitting";
+  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const isRetrying = isSubmitting && navigation.formData?.get("_action") === "retry_registration";
+  const isStartingSync = isSubmitting && navigation.formData?.get("_action") === "start_sync";
 
   const currentRegistrationStatus: RegistrationStatus | null =
     actionData?.action === "retry_registration" && actionData.registrationStatus
       ? (actionData.registrationStatus as RegistrationStatus)
       : registrationStatus;
+
+  const currentSyncStatus: InitialSyncStatus =
+    actionData?.action === "start_sync" && actionData.syncStatus
+      ? (actionData.syncStatus as InitialSyncStatus)
+      : initialSyncState?.status ?? "not_started";
+
+  const currentSyncState: InitialSyncState = { status: currentSyncStatus };
+
+  useEffect(() => {
+    if (currentSyncStatus === "in_progress") {
+      if (!pollIntervalRef.current) {
+        pollIntervalRef.current = setInterval(() => {
+          if (revalidator.state === "idle") {
+            revalidator.revalidate();
+          }
+        }, POLL_INTERVAL_MS);
+      }
+    } else {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+    }
+
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+    };
+  }, [currentSyncStatus, revalidator]);
 
   if (error || !state) {
     return (
@@ -687,7 +849,23 @@ export default function OnboardingPage() {
         </s-section>
       )}
 
-      {actionData?.success && actionData.action !== "retry_registration" && (
+      {actionData?.success && actionData.action === "start_sync" && (
+        <s-section>
+          <s-banner tone="success" heading="Sync Started">
+            Initial sync has been started. Status will update automatically.
+          </s-banner>
+        </s-section>
+      )}
+
+      {actionData?.success === false && actionData.action === "start_sync" && (
+        <s-section>
+          <s-banner tone="warning" heading="Sync Not Started">
+            {actionData.error ?? "Sync could not be started."}
+          </s-banner>
+        </s-section>
+      )}
+
+      {actionData?.success && actionData.action !== "retry_registration" && actionData.action !== "start_sync" && (
         <s-section>
           <s-banner tone="info" heading="Done">
             {actionData.action === "dismissed"
@@ -739,6 +917,13 @@ export default function OnboardingPage() {
             <s-button href="/app?skipOnboarding=true">Go to Dashboard</s-button>
           </s-stack>
         </s-stack>
+      </s-section>
+
+      <s-section heading="Initial Sync">
+        <InitialSyncSection
+          syncState={currentSyncState}
+          isStarting={isStartingSync}
+        />
       </s-section>
 
       {currentRegistrationStatus && (
