@@ -582,7 +582,7 @@ describe("after-auth", () => {
       const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
       runAfterAuth(
-        "onboarding-reset-shop.myshopify.com",
+        "test-onboarding-reset.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
@@ -692,7 +692,7 @@ describe("after-auth", () => {
       const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
       runAfterAuth(
-        "safelog-test.myshopify.com",
+        "test-safelog.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
@@ -716,7 +716,7 @@ describe("after-auth", () => {
         expect(parsed.shopHash.length).toBeGreaterThan(0);
 
         expect(logOutput).not.toContain("shop-uuid-123");
-        expect(logOutput).not.toContain("safelog-test.myshopify.com");
+        expect(logOutput).not.toContain("test-safelog.myshopify.com");
         expect(logOutput).not.toContain("shop_id=");
       });
 
