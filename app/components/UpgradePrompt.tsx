@@ -6,25 +6,51 @@
  * When PLAN_GATING_ENFORCED is on, prompts indicate actual limitations.
  */
 
-import type { PlanKey, FeatureKey } from "~/lib/entitlements";
+import {
+  type PlanKey,
+  type FeatureKey,
+  ALL_PLAN_KEYS,
+  getPlanConfig,
+  planHasFeature,
+} from "~/lib/entitlements";
 
-const PLAN_DISPLAY_NAMES: Record<PlanKey, string> = {
+/**
+ * Display names for plans. Single source of truth for UI.
+ */
+export const PLAN_DISPLAY_NAMES: Record<PlanKey, string> = {
   free: "Free",
   starter: "Starter",
   growth: "Growth",
   scale: "Scale",
 };
 
-const FEATURE_PLAN_REQUIREMENTS: Record<FeatureKey, PlanKey> = {
-  aging_dashboard: "free",
-  unlimited_imports: "starter",
-  matching: "starter",
-  reminders: "starter",
-  credit_holds: "growth",
-  pdf_statements: "growth",
-  payer_memory: "growth",
-  audit_export: "scale",
+/**
+ * Display names for features. Single source of truth for UI.
+ */
+export const FEATURE_DISPLAY_NAMES: Record<FeatureKey, string> = {
+  aging_dashboard: "Aging Dashboard",
+  unlimited_imports: "Unlimited Bank Imports",
+  matching: "Payment Matching",
+  reminders: "Payment Reminders",
+  credit_holds: "Credit Holds",
+  pdf_statements: "PDF Statements",
+  payer_memory: "Payer Memory",
+  audit_export: "Audit Export",
 };
+
+/**
+ * Get the minimum plan required for a feature.
+ * Derived from entitlements.ts using ALL_PLAN_KEYS + getPlanConfig + planHasFeature.
+ */
+export function getRequiredPlanForFeature(feature: FeatureKey): PlanKey {
+  for (const planKey of ALL_PLAN_KEYS) {
+    const plan = getPlanConfig(planKey);
+    if (planHasFeature(plan, feature)) {
+      return planKey;
+    }
+  }
+  return "scale";
+}
 
 interface UpgradePromptProps {
   currentPlan: PlanKey;
@@ -43,10 +69,9 @@ export function UpgradePrompt({
   upgradeUrl,
   compact = false,
 }: UpgradePromptProps) {
-  const requiredPlan = feature ? FEATURE_PLAN_REQUIREMENTS[feature] : null;
-  const planOrder: PlanKey[] = ["free", "starter", "growth", "scale"];
-  const currentIndex = planOrder.indexOf(currentPlan);
-  const requiredIndex = requiredPlan ? planOrder.indexOf(requiredPlan) : -1;
+  const requiredPlan = feature ? getRequiredPlanForFeature(feature) : null;
+  const currentIndex = ALL_PLAN_KEYS.indexOf(currentPlan);
+  const requiredIndex = requiredPlan ? ALL_PLAN_KEYS.indexOf(requiredPlan) : -1;
 
   const needsUpgrade = requiredPlan && requiredIndex > currentIndex;
   const suggestedPlan = needsUpgrade ? requiredPlan : null;
@@ -106,7 +131,7 @@ export function UpgradePrompt({
         <s-stack>
           <s-text>
             You&apos;ve reached the {limitLabel} limit for your plan tier, but limits
-            are not currently enforced. Consider upgrading before enforcement begins.
+            are not currently enforced.
           </s-text>
           <s-button href={upgradeUrl} target="_top" variant="secondary">
             View Plans
@@ -117,7 +142,7 @@ export function UpgradePrompt({
   }
 
   if (suggestedPlan) {
-    const featureLabel = feature ? getFeatureLabel(feature) : "this feature";
+    const featureLabel = feature ? FEATURE_DISPLAY_NAMES[feature] : "this feature";
 
     if (gatingEnforced) {
       return (
@@ -150,20 +175,6 @@ export function UpgradePrompt({
   }
 
   return null;
-}
-
-function getFeatureLabel(feature: FeatureKey): string {
-  const labels: Record<FeatureKey, string> = {
-    aging_dashboard: "Aging Dashboard",
-    unlimited_imports: "Unlimited Bank Imports",
-    matching: "Payment Matching",
-    reminders: "Payment Reminders",
-    credit_holds: "Credit Holds",
-    pdf_statements: "PDF Statements",
-    payer_memory: "Payer Memory",
-    audit_export: "Audit Export",
-  };
-  return labels[feature];
 }
 
 interface PlanBannerProps {

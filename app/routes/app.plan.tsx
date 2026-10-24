@@ -20,28 +20,15 @@ import {
   type PlanKey,
   type FeatureKey,
   ALL_PLAN_KEYS,
+  ALL_FEATURE_KEYS,
   getPlanConfig,
   planHasFeature,
   planLimit,
 } from "~/lib/entitlements";
-
-const PLAN_DISPLAY_NAMES: Record<PlanKey, string> = {
-  free: "Free",
-  starter: "Starter",
-  growth: "Growth",
-  scale: "Scale",
-};
-
-const FEATURE_DISPLAY_NAMES: Record<FeatureKey, string> = {
-  aging_dashboard: "Aging Dashboard",
-  unlimited_imports: "Unlimited Bank Imports",
-  matching: "Payment Matching",
-  reminders: "Payment Reminders",
-  credit_holds: "Credit Holds",
-  pdf_statements: "PDF Statements",
-  payer_memory: "Payer Memory",
-  audit_export: "Audit Export",
-};
+import {
+  PLAN_DISPLAY_NAMES,
+  FEATURE_DISPLAY_NAMES,
+} from "~/components/UpgradePrompt";
 
 const FEATURE_DESCRIPTIONS: Record<FeatureKey, string> = {
   aging_dashboard: "Track outstanding receivables with aging buckets",
@@ -53,8 +40,6 @@ const FEATURE_DESCRIPTIONS: Record<FeatureKey, string> = {
   payer_memory: "Remember payer preferences and patterns",
   audit_export: "Export audit logs for compliance",
 };
-
-const PLAN_ORDER: PlanKey[] = ["free", "starter", "growth", "scale"];
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { shopify } = context;
@@ -98,8 +83,6 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
           key: planData.plan.key,
           name: planData.subscriptionName ?? planData.plan.key,
           isTest: planData.isTest,
-          subscriptionId: planData.subscriptionId,
-          fromCache: planData.fromCache,
         }
       : null,
     usage: usage ?? {
@@ -117,7 +100,7 @@ function formatLimit(limit: number): string {
   return limit === -1 ? "Unlimited" : String(limit);
 }
 
-function UsageBar({
+function UsageDisplay({
   current,
   limit,
   label,
@@ -127,64 +110,27 @@ function UsageBar({
   label: string;
 }) {
   const isUnlimited = limit === -1;
-  const percentage = isUnlimited ? 0 : Math.min((current / limit) * 100, 100);
   const isAtLimit = !isUnlimited && current >= limit;
-  const isNearLimit = !isUnlimited && current >= limit * 0.8;
+  const isNearLimit = !isUnlimited && current >= limit * 0.8 && current < limit;
 
   return (
-    <s-stack>
-      <s-paragraph>
-        <s-text type="strong">{label}: </s-text>
-        <s-text>
-          {current} / {formatLimit(limit)}
-        </s-text>
-        {isAtLimit && <s-badge tone="critical">At Limit</s-badge>}
-        {!isAtLimit && isNearLimit && <s-badge tone="warning">Near Limit</s-badge>}
-      </s-paragraph>
-      {!isUnlimited && (
-        <div
-          style={{
-            height: "8px",
-            backgroundColor: "var(--p-color-bg-fill-tertiary)",
-            borderRadius: "4px",
-            overflow: "hidden",
-          }}
-        >
-          <div
-            style={{
-              height: "100%",
-              width: `${percentage}%`,
-              backgroundColor: isAtLimit
-                ? "var(--p-color-bg-fill-critical)"
-                : isNearLimit
-                  ? "var(--p-color-bg-fill-warning)"
-                  : "var(--p-color-bg-fill-success)",
-              transition: "width 0.3s ease",
-            }}
-          />
-        </div>
-      )}
-    </s-stack>
+    <s-paragraph>
+      <s-text type="strong">{label}: </s-text>
+      <s-text>
+        {current} / {formatLimit(limit)}
+      </s-text>
+      {isAtLimit && <s-badge tone="critical">At Limit</s-badge>}
+      {!isAtLimit && isNearLimit && <s-badge tone="warning">Near Limit</s-badge>}
+    </s-paragraph>
   );
 }
 
 function FeatureComparisonTable({ currentPlanKey }: { currentPlanKey: PlanKey }) {
-  const features: FeatureKey[] = [
-    "aging_dashboard",
-    "unlimited_imports",
-    "matching",
-    "reminders",
-    "credit_holds",
-    "pdf_statements",
-    "payer_memory",
-    "audit_export",
-  ];
-
   return (
     <s-table>
       <s-table-header-row>
         <s-table-header>Feature</s-table-header>
-        {PLAN_ORDER.map((planKey) => (
+        {ALL_PLAN_KEYS.map((planKey) => (
           <s-table-header key={planKey}>
             {PLAN_DISPLAY_NAMES[planKey]}
             {planKey === currentPlanKey && " ✓"}
@@ -192,14 +138,14 @@ function FeatureComparisonTable({ currentPlanKey }: { currentPlanKey: PlanKey })
         ))}
       </s-table-header-row>
       <s-table-body>
-        {features.map((feature) => (
+        {ALL_FEATURE_KEYS.map((feature) => (
           <s-table-row key={feature}>
             <s-table-cell>
               <s-text type="strong">{FEATURE_DISPLAY_NAMES[feature]}</s-text>
               <br />
               <s-text>{FEATURE_DESCRIPTIONS[feature]}</s-text>
             </s-table-cell>
-            {PLAN_ORDER.map((planKey) => {
+            {ALL_PLAN_KEYS.map((planKey) => {
               const plan = getPlanConfig(planKey);
               const hasFeature = planHasFeature(plan, feature);
               return (
@@ -220,7 +166,7 @@ function FeatureComparisonTable({ currentPlanKey }: { currentPlanKey: PlanKey })
             <br />
             <s-text>Maximum buyer accounts</s-text>
           </s-table-cell>
-          {PLAN_ORDER.map((planKey) => {
+          {ALL_PLAN_KEYS.map((planKey) => {
             const plan = getPlanConfig(planKey);
             const limit = planLimit(plan, "companies");
             return (
@@ -236,7 +182,7 @@ function FeatureComparisonTable({ currentPlanKey }: { currentPlanKey: PlanKey })
             <br />
             <s-text>Bank statement imports per month</s-text>
           </s-table-cell>
-          {PLAN_ORDER.map((planKey) => {
+          {ALL_PLAN_KEYS.map((planKey) => {
             const plan = getPlanConfig(planKey);
             const limit = planLimit(plan, "importsPerMonth");
             return (
@@ -245,16 +191,6 @@ function FeatureComparisonTable({ currentPlanKey }: { currentPlanKey: PlanKey })
               </s-table-cell>
             );
           })}
-        </s-table-row>
-        <s-table-row>
-          <s-table-cell>
-            <s-text type="strong">Price</s-text>
-          </s-table-cell>
-          {PLAN_ORDER.map((planKey) => (
-            <s-table-cell key={`price-${planKey}`}>
-              <s-text>TBD</s-text>
-            </s-table-cell>
-          ))}
         </s-table-row>
       </s-table-body>
     </s-table>
@@ -313,34 +249,18 @@ export default function PlanPage() {
                   {isTest && <s-badge tone="info">Test</s-badge>}
                 </s-text>
               </s-paragraph>
-
-              {plan?.subscriptionId && (
-                <s-paragraph>
-                  <s-text>
-                    Subscription ID: {plan.subscriptionId}
-                  </s-text>
-                </s-paragraph>
-              )}
-
-              {plan?.fromCache && (
-                <s-paragraph>
-                  <s-text>
-                    Plan data loaded from cache
-                  </s-text>
-                </s-paragraph>
-              )}
             </s-stack>
           </s-section>
 
           {/* Usage Statistics */}
           <s-section heading="Usage">
             <s-stack>
-              <UsageBar
+              <UsageDisplay
                 current={companiesUsed}
                 limit={companiesLimit}
                 label="Buyer Accounts"
               />
-              <UsageBar
+              <UsageDisplay
                 current={importsUsed}
                 limit={importsLimit}
                 label="Bank Imports This Month"
@@ -382,7 +302,7 @@ export default function PlanPage() {
                   <s-banner tone="info" heading="Usage Note">
                     <s-text>
                       You&apos;ve reached the plan limit, but limits are not currently
-                      enforced. Consider upgrading before enforcement begins.
+                      enforced.
                     </s-text>
                   </s-banner>
                 ) : (
@@ -412,11 +332,6 @@ export default function PlanPage() {
 
           {/* Feature Comparison */}
           <s-section heading="Plan Comparison">
-            <s-paragraph>
-              <s-text>
-                Pricing is not yet finalized. Contact us for current pricing information.
-              </s-text>
-            </s-paragraph>
             <FeatureComparisonTable currentPlanKey={planKey} />
           </s-section>
         </>
@@ -452,13 +367,6 @@ export default function PlanPage() {
             </s-paragraph>
           )}
         </s-stack>
-      </s-section>
-
-      <s-section slot="aside" heading="Need Help?">
-        <s-paragraph>
-          Contact support if you have questions about plans or need assistance
-          with your subscription.
-        </s-paragraph>
       </s-section>
     </s-page>
   );

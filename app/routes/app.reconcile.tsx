@@ -94,7 +94,6 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     };
   }
 
-  const planData = await resolvePlan(sql, shopDomain);
   const gatingEnforced = isGatingEnforced();
   const storeHandle = shopDomain.replace(".myshopify.com", "");
 
@@ -107,26 +106,32 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   let totalCount = 0;
 
   // P3: Get real tab counts from COUNT queries (not page length)
+  // Run resolvePlan in parallel with tab counts to avoid extra round trip on cache miss
   let tabCounts = { suggested: 0, unmatched: 0 };
+  let planData = { plan: { key: "free" as PlanKey } };
   try {
-    const [suggestedCount] = await sql<{ count: string }[]>`
-      SELECT COUNT(*)::text AS count
-      FROM "Match"
-      WHERE "shopId" = ${shop.id}
-        AND state = 'suggested'
-    `;
-    const [unmatchedCount] = await sql<{ count: string }[]>`
-      SELECT COUNT(*)::text AS count
-      FROM "Payment"
-      WHERE "shopId" = ${shop.id}
-        AND status IN ('unmatched', 'partial')
-    `;
+    const [planResult, suggestedCount, unmatchedCount] = await Promise.all([
+      resolvePlan(sql, shopDomain),
+      sql<{ count: string }[]>`
+        SELECT COUNT(*)::text AS count
+        FROM "Match"
+        WHERE "shopId" = ${shop.id}
+          AND state = 'suggested'
+      `.then(r => r[0]),
+      sql<{ count: string }[]>`
+        SELECT COUNT(*)::text AS count
+        FROM "Payment"
+        WHERE "shopId" = ${shop.id}
+          AND status IN ('unmatched', 'partial')
+      `.then(r => r[0]),
+    ]);
+    planData = planResult;
     tabCounts = {
       suggested: parseInt(suggestedCount?.count ?? "0", 10),
       unmatched: parseInt(unmatchedCount?.count ?? "0", 10),
     };
   } catch (err) {
-    console.error("[app.reconcile] Error getting tab counts:", err);
+    console.error("[app.reconcile] Error getting tab counts or plan:", err);
   }
 
   try {

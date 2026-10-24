@@ -37,6 +37,9 @@ export const CUSTOMER_OPTIONAL_PII_FIELDS = ["email", "displayName"] as const;
 /**
  * Forbidden fields that are NEVER fetched, regardless of approval level.
  * Phone and address data is not needed for buyer account management.
+ *
+ * Includes V2 API variants (addressesV2, defaultPhoneNumber) that expose
+ * the same PII data under different field names.
  */
 export const CUSTOMER_FORBIDDEN_FIELDS = [
   "phone",
@@ -44,6 +47,8 @@ export const CUSTOMER_FORBIDDEN_FIELDS = [
   "firstName",
   "lastName",
   "defaultAddress",
+  "addressesV2",
+  "defaultPhoneNumber",
 ] as const;
 
 /**
