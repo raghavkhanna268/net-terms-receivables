@@ -16,6 +16,7 @@ import { ensureValidation } from "./validation-registration.server";
 import { ensurePaymentCustomization } from "./payment-customization-registration.server";
 import { getRequestSql } from "./request-context.server";
 import { validateTimezone } from "./aging-dates.server";
+import { toErrorCode } from "./log.server";
 import type { Sql } from "./db-light.server";
 
 /**
@@ -253,8 +254,7 @@ async function runSetup(
     await ensureMetafieldDefinitions(admin);
   } catch (error) {
     hasError = true;
-    const errCode = error instanceof Error ? error.message : "unknown";
-    console.error(`[afterAuth] metafield_definitions_failed reason=exception err=${errCode}`);
+    console.error(`[afterAuth] metafield_definitions_failed reason=exception err=${toErrorCode(error)}`);
   }
   
   try {

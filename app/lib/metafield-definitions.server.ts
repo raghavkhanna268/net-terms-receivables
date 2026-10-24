@@ -167,7 +167,8 @@ async function createMetafieldDefinition(
       }
 
       const firstCode = userErrors[0]?.code ?? "unknown";
-      result.error = `shopify_user_error_${firstCode.toLowerCase()}`;
+      const sanitizedCode = firstCode.toLowerCase().replace(/[^a-z0-9_]/g, "_").slice(0, 40);
+      result.error = `shopify_user_error_${sanitizedCode}`;
       return result;
     }
 

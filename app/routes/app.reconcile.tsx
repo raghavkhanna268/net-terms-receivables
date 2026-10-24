@@ -43,6 +43,21 @@ import { safeLog, toErrorCode } from "~/lib/log.server";
 
 const PAGE_SIZE = 20;
 
+/**
+ * Map error codes to human-readable messages for display to merchants.
+ * Raw error codes (e.g., "retryable:shopify_api_error") should never be shown.
+ */
+function toHumanError(error: string | null | undefined): string | null {
+  if (!error) return null;
+  if (error.startsWith("retryable:") || error.startsWith("permanent:")) {
+    return "An error occurred. Please try again.";
+  }
+  if (error.match(/^[a-z_]+$/)) {
+    return "An error occurred. Please try again.";
+  }
+  return error;
+}
+
 const VALID_VIEWS = ["suggested", "unmatched", "confirmed", "pushing"] as const;
 type ReconcileView = (typeof VALID_VIEWS)[number];
 
@@ -384,7 +399,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         const result = await applyMatch(sql, shop.id, matchId, userId);
         return {
           success: result.success,
-          error: result.success ? null : (result.error ?? "Failed to apply match"),
+          error: result.success ? null : toHumanError(result.error) ?? "Failed to apply match",
         };
       }
 
@@ -398,7 +413,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         const result = await unmatchMatch(sql, shop.id, matchId, userId);
         return {
           success: result.success,
-          error: result.success ? null : (result.error ?? "Failed to unmatch"),
+          error: result.success ? null : toHumanError(result.error) ?? "Failed to unmatch",
         };
       }
 

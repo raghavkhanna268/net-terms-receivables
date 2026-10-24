@@ -1233,7 +1233,7 @@ async function claimMatchAndDecide(
   } catch (error) {
     return {
       success: false,
-      error: `retryable:${toErrorCode(error)}`,
+      error: toErrorCode(error),
     };
   }
 }
@@ -1377,7 +1377,7 @@ async function finalizeFullApply(
         `;
         return {
           raceDetected: true,
-          error: `Invoice state changed during push (status=${lockedInvoice.status}, outstanding=${lockedInvoice.outstandingPaise})`,
+          error: "invoice_state_changed_during_push",
         };
       }
 
@@ -1663,7 +1663,7 @@ export async function unmatchMatch(
   } catch (error) {
     return {
       success: false,
-      error: `retryable:${toErrorCode(error)}`,
+      error: toErrorCode(error),
     };
   }
 }

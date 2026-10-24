@@ -736,6 +736,71 @@ describe("backstop.server", () => {
         expect(result.applied).toBe(true);
         expect(result.tagged).toBe(false);
       });
+
+      it("partial failure: some holds succeed, some fail", async () => {
+        mockSql._setResult("INSERT INTO backstop_processed_orders", [{ action: "pending" }]);
+        mockSql._setResult("BuyerAccount", [
+          { holdState: "HELD", bypass: false, creditLimit: "100000.00", manualHold: true },
+        ]);
+
+        mockShopifyGraphQLRequest.mockResolvedValueOnce({
+          success: true,
+          data: {
+            order: {
+              fulfillmentOrders: {
+                edges: [
+                  {
+                    node: {
+                      id: "gid://shopify/FulfillmentOrder/1",
+                      status: "OPEN",
+                      supportedActions: [{ action: "HOLD" }],
+                    },
+                  },
+                  {
+                    node: {
+                      id: "gid://shopify/FulfillmentOrder/2",
+                      status: "OPEN",
+                      supportedActions: [{ action: "HOLD" }],
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        } as ShopifyClientResult<unknown>);
+
+        mockShopifyGraphQLRequest.mockResolvedValueOnce({
+          success: true,
+          data: {
+            fulfillmentOrderHold: {
+              fulfillmentOrder: { id: "gid://shopify/FulfillmentOrder/1", status: "ON_HOLD" },
+              userErrors: [],
+            },
+          },
+        } as ShopifyClientResult<unknown>);
+
+        mockShopifyGraphQLRequest.mockResolvedValueOnce({
+          success: true,
+          data: {
+            fulfillmentOrderHold: {
+              fulfillmentOrder: null,
+              userErrors: [{ field: ["id"], message: `Error: ${SENTINEL}`, code: "INVALID" }],
+            },
+          },
+        } as ShopifyClientResult<unknown>);
+
+        let thrownError: unknown;
+        try {
+          await applyBackstop(mockSql as never, baseInput);
+        } catch (error) {
+          thrownError = error;
+        }
+
+        expect(thrownError).toBeInstanceOf(RetryableBackstopError);
+        const msg = (thrownError as RetryableBackstopError).message;
+        expect(msg).toBe("retryable:shopify_hold_partial_failure");
+        expect(msg).not.toContain(SENTINEL);
+      });
     });
   });
 });

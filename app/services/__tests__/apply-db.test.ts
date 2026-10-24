@@ -2345,6 +2345,23 @@ describeWithDb("S17 apply service DB integration", () => {
       expect(result.error).not.toContain(SENTINEL);
     });
 
+    it("invoice status error uses code, no amount leak (issue #190 amount fix)", async () => {
+      const AMOUNT_SENTINEL = "999888777666";
+      const paymentId = await createPayment(BigInt(AMOUNT_SENTINEL));
+      const invoiceId = await createInvoice(BigInt(AMOUNT_SENTINEL));
+      const matchId = await createConfirmedMatch(paymentId, invoiceId, BigInt(AMOUNT_SENTINEL));
+
+      await sql`UPDATE "Invoice" SET status = 'paid' WHERE id = ${invoiceId}`;
+
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      expect(result.success).toBe(false);
+      expect(result.reasonCode).toBe("INVOICE_NOT_OPEN");
+      expect(result.error).not.toContain(AMOUNT_SENTINEL);
+      expect(result.error).not.toContain("outstanding");
+      expect(result.error).not.toContain("Paise");
+    });
+
     it("error codes use toErrorCode pattern (retryable: or permanent: prefix)", async () => {
       mockShopifySuccess = false;
       const paymentId = await createPayment(1000000n);
