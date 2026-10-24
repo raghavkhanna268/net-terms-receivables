@@ -413,19 +413,10 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   const contentType = request.headers.get("content-type") ?? "";
   if (contentType.includes("application/json")) {
-    try {
-      const body = await request.clone().text();
-      const trimmed = body.trim();
-      if (trimmed === "{}" || trimmed === "" || trimmed === "null") {
-        return Response.json({ success: false, error: "Empty body" }, { status: 400 });
-      }
-      const parsed = JSON.parse(trimmed);
-      if (typeof parsed !== "object" || parsed === null || Object.keys(parsed).length === 0) {
-        return Response.json({ success: false, error: "Empty body" }, { status: 400 });
-      }
-    } catch {
-      return Response.json({ success: false, error: "Invalid body" }, { status: 400 });
-    }
+    return Response.json(
+      { success: false, error: "JSON requests not supported" },
+      { status: 400 }
+    );
   }
 
   const formData = await request.formData();
@@ -554,7 +545,6 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         success: false,
         error: "Sync already in progress or complete",
         action: "start_sync",
-        syncStatus: syncState.status,
       };
     }
 
@@ -570,16 +560,12 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         success: false,
         error: `Sync ${result.reason?.replace("_", " ")}`,
         action: "start_sync",
-        syncStatus: "in_progress" as InitialSyncStatus,
       };
     }
-
-    safeLog("info", "onboarding.initial_sync_started", { shopHash: hash });
 
     return {
       success: true,
       action: "start_sync",
-      syncStatus: "in_progress" as InitialSyncStatus,
     };
   }
 
@@ -786,15 +772,11 @@ export default function OnboardingPage() {
       ? (actionData.registrationStatus as RegistrationStatus)
       : registrationStatus;
 
-  const currentSyncStatus: InitialSyncStatus =
-    actionData?.action === "start_sync" && actionData.syncStatus
-      ? (actionData.syncStatus as InitialSyncStatus)
-      : initialSyncState?.status ?? "not_started";
-
-  const currentSyncState: InitialSyncState = { status: currentSyncStatus };
+  const loaderSyncStatus: InitialSyncStatus = initialSyncState?.status ?? "not_started";
+  const currentSyncState: InitialSyncState = { status: loaderSyncStatus };
 
   useEffect(() => {
-    if (currentSyncStatus === "in_progress") {
+    if (loaderSyncStatus === "in_progress") {
       if (!pollIntervalRef.current) {
         pollIntervalRef.current = setInterval(() => {
           if (revalidator.state === "idle") {
@@ -815,7 +797,7 @@ export default function OnboardingPage() {
         pollIntervalRef.current = null;
       }
     };
-  }, [currentSyncStatus, revalidator]);
+  }, [loaderSyncStatus, revalidator]);
 
   if (error || !state) {
     return (

@@ -48,12 +48,40 @@ function getTodayUTC(): string {
  * - Each shop gets at most one reconcile per kind per day
  * - Re-running the nightly job on the same day is idempotent
  */
-function makeReconcileWebhookId(
+export function makeReconcileWebhookId(
   shop: string,
   kind: "companies" | "orders"
 ): string {
   const today = getTodayUTC();
   return `reconcile:${shop}:${today}:${kind}`;
+}
+
+/**
+ * Enqueue a reconcile message for a single shop (S23-04).
+ *
+ * Used by onboarding initial sync to start sync for one shop.
+ * Same idempotency guarantees as enqueueReconcileForAllShops.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopDomain - Shop domain
+ * @returns The webhookId that was enqueued
+ */
+export async function enqueueReconcileForShop(
+  sql: Sql,
+  shopDomain: string
+): Promise<{ webhookId: string }> {
+  const webhookId = makeReconcileWebhookId(shopDomain, "companies");
+  const now = new Date().toISOString();
+
+  const companiesMsg: ReconcileMessage = {
+    topic: "RECONCILE_COMPANIES",
+    shop: shopDomain,
+    webhookId,
+    enqueuedAt: now,
+  };
+  await sql`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sql.json(companiesMsg)})`;
+
+  return { webhookId };
 }
 
 /**
@@ -80,20 +108,10 @@ export async function enqueueReconcileForAllShops(sql: Sql): Promise<number> {
     return 0;
   }
 
-  const now = new Date().toISOString();
   let enqueued = 0;
 
   for (const shop of shops) {
-    // Enqueue companies reconcile only
-    // Orders will be enqueued after companies complete (see processor.server.ts)
-    const companiesMsg: ReconcileMessage = {
-      topic: "RECONCILE_COMPANIES",
-      shop: shop.domain,
-      webhookId: makeReconcileWebhookId(shop.domain, "companies"),
-      enqueuedAt: now,
-    };
-    await sql`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sql.json(companiesMsg)})`;
-
+    await enqueueReconcileForShop(sql, shop.domain);
     enqueued += 1;
   }
 

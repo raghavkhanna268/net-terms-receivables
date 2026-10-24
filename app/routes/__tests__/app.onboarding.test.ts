@@ -1177,7 +1177,7 @@ describe("S23-04: initial sync", () => {
       expect(result.initialSyncState?.status).toBe("failed");
     });
 
-    it("returns failed when entries exist in DLQ", async () => {
+    it("returns failed when entries exist in DLQ for latest bulk_op_id", async () => {
       mockSql.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
@@ -1190,7 +1190,15 @@ describe("S23-04: initial sync", () => {
           return Promise.resolve([{ count: "0" }]);
         }
         if (query.includes("s6_bulk_operations")) {
-          return Promise.resolve([]);
+          return Promise.resolve([
+            {
+              bulk_op_id: "gid://shopify/BulkOperation/1",
+              reconcile_stage: "companies",
+              completed_at: null,
+              failure_count: 0,
+              started_at: new Date(),
+            },
+          ]);
         }
         if (query.includes("s6_dead_letter")) {
           return Promise.resolve([{ count: "1" }]);
@@ -1269,10 +1277,9 @@ describe("S23-04: initial sync", () => {
       } as never);
 
       expect(result).not.toBeInstanceOf(Response);
-      const data = result as { success: boolean; action: string; syncStatus: string };
+      const data = result as { success: boolean; action: string };
       expect(data.success).toBe(true);
       expect(data.action).toBe("start_sync");
-      expect(data.syncStatus).toBe("in_progress");
       expect(enqueued).toBe(true);
     });
 
@@ -1491,7 +1498,7 @@ describe("S23-04: initial sync", () => {
       expect(enqueueCount).toBe(0);
     });
 
-    it("returns 400 for empty JSON body {}", async () => {
+    it("returns 400 for any JSON content-type request including {}", async () => {
       mockSql.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("SELECT id FROM")) {
@@ -1524,10 +1531,10 @@ describe("S23-04: initial sync", () => {
       const response = result as Response;
       expect(response.status).toBe(400);
       const body = (await response.json()) as { error: string };
-      expect(body.error).toBe("Empty body");
+      expect(body.error).toBe("JSON requests not supported");
     });
 
-    it("returns 400 for empty string body", async () => {
+    it("returns 400 for JSON content-type with valid body like {\"a\":1}", async () => {
       mockSql.mockImplementation(() => Promise.resolve([]));
 
       const { action } = await import("../app.onboarding");
@@ -1536,7 +1543,7 @@ describe("S23-04: initial sync", () => {
         request: new Request("https://example.com/app/onboarding", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: "",
+          body: JSON.stringify({ a: 1 }),
         }),
         context: {
           shopify: {
@@ -1553,6 +1560,8 @@ describe("S23-04: initial sync", () => {
       expect(result).toBeInstanceOf(Response);
       const response = result as Response;
       expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toBe("JSON requests not supported");
     });
 
     it("start_sync logs use shopHash, not raw domain or ids", async () => {

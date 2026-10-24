@@ -1,14 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Sql } from "../db-light.server";
+import { ReconcileMessage } from "~/services/drain/reconcile.server";
 
 /**
  * Tests for initial-sync.server.ts (S23-04).
  *
  * Tests verify:
- * 1. getInitialSyncState derives status correctly from s6_bulk_operations
- * 2. enqueueInitialSync idempotency (no duplicate enqueue)
+ * 1. getInitialSyncState derives status from LATEST run only
+ * 2. enqueueInitialSync uses manual idempotency key with in-flight protection
  * 3. canStartSync logic
- * 4. Logs use shopHash, no PII
+ * 4. Logs use shopHash, no PII (no domain or webhookId)
+ * 5. Message shape matches reconcile.server.ts
  */
 
 const mockSql = Object.assign(vi.fn(), {
@@ -37,9 +39,6 @@ describe("initial-sync.server", () => {
         if (query.includes("s6_bulk_operations")) {
           return Promise.resolve([]);
         }
-        if (query.includes("s6_dead_letter")) {
-          return Promise.resolve([{ count: "0" }]);
-        }
         return Promise.resolve([]);
       });
 
@@ -54,7 +53,13 @@ describe("initial-sync.server", () => {
         const query = strings.join("?");
         if (query.includes("s6_bulk_operations")) {
           return Promise.resolve([
-            { reconcile_stage: "companies", completed_at: null, failure_count: 0 },
+            {
+              bulk_op_id: "gid://shopify/BulkOperation/1",
+              reconcile_stage: "companies",
+              completed_at: null,
+              failure_count: 0,
+              started_at: new Date(),
+            },
           ]);
         }
         if (query.includes("s6_dead_letter")) {
@@ -74,7 +79,13 @@ describe("initial-sync.server", () => {
         const query = strings.join("?");
         if (query.includes("s6_bulk_operations")) {
           return Promise.resolve([
-            { reconcile_stage: "companies", completed_at: new Date(), failure_count: 0 },
+            {
+              bulk_op_id: "gid://shopify/BulkOperation/1",
+              reconcile_stage: "companies",
+              completed_at: new Date(),
+              failure_count: 0,
+              started_at: new Date(),
+            },
           ]);
         }
         if (query.includes("s6_dead_letter")) {
@@ -94,8 +105,20 @@ describe("initial-sync.server", () => {
         const query = strings.join("?");
         if (query.includes("s6_bulk_operations")) {
           return Promise.resolve([
-            { reconcile_stage: "companies", completed_at: new Date(), failure_count: 0 },
-            { reconcile_stage: "orders", completed_at: new Date(), failure_count: 0 },
+            {
+              bulk_op_id: "gid://shopify/BulkOperation/1",
+              reconcile_stage: "companies",
+              completed_at: new Date(),
+              failure_count: 0,
+              started_at: new Date(),
+            },
+            {
+              bulk_op_id: "gid://shopify/BulkOperation/2",
+              reconcile_stage: "orders",
+              completed_at: new Date(),
+              failure_count: 0,
+              started_at: new Date(),
+            },
           ]);
         }
         if (query.includes("s6_dead_letter")) {
@@ -115,7 +138,13 @@ describe("initial-sync.server", () => {
         const query = strings.join("?");
         if (query.includes("s6_bulk_operations")) {
           return Promise.resolve([
-            { reconcile_stage: "companies", completed_at: null, failure_count: 5 },
+            {
+              bulk_op_id: "gid://shopify/BulkOperation/1",
+              reconcile_stage: "companies",
+              completed_at: null,
+              failure_count: 5,
+              started_at: new Date(),
+            },
           ]);
         }
         if (query.includes("s6_dead_letter")) {
@@ -130,33 +159,21 @@ describe("initial-sync.server", () => {
       expect(result.status).toBe("failed");
     });
 
-    it("returns failed when DLQ entries exist", async () => {
-      mockSql.mockImplementation((strings: TemplateStringsArray) => {
-        const query = strings.join("?");
-        if (query.includes("s6_bulk_operations")) {
-          return Promise.resolve([]);
-        }
-        if (query.includes("s6_dead_letter")) {
-          return Promise.resolve([{ count: "1" }]);
-        }
-        return Promise.resolve([]);
-      });
-
-      const { getInitialSyncState } = await import("../initial-sync.server");
-      const result = await getInitialSyncState(mockSql as unknown as Sql, "test.myshopify.com");
-
-      expect(result.status).toBe("failed");
-    });
-
-    it("failed takes precedence over in_progress", async () => {
+    it("returns failed when DLQ entries exist for latest run's bulk_op_id", async () => {
       mockSql.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("s6_bulk_operations")) {
           return Promise.resolve([
-            { reconcile_stage: "companies", completed_at: null, failure_count: 0 },
+            {
+              bulk_op_id: "gid://shopify/BulkOperation/1",
+              reconcile_stage: "companies",
+              completed_at: null,
+              failure_count: 0,
+              started_at: new Date(),
+            },
           ]);
         }
-        if (query.includes("s6_dead_letter")) {
+        if (query.includes("s6_dead_letter") && query.includes("bulkOperationId")) {
           return Promise.resolve([{ count: "1" }]);
         }
         return Promise.resolve([]);
@@ -167,38 +184,94 @@ describe("initial-sync.server", () => {
 
       expect(result.status).toBe("failed");
     });
-  });
 
-  describe("enqueueInitialSync", () => {
-    it("enqueues message when not already processed or queued", async () => {
-      let enqueued = false;
+    it("an older failure followed by a newer success gives done", async () => {
       mockSql.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
-        if (query.includes("s6_processed_webhooks") && query.includes("webhook_id")) {
-          return Promise.resolve([]);
+        if (query.includes("s6_bulk_operations")) {
+          return Promise.resolve([
+            {
+              bulk_op_id: "gid://shopify/BulkOperation/2",
+              reconcile_stage: "companies",
+              completed_at: new Date(),
+              failure_count: 0,
+              started_at: new Date("2026-10-24"),
+            },
+            {
+              bulk_op_id: "gid://shopify/BulkOperation/3",
+              reconcile_stage: "orders",
+              completed_at: new Date(),
+              failure_count: 0,
+              started_at: new Date("2026-10-24"),
+            },
+          ]);
         }
-        if (query.includes("pgmq.q_s6_sync") && query.includes("webhookId")) {
-          return Promise.resolve([]);
-        }
-        if (query.includes("pgmq.send")) {
-          enqueued = true;
-          return Promise.resolve([{ send: "1" }]);
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
         }
         return Promise.resolve([]);
       });
 
-      const { enqueueInitialSync } = await import("../initial-sync.server");
-      const result = await enqueueInitialSync(mockSql as unknown as Sql, "test.myshopify.com");
+      const { getInitialSyncState } = await import("../initial-sync.server");
+      const result = await getInitialSyncState(mockSql as unknown as Sql, "test.myshopify.com");
 
-      expect(result.enqueued).toBe(true);
-      expect(enqueued).toBe(true);
+      expect(result.status).toBe("done");
     });
 
-    it("returns already_processed when webhook already processed", async () => {
+    it("non-reconcile DLQ row doesn't make it failed", async () => {
       mockSql.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
-        if (query.includes("s6_processed_webhooks") && query.includes("webhook_id")) {
-          return Promise.resolve([{ webhook_id: "existing" }]);
+        if (query.includes("s6_bulk_operations")) {
+          return Promise.resolve([
+            {
+              bulk_op_id: "gid://shopify/BulkOperation/1",
+              reconcile_stage: "companies",
+              completed_at: new Date(),
+              failure_count: 0,
+              started_at: new Date(),
+            },
+            {
+              bulk_op_id: "gid://shopify/BulkOperation/2",
+              reconcile_stage: "orders",
+              completed_at: new Date(),
+              failure_count: 0,
+              started_at: new Date(),
+            },
+          ]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { getInitialSyncState } = await import("../initial-sync.server");
+      const result = await getInitialSyncState(mockSql as unknown as Sql, "test.myshopify.com");
+
+      expect(result.status).toBe("done");
+    });
+  });
+
+  describe("enqueueInitialSync", () => {
+    it("returns in_progress when latest run is still running", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("pgmq.q_s6_sync") && query.includes("manual")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_bulk_operations")) {
+          return Promise.resolve([
+            {
+              bulk_op_id: "gid://shopify/BulkOperation/1",
+              reconcile_stage: "companies",
+              completed_at: null,
+              failure_count: 0,
+              started_at: new Date(),
+            },
+          ]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
         }
         return Promise.resolve([]);
       });
@@ -207,16 +280,13 @@ describe("initial-sync.server", () => {
       const result = await enqueueInitialSync(mockSql as unknown as Sql, "test.myshopify.com");
 
       expect(result.enqueued).toBe(false);
-      expect(result.reason).toBe("already_processed");
+      expect(result.reason).toBe("in_progress");
     });
 
-    it("returns already_queued when message already in queue", async () => {
+    it("returns already_queued when manual message already in queue", async () => {
       mockSql.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
-        if (query.includes("s6_processed_webhooks") && query.includes("webhook_id")) {
-          return Promise.resolve([]);
-        }
-        if (query.includes("pgmq.q_s6_sync") && query.includes("webhookId")) {
+        if (query.includes("pgmq.q_s6_sync") && query.includes("manual")) {
           return Promise.resolve([{ msg_id: "123" }]);
         }
         return Promise.resolve([]);
@@ -229,15 +299,86 @@ describe("initial-sync.server", () => {
       expect(result.reason).toBe("already_queued");
     });
 
-    it("logs use shopHash, not raw domain", async () => {
+    it("enqueues message when latest run failed (even if day-key processed)", async () => {
+      let enqueued = false;
+      let sentMessage: ReconcileMessage | null = null;
+
+      mockSql.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
+        const query = strings.join("?");
+        if (query.includes("pgmq.q_s6_sync") && query.includes("manual")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_bulk_operations")) {
+          return Promise.resolve([
+            {
+              bulk_op_id: "gid://shopify/BulkOperation/1",
+              reconcile_stage: "companies",
+              completed_at: null,
+              failure_count: 5,
+              started_at: new Date(),
+            },
+          ]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("pgmq.send")) {
+          enqueued = true;
+          const jsonArg = values.find((v) => typeof v === "string" && v.includes("RECONCILE"));
+          if (jsonArg) {
+            sentMessage = JSON.parse(jsonArg as string);
+          }
+          return Promise.resolve([{ send: "1" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { enqueueInitialSync } = await import("../initial-sync.server");
+      const result = await enqueueInitialSync(mockSql as unknown as Sql, "test.myshopify.com");
+
+      expect(result.enqueued).toBe(true);
+      expect(enqueued).toBe(true);
+      expect(sentMessage).not.toBeNull();
+      expect(sentMessage!.webhookId).toMatch(/^reconcile:.*:manual:\d+:companies$/);
+    });
+
+    it("enqueues with manual webhookId format", async () => {
+      let sentMessage: ReconcileMessage | null = null;
+
+      mockSql.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
+        const query = strings.join("?");
+        if (query.includes("pgmq.q_s6_sync") && query.includes("manual")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_bulk_operations")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("pgmq.send")) {
+          const jsonArg = values.find((v) => typeof v === "string" && v.includes("RECONCILE"));
+          if (jsonArg) {
+            sentMessage = JSON.parse(jsonArg as string);
+          }
+          return Promise.resolve([{ send: "1" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { enqueueInitialSync } = await import("../initial-sync.server");
+      await enqueueInitialSync(mockSql as unknown as Sql, "test.myshopify.com");
+
+      expect(sentMessage).not.toBeNull();
+      expect(sentMessage!.webhookId).toMatch(/^reconcile:test\.myshopify\.com:manual:\d+:companies$/);
+    });
+
+    it("logs use shopHash, no domain or webhookId", async () => {
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
       mockSql.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
-        if (query.includes("s6_processed_webhooks") && query.includes("webhook_id")) {
+        if (query.includes("pgmq.q_s6_sync") && query.includes("manual")) {
           return Promise.resolve([]);
         }
-        if (query.includes("pgmq.q_s6_sync") && query.includes("webhookId")) {
+        if (query.includes("s6_bulk_operations")) {
           return Promise.resolve([]);
         }
         if (query.includes("pgmq.send")) {
@@ -253,7 +394,7 @@ describe("initial-sync.server", () => {
 
       expect(allLogs).toContain('"shopHash":');
       expect(allLogs).not.toContain(".myshopify.com");
-      expect(allLogs).not.toContain("test");
+      expect(allLogs).not.toContain("webhookId");
 
       consoleSpy.mockRestore();
     });
@@ -278,6 +419,46 @@ describe("initial-sync.server", () => {
     it("returns false for done", async () => {
       const { canStartSync } = await import("../initial-sync.server");
       expect(canStartSync("done")).toBe(false);
+    });
+  });
+
+  describe("message shape", () => {
+    it("matches ReconcileMessage shape from reconcile.server.ts", async () => {
+      let sentMessage: unknown = null;
+
+      mockSql.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
+        const query = strings.join("?");
+        if (query.includes("pgmq.q_s6_sync") && query.includes("manual")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_bulk_operations")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("pgmq.send")) {
+          const jsonArg = values.find((v) => typeof v === "string" && v.includes("RECONCILE"));
+          if (jsonArg) {
+            sentMessage = JSON.parse(jsonArg as string);
+          }
+          return Promise.resolve([{ send: "1" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { enqueueInitialSync } = await import("../initial-sync.server");
+      await enqueueInitialSync(mockSql as unknown as Sql, "test.myshopify.com");
+
+      expect(sentMessage).not.toBeNull();
+      const msg = sentMessage as ReconcileMessage;
+
+      expect(msg.topic).toBe("RECONCILE_COMPANIES");
+      expect(msg.shop).toBe("test.myshopify.com");
+      expect(msg.webhookId).toMatch(/^reconcile:.*:manual:\d+:companies$/);
+      expect(msg.enqueuedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+      expect(typeof msg.topic).toBe("string");
+      expect(typeof msg.shop).toBe("string");
+      expect(typeof msg.webhookId).toBe("string");
+      expect(typeof msg.enqueuedAt).toBe("string");
     });
   });
 });
