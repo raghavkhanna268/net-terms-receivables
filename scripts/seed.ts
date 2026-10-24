@@ -55,7 +55,8 @@
  *   npm run seed -- --reset                   # Delete seed data before seeding
  *
  * Environment:
- *   SHOP                 - Shop domain (must be net-terms-receivables.myshopify.com)
+ *   SHOP                 - Shop domain (SHOP must equal ALLOWED_DEV_STORE)
+ *   ALLOWED_DEV_STORE    - Dev-store domain the seed may run against (required; fails closed if unset)
  *   SHOPIFY_ADMIN_TOKEN  - Admin API access token with production scopes
  *   DATABASE_URL         - Direct Postgres connection for DB seeding (optional)
  *
