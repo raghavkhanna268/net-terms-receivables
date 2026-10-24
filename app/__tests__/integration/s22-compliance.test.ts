@@ -295,13 +295,13 @@ describe("S22 Migration Verification", () => {
         VALUES (${matchBId}, ${shopBId}, ${paymentBId}, ${invoiceBId}, 1000.00, 100, '[]'::jsonb, 'confirmed', ${now}, ${now})
       `;
 
-      // Create RejectedMatches
+      // Create RejectedMatches (table is @@map to rejected_matches, columns stay camelCase)
       await sql!`
-        INSERT INTO "RejectedMatch" (id, "shopId", "paymentId", "invoiceId", "rejectedBy", "rejectedAt")
+        INSERT INTO rejected_matches (id, "shopId", "paymentId", "invoiceId", "rejectedBy", "rejectedAt")
         VALUES (${rejectedMatchAId}, ${shopAId}, ${paymentAId}, ${invoiceAId}, 'user-a', ${now})
       `;
       await sql!`
-        INSERT INTO "RejectedMatch" (id, "shopId", "paymentId", "invoiceId", "rejectedBy", "rejectedAt")
+        INSERT INTO rejected_matches (id, "shopId", "paymentId", "invoiceId", "rejectedBy", "rejectedAt")
         VALUES (${rejectedMatchBId}, ${shopBId}, ${paymentBId}, ${invoiceBId}, 'user-b', ${now})
       `;
 
@@ -339,8 +339,8 @@ describe("S22 Migration Verification", () => {
           (SELECT COUNT(*)::text FROM "Payment" WHERE id = ${paymentBId}) as "paymentB",
           (SELECT COUNT(*)::text FROM "Match" WHERE id = ${matchAId}) as "matchA",
           (SELECT COUNT(*)::text FROM "Match" WHERE id = ${matchBId}) as "matchB",
-          (SELECT COUNT(*)::text FROM "RejectedMatch" WHERE id = ${rejectedMatchAId}) as "rejectedA",
-          (SELECT COUNT(*)::text FROM "RejectedMatch" WHERE id = ${rejectedMatchBId}) as "rejectedB",
+          (SELECT COUNT(*)::text FROM rejected_matches WHERE id = ${rejectedMatchAId}) as "rejectedA",
+          (SELECT COUNT(*)::text FROM rejected_matches WHERE id = ${rejectedMatchBId}) as "rejectedB",
           (SELECT COUNT(*)::text FROM "PayerAlias" WHERE id = ${aliasAId}) as "aliasA",
           (SELECT COUNT(*)::text FROM "PayerAlias" WHERE id = ${aliasBId}) as "aliasB",
           (SELECT COUNT(*)::text FROM "Invoice" WHERE id = ${invoiceAId}) as "invoiceA",
@@ -391,8 +391,8 @@ describe("S22 Migration Verification", () => {
           (SELECT COUNT(*)::text FROM "Payment" WHERE id = ${paymentBId}) as "paymentB",
           (SELECT COUNT(*)::text FROM "Match" WHERE id = ${matchAId}) as "matchA",
           (SELECT COUNT(*)::text FROM "Match" WHERE id = ${matchBId}) as "matchB",
-          (SELECT COUNT(*)::text FROM "RejectedMatch" WHERE id = ${rejectedMatchAId}) as "rejectedA",
-          (SELECT COUNT(*)::text FROM "RejectedMatch" WHERE id = ${rejectedMatchBId}) as "rejectedB",
+          (SELECT COUNT(*)::text FROM rejected_matches WHERE id = ${rejectedMatchAId}) as "rejectedA",
+          (SELECT COUNT(*)::text FROM rejected_matches WHERE id = ${rejectedMatchBId}) as "rejectedB",
           (SELECT COUNT(*)::text FROM "PayerAlias" WHERE id = ${aliasAId}) as "aliasA",
           (SELECT COUNT(*)::text FROM "PayerAlias" WHERE id = ${aliasBId}) as "aliasB",
           (SELECT COUNT(*)::text FROM "Invoice" WHERE id = ${invoiceAId}) as "invoiceA",

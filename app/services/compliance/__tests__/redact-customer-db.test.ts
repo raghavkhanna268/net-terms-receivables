@@ -422,11 +422,11 @@ describeWithDb("redactCustomer DB integration", () => {
         await redactCustomer(sql, SHOP_A_ID, CUSTOMER_X_GID);
       } catch (e) {
         error = e as Error;
+      } finally {
+        // Clean up trigger in finally block so a failed assert can't leave it behind
+        await sql`DROP TRIGGER IF EXISTS test_redact_fail ON "BuyerAccount"`;
+        await sql`DROP FUNCTION IF EXISTS test_redact_fail_trigger()`;
       }
-
-      // Clean up trigger
-      await sql`DROP TRIGGER IF EXISTS test_redact_fail ON "BuyerAccount"`;
-      await sql`DROP FUNCTION IF EXISTS test_redact_fail_trigger()`;
 
       expect(error).not.toBeNull();
       expect(error?.message).toContain('Test failure injection');
