@@ -51,14 +51,22 @@ UTR (Unique Transaction Reference) formats are based on RBI and bank documentati
 
 ### HDFC Fixtures
 - `hdfc-retail-synthetic.csv` - Standard retail savings account format (SYNTHETIC)
+- `hdfc-retail-synthetic.xlsx` - XLSX version of above (SYNTHETIC)
 - `hdfc-malformed-synthetic.csv` - Malformed rows for error handling tests (SYNTHETIC)
+- `hdfc-malformed-synthetic.xlsx` - XLSX version of above (SYNTHETIC)
 
 ### ICICI Fixtures
 - `icici-retail-synthetic.csv` - Standard retail savings format (SYNTHETIC)
+- `icici-retail-synthetic.xlsx` - XLSX version of above (SYNTHETIC)
 - `icici-malformed-synthetic.csv` - Malformed rows for error handling tests (SYNTHETIC)
+- `icici-malformed-synthetic.xlsx` - XLSX version of above (SYNTHETIC)
 
 ### Unknown Format
 - `unknown-bank-synthetic.csv` - Unknown bank format for detection tests (SYNTHETIC)
+
+### XLSX Generation
+XLSX fixtures are generated from CSV source files using `scripts/generate-xlsx-fixtures.ts`.
+Run `npx tsx scripts/generate-xlsx-fixtures.ts` to regenerate them after modifying CSV sources.
 
 ## Synthetic Data Generation Rules
 

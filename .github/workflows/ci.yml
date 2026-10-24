@@ -66,9 +66,9 @@ jobs:
       - name: Install actionlint
         env:
           # Pin to specific version for reproducibility
-          ACTIONLINT_VERSION: "1.7.4"
-          # SHA256 of actionlint_1.7.4_linux_amd64.tar.gz
-          ACTIONLINT_SHA256: "fc0a6886bbb9a23a39eeec4b176193cadb54ddbe77cdbb19b637933919545395"
+          ACTIONLINT_VERSION: "1.7.12"
+          # SHA256 of actionlint_1.7.12_linux_amd64.tar.gz (1.7.10+ allows 25 workflow_dispatch inputs)
+          ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/actionlint"
