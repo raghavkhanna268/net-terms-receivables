@@ -4,11 +4,6 @@
 -- S13 backstop state for each referenced order.
 -- Prints only ids, enums, booleans and timestamps. No PII, no payloads.
 -- Usage: psql -v ON_ERROR_STOP=1 -v msg_ids='162,163' -f scripts/readonly/canary-orders-backstop.sql
--- Output column kinds for passthrough columns (scripts/ci/check-readonly-columns.ts,
--- see scripts/readonly/README.md). Derived counts/booleans/CASE enums need no entry.
--- @col src, topic, action, type, hold_state: enum
--- @col read_ct: count
--- @col manual_hold, bypass: boolean
 \set ON_ERROR_STOP 1
 BEGIN TRANSACTION READ ONLY;
 

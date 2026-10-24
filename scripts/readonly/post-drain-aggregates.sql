@@ -4,12 +4,6 @@
 -- Vars: since (ISO timestamp, redrive start), location_id (CompanyLocation numeric id
 --       of one held account for the overdue drill-down).
 -- Usage: psql -v since='2026-10-24T08:29:23Z' -v location_id='24544084133' -f ...
--- Output column kinds for passthrough columns (scripts/ci/check-readonly-columns.ts,
--- see scripts/readonly/README.md). Derived counts/booleans/CASE enums need no entry.
--- @col topic, original_queue, error_format, error_disposition, error_code, status, due_basis, action, account_hold_state, kind, holdState, defaultTermsSource, dueSource, dueBasis: enum
--- @col fo_held, non_mm_skipped, syncVersion: count
--- @col manualHold, bypass, syncPending: boolean
--- @col issued_at_days_ago: timestamp
 \set ON_ERROR_STOP 1
 BEGIN TRANSACTION READ ONLY;
 

@@ -4,12 +4,6 @@
 -- name, holdNote, emails, domains, money amounts, payloads or free-text JSON fields.
 -- Note: AuditEvent's timestamp column is "at" (no createdAt).
 -- Var: since (ISO-8601 UTC, e.g. 2026-10-24T09:30:00Z)
--- Output column kinds for passthrough columns (scripts/ci/check-readonly-columns.ts,
--- see scripts/readonly/README.md). Derived counts/booleans/CASE enums need no entry.
--- @col holdState, type, status, proname: enum
--- @col manualHold, bypass, syncPending: boolean
--- @col syncVersion: count
--- @col gated_at_pos: id
 \set ON_ERROR_STOP 1
 BEGIN TRANSACTION READ ONLY;
 

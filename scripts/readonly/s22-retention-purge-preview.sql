@@ -4,10 +4,6 @@
 -- hard-coded here because the migration's config function may not exist yet).
 -- Counts, booleans and timestamps only. No narration, payerText or other PII.
 -- Vars: none.
--- Output column kinds for passthrough columns (scripts/ci/check-readonly-columns.ts,
--- see scripts/readonly/README.md). Derived counts/booleans/CASE enums need no entry.
--- @col transaction_read_only: boolean
--- @col status: enum
 \set ON_ERROR_STOP 1
 BEGIN TRANSACTION READ ONLY;
 

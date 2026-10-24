@@ -6,9 +6,6 @@
 -- Counts only: no ids, no payloads, no domains.
 -- Usage: psql -v ON_ERROR_STOP=1 -v msg_ids='240,241' -v since='2026-10-24T08:29:23Z' \
 --        -f scripts/readonly/redriven-webhook-receipts.sql
--- Output column kinds for passthrough columns (scripts/ci/check-readonly-columns.ts,
--- see scripts/readonly/README.md). Derived counts/booleans/CASE enums need no entry.
--- @col src, topic: enum
 \set ON_ERROR_STOP 1
 BEGIN TRANSACTION READ ONLY;
 
