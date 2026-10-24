@@ -1,4 +1,12 @@
-import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
+import postgres from "postgres";
+import { sqlOptions } from "~/lib/db-light.server";
+import {
+  getSeedDbCounts,
+  createSeedDbWriteTracker,
+  checkOutputForPii,
+  PII_PATTERNS,
+} from "../lib/seed-summary";
 import {
   SEED_TAG,
   SEED_PREFIX,
@@ -20,6 +28,7 @@ import {
   resetSeedData,
   formatCurrency,
   printDatabaseSeedSQL,
+  seedDatabase,
   seedTaggedCustomerOrders,
   TAGGED_CUSTOMER_SEEDS,
   TAGGED_ORDER_DISTRIBUTION,
@@ -6386,5 +6395,367 @@ describe("failed counts and exit code", () => {
     expect(state.failedCount.orders).toBe(0);
     expect(state.failedCount.roleAssignments).toBe(0);
     expect(state.failedCount.dbRows).toBe(0);
+  });
+});
+
+// Real-DB integration tests for seed summary counts
+const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
+const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
+
+describeWithDb("seed summary DB integration", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-seed-summary";
+  const TEST_SHOP_DOMAIN = `seed-summary-test-${TEST_SUFFIX}.myshopify.com`;
+  
+  // Track all shop IDs created for cleanup
+  const createdShopIds: string[] = [];
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+  });
+
+  afterAll(async () => {
+    // Clean up all test data
+    for (const shopId of createdShopIds) {
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "AccountSource" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    }
+    // Also clean by domain in case seed created the shop
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" IN (SELECT id FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN})`;
+    await sql`DELETE FROM "AccountSource" WHERE "shopId" IN (SELECT id FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN})`;
+    await sql`DELETE FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN}`;
+    await sql.end();
+  });
+
+  it("seedDatabase creates rows and summary counts match actual DB counts (fresh)", async () => {
+    const state = createMockState({
+      shop: TEST_SHOP_DOMAIN,
+      databaseUrl: TEST_DATABASE_URL!,
+      dryRun: false,
+      currencyCode: "INR",
+    });
+
+    const locations = new Map<number, string>();
+    locations.set(15, `gid://shopify/CompanyLocation/test-${TEST_SUFFIX}-loc-15`);
+    locations.set(30, `gid://shopify/CompanyLocation/test-${TEST_SUFFIX}-loc-30`);
+    locations.set(60, `gid://shopify/CompanyLocation/test-${TEST_SUFFIX}-loc-60`);
+    state.companies.set(`test-company-${TEST_SUFFIX}`, createMockCompanyData({
+      id: `gid://shopify/Company/test-${TEST_SUFFIX}`,
+      contactCustomerId: `gid://shopify/Customer/test-${TEST_SUFFIX}`,
+      locations,
+    }));
+
+    // Capture console output
+    const logs: string[] = [];
+    const logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
+      logs.push(args.join(" "));
+    });
+
+    await seedDatabase(state);
+    logSpy.mockRestore();
+
+    // Verify counts (3 tag rules, 3 accounts)
+    expect(state.createdCount.dbRules).toBe(3);
+    expect(state.createdCount.dbAccounts).toBe(3);
+
+    // Verify log shows "created" not "updated" for fresh run
+    const output = logs.join("\n");
+    expect(output).toContain("Shop record created");
+    expect(output).toMatch(/AccountSources: 3 \(3 created\)/);
+    expect(output).toMatch(/BuyerAccounts: 3 \(3 created\)/);
+  });
+
+  it("seedDatabase re-run shows updated counts (idempotent)", async () => {
+    const state = createMockState({
+      shop: TEST_SHOP_DOMAIN,
+      databaseUrl: TEST_DATABASE_URL!,
+      dryRun: false,
+      currencyCode: "INR",
+    });
+
+    const locations = new Map<number, string>();
+    locations.set(15, `gid://shopify/CompanyLocation/test-${TEST_SUFFIX}-loc-15`);
+    locations.set(30, `gid://shopify/CompanyLocation/test-${TEST_SUFFIX}-loc-30`);
+    locations.set(60, `gid://shopify/CompanyLocation/test-${TEST_SUFFIX}-loc-60`);
+    state.companies.set(`test-company-${TEST_SUFFIX}`, createMockCompanyData({
+      id: `gid://shopify/Company/test-${TEST_SUFFIX}`,
+      contactCustomerId: `gid://shopify/Customer/test-${TEST_SUFFIX}`,
+      locations,
+    }));
+
+    // Capture console output
+    const logs: string[] = [];
+    const logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
+      logs.push(args.join(" "));
+    });
+
+    await seedDatabase(state);
+    logSpy.mockRestore();
+
+    // Counts should still be 3 each
+    expect(state.createdCount.dbRules).toBe(3);
+    expect(state.createdCount.dbAccounts).toBe(3);
+
+    // Verify log shows "updated" not "created" for re-run
+    const output = logs.join("\n");
+    expect(output).toContain("Shop record updated");
+    expect(output).toMatch(/AccountSources: 3 \(3 updated\)/);
+    expect(output).toMatch(/BuyerAccounts: 3 \(3 updated\)/);
+  });
+
+  it("handles pre-existing Shop with non-seed id", async () => {
+    const PREEXISTING_SUFFIX = TEST_SUFFIX + "-preexist-shop";
+    const PREEXISTING_DOMAIN = `preexist-shop-${PREEXISTING_SUFFIX}.myshopify.com`;
+    const PREEXISTING_SHOP_ID = `installed-shop-${PREEXISTING_SUFFIX}`;
+    createdShopIds.push(PREEXISTING_SHOP_ID);
+
+    // Create pre-existing shop with non-seed ID
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, plan, "defaultTermsDays", timezone, "createdAt", "updatedAt")
+      VALUES (${PREEXISTING_SHOP_ID}, ${PREEXISTING_DOMAIN}, 'USD', 'basic', 30, 'UTC', NOW(), NOW())
+    `;
+
+    const state = createMockState({
+      shop: PREEXISTING_DOMAIN,
+      databaseUrl: TEST_DATABASE_URL!,
+      dryRun: false,
+      currencyCode: "INR",
+    });
+
+    const locations = new Map<number, string>();
+    locations.set(15, `gid://shopify/CompanyLocation/preexist-${PREEXISTING_SUFFIX}-loc-15`);
+    locations.set(30, `gid://shopify/CompanyLocation/preexist-${PREEXISTING_SUFFIX}-loc-30`);
+    state.companies.set(`preexist-company`, createMockCompanyData({
+      id: `gid://shopify/Company/preexist-${PREEXISTING_SUFFIX}`,
+      contactCustomerId: `gid://shopify/Customer/preexist-${PREEXISTING_SUFFIX}`,
+      locations,
+    }));
+
+    await seedDatabase(state);
+
+    // Verify counts are correct (uses actual shopId from RETURNING, not seed-shop-*)
+    expect(state.createdCount.dbRules).toBe(3);
+    expect(state.createdCount.dbAccounts).toBe(2);
+
+    // Verify actual DB counts match
+    const tracker = createSeedDbWriteTracker();
+    tracker.shopId = PREEXISTING_SHOP_ID;
+    tracker.tags.add("ntr-seed-net15");
+    tracker.tags.add("ntr-seed-net30");
+    tracker.tags.add("ntr-seed-net60");
+    for (const [, locId] of locations) {
+      tracker.companyLocationIds.add(locId);
+    }
+    const actualCounts = await getSeedDbCounts(sql, tracker);
+    expect(actualCounts.accountSourceCount).toBe(3);
+    expect(actualCounts.buyerAccountCount).toBe(2);
+  });
+
+  it("handles pre-existing AccountSource with non-seed id", async () => {
+    const PREEXISTING_SUFFIX = TEST_SUFFIX + "-preexist-source";
+    const PREEXISTING_DOMAIN = `preexist-source-${PREEXISTING_SUFFIX}.myshopify.com`;
+    const PREEXISTING_SHOP_ID = `installed-shop-${PREEXISTING_SUFFIX}`;
+    const PREEXISTING_SOURCE_ID = `app-source-${PREEXISTING_SUFFIX}`;
+    createdShopIds.push(PREEXISTING_SHOP_ID);
+
+    // Create pre-existing shop and AccountSource with non-seed IDs
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, plan, "defaultTermsDays", timezone, "createdAt", "updatedAt")
+      VALUES (${PREEXISTING_SHOP_ID}, ${PREEXISTING_DOMAIN}, 'USD', 'basic', 30, 'UTC', NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "AccountSource" (id, "shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")
+      VALUES (${PREEXISTING_SOURCE_ID}, ${PREEXISTING_SHOP_ID}, 'ntr-seed-net15', 15, NOW(), NOW())
+    `;
+
+    const state = createMockState({
+      shop: PREEXISTING_DOMAIN,
+      databaseUrl: TEST_DATABASE_URL!,
+      dryRun: false,
+      currencyCode: "INR",
+    });
+
+    const locations = new Map<number, string>();
+    locations.set(15, `gid://shopify/CompanyLocation/preexist-source-${PREEXISTING_SUFFIX}-loc-15`);
+    state.companies.set(`preexist-source-company`, createMockCompanyData({
+      id: `gid://shopify/Company/preexist-source-${PREEXISTING_SUFFIX}`,
+      contactCustomerId: `gid://shopify/Customer/preexist-source-${PREEXISTING_SUFFIX}`,
+      locations,
+    }));
+
+    await seedDatabase(state);
+
+    // Should count all 3 AccountSources (1 updated, 2 created) and 1 BuyerAccount
+    expect(state.createdCount.dbRules).toBe(3);
+    expect(state.createdCount.dbAccounts).toBe(1);
+
+    // Verify the pre-existing source was updated (kept its ID but updated defaultTermsDays)
+    const sourceResult = await sql`
+      SELECT id, "defaultTermsDays" FROM "AccountSource"
+      WHERE "shopId" = ${PREEXISTING_SHOP_ID} AND tag = 'ntr-seed-net15'
+    `;
+    expect(sourceResult[0]?.id).toBe(PREEXISTING_SOURCE_ID);
+  });
+
+  it("handles pre-existing BuyerAccount with non-seed id", async () => {
+    const PREEXISTING_SUFFIX = TEST_SUFFIX + "-preexist-account";
+    const PREEXISTING_DOMAIN = `preexist-account-${PREEXISTING_SUFFIX}.myshopify.com`;
+    const PREEXISTING_SHOP_ID = `installed-shop-${PREEXISTING_SUFFIX}`;
+    const PREEXISTING_ACCOUNT_ID = `app-account-${PREEXISTING_SUFFIX}`;
+    const LOCATION_ID = `gid://shopify/CompanyLocation/preexist-account-${PREEXISTING_SUFFIX}-loc-30`;
+    createdShopIds.push(PREEXISTING_SHOP_ID);
+
+    // Create pre-existing shop and BuyerAccount with non-seed IDs
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, plan, "defaultTermsDays", timezone, "createdAt", "updatedAt")
+      VALUES (${PREEXISTING_SHOP_ID}, ${PREEXISTING_DOMAIN}, 'USD', 'basic', 30, 'UTC', NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "defaultTermsDays", "defaultTermsSource", "holdState", "createdAt", "updatedAt")
+      VALUES (${PREEXISTING_ACCOUNT_ID}, ${PREEXISTING_SHOP_ID}, 'COMPANY', 'existing-co', ${LOCATION_ID}, 'Existing Account', 30, 'explicit', 'OK', NOW(), NOW())
+    `;
+
+    const state = createMockState({
+      shop: PREEXISTING_DOMAIN,
+      databaseUrl: TEST_DATABASE_URL!,
+      dryRun: false,
+      currencyCode: "INR",
+    });
+
+    const locations = new Map<number, string>();
+    locations.set(30, LOCATION_ID);
+    state.companies.set(`preexist-account-company`, createMockCompanyData({
+      id: `gid://shopify/Company/preexist-account-${PREEXISTING_SUFFIX}`,
+      contactCustomerId: `gid://shopify/Customer/preexist-account-${PREEXISTING_SUFFIX}`,
+      locations,
+    }));
+
+    await seedDatabase(state);
+
+    // Should count all (3 AccountSources created, 1 BuyerAccount updated)
+    expect(state.createdCount.dbRules).toBe(3);
+    expect(state.createdCount.dbAccounts).toBe(1);
+
+    // Verify the pre-existing account was updated (kept its ID)
+    const accountResult = await sql`
+      SELECT id FROM "BuyerAccount"
+      WHERE "shopId" = ${PREEXISTING_SHOP_ID} AND "companyLocationId" = ${LOCATION_ID}
+    `;
+    expect(accountResult[0]?.id).toBe(PREEXISTING_ACCOUNT_ID);
+  });
+});
+
+describeWithDb("seed summary output PII checks (real console)", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-pii-check";
+  const TEST_SHOP_DOMAIN = `pii-check-${TEST_SUFFIX}.myshopify.com`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" IN (SELECT id FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN})`;
+    await sql`DELETE FROM "AccountSource" WHERE "shopId" IN (SELECT id FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN})`;
+    await sql`DELETE FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN}`;
+    await sql.end();
+  });
+
+  it("seedDatabase console output contains no PII", async () => {
+    const state = createMockState({
+      shop: TEST_SHOP_DOMAIN,
+      databaseUrl: TEST_DATABASE_URL!,
+      dryRun: false,
+      currencyCode: "INR",
+    });
+
+    const locations = new Map<number, string>();
+    locations.set(15, `gid://shopify/CompanyLocation/pii-${TEST_SUFFIX}-loc-15`);
+    state.companies.set(`pii-test-company`, createMockCompanyData({
+      id: `gid://shopify/Company/pii-${TEST_SUFFIX}`,
+      contactCustomerId: `gid://shopify/Customer/pii-${TEST_SUFFIX}`,
+      locations,
+    }));
+
+    // Capture ALL console output
+    const logs: string[] = [];
+    const logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
+      logs.push(args.join(" "));
+    });
+    const infoSpy = vi.spyOn(console, "info").mockImplementation((...args) => {
+      logs.push(args.join(" "));
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation((...args) => {
+      logs.push(args.join(" "));
+    });
+
+    await seedDatabase(state);
+
+    logSpy.mockRestore();
+    infoSpy.mockRestore();
+    errorSpy.mockRestore();
+
+    const output = logs.join("\n");
+    const piiCheck = checkOutputForPii(output);
+
+    expect(piiCheck.hasPii).toBe(false);
+    if (piiCheck.hasPii) {
+      console.log("PII found in output:", piiCheck.matches);
+      console.log("Output:", output);
+    }
+
+    // Also verify no @ (email), no .myshopify.com (domain), no currency amounts
+    expect(output).not.toMatch(/@/);
+    expect(output).not.toMatch(/\.myshopify\.com/i);
+    expect(output).not.toMatch(/(?:INR|USD|EUR|GBP)\s*\d+(?:,\d{3})*(?:\.\d{2})?/i);
+  });
+});
+
+describe("seed summary output PII checks (unit)", () => {
+  it("checkOutputForPii detects email addresses", () => {
+    const output = "Created customer: test@example.com";
+    const result = checkOutputForPii(output);
+    expect(result.hasPii).toBe(true);
+    expect(result.matches.some(m => m.pattern === "email")).toBe(true);
+  });
+
+  it("checkOutputForPii detects Shopify domains", () => {
+    const output = "Shop: my-store.myshopify.com";
+    const result = checkOutputForPii(output);
+    expect(result.hasPii).toBe(true);
+    expect(result.matches.some(m => m.pattern === "shopifyDomain")).toBe(true);
+  });
+
+  it("checkOutputForPii detects currency amounts", () => {
+    const output = "Total: INR 1,234.00";
+    const result = checkOutputForPii(output);
+    expect(result.hasPii).toBe(true);
+    expect(result.matches.some(m => m.pattern === "currencyAmount")).toBe(true);
+  });
+
+  it("checkOutputForPii allows counts, ids, enums, booleans", () => {
+    const output = `
+      Companies: 5
+      Locations: 15
+      Orders: 33
+      Has overdue orders: true
+      Company ID: gid://shopify/Company/123
+      Mode: SEED
+    `;
+    const result = checkOutputForPii(output);
+    expect(result.hasPii).toBe(false);
+  });
+
+  it("PII_PATTERNS regex patterns are correctly defined", () => {
+    expect(PII_PATTERNS.email.test("user@example.com")).toBe(true);
+    expect(PII_PATTERNS.email.test("no email here")).toBe(false);
+    
+    expect(PII_PATTERNS.shopifyDomain.test("store.myshopify.com")).toBe(true);
+    expect(PII_PATTERNS.shopifyDomain.test("store.example.com")).toBe(false);
+    
+    expect(PII_PATTERNS.currencyAmount.test("INR 1000")).toBe(true);
+    expect(PII_PATTERNS.currencyAmount.test("USD 1,234.56")).toBe(true);
+    expect(PII_PATTERNS.currencyAmount.test("Count: 1000")).toBe(false);
   });
 });
