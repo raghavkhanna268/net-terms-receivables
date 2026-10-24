@@ -541,7 +541,7 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
   });
 
   describe("malformed row handling", () => {
-    it("HDFC: reports coded errors for malformed rows, skips Opening Balance without error", async () => {
+    it("HDFC: reports coded errors for malformed rows, skips Opening/Closing Balance without error", async () => {
       const content = readFileSync(join(FIXTURES_DIR, "hdfc-edgecases-synthetic.csv"));
       const file = new File([content], "hdfc-edgecases-synthetic.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
@@ -559,11 +559,18 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       );
       expect(openingBalanceInTxns).toBeUndefined();
 
-      expect(result.errors.length).toBe(2);
+      const closingBalanceInTxns = result.transactions.find((t) =>
+        t.narration.includes("Closing Balance")
+      );
+      expect(closingBalanceInTxns).toBeUndefined();
+
+      expect(result.errors.length).toBe(3);
       expect(result.errors[0].row).toBe(18);
       expect(result.errors[0].code).toBe("ROW_PARSE_FAILED");
       expect(result.errors[1].row).toBe(26);
       expect(result.errors[1].code).toBe("ROW_PARSE_FAILED");
+      expect(result.errors[2].row).toBe(27);
+      expect(result.errors[2].code).toBe("NORMALIZE_FAILED");
     });
 
     it("ICICI: produces exactly 1 error at row 17 for impossible date", async () => {
@@ -582,7 +589,7 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       expect(malformedInTxns).toBeUndefined();
     });
 
-    it("SBI: reports coded errors for malformed rows", async () => {
+    it("SBI: reports coded errors for malformed rows, skips Closing Balance without error", async () => {
       const content = readFileSync(join(FIXTURES_DIR, "sbi-edgecases-synthetic.csv"));
       const file = new File([content], "sbi-edgecases-synthetic.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
@@ -595,16 +602,23 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       );
       expect(malformedInTxns).toBeUndefined();
 
-      expect(result.errors.length).toBe(3);
+      const closingBalanceInTxns = result.transactions.find((t) =>
+        t.narration.includes("Closing Balance")
+      );
+      expect(closingBalanceInTxns).toBeUndefined();
+
+      expect(result.errors.length).toBe(4);
       expect(result.errors[0].row).toBe(18);
       expect(result.errors[0].code).toBe("ROW_PARSE_FAILED");
       expect(result.errors[1].row).toBe(26);
       expect(result.errors[1].code).toBe("ROW_PARSE_FAILED");
       expect(result.errors[2].row).toBe(27);
       expect(result.errors[2].code).toBe("ROW_PARSE_FAILED");
+      expect(result.errors[3].row).toBe(28);
+      expect(result.errors[3].code).toBe("NORMALIZE_FAILED");
     });
 
-    it("Axis: reports coded errors for malformed rows", async () => {
+    it("Axis: reports coded errors for malformed rows, skips Closing Balance without error", async () => {
       const content = readFileSync(join(FIXTURES_DIR, "axis-edgecases-synthetic.csv"));
       const file = new File([content], "axis-edgecases-synthetic.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
@@ -617,51 +631,58 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       );
       expect(malformedInTxns).toBeUndefined();
 
-      expect(result.errors.length).toBe(3);
+      const closingBalanceInTxns = result.transactions.find((t) =>
+        t.narration.includes("Closing Balance")
+      );
+      expect(closingBalanceInTxns).toBeUndefined();
+
+      expect(result.errors.length).toBe(4);
       expect(result.errors[0].row).toBe(18);
       expect(result.errors[0].code).toBe("ROW_PARSE_FAILED");
       expect(result.errors[1].row).toBe(26);
       expect(result.errors[1].code).toBe("ROW_PARSE_FAILED");
       expect(result.errors[2].row).toBe(27);
       expect(result.errors[2].code).toBe("ROW_PARSE_FAILED");
+      expect(result.errors[3].row).toBe(28);
+      expect(result.errors[3].code).toBe("NORMALIZE_FAILED");
     });
   });
 
   describe("row accounting invariant", () => {
-    it("HDFC: no data row with amount is silently dropped", async () => {
+    it("HDFC: transactions + errors + skippedRows === totalRows", async () => {
       const content = readFileSync(join(FIXTURES_DIR, "hdfc-edgecases-synthetic.csv"));
       const file = new File([content], "hdfc-edgecases-synthetic.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
 
-      const parseFailedErrors = result.errors.filter((e) => e.code === "ROW_PARSE_FAILED");
-
+      expect(result.transactions.length + result.errors.length + result.skippedRows).toBe(result.totalRows);
       expect(result.transactions.length).toBe(13);
-      expect(parseFailedErrors.length).toBe(2);
-      expect(parseFailedErrors.map((e) => e.row)).toEqual([18, 26]);
+      expect(result.errors.length).toBe(3);
+      expect(result.errors.filter((e) => e.code === "ROW_PARSE_FAILED").map((e) => e.row)).toEqual([18, 26]);
+      expect(result.errors.filter((e) => e.code === "NORMALIZE_FAILED").map((e) => e.row)).toEqual([27]);
     });
 
-    it("SBI: no data row with amount is silently dropped", async () => {
+    it("SBI: transactions + errors + skippedRows === totalRows", async () => {
       const content = readFileSync(join(FIXTURES_DIR, "sbi-edgecases-synthetic.csv"));
       const file = new File([content], "sbi-edgecases-synthetic.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
 
-      const parseFailedErrors = result.errors.filter((e) => e.code === "ROW_PARSE_FAILED");
-
+      expect(result.transactions.length + result.errors.length + result.skippedRows).toBe(result.totalRows);
       expect(result.transactions.length).toBe(13);
-      expect(parseFailedErrors.length).toBe(3);
-      expect(parseFailedErrors.map((e) => e.row)).toEqual([18, 26, 27]);
+      expect(result.errors.length).toBe(4);
+      expect(result.errors.filter((e) => e.code === "ROW_PARSE_FAILED").map((e) => e.row)).toEqual([18, 26, 27]);
+      expect(result.errors.filter((e) => e.code === "NORMALIZE_FAILED").map((e) => e.row)).toEqual([28]);
     });
 
-    it("Axis: no data row with amount is silently dropped", async () => {
+    it("Axis: transactions + errors + skippedRows === totalRows", async () => {
       const content = readFileSync(join(FIXTURES_DIR, "axis-edgecases-synthetic.csv"));
       const file = new File([content], "axis-edgecases-synthetic.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
 
-      const parseFailedErrors = result.errors.filter((e) => e.code === "ROW_PARSE_FAILED");
-
+      expect(result.transactions.length + result.errors.length + result.skippedRows).toBe(result.totalRows);
       expect(result.transactions.length).toBe(13);
-      expect(parseFailedErrors.length).toBe(3);
-      expect(parseFailedErrors.map((e) => e.row)).toEqual([18, 26, 27]);
+      expect(result.errors.length).toBe(4);
+      expect(result.errors.filter((e) => e.code === "ROW_PARSE_FAILED").map((e) => e.row)).toEqual([18, 26, 27]);
+      expect(result.errors.filter((e) => e.code === "NORMALIZE_FAILED").map((e) => e.row)).toEqual([28]);
     });
   });
 

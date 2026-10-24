@@ -78,7 +78,7 @@ export async function parseHdfcStatement(
 
   // Detect footer rows to skip
   const footerRows = detectFooterRows(sheet, headerRow + 1);
-  skippedRows = headerRow + 1 + footerRows.size;
+  skippedRows = headerRow + 1;
 
   // Process data rows
   let pendingNarration: string[] = [];
@@ -141,13 +141,17 @@ export async function parseHdfcStatement(
     // Parse this row
     const rawRow = extractHdfcRow(row, columns, i + 1);
     if (!rawRow) {
+      const dateCell = String(row[columns.dateCol] ?? "").trim();
+      const narrationContent = String(row[columns.narrationCol] ?? "").trim();
       const debitCell = String(row[columns.withdrawalCol] ?? "").trim();
       const creditCell = String(row[columns.depositCol] ?? "").trim();
       const hasAmount = (debitCell && !debitCell.match(/^[\d.,\s]*$/)) ||
                         (creditCell && !creditCell.match(/^[\d.,\s]*$/)) ||
                         (debitCell && parseFloat(debitCell.replace(/[,\s]/g, "")) > 0) ||
                         (creditCell && parseFloat(creditCell.replace(/[,\s]/g, "")) > 0);
-      if (hasAmount) {
+      const hasNonNumericNarration = narrationContent && !narrationContent.match(/^[\d.,\s]*$/);
+      const hasDate = dateCell.length > 0;
+      if (hasAmount || hasNonNumericNarration || hasDate) {
         errors.push({
           row: i + 1,
           code: "ROW_PARSE_FAILED",

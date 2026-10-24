@@ -86,7 +86,7 @@ export async function parseSbiStatement(
 
   // Detect footer rows to skip
   const footerRows = detectFooterRows(sheet, headerRow + 1);
-  skippedRows = headerRow + 1 + footerRows.size;
+  skippedRows = headerRow + 1;
 
   // Process data rows
   let pendingNarration: string[] = [];
@@ -102,13 +102,17 @@ export async function parseSbiStatement(
       continue;
     }
 
-    // Check for Opening Balance row
+    // Check for Opening Balance / Closing Balance / B/F rows
     const firstCell = String(row[0] ?? "").trim().toUpperCase();
     const descCell = String(row[columns.descriptionCol] ?? "").trim().toUpperCase();
     if (
-      firstCell.includes("OPENING BALANCE") ||
+      firstCell.includes("OPENING") ||
+      firstCell.includes("CLOSING") ||
       descCell.includes("OPENING BALANCE") ||
-      descCell === "O/B"
+      descCell.includes("CLOSING BALANCE") ||
+      descCell === "O/B" ||
+      descCell === "B/F" ||
+      descCell.includes("BROUGHT FORWARD")
     ) {
       skippedRows++;
       continue;
@@ -146,13 +150,17 @@ export async function parseSbiStatement(
     // Parse this row
     const rawRow = extractSbiRow(row, columns, i + 1);
     if (!rawRow) {
+      const dateCell = String(row[columns.dateCol] ?? "").trim();
+      const descContent = String(row[columns.descriptionCol] ?? "").trim();
       const debitCell = String(row[columns.debitCol] ?? "").trim();
       const creditCell = String(row[columns.creditCol] ?? "").trim();
       const hasAmount = (debitCell && !debitCell.match(/^[\d.,\s]*$/)) ||
                         (creditCell && !creditCell.match(/^[\d.,\s]*$/)) ||
                         (debitCell && parseFloat(debitCell.replace(/[,\s]/g, "")) > 0) ||
                         (creditCell && parseFloat(creditCell.replace(/[,\s]/g, "")) > 0);
-      if (hasAmount) {
+      const hasNonNumericDesc = descContent && !descContent.match(/^[\d.,\s]*$/);
+      const hasDate = dateCell.length > 0;
+      if (hasAmount || hasNonNumericDesc || hasDate) {
         errors.push({
           row: i + 1,
           code: "ROW_PARSE_FAILED",
