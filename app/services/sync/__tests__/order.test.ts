@@ -959,7 +959,7 @@ describeWithDb("Order Sync", () => {
       expect(result.dueBasis).toBe("paymentTermsDueInDays");
       // 2025-07-01 + 45 days = 2025-08-15
       const expectedDue = new Date("2025-07-01T00:00:00.000Z");
-      expectedDue.setDate(expectedDue.getDate() + 45);
+      expectedDue.setUTCDate(expectedDue.getUTCDate() + 45);
       expect(result.dueAt?.toISOString()).toBe(expectedDue.toISOString());
     });
 
@@ -1195,7 +1195,7 @@ describeWithDb("Order Sync", () => {
       // S6 sync must use processedAt (not createdAt) for issuedAt
       const now = new Date("2025-08-01T12:00:00.000Z");
       const processedAt = new Date(now);
-      processedAt.setDate(processedAt.getDate() - 35); // 35 days before createdAt
+      processedAt.setUTCDate(processedAt.getUTCDate() - 35); // 35 days before createdAt
 
       const order: ShopifyOrder = {
         id: "gid://shopify/Order/backdated-1",
@@ -1221,7 +1221,7 @@ describeWithDb("Order Sync", () => {
 
       // Due date should be processedAt + 30 days (5 days before createdAt)
       const expectedDueAt = new Date(processedAt);
-      expectedDueAt.setDate(expectedDueAt.getDate() + 30);
+      expectedDueAt.setUTCDate(expectedDueAt.getUTCDate() + 30);
       expect(result.dueAt?.toISOString()).toBe(expectedDueAt.toISOString());
 
       // This order would be 5 days overdue as of createdAt
