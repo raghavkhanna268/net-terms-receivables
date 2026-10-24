@@ -564,13 +564,15 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       );
       expect(closingBalanceInTxns).toBeUndefined();
 
-      expect(result.errors.length).toBe(3);
+      expect(result.errors.length).toBe(4);
       expect(result.errors[0].row).toBe(18);
       expect(result.errors[0].code).toBe("ROW_PARSE_FAILED");
       expect(result.errors[1].row).toBe(26);
       expect(result.errors[1].code).toBe("ROW_PARSE_FAILED");
       expect(result.errors[2].row).toBe(27);
       expect(result.errors[2].code).toBe("NORMALIZE_FAILED");
+      expect(result.errors[3].row).toBe(28);
+      expect(result.errors[3].code).toBe("ROW_PARSE_FAILED");
     });
 
     it("ICICI: produces exactly 1 error at row 17 for impossible date", async () => {
@@ -589,7 +591,7 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       expect(malformedInTxns).toBeUndefined();
     });
 
-    it("SBI: reports coded errors for malformed rows, skips Closing Balance without error", async () => {
+    it("SBI: reports coded errors for malformed rows, skips Closing Balance/B-F without error", async () => {
       const content = readFileSync(join(FIXTURES_DIR, "sbi-edgecases-synthetic.csv"));
       const file = new File([content], "sbi-edgecases-synthetic.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
@@ -607,7 +609,15 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       );
       expect(closingBalanceInTxns).toBeUndefined();
 
-      expect(result.errors.length).toBe(4);
+      const bfInTxns = result.transactions.find((t) => t.narration === "B/F");
+      expect(bfInTxns).toBeUndefined();
+
+      const broughtForwardInTxns = result.transactions.find((t) =>
+        t.narration.includes("Brought Forward")
+      );
+      expect(broughtForwardInTxns).toBeUndefined();
+
+      expect(result.errors.length).toBe(5);
       expect(result.errors[0].row).toBe(18);
       expect(result.errors[0].code).toBe("ROW_PARSE_FAILED");
       expect(result.errors[1].row).toBe(26);
@@ -616,9 +626,11 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       expect(result.errors[2].code).toBe("ROW_PARSE_FAILED");
       expect(result.errors[3].row).toBe(28);
       expect(result.errors[3].code).toBe("NORMALIZE_FAILED");
+      expect(result.errors[4].row).toBe(29);
+      expect(result.errors[4].code).toBe("ROW_PARSE_FAILED");
     });
 
-    it("Axis: reports coded errors for malformed rows, skips Closing Balance without error", async () => {
+    it("Axis: reports coded errors for malformed rows, skips Closing Balance/B-F without error", async () => {
       const content = readFileSync(join(FIXTURES_DIR, "axis-edgecases-synthetic.csv"));
       const file = new File([content], "axis-edgecases-synthetic.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
@@ -636,7 +648,15 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       );
       expect(closingBalanceInTxns).toBeUndefined();
 
-      expect(result.errors.length).toBe(4);
+      const bfInTxns = result.transactions.find((t) => t.narration === "B/F");
+      expect(bfInTxns).toBeUndefined();
+
+      const broughtForwardInTxns = result.transactions.find((t) =>
+        t.narration.includes("Brought Forward")
+      );
+      expect(broughtForwardInTxns).toBeUndefined();
+
+      expect(result.errors.length).toBe(5);
       expect(result.errors[0].row).toBe(18);
       expect(result.errors[0].code).toBe("ROW_PARSE_FAILED");
       expect(result.errors[1].row).toBe(26);
@@ -645,6 +665,8 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       expect(result.errors[2].code).toBe("ROW_PARSE_FAILED");
       expect(result.errors[3].row).toBe(28);
       expect(result.errors[3].code).toBe("NORMALIZE_FAILED");
+      expect(result.errors[4].row).toBe(29);
+      expect(result.errors[4].code).toBe("ROW_PARSE_FAILED");
     });
   });
 
@@ -656,8 +678,8 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
 
       expect(result.transactions.length + result.errors.length + result.skippedRows).toBe(result.totalRows);
       expect(result.transactions.length).toBe(13);
-      expect(result.errors.length).toBe(3);
-      expect(result.errors.filter((e) => e.code === "ROW_PARSE_FAILED").map((e) => e.row)).toEqual([18, 26]);
+      expect(result.errors.length).toBe(4);
+      expect(result.errors.filter((e) => e.code === "ROW_PARSE_FAILED").map((e) => e.row)).toEqual([18, 26, 28]);
       expect(result.errors.filter((e) => e.code === "NORMALIZE_FAILED").map((e) => e.row)).toEqual([27]);
     });
 
@@ -668,8 +690,8 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
 
       expect(result.transactions.length + result.errors.length + result.skippedRows).toBe(result.totalRows);
       expect(result.transactions.length).toBe(13);
-      expect(result.errors.length).toBe(4);
-      expect(result.errors.filter((e) => e.code === "ROW_PARSE_FAILED").map((e) => e.row)).toEqual([18, 26, 27]);
+      expect(result.errors.length).toBe(5);
+      expect(result.errors.filter((e) => e.code === "ROW_PARSE_FAILED").map((e) => e.row)).toEqual([18, 26, 27, 29]);
       expect(result.errors.filter((e) => e.code === "NORMALIZE_FAILED").map((e) => e.row)).toEqual([28]);
     });
 
@@ -680,8 +702,8 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
 
       expect(result.transactions.length + result.errors.length + result.skippedRows).toBe(result.totalRows);
       expect(result.transactions.length).toBe(13);
-      expect(result.errors.length).toBe(4);
-      expect(result.errors.filter((e) => e.code === "ROW_PARSE_FAILED").map((e) => e.row)).toEqual([18, 26, 27]);
+      expect(result.errors.length).toBe(5);
+      expect(result.errors.filter((e) => e.code === "ROW_PARSE_FAILED").map((e) => e.row)).toEqual([18, 26, 27, 29]);
       expect(result.errors.filter((e) => e.code === "NORMALIZE_FAILED").map((e) => e.row)).toEqual([28]);
     });
   });
