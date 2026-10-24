@@ -1230,6 +1230,81 @@ export function test() { return pattern; }`
       const { exitCode } = runGuard();
       expect(exitCode).toBe(0);
     });
+
+    // P2 Round 5: Token in URL path with trailing segment
+    it("fails for real token in URL path with trailing segment", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      // Build real-looking token at test generation time
+      const realToken = "shpat_" + "a1b2c3d4e5f67890abcdef1234567890";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const url = "/tokens/${realToken}/revoke";
+export function test() { return url; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("token-prefix");
+    });
+
+    // P1 Round 5: isValidShopDomain and escaped-regex tests
+    it("fails for isValidShopDomain with real domain (built by concat)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const realDomain = "clearwater" + "-wholesale" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `expect(isValidShopDomain("${realDomain}")).toBe(true);
+export function test() { return true; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("allows escaped-regex pattern (no literal domain)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const pattern = /^[a-z0-9-]+\\.myshopify\\.com$/;
+export function test() { return pattern; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("allows isValidShopDomain with fake domain", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `expect(isValidShopDomain("test-shop.myshopify.com")).toBe(true);
+export function test() { return true; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    // P3 Round 5: TLD boundary tests
+    it("fails for domain with fake TLD prefix (.testing)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const domain = "clearwater" + ".testing" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "${domain}"; export function test() { return domain; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for domain with suffix after TLD (.myshopify.com-evil)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "clearwater.myshopify.com-evil"; export function test() { return domain; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
   });
 
   // =========================================================================

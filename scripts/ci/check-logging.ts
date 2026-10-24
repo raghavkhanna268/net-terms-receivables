@@ -1552,7 +1552,8 @@ function matchesFakePrefix(subdomain: string): boolean {
  * Returns true only if ALL domains on the line are fake. Returns false if ANY domain is real.
  */
 function allDomainsAreFake(line: string): boolean {
-  const domainRegex = /([a-z0-9][-_a-z0-9]*)\.(myshopify\.com|test|invalid|example|localhost)/gi;
+  // P3: Added (?![-\w]) after TLD group to prevent matching partial TLDs like .testing or .myshopify.com-evil
+  const domainRegex = /([a-z0-9][-_a-z0-9]*)\.(myshopify\.com|test|invalid|example|localhost)(?![-\w])/gi;
   let match;
   let foundAnyLiteralDomain = false;
   
@@ -1586,6 +1587,12 @@ function allDomainsAreFake(line: string): boolean {
     return true;
   }
 
+  // P1: Escaped-regex patterns like `\.myshopify\.com` or `[a-z]+\.myshopify\.com` are safe
+  // (they match the domain pattern in a regex, not a literal domain)
+  if (/\\\.myshopify\\\.com/i.test(line)) {
+    return true;
+  }
+
   return false;
 }
 
@@ -1614,19 +1621,13 @@ function analyzeTestFile(testFile: TestFile): Violation[] {
     if (line.trim().startsWith("//") || line.trim().startsWith("*")) continue;
 
     // Check for token prefixes (shpat_, shpua_, shpss_, shpca_, shppa_)
-    // P2: Decide fake vs real based on the token VALUE only
-    // P2: Only skip when token is in actual regex literal or RegExp constructor
+    // P2 Round 5: Removed regex-literal/RegExp skips - hasRealLookingToken handles patterns
     if (TOKEN_PREFIX_PATTERN.test(line)) {
       // Skip if it's in a file that handles token redaction
       if (/\/log\.server|lib\/log/i.test(testFile.relPath) || testFile.relPath.includes("sentry")) continue;
 
-      // P2: Check if token is in an actual regex literal or RegExp constructor
-      // Regex literal: /...shpat_.../flags or new RegExp("...shpat_...")
-      const isInRegexLiteral = /\/[^/]*shp(?:at|ua|ss|ca|pa)_[^/]*\/[gimsuy]*/.test(line);
-      const isInRegExpConstructor = /RegExp\s*\([^)]*shp(?:at|ua|ss|ca|pa)_/.test(line);
-      if (isInRegexLiteral || isInRegExpConstructor) continue;
-
-      // P1: Check if the token VALUE looks real (32+ hex chars, not synthetic)
+      // Check if the token VALUE looks real (32+ hex chars, not synthetic)
+      // Pattern text like `shpat_[a-f0-9]{32}` has no 32 literal hex chars, so it's ignored
       if (hasRealLookingToken(line)) {
         violations.push({
           file: testFile.relPath,
@@ -1641,11 +1642,10 @@ function analyzeTestFile(testFile: TestFile): Violation[] {
 
     // Check for myshopify.com domain literal
     // P1 fix: Strict fail-closed - only allow explicitly fake domains
+    // P1 Round 5: Removed VALIDATION_PATTERNS line-wide skip; escaped-regex handled in allDomainsAreFake
     if (DOMAIN_LITERAL_PATTERN.test(line)) {
       // Skip comments
       if (line.trim().startsWith("//") || line.trim().startsWith("*")) continue;
-      // Skip validation patterns
-      if (VALIDATION_PATTERNS.some((p) => p.test(line))) continue;
       // Skip specific assertion patterns (P1: strict list only)
       if (DOMAIN_SKIP_PATTERNS.some((p) => p.test(line))) continue;
 
