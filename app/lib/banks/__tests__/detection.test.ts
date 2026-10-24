@@ -276,64 +276,82 @@ describe("detection", () => {
       expect(result.bank).not.toBe("AXIS");
     });
 
-    it("all HDFC header variants detect as HDFC", () => {
+    it("all HDFC header variants detect as HDFC via detectBank", () => {
       const hdfcVariants = [
+        // HDFC_HEADERS (primary retail format)
         ["Date", "Narration", "Chq./Ref.No.", "Value Dt", "Withdrawal Amt.", "Deposit Amt.", "Closing Balance"],
+        // HDFC_HEADERS_ALT (alternate spacing)
         ["Date", "Narration", "Chq./Ref. No.", "Value Dt"],
+        // HDFC_ENET_HEADERS (e-net banking format)
         ["Date", "Transaction Description", "Chq/Ref. No", "Value Date", "Debit Amount", "Credit Amount", "Closing Balance"],
       ];
 
       for (const headers of hdfcVariants) {
         const sheet: SheetData = {
           name: "Sheet1",
-          rows: [headers],
+          rows: [headers, ["01/10/26", "TEST", "REF001", "01/10/26", "", "1000", "1000"]],
         };
-        const result = detectHeaderRow(sheet);
-        expect(result?.bank).toBe("HDFC");
+        const result = detectBank(sheet);
+        expect(result.bank).toBe("HDFC");
+        expect(result.confidence).toBeGreaterThanOrEqual(0.5);
       }
     });
 
-    it("all ICICI header variants detect as ICICI", () => {
+    it("all ICICI header variants detect as ICICI via detectBank", () => {
       const iciciVariants = [
+        // ICICI_HEADERS (primary retail format)
         ["S No.", "Transaction Date", "Cheque Number", "Remarks", "Withdrawal", "Deposit", "Balance"],
+        // ICICI_HEADERS_ALT (alternate format)
         ["S No.", "Transaction Date", "Cheque/Reference No.", "Remarks"],
+        // ICICI_CORPORATE_HEADERS (corporate banking format)
         ["Tran ID", "Value Date", "Transaction Date", "Cheque/RefNo", "Withdrawal (Dr)", "Deposit (Cr)"],
+        // ICICI_DETAILED_HEADERS (detailed format - regression test for DR/CR matching)
         ["Date", "Particulars", "Chq. No.", "Withdrawals", "Deposits", "Balance"],
       ];
 
       for (const headers of iciciVariants) {
         const sheet: SheetData = {
           name: "Sheet1",
-          rows: [headers],
+          rows: [headers, ["1", "01.10.2026", "", "TEST", "", "1000", "1000"]],
         };
-        const result = detectHeaderRow(sheet);
-        expect(result?.bank).toBe("ICICI");
+        const result = detectBank(sheet);
+        expect(result.bank).toBe("ICICI");
+        expect(result.confidence).toBeGreaterThanOrEqual(0.5);
       }
     });
 
-    it("SBI primary header variant detects as SBI (UNVERIFIED)", () => {
+    it("SBI primary header variant detects as SBI via detectBank (UNVERIFIED)", () => {
+      // SBI_HEADERS (primary format - only variant to avoid ICICI collision)
       const sheet: SheetData = {
         name: "Sheet1",
-        rows: [["Txn Date", "Value Date", "Description", "Ref No./Cheque No.", "Debit", "Credit", "Balance"]],
+        rows: [
+          ["Txn Date", "Value Date", "Description", "Ref No./Cheque No.", "Debit", "Credit", "Balance"],
+          ["01/10/2026", "01/10/2026", "TEST", "REF001", "", "1000", "1000"],
+        ],
       };
-      const result = detectHeaderRow(sheet);
-      expect(result?.bank).toBe("SBI");
+      const result = detectBank(sheet);
+      expect(result.bank).toBe("SBI");
+      expect(result.confidence).toBeGreaterThanOrEqual(0.5);
     });
 
-    it("all Axis header variants detect as AXIS (UNVERIFIED)", () => {
+    it("all Axis header variants detect as AXIS via detectBank (UNVERIFIED)", () => {
       const axisVariants = [
+        // AXIS_HEADERS (primary retail format with DR/CR columns)
         ["Tran Date", "Chq No", "Particulars", "DR", "CR", "Balance"],
+        // AXIS_HEADERS_ALT (alternate format with Debit/Credit)
         ["Transaction Date", "Value Date", "Particulars", "Chq./Ref.No.", "Debit", "Credit", "Balance"],
+        // AXIS_HEADERS_CORPORATE (corporate format with Value Date)
         ["Tran Date", "Value Date", "Particulars", "Chq No", "Debit", "Credit", "Balance"],
       ];
 
       for (const headers of axisVariants) {
         const sheet: SheetData = {
           name: "Sheet1",
-          rows: [headers],
+          rows: [headers, ["01-10-2026", "", "TEST", "100", "", "1000"]],
         };
-        const result = detectHeaderRow(sheet);
-        expect(result?.bank).toBe("AXIS");
+        const result = detectBank(sheet);
+        expect(result.bank).toBe("AXIS");
+        expect(result.confidence).toBeGreaterThanOrEqual(0.5);
       }
     });
 
@@ -342,12 +360,13 @@ describe("detection", () => {
         name: "Sheet1",
         rows: [
           ["Date", "Particulars", "Chq. No.", "Withdrawals", "Deposits", "Balance"],
+          ["01.10.2026", "TEST", "", "1000", "", "99000"],
         ],
       };
       
-      const result = detectHeaderRow(sheet);
-      expect(result?.bank).toBe("ICICI");
-      expect(result?.bank).not.toBe("AXIS");
+      const result = detectBank(sheet);
+      expect(result.bank).toBe("ICICI");
+      expect(result.bank).not.toBe("AXIS");
     });
   });
 
