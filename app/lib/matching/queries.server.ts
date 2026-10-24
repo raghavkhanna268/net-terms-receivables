@@ -277,7 +277,7 @@ export async function getSuggestedMatches(
   options: {
     limit: number;
     offset: number;
-    state?: "suggested" | "confirmed" | "unmatched";
+    state?: "suggested" | "confirmed" | "unmatched" | "pushing";
   }
 ): Promise<{
   matches: Array<{

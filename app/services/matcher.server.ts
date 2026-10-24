@@ -420,9 +420,9 @@ export async function confirmMatch(
       if (!matchRow) {
         return { success: false, error: "Match not found" };
       }
-      // P3: Return specific error for already-confirmed match
+      // Idempotent: already confirmed/pushed matches return success with no side effects
       if (matchRow.state === "confirmed" || matchRow.state === "pushed") {
-        return { success: false, error: "This match is already confirmed" };
+        return { success: true };
       }
       if (matchRow.state !== "suggested") {
         return { success: false, error: "Match not found or already processed" };
@@ -446,8 +446,9 @@ export async function confirmMatch(
 
       const invoiceMap = new Map(invoiceRows.map((i) => [i.id, BigInt(i.outstanding_paise)]));
 
-      // STEP 4: Query ALL 'confirmed' matches across ALL payments for these invoices
-      // P2: Count only 'confirmed' (not 'pushed') because 'pushed' is already reflected in Invoice.outstanding
+      // STEP 4: Query ALL 'confirmed'/'pushing' matches across ALL payments for these invoices
+      // P2: Count 'confirmed' and 'pushing' (not 'pushed') because 'pushed' is already reflected in Invoice.outstanding
+      // S17: 'pushing' is in-flight, must be counted to prevent double-allocation
       const allConfirmedForInvoices = await tx<
         { invoice_id: string; total_paise: string }[]
       >`
@@ -457,15 +458,16 @@ export async function confirmMatch(
         FROM "Match"
         WHERE "invoiceId" IN ${tx(invoiceIds)}
           AND "shopId" = ${shopId}
-          AND state = 'confirmed'
+          AND state IN ('confirmed', 'pushing')
         GROUP BY "invoiceId"
       `;
       const invoiceAllocatedCrossPayment = new Map(
         allConfirmedForInvoices.map((r) => [r.invoice_id, BigInt(r.total_paise)])
       );
 
-      // Calculate total already allocated (confirmed + pushed) for this payment
-      const confirmedMatches = matchRows.filter((m) => m.state === "confirmed" || m.state === "pushed");
+      // Calculate total already allocated (confirmed + pushing + pushed) for this payment
+      // S17: Include 'pushing' to prevent double-allocation while push is in flight
+      const confirmedMatches = matchRows.filter((m) => m.state === "confirmed" || m.state === "pushing" || m.state === "pushed");
       const paymentAmountPaise = BigInt(payment.amount_paise);
       const alreadyAllocatedPaise = confirmedMatches.reduce(
         (sum, m) => sum + BigInt(m.amount_paise),
@@ -499,8 +501,9 @@ export async function confirmMatch(
 
       const finalAmountDecimal = Number(finalAllocationPaise) / 100;
 
-      // Confirm this match with capped amount
-      await tx`
+      // Confirm this match with capped amount using conditional UPDATE
+      // Only transitions if state is still 'suggested' (idempotency)
+      const [confirmedRow] = await tx<{ id: string }[]>`
         UPDATE "Match"
         SET
           state = 'confirmed',
@@ -510,6 +513,40 @@ export async function confirmMatch(
           "updatedAt" = NOW()
         WHERE id = ${matchId}
           AND "shopId" = ${shopId}
+          AND state = 'suggested'
+        RETURNING id
+      `;
+
+      // If no transition happened (match wasn't in 'suggested' state), return early
+      // This handles idempotent retry of already-confirmed matches
+      if (!confirmedRow) {
+        // Check current state for better error message
+        const [currentMatch] = await tx<{ state: string }[]>`
+          SELECT state FROM "Match" WHERE id = ${matchId} AND "shopId" = ${shopId}
+        `;
+        if (currentMatch?.state === "confirmed" || currentMatch?.state === "pushed") {
+          // Already confirmed - idempotent success
+          return { success: true };
+        }
+        return { success: false, error: `Match state is '${currentMatch?.state ?? "unknown"}'` };
+      }
+
+      // S17: Write audit event for the transition
+      await tx`
+        INSERT INTO "AuditEvent" (id, "shopId", actor, type, data, at)
+        VALUES (
+          gen_random_uuid(),
+          ${shopId},
+          ${userId},
+          'match.confirmed',
+          ${tx.json({
+            matchId,
+            invoiceId: match.invoice_id,
+            paymentId: payment.id,
+            amountPaise: finalAllocationPaise.toString(),
+          })}::jsonb,
+          NOW()
+        )
       `;
 
       // Calculate new remaining payment after this confirmation
@@ -759,8 +796,9 @@ export async function updateMatchAllocation(
 
       const invoiceMap = new Map(invoiceRows.map((i) => [i.id, BigInt(i.outstanding_paise)]));
 
-      // STEP 4: Query ALL 'confirmed' matches across ALL payments for these invoices
-      // P2: Count only 'confirmed' (not 'pushed') because 'pushed' is already reflected in Invoice.outstanding
+      // STEP 4: Query ALL 'confirmed'/'pushing' matches across ALL payments for these invoices
+      // P2: Count 'confirmed' and 'pushing' (not 'pushed') because 'pushed' is already reflected in Invoice.outstanding
+      // S17: 'pushing' is in-flight, must be counted to prevent double-allocation
       const allConfirmedForInvoices = await tx<
         { invoice_id: string; total_paise: string }[]
       >`
@@ -770,15 +808,16 @@ export async function updateMatchAllocation(
         FROM "Match"
         WHERE "invoiceId" IN ${tx(invoiceIds)}
           AND "shopId" = ${shopId}
-          AND state = 'confirmed'
+          AND state IN ('confirmed', 'pushing')
         GROUP BY "invoiceId"
       `;
       const invoiceAllocatedCrossPayment = new Map(
         allConfirmedForInvoices.map((r) => [r.invoice_id, BigInt(r.total_paise)])
       );
 
-      // Calculate remaining payment (after confirmed + pushed)
-      const confirmedMatches = matchRows.filter((m) => m.state === "confirmed" || m.state === "pushed");
+      // Calculate remaining payment (after confirmed + pushing + pushed)
+      // S17: Include 'pushing' to prevent double-allocation while push is in flight
+      const confirmedMatches = matchRows.filter((m) => m.state === "confirmed" || m.state === "pushing" || m.state === "pushed");
       const paymentAmountPaise = BigInt(payment.amount_paise);
       const alreadyAllocatedPaise = confirmedMatches.reduce(
         (sum, m) => sum + BigInt(m.amount_paise),

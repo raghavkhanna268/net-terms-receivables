@@ -344,6 +344,7 @@ SELECT 'S16-1' AS check_id,
   (SELECT count(*) FROM "Payment"    WHERE "shopId" = :'shop_id' AND status::text = 'matched')      AS payments_matched,
   (SELECT count(*) FROM "Match"      WHERE "shopId" = :'shop_id' AND state::text = 'suggested')     AS matches_suggested,
   (SELECT count(*) FROM "Match"      WHERE "shopId" = :'shop_id' AND state::text = 'confirmed')     AS matches_confirmed,
+  (SELECT count(*) FROM "Match"      WHERE "shopId" = :'shop_id' AND state::text = 'pushing')       AS matches_pushing,
   (SELECT count(*) FROM "Match"      WHERE "shopId" = :'shop_id' AND state::text = 'pushed')        AS matches_pushed,
   (SELECT count(*) FROM "Match"      WHERE "shopId" = :'shop_id' AND state::text = 'unmatched')     AS matches_unmatched,
   (SELECT count(*) FROM rejected_matches WHERE "shopId" = :'shop_id')                               AS rejected_pairs,
@@ -366,15 +367,15 @@ SELECT 'S16-2' AS check_id, v.invariant, v.violations, (v.violations = 0) AS pas
                         AND m."shopId" = :'shop_id' AND m.state::text = 'unmatched')
   UNION ALL
   SELECT 'payment_confirmed_alloc_exceeds_amount', count(*) FROM (
-    SELECT p.id FROM "Payment" p JOIN "Match" m ON m."paymentId" = p.id AND m.state::text IN ('confirmed','pushed')
+    SELECT p.id FROM "Payment" p JOIN "Match" m ON m."paymentId" = p.id AND m.state::text IN ('confirmed','pushing','pushed')
     WHERE p."shopId" = :'shop_id' GROUP BY p.id, p.amount HAVING sum(m.amount) > p.amount) x
   UNION ALL
   SELECT 'invoice_confirmed_alloc_exceeds_total', count(*) FROM (
-    SELECT i.id FROM "Invoice" i JOIN "Match" m ON m."invoiceId" = i.id AND m.state::text IN ('confirmed','pushed')
+    SELECT i.id FROM "Invoice" i JOIN "Match" m ON m."invoiceId" = i.id AND m.state::text IN ('confirmed','pushing','pushed')
     WHERE i."shopId" = :'shop_id' GROUP BY i.id, i.total HAVING sum(m.amount) > i.total) x
   UNION ALL
   SELECT 'payment_status_inconsistent_with_confirmed_alloc', count(*) FROM (
-    SELECT p.id, p.status::text AS st, p.amount, COALESCE(sum(m.amount) FILTER (WHERE m.state::text IN ('confirmed','pushed')), 0) AS alloc,
+    SELECT p.id, p.status::text AS st, p.amount, COALESCE(sum(m.amount) FILTER (WHERE m.state::text IN ('confirmed','pushing','pushed')), 0) AS alloc,
            count(*) FILTER (WHERE m.state::text = 'suggested') AS sugg
     FROM "Payment" p LEFT JOIN "Match" m ON m."paymentId" = p.id
     WHERE p."shopId" = :'shop_id' GROUP BY p.id, p.status, p.amount) x

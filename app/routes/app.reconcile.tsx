@@ -1,11 +1,12 @@
 /**
- * Payment reconciliation review queue (S16).
+ * Payment reconciliation review queue (S16/S17).
  *
  * Displays unmatched/suggested payment matches for merchant review.
  * Confirm/Reject/Edit allocation actions are POST requests, idempotent and shop-scoped.
  *
- * This is v1 CONFIRM-ONLY: merchants review suggestions but no mutations are
- * applied to orders. S17 will read confirmed matches and apply them.
+ * S16: CONFIRM flow - merchants review suggested matches and confirm/reject them.
+ * S17: APPLY flow - confirmed matches are pushed to Shopify (orderMarkAsPaid).
+ *      Pushing matches show in "In Progress" tab with Retry action.
  *
  * Polaris web component patterns from #68:
  * - s-table with s-table-header-row directly under s-table
@@ -32,6 +33,7 @@ import {
   rejectMatch,
   MAX_PAYMENTS_PER_REQUEST,
 } from "~/services/matcher.server";
+import { applyMatch, unmatchMatch } from "~/services/apply.server";
 import { formatPaiseAmount } from "~/lib/aging";
 import { resolvePlan } from "~/services/plan.server";
 import { isGatingEnforced } from "~/services/gating.server";
@@ -86,7 +88,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       pagination: { page: 1, pageSize: PAGE_SIZE, totalCount: 0 },
       view,
       error: "Shop not found",
-      tabCounts: { suggested: 0, unmatched: 0 },
+      tabCounts: { suggested: 0, unmatched: 0, confirmed: 0, pushing: 0 },
       planKey: "free" as PlanKey,
       gatingEnforced: false,
       storeHandle: shopDomain.replace(".myshopify.com", ""),
@@ -107,10 +109,10 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   // P3: Get real tab counts from COUNT queries (not page length)
   // Run resolvePlan in parallel with tab counts to avoid extra round trip on cache miss
-  let tabCounts = { suggested: 0, unmatched: 0 };
+  let tabCounts = { suggested: 0, unmatched: 0, confirmed: 0, pushing: 0 };
   let planData = { plan: { key: "free" as PlanKey } };
   try {
-    const [planResult, suggestedCount, unmatchedCount] = await Promise.all([
+    const [planResult, suggestedCount, unmatchedCount, confirmedCount, pushingCount] = await Promise.all([
       resolvePlan(sql, shopDomain),
       sql<{ count: string }[]>`
         SELECT COUNT(*)::text AS count
@@ -124,11 +126,25 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         WHERE "shopId" = ${shop.id}
           AND status IN ('unmatched', 'partial')
       `.then(r => r[0]),
+      sql<{ count: string }[]>`
+        SELECT COUNT(*)::text AS count
+        FROM "Match"
+        WHERE "shopId" = ${shop.id}
+          AND state = 'confirmed'
+      `.then(r => r[0]),
+      sql<{ count: string }[]>`
+        SELECT COUNT(*)::text AS count
+        FROM "Match"
+        WHERE "shopId" = ${shop.id}
+          AND state = 'pushing'
+      `.then(r => r[0]),
     ]);
     planData = planResult;
     tabCounts = {
       suggested: parseInt(suggestedCount?.count ?? "0", 10),
       unmatched: parseInt(unmatchedCount?.count ?? "0", 10),
+      confirmed: parseInt(confirmedCount?.count ?? "0", 10),
+      pushing: parseInt(pushingCount?.count ?? "0", 10),
     };
   } catch (err) {
     console.error("[app.reconcile] Error getting tab counts or plan:", err);
@@ -182,6 +198,46 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         payerText: p.payerText,
         utr: p.utr,
         rail: p.rail,
+      }));
+      totalCount = result.totalCount;
+    } else if (view === "confirmed") {
+      // S17: View confirmed matches awaiting apply
+      const result = await getSuggestedMatches(sql, shop.id, {
+        limit: PAGE_SIZE,
+        offset: (page - 1) * PAGE_SIZE,
+        state: "confirmed",
+      });
+
+      matches = result.matches.map((m) => ({
+        id: m.id,
+        paymentId: m.paymentId,
+        invoiceId: m.invoiceId,
+        invoiceName: m.invoiceName,
+        amountPaise: m.amountPaise.toString(),
+        score: m.score,
+        reasons: m.reasons,
+        state: m.state,
+        buyerName: m.buyerName,
+      }));
+      totalCount = result.totalCount;
+    } else if (view === "pushing") {
+      // S17: View pushing matches (in-flight) with Retry action
+      const result = await getSuggestedMatches(sql, shop.id, {
+        limit: PAGE_SIZE,
+        offset: (page - 1) * PAGE_SIZE,
+        state: "pushing",
+      });
+
+      matches = result.matches.map((m) => ({
+        id: m.id,
+        paymentId: m.paymentId,
+        invoiceId: m.invoiceId,
+        invoiceName: m.invoiceName,
+        amountPaise: m.amountPaise.toString(),
+        score: m.score,
+        reasons: m.reasons,
+        state: m.state,
+        buyerName: m.buyerName,
       }));
       totalCount = result.totalCount;
     } else {
@@ -293,6 +349,34 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         return {
           success: result.success,
           error: result.success ? null : "Failed to reject match",
+        };
+      }
+
+      // S17: Apply confirmed match to reduce invoice outstanding
+      // IDOR protection: pass shop.id from authenticated session
+      case "apply": {
+        const matchId = formData.get("matchId") as string;
+        if (!matchId) {
+          return { success: false, error: "Match ID required" };
+        }
+        const result = await applyMatch(sql, shop.id, matchId, userId);
+        return {
+          success: result.success,
+          error: result.success ? null : (result.error ?? "Failed to apply match"),
+        };
+      }
+
+      // S17: Unmatch a confirmed or pushed match
+      // IDOR protection: pass shop.id from authenticated session
+      case "unmatch": {
+        const matchId = formData.get("matchId") as string;
+        if (!matchId) {
+          return { success: false, error: "Match ID required" };
+        }
+        const result = await unmatchMatch(sql, shop.id, matchId, userId);
+        return {
+          success: result.success,
+          error: result.success ? null : (result.error ?? "Failed to unmatch"),
         };
       }
 
@@ -671,6 +755,204 @@ function SuggestedMatchesView({
   );
 }
 
+/**
+ * S17: Confirmed matches view with Apply/Unmatch actions.
+ */
+function ConfirmedMatchesView({
+  matches,
+  currency,
+  page,
+  totalCount,
+  pageSize,
+}: {
+  matches: MatchSummary[];
+  currency: string;
+  page: number;
+  totalCount: number;
+  pageSize: number;
+}) {
+  const navigation = useNavigation();
+  const isSubmitting = navigation.state === "submitting";
+  const totalPages = Math.ceil(totalCount / pageSize);
+
+  if (matches.length === 0) {
+    return (
+      <s-empty-state heading="No confirmed matches">
+        <s-text slot="subheading">
+          Confirm suggested matches first. Once confirmed, you can apply them
+          here to reduce invoice outstanding amounts.
+        </s-text>
+      </s-empty-state>
+    );
+  }
+
+  return (
+    <s-stack>
+      <s-table>
+        <s-table-header-row>
+          <s-table-header>Invoice</s-table-header>
+          <s-table-header>Buyer</s-table-header>
+          <s-table-header format="currency">Amount</s-table-header>
+          <s-table-header>Actions</s-table-header>
+        </s-table-header-row>
+        <s-table-body>
+          {matches.map((match) => (
+            <s-table-row key={match.id}>
+              <s-table-cell>{match.invoiceName}</s-table-cell>
+              <s-table-cell>{match.buyerName}</s-table-cell>
+              <s-table-cell>
+                {formatPaiseAmount(BigInt(match.amountPaise), currency)}
+              </s-table-cell>
+              <s-table-cell>
+                <s-stack direction="inline">
+                  <Form method="post" style={{ display: "inline" }}>
+                    <input type="hidden" name="intent" value="apply" />
+                    <input type="hidden" name="matchId" value={match.id} />
+                    <s-button
+                      variant="primary"
+                      type="submit"
+                      disabled={isSubmitting}
+                    >
+                      Apply
+                    </s-button>
+                  </Form>
+                  <Form method="post" style={{ display: "inline" }}>
+                    <input type="hidden" name="intent" value="unmatch" />
+                    <input type="hidden" name="matchId" value={match.id} />
+                    <s-button
+                      variant="secondary"
+                      tone="critical"
+                      type="submit"
+                      disabled={isSubmitting}
+                    >
+                      Unmatch
+                    </s-button>
+                  </Form>
+                </s-stack>
+              </s-table-cell>
+            </s-table-row>
+          ))}
+        </s-table-body>
+      </s-table>
+
+      {totalPages > 1 && (
+        <s-stack direction="inline">
+          {page > 1 && (
+            <s-button href={`/app/reconcile?view=confirmed&page=${page - 1}`}>
+              Previous
+            </s-button>
+          )}
+          <s-text>
+            Page {page} of {totalPages} ({totalCount} matches)
+          </s-text>
+          {page < totalPages && (
+            <s-button href={`/app/reconcile?view=confirmed&page=${page + 1}`}>
+              Next
+            </s-button>
+          )}
+        </s-stack>
+      )}
+    </s-stack>
+  );
+}
+
+/**
+ * S17: Pushing matches view - shows in-flight matches with Retry action.
+ * These are matches where TX1 succeeded but TX2 hasn't finalized yet.
+ */
+function PushingMatchesView({
+  matches,
+  currency,
+  page,
+  totalCount,
+  pageSize,
+}: {
+  matches: MatchSummary[];
+  currency: string;
+  page: number;
+  totalCount: number;
+  pageSize: number;
+}) {
+  const navigation = useNavigation();
+  const isSubmitting = navigation.state === "submitting";
+  const totalPages = Math.ceil(totalCount / pageSize);
+
+  if (matches.length === 0) {
+    return (
+      <s-empty-state heading="No in-progress matches">
+        <s-text slot="subheading">
+          There are no matches currently being applied. Check back later if you
+          see matches stuck in progress.
+        </s-text>
+      </s-empty-state>
+    );
+  }
+
+  return (
+    <s-stack>
+      <s-banner tone="warning" heading="Matches in progress">
+        These matches started applying but have not completed. Stale matches
+        (older than 5 minutes) can be retried using the Retry action below.
+      </s-banner>
+
+      <s-table>
+        <s-table-header-row>
+          <s-table-header>Invoice</s-table-header>
+          <s-table-header>Account</s-table-header>
+          <s-table-header>Amount</s-table-header>
+          <s-table-header>Actions</s-table-header>
+        </s-table-header-row>
+        <s-table-body>
+          {matches.map((match) => (
+            <s-table-row key={match.id}>
+              <s-table-cell>
+                <s-link href={`/app/invoices/${match.invoiceId}`}>
+                  {match.invoiceName}
+                </s-link>
+              </s-table-cell>
+              <s-table-cell>{match.buyerName}</s-table-cell>
+              <s-table-cell>
+                {formatPaiseAmount(BigInt(match.amountPaise), currency)}
+              </s-table-cell>
+              <s-table-cell>
+                <Form method="post" style={{ display: "inline" }}>
+                  <input type="hidden" name="intent" value="apply" />
+                  <input type="hidden" name="matchId" value={match.id} />
+                  <s-button
+                    variant="primary"
+                    type="submit"
+                    disabled={isSubmitting}
+                  >
+                    Retry
+                  </s-button>
+                </Form>
+              </s-table-cell>
+            </s-table-row>
+          ))}
+        </s-table-body>
+      </s-table>
+
+      {totalPages > 1 && (
+        <s-stack direction="inline">
+          {page > 1 && (
+            <s-button href={`/app/reconcile?view=pushing&page=${page - 1}`}>
+              Previous
+            </s-button>
+          )}
+          <s-text>
+            Page {page} of {totalPages} ({totalCount} matches)
+          </s-text>
+          {page < totalPages && (
+            <s-button href={`/app/reconcile?view=pushing&page=${page + 1}`}>
+              Next
+            </s-button>
+          )}
+        </s-stack>
+      )}
+    </s-stack>
+  );
+}
+
 export default function ReconcilePage() {
   const {
     shopCurrency,
@@ -734,6 +1016,20 @@ export default function ReconcilePage() {
           >
             Unmatched ({tabCounts.unmatched})
           </s-button>
+          <s-button
+            href="/app/reconcile?view=confirmed"
+            variant={view === "confirmed" ? "primary" : "secondary"}
+          >
+            Confirmed ({tabCounts.confirmed})
+          </s-button>
+          {tabCounts.pushing > 0 && (
+            <s-button
+              href="/app/reconcile?view=pushing"
+              variant={view === "pushing" ? "primary" : "secondary"}
+            >
+              In progress ({tabCounts.pushing})
+            </s-button>
+          )}
         </s-stack>
       </s-section>
 
@@ -748,6 +1044,26 @@ export default function ReconcilePage() {
         <s-section heading="Unmatched Payments">
           <UnmatchedPaymentsView
             payments={payments}
+            currency={shopCurrency}
+            page={pagination.page}
+            totalCount={pagination.totalCount}
+            pageSize={pagination.pageSize}
+          />
+        </s-section>
+      ) : view === "confirmed" ? (
+        <s-section heading="Confirmed Matches">
+          <ConfirmedMatchesView
+            matches={matches}
+            currency={shopCurrency}
+            page={pagination.page}
+            totalCount={pagination.totalCount}
+            pageSize={pagination.pageSize}
+          />
+        </s-section>
+      ) : view === "pushing" ? (
+        <s-section heading="In progress">
+          <PushingMatchesView
+            matches={matches}
             currency={shopCurrency}
             page={pagination.page}
             totalCount={pagination.totalCount}
@@ -785,7 +1101,8 @@ export default function ReconcilePage() {
           </s-list-item>
         </s-unordered-list>
         <s-paragraph>
-          Confirmed matches will be applied to orders in a future update (S17).
+          Use Apply on confirmed matches to reduce invoice outstanding and mark
+          orders as paid in Shopify.
         </s-paragraph>
       </s-section>
 
