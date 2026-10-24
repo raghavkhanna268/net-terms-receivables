@@ -22,7 +22,6 @@
  */
 
 import type { Sql } from "~/lib/db-light.server";
-import { activeAccountFragment } from "~/services/gating.server";
 import type {
   AgingBucketKey,
   SerializableAgingTotals,
@@ -45,8 +44,8 @@ interface ShopTotalRow {
  * Returns one row per currency per bucket with the total outstanding amount.
  * Empty buckets are not returned (filter them client-side).
  *
- * When gating is enforced (PLAN_GATING_ENFORCED=true), invoices for gated
- * accounts are excluded from the totals.
+ * Gated accounts are included in totals (gating applies only to value-add actions,
+ * not to holds, aging, or sync queries).
  *
  * @param sql - postgres.js SQL client
  * @param shopId - Shop ID to query
@@ -78,7 +77,6 @@ export async function getShopAgingTotals(
       WHERE i."shopId" = ${shopId}
         AND i.status = 'open'
         AND i.outstanding > 0
-        AND ${activeAccountFragment(sql)}
     )
     SELECT
       currency,
@@ -163,7 +161,6 @@ export async function getShopAgingTotals(
     WHERE i."shopId" = ${shopId}
       AND i.status = 'open'
       AND i.outstanding > 0
-      AND ${activeAccountFragment(sql)}
   `;
 
   result.oldestOverdueDays = oldestRow?.oldest_days ?? null;
@@ -177,9 +174,8 @@ export async function getShopAgingTotals(
  * Returns one row per buyer per currency with their total outstanding,
  * overdue amounts, and oldest overdue days.
  *
- * When gating is enforced (PLAN_GATING_ENFORCED=true), gated accounts are
- * excluded from the results. When gating is not enforced, all accounts are
- * included and the is_gated flag indicates their status.
+ * Gated accounts are included (gating applies only to value-add actions,
+ * not to holds, aging, or sync queries). The is_gated flag indicates status.
  *
  * @param sql - postgres.js SQL client
  * @param shopId - Shop ID to query
@@ -223,7 +219,6 @@ export async function getBuyerLedger(
       WHERE i."shopId" = ${shopId}
         AND i.status = 'open'
         AND i.outstanding > 0
-        AND ${activeAccountFragment(sql)}
     ),
     buyer_totals AS (
       SELECT
@@ -279,7 +274,6 @@ export async function getBuyerLedger(
     WHERE i."shopId" = ${shopId}
       AND i.status = 'open'
       AND i.outstanding > 0
-      AND ${activeAccountFragment(sql)}
   `;
 
   return {
@@ -291,8 +285,8 @@ export async function getBuyerLedger(
 /**
  * Get open invoices for a specific buyer, sorted by due date.
  *
- * When gating is enforced (PLAN_GATING_ENFORCED=true), invoices for gated
- * accounts are excluded. This prevents viewing invoices for gated buyers.
+ * Gated accounts are included (gating applies only to value-add actions,
+ * not to holds, aging, or sync queries).
  *
  * @param sql - postgres.js SQL client
  * @param shopId - Shop ID to query
@@ -335,7 +329,6 @@ export async function getBuyerInvoices(
       AND i."buyerAccountId" = ${buyerAccountId}
       AND i.status = 'open'
       AND i.outstanding > 0
-      AND ${activeAccountFragment(sql)}
     ORDER BY i."dueAt" ASC NULLS LAST, i.name ASC
     LIMIT ${limit}
     OFFSET ${offset}
@@ -349,7 +342,6 @@ export async function getBuyerInvoices(
       AND i."buyerAccountId" = ${buyerAccountId}
       AND i.status = 'open'
       AND i.outstanding > 0
-      AND ${activeAccountFragment(sql)}
   `;
 
   return {

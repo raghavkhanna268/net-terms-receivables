@@ -1,12 +1,13 @@
 /**
  * Database queries for payment matching.
  *
- * All queries use postgres.js and respect activeAccountFragment for gating.
+ * All queries use postgres.js. Gated accounts are included in matching
+ * (gating applies only to value-add actions, not to holds, aging,
+ * matching, or sync queries).
  * Amounts are returned as bigint strings (paise) for exact arithmetic.
  */
 
 import type { Sql } from "~/lib/db-light.server";
-import { activeAccountFragment } from "~/services/gating.server";
 import type {
   InvoiceForScoring,
   PaymentForScoring,
@@ -159,7 +160,6 @@ export async function getOpenInvoicesInAmountWindow(
       AND i.outstanding > 0
       AND i.outstanding >= ${minDecimal}
       AND i.outstanding <= ${maxDecimal}
-      AND ${activeAccountFragment(sql)}
     ORDER BY i."dueAt" ASC NULLS LAST, i.name ASC
   `;
 
@@ -200,7 +200,6 @@ export async function getOpenInvoicesForBuyer(
       AND i."buyerAccountId" = ${buyerAccountId}
       AND i.status = 'open'
       AND i.outstanding > 0
-      AND ${activeAccountFragment(sql)}
     ORDER BY i."dueAt" ASC NULLS LAST, i.name ASC
   `;
 
@@ -224,7 +223,7 @@ export async function getBuyersWithAliases(
   sql: Sql,
   shopId: string
 ): Promise<BuyerForScoring[]> {
-  // Get buyers with respect to gating
+  // Get all buyers (gating applies only to value-add actions, not matching)
   const buyers = await sql<BuyerRow[]>`
     SELECT
       ba.id,
@@ -233,7 +232,6 @@ export async function getBuyersWithAliases(
     FROM "BuyerAccount" ba
     LEFT JOIN "s8_tagged_customers" tc ON tc."shop_id" = ba."shopId" AND tc."customer_id" = ba."customerId"
     WHERE ba."shopId" = ${shopId}
-      AND ${activeAccountFragment(sql)}
   `;
 
   if (buyers.length === 0) {
@@ -637,7 +635,6 @@ export async function findBuyerByAlias(
     LEFT JOIN "s8_tagged_customers" tc ON tc."shop_id" = ba."shopId" AND tc."customer_id" = ba."customerId"
     WHERE pa."payerKey" = ${payerKey}
       AND ba."shopId" = ${shopId}
-      AND ${activeAccountFragment(sql)}
     LIMIT 1
   `;
 

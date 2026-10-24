@@ -544,7 +544,7 @@ describeWithDb("syncVersion race condition (real functions)", () => {
   });
 });
 
-describeWithDb("syncCreditStatusMetafield gated account skip", () => {
+describeWithDb("syncCreditStatusMetafield gated account", () => {
   let sql: ReturnType<typeof postgres>;
   const TEST_SUFFIX = Date.now().toString(36) + "-gated";
   const TEST_SHOP_ID = `shop-gated-${TEST_SUFFIX}`;
@@ -591,22 +591,33 @@ describeWithDb("syncCreditStatusMetafield gated account skip", () => {
     await sql.end();
   });
 
-  it("gated account: syncPending cleared inside tx, writeMetafield never called", async () => {
+  it("gated account: metafield is written (gating applies only to value-add actions)", async () => {
     // Verify syncPending is true before
     const [before] = await sql<{ syncPending: boolean }[]>`
       SELECT "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}
     `;
     expect(before.syncPending).toBe(true);
 
+    // Mock Shopify GraphQL response
+    mockShopifyGraphQLRequest.mockResolvedValue({
+      success: true,
+      data: {
+        metafieldsSet: {
+          metafields: [{ id: "gid://shopify/Metafield/123" }],
+          userErrors: [],
+        },
+      },
+    });
+
     // Call the real syncCreditStatusMetafield
     const result = await syncCreditStatusMetafield(sql, TEST_GATED_ACCOUNT_ID);
 
-    // Should succeed without calling writeMetafield
+    // Gated accounts now get metafield writes (gating only applies to value-add actions)
     expect(result.success).toBe(true);
     expect(result.metafieldSyncPending).toBe(false);
 
-    // writeMetafield (shopifyGraphQLRequest) should NOT have been called
-    expect(mockShopifyGraphQLRequest).not.toHaveBeenCalled();
+    // writeMetafield (shopifyGraphQLRequest) SHOULD be called for gated accounts
+    expect(mockShopifyGraphQLRequest).toHaveBeenCalled();
 
     // Verify syncPending is now false
     const [after] = await sql<{ syncPending: boolean }[]>`

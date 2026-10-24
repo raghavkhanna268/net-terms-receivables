@@ -384,22 +384,24 @@ describeWithDb("credit-status-recompute DB integration", () => {
       }
     });
 
-    it("gated account reports real stored values, not fake ones", async () => {
-      // Set account to gated and HELD
+    it("gated account gets metafield written (gating applies only to value-add actions)", async () => {
+      // Set account to gated and HELD with syncPending=true to trigger metafield write
+      // (syncPending=true simulates a state change that needs sync)
       await sql`
         UPDATE "BuyerAccount"
-        SET gated_at = NOW(), "holdState" = 'HELD', "holdReasonCode" = 'MANUAL_HOLD'
+        SET gated_at = NOW(), "holdState" = 'HELD', "holdReasonCode" = 'MANUAL_HOLD', 
+            "manualHold" = true, "syncPending" = true
         WHERE id = ${TEST_ACCOUNT_ID}
       `;
 
       const result = await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
 
       expect(result.success).toBe(true);
-      expect(result.metafieldWritten).toBe(false);
-      // Reports real stored values: HELD (not bypass) = hold true
+      // Gated accounts now get metafield writes (gating only applies to value-add actions)
+      expect(result.metafieldWritten).toBe(true);
       expect(result.previousHold).toBe(true);
       expect(result.newHold).toBe(true);
-      expect(metafieldWriteCount).toBe(0); // No write for gated accounts
+      expect(metafieldWriteCount).toBe(1); // Metafield written for gated accounts
     });
 
     it("P2-5: newer syncVersion owns sync - returns success, not retryable failure", async () => {

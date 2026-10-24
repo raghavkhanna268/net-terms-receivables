@@ -618,7 +618,7 @@ describeWithDb("shop totals = sum of ledger (gating test)", () => {
     }
   });
 
-  it("shop totals equal sum of ledger rows with PLAN_GATING_ENFORCED=true", async () => {
+  it("shop totals include gated account rows with PLAN_GATING_ENFORCED=true", async () => {
     const originalEnv = process.env.PLAN_GATING_ENFORCED;
     (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "true";
 
@@ -633,10 +633,15 @@ describeWithDb("shop totals = sum of ledger (gating test)", () => {
         sortOrder: "desc",
       });
 
-      // With gating enforced, the gated buyer should be excluded
-      // Only the active buyer's invoice (5000.00 = 500000 paise) should be counted
-      expect(ledger.rows.length).toBe(1);
-      expect(ledger.rows[0].buyer_name).toBe("Active Buyer");
+      // With gating enforced, gated accounts are STILL included in totals and ledger
+      // (gating applies only to value-add actions, not to aging/totals/lists)
+      // Both the active buyer's invoice (5000.00) and gated buyer's invoice (3000.00) should be counted
+      expect(ledger.rows.length).toBe(2);
+      
+      // Find the gated buyer row - it should be marked as gated
+      const gatedRow = ledger.rows.find(r => r.is_gated === true);
+      expect(gatedRow).toBeDefined();
+      expect(gatedRow!.buyer_name).toBe("Gated Buyer");
 
       // Sum ledger outstanding amounts by currency
       const ledgerSumByCurrency: Record<string, bigint> = {};
@@ -646,13 +651,13 @@ describeWithDb("shop totals = sum of ledger (gating test)", () => {
         ledgerSumByCurrency[currency] = (ledgerSumByCurrency[currency] ?? 0n) + amount;
       }
 
-      // Verify totals match ledger (both should exclude gated buyer)
+      // Verify totals match ledger (both should include gated buyer)
       for (const [currency, totalAmount] of Object.entries(totals.totalByCurrency)) {
         expect(ledgerSumByCurrency[currency]).toBe(BigInt(totalAmount));
       }
 
-      // Verify the amount is only the active buyer's invoice
-      expect(totals.totalByCurrency["INR"]).toBe("500000");
+      // Verify the amount includes both buyers' invoices (5000 + 3000 = 8000 = 800000 paise)
+      expect(totals.totalByCurrency["INR"]).toBe("800000");
     } finally {
       // Restore original environment
       (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = originalEnv;

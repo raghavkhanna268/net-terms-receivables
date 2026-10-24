@@ -9,7 +9,7 @@
  * Design decisions:
  * - v1 is CONFIRM-ONLY: matcher produces suggestions, nothing is applied
  * - Matching is idempotent: re-running clears old suggestions first
- * - Respects activeAccountFragment for gated accounts
+ * - Gated accounts are included (gating applies only to value-add actions)
  * - All amounts in integer paise to avoid floating-point errors
  * - PayerAlias is ONLY learned on merchant confirm (not from fuzzy matches)
  * - Rejected pairs are persisted and never re-suggested
