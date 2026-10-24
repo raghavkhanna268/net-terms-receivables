@@ -456,8 +456,8 @@ describeWithDb("processor backstop integration (DB-backed)", () => {
         )
       `;
 
-      const [beforeDrain] = await sql<{ msg_id: bigint }[]>`
-        SELECT msg_id FROM pgmq.q_s6_sync
+      const [beforeDrain] = await sql<{ msg_id: string }[]>`
+        SELECT msg_id::text FROM pgmq.q_s6_sync
         WHERE message->>'webhookId' = ${message.webhookId}
       `;
       expect(beforeDrain).toBeDefined();
@@ -486,7 +486,7 @@ describeWithDb("processor backstop integration (DB-backed)", () => {
       expect(dlqEntry).toBeDefined();
 
       await sql`DELETE FROM s6_dead_letter WHERE message->>'webhookId' = ${message.webhookId}`;
-      await sql`DELETE FROM pgmq.a_s6_sync WHERE msg_id = ${msgId}`;
+      await sql`DELETE FROM pgmq.a_s6_sync WHERE msg_id = ${msgId}::bigint`;
     });
 
     it("bulk queue: unregistered topic at read_ct >= noHandlerMaxReads goes to DLQ with no_handler code", async () => {
@@ -514,8 +514,8 @@ describeWithDb("processor backstop integration (DB-backed)", () => {
         )
       `;
 
-      const [beforeDrain] = await sql<{ msg_id: bigint }[]>`
-        SELECT msg_id FROM pgmq.q_s6_bulk
+      const [beforeDrain] = await sql<{ msg_id: string }[]>`
+        SELECT msg_id::text FROM pgmq.q_s6_bulk
         WHERE message->>'webhookId' = ${message.webhookId}
       `;
       expect(beforeDrain).toBeDefined();
@@ -544,7 +544,7 @@ describeWithDb("processor backstop integration (DB-backed)", () => {
       expect(dlqEntry).toBeDefined();
 
       await sql`DELETE FROM s6_dead_letter WHERE message->>'webhookId' = ${message.webhookId}`;
-      await sql`DELETE FROM pgmq.a_s6_bulk WHERE msg_id = ${msgId}`;
+      await sql`DELETE FROM pgmq.a_s6_bulk WHERE msg_id = ${msgId}::bigint`;
     });
 
     it("no_handler code contains no raw message text or PII", async () => {
