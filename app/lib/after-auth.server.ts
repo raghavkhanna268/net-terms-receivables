@@ -13,6 +13,7 @@
 
 import { ensureMetafieldDefinitions } from "./metafield-definitions.server";
 import { ensureValidation } from "./validation-registration.server";
+import { ensurePaymentCustomization } from "./payment-customization-registration.server";
 import { getRequestSql } from "./request-context.server";
 import { validateTimezone } from "./aging-dates.server";
 
@@ -171,6 +172,18 @@ async function runSetup(
   } catch (error) {
     hasError = true;
     console.error(`[afterAuth] Failed to ensure validation for ${shop}:`, error);
+  }
+  
+  // S13: Payment customization for hiding net-terms payment methods
+  // Failure is logged but doesn't break auth - can be retried on next request
+  try {
+    const result = await ensurePaymentCustomization(admin);
+    if (result.created) {
+      console.log(`[afterAuth] Created payment customization for ${shop}: ${result.id}`);
+    }
+  } catch (error) {
+    hasError = true;
+    console.error(`[afterAuth] Failed to ensure payment customization for ${shop}:`, error);
   }
   
   // Timezone sync runs even if earlier steps fail - it's independent

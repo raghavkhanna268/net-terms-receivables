@@ -353,23 +353,32 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
 
   // S13: Apply backstop for ORDERS_CREATE on held accounts
   if (message.topic === "ORDERS_CREATE" && orderResult.success && orderResult.entityId) {
-    try {
-      const { applyBackstop } = await import("~/services/backstop.server");
-      
-      // Get shop ID and buyer account ID from the invoice
-      const [invoiceInfo] = await sql<{ shopId: string; buyerAccountId: string }[]>`
-        SELECT "shopId", "buyerAccountId"
-        FROM "Invoice"
-        WHERE id = ${orderResult.entityId}
-      `;
+    const {
+      applyBackstop,
+      RetryableBackstopError,
+      recordBackstopFailure,
+    } = await import("~/services/backstop.server");
 
-      if (invoiceInfo) {
+    // Get shop ID and buyer account ID from the invoice
+    const [invoiceInfo] = await sql<{
+      shopId: string;
+      buyerAccountId: string | null;
+      invoiceId: string;
+    }[]>`
+      SELECT "shopId", "buyerAccountId", id AS "invoiceId"
+      FROM "Invoice"
+      WHERE id = ${orderResult.entityId}
+    `;
+
+    if (invoiceInfo) {
+      try {
         const backstopResult = await applyBackstop(sql, {
           shopDomain: message.shop,
           shopId: invoiceInfo.shopId,
           orderId: orderResult.entityId,
           orderGid: message.resourceGid,
           buyerAccountId: invoiceInfo.buyerAccountId,
+          invoiceId: invoiceInfo.invoiceId,
         });
 
         if (backstopResult.applied) {
@@ -377,10 +386,36 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
             `[backstop] Applied to order ${message.resourceGid}: ${backstopResult.fulfillmentOrdersHeld} fulfillment orders held`
           );
         }
+      } catch (e) {
+        if (e instanceof RetryableBackstopError) {
+          // Check if this is the last retry - if so, record failure and let order through
+          // The webhook's read_ct is incremented on each read, so we use a threshold
+          // matching the drain config (DEFAULT_DRAIN_CONFIG.maxRetries = 5)
+          // Note: We don't have access to read_ct here, so we rely on the processor
+          // catching this error and applying its normal retry/DLQ logic
+          console.warn(
+            `[backstop] Retryable error for ${message.resourceGid}: ${e.message} (reason: ${e.reason})`
+          );
+
+          // Return a failure result to trigger pgmq retry
+          return {
+            success: false,
+            action: "skipped" as const,
+            error: `Backstop retryable error: ${e.message}`,
+            retryable: true,
+          };
+        }
+
+        // Non-RetryableBackstopError: log and record failure, but don't block order processing
+        console.error(`[backstop] Unexpected error for ${message.resourceGid}:`, e);
+        await recordBackstopFailure(
+          sql,
+          invoiceInfo.shopId,
+          message.resourceGid,
+          invoiceInfo.buyerAccountId,
+          e instanceof Error ? e.message : String(e),
+        );
       }
-    } catch (e) {
-      // Log but don't fail the webhook - backstop is best-effort
-      console.error(`[backstop] Error applying backstop for ${message.resourceGid}:`, e);
     }
   }
 

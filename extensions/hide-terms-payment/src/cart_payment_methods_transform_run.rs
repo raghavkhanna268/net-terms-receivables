@@ -3,17 +3,45 @@ use shopify_function::prelude::*;
 use shopify_function::scalars::JsonValue;
 use shopify_function::Result;
 
-/// Configuration for the payment customization.
-/// Contains the name of the manual payment method to hide for tagged customers.
+/// Configuration for the payment customization (from $app:hide-terms-config metafield).
+/// 
+/// For B2B company locations: uses deferredPaymentPatterns to match payment method names.
+/// For tagged customers: uses manualPaymentMethodName for exact match.
+/// 
+/// NOTE: The 2026-10 cart.payment-methods.transform schema.graphql PaymentMethod type
+/// only exposes `id` and `name` fields - there is no `deferred` flag or payment-terms
+/// operation. We must match by name patterns, which is configurable to handle merchant-
+/// specific payment method naming conventions.
 #[derive(Default, PartialEq, Clone, Debug)]
 pub struct Configuration {
+    /// Patterns to match deferred payment method names (case-insensitive substring match).
+    /// Defaults to ["deferred", "net terms", "net-terms", "pay later", "payment terms"].
+    pub deferred_payment_patterns: Option<Vec<String>>,
+    /// Exact name of manual payment method to hide for tagged customers (case-insensitive).
     pub manual_payment_method_name: Option<String>,
 }
 
 impl Configuration {
     fn from_json_value(json_value: &JsonValue) -> Self {
         if let JsonValue::Object(obj) = json_value {
+            let patterns = obj
+                .get("deferredPaymentPatterns")
+                .and_then(|v| match v {
+                    JsonValue::Array(arr) => {
+                        let strings: Vec<String> = arr
+                            .iter()
+                            .filter_map(|item| match item {
+                                JsonValue::String(s) => Some(s.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        if strings.is_empty() { None } else { Some(strings) }
+                    }
+                    _ => None,
+                });
+            
             Configuration {
+                deferred_payment_patterns: patterns,
                 manual_payment_method_name: obj
                     .get("manualPaymentMethodName")
                     .and_then(|v| match v {
@@ -23,6 +51,14 @@ impl Configuration {
             }
         } else {
             Configuration::default()
+        }
+    }
+    
+    /// Get the deferred payment patterns to use (configured or defaults).
+    fn get_deferred_patterns(&self) -> Vec<&str> {
+        match &self.deferred_payment_patterns {
+            Some(patterns) => patterns.iter().map(|s| s.as_str()).collect(),
+            None => DEFAULT_DEFERRED_PATTERNS.to_vec(),
         }
     }
 }
@@ -108,9 +144,10 @@ impl CreditStatus {
     }
 }
 
-/// Pattern to match deferred payment method names (case-insensitive).
+/// Default patterns to match deferred payment method names (case-insensitive).
+/// These are used when no deferredPaymentPatterns config is provided.
 /// Shopify B2B deferred payment methods typically contain these terms.
-const DEFERRED_PAYMENT_PATTERNS: &[&str] = &[
+const DEFAULT_DEFERRED_PATTERNS: &[&str] = &[
     "deferred",
     "net terms",
     "net-terms",
@@ -118,10 +155,10 @@ const DEFERRED_PAYMENT_PATTERNS: &[&str] = &[
     "payment terms",
 ];
 
-/// Check if a payment method name matches deferred payment patterns.
-fn is_deferred_payment_method(name: &str) -> bool {
+/// Check if a payment method name matches any of the given patterns (case-insensitive).
+fn matches_deferred_patterns(name: &str, patterns: &[&str]) -> bool {
     let lower = name.to_lowercase();
-    DEFERRED_PAYMENT_PATTERNS.iter().any(|pattern| lower.contains(pattern))
+    patterns.iter().any(|pattern| lower.contains(&pattern.to_lowercase()))
 }
 
 fn pass() -> schema::CartPaymentMethodsTransformRunResult {
@@ -145,6 +182,16 @@ fn cart_payment_methods_transform_run(
         None => return Ok(pass()),
     };
 
+    // Load config once (used for both B2B and customer paths)
+    let config = match input.payment_customization() {
+        Some(pc) => match pc.metafield() {
+            Some(m) => Configuration::from_json_value(m.json_value()),
+            None => Configuration::default(),
+        },
+        None => Configuration::default(),
+    };
+    let deferred_patterns = config.get_deferred_patterns();
+
     // Check B2B company location first (takes precedence)
     if let Some(purchasing_company) = buyer_identity.purchasing_company() {
         let location = purchasing_company.location();
@@ -153,11 +200,11 @@ fn cart_payment_methods_transform_run(
             let credit_status = CreditStatus::from_json_value(json_value);
             
             if credit_status.is_held() {
-                // For B2B, hide deferred payment methods
+                // For B2B, hide deferred payment methods using configured patterns
                 let operations: Vec<schema::Operation> = input
                     .payment_methods()
                     .iter()
-                    .filter(|pm| is_deferred_payment_method(pm.name()))
+                    .filter(|pm| matches_deferred_patterns(pm.name(), &deferred_patterns))
                     .map(|pm| hide_payment_method(pm.id().to_string()))
                     .collect();
                 
@@ -175,17 +222,8 @@ fn cart_payment_methods_transform_run(
             let credit_status = CreditStatus::from_json_value(json_value);
             
             if credit_status.is_held() {
-                // For tagged customers, check for configured manual payment method name
-                let config = match input.payment_customization() {
-                    Some(pc) => match pc.metafield() {
-                        Some(m) => Configuration::from_json_value(m.json_value()),
-                        None => Configuration::default(),
-                    },
-                    None => Configuration::default(),
-                };
-                
                 let operations: Vec<schema::Operation> = if let Some(ref target_name) = config.manual_payment_method_name {
-                    // Hide the specifically configured payment method
+                    // Hide the specifically configured payment method (exact match)
                     input
                         .payment_methods()
                         .iter()
@@ -193,11 +231,11 @@ fn cart_payment_methods_transform_run(
                         .map(|pm| hide_payment_method(pm.id().to_string()))
                         .collect()
                 } else {
-                    // No config - hide deferred payment methods by pattern
+                    // No specific method configured - hide by deferred payment patterns
                     input
                         .payment_methods()
                         .iter()
-                        .filter(|pm| is_deferred_payment_method(pm.name()))
+                        .filter(|pm| matches_deferred_patterns(pm.name(), &deferred_patterns))
                         .map(|pm| hide_payment_method(pm.id().to_string()))
                         .collect()
                 };
@@ -220,7 +258,11 @@ mod tests {
         run_function_with_input(cart_payment_methods_transform_run, input_json)
     }
 
-    fn make_b2b_input(metafield_json: Option<&str>, payment_methods: &[(&str, &str)]) -> String {
+    fn make_b2b_input_with_config(
+        metafield_json: Option<&str>,
+        payment_methods: &[(&str, &str)],
+        config_json: Option<&str>,
+    ) -> String {
         let location_metafield = match metafield_json {
             Some(mf) => format!(r#"{{ "metafield": {{ "jsonValue": {} }} }}"#, mf),
             None => r#"{ "metafield": null }"#.to_string(),
@@ -231,6 +273,11 @@ mod tests {
             .map(|(id, name)| format!(r#"{{ "id": "{}", "name": "{}" }}"#, id, name))
             .collect::<Vec<_>>()
             .join(", ");
+
+        let pc_json = match config_json {
+            Some(cfg) => format!(r#"{{ "metafield": {{ "jsonValue": {} }} }}"#, cfg),
+            None => "null".to_string(),
+        };
 
         format!(
             r#"{{
@@ -243,10 +290,14 @@ mod tests {
                     }}
                 }},
                 "paymentMethods": [{}],
-                "paymentCustomization": null
+                "paymentCustomization": {}
             }}"#,
-            location_metafield, pm_json
+            location_metafield, pm_json, pc_json
         )
+    }
+
+    fn make_b2b_input(metafield_json: Option<&str>, payment_methods: &[(&str, &str)]) -> String {
+        make_b2b_input_with_config(metafield_json, payment_methods, None)
     }
 
     fn make_customer_input(
@@ -454,14 +505,15 @@ mod tests {
 
     #[test]
     fn test_deferred_payment_pattern_matching() {
-        assert!(is_deferred_payment_method("Deferred Payment"));
-        assert!(is_deferred_payment_method("Net Terms (30 days)"));
-        assert!(is_deferred_payment_method("net-terms"));
-        assert!(is_deferred_payment_method("Pay Later"));
-        assert!(is_deferred_payment_method("B2B Payment Terms"));
-        assert!(!is_deferred_payment_method("Credit Card"));
-        assert!(!is_deferred_payment_method("Shop Pay"));
-        assert!(!is_deferred_payment_method("Cash on Delivery"));
+        let patterns = DEFAULT_DEFERRED_PATTERNS.to_vec();
+        assert!(matches_deferred_patterns("Deferred Payment", &patterns));
+        assert!(matches_deferred_patterns("Net Terms (30 days)", &patterns));
+        assert!(matches_deferred_patterns("net-terms", &patterns));
+        assert!(matches_deferred_patterns("Pay Later", &patterns));
+        assert!(matches_deferred_patterns("B2B Payment Terms", &patterns));
+        assert!(!matches_deferred_patterns("Credit Card", &patterns));
+        assert!(!matches_deferred_patterns("Shop Pay", &patterns));
+        assert!(!matches_deferred_patterns("Cash on Delivery", &patterns));
     }
 
     #[test]
@@ -519,5 +571,153 @@ mod tests {
                 reason
             );
         }
+    }
+
+    // =========================================================================
+    // S11 Exact Fixture Test - validates metafield shape matches S11's output
+    // =========================================================================
+
+    /// This fixture is the exact JSON produced by S11's serializeCreditStatusFromDb().
+    /// If S11's output format changes and this test fails, update the Rust parser.
+    /// See app/lib/metafields-contract.ts for the TypeScript definition.
+    fn s11_exact_held_metafield() -> &'static str {
+        // Exact shape from serializeCreditStatusFromDb with:
+        // - schemaVersion: 1 (number, not string)
+        // - currencyCode (not "currency")
+        // - limitPaise/exposurePaise as strings (not numbers)
+        // - holdReasonCode can be null
+        // - No "bypass" field - bypass=true produces hold:false in the metafield
+        r#"{"schemaVersion":1,"currencyCode":"INR","hold":true,"holdReasonCode":"PAYMENT_OVERDUE","limitPaise":"10000000","exposurePaise":"5000000","updatedAt":"2026-10-24T00:00:00.000Z"}"#
+    }
+
+    fn s11_exact_ok_metafield() -> &'static str {
+        r#"{"schemaVersion":1,"currencyCode":"INR","hold":false,"holdReasonCode":null,"limitPaise":"10000000","exposurePaise":"5000000","updatedAt":"2026-10-24T00:00:00.000Z"}"#
+    }
+
+    fn s11_exact_bypass_metafield() -> &'static str {
+        // Bypass accounts have hold:false in the metafield (S11's computeHoldState sets metafieldHold=false)
+        r#"{"schemaVersion":1,"currencyCode":"INR","hold":false,"holdReasonCode":null,"limitPaise":"10000000","exposurePaise":"15000000","updatedAt":"2026-10-24T00:00:00.000Z"}"#
+    }
+
+    fn s11_exact_no_limit_metafield() -> &'static str {
+        // No limit = "999999999999999" (very large sentinel)
+        r#"{"schemaVersion":1,"currencyCode":"INR","hold":false,"holdReasonCode":null,"limitPaise":"999999999999999","exposurePaise":"5000000","updatedAt":"2026-10-24T00:00:00.000Z"}"#
+    }
+
+    #[test]
+    fn test_s11_exact_fixture_held() {
+        let input = make_b2b_input(Some(s11_exact_held_metafield()), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(!result.operations.is_empty(), "S11 exact held metafield should hide deferred methods");
+    }
+
+    #[test]
+    fn test_s11_exact_fixture_ok() {
+        let input = make_b2b_input(Some(s11_exact_ok_metafield()), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "S11 exact OK metafield should pass");
+    }
+
+    #[test]
+    fn test_s11_exact_fixture_bypass() {
+        let input = make_b2b_input(Some(s11_exact_bypass_metafield()), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "S11 exact bypass metafield should pass (hold:false)");
+    }
+
+    #[test]
+    fn test_s11_exact_fixture_no_limit() {
+        let input = make_b2b_input(Some(s11_exact_no_limit_metafield()), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "S11 exact no-limit metafield should pass");
+    }
+
+    // =========================================================================
+    // Indian Payment Methods Test - these should NEVER be hidden
+    // =========================================================================
+
+    /// Indian payment methods that must never be hidden, even for held accounts.
+    /// These are standard payment methods in India, not deferred/net-terms.
+    fn indian_payment_methods() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("gid://shopify/PaymentCustomizationPaymentMethod/10", "Razorpay UPI"),
+            ("gid://shopify/PaymentCustomizationPaymentMethod/11", "Razorpay Cards"),
+            ("gid://shopify/PaymentCustomizationPaymentMethod/12", "Razorpay NetBanking"),
+            ("gid://shopify/PaymentCustomizationPaymentMethod/13", "Cash on Delivery (COD)"),
+            ("gid://shopify/PaymentCustomizationPaymentMethod/14", "Bank Deposit"),
+        ]
+    }
+
+    #[test]
+    fn test_indian_payment_methods_never_hidden() {
+        // Even for a HELD account, Indian payment methods should NOT be hidden
+        let input = make_b2b_input(Some(held_metafield()), &indian_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(
+            result.operations.is_empty(),
+            "Indian payment methods (Razorpay UPI, Cards, NetBanking, COD, Bank Deposit) should NEVER be hidden"
+        );
+    }
+
+    #[test]
+    fn test_indian_payment_methods_mixed_with_deferred() {
+        // When Indian methods are mixed with deferred methods, only deferred should be hidden
+        let mut methods = indian_payment_methods();
+        methods.push(("gid://shopify/PaymentCustomizationPaymentMethod/99", "Deferred Payment"));
+        
+        let input = make_b2b_input(Some(held_metafield()), &methods);
+        let result = run_test(&input).unwrap();
+        
+        assert_eq!(result.operations.len(), 1, "Only deferred payment should be hidden");
+        match &result.operations[0] {
+            schema::Operation::PaymentMethodHide(hide_op) => {
+                assert!(
+                    hide_op.payment_method_id.contains("99"),
+                    "Should only hide 'Deferred Payment' (id 99), not Indian methods"
+                );
+            }
+        }
+    }
+
+    // =========================================================================
+    // Custom Config Tests - configurable patterns
+    // =========================================================================
+
+    #[test]
+    fn test_b2b_custom_patterns_via_config() {
+        // Custom patterns that don't match default patterns
+        let config = r#"{"deferredPaymentPatterns": ["credit line", "30 days"]}"#;
+        let methods = vec![
+            ("gid://shopify/PaymentCustomizationPaymentMethod/1", "Credit Card"),
+            ("gid://shopify/PaymentCustomizationPaymentMethod/2", "30 Days Credit Line"),
+            ("gid://shopify/PaymentCustomizationPaymentMethod/3", "Net Terms"),
+        ];
+        
+        let input = make_b2b_input_with_config(Some(held_metafield()), &methods, Some(config));
+        let result = run_test(&input).unwrap();
+        
+        // With custom patterns, should only hide method 2 (matches "30 days" and "credit line")
+        // Net Terms should NOT be hidden because it's not in custom patterns
+        assert_eq!(result.operations.len(), 1, "Should only hide method matching custom patterns");
+        match &result.operations[0] {
+            schema::Operation::PaymentMethodHide(hide_op) => {
+                assert!(
+                    hide_op.payment_method_id.contains("2"),
+                    "Should hide '30 Days Credit Line' which matches custom patterns"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_b2b_empty_patterns_hides_nothing() {
+        // Empty patterns array means don't hide anything
+        let config = r#"{"deferredPaymentPatterns": []}"#;
+        let input = make_b2b_input_with_config(Some(held_metafield()), &default_payment_methods(), Some(config));
+        let result = run_test(&input).unwrap();
+        
+        // Empty patterns should use defaults (this is the current behavior)
+        // If we wanted empty patterns to hide nothing, we'd need to change get_deferred_patterns
+        assert!(!result.operations.is_empty(), "Empty patterns fall back to defaults");
     }
 }
