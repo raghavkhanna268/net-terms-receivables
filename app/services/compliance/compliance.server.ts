@@ -32,7 +32,11 @@ import type { Sql } from "~/lib/db-light.server";
  * Matched payments retain narration until customers/redact or shop/redact.
  *
  * PROVISIONAL: 180 days, pending product decision from Raghav.
- * See migration 20261031000000_s22_followups and docs/privacy.md.
+ *
+ * *** SINGLE SOURCE OF TRUTH: s22_unmatched_narration_retention_days() SQL function ***
+ * See migration 20261101000000_s22_followups. This TS constant documents
+ * the same value for application code reference; the SQL function is
+ * authoritative for the pg_cron job.
  */
 export const UNMATCHED_NARRATION_RETENTION_DAYS = 180;
 

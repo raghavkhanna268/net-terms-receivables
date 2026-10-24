@@ -62,7 +62,7 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 
 **Retention purge:** The `s22_purge_unmatched_narration` pg_cron job runs daily at 04:00 UTC and clears narration/payerText on unmatched payments older than the retention window. This preserves amounts, UTR, rail, value date, and status for reconciliation purposes while removing potentially PII-bearing text. Matched payments retain their narration until explicitly redacted via customers/redact or shop/redact.
 
-**PROVISIONAL:** The 180-day retention window is provisional, pending product decision. See `UNMATCHED_NARRATION_RETENTION_DAYS` in `app/services/compliance/compliance.server.ts`.
+**PROVISIONAL:** The 180-day retention window is provisional, pending Raghav. The single source of truth is the `s22_unmatched_narration_retention_days()` SQL function in migration `20261101000000_s22_followups`. The TS constant `UNMATCHED_NARRATION_RETENTION_DAYS` in `app/services/compliance/compliance.server.ts` documents the same value for reference.
 
 ### 2.5 Data Request Records (S22)
 
