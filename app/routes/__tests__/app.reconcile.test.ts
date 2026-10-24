@@ -4,22 +4,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
  * Tests for S16/S17 reconcile route (app/routes/app.reconcile.tsx).
  *
  * Covers M5 (#174): safeLog/toErrorCode logging with no PII leaks.
- * Verifies that error logs contain only shopId/errorCode, never domain/email/amount.
+ * Uses REAL safeLog/toErrorCode (no mocking of log.server).
+ * Spies on console.error to verify no domain/email/amount in output.
  */
-
-vi.mock("~/lib/log.server", () => ({
-  safeLog: vi.fn(),
-  toErrorCode: vi.fn((err) => {
-    if (err instanceof Error) {
-      return err.name !== "Error" ? err.name : "error";
-    }
-    if (typeof err === "object" && err !== null) {
-      const obj = err as Record<string, unknown>;
-      if (typeof obj.code === "string") return obj.code;
-    }
-    return "unknown";
-  }),
-}));
 
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(),
@@ -69,6 +56,7 @@ describe("Reconcile Route (M5)", () => {
   const mockPattern = "/app/reconcile";
 
   let mockSql: ReturnType<typeof vi.fn>;
+  let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     vi.resetModules();
@@ -77,15 +65,16 @@ describe("Reconcile Route (M5)", () => {
     mockContext.shopify.authenticate.admin.mockResolvedValue({
       session: mockSession,
     });
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
   afterEach(() => {
+    consoleErrorSpy.mockRestore();
     vi.clearAllMocks();
   });
 
   describe("loader error logging (M5)", () => {
-    it("logs error code, not raw error with domain", async () => {
-      const { safeLog, toErrorCode } = await import("~/lib/log.server");
+    it("logs error code via real safeLog, not raw error with domain", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       const { resolvePlan } = await import("~/services/plan.server");
 
@@ -113,23 +102,20 @@ describe("Reconcile Route (M5)", () => {
         pattern: mockPattern,
       });
 
-      expect(safeLog).toHaveBeenCalled();
-      const safeLogMock = vi.mocked(safeLog);
-      const calls = safeLogMock.mock.calls;
+      expect(consoleErrorSpy).toHaveBeenCalled();
+      const allLogs = consoleErrorSpy.mock.calls.map((c: unknown[]) => c[0]).join(" ");
 
-      for (const call of calls) {
-        const logArgs = JSON.stringify(call);
-        expect(logArgs).not.toContain("myshopify.com");
-        expect(logArgs).not.toContain("@example.com");
-        expect(logArgs).not.toContain("125000");
-        expect(logArgs).not.toContain("owes");
-      }
+      expect(allLogs).not.toContain("myshopify.com");
+      expect(allLogs).not.toContain("@example.com");
+      expect(allLogs).not.toContain("125000");
+      expect(allLogs).not.toContain("owes");
 
-      expect(toErrorCode).toHaveBeenCalledWith(sensitiveError);
+      expect(allLogs).toContain("reconcile_tab_counts_error");
+      expect(allLogs).toContain('"shopId":"shop-123"');
+      expect(allLogs).toContain('"err":');
     });
 
     it("logs shopId and errorCode for tab counts error", async () => {
-      const { safeLog } = await import("~/lib/log.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
       const { resolvePlan } = await import("~/services/plan.server");
 
@@ -153,18 +139,13 @@ describe("Reconcile Route (M5)", () => {
         pattern: mockPattern,
       });
 
-      expect(safeLog).toHaveBeenCalledWith(
-        "error",
-        "reconcile_tab_counts_error",
-        expect.objectContaining({
-          shopId: "shop-456",
-          err: "TypeError",
-        })
-      );
+      const logOutput = consoleErrorSpy.mock.calls[0][0];
+      expect(logOutput).toContain('"event":"reconcile_tab_counts_error"');
+      expect(logOutput).toContain('"shopId":"shop-456"');
+      expect(logOutput).toContain('"err":"TypeError"');
     });
 
     it("logs shopId, view, and errorCode for loader data error", async () => {
-      const { safeLog } = await import("~/lib/log.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
       const { resolvePlan } = await import("~/services/plan.server");
       const { getSuggestedMatches } = await import(
@@ -199,15 +180,14 @@ describe("Reconcile Route (M5)", () => {
         pattern: mockPattern,
       });
 
-      expect(safeLog).toHaveBeenCalledWith(
-        "error",
-        "reconcile_loader_error",
-        expect.objectContaining({
-          shopId: "shop-789",
-          view: "suggested",
-          err: expect.any(String),
-        })
-      );
+      const logOutput = consoleErrorSpy.mock.calls[0][0];
+      expect(logOutput).toContain('"event":"reconcile_loader_error"');
+      expect(logOutput).toContain('"shopId":"shop-789"');
+      expect(logOutput).toContain('"stage":"suggested"');
+      expect(logOutput).toContain('"err":');
+
+      expect(logOutput).not.toContain("myshopify.com");
+      expect(logOutput).not.toContain("@shop");
 
       expect(result.error).toBe("Failed to load reconciliation data");
     });
@@ -215,7 +195,6 @@ describe("Reconcile Route (M5)", () => {
 
   describe("action error logging (M5)", () => {
     it("logs shopId, action, and errorCode for action error", async () => {
-      const { safeLog } = await import("~/lib/log.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
       const { confirmMatch } = await import("~/services/matcher.server");
 
@@ -245,28 +224,21 @@ describe("Reconcile Route (M5)", () => {
         pattern: mockPattern,
       });
 
-      expect(safeLog).toHaveBeenCalledWith(
-        "error",
-        "reconcile_action_error",
-        expect.objectContaining({
-          shopId: "shop-action-test",
-          action: "confirm",
-          err: expect.any(String),
-        })
-      );
+      const logOutput = consoleErrorSpy.mock.calls[0][0];
+      expect(logOutput).toContain('"event":"reconcile_action_error"');
+      expect(logOutput).toContain('"shopId":"shop-action-test"');
+      expect(logOutput).toContain('"action":"confirm"');
+      expect(logOutput).toContain('"err":');
 
-      const safeLogMock = vi.mocked(safeLog);
-      const logArgs = JSON.stringify(safeLogMock.mock.calls);
-      expect(logArgs).not.toContain("@company.com");
-      expect(logArgs).not.toContain("50000");
-      expect(logArgs).not.toContain("buyer");
+      expect(logOutput).not.toContain("@company.com");
+      expect(logOutput).not.toContain("50000");
+      expect(logOutput).not.toContain("buyer");
 
       expect(result.success).toBe(false);
       expect(result.error).toBe("Action failed");
     });
 
     it("does not log raw error message with UTR or narration", async () => {
-      const { safeLog } = await import("~/lib/log.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
       const { applyMatch } = await import("~/services/apply.server");
 
@@ -298,17 +270,15 @@ describe("Reconcile Route (M5)", () => {
         pattern: mockPattern,
       });
 
-      const safeLogMock = vi.mocked(safeLog);
-      const logArgs = JSON.stringify(safeLogMock.mock.calls);
-      expect(logArgs).not.toContain("HDFC12345678");
-      expect(logArgs).not.toContain("narration");
-      expect(logArgs).not.toContain("INVOICE-PAY");
+      const logOutput = consoleErrorSpy.mock.calls[0][0];
+      expect(logOutput).not.toContain("HDFC12345678");
+      expect(logOutput).not.toContain("narration");
+      expect(logOutput).not.toContain("INVOICE-PAY");
     });
   });
 
   describe("loader success paths (no errors)", () => {
-    it("does not call safeLog when no errors occur", async () => {
-      const { safeLog } = await import("~/lib/log.server");
+    it("does not call console.error when no errors occur", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       const { resolvePlan } = await import("~/services/plan.server");
       const { getSuggestedMatches } = await import(
@@ -341,7 +311,7 @@ describe("Reconcile Route (M5)", () => {
         pattern: mockPattern,
       });
 
-      expect(safeLog).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
   });
 });

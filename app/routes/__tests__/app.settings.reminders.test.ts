@@ -7,25 +7,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
  * - Loader: default disabled, not-configured state, caps and usage present, shop not found
  * - Action: toggle_enabled, update_rule, create_rule, delete_rule, offset validation, invalid intent
  * - ensureDefaultReminderRules: seeds 3 on first settings creation, no-op when settings exist
- * - R2 (#174): safeLog/toErrorCode logging with no PII leaks
+ * - R2 (#174): safeLog/toErrorCode logging with no PII leaks (uses REAL log.server)
  *
  * Uses partial mocking: DB functions are mocked, pure helpers (isValidOffset,
- * isReminderSendingEnabled) use real implementations.
+ * isReminderSendingEnabled) use real implementations. log.server is NOT mocked.
  */
-
-vi.mock("~/lib/log.server", () => ({
-  safeLog: vi.fn(),
-  toErrorCode: vi.fn((err) => {
-    if (err instanceof Error) {
-      return err.name !== "Error" ? err.name : "error";
-    }
-    if (typeof err === "object" && err !== null) {
-      const obj = err as Record<string, unknown>;
-      if (typeof obj.code === "string") return obj.code;
-    }
-    return "unknown";
-  }),
-}));
 
 vi.mock("~/services/reminders.server", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/services/reminders.server")>();
@@ -1108,6 +1094,7 @@ describe("Reminder Settings Route error logging (R2)", () => {
   const mockPattern = "/app/settings/reminders";
 
   let mockSql: ReturnType<typeof vi.fn>;
+  let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     vi.resetModules();
@@ -1117,15 +1104,16 @@ describe("Reminder Settings Route error logging (R2)", () => {
       session: mockSession,
     });
     mockContext.cloudflare.env = {};
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
   afterEach(() => {
+    consoleErrorSpy.mockRestore();
     vi.clearAllMocks();
   });
 
   describe("loader error logging (R2)", () => {
-    it("logs error code, not raw error with domain or email", async () => {
-      const { safeLog, toErrorCode } = await import("~/lib/log.server");
+    it("logs error code via real safeLog, not raw error with domain or email", async () => {
       const {
         getShopReminderSettings,
         getShopReminderRules,
@@ -1161,28 +1149,22 @@ describe("Reminder Settings Route error logging (R2)", () => {
         pattern: mockPattern,
       });
 
-      expect(safeLog).toHaveBeenCalledWith(
-        "error",
-        "reminders_send_counts_error",
-        expect.objectContaining({
-          shopId: "shop-123",
-          err: expect.any(String),
-        })
-      );
+      expect(consoleErrorSpy).toHaveBeenCalled();
+      const logOutput = consoleErrorSpy.mock.calls[0][0];
 
-      const safeLogMock = vi.mocked(safeLog);
-      const logArgs = JSON.stringify(safeLogMock.mock.calls);
-      expect(logArgs).not.toContain("myshopify.com");
-      expect(logArgs).not.toContain("@sensitive-store");
-      expect(logArgs).not.toContain("99500");
-      expect(logArgs).not.toContain("balance");
+      expect(logOutput).toContain('"event":"reminders_send_counts_error"');
+      expect(logOutput).toContain('"shopId":"shop-123"');
+      expect(logOutput).toContain('"err":');
 
-      expect(toErrorCode).toHaveBeenCalledWith(sensitiveError);
+      expect(logOutput).not.toContain("myshopify.com");
+      expect(logOutput).not.toContain("@sensitive-store");
+      expect(logOutput).not.toContain("99500");
+      expect(logOutput).not.toContain("balance");
+
       expect(result.usageError).toBe(true);
     });
 
     it("logs shopId and errorCode for send counts error", async () => {
-      const { safeLog } = await import("~/lib/log.server");
       const {
         getShopReminderSettings,
         getShopReminderRules,
@@ -1216,20 +1198,15 @@ describe("Reminder Settings Route error logging (R2)", () => {
         pattern: mockPattern,
       });
 
-      expect(safeLog).toHaveBeenCalledWith(
-        "error",
-        "reminders_send_counts_error",
-        expect.objectContaining({
-          shopId: "shop-456",
-          err: "TypeError",
-        })
-      );
+      const logOutput = consoleErrorSpy.mock.calls[0][0];
+      expect(logOutput).toContain('"event":"reminders_send_counts_error"');
+      expect(logOutput).toContain('"shopId":"shop-456"');
+      expect(logOutput).toContain('"err":"TypeError"');
     });
   });
 
   describe("action error logging (R2)", () => {
     it("logs shopId, action, and errorCode for action error", async () => {
-      const { safeLog } = await import("~/lib/log.server");
       const { updateShopReminderSettings } = await import(
         "~/services/reminders.server"
       );
@@ -1271,29 +1248,22 @@ describe("Reminder Settings Route error logging (R2)", () => {
         pattern: mockPattern,
       });
 
-      expect(safeLog).toHaveBeenCalledWith(
-        "error",
-        "reminders_action_error",
-        expect.objectContaining({
-          shopId: "shop-action-test",
-          action: "toggle_enabled",
-          err: expect.any(String),
-        })
-      );
+      const logOutput = consoleErrorSpy.mock.calls[0][0];
+      expect(logOutput).toContain('"event":"reminders_action_error"');
+      expect(logOutput).toContain('"shopId":"shop-action-test"');
+      expect(logOutput).toContain('"action":"toggle_enabled"');
+      expect(logOutput).toContain('"err":');
 
-      const safeLogMock = vi.mocked(safeLog);
-      const logArgs = JSON.stringify(safeLogMock.mock.calls);
-      expect(logArgs).not.toContain("myshopify.com");
-      expect(logArgs).not.toContain("@shop");
-      expect(logArgs).not.toContain("50000");
-      expect(logArgs).not.toContain("merchant");
+      expect(logOutput).not.toContain("myshopify.com");
+      expect(logOutput).not.toContain("@shop");
+      expect(logOutput).not.toContain("50000");
+      expect(logOutput).not.toContain("merchant");
 
       expect(result.success).toBe(false);
       expect(result.error).toBe("Action failed");
     });
 
     it("does not log raw error message with customer email", async () => {
-      const { safeLog } = await import("~/lib/log.server");
       const { updateReminderRule } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
@@ -1335,17 +1305,15 @@ describe("Reminder Settings Route error logging (R2)", () => {
         pattern: mockPattern,
       });
 
-      const safeLogMock = vi.mocked(safeLog);
-      const logArgs = JSON.stringify(safeLogMock.mock.calls);
-      expect(logArgs).not.toContain("customer@business.com");
-      expect(logArgs).not.toContain("INV-2024-001");
-      expect(logArgs).not.toContain("Reminder failed");
+      const logOutput = consoleErrorSpy.mock.calls[0][0];
+      expect(logOutput).not.toContain("customer@business.com");
+      expect(logOutput).not.toContain("INV-2024-001");
+      expect(logOutput).not.toContain("Reminder failed");
     });
   });
 
   describe("loader success paths (no errors)", () => {
-    it("does not call safeLog when no errors occur", async () => {
-      const { safeLog } = await import("~/lib/log.server");
+    it("does not call console.error when no errors occur", async () => {
       const {
         getShopReminderSettings,
         getShopReminderRules,
@@ -1378,7 +1346,7 @@ describe("Reminder Settings Route error logging (R2)", () => {
         pattern: mockPattern,
       });
 
-      expect(safeLog).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
   });
 });

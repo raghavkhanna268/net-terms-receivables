@@ -268,7 +268,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   } catch (err) {
     safeLog("error", "reconcile_loader_error", {
       shopId: shop.id,
-      view,
+      stage: view,
       err: toErrorCode(err),
     });
     return {
