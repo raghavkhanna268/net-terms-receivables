@@ -687,6 +687,85 @@ mod tests {
         assert!(result.operations.is_empty(), "B2B with no location metafield should pass (not a net-terms location)");
     }
 
+    // =========================================================================
+    // Missing/Null $app:credit_status metafield = ALLOW (fail-open)
+    // These tests verify that seed CompanyLocations without the metafield
+    // are allowed through checkout (no validation error, nothing hidden).
+    // =========================================================================
+
+    #[test]
+    fn test_missing_credit_status_metafield_allows_checkout() {
+        // When $app:credit_status is missing (null), checkout should ALLOW.
+        // This is the fail-open behavior required for seed CompanyLocations
+        // that haven't had their metafield synced yet.
+        let input = make_input("100.00", "INR", None, false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Missing credit_status metafield must ALLOW (no validation error)");
+    }
+
+    #[test]
+    fn test_b2b_missing_credit_status_metafield_allows_checkout() {
+        // B2B CompanyLocation with null $app:credit_status should ALLOW.
+        let input = make_b2b_input(None, &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "B2B with missing credit_status metafield must ALLOW");
+    }
+
+    #[test]
+    fn test_null_json_value_in_metafield_allows_checkout() {
+        // Even if the metafield object exists but jsonValue is empty/null-like
+        let input = make_input("100.00", "INR", Some("null"), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Null jsonValue in metafield must ALLOW");
+    }
+
+    #[test]
+    fn test_empty_object_metafield_allows_checkout() {
+        // Empty object {} should fail-open (no schemaVersion)
+        let input = make_input("100.00", "INR", Some("{}"), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Empty object metafield must ALLOW (fail-open)");
+    }
+
+    fn make_b2b_input(metafield_json: Option<&str>, _payment_methods: &[(&str, &str)]) -> String {
+        let location_metafield = match metafield_json {
+            Some(mf) => format!(r#"{{ "jsonValue": {} }}"#, mf),
+            None => "null".to_string(),
+        };
+
+        format!(
+            r#"{{
+                "cart": {{
+                    "cost": {{
+                        "totalAmount": {{
+                            "amount": "100.00",
+                            "currencyCode": "INR"
+                        }}
+                    }},
+                    "buyerIdentity": {{
+                        "customer": null,
+                        "purchasingCompany": {{
+                            "location": {{
+                                "metafield": {}
+                            }}
+                        }}
+                    }}
+                }},
+                "buyerJourney": {{
+                    "step": "CHECKOUT_COMPLETION"
+                }}
+            }}"#,
+            location_metafield
+        )
+    }
+
+    fn default_payment_methods() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("gid://shopify/PaymentCustomizationPaymentMethod/1", "Credit Card"),
+            ("gid://shopify/PaymentCustomizationPaymentMethod/2", "Deferred Payment"),
+        ]
+    }
+
     // S11 compatibility tests: verify the JS writer produces JSON that Rust can deserialize
     // These tests use the same fixtures as the TypeScript tests in app/lib/__tests__/metafields-contract.test.ts
 

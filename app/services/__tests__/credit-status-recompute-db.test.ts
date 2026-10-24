@@ -113,11 +113,11 @@ describeWithDb("credit-status-recompute DB integration", () => {
     mockShouldFail = false;
     mockShopifyGraphQLRequest.mockClear();
     
-    // Reset account state - MUST include gated_at to clear it after gated test
+    // Reset account state - MUST include gated_at and metafieldSyncedAt to clear after tests
     await sql`
       UPDATE "BuyerAccount"
       SET "holdState" = 'OK', "holdReasonCode" = NULL, "manualHold" = false,
-          "syncPending" = false, "syncVersion" = 1, gated_at = NULL
+          "syncPending" = false, "syncVersion" = 1, gated_at = NULL, "metafieldSyncedAt" = NULL
       WHERE id = ${TEST_ACCOUNT_ID}
     `;
     
@@ -298,8 +298,15 @@ describeWithDb("credit-status-recompute DB integration", () => {
       }
     });
 
-    it("does NOT write metafield when nothing changed AND syncPending=false", async () => {
-      // Account is OK, no invoices, syncPending=false (already set in beforeEach)
+    it("does NOT write metafield when nothing changed AND syncPending=false AND metafieldSyncedAt is set", async () => {
+      // Account is OK, no invoices, syncPending=false, metafieldSyncedAt is set
+      // This is the only case where we early-return without writing
+      await sql`
+        UPDATE "BuyerAccount"
+        SET "metafieldSyncedAt" = NOW()
+        WHERE id = ${TEST_ACCOUNT_ID}
+      `;
+
       const result = await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
 
       expect(result.success).toBe(true);
@@ -426,6 +433,86 @@ describeWithDb("credit-status-recompute DB integration", () => {
       expect(result.success).toBe(true);
       // metafieldWritten depends on whether the mock was called
       // The key assertion is success=true, not retryable failure
+    });
+  });
+
+  describe("metafieldSyncedAt column", () => {
+    it("OK account with metafieldSyncedAt NULL gets exactly ONE write, then ZERO on subsequent no-op recomputes", async () => {
+      // Ensure metafieldSyncedAt is NULL (set by beforeEach)
+      const [before] = await sql<{ metafieldSyncedAt: Date | null }[]>`
+        SELECT "metafieldSyncedAt" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
+      `;
+      expect(before.metafieldSyncedAt).toBeNull();
+
+      // First recompute - should write metafield even though hold hasn't changed
+      // because metafieldSyncedAt is NULL
+      const result1 = await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
+      expect(result1.success).toBe(true);
+      expect(metafieldWriteCount).toBe(1);
+
+      // Verify metafieldSyncedAt is now set
+      const [after1] = await sql<{ metafieldSyncedAt: Date | null }[]>`
+        SELECT "metafieldSyncedAt" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
+      `;
+      expect(after1.metafieldSyncedAt).not.toBeNull();
+
+      // Second recompute - should NOT write (no change, already synced)
+      const result2 = await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
+      expect(result2.success).toBe(true);
+      expect(result2.metafieldWritten).toBe(false);
+      expect(metafieldWriteCount).toBe(1); // Still 1, no additional write
+
+      // Third recompute - also no write
+      const result3 = await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
+      expect(result3.success).toBe(true);
+      expect(result3.metafieldWritten).toBe(false);
+      expect(metafieldWriteCount).toBe(1); // Still 1, no additional write
+    });
+
+    it("failed write or userErrors leave metafieldSyncedAt NULL and keep syncPending", async () => {
+      // Ensure metafieldSyncedAt is NULL
+      const [before] = await sql<{ metafieldSyncedAt: Date | null; syncPending: boolean }[]>`
+        SELECT "metafieldSyncedAt", "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
+      `;
+      expect(before.metafieldSyncedAt).toBeNull();
+
+      // Make metafield write fail
+      mockShouldFail = true;
+
+      const result = await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Metafield");
+
+      // Verify metafieldSyncedAt is still NULL and syncPending is true
+      const [after] = await sql<{ metafieldSyncedAt: Date | null; syncPending: boolean }[]>`
+        SELECT "metafieldSyncedAt", "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
+      `;
+      expect(after.metafieldSyncedAt).toBeNull();
+      expect(after.syncPending).toBe(true);
+    });
+
+    it("successful write after previous failure sets metafieldSyncedAt", async () => {
+      // Ensure metafieldSyncedAt is NULL and syncPending is true (simulating previous failure)
+      await sql`
+        UPDATE "BuyerAccount"
+        SET "metafieldSyncedAt" = NULL, "syncPending" = true
+        WHERE id = ${TEST_ACCOUNT_ID}
+      `;
+
+      // Reset write count
+      metafieldWriteCount = 0;
+      mockShouldFail = false;
+
+      const result = await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
+      expect(result.success).toBe(true);
+      expect(metafieldWriteCount).toBe(1);
+
+      // Verify metafieldSyncedAt is now set
+      const [after] = await sql<{ metafieldSyncedAt: Date | null; syncPending: boolean }[]>`
+        SELECT "metafieldSyncedAt", "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
+      `;
+      expect(after.metafieldSyncedAt).not.toBeNull();
+      expect(after.syncPending).toBe(false);
     });
   });
 
