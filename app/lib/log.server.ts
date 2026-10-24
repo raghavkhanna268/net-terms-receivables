@@ -90,6 +90,12 @@ const SENSITIVE_VALUE_PATTERNS: RegExp[] = [
 const REDACTED = "<redacted>";
 
 /**
+ * Pattern for valid error codes.
+ * Must start with a letter, contain only alphanumerics/underscores, max 64 chars.
+ */
+const SAFE_CODE_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+
+/**
  * Check if a field key is allowlisted.
  */
 function isAllowedKey(key: string): boolean {
@@ -101,6 +107,14 @@ function isAllowedKey(key: string): boolean {
  */
 function isSensitiveValue(value: string): boolean {
   return SENSITIVE_VALUE_PATTERNS.some((pattern) => pattern.test(value));
+}
+
+/**
+ * Check if a string is a safe error code.
+ * Must match safe pattern and not contain sensitive patterns.
+ */
+function isSafeCode(code: string): boolean {
+  return SAFE_CODE_PATTERN.test(code) && !isSensitiveValue(code);
 }
 
 /**
@@ -137,19 +151,78 @@ function redactValue(value: unknown, key: string): unknown {
 }
 
 /**
+ * Internal toErrorCode for use within redactFields.
+ * This ensures the `err` key only contains safe error codes, not free text.
+ */
+function toErrorCodeInternal(err: unknown): string {
+  if (err === null || err === undefined) {
+    return "unknown";
+  }
+
+  if (typeof err === "object") {
+    const errObj = err as Record<string, unknown>;
+
+    if (typeof errObj.code === "string" && errObj.code && isSafeCode(errObj.code)) {
+      return errObj.code;
+    }
+
+    if (typeof errObj.errorCode === "string" && errObj.errorCode && isSafeCode(errObj.errorCode)) {
+      return errObj.errorCode;
+    }
+
+    if (typeof errObj.name === "string" && errObj.name && errObj.name !== "Error" && isSafeCode(errObj.name)) {
+      return errObj.name;
+    }
+
+    if (err instanceof Error) {
+      const msg = err.message.toLowerCase();
+
+      if (msg.includes("econnrefused")) return "connection_refused";
+      if (msg.includes("etimedout") || msg.includes("timeout")) return "timeout";
+      if (msg.includes("enotfound")) return "dns_error";
+      if (msg.includes("fetch failed")) return "fetch_error";
+
+      if (msg.includes("invalid_grant")) return "invalid_grant";
+      if (msg.includes("access denied") || msg.includes("access_denied")) return "access_denied";
+      if (msg.includes("throttled")) return "throttled";
+      if (msg.includes("rate limit")) return "rate_limited";
+
+      if (msg.includes("unique constraint") || msg.includes("duplicate key")) return "pg_unique_violation";
+      if (msg.includes("foreign key")) return "pg_foreign_key_violation";
+      if (msg.includes("connection") && msg.includes("postgres")) return "pg_connection_error";
+
+      if (err.name !== "Error" && isSafeCode(err.name)) {
+        return err.name;
+      }
+      return "error";
+    }
+  }
+
+  if (typeof err === "string") {
+    if (isSafeCode(err)) {
+      return err;
+    }
+    return "string_error";
+  }
+
+  return "unknown";
+}
+
+/**
  * Redact all fields in an object, keeping only allowlisted keys.
  * Non-allowlisted keys have all values redacted (including numbers, per #174 money rule).
  * Only booleans pass through for non-allowlisted keys.
+ * The `err` key is special: it is routed through toErrorCode to ensure only safe codes.
  */
 function redactFields(fields: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
 
   for (const [key, value] of Object.entries(fields)) {
-    if (isAllowedKey(key)) {
+    if (key === "err") {
+      result[key] = toErrorCodeInternal(value);
+    } else if (isAllowedKey(key)) {
       result[key] = redactValue(value, key);
     } else {
-      // Only booleans pass through for non-allowlisted keys
-      // Numbers are redacted (could be money amounts per #174)
       result[key] = typeof value === "boolean" ? value : REDACTED;
     }
   }
@@ -211,20 +284,6 @@ export function safeLog(
       console.error(logEntry);
       break;
   }
-}
-
-/**
- * Pattern for valid error codes.
- * Must start with a letter, contain only alphanumerics/underscores, max 64 chars.
- */
-const SAFE_CODE_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
-
-/**
- * Check if a string is a safe error code.
- * Must match safe pattern and not contain sensitive patterns.
- */
-function isSafeCode(code: string): boolean {
-  return SAFE_CODE_PATTERN.test(code) && !isSensitiveValue(code);
 }
 
 /**

@@ -64,8 +64,6 @@ export function getShopifyApp(): ReturnType<typeof shopifyApp> {
   const scopesEnv = process.env.SCOPES ?? "";
   const scopes = parseScopes(scopesEnv);
 
-  const isProduction = process.env.NODE_ENV === "production";
-
   cachedShopifyApp = shopifyApp({
     apiKey,
     apiSecretKey,
@@ -79,7 +77,7 @@ export function getShopifyApp(): ReturnType<typeof shopifyApp> {
       expiringOfflineAccessTokens: true,
     },
     logger: {
-      level: isProduction ? LogSeverity.Warning : LogSeverity.Info,
+      level: process.env.NODE_ENV === "development" ? LogSeverity.Info : LogSeverity.Warning,
     },
     ...(process.env.SHOP_CUSTOM_DOMAIN
       ? { customShopDomains: [process.env.SHOP_CUSTOM_DOMAIN] }

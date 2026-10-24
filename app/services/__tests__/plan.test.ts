@@ -26,11 +26,12 @@ vi.mock("../drain/admin-client.server", () => ({
 vi.mock("~/lib/sentry", () => ({
   captureException: vi.fn(),
   captureMessage: vi.fn(),
+  captureExceptionWithTags: vi.fn(),
 }));
 
 // Import after mocks are set up
 import { adminGraphQL as _adminGraphQL } from "../drain/admin-client.server";
-import { captureException as _captureException } from "~/lib/sentry";
+import { captureExceptionWithTags as _captureExceptionWithTags } from "~/lib/sentry";
 import {
   resolvePlan,
   getPlanByShopId,
@@ -39,7 +40,7 @@ import {
 } from "../plan.server";
 
 const adminGraphQL = _adminGraphQL as ReturnType<typeof vi.fn>;
-const captureException = _captureException as ReturnType<typeof vi.fn>;
+const captureExceptionWithTags = _captureExceptionWithTags as ReturnType<typeof vi.fn>;
 
 // Mock SQL client
 const createMockSql = () => {
@@ -800,7 +801,7 @@ describe("Plan Resolution Service", () => {
       await promise;
       
       // Should have captured the error to Sentry
-      expect(captureException).toHaveBeenCalledWith(testError);
+      expect(captureExceptionWithTags).toHaveBeenCalledWith(testError, { shopId: TEST_SHOP_ID });
     });
 
     it("removes shop from in-flight map even when refresh fails", async () => {

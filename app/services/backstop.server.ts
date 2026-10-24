@@ -37,6 +37,7 @@
 import type { Sql } from "~/lib/db-light.server";
 import { shopifyGraphQLRequest } from "./shopify-client.server";
 import { hasOverdueInvoices } from "./overdue.server";
+import { safeLog, toErrorCode } from "~/lib/log.server";
 
 /**
  * Tag added to orders from held accounts.
@@ -948,12 +949,12 @@ export async function applyBackstop(
       };
     }
 
-    // Account was held before this order - apply backstop
-    console.warn(
-      `[backstop] Applying holds for order ${orderGid} from held account ${buyerAccountId}`,
-    );
+    safeLog("warn", "backstop_applying_holds", {
+      shopId,
+      orderGid,
+      buyerAccountId,
+    });
 
-    // Hold fulfillment orders (throws on retryable failure)
     const { heldCount, nonMerchantManagedSkipped } = await holdFulfillmentOrders(
       sql,
       shopId,
@@ -961,11 +962,13 @@ export async function applyBackstop(
       orderGid,
     );
 
-    // Tag the order
     const tagResult = await tagOrder(shopDomain, orderGid);
     if (!tagResult.success) {
-      console.error(`[backstop] Failed to tag order: ${tagResult.error}`);
-      // Continue anyway - holds are more important than tags
+      safeLog("error", "backstop_tag_order_failed", {
+        shopId,
+        orderGid,
+        err: toErrorCode(tagResult.error),
+      });
     }
 
     // Record audit event

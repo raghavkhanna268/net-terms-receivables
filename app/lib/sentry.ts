@@ -12,7 +12,7 @@ import { redactString, toErrorCode } from "./log.server";
 
 /**
  * Restrictive data collection settings per #174 PII rules.
- * @sentry/core 11.9.0 replaced sendDefaultPii with dataCollection.
+ * @sentry/core 11.8.0 replaced sendDefaultPii with dataCollection.
  * Defaults are permissive, so we explicitly disable all data collection.
  * beforeSend/beforeSendTransaction hooks provide defense-in-depth.
  */
@@ -182,7 +182,7 @@ export function wrapWithSentry<E extends SentryEnv>(
       return {
         dsn,
         tracesSampleRate: parseFloat(env.SENTRY_TRACES_SAMPLE_RATE ?? "0"),
-        // A1: Disable all automatic data collection. @sentry/core 11.9.0 replaced
+        // A1: Disable all automatic data collection. @sentry/core 11.8.0 replaced
         // sendDefaultPii with dataCollection, which defaults to permissive settings.
         // Shopify request URLs carry shop/host/hmac query params, so we must disable
         // urlQueryParams, cookies, httpHeaders, httpBodies, and all other collection.

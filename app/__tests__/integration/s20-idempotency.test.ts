@@ -280,7 +280,7 @@ describeWithDb("S20 Idempotency: recordAndEnqueueSync atomicity", () => {
 
     expect(result.status).toBe("error");
     if (result.status === "error") {
-      expect(result.error.message).toContain("Simulated pgmq failure");
+      expect(result.code).toBe("error");
     }
 
     // Verify 0 receipts (rolled back)

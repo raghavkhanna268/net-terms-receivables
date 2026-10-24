@@ -95,7 +95,7 @@ export function parseTriggeredAt(request: Request): Date | null {
 export type RecordAndEnqueueResult =
   | { status: "enqueued"; msgId: string }
   | { status: "duplicate" }
-  | { status: "error"; error: Error };
+  | { status: "error"; code: string };
 
 /**
  * S20 atomic receipt+enqueue helper for sync webhooks.
@@ -164,6 +164,7 @@ export async function recordAndEnqueueSync(
 
     return result;
   } catch (err) {
-    return { status: "error", error: err instanceof Error ? err : new Error(String(err)) };
+    const { toErrorCode } = await import("./log.server");
+    return { status: "error", code: toErrorCode(err) };
   }
 }

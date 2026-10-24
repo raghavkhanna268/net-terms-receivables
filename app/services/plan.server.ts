@@ -20,7 +20,8 @@
 
 import type { Sql } from "~/lib/db-light.server";
 import { getRequestWaitUntil } from "~/lib/request-context.server";
-import { captureException, captureMessage } from "~/lib/sentry";
+import { captureExceptionWithTags } from "~/lib/sentry";
+import { safeLog, toErrorCode } from "~/lib/log.server";
 import {
   type PlanKey,
   type PlanConfig,
@@ -232,13 +233,9 @@ async function fetchPlanFromShopify(
   );
 
   if (!result.success) {
-    console.error(
-      `[plan.server] Failed to fetch subscription for ${shop}: ${result.error}`
-    );
-    captureMessage(
-      `Plan fetch failed: ${result.error}`,
-      "warning"
-    );
+    safeLog("error", "plan_fetch_failed", {
+      err: result.error,
+    });
     return null;
   }
 
@@ -264,14 +261,10 @@ async function fetchPlanFromShopify(
   const planKey = mapSubscriptionToPlanKey(activeSubscription.name);
 
   if (!planKey) {
-    // Unknown subscription name - log and default to free
-    console.warn(
-      `[plan.server] Unknown subscription name for ${shop}: "${activeSubscription.name}"`
-    );
-    captureMessage(
-      `Unknown subscription name: "${activeSubscription.name}"`,
-      "warning"
-    );
+    safeLog("warn", "unknown_subscription_name", {
+      subscriptionId: activeSubscription.id,
+      isTest: activeSubscription.test,
+    });
     return {
       planKey: "free",
       subscriptionId: activeSubscription.id,
@@ -337,11 +330,11 @@ function triggerBackgroundRefresh(
           fetched.subscriptionName,
           fetched.isTest
         );
-        console.log(`[plan.server] Background refresh completed for ${shopDomain}`);
+        safeLog("info", "plan_background_refresh_completed", { shopId });
       }
     } catch (err) {
-      console.error(`[plan.server] Background refresh failed for ${shopDomain}:`, err);
-      captureException(err);
+      safeLog("error", "plan_background_refresh_failed", { shopId, err: toErrorCode(err) });
+      captureExceptionWithTags(err, { shopId });
     } finally {
       inFlightRefreshes.delete(shopDomain);
     }
@@ -386,7 +379,7 @@ export async function resolvePlan(
     shopId = await getShopId(sql, shopDomain);
 
     if (!shopId) {
-      console.warn(`[plan.server] Shop not found: ${shopDomain}`);
+      safeLog("warn", "plan_shop_not_found", {});
       return defaultResult;
     }
 
@@ -423,9 +416,8 @@ export async function resolvePlan(
     const fetched = await fetchPlanFromShopify(shopDomain);
 
     if (!fetched) {
-      // Fetch failed - use cached plan if available (fail-to-cached)
       if (cachedPlan) {
-        console.warn(`[plan.server] Fetch failed for ${shopDomain}, using cached plan`);
+        safeLog("warn", "plan_fetch_failed_using_cache", { shopId });
         return {
           plan: getPlanConfig(cachedPlan.planKey),
           subscriptionId: cachedPlan.subscriptionId,
@@ -434,7 +426,6 @@ export async function resolvePlan(
           fromCache: true,
         };
       }
-      // No cache exists - only now default to free
       return defaultResult;
     }
 
@@ -456,12 +447,11 @@ export async function resolvePlan(
       fromCache: false,
     };
   } catch (error) {
-    console.error("[plan.server] Error resolving plan:", error);
-    captureException(error);
+    safeLog("error", "plan_resolve_error", { shopId, err: toErrorCode(error) });
+    captureExceptionWithTags(error, { shopId: shopId ?? undefined });
     
-    // Fail-to-cached: use cached plan if available
     if (cachedPlan) {
-      console.warn(`[plan.server] Exception for ${shopDomain}, using cached plan`);
+      safeLog("warn", "plan_exception_using_cache", { shopId });
       return {
         plan: getPlanConfig(cachedPlan.planKey),
         subscriptionId: cachedPlan.subscriptionId,
@@ -471,7 +461,6 @@ export async function resolvePlan(
       };
     }
     
-    // No cache - only now default to free
     return defaultResult;
   }
 }
@@ -487,9 +476,9 @@ export async function refreshPlanCache(
   sql: Sql,
   shopDomain: string
 ): Promise<void> {
-  // Force refresh bypasses cache
+  const shopId = await getShopId(sql, shopDomain);
   await resolvePlan(sql, shopDomain, true);
-  console.log(`[plan.server] Refreshed plan cache for ${shopDomain}`);
+  safeLog("info", "plan_cache_refreshed", { shopId });
 }
 
 /**

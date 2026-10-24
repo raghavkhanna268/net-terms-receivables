@@ -379,7 +379,7 @@ describe("S8 Webhook Handlers", () => {
     it("throws when recordAndEnqueueSync returns error", async () => {
       mockRecordAndEnqueueSync.mockResolvedValueOnce({
         status: "error",
-        error: new Error("Simulated enqueue failure"),
+        code: "enqueue_failed",
       });
 
       const { action } = await import("../webhooks.customers");
@@ -390,7 +390,7 @@ describe("S8 Webhook Handlers", () => {
       );
 
       await expect(action(createActionArgs(request))).rejects.toThrow(
-        "Simulated enqueue failure"
+        "enqueue_failed"
       );
     });
   });
@@ -501,7 +501,7 @@ describe("S8 Webhook Handlers", () => {
     it("throws when recordAndEnqueueSync returns error", async () => {
       mockRecordAndEnqueueSync.mockResolvedValueOnce({
         status: "error",
-        error: new Error("Simulated enqueue failure"),
+        code: "enqueue_failed",
       });
 
       const { action } = await import("../webhooks.draft_orders");
@@ -512,7 +512,7 @@ describe("S8 Webhook Handlers", () => {
       );
 
       await expect(action(createActionArgs(request))).rejects.toThrow(
-        "Simulated enqueue failure"
+        "enqueue_failed"
       );
     });
   });
