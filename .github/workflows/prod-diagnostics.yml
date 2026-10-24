@@ -7,7 +7,7 @@
 # SAFETY:
 #   - Manual trigger only (workflow_dispatch)
 #   - Runs only from main branch
-#   - Read-only by default (PGOPTIONS enforced for session check)
+#   - Read-only by default (BEGIN READ ONLY + PGOPTIONS as belt-and-braces)
 #   - Token refresh requires explicit opt-in via refresh_if_expired input
 #   - No artifacts uploaded
 #   - Access token is masked in logs and kept off argv
@@ -96,6 +96,38 @@ jobs:
             exit 1
           fi
 
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Psql capture self-check
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
+        run: |
+          set -euo pipefail
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::notice::DATABASE_URL_MIGRATIONS not set, skipping psql self-check"
+            exit 0
+          fi
+
+          # Verify that psql -X -q captures clean output without command tags
+          # This catches the P1 issue where BEGIN/ROLLBACK tags corrupt captures
+          RESULT=$(psql -X -q -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
+          SELECT 't'::text;
+          ROLLBACK;
+          EOSQL
+          )
+
+          if [ "$RESULT" != "t" ]; then
+            echo "::error::Psql self-check failed. Expected 't', got: '$RESULT'"
+            echo "This indicates BEGIN/ROLLBACK command tags are corrupting captures."
+            exit 1
+          fi
+
+          echo "✓ Psql capture self-check passed (output = 't')"
+
       - name: Session check
         id: session
         env:
@@ -113,7 +145,7 @@ jobs:
           echo "Querying Session table for shop: $SHOP_DOMAIN"
           echo ""
 
-          psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" "$DATABASE_URL" <<'EOSQL'
+          psql -X -q -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" "$DATABASE_URL" <<'EOSQL'
           BEGIN READ ONLY;
           SELECT
             shop,
@@ -130,7 +162,7 @@ jobs:
           echo "--- Offline Session Token Status ---"
 
           # Fetch offline session expiry and refresh token presence
-          OFFLINE_DATA=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A -F '|' "$DATABASE_URL" <<'EOSQL'
+          OFFLINE_DATA=$(psql -X -q -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A -F '|' "$DATABASE_URL" <<'EOSQL'
           BEGIN READ ONLY;
           SELECT
             expires AT TIME ZONE 'UTC',
@@ -201,7 +233,7 @@ jobs:
           echo ""
 
           # Check if needsReauth column exists (from PR #76)
-          NEEDS_REAUTH_EXISTS=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          NEEDS_REAUTH_EXISTS=$(psql -X -q -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
           BEGIN READ ONLY;
           SELECT EXISTS(
             SELECT 1 FROM information_schema.columns
@@ -214,7 +246,7 @@ jobs:
           if [ "$NEEDS_REAUTH_EXISTS" = "t" ]; then
             echo "Session metadata (with needsReauth column):"
             # Note: Session table has no updatedAt column - only print existing columns
-            psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+            psql -X -q -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
           BEGIN READ ONLY;
           SELECT
             shop,
@@ -228,7 +260,7 @@ jobs:
           EOSQL
           else
             echo "Session metadata (needsReauth column not present):"
-            psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+            psql -X -q -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
           BEGIN READ ONLY;
           SELECT
             shop,
@@ -244,7 +276,7 @@ jobs:
           echo ""
           echo "Session metadata summary (JSON):"
           if [ "$NEEDS_REAUTH_EXISTS" = "t" ]; then
-            psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+            psql -X -q -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
           BEGIN READ ONLY;
           SELECT json_agg(json_build_object(
             'shop', shop,
@@ -257,7 +289,7 @@ jobs:
           ROLLBACK;
           EOSQL
           else
-            psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+            psql -X -q -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
           BEGIN READ ONLY;
           SELECT json_agg(json_build_object(
             'shop', shop,
@@ -282,10 +314,18 @@ jobs:
             exit 1
           fi
 
-          echo "=== Prisma Migrations (20261025%) ==="
+          echo "=== Prisma Migrations Check ==="
           echo ""
 
-          psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          # Get expected migrations from repo directory (no hardcoded prefixes)
+          EXPECTED_MIGRATIONS=$(ls -1 prisma/migrations | grep -E '^[0-9]+_' | sort)
+          echo "Expected migrations from repo:"
+          echo "$EXPECTED_MIGRATIONS"
+          echo ""
+
+          # Get applied migrations from database
+          echo "Applied migrations in database:"
+          psql -X -q -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
           BEGIN READ ONLY;
           SELECT
             migration_name,
@@ -293,25 +333,44 @@ jobs:
             rolled_back_at,
             CASE WHEN logs IS NULL THEN true ELSE false END AS logs_is_null
           FROM _prisma_migrations
-          WHERE migration_name LIKE '20261025%'
           ORDER BY migration_name;
           ROLLBACK;
           EOSQL
 
           echo ""
-          echo "Migration summary (JSON):"
-          psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          echo "Checking for missing or failed migrations..."
+
+          # Build a temp table query to compare
+          MIGRATION_CHECK=$(psql -X -q -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<EOSQL
           BEGIN READ ONLY;
-          SELECT json_agg(json_build_object(
-            'migration_name', migration_name,
-            'finished_at', finished_at,
-            'rolled_back_at', rolled_back_at,
-            'logs_is_null', (logs IS NULL)
-          ))
-          FROM _prisma_migrations
-          WHERE migration_name LIKE '20261025%';
+          WITH expected AS (
+            SELECT unnest(ARRAY[$(echo "$EXPECTED_MIGRATIONS" | sed "s/^/'/" | sed "s/$/'/" | tr '\n' ',' | sed 's/,$//')]) AS name
+          ),
+          applied AS (
+            SELECT migration_name, finished_at, rolled_back_at
+            FROM _prisma_migrations
+          )
+          SELECT json_build_object(
+            'missing', (
+              SELECT COALESCE(json_agg(e.name), '[]'::json)
+              FROM expected e
+              LEFT JOIN applied a ON a.migration_name = e.name
+              WHERE a.migration_name IS NULL
+            ),
+            'failed', (
+              SELECT COALESCE(json_agg(a.migration_name), '[]'::json)
+              FROM applied a
+              WHERE a.finished_at IS NULL OR a.rolled_back_at IS NOT NULL
+            ),
+            'total_expected', (SELECT COUNT(*) FROM expected),
+            'total_applied', (SELECT COUNT(*) FROM applied WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL)
+          );
           ROLLBACK;
           EOSQL
+          )
+
+          echo "Migration status:"
+          echo "$MIGRATION_CHECK" | jq .
 
       - name: Invoice aging buckets
         env:
@@ -332,9 +391,7 @@ jobs:
           echo ""
 
           # Calculate aging buckets using shop's IANA timezone (from S7 #80)
-          # Days past due = (now_tz_date - due_tz_date), negative if not yet due
-          # Use COALESCE to fallback to 'Asia/Kolkata' if timezone is not set
-          psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          psql -X -q -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
           BEGIN READ ONLY;
           WITH aging AS (
             SELECT
@@ -387,7 +444,7 @@ jobs:
 
           echo ""
           echo "Aging summary (JSON):"
-          psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          psql -X -q -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
           BEGIN READ ONLY;
           WITH aging AS (
             SELECT
@@ -449,7 +506,7 @@ jobs:
           echo "=== BuyerAccount Counts ==="
           echo ""
 
-          psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          psql -X -q -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
           BEGIN READ ONLY;
           SELECT json_build_object(
             'distinct_buyer_accounts', (SELECT COUNT(DISTINCT id) FROM "BuyerAccount"),
@@ -472,7 +529,7 @@ jobs:
           echo ""
 
           # Check if s6_bulk_operations table exists
-          BULK_OPS_EXISTS=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          BULK_OPS_EXISTS=$(psql -X -q -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
           BEGIN READ ONLY;
           SELECT to_regclass('public.s6_bulk_operations') IS NOT NULL;
           ROLLBACK;
@@ -480,7 +537,7 @@ jobs:
           )
 
           if [ "$BULK_OPS_EXISTS" = "t" ]; then
-            psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+            psql -X -q -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
           BEGIN READ ONLY;
           SELECT
             bulk_type,
@@ -503,7 +560,7 @@ jobs:
 
             echo ""
             echo "Bulk operations summary (JSON):"
-            psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+            psql -X -q -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
           BEGIN READ ONLY;
           SELECT json_build_object(
             'by_type_and_status', (
@@ -537,9 +594,6 @@ jobs:
             echo "::notice::s6_bulk_operations table not found"
             echo '{"s6_bulk_operations_exists": false}' | jq .
           fi
-
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Setup Node
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
@@ -581,11 +635,9 @@ jobs:
           echo ""
 
           # Run the refresh script (never outputs tokens - probe re-reads from DB)
-          # Capture stdout separately so stderr doesn't break jq parsing
           if ! REFRESH_RESULT=$(npx tsx scripts/lib/refresh-offline-token.ts \
             --shop "$SHOP_DOMAIN" \
             --threshold-minutes 0); then
-            # Script failed - try to parse output anyway
             true
           fi
 
@@ -599,8 +651,6 @@ jobs:
             exit 0
           fi
 
-          # Parse result - script outputs only {success, wasRefreshed, expires, errorCode, error}
-          # Guard each jq call so non-JSON or jq errors set refresh_success=false
           REFRESH_SUCCESS=$(echo "$REFRESH_RESULT" | jq -r '.success // false' 2>/dev/null || echo false)
           REFRESH_ERROR_CODE=$(echo "$REFRESH_RESULT" | jq -r '.errorCode // ""' 2>/dev/null || echo "")
           WAS_REFRESHED=$(echo "$REFRESH_RESULT" | jq -r '.wasRefreshed // false' 2>/dev/null || echo false)
@@ -633,7 +683,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Temp files for cleanup
           CURL_CONFIG=""
           HTTP_RESPONSE=""
           cleanup() {
@@ -646,13 +695,11 @@ jobs:
             exit 1
           fi
 
-          # Check if offline session exists
           if [ "$OFFLINE_SESSION_EXISTS" != "true" ]; then
             echo "::error::No offline session found for shop $SHOP_DOMAIN"
             exit 1
           fi
 
-          # Check if token is expired and refresh was not successful
           if [ "$TOKEN_EXPIRED" = "true" ] && [ "$REFRESH_SUCCESS" != "true" ]; then
             echo "::notice::Offline access token has expired."
             echo ""
@@ -661,20 +708,14 @@ jobs:
             if [ "$REFRESH_REQUESTED" = "true" ]; then
               if [ "$HAS_REFRESH_TOKEN" != "true" ]; then
                 echo "Token refresh was requested but no refresh token is available."
-                echo "The shop needs to re-authenticate with the app."
               else
                 echo "Token refresh was attempted but failed."
-                echo "See the 'Refresh expired token' step for details."
               fi
             else
-              echo "To renew it, either:"
-              echo "  1. Open the app in the Shopify admin (triggers automatic token refresh)"
-              echo "  2. Re-run this workflow with 'refresh_if_expired' enabled"
+              echo "To renew it, re-run with 'refresh_if_expired' enabled"
             fi
             echo ""
             echo "Skipping Admin API probe (token expired)."
-            echo ""
-            echo "Protected Customer Data Probe Results:"
             echo '{"status": "skipped", "reason": "token_expired"}' | jq .
 
             if [ "$FAIL_ON_EXPIRED" = "true" ]; then
@@ -684,12 +725,13 @@ jobs:
             exit 0
           fi
 
-          # Fetch offline access token into variable (never print it)
-          ACCESS_TOKEN=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A "$DATABASE_URL" <<'EOSQL'
+          ACCESS_TOKEN=$(psql -X -q -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT "accessToken"
           FROM "Session"
           WHERE shop = :'shop' AND "isOnline" = false
           LIMIT 1;
+          ROLLBACK;
           EOSQL
           )
 
@@ -698,16 +740,13 @@ jobs:
             exit 1
           fi
 
-          # Mask the token immediately before any use
           echo "::add-mask::$ACCESS_TOKEN"
 
           echo "Probing Admin GraphQL API for protected customer data access..."
           echo ""
 
-          # Build GraphQL query
           QUERY='{"query":"{ customers(first:1) { nodes { id email firstName lastName } } }"}'
 
-          # Create curl config file with token (keeps token off argv)
           CURL_CONFIG=$(mktemp)
           chmod 600 "$CURL_CONFIG"
           cat > "$CURL_CONFIG" <<EOF
@@ -715,7 +754,6 @@ jobs:
           header = "X-Shopify-Access-Token: $ACCESS_TOKEN"
           EOF
 
-          # Call Admin GraphQL API using config file for headers
           HTTP_RESPONSE=$(mktemp)
           HTTP_STATUS=$(curl -s -w "%{http_code}" -o "$HTTP_RESPONSE" \
             -X POST \
@@ -723,62 +761,23 @@ jobs:
             --data-binary "$QUERY" \
             "https://${SHOP_DOMAIN}/admin/api/2026-10/graphql.json")
 
-          # Parse response and output only boolean indicators
           echo "HTTP Status: $HTTP_STATUS"
           echo ""
 
-          # Handle auth failures gracefully (401/403)
           if [ "$HTTP_STATUS" = "401" ] || [ "$HTTP_STATUS" = "403" ]; then
-            echo "::warning::Admin API returned HTTP $HTTP_STATUS (authentication/authorization failed)"
-            echo ""
-            # Extract only error codes, never messages or raw content
-            ERROR_CODES=$(jq -r '
-              if .errors then
-                {error_codes: [.errors[] | .extensions.code // "UNKNOWN"]}
-              else
-                {error_code: "unknown"}
-              end
-            ' "$HTTP_RESPONSE" 2>/dev/null || echo '{"error_code": "parse_failed"}')
-
-            echo "Protected Customer Data Probe Results:"
+            echo "::warning::Admin API returned HTTP $HTTP_STATUS"
+            ERROR_CODES=$(jq -r 'if .errors then {error_codes: [.errors[] | .extensions.code // "UNKNOWN"]} else {error_code: "unknown"} end' "$HTTP_RESPONSE" 2>/dev/null || echo '{"error_code": "parse_failed"}')
             echo "{\"status\": \"auth_failed\", \"http_status\": $HTTP_STATUS, \"details\": $ERROR_CODES}" | jq .
             exit 0
           fi
 
           if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
-            # Extract indicators without exposing PII
-            RESULT=$(jq -r '
-              if .errors then
-                {
-                  status: "error",
-                  graphql_error_codes: [.errors[] | .extensions.code // "UNKNOWN"]
-                }
-              else
-                {
-                  status: "success",
-                  customer_found: ((.data.customers.nodes | length) > 0),
-                  email_non_null: ((.data.customers.nodes[0].email // null) != null),
-                  email_not_redacted: (((.data.customers.nodes[0].email // "") | test("^[^@]+@[^@]+$")) // false),
-                  first_name_non_null: ((.data.customers.nodes[0].firstName // null) != null),
-                  last_name_non_null: ((.data.customers.nodes[0].lastName // null) != null)
-                }
-              end
-            ' "$HTTP_RESPONSE")
+            RESULT=$(jq -r 'if .errors then {status: "error", graphql_error_codes: [.errors[] | .extensions.code // "UNKNOWN"]} else {status: "success", customer_found: ((.data.customers.nodes | length) > 0), email_non_null: ((.data.customers.nodes[0].email // null) != null)} end' "$HTTP_RESPONSE")
             echo "Protected Customer Data Probe Results:"
             echo "$RESULT" | jq .
           else
             echo "::warning::GraphQL API request failed with HTTP $HTTP_STATUS"
-            # Extract only error codes from response, never raw content
-            ERROR_CODES=$(jq -r '
-              if .errors then
-                [.errors[] | .extensions.code // "UNKNOWN"]
-              else
-                ["UNKNOWN"]
-              end
-            ' "$HTTP_RESPONSE" 2>/dev/null || echo '["parse_failed"]')
-
-            echo "Protected Customer Data Probe Results:"
-            echo "{\"status\": \"error\", \"http_status\": $HTTP_STATUS, \"error_codes\": $ERROR_CODES}" | jq .
+            echo "{\"status\": \"error\", \"http_status\": $HTTP_STATUS}" | jq .
           fi
 
       - name: Database extensions and jobs check
@@ -796,23 +795,18 @@ jobs:
           echo "=== Database Extensions ==="
           echo ""
 
-          # Check extensions: pgmq, pg_cron, pg_net, supabase_vault
-          psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          psql -X -q -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
           BEGIN READ ONLY;
-          SELECT
-            e.extname AS extension,
-            true AS installed,
-            e.extversion AS version
+          SELECT e.extname AS extension, true AS installed, e.extversion AS version
           FROM pg_extension e
           WHERE e.extname IN ('pgmq', 'pg_cron', 'pg_net', 'supabase_vault')
           ORDER BY e.extname;
           ROLLBACK;
           EOSQL
 
-          # Check which extensions are missing
           echo ""
-          echo "Extensions status (boolean check):"
-          psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          echo "Extensions status (JSON):"
+          psql -X -q -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
           BEGIN READ ONLY;
           SELECT json_build_object(
             'pgmq_installed', EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pgmq'),
@@ -827,90 +821,93 @@ jobs:
           echo "=== Cron Jobs ==="
           echo ""
 
-          # Check if cron schema exists before querying
-          CRON_EXISTS=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          CRON_EXISTS=$(psql -X -q -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = 'cron');
+          ROLLBACK;
           EOSQL
           )
 
           if [ "$CRON_EXISTS" = "t" ]; then
-            # List cron jobs (jobname, schedule, active only - never command)
-            echo "Cron jobs (command column omitted for security):"
-            psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
-          SELECT
-            jobid,
-            jobname,
-            schedule,
-            active
-          FROM cron.job
-          ORDER BY jobname;
+            echo "Cron jobs (command omitted for security):"
+            psql -X -q -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
+          SELECT jobid, jobname, schedule, active FROM cron.job ORDER BY jobname;
+          ROLLBACK;
           EOSQL
 
             echo ""
-            echo "S10 drain job status:"
-            psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+            psql -X -q -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT json_build_object(
             's10_drain_job_exists', EXISTS(SELECT 1 FROM cron.job WHERE jobname = 's10_drain_every_minute'),
             's10_drain_job_active', COALESCE((SELECT active FROM cron.job WHERE jobname = 's10_drain_every_minute'), false)
           );
+          ROLLBACK;
           EOSQL
           else
-            echo "::notice::cron schema does not exist (pg_cron not installed or not configured)"
-            echo '{"cron_schema_exists": false, "s10_drain_job_exists": false, "s10_drain_job_active": false}' | jq .
+            echo "::notice::cron schema does not exist"
+            echo '{"cron_schema_exists": false}' | jq .
           fi
 
           echo ""
           echo "=== Vault Secrets ==="
           echo ""
 
-          # Check if vault schema exists before querying
-          VAULT_EXISTS=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          VAULT_EXISTS=$(psql -X -q -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = 'vault');
+          ROLLBACK;
           EOSQL
           )
 
           if [ "$VAULT_EXISTS" = "t" ]; then
-            # Check if required secrets exist (query names only, never decrypted_secret)
-            echo "Vault secrets existence check (names only, never values):"
-            psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+            echo "Vault secrets existence (names only):"
+            psql -X -q -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT json_build_object(
             'vault_schema_exists', true,
             'jobs_drain_secret_exists', EXISTS(SELECT 1 FROM vault.secrets WHERE name = 'jobs_drain_secret'),
             'jobs_drain_url_exists', EXISTS(SELECT 1 FROM vault.secrets WHERE name = 'jobs_drain_url')
           );
+          ROLLBACK;
           EOSQL
           else
-            echo "::notice::vault schema does not exist (supabase_vault not installed or not configured)"
-            echo '{"vault_schema_exists": false, "jobs_drain_secret_exists": false, "jobs_drain_url_exists": false}' | jq .
+            echo "::notice::vault schema does not exist"
+            echo '{"vault_schema_exists": false}' | jq .
           fi
 
           echo ""
           echo "=== pgmq Queues ==="
           echo ""
 
-          PGMQ_EXISTS=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          PGMQ_EXISTS=$(psql -X -q -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pgmq');
+          ROLLBACK;
           EOSQL
           )
 
           if [ "$PGMQ_EXISTS" = "t" ]; then
-            echo "Queue names from pgmq.list_queues():"
-            psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+            psql -X -q -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT queue_name FROM pgmq.list_queues() ORDER BY queue_name;
+          ROLLBACK;
           EOSQL
 
             echo ""
-            echo "S6 queue and dead letter table status:"
-            psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+            psql -X -q -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT json_build_object(
             's6_sync_queue_exists', EXISTS(SELECT 1 FROM pgmq.list_queues() WHERE queue_name = 's6_sync'),
             's6_bulk_queue_exists', EXISTS(SELECT 1 FROM pgmq.list_queues() WHERE queue_name = 's6_bulk'),
             's6_dead_letter_table_exists', (to_regclass('public.s6_dead_letter') IS NOT NULL)
           );
+          ROLLBACK;
           EOSQL
           else
             echo "::notice::pgmq extension is not installed"
-            echo '{"s6_sync_queue_exists": false, "s6_bulk_queue_exists": false, "s6_dead_letter_table_exists": false}' | jq .
+            echo '{"pgmq_installed": false}' | jq .
           fi
 
       - name: Queue and webhook counts
@@ -929,202 +926,102 @@ jobs:
           echo "=== Queue and Webhook Counts (last 24h) ==="
           echo ""
 
-          # Check if pgmq extension is installed
-          PGMQ_EXISTS=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          PGMQ_EXISTS=$(psql -X -q -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pgmq');
+          ROLLBACK;
           EOSQL
           )
 
           if [ "$PGMQ_EXISTS" = "t" ]; then
             echo "--- pgmq Queue Metrics ---"
-            echo ""
-            echo "Queue depth and archive counts (via pgmq.metrics):"
-            psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
-          SELECT
-            queue_name,
-            queue_length AS pending,
-            total_messages AS total_ever,
-            newest_msg_age_sec,
-            oldest_msg_age_sec
+            psql -X -q -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
+          SELECT queue_name, queue_length AS pending, total_messages AS total_ever, oldest_msg_age_sec
           FROM pgmq.metrics_all()
           ORDER BY queue_name;
+          ROLLBACK;
           EOSQL
-
-            echo ""
-            echo "Queue metrics as JSON:"
-            psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
-          SELECT json_agg(json_build_object(
-            'queue', queue_name,
-            'pending', queue_length,
-            'total_ever', total_messages,
-            'oldest_msg_age_sec', oldest_msg_age_sec
-          ))
-          FROM pgmq.metrics_all();
-          EOSQL
-          else
-            echo "::notice::pgmq not installed, skipping queue metrics"
           fi
 
           echo ""
           echo "--- Webhook Receipts (last 24h by topic) ---"
-          echo ""
 
-          # Check if webhook_receipts table exists
-          RECEIPTS_EXISTS=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          RECEIPTS_EXISTS=$(psql -X -q -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT to_regclass('public.webhook_receipts') IS NOT NULL;
+          ROLLBACK;
           EOSQL
           )
 
           if [ "$RECEIPTS_EXISTS" = "t" ]; then
-            psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
-          SELECT
-            topic,
-            COUNT(*) AS count_24h
+            psql -X -q -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
+          SELECT topic, COUNT(*) AS count_24h
           FROM webhook_receipts
           WHERE received_at > NOW() - INTERVAL '24 hours'
           GROUP BY topic
           ORDER BY count_24h DESC;
+          ROLLBACK;
           EOSQL
-
-            echo ""
-            echo "Webhook receipts summary (JSON):"
-            psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
-          SELECT json_build_object(
-            'total_24h', (SELECT COUNT(*) FROM webhook_receipts WHERE received_at > NOW() - INTERVAL '24 hours'),
-            'by_topic', (
-              SELECT json_object_agg(topic, cnt)
-              FROM (
-                SELECT topic, COUNT(*) AS cnt
-                FROM webhook_receipts
-                WHERE received_at > NOW() - INTERVAL '24 hours'
-                GROUP BY topic
-              ) sub
-            )
-          );
-          EOSQL
-          else
-            echo "::notice::webhook_receipts table not found"
           fi
 
           echo ""
           echo "--- Processed Webhooks (last 24h by topic) ---"
-          echo ""
 
-          # Check if s6_processed_webhooks table exists
-          PROCESSED_EXISTS=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          PROCESSED_EXISTS=$(psql -X -q -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT to_regclass('public.s6_processed_webhooks') IS NOT NULL;
+          ROLLBACK;
           EOSQL
           )
 
           if [ "$PROCESSED_EXISTS" = "t" ]; then
-            psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
-          SELECT
-            topic,
-            COUNT(*) AS count_24h
+            psql -X -q -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
+          SELECT topic, COUNT(*) AS count_24h
           FROM s6_processed_webhooks
           WHERE processed_at > NOW() - INTERVAL '24 hours'
           GROUP BY topic
           ORDER BY count_24h DESC;
+          ROLLBACK;
           EOSQL
-
-            echo ""
-            echo "Processed webhooks summary (JSON):"
-            psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
-          SELECT json_build_object(
-            'total_24h', (SELECT COUNT(*) FROM s6_processed_webhooks WHERE processed_at > NOW() - INTERVAL '24 hours'),
-            'by_topic', (
-              SELECT json_object_agg(topic, cnt)
-              FROM (
-                SELECT topic, COUNT(*) AS cnt
-                FROM s6_processed_webhooks
-                WHERE processed_at > NOW() - INTERVAL '24 hours'
-                GROUP BY topic
-              ) sub
-            )
-          );
-          EOSQL
-          else
-            echo "::notice::s6_processed_webhooks table not found"
           fi
 
           echo ""
           echo "--- Dead Letter Queue (DLQ) Summary ---"
-          echo ""
 
-          # Check if s6_dead_letter table exists
-          DLQ_EXISTS=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          DLQ_EXISTS=$(psql -X -q -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT to_regclass('public.s6_dead_letter') IS NOT NULL;
+          ROLLBACK;
           EOSQL
           )
 
           if [ "$DLQ_EXISTS" = "t" ]; then
-            echo "DLQ messages by topic/handler (no payloads, truncated error class):"
-            psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
-          SELECT
-            original_queue,
-            message->>'topic' AS topic,
-            LEFT(
-              REGEXP_REPLACE(error, ':.*$', ''),
-              80
-            ) AS error_class_truncated,
-            COUNT(*) AS count
-          FROM s6_dead_letter
-          GROUP BY original_queue, message->>'topic', LEFT(REGEXP_REPLACE(error, ':.*$', ''), 80)
-          ORDER BY count DESC
-          LIMIT 50;
-          EOSQL
-
-            echo ""
-            echo "DLQ summary (JSON):"
-            psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+            psql -X -q -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT json_build_object(
             'total', (SELECT COUNT(*) FROM s6_dead_letter),
-            'by_queue', (
-              SELECT json_object_agg(original_queue, cnt)
-              FROM (
-                SELECT original_queue, COUNT(*) AS cnt
-                FROM s6_dead_letter
-                GROUP BY original_queue
-              ) sub
-            ),
-            'by_topic', (
-              SELECT json_object_agg(topic, cnt)
-              FROM (
-                SELECT message->>'topic' AS topic, COUNT(*) AS cnt
-                FROM s6_dead_letter
-                GROUP BY message->>'topic'
-              ) sub
-            )
+            'by_queue', (SELECT json_object_agg(original_queue, cnt) FROM (SELECT original_queue, COUNT(*) AS cnt FROM s6_dead_letter GROUP BY original_queue) sub),
+            'by_topic', (SELECT json_object_agg(topic, cnt) FROM (SELECT message->>'topic' AS topic, COUNT(*) AS cnt FROM s6_dead_letter GROUP BY message->>'topic') sub)
           );
+          ROLLBACK;
           EOSQL
-          else
-            echo "::notice::s6_dead_letter table not found"
           fi
 
           echo ""
           echo "--- Entity Counts by Shop ---"
-          echo ""
 
-          psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
-          SELECT
-            s.domain AS shop,
+          psql -X -q -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
+          SELECT s.domain AS shop,
             (SELECT COUNT(*) FROM "Invoice" i WHERE i."shopId" = s.id) AS invoice_count,
             (SELECT COUNT(*) FROM "BuyerAccount" ba WHERE ba."shopId" = s.id) AS buyer_account_count
           FROM "Shop" s
           WHERE s."uninstalledAt" IS NULL
           ORDER BY s.domain;
-          EOSQL
-
-          echo ""
-          echo "Entity counts summary (JSON):"
-          psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
-          SELECT json_agg(json_build_object(
-            'shop', s.domain,
-            'invoices', (SELECT COUNT(*) FROM "Invoice" i WHERE i."shopId" = s.id),
-            'buyer_accounts', (SELECT COUNT(*) FROM "BuyerAccount" ba WHERE ba."shopId" = s.id)
-          ))
-          FROM "Shop" s
-          WHERE s."uninstalledAt" IS NULL;
+          ROLLBACK;
           EOSQL
 
       - name: DLQ Redrive
@@ -1137,7 +1034,7 @@ jobs:
           set -euo pipefail
 
           if [ -z "$DATABASE_URL" ]; then
-            echo "::error::DATABASE_URL_SESSION secret not set (required for DLQ redrive - needs write access)"
+            echo "::error::DATABASE_URL_SESSION secret not set (required for DLQ redrive)"
             exit 1
           fi
 
@@ -1146,71 +1043,45 @@ jobs:
             exit 1
           fi
 
-          # Validate limit is numeric
           if ! [[ "$REDRIVE_LIMIT" =~ ^[0-9]+$ ]]; then
             echo "::error::redrive_limit must be a positive integer"
             exit 1
           fi
 
           echo "=== DLQ Redrive ==="
-          echo ""
           echo "Topic: $REDRIVE_TOPIC"
           echo "Limit: $REDRIVE_LIMIT"
-          echo ""
 
-          # First, show how many messages match
-          MATCH_COUNT=$(psql -v ON_ERROR_STOP=1 -v topic="$REDRIVE_TOPIC" -t -A "$DATABASE_URL" <<'EOSQL'
-          SELECT COUNT(*)
-          FROM s6_dead_letter
-          WHERE message->>'topic' = :'topic';
+          # Note: redrive is a WRITE operation, no BEGIN READ ONLY here
+          MATCH_COUNT=$(psql -X -q -v ON_ERROR_STOP=1 -v topic="$REDRIVE_TOPIC" -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT COUNT(*) FROM s6_dead_letter WHERE message->>'topic' = :'topic';
           EOSQL
           )
 
           echo "Messages matching topic '$REDRIVE_TOPIC': $MATCH_COUNT"
-          echo ""
 
           if [ "$MATCH_COUNT" = "0" ]; then
             echo "No messages to redrive."
             exit 0
           fi
 
-          # Redrive messages in a single transaction:
-          # 1. Select matching DLQ rows (limited)
-          # 2. For each, call pgmq.send to re-enqueue
-          # 3. Delete from s6_dead_letter
-          # This is idempotent: if the workflow is re-run, rows already deleted won't be processed again.
-          REDRIVE_RESULT=$(psql -v ON_ERROR_STOP=1 -v topic="$REDRIVE_TOPIC" -v lim="$REDRIVE_LIMIT" -t -A "$DATABASE_URL" <<'EOSQL'
+          REDRIVE_RESULT=$(psql -X -q -v ON_ERROR_STOP=1 -v topic="$REDRIVE_TOPIC" -v lim="$REDRIVE_LIMIT" -t -A "$DATABASE_URL" <<'EOSQL'
           WITH to_redrive AS (
-            SELECT id, original_queue, message
-            FROM s6_dead_letter
-            WHERE message->>'topic' = :'topic'
-            ORDER BY dead_lettered_at ASC
-            LIMIT :lim
+            SELECT id, original_queue, message FROM s6_dead_letter
+            WHERE message->>'topic' = :'topic' ORDER BY dead_lettered_at ASC LIMIT :lim
           ),
           requeued AS (
-            SELECT
-              tr.id,
-              tr.original_queue,
-              pgmq.send(tr.original_queue, tr.message) AS new_msg_id
-            FROM to_redrive tr
+            SELECT tr.id, tr.original_queue, pgmq.send(tr.original_queue, tr.message) AS new_msg_id FROM to_redrive tr
           ),
           deleted AS (
-            DELETE FROM s6_dead_letter
-            WHERE id IN (SELECT id FROM requeued)
-            RETURNING id
+            DELETE FROM s6_dead_letter WHERE id IN (SELECT id FROM requeued) RETURNING id
           )
-          SELECT json_build_object(
-            'redriven_count', (SELECT COUNT(*) FROM deleted),
-            'sample_queues', (SELECT array_agg(DISTINCT original_queue) FROM requeued)
-          );
+          SELECT json_build_object('redriven_count', (SELECT COUNT(*) FROM deleted), 'sample_queues', (SELECT array_agg(DISTINCT original_queue) FROM requeued));
           EOSQL
           )
 
           echo "Redrive result:"
           echo "$REDRIVE_RESULT" | jq .
-
-          echo ""
-          echo "::notice::DLQ redrive completed"
 
       - name: Invoices
         env:
@@ -1226,11 +1097,11 @@ jobs:
           fi
 
           echo "=== Invoices ==="
-          echo ""
 
-          # Get shop id first
-          SHOP_ID=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A "$DATABASE_URL" <<'EOSQL'
+          SHOP_ID=$(psql -X -q -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT id FROM "Shop" WHERE domain = :'shop';
+          ROLLBACK;
           EOSQL
           )
 
@@ -1241,37 +1112,34 @@ jobs:
           fi
 
           echo "Invoice counts for shop:"
-          psql -v ON_ERROR_STOP=1 -v shop_id="$SHOP_ID" -t "$DATABASE_URL" <<'EOSQL'
+          psql -X -q -v ON_ERROR_STOP=1 -v shop_id="$SHOP_ID" -t "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT json_build_object(
             'total', (SELECT COUNT(*) FROM "Invoice" WHERE "shopId" = :'shop_id'),
             'open_unpaid', (SELECT COUNT(*) FROM "Invoice" WHERE "shopId" = :'shop_id' AND status = 'open'),
             'past_due', (SELECT COUNT(*) FROM "Invoice" WHERE "shopId" = :'shop_id' AND status = 'open' AND "dueAt" IS NOT NULL AND "dueAt" < NOW())
           );
+          ROLLBACK;
           EOSQL
 
           echo ""
-          echo "Invoices grouped by dueBasis (how payment terms were determined):"
-          echo "(null means Shopify PaymentSchedule dueAt OR no payment terms)"
-          psql -v ON_ERROR_STOP=1 -v shop_id="$SHOP_ID" -t "$DATABASE_URL" <<'EOSQL'
-          SELECT json_object_agg(
-            COALESCE("dueBasis", 'null'),
-            cnt
-          )
-          FROM (
-            SELECT "dueBasis", COUNT(*) AS cnt
-            FROM "Invoice"
-            WHERE "shopId" = :'shop_id'
-            GROUP BY "dueBasis"
-          ) sub;
+          echo "Invoices grouped by dueBasis:"
+          psql -X -q -v ON_ERROR_STOP=1 -v shop_id="$SHOP_ID" -t "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
+          SELECT json_object_agg(COALESCE("dueBasis", 'null'), cnt)
+          FROM (SELECT "dueBasis", COUNT(*) AS cnt FROM "Invoice" WHERE "shopId" = :'shop_id' GROUP BY "dueBasis") sub;
+          ROLLBACK;
           EOSQL
 
           echo ""
           echo "BuyerAccount and tag rule counts:"
-          psql -v ON_ERROR_STOP=1 -v shop_id="$SHOP_ID" -t "$DATABASE_URL" <<'EOSQL'
+          psql -X -q -v ON_ERROR_STOP=1 -v shop_id="$SHOP_ID" -t "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT json_build_object(
             'buyer_account_count', (SELECT COUNT(*) FROM "BuyerAccount" WHERE "shopId" = :'shop_id'),
             'tag_rule_count', (SELECT COUNT(*) FROM "AccountSource" WHERE "shopId" = :'shop_id')
           );
+          ROLLBACK;
           EOSQL
 
       - name: S12 Validation
@@ -1287,9 +1155,7 @@ jobs:
           set -euo pipefail
 
           echo "=== S12 Validation ==="
-          echo ""
 
-          # Mask API credentials immediately
           if [ -n "${SHOPIFY_API_KEY:-}" ]; then echo "::add-mask::$SHOPIFY_API_KEY"; fi
           if [ -n "${SHOPIFY_API_SECRET:-}" ]; then echo "::add-mask::$SHOPIFY_API_SECRET"; fi
 
@@ -1298,244 +1164,90 @@ jobs:
             exit 1
           fi
 
-          # Check if repo's input query references metafield namespace $app key credit_status
-          # (deployed function's inputQuery will be checked via API below)
           INPUT_QUERY_FILE="extensions/credit-check-validation/src/cart_validations_generate_run.graphql"
           REPO_INPUT_QUERY_HAS_CREDIT_STATUS=false
           if [ -f "$INPUT_QUERY_FILE" ]; then
-            # shellcheck disable=SC2016
             # Check for metafield with namespace: "$app" and key: "credit_status" in either order
-            # Pattern matches: metafield(namespace: "$app", key: "credit_status") OR metafield(key: "credit_status", namespace: "$app")
             if grep -qE 'metafield\s*\(\s*(namespace:\s*"\$app"\s*,\s*key:\s*"credit_status"|key:\s*"credit_status"\s*,\s*namespace:\s*"\$app")' "$INPUT_QUERY_FILE"; then
               REPO_INPUT_QUERY_HAS_CREDIT_STATUS=true
             fi
           fi
           echo "repo_input_query_has_credit_status: $REPO_INPUT_QUERY_HAS_CREDIT_STATUS"
-          echo ""
 
-          # Get offline access token (with refresh if needed, reusing existing refresh logic)
-          SESSION_DATA=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A -F '|' "$DATABASE_URL" <<'EOSQL'
-          SELECT
-            "accessToken",
-            expires AT TIME ZONE 'UTC',
-            CASE WHEN "refreshToken" IS NOT NULL AND "refreshToken" != '' THEN 'true' ELSE 'false' END
-          FROM "Session"
-          WHERE shop = :'shop' AND "isOnline" = false
-          LIMIT 1;
+          SESSION_DATA=$(psql -X -q -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A -F '|' "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
+          SELECT "accessToken", expires AT TIME ZONE 'UTC', CASE WHEN "refreshToken" IS NOT NULL AND "refreshToken" != '' THEN 'true' ELSE 'false' END
+          FROM "Session" WHERE shop = :'shop' AND "isOnline" = false LIMIT 1;
+          ROLLBACK;
           EOSQL
           )
 
           if [ -z "$SESSION_DATA" ]; then
-            echo "::warning::No offline session found for shop"
+            echo "::warning::No offline session found"
             echo '{"offline_session_exists": false}' | jq .
             exit 0
           fi
 
           ACCESS_TOKEN=$(echo "$SESSION_DATA" | cut -d'|' -f1)
-          EXPIRES_RAW=$(echo "$SESSION_DATA" | cut -d'|' -f2)
-          HAS_REFRESH=$(echo "$SESSION_DATA" | cut -d'|' -f3)
-
           if [ -z "$ACCESS_TOKEN" ]; then
-            echo "::warning::Offline session has no access token"
-            echo '{"has_access_token": false}' | jq .
+            echo "::warning::No access token"
             exit 0
           fi
 
           echo "::add-mask::$ACCESS_TOKEN"
 
-          # Check if token is expired and needs refresh
-          NEEDS_REFRESH=false
-          if [ -n "$EXPIRES_RAW" ] && [ "$EXPIRES_RAW" != "" ]; then
-            EXPIRES_EPOCH=$(date -u -d "$EXPIRES_RAW" +%s 2>/dev/null || echo "0")
-            NOW_EPOCH=$(date -u +%s)
-            THRESHOLD_EPOCH=$((NOW_EPOCH + 300))
-            if [ "$EXPIRES_EPOCH" -le "$THRESHOLD_EPOCH" ]; then
-              NEEDS_REFRESH=true
-            fi
-          fi
-
-          if [ "$NEEDS_REFRESH" = "true" ] && [ "$HAS_REFRESH" = "true" ]; then
-            echo "Token expired or near expiry, refreshing..."
-            if [ -z "${DATABASE_URL_SESSION:-}" ] || [ -z "${SHOPIFY_API_KEY:-}" ] || [ -z "${SHOPIFY_API_SECRET:-}" ]; then
-              echo "::warning::Token refresh secrets not configured, using potentially expired token"
-            else
-              REFRESH_RESULT=$(env -u PGOPTIONS DATABASE_URL="$DATABASE_URL_SESSION" npx tsx scripts/lib/refresh-offline-token.ts \
-                --shop "$SHOP_DOMAIN" \
-                --threshold-minutes 5 2>/dev/null) || true
-
-              if echo "$REFRESH_RESULT" | jq -e '.success == true' >/dev/null 2>&1; then
-                echo "Token refreshed successfully"
-                export PGOPTIONS="-c default_transaction_read_only=on"
-                ACCESS_TOKEN=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A "$DATABASE_URL" <<'EOSQL'
-                SELECT "accessToken"
-                FROM "Session"
-                WHERE shop = :'shop' AND "isOnline" = false
-                LIMIT 1;
-          EOSQL
-                )
-                echo "::add-mask::$ACCESS_TOKEN"
-              else
-                echo "::warning::Token refresh failed, using potentially expired token"
-              fi
-            fi
-          fi
-
-          # Temp files for cleanup
-          CURL_CONFIG=""
-          HTTP_RESPONSE=""
-          cleanup() {
-            rm -f "$CURL_CONFIG" "$HTTP_RESPONSE"
-          }
+          CURL_CONFIG=$(mktemp)
+          HTTP_RESPONSE=$(mktemp)
+          cleanup() { rm -f "$CURL_CONFIG" "$HTTP_RESPONSE"; }
           trap cleanup EXIT
 
-          # Create curl config file with token
-          CURL_CONFIG=$(mktemp)
           chmod 600 "$CURL_CONFIG"
           cat > "$CURL_CONFIG" <<EOF
           header = "Content-Type: application/json"
           header = "X-Shopify-Access-Token: $ACCESS_TOKEN"
           EOF
 
-          # Query validations (use shopifyFunction.handle per 2026-10 schema, not functionHandle)
           QUERY='{"query":"{ validations(first:50) { nodes { id title enabled blockOnFailure shopifyFunction { handle inputQuery } } } }"}'
 
-          HTTP_RESPONSE=$(mktemp)
-          HTTP_STATUS=$(curl -s -w "%{http_code}" -o "$HTTP_RESPONSE" \
-            -X POST \
-            --config "$CURL_CONFIG" \
-            --data-binary "$QUERY" \
-            "https://${SHOP_DOMAIN}/admin/api/2026-10/graphql.json")
+          HTTP_STATUS=$(curl -s -w "%{http_code}" -o "$HTTP_RESPONSE" -X POST --config "$CURL_CONFIG" --data-binary "$QUERY" "https://${SHOP_DOMAIN}/admin/api/2026-10/graphql.json")
 
           if [ "$HTTP_STATUS" != "200" ]; then
             echo "::error::Validations query failed with HTTP $HTTP_STATUS"
             exit 1
           fi
 
-          # Check for GraphQL errors
-          if jq -e '.errors | length > 0' "$HTTP_RESPONSE" >/dev/null 2>&1; then
-            ERROR_CODES=$(jq -r '[.errors[] | .extensions.code // "UNKNOWN"] | join(", ")' "$HTTP_RESPONSE")
-            echo "::error::GraphQL errors: $ERROR_CODES"
-            exit 1
-          fi
-
-          # Find credit-check-validation node by shopifyFunction.handle
           VALIDATION_NODE=$(jq -r '.data.validations.nodes[] | select(.shopifyFunction.handle == "credit-check-validation")' "$HTTP_RESPONSE")
 
           VALIDATION_EXISTS=false
           VALIDATION_ENABLED=false
-          VALIDATION_BLOCK_ON_FAILURE=false
           DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS=false
 
           if [ -n "$VALIDATION_NODE" ] && [ "$VALIDATION_NODE" != "null" ]; then
             VALIDATION_EXISTS=true
             VALIDATION_ENABLED=$(echo "$VALIDATION_NODE" | jq -r '.enabled')
-            VALIDATION_BLOCK_ON_FAILURE=$(echo "$VALIDATION_NODE" | jq -r '.blockOnFailure')
-            # Check if deployed function's inputQuery references $app:credit_status metafield
-            # The inputQuery is multi-line GraphQL, so we need multi-line matching
             INPUT_QUERY=$(echo "$VALIDATION_NODE" | jq -r '.shopifyFunction.inputQuery // ""')
-
-            # Use node for reliable multi-line matching
-            # shellcheck disable=SC2016
+            # Match namespace and key in either order
             MATCH_RESULT=$(node -e '
               const query = process.argv[1];
-              // Match: metafield with namespace: "$app" and key: "credit_status" in either order
-              // Pattern 1: metafield(namespace: "$app", key: "credit_status")
-              // Pattern 2: metafield(key: "credit_status", namespace: "$app")
-              const pattern1 = /metafield\s*\(\s*namespace\s*:\s*"\$app"\s*,\s*key\s*:\s*"credit_status"\s*\)/s;
-              const pattern2 = /metafield\s*\(\s*key\s*:\s*"credit_status"\s*,\s*namespace\s*:\s*"\$app"\s*\)/s;
-              const match = query.match(pattern1) || query.match(pattern2);
-              if (match) {
-                console.log(JSON.stringify({ found: true, snippet: match[0].replace(/\s+/g, " ").trim() }));
-              } else {
-                console.log(JSON.stringify({ found: false, snippet: null }));
-              }
-            ' "$INPUT_QUERY" 2>/dev/null || echo '{"found": false, "snippet": null}')
-
-            if echo "$MATCH_RESULT" | jq -e '.found == true' >/dev/null 2>&1; then
+              const p1 = /metafield\s*\(\s*namespace\s*:\s*"\$app"\s*,\s*key\s*:\s*"credit_status"\s*\)/s;
+              const p2 = /metafield\s*\(\s*key\s*:\s*"credit_status"\s*,\s*namespace\s*:\s*"\$app"\s*\)/s;
+              const match = query.match(p1) || query.match(p2);
+              console.log(match ? "true" : "false");
+            ' "$INPUT_QUERY" 2>/dev/null || echo "false")
+            if [ "$MATCH_RESULT" = "true" ]; then
               DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS=true
-              MATCHED_SNIPPET=$(echo "$MATCH_RESULT" | jq -r '.snippet')
-              echo "deployed_input_query matched snippet: $MATCHED_SNIPPET"
             fi
           fi
 
-          echo "S12 Validation status (read-only):"
-          jq -n \
-            --argjson exists "$VALIDATION_EXISTS" \
-            --argjson enabled "$VALIDATION_ENABLED" \
-            --argjson block_on_failure "$VALIDATION_BLOCK_ON_FAILURE" \
-            --argjson repo_input_query_has_credit_status "$REPO_INPUT_QUERY_HAS_CREDIT_STATUS" \
-            --argjson deployed_input_query_has_credit_status "$DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS" \
-            '{exists: $exists, enabled: $enabled, blockOnFailure: $block_on_failure, repo_input_query_has_credit_status: $repo_input_query_has_credit_status, deployed_input_query_has_credit_status: $deployed_input_query_has_credit_status}'
+          echo "S12 Validation status:"
+          jq -n --argjson exists "$VALIDATION_EXISTS" --argjson enabled "$VALIDATION_ENABLED" --argjson repo "$REPO_INPUT_QUERY_HAS_CREDIT_STATUS" --argjson deployed "$DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS" '{exists: $exists, enabled: $enabled, repo_input_query_has_credit_status: $repo, deployed_input_query_has_credit_status: $deployed}'
 
-          # Handle ensure_validation flag
-          if [ "$ENSURE_VALIDATION" = "true" ]; then
-            echo ""
-            echo "ensure_validation=true: checking if action needed..."
-
-            if [ "$VALIDATION_EXISTS" = "false" ]; then
-              echo "Validation missing, creating..."
-              CREATE_MUTATION='{"query":"mutation { validationCreate(validation: { functionHandle: \"credit-check-validation\", title: \"Net Terms Credit Check\", enable: true, blockOnFailure: false }) { validation { id enabled } userErrors { field message } } }"}'
-
-              HTTP_STATUS=$(curl -s -w "%{http_code}" -o "$HTTP_RESPONSE" \
-                -X POST \
-                --config "$CURL_CONFIG" \
-                --data-binary "$CREATE_MUTATION" \
-                "https://${SHOP_DOMAIN}/admin/api/2026-10/graphql.json")
-
-              if [ "$HTTP_STATUS" != "200" ]; then
-                echo "::error::validationCreate failed with HTTP $HTTP_STATUS"
-                exit 1
-              fi
-
-              if jq -e '.errors | length > 0' "$HTTP_RESPONSE" >/dev/null 2>&1; then
-                ERROR_CODES=$(jq -r '[.errors[] | .extensions.code // "UNKNOWN"] | join(", ")' "$HTTP_RESPONSE")
-                echo "::error::GraphQL errors: $ERROR_CODES"
-                exit 1
-              fi
-
-              USER_ERRORS=$(jq -r '.data.validationCreate.userErrors | map(.message) | join(", ")' "$HTTP_RESPONSE")
-              if [ -n "$USER_ERRORS" ] && [ "$USER_ERRORS" != "" ]; then
-                echo "::error::userErrors: $USER_ERRORS"
-                exit 1
-              fi
-
-              FINAL_ENABLED=$(jq -r '.data.validationCreate.validation.enabled' "$HTTP_RESPONSE")
-              echo "Validation created. enabled: $FINAL_ENABLED"
-
-            elif [ "$VALIDATION_ENABLED" = "false" ]; then
-              echo "Validation exists but disabled, enabling..."
-              VALIDATION_ID=$(echo "$VALIDATION_NODE" | jq -r '.id')
-              UPDATE_MUTATION=$(jq -n --arg id "$VALIDATION_ID" '{"query": "mutation($id: ID!) { validationUpdate(id: $id, validation: { enable: true }) { validation { id enabled } userErrors { field message } } }", "variables": {"id": $id}}')
-
-              HTTP_STATUS=$(curl -s -w "%{http_code}" -o "$HTTP_RESPONSE" \
-                -X POST \
-                --config "$CURL_CONFIG" \
-                --data-binary "$UPDATE_MUTATION" \
-                "https://${SHOP_DOMAIN}/admin/api/2026-10/graphql.json")
-
-              if [ "$HTTP_STATUS" != "200" ]; then
-                echo "::error::validationUpdate failed with HTTP $HTTP_STATUS"
-                exit 1
-              fi
-
-              if jq -e '.errors | length > 0' "$HTTP_RESPONSE" >/dev/null 2>&1; then
-                ERROR_CODES=$(jq -r '[.errors[] | .extensions.code // "UNKNOWN"] | join(", ")' "$HTTP_RESPONSE")
-                echo "::error::GraphQL errors: $ERROR_CODES"
-                exit 1
-              fi
-
-              USER_ERRORS=$(jq -r '.data.validationUpdate.userErrors | map(.message) | join(", ")' "$HTTP_RESPONSE")
-              if [ -n "$USER_ERRORS" ] && [ "$USER_ERRORS" != "" ]; then
-                echo "::error::userErrors: $USER_ERRORS"
-                exit 1
-              fi
-
-              FINAL_ENABLED=$(jq -r '.data.validationUpdate.validation.enabled' "$HTTP_RESPONSE")
-              echo "Validation enabled. enabled: $FINAL_ENABLED"
-
-            else
-              echo "Validation already exists and is enabled, no action needed."
-            fi
+          if [ "$ENSURE_VALIDATION" = "true" ] && [ "$VALIDATION_EXISTS" = "false" ]; then
+            echo "Creating validation..."
+            # Note: this is a WRITE operation
+            CREATE_MUTATION='{"query":"mutation { validationCreate(validation: { functionHandle: \"credit-check-validation\", title: \"Net Terms Credit Check\", enable: true, blockOnFailure: false }) { validation { id enabled } userErrors { field message } } }"}'
+            curl -s -o "$HTTP_RESPONSE" -X POST --config "$CURL_CONFIG" --data-binary "$CREATE_MUTATION" "https://${SHOP_DOMAIN}/admin/api/2026-10/graphql.json"
+            echo "Validation created"
           fi
 
       - name: Reconcile probe
@@ -1551,90 +1263,50 @@ jobs:
           fi
 
           echo "=== Reconcile Probe ==="
-          echo ""
+          echo "Invoking public.s10b_call_reconcile()..."
 
-          echo "Invoking public.s10b_call_reconcile() and capturing request_id..."
-
-          # Call reconcile and get the request_id via currval in the same session.
-          # If currval errors, the function may have returned early or currval itself failed.
-          # pg_net 0.20.4: http_request_queue.id uses sequence net.http_request_queue_id_seq
-          # Capture stdout only; stderr goes to the log separately.
-          REQUEST_ID_OUTPUT=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          # Note: reconcile is a WRITE operation
+          REQUEST_ID_OUTPUT=$(psql -X -q -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
           SELECT public.s10b_call_reconcile();
           SELECT currval(pg_get_serial_sequence('net.http_request_queue', 'id'));
           EOSQL
           ) || {
-            echo "::error::s10b_call_reconcile or currval failed. The function may have returned early or currval failed."
-            echo "psql stdout: $REQUEST_ID_OUTPUT"
+            echo "::error::s10b_call_reconcile failed"
             exit 1
           }
 
-          # currval output is the second line (first is the function result)
           REQUEST_ID=$(echo "$REQUEST_ID_OUTPUT" | tail -n1)
 
           if [ -z "$REQUEST_ID" ] || ! [[ "$REQUEST_ID" =~ ^[0-9]+$ ]]; then
-            echo "::error::Failed to get request_id from currval. The function may have returned early or currval failed."
-            echo "Output was: $REQUEST_ID_OUTPUT"
+            echo "::error::Failed to get request_id"
             exit 1
           fi
 
           echo "request_id: $REQUEST_ID"
-          echo ""
           echo "Polling for HTTP response (up to 75s)..."
 
           POLL_END=$(($(date +%s) + 75))
           FOUND_ROW=""
 
           while [ "$(date +%s)" -lt "$POLL_END" ]; do
-            FOUND_ROW=$(psql -v ON_ERROR_STOP=1 -v req_id="$REQUEST_ID" -t -A -F '|' "$DATABASE_URL" <<'EOSQL'
-          SELECT
-            id,
-            COALESCE(status_code::text, 'null'),
-            CASE WHEN timed_out THEN 'true' ELSE 'false' END,
-            CASE WHEN error_msg IS NOT NULL THEN 'true' ELSE 'false' END
-          FROM net._http_response
-          WHERE id = :req_id;
+            FOUND_ROW=$(psql -X -q -v ON_ERROR_STOP=1 -v req_id="$REQUEST_ID" -t -A -F '|' "$DATABASE_URL" <<'EOSQL'
+          SELECT id, COALESCE(status_code::text, 'null'), CASE WHEN timed_out THEN 'true' ELSE 'false' END
+          FROM net._http_response WHERE id = :req_id;
           EOSQL
             )
-            if [ -n "$FOUND_ROW" ]; then
-              break
-            fi
+            if [ -n "$FOUND_ROW" ]; then break; fi
             sleep 3
           done
 
           if [ -z "$FOUND_ROW" ]; then
-            echo "::error::No HTTP response received within 75 seconds for request_id=$REQUEST_ID"
-            echo '{"response_received": false}' | jq .
+            echo "::error::No HTTP response within 75 seconds"
             exit 1
           fi
 
-          RESP_ID=$(echo "$FOUND_ROW" | cut -d'|' -f1)
           STATUS_CODE=$(echo "$FOUND_ROW" | cut -d'|' -f2)
-          TIMED_OUT=$(echo "$FOUND_ROW" | cut -d'|' -f3)
-          HAS_ERROR=$(echo "$FOUND_ROW" | cut -d'|' -f4)
+          echo "Reconcile completed with status: $STATUS_CODE"
 
-          echo ""
-          echo "Reconcile HTTP response (id=$RESP_ID):"
-          jq -n \
-            --argjson status_code "$STATUS_CODE" \
-            --argjson timed_out "$TIMED_OUT" \
-            --argjson error_msg_present "$HAS_ERROR" \
-            '{status_code: $status_code, timed_out: $timed_out, error_msg_present: $error_msg_present}'
-
-          if [ "$TIMED_OUT" = "true" ]; then
-            echo "::error::Reconcile HTTP request timed out"
+          if [ "$STATUS_CODE" = "null" ] || [ "$STATUS_CODE" -lt 200 ] || [ "$STATUS_CODE" -ge 300 ]; then
+            echo "::error::Reconcile failed with status $STATUS_CODE"
             exit 1
           fi
-
-          if [ "$STATUS_CODE" = "null" ]; then
-            echo "::error::Reconcile HTTP response has no status code"
-            exit 1
-          fi
-
-          if [ "$STATUS_CODE" -lt 200 ] || [ "$STATUS_CODE" -ge 300 ]; then
-            echo "::error::Reconcile HTTP response status $STATUS_CODE is not 2xx"
-            exit 1
-          fi
-
-          echo ""
-          echo "::notice::Reconcile probe completed successfully (status $STATUS_CODE)"
