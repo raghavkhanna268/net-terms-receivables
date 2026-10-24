@@ -482,7 +482,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
 
     it("(f.3) rejects invalid bank type", async () => {
       const payload = {
-        bank: "SBI",
+        bank: "KOTAK",
         fileName: "invalid.csv",
         credits: [
           {
