@@ -48,6 +48,7 @@ import {
 } from "~/lib/invoice-eligibility";
 import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
 import { adminGraphQL, BULK_OPERATION_STATUS_QUERY } from "../drain/admin-client.server";
+import { incrementOrderOutstandingMissing } from "../drain/reconcile-handlers.server";
 import {
   getBulkOperationMetadata,
   updateBulkOperationChunkSize,
@@ -432,43 +433,59 @@ async function processOrderLines(
     return 0;
   }
 
-  // Batch lookup: find existing invoices for these orders
+  // Batch lookup: find existing invoices for these orders (including outstanding/status for P2 fix)
   const orderIds = orders.map((o) => o.id);
-  const existingInvoices = await sql<{ orderId: string; buyerAccountId: string }[]>`
-    SELECT "orderId", "buyerAccountId" FROM "Invoice"
+  const existingInvoices = await sql<{
+    orderId: string;
+    buyerAccountId: string;
+    outstanding: string;
+    status: "open" | "paid" | "cancelled";
+  }[]>`
+    SELECT "orderId", "buyerAccountId", outstanding::text, status::"InvoiceStatus"
+    FROM "Invoice"
     WHERE "shopId" = ${shopId} AND "orderId" = ANY(${orderIds})
   `;
-  const existingByOrderId = new Map(existingInvoices.map((i) => [i.orderId, i.buyerAccountId]));
+  const existingByOrderId = new Map(
+    existingInvoices.map((i) => [i.orderId, { buyerAccountId: i.buyerAccountId, outstanding: i.outstanding, status: i.status }])
+  );
 
   const invoices: InvoiceData[] = [];
   let skippedCount = 0;
+  let outstandingMissingCount = 0;
 
   for (const order of orders) {
     const shopifyOrder = bulkOrderToShopifyOrder(order);
-    const existingBuyerAccountId = existingByOrderId.get(shopifyOrder.id);
+    const existingInvoice = existingByOrderId.get(shopifyOrder.id);
 
     // Check eligibility
     const eligibility = await checkOrderEligibility(sql, shopifyOrder, eligibilityContext);
 
-    if (existingBuyerAccountId) {
+    if (existingInvoice) {
       // Invoice exists - ALWAYS update it (eligibility only gates creation)
-      // Note: For bulk reconcile, we don't track outstandingMissing counter per-order
-      const { invoiceData } = mapOrderToInvoiceWithEligibility(
+      // Pass existing outstanding/status for fallback when totalOutstandingSet is missing
+      const { invoiceData, outstandingMissing } = mapOrderToInvoiceWithEligibility(
         shopId,
-        eligibility.buyerAccountId ?? existingBuyerAccountId,
+        eligibility.buyerAccountId ?? existingInvoice.buyerAccountId,
         shopifyOrder,
-        eligibility
+        eligibility,
+        { outstanding: existingInvoice.outstanding, status: existingInvoice.status }
       );
       invoices.push(invoiceData);
+      if (outstandingMissing) {
+        outstandingMissingCount++;
+      }
     } else if (eligibility.eligible) {
       // No existing Invoice and eligible - create it
-      const { invoiceData } = mapOrderToInvoiceWithEligibility(
+      const { invoiceData, outstandingMissing } = mapOrderToInvoiceWithEligibility(
         shopId,
         eligibility.buyerAccountId!,
         shopifyOrder,
         eligibility
       );
       invoices.push(invoiceData);
+      if (outstandingMissing) {
+        outstandingMissingCount++;
+      }
     } else {
       skippedCount++;
     }
@@ -478,7 +495,28 @@ async function processOrderLines(
     console.log(`[bulk-jsonl] ${skippedCount} orders skipped (not eligible, no existing invoice)`);
   }
 
-  return await bulkUpsertInvoices(sql, invoices);
+  const upsertedCount = await bulkUpsertInvoices(sql, invoices);
+
+  // Best-effort increment of diagnostic counter (batch: once per processOrderLines call)
+  if (outstandingMissingCount > 0) {
+    try {
+      // Get shop domain from eligibility context for the counter
+      const [shopRow] = await sql<{ domain: string }[]>`
+        SELECT domain FROM "Shop" WHERE id = ${shopId}
+      `;
+      if (shopRow) {
+        for (let i = 0; i < outstandingMissingCount; i++) {
+          await incrementOrderOutstandingMissing(sql, shopRow.domain);
+        }
+      }
+    } catch (err) {
+      console.warn(
+        `[bulk-jsonl] Failed to increment order_outstanding_missing counter: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
+  return upsertedCount;
 }
 
 /**

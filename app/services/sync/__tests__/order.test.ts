@@ -852,16 +852,7 @@ describeWithDb("Order Sync", () => {
     });
 
     it("increments order_outstanding_missing counter when field is missing", async () => {
-      // Create the counter table if it doesn't exist
-      await sql`
-        CREATE TABLE IF NOT EXISTS order_outstanding_missing (
-          shop TEXT NOT NULL,
-          day DATE NOT NULL,
-          count INT NOT NULL DEFAULT 1,
-          PRIMARY KEY (shop, day)
-        )
-      `;
-
+      // Table created by migration 20261026010000_order_outstanding_missing
       // Clean up any existing counter for this shop
       await sql`DELETE FROM order_outstanding_missing WHERE shop = ${TEST_SHOP_DOMAIN}`;
 
@@ -1495,6 +1486,72 @@ describeWithDb("Order Sync", () => {
 
       // cancelledAt takes precedence over everything
       expect(outstandingMissing).toBe(false);
+      expect(invoiceData.status).toBe("cancelled");
+      expect(invoiceData.outstanding).toBe("0.00");
+    });
+
+    it("bulk reconcile: preserves existing status=paid when totalOutstandingSet is missing", () => {
+      // P2 fix: bulk-jsonl-processor passes existing invoice data to mapOrderToInvoiceWithEligibility
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/bulk-paid-missing-1",
+        name: "#BULK_PAID_MISSING",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PARTIALLY_PAID",
+        totalPriceSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        // totalOutstandingSet intentionally missing (simulates rare API response)
+        paymentTerms: {
+          id: "pt",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      // Simulate existing paid invoice being updated via bulk reconcile
+      const { invoiceData, outstandingMissing } = mapOrderToInvoiceWithEligibility(
+        "shop-1",
+        "account-1",
+        order,
+        mockEligibility,
+        { outstanding: "0.00", status: "paid" }
+      );
+
+      // Should preserve existing status=paid (not revert to open)
+      expect(outstandingMissing).toBe(true);
+      expect(invoiceData.status).toBe("paid");
+      expect(invoiceData.outstanding).toBe("0.00");
+    });
+
+    it("bulk reconcile: preserves existing status=cancelled when totalOutstandingSet is missing", () => {
+      // P2 fix: bulk-jsonl-processor passes existing invoice data to mapOrderToInvoiceWithEligibility
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/bulk-cancelled-missing-1",
+        name: "#BULK_CANCELLED_MISSING",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PARTIALLY_PAID",
+        totalPriceSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        // totalOutstandingSet intentionally missing
+        paymentTerms: {
+          id: "pt",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      // Simulate existing cancelled invoice being updated via bulk reconcile
+      const { invoiceData, outstandingMissing } = mapOrderToInvoiceWithEligibility(
+        "shop-1",
+        "account-1",
+        order,
+        mockEligibility,
+        { outstanding: "0.00", status: "cancelled" }
+      );
+
+      // Should preserve existing status=cancelled (not revert to open)
+      expect(outstandingMissing).toBe(true);
       expect(invoiceData.status).toBe("cancelled");
       expect(invoiceData.outstanding).toBe("0.00");
     });
