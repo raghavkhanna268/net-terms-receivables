@@ -174,4 +174,73 @@ describe("webhooks.app.subscriptions_update", () => {
     const response = await action(createActionArgs(request));
     expect(response.status).toBe(500);
   });
+
+  describe("E9 HMAC-first verification (security)", () => {
+    function createRequestWithMissingHeaders(
+      body: object,
+      options: {
+        omitHmac?: boolean;
+        omitTopic?: boolean;
+        omitShop?: boolean;
+        wrongHmac?: boolean;
+      } = {}
+    ): Request {
+      const bodyStr = JSON.stringify(body);
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "X-Shopify-Webhook-Id": TEST_WEBHOOK_ID,
+        "X-Shopify-API-Version": "2026-10",
+      };
+
+      if (!options.omitHmac) {
+        headers["X-Shopify-Hmac-Sha256"] = options.wrongHmac
+          ? "invalid-hmac-signature"
+          : computeHmac(API_SECRET, bodyStr);
+      }
+      if (!options.omitTopic) {
+        headers["X-Shopify-Topic"] = "app_subscriptions/update";
+      }
+      if (!options.omitShop) {
+        headers["X-Shopify-Shop-Domain"] = TEST_SHOP;
+      }
+
+      return new Request("https://example.com/webhooks/app/subscriptions_update", {
+        method: "POST",
+        headers,
+        body: bodyStr,
+      });
+    }
+
+    it("returns 401 when HMAC missing, even if topic missing", async () => {
+      const { action } = await import("../webhooks.app.subscriptions_update");
+      const request = createRequestWithMissingHeaders(
+        { app_subscription: { id: "gid://shopify/AppSubscription/123" } },
+        { omitHmac: true, omitTopic: true }
+      );
+
+      try {
+        await action(createActionArgs(request));
+        expect.fail("Expected action to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(401);
+      }
+    });
+
+    it("returns 401 when HMAC wrong, even if shop missing", async () => {
+      const { action } = await import("../webhooks.app.subscriptions_update");
+      const request = createRequestWithMissingHeaders(
+        { app_subscription: { id: "gid://shopify/AppSubscription/123" } },
+        { wrongHmac: true, omitShop: true }
+      );
+
+      try {
+        await action(createActionArgs(request));
+        expect.fail("Expected action to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(401);
+      }
+    });
+  });
 });
