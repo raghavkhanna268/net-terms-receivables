@@ -13,6 +13,9 @@ on:
       - 'prisma/**'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   migrate:
     name: Run Prisma Migrations
@@ -25,6 +28,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v5
@@ -47,4 +52,6 @@ jobs:
             echo "3. Add it as DATABASE_URL_MIGRATIONS in GitHub Secrets"
             exit 0
           fi
-          npx prisma migrate deploy
+          # Public-repo safe: redact the datasource host Prisma prints.
+          set -o pipefail
+          npx prisma migrate deploy 2>&1 | sed -E 's/ at "[^"]*"/ at "<redacted>"/g'
