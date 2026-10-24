@@ -122,7 +122,7 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
         ${invoiceId}, ${TEST_SHOP_ID}, ${accountId}, ${orderId},
         ${invoiceName}, 10000.00, 10000.00, 'open',
         NOW() - INTERVAL '5 days',
-        (NOW() AT TIME ZONE ${testTimezone})::DATE,
+        ((NOW() AT TIME ZONE ${testTimezone})::DATE)::timestamp AT TIME ZONE ${testTimezone},
         NOW(), NOW()
       )
     `;
@@ -263,7 +263,7 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
           ${paidInvoiceId}, ${TEST_SHOP_ID}, ${TEST_ACTIVE_ACCOUNT_ID}, ${orderId},
           '#PAID-1', 10000.00, 0.00, 'paid',
           NOW() - INTERVAL '10 days',
-          (NOW() AT TIME ZONE ${testTimezone})::DATE,
+          ((NOW() AT TIME ZONE ${testTimezone})::DATE)::timestamp AT TIME ZONE ${testTimezone},
           NOW(), NOW()
         )
       `;
