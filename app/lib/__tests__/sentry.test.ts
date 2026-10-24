@@ -13,7 +13,7 @@ describe("sentry.ts", () => {
   });
 
   describe("wrapWithSentry config", () => {
-    it("includes beforeSend hook", async () => {
+    it("includes beforeSend hook for PII protection (A1)", async () => {
       const { withSentry } = await import("@sentry/cloudflare");
       const { wrapWithSentry } = await import("../sentry");
 
@@ -65,10 +65,11 @@ describe("sentry.ts", () => {
     }
     interface TestEvent {
       request?: TestRequest;
-      exception?: { values?: Array<{ value?: string }> };
+      exception?: { values?: Array<{ value?: string; type?: string }> };
       message?: string;
       breadcrumbs?: Array<{ message?: string; data?: Record<string, unknown> }>;
       extra?: Record<string, unknown>;
+      tags?: Record<string, string>;
       contexts?: Record<string, Record<string, unknown>>;
     }
     let beforeSend: (event: TestEvent, hint: unknown) => TestEvent | null;
@@ -86,167 +87,201 @@ describe("sentry.ts", () => {
       beforeSend = config.beforeSend as typeof beforeSend;
     });
 
-    it("deletes request.headers", () => {
-      const event = {
-        request: {
-          headers: { Authorization: "Bearer shpat_secret" },
-          url: "https://example.com/app",
-        },
-      };
-
-      const result = beforeSend(event, {});
-
-      expect(result?.request?.headers).toBeUndefined();
-    });
-
-    it("deletes request.cookies", () => {
-      const event = {
-        request: {
-          cookies: { session: "secret-session-id" },
-          url: "https://example.com/app",
-        },
-      };
-
-      const result = beforeSend(event, {});
-
-      expect(result?.request?.cookies).toBeUndefined();
-    });
-
-    it("deletes request.query_string", () => {
-      const event = {
-        request: {
-          query_string: "shop=test.myshopify.com&id_token=secret",
-          url: "https://example.com/app",
-        },
-      };
-
-      const result = beforeSend(event, {});
-
-      expect(result?.request?.query_string).toBeUndefined();
-    });
-
-    it("strips query string from request.url", () => {
-      const event = {
-        request: {
-          url: "https://example.com/app?shop=test.myshopify.com&id_token=secret",
-        },
-      };
-
-      const result = beforeSend(event, {});
-
-      expect(result?.request?.url).toBe("https://example.com/app");
-    });
-
-    it("deletes id_token from request.data", () => {
-      const event = {
-        request: {
-          url: "https://example.com/app",
-          data: {
-            id_token: "eyJhbGciOiJIUzI1NiJ9.test.signature",
-            other: "value",
+    describe("request scrubbing", () => {
+      it("deletes request.headers", () => {
+        const event = {
+          request: {
+            headers: { Authorization: "Bearer shpat_secret" },
+            url: "https://example.com/app",
           },
-        },
-      };
+        };
 
-      const result = beforeSend(event, {});
+        const result = beforeSend(event, {});
 
-      expect(result?.request?.data?.id_token).toBeUndefined();
-      expect(result?.request?.data?.other).toBe("value");
+        expect(result?.request?.headers).toBeUndefined();
+      });
+
+      it("deletes request.cookies", () => {
+        const event = {
+          request: {
+            cookies: { session: "secret-session-id" },
+            url: "https://example.com/app",
+          },
+        };
+
+        const result = beforeSend(event, {});
+
+        expect(result?.request?.cookies).toBeUndefined();
+      });
+
+      it("deletes request.query_string", () => {
+        const event = {
+          request: {
+            query_string: "shop=test.myshopify.com&id_token=secret",
+            url: "https://example.com/app",
+          },
+        };
+
+        const result = beforeSend(event, {});
+
+        expect(result?.request?.query_string).toBeUndefined();
+      });
+
+      it("strips query string from request.url", () => {
+        const event = {
+          request: {
+            url: "https://example.com/app?shop=test.myshopify.com&id_token=secret",
+          },
+        };
+
+        const result = beforeSend(event, {});
+
+        expect(result?.request?.url).toBe("https://example.com/app");
+      });
+
+      it("deletes request.data entirely", () => {
+        const event = {
+          request: {
+            url: "https://example.com/app",
+            data: {
+              id_token: "eyJhbGciOiJIUzI1NiJ9.test.signature",
+              shop: "test.myshopify.com",
+              other: "value",
+            },
+          },
+        };
+
+        const result = beforeSend(event, {});
+
+        expect(result?.request?.data).toBeUndefined();
+      });
     });
 
-    it("deletes shop from request.data", () => {
-      const event = {
-        request: {
-          url: "https://example.com/app",
-          data: { shop: "test.myshopify.com" },
-        },
-      };
+    describe("exception scrubbing (P1b)", () => {
+      it("replaces exception value with error code", () => {
+        const event = {
+          exception: {
+            values: [
+              { value: "Error for shop test.myshopify.com: failed", type: "Error" },
+            ],
+          },
+        };
 
-      const result = beforeSend(event, {});
+        const result = beforeSend(event, {});
 
-      expect(result?.request?.data?.shop).toBeUndefined();
+        // Value should be replaced with error code, not contain original message
+        expect(result?.exception?.values?.[0]?.value).not.toContain("myshopify.com");
+        expect(result?.exception?.values?.[0]?.value).not.toContain("failed");
+        // Type should be preserved
+        expect(result?.exception?.values?.[0]?.type).toBe("Error");
+      });
+
+      it("converts detailed error message to code", () => {
+        const event = {
+          exception: {
+            values: [
+              { value: "Connection to database failed with ECONNREFUSED", type: "Error" },
+            ],
+          },
+        };
+
+        const result = beforeSend(event, {});
+
+        // Should return an error code
+        expect(result?.exception?.values?.[0]?.value).toBe("connection_refused");
+      });
     });
 
-    it("redacts myshopify.com from exception values", () => {
-      const event = {
-        exception: {
-          values: [
-            { value: "Error for shop test.myshopify.com: failed" },
+    describe("message scrubbing", () => {
+      it("redacts myshopify.com from message", () => {
+        const event = {
+          message: "Failed for shop test.myshopify.com",
+        };
+
+        const result = beforeSend(event, {});
+
+        expect(result?.message).not.toContain("myshopify.com");
+        expect(result?.message).toContain("<redacted>");
+      });
+    });
+
+    describe("breadcrumbs scrubbing", () => {
+      it("removes breadcrumbs entirely", () => {
+        const event = {
+          breadcrumbs: [
+            { message: "Processing shop test.myshopify.com" },
+            { message: "User action", data: { id_token: "secret" } },
           ],
-        },
-      };
+        };
 
-      const result = beforeSend(event, {});
+        const result = beforeSend(event, {});
 
-      expect(result?.exception?.values?.[0]?.value).not.toContain("myshopify.com");
-      expect(result?.exception?.values?.[0]?.value).toContain("<redacted>");
+        expect(result?.breadcrumbs).toBeUndefined();
+      });
     });
 
-    it("redacts myshopify.com from message", () => {
-      const event = {
-        message: "Failed for shop test.myshopify.com",
-      };
-
-      const result = beforeSend(event, {});
-
-      expect(result?.message).not.toContain("myshopify.com");
-      expect(result?.message).toContain("<redacted>");
-    });
-
-    it("redacts myshopify.com from breadcrumb messages", () => {
-      const event = {
-        breadcrumbs: [
-          { message: "Processing shop test.myshopify.com" },
-        ],
-      };
-
-      const result = beforeSend(event, {});
-
-      expect(result?.breadcrumbs?.[0]?.message).not.toContain("myshopify.com");
-      expect(result?.breadcrumbs?.[0]?.message).toContain("<redacted>");
-    });
-
-    it("deletes id_token from breadcrumb data", () => {
-      const event = {
-        breadcrumbs: [
-          {
-            message: "Request",
-            data: { id_token: "secret", other: "value" },
+    describe("extra scrubbing (allowlist)", () => {
+      it("keeps only allowlisted keys in extra", () => {
+        const event = {
+          extra: {
+            id_token: "secret",
+            requestId: "req-123",
+            shopId: "shop-456",
+            code: "network_error",
+            sensitiveData: "should be removed",
           },
-        ],
-      };
+        };
 
-      const result = beforeSend(event, {});
+        const result = beforeSend(event, {});
 
-      expect(result?.breadcrumbs?.[0]?.data?.id_token).toBeUndefined();
-      expect(result?.breadcrumbs?.[0]?.data?.other).toBe("value");
+        expect(result?.extra?.id_token).toBeUndefined();
+        expect(result?.extra?.sensitiveData).toBeUndefined();
+        expect(result?.extra?.requestId).toBe("req-123");
+        expect(result?.extra?.shopId).toBe("shop-456");
+        expect(result?.extra?.code).toBe("network_error");
+      });
     });
 
-    it("deletes id_token from extra", () => {
-      const event = {
-        extra: {
-          id_token: "secret",
-          requestId: "req-123",
-        },
-      };
+    describe("tags scrubbing (allowlist)", () => {
+      it("keeps only allowlisted keys in tags", () => {
+        const event = {
+          tags: {
+            shopId: "shop-123",
+            code: "error_code",
+            shop: "test.myshopify.com",
+            email: "user@example.com",
+          },
+        };
 
-      const result = beforeSend(event, {});
+        const result = beforeSend(event, {});
 
-      expect(result?.extra?.id_token).toBeUndefined();
-      expect(result?.extra?.requestId).toBe("req-123");
+        expect(result?.tags?.shopId).toBe("shop-123");
+        expect(result?.tags?.code).toBe("error_code");
+        expect(result?.tags?.shop).toBeUndefined();
+        expect(result?.tags?.email).toBeUndefined();
+      });
     });
 
-    it("deletes shop from contexts", () => {
-      const event = {
-        contexts: {
-          request: { shop: "test.myshopify.com", method: "POST" },
-        },
-      };
+    describe("contexts scrubbing (allowlist)", () => {
+      it("keeps only allowlisted keys in contexts", () => {
+        const event = {
+          contexts: {
+            request: {
+              shop: "test.myshopify.com",
+              shopId: "shop-123",
+              method: "POST",
+              requestId: "req-456",
+            },
+          },
+        };
 
-      const result = beforeSend(event, {});
+        const result = beforeSend(event, {});
 
-      expect(result?.contexts?.request?.shop).toBeUndefined();
-      expect(result?.contexts?.request?.method).toBe("POST");
+        expect(result?.contexts?.request?.shop).toBeUndefined();
+        expect(result?.contexts?.request?.method).toBeUndefined();
+        expect(result?.contexts?.request?.shopId).toBe("shop-123");
+        expect(result?.contexts?.request?.requestId).toBe("req-456");
+      });
     });
   });
 

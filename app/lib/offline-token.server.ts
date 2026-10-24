@@ -25,6 +25,7 @@
  */
 
 import type { Sql } from "./db-light.server";
+import { safeLog, shopHash } from "./log.server";
 
 /**
  * 5 minutes in milliseconds - matches the library's WITHIN_MILLISECONDS_OF_EXPIRY.
@@ -253,6 +254,10 @@ export async function refreshOfflineTokenIfNeeded(
     if (!usedRefreshToken) {
       // Mark session as needing re-auth with guarded update
       await markSessionNeedsReauthGuarded(tx, sessionId, null);
+      safeLog("error", "offline_token_no_refresh_token", {
+        shopHash: await shopHash(shop),
+        code: "no_refresh_token",
+      });
       return {
         success: false,
         errorCode: "no_refresh_token",
@@ -267,6 +272,10 @@ export async function refreshOfflineTokenIfNeeded(
     ) {
       // Mark session as needing re-auth with guarded update
       await markSessionNeedsReauthGuarded(tx, sessionId, usedRefreshToken);
+      safeLog("error", "offline_token_refresh_token_expired", {
+        shopHash: await shopHash(shop),
+        code: "invalid_grant",
+      });
       return {
         success: false,
         errorCode: "invalid_grant",
@@ -309,6 +318,10 @@ export async function refreshOfflineTokenIfNeeded(
         // No concurrent winner - mark session as needing re-auth
         // Use guarded update to only mark if our refresh token is still current
         await markSessionNeedsReauthGuarded(tx, sessionId, usedRefreshToken);
+        safeLog("error", "offline_token_invalid_grant", {
+          shopHash: await shopHash(shop),
+          code: "invalid_grant",
+        });
       }
 
       return {

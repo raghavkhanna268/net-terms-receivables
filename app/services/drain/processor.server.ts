@@ -55,7 +55,7 @@ import {
   incrementOrderRefetchNull,
   enqueueReconcileOrders,
 } from "./reconcile-handlers.server";
-import { toErrorCode, safeLog, shopHashSync } from "~/lib/log.server";
+import { toErrorCode, safeLog, shopHash } from "~/lib/log.server";
 
 /**
  * Configuration for drain processing.
@@ -404,7 +404,7 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
   // NEVER assume deleted - this would break Net 60/90 invoices
   if (!result.data?.node) {
     safeLog("warn", "order_refetch_null", {
-      shopHash: shopHashSync(message.shop),
+      shopHash: await shopHash(message.shop),
       orderGid: message.resourceGid,
       topic: message.topic,
     });
@@ -590,7 +590,7 @@ async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResul
   // Log warning if fallback was used
   if (result.usedFallback) {
     safeLog("warn", "customer_pii_access_denied_fallback", {
-      shopHash: shopHashSync(message.shop),
+      shopHash: await shopHash(message.shop),
       customerId: message.resourceGid,
       topic: message.topic,
       fields: "email,displayName",

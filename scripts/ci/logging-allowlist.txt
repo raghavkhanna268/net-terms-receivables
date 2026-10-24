@@ -1,56 +1,15 @@
-# Logging Allowlist - Burn-Down List
-# ==================================
-# Existing call sites that need to be migrated to safeLog.
-# Each entry is file:line_number
-# When you fix a call site, remove it from this list.
-#
-# DO NOT ADD NEW ENTRIES - fix the code instead!
-#
-# Tracking issue: #174
-# As of: 2026-10-24
+# Logging allowlist - format: file:rule:count
+# These are existing violations pending cleanup.
+# Adding a new violation will fail CI even if existing ones are allowlisted.
+# DO NOT add new entries without fixing the underlying code.
 
-# W1-W15: Webhook routes (in scope for PR #168)
-app/routes/webhooks.app.scopes_update.tsx:29
-app/routes/webhooks.app.scopes_update.tsx:50
-app/routes/webhooks.company_locations.tsx:77
-app/routes/webhooks.company_locations.tsx:82
-app/routes/webhooks.customers.tsx:82
-app/routes/webhooks.customers.tsx:87
-app/routes/webhooks.draft_orders.tsx:85
-app/routes/webhooks.draft_orders.tsx:90
-app/routes/webhooks.orders.tsx:87
-app/routes/webhooks.orders.tsx:92
-app/routes/webhooks.orders.tsx:96
-app/routes/webhooks.bulk_operations.finish.tsx:89
-app/routes/webhooks.companies.tsx:74
-app/routes/webhooks.companies.tsx:79
-
-# Sync services - Medium findings (other developers will migrate)
-app/services/sync/draft-order.server.ts:64
-app/services/sync/company-location.server.ts:58
-app/services/sync/customer.server.ts:93
-app/services/sync/customer.server.ts:630
-app/services/sync/bulk-jsonl-processor.server.ts:846
-app/services/sync/bulk-jsonl-processor.server.ts:972
-app/services/sync/order.server.ts:88
-
-# J9: Reconcile handlers
-app/services/drain/reconcile-handlers.server.ts:137
-
-# P1-P5: Plan service (other developers will migrate)
-app/services/plan.server.ts:340
-app/services/plan.server.ts:343
-app/services/plan.server.ts:389
-app/services/plan.server.ts:428
-app/services/plan.server.ts:464
-app/services/plan.server.ts:492
-
-# S2: Order sync captureException (other developers will migrate)
-app/services/sync/order.server.ts:147
-app/services/sync/order.server.ts:204
-app/services/sync/order.server.ts:583
-app/services/sync/order.server.ts:623
-
-# P4, P5: Plan service captureException (other developers will migrate)
-app/services/plan.server.ts:344
-app/services/plan.server.ts:460
+# Burn-down list from initial audit
+app/services/sync/draft-order.server.ts:shop-interpolation:1
+app/services/sync/order.server.ts:shop-interpolation:1
+app/services/plan.server.ts:raw-capture:2
+app/services/plan.server.ts:shop-interpolation:6
+app/services/sync/customer.server.ts:shop-interpolation:2
+app/services/sync/bulk-jsonl-processor.server.ts:shop-interpolation:2
+app/services/drain/reconcile-handlers.server.ts:shop-interpolation:1
+app/services/sync/order.server.ts:raw-capture:4
+app/services/sync/company-location.server.ts:shop-interpolation:1

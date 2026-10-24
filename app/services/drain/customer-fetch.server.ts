@@ -30,20 +30,19 @@ export interface CustomerFetchResult {
 /**
  * Check if a GraphQL response contains ACCESS_DENIED error.
  *
- * Detection priority:
- * 1. Check for "ACCESS_DENIED" in error message (from extensions.code in shopify-client)
- * 2. Fall back to case-insensitive "access denied" match
- *
- * Note: shopify-client.server.ts checks extensions.code === "ACCESS_DENIED" and
- * formats the error as "Access denied: <message>". We check for both patterns
- * to handle any formatting variations.
+ * Uses errorCode from shopify-client which is set from GraphQL extensions.code.
+ * Falls back to error message matching for backwards compatibility.
  */
 function hasAccessDeniedError(result: AdminClientResult<unknown>): boolean {
   if (result.success) return false;
   
+  // Primary check: use errorCode (safe, from extensions.code)
+  if (result.errorCode === "access_denied") {
+    return true;
+  }
+  
+  // Fallback: check error message for legacy compatibility
   const error = result.error ?? "";
-  // Check for ACCESS_DENIED code (from shopify-client formatting)
-  // or case-insensitive "access denied" in message
   return (
     error.includes("ACCESS_DENIED") ||
     error.toLowerCase().includes("access denied")

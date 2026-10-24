@@ -30,6 +30,8 @@ export interface AdminClientResult<T = unknown> {
   success: boolean;
   data?: T;
   error?: string;
+  /** Error code for safe logging (no PII) */
+  errorCode?: string;
   retryable: boolean;
 }
 
@@ -55,6 +57,7 @@ export async function adminGraphQL<T = unknown>(
     success: result.success,
     data: result.data,
     error: result.error,
+    errorCode: result.errorCode,
     retryable: result.retryable,
   };
 }

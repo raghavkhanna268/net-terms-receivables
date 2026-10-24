@@ -8,7 +8,8 @@
 # 4. Amount fields in log calls
 # 5. Sensitive keys (narration, payerText, etc.) in log arguments
 #
-# Uses a burn-down allowlist for existing violations.
+# Uses a burn-down allowlist keyed by file:rule:count (stable across line shifts).
+# Adding a NEW violation will fail CI even if existing ones are allowlisted.
 
 set -euo pipefail
 
@@ -21,35 +22,38 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# Track violations
-VIOLATIONS=0
-VIOLATION_DETAILS=""
+# Associative array to count violations per file:rule
+declare -A VIOLATION_COUNTS
+declare -A VIOLATION_DETAILS
 
 add_violation() {
   local file="$1"
   local line="$2"
   local rule="$3"
   local content="$4"
-  VIOLATIONS=$((VIOLATIONS + 1))
-  VIOLATION_DETAILS="${VIOLATION_DETAILS}  ${file}:${line} [${rule}] ${content}\n"
+  local rel_file="${file#$REPO_ROOT/}"
+  local key="${rel_file}:${rule}"
+  
+  # Increment count for this file:rule combo
+  VIOLATION_COUNTS["$key"]=$(( ${VIOLATION_COUNTS["$key"]:-0} + 1 ))
+  
+  # Store details for reporting
+  VIOLATION_DETAILS["$key"]="${VIOLATION_DETAILS["$key"]:-}  ${rel_file}:${line} ${content}\n"
 }
 
-# Check if a file:line is in the allowlist
-is_allowlisted() {
-  local file="$1"
-  local line="$2"
-  
-  if [[ ! -f "$ALLOWLIST_FILE" ]]; then
-    return 1
-  fi
-  
-  # Match exact file:line or file:* (whole file)
-  local rel_file="${file#$REPO_ROOT/}"
-  if grep -qE "^${rel_file}:${line}$|^${rel_file}:\*$" "$ALLOWLIST_FILE" 2>/dev/null; then
-    return 0
-  fi
-  return 1
-}
+# Read allowlist into associative array
+declare -A ALLOWLIST_COUNTS
+if [[ -f "$ALLOWLIST_FILE" ]]; then
+  while IFS=: read -r file rule count || [[ -n "$file" ]]; do
+    # Skip comments and empty lines
+    [[ -z "$file" || "$file" =~ ^# ]] && continue
+    # Trim whitespace
+    file="${file## }"; file="${file%% }"
+    rule="${rule## }"; rule="${rule%% }"
+    count="${count## }"; count="${count%% }"
+    [[ -n "$file" && -n "$rule" && -n "$count" ]] && ALLOWLIST_COUNTS["${file}:${rule}"]="$count"
+  done < "$ALLOWLIST_FILE"
+fi
 
 echo "=== Logging Guard Check ==="
 echo ""
@@ -84,9 +88,7 @@ while IFS= read -r file; do
     
     # Check if console/safeLog/captureMessage/error: statement
     if echo "$content" | grep -qE 'console\.(log|warn|error|info|debug)\(|safeLog\(|captureMessage\(|captureException\(|error:\s*[`"'"'"']'; then
-      if ! is_allowlisted "$file" "$line_num"; then
-        add_violation "$file" "$line_num" "domain-literal" "$(echo "$content" | head -c 100)"
-      fi
+      add_violation "$file" "$line_num" "domain-literal" "$(echo "$content" | head -c 100)"
     fi
   done < <(grep -n 'myshopify\.com' "$file" 2>/dev/null || true)
 done <<< "$FILES"
@@ -101,9 +103,7 @@ while IFS= read -r file; do
     
     # Check if in a log/error context
     if echo "$content" | grep -qE 'console\.|safeLog|captureMessage|error:\s*`|error:\s*"'; then
-      if ! is_allowlisted "$file" "$line_num"; then
-        add_violation "$file" "$line_num" "shop-interpolation" "$(echo "$content" | head -c 100)"
-      fi
+      add_violation "$file" "$line_num" "shop-interpolation" "$(echo "$content" | head -c 100)"
     fi
   done < <(grep -nE '\$\{(shop|shopDomain|payloadShop|message\.shop)\}' "$file" 2>/dev/null || true)
 done <<< "$FILES"
@@ -121,9 +121,7 @@ while IFS= read -r file; do
       continue
     fi
     
-    if ! is_allowlisted "$file" "$line_num"; then
-      add_violation "$file" "$line_num" "raw-capture" "$(echo "$content" | head -c 100)"
-    fi
+    add_violation "$file" "$line_num" "raw-capture" "$(echo "$content" | head -c 100)"
   done < <(grep -nE 'captureException\(\s*(err|error)\s*\)' "$file" 2>/dev/null || true)
 done <<< "$FILES"
 
@@ -137,9 +135,7 @@ while IFS= read -r file; do
     
     # Check if in a log context
     if echo "$content" | grep -qE 'console\.|safeLog'; then
-      if ! is_allowlisted "$file" "$line_num"; then
-        add_violation "$file" "$line_num" "amount-in-log" "$(echo "$content" | head -c 100)"
-      fi
+      add_violation "$file" "$line_num" "amount-in-log" "$(echo "$content" | head -c 100)"
     fi
   done < <(grep -nE '(amount|paise|outstanding|balance|total)[=:,]' "$file" 2>/dev/null | grep -vE 'type|interface|import|//|/\*' || true)
 done <<< "$FILES"
@@ -166,9 +162,7 @@ while IFS= read -r file; do
     
     # Check if in a log context
     if echo "$content" | grep -qE 'console\.|safeLog'; then
-      if ! is_allowlisted "$file" "$line_num"; then
-        add_violation "$file" "$line_num" "sensitive-key" "$(echo "$content" | head -c 100)"
-      fi
+      add_violation "$file" "$line_num" "sensitive-key" "$(echo "$content" | head -c 100)"
     fi
   done < <(grep -nE "$SENSITIVE_PATTERN" "$file" 2>/dev/null || true)
 done <<< "$FILES"
@@ -199,9 +193,7 @@ while IFS= read -r file; do
     fi
     
     if echo "$content" | grep -qE 'console\.(log|warn|error)|echo\s.*\$|print'; then
-      if ! is_allowlisted "$file" "$line_num"; then
-        add_violation "$file" "$line_num" "script-domain" "$(echo "$content" | head -c 100)"
-      fi
+      add_violation "$file" "$line_num" "script-domain" "$(echo "$content" | head -c 100)"
     fi
   done < <(grep -nE 'myshopify\.com|shpat_|shpua_|shpss_' "$file" 2>/dev/null || true)
 done <<< "$SCRIPT_FILES"
@@ -209,15 +201,32 @@ done <<< "$SCRIPT_FILES"
 echo ""
 echo "=== Results ==="
 
-if [[ $VIOLATIONS -eq 0 ]]; then
+# Compare violation counts against allowlist
+NEW_VIOLATIONS=0
+OVER_ALLOWLIST=""
+
+for key in "${!VIOLATION_COUNTS[@]}"; do
+  found_count="${VIOLATION_COUNTS[$key]}"
+  allowed_count="${ALLOWLIST_COUNTS[$key]:-0}"
+  
+  if (( found_count > allowed_count )); then
+    NEW_VIOLATIONS=$(( NEW_VIOLATIONS + found_count - allowed_count ))
+    OVER_ALLOWLIST="${OVER_ALLOWLIST}  ${key}: found ${found_count}, allowed ${allowed_count}\n"
+    # Show details for this key
+    OVER_ALLOWLIST="${OVER_ALLOWLIST}${VIOLATION_DETAILS[$key]}"
+  fi
+done
+
+if [[ $NEW_VIOLATIONS -eq 0 ]]; then
   echo -e "${GREEN}✓ No logging violations found${NC}"
   exit 0
 else
-  echo -e "${RED}✗ Found $VIOLATIONS logging violation(s):${NC}"
+  echo -e "${RED}✗ Found $NEW_VIOLATIONS NEW logging violation(s) above allowlist:${NC}"
   echo ""
-  echo -e "$VIOLATION_DETAILS"
+  echo -e "$OVER_ALLOWLIST"
   echo ""
-  echo -e "${YELLOW}To fix: Update the code to use safeLog with shopId/shopHash, or add to${NC}"
-  echo -e "${YELLOW}scripts/ci/logging-allowlist.txt if this is an existing call site.${NC}"
+  echo -e "${YELLOW}To fix: Update the code to use safeLog with shopId/shopHash.${NC}"
+  echo -e "${YELLOW}To allowlist (temporary): add/update entry in scripts/ci/logging-allowlist.txt${NC}"
+  echo -e "${YELLOW}Format: file:rule:count${NC}"
   exit 1
 fi

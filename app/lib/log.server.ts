@@ -138,6 +138,8 @@ function redactValue(value: unknown, key: string): unknown {
 
 /**
  * Redact all fields in an object, keeping only allowlisted keys.
+ * Non-allowlisted keys have all values redacted (including numbers, per #174 money rule).
+ * Only booleans pass through for non-allowlisted keys.
  */
 function redactFields(fields: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
@@ -146,9 +148,9 @@ function redactFields(fields: Record<string, unknown>): Record<string, unknown> 
     if (isAllowedKey(key)) {
       result[key] = redactValue(value, key);
     } else {
-      result[key] = typeof value === "boolean" || typeof value === "number"
-        ? value
-        : REDACTED;
+      // Only booleans pass through for non-allowlisted keys
+      // Numbers are redacted (could be money amounts per #174)
+      result[key] = typeof value === "boolean" ? value : REDACTED;
     }
   }
 
@@ -212,10 +214,25 @@ export function safeLog(
 }
 
 /**
+ * Pattern for valid error codes.
+ * Must start with a letter, contain only alphanumerics/underscores, max 64 chars.
+ */
+const SAFE_CODE_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+
+/**
+ * Check if a string is a safe error code.
+ * Must match safe pattern and not contain sensitive patterns.
+ */
+function isSafeCode(code: string): boolean {
+  return SAFE_CODE_PATTERN.test(code) && !isSensitiveValue(code);
+}
+
+/**
  * Map an error to an error code for safe logging.
  *
  * Extracts code from error objects or maps known error types.
  * Never returns the raw error message.
+ * Validates codes to prevent domain/email-like strings from leaking.
  *
  * @param err - Error object or unknown
  * @returns Error code string
@@ -228,15 +245,15 @@ export function toErrorCode(err: unknown): string {
   if (typeof err === "object") {
     const errObj = err as Record<string, unknown>;
 
-    if (typeof errObj.code === "string" && errObj.code) {
+    if (typeof errObj.code === "string" && errObj.code && isSafeCode(errObj.code)) {
       return errObj.code;
     }
 
-    if (typeof errObj.errorCode === "string" && errObj.errorCode) {
+    if (typeof errObj.errorCode === "string" && errObj.errorCode && isSafeCode(errObj.errorCode)) {
       return errObj.errorCode;
     }
 
-    if (typeof errObj.name === "string" && errObj.name && errObj.name !== "Error") {
+    if (typeof errObj.name === "string" && errObj.name && errObj.name !== "Error" && isSafeCode(errObj.name)) {
       return errObj.name;
     }
 
@@ -257,12 +274,19 @@ export function toErrorCode(err: unknown): string {
       if (msg.includes("foreign key")) return "pg_foreign_key_violation";
       if (msg.includes("connection") && msg.includes("postgres")) return "pg_connection_error";
 
-      return err.name !== "Error" ? err.name : "error";
+      if (err.name !== "Error" && isSafeCode(err.name)) {
+        return err.name;
+      }
+      return "error";
     }
   }
 
   if (typeof err === "string") {
-    return err.length < 50 && !err.includes(" ") ? err : "string_error";
+    // Validate string codes
+    if (isSafeCode(err)) {
+      return err;
+    }
+    return "string_error";
   }
 
   return "unknown";
@@ -288,17 +312,3 @@ export async function shopHash(domain: string): Promise<string> {
   return hashHex.slice(0, 12);
 }
 
-/**
- * Synchronous version of shopHash using a simple hash for hot paths.
- * Uses djb2 algorithm - fast but not cryptographic.
- * For compliance paths, prefer the async shopHash.
- */
-export function shopHashSync(domain: string): string {
-  const str = domain.toLowerCase();
-  let hash = 5381;
-  for (let i = 0; i < str.length; i++) {
-    hash = ((hash << 5) + hash) ^ str.charCodeAt(i);
-  }
-  const unsigned = hash >>> 0;
-  return unsigned.toString(16).padStart(8, "0").slice(0, 12);
-}

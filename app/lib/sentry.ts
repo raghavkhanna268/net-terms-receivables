@@ -11,6 +11,21 @@ import type { TransactionEvent } from "@sentry/core";
 import { redactString, toErrorCode } from "./log.server";
 
 /**
+ * Allowlisted tag/extra keys that are safe to send to Sentry.
+ * Only these keys pass through; all others are removed.
+ */
+const ALLOWED_SENTRY_KEYS = new Set([
+  "shopId",
+  "code",
+  "requestId",
+  "webhookId",
+  "jobId",
+  "topic",
+  "status",
+  "errorCode",
+]);
+
+/**
  * Environment variables for Sentry configuration.
  * These are optional - Sentry is a no-op when DSN is not set.
  */
@@ -20,12 +35,30 @@ export interface SentryEnv {
 }
 
 /**
+ * Scrub a record to only keep allowlisted keys.
+ */
+function scrubRecord(record: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (ALLOWED_SENTRY_KEYS.has(key)) {
+      // Keep only safe string values
+      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+        result[key] = value;
+      }
+    }
+  }
+  return result;
+}
+
+/**
  * Scrub sensitive data from a Sentry event.
  *
+ * Security rules per #174:
  * - Deletes request.headers, cookies, query_string
  * - Strips query string from request.url
- * - Drops id_token, shop, host from anywhere in the event
- * - Redacts exception values and messages
+ * - Replaces exception values with error code (not raw messages)
+ * - Scrubs tags, extra, contexts to only allowlisted keys
+ * - Removes breadcrumbs entirely (can contain sensitive data)
  */
 function scrubEvent(event: SentryEvent): SentryEvent {
   if (event.request) {
@@ -38,59 +71,44 @@ function scrubEvent(event: SentryEvent): SentryEvent {
       event.request.url = urlParts[0];
     }
 
-    if (event.request.data && typeof event.request.data === "object") {
-      const data = event.request.data as Record<string, unknown>;
-      delete data.id_token;
-      delete data.shop;
-      delete data.host;
-    }
+    // Delete request body entirely
+    delete event.request.data;
   }
 
+  // Replace exception values with error code (P1b)
   if (event.exception?.values) {
     for (const exception of event.exception.values) {
       if (exception.value) {
-        exception.value = redactString(exception.value);
+        // Replace raw error message with error code
+        const errorCode = toErrorCode(new Error(exception.value));
+        exception.value = errorCode;
       }
     }
   }
 
+  // Replace message with redacted version
   if (event.message) {
     event.message = redactString(event.message);
   }
 
-  if (event.breadcrumbs) {
-    for (const breadcrumb of event.breadcrumbs) {
-      if (breadcrumb.message) {
-        breadcrumb.message = redactString(breadcrumb.message);
-      }
-      if (breadcrumb.data && typeof breadcrumb.data === "object") {
-        const data = breadcrumb.data as Record<string, unknown>;
-        delete data.id_token;
-        delete data.shop;
-        delete data.host;
-        for (const key of Object.keys(data)) {
-          if (typeof data[key] === "string") {
-            data[key] = redactString(data[key] as string);
-          }
-        }
-      }
-    }
-  }
+  // Remove breadcrumbs entirely (can contain sensitive logs/navigation)
+  delete event.breadcrumbs;
 
+  // Scrub extra to only allowlisted keys
   if (event.extra && typeof event.extra === "object") {
-    const extra = event.extra as Record<string, unknown>;
-    delete extra.id_token;
-    delete extra.shop;
-    delete extra.host;
+    event.extra = scrubRecord(event.extra as Record<string, unknown>);
   }
 
+  // Scrub tags to only allowlisted keys
+  if (event.tags && typeof event.tags === "object") {
+    event.tags = scrubRecord(event.tags as Record<string, unknown>) as Record<string, string>;
+  }
+
+  // Scrub contexts to only allowlisted keys per context
   if (event.contexts && typeof event.contexts === "object") {
-    for (const context of Object.values(event.contexts)) {
+    for (const [contextName, context] of Object.entries(event.contexts)) {
       if (context && typeof context === "object") {
-        const ctx = context as Record<string, unknown>;
-        delete ctx.id_token;
-        delete ctx.shop;
-        delete ctx.host;
+        event.contexts[contextName] = scrubRecord(context as Record<string, unknown>);
       }
     }
   }
@@ -144,6 +162,9 @@ export function wrapWithSentry<E extends SentryEnv>(
       return {
         dsn,
         tracesSampleRate: parseFloat(env.SENTRY_TRACES_SAMPLE_RATE ?? "0"),
+        // A1: PII protection is enforced by beforeSend/beforeSendTransaction hooks
+        // which scrub all sensitive data including request headers, cookies, exception
+        // messages, tags, extra, and contexts - allowing only safe identifiers.
         beforeSend,
         beforeSendTransaction,
       };

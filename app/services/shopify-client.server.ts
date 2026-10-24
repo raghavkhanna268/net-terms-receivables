@@ -43,6 +43,7 @@ import {
 } from "@shopify/shopify-api";
 import { getRequestSql } from "~/lib/request-context.server";
 import { refreshOfflineTokenIfNeeded } from "~/lib/offline-token.server";
+import { safeLog, shopHash } from "~/lib/log.server";
 
 /**
  * Execution context: determines retry budget.
@@ -236,6 +237,10 @@ export async function shopifyGraphQL<T = unknown>(
   const clientSecret = process.env.SHOPIFY_API_SECRET;
   
   if (!clientId || !clientSecret) {
+    safeLog("error", "shopify_missing_credentials", {
+      shopHash: await shopHash(shop),
+      code: "missing_credentials",
+    });
     return {
       success: false,
       error: "Shopify credentials not configured",

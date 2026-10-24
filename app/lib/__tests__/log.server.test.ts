@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { safeLog, toErrorCode, shopHash, shopHashSync, redactString } from "../log.server";
+import { safeLog, toErrorCode, shopHash, redactString } from "../log.server";
 
 describe("log.server", () => {
   describe("safeLog", () => {
@@ -109,9 +109,29 @@ describe("log.server", () => {
         expect(consoleLogSpy.mock.calls[0][0]).toContain('"shop":"<redacted>"');
       });
 
-      it("preserves numbers for unknown keys", () => {
+      it("redacts numbers for unknown keys (could be money amounts per #174)", () => {
         safeLog("info", "test", { unknownNumber: 42 });
-        expect(consoleLogSpy.mock.calls[0][0]).toContain('"unknownNumber":42');
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"unknownNumber":"<redacted>"');
+      });
+
+      it("redacts amount/balance/total fields (money values per #174)", () => {
+        safeLog("info", "test", { amount: 125000 });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"amount":"<redacted>"');
+      });
+
+      it("redacts outstandingPaise field (money value)", () => {
+        safeLog("info", "test", { outstandingPaise: 9900 });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"outstandingPaise":"<redacted>"');
+      });
+
+      it("redacts creditLimit field (money value)", () => {
+        safeLog("info", "test", { creditLimit: 50000 });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"creditLimit":"<redacted>"');
+      });
+
+      it("redacts totalAmount field (money value)", () => {
+        safeLog("info", "test", { totalAmount: 100000 });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"totalAmount":"<redacted>"');
       });
 
       it("preserves booleans for unknown keys", () => {
@@ -311,29 +331,29 @@ describe("log.server", () => {
     });
   });
 
-  describe("shopHashSync", () => {
-    it("returns 8-character hex string (djb2 produces 32-bit hash)", () => {
-      const hash = shopHashSync("test-shop.myshopify.com");
-      expect(hash).toHaveLength(8);
-      expect(hash).toMatch(/^[0-9a-f]+$/);
+  describe("toErrorCode validation", () => {
+    it("rejects domain-like strings as codes", () => {
+      const err = { code: "acme.myshopify.com" };
+      expect(toErrorCode(err)).toBe("unknown");
     });
 
-    it("is case-insensitive", () => {
-      const hash1 = shopHashSync("Test-Shop.myshopify.com");
-      const hash2 = shopHashSync("test-shop.myshopify.com");
-      expect(hash1).toBe(hash2);
+    it("rejects email-like strings as codes", () => {
+      const err = { code: "user@example.com" };
+      expect(toErrorCode(err)).toBe("unknown");
     });
 
-    it("produces different hashes for different domains", () => {
-      const hash1 = shopHashSync("shop1.myshopify.com");
-      const hash2 = shopHashSync("shop2.myshopify.com");
-      expect(hash1).not.toBe(hash2);
+    it("rejects codes with spaces", () => {
+      expect(toErrorCode("some error message")).toBe("string_error");
     });
 
-    it("is deterministic", () => {
-      const hash1 = shopHashSync("test.myshopify.com");
-      const hash2 = shopHashSync("test.myshopify.com");
-      expect(hash1).toBe(hash2);
+    it("accepts valid snake_case codes", () => {
+      const err = { code: "network_error" };
+      expect(toErrorCode(err)).toBe("network_error");
+    });
+
+    it("accepts valid PascalCase codes", () => {
+      const err = { name: "TypeError" };
+      expect(toErrorCode(err)).toBe("TypeError");
     });
   });
 });

@@ -23,10 +23,6 @@ describe("check-logging.sh", () => {
     fs.writeFileSync(allowlistFile, allowlist.join("\n"));
 
     const scriptPath = path.join(__dirname, "..", "check-logging.sh");
-    const env = {
-      ...process.env,
-      REPO_ROOT: tmpDir,
-    };
 
     try {
       // Modify the script to use our test directory
@@ -50,7 +46,6 @@ describe("check-logging.sh", () => {
 
       const output = execSync(testScript, {
         encoding: "utf-8",
-        env,
       });
       return { exitCode: 0, output };
     } catch (err) {
@@ -80,10 +75,10 @@ export function logEvent() {
       fs.writeFileSync(
         path.join(fixtureDir, "good.ts"),
         `
-import { safeLog, shopHashSync } from "~/lib/log.server";
+import { safeLog, shopHash } from "~/lib/log.server";
 
-export function logEvent(shop: string) {
-  safeLog("warn", "test_event", { shopHash: shopHashSync(shop) });
+export async function logEvent(shop: string) {
+  safeLog("warn", "test_event", { shopHash: await shopHash(shop) });
 }
         `
       );
@@ -178,8 +173,8 @@ export function handleError() {
     });
   });
 
-  describe("allowlist", () => {
-    it("passes when violation is in allowlist", () => {
+  describe("allowlist format (file:rule:count)", () => {
+    it("passes when violation count equals allowlist", () => {
       fs.writeFileSync(
         path.join(fixtureDir, "allowed.ts"),
         `
@@ -189,24 +184,80 @@ export function logEvent(shop: string) {
         `
       );
 
-      // Line 3 has the violation
-      const { exitCode } = runGuard(["app/allowed.ts:3"]);
+      // New format: file:rule:count
+      const { exitCode } = runGuard(["app/allowed.ts:shop-interpolation:1"]);
       expect(exitCode).toBe(0);
     });
 
-    it("fails when violation is NOT in allowlist", () => {
+    it("fails when violation count exceeds allowlist", () => {
       fs.writeFileSync(
         path.join(fixtureDir, "not-allowed.ts"),
         `
+export function logEvent(shop: string) {
+  console.log(\`Processing for \${shop}\`);
+  console.log(\`Done for \${shop}\`);
+}
+        `
+      );
+
+      // Only allow 1 but file has 2
+      const { exitCode, output } = runGuard(["app/not-allowed.ts:shop-interpolation:1"]);
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("found 2, allowed 1");
+    });
+
+    it("line number shifts do not break allowlist", () => {
+      // Create initial file with violation on line 5
+      fs.writeFileSync(
+        path.join(fixtureDir, "shifting.ts"),
+        `
+// comment line 1
+// comment line 2
 export function logEvent(shop: string) {
   console.log(\`Processing for \${shop}\`);
 }
         `
       );
 
-      // Wrong file in allowlist
-      const { exitCode } = runGuard(["app/other.ts:3"]);
+      // Allowlist with file:rule:count (no line number)
+      const { exitCode: exitCode1 } = runGuard(["app/shifting.ts:shop-interpolation:1"]);
+      expect(exitCode1).toBe(0);
+
+      // Now add more comments, shifting the violation to a different line
+      fs.writeFileSync(
+        path.join(fixtureDir, "shifting.ts"),
+        `
+// comment line 1
+// comment line 2
+// NEW comment line 3
+// NEW comment line 4
+// NEW comment line 5
+export function logEvent(shop: string) {
+  console.log(\`Processing for \${shop}\`);
+}
+        `
+      );
+
+      // Same allowlist should still pass (line-independent)
+      const { exitCode: exitCode2 } = runGuard(["app/shifting.ts:shop-interpolation:1"]);
+      expect(exitCode2).toBe(0);
+    });
+
+    it("adding a new violation fails even with existing allowlist", () => {
+      fs.writeFileSync(
+        path.join(fixtureDir, "growing.ts"),
+        `
+export function logEvent(shop: string) {
+  console.log(\`Processing for \${shop}\`);
+  console.warn(\`Warning for \${shop}\`);
+}
+        `
+      );
+
+      // Only allow 1 violation
+      const { exitCode, output } = runGuard(["app/growing.ts:shop-interpolation:1"]);
       expect(exitCode).not.toBe(0);
+      expect(output).toContain("NEW logging violation");
     });
   });
 });
