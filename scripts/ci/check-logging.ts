@@ -2,13 +2,11 @@
 /**
  * AST-based CI logging guard for PII/domain leak prevention.
  *
- * Replaces the grep-based check-logging.sh with proper multi-line handling.
- * Uses TypeScript compiler API to walk AST nodes and inspect call arguments.
- *
- * Checks app/**, workers/**, scripts/** .ts/.tsx files (excluding tests/fixtures) for:
- * 1. console.*, safeLog, Sentry.* calls with sensitive data in object literals
+ * Checks app/**, workers/**, scripts/** files for:
+ * 1. console.*, safeLog, Sentry.* calls with sensitive data
  * 2. Template literals interpolating shop/domain identifiers
- * 3. captureException with raw catch variables (no tags)
+ * 3. captureException with raw catch variables
+ * 4. Script files (.sh/.mjs) with domain literals or token prefixes
  *
  * Maintains burn-down allowlist format: file:rule:count
  */
@@ -30,117 +28,117 @@ const REPO_ROOT = process.env.LOGGING_GUARD_ROOT ?? path.resolve(__dirname, "../
 const ALLOWLIST_FILE = process.env.LOGGING_GUARD_ALLOWLIST ?? path.join(__dirname, "logging-allowlist.txt");
 
 /**
- * Sensitive key patterns that indicate PII or financial data.
- * Keys matching these are flagged unless explicitly allowlisted.
+ * Primary sensitive key/value pattern - unanchored substring matching.
+ * Matches any key/identifier containing these substrings (case-insensitive):
+ * - Financial: amount, paise, total, outstanding, balance
+ * - Merchant: shop, domain (catches shopDomain, myshopifyDomain, shop_domain)
+ * - PII: email, name, narration, payer, remitter, phone, address, note
+ *
+ * Applied to both camelCase and snake_case after normalization.
  */
-const SENSITIVE_KEY_PATTERNS = [
-  /^amount$/i,
-  /amount$/i,
-  /^paise$/i,
-  /paise$/i,
-  /^total$/i,
-  /total$/i,
-  /^outstanding$/i,
-  /outstanding$/i,
-  /^balance$/i,
-  /balance$/i,
-  /^shop$/i,
-  /^shopDomain$/i,
-  /^domain$/i,
-  /^email$/i,
-  /^name$/i,
-  /^narration$/i,
-  /^payer$/i,
-  /^remitter$/i,
-  /^payerText$/i,
-  /^payerKey$/i,
+const SENSITIVE_PATTERN = /amount|paise|total|outstanding|balance|shop|domain|email|name|narration|payer|remitter|phone|address|note/i;
+
+/**
+ * Token patterns that are always sensitive (exact match).
+ */
+const TOKEN_KEY_PATTERNS = [
   /^accessToken$/i,
   /^refreshToken$/i,
+  /^access_token$/i,
+  /^refresh_token$/i,
 ];
 
 /**
- * Allowlisted keys that are safe even if they match sensitive patterns.
- * Each entry has a comment explaining why it's safe.
+ * Token prefix patterns for text-based scanning of scripts.
+ */
+const TOKEN_PREFIX_PATTERN = /shpat_|shpua_|shpss_/;
+
+/**
+ * Normalize a key for matching: convert snake_case to camelCase equivalent
+ * for consistent pattern matching.
+ */
+function normalizeKey(key: string): string {
+  // Convert snake_case to lowercase for matching
+  // shop_domain -> shopdomain (matches "shop" and "domain")
+  return key.toLowerCase().replace(/_/g, "");
+}
+
+/**
+ * Check if a key matches any sensitive pattern.
+ */
+function isSensitiveKey(key: string): boolean {
+  // Check token patterns first (exact match)
+  if (TOKEN_KEY_PATTERNS.some((pattern) => pattern.test(key))) {
+    return true;
+  }
+  // Check normalized key against sensitive pattern
+  const normalized = normalizeKey(key);
+  return SENSITIVE_PATTERN.test(normalized);
+}
+
+/**
+ * Check if an identifier name (variable, property) is sensitive.
+ * Used for checking values like { store: shop } or { x: shopDomain }.
+ */
+function isSensitiveIdentifier(name: string): boolean {
+  const normalized = normalizeKey(name);
+  return SENSITIVE_PATTERN.test(normalized);
+}
+
+/**
+ * Allowlisted keys that are safe even if they match the sensitive pattern.
+ * ONLY include keys that actually match SENSITIVE_PATTERN and are genuinely safe.
+ * Each entry must have a documented reason.
  *
- * Format: key -> reason
+ * Criteria for inclusion:
+ * - Must match the deny regex (otherwise it's noise)
+ * - Must NEVER carry: domain, email, person/company name, or money amount
+ * - IDs, hashes, counts, and code-controlled enum values are OK
  */
 const SAFE_KEY_ALLOWLIST: Record<string, string> = {
-  // Hash of shop domain, not the domain itself
-  shopHash: "SHA-256 hash prefix, not PII",
-  // Database IDs, not sensitive
-  shopId: "Internal UUID, not the domain",
-  // Error codes, not raw errors
-  errorCode: "Structured error code, not raw message",
-  code: "Structured error code or enum",
-  err: "Error code string from toErrorCode()",
-  // Count metrics are safe (not individual amounts)
-  count: "Aggregate count, not individual amount",
-  totalCount: "Aggregate count metric",
-  orderCount: "Aggregate count metric",
-  invoiceCount: "Aggregate count metric",
-  matchCount: "Aggregate count metric",
-  lineCount: "Aggregate count metric",
-  skippedCount: "Aggregate count metric",
-  errorCount: "Aggregate count metric",
-  failureCount: "Aggregate count metric",
-  successCount: "Aggregate count metric",
-  upsertedCount: "Aggregate count metric",
-  // Status/result fields
-  status: "Enum status value",
-  action: "Enum action value",
-  reason: "Structured reason code",
-  reasonCode: "Structured reason code",
-  // Timing metrics
-  durationMs: "Duration in milliseconds",
-  elapsedMs: "Elapsed time metric",
-  // Boolean flags
-  success: "Boolean flag",
-  retryable: "Boolean flag",
-  // Safe identifiers (internal UUIDs/GIDs)
-  requestId: "Request correlation ID",
-  webhookId: "Webhook correlation ID",
-  jobId: "Job correlation ID",
-  matchId: "Match correlation ID",
-  orderId: "Internal order UUID",
-  orderGid: "Shopify GID (not PII)",
-  invoiceId: "Internal invoice UUID",
-  customerId: "Internal customer UUID",
-  companyId: "Internal company UUID",
-  locationId: "Internal location UUID",
-  buyerAccountId: "Internal buyer account UUID",
-  sessionId: "Session correlation ID",
-  operationId: "Operation correlation ID",
-  bulkOperationId: "Bulk operation correlation ID",
-  messageId: "Message correlation ID",
-  msgId: "Message correlation ID (short)",
-  // Metadata
-  topic: "Webhook topic enum",
-  stage: "Processing stage enum",
-  origin: "Origin enum value",
-  queue: "Queue name",
-  version: "Version string",
-  fields: "Field list metadata",
-  // Bulk processing metadata
-  bulkType: "Bulk operation type enum",
-  offset: "Byte offset (not sensitive)",
-  byteOffset: "Byte offset (not sensitive)",
-  newByteOffset: "Byte offset (not sensitive)",
-  chunkSize: "Chunk size in bytes",
-  // HTTP metadata
-  httpStatus: "HTTP status code",
-  statusCode: "HTTP status code",
+  // Hashed identifiers (not the raw domain)
+  shopHash: "SHA-256 hash prefix of domain, not PII",
+
+  // Internal database IDs (UUIDs, not domains or names)
+  shopId: "Internal UUID primary key, not the domain string",
+  shop_id: "Internal UUID primary key (snake_case), not the domain string",
+  shopFilter: "Numeric shop index for filtering, not the domain",
+  shop_filter: "Numeric shop index for filtering (snake_case), not the domain",
+
+  // Count/total metrics (aggregate numbers, not individual money amounts)
+  totalCount: "Aggregate count of items, not a money amount",
+  total_count: "Aggregate count of items (snake_case), not a money amount",
+  totalOrders: "Count of orders processed, not money",
+  totalTaggedOrders: "Count of tagged orders, not money",
+  totalUpserted: "Count of upserted records, not money",
+  totalProcessed: "Count of processed items, not money",
+  totalSkipped: "Count of skipped items, not money",
+  totalFailures: "Count of failures, not money",
+  grandTotal: "Grand count of items, not money",
+  orderCount: "Count of orders, not a money amount",
+  invoiceCount: "Count of invoices, not a money amount",
+  outstandingCount: "Count of outstanding items, not a money amount",
+  balanceCount: "Count of balance entries, not a money amount",
+  amountCount: "Count of amount entries, not a money amount",
+
+  // Code-controlled enum/metadata values (never user-supplied)
+  topicName: "Webhook topic identifier (code-controlled enum)",
+  topic_name: "Webhook topic identifier (snake_case, code-controlled enum)",
+  queueName: "Queue identifier (code-controlled infrastructure name)",
+  queue_name: "Queue identifier (snake_case, code-controlled)",
+  functionName: "Function identifier (code-controlled, not user name)",
+  function_name: "Function identifier (snake_case, code-controlled)",
+  domainEvent: "Domain-driven design event type (code-controlled enum)",
+  domain_event: "Domain-driven design event type (snake_case)",
+  mutationName: "GraphQL mutation name (code-controlled)",
+  roleName: "Contact role enum (code-controlled, not person name)",
 };
 
 /**
- * Template literal interpolation patterns that indicate shop/domain leakage.
+ * Pattern to match sensitive identifiers in template literal last property.
+ * Matches: shop, shopDomain, domain, myshopifyDomain, payloadShop, etc.
  */
-const SENSITIVE_INTERPOLATION_PATTERNS = [
-  /^\s*shop\s*$/,
-  /^\s*shopDomain\s*$/,
-  /^\s*payloadShop\s*$/,
-  /^\s*message\.shop\s*$/,
-  /^\s*domain\s*$/,
-];
+const SENSITIVE_TEMPLATE_LAST_PROP = /(?:^|\.)(shop|shopDomain|domain|myshopifyDomain|payloadShop|shop_domain)$/i;
 
 /**
  * Literal domain patterns in strings.
@@ -156,17 +154,6 @@ const VALIDATION_PATTERNS = [
   /isValidShopDomain/,
   /\\\.myshopify\\\.com/,
 ];
-
-/**
- * Log/error call patterns to check.
- */
-const _LOG_CALL_NAMES = new Set([
-  "log",
-  "warn",
-  "error",
-  "info",
-  "debug",
-]);
 
 const CONSOLE_METHODS = new Set([
   "console.log",
@@ -188,6 +175,7 @@ const SENTRY_METHODS = new Set([
   "setContext",
   "setTag",
   "setTags",
+  "setUser",
 ]);
 
 // ============================================================================
@@ -203,59 +191,133 @@ interface Violation {
   snippet: string;
 }
 
-interface _AllowlistEntry {
-  file: string;
-  rule: string;
-  count: number;
-}
-
 // ============================================================================
 // File Discovery
 // ============================================================================
 
-function findSourceFiles(rootDir: string): string[] {
-  const files: string[] = [];
+interface SourceFiles {
+  tsFiles: string[];
+  scriptFiles: string[];
+}
+
+function findSourceFiles(rootDir: string): SourceFiles {
+  const tsFiles: string[] = [];
+  const scriptFiles: string[] = [];
   const dirsToSearch = ["app", "workers", "scripts"];
 
   for (const dir of dirsToSearch) {
     const fullPath = path.join(rootDir, dir);
     if (fs.existsSync(fullPath)) {
-      walkDirectory(fullPath, files);
+      walkDirectory(fullPath, tsFiles, scriptFiles, rootDir);
     }
   }
 
-  return files;
+  return { tsFiles, scriptFiles };
 }
 
-function walkDirectory(dir: string, files: string[]): void {
+function walkDirectory(
+  dir: string,
+  tsFiles: string[],
+  scriptFiles: string[],
+  rootDir: string
+): void {
   const entries = fs.readdirSync(dir, { withFileTypes: true });
+  const relDir = path.relative(rootDir, dir);
 
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
 
     if (entry.isDirectory()) {
-      // Skip test directories and node_modules
-      if (
-        entry.name === "__tests__" ||
-        entry.name === "test" ||
-        entry.name === "fixtures" ||
-        entry.name === "node_modules" ||
-        entry.name === "ci" // Skip scripts/ci to avoid self-checking
-      ) {
-        continue;
-      }
-      walkDirectory(fullPath, files);
+      // Skip node_modules everywhere
+      if (entry.name === "node_modules") continue;
+
+      // Skip __tests__ and test directories
+      if (entry.name === "__tests__" || entry.name === "test") continue;
+
+      // Skip scripts/ci (self) and scripts/ci/__tests__/fixtures specifically
+      if (relDir === "scripts" && entry.name === "ci") continue;
+
+      walkDirectory(fullPath, tsFiles, scriptFiles, rootDir);
     } else if (entry.isFile()) {
-      // Include .ts and .tsx files, exclude test files
+      // TypeScript files (exclude test files)
       if (
         (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx")) &&
         !entry.name.endsWith(".test.ts") &&
         !entry.name.endsWith(".test.tsx")
       ) {
-        files.push(fullPath);
+        tsFiles.push(fullPath);
+      }
+
+      // Shell and mjs scripts (for text-based scanning)
+      if (entry.name.endsWith(".sh") || entry.name.endsWith(".mjs")) {
+        scriptFiles.push(fullPath);
       }
     }
   }
+}
+
+// ============================================================================
+// Text-based Script Analysis (P1.2 regression fix)
+// ============================================================================
+
+function analyzeScriptFile(filePath: string): Violation[] {
+  const violations: Violation[] = [];
+  const content = fs.readFileSync(filePath, "utf-8");
+  const lines = content.split("\n");
+  const relPath = path.relative(REPO_ROOT, filePath);
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lineNum = i + 1;
+
+    // Skip comments
+    if (line.trim().startsWith("#") || line.trim().startsWith("//")) continue;
+
+    // Check for myshopify.com domain literal
+    if (DOMAIN_LITERAL_PATTERN.test(line)) {
+      // Skip validation patterns
+      if (!VALIDATION_PATTERNS.some((p) => p.test(line))) {
+        // Skip if it's in a help/usage message context
+        if (!line.includes("e.g.") && !line.includes("example") && !line.includes("placeholder")) {
+          violations.push({
+            file: relPath,
+            line: lineNum,
+            column: 1,
+            rule: "script-domain",
+            message: "Literal myshopify.com domain in script",
+            snippet: truncate(line, 100),
+          });
+        }
+      }
+    }
+
+    // Check for token prefixes (shpat_, shpua_, shpss_)
+    if (TOKEN_PREFIX_PATTERN.test(line)) {
+      violations.push({
+        file: relPath,
+        line: lineNum,
+        column: 1,
+        rule: "script-token",
+        message: "Token prefix pattern in script (shpat_/shpua_/shpss_)",
+        snippet: truncate(line, 100),
+      });
+    }
+
+    // Check for echo/print of $SHOP-style variables
+    if (/echo\s.*\$\{?(SHOP|shop|SHOP_DOMAIN|shop_domain)\}?/i.test(line) ||
+        /print.*\$\{?(SHOP|shop|SHOP_DOMAIN|shop_domain)\}?/i.test(line)) {
+      violations.push({
+        file: relPath,
+        line: lineNum,
+        column: 1,
+        rule: "script-shop-var",
+        message: "Shell variable with shop/domain echoed",
+        snippet: truncate(line, 100),
+      });
+    }
+  }
+
+  return violations;
 }
 
 // ============================================================================
@@ -274,6 +336,29 @@ function analyzeFile(filePath: string): Violation[] {
   );
 
   const relPath = path.relative(REPO_ROOT, filePath);
+
+  // Also check for token prefixes in TS files (but not in safeLog helper or regex patterns)
+  const lines = sourceText.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (TOKEN_PREFIX_PATTERN.test(line)) {
+      // Skip comments
+      if (line.trim().startsWith("//") || line.trim().startsWith("*")) continue;
+      // Skip regex patterns (used for validation/redaction)
+      if (/\/.*shp[atu]{2}_/.test(line) || /RegExp|\.test\(|\.replace\(/.test(line)) continue;
+      // Skip if it's in a file that handles token redaction
+      if (relPath.includes("log.server") || relPath.includes("sentry")) continue;
+
+      violations.push({
+        file: relPath,
+        line: i + 1,
+        column: 1,
+        rule: "token-prefix",
+        message: "Token prefix pattern found (shpat_/shpua_/shpss_)",
+        snippet: truncate(line, 100),
+      });
+    }
+  }
 
   function visit(node: ts.Node): void {
     if (ts.isCallExpression(node)) {
@@ -297,7 +382,7 @@ function checkCallExpression(
 
   // Check console.* calls
   if (CONSOLE_METHODS.has(callName) || callName === "safeLog") {
-    checkLogCall(call, callName, sourceFile, relPath, violations);
+    checkLogCall(call, sourceFile, relPath, violations);
   }
 
   // Check Sentry methods
@@ -310,7 +395,6 @@ function checkCallExpression(
 function getCallName(call: ts.CallExpression): string | null {
   const expr = call.expression;
 
-  // console.log, console.error, etc.
   if (ts.isPropertyAccessExpression(expr)) {
     const obj = expr.expression;
     const prop = expr.name.text;
@@ -319,15 +403,9 @@ function getCallName(call: ts.CallExpression): string | null {
       return `${obj.text}.${prop}`;
     }
 
-    // Sentry.captureException, etc.
-    if (ts.isIdentifier(obj) && obj.text === "Sentry") {
-      return `Sentry.${prop}`;
-    }
-
     return prop;
   }
 
-  // Direct function call: safeLog, captureException, etc.
   if (ts.isIdentifier(expr)) {
     return expr.text;
   }
@@ -337,48 +415,115 @@ function getCallName(call: ts.CallExpression): string | null {
 
 function checkLogCall(
   call: ts.CallExpression,
-  callName: string,
   sourceFile: ts.SourceFile,
   relPath: string,
   violations: Violation[]
 ): void {
-  for (const arg of call.arguments) {
-    // Check template literals for shop interpolation
-    if (ts.isTemplateExpression(arg) || ts.isTaggedTemplateExpression(arg)) {
-      const templateViolations = checkTemplateLiteral(arg, sourceFile);
-      for (const violation of templateViolations) {
-        violations.push({
-          file: relPath,
-          line: violation.line,
-          column: violation.column,
-          rule: "shop-interpolation",
-          message: `Template literal interpolates sensitive variable: ${violation.expr}`,
-          snippet: violation.snippet,
-        });
-      }
-    }
+  for (let i = 0; i < call.arguments.length; i++) {
+    const arg = call.arguments[i];
+    checkArgument(arg, sourceFile, relPath, violations, i);
+  }
+}
 
-    // Check for literal domain strings
-    if (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) {
-      const text = arg.text;
-      if (DOMAIN_LITERAL_PATTERN.test(text) && !isValidationPattern(text)) {
-        const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
-        violations.push({
-          file: relPath,
-          line: line + 1,
-          column: character + 1,
-          rule: "domain-literal",
-          message: "Literal myshopify.com domain in log statement",
-          snippet: truncate(arg.getText(), 100),
-        });
-      }
-    }
-
-    // Check object literals for sensitive keys
-    if (ts.isObjectLiteralExpression(arg)) {
-      checkObjectLiteral(arg, sourceFile, relPath, violations);
+function checkArgument(
+  arg: ts.Node,
+  sourceFile: ts.SourceFile,
+  relPath: string,
+  violations: Violation[],
+  argIndex: number
+): void {
+  // Check template literals for shop interpolation
+  if (ts.isTemplateExpression(arg) || ts.isTaggedTemplateExpression(arg)) {
+    const templateViolations = checkTemplateLiteral(arg, sourceFile);
+    for (const v of templateViolations) {
+      violations.push({
+        file: relPath,
+        line: v.line,
+        column: v.column,
+        rule: "shop-interpolation",
+        message: `Template literal interpolates sensitive variable: ${v.expr}`,
+        snippet: v.snippet,
+      });
     }
   }
+
+  // Check string concatenation (P2.7)
+  if (ts.isBinaryExpression(arg) && arg.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    checkStringConcatenation(arg, sourceFile, relPath, violations);
+  }
+
+  // Check for literal domain strings
+  if (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) {
+    const text = arg.text;
+    if (DOMAIN_LITERAL_PATTERN.test(text) && !isValidationPattern(text)) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "domain-literal",
+        message: "Literal myshopify.com domain in log statement",
+        snippet: truncate(arg.getText(), 100),
+      });
+    }
+  }
+
+  // Check object literals for sensitive keys and values
+  if (ts.isObjectLiteralExpression(arg)) {
+    checkObjectLiteral(arg, sourceFile, relPath, violations);
+  }
+
+  // Check array literals (P3.10)
+  if (ts.isArrayLiteralExpression(arg)) {
+    checkArrayLiteral(arg, sourceFile, relPath, violations);
+  }
+
+  // Check raw identifier arguments (P2.4) - e.g., console.error(x, err)
+  if (ts.isIdentifier(arg) && argIndex > 0) {
+    const name = arg.text;
+    // Check for error-like identifiers
+    if (isErrorLikeIdentifier(name)) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "raw-error-arg",
+        message: `Raw error identifier passed to log: ${name}`,
+        snippet: truncate(arg.getText(), 100),
+      });
+    }
+    // Check for sensitive identifiers as values
+    if (isSensitiveIdentifier(name) && !SAFE_KEY_ALLOWLIST[name]) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "sensitive-value",
+        message: `Sensitive identifier passed as argument: ${name}`,
+        snippet: truncate(arg.getText(), 100),
+      });
+    }
+  }
+}
+
+/**
+ * Check if an identifier name looks like an error variable.
+ */
+function isErrorLikeIdentifier(name: string): boolean {
+  const lower = name.toLowerCase();
+  return (
+    lower === "err" ||
+    lower === "error" ||
+    lower === "e" ||
+    lower === "ex" ||
+    lower === "exc" ||
+    lower === "caught" ||
+    lower === "exception" ||
+    lower.endsWith("error") ||
+    lower.endsWith("err")
+  );
 }
 
 function checkSentryCall(
@@ -388,35 +533,46 @@ function checkSentryCall(
   relPath: string,
   violations: Violation[]
 ): void {
-  // captureException(err) without tags
+  // captureException - catch any identifier without second argument (P3.9)
   if (methodName === "captureException") {
     const firstArg = call.arguments[0];
     const secondArg = call.arguments[1];
 
-    // Check if it's a raw catch variable without options
-    if (firstArg && ts.isIdentifier(firstArg)) {
-      const name = firstArg.text;
-      if ((name === "err" || name === "error") && !secondArg) {
-        // No second argument with tags - this is raw capture
-        const fullText = call.getText(sourceFile);
-        if (!fullText.includes("tags") && !fullText.includes("captureExceptionWithTags")) {
-          const { line, character } = sourceFile.getLineAndCharacterOfPosition(call.getStart());
-          violations.push({
-            file: relPath,
-            line: line + 1,
-            column: character + 1,
-            rule: "raw-capture",
-            message: "captureException with raw catch variable (use captureExceptionWithTags)",
-            snippet: truncate(fullText, 100),
-          });
-        }
+    if (firstArg && ts.isIdentifier(firstArg) && !secondArg) {
+      const fullText = call.getText(sourceFile);
+      if (!fullText.includes("tags") && !fullText.includes("captureExceptionWithTags")) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(call.getStart());
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          column: character + 1,
+          rule: "raw-capture",
+          message: `captureException with raw variable '${firstArg.text}' (use captureExceptionWithTags)`,
+          snippet: truncate(fullText, 100),
+        });
       }
     }
   }
 
-  // setExtra(key, value), setTag(key, value): first argument is the key
-  if ((methodName === "setExtra" || methodName === "setTag") && call.arguments.length >= 1) {
+  // setUser - always flag (P2.5)
+  if (methodName === "setUser" && call.arguments.length > 0) {
+    const { line, character } = sourceFile.getLineAndCharacterOfPosition(call.getStart());
+    violations.push({
+      file: relPath,
+      line: line + 1,
+      column: character + 1,
+      rule: "sentry-setuser",
+      message: "Sentry.setUser passes user PII to error tracking",
+      snippet: truncate(call.getText(sourceFile), 100),
+    });
+  }
+
+  // setExtra(key, value), setTag(key, value): check both key AND value (P2.5)
+  if ((methodName === "setExtra" || methodName === "setTag") && call.arguments.length >= 2) {
     const keyArg = call.arguments[0];
+    const valueArg = call.arguments[1];
+
+    // Check key
     if (ts.isStringLiteral(keyArg)) {
       const keyName = keyArg.text;
       if (isSensitiveKey(keyName) && !SAFE_KEY_ALLOWLIST[keyName]) {
@@ -431,39 +587,39 @@ function checkSentryCall(
         });
       }
     }
-  }
 
-  // setContext(name, context): check the context object (second argument)
-  if (methodName === "setContext" && call.arguments.length >= 2) {
-    const contextArg = call.arguments[1];
-    if (ts.isObjectLiteralExpression(contextArg)) {
-      checkObjectLiteral(contextArg, sourceFile, relPath, violations);
-    }
+    // Check value (P2.5)
+    checkSentryValue(valueArg, methodName, sourceFile, relPath, violations);
   }
 
   // Check all arguments for sensitive data
   for (const arg of call.arguments) {
-    // Check object literals (extras, context, tags)
     if (ts.isObjectLiteralExpression(arg)) {
       checkObjectLiteral(arg, sourceFile, relPath, violations);
     }
 
-    // Check template literals
+    if (ts.isArrayLiteralExpression(arg)) {
+      checkArrayLiteral(arg, sourceFile, relPath, violations);
+    }
+
     if (ts.isTemplateExpression(arg) || ts.isTaggedTemplateExpression(arg)) {
       const templateViolations = checkTemplateLiteral(arg, sourceFile);
-      for (const violation of templateViolations) {
+      for (const v of templateViolations) {
         violations.push({
           file: relPath,
-          line: violation.line,
-          column: violation.column,
+          line: v.line,
+          column: v.column,
           rule: "shop-interpolation",
-          message: `Template literal in Sentry call interpolates sensitive variable: ${violation.expr}`,
-          snippet: violation.snippet,
+          message: `Template in Sentry call interpolates sensitive variable: ${v.expr}`,
+          snippet: v.snippet,
         });
       }
     }
 
-    // Check string literals for domain
+    if (ts.isBinaryExpression(arg) && arg.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+      checkStringConcatenation(arg, sourceFile, relPath, violations);
+    }
+
     if (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) {
       if (DOMAIN_LITERAL_PATTERN.test(arg.text) && !isValidationPattern(arg.text)) {
         const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
@@ -480,6 +636,49 @@ function checkSentryCall(
   }
 }
 
+/**
+ * Check a Sentry setTag/setExtra value for sensitive data (P2.5).
+ */
+function checkSentryValue(
+  value: ts.Node,
+  methodName: string,
+  sourceFile: ts.SourceFile,
+  relPath: string,
+  violations: Violation[]
+): void {
+  // Check identifier values
+  if (ts.isIdentifier(value)) {
+    const name = value.text;
+    if (isSensitiveIdentifier(name) && !SAFE_KEY_ALLOWLIST[name]) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(value.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "sensitive-value",
+        message: `Sensitive identifier as ${methodName} value: ${name}`,
+        snippet: truncate(value.getText(), 100),
+      });
+    }
+  }
+
+  // Check property access (.message, .stack)
+  if (ts.isPropertyAccessExpression(value)) {
+    const propName = value.name.text;
+    if (propName === "message" || propName === "stack") {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(value.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "error-message",
+        message: `Error .${propName} passed to Sentry ${methodName}`,
+        snippet: truncate(value.getText(), 100),
+      });
+    }
+  }
+}
+
 function checkObjectLiteral(
   obj: ts.ObjectLiteralExpression,
   sourceFile: ts.SourceFile,
@@ -487,7 +686,7 @@ function checkObjectLiteral(
   violations: Violation[],
   depth = 0
 ): void {
-  if (depth > 5) return; // Prevent infinite recursion
+  if (depth > 5) return;
 
   for (const prop of obj.properties) {
     let keyName: string | null = null;
@@ -500,9 +699,17 @@ function checkObjectLiteral(
         keyName = prop.name.text;
       }
 
+      // Check the value (P2.4)
+      checkPropertyValue(prop.initializer, sourceFile, relPath, violations, depth);
+
       // Recurse into nested object literals
       if (ts.isObjectLiteralExpression(prop.initializer)) {
         checkObjectLiteral(prop.initializer, sourceFile, relPath, violations, depth + 1);
+      }
+
+      // Recurse into arrays (P3.10)
+      if (ts.isArrayLiteralExpression(prop.initializer)) {
+        checkArrayLiteral(prop.initializer, sourceFile, relPath, violations, depth + 1);
       }
 
       // Check template literal values
@@ -519,6 +726,12 @@ function checkObjectLiteral(
           });
         }
       }
+
+      // Check string concatenation in values (P2.7)
+      if (ts.isBinaryExpression(prop.initializer) &&
+          prop.initializer.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+        checkStringConcatenation(prop.initializer, sourceFile, relPath, violations);
+      }
     }
 
     // Shorthand property: { shop } is equivalent to { shop: shop }
@@ -528,7 +741,6 @@ function checkObjectLiteral(
 
     // Spread element: { ...obj }
     if (ts.isSpreadAssignment(prop)) {
-      // Check if spreading a known sensitive object
       const spreadExpr = prop.expression;
       if (ts.isIdentifier(spreadExpr)) {
         const name = spreadExpr.text;
@@ -561,6 +773,176 @@ function checkObjectLiteral(
   }
 }
 
+/**
+ * Check a property value for sensitive data (P2.4).
+ */
+function checkPropertyValue(
+  value: ts.Node,
+  sourceFile: ts.SourceFile,
+  relPath: string,
+  violations: Violation[],
+  _depth: number
+): void {
+  // Check identifier values: { store: shop }
+  if (ts.isIdentifier(value)) {
+    const name = value.text;
+    if (isSensitiveIdentifier(name) && !SAFE_KEY_ALLOWLIST[name]) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(value.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "sensitive-value",
+        message: `Sensitive identifier as value: ${name}`,
+        snippet: truncate(value.getText(), 100),
+      });
+    }
+    // Check for error identifiers
+    if (isErrorLikeIdentifier(name)) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(value.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "raw-error-value",
+        message: `Error identifier as property value: ${name}`,
+        snippet: truncate(value.getText(), 100),
+      });
+    }
+  }
+
+  // Check property access: { error: err.message } or { x: foo.stack }
+  if (ts.isPropertyAccessExpression(value)) {
+    const propName = value.name.text;
+    if (propName === "message" || propName === "stack") {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(value.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "error-message",
+        message: `Error .${propName} in property value`,
+        snippet: truncate(value.getText(), 100),
+      });
+    }
+    // Check if the last property name is sensitive
+    if (isSensitiveIdentifier(propName) && !SAFE_KEY_ALLOWLIST[propName]) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(value.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "sensitive-value",
+        message: `Property access to sensitive field: .${propName}`,
+        snippet: truncate(value.getText(), 100),
+      });
+    }
+  }
+
+  // Check call expressions: { error: String(err) }
+  if (ts.isCallExpression(value)) {
+    const callName = getCallName(value);
+    if (callName === "String" || callName === "JSON.stringify") {
+      const firstArg = value.arguments[0];
+      if (firstArg && ts.isIdentifier(firstArg) && isErrorLikeIdentifier(firstArg.text)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(value.getStart());
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          column: character + 1,
+          rule: "error-stringify",
+          message: `Error stringified in property value: ${callName}(${firstArg.text})`,
+          snippet: truncate(value.getText(), 100),
+        });
+      }
+    }
+  }
+}
+
+/**
+ * Check array literals for sensitive data (P3.10).
+ */
+function checkArrayLiteral(
+  arr: ts.ArrayLiteralExpression,
+  sourceFile: ts.SourceFile,
+  relPath: string,
+  violations: Violation[],
+  depth = 0
+): void {
+  if (depth > 5) return;
+
+  for (const element of arr.elements) {
+    if (ts.isObjectLiteralExpression(element)) {
+      checkObjectLiteral(element, sourceFile, relPath, violations, depth + 1);
+    }
+    if (ts.isArrayLiteralExpression(element)) {
+      checkArrayLiteral(element, sourceFile, relPath, violations, depth + 1);
+    }
+    if (ts.isIdentifier(element)) {
+      const name = element.text;
+      if (isSensitiveIdentifier(name) && !SAFE_KEY_ALLOWLIST[name]) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(element.getStart());
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          column: character + 1,
+          rule: "sensitive-value",
+          message: `Sensitive identifier in array: ${name}`,
+          snippet: truncate(element.getText(), 100),
+        });
+      }
+    }
+  }
+}
+
+/**
+ * Check string concatenation for sensitive identifiers (P2.7).
+ */
+function checkStringConcatenation(
+  expr: ts.BinaryExpression,
+  sourceFile: ts.SourceFile,
+  relPath: string,
+  violations: Violation[]
+): void {
+  function checkOperand(operand: ts.Node): void {
+    if (ts.isIdentifier(operand)) {
+      const name = operand.text;
+      if (isSensitiveIdentifier(name) && !SAFE_KEY_ALLOWLIST[name]) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(operand.getStart());
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          column: character + 1,
+          rule: "concat-sensitive",
+          message: `Sensitive identifier in string concatenation: ${name}`,
+          snippet: truncate(expr.getText(sourceFile), 100),
+        });
+      }
+    }
+    if (ts.isBinaryExpression(operand) && operand.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+      checkOperand(operand.left);
+      checkOperand(operand.right);
+    }
+    if (ts.isPropertyAccessExpression(operand)) {
+      const propName = operand.name.text;
+      if (isSensitiveIdentifier(propName) && !SAFE_KEY_ALLOWLIST[propName]) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(operand.getStart());
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          column: character + 1,
+          rule: "concat-sensitive",
+          message: `Property access to sensitive field in concatenation: .${propName}`,
+          snippet: truncate(expr.getText(sourceFile), 100),
+        });
+      }
+    }
+  }
+
+  checkOperand(expr.left);
+  checkOperand(expr.right);
+}
+
 function checkTemplateLiteral(
   node: ts.Node,
   sourceFile: ts.SourceFile
@@ -571,17 +953,30 @@ function checkTemplateLiteral(
     const expr = span.expression;
     const exprText = expr.getText(sourceFile);
 
-    // Check if expression matches sensitive patterns
-    for (const pattern of SENSITIVE_INTERPOLATION_PATTERNS) {
-      if (pattern.test(exprText)) {
+    // P2.3: Match on the last property name for property access
+    // ${session.shop}, ${payload.shop}, ${x.shopDomain} should all fail
+    if (SENSITIVE_TEMPLATE_LAST_PROP.test(exprText)) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(expr.getStart());
+      violations.push({
+        line: line + 1,
+        column: character + 1,
+        expr: exprText.trim(),
+        snippet: truncate(span.getText(sourceFile), 80),
+      });
+      return;
+    }
+
+    // Also check plain identifiers
+    if (ts.isIdentifier(expr)) {
+      const name = expr.text;
+      if (isSensitiveIdentifier(name) && !SAFE_KEY_ALLOWLIST[name]) {
         const { line, character } = sourceFile.getLineAndCharacterOfPosition(expr.getStart());
         violations.push({
           line: line + 1,
           column: character + 1,
-          expr: exprText.trim(),
+          expr: name,
           snippet: truncate(span.getText(sourceFile), 80),
         });
-        break;
       }
     }
   }
@@ -602,10 +997,6 @@ function checkTemplateLiteral(
   }
 
   return violations;
-}
-
-function isSensitiveKey(key: string): boolean {
-  return SENSITIVE_KEY_PATTERNS.some((pattern) => pattern.test(key));
 }
 
 function isValidationPattern(text: string): boolean {
@@ -668,12 +1059,20 @@ function groupViolations(violations: Violation[]): Map<string, Violation[]> {
 function main(): void {
   console.log("=== AST-based Logging Guard Check ===\n");
 
-  const files = findSourceFiles(REPO_ROOT);
-  console.log(`Scanning ${files.length} source files...\n`);
+  const { tsFiles, scriptFiles } = findSourceFiles(REPO_ROOT);
+  console.log(`Scanning ${tsFiles.length} TypeScript files and ${scriptFiles.length} script files...\n`);
 
   const allViolations: Violation[] = [];
-  for (const file of files) {
+
+  // Analyze TypeScript files
+  for (const file of tsFiles) {
     const violations = analyzeFile(file);
+    allViolations.push(...violations);
+  }
+
+  // Analyze script files (text-based)
+  for (const file of scriptFiles) {
+    const violations = analyzeScriptFile(file);
     allViolations.push(...violations);
   }
 
@@ -687,7 +1086,7 @@ function main(): void {
     allowed: number;
     violations: Violation[];
   }> = [];
-  const staleEntries: string[] = [];
+  const staleEntries: Array<{ key: string; allowed: number; found: number }> = [];
 
   // Check for violations exceeding allowlist
   for (const [key, violations] of grouped) {
@@ -700,15 +1099,11 @@ function main(): void {
     }
   }
 
-  // Check for stale allowlist entries (entries with no violations)
-  for (const [key, count] of allowlist) {
-    if (!grouped.has(key)) {
-      staleEntries.push(`${key}:${count}`);
-    } else {
-      const found = grouped.get(key)!.length;
-      if (found < count) {
-        staleEntries.push(`${key}:${count} (found only ${found})`);
-      }
+  // Check for stale allowlist entries (P2.6: fail on stale/over-counted)
+  for (const [key, allowed] of allowlist) {
+    const found = grouped.get(key)?.length ?? 0;
+    if (found < allowed) {
+      staleEntries.push({ key, allowed, found });
     }
   }
 
@@ -720,7 +1115,10 @@ function main(): void {
     process.exit(0);
   }
 
+  let shouldFail = false;
+
   if (newViolations > 0) {
+    shouldFail = true;
     console.log(
       `\x1b[31m✗ Found ${newViolations} NEW logging violation(s) above allowlist:\x1b[0m\n`
     );
@@ -742,22 +1140,19 @@ function main(): void {
     console.log("\x1b[33mFormat: file:rule:count\x1b[0m\n");
   }
 
+  // P2.6: Stale entries now FAIL (ratchet)
   if (staleEntries.length > 0) {
+    shouldFail = true;
     console.log(
-      `\x1b[33m⚠ Found ${staleEntries.length} stale allowlist entry(ies):\x1b[0m\n`
+      `\x1b[31m✗ Found ${staleEntries.length} stale/over-counted allowlist entry(ies):\x1b[0m\n`
     );
-    for (const entry of staleEntries) {
-      console.log(`  ${entry}`);
+    for (const { key, allowed, found } of staleEntries) {
+      console.log(`  ${key}: allowed ${allowed}, found only ${found}`);
     }
-    console.log("\n\x1b[33mThese entries can be removed or reduced in logging-allowlist.txt\x1b[0m\n");
+    console.log("\n\x1b[33mTo fix: Reduce the count in logging-allowlist.txt to match actual violations.\x1b[0m\n");
   }
 
-  if (newViolations > 0) {
-    process.exit(1);
-  }
-
-  // Stale entries alone don't fail (to allow gradual cleanup)
-  process.exit(0);
+  process.exit(shouldFail ? 1 : 0);
 }
 
 main();

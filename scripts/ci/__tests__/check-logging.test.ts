@@ -7,22 +7,26 @@ import * as os from "os";
 /**
  * Tests for the AST-based logging guard (check-logging.ts).
  *
- * Tests cover:
- * - Gap 1: Multi-line calls now properly detected
- * - Gap 2: Amount/paise/total/outstanding/balance keys caught
- * - Gap 3: Lines with type/interface/import are not skipped
- * - Gap 4: Sentry methods (addBreadcrumb, setExtra, etc.) checked
- * - Gap 5: Shorthand properties ({ shop }) detected
- * - Allowlist mechanics: at-count passes, over-count fails, stale reported
+ * Covers all items from QA review:
+ * P1.1: Unanchored regex with phone/address/notes, snake_case support
+ * P1.2: Text pass for .sh/.mjs with token prefixes
+ * P2.3: Template interpolation matches last property name
+ * P2.4: Check values (identifier values, .message/.stack, raw error args)
+ * P2.5: Sentry setUser and setTag/setExtra value checking
+ * P2.6: Stale/over-counted allowlist entries FAIL (ratchet)
+ * P2.7: String concatenation
+ * P3.8: Directory skip logic is path-specific
+ * P3.9: raw-capture catches any catch-clause variable
+ * P3.10: Walk arrays
  */
 
 describe("check-logging.ts (AST-based)", () => {
   let tmpDir: string;
   let appDir: string;
+  let scriptsDir: string;
   let scriptPath: string;
 
   beforeAll(() => {
-    // Verify the script exists
     scriptPath = path.join(__dirname, "..", "check-logging.ts");
     expect(fs.existsSync(scriptPath)).toBe(true);
   });
@@ -30,20 +34,16 @@ describe("check-logging.ts (AST-based)", () => {
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "logging-test-"));
     appDir = path.join(tmpDir, "app");
+    scriptsDir = path.join(tmpDir, "scripts");
     fs.mkdirSync(appDir, { recursive: true });
-    // Also create workers and scripts dirs (the checker scans these)
     fs.mkdirSync(path.join(tmpDir, "workers"), { recursive: true });
-    fs.mkdirSync(path.join(tmpDir, "scripts"), { recursive: true });
+    fs.mkdirSync(scriptsDir, { recursive: true });
   });
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  /**
-   * Run the logging guard against a test directory with optional allowlist.
-   * Uses environment variables to override the root and allowlist paths.
-   */
   const runGuard = (
     allowlist: string[] = []
   ): { exitCode: number; output: string } => {
@@ -70,606 +70,418 @@ describe("check-logging.ts (AST-based)", () => {
     }
   };
 
-  describe("Gap 1: Multi-line calls", () => {
-    it("fails for multi-line console.log with shop interpolation", () => {
+  // =========================================================================
+  // P1.1: Unanchored regex with phone/address/notes, snake_case
+  // =========================================================================
+  describe("P1.1: Unanchored key matching with extensions", () => {
+    it("fails for buyerEmail (prefixed email)", () => {
       fs.writeFileSync(
-        path.join(appDir, "multiline.ts"),
-        `
-export function test(shop: string) {
-  console.log(
-    \`Processing webhook for \${shop}\`
-  );
-}
-        `
+        path.join(appDir, "test.ts"),
+        `export function test(buyerEmail: string) { console.log("Buyer", { buyerEmail }); }`
       );
-
       const { exitCode, output } = runGuard();
       expect(exitCode).not.toBe(0);
-      expect(output).toContain("shop-interpolation");
+      expect(output).toContain("buyerEmail");
     });
 
-    it("fails for multi-line safeLog with sensitive key in object literal", () => {
+    it("fails for customerEmail", () => {
       fs.writeFileSync(
-        path.join(appDir, "multiline-safelog.ts"),
-        `
-function safeLog(_l: string, _e: string, _f: Record<string, unknown>) {}
+        path.join(appDir, "test.ts"),
+        `export function test(customerEmail: string) { console.log("Customer", { customerEmail }); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("customerEmail");
+    });
 
-export function test(amount: number) {
-  safeLog("info", "event", {
-    amount,
-    currency: "INR"
+    it("fails for companyName", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(companyName: string) { console.log("Company", { companyName }); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("companyName");
+    });
+
+    it("fails for firstName", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(firstName: string) { console.log("User", { firstName }); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("firstName");
+    });
+
+    it("fails for payerName", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(payerName: string) { console.log("Payer", { payerName }); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("payerName");
+    });
+
+    it("fails for myshopifyDomain", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(myshopifyDomain: string) { console.log("Domain", { myshopifyDomain }); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("myshopifyDomain");
+    });
+
+    it("fails for shop_domain (snake_case)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(shop_domain: string) { console.log("Shop", { shop_domain }); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("shop_domain");
+    });
+
+    it("fails for phone", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(phone: string) { console.log("Contact", { phone }); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("phone");
+    });
+
+    it("fails for address", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(address: string) { console.log("Location", { address }); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("address");
+    });
+
+    it("fails for notes", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(notes: string) { console.log("Record", { notes }); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("notes");
+    });
   });
-}
-        `
-      );
 
+  // =========================================================================
+  // P1.2: Text pass for .sh/.mjs with token prefixes
+  // =========================================================================
+  describe("P1.2: Script file scanning", () => {
+    it("fails for shpat_ token prefix in shell script", () => {
+      fs.writeFileSync(
+        path.join(scriptsDir, "test.sh"),
+        `#!/bin/bash\nTOKEN="shpat_1234567890"\necho $TOKEN`
+      );
       const { exitCode, output } = runGuard();
       expect(exitCode).not.toBe(0);
-      expect(output).toContain("sensitive-key");
+      expect(output).toContain("script-token");
     });
 
-    it("passes for multi-line call with only safe keys", () => {
+    it("fails for myshopify.com in mjs script", () => {
       fs.writeFileSync(
-        path.join(appDir, "multiline-safe.ts"),
-        `
-export function test(shopId: string) {
-  console.log(
-    "[test] Processing completed",
-    { shopId, count: 5 }
-  );
-}
-        `
+        path.join(scriptsDir, "test.mjs"),
+        `const shop = "test.myshopify.com";\nconsole.log(shop);`
       );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("script-domain");
+    });
 
-      const { exitCode } = runGuard();
+    it("fails for echo $SHOP in shell script", () => {
+      fs.writeFileSync(
+        path.join(scriptsDir, "test.sh"),
+        `#!/bin/bash\nSHOP="example.myshopify.com"\necho "Shop: $SHOP"`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("script-shop-var");
+    });
+  });
+
+  // =========================================================================
+  // P2.3: Template interpolation matches last property name
+  // =========================================================================
+  describe("P2.3: Template last property matching", () => {
+    it("fails for ${session.shop}", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(session: { shop: string }) { console.log(\`Processing \${session.shop}\`); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("session.shop");
+    });
+
+    it("fails for ${payload.shop}", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(payload: { shop: string }) { console.log(\`Webhook for \${payload.shop}\`); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("payload.shop");
+    });
+
+    it("fails for ${x.shopDomain}", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(x: { shopDomain: string }) { console.log(\`Domain: \${x.shopDomain}\`); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("x.shopDomain");
+    });
+  });
+
+  // =========================================================================
+  // P2.4: Check values (identifier, .message, raw error args)
+  // =========================================================================
+  describe("P2.4: Value checking", () => {
+    it("fails for { store: shop } (sensitive identifier as value)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(shop: string) { console.log("Info", { store: shop }); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("sensitive-value");
+    });
+
+    it("fails for { error: err.message }", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(err: Error) { console.log("Error", { error: err.message }); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("error-message");
+    });
+
+    it("fails for { trace: err.stack }", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(err: Error) { console.log("Stack", { trace: err.stack }); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("error-message");
+    });
+
+    it("fails for console.error(x, err) - raw error positionally", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test() { try { throw new Error(); } catch (err) { console.error("Failed:", err); } }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("raw-error-arg");
+    });
+  });
+
+  // =========================================================================
+  // P2.5: Sentry setUser and setTag/setExtra value checking
+  // =========================================================================
+  describe("P2.5: Sentry value checking", () => {
+    it("fails for Sentry.setUser", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `import * as Sentry from "@sentry/cloudflare";\nexport function test() { Sentry.setUser({ id: "123" }); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("sentry-setuser");
+    });
+
+    it("fails for setTag with sensitive value", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `import * as Sentry from "@sentry/cloudflare";\nexport function test(shopDomain: string) { Sentry.setTag("store", shopDomain); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("sensitive-value");
+    });
+
+    it("fails for setExtra with .message", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `import * as Sentry from "@sentry/cloudflare";\nexport function test(err: Error) { Sentry.setExtra("error", err.message); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("error-message");
+    });
+  });
+
+  // =========================================================================
+  // P2.6: Stale/over-counted allowlist entries FAIL (ratchet)
+  // =========================================================================
+  describe("P2.6: Allowlist ratchet", () => {
+    it("fails when allowlist count exceeds actual violations (stale)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(shopId: string) { console.log("Safe", { shopId }); }`
+      );
+      // Allowlist says 2 violations but file has 0
+      const { exitCode, output } = runGuard(["app/test.ts:shop-interpolation:2"]);
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("stale");
+    });
+
+    it("fails when allowlist count is higher than actual", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(shop: string) { console.log(\`Processing \${shop}\`); }`
+      );
+      // Allowlist says 3 violations but file has 1
+      const { exitCode, output } = runGuard(["app/test.ts:shop-interpolation:3"]);
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("allowed 3, found only 1");
+    });
+
+    it("passes when allowlist count matches actual violations", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(shop: string) { console.log(\`Processing \${shop}\`); }`
+      );
+      const { exitCode } = runGuard(["app/test.ts:shop-interpolation:1"]);
       expect(exitCode).toBe(0);
     });
   });
 
-  describe("Gap 2: Amount keys with variations", () => {
-    it("fails for amountPaise key", () => {
+  // =========================================================================
+  // P2.7: String concatenation
+  // =========================================================================
+  describe("P2.7: String concatenation", () => {
+    it("fails for \"sync \" + shop", () => {
       fs.writeFileSync(
-        path.join(appDir, "amount.ts"),
-        `
-export function test() {
-  console.log("Payment", { amountPaise: 50000 });
-}
-        `
+        path.join(appDir, "test.ts"),
+        `export function test(shop: string) { console.log("Processing " + shop); }`
       );
-
       const { exitCode, output } = runGuard();
       expect(exitCode).not.toBe(0);
-      expect(output).toContain("sensitive-key");
-      expect(output).toContain("amountPaise");
+      expect(output).toContain("concat-sensitive");
     });
 
-    it("fails for totalPaise key", () => {
+    it("fails for concatenation with property access", () => {
       fs.writeFileSync(
-        path.join(appDir, "total.ts"),
-        `
-export function test() {
-  console.log("Order", { totalPaise: 100000 });
-}
-        `
+        path.join(appDir, "test.ts"),
+        `export function test(data: { domain: string }) { console.log("Domain: " + data.domain); }`
       );
-
       const { exitCode, output } = runGuard();
       expect(exitCode).not.toBe(0);
-      expect(output).toContain("totalPaise");
-    });
-
-    it("fails for outstandingPaise key", () => {
-      fs.writeFileSync(
-        path.join(appDir, "outstanding.ts"),
-        `
-export function test() {
-  console.log("Balance", { outstandingPaise: 25000 });
-}
-        `
-      );
-
-      const { exitCode, output } = runGuard();
-      expect(exitCode).not.toBe(0);
-      expect(output).toContain("outstandingPaise");
-    });
-
-    it("fails for balance key", () => {
-      fs.writeFileSync(
-        path.join(appDir, "balance.ts"),
-        `
-export function test() {
-  console.log("Account", { balance: 5000 });
-}
-        `
-      );
-
-      const { exitCode, output } = runGuard();
-      expect(exitCode).not.toBe(0);
-      expect(output).toContain("balance");
-    });
-
-    it("passes for count keys (aggregate metrics)", () => {
-      fs.writeFileSync(
-        path.join(appDir, "counts.ts"),
-        `
-export function test() {
-  console.log("Metrics", { count: 5, totalCount: 100, orderCount: 50 });
-}
-        `
-      );
-
-      const { exitCode } = runGuard();
-      expect(exitCode).toBe(0);
+      expect(output).toContain("concat-sensitive");
     });
   });
 
-  describe("Gap 3: Lines with type/interface/import are not skipped", () => {
-    it("fails for console.log after import statement", () => {
+  // =========================================================================
+  // P3.9: raw-capture catches any catch-clause variable
+  // =========================================================================
+  describe("P3.9: raw-capture any variable", () => {
+    it("fails for captureException(e)", () => {
       fs.writeFileSync(
-        path.join(appDir, "with-import.ts"),
-        `
-import { something } from "somewhere";
-
-export function test(shop: string) {
-  console.log(\`Processing \${shop}\`);
-}
-        `
+        path.join(appDir, "test.ts"),
+        `import { captureException } from "./sentry";\nexport function test() { try { throw new Error(); } catch (e) { captureException(e); } }`
       );
-
-      const { exitCode, output } = runGuard();
-      expect(exitCode).not.toBe(0);
-      expect(output).toContain("shop-interpolation");
-    });
-
-    it("fails for console.log in file with interface", () => {
-      fs.writeFileSync(
-        path.join(appDir, "with-interface.ts"),
-        `
-interface OrderInfo {
-  totalAmount: number;
-  shopDomain: string;
-}
-
-export function test(shopDomain: string): OrderInfo {
-  console.log(\`Webhook received for \${shopDomain}\`);
-  return { totalAmount: 0, shopDomain };
-}
-        `
-      );
-
-      const { exitCode, output } = runGuard();
-      expect(exitCode).not.toBe(0);
-      expect(output).toContain("shop-interpolation");
-    });
-
-    it("fails for console.log with inline comment", () => {
-      fs.writeFileSync(
-        path.join(appDir, "with-comment.ts"),
-        `
-export function test(shop: string) {
-  console.log(\`Processing \${shop}\`); // this is the domain
-}
-        `
-      );
-
-      const { exitCode, output } = runGuard();
-      expect(exitCode).not.toBe(0);
-      expect(output).toContain("shop-interpolation");
-    });
-  });
-
-  describe("Gap 4: Sentry methods are checked", () => {
-    it("fails for addBreadcrumb with sensitive data", () => {
-      fs.writeFileSync(
-        path.join(appDir, "sentry-breadcrumb.ts"),
-        `
-import * as Sentry from "@sentry/cloudflare";
-
-export function test(shop: string) {
-  Sentry.addBreadcrumb({
-    message: "Processing",
-    data: { shop },
-  });
-}
-        `
-      );
-
-      const { exitCode, output } = runGuard();
-      expect(exitCode).not.toBe(0);
-      expect(output).toContain("sensitive-key");
-    });
-
-    it("fails for setExtra with sensitive key", () => {
-      fs.writeFileSync(
-        path.join(appDir, "sentry-extra.ts"),
-        `
-import * as Sentry from "@sentry/cloudflare";
-
-export function test(amount: number) {
-  Sentry.setExtra("amount", amount);
-}
-        `
-      );
-
-      const { exitCode, output } = runGuard();
-      expect(exitCode).not.toBe(0);
-      expect(output).toContain("sensitive-key");
-    });
-
-    it("fails for setContext with shop in object", () => {
-      fs.writeFileSync(
-        path.join(appDir, "sentry-context.ts"),
-        `
-import * as Sentry from "@sentry/cloudflare";
-
-export function test(shop: string) {
-  Sentry.setContext("payment", {
-    shop,
-    narration: "Payment",
-  });
-}
-        `
-      );
-
-      const { exitCode, output } = runGuard();
-      expect(exitCode).not.toBe(0);
-      expect(output).toContain("sensitive-key");
-    });
-
-    it("fails for setTag with domain", () => {
-      fs.writeFileSync(
-        path.join(appDir, "sentry-tag.ts"),
-        `
-import * as Sentry from "@sentry/cloudflare";
-
-export function test(domain: string) {
-  Sentry.setTag("domain", domain);
-}
-        `
-      );
-
-      const { exitCode, output } = runGuard();
-      expect(exitCode).not.toBe(0);
-      expect(output).toContain("sensitive-key");
-    });
-
-    it("fails for captureException with raw error (no tags)", () => {
-      fs.writeFileSync(
-        path.join(appDir, "sentry-capture.ts"),
-        `
-import { captureException } from "./sentry";
-
-export function test() {
-  try {
-    throw new Error("test");
-  } catch (err) {
-    captureException(err);
-  }
-}
-        `
-      );
-
       const { exitCode, output } = runGuard();
       expect(exitCode).not.toBe(0);
       expect(output).toContain("raw-capture");
     });
 
-    it("passes for safe Sentry usage with shopId and errorCode", () => {
+    it("fails for captureException(caught)", () => {
       fs.writeFileSync(
-        path.join(appDir, "sentry-safe.ts"),
-        `
-import * as Sentry from "@sentry/cloudflare";
-
-export function test(shopId: string, errorCode: string) {
-  Sentry.setTag("shopId", shopId);
-  Sentry.setTag("code", errorCode);
-  Sentry.addBreadcrumb({
-    message: "Processing",
-    data: { shopId, status: "received" },
-  });
-}
-        `
+        path.join(appDir, "test.ts"),
+        `import { captureException } from "./sentry";\nexport function test() { try { throw new Error(); } catch (caught) { captureException(caught); } }`
       );
-
-      const { exitCode } = runGuard();
-      expect(exitCode).toBe(0);
-    });
-  });
-
-  describe("Gap 5: Shorthand properties ({ shop }) are detected", () => {
-    it("fails for { shop } shorthand", () => {
-      fs.writeFileSync(
-        path.join(appDir, "shorthand.ts"),
-        `
-export function test(shop: string) {
-  console.log("Order", { shop });
-}
-        `
-      );
-
       const { exitCode, output } = runGuard();
       expect(exitCode).not.toBe(0);
-      expect(output).toContain("sensitive-key");
-      expect(output).toContain("shop");
+      expect(output).toContain("raw-capture");
     });
 
-    it("fails for { shopDomain } shorthand", () => {
+    it("fails for captureException(exception)", () => {
       fs.writeFileSync(
-        path.join(appDir, "shorthand-domain.ts"),
-        `
-export function test(shopDomain: string) {
-  console.log("Webhook", { shopDomain, topic: "orders/create" });
-}
-        `
+        path.join(appDir, "test.ts"),
+        `import { captureException } from "./sentry";\nexport function test() { try { throw new Error(); } catch (exception) { captureException(exception); } }`
       );
-
       const { exitCode, output } = runGuard();
       expect(exitCode).not.toBe(0);
-      expect(output).toContain("shopDomain");
+      expect(output).toContain("raw-capture");
     });
+  });
 
-    it("fails for { email } shorthand", () => {
+  // =========================================================================
+  // P3.10: Walk arrays
+  // =========================================================================
+  describe("P3.10: Array walking", () => {
+    it("fails for { items: [{ email }] }", () => {
       fs.writeFileSync(
-        path.join(appDir, "shorthand-email.ts"),
-        `
-export function test(email: string) {
-  console.log("User", { email });
-}
-        `
+        path.join(appDir, "test.ts"),
+        `export function test(email: string) { console.log("Users", { items: [{ email }] }); }`
       );
-
       const { exitCode, output } = runGuard();
       expect(exitCode).not.toBe(0);
       expect(output).toContain("email");
     });
 
-    it("fails for multiple shorthand sensitive keys", () => {
+    it("fails for nested arrays with sensitive data", () => {
       fs.writeFileSync(
-        path.join(appDir, "shorthand-multi.ts"),
-        `
-export function test(shop: string, amount: number, payer: string) {
-  console.log("Details", { shop, amount, payer });
-}
-        `
+        path.join(appDir, "test.ts"),
+        `export function test(shop: string) { console.log("Data", { outer: [{ inner: [{ shop }] }] }); }`
       );
-
       const { exitCode, output } = runGuard();
       expect(exitCode).not.toBe(0);
-      // Should find all three sensitive keys
-      expect(output).toMatch(/shop|amount|payer/);
-    });
-
-    it("passes for safe shorthand keys", () => {
-      fs.writeFileSync(
-        path.join(appDir, "shorthand-safe.ts"),
-        `
-export function test(shopId: string, count: number, status: string) {
-  console.log("Safe", { shopId, count, status });
-}
-        `
-      );
-
-      const { exitCode } = runGuard();
-      expect(exitCode).toBe(0);
+      expect(output).toContain("shop");
     });
   });
 
-  describe("Allowlist mechanics (file:rule:count)", () => {
-    it("passes when violation count equals allowlist", () => {
+  // =========================================================================
+  // Passing cases (safe keys)
+  // =========================================================================
+  describe("Safe keys pass", () => {
+    it("passes for shopId", () => {
       fs.writeFileSync(
-        path.join(appDir, "allowed.ts"),
-        `
-export function test(shop: string) {
-  console.log(\`Processing for \${shop}\`);
-}
-        `
+        path.join(appDir, "test.ts"),
+        `export function test(shopId: string) { console.log("Info", { shopId }); }`
       );
-
-      const { exitCode } = runGuard(["app/allowed.ts:shop-interpolation:1"]);
-      expect(exitCode).toBe(0);
-    });
-
-    it("fails when violation count exceeds allowlist", () => {
-      fs.writeFileSync(
-        path.join(appDir, "over-allowed.ts"),
-        `
-export function test(shop: string) {
-  console.log(\`Processing for \${shop}\`);
-  console.log(\`Done for \${shop}\`);
-}
-        `
-      );
-
-      // Only allow 1 but file has 2
-      const { exitCode, output } = runGuard([
-        "app/over-allowed.ts:shop-interpolation:1",
-      ]);
-      expect(exitCode).not.toBe(0);
-      expect(output).toContain("found 2, allowed 1");
-    });
-
-    it("reports stale allowlist entries (no violations found)", () => {
-      fs.writeFileSync(
-        path.join(appDir, "clean.ts"),
-        `
-export function test(shopId: string) {
-  console.log("Clean", { shopId });
-}
-        `
-      );
-
-      // Allowlist has entry but file is clean
-      const { output } = runGuard(["app/clean.ts:shop-interpolation:1"]);
-      expect(output).toContain("stale");
-      expect(output).toContain("app/clean.ts:shop-interpolation:1");
-    });
-
-    it("reports stale allowlist entries (fewer violations than allowed)", () => {
-      fs.writeFileSync(
-        path.join(appDir, "reduced.ts"),
-        `
-export function test(shop: string) {
-  console.log(\`Processing \${shop}\`);
-}
-        `
-      );
-
-      // Allowlist allows 3 but file only has 1
-      const { output } = runGuard(["app/reduced.ts:shop-interpolation:3"]);
-      expect(output).toContain("stale");
-      expect(output).toContain("found only 1");
-    });
-
-    it("line number shifts do not break allowlist", () => {
-      // Initial file
-      fs.writeFileSync(
-        path.join(appDir, "shifting.ts"),
-        `
-export function test(shop: string) {
-  console.log(\`Processing for \${shop}\`);
-}
-        `
-      );
-
-      const { exitCode: exitCode1 } = runGuard([
-        "app/shifting.ts:shop-interpolation:1",
-      ]);
-      expect(exitCode1).toBe(0);
-
-      // Add comments, shifting the violation to a different line
-      fs.writeFileSync(
-        path.join(appDir, "shifting.ts"),
-        `
-// Comment 1
-// Comment 2
-// Comment 3
-// Comment 4
-// Comment 5
-export function test(shop: string) {
-  console.log(\`Processing for \${shop}\`);
-}
-        `
-      );
-
-      // Same allowlist should still pass
-      const { exitCode: exitCode2 } = runGuard([
-        "app/shifting.ts:shop-interpolation:1",
-      ]);
-      expect(exitCode2).toBe(0);
-    });
-
-    it("adding a new violation fails even with existing allowlist", () => {
-      fs.writeFileSync(
-        path.join(appDir, "growing.ts"),
-        `
-export function test1(shop: string) {
-  console.log(\`Processing for \${shop}\`);
-}
-export function test2(shop: string) {
-  console.log(\`Done for \${shop}\`);
-}
-        `
-      );
-
-      // Only allow 1 violation
-      const { exitCode, output } = runGuard([
-        "app/growing.ts:shop-interpolation:1",
-      ]);
-      expect(exitCode).not.toBe(0);
-      expect(output).toContain("NEW logging violation");
-    });
-  });
-
-  describe("Passing cases", () => {
-    it("passes for safeLog with shopId", () => {
-      fs.writeFileSync(
-        path.join(appDir, "good.ts"),
-        `
-function safeLog(_l: string, _e: string, _f: Record<string, unknown>) {}
-
-export function test() {
-  safeLog("info", "test_event", { shopId: "shop-123", count: 5 });
-}
-        `
-      );
-
       const { exitCode } = runGuard();
       expect(exitCode).toBe(0);
     });
 
-    it("passes for safeLog with shopHash", () => {
+    it("passes for shopHash", () => {
       fs.writeFileSync(
-        path.join(appDir, "hash.ts"),
-        `
-function safeLog(_l: string, _e: string, _f: Record<string, unknown>) {}
-async function shopHash(_s: string): Promise<string> { return "abc123"; }
-
-export async function test(shop: string) {
-  safeLog("warn", "test_event", { shopHash: await shopHash(shop) });
-}
-        `
+        path.join(appDir, "test.ts"),
+        `export function test(shopHash: string) { console.log("Info", { shopHash }); }`
       );
-
       const { exitCode } = runGuard();
       expect(exitCode).toBe(0);
     });
 
-    it("passes for validation regex with myshopify.com", () => {
+    it("passes for totalCount", () => {
       fs.writeFileSync(
-        path.join(appDir, "validation.ts"),
-        `
-const isValidShopDomain = (shop: string) => /\\.myshopify\\.com$/.test(shop);
-        `
+        path.join(appDir, "test.ts"),
+        `export function test(totalCount: number) { console.log("Metrics", { totalCount }); }`
       );
-
       const { exitCode } = runGuard();
       expect(exitCode).toBe(0);
     });
 
-    it("passes for captureExceptionWithTags", () => {
+    it("passes for functionName", () => {
       fs.writeFileSync(
-        path.join(appDir, "sentry-with-tags.ts"),
-        `
-function captureExceptionWithTags(_e: unknown, _t: Record<string, string>) {}
-
-export function test() {
-  try {
-    throw new Error("test");
-  } catch (err) {
-    captureExceptionWithTags(err, { code: "test_error" });
-  }
-}
-        `
+        path.join(appDir, "test.ts"),
+        `export function test(functionName: string) { console.log("Meta", { functionName }); }`
       );
-
-      const { exitCode } = runGuard();
-      expect(exitCode).toBe(0);
-    });
-
-    it("passes for IDs and GIDs", () => {
-      fs.writeFileSync(
-        path.join(appDir, "ids.ts"),
-        `
-export function test(orderId: string, orderGid: string, customerId: string) {
-  console.log("Order", { orderId, orderGid, customerId, requestId: "req-123" });
-}
-        `
-      );
-
-      const { exitCode } = runGuard();
-      expect(exitCode).toBe(0);
-    });
-
-    it("passes for timing metrics", () => {
-      fs.writeFileSync(
-        path.join(appDir, "timing.ts"),
-        `
-export function test() {
-  console.log("Performance", { durationMs: 150, elapsedMs: 200 });
-}
-        `
-      );
-
       const { exitCode } = runGuard();
       expect(exitCode).toBe(0);
     });

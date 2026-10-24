@@ -3,37 +3,66 @@
 # Adding a new violation will fail CI even if existing ones are allowlisted.
 # DO NOT add new entries without fixing the underlying code.
 #
-# AST-based checker (check-logging.ts) replaces grep-based approach.
-# Stale entries from previous grep-based checker have been removed.
+# AST-based checker (check-logging.ts) with comprehensive PII detection.
+# Stale entries fail CI (ratchet mode).
 
-# Burn-down list from initial audit + AST migration
+# =============================================================================
+# App routes - shop interpolation
+# =============================================================================
+# app.imports.tsx: 1 console.log with ${shopDomain} interpolation
+# (reduced from 2 after Batch B #182 fixes)
+app/routes/app.imports.tsx:shop-interpolation:1
+
+# app.reconcile.tsx: 3 raw error args
+app/routes/app.reconcile.tsx:raw-error-arg:3
+
+# app.settings.reminders.tsx: 2 raw error args
+app/routes/app.settings.reminders.tsx:raw-error-arg:2
+
+# =============================================================================
+# App services - shop interpolation and raw errors
+# =============================================================================
 # plan.server.ts: 8 console.* calls with ${shop} or ${shopDomain} interpolation
-# (lines 236, 269 use ${shop}; lines 340, 343, 389, 428, 464, 492 use ${shopDomain})
 app/services/plan.server.ts:shop-interpolation:8
-
-# plan.server.ts: 2 raw captureException(err) without tags
+# plan.server.ts: 2 raw captureException calls + 2 raw error args
 app/services/plan.server.ts:raw-capture:2
+app/services/plan.server.ts:raw-error-arg:2
 
 # bulk-jsonl-processor.server.ts: 3 console.log with ${shop} interpolation
-# (lines 972, 1124, 1151)
 app/services/sync/bulk-jsonl-processor.server.ts:shop-interpolation:3
 
 # reconcile-handlers.server.ts: 2 console.log with ${shop} interpolation
-# (lines 103, 137)
 app/services/drain/reconcile-handlers.server.ts:shop-interpolation:2
 
 # order.server.ts: 4 raw captureException(error) without tags
 app/services/sync/order.server.ts:raw-capture:4
 
-# app.imports.tsx: 2 console.log with ${shopDomain} interpolation
-# (lines 443, 560)
-app/routes/app.imports.tsx:shop-interpolation:2
-
+# =============================================================================
+# Scripts - shop interpolation and raw errors
+# =============================================================================
 # refresh-offline-token.ts: 1 help text with myshopify.com example
-# (line 145, help message showing usage example)
 scripts/lib/refresh-offline-token.ts:domain-literal:1
 
-# seed.ts: console.log with ${shopDomain} (line 3640) and help text
-# with myshopify.com example (line 3687)
-scripts/seed.ts:shop-interpolation:1
+# seed.ts: 2 violations:
+# - ${shopDomain} placeholder in printDatabaseSeedSQL (line 3640)
+# - ${accountName} seed data in SQL output (line 3662)
+# Note: seed.ts runs in seed-dev-store.yml workflow but uses placeholder values
+scripts/seed.ts:shop-interpolation:2
+# seed.ts: help text with myshopify.com example
 scripts/seed.ts:domain-literal:1
+
+# backstop-backfill.ts: raw error arg
+scripts/backstop-backfill.ts:raw-error-arg:1
+
+# credit-status-metafield-backfill.ts: raw error arg
+scripts/credit-status-metafield-backfill.ts:raw-error-arg:1
+
+# validate-graphql-schema.ts: 2 ${errName} interpolations (error name string)
+scripts/validate-graphql-schema.ts:shop-interpolation:2
+
+# =============================================================================
+# Benchmark scripts - intentionally fake domains for testing
+# =============================================================================
+# These use 'nonexistent.myshopify.com' which is intentionally fake
+scripts/benchmark-cpu-breakdown.mjs:script-domain:1
+scripts/benchmark-db-cpu.mjs:script-domain:1
