@@ -28,6 +28,10 @@ on:
         description: 'Reset existing seed data before seeding'
         type: boolean
         default: false
+      report_duplicates:
+        description: 'Report potential duplicate companies only (read-only, no mutations; overrides dry_run/reset)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -46,6 +50,7 @@ jobs:
       # Pass inputs via env, not interpolated into run blocks
       INPUT_DRY_RUN: ${{ inputs.dry_run }}
       INPUT_RESET: ${{ inputs.reset }}
+      INPUT_REPORT_DUPLICATES: ${{ inputs.report_duplicates }}
 
     steps:
       - name: Checkout
@@ -216,6 +221,11 @@ jobs:
           set -euo pipefail
 
           ARGS=()
+          if [ "$INPUT_REPORT_DUPLICATES" = "true" ]; then
+            # Read-only: seed.ts exits after the duplicate report, before reset/seed
+            npx tsx scripts/seed.ts --report-duplicates
+            exit 0
+          fi
           if [ "$INPUT_DRY_RUN" = "true" ]; then
             ARGS+=("--dry-run")
           fi
