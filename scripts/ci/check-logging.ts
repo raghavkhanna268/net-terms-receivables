@@ -689,7 +689,7 @@ function isErrorLikeIdentifier(name: string): boolean {
  */
 function resolveConstInitializer(
   identifier: ts.Identifier,
-  sourceFile: ts.SourceFile
+  _sourceFile: ts.SourceFile
 ): ts.Expression | null {
   const name = identifier.text;
   
@@ -1694,11 +1694,6 @@ function checkLoggerMock(
 // ============================================================================
 // Logger Mock Allowlist
 // ============================================================================
-
-interface LoggerMockAllowlistEntry {
-  path: string;
-  reason: string;
-}
 
 function loadLoggerMockAllowlist(filePath: string): Map<string, string> {
   const allowlist = new Map<string, string>();

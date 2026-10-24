@@ -71,7 +71,7 @@ async function main(): Promise<void> {
   const since = process.env.SINCE ?? "";
   const until = process.env.UNTIL ?? "";
   const parsed = parseArgs(["--since", since, "--until", until]);
-  if (parsed.dryRun !== true || parsed.error) {
+  if (parsed.dryRun !== true || parsed.argError) {
     console.error("preflight: argv is not dry-run");
     process.exit(1);
   }

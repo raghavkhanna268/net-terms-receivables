@@ -8,7 +8,7 @@
  */
 
 import * as Sentry from "@sentry/cloudflare";
-import { safeLog, toErrorCode } from "~/lib/log.server";
+import { safeLog as _safeLog, toErrorCode } from "~/lib/log.server";
 
 // SHOULD FAIL: Bare ${err} in console.log
 export function logBareError(err: Error) {
