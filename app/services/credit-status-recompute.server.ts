@@ -52,6 +52,7 @@ interface BuyerAccountForRecompute {
   bypass: boolean;
   gatedAt: Date | null;
   syncPending: boolean;
+  metafieldSyncedAt: Date | null;
 }
 
 /**
@@ -81,7 +82,8 @@ export async function recomputeCreditStatus(
       "holdState",
       bypass,
       gated_at AS "gatedAt",
-      "syncPending"
+      "syncPending",
+      "metafieldSyncedAt"
     FROM "BuyerAccount"
     WHERE id = ${buyerAccountId}
   `;
@@ -118,8 +120,9 @@ export async function recomputeCreditStatus(
 
   // Early return only when:
   // 1. Hold value hasn't changed, AND
-  // 2. No sync is pending (previous metafield write completed)
-  if (previousHold === newHold && !account.syncPending) {
+  // 2. No sync is pending (previous metafield write completed), AND
+  // 3. Metafield has been written at least once (metafieldSyncedAt is not NULL)
+  if (previousHold === newHold && !account.syncPending && account.metafieldSyncedAt !== null) {
     return {
       success: true,
       metafieldWritten: false,
