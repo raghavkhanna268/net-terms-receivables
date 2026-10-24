@@ -124,10 +124,21 @@ const NEGATIVE_FIXTURES = {
     }`,
     expectedError: "Cannot query field",
   },
-  unvalidatableDynamicQuery: {
-    name: "NEGATIVE_TEST_UNVALIDATABLE",
-    source: null, // This fixture tests the detection of unvalidatable queries, not a specific source
-    expectedError: "cannot be statically validated",
+  unvalidatableInterpolation: {
+    fileContent: 'const result = await admin.graphql(`query { shop { ${dynamicField} } }`);',
+    expectedError: "template interpolation cannot be statically validated",
+  },
+  unvalidatableBuilder: {
+    fileContent: 'const result = await admin.graphql(buildQuery(args));',
+    expectedError: "uses a dynamic builder that cannot be statically validated",
+  },
+  unvalidatableVariable: {
+    fileContent: 'const result = await admin.graphql(someQueryVariable, { variables });',
+    expectedError: "uses a variable reference that cannot be statically validated",
+  },
+  unvalidatablePropertyAccess: {
+    fileContent: 'const result = await admin.graphql(QUERIES.getShop, { variables });',
+    expectedError: "uses a property reference that cannot be statically validated",
   },
 };
 
@@ -471,6 +482,94 @@ function runSelfTests(schema: GraphQLSchema): boolean {
     }
   }
 
+  // Test unvalidatable query detection: interpolation
+  const interpolationErrors = checkForUnvalidatableQueries(
+    "/self-test/interpolation.ts",
+    NEGATIVE_FIXTURES.unvalidatableInterpolation.fileContent
+  );
+  if (interpolationErrors.length === 0) {
+    console.log(`  ❌ SELF-TEST FAILED: unvalidatableInterpolation - expected error but got none`);
+    allPassed = false;
+  } else {
+    const hasExpectedError = interpolationErrors.some((e) =>
+      e.message.includes(NEGATIVE_FIXTURES.unvalidatableInterpolation.expectedError)
+    );
+    if (hasExpectedError) {
+      console.log(`  ✓ unvalidatableInterpolation: correctly detected error`);
+    } else {
+      console.log(`  ❌ SELF-TEST FAILED: unvalidatableInterpolation - wrong error type`);
+      console.log(`     Expected: ${NEGATIVE_FIXTURES.unvalidatableInterpolation.expectedError}`);
+      console.log(`     Got: ${interpolationErrors[0].message}`);
+      allPassed = false;
+    }
+  }
+
+  // Test unvalidatable query detection: builder pattern
+  const builderErrors = checkForUnvalidatableQueries(
+    "/self-test/builder.ts",
+    NEGATIVE_FIXTURES.unvalidatableBuilder.fileContent
+  );
+  if (builderErrors.length === 0) {
+    console.log(`  ❌ SELF-TEST FAILED: unvalidatableBuilder - expected error but got none`);
+    allPassed = false;
+  } else {
+    const hasExpectedError = builderErrors.some((e) =>
+      e.message.includes(NEGATIVE_FIXTURES.unvalidatableBuilder.expectedError)
+    );
+    if (hasExpectedError) {
+      console.log(`  ✓ unvalidatableBuilder: correctly detected error`);
+    } else {
+      console.log(`  ❌ SELF-TEST FAILED: unvalidatableBuilder - wrong error type`);
+      console.log(`     Expected: ${NEGATIVE_FIXTURES.unvalidatableBuilder.expectedError}`);
+      console.log(`     Got: ${builderErrors[0].message}`);
+      allPassed = false;
+    }
+  }
+
+  // Test unvalidatable query detection: variable reference
+  const variableErrors = checkForUnvalidatableQueries(
+    "/self-test/variable.ts",
+    NEGATIVE_FIXTURES.unvalidatableVariable.fileContent
+  );
+  if (variableErrors.length === 0) {
+    console.log(`  ❌ SELF-TEST FAILED: unvalidatableVariable - expected error but got none`);
+    allPassed = false;
+  } else {
+    const hasExpectedError = variableErrors.some((e) =>
+      e.message.includes(NEGATIVE_FIXTURES.unvalidatableVariable.expectedError)
+    );
+    if (hasExpectedError) {
+      console.log(`  ✓ unvalidatableVariable: correctly detected error`);
+    } else {
+      console.log(`  ❌ SELF-TEST FAILED: unvalidatableVariable - wrong error type`);
+      console.log(`     Expected: ${NEGATIVE_FIXTURES.unvalidatableVariable.expectedError}`);
+      console.log(`     Got: ${variableErrors[0].message}`);
+      allPassed = false;
+    }
+  }
+
+  // Test unvalidatable query detection: property access (QUERIES.foo pattern)
+  const propertyErrors = checkForUnvalidatableQueries(
+    "/self-test/property.ts",
+    NEGATIVE_FIXTURES.unvalidatablePropertyAccess.fileContent
+  );
+  if (propertyErrors.length === 0) {
+    console.log(`  ❌ SELF-TEST FAILED: unvalidatablePropertyAccess - expected error but got none`);
+    allPassed = false;
+  } else {
+    const hasExpectedError = propertyErrors.some((e) =>
+      e.message.includes(NEGATIVE_FIXTURES.unvalidatablePropertyAccess.expectedError)
+    );
+    if (hasExpectedError) {
+      console.log(`  ✓ unvalidatablePropertyAccess: correctly detected error`);
+    } else {
+      console.log(`  ❌ SELF-TEST FAILED: unvalidatablePropertyAccess - wrong error type`);
+      console.log(`     Expected: ${NEGATIVE_FIXTURES.unvalidatablePropertyAccess.expectedError}`);
+      console.log(`     Got: ${propertyErrors[0].message}`);
+      allPassed = false;
+    }
+  }
+
   console.log("");
   return allPassed;
 }
@@ -482,6 +581,7 @@ function runSelfTests(schema: GraphQLSchema): boolean {
  * - Are generic wrapper functions where queries are passed in (validated elsewhere)
  */
 const ADMIN_GRAPHQL_CONST_ALLOWLIST = [
+  "after-auth.server.ts", // Uses SHOP_TIMEZONE_QUERY constant
   "metafield-definitions.server.ts", // Uses METAFIELD_DEFINITION_CREATE_MUTATION constant
   "validation-registration.server.ts", // Uses VALIDATIONS_QUERY, VALIDATION_CREATE_MUTATION constants
   "shopify-client.server.ts", // Generic wrapper that takes query as parameter
@@ -493,30 +593,31 @@ const ADMIN_GRAPHQL_CONST_ALLOWLIST = [
  *
  * Allowed patterns:
  * - admin.graphql(`query { ... }`) - inline static template (extracted by this script)
- * - admin.graphql(CONSTANT_NAME, ...) - uses a const (validated by this script)
- * - admin.graphql(query, ...) in wrapper functions - query passed in (validated elsewhere)
+ * - admin.graphql(CONSTANT_NAME, ...) - uses a const (validated by this script, file in allowlist)
+ * - admin.graphql(query, ...) in wrapper functions - query passed in (validated elsewhere, file in allowlist)
  *
- * Disallowed patterns:
+ * Disallowed patterns (ALWAYS checked, even for allowlisted files):
  * - admin.graphql(`query ${variable}`) - template with interpolation
- * - admin.graphql(buildQuery(args)) - function call building query dynamically
  * - gql`query ${variable}` - gql tag with interpolation
+ *
+ * Disallowed patterns (skipped for allowlisted files):
+ * - admin.graphql(buildQuery(args)) - function call building query dynamically
+ * - admin.graphql(variableName) - variable reference (not a template literal)
+ * - admin.graphql(QUERIES.foo) - property access on object
  */
 function checkForUnvalidatableQueries(filePath: string, content: string): GraphQLError[] {
   const errors: GraphQLError[] = [];
   const fileName = path.basename(filePath);
 
-  // Skip the validation script itself
+  // Skip the validation script itself entirely
   if (fileName === "validate-graphql-schema.ts") {
     return errors;
   }
 
-  // Skip files that use admin.graphql() with named constants or are generic wrappers
-  if (ADMIN_GRAPHQL_CONST_ALLOWLIST.some(f => fileName.includes(f))) {
-    return errors;
-  }
+  // ALWAYS check for interpolation patterns - never skip these even for allowlisted files
+  // These are truly dynamic and cannot be validated regardless of allowlist
 
   // Check for admin.graphql() with template literals containing interpolations
-  // This is the truly dynamic case that cannot be validated
   const adminGraphqlInterpolationPattern = /admin\.graphql\s*\(\s*`[^`]*\$\{/g;
   let match;
   while ((match = adminGraphqlInterpolationPattern.exec(content)) !== null) {
@@ -537,6 +638,57 @@ function checkForUnvalidatableQueries(filePath: string, content: string): GraphQ
       new GraphQLError(
         `${filePath}:${lineNumber}: gql/graphql template with interpolation cannot be statically validated. ` +
           `Use a static template literal.`
+      )
+    );
+  }
+
+  // Skip static-document checks for allowlisted files (they use named consts or are wrappers)
+  if (ADMIN_GRAPHQL_CONST_ALLOWLIST.some(f => fileName.includes(f))) {
+    return errors;
+  }
+
+  // Check for admin.graphql() with function calls (builder pattern)
+  // Pattern: admin.graphql(someFunction(...))
+  const adminGraphqlBuilderPattern = /admin\.graphql\s*\(\s*(\w+)\s*\(/g;
+  while ((match = adminGraphqlBuilderPattern.exec(content)) !== null) {
+    const lineNumber = content.substring(0, match.index).split("\n").length;
+    const functionName = match[1];
+    errors.push(
+      new GraphQLError(
+        `${filePath}:${lineNumber}: admin.graphql(${functionName}(...)) uses a dynamic builder that cannot be statically validated. ` +
+          `Add file to ADMIN_GRAPHQL_CONST_ALLOWLIST or extract query to a const.`
+      )
+    );
+  }
+
+  // Check for admin.graphql() with property access (QUERIES.foo pattern)
+  // Pattern: admin.graphql(SOMETHING.property, ...) or admin.graphql(SOMETHING.property)
+  const adminGraphqlPropertyPattern = /admin\.graphql\s*\(\s*(\w+)\.(\w+)(?:\s*,|\s*\))/g;
+  while ((match = adminGraphqlPropertyPattern.exec(content)) !== null) {
+    const lineNumber = content.substring(0, match.index).split("\n").length;
+    const objectName = match[1];
+    const propertyName = match[2];
+    errors.push(
+      new GraphQLError(
+        `${filePath}:${lineNumber}: admin.graphql(${objectName}.${propertyName}) uses a property reference that cannot be statically validated. ` +
+          `Add file to ADMIN_GRAPHQL_CONST_ALLOWLIST or use the query directly.`
+      )
+    );
+  }
+
+  // Check for admin.graphql() with variable references (not template literals)
+  // Pattern: admin.graphql(variableName, ...) or admin.graphql(variableName)
+  // The regex requires an identifier followed by `,` or `)`, so:
+  // - Template literals (backticks) are naturally excluded (backtick isn't [a-zA-Z_])
+  // - Property access (OBJ.prop) is naturally excluded (`.` isn't `,` or `)`)
+  const adminGraphqlVariablePattern = /admin\.graphql\s*\(\s*([a-zA-Z_]\w*)(?:\s*,|\s*\))/g;
+  while ((match = adminGraphqlVariablePattern.exec(content)) !== null) {
+    const variableName = match[1];
+    const lineNumber = content.substring(0, match.index).split("\n").length;
+    errors.push(
+      new GraphQLError(
+        `${filePath}:${lineNumber}: admin.graphql(${variableName}) uses a variable reference that cannot be statically validated. ` +
+          `Add file to ADMIN_GRAPHQL_CONST_ALLOWLIST if the variable is a validated const.`
       )
     );
   }
