@@ -162,6 +162,30 @@ export async function incrementOrderRefetchNull(
 }
 
 /**
+ * Increment the order outstanding missing counter for a shop.
+ *
+ * Called when an order's totalOutstandingSet field is missing.
+ * This tracks orders where we had to fall back to total or existing outstanding.
+ *
+ * Uses an aggregate table (shop, day, count) - no PII, no individual order IDs.
+ * Best-effort: failures are logged but never fail the invoice write.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shop - Shop domain
+ */
+export async function incrementOrderOutstandingMissing(
+  sql: Sql,
+  shop: string
+): Promise<void> {
+  await sql`
+    INSERT INTO order_outstanding_missing (shop, day, count)
+    VALUES (${shop}, CURRENT_DATE, 1)
+    ON CONFLICT (shop, day)
+    DO UPDATE SET count = order_outstanding_missing.count + 1
+  `;
+}
+
+/**
  * Get order refetch null count for a shop.
  *
  * Used for monitoring and debugging. Returns the total count of null re-fetches

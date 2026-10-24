@@ -452,24 +452,23 @@ async function processOrderLines(
 
     if (existingBuyerAccountId) {
       // Invoice exists - ALWAYS update it (eligibility only gates creation)
-      invoices.push(
-        mapOrderToInvoiceWithEligibility(
-          shopId,
-          eligibility.buyerAccountId ?? existingBuyerAccountId,
-          shopifyOrder,
-          eligibility
-        )
+      // Note: For bulk reconcile, we don't track outstandingMissing counter per-order
+      const { invoiceData } = mapOrderToInvoiceWithEligibility(
+        shopId,
+        eligibility.buyerAccountId ?? existingBuyerAccountId,
+        shopifyOrder,
+        eligibility
       );
+      invoices.push(invoiceData);
     } else if (eligibility.eligible) {
       // No existing Invoice and eligible - create it
-      invoices.push(
-        mapOrderToInvoiceWithEligibility(
-          shopId,
-          eligibility.buyerAccountId!,
-          shopifyOrder,
-          eligibility
-        )
+      const { invoiceData } = mapOrderToInvoiceWithEligibility(
+        shopId,
+        eligibility.buyerAccountId!,
+        shopifyOrder,
+        eligibility
       );
+      invoices.push(invoiceData);
     } else {
       skippedCount++;
     }

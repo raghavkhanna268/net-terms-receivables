@@ -769,6 +769,21 @@ model S10bOrderRefetchNull {
   @@map("s10b_order_refetch_null")
 }
 
+/// Order outstanding missing aggregate (diagnostic counter)
+/// Counts orders where totalOutstandingSet was missing per shop per day.
+/// No PII - just (shop, day, count) for diagnostics.
+/// 90-day retention via pg_cron purge job.
+///
+/// Note: This table is created by the order_outstanding_missing migration.
+model OrderOutstandingMissing {
+  shop  String
+  day   DateTime @db.Date
+  count Int      @default(1)
+
+  @@id([shop, day])
+  @@map("order_outstanding_missing")
+}
+
 // =============================================================================
 // S22 DATA REQUESTS
 // =============================================================================

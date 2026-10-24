@@ -34,6 +34,7 @@ import {
   getEligibilityContextByDomain,
   type EligibilityResult,
 } from "~/lib/invoice-eligibility";
+import { incrementOrderOutstandingMissing } from "../drain/reconcile-handlers.server";
 
 /**
  * Process an Order webhook event.
@@ -105,24 +106,37 @@ export async function processOrderWebhook(
     id: string;
     buyerAccountId: string;
     outstanding: string;
+    status: "open" | "paid" | "cancelled";
   }[]>`
-    SELECT id, "buyerAccountId", outstanding::text
+    SELECT id, "buyerAccountId", outstanding::text, status::"InvoiceStatus"
     FROM "Invoice"
     WHERE "shopId" = ${shopId} AND "orderId" = ${order.id}
   `;
 
   if (existingInvoice) {
     // Invoice exists - update it with latest order data
-    // Pass existing outstanding for fallback when totalOutstandingSet is missing
+    // Pass existing outstanding AND status for fallback when totalOutstandingSet is missing
     const eligibility = await checkOrderEligibility(sql, order, context);
-    const invoiceData = mapOrderToInvoiceWithEligibility(
+    const { invoiceData, outstandingMissing } = mapOrderToInvoiceWithEligibility(
       shopId,
       eligibility.buyerAccountId ?? existingInvoice.buyerAccountId,
       order,
       eligibility,
-      existingInvoice.outstanding
+      { outstanding: existingInvoice.outstanding, status: existingInvoice.status }
     );
     const result = await upsertInvoice(sql, invoiceData);
+
+    // Best-effort diagnostic counter increment - never fails the invoice write
+    if (outstandingMissing) {
+      try {
+        await incrementOrderOutstandingMissing(sql, shopDomain);
+      } catch (err) {
+        console.warn(
+          `[order.server] Failed to increment order_outstanding_missing counter: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    }
+
     await markWebhookProcessed(sql, webhookId, topic, order.id, shopDomain);
     return result;
   }
@@ -152,13 +166,24 @@ export async function processOrderWebhook(
   }
 
   // Eligible - create Invoice
-  const invoiceData = mapOrderToInvoiceWithEligibility(
+  const { invoiceData, outstandingMissing } = mapOrderToInvoiceWithEligibility(
     shopId,
     eligibility.buyerAccountId!,
     order,
     eligibility
   );
   const result = await upsertInvoice(sql, invoiceData);
+
+  // Best-effort diagnostic counter increment - never fails the invoice write
+  if (outstandingMissing) {
+    try {
+      await incrementOrderOutstandingMissing(sql, shopDomain);
+    } catch (err) {
+      console.warn(
+        `[order.server] Failed to increment order_outstanding_missing counter: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
 
   await markWebhookProcessed(sql, webhookId, topic, order.id, shopDomain);
 
@@ -193,6 +218,18 @@ export function getAndResetOutstandingMissingCounter(): number {
   return count;
 }
 
+/** Result of mapping order to invoice data */
+export interface MapOrderResult {
+  invoiceData: InvoiceData;
+  outstandingMissing: boolean;
+}
+
+/** Existing invoice data for updates */
+interface ExistingInvoiceData {
+  outstanding: string;
+  status: "open" | "paid" | "cancelled";
+}
+
 /**
  * Map Order to Invoice data using eligibility result.
  * Uses S9 due date inference from the eligibility check.
@@ -204,17 +241,20 @@ export function getAndResetOutstandingMissingCounter(): number {
  *   - If outstanding > 0, status is "open"
  * - REFUNDED/VOIDED: status "cancelled", outstanding 0
  * - cancelledAt set: status "cancelled", outstanding 0
- * - If totalOutstandingSet is missing: new invoice uses total, existing unchanged
+ * - If totalOutstandingSet is missing:
+ *   - New invoice: uses total, status "open"
+ *   - Existing invoice: keeps BOTH existing outstanding AND existing status
  *
- * @param existingOutstanding - Pass existing invoice outstanding when updating
+ * @param existingInvoice - Pass existing invoice outstanding and status when updating
+ * @returns Object with invoiceData and outstandingMissing flag
  */
 export function mapOrderToInvoiceWithEligibility(
   shopId: string,
   buyerAccountId: string,
   order: ShopifyOrder,
   eligibility: EligibilityResult,
-  existingOutstanding?: string
-): InvoiceData {
+  existingInvoice?: ExistingInvoiceData
+): MapOrderResult {
   const total = order.totalPriceSet?.shopMoney.amount ?? "0.00";
   const issuedAt = new Date(order.processedAt ?? order.createdAt);
 
@@ -224,6 +264,7 @@ export function mapOrderToInvoiceWithEligibility(
   // Determine status and outstanding
   let status: "open" | "paid" | "cancelled" = "open";
   let outstanding: string;
+  let outstandingMissing = false;
 
   // P3: cancelledAt takes precedence - cancelled with outstanding 0
   if (order.cancelledAt) {
@@ -262,16 +303,23 @@ export function mapOrderToInvoiceWithEligibility(
             status = "open";
           }
         } else {
-          // Field missing - log warning and increment counter
+          // Field missing - log warning and set flag for diagnostic counter
+          outstandingMissing = true;
           orderOutstandingMissingCounter++;
           console.warn(
             `[order.server] totalOutstandingSet missing for order ${order.id} ` +
               `(status: ${order.displayFinancialStatus}). ` +
-              `Using ${existingOutstanding !== undefined ? "existing" : "total"} value.`
+              `Using ${existingInvoice !== undefined ? "existing" : "total"} value.`
           );
-          // New invoice: use total; existing invoice: keep current outstanding
-          outstanding = existingOutstanding ?? total;
-          status = "open";
+          // New invoice: use total, status "open"
+          // Existing invoice: keep BOTH existing outstanding AND existing status
+          if (existingInvoice !== undefined) {
+            outstanding = existingInvoice.outstanding;
+            status = existingInvoice.status;
+          } else {
+            outstanding = total;
+            status = "open";
+          }
         }
         break;
       }
@@ -279,18 +327,21 @@ export function mapOrderToInvoiceWithEligibility(
   }
 
   return {
-    shopId,
-    buyerAccountId,
-    orderId: order.id,
-    name: order.name,
-    total,
-    outstanding,
-    issuedAt,
-    dueAt: dueDate?.dueAt ?? null,
-    dueSource: dueDate?.dueSource ?? "none",
-    dueBasis: dueDate?.basis ?? null,
-    dueReason: dueDate?.reason ?? null,
-    status,
+    invoiceData: {
+      shopId,
+      buyerAccountId,
+      orderId: order.id,
+      name: order.name,
+      total,
+      outstanding,
+      issuedAt,
+      dueAt: dueDate?.dueAt ?? null,
+      dueSource: dueDate?.dueSource ?? "none",
+      dueBasis: dueDate?.basis ?? null,
+      dueReason: dueDate?.reason ?? null,
+      status,
+    },
+    outstandingMissing,
   };
 }
 
