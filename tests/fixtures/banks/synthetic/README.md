@@ -34,6 +34,34 @@ These fixtures are built from **publicly available** bank statement format docum
 
 **Date format:** DD.MM.YYYY or DD-Mon-YYYY (corporate)
 
+### SBI (State Bank of India) Format (UNVERIFIED)
+
+| Source | URL | Information Used |
+|--------|-----|------------------|
+| TieOut SBI Documentation | https://www.tieout.in/banks/sbi/ | Column structure, date formats |
+| CleanStatement SBI | https://www.cleanstatement.in/sbi-bank-statement-to-excel | Column layout |
+| StatementConverter SBI | https://statementconverter.io/blog/convert-sbi-bank-statement-to-excel | Format details |
+
+**SBI Retail columns (UNVERIFIED):** Txn Date | Value Date | Description | Ref No./Cheque No. | Debit | Credit | Balance
+
+**Date format:** DD/MM/YYYY or DD MMM YYYY
+
+**IMPORTANT:** SBI format is UNVERIFIED pending redacted real samples from the merchant.
+
+### Axis Bank Format (UNVERIFIED)
+
+| Source | URL | Information Used |
+|--------|-----|------------------|
+| TieOut Axis Documentation | https://www.tieout.in/banks/axis/ | Column structure, date formats |
+| CleanStatement Axis | https://www.cleanstatement.in/axis-bank-statement-to-excel | Column layout |
+| StatementConverter Axis | https://statementconverter.io/blog/convert-axis-bank-statement-to-excel | Format details |
+
+**Axis Bank Retail columns (UNVERIFIED):** Tran Date | Chq No | Particulars | DR | CR | Balance
+
+**Date format:** DD-MM-YYYY or DD/MM/YYYY
+
+**IMPORTANT:** Axis format is UNVERIFIED pending redacted real samples from the merchant.
+
 ## UTR Format Documentation
 
 UTR (Unique Transaction Reference) formats are based on RBI and bank documentation:
@@ -61,6 +89,18 @@ UTR (Unique Transaction Reference) formats are based on RBI and bank documentati
 - `icici-malformed-synthetic.csv` - Malformed rows for error handling tests (SYNTHETIC)
 - `icici-malformed-synthetic.xlsx` - XLSX version of above (SYNTHETIC)
 
+### SBI Fixtures (UNVERIFIED)
+- `sbi-retail-synthetic.csv` - Standard retail savings format (SYNTHETIC, UNVERIFIED LAYOUT)
+- `sbi-retail-synthetic.xlsx` - XLSX version of above (SYNTHETIC, UNVERIFIED LAYOUT)
+- `sbi-malformed-synthetic.csv` - Malformed rows for error handling tests (SYNTHETIC, UNVERIFIED LAYOUT)
+- `sbi-malformed-synthetic.xlsx` - XLSX version of above (SYNTHETIC, UNVERIFIED LAYOUT)
+
+### Axis Bank Fixtures (UNVERIFIED)
+- `axis-retail-synthetic.csv` - Standard retail savings format (SYNTHETIC, UNVERIFIED LAYOUT)
+- `axis-retail-synthetic.xlsx` - XLSX version of above (SYNTHETIC, UNVERIFIED LAYOUT)
+- `axis-malformed-synthetic.csv` - Malformed rows for error handling tests (SYNTHETIC, UNVERIFIED LAYOUT)
+- `axis-malformed-synthetic.xlsx` - XLSX version of above (SYNTHETIC, UNVERIFIED LAYOUT)
+
 ### Unknown Format
 - `unknown-bank-synthetic.csv` - Unknown bank format for detection tests (SYNTHETIC)
 
@@ -85,5 +125,7 @@ All fixtures follow these rules to ensure data is obviously synthetic:
 ### REMAINING (Not Done)
 
 - [ ] **Validate against real HDFC and ICICI exports** - Synthetic fixtures match public documentation, but minor variations in real exports (spacing, edge cases, header variations) may require adjustments after validation with actual bank statements.
+- [ ] **Validate SBI layouts against redacted real samples** - SBI parser layout is UNVERIFIED and based solely on public documentation. Production validation required.
+- [ ] **Validate Axis layouts against redacted real samples** - Axis parser layout is UNVERIFIED and based solely on public documentation. Production validation required.
 
 The synthetic data accurately reflects the publicly documented column structure and date formats, but production validation is required before relying on this parser for real financial data.

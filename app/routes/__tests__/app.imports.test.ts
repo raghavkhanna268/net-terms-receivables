@@ -1002,7 +1002,7 @@ describe("Import validation (unit tests)", () => {
 
   it("rejects invalid bank type", () => {
     const payload = {
-      bank: "SBI",
+      bank: "KOTAK",
       fileName: "statement.csv",
       credits: [
         {
