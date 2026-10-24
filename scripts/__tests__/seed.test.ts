@@ -1401,9 +1401,10 @@ describe("Error Logging Helpers", () => {
     expect(logSpy).toHaveBeenCalled();
     const calls = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
     expect(calls).toContain("User errors");
-    expect(calls).toContain("Zone code required");
     expect(calls).toContain("input.companyLocation.shippingAddress");
     expect(calls).toContain("INVALID");
+    // Should NOT contain error message text (PII compliance)
+    expect(calls).not.toContain("Zone code required");
 
     logSpy.mockRestore();
   });
@@ -3117,11 +3118,14 @@ describe("Updated and Unchanged Counting", () => {
     const state = createMockState();
     await seedCompanies(state);
 
-    // Should log warning about drifted company
+    // Should log warning about drifted company (externalId only, no names)
     const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
     expect(output).toContain("drifted from fixture");
-    expect(output).toContain("Different Name");
-    expect(output).toContain(seed.name);
+    expect(output).toContain("Name differs");
+    expect(output).toContain(SEED_PREFIX);
+    // Should NOT contain actual names
+    expect(output).not.toContain("Different Name");
+    expect(output).not.toContain(seed.name);
 
     // Company-1 drifted, companies 2-5 unchanged
     expect(state.driftedCount.companies).toBe(1);
@@ -4996,12 +5000,12 @@ describe("reset functionality", () => {
 
     // Should have skipped the company
     expect(state.skippedCount.companies).toBe(1);
-    // Skip reason should include code and message (no PII)
+    // Skip reason should include id and code only (no PII/message text)
     expect(state.skippedReasons.length).toBe(1);
     expect(state.skippedReasons[0]).toContain("HAS_ORDERS");
-    expect(state.skippedReasons[0]).toContain("Company has orders and cannot be deleted");
     expect(state.skippedReasons[0]).toContain("gid://company/withorders");
-    // Should NOT contain shop domain or email
+    // Should NOT contain error message or shop domain
+    expect(state.skippedReasons[0]).not.toContain("Company has orders and cannot be deleted");
     expect(state.skippedReasons[0]).not.toContain(".myshopify.com");
   });
 
@@ -6006,6 +6010,118 @@ describe("reset functionality", () => {
     expect(state.deletedCount.companies).toBe(0);
     
     logSpy.mockRestore();
+  });
+
+  it("output and skipReasons contain no shop domain or error message text", async () => {
+    // Use distinctive sentinel strings that should NOT appear in output
+    const sentinelDomain = "sentinel-shop-domain-12345.myshopify.com";
+    const sentinelMessage = "SENTINEL_ERROR_MESSAGE_67890";
+    
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+      const variables = body.variables as Record<string, unknown> | undefined;
+
+      if (query.includes("FindSeededOrders")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { orders: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      if (query.includes("FindSeededCustomers")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { customers: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      if (query.includes("FindSeededCompaniesByExternalId")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companies: {
+                nodes: [{ id: "gid://company/1", externalId: `${SEED_PREFIX}company-1`, locations: { edges: [] } }],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      if (query.includes("FindCompaniesByNameForReset")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companies: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyDelete returns a userError with the sentinel message
+      if (query.includes("companyDelete")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyDelete: {
+                deletedCompanyId: null,
+                userErrors: [{ field: ["id"], message: sentinelMessage, code: "TEST_ERROR" }],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    
+    const { resetSeedData } = await import("../seed");
+    // Use the sentinel domain in state.shop
+    const state = createMockState({ resetApply: true, shop: sentinelDomain });
+
+    await resetSeedData(state);
+
+    const logOutput = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    const errorOutput = errorSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    const allOutput = logOutput + "\n" + errorOutput;
+    
+    // Output should NOT contain the sentinel shop domain
+    expect(allOutput).not.toContain(sentinelDomain);
+    expect(allOutput).not.toContain("sentinel-shop-domain");
+    
+    // Output should NOT contain the sentinel error message
+    expect(allOutput).not.toContain(sentinelMessage);
+    expect(allOutput).not.toContain("SENTINEL_ERROR");
+    
+    // skipReasons should NOT contain the sentinel message
+    for (const reason of state.skippedReasons) {
+      expect(reason).not.toContain(sentinelMessage);
+      expect(reason).not.toContain(sentinelDomain);
+    }
+    
+    // But it SHOULD contain the error code
+    expect(allOutput).toContain("TEST_ERROR");
+    
+    logSpy.mockRestore();
+    errorSpy.mockRestore();
   });
 });
 

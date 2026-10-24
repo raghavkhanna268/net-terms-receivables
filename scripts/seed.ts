@@ -402,11 +402,11 @@ export function logGraphQLErrors<T>(
   mutationName?: string
 ): void {
   if (response.errors && response.errors.length > 0) {
-    console.error(`  ❌ GraphQL errors${mutationName ? ` in ${mutationName}` : ""}:`);
+    console.error(`  ❌ GraphQL errors${mutationName ? ` in ${mutationName}` : ""}: ${response.errors.length} error(s)`);
     for (const err of response.errors) {
       const pathStr = err.path?.join(".") ?? "";
-      const codeStr = err.extensions?.code ? ` [${err.extensions.code}]` : "";
-      console.error(`     - ${err.message}${pathStr ? ` (path: ${pathStr})` : ""}${codeStr}`);
+      const code = err.extensions?.code ?? "UNKNOWN";
+      console.error(`     - [${code}]${pathStr ? ` (path: ${pathStr})` : ""}`);
     }
   }
 
@@ -422,11 +422,11 @@ export function logGraphQLErrors<T>(
 
 export function logUserErrors(userErrors: UserError[], context?: string): void {
   if (userErrors.length > 0) {
-    console.error(`  ❌ User errors${context ? ` in ${context}` : ""}:`);
+    console.error(`  ❌ User errors${context ? ` in ${context}` : ""}: ${userErrors.length} error(s)`);
     for (const err of userErrors) {
       const fieldStr = err.field?.join(".") ?? "";
-      const codeStr = err.code ? ` [${err.code}]` : "";
-      console.error(`     - ${err.message}${fieldStr ? ` (field: ${fieldStr})` : ""}${codeStr}`);
+      const code = err.code ?? "UNKNOWN";
+      console.error(`     - [${code}]${fieldStr ? ` (field: ${fieldStr})` : ""}`);
     }
   }
 }
@@ -1057,11 +1057,10 @@ async function deleteMarkedCompanies(
     if (userErrors.length > 0) {
       const error = userErrors[0];
       const code = error.code ?? "UNKNOWN";
-      const message = error.message;
-      const reason = `${company.id}: [${code}] ${message}`;
+      const reason = `${company.id}: [${code}]`;
       stats.skipReasons.push(reason);
       stats.companiesSkipped++;
-      console.log(`    ⚠️  Skipped ${company.id}: [${code}] ${message}`);
+      console.log(`    ⚠️  Skipped ${company.id}: [${code}]`);
     } else if (deletedId) {
       stats.companiesDeleted++;
       stats.deletedCompanyIds.add(company.id);
@@ -1098,7 +1097,9 @@ async function deleteMarkedDbAccounts(
     `;
     
     if (!shop) {
-      console.log(`    ⚠️  Shop not found in DB: ${state.shop}`);
+      console.log(`    ⚠️  Shop row not found`);
+      stats.skipReasons.push(`Shop row not found`);
+      stats.dbAccountsFailed++;
       return;
     }
     
@@ -1111,10 +1112,10 @@ async function deleteMarkedDbAccounts(
     stats.dbAccountsDeleted = result.count;
     console.log(`    ✓ Deleted ${result.count} BuyerAccount rows`);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    stats.skipReasons.push(`DB delete failed: ${msg}`);
+    const errType = err instanceof Error ? err.constructor.name : "UnknownError";
+    stats.skipReasons.push(`DB delete failed: [${errType}]`);
     stats.dbAccountsFailed++;
-    console.log(`    ⚠️  Failed to delete DB rows: ${msg}`);
+    console.log(`    ⚠️  DB delete failed: [${errType}]`);
   } finally {
     await db.end();
   }
@@ -1136,8 +1137,8 @@ export async function seedCompanies(state: SeedState): Promise<void> {
       
       if (adoptionResult && "ambiguous" in adoptionResult) {
         // Multiple candidates - skip and log
-        const reason = `Ambiguous match for ${seed.name}: ${adoptionResult.candidates.length} companies have same contact email`;
-        console.log(`  ⚠️  Skipped ${seed.name}: ${reason}`);
+        const reason = `Ambiguous match for ${externalId}: ${adoptionResult.candidates.length} candidates`;
+        console.log(`  ⚠️  Skipped ${externalId}: ${reason}`);
         console.log(`      Candidates: ${adoptionResult.candidates.map(c => c.id).join(", ")}`);
         state.skippedCount.companies++;
         state.skippedReasons.push(reason);
@@ -1149,8 +1150,8 @@ export async function seedCompanies(state: SeedState): Promise<void> {
         
         // P1: Check if candidate has a conflicting externalId (non-null and different from target)
         if (candidate.externalId !== null && candidate.externalId !== externalId) {
-          const reason = `Company ${candidate.id} already has externalId '${candidate.externalId}', cannot adopt as '${externalId}'`;
-          console.log(`  ⚠️  Skipped ${seed.name}: ${reason}`);
+          const reason = `${candidate.id} already has externalId '${candidate.externalId}', cannot adopt as '${externalId}'`;
+          console.log(`  ⚠️  Skipped ${externalId}: ${reason}`);
           state.skippedCount.companies++;
           state.skippedReasons.push(reason);
           continue;
@@ -1159,22 +1160,22 @@ export async function seedCompanies(state: SeedState): Promise<void> {
         // Single match - adopt it by setting externalId
         if (state.dryRun) {
           // P3a: Dry-run preview of adoption
-          console.log(`  [dry-run] Would adopt ${candidate.id} for ${seed.name} (matched by ${adoptionResult.matchType})`);
+          console.log(`  [dry-run] Would adopt ${candidate.id} as ${externalId} (matched by ${adoptionResult.matchType})`);
           // For dry-run, we can't continue with this company since we don't have real data
           continue;
         }
         
-        console.log(`  📎 Found existing company for ${seed.name} (matched by ${adoptionResult.matchType})`);
-        console.log(`     Adopting ${candidate.id} by setting externalId...`);
+        console.log(`  📎 Found existing company ${candidate.id} for ${externalId} (matched by ${adoptionResult.matchType})`);
+        console.log(`     Adopting by setting externalId...`);
         
         const adopted = await adoptCompany(state, candidate.id, externalId);
         if (adopted) {
           existing = adopted;
           wasAdopted = true;
           state.adoptedCount.companies++;
-          console.log(`  ✅ Adopted: ${seed.name} (${externalId})`);
+          console.log(`  ✅ Adopted: ${externalId}`);
         } else {
-          state.errors.push(`Failed to adopt company ${candidate.id} for ${seed.name}`);
+          state.errors.push(`Failed to adopt ${candidate.id} as ${externalId}`);
         }
       }
     }
@@ -1193,12 +1194,12 @@ export async function seedCompanies(state: SeedState): Promise<void> {
       if (wasAdopted) {
         // Already logged as adopted
       } else if (fixtureMatches) {
-        console.log(`  ✓ ${seed.name} unchanged (${externalId})`);
+        console.log(`  ✓ ${externalId} unchanged`);
         state.unchangedCount.companies++;
       } else {
-        console.log(`  ⚠️  ${seed.name} drifted from fixture (${externalId})`);
-        if (!nameMatches) console.log(`      Name: "${existing.name}" vs fixture "${seed.name}"`);
-        if (!emailMatches) console.log(`      Email: "${existingEmail}" vs fixture "${seed.contact.email}"`);
+        console.log(`  ⚠️  ${externalId} drifted from fixture`);
+        if (!nameMatches) console.log(`      Name differs`);
+        if (!emailMatches) console.log(`      Email differs`);
         state.driftedCount.companies++;
       }
       
@@ -1258,7 +1259,7 @@ export async function seedCompanies(state: SeedState): Promise<void> {
               }
             } else {
               state.failedCount.locations++;
-              state.errors.push(`Failed to create location ${loc.suffix} for ${seed.name}`);
+              state.errors.push(`Failed to create location ${loc.suffix} for ${externalId}`);
             }
           }
         }
@@ -1269,7 +1270,7 @@ export async function seedCompanies(state: SeedState): Promise<void> {
     }
 
     if (state.dryRun) {
-      console.log(`  [dry-run] Would create: ${seed.name} (${externalId}) with 3 locations`);
+      console.log(`  [dry-run] Would create: ${externalId} with 3 locations`);
       const locations = new Map<number, string>();
       for (const loc of LOCATION_TERMS) {
         locations.set(loc.dueInDays, `dry-run-location-${seed.key}-${loc.dueInDays}`);
@@ -1290,9 +1291,9 @@ export async function seedCompanies(state: SeedState): Promise<void> {
     if (result) {
       state.companies.set(seed.key, result);
       state.createdCount.companies++;
-      console.log(`  ✅ Created: ${seed.name} with ${result.locations.size} locations`);
+      console.log(`  ✅ Created: ${externalId} with ${result.locations.size} locations`);
     } else {
-      state.errors.push(`Failed to create company: ${seed.name}`);
+      state.errors.push(`Failed to create company: ${externalId}`);
     }
   }
 }
@@ -1728,7 +1729,7 @@ async function continueWithExistingCompany(
   state: SeedState,
   company: CompanyNode,
   seed: (typeof COMPANY_SEEDS)[number],
-  _externalId: string
+  externalId: string
 ): Promise<CompanyData | null> {
   const contactRoles = await fetchCompanyContactRoles(state, company.id);
   const contactId = company.contacts.edges[0]?.node.id ?? "";
@@ -1771,7 +1772,7 @@ async function continueWithExistingCompany(
         }
       } else {
         state.failedCount.locations++;
-        state.errors.push(`Failed to create location ${loc.suffix} for ${seed.name}`);
+        state.errors.push(`Failed to create location ${loc.suffix} for ${externalId}`);
       }
     } else {
       // Ensure role on existing location
@@ -1795,7 +1796,7 @@ export async function reportDuplicates(state: SeedState): Promise<void> {
   
   for (const seed of COMPANY_SEEDS) {
     const externalId = `${SEED_PREFIX}${seed.key}`;
-    console.log(`  ${seed.name} (expected externalId: ${externalId}):`);
+    console.log(`  ${externalId}:`);
     
     // Check for existing company with seed externalId
     const existing = await findCompanyByExternalId(state, externalId);
@@ -1814,7 +1815,7 @@ export async function reportDuplicates(state: SeedState): Promise<void> {
         console.log(`      - ${match.id}${externalIdStr}`);
       }
     } else {
-      console.log(`    ○ No companies with name "${seed.name}"`);
+      console.log(`    ○ No companies with matching name`);
     }
     
     // Find companies with same contact email
@@ -1823,26 +1824,26 @@ export async function reportDuplicates(state: SeedState): Promise<void> {
       console.log(`    Companies with same contact email (${emailMatches.length}):`);
       for (const match of emailMatches) {
         const externalIdStr = match.externalId ? ` [externalId: ${match.externalId}]` : " [no externalId]";
-        console.log(`      - ${match.id}: "${match.name}"${externalIdStr}`);
+        console.log(`      - ${match.id}${externalIdStr}`);
       }
     } else {
-      console.log(`    ○ No companies with contact email for ${seed.key}`);
+      console.log(`    ○ No companies with matching contact email`);
     }
     
     // Find customers with same email (may cause TAKEN error even if no company exists)
     const customerLookup = await findCustomersByEmail(state, seed.contact.email);
     if (customerLookup) {
       if (customerLookup.ambiguous === true) {
-        console.log(`    ⚠️  Multiple customers with email ${seed.contact.email} (${customerLookup.customerIds.length}):`);
+        console.log(`    ⚠️  Multiple customers with matching email (${customerLookup.customerIds.length}):`);
         for (const customerId of customerLookup.customerIds) {
           console.log(`      - ${customerId}`);
         }
       } else {
-        console.log(`    Customers with same email (1):`);
+        console.log(`    Customers with matching email (1):`);
         console.log(`      - ${customerLookup.customer.id}`);
       }
     } else {
-      console.log(`    ○ No customers with email ${seed.contact.email}`);
+      console.log(`    ○ No customers with matching email`);
     }
     
     console.log();
@@ -1965,8 +1966,8 @@ export async function createCompanyWithLocations(
   
   if (customerLookup?.ambiguous === true) {
     // Multiple customers with same email - skip
-    const reason = `Multiple customers with email ${seed.contact.email}: ${customerLookup.customerIds.join(", ")}`;
-    console.log(`  ⚠️  Skipped ${seed.name}: ${reason}`);
+    const reason = `Multiple customers with matching email for ${externalId}: ${customerLookup.customerIds.join(", ")}`;
+    console.log(`  ⚠️  Skipped ${externalId}: ${reason}`);
     state.skippedCount.companies++;
     state.skippedReasons.push(reason);
     return null;
@@ -1988,7 +1989,7 @@ export async function createCompanyWithLocations(
   }>(state, COMPANY_CREATE_MUTATION, variables, { isMutation: true, mutationName: "companyCreate" });
 
   if (createResult.errors) {
-    console.error(`    ❌ Failed to create company ${seed.name}: GraphQL errors`);
+    console.error(`    ❌ Failed to create ${externalId}: GraphQL errors`);
     return null;
   }
 
@@ -2001,14 +2002,14 @@ export async function createCompanyWithLocations(
   );
   
   if (takenError) {
-    console.log(`    ⚠️  Contact email already taken for ${seed.name}, attempting recovery...`);
+    console.log(`    ⚠️  Contact email already taken for ${externalId}, attempting recovery...`);
     
     // Find company by contact email and adopt it
     const adoptionResult = await findCompanyForAdoption(state, seed);
     
     if (adoptionResult && "ambiguous" in adoptionResult) {
       console.error(`    ❌ Cannot recover: multiple companies with same contact email`);
-      logUserErrors(userErrors, `createCompanyWithLocations(${seed.name})`);
+      logUserErrors(userErrors, `createCompanyWithLocations(${externalId})`);
       return null;
     }
     
@@ -2017,7 +2018,7 @@ export async function createCompanyWithLocations(
       
       // P1: Check if candidate has a conflicting externalId (non-null and different from target)
       if (candidate.externalId !== null && candidate.externalId !== externalId) {
-        const reason = `Company ${candidate.id} already has externalId '${candidate.externalId}', cannot adopt as '${externalId}'`;
+        const reason = `${candidate.id} already has externalId '${candidate.externalId}', cannot adopt as '${externalId}'`;
         console.error(`    ❌ Cannot recover: ${reason}`);
         state.skippedCount.companies++;
         state.skippedReasons.push(reason);
@@ -2122,7 +2123,7 @@ export async function createCompanyWithLocations(
           }
         } else {
           state.failedCount.locations++;
-          state.errors.push(`Failed to create location ${loc.suffix} for ${seed.name}`);
+          state.errors.push(`Failed to create location ${loc.suffix} for ${externalId}`);
         }
       }
       
@@ -2131,18 +2132,18 @@ export async function createCompanyWithLocations(
     
     // No company AND no customer found - log original error
     console.error(`    ❌ TAKEN error but no company or customer found with contact email`);
-    logUserErrors(userErrors, `createCompanyWithLocations(${seed.name})`);
+    logUserErrors(userErrors, `createCompanyWithLocations(${externalId})`);
     return null;
   }
 
   if (userErrors.length) {
-    logUserErrors(userErrors, `createCompanyWithLocations(${seed.name})`);
+    logUserErrors(userErrors, `createCompanyWithLocations(${externalId})`);
     return null;
   }
 
   const company = createResult.data?.companyCreate.company;
   if (!company) {
-    console.error(`    ❌ No company returned for ${seed.name} (companyCreate returned null)`);
+    console.error(`    ❌ No company returned for ${externalId} (companyCreate returned null)`);
     return null;
   }
 
@@ -2206,7 +2207,7 @@ export async function createCompanyWithLocations(
       }
     } else {
       state.failedCount.locations++;
-      state.errors.push(`Failed to create location ${loc.suffix} for ${seed.name}`);
+      state.errors.push(`Failed to create location ${loc.suffix} for ${externalId}`);
     }
   }
 
@@ -3496,7 +3497,7 @@ export async function seedDatabase(state: SeedState): Promise<void> {
       RETURNING id
     `;
     const shopId = shopResult[0]?.id;
-    console.log(`  ✅ Shop record: ${state.shop}`);
+    console.log(`  ✅ Shop record upserted`);
 
     // Upsert AccountSource tag rules for Net 15/30/60
     for (const loc of LOCATION_TERMS) {
@@ -3557,11 +3558,12 @@ export async function seedDatabase(state: SeedState): Promise<void> {
 }
 
 export function printDatabaseSeedSQL(state: SeedState): void {
-  const shopId = `seed-shop-${state.shop}`;
+  const shopId = `seed-shop-placeholder`;
+  const shopDomain = "<YOUR_SHOP_DOMAIN>";
   
-  console.log(`-- Upsert Shop`);
+  console.log(`-- Upsert Shop (replace <YOUR_SHOP_DOMAIN> with actual domain)`);
   console.log(`INSERT INTO "Shop" (id, domain, currency, plan, "defaultTermsDays", timezone, "createdAt", "updatedAt")`);
-  console.log(`VALUES ('${shopId}', '${state.shop}', '${state.currencyCode || "INR"}', 'development', 30, 'Asia/Kolkata', NOW(), NOW())`);
+  console.log(`VALUES ('${shopId}', '${shopDomain}', '${state.currencyCode || "INR"}', 'development', 30, 'Asia/Kolkata', NOW(), NOW())`);
   console.log(`ON CONFLICT (domain) DO UPDATE SET currency = EXCLUDED.currency, "updatedAt" = NOW();`);
   console.log();
 
@@ -3667,7 +3669,7 @@ export async function main(): Promise<void> {
     errors: [],
   };
 
-  console.log(`\nShop: ${state.shop}`);
+  console.log(`\nShop: [configured]`);
   const modeStr = reportDuplicatesMode ? "REPORT DUPLICATES (read-only)" 
     : dryRun ? "DRY RUN (read-only lookups, no mutations)" 
     : reset ? (resetApply ? "RESET + APPLY (will delete)" : "RESET (dry-run, use --apply to delete)") 
