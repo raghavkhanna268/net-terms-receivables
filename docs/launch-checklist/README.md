@@ -25,5 +25,6 @@ Step-by-step checklists for launch prerequisites. Complete these before Shopify 
 ## Related Documentation
 
 - [docs/scopes.md](../scopes.md) — OAuth scope audit with API call references
-- [docs/privacy.md](../privacy.md) — Privacy policy and data handling
+- [docs/privacy.md](../privacy.md) — Public privacy policy (rendered at `/privacy`)
+- [docs/privacy-implementation.md](../privacy-implementation.md) — Internal implementation details and checklist
 - [docs/ops.md](../ops.md) — Operations runbook
