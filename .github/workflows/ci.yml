@@ -89,6 +89,9 @@ jobs:
       - name: Backfill dry-run log filter self-test
         run: python3 scripts/ci/test_backfill_dry_run_filter.py
 
+      - name: DB host redaction filter self-test
+        run: bash scripts/ci/test-redact-db-host.sh
+
       - name: Shopify release guards (scopes, config, input-query PII)
         run: |
           python3 scripts/ci/test_shopify_release_guards.py

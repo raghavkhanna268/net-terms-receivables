@@ -60,4 +60,5 @@ jobs:
           fi
           # Public-repo safe: redact the datasource host Prisma prints.
           set -o pipefail
-          npx prisma migrate deploy 2>&1 | sed -E 's/ at "[^"]*"/ at "<redacted>"/g'
+          # Same filter as before, now shared: scripts/ci/redact-db-host.sh (default mode).
+          npx prisma migrate deploy 2>&1 | bash scripts/ci/redact-db-host.sh
