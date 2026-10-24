@@ -152,7 +152,7 @@ async function createMetafieldDefinition(
     const data = (await response.json()) as MetafieldDefinitionCreateResult;
 
     if (data.errors?.length) {
-      result.error = `GraphQL errors: ${data.errors.map((e) => e.message).join(", ")}`;
+      result.error = "shopify_graphql_error";
       return result;
     }
 
@@ -166,7 +166,9 @@ async function createMetafieldDefinition(
         return result;
       }
 
-      result.error = `userErrors: ${userErrors.map((e) => `[${e.code ?? "UNKNOWN"}] ${e.message}`).join("; ")}`;
+      const firstCode = userErrors[0]?.code ?? "unknown";
+      const sanitizedCode = firstCode.toLowerCase().replace(/[^a-z0-9_]/g, "_").slice(0, 40);
+      result.error = `shopify_user_error_${sanitizedCode}`;
       return result;
     }
 
@@ -177,7 +179,7 @@ async function createMetafieldDefinition(
 
     return result;
   } catch (error) {
-    result.error = `Exception: ${error instanceof Error ? error.message : String(error)}`;
+    result.error = toErrorCode(error);
     return result;
   }
 }
@@ -209,11 +211,9 @@ export async function ensureMetafieldDefinitions(
       if (result.error) {
         safeLog("error", "metafield_definition_create_failed", {
           ownerType,
-          err: toErrorCode(result.error),
+          err: result.error,
         });
-        errors.push(
-          `${definition.namespace}:${definition.key}@${ownerType}: ${result.error}`,
-        );
+        errors.push(result.error);
       } else if (result.created) {
         safeLog("info", "metafield_definition_created", {
           ownerType,
@@ -228,9 +228,7 @@ export async function ensureMetafieldDefinitions(
   }
 
   if (errors.length > 0) {
-    throw new Error(
-      `Failed to create metafield definitions: ${errors.join("; ")}`,
-    );
+    throw new Error("metafield_definition_create_failed");
   }
 
   return results;

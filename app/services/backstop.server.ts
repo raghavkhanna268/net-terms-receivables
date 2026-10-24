@@ -579,7 +579,7 @@ async function holdFulfillmentOrders(
 
   if (!queryResult.success) {
     throw new RetryableBackstopError(
-      `Failed to query fulfillment orders: ${queryResult.error}`,
+      "retryable:shopify_fulfillment_query_failed",
       "api_error",
     );
   }
@@ -623,7 +623,7 @@ async function holdFulfillmentOrders(
   }
 
   let heldCount = 0;
-  const errors: string[] = [];
+  let errorCount = 0;
 
   for (const edge of holdableFOs) {
     const holdResult = await shopifyGraphQLRequest<FulfillmentOrderHoldResult>(
@@ -639,7 +639,7 @@ async function holdFulfillmentOrders(
     );
 
     if (!holdResult.success) {
-      errors.push(`${edge.node.id}: API error - ${holdResult.error}`);
+      errorCount++;
       continue;
     }
 
@@ -656,28 +656,26 @@ async function holdFulfillmentOrders(
         heldCount++;
         continue;
       }
-      errors.push(
-        `${edge.node.id}: ${userErrors.map((e) => `${e.code ?? "ERROR"}: ${e.message}`).join(", ")}`,
-      );
+      errorCount++;
       continue;
     }
 
     heldCount++;
   }
 
-  // Partial failure - some succeeded, some failed. Don't mark processed, allow retry.
-  if (errors.length > 0 && heldCount < holdableFOs.length) {
+  // Total failure - none succeeded
+  if (errorCount > 0 && heldCount === 0) {
     throw new RetryableBackstopError(
-      `Partial failure: held ${heldCount}/${holdableFOs.length} FOs. Errors: ${errors.join("; ")}`,
-      "partial_failure",
+      "retryable:shopify_hold_all_failed",
+      "all_holds_failed",
     );
   }
 
-  // Total failure
-  if (errors.length > 0 && heldCount === 0) {
+  // Partial failure - some succeeded, some failed. Don't mark processed, allow retry.
+  if (errorCount > 0 && heldCount < holdableFOs.length) {
     throw new RetryableBackstopError(
-      `Failed to hold all FOs: ${errors.join("; ")}`,
-      "all_holds_failed",
+      "retryable:shopify_hold_partial_failure",
+      "partial_failure",
     );
   }
 
@@ -701,12 +699,12 @@ async function tagOrder(
   );
 
   if (!result.success) {
-    return { success: false, error: result.error };
+    return { success: false, error: "shopify_tags_api_error" };
   }
 
   const userErrors = result.data?.tagsAdd?.userErrors ?? [];
   if (userErrors.length > 0) {
-    return { success: false, error: userErrors.map((e) => e.message).join(", ") };
+    return { success: false, error: "shopify_tags_user_error" };
   }
 
   return { success: true };
@@ -1003,7 +1001,7 @@ export async function applyBackstop(
 
     // Wrap unexpected errors as retryable
     throw new RetryableBackstopError(
-      `Unexpected error: ${error instanceof Error ? error.message : String(error)}`,
+      `retryable:${toErrorCode(error)}`,
       "unexpected_error",
     );
   }
