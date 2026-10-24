@@ -1,0 +1,198 @@
+/**
+ * Web Vitals Reporter for Shopify App Bridge.
+ *
+ * Registers with shopify.webVitals.onReport to collect Core Web Vitals
+ * and forwards only LCP, CLS, and INP to our endpoint.
+ *
+ * Privacy requirements (S23-30, PCD-2):
+ * - Only sends: name, value, id, route (pathname without query), version
+ * - NEVER sends: shop domain, host param, query strings, session token,
+ *   user/customer data, country, IP, user agent
+ *
+ * @module
+ */
+
+/**
+ * Metric names from App Bridge Web Vitals API.
+ * We only forward the Core Web Vitals: LCP, CLS, INP.
+ */
+type MetricName = "LCP" | "FCP" | "CLS" | "INP" | "TTFB" | "FID";
+
+/**
+ * Metric from App Bridge shopify.webVitals.onReport callback.
+ * Based on https://shopify.dev/docs/api/app-home/apis/web-vitals
+ */
+interface WebVitalsMetric {
+  id: string;
+  name: MetricName;
+  value: number;
+  version?: string;
+  country?: string;
+}
+
+/**
+ * Callback payload from shopify.webVitals.onReport.
+ */
+interface WebVitalsReport {
+  metrics: WebVitalsMetric[];
+}
+
+/**
+ * Shopify global with Web Vitals API.
+ */
+interface ShopifyGlobal {
+  webVitals?: {
+    onReport: (callback: ((report: WebVitalsReport) => void) | null) => void;
+  };
+}
+
+/**
+ * Core Web Vitals we forward to our endpoint.
+ * Per S23-30: LCP, CLS, INP only.
+ */
+const ALLOWED_METRICS = new Set<MetricName>(["LCP", "CLS", "INP"]);
+
+/**
+ * Payload sent to our endpoint.
+ * Minimal, privacy-safe fields only.
+ */
+export interface WebVitalsPayload {
+  metrics: Array<{
+    name: MetricName;
+    value: number;
+    id: string;
+    route: string;
+    version: string;
+  }>;
+}
+
+/**
+ * Round a metric value appropriately.
+ * - CLS: keep 4 decimal places (it's a score, typically 0.0000 to 0.xxxx)
+ * - LCP/INP: round to integer (milliseconds)
+ */
+function roundValue(name: MetricName, value: number): number {
+  if (name === "CLS") {
+    return Math.round(value * 10000) / 10000;
+  }
+  return Math.round(value);
+}
+
+/**
+ * Get clean route from current URL.
+ * Returns pathname only, no query string or hash.
+ */
+function getCleanRoute(): string {
+  if (typeof window === "undefined") {
+    return "/app";
+  }
+  return window.location.pathname;
+}
+
+/**
+ * Send metrics to our endpoint using sendBeacon with fetch keepalive fallback.
+ */
+function sendMetrics(payload: WebVitalsPayload): void {
+  const endpoint = "/api/web-vitals";
+  const body = JSON.stringify(payload);
+
+  if (typeof navigator !== "undefined" && navigator.sendBeacon) {
+    const blob = new Blob([body], { type: "application/json" });
+    const sent = navigator.sendBeacon(endpoint, blob);
+    if (sent) {
+      return;
+    }
+  }
+
+  if (typeof fetch !== "undefined") {
+    fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+      keepalive: true,
+    }).catch(() => {
+      // Silently ignore send failures - these are optional analytics
+    });
+  }
+}
+
+/**
+ * Filter and transform metrics from App Bridge to our payload format.
+ * Only includes LCP, CLS, INP. Strips all other data.
+ *
+ * @param metrics - Raw metrics from App Bridge
+ * @param route - Clean route (pathname only)
+ * @returns Filtered payload or null if no allowed metrics
+ */
+export function filterMetrics(
+  metrics: WebVitalsMetric[],
+  route: string
+): WebVitalsPayload | null {
+  const filtered = metrics
+    .filter((m) => ALLOWED_METRICS.has(m.name))
+    .map((m) => ({
+      name: m.name,
+      value: roundValue(m.name, m.value),
+      id: m.id,
+      route,
+      version: m.version ?? "unknown",
+    }));
+
+  if (filtered.length === 0) {
+    return null;
+  }
+
+  return { metrics: filtered };
+}
+
+/**
+ * Handle Web Vitals report from App Bridge.
+ * Filters to allowed metrics and sends to our endpoint.
+ */
+function handleReport(report: WebVitalsReport): void {
+  const route = getCleanRoute();
+  const payload = filterMetrics(report.metrics, route);
+
+  if (payload) {
+    sendMetrics(payload);
+  }
+}
+
+/**
+ * Check if running in SSR (server-side rendering).
+ */
+function isSSR(): boolean {
+  return typeof window === "undefined";
+}
+
+/**
+ * Get the shopify global object if available.
+ */
+function getShopify(): ShopifyGlobal | null {
+  if (isSSR()) {
+    return null;
+  }
+  return (window as unknown as { shopify?: ShopifyGlobal }).shopify ?? null;
+}
+
+/**
+ * Register the Web Vitals reporter with App Bridge.
+ *
+ * Safe to call in SSR (no-op) and when shopify.webVitals is undefined
+ * (older App Bridge versions or tests).
+ *
+ * @returns Cleanup function to unregister, or undefined if not registered
+ */
+export function registerWebVitalsReporter(): (() => void) | undefined {
+  const shopify = getShopify();
+
+  if (!shopify?.webVitals) {
+    return undefined;
+  }
+
+  shopify.webVitals.onReport(handleReport);
+
+  return () => {
+    shopify.webVitals?.onReport(null);
+  };
+}
