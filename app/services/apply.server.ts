@@ -334,165 +334,21 @@ async function handlePushedMatch(
     };
   }
 
-  // No audit event found - this is crash recovery (Issue #6)
-  // Match was claimed but apply never completed
-  console.log(
-    `[applyMatch] Crash recovery: matchId=${matchId} was pushed but no audit event found, retrying`
+  // No audit event found - this is an inconsistent state (legacy crash or data issue)
+  // With the new 'pushing' state, matches should not reach 'pushed' without an audit event
+  // Return error - manual intervention may be needed
+  console.error(
+    `[applyMatch] Inconsistent state: matchId=${matchId} is 'pushed' but no audit event found. ` +
+    `This should not happen with the 'pushing' state machine. Manual review needed.`
   );
 
-  // Determine if this is a partial or full payment
-  const matchAmountPaise = BigInt(matchRow.amountPaise);
-  const outstandingPaise = BigInt(invoiceRow.outstandingPaise);
-  const isFullPayment = matchAmountPaise >= outstandingPaise;
-
-  if (!isFullPayment) {
-    // Partial payment crash recovery - just finalize the partial apply
-    try {
-      await sql.begin(async (tx) => {
-        // Lock and update invoice - IDOR protection: filter by shopId
-        const [lockedInvoice] = await tx<{ outstandingPaise: string }[]>`
-          SELECT (ROUND(outstanding * 100))::text AS "outstandingPaise"
-          FROM "Invoice"
-          WHERE id = ${invoiceRow.id}
-            AND "shopId" = ${shopId}
-          FOR UPDATE
-        `;
-
-        if (!lockedInvoice) {
-          throw new Error("Invoice not found during recovery");
-        }
-
-        const currentOutstanding = BigInt(lockedInvoice.outstandingPaise);
-        const reduction = matchAmountPaise > currentOutstanding ? currentOutstanding : matchAmountPaise;
-        const newOutstanding = currentOutstanding - reduction;
-
-        await tx`
-          UPDATE "Invoice"
-          SET outstanding = ${Number(newOutstanding) / 100}, "updatedAt" = NOW()
-          WHERE id = ${invoiceRow.id}
-            AND "shopId" = ${shopId}
-        `;
-
-        // Write audit event for the recovered apply
-        await writeAuditEvent(tx, shopId, actor, "match.applied", {
-          matchId,
-          invoiceId: invoiceRow.id,
-          paymentId: matchRow.paymentId,
-          amountPaise: reduction.toString(),
-          previousOutstandingPaise: currentOutstanding.toString(),
-          newOutstandingPaise: newOutstanding.toString(),
-          recoveredFromCrash: true,
-        });
-      });
-
-      await safeEnqueueRecompute(sql, invoiceRow.id);
-
-      return {
-        success: true,
-        invoicePaid: false,
-        shopifyPushSucceeded: false,
-        reasonCode: "RECOVERED_FROM_CRASH",
-      };
-    } catch (error) {
-      return {
-        success: false,
-        invoicePaid: false,
-        shopifyPushSucceeded: false,
-        error: `Recovery failed: ${error instanceof Error ? error.message : String(error)}`,
-      };
-    }
-  }
-
-  // Full payment crash recovery - need to call Shopify
-  let shopifySuccess = false;
-  let reasonCode: string | undefined;
-
-  if (invoiceRow.orderId) {
-    const shopifyResult = await callOrderMarkAsPaid(
-      invoiceRow.shopDomain,
-      invoiceRow.orderId
-    );
-
-    if (shopifyResult.success) {
-      shopifySuccess = true;
-    } else if (shopifyResult.alreadyPaid) {
-      shopifySuccess = true;
-      reasonCode = "ALREADY_PAID_IN_SHOPIFY";
-    } else {
-      return {
-        success: false,
-        invoicePaid: false,
-        shopifyPushSucceeded: false,
-        error: shopifyResult.error ?? "Shopify call failed during recovery",
-        retryable: shopifyResult.retryable,
-      };
-    }
-  } else {
-    shopifySuccess = true;
-  }
-
-  // Finalize the full payment
-  try {
-    await sql.begin(async (tx) => {
-      // IDOR protection: filter by shopId
-      const [lockedInvoice] = await tx<{ outstandingPaise: string }[]>`
-        SELECT (ROUND(outstanding * 100))::text AS "outstandingPaise"
-        FROM "Invoice"
-        WHERE id = ${invoiceRow.id}
-          AND "shopId" = ${shopId}
-        FOR UPDATE
-      `;
-
-      if (!lockedInvoice) {
-        throw new Error("Invoice not found during recovery");
-      }
-
-      const previousOutstanding = lockedInvoice.outstandingPaise;
-
-      await tx`
-        UPDATE "Invoice"
-        SET outstanding = 0, status = 'paid', "updatedAt" = NOW()
-        WHERE id = ${invoiceRow.id}
-          AND "shopId" = ${shopId}
-      `;
-
-      await writeAuditEvent(tx, shopId, actor, "match.applied", {
-        matchId,
-        invoiceId: invoiceRow.id,
-        paymentId: matchRow.paymentId,
-        amountPaise: matchRow.amountPaise,
-        previousOutstandingPaise: previousOutstanding,
-        newOutstandingPaise: "0",
-        reasonCode,
-        recoveredFromCrash: true,
-      });
-
-      await writeAuditEvent(tx, shopId, actor, "invoice.paid", {
-        invoiceId: invoiceRow.id,
-        matchId,
-        orderGid: invoiceRow.orderId,
-        shopifyPushSucceeded: shopifySuccess,
-        reasonCode,
-        recoveredFromCrash: true,
-      });
-    });
-
-    await safeEnqueueRecompute(sql, invoiceRow.id);
-
-    return {
-      success: true,
-      invoicePaid: true,
-      shopifyPushSucceeded: shopifySuccess,
-      reasonCode: reasonCode ?? "RECOVERED_FROM_CRASH",
-    };
-  } catch (error) {
-    return {
-      success: false,
-      invoicePaid: false,
-      shopifyPushSucceeded: shopifySuccess,
-      error: `Recovery finalization failed: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
+  return {
+    success: false,
+    invoicePaid: false,
+    shopifyPushSucceeded: false,
+    error: "Match is in inconsistent state (pushed without audit). Contact support.",
+    reasonCode: "INCONSISTENT_STATE",
+  };
 }
 
 /**
@@ -712,32 +568,46 @@ async function handleStalePushingMatch(
     }
   }
 
-  // Shopify not yet paid - need to re-push
-  // Determine if this is a partial or full payment
+  // Shopify not yet paid - need to determine partial vs full from LOCKED outstanding
+  // then either finalize locally (partial) or call Shopify (full)
   const matchAmountPaise = BigInt(matchRow.amountPaise);
-  const outstandingPaise = BigInt(invoiceRow.outstandingPaise);
-  const isFullPayment = matchAmountPaise >= outstandingPaise;
 
-  if (!isFullPayment) {
-    // Partial payment stale re-claim - finalize locally
-    try {
-      await sql.begin(async (tx) => {
-        const [lockedInvoice] = await tx<{ outstandingPaise: string }[]>`
-          SELECT (ROUND(outstanding * 100))::text AS "outstandingPaise"
-          FROM "Invoice"
-          WHERE id = ${invoiceRow.id}
+  // First, lock invoice to determine partial vs full and get accurate outstanding
+  try {
+    const decisionResult = await sql.begin(async (tx) => {
+      const [lockedInvoice] = await tx<{ outstandingPaise: string; status: string }[]>`
+        SELECT
+          (ROUND(outstanding * 100))::text AS "outstandingPaise",
+          status
+        FROM "Invoice"
+        WHERE id = ${invoiceRow.id}
+          AND "shopId" = ${shopId}
+        FOR UPDATE
+      `;
+
+      if (!lockedInvoice) {
+        return { error: "Invoice not found during stale reclaim" };
+      }
+
+      // Re-check status after locking
+      if (lockedInvoice.status !== "open") {
+        // Invoice no longer open - just finalize match
+        await tx`
+          UPDATE "Match"
+          SET state = 'pushed', "updatedAt" = NOW()
+          WHERE id = ${matchId}
             AND "shopId" = ${shopId}
-          FOR UPDATE
         `;
+        return { alreadyFinalized: true, invoicePaid: lockedInvoice.status === "paid" };
+      }
 
-        if (!lockedInvoice) {
-          throw new Error("Invoice not found during stale reclaim");
-        }
+      const currentOutstanding = BigInt(lockedInvoice.outstandingPaise);
+      const reduction = matchAmountPaise > currentOutstanding ? currentOutstanding : matchAmountPaise;
+      const newOutstanding = currentOutstanding - reduction;
+      const isFullPayment = newOutstanding === 0n;
 
-        const currentOutstanding = BigInt(lockedInvoice.outstandingPaise);
-        const reduction = matchAmountPaise > currentOutstanding ? currentOutstanding : matchAmountPaise;
-        const newOutstanding = currentOutstanding - reduction;
-
+      if (!isFullPayment) {
+        // PARTIAL: finalize locally in this transaction
         await tx`
           UPDATE "Invoice"
           SET outstanding = ${Number(newOutstanding) / 100}, "updatedAt" = NOW()
@@ -761,58 +631,100 @@ async function handleStalePushingMatch(
           newOutstandingPaise: newOutstanding.toString(),
           staleReclaim: true,
         });
-      });
 
+        return { isPartial: true, currentOutstanding: currentOutstanding.toString() };
+      }
+
+      // FULL: need Shopify call - return outstanding for later use
+      return { isPartial: false, currentOutstanding: currentOutstanding.toString() };
+    });
+
+    if ("error" in decisionResult) {
+      return {
+        success: false,
+        invoicePaid: false,
+        shopifyPushSucceeded: false,
+        error: decisionResult.error,
+      };
+    }
+
+    if (decisionResult.alreadyFinalized) {
+      return {
+        success: true,
+        invoicePaid: decisionResult.invoicePaid ?? false,
+        shopifyPushSucceeded: true,
+        reasonCode: "STALE_RECLAIM_ALREADY_FINALIZED",
+      };
+    }
+
+    if (decisionResult.isPartial) {
       await safeEnqueueRecompute(sql, invoiceRow.id);
-
       return {
         success: true,
         invoicePaid: false,
         shopifyPushSucceeded: false,
         reasonCode: "STALE_RECLAIM_PARTIAL",
       };
-    } catch (error) {
-      return {
-        success: false,
-        invoicePaid: false,
-        shopifyPushSucceeded: false,
-        error: `Stale reclaim failed: ${error instanceof Error ? error.message : String(error)}`,
-      };
     }
-  }
 
-  // Full payment stale re-claim - need to call Shopify
-  let shopifySuccess = false;
-  let reasonCode: string | undefined;
+    // FULL payment path: call Shopify outside transaction
+    const currentOutstandingPaise = decisionResult.currentOutstanding!;
+    let shopifySuccess = false;
+    let reasonCode: string | undefined;
 
-  if (invoiceRow.orderId) {
-    const shopifyResult = await callOrderMarkAsPaid(
-      invoiceRow.shopDomain,
-      invoiceRow.orderId
-    );
+    if (invoiceRow.orderId) {
+      const shopifyResult = await callOrderMarkAsPaid(
+        invoiceRow.shopDomain,
+        invoiceRow.orderId
+      );
 
-    if (shopifyResult.success) {
-      shopifySuccess = true;
-    } else if (shopifyResult.alreadyPaid) {
-      shopifySuccess = true;
-      reasonCode = "STALE_RECLAIM_ALREADY_PAID_IN_SHOPIFY";
+      if (shopifyResult.success) {
+        shopifySuccess = true;
+      } else if (shopifyResult.alreadyPaid) {
+        shopifySuccess = true;
+        reasonCode = "STALE_RECLAIM_ALREADY_PAID_IN_SHOPIFY";
+      } else {
+        // Shopify call failed - leave in 'pushing' for another retry
+        return {
+          success: false,
+          invoicePaid: false,
+          shopifyPushSucceeded: false,
+          error: shopifyResult.error ?? "Shopify call failed during stale reclaim",
+          retryable: shopifyResult.retryable,
+        };
+      }
     } else {
-      // Shopify call failed - leave in 'pushing' for another retry
-      return {
-        success: false,
-        invoicePaid: false,
-        shopifyPushSucceeded: false,
-        error: shopifyResult.error ?? "Shopify call failed during stale reclaim",
-        retryable: shopifyResult.retryable,
-      };
+      shopifySuccess = true;
     }
-  } else {
-    shopifySuccess = true;
-  }
 
-  // Finalize the stale re-claimed full payment
-  try {
+    // Finalize: lock invoice again, re-check status, then mark paid
     await sql.begin(async (tx) => {
+      const [lockedInvoice] = await tx<{ outstandingPaise: string; status: string }[]>`
+        SELECT
+          (ROUND(outstanding * 100))::text AS "outstandingPaise",
+          status
+        FROM "Invoice"
+        WHERE id = ${invoiceRow.id}
+          AND "shopId" = ${shopId}
+        FOR UPDATE
+      `;
+
+      if (!lockedInvoice) {
+        throw new Error("Invoice not found during stale reclaim finalize");
+      }
+
+      // Re-check status after locking
+      if (lockedInvoice.status !== "open") {
+        // Just finalize match if invoice already changed
+        await tx`
+          UPDATE "Match"
+          SET state = 'pushed', "updatedAt" = NOW()
+          WHERE id = ${matchId}
+            AND "shopId" = ${shopId}
+        `;
+        return;
+      }
+
       await tx`
         UPDATE "Invoice"
         SET outstanding = 0, status = 'paid', "updatedAt" = NOW()
@@ -831,8 +743,8 @@ async function handleStalePushingMatch(
         matchId,
         invoiceId: invoiceRow.id,
         paymentId: matchRow.paymentId,
-        amountPaise: matchRow.amountPaise,
-        previousOutstandingPaise: invoiceRow.outstandingPaise,
+        amountPaise: currentOutstandingPaise,
+        previousOutstandingPaise: currentOutstandingPaise,
         newOutstandingPaise: "0",
         reasonCode,
         staleReclaim: true,
@@ -857,12 +769,12 @@ async function handleStalePushingMatch(
       reasonCode: reasonCode ?? "STALE_RECLAIM_FULL",
     };
   } catch (error) {
-    // DB error after Shopify succeeded - leave in 'pushing' for stale re-claim
+    // DB error - leave in 'pushing' for stale re-claim
     return {
       success: false,
       invoicePaid: false,
-      shopifyPushSucceeded: shopifySuccess,
-      error: `Stale reclaim finalization failed: ${error instanceof Error ? error.message : String(error)}`,
+      shopifyPushSucceeded: false,
+      error: `Stale reclaim failed: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
 }
@@ -913,14 +825,16 @@ async function claimMatchAndDecide(
         return { success: false, error: `Invoice status is '${lockedInvoice.status}', expected 'open'` };
       }
 
-      // RACE CHECK: Refuse apply while another match on this invoice has an in-flight push
+      // RACE CHECK: Refuse apply while another match on this invoice has a FRESH in-flight push
       // (state='pushing' means TX1 claimed it but TX2 hasn't finalized yet)
-      const [inFlightPush] = await tx<{ id: string }[]>`
-        SELECT id FROM "Match"
+      // Siblings older than 5 min are considered stale and don't block - they'll be recovered
+      const [inFlightPush] = await tx<{ id: string; updatedAt: Date }[]>`
+        SELECT id, "updatedAt" FROM "Match"
         WHERE "invoiceId" = ${invoiceRow.id}
           AND "shopId" = ${shopId}
           AND id != ${matchId}
           AND state = 'pushing'
+          AND "updatedAt" >= NOW() - interval '5 minutes'
         LIMIT 1
       `;
 

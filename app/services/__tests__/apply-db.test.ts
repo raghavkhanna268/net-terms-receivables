@@ -1072,20 +1072,21 @@ describeWithDb("S17 apply service DB integration", () => {
         VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 10000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushing', NOW() - interval '10 minutes', NOW() - interval '10 minutes')
       `;
 
-      // Reset call count
+      // Reset call counts
       shopifyCallCount = 0;
+      verifyOrderIsPaidCallCount = 0;
+      orderMarkAsPaidCallCount = 0;
 
       // Apply - should reclaim and re-push to Shopify
       const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       expect(result.success).toBe(true);
       expect(result.invoicePaid).toBe(true);
-      // reasonCode depends on whether verifyOrderIsPaid returned false
       expect(result.reasonCode).toBe("STALE_RECLAIM_FULL");
 
-      // Shopify should have been called (once for verifyOrderIsPaid, once for orderMarkAsPaid)
-      // Note: verifyOrderIsPaid is called, then orderMarkAsPaid
-      expect(shopifyCallCount).toBeGreaterThanOrEqual(1);
+      // Exactly one verifyOrderIsPaid call, exactly one orderMarkAsPaid call
+      expect(verifyOrderIsPaidCallCount).toBe(1);
+      expect(orderMarkAsPaidCallCount).toBe(1);
 
       // Match should now be 'pushed'
       const [match] = await sql<{ state: string }[]>`
@@ -1255,23 +1256,27 @@ describeWithDb("S17 apply service DB integration", () => {
         VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 10000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushing', NOW() - interval '10 minutes', NOW() - interval '10 minutes')
       `;
 
+      // Reset call counts
+      orderMarkAsPaidCallCount = 0;
+
       // Simulate concurrent retriers
       const [r1, r2] = await Promise.all([
         applyMatch(sql, TEST_SHOP_ID, matchId, "test-user-1"),
         applyMatch(sql, TEST_SHOP_ID, matchId, "test-user-2"),
       ]);
 
-      // Exactly one should succeed, the other should get PUSH_IN_PROGRESS or ALREADY_APPLIED
+      // Exactly one should succeed
       const successes = [r1, r2].filter(r => r.success);
       const failures = [r1, r2].filter(r => !r.success);
 
-      // At least one succeeds
-      expect(successes.length).toBeGreaterThanOrEqual(1);
+      expect(successes.length).toBe(1);
+      expect(failures.length).toBe(1);
 
-      // If one failed, it should be due to race
-      if (failures.length > 0) {
-        expect(failures[0].reasonCode).toMatch(/PUSH_IN_PROGRESS|ALREADY_APPLIED/);
-      }
+      // The failure should be due to race
+      expect(failures[0].reasonCode).toMatch(/PUSH_IN_PROGRESS|ALREADY_APPLIED|STALE_RECLAIM/);
+
+      // Exactly one orderMarkAsPaid call
+      expect(orderMarkAsPaidCallCount).toBe(1);
 
       // Match should be 'pushed' (finalized by winner)
       const [match] = await sql<{ state: string }[]>`
@@ -1323,7 +1328,7 @@ describeWithDb("S17 apply service DB integration", () => {
       const paymentId2 = await createPayment(500000n); // Second payment
       const invoiceId = await createInvoice(1000000n); // 10000 INR invoice
 
-      // Create a match in 'pushing' state for paymentId1
+      // Create a match in 'pushing' state for paymentId1 (FRESH - within 5 min)
       const matchId1 = `match-pushing-block-${Date.now().toString(36)}`;
       await sql`
         INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
@@ -1352,24 +1357,47 @@ describeWithDb("S17 apply service DB integration", () => {
       expect(match2.state).toBe("confirmed");
     });
 
-    it("'pushing' partial on invoice doesn't reduce outstanding yet", async () => {
-      const paymentId = await createPayment(500000n);
-      const invoiceId = await createInvoice(1000000n); // 10000 INR
+    it("STALE 'pushing' sibling (> 5 min) does NOT block new apply", async () => {
+      const paymentId1 = await createPayment(500000n); // First payment (stale pushing)
+      const paymentId2 = await createPayment(500000n); // Second payment (new apply)
+      const invoiceId = await createInvoice(1000000n); // 10000 INR invoice
 
-      // Create a match directly in 'pushing' state (simulating partial in-flight)
-      const matchId = `match-pushing-partial-${Date.now().toString(36)}`;
+      // Create a match in 'pushing' state for paymentId1 (STALE - > 5 min old)
+      const matchId1 = `match-pushing-stale-sibling-${Date.now().toString(36)}`;
       await sql`
         INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
-        VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 5000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushing', NOW(), NOW())
+        VALUES (${matchId1}, ${TEST_SHOP_ID}, ${paymentId1}, ${invoiceId}, 5000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushing', NOW() - interval '10 minutes', NOW() - interval '10 minutes')
       `;
 
-      // Invoice outstanding should still be full amount (pushing doesn't reduce yet)
-      const [invoice] = await sql<{ outstanding: string; status: string }[]>`
-        SELECT outstanding::text, status FROM "Invoice" WHERE id = ${invoiceId}
+      // Create a confirmed match for paymentId2 on the same invoice
+      const matchId2 = await createConfirmedMatch(paymentId2, invoiceId, 500000n);
+
+      // Try to apply match2 - should NOT be blocked because match1 is STALE (> 5 min)
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId2, "test-user");
+
+      // Should succeed (stale sibling doesn't block)
+      expect(result.success).toBe(true);
+      expect(result.invoicePaid).toBe(false); // Partial
+
+      // Invoice outstanding should be reduced by 5000
+      const [invoice] = await sql<{ outstanding: string }[]>`
+        SELECT outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
       `;
-      expect(parseFloat(invoice.outstanding)).toBe(10000);
-      expect(invoice.status).toBe("open");
+      expect(parseFloat(invoice.outstanding)).toBe(5000);
+
+      // match2 should now be 'pushed'
+      const [match2] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId2}
+      `;
+      expect(match2.state).toBe("pushed");
+
+      // match1 should still be 'pushing' (it wasn't recovered, just ignored)
+      const [match1] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId1}
+      `;
+      expect(match1.state).toBe("pushing");
     });
+
   });
 
   /**

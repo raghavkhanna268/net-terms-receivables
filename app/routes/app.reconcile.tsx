@@ -87,7 +87,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       pagination: { page: 1, pageSize: PAGE_SIZE, totalCount: 0 },
       view,
       error: "Shop not found",
-      tabCounts: { suggested: 0, unmatched: 0, confirmed: 0 },
+      tabCounts: { suggested: 0, unmatched: 0, confirmed: 0, pushing: 0 },
       planKey: "free" as PlanKey,
       gatingEnforced: false,
       storeHandle: shopDomain.replace(".myshopify.com", ""),
@@ -205,6 +205,26 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         limit: PAGE_SIZE,
         offset: (page - 1) * PAGE_SIZE,
         state: "confirmed",
+      });
+
+      matches = result.matches.map((m) => ({
+        id: m.id,
+        paymentId: m.paymentId,
+        invoiceId: m.invoiceId,
+        invoiceName: m.invoiceName,
+        amountPaise: m.amountPaise.toString(),
+        score: m.score,
+        reasons: m.reasons,
+        state: m.state,
+        buyerName: m.buyerName,
+      }));
+      totalCount = result.totalCount;
+    } else if (view === "pushing") {
+      // S17: View pushing matches (in-flight) with Retry action
+      const result = await getSuggestedMatches(sql, shop.id, {
+        limit: PAGE_SIZE,
+        offset: (page - 1) * PAGE_SIZE,
+        state: "pushing",
       });
 
       matches = result.matches.map((m) => ({
@@ -835,6 +855,104 @@ function ConfirmedMatchesView({
   );
 }
 
+/**
+ * S17: Pushing matches view - shows in-flight matches with Retry action.
+ * These are matches where TX1 succeeded but TX2 hasn't finalized yet.
+ */
+function PushingMatchesView({
+  matches,
+  currency,
+  page,
+  totalCount,
+  pageSize,
+}: {
+  matches: MatchSummary[];
+  currency: string;
+  page: number;
+  totalCount: number;
+  pageSize: number;
+}) {
+  const navigation = useNavigation();
+  const isSubmitting = navigation.state === "submitting";
+  const totalPages = Math.ceil(totalCount / pageSize);
+
+  if (matches.length === 0) {
+    return (
+      <s-empty-state heading="No in-progress matches">
+        <s-text slot="subheading">
+          There are no matches currently being applied. Check back later if you
+          see matches stuck in progress.
+        </s-text>
+      </s-empty-state>
+    );
+  }
+
+  return (
+    <s-stack>
+      <s-banner tone="warning" heading="Matches In Progress">
+        These matches started applying but haven't completed. Click Retry to
+        attempt completion, or wait for automatic recovery (stale matches are
+        retried after 5 minutes).
+      </s-banner>
+
+      <s-table>
+        <s-table-header-row>
+          <s-table-header>Invoice</s-table-header>
+          <s-table-header>Account</s-table-header>
+          <s-table-header>Amount</s-table-header>
+          <s-table-header>Actions</s-table-header>
+        </s-table-header-row>
+        <s-table-body>
+          {matches.map((match) => (
+            <s-table-row key={match.id}>
+              <s-table-cell>
+                <s-link href={`/app/invoices/${match.invoiceId}`}>
+                  {match.invoiceName}
+                </s-link>
+              </s-table-cell>
+              <s-table-cell>{match.buyerName}</s-table-cell>
+              <s-table-cell>
+                {formatPaiseAmount(BigInt(match.amountPaise), currency)}
+              </s-table-cell>
+              <s-table-cell>
+                <Form method="post" style={{ display: "inline" }}>
+                  <input type="hidden" name="intent" value="apply" />
+                  <input type="hidden" name="matchId" value={match.id} />
+                  <s-button
+                    variant="primary"
+                    type="submit"
+                    disabled={isSubmitting}
+                  >
+                    Retry
+                  </s-button>
+                </Form>
+              </s-table-cell>
+            </s-table-row>
+          ))}
+        </s-table-body>
+      </s-table>
+
+      {totalPages > 1 && (
+        <s-stack direction="inline">
+          {page > 1 && (
+            <s-button href={`/app/reconcile?view=pushing&page=${page - 1}`}>
+              Previous
+            </s-button>
+          )}
+          <s-text>
+            Page {page} of {totalPages} ({totalCount} matches)
+          </s-text>
+          {page < totalPages && (
+            <s-button href={`/app/reconcile?view=pushing&page=${page + 1}`}>
+              Next
+            </s-button>
+          )}
+        </s-stack>
+      )}
+    </s-stack>
+  );
+}
+
 export default function ReconcilePage() {
   const {
     shopCurrency,
@@ -904,6 +1022,14 @@ export default function ReconcilePage() {
           >
             Confirmed ({tabCounts.confirmed})
           </s-button>
+          {tabCounts.pushing > 0 && (
+            <s-button
+              href="/app/reconcile?view=pushing"
+              variant={view === "pushing" ? "primary" : "secondary"}
+            >
+              In Progress ({tabCounts.pushing})
+            </s-button>
+          )}
         </s-stack>
       </s-section>
 
@@ -927,6 +1053,16 @@ export default function ReconcilePage() {
       ) : view === "confirmed" ? (
         <s-section heading="Confirmed Matches">
           <ConfirmedMatchesView
+            matches={matches}
+            currency={shopCurrency}
+            page={pagination.page}
+            totalCount={pagination.totalCount}
+            pageSize={pagination.pageSize}
+          />
+        </s-section>
+      ) : view === "pushing" ? (
+        <s-section heading="In Progress">
+          <PushingMatchesView
             matches={matches}
             currency={shopCurrency}
             page={pagination.page}
