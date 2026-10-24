@@ -1076,6 +1076,7 @@ jobs:
           EOSQL
 
       - name: S12 Validation
+        id: s12_validation
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
           ENSURE_VALIDATION: ${{ inputs.ensure_validation }}
@@ -1121,10 +1122,16 @@ jobs:
           if [ "$TOKEN_EXPIRED" = "true" ] && [ "$REFRESH_SUCCESS" != "true" ]; then
             echo "::notice::Offline access token has expired, skipping S12 Validation (read-only mode)."
             echo ""
+            # If ensure_validation was requested but we can't run it, warn and record in summary
+            if [ "$ENSURE_VALIDATION" = "true" ]; then
+              echo "::warning::ensure_validation=true but token is expired; cannot create/enable validation without valid token"
+              echo "ensure_validation_skipped=true" >> "$GITHUB_STEP_SUMMARY"
+            fi
             echo "S12 Validation status:"
             jq -n \
               --argjson repo_input_query_has_credit_status "$REPO_INPUT_QUERY_HAS_CREDIT_STATUS" \
-              '{status: "skipped", reason: "token_expired", repo_input_query_has_credit_status: $repo_input_query_has_credit_status}'
+              --argjson ensure_validation_skipped "$([ "$ENSURE_VALIDATION" = "true" ] && echo true || echo false)" \
+              '{status: "skipped", reason: "token_expired", repo_input_query_has_credit_status: $repo_input_query_has_credit_status, ensure_validation_skipped: $ensure_validation_skipped}'
             exit 0
           fi
 
