@@ -204,8 +204,8 @@ describe("S22 Migration Verification", () => {
     });
   });
 
-  describe("Retention Purge SQL", () => {
-    it.skipIf(!DATABASE_URL)("purges narration on old unmatched payments, preserves matched and amounts/UTR", async () => {
+  describe("Retention Purge Function", () => {
+    it.skipIf(!DATABASE_URL)("s22_purge_unmatched_narration() purges old unmatched, preserves matched and amounts/UTR", async () => {
       const testId = Date.now();
       const testShopId = `shop-retention-${testId}`;
       const testImportId = `import-retention-${testId}`;
@@ -247,11 +247,11 @@ describe("S22 Migration Verification", () => {
         VALUES (${oldMatchedId}, ${testShopId}, ${testImportId}, ${oldDate}, 3000.00, 'UTR003', 'OLD MATCHED NARRATION', 'MATCHED PAYER', 'matched', ${now}, ${now})
       `;
 
-      // Payment 4: Old unmatched with NULL narration (should NOT be touched)
-      const oldNullNarrationId = `pay-old-null-${testId}`;
+      // Payment 4: Old unmatched with empty narration (should NOT be touched)
+      const oldEmptyNarrationId = `pay-old-empty-${testId}`;
       await sql!`
         INSERT INTO public."Payment" (id, "shopId", "importId", "valueDate", amount, utr, narration, "payerText", status, "createdAt", "updatedAt")
-        VALUES (${oldNullNarrationId}, ${testShopId}, ${testImportId}, ${oldDate}, 4000.00, 'UTR004', '', NULL, 'unmatched', ${now}, ${now})
+        VALUES (${oldEmptyNarrationId}, ${testShopId}, ${testImportId}, ${oldDate}, 4000.00, 'UTR004', '', NULL, 'unmatched', ${now}, ${now})
       `;
 
       // Payment 5: Old unmatched already redacted (should NOT be touched)
@@ -261,20 +261,11 @@ describe("S22 Migration Verification", () => {
         VALUES (${oldRedactedId}, ${testShopId}, ${testImportId}, ${oldDate}, 5000.00, 'UTR005', '[REDACTED]', NULL, 'unmatched', ${now}, ${now})
       `;
 
-      // Run the purge SQL (same as the pg_cron job body, using 180 days directly for test)
-      await sql!`
-        UPDATE public."Payment"
-        SET
-          narration = '[RETENTION_PURGED]',
-          "payerText" = NULL,
-          "updatedAt" = NOW()
-        WHERE status = 'unmatched'
-          AND "valueDate" < NOW() - INTERVAL '180 days'
-          AND narration IS NOT NULL
-          AND narration IS DISTINCT FROM '[RETENTION_PURGED]'
-          AND narration IS DISTINCT FROM '[REDACTED]'
-          AND narration != ''
+      // Call the same function that pg_cron uses
+      const [result] = await sql!<{ s22_purge_unmatched_narration: number }[]>`
+        SELECT public.s22_purge_unmatched_narration()
       `;
+      expect(result.s22_purge_unmatched_narration).toBe(1); // Only 1 row should be purged
 
       // Verify old unmatched was purged
       const [oldUnmatched] = await sql!<{ narration: string; payerText: string | null; amount: string; utr: string }[]>`
@@ -300,11 +291,11 @@ describe("S22 Migration Verification", () => {
       expect(oldMatched.payerText).toBe('MATCHED PAYER');
 
       // Verify old empty narration was NOT touched
-      const [oldNull] = await sql!<{ narration: string; payerText: string | null }[]>`
-        SELECT narration, "payerText" FROM public."Payment" WHERE id = ${oldNullNarrationId}
+      const [oldEmpty] = await sql!<{ narration: string; payerText: string | null }[]>`
+        SELECT narration, "payerText" FROM public."Payment" WHERE id = ${oldEmptyNarrationId}
       `;
-      expect(oldNull.narration).toBe('');
-      expect(oldNull.payerText).toBeNull();
+      expect(oldEmpty.narration).toBe('');
+      expect(oldEmpty.payerText).toBeNull();
 
       // Verify already redacted was NOT touched
       const [oldRedacted] = await sql!<{ narration: string }[]>`
