@@ -21,35 +21,42 @@ import {
 } from "~/lib/metafields-contract";
 import { shopifyGraphQLRequest, type ShopifyClientResult } from "./shopify-client.server";
 import { hasOverdueInvoices } from "./overdue.server";
-import { safeLog, toErrorCode } from "~/lib/log.server";
+import { safeLog, toErrorCode, isSafeCode } from "~/lib/log.server";
 
 // Re-export HoldReasonCode for use by credit-status-recompute.server.ts
 export type { HoldReasonCode };
 
 /**
- * Permanent sync error codes that should not be retried nightly.
- * These are fixed codes only - never raw Shopify/GraphQL error text.
- * Maps to metafieldSyncErrorCode column.
+ * Permanent sync error codes that EXCLUDE the account from nightly resync.
+ * These represent truly permanent failures that won't resolve without human action.
+ * Unknown/temporary codes are NOT in this list - they leave the marker NULL so the
+ * nightly resync can retry them (at most once per UTC day under the cap).
+ * This prevents a single transient GraphQL error from permanently blocking a paid buyer.
  */
 export const PERMANENT_SYNC_ERROR_CODES = [
   "no_session",
   "access_denied",
   "missing_credentials",
   "token_refresh_failed",
+  "no_refresh_token",
+  "invalid_grant",
   "user_error",
   "owner_not_found",
   "redacted",
-  "unknown_permanent",
 ] as const;
 
 export type PermanentSyncErrorCode = (typeof PERMANENT_SYNC_ERROR_CODES)[number];
 
 /**
- * Maps raw error codes to permanent sync error codes.
- * Unknown codes map to 'unknown_permanent' to avoid storing raw error text.
+ * Maps raw error codes to permanent sync error codes for the marker column.
+ * Returns null for unknown codes - they should NOT set the marker, allowing
+ * the nightly resync to retry them.
+ * 
+ * IMPORTANT: Use this ONLY for the metafieldSyncErrorCode marker column.
+ * For logging, audit, and DLQ, use the original client errorCode directly.
  */
-export function toPermanentSyncErrorCode(errorCode: string | undefined): PermanentSyncErrorCode {
-  if (!errorCode) return "unknown_permanent";
+export function toPermanentSyncErrorCode(errorCode: string | undefined): PermanentSyncErrorCode | null {
+  if (!errorCode) return null;
   
   // Direct matches
   if ((PERMANENT_SYNC_ERROR_CODES as readonly string[]).includes(errorCode)) {
@@ -58,11 +65,11 @@ export function toPermanentSyncErrorCode(errorCode: string | undefined): Permane
   
   // Map related codes
   if (errorCode === "http_403") return "access_denied";
-  if (errorCode === "token_refresh_failed" || errorCode === "invalid_grant") return "token_refresh_failed";
-  if (errorCode.startsWith("graphql_error:")) return "unknown_permanent";
-  if (errorCode === "graphql_query_error") return "unknown_permanent";
   
-  return "unknown_permanent";
+  // graphql_error:*, graphql_query_error, http_400, http_404, unknown - return null
+  // These are NOT permanent: they might resolve on retry, so leave marker NULL
+  // and let the nightly resync retry them (at most once per UTC day)
+  return null;
 }
 
 /**
@@ -885,11 +892,15 @@ export async function syncCreditStatusMetafield(
     const rawErrorCode = metafieldResult.errorCode ?? toErrorCode(metafieldResult.error);
     const retryable = metafieldResult.retryable;
     
-    // Map error code for non-retryable errors to avoid storing raw text
-    // Retryable errors use toErrorCode which is already safe (no raw messages)
-    const errorCode = retryable === false 
-      ? toPermanentSyncErrorCode(rawErrorCode)
-      : rawErrorCode;
+    // For return/log/audit/DLQ: use original client code if safe, otherwise toErrorCode fallback.
+    // This keeps the specific error code (e.g., graphql_error:ACCESS_DENIED) in DLQ and logs.
+    const errorCode = isSafeCode(rawErrorCode) ? rawErrorCode : toErrorCode(metafieldResult.error);
+    
+    // For marker column only: map to known permanent codes, or null if unknown.
+    // Unknown non-retryable codes (graphql_error:*, http_400, http_404, unknown) leave marker NULL
+    // so the nightly resync can retry them (at most once per UTC day under the cap).
+    // This prevents a single transient error from permanently excluding a paid buyer.
+    const markerCode = retryable === false ? toPermanentSyncErrorCode(rawErrorCode) : null;
 
     safeLog("error", "credit_status_metafield_sync_failed", {
       buyerAccountId,
@@ -926,11 +937,12 @@ export async function syncCreditStatusMetafield(
       }
     }
 
-    // Set permanent error marker if not retryable (respecting syncVersion guard)
-    if (retryable === false) {
+    // Set permanent error marker ONLY for known permanent codes.
+    // Unknown non-retryable codes leave marker NULL for nightly resync retry.
+    if (markerCode !== null) {
       await sql`
         UPDATE "BuyerAccount"
-        SET "metafieldSyncErrorCode" = ${errorCode},
+        SET "metafieldSyncErrorCode" = ${markerCode},
             "metafieldSyncErrorAt" = NOW()
         WHERE id = ${buyerAccountId}
           AND "syncVersion" = ${txResult.syncVersion}

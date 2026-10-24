@@ -132,6 +132,9 @@ BEGIN
     v_accounts_enqueued := v_accounts_enqueued + 1;
   END LOOP;
   
+  -- Return stats for logging
+  -- (RETURN QUERY moved to end of function for Part 3)
+  
   -- Part 3: Resync pass - Accounts with stale syncPending that need metafield retry
   -- This handles both directions:
   -- A) Hold direction: HELD in DB but metafield write failed, checkout not blocking
