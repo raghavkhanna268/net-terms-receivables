@@ -254,7 +254,9 @@ export async function applyMatch(
  * 1. Idempotent retry - match was already successfully applied
  * 2. Crash recovery (Issue #6) - match was claimed but push never completed
  *
- * We detect crash recovery by checking if the invoice is NOT 'paid' yet.
+ * We detect crash recovery by checking:
+ * - For full payments: invoice status is not 'paid'
+ * - For partial payments: no match.applied audit event exists
  */
 async function handlePushedMatch(
   sql: Sql,
@@ -290,7 +292,7 @@ async function handlePushedMatch(
     };
   }
 
-  // If invoice is already paid, this is a successful idempotent retry
+  // If invoice is already paid, this is a successful idempotent retry (full payment)
   if (invoiceRow.status === "paid") {
     return {
       success: true,
@@ -300,10 +302,23 @@ async function handlePushedMatch(
     };
   }
 
-  // Invoice is NOT paid - this is crash recovery (Issue #6)
-  // We need to retry the Shopify push and finalize
+  // Check if this match was already applied by looking for audit event
+  // This handles idempotent retry of partial payments
+  const appliedAmount = await getAppliedAmountFromAudit(sql, matchRow.shopId, matchId);
+  if (appliedAmount !== null) {
+    // Match was already applied (partial payment idempotent retry)
+    return {
+      success: true,
+      invoicePaid: false,
+      shopifyPushSucceeded: false,
+      reasonCode: "ALREADY_APPLIED",
+    };
+  }
+
+  // No audit event found - this is crash recovery (Issue #6)
+  // Match was claimed but apply never completed
   console.log(
-    `[applyMatch] Crash recovery: matchId=${matchId} was pushed but invoice not paid, retrying`
+    `[applyMatch] Crash recovery: matchId=${matchId} was pushed but no audit event found, retrying`
   );
 
   // Determine if this is a partial or full payment

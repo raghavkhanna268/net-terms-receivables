@@ -26,9 +26,24 @@ vi.mock("../shopify-client.server", async (importOriginal) => {
   const actual = await importOriginal() as Record<string, unknown>;
   return {
     ...actual,
-    shopifyGraphQLRequest: vi.fn().mockImplementation(async () => {
+    shopifyGraphQLRequest: vi.fn().mockImplementation(async (_shop: string, query: string) => {
       shopifyCallCount++;
 
+      // Handle ORDER_QUERY for verifyOrderIsPaid (Issue #5)
+      const isOrderQuery = query.includes("query GetOrder");
+      if (isOrderQuery) {
+        return {
+          success: true,
+          data: {
+            order: {
+              id: "gid://shopify/Order/123",
+              displayFinancialStatus: mockAlreadyPaid ? "PAID" : "PENDING",
+            },
+          },
+        };
+      }
+
+      // Handle OrderMarkAsPaid mutation
       if (mockAlreadyPaid) {
         return {
           success: true,
@@ -282,6 +297,57 @@ describeWithDb("S17 apply service DB integration", () => {
       `;
 
       expect(parseInt(count.count)).toBe(1);
+    });
+
+    /**
+     * QA-requested real-DB test: Apply same ₹5,000 partial match 3 times on ₹10,000 invoice.
+     * Verifies:
+     * - Outstanding stays ₹5,000 (not ₹0, not negative)
+     * - Status stays 'open' (not 'paid')
+     * - orderMarkAsPaid is never called
+     * - Exactly one match.applied event
+     */
+    it("idempotent partial: ₹5,000 match applied 3x on ₹10,000 invoice", async () => {
+      const paymentId = await createPayment(500000n); // ₹5,000
+      const invoiceId = await createInvoice(1000000n); // ₹10,000
+      const matchId = await createConfirmedMatch(paymentId, invoiceId, 500000n);
+
+      // Reset Shopify call counter
+      shopifyCallCount = 0;
+
+      // Apply same match 3 times
+      const result1 = await applyMatch(sql, matchId, "test-user");
+      const result2 = await applyMatch(sql, matchId, "test-user");
+      const result3 = await applyMatch(sql, matchId, "test-user");
+
+      // All calls should succeed
+      expect(result1.success).toBe(true);
+      expect(result2.success).toBe(true);
+      expect(result3.success).toBe(true);
+
+      // First is partial, rest are idempotent
+      expect(result1.invoicePaid).toBe(false);
+      expect(result2.reasonCode).toBe("ALREADY_APPLIED");
+      expect(result3.reasonCode).toBe("ALREADY_APPLIED");
+
+      // Verify orderMarkAsPaid was NEVER called (partial payment)
+      expect(shopifyCallCount).toBe(0);
+
+      // Verify invoice outstanding stays ₹5,000, status stays 'open'
+      const [invoice] = await sql<{ outstanding: string; status: string }[]>`
+        SELECT outstanding::text, status FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+      expect(parseFloat(invoice.outstanding)).toBe(5000); // ₹5,000 remaining
+      expect(invoice.status).toBe("open");
+
+      // Verify exactly one match.applied audit event
+      const [eventCount] = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text AS count FROM "AuditEvent"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+          AND type = 'match.applied'
+          AND data->>'matchId' = ${matchId}
+      `;
+      expect(parseInt(eventCount.count)).toBe(1);
     });
   });
 
