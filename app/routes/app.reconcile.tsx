@@ -1,18 +1,3 @@
-/**
- * Payment reconciliation review queue (S16).
- *
- * Displays unmatched/suggested payment matches for merchant review.
- * Confirm/Reject/Edit allocation actions are POST requests, idempotent and shop-scoped.
- *
- * This is v1 CONFIRM-ONLY: merchants review suggestions but no mutations are
- * applied to orders. S17 will read confirmed matches and apply them.
- *
- * Polaris web component patterns from #68:
- * - s-table with s-table-header-row directly under s-table
- * - s-stack direction="inline" (no s-inline-stack)
- * - s-button href instead of wrapping Link
- */
-
 import type {
   HeadersFunction,
   LoaderFunctionArgs,
@@ -32,6 +17,7 @@ import {
   rejectMatch,
   MAX_PAYMENTS_PER_REQUEST,
 } from "~/services/matcher.server";
+import { applyMatch, unmatchMatch } from "~/services/apply.server";
 import { formatPaiseAmount } from "~/lib/aging";
 import { resolvePlan } from "~/services/plan.server";
 import { isGatingEnforced } from "~/services/gating.server";
@@ -86,7 +72,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       pagination: { page: 1, pageSize: PAGE_SIZE, totalCount: 0 },
       view,
       error: "Shop not found",
-      tabCounts: { suggested: 0, unmatched: 0 },
+      tabCounts: { suggested: 0, unmatched: 0, confirmed: 0 },
       planKey: "free" as PlanKey,
       gatingEnforced: false,
       storeHandle: shopDomain.replace(".myshopify.com", ""),
@@ -105,138 +91,28 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   } | null = null;
   let totalCount = 0;
 
-  // P3: Get real tab counts from COUNT queries (not page length)
-  // Run resolvePlan in parallel with tab counts to avoid extra round trip on cache miss
-  let tabCounts = { suggested: 0, unmatched: 0 };
+  let tabCounts = { suggested: 0, unmatched: 0, confirmed: 0 };
   let planData = { plan: { key: "free" as PlanKey } };
   try {
-    const [planResult, suggestedCount, unmatchedCount] = await Promise.all([
-      resolvePlan(sql, shopDomain),
-      sql<{ count: string }[]>`
-        SELECT COUNT(*)::text AS count
-        FROM "Match"
-        WHERE "shopId" = ${shop.id}
-          AND state = 'suggested'
-      `.then(r => r[0]),
-      sql<{ count: string }[]>`
-        SELECT COUNT(*)::text AS count
-        FROM "Payment"
-        WHERE "shopId" = ${shop.id}
-          AND status IN ('unmatched', 'partial')
-      `.then(r => r[0]),
-    ]);
-    planData = planResult;
-    tabCounts = {
-      suggested: parseInt(suggestedCount?.count ?? "0", 10),
-      unmatched: parseInt(unmatchedCount?.count ?? "0", 10),
-    };
-  } catch (err) {
-    console.error("[app.reconcile] Error getting tab counts or plan:", err);
-  }
+    const [pR, sC, uC] = await Promise.all([resolvePlan(sql, shopDomain), sql<{c:string}[]>`SELECT COUNT(*)::text AS c FROM "Match" WHERE "shopId"=${shop.id} AND state='suggested'`.then(r=>r[0]), sql<{c:string}[]>`SELECT COUNT(*)::text AS c FROM "Payment" WHERE "shopId"=${shop.id} AND status IN ('unmatched','partial')`.then(r=>r[0])]);
+    planData = pR; tabCounts = { suggested: parseInt(sC?.c??"0",10), unmatched: parseInt(uC?.c??"0",10), confirmed: 0 };
+  } catch { /* continue */ }
 
+  const mm = (m:{id:string,paymentId:string,invoiceId:string,invoiceName:string,amountPaise:bigint,score:number,reasons:unknown,state:string,buyerName:string})=>({id:m.id,paymentId:m.paymentId,invoiceId:m.invoiceId,invoiceName:m.invoiceName,amountPaise:m.amountPaise.toString(),score:m.score,reasons:m.reasons,state:m.state,buyerName:m.buyerName});
   try {
     if (selectedPaymentId) {
-      // Viewing a specific payment's matches
-      const paymentData = await getPaymentWithMatches(
-        sql,
-        shop.id,
-        selectedPaymentId
-      );
-
-      if (paymentData) {
-        selectedPayment = {
-          payment: {
-            id: paymentData.payment.id,
-            amountPaise: paymentData.payment.amountPaise.toString(),
-            narration: paymentData.payment.narration,
-            payerText: paymentData.payment.payerText,
-            utr: paymentData.payment.utr,
-            rail: paymentData.payment.rail,
-            valueDate: paymentData.payment.valueDate.toISOString(),
-            importFileName: paymentData.payment.importFileName,
-          },
-          matches: paymentData.matches.map((m) => ({
-            id: m.id,
-            paymentId: selectedPaymentId,
-            invoiceId: m.invoiceId,
-            invoiceName: m.invoiceName,
-            amountPaise: m.amountPaise.toString(),
-            score: m.score,
-            reasons: m.reasons,
-            state: m.state,
-            buyerName: m.buyerName,
-          })),
-        };
-      }
+      const pd = await getPaymentWithMatches(sql, shop.id, selectedPaymentId);
+      if (pd) { const p = pd.payment; selectedPayment = { payment: { id: p.id, amountPaise: p.amountPaise.toString(), narration: p.narration, payerText: p.payerText, utr: p.utr, rail: p.rail, valueDate: p.valueDate.toISOString(), importFileName: p.importFileName }, matches: pd.matches.map(m=>({...mm({...m,paymentId:selectedPaymentId})})) }; }
     } else if (view === "unmatched") {
-      // View unmatched payments
-      const result = await getUnmatchedPayments(sql, shop.id, {
-        limit: PAGE_SIZE,
-        offset: (page - 1) * PAGE_SIZE,
-      });
-
-      payments = result.payments.map((p) => ({
-        id: p.id,
-        amountPaise: p.amountPaise.toString(),
-        narration: p.narration,
-        payerText: p.payerText,
-        utr: p.utr,
-        rail: p.rail,
-      }));
-      totalCount = result.totalCount;
+      const r = await getUnmatchedPayments(sql, shop.id, { limit: PAGE_SIZE, offset: (page-1)*PAGE_SIZE });
+      payments = r.payments.map(p => ({ id: p.id, amountPaise: p.amountPaise.toString(), narration: p.narration, payerText: p.payerText, utr: p.utr, rail: p.rail })); totalCount = r.totalCount;
+    } else if (view === "confirmed") {
+      const r = await getSuggestedMatches(sql, shop.id, { limit: PAGE_SIZE, offset: (page-1)*PAGE_SIZE, state: "confirmed" }); matches = r.matches.map(mm); totalCount = r.totalCount; tabCounts.confirmed = totalCount;
     } else {
-      // View suggested matches (default)
-      const result = await getSuggestedMatches(sql, shop.id, {
-        limit: PAGE_SIZE,
-        offset: (page - 1) * PAGE_SIZE,
-        state: "suggested",
-      });
-
-      matches = result.matches.map((m) => ({
-        id: m.id,
-        paymentId: m.paymentId,
-        invoiceId: m.invoiceId,
-        invoiceName: m.invoiceName,
-        amountPaise: m.amountPaise.toString(),
-        score: m.score,
-        reasons: m.reasons,
-        state: m.state,
-        buyerName: m.buyerName,
-      }));
-      totalCount = result.totalCount;
+      const r = await getSuggestedMatches(sql, shop.id, { limit: PAGE_SIZE, offset: (page-1)*PAGE_SIZE, state: "suggested" }); matches = r.matches.map(mm); totalCount = r.totalCount;
     }
-  } catch (err) {
-    console.error("[app.reconcile] Error loading data:", err);
-    return {
-      shopCurrency: shop.currency,
-      payments: [],
-      matches: [],
-      selectedPayment: null,
-      pagination: { page, pageSize: PAGE_SIZE, totalCount: 0 },
-      view,
-      error: "Failed to load reconciliation data",
-      tabCounts,
-      planKey: planData.plan.key,
-      gatingEnforced,
-      storeHandle,
-      appHandle: process.env.APP_HANDLE ?? "net-terms-receivables",
-    };
-  }
-
-  return {
-    shopCurrency: shop.currency,
-    payments,
-    matches,
-    selectedPayment,
-    pagination: { page, pageSize: PAGE_SIZE, totalCount },
-    view,
-    error: null,
-    tabCounts,
-    planKey: planData.plan.key,
-    gatingEnforced,
-    storeHandle,
-    appHandle: process.env.APP_HANDLE ?? "net-terms-receivables",
-  };
+  } catch { return { shopCurrency: shop.currency, payments: [], matches: [], selectedPayment: null, pagination: { page, pageSize: PAGE_SIZE, totalCount: 0 }, view, error: "Load failed", tabCounts, planKey: planData.plan.key, gatingEnforced, storeHandle, appHandle: process.env.APP_HANDLE ?? "net-terms-receivables" }; }
+  return { shopCurrency: shop.currency, payments, matches, selectedPayment, pagination: { page, pageSize: PAGE_SIZE, totalCount }, view, error: null, tabCounts, planKey: planData.plan.key, gatingEnforced, storeHandle, appHandle: process.env.APP_HANDLE ?? "net-terms-receivables" };
 };
 
 export const action = async ({ request, context }: ActionFunctionArgs) => {
@@ -262,413 +138,83 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   try {
     switch (intent) {
       case "run_matcher": {
-        // Use MAX_PAYMENTS_PER_REQUEST to respect Workers Free 10ms CPU budget
-        const result = await runMatcher(sql, shop.id, { limit: MAX_PAYMENTS_PER_REQUEST });
-        return {
-          success: true,
-          message: `Processed ${result.paymentsProcessed} payments, created ${result.matchesCreated} matches (${result.highConfidenceMatches} high confidence)${result.hasMore ? " (more pending)" : ""}`,
-        };
+        const r = await runMatcher(sql, shop.id, { limit: MAX_PAYMENTS_PER_REQUEST });
+        return { success: true, message: `${r.paymentsProcessed} payments, ${r.matchesCreated} matches (${r.highConfidenceMatches} high)${r.hasMore?" (more)":""}` };
       }
-
       case "confirm": {
         const matchId = formData.get("matchId") as string;
-        if (!matchId) {
-          return { success: false, error: "Match ID required" };
-        }
-        const result = await confirmMatch(sql, shop.id, matchId, userId);
-        // P2.6: Return generic error messages, details logged server-side
-        return {
-          success: result.success,
-          error: result.success ? null : "Failed to confirm match",
-        };
+        if (!matchId) return { success: false, error: "Match ID required" };
+        const r = await confirmMatch(sql, shop.id, matchId, userId);
+        return { success: r.success, error: r.success ? null : "Confirm failed" };
       }
-
       case "reject": {
         const matchId = formData.get("matchId") as string;
-        if (!matchId) {
-          return { success: false, error: "Match ID required" };
-        }
-        const result = await rejectMatch(sql, shop.id, matchId, userId);
-        // P2.6: Return generic error messages, details logged server-side
-        return {
-          success: result.success,
-          error: result.success ? null : "Failed to reject match",
-        };
+        if (!matchId) return { success: false, error: "Match ID required" };
+        const r = await rejectMatch(sql, shop.id, matchId, userId);
+        return { success: r.success, error: r.success ? null : "Reject failed" };
       }
-
-      default:
-        return { success: false, error: "Unknown action" };
+      case "apply": {
+        const matchId = formData.get("matchId") as string;
+        if (!matchId) return { success: false, error: "Match ID required" };
+        const r = await applyMatch(sql, matchId, userId);
+        return { success: r.success, error: r.success ? null : (r.error ?? "Apply failed") };
+      }
+      case "unmatch": {
+        const matchId = formData.get("matchId") as string;
+        if (!matchId) return { success: false, error: "Match ID required" };
+        const r = await unmatchMatch(sql, matchId, userId);
+        return { success: r.success, error: r.success ? null : (r.error ?? "Unmatch failed") };
+      }
+      default: return { success: false, error: "Unknown" };
     }
   } catch (err) {
-    // P2.6: Log details server-side, return generic message to client
-    console.error("[app.reconcile] Action error:", err);
-    return {
-      success: false,
-      error: "Action failed",
-    };
+    console.error("[reconcile] action:", err);
+    return { success: false, error: "Failed" };
   }
 };
 
-function ScoreBadge({ score }: { score: number }) {
-  if (score >= 80) {
-    return <s-badge tone="success">High ({score})</s-badge>;
-  }
-  if (score >= 50) {
-    return <s-badge tone="warning">Medium ({score})</s-badge>;
-  }
-  return <s-badge tone="critical">Low ({score})</s-badge>;
+function ScoreBadge({score}:{score:number}) {
+  const t = score>=80?"success":score>=50?"warning":"critical", l = score>=80?"Hi":score>=50?"Med":"Lo";
+  return <s-badge tone={t}>{l} ({score})</s-badge>;
 }
-
-function RailBadge({ rail }: { rail: string | null }) {
+function RailBadge({rail}:{rail:string|null}) {
   if (!rail) return <s-text>—</s-text>;
-
-  if (rail === "NEFT") return <s-badge tone="info">{rail}</s-badge>;
-  if (rail === "RTGS") return <s-badge tone="success">{rail}</s-badge>;
-  if (rail === "IMPS") return <s-badge tone="warning">{rail}</s-badge>;
-  return <s-badge>{rail}</s-badge>;
+  const t = rail==="NEFT"?"info":rail==="RTGS"?"success":rail==="IMPS"?"warning":undefined;
+  return t ? <s-badge tone={t}>{rail}</s-badge> : <s-badge>{rail}</s-badge>;
+}
+function MatchReasons({reasons}:{reasons:unknown}) {
+  return Array.isArray(reasons)?<s-text>{reasons.map(r=>`${r.type}+${r.points}`).join(", ")}</s-text>:null;
 }
 
-function MatchReasons({ reasons }: { reasons: unknown }) {
-  if (!Array.isArray(reasons)) return null;
-
-  return (
-    <s-stack>
-      {reasons.map((reason, idx) => (
-        <s-text key={idx}>
-          {reason.type}: +{reason.points} {reason.detail ? `(${reason.detail})` : ""}
-        </s-text>
-      ))}
-    </s-stack>
-  );
+function PaymentDetailView({ payment, matches, currency }: { payment: { id: string; amountPaise: string; narration: string; payerText: string | null; utr: string | null; rail: string | null; valueDate: string; importFileName: string }; matches: MatchSummary[]; currency: string }) {
+  const nav = useNavigation(), dis = nav.state === "submitting";
+  const P = ({l,v}:{l:string,v:unknown})=><s-paragraph><s-text type="strong">{l}: </s-text><s-text>{v as string}</s-text></s-paragraph>;
+  return (<s-section heading="Payment Details"><s-stack>
+    <P l="Amount" v={formatPaiseAmount(BigInt(payment.amountPaise), currency)}/><P l="Date" v={new Date(payment.valueDate).toLocaleDateString("en-IN",{timeZone:"Asia/Kolkata"})}/>
+    <s-paragraph><s-text type="strong">Rail: </s-text><RailBadge rail={payment.rail}/></s-paragraph>
+    {payment.utr && <P l="UTR" v={payment.utr}/>}{payment.payerText && <P l="Payer" v={payment.payerText}/>}
+    <P l="Narration" v={payment.narration}/><P l="Import" v={payment.importFileName}/><s-divider/>
+    <s-paragraph><s-text type="strong">Matches ({matches.length})</s-text></s-paragraph>
+    {!matches.length ? <s-empty-state heading="None"><s-text slot="subheading">No matches. Run matcher.</s-text></s-empty-state> : <s-table><s-table-header-row><s-table-header>Invoice</s-table-header><s-table-header>Buyer</s-table-header><s-table-header format="currency">Amt</s-table-header><s-table-header>Score</s-table-header><s-table-header>Reasons</s-table-header><s-table-header>Actions</s-table-header></s-table-header-row><s-table-body>
+    {matches.map(m=>(<s-table-row key={m.id}><s-table-cell>{m.invoiceName}</s-table-cell><s-table-cell>{m.buyerName}</s-table-cell><s-table-cell>{formatPaiseAmount(BigInt(m.amountPaise),currency)}</s-table-cell><s-table-cell><ScoreBadge score={m.score}/></s-table-cell><s-table-cell><MatchReasons reasons={m.reasons}/></s-table-cell><s-table-cell>{m.state==="suggested"?<s-stack direction="inline"><Form method="post"><input type="hidden" name="intent" value="confirm"/><input type="hidden" name="matchId" value={m.id}/><s-button variant="primary" type="submit" disabled={dis}>Confirm</s-button></Form><Form method="post"><input type="hidden" name="intent" value="reject"/><input type="hidden" name="matchId" value={m.id}/><s-button variant="secondary" tone="critical" type="submit" disabled={dis}>Reject</s-button></Form></s-stack>:<s-badge tone={m.state==="confirmed"?"success":"critical"}>{m.state}</s-badge>}</s-table-cell></s-table-row>))}
+    </s-table-body></s-table>}<s-button href="/app/reconcile">Back</s-button>
+  </s-stack></s-section>);
 }
 
-function PaymentDetailView({
-  payment,
-  matches,
-  currency,
-}: {
-  payment: { id: string; amountPaise: string; narration: string; payerText: string | null; utr: string | null; rail: string | null; valueDate: string; importFileName: string };
-  matches: MatchSummary[];
-  currency: string;
-}) {
-  const navigation = useNavigation();
-  const isSubmitting = navigation.state === "submitting";
-
-  return (
-    <s-section heading="Payment Details">
-      <s-stack>
-        <s-paragraph>
-          <s-text type="strong">Amount: </s-text>
-          <s-text>{formatPaiseAmount(BigInt(payment.amountPaise), currency)}</s-text>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text type="strong">Value Date: </s-text>
-          <s-text>
-            {new Date(payment.valueDate).toLocaleDateString("en-IN", {
-              timeZone: "Asia/Kolkata",
-            })}
-          </s-text>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text type="strong">Rail: </s-text>
-          <RailBadge rail={payment.rail} />
-        </s-paragraph>
-        {payment.utr && (
-          <s-paragraph>
-            <s-text type="strong">UTR: </s-text>
-            <s-text>{payment.utr}</s-text>
-          </s-paragraph>
-        )}
-        {payment.payerText && (
-          <s-paragraph>
-            <s-text type="strong">Payer: </s-text>
-            <s-text>{payment.payerText}</s-text>
-          </s-paragraph>
-        )}
-        <s-paragraph>
-          <s-text type="strong">Narration: </s-text>
-          <s-text>{payment.narration}</s-text>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text type="strong">Import: </s-text>
-          <s-text>{payment.importFileName}</s-text>
-        </s-paragraph>
-
-        <s-divider />
-
-        <s-paragraph>
-          <s-text type="strong">Suggested Matches ({matches.length})</s-text>
-        </s-paragraph>
-
-        {matches.length === 0 ? (
-          <s-empty-state heading="No matches found">
-            <s-text slot="subheading">
-              No invoice matches were found for this payment. You can run the
-              matcher again or manually reconcile.
-            </s-text>
-          </s-empty-state>
-        ) : (
-          <s-table>
-            <s-table-header-row>
-              <s-table-header>Invoice</s-table-header>
-              <s-table-header>Buyer</s-table-header>
-              <s-table-header format="currency">Amount</s-table-header>
-              <s-table-header>Score</s-table-header>
-              <s-table-header>Reasons</s-table-header>
-              <s-table-header>Actions</s-table-header>
-            </s-table-header-row>
-            <s-table-body>
-              {matches.map((match) => (
-                <s-table-row key={match.id}>
-                  <s-table-cell>{match.invoiceName}</s-table-cell>
-                  <s-table-cell>{match.buyerName}</s-table-cell>
-                  <s-table-cell>
-                    {formatPaiseAmount(BigInt(match.amountPaise), currency)}
-                  </s-table-cell>
-                  <s-table-cell>
-                    <ScoreBadge score={match.score} />
-                  </s-table-cell>
-                  <s-table-cell>
-                    <MatchReasons reasons={match.reasons} />
-                  </s-table-cell>
-                  <s-table-cell>
-                    {match.state === "suggested" ? (
-                      <s-stack direction="inline">
-                        <Form method="post">
-                          <input type="hidden" name="intent" value="confirm" />
-                          <input type="hidden" name="matchId" value={match.id} />
-                          <s-button
-                            variant="primary"
-                            type="submit"
-                            disabled={isSubmitting}
-                          >
-                            Confirm
-                          </s-button>
-                        </Form>
-                        <Form method="post">
-                          <input type="hidden" name="intent" value="reject" />
-                          <input type="hidden" name="matchId" value={match.id} />
-                          <s-button
-                            variant="secondary"
-                            tone="critical"
-                            type="submit"
-                            disabled={isSubmitting}
-                          >
-                            Reject
-                          </s-button>
-                        </Form>
-                      </s-stack>
-                    ) : (
-                      <s-badge
-                        tone={match.state === "confirmed" ? "success" : "critical"}
-                      >
-                        {match.state}
-                      </s-badge>
-                    )}
-                  </s-table-cell>
-                </s-table-row>
-              ))}
-            </s-table-body>
-          </s-table>
-        )}
-
-        <s-button href="/app/reconcile">Back to Queue</s-button>
-      </s-stack>
-    </s-section>
-  );
+function UnmatchedPaymentsView({payments,currency,page,totalCount,pageSize}:{payments:PaymentSummary[];currency:string;page:number;totalCount:number;pageSize:number}) {
+  const tp = Math.ceil(totalCount/pageSize), tr = (s:string,n:number)=>s.length>n?s.slice(0,n)+"…":s;
+  if (!payments.length) return <s-empty-state heading="None"><s-text slot="subheading">All matched. Import statements.</s-text></s-empty-state>;
+  return (<s-stack><s-table><s-table-header-row><s-table-header format="currency">Amt</s-table-header><s-table-header>Rail</s-table-header><s-table-header>UTR</s-table-header><s-table-header>Payer</s-table-header><s-table-header>Narration</s-table-header><s-table-header>Act</s-table-header></s-table-header-row><s-table-body>
+  {payments.map(p=>(<s-table-row key={p.id}><s-table-cell>{formatPaiseAmount(BigInt(p.amountPaise),currency)}</s-table-cell><s-table-cell><RailBadge rail={p.rail}/></s-table-cell><s-table-cell>{p.utr??"—"}</s-table-cell><s-table-cell>{p.payerText?tr(p.payerText,30):"—"}</s-table-cell><s-table-cell>{tr(p.narration,40)}</s-table-cell><s-table-cell><s-link href={`/app/reconcile?payment=${p.id}`}>View</s-link></s-table-cell></s-table-row>))}
+  </s-table-body></s-table>{tp>1&&<s-stack direction="inline">{page>1&&<s-button href={`/app/reconcile?view=unmatched&page=${page-1}`}>Prev</s-button>}<s-text>Page {page}/{tp} ({totalCount})</s-text>{page<tp&&<s-button href={`/app/reconcile?view=unmatched&page=${page+1}`}>Next</s-button>}</s-stack>}</s-stack>);
 }
 
-function UnmatchedPaymentsView({
-  payments,
-  currency,
-  page,
-  totalCount,
-  pageSize,
-}: {
-  payments: PaymentSummary[];
-  currency: string;
-  page: number;
-  totalCount: number;
-  pageSize: number;
-}) {
-  const totalPages = Math.ceil(totalCount / pageSize);
-
-  if (payments.length === 0) {
-    return (
-      <s-empty-state heading="No unmatched payments">
-        <s-text slot="subheading">
-          All payments have been matched or are pending review. Import more bank
-          statements to see new payments here.
-        </s-text>
-      </s-empty-state>
-    );
-  }
-
-  return (
-    <s-stack>
-      <s-table>
-        <s-table-header-row>
-          <s-table-header format="currency">Amount</s-table-header>
-          <s-table-header>Rail</s-table-header>
-          <s-table-header>UTR</s-table-header>
-          <s-table-header>Payer</s-table-header>
-          <s-table-header>Narration</s-table-header>
-          <s-table-header>Actions</s-table-header>
-        </s-table-header-row>
-        <s-table-body>
-          {payments.map((payment) => (
-            <s-table-row key={payment.id}>
-              <s-table-cell>
-                {formatPaiseAmount(BigInt(payment.amountPaise), currency)}
-              </s-table-cell>
-              <s-table-cell>
-                <RailBadge rail={payment.rail} />
-              </s-table-cell>
-              <s-table-cell>{payment.utr ?? "—"}</s-table-cell>
-              <s-table-cell>
-                {payment.payerText
-                  ? payment.payerText.slice(0, 30) +
-                    (payment.payerText.length > 30 ? "…" : "")
-                  : "—"}
-              </s-table-cell>
-              <s-table-cell>
-                {payment.narration.slice(0, 40) +
-                  (payment.narration.length > 40 ? "…" : "")}
-              </s-table-cell>
-              <s-table-cell>
-                <s-link href={`/app/reconcile?payment=${payment.id}`}>
-                  View
-                </s-link>
-              </s-table-cell>
-            </s-table-row>
-          ))}
-        </s-table-body>
-      </s-table>
-
-      {totalPages > 1 && (
-        <s-stack direction="inline">
-          {page > 1 && (
-            <s-button href={`/app/reconcile?view=unmatched&page=${page - 1}`}>
-              Previous
-            </s-button>
-          )}
-          <s-text>
-            Page {page} of {totalPages} ({totalCount} payments)
-          </s-text>
-          {page < totalPages && (
-            <s-button href={`/app/reconcile?view=unmatched&page=${page + 1}`}>
-              Next
-            </s-button>
-          )}
-        </s-stack>
-      )}
-    </s-stack>
-  );
-}
-
-function SuggestedMatchesView({
-  matches,
-  currency,
-  page,
-  totalCount,
-  pageSize,
-}: {
-  matches: MatchSummary[];
-  currency: string;
-  page: number;
-  totalCount: number;
-  pageSize: number;
-}) {
-  const navigation = useNavigation();
-  const isSubmitting = navigation.state === "submitting";
-  const totalPages = Math.ceil(totalCount / pageSize);
-
-  if (matches.length === 0) {
-    return (
-      <s-empty-state heading="No pending matches">
-        <s-text slot="subheading">
-          There are no suggested matches awaiting review. Run the matcher to
-          generate new suggestions.
-        </s-text>
-      </s-empty-state>
-    );
-  }
-
-  return (
-    <s-stack>
-      <s-table>
-        <s-table-header-row>
-          <s-table-header>Invoice</s-table-header>
-          <s-table-header>Buyer</s-table-header>
-          <s-table-header format="currency">Amount</s-table-header>
-          <s-table-header>Score</s-table-header>
-          <s-table-header>Actions</s-table-header>
-        </s-table-header-row>
-        <s-table-body>
-          {matches.map((match) => (
-            <s-table-row key={match.id}>
-              <s-table-cell>{match.invoiceName}</s-table-cell>
-              <s-table-cell>{match.buyerName}</s-table-cell>
-              <s-table-cell>
-                {formatPaiseAmount(BigInt(match.amountPaise), currency)}
-              </s-table-cell>
-              <s-table-cell>
-                <ScoreBadge score={match.score} />
-              </s-table-cell>
-              <s-table-cell>
-                <s-stack direction="inline">
-                  <s-link href={`/app/reconcile?payment=${match.paymentId}`}>
-                    Details
-                  </s-link>
-                  <Form method="post" style={{ display: "inline" }}>
-                    <input type="hidden" name="intent" value="confirm" />
-                    <input type="hidden" name="matchId" value={match.id} />
-                    <s-button
-                      variant="primary"
-                      type="submit"
-                      disabled={isSubmitting}
-                    >
-                      Confirm
-                    </s-button>
-                  </Form>
-                  <Form method="post" style={{ display: "inline" }}>
-                    <input type="hidden" name="intent" value="reject" />
-                    <input type="hidden" name="matchId" value={match.id} />
-                    <s-button
-                      variant="secondary"
-                      tone="critical"
-                      type="submit"
-                      disabled={isSubmitting}
-                    >
-                      Reject
-                    </s-button>
-                  </Form>
-                </s-stack>
-              </s-table-cell>
-            </s-table-row>
-          ))}
-        </s-table-body>
-      </s-table>
-
-      {totalPages > 1 && (
-        <s-stack direction="inline">
-          {page > 1 && (
-            <s-button href={`/app/reconcile?view=suggested&page=${page - 1}`}>
-              Previous
-            </s-button>
-          )}
-          <s-text>
-            Page {page} of {totalPages} ({totalCount} matches)
-          </s-text>
-          {page < totalPages && (
-            <s-button href={`/app/reconcile?view=suggested&page=${page + 1}`}>
-              Next
-            </s-button>
-          )}
-        </s-stack>
-      )}
-    </s-stack>
-  );
+function SuggestedMatchesView({matches,currency,page,totalCount,pageSize}:{matches:MatchSummary[];currency:string;page:number;totalCount:number;pageSize:number}) {
+  const nav=useNavigation(),dis=nav.state==="submitting",tp=Math.ceil(totalCount/pageSize);
+  if (!matches.length) return <s-empty-state heading="None"><s-text slot="subheading">No suggestions. Run matcher.</s-text></s-empty-state>;
+  return (<s-stack><s-table><s-table-header-row><s-table-header>Invoice</s-table-header><s-table-header>Buyer</s-table-header><s-table-header format="currency">Amt</s-table-header><s-table-header>Score</s-table-header><s-table-header>Actions</s-table-header></s-table-header-row><s-table-body>
+  {matches.map(m=>(<s-table-row key={m.id}><s-table-cell>{m.invoiceName}</s-table-cell><s-table-cell>{m.buyerName}</s-table-cell><s-table-cell>{formatPaiseAmount(BigInt(m.amountPaise),currency)}</s-table-cell><s-table-cell><ScoreBadge score={m.score}/></s-table-cell><s-table-cell><s-stack direction="inline"><s-link href={`/app/reconcile?payment=${m.paymentId}`}>Details</s-link><Form method="post" style={{display:"inline"}}><input type="hidden" name="intent" value="confirm"/><input type="hidden" name="matchId" value={m.id}/><s-button variant="primary" type="submit" disabled={dis}>Confirm</s-button></Form><Form method="post" style={{display:"inline"}}><input type="hidden" name="intent" value="reject"/><input type="hidden" name="matchId" value={m.id}/><s-button variant="secondary" tone="critical" type="submit" disabled={dis}>Reject</s-button></Form></s-stack></s-table-cell></s-table-row>))}
+  </s-table-body></s-table>{tp>1&&<s-stack direction="inline">{page>1&&<s-button href={`/app/reconcile?view=suggested&page=${page-1}`}>Prev</s-button>}<s-text>Page {page}/{tp} ({totalCount})</s-text>{page<tp&&<s-button href={`/app/reconcile?view=suggested&page=${page+1}`}>Next</s-button>}</s-stack>}</s-stack>);
 }
 
 export default function ReconcilePage() {
@@ -701,7 +247,6 @@ export default function ReconcilePage() {
         </s-section>
       )}
 
-      {/* S21: Upgrade prompt for matching feature (requires Starter+) */}
       {planKey === "free" && (
         <s-section>
           <UpgradePrompt
@@ -713,102 +258,29 @@ export default function ReconcilePage() {
         </s-section>
       )}
 
-      {/* Action bar */}
-      <s-section>
-        <s-stack direction="inline">
-          <Form method="post">
-            <input type="hidden" name="intent" value="run_matcher" />
-            <s-button variant="primary" type="submit" disabled={isSubmitting}>
-              {isSubmitting ? "Running…" : "Run Matcher"}
-            </s-button>
-          </Form>
-          <s-button
-            href="/app/reconcile?view=suggested"
-            variant={view === "suggested" ? "primary" : "secondary"}
-          >
-            Suggested ({tabCounts.suggested})
-          </s-button>
-          <s-button
-            href="/app/reconcile?view=unmatched"
-            variant={view === "unmatched" ? "primary" : "secondary"}
-          >
-            Unmatched ({tabCounts.unmatched})
-          </s-button>
-        </s-stack>
-      </s-section>
+      <s-section><s-stack direction="inline">
+        <Form method="post"><input type="hidden" name="intent" value="run_matcher"/><s-button variant="primary" type="submit" disabled={isSubmitting}>{isSubmitting?"Running…":"Run Matcher"}</s-button></Form>
+        <s-button href="/app/reconcile?view=suggested" variant={view==="suggested"?"primary":"secondary"}>Suggested ({tabCounts.suggested})</s-button>
+        <s-button href="/app/reconcile?view=unmatched" variant={view==="unmatched"?"primary":"secondary"}>Unmatched ({tabCounts.unmatched})</s-button>
+        <s-button href="/app/reconcile?view=confirmed" variant={view==="confirmed"?"primary":"secondary"}>Confirmed ({tabCounts.confirmed})</s-button>
+      </s-stack></s-section>
 
-      {/* Content based on selected view */}
-      {selectedPayment ? (
-        <PaymentDetailView
-          payment={selectedPayment.payment}
-          matches={selectedPayment.matches}
-          currency={shopCurrency}
-        />
-      ) : view === "unmatched" ? (
-        <s-section heading="Unmatched Payments">
-          <UnmatchedPaymentsView
-            payments={payments}
-            currency={shopCurrency}
-            page={pagination.page}
-            totalCount={pagination.totalCount}
-            pageSize={pagination.pageSize}
-          />
+      {selectedPayment ? <PaymentDetailView payment={selectedPayment.payment} matches={selectedPayment.matches} currency={shopCurrency}/> : view==="unmatched" ? (
+        <s-section heading="Unmatched"><UnmatchedPaymentsView payments={payments} currency={shopCurrency} page={pagination.page} totalCount={pagination.totalCount} pageSize={pagination.pageSize}/></s-section>
+      ) : view==="confirmed" ? (
+        <s-section heading="Confirmed">
+          {!matches.length ? <s-empty-state heading="None"><s-text slot="subheading">Confirm matches first.</s-text></s-empty-state> : (
+            <s-table><s-table-header-row><s-table-header>Invoice</s-table-header><s-table-header>Buyer</s-table-header><s-table-header format="currency">Amount</s-table-header><s-table-header>Actions</s-table-header></s-table-header-row><s-table-body>
+              {matches.map((m) => (<s-table-row key={m.id}><s-table-cell>{m.invoiceName}</s-table-cell><s-table-cell>{m.buyerName}</s-table-cell><s-table-cell>{formatPaiseAmount(BigInt(m.amountPaise), shopCurrency)}</s-table-cell><s-table-cell>
+                <Form method="post" style={{display:"inline"}}><input type="hidden" name="intent" value="apply"/><input type="hidden" name="matchId" value={m.id}/><s-button variant="primary" type="submit" disabled={isSubmitting}>Apply</s-button></Form>{" "}
+                <Form method="post" style={{display:"inline"}}><input type="hidden" name="intent" value="unmatch"/><input type="hidden" name="matchId" value={m.id}/><s-button variant="secondary" tone="critical" type="submit" disabled={isSubmitting}>Unmatch</s-button></Form>
+              </s-table-cell></s-table-row>))}
+            </s-table-body></s-table>)}
         </s-section>
-      ) : (
-        <s-section heading="Suggested Matches">
-          <SuggestedMatchesView
-            matches={matches}
-            currency={shopCurrency}
-            page={pagination.page}
-            totalCount={pagination.totalCount}
-            pageSize={pagination.pageSize}
-          />
-        </s-section>
-      )}
+      ) : <s-section heading="Suggested"><SuggestedMatchesView matches={matches} currency={shopCurrency} page={pagination.page} totalCount={pagination.totalCount} pageSize={pagination.pageSize}/></s-section>}
 
-      <s-section slot="aside" heading="About Reconciliation">
-        <s-paragraph>
-          This page helps you match bank payments to customer invoices.
-        </s-paragraph>
-        <s-unordered-list>
-          <s-list-item>
-            <s-text type="strong">Run Matcher:</s-text> Automatically find
-            potential matches for unmatched payments
-          </s-list-item>
-          <s-list-item>
-            <s-text type="strong">Confirm:</s-text> Mark a suggested match as
-            correct
-          </s-list-item>
-          <s-list-item>
-            <s-text type="strong">Reject:</s-text> Mark a suggested match as
-            incorrect
-          </s-list-item>
-        </s-unordered-list>
-        <s-paragraph>
-          Confirmed matches will be applied to orders in a future update (S17).
-        </s-paragraph>
-      </s-section>
-
-      <s-section slot="aside" heading="Match Scoring">
-        <s-paragraph>Match confidence is scored 0-100:</s-paragraph>
-        <s-unordered-list>
-          <s-list-item>
-            <s-text type="strong">Invoice/Order ref:</s-text> +30 points
-          </s-list-item>
-          <s-list-item>
-            <s-text type="strong">Exact amount:</s-text> +20 points
-          </s-list-item>
-          <s-list-item>
-            <s-text type="strong">Partial/overpayment:</s-text> +10 points
-          </s-list-item>
-          <s-list-item>
-            <s-text type="strong">Payer name:</s-text> +10 points
-          </s-list-item>
-        </s-unordered-list>
-        <s-paragraph>
-          Scores of 80+ are high confidence. Lower scores need more careful
-          review.
-        </s-paragraph>
+      <s-section slot="aside" heading="Help">
+        <s-paragraph>Run Matcher finds matches. Apply reduces outstanding. Unmatch reverts. Scores: ref +30, amount +20. 80+ = high.</s-paragraph>
       </s-section>
     </s-page>
   );
