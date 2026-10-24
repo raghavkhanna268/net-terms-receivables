@@ -589,10 +589,10 @@ export async function updateCreditStatus(
     };
   }
 
-  // Clear syncPending only if syncVersion matches (no newer write occurred)
+  // Clear syncPending and set metafieldSyncedAt only if syncVersion matches (no newer write occurred)
   const clearResult = await sql<{ id: string }[]>`
     UPDATE "BuyerAccount"
-    SET "syncPending" = false
+    SET "syncPending" = false, "metafieldSyncedAt" = NOW()
     WHERE id = ${buyerAccountId}
       AND "syncVersion" = ${txResult.syncVersion}
     RETURNING id
@@ -665,7 +665,7 @@ export async function syncCreditStatusMetafield(
 
     const owner = getOwnerGid(account);
     if (!owner) {
-      await tx`UPDATE "BuyerAccount" SET "syncPending" = false WHERE id = ${buyerAccountId}`;
+      await tx`UPDATE "BuyerAccount" SET "syncPending" = false, "metafieldSyncedAt" = NOW() WHERE id = ${buyerAccountId}`;
       return { success: true, skipMetafield: true } as const;
     }
 
@@ -760,10 +760,10 @@ export async function syncCreditStatusMetafield(
     };
   }
 
-  // Clear syncPending only if syncVersion matches (no newer write occurred)
+  // Clear syncPending and set metafieldSyncedAt only if syncVersion matches (no newer write occurred)
   const clearResult = await sql<{ id: string }[]>`
     UPDATE "BuyerAccount"
-    SET "syncPending" = false
+    SET "syncPending" = false, "metafieldSyncedAt" = NOW()
     WHERE id = ${buyerAccountId}
       AND "syncVersion" = ${txResult.syncVersion}
     RETURNING id

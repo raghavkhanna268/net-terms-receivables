@@ -29,7 +29,8 @@
     "test:coverage": "vitest run --coverage",
     "test:build": "vitest run --config vitest.build.config.ts",
     "benchmark:cpu": "node scripts/benchmark-cpu.mjs",
-    "seed": "tsx scripts/seed.ts"
+    "seed": "tsx scripts/seed.ts",
+    "credit-status:backfill": "tsx scripts/credit-status-metafield-backfill.ts"
   },
   "dependencies": {
     "@prisma/adapter-pg": "7.10.1",

@@ -260,6 +260,9 @@ model BuyerAccount {
   /// S21: When this account was gated due to plan limits. NULL means active.
   /// Gated accounts are excluded from limit count and enforcement.
   gatedAt             DateTime?          @map("gated_at") @db.Timestamptz
+  /// When the credit_status metafield was last successfully synced to Shopify.
+  /// NULL means the metafield has never been written; recompute must sync it.
+  metafieldSyncedAt   DateTime?          @db.Timestamptz(3)
 
   // Relations (onDelete: CASCADE - accounts are shop-specific)
   shop     Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
