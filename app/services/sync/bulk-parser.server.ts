@@ -185,6 +185,7 @@ export function bulkOrderToShopifyOrder(order: BulkOrderLine): ShopifyOrder {
     closedAt: order.closedAt,
     displayFinancialStatus: order.displayFinancialStatus,
     totalPriceSet: order.totalPriceSet,
+    totalOutstandingSet: order.totalOutstandingSet,
     paymentTerms: order.paymentTerms,
     purchasingEntity: order.purchasingEntity,
     customer: order.customer,

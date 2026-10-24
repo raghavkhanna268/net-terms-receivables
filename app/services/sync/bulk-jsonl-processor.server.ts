@@ -409,7 +409,7 @@ async function processCompanyLines(
  * Eligibility gates CREATION only. If an Invoice already exists for an order,
  * it is ALWAYS updated (to heal status changes like PAID, REFUNDED, etc.).
  */
-async function processOrderLines(
+export async function processOrderLines(
   sql: Sql,
   shopId: string,
   lines: string[],
@@ -434,6 +434,7 @@ async function processOrderLines(
   }
 
   // Batch lookup: find existing invoices for these orders (including outstanding/status for P2 fix)
+  // Note: use IN ${sql(ids)} instead of ANY(${ids}) for fetch_types:false compatibility
   const orderIds = orders.map((o) => o.id);
   const existingInvoices = await sql<{
     orderId: string;
@@ -443,7 +444,7 @@ async function processOrderLines(
   }[]>`
     SELECT "orderId", "buyerAccountId", outstanding::text, status::"InvoiceStatus"
     FROM "Invoice"
-    WHERE "shopId" = ${shopId} AND "orderId" = ANY(${orderIds})
+    WHERE "shopId" = ${shopId} AND "orderId" IN ${sql(orderIds)}
   `;
   const existingByOrderId = new Map(
     existingInvoices.map((i) => [i.orderId, { buyerAccountId: i.buyerAccountId, outstanding: i.outstanding, status: i.status }])
@@ -497,7 +498,7 @@ async function processOrderLines(
 
   const upsertedCount = await bulkUpsertInvoices(sql, invoices);
 
-  // Best-effort increment of diagnostic counter (batch: once per processOrderLines call)
+  // Best-effort increment of diagnostic counter (single DB round-trip for the batch)
   if (outstandingMissingCount > 0) {
     try {
       // Get shop domain from eligibility context for the counter
@@ -505,9 +506,7 @@ async function processOrderLines(
         SELECT domain FROM "Shop" WHERE id = ${shopId}
       `;
       if (shopRow) {
-        for (let i = 0; i < outstandingMissingCount; i++) {
-          await incrementOrderOutstandingMissing(sql, shopRow.domain);
-        }
+        await incrementOrderOutstandingMissing(sql, shopRow.domain, outstandingMissingCount);
       }
     } catch (err) {
       console.warn(
