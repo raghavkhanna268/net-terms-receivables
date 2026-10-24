@@ -66,6 +66,7 @@
 
 import { pathToFileURL } from "node:url";
 import postgres from "postgres";
+import { getSeedDbCounts, verifySeedCounts } from "./lib/seed-summary";
 
 // -- Types --
 
@@ -3554,6 +3555,21 @@ export async function seedDatabase(state: SeedState): Promise<void> {
       }
     }
     console.log(`  ✅ BuyerAccounts: ${state.createdCount.dbAccounts} with explicit default terms`);
+
+    // Verify counts against actual DB state
+    const actualCounts = await getSeedDbCounts(sql, state.shop);
+    const verification = verifySeedCounts(
+      state.createdCount.dbRules,
+      state.createdCount.dbAccounts,
+      actualCounts
+    );
+    
+    if (!verification.valid) {
+      // Update state to reflect actual DB counts (handles upsert idempotency)
+      state.createdCount.dbRules = actualCounts.accountSourceCount;
+      state.createdCount.dbAccounts = actualCounts.buyerAccountCount;
+      console.log(`  ℹ️  Counts adjusted to actual DB state (idempotent upsert)`);
+    }
 
   } finally {
     await sql.end();

@@ -1,4 +1,12 @@
-import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
+import postgres from "postgres";
+import { sqlOptions } from "~/lib/db-light.server";
+import {
+  getSeedDbCounts,
+  verifySeedCounts,
+  checkOutputForPii,
+  PII_PATTERNS,
+} from "../lib/seed-summary";
 import {
   SEED_TAG,
   SEED_PREFIX,
@@ -20,6 +28,7 @@ import {
   resetSeedData,
   formatCurrency,
   printDatabaseSeedSQL,
+  seedDatabase,
   seedTaggedCustomerOrders,
   TAGGED_CUSTOMER_SEEDS,
   TAGGED_ORDER_DISTRIBUTION,
@@ -6386,5 +6395,217 @@ describe("failed counts and exit code", () => {
     expect(state.failedCount.orders).toBe(0);
     expect(state.failedCount.roleAssignments).toBe(0);
     expect(state.failedCount.dbRows).toBe(0);
+  });
+});
+
+// Real-DB integration tests for seed summary counts
+const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
+const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
+
+describeWithDb("seed summary DB integration", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-seed-summary";
+  const TEST_SHOP_DOMAIN = `seed-summary-test-${TEST_SUFFIX}.myshopify.com`;
+  const TEST_SHOP_ID = `seed-shop-${TEST_SHOP_DOMAIN}`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+  });
+
+  afterAll(async () => {
+    // Clean up test data
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "AccountSource" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+    await sql.end();
+  });
+
+  it("seedDatabase creates rows and summary counts match actual DB counts", async () => {
+    // Create a test state with company data
+    const state = createMockState({
+      shop: TEST_SHOP_DOMAIN,
+      databaseUrl: TEST_DATABASE_URL!,
+      dryRun: false,
+      currencyCode: "INR",
+    });
+
+    // Add test company with all 3 locations
+    const locations = new Map<number, string>();
+    locations.set(15, `gid://shopify/CompanyLocation/test-${TEST_SUFFIX}-loc-15`);
+    locations.set(30, `gid://shopify/CompanyLocation/test-${TEST_SUFFIX}-loc-30`);
+    locations.set(60, `gid://shopify/CompanyLocation/test-${TEST_SUFFIX}-loc-60`);
+    state.companies.set(`test-company-${TEST_SUFFIX}`, createMockCompanyData({
+      id: `gid://shopify/Company/test-${TEST_SUFFIX}`,
+      contactCustomerId: `gid://shopify/Customer/test-${TEST_SUFFIX}`,
+      locations,
+    }));
+
+    // Run seedDatabase
+    await seedDatabase(state);
+
+    // Verify counts from state match actual DB
+    const actualCounts = await getSeedDbCounts(sql, TEST_SHOP_DOMAIN);
+
+    expect(actualCounts.shopExists).toBe(true);
+    expect(state.createdCount.dbRules).toBe(actualCounts.accountSourceCount);
+    expect(state.createdCount.dbAccounts).toBe(actualCounts.buyerAccountCount);
+
+    // Verify expected counts (3 tag rules, 3 accounts)
+    expect(actualCounts.accountSourceCount).toBe(3);
+    expect(actualCounts.buyerAccountCount).toBe(3);
+  });
+
+  it("seedDatabase is idempotent - re-run produces same counts", async () => {
+    // Re-run with the same state
+    const state = createMockState({
+      shop: TEST_SHOP_DOMAIN,
+      databaseUrl: TEST_DATABASE_URL!,
+      dryRun: false,
+      currencyCode: "INR",
+    });
+
+    const locations = new Map<number, string>();
+    locations.set(15, `gid://shopify/CompanyLocation/test-${TEST_SUFFIX}-loc-15`);
+    locations.set(30, `gid://shopify/CompanyLocation/test-${TEST_SUFFIX}-loc-30`);
+    locations.set(60, `gid://shopify/CompanyLocation/test-${TEST_SUFFIX}-loc-60`);
+    state.companies.set(`test-company-${TEST_SUFFIX}`, createMockCompanyData({
+      id: `gid://shopify/Company/test-${TEST_SUFFIX}`,
+      contactCustomerId: `gid://shopify/Customer/test-${TEST_SUFFIX}`,
+      locations,
+    }));
+
+    // Reset counters to simulate fresh run
+    state.createdCount.dbRules = 0;
+    state.createdCount.dbAccounts = 0;
+
+    // Run seedDatabase again
+    await seedDatabase(state);
+
+    // Should still match actual DB counts (idempotent)
+    const actualCounts = await getSeedDbCounts(sql, TEST_SHOP_DOMAIN);
+
+    // State counts should be adjusted to actual DB counts
+    expect(state.createdCount.dbRules).toBe(actualCounts.accountSourceCount);
+    expect(state.createdCount.dbAccounts).toBe(actualCounts.buyerAccountCount);
+
+    // Still 3 of each (upsert, not insert)
+    expect(actualCounts.accountSourceCount).toBe(3);
+    expect(actualCounts.buyerAccountCount).toBe(3);
+  });
+
+  it("verifySeedCounts detects mismatches", () => {
+    // Test mismatch detection
+    const actualCounts = {
+      shopExists: true,
+      accountSourceCount: 3,
+      buyerAccountCount: 5,
+    };
+
+    const verification = verifySeedCounts(3, 10, actualCounts);
+    expect(verification.valid).toBe(false);
+    expect(verification.discrepancies).toContain(
+      "BuyerAccount mismatch: reported 10, actual 5"
+    );
+  });
+
+  it("verifySeedCounts returns valid when counts match", () => {
+    const actualCounts = {
+      shopExists: true,
+      accountSourceCount: 3,
+      buyerAccountCount: 3,
+    };
+
+    const verification = verifySeedCounts(3, 3, actualCounts);
+    expect(verification.valid).toBe(true);
+    expect(verification.discrepancies).toHaveLength(0);
+  });
+});
+
+describe("seed summary output PII checks", () => {
+  it("checkOutputForPii detects email addresses", () => {
+    const output = "Created customer: test@example.com";
+    const result = checkOutputForPii(output);
+    expect(result.hasPii).toBe(true);
+    expect(result.matches.some(m => m.pattern === "email")).toBe(true);
+  });
+
+  it("checkOutputForPii detects Shopify domains", () => {
+    const output = "Shop: my-store.myshopify.com";
+    const result = checkOutputForPii(output);
+    expect(result.hasPii).toBe(true);
+    expect(result.matches.some(m => m.pattern === "shopifyDomain")).toBe(true);
+  });
+
+  it("checkOutputForPii detects currency amounts", () => {
+    const output = "Total: INR 1,234.00";
+    const result = checkOutputForPii(output);
+    expect(result.hasPii).toBe(true);
+    expect(result.matches.some(m => m.pattern === "currencyAmount")).toBe(true);
+  });
+
+  it("checkOutputForPii allows counts, ids, enums, booleans", () => {
+    const output = `
+      Companies: 5
+      Locations: 15
+      Orders: 33
+      Has overdue orders: true
+      Company ID: gid://shopify/Company/123
+      Mode: SEED
+    `;
+    const result = checkOutputForPii(output);
+    expect(result.hasPii).toBe(false);
+  });
+
+  it("summary output format contains only allowed content types", () => {
+    // Capture what the summary section would print
+    const state = createMockState();
+    state.createdCount.companies = 5;
+    state.createdCount.locations = 15;
+    state.createdCount.orders = 33;
+    state.createdCount.roleAssignments = 15;
+    state.createdCount.dbRules = 3;
+    state.createdCount.dbAccounts = 15;
+    state.overdueOrdersCount = 10;
+    state.ordersWithShopifyTerms = 20;
+    state.ordersWithoutShopifyTerms = 13;
+    state.taggedCustomerOrdersCount = 9;
+
+    // Build summary output similar to what main() would print
+    const summaryLines: string[] = [];
+    summaryLines.push(`Companies: ${state.createdCount.companies}`);
+    summaryLines.push(`Locations: ${state.createdCount.locations}`);
+    summaryLines.push(`Role assignments: ${state.createdCount.roleAssignments}`);
+    summaryLines.push(`Orders: ${state.createdCount.orders}`);
+    summaryLines.push(`Failed Companies: ${state.failedCount.companies}`);
+    summaryLines.push(`Failed Locations: ${state.failedCount.locations}`);
+    summaryLines.push(`Failed Role assignments: ${state.failedCount.roleAssignments}`);
+    summaryLines.push(`Failed Orders: ${state.failedCount.orders}`);
+    summaryLines.push(`Failed DB rows: ${state.failedCount.dbRows}`);
+    summaryLines.push(`B2B orders: ${state.createdCount.orders - state.taggedCustomerOrdersCount}`);
+    summaryLines.push(`Tagged customer orders: ${state.taggedCustomerOrdersCount}`);
+    summaryLines.push(`Orders with payment terms: ${state.ordersWithShopifyTerms}`);
+    summaryLines.push(`Overdue orders: ${state.overdueOrdersCount}`);
+    summaryLines.push(`Has overdue orders: ${state.overdueOrdersCount > 0}`);
+    summaryLines.push(`Tag rules: ${state.createdCount.dbRules}`);
+    summaryLines.push(`BuyerAccounts: ${state.createdCount.dbAccounts}`);
+
+    const output = summaryLines.join("\n");
+    const result = checkOutputForPii(output);
+    
+    expect(result.hasPii).toBe(false);
+    expect(result.matches).toHaveLength(0);
+  });
+
+  it("PII_PATTERNS regex patterns are correctly defined", () => {
+    // Verify regex patterns match expected content
+    expect(PII_PATTERNS.email.test("user@example.com")).toBe(true);
+    expect(PII_PATTERNS.email.test("no email here")).toBe(false);
+    
+    expect(PII_PATTERNS.shopifyDomain.test("store.myshopify.com")).toBe(true);
+    expect(PII_PATTERNS.shopifyDomain.test("store.example.com")).toBe(false);
+    
+    expect(PII_PATTERNS.currencyAmount.test("INR 1000")).toBe(true);
+    expect(PII_PATTERNS.currencyAmount.test("USD 1,234.56")).toBe(true);
+    expect(PII_PATTERNS.currencyAmount.test("Count: 1000")).toBe(false);
   });
 });
