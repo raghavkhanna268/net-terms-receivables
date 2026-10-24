@@ -139,8 +139,98 @@ describe("bank statement parsing integration", () => {
     });
   });
 
+  describe("HDFC XLSX format (synthetic)", () => {
+    let result: ParseResult;
+
+    beforeAll(async () => {
+      const content = readFileSync(join(FIXTURES_DIR, "hdfc-retail-synthetic.xlsx"));
+      const file = new File([content], "hdfc-retail-synthetic.xlsx", {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      result = await parseBankStatement(file);
+    });
+
+    it("detects HDFC bank from XLSX", () => {
+      expect(result.detection.bank).toBe("HDFC");
+      expect(result.detection.confidence).toBeGreaterThanOrEqual(0.5);
+    });
+
+    it("parses multiple transactions from XLSX", () => {
+      expect(result.transactions.length).toBeGreaterThan(5);
+    });
+
+    it("extracts all four rails from XLSX", () => {
+      const neftTxns = result.transactions.filter((t) => t.parsed.rail === "NEFT");
+      const rtgsTxns = result.transactions.filter((t) => t.parsed.rail === "RTGS");
+      const impsTxns = result.transactions.filter((t) => t.parsed.rail === "IMPS");
+      const upiTxns = result.transactions.filter((t) => t.parsed.rail === "UPI");
+
+      expect(neftTxns.length).toBeGreaterThan(0);
+      expect(rtgsTxns.length).toBeGreaterThan(0);
+      expect(impsTxns.length).toBeGreaterThan(0);
+      expect(upiTxns.length).toBeGreaterThan(0);
+    });
+
+    it("parses dates correctly from XLSX", () => {
+      for (const txn of result.transactions) {
+        expect(txn.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+        expect(txn.date.startsWith("2026")).toBe(true);
+      }
+    });
+
+    it("generates unique dedupe keys from XLSX", () => {
+      const keys = result.transactions.map((t) => t.dedupeKey);
+      const uniqueKeys = new Set(keys);
+      expect(uniqueKeys.size).toBe(keys.length);
+    });
+  });
+
+  describe("ICICI XLSX format (synthetic)", () => {
+    let result: ParseResult;
+
+    beforeAll(async () => {
+      const content = readFileSync(join(FIXTURES_DIR, "icici-retail-synthetic.xlsx"));
+      const file = new File([content], "icici-retail-synthetic.xlsx", {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      result = await parseBankStatement(file);
+    });
+
+    it("detects ICICI bank from XLSX", () => {
+      expect(result.detection.bank).toBe("ICICI");
+      expect(result.detection.confidence).toBeGreaterThanOrEqual(0.5);
+    });
+
+    it("parses multiple transactions from XLSX", () => {
+      expect(result.transactions.length).toBeGreaterThan(5);
+    });
+
+    it("extracts all four rails from XLSX", () => {
+      const neftTxns = result.transactions.filter((t) => t.parsed.rail === "NEFT");
+      const rtgsTxns = result.transactions.filter((t) => t.parsed.rail === "RTGS");
+      const impsTxns = result.transactions.filter((t) => t.parsed.rail === "IMPS");
+      const upiTxns = result.transactions.filter((t) => t.parsed.rail === "UPI");
+
+      expect(neftTxns.length).toBeGreaterThan(0);
+      expect(rtgsTxns.length).toBeGreaterThan(0);
+      expect(impsTxns.length).toBeGreaterThan(0);
+      expect(upiTxns.length).toBeGreaterThan(0);
+    });
+
+    it("parses dates correctly from XLSX", () => {
+      for (const txn of result.transactions) {
+        expect(txn.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      }
+    });
+
+    it("skips B/F row from XLSX", () => {
+      const bf = result.transactions.find((t) => t.narration.includes("B/F"));
+      expect(bf).toBeUndefined();
+    });
+  });
+
   describe("malformed data handling (synthetic)", () => {
-    describe("HDFC malformed", () => {
+    describe("HDFC malformed CSV", () => {
       let result: ParseResult;
 
       beforeAll(async () => {
@@ -163,12 +253,35 @@ describe("bank statement parsing integration", () => {
       });
 
       it("skips rows with missing required fields", () => {
-        // Should have fewer transactions than total rows
         expect(result.transactions.length).toBeLessThan(result.totalRows);
       });
     });
 
-    describe("ICICI malformed", () => {
+    describe("HDFC malformed XLSX", () => {
+      let result: ParseResult;
+
+      beforeAll(async () => {
+        const content = readFileSync(join(FIXTURES_DIR, "hdfc-malformed-synthetic.xlsx"));
+        const file = new File([content], "hdfc-malformed-synthetic.xlsx", {
+          type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        });
+        result = await parseBankStatement(file);
+      });
+
+      it("still detects as HDFC from XLSX", () => {
+        expect(result.detection.bank).toBe("HDFC");
+      });
+
+      it("parses valid rows from XLSX", () => {
+        expect(result.transactions.length).toBeGreaterThan(0);
+      });
+
+      it("skips malformed rows from XLSX", () => {
+        expect(result.transactions.length).toBeLessThan(result.totalRows);
+      });
+    });
+
+    describe("ICICI malformed CSV", () => {
       let result: ParseResult;
 
       beforeAll(async () => {
@@ -186,9 +299,32 @@ describe("bank statement parsing integration", () => {
       });
 
       it("handles impossible dates gracefully", () => {
-        // 45.15.2026 should be skipped
         const impossibleDate = result.transactions.find((t) => t.date.includes("45"));
         expect(impossibleDate).toBeUndefined();
+      });
+    });
+
+    describe("ICICI malformed XLSX", () => {
+      let result: ParseResult;
+
+      beforeAll(async () => {
+        const content = readFileSync(join(FIXTURES_DIR, "icici-malformed-synthetic.xlsx"));
+        const file = new File([content], "icici-malformed-synthetic.xlsx", {
+          type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        });
+        result = await parseBankStatement(file);
+      });
+
+      it("still detects as ICICI from XLSX", () => {
+        expect(result.detection.bank).toBe("ICICI");
+      });
+
+      it("parses valid rows from XLSX", () => {
+        expect(result.transactions.length).toBeGreaterThan(0);
+      });
+
+      it("skips malformed rows from XLSX", () => {
+        expect(result.transactions.length).toBeLessThan(result.totalRows);
       });
     });
   });
