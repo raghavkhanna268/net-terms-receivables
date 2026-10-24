@@ -23,19 +23,54 @@ SELECT original_queue, message->>'topic' AS topic, COUNT(*) AS total,
        COUNT(*) FILTER (WHERE dead_lettered_at >= (:'since')::timestamptz) AS since_start
 FROM s6_dead_letter GROUP BY 1, 2 ORDER BY 1, 2;
 
-\echo '== DLQ entries since redrive start (ids + error class enum; error text never printed; same classes as post-redrive-verify S20-4)'
+\echo '== DLQ entries since redrive start (ids + error code; error text never printed). error is "[non_retryable:|permanent:]<code>" since #176; older raw-text rows map to legacy_* buckets'
 SELECT original_msg_id, message->>'topic' AS topic, dead_lettered_at,
-       CASE
-         WHEN error LIKE 'Order has payment terms but no matching BuyerAccount found%' THEN 'nba_payment_terms'
-         WHEN error LIKE 'Customer matches tag rule % but no BuyerAccount found%'      THEN 'nba_tag_rule'
-         WHEN error LIKE 'CompanyLocation exists but no BuyerAccount synced yet%'      THEN 'nba_company_location'
-         WHEN error LIKE 'No handler registered for topic after %'                     THEN 'no_handler'
-         WHEN error LIKE 'Non-retryable error:%'                                       THEN 'non_retryable'
-         WHEN error IS NULL                                                            THEN NULL
-         ELSE 'other'
-       END AS error_class
-FROM s6_dead_letter WHERE dead_lettered_at >= (:'since')::timestamptz
+       error_format, error_disposition, error_code
+FROM
+  (SELECT d.*,
+    CASE WHEN d.error IS NULL THEN NULL
+         WHEN m.m IS NOT NULL THEN 'code'
+         WHEN d.error LIKE 'No handler registered for topic after %' THEN 'no_handler_text'
+         ELSE 'legacy_text' END AS error_format,
+    CASE WHEN d.error IS NULL THEN NULL
+         WHEN m.m IS NOT NULL THEN COALESCE(m.m[1], 'none')
+         WHEN d.error LIKE 'Non-retryable error:%' THEN 'non_retryable'
+         ELSE 'none' END AS error_disposition,
+    CASE WHEN d.error IS NULL THEN NULL
+         WHEN m.m IS NOT NULL THEN m.m[2]
+         WHEN d.error LIKE 'No handler registered for topic after %' THEN 'no_handler'
+         WHEN d.error LIKE 'Order has payment terms but no matching BuyerAccount found%' THEN 'legacy_nba_payment_terms'
+         WHEN d.error LIKE 'Customer matches tag rule % but no BuyerAccount found%' THEN 'legacy_nba_tag_rule'
+         WHEN d.error LIKE 'CompanyLocation exists but no BuyerAccount synced yet%' THEN 'legacy_nba_company_location'
+         ELSE 'legacy_unclassified' END AS error_code
+  FROM s6_dead_letter d
+  CROSS JOIN LATERAL (SELECT regexp_match(d.error, '^(?:(non_retryable|permanent):)?([A-Za-z][A-Za-z0-9_]{0,63}|graphql_error:[A-Za-z0-9_,]{1,200})$') AS m) m) dlq
+WHERE dead_lettered_at >= (:'since')::timestamptz
 ORDER BY dead_lettered_at LIMIT 50;
+
+\echo '== DLQ by error code (all-time / since redrive start)'
+SELECT error_format, error_disposition, error_code, COUNT(*) AS total,
+       COUNT(*) FILTER (WHERE dead_lettered_at >= (:'since')::timestamptz) AS since_start
+FROM
+  (SELECT d.*,
+    CASE WHEN d.error IS NULL THEN NULL
+         WHEN m.m IS NOT NULL THEN 'code'
+         WHEN d.error LIKE 'No handler registered for topic after %' THEN 'no_handler_text'
+         ELSE 'legacy_text' END AS error_format,
+    CASE WHEN d.error IS NULL THEN NULL
+         WHEN m.m IS NOT NULL THEN COALESCE(m.m[1], 'none')
+         WHEN d.error LIKE 'Non-retryable error:%' THEN 'non_retryable'
+         ELSE 'none' END AS error_disposition,
+    CASE WHEN d.error IS NULL THEN NULL
+         WHEN m.m IS NOT NULL THEN m.m[2]
+         WHEN d.error LIKE 'No handler registered for topic after %' THEN 'no_handler'
+         WHEN d.error LIKE 'Order has payment terms but no matching BuyerAccount found%' THEN 'legacy_nba_payment_terms'
+         WHEN d.error LIKE 'Customer matches tag rule % but no BuyerAccount found%' THEN 'legacy_nba_tag_rule'
+         WHEN d.error LIKE 'CompanyLocation exists but no BuyerAccount synced yet%' THEN 'legacy_nba_company_location'
+         ELSE 'legacy_unclassified' END AS error_code
+  FROM s6_dead_letter d
+  CROSS JOIN LATERAL (SELECT regexp_match(d.error, '^(?:(non_retryable|permanent):)?([A-Za-z][A-Za-z0-9_]{0,63}|graphql_error:[A-Za-z0-9_,]{1,200})$') AS m) m) dlq
+GROUP BY 1, 2, 3 ORDER BY 1, 2, 3;
 
 \echo '== Invoice totals by status / past-due bucket / dueBasis (dueAt; overdue_rule = backstop rule dueAt < now()-1d)'
 SELECT DENSE_RANK() OVER (ORDER BY i."shopId") AS shop_idx, i.status,
@@ -55,6 +90,7 @@ GROUP BY i."shopId", 2, 3, 4 ORDER BY 1, 2, 3, 4;
 SELECT action, COALESCE(CASE reason
          WHEN 'Order placed from held account - backstop applied'                   THEN 'hold_applied'
          WHEN 'Backstop failed after all retries - manual intervention required'     THEN 'failed_after_retries'
+         WHEN 'backstop_max_retries'                                                THEN 'failed_after_retries'
          WHEN 'Skipped non-merchant-managed fulfillment orders (outside our scope)'  THEN 'non_merchant_managed_skipped'
          WHEN 'Account not found'                                                   THEN 'account_not_found'
          WHEN 'Bypass active'                                                       THEN 'bypass_active'
@@ -83,6 +119,7 @@ SELECT e.at, e.data->>'orderGid' AS order_gid, e.data->>'buyerAccountId' AS buye
        CASE e.data->>'reason'
          WHEN 'Order placed from held account - backstop applied'                   THEN 'hold_applied'
          WHEN 'Backstop failed after all retries - manual intervention required'     THEN 'failed_after_retries'
+         WHEN 'backstop_max_retries'                                                THEN 'failed_after_retries'
          WHEN 'Skipped non-merchant-managed fulfillment orders (outside our scope)'  THEN 'non_merchant_managed_skipped'
          WHEN 'Account not found'                                                   THEN 'account_not_found'
          WHEN 'Bypass active'                                                       THEN 'bypass_active'
@@ -101,6 +138,17 @@ FROM "AuditEvent" e
 LEFT JOIN "BuyerAccount" a ON a.id = e.data->>'buyerAccountId'
 WHERE e.type = 'backstop.hold_applied' AND e.at >= (:'since')::timestamptz
 ORDER BY e.at;
+
+\echo '== backstop.failed AuditEvents by error code (all-time / since redrive start; data.errorCode since #176, legacy data.error text never printed)'
+SELECT CASE WHEN e.data ? 'errorCode' THEN
+              CASE WHEN e.data->>'errorCode' ~ '^(?:(non_retryable|permanent):)?([A-Za-z][A-Za-z0-9_]{0,63}|graphql_error:[A-Za-z0-9_,]{1,200})$' THEN e.data->>'errorCode' ELSE '<other>' END
+            WHEN e.data ? 'error' THEN 'legacy_unclassified'
+            ELSE '(none)' END AS error_code,
+       COUNT(*) AS total,
+       COUNT(*) FILTER (WHERE e.at >= (:'since')::timestamptz) AS since_start
+FROM "AuditEvent" e
+WHERE e.type = 'backstop.failed'
+GROUP BY 1 ORDER BY 1;
 
 \echo '== held account drill-down: account hold fields (no name)'
 SELECT a.id, a.kind, a."holdState", CASE WHEN a."holdReasonCode" ~ '^[A-Z0-9_]{1,40}$' THEN a."holdReasonCode" WHEN a."holdReasonCode" IS NULL THEN NULL ELSE '<other>' END AS hold_reason_code, a."manualHold", a.bypass,
