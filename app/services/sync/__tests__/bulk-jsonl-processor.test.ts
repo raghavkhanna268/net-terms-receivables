@@ -18,6 +18,23 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // Mock modules before importing
 vi.mock("~/lib/db-light.server", () => ({}));
 
+vi.mock("~/lib/request-context.server", () => ({
+  getRequestEnv: vi.fn(() => ({ CUSTOMER_PII_FIELDS: "1" })),
+  getRequestSql: vi.fn(() => ({})),
+  getRequestWaitUntil: vi.fn(() => () => {}),
+  requestContext: { getStore: vi.fn() },
+}));
+
+vi.mock("~/shopify.server", () => ({
+  sessionStorage: {},
+  shopify: {},
+}));
+
+vi.mock("~/services/shopify-client.server", () => ({
+  shopifyGraphQL: vi.fn().mockResolvedValue({ success: true, data: null }),
+  shopifyGraphQLQueue: vi.fn().mockResolvedValue({ success: true, data: null }),
+}));
+
 vi.mock("~/services/sync/company.server", () => ({
   isWebhookProcessed: vi.fn().mockResolvedValue(false),
   markWebhookProcessed: vi.fn().mockResolvedValue(undefined),
@@ -51,7 +68,38 @@ vi.mock("~/services/sync/order.server", () => ({
     dueReason: null,
     status: "open",
   })),
+  mapOrderToInvoiceWithEligibility: vi.fn((shopId, buyerAccountId, order, elig) => ({
+    shopId,
+    buyerAccountId,
+    orderId: order.id,
+    name: order.name,
+    total: "100.00",
+    outstanding: "100.00",
+    issuedAt: new Date(),
+    dueAt: elig?.dueDate?.dueAt ?? null,
+    dueSource: elig?.dueDate?.dueSource ?? "none",
+    dueBasis: elig?.dueDate?.basis ?? null,
+    dueReason: elig?.dueDate?.reason ?? null,
+    status: "open",
+  })),
   bulkUpsertInvoices: vi.fn().mockResolvedValue(0),
+}));
+
+vi.mock("~/lib/invoice-eligibility", () => ({
+  checkOrderEligibility: vi.fn().mockResolvedValue({
+    eligible: true,
+    reason: "shopify_payment_terms",
+    explanation: "Default mock",
+    buyerAccountId: "buyer-mock",
+    dueDate: {
+      dueAt: new Date("2025-01-31T00:00:00Z"),
+      dueSource: "schedule",
+      basis: null,
+      reason: "Default mock schedule",
+    },
+  }),
+  getEligibilityContext: vi.fn().mockResolvedValue({ shop: { id: "shop-123" } }),
+  isTerminalFinancialStatus: vi.fn().mockReturnValue(false),
 }));
 
 vi.mock("~/services/sync/customer.server", () => ({
