@@ -279,7 +279,7 @@ async function handlePushedMatch(
   shopId: string,
   matchId: string,
   matchRow: { id: string; shopId: string; paymentId: string; invoiceId: string; amountPaise: string },
-  _actor: string
+  actor: string
 ): Promise<ApplyMatchResult> {
   // Check invoice status to determine if this is idempotent or crash recovery
   // IDOR protection: filter by shopId
@@ -334,21 +334,50 @@ async function handlePushedMatch(
     };
   }
 
-  // No audit event found - this is an inconsistent state (legacy crash or data issue)
-  // With the new 'pushing' state, matches should not reach 'pushed' without an audit event
-  // Return error - manual intervention may be needed
-  console.error(
+  // P1: No 'pushed' without match.applied audit. Invoice is no longer open OR
+  // there was a crash before the audit was written. Transition to 'unmatched'
+  // with an audit event explaining the situation.
+  console.warn(
     `[applyMatch] Inconsistent state: matchId=${matchId} is 'pushed' but no audit event found. ` +
-    `This should not happen with the 'pushing' state machine. Manual review needed.`
+    `Transitioning to 'unmatched' with PUSHED_WITHOUT_AUDIT audit.`
   );
 
-  return {
-    success: false,
-    invoicePaid: false,
-    shopifyPushSucceeded: false,
-    error: "Match is in inconsistent state (pushed without audit). Contact support.",
-    reasonCode: "INCONSISTENT_STATE",
-  };
+  try {
+    await sql.begin(async (tx) => {
+      await tx`
+        UPDATE "Match"
+        SET state = 'unmatched', "updatedAt" = NOW()
+        WHERE id = ${matchId}
+          AND "shopId" = ${shopId}
+          AND state = 'pushed'
+      `;
+
+      await writeAuditEvent(tx, shopId, actor, "match.unmatched", {
+        matchId,
+        invoiceId: invoiceRow.id,
+        paymentId: matchRow.paymentId,
+        previousState: "pushed",
+        reason: "PUSHED_WITHOUT_AUDIT",
+        invoiceStatus: invoiceRow.status,
+      });
+    });
+
+    return {
+      success: false,
+      invoicePaid: false,
+      shopifyPushSucceeded: false,
+      error: "Match was in inconsistent state and has been unmatched. Please re-confirm and apply.",
+      reasonCode: "PUSHED_WITHOUT_AUDIT",
+    };
+  } catch (error) {
+    return {
+      success: false,
+      invoicePaid: false,
+      shopifyPushSucceeded: false,
+      error: `Failed to recover inconsistent match: ${error instanceof Error ? error.message : String(error)}`,
+      reasonCode: "RECOVERY_FAILED",
+    };
+  }
 }
 
 /**
@@ -1210,13 +1239,25 @@ export async function unmatchMatch(
           };
         }
 
-        // Find the actual applied amount from the audit trail (Issue #3)
+        // P1: Find the actual applied amount from the audit trail.
+        // Never restore Match.amount without an applied audit.
         const appliedAmount = await getAppliedAmountFromAudit(
           tx,
           shopId,
           matchId
         );
-        const restoreAmount = appliedAmount ?? BigInt(matchRow.amountPaise);
+
+        if (appliedAmount === null) {
+          // No audit found - cannot determine how much was actually applied.
+          // This is an inconsistent state; refuse the unmatch.
+          return {
+            success: false,
+            error: "Cannot unmatch: no applied audit found for this match",
+            alreadyPushed: false,
+          };
+        }
+
+        const restoreAmount = appliedAmount;
 
         // Transition to unmatched - IDOR protection: filter by shopId
         const [transitioned] = await tx<{ id: string }[]>`
@@ -1483,6 +1524,8 @@ type AuditData = {
   staleReclaim?: boolean;
   shopifyAlreadyPaid?: boolean;
   previousState?: string;
+  reason?: string;
+  invoiceStatus?: string;
 };
 
 /**

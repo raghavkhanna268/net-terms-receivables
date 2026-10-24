@@ -733,50 +733,57 @@ describeWithDb("S17 apply service DB integration", () => {
   });
 
   /**
-   * Issue #6: Crash recovery between claim (tx1) and finalize (tx2).
-   * Match in 'pushed' state but invoice not 'paid' triggers recovery.
+   * P1: No 'pushed' without match.applied audit.
+   * A 'pushed' match without audit gets transitioned to 'unmatched'.
    */
-  describe("Issue #6: Crash recovery for pushed matches", () => {
-    it("retries push for pushed match with non-paid invoice", async () => {
+  describe("P1: Pushed without audit transitions to unmatched", () => {
+    it("transitions pushed match without audit to unmatched (full payment scenario)", async () => {
       const paymentId = await createPayment(1000000n);
       const invoiceId = await createInvoice(1000000n);
 
-      // Create a match directly in 'pushed' state (simulating crash after tx1)
-      const matchId = `match-crash-${Date.now().toString(36)}`;
+      // Create a match directly in 'pushed' state WITHOUT audit event
+      const matchId = `match-no-audit-${Date.now().toString(36)}`;
       await sql`
         INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
         VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 10000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushed', NOW(), NOW())
       `;
 
-      // Invoice is still open (simulating crash before tx2 completed)
-      const [beforeRecovery] = await sql<{ status: string; outstanding: string }[]>`
+      // Invoice is still open (no audit = no reduction)
+      const [before] = await sql<{ status: string; outstanding: string }[]>`
         SELECT status, outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
       `;
-      expect(beforeRecovery.status).toBe("open");
-      expect(parseFloat(beforeRecovery.outstanding)).toBe(10000);
+      expect(before.status).toBe("open");
+      expect(parseFloat(before.outstanding)).toBe(10000);
 
-      // Call applyMatch - should detect crash and retry
+      // Call applyMatch - should detect missing audit and transition to unmatched
       const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
-      expect(result.success).toBe(true);
-      expect(result.invoicePaid).toBe(true);
-      expect(result.reasonCode).toContain("RECOVERED");
+      expect(result.success).toBe(false);
+      expect(result.reasonCode).toBe("PUSHED_WITHOUT_AUDIT");
 
-      // Invoice should now be paid
-      const [afterRecovery] = await sql<{ status: string; outstanding: string }[]>`
+      // Match should now be 'unmatched'
+      const [match] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId}
+      `;
+      expect(match.state).toBe("unmatched");
+
+      // Invoice outstanding should be unchanged (nothing was applied)
+      const [after] = await sql<{ status: string; outstanding: string }[]>`
         SELECT status, outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
       `;
-      expect(afterRecovery.status).toBe("paid");
-      expect(parseFloat(afterRecovery.outstanding)).toBe(0);
+      expect(after.status).toBe("open");
+      expect(parseFloat(after.outstanding)).toBe(10000);
 
-      // Audit trail should have recoveredFromCrash flag
-      const [auditEvent] = await sql<{ data: { recoveredFromCrash?: boolean } }[]>`
+      // Audit trail should have match.unmatched with PUSHED_WITHOUT_AUDIT reason
+      const [auditEvent] = await sql<{ data: { reason?: string; previousState?: string } }[]>`
         SELECT data FROM "AuditEvent"
         WHERE "shopId" = ${TEST_SHOP_ID}
-          AND type = 'match.applied'
+          AND type = 'match.unmatched'
           AND data->>'matchId' = ${matchId}
       `;
-      expect(auditEvent?.data.recoveredFromCrash).toBe(true);
+      expect(auditEvent).toBeDefined();
+      expect(auditEvent?.data.reason).toBe("PUSHED_WITHOUT_AUDIT");
+      expect(auditEvent?.data.previousState).toBe("pushed");
     });
 
     it("idempotent retry for pushed match with paid invoice", async () => {
@@ -793,7 +800,7 @@ describeWithDb("S17 apply service DB integration", () => {
       // Mark invoice as already paid
       await sql`UPDATE "Invoice" SET status = 'paid', outstanding = 0 WHERE id = ${invoiceId}`;
 
-      // Call applyMatch - should be idempotent success
+      // Call applyMatch - should be idempotent success (invoice is paid = success)
       const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       expect(result.success).toBe(true);
@@ -809,29 +816,34 @@ describeWithDb("S17 apply service DB integration", () => {
       expect(events.length).toBe(0);
     });
 
-    it("partial payment crash recovery reduces outstanding correctly", async () => {
+    it("partial pushed without audit also transitions to unmatched", async () => {
       const paymentId = await createPayment(500000n);
       const invoiceId = await createInvoice(1000000n);
 
-      // Create a match in 'pushed' state for partial payment
-      const matchId = `match-partial-crash-${Date.now().toString(36)}`;
+      // Create a match in 'pushed' state for partial payment WITHOUT audit
+      const matchId = `match-partial-no-audit-${Date.now().toString(36)}`;
       await sql`
         INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
         VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 5000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushed', NOW(), NOW())
       `;
 
-      // Invoice is still open (crash before tx2)
+      // Invoice is still open
       const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
-      expect(result.success).toBe(true);
-      expect(result.invoicePaid).toBe(false); // Partial, not full
-      expect(result.reasonCode).toBe("RECOVERED_FROM_CRASH");
+      expect(result.success).toBe(false);
+      expect(result.reasonCode).toBe("PUSHED_WITHOUT_AUDIT");
 
-      // Outstanding should be reduced
+      // Match should now be 'unmatched'
+      const [match] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId}
+      `;
+      expect(match.state).toBe("unmatched");
+
+      // Outstanding unchanged (nothing was applied)
       const [invoice] = await sql<{ outstanding: string; status: string }[]>`
         SELECT outstanding::text, status FROM "Invoice" WHERE id = ${invoiceId}
       `;
-      expect(parseFloat(invoice.outstanding)).toBe(5000);
+      expect(parseFloat(invoice.outstanding)).toBe(10000);
       expect(invoice.status).toBe("open");
     });
   });
