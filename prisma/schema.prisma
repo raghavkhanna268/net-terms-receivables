@@ -264,6 +264,12 @@ model BuyerAccount {
   /// When the credit_status metafield was last successfully synced to Shopify.
   /// NULL means the metafield has never been written; recompute must sync it.
   metafieldSyncedAt   DateTime?          @db.Timestamptz(3)
+  /// Error code from the last permanent metafield sync failure (e.g., no_session, access_denied).
+  /// NULL means no permanent error. Set on permanent failure, cleared on success.
+  /// Only stores fixed codes from PERMANENT_SYNC_ERROR_CODES allowlist; never raw error text.
+  metafieldSyncErrorCode String?
+  /// When the permanent metafield sync error occurred. NULL when metafieldSyncErrorCode is NULL.
+  metafieldSyncErrorAt   DateTime?        @db.Timestamptz(3)
 
   // Relations (onDelete: CASCADE - accounts are shop-specific)
   shop     Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
