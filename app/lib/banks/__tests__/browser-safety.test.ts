@@ -220,15 +220,29 @@ describe("SheetJS lazy loading verification", () => {
 });
 
 describe("imports route lazy loading", () => {
-  it("app.imports.tsx uses dynamic import for banks module", async () => {
+  it("app.imports.tsx uses dynamic import for banks .client module", async () => {
     const routeSource = readFileSync(
       join(process.cwd(), "app/routes/app.imports.tsx"),
       "utf-8"
     );
 
-    expect(routeSource).toMatch(/await\s+import\s*\(\s*["']~\/lib\/banks/);
+    // Must use the .client.ts module to keep xlsx out of server bundle
+    expect(routeSource).toMatch(/await\s+import\s*\(\s*["']~\/lib\/banks\/parse\.client/);
 
+    // Must not have static imports of banks module
     expect(routeSource).not.toMatch(/^import\s+{\s*parseBankStatement\s*}/m);
     expect(routeSource).not.toMatch(/^import\s+\*\s+as.*from\s+["']~\/lib\/banks/m);
+  });
+
+  it("parse.client.ts exists and re-exports from index", async () => {
+    const clientSource = readFileSync(
+      join(process.cwd(), "app/lib/banks/parse.client.ts"),
+      "utf-8"
+    );
+
+    // Should re-export parseBankStatement
+    expect(clientSource).toMatch(/export\s+{\s*parseBankStatement/);
+    // Should be a .client.ts file (checked by filename)
+    expect(clientSource).toMatch(/\.client\.ts/);
   });
 });

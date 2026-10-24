@@ -230,7 +230,7 @@ describe("bank statement parsing integration", () => {
   });
 
   describe("malformed data handling (synthetic)", () => {
-    describe("HDFC malformed", () => {
+    describe("HDFC malformed CSV", () => {
       let result: ParseResult;
 
       beforeAll(async () => {
@@ -253,12 +253,35 @@ describe("bank statement parsing integration", () => {
       });
 
       it("skips rows with missing required fields", () => {
-        // Should have fewer transactions than total rows
         expect(result.transactions.length).toBeLessThan(result.totalRows);
       });
     });
 
-    describe("ICICI malformed", () => {
+    describe("HDFC malformed XLSX", () => {
+      let result: ParseResult;
+
+      beforeAll(async () => {
+        const content = readFileSync(join(FIXTURES_DIR, "hdfc-malformed-synthetic.xlsx"));
+        const file = new File([content], "hdfc-malformed-synthetic.xlsx", {
+          type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        });
+        result = await parseBankStatement(file);
+      });
+
+      it("still detects as HDFC from XLSX", () => {
+        expect(result.detection.bank).toBe("HDFC");
+      });
+
+      it("parses valid rows from XLSX", () => {
+        expect(result.transactions.length).toBeGreaterThan(0);
+      });
+
+      it("skips malformed rows from XLSX", () => {
+        expect(result.transactions.length).toBeLessThan(result.totalRows);
+      });
+    });
+
+    describe("ICICI malformed CSV", () => {
       let result: ParseResult;
 
       beforeAll(async () => {
@@ -276,9 +299,32 @@ describe("bank statement parsing integration", () => {
       });
 
       it("handles impossible dates gracefully", () => {
-        // 45.15.2026 should be skipped
         const impossibleDate = result.transactions.find((t) => t.date.includes("45"));
         expect(impossibleDate).toBeUndefined();
+      });
+    });
+
+    describe("ICICI malformed XLSX", () => {
+      let result: ParseResult;
+
+      beforeAll(async () => {
+        const content = readFileSync(join(FIXTURES_DIR, "icici-malformed-synthetic.xlsx"));
+        const file = new File([content], "icici-malformed-synthetic.xlsx", {
+          type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        });
+        result = await parseBankStatement(file);
+      });
+
+      it("still detects as ICICI from XLSX", () => {
+        expect(result.detection.bank).toBe("ICICI");
+      });
+
+      it("parses valid rows from XLSX", () => {
+        expect(result.transactions.length).toBeGreaterThan(0);
+      });
+
+      it("skips malformed rows from XLSX", () => {
+        expect(result.transactions.length).toBeLessThan(result.totalRows);
       });
     });
   });

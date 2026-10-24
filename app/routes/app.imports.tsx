@@ -5,11 +5,15 @@
  * - CSV and XLS/XLSX formats supported
  * - SheetJS is lazy-loaded (dynamic import) only when parsing
  * - Raw file never leaves the browser
- * - Only parsed credit rows would be sent to the import endpoint
+ * - Only parsed credit rows would be sent to the import endpoint (when implemented)
  *
  * IMPORTANT: No import endpoint exists yet. This route implements parsing
- * and UI up to that point. When the endpoint is added, uncomment the submit
- * logic and wire it to send only NormalisedTxn[] (not File/Blob/ArrayBuffer).
+ * and UI up to that point. When the endpoint is added, wire it to send only
+ * NormalisedTxn[] (not File/Blob/ArrayBuffer).
+ *
+ * NOTE: Uses ~/lib/banks/parse.client.ts to keep SheetJS (~1MB) out of
+ * the Cloudflare Worker bundle. The .client.ts extension ensures the module
+ * is never included in SSR builds.
  */
 
 import { useState, useCallback, useRef } from "react";
@@ -24,14 +28,13 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
-  const [shop] = await sql<{ id: string; currency: string }[]>`
-    SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ currency: string }[]>`
+    SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
   return {
     shopDomain,
     shopCurrency: shop?.currency ?? "INR",
-    shopId: shop?.id ?? null,
   };
 };
 
@@ -99,7 +102,8 @@ export default function ImportsPage() {
       setResult(null);
 
       try {
-        const { parseBankStatement } = await import("~/lib/banks/index.js");
+        // Dynamic import from .client.ts module keeps xlsx out of server bundle
+        const { parseBankStatement } = await import("~/lib/banks/parse.client.js");
 
         const parseResult = await parseBankStatement(file);
 
@@ -330,8 +334,8 @@ export default function ImportsPage() {
       <s-section slot="aside" heading="Privacy">
         <s-banner tone="info" heading="Browser-Only Parsing">
           Your bank statement file is parsed entirely in your browser. The raw
-          file data (CSV/XLS/XLSX) never leaves your device. Only the extracted
-          credit transaction details are submitted when you click Import.
+          file data (CSV/XLS/XLSX) never leaves your device. Import functionality
+          is coming soon — currently you can only preview parsed transactions.
         </s-banner>
       </s-section>
     </s-page>
