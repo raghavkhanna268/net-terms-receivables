@@ -42,14 +42,14 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   if (!bulkOperationId) {
     console.warn(
-      `[webhooks.bulk_operations.finish] Missing admin_graphql_api_id for ${shop}`
+      `[webhooks.bulk_operations.finish] Missing admin_graphql_api_id wh=${webhookId}`
     );
     return new Response(null, { status: 200 });
   }
 
   if (typedPayload.status !== "COMPLETED") {
     console.log(
-      `[webhooks.bulk_operations.finish] Ignoring non-completed operation: ${typedPayload.status} for ${shop}`
+      `[webhooks.bulk_operations.finish] Ignoring non-completed operation: ${typedPayload.status} wh=${webhookId}`
     );
     return new Response(null, { status: 200 });
   }
@@ -61,7 +61,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   if (!bulkType) {
     console.warn(
-      `[webhooks.bulk_operations.finish] Unknown bulk operation ${bulkOperationId} for ${shop}, skipping`
+      `[webhooks.bulk_operations.finish] Unknown bulk operation ${bulkOperationId} wh=${webhookId}, skipping`
     );
     return new Response(null, { status: 200 });
   }
@@ -86,12 +86,12 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   });
 
   if (result.duplicate) {
-    console.log(`[webhooks.bulk_operations.finish] Duplicate for ${shop}, skipping`);
+    console.log(`[webhooks.bulk_operations.finish] Duplicate wh=${webhookId}, skipping`);
     return new Response(null, { status: 200 });
   }
 
   console.log(
-    `[webhooks.bulk_operations.finish] Enqueued ${bulkType} bulk operation for ${shop}: ${bulkOperationId}`
+    `[webhooks.bulk_operations.finish] Enqueued ${bulkType} bulk operation wh=${webhookId}: ${bulkOperationId}`
   );
 
   return new Response(null, { status: 200 });
