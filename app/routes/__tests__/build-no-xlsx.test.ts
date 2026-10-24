@@ -65,15 +65,11 @@ describe("Build output: no xlsx in server bundle", () => {
     const hasBuild = await buildExists();
     
     if (!hasBuild) {
-      // Skip gracefully - CI runs tests before build, so dist/ won't exist yet.
-      // Bundle verification happens in the Wrangler dry-run step after build.
-      const msg = "Skipping: dist/server not found. Run `npm run build` first.";
-      if (isCI()) {
-        console.log(`[build-no-xlsx] ${msg} (CI runs tests before build)`);
-      } else {
-        console.log(msg);
-      }
-      return;
+      // When run via `npm run test:build`, dist/ must exist - fail if missing
+      throw new Error(
+        "FAIL: dist/server not found. " +
+        "Run `npm run build` first, then `npm run test:build`."
+      );
     }
 
     const jsFiles = await getJsFiles(DIST_SERVER_DIR);
@@ -118,14 +114,11 @@ describe("Build output: no xlsx in server bundle", () => {
     const hasBuild = await buildExists();
     
     if (!hasBuild) {
-      // Skip gracefully - CI runs tests before build
-      const msg = "Skipping: dist/server not found. Run `npm run build` first.";
-      if (isCI()) {
-        console.log(`[build-no-xlsx] ${msg} (CI runs tests before build)`);
-      } else {
-        console.log(msg);
-      }
-      return;
+      // When run via `npm run test:build`, dist/ must exist - fail if missing
+      throw new Error(
+        "FAIL: dist/server not found. " +
+        "Run `npm run build` first, then `npm run test:build`."
+      );
     }
 
     const jsFiles = await getJsFiles(DIST_SERVER_DIR);
@@ -164,14 +157,11 @@ describe("Build output: no xlsx in server bundle", () => {
     }
 
     if (!hasBuild) {
-      // Skip gracefully - CI runs tests before build
-      const msg = "Skipping: dist/client not found. Run `npm run build` first.";
-      if (isCI()) {
-        console.log(`[build-no-xlsx] ${msg} (CI runs tests before build)`);
-      } else {
-        console.log(msg);
-      }
-      return;
+      // When run via `npm run test:build`, dist/ must exist - fail if missing
+      throw new Error(
+        "FAIL: dist/client not found. " +
+        "Run `npm run build` first, then `npm run test:build`."
+      );
     }
 
     const jsFiles = await getJsFiles(clientDir);
