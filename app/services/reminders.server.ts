@@ -798,3 +798,60 @@ export async function deleteReminderRule(
   `;
   return result.length > 0;
 }
+
+/**
+ * Default reminder rule offsets.
+ * - 3 days before due date (-3)
+ * - On due date (0)
+ * - 7 days overdue (+7)
+ */
+export const DEFAULT_RULE_OFFSETS = [-3, 0, 7] as const;
+
+/**
+ * Ensure default reminder rules exist for a shop.
+ *
+ * Seeds the 3 default rules (offsets -3, 0, +7) ONLY when the shop has no rules
+ * at all. If any rule exists (even just one), this is a no-op.
+ *
+ * Edge case: If a merchant deletes ALL rules, the next page load will re-seed.
+ * This matches "only when the shop has no rules at all" behavior.
+ *
+ * Concurrency-safe: Uses pg_advisory_xact_lock to prevent duplicate inserts
+ * when multiple concurrent requests hit the loader.
+ *
+ * Does NOT enable reminders - they stay disabled by default.
+ * Does NOT send any emails.
+ */
+export async function ensureDefaultReminderRules(
+  sql: Sql,
+  shopId: string
+): Promise<{ seeded: boolean; count: number }> {
+  const result = await sql.begin(async (tx) => {
+    // Acquire advisory lock for this shop (released at end of transaction)
+    // Uses S18 prefix (0x12 = 18) to namespace the lock
+    await tx`SELECT pg_advisory_xact_lock(hashtext('s18_rules_' || ${shopId}))`;
+
+    // Check if any rules exist
+    const [existing] = await tx<{ count: number }[]>`
+      SELECT COUNT(*)::INT as count FROM "ReminderRule" WHERE "shopId" = ${shopId}
+    `;
+
+    if (existing.count > 0) {
+      return { seeded: false, count: 0 };
+    }
+
+    // Seed default rules (all enabled by default, but reminders setting stays disabled)
+    let count = 0;
+    for (const offset of DEFAULT_RULE_OFFSETS) {
+      await tx`
+        INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+        VALUES (gen_random_uuid()::TEXT, ${shopId}, ${offset}, 'email'::"ReminderChannel", true, NOW(), NOW())
+      `;
+      count++;
+    }
+
+    return { seeded: true, count };
+  });
+
+  return result;
+}

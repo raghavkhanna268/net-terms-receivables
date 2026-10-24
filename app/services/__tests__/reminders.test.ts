@@ -1016,3 +1016,278 @@ describe("formatAmount (rendered in email)", () => {
     expect(html).not.toContain("₹12.35"); // Would be wrong if we divided by 100
   });
 });
+
+describe("ensureDefaultReminderRules", () => {
+  it("DEFAULT_RULE_OFFSETS contains -3, 0, 7", async () => {
+    const { DEFAULT_RULE_OFFSETS } = await import("../reminders.server");
+
+    expect(DEFAULT_RULE_OFFSETS).toEqual([-3, 0, 7]);
+  });
+
+  it("seeds 3 rules on empty shop", async () => {
+    const { ensureDefaultReminderRules } = await import("../reminders.server");
+
+    const insertedRules: { offset: number }[] = [];
+    const mockTx = Object.assign(
+      vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        const query = strings.join("?");
+
+        // Advisory lock
+        if (query.includes("pg_advisory_xact_lock")) {
+          return [];
+        }
+
+        // Count existing rules
+        if (query.includes("COUNT(*)::INT")) {
+          return [{ count: 0 }];
+        }
+
+        // Insert rule
+        if (query.includes("INSERT INTO \"ReminderRule\"")) {
+          const offsetDays = values[1] as number;
+          insertedRules.push({ offset: offsetDays });
+          return [];
+        }
+
+        return [];
+      }),
+      {}
+    );
+
+    const mockSql = Object.assign(vi.fn(), {
+      begin: vi.fn(async (callback: (tx: typeof mockTx) => Promise<unknown>) => {
+        return callback(mockTx);
+      }),
+    });
+
+    const result = await ensureDefaultReminderRules(
+      mockSql as unknown as Parameters<typeof ensureDefaultReminderRules>[0],
+      "shop-new"
+    );
+
+    expect(result.seeded).toBe(true);
+    expect(result.count).toBe(3);
+    expect(insertedRules.map((r) => r.offset)).toEqual([-3, 0, 7]);
+  });
+
+  it("is no-op when any rule exists", async () => {
+    const { ensureDefaultReminderRules } = await import("../reminders.server");
+
+    let insertCalled = false;
+    const mockTx = Object.assign(
+      vi.fn(async (strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+
+        // Advisory lock
+        if (query.includes("pg_advisory_xact_lock")) {
+          return [];
+        }
+
+        // Count existing rules - return 1 (has rules)
+        if (query.includes("COUNT(*)::INT")) {
+          return [{ count: 1 }];
+        }
+
+        // Insert rule (should not be called)
+        if (query.includes("INSERT INTO \"ReminderRule\"")) {
+          insertCalled = true;
+          return [];
+        }
+
+        return [];
+      }),
+      {}
+    );
+
+    const mockSql = Object.assign(vi.fn(), {
+      begin: vi.fn(async (callback: (tx: typeof mockTx) => Promise<unknown>) => {
+        return callback(mockTx);
+      }),
+    });
+
+    const result = await ensureDefaultReminderRules(
+      mockSql as unknown as Parameters<typeof ensureDefaultReminderRules>[0],
+      "shop-with-rules"
+    );
+
+    expect(result.seeded).toBe(false);
+    expect(result.count).toBe(0);
+    expect(insertCalled).toBe(false);
+  });
+
+  it("does not re-add after merchant deletes one rule (shop still has 2)", async () => {
+    const { ensureDefaultReminderRules } = await import("../reminders.server");
+
+    let insertCalled = false;
+    const mockTx = Object.assign(
+      vi.fn(async (strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+
+        // Advisory lock
+        if (query.includes("pg_advisory_xact_lock")) {
+          return [];
+        }
+
+        // Count existing rules - return 2 (merchant deleted 1 of 3)
+        if (query.includes("COUNT(*)::INT")) {
+          return [{ count: 2 }];
+        }
+
+        // Insert rule (should not be called)
+        if (query.includes("INSERT INTO \"ReminderRule\"")) {
+          insertCalled = true;
+          return [];
+        }
+
+        return [];
+      }),
+      {}
+    );
+
+    const mockSql = Object.assign(vi.fn(), {
+      begin: vi.fn(async (callback: (tx: typeof mockTx) => Promise<unknown>) => {
+        return callback(mockTx);
+      }),
+    });
+
+    const result = await ensureDefaultReminderRules(
+      mockSql as unknown as Parameters<typeof ensureDefaultReminderRules>[0],
+      "shop-with-2-rules"
+    );
+
+    expect(result.seeded).toBe(false);
+    expect(result.count).toBe(0);
+    expect(insertCalled).toBe(false);
+  });
+
+  it("re-seeds after ALL rules are deleted (behavior: only when shop has no rules at all)", async () => {
+    const { ensureDefaultReminderRules } = await import("../reminders.server");
+
+    const insertedRules: { offset: number }[] = [];
+    const mockTx = Object.assign(
+      vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        const query = strings.join("?");
+
+        // Advisory lock
+        if (query.includes("pg_advisory_xact_lock")) {
+          return [];
+        }
+
+        // Count existing rules - return 0 (merchant deleted ALL rules)
+        if (query.includes("COUNT(*)::INT")) {
+          return [{ count: 0 }];
+        }
+
+        // Insert rule
+        if (query.includes("INSERT INTO \"ReminderRule\"")) {
+          const offsetDays = values[1] as number;
+          insertedRules.push({ offset: offsetDays });
+          return [];
+        }
+
+        return [];
+      }),
+      {}
+    );
+
+    const mockSql = Object.assign(vi.fn(), {
+      begin: vi.fn(async (callback: (tx: typeof mockTx) => Promise<unknown>) => {
+        return callback(mockTx);
+      }),
+    });
+
+    const result = await ensureDefaultReminderRules(
+      mockSql as unknown as Parameters<typeof ensureDefaultReminderRules>[0],
+      "shop-deleted-all"
+    );
+
+    // Per spec: "only when the shop has no rules at all" means re-seed when ALL deleted
+    expect(result.seeded).toBe(true);
+    expect(result.count).toBe(3);
+  });
+
+  it("uses advisory lock for concurrency safety", async () => {
+    const { ensureDefaultReminderRules } = await import("../reminders.server");
+
+    let lockAcquired = false;
+    let lockShopId: string | null = null;
+    const mockTx = Object.assign(
+      vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        const query = strings.join("?");
+
+        // Advisory lock
+        if (query.includes("pg_advisory_xact_lock")) {
+          lockAcquired = true;
+          lockShopId = values[0] as string;
+          return [];
+        }
+
+        // Count existing rules
+        if (query.includes("COUNT(*)::INT")) {
+          return [{ count: 3 }];
+        }
+
+        return [];
+      }),
+      {}
+    );
+
+    const mockSql = Object.assign(vi.fn(), {
+      begin: vi.fn(async (callback: (tx: typeof mockTx) => Promise<unknown>) => {
+        return callback(mockTx);
+      }),
+    });
+
+    await ensureDefaultReminderRules(
+      mockSql as unknown as Parameters<typeof ensureDefaultReminderRules>[0],
+      "shop-concurrent"
+    );
+
+    expect(lockAcquired).toBe(true);
+    expect(lockShopId).toBe("shop-concurrent");
+  });
+
+  it("acquires advisory lock with shop-derived key for concurrency safety", async () => {
+    const { ensureDefaultReminderRules } = await import("../reminders.server");
+
+    const lockCalls: string[] = [];
+    const mockTx = Object.assign(
+      vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        const query = strings.join("?");
+
+        // Advisory lock - capture the shop ID used
+        if (query.includes("pg_advisory_xact_lock")) {
+          lockCalls.push(values[0] as string);
+          return [];
+        }
+
+        // Count existing rules
+        if (query.includes("COUNT(*)::INT")) {
+          return [{ count: 3 }];
+        }
+
+        return [];
+      }),
+      {}
+    );
+
+    const mockSql = Object.assign(vi.fn(), {
+      begin: vi.fn(async (callback: (tx: typeof mockTx) => Promise<unknown>) => {
+        return callback(mockTx);
+      }),
+    });
+
+    // Call twice with different shop IDs
+    await ensureDefaultReminderRules(
+      mockSql as unknown as Parameters<typeof ensureDefaultReminderRules>[0],
+      "shop-alpha"
+    );
+    await ensureDefaultReminderRules(
+      mockSql as unknown as Parameters<typeof ensureDefaultReminderRules>[0],
+      "shop-beta"
+    );
+
+    // Each call acquired its own shop-specific lock
+    expect(lockCalls).toEqual(["shop-alpha", "shop-beta"]);
+  });
+});
