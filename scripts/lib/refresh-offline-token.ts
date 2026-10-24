@@ -60,13 +60,13 @@ const sqlOptions: Options<Record<string, never>> = {
 
 /**
  * Script-specific result that includes wasRefreshed and ISO string expires.
+ * Never includes raw error messages for security (X6).
  */
 export interface ScriptRefreshResult {
   success: boolean;
   wasRefreshed?: boolean;
   expires?: string;
-  errorCode?: RefreshErrorCode | "config_error";
-  error?: string;
+  errorCode?: RefreshErrorCode | "config_error" | string;
 }
 
 /**
@@ -102,10 +102,10 @@ export async function refreshOfflineTokenIfNeeded(
         expires: result.expires?.toISOString(),
       };
     } else {
+      // Return errorCode only, not raw error message (X6)
       return {
         success: false,
         errorCode: result.errorCode,
-        error: result.error,
       };
     }
   } finally {
@@ -224,10 +224,11 @@ async function main(): Promise<void> {
 const isMainModule = import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMainModule) {
   main().catch((err) => {
+    // Return errorCode only, not raw error message (X6)
+    const errCode = err instanceof Error && "code" in err ? (err as { code: string }).code : undefined;
     console.log(JSON.stringify({
       success: false,
-      errorCode: "unknown",
-      error: err instanceof Error ? err.message : "Unknown error",
+      errorCode: errCode ?? (err instanceof Error ? err.name : "unknown"),
     }));
     process.exit(1);
   });

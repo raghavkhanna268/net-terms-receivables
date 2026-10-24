@@ -24,6 +24,7 @@ import {
   type PaymentCustomizationInfo,
   type OnboardingStep,
 } from "~/lib/onboarding-steps.server";
+import { toErrorCode } from "~/lib/log.server";
 
 const VALIDATION_FUNCTION_HANDLE = "credit-check-validation";
 const PAYMENT_CUSTOMIZATION_HANDLE = "hide-terms-payment";
@@ -79,7 +80,7 @@ async function fetchValidationInfo(
       title: validation.node.title,
     };
   } catch (error) {
-    console.error("[onboarding] Failed to fetch validations:", error);
+    console.error(`[onboarding] Failed to fetch validations: err=${toErrorCode(error)}`);
     return null;
   }
 }
@@ -123,7 +124,7 @@ async function fetchPaymentCustomizationInfo(
       title: customization.node.title,
     };
   } catch (error) {
-    console.error("[onboarding] Failed to fetch payment customizations:", error);
+    console.error(`[onboarding] Failed to fetch payment customizations: err=${toErrorCode(error)}`);
     return null;
   }
 }

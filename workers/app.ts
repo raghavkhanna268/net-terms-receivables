@@ -93,7 +93,10 @@ export default wrapWithSentry({
           `timedOut=${result.timedOut} elapsed=${result.elapsedMs}ms`
       );
     } catch (error) {
-      console.error("[scheduled] drain error:", error);
+      // Log error class only, not raw error (J1)
+      const errName = error instanceof Error ? error.name : "unknown";
+      const errCode = error instanceof Error && "code" in error ? (error as { code: string }).code : undefined;
+      console.error(`[scheduled] drain error: err=${errCode ?? errName}`);
     } finally {
       if (sql !== null) {
         // Use type assertion because TypeScript's flow analysis doesn't track

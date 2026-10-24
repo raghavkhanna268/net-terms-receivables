@@ -440,7 +440,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
       // Log import start (counts only, no PII)
       console.log(
-        `[import] Starting import: shop=${shopDomain} importId=${importId} rows=${importData.credits.length}`
+        `[import] Starting import: shopId=${shopId} importId=${importId} rows=${importData.credits.length}`
       );
 
       // Prepare all rows for batch insert
@@ -557,7 +557,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     // Log error without message content (may contain row data)
     const errCode = err instanceof Error && "code" in err ? (err as { code: string }).code : undefined;
     console.error(
-      `[import] Import failed: shop=${shopDomain} errorName=${err instanceof Error ? err.name : "unknown"} code=${errCode ?? "none"}`
+      `[import] Import failed: shopId=${shopId} errorName=${err instanceof Error ? err.name : "unknown"} code=${errCode ?? "none"}`
     );
     return Response.json(
       { success: false, error: "Import failed" },
@@ -710,7 +710,9 @@ export default function ImportsPage() {
         });
         setStatus("parsed");
       } catch (err) {
-        console.error("[app.imports] Parse error:", err);
+        // Log error class only - client-side, no raw error details (M8)
+        const errName = err instanceof Error ? err.name : "unknown";
+        console.error(`[app.imports] Parse error: ${errName}`);
         setErrorMessage(
           err instanceof Error ? err.message : "Failed to parse bank statement"
         );

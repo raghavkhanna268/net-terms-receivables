@@ -246,7 +246,8 @@ async function main() {
   try {
     await runBenchmark();
   } catch (error) {
-    console.error(`Benchmark failed: ${error.message}`);
+    // Log error class only (X8)
+    console.error(`Benchmark failed: ${error.name ?? "unknown"}`);
   }
 
   measureBundleSize();
