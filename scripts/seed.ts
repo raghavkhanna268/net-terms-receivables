@@ -530,7 +530,7 @@ export async function checkDevStore(state: SeedState): Promise<boolean> {
   const result = await graphql<{ shop: ShopInfo }>(state, query);
 
   if (result.errors) {
-    console.error("  ❌ Failed to get shop info:", result.errors.map((e) => e.message).join(", "));
+    console.error(`  ❌ Failed to get shop info: ${result.errors.length} GraphQL error(s)`);
     return false;
   }
 
@@ -580,18 +580,18 @@ export async function checkB2BSupport(state: SeedState): Promise<boolean> {
       );
       if (b2bError) {
         console.error("  ❌ B2B not available on this store");
-        console.error(`     Error: ${b2bError.message}`);
         console.error("     B2B requires Shopify Plus or a dev store with B2B enabled.");
         return false;
       }
-      console.error("  ❌ GraphQL errors:", result.errors.map((e) => e.message).join(", "));
+      console.error(`  ❌ GraphQL errors: ${result.errors.length} error(s)`);
       return false;
     }
 
     console.log("  ✅ B2B is available");
     return true;
   } catch (error) {
-    console.error("  ❌ Failed to check B2B support:", error);
+    const errType = error instanceof Error ? error.constructor.name : typeof error;
+    console.error(`  ❌ Failed to check B2B support: [${errType}]`);
     return false;
   }
 }
@@ -613,7 +613,7 @@ export async function fetchPaymentTermsTemplates(state: SeedState): Promise<bool
   const result = await graphql<{ paymentTermsTemplates: PaymentTermsTemplate[] }>(state, query);
 
   if (result.errors) {
-    console.error("  ❌ Failed to fetch payment terms templates:", result.errors.map((e) => e.message).join(", "));
+    console.error(`  ❌ Failed to fetch payment terms templates: ${result.errors.length} GraphQL error(s)`);
     return false;
   }
 
@@ -2571,7 +2571,7 @@ export async function hasContactRoleOnLocation(
  * Assign a role to a contact on a company location.
  * Returns true if successful, false on failure.
  */
-async function assignRoleToContactOnLocation(
+export async function assignRoleToContactOnLocation(
   state: SeedState,
   locationId: string,
   contactId: string,
@@ -2599,7 +2599,8 @@ async function assignRoleToContactOnLocation(
   }
 
   if (payload.userErrors.length) {
-    console.error(`    ❌ Failed to assign role: ${payload.userErrors[0].message}${payload.userErrors[0].code ? ` [${payload.userErrors[0].code}]` : ""}`);
+    const code = payload.userErrors[0].code ?? "UNKNOWN";
+    console.error(`    ❌ Failed to assign role: [${code}]`);
     return false;
   }
 
@@ -2856,7 +2857,7 @@ interface CustomersSearchResult {
  *
  * @returns Customer ID or null on failure
  */
-async function ensureTaggedCustomer(
+export async function ensureTaggedCustomer(
   state: SeedState,
   email: string,
   termsDays: number
@@ -2878,7 +2879,7 @@ async function ensureTaggedCustomer(
     );
 
     if (response.errors) {
-      console.log(`    ⚠️  GraphQL error finding customer: ${response.errors.map((e: { message: string }) => e.message).join(", ")}`);
+      console.log(`    ⚠️  GraphQL error finding customer: ${response.errors.length} error(s)`);
       return null;
     }
 
@@ -2897,7 +2898,7 @@ async function ensureTaggedCustomer(
     cursor = response.data?.customers.pageInfo?.endCursor ?? undefined;
     
     if (page === MAX_SEARCH_PAGES - 1) {
-      console.log(`    ⚠️  Search for customer with email "${email}" exceeded ${MAX_SEARCH_PAGES} pages`);
+      console.log(`    ⚠️  Customer search exceeded ${MAX_SEARCH_PAGES} pages`);
     }
   }
 
@@ -2912,7 +2913,7 @@ async function ensureTaggedCustomer(
       mutation CreateCustomer($input: CustomerInput!) {
         customerCreate(input: $input) {
           customer { id }
-          userErrors { field message }
+          userErrors { field message code }
         }
       }
     `, {
@@ -2923,12 +2924,13 @@ async function ensureTaggedCustomer(
     }, { isMutation: true });
 
     if (createResult.errors) {
-      console.log(`    ⚠️  GraphQL error creating customer: ${createResult.errors.map(e => e.message).join(", ")}`);
+      console.log(`    ⚠️  GraphQL error creating customer: ${createResult.errors.length} error(s)`);
       return null;
     }
 
     if (createResult.data?.customerCreate.userErrors.length) {
-      console.log(`    ⚠️  Failed to create customer: ${createResult.data.customerCreate.userErrors[0].message}`);
+      const code = createResult.data.customerCreate.userErrors[0].code ?? "UNKNOWN";
+      console.log(`    ⚠️  Failed to create customer: [${code}]`);
       return null;
     }
 
@@ -2937,7 +2939,7 @@ async function ensureTaggedCustomer(
       console.log(`    ⚠️  No customer ID returned`);
       return null;
     }
-    console.log(`    → Created customer: ${email}`);
+    console.log(`    → Created customer: ${customerId}`);
   }
 
   // Use tagsAdd to add the terms tag (idempotent - won't duplicate)
@@ -2950,7 +2952,7 @@ async function ensureTaggedCustomer(
     mutation TagCustomer($id: ID!, $tags: [String!]!) {
       tagsAdd(id: $id, tags: $tags) {
         node { ... on Customer { id } }
-        userErrors { field message }
+        userErrors { field message code }
       }
     }
   `, {
@@ -2959,11 +2961,12 @@ async function ensureTaggedCustomer(
   }, { isMutation: true });
 
   if (tagResult.errors) {
-    console.log(`    ⚠️  GraphQL error tagging customer: ${tagResult.errors.map(e => e.message).join(", ")}`);
+    console.log(`    ⚠️  GraphQL error tagging customer: ${tagResult.errors.length} error(s)`);
   }
 
   if (tagResult.data?.tagsAdd.userErrors.length) {
-    console.log(`    ⚠️  Failed to tag customer: ${tagResult.data.tagsAdd.userErrors[0].message}`);
+    const code = tagResult.data.tagsAdd.userErrors[0].code ?? "UNKNOWN";
+    console.log(`    ⚠️  Failed to tag customer: [${code}]`);
   }
 
   return customerId;
@@ -3579,9 +3582,9 @@ export function printDatabaseSeedSQL(state: SeedState): void {
   console.log(`-- Upsert BuyerAccount records for each company location`);
   for (const [companyKey, company] of state.companies) {
     for (const [dueInDays, locationId] of company.locations) {
-      const rawName = `${COMPANY_SEEDS.find(c => c.key === companyKey)?.name ?? companyKey} - Net ${dueInDays}`;
-      // Escape single quotes for SQL (double them)
-      const accountName = rawName.replace(/'/g, "''");
+      // Use externalId for account name (PII-free)
+      const externalId = `${SEED_PREFIX}${companyKey}`;
+      const accountName = `${externalId} - Net ${dueInDays}`;
       console.log(`INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "defaultTermsDays", "defaultTermsSource", "holdState", "createdAt", "updatedAt")`);
       console.log(`VALUES ('seed-account-${locationId}', '${shopId}', 'COMPANY', '${company.id}', '${locationId}', '${accountName}', ${dueInDays}, 'explicit', 'OK', NOW(), NOW())`);
       console.log(`ON CONFLICT ("shopId", "companyLocationId") DO UPDATE SET "defaultTermsDays" = EXCLUDED."defaultTermsDays", "defaultTermsSource" = EXCLUDED."defaultTermsSource", "updatedAt" = NOW();`);
@@ -3614,8 +3617,7 @@ function validateEnv(): { shop: string; token: string; databaseUrl: string | nul
 
   // Security: enforce hardcoded dev store domain
   if (shop !== ALLOWED_DEV_STORE) {
-    console.error(`❌ Security: seed script only runs on ${ALLOWED_DEV_STORE}`);
-    console.error(`   Received SHOP=${shop}`);
+    console.error("❌ Security: SHOP is not a valid dev-store domain");
     console.error("   This guard prevents accidental mutation of production data.");
     return null;
   }
@@ -3851,11 +3853,19 @@ export async function main(): Promise<void> {
   console.log("\n✅ Seed complete!");
 }
 
+/**
+ * Format a fatal error for logging without exposing message/stack.
+ * Only returns the error type (constructor name or typeof).
+ */
+export function formatFatal(err: unknown): string {
+  return err instanceof Error ? err.constructor.name : typeof err;
+}
+
 // Only run main() when executed directly (not when imported for testing)
 const isMainModule = import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMainModule) {
   main().catch((err) => {
-    console.error("\n❌ Fatal error:", err);
+    console.error(`\n❌ Fatal error: [${formatFatal(err)}]`);
     process.exit(1);
   });
 }
