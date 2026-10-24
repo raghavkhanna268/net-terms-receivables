@@ -145,7 +145,7 @@ export interface ShopifyOrder {
           dueAt?: string | null;
           issuedAt?: string | null;
           completedAt?: string | null;
-          amount: {
+          amount?: {
             amount: string;
             currencyCode: string;
           };
@@ -232,6 +232,24 @@ export interface BulkOrderLine {
   paymentTerms?: ShopifyOrder["paymentTerms"];
   purchasingEntity?: ShopifyOrder["purchasingEntity"];
   customer?: ShopifyOrder["customer"];
+}
+
+/**
+ * Bulk JSONL line for PaymentSchedule (child of Order).
+ *
+ * Shopify bulk exports write CONNECTION nodes (like paymentSchedules) as
+ * separate JSONL lines with __parentId pointing to the parent Order.
+ */
+export interface BulkPaymentScheduleLine {
+  id: string;
+  __parentId: string; // Order GID
+  dueAt?: string | null;
+  issuedAt?: string | null;
+  completedAt?: string | null;
+  amount?: {
+    amount: string;
+    currencyCode: string;
+  };
 }
 
 /**

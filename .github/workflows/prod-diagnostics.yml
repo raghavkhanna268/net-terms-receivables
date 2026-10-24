@@ -183,6 +183,8 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
@@ -405,10 +407,13 @@ jobs:
                   first_name_non_null: ((.data.customers.nodes[0].firstName // null) != null),
                   last_name_non_null: ((.data.customers.nodes[0].lastName // null) != null)
                 }
+                | .pii_readable = (.customer_found and .email_non_null and .email_not_redacted)
               end
             ' "$HTTP_RESPONSE")
+            # Public-repo safe: only booleans/status codes are printed, never values.
             echo "Protected Customer Data Probe Results:"
-            echo "$RESULT" | jq .
+            echo "$RESULT" | jq '{status, pii_readable, customer_found, email_non_null, email_not_redacted, first_name_non_null, last_name_non_null, graphql_error_codes} | with_entries(select(.value != null))'
+            echo "pii_readable=$(echo "$RESULT" | jq -r '.pii_readable // false')"
           else
             echo "::warning::GraphQL API request failed with HTTP $HTTP_STATUS"
             # Extract only error codes from response, never raw content
@@ -697,18 +702,18 @@ jobs:
           )
 
           if [ "$DLQ_EXISTS" = "t" ]; then
-            echo "DLQ messages by topic/handler (no payloads, truncated error class):"
+            echo "DLQ messages by topic/handler (no payloads; error class truncated, hosts/emails/ids redacted):"
             psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
           SELECT
             original_queue,
             message->>'topic' AS topic,
             LEFT(
-              REGEXP_REPLACE(error, ':.*$', ''),
+              REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(error, ':.*$', ''), '[^[:space:]@]+@[^[:space:]]+', '<email>', 'g'), '[A-Za-z0-9_.-]+\.(local|com|net|org|io|co|dev|in|app)\M', '<host>', 'g'), '\m[0-9a-fA-F]{12,}\M', '<hex>', 'g'), '[0-9]{4,}', '<n>', 'g'),
               80
             ) AS error_class_truncated,
             COUNT(*) AS count
           FROM s6_dead_letter
-          GROUP BY original_queue, message->>'topic', LEFT(REGEXP_REPLACE(error, ':.*$', ''), 80)
+          GROUP BY original_queue, message->>'topic', error_class_truncated
           ORDER BY count DESC
           LIMIT 50;
           EOSQL
@@ -1111,9 +1116,11 @@ jobs:
                 exit 1
               fi
 
-              USER_ERRORS=$(jq -r '.data.validationCreate.userErrors | map(.message) | join(", ")' "$HTTP_RESPONSE")
-              if [ -n "$USER_ERRORS" ] && [ "$USER_ERRORS" != "" ]; then
-                echo "::error::userErrors: $USER_ERRORS"
+              # Public-repo safe: print only the count and field paths, never messages.
+              USER_ERROR_COUNT=$(jq -r '.data.validationCreate.userErrors // [] | length' "$HTTP_RESPONSE")
+              if [ "$USER_ERROR_COUNT" != "0" ]; then
+                USER_ERROR_FIELDS=$(jq -r '[.data.validationCreate.userErrors[] | (.field // []) | join(".")] | join(", ")' "$HTTP_RESPONSE")
+                echo "::error::userErrors count=$USER_ERROR_COUNT fields=[$USER_ERROR_FIELDS]"
                 exit 1
               fi
 
@@ -1142,9 +1149,11 @@ jobs:
                 exit 1
               fi
 
-              USER_ERRORS=$(jq -r '.data.validationUpdate.userErrors | map(.message) | join(", ")' "$HTTP_RESPONSE")
-              if [ -n "$USER_ERRORS" ] && [ "$USER_ERRORS" != "" ]; then
-                echo "::error::userErrors: $USER_ERRORS"
+              # Public-repo safe: print only the count and field paths, never messages.
+              USER_ERROR_COUNT=$(jq -r '.data.validationUpdate.userErrors // [] | length' "$HTTP_RESPONSE")
+              if [ "$USER_ERROR_COUNT" != "0" ]; then
+                USER_ERROR_FIELDS=$(jq -r '[.data.validationUpdate.userErrors[] | (.field // []) | join(".")] | join(", ")' "$HTTP_RESPONSE")
+                echo "::error::userErrors count=$USER_ERROR_COUNT fields=[$USER_ERROR_FIELDS]"
                 exit 1
               fi
 
@@ -1183,7 +1192,7 @@ jobs:
           EOSQL
           ) || {
             echo "::error::s10b_call_reconcile or currval failed. The function may have returned early or currval failed."
-            echo "psql stdout: $REQUEST_ID_OUTPUT"
+            echo "psql stdout lines: $(printf '%s' "${REQUEST_ID_OUTPUT:-}" | grep -c '' || true)"
             exit 1
           }
 
@@ -1192,7 +1201,7 @@ jobs:
 
           if [ -z "$REQUEST_ID" ] || ! [[ "$REQUEST_ID" =~ ^[0-9]+$ ]]; then
             echo "::error::Failed to get request_id from currval. The function may have returned early or currval failed."
-            echo "Output was: $REQUEST_ID_OUTPUT"
+            echo "Output lines: $(printf '%s' "$REQUEST_ID_OUTPUT" | grep -c '' || true) (values not printed)"
             exit 1
           fi
 

@@ -87,18 +87,22 @@ export const BULK_COMPANIES_QUERY = `
 /**
  * GraphQL mutation to start a bulk operation for orders with payment terms.
  *
- * Filters to orders with outstanding payment terms:
+ * Filters to orders relevant for net-terms invoice management:
  * - pending: Orders awaiting full payment (typical for net-terms)
  * - partially_paid: Orders with partial payment received
+ * - partially_refunded: Refunded but still has outstanding amount
+ * - authorized: Orders with payment authorized (can become net-terms)
+ * - paid: To update (settle) existing invoices that became PAID
+ * - refunded: To update existing invoices that were refunded
+ * - voided: To update existing invoices that were voided
+ * - expired: Payment authorization expired (can still have net-terms)
+ *
+ * Note: Eligibility rules still gate CREATION of new invoices.
+ * This wider filter ensures reconcile can UPDATE existing invoices
+ * when their status changes (e.g., an invoice that was PENDING becomes PAID).
  *
  * Per Shopify Admin API OrderDisplayFinancialStatus enum (2026-10):
  * @see https://shopify.dev/docs/api/admin-graphql/2026-10/enums/OrderDisplayFinancialStatus
- *
- * Valid values: AUTHORIZED, EXPIRED, PAID, PARTIALLY_PAID, PARTIALLY_REFUNDED,
- * PENDING, REFUNDED, VOIDED. For net-terms orders:
- * - PENDING: Created with payment terms, awaiting full payment
- * - PARTIALLY_PAID: Partial payment manually captured
- * - AUTHORIZED does not apply to net-terms (for payment card auth holds only)
  *
  * Without read_all_orders scope, order access is limited to the last 60 days
  * (Shopify default). Once read_all_orders is approved, all historical orders
@@ -112,7 +116,7 @@ export const BULK_ORDERS_QUERY = `
     bulkOperationRunQuery(
       query: """
       {
-        orders(query: "financial_status:pending OR financial_status:partially_paid") {
+        orders(query: "financial_status:pending OR financial_status:partially_paid OR financial_status:partially_refunded OR financial_status:authorized OR financial_status:paid OR financial_status:refunded OR financial_status:voided OR financial_status:expired") {
           edges {
             node {
               id
