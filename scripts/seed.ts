@@ -334,7 +334,7 @@ export interface SeedState {
   skippedCount: { companies: number; orders: number; roleAssignments: number };
   skippedReasons: string[];
   deletedCount: { companies: number; orders: number };
-  failedCount: { locations: number; orders: number; roleAssignments: number };
+  failedCount: { companies: number; locations: number; orders: number; roleAssignments: number; dbRows: number };
   ordersWithShopifyTerms: number;
   ordersWithoutShopifyTerms: number;
   overdueOrdersCount: number;
@@ -644,6 +644,59 @@ export async function fetchPaymentTermsTemplates(state: SeedState): Promise<bool
 
 // -- Reset / Cleanup --
 
+/**
+ * Query to find seeded orders by tag.
+ */
+export const FIND_SEEDED_ORDERS_QUERY = `
+  query FindSeededOrders($query: String!) {
+    orders(first: 50, query: $query) {
+      nodes { id name tags }
+    }
+  }
+`;
+
+/**
+ * Query to find seeded companies by externalId prefix.
+ */
+export const FIND_SEEDED_COMPANIES_BY_EXTERNAL_ID_QUERY = `
+  query FindSeededCompaniesByExternalId($query: String!) {
+    companies(first: 50, query: $query) {
+      nodes { id name externalId }
+    }
+  }
+`;
+
+/**
+ * Query to find companies by name (for reset - finds companies without externalId).
+ */
+export const FIND_COMPANIES_BY_NAME_FOR_RESET_QUERY = `
+  query FindCompaniesByNameForReset($query: String!) {
+    companies(first: 10, query: $query) {
+      nodes { id name externalId }
+    }
+  }
+`;
+
+/**
+ * Mutation to delete a company.
+ */
+export const COMPANY_DELETE_MUTATION = `
+  mutation DeleteCompany($id: ID!) {
+    companyDelete(id: $id) {
+      deletedCompanyId
+      userErrors { field message code }
+    }
+  }
+`;
+
+interface ResetStats {
+  companiesDeleted: number;
+  companiesSkipped: number;
+  companiesStillPresent: number;
+  ordersSkipped: number;
+  skipReasons: string[];
+}
+
 export async function resetSeedData(state: SeedState): Promise<void> {
   console.log("\n🗑️  Resetting seed data...");
 
@@ -652,79 +705,176 @@ export async function resetSeedData(state: SeedState): Promise<void> {
     return;
   }
 
-  await deleteSeededOrders(state);
-  await deleteSeededCompanies(state);
+  const stats: ResetStats = {
+    companiesDeleted: 0,
+    companiesSkipped: 0,
+    companiesStillPresent: 0,
+    ordersSkipped: 0,
+    skipReasons: [],
+  };
+
+  await deleteSeededOrders(state, stats);
+  await deleteSeededCompanies(state, stats);
+
+  // Update state counts
+  state.deletedCount.companies = stats.companiesDeleted;
+  state.deletedCount.orders = stats.ordersSkipped;
+  state.skippedCount.companies += stats.companiesSkipped;
+  state.skippedReasons.push(...stats.skipReasons);
 
   console.log("\n  Reset summary:");
-  console.log(`    Companies deleted: ${state.deletedCount.companies}`);
-  console.log(`    Orders found: ${state.deletedCount.orders} (cannot delete via API, remain tagged)`);
-  
-  if (state.deletedCount.orders > 0 && state.deletedCount.companies === 0) {
-    console.log("\n  ⚠️  Note: companyDelete fails while orders exist for that company.");
-    console.log("     To fully reset, cancel the seeded orders in Shopify Admin first,");
-    console.log("     or manually delete companies after orders are archived.");
+  console.log(`    Companies deleted:       ${stats.companiesDeleted}`);
+  console.log(`    Companies skipped:       ${stats.companiesSkipped}`);
+  console.log(`    Companies still present: ${stats.companiesStillPresent}`);
+  console.log(`    Orders skipped:          ${stats.ordersSkipped} (cannot delete via API)`);
+
+  if (stats.skipReasons.length > 0) {
+    console.log("\n  Skip reasons:");
+    for (const reason of stats.skipReasons) {
+      console.log(`    - ${reason}`);
+    }
+  }
+
+  if (stats.companiesStillPresent > 0) {
+    console.log(`\n  ⚠️  ${stats.companiesStillPresent} seed companies still present after deletion attempt.`);
+    console.log("     Companies with orders cannot be deleted via API.");
+    console.log("     To fully reset, cancel/archive orders in Shopify Admin first.");
   }
 }
 
-async function deleteSeededOrders(state: SeedState): Promise<void> {
+async function deleteSeededOrders(state: SeedState, stats: ResetStats): Promise<void> {
   console.log("  Searching for seeded orders...");
 
-  const result = await graphql<{ orders: { nodes: OrderNode[] } }>(state, `
-    query FindSeededOrders($query: String!) {
-      orders(first: 50, query: $query) {
-        nodes { id name tags }
-      }
-    }
-  `, { query: `tag:'${SEED_TAG}'` });
+  const result = await graphql<{ orders: { nodes: OrderNode[] } }>(
+    state,
+    FIND_SEEDED_ORDERS_QUERY,
+    { query: `tag:'${SEED_TAG}'` }
+  );
 
-  // Strict match: only count orders that actually have the exact SEED_TAG
   const allOrders = result.data?.orders.nodes ?? [];
   const seededOrders = allOrders.filter(o => o.tags.includes(SEED_TAG));
   console.log(`  Found ${seededOrders.length} seeded orders (strict match)`);
-  // Note: orders cannot be deleted via Admin API
-  state.deletedCount.orders = seededOrders.length;
+
+  // Orders cannot be deleted via Admin API - count as skipped
+  stats.ordersSkipped = seededOrders.length;
 
   if (seededOrders.length > 0) {
-    console.log("  ⚠️  Orders cannot be deleted via API. They remain tagged for identification.");
+    console.log("  ⚠️  Orders cannot be deleted via API. Counted as skipped.");
   }
 }
 
-async function deleteSeededCompanies(state: SeedState): Promise<void> {
-  console.log("  Searching for seeded companies...");
+async function deleteSeededCompanies(state: SeedState, stats: ResetStats): Promise<void> {
+  console.log("  Searching for seeded companies by externalId, name, and contact email...");
 
-  // Use unquoted wildcard - quoting makes Shopify treat '*' as a literal
-  const result = await graphql<{ companies: { nodes: CompanyNode[] } }>(state, `
-    query FindSeededCompanies($query: String!) {
-      companies(first: 50, query: $query) {
-        nodes { id name externalId }
+  // Collect all seed companies to delete using multiple search strategies
+  const companiesById = new Map<string, { id: string; name: string; externalId: string | null }>();
+
+  // Strategy 1: Search by externalId prefix
+  const byExternalId = await graphql<{ companies: { nodes: Array<{ id: string; name: string; externalId: string | null }> } }>(
+    state,
+    FIND_SEEDED_COMPANIES_BY_EXTERNAL_ID_QUERY,
+    { query: `external_id:${SEED_PREFIX}*` }
+  );
+  for (const company of byExternalId.data?.companies.nodes ?? []) {
+    if (company.externalId?.startsWith(SEED_PREFIX)) {
+      companiesById.set(company.id, company);
+    }
+  }
+  console.log(`    By externalId: ${companiesById.size} found`);
+
+  // Strategy 2: Search by seed company names (finds companies without externalId)
+  for (const seed of COMPANY_SEEDS) {
+    const byName = await graphql<{ companies: { nodes: Array<{ id: string; name: string; externalId: string | null }> } }>(
+      state,
+      FIND_COMPANIES_BY_NAME_FOR_RESET_QUERY,
+      { query: `name:'${seed.name}'` }
+    );
+    for (const company of byName.data?.companies.nodes ?? []) {
+      if (company.name === seed.name && !companiesById.has(company.id)) {
+        companiesById.set(company.id, company);
+        console.log(`    By name "${seed.name}": found ${company.id}`);
       }
     }
-  `, { query: `external_id:${SEED_PREFIX}*` });
+  }
 
-  // Safety filter: only delete companies whose externalId actually starts with SEED_PREFIX
-  const allCompanies = result.data?.companies.nodes ?? [];
-  const seededCompanies = allCompanies.filter(c => c.externalId?.startsWith(SEED_PREFIX));
-  console.log(`  Found ${seededCompanies.length} seeded companies (strict match)`);
-
-  for (const company of seededCompanies) {
-    // Mutations must not retry on network errors (may have executed)
-    const deleteResult = await graphql<{ companyDelete: { deletedCompanyId: string; userErrors: UserError[] } }>(
-      state,
-      `mutation DeleteCompany($id: ID!) {
-        companyDelete(id: $id) {
-          deletedCompanyId
-          userErrors { field message }
-        }
-      }`,
-      { id: company.id },
-      { isMutation: true }
-    );
-
-    if (deleteResult.data?.companyDelete.userErrors.length) {
-      console.log(`    ⚠️  Failed to delete ${company.name}: ${deleteResult.data.companyDelete.userErrors[0].message}`);
-    } else if (deleteResult.data?.companyDelete.deletedCompanyId) {
-      state.deletedCount.companies++;
+  // Strategy 3: Search by seed contact emails (via findCompaniesByContactEmail)
+  for (const seed of COMPANY_SEEDS) {
+    const byEmail = await findCompaniesByContactEmail(state, seed.contact.email);
+    for (const candidate of byEmail) {
+      if (!companiesById.has(candidate.id)) {
+        companiesById.set(candidate.id, { id: candidate.id, name: candidate.name, externalId: candidate.externalId });
+        console.log(`    By contact email for "${seed.name}": found ${candidate.id}`);
+      }
     }
+  }
+
+  const allSeedCompanies = Array.from(companiesById.values());
+  console.log(`  Total unique seed companies found: ${allSeedCompanies.length}`);
+
+  // Delete each company
+  const deletedIds = new Set<string>();
+  for (const company of allSeedCompanies) {
+    const deleteResult = await graphql<{
+      companyDelete: { deletedCompanyId: string | null; userErrors: UserError[] };
+    }>(state, COMPANY_DELETE_MUTATION, { id: company.id }, { isMutation: true });
+
+    const userErrors = deleteResult.data?.companyDelete.userErrors ?? [];
+    const deletedId = deleteResult.data?.companyDelete.deletedCompanyId;
+
+    if (userErrors.length > 0) {
+      const error = userErrors[0];
+      const code = error.code ?? "UNKNOWN";
+      const message = error.message;
+      const reason = `${company.id}: [${code}] ${message}`;
+      stats.skipReasons.push(reason);
+      stats.companiesSkipped++;
+      console.log(`    ⚠️  Skipped ${company.id}: [${code}] ${message}`);
+    } else if (deletedId) {
+      deletedIds.add(deletedId);
+      stats.companiesDeleted++;
+      console.log(`    ✓ Deleted ${company.id}`);
+    } else {
+      const reason = `${company.id}: No deletedCompanyId returned and no userErrors`;
+      stats.skipReasons.push(reason);
+      stats.companiesSkipped++;
+      console.log(`    ⚠️  Skipped ${company.id}: No deletedCompanyId returned`);
+    }
+  }
+
+  // Verify deletion by re-querying
+  console.log("  Verifying deletions...");
+  const verifyResult = await graphql<{ companies: { nodes: Array<{ id: string; name: string; externalId: string | null }> } }>(
+    state,
+    FIND_SEEDED_COMPANIES_BY_EXTERNAL_ID_QUERY,
+    { query: `external_id:${SEED_PREFIX}*` }
+  );
+  const stillPresentByExternalId = (verifyResult.data?.companies.nodes ?? [])
+    .filter(c => c.externalId?.startsWith(SEED_PREFIX));
+
+  // Also check by name for companies without externalId
+  const stillPresentByName = new Set<string>();
+  for (const seed of COMPANY_SEEDS) {
+    const byName = await graphql<{ companies: { nodes: Array<{ id: string; name: string; externalId: string | null }> } }>(
+      state,
+      FIND_COMPANIES_BY_NAME_FOR_RESET_QUERY,
+      { query: `name:'${seed.name}'` }
+    );
+    for (const company of byName.data?.companies.nodes ?? []) {
+      if (company.name === seed.name && !deletedIds.has(company.id)) {
+        stillPresentByName.add(company.id);
+      }
+    }
+  }
+
+  stats.companiesStillPresent = stillPresentByExternalId.length + stillPresentByName.size;
+
+  if (stats.companiesStillPresent > 0) {
+    console.log(`  Verification: ${stats.companiesStillPresent} seed companies still present`);
+    for (const company of stillPresentByExternalId) {
+      console.log(`    - ${company.id} (${company.name})`);
+    }
+  } else {
+    console.log("  Verification: All seed companies successfully deleted");
   }
 }
 
@@ -3265,7 +3415,7 @@ export async function main(): Promise<void> {
     skippedCount: { companies: 0, orders: 0, roleAssignments: 0 },
     skippedReasons: [],
     deletedCount: { companies: 0, orders: 0 },
-    failedCount: { locations: 0, orders: 0, roleAssignments: 0 },
+    failedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRows: 0 },
     ordersWithShopifyTerms: 0,
     ordersWithoutShopifyTerms: 0,
     overdueOrdersCount: 0,
@@ -3391,13 +3541,15 @@ export async function main(): Promise<void> {
     }
   }
 
-  const totalFailures = state.failedCount.locations + state.failedCount.orders + state.failedCount.roleAssignments;
-  if (totalFailures > 0) {
-    console.log("    ❌ Failed:");
-    console.log(`      Locations:        ${state.failedCount.locations}`);
-    console.log(`      Role assignments: ${state.failedCount.roleAssignments}`);
-    console.log(`      Orders:           ${state.failedCount.orders}`);
-  }
+  // Always print explicit failed counts for every category
+  const totalFailures = state.failedCount.companies + state.failedCount.locations + 
+                        state.failedCount.orders + state.failedCount.roleAssignments + state.failedCount.dbRows;
+  console.log("    Failed:");
+  console.log(`      Companies:        ${state.failedCount.companies}`);
+  console.log(`      Locations:        ${state.failedCount.locations}`);
+  console.log(`      Role assignments: ${state.failedCount.roleAssignments}`);
+  console.log(`      Orders:           ${state.failedCount.orders}`);
+  console.log(`      DB rows:          ${state.failedCount.dbRows}`);
 
   // Order breakdown
   const b2bOrdersCount = state.createdCount.orders - state.taggedCustomerOrdersCount;

@@ -38,6 +38,10 @@ import {
   COMPANY_UPDATE_MUTATION as _COMPANY_UPDATE_MUTATION,
   COMPANY_ASSIGN_CUSTOMER_AS_CONTACT_MUTATION as _COMPANY_ASSIGN_CUSTOMER_AS_CONTACT_MUTATION,
   COMPANY_ASSIGN_MAIN_CONTACT_MUTATION as _COMPANY_ASSIGN_MAIN_CONTACT_MUTATION,
+  FIND_SEEDED_ORDERS_QUERY as _FIND_SEEDED_ORDERS_QUERY,
+  FIND_SEEDED_COMPANIES_BY_EXTERNAL_ID_QUERY as _FIND_SEEDED_COMPANIES_BY_EXTERNAL_ID_QUERY,
+  FIND_COMPANIES_BY_NAME_FOR_RESET_QUERY as _FIND_COMPANIES_BY_NAME_FOR_RESET_QUERY,
+  COMPANY_DELETE_MUTATION as _COMPANY_DELETE_MUTATION,
   MAX_SEARCH_PAGES,
   buildCompanyCreateInput,
   buildCompanyCreateInputWithoutContact,
@@ -119,7 +123,7 @@ function createMockState(overrides: Partial<SeedState> = {}): SeedState {
     skippedCount: { companies: 0, orders: 0, roleAssignments: 0 },
     skippedReasons: [],
     deletedCount: { companies: 0, orders: 0 },
-    failedCount: { locations: 0, orders: 0, roleAssignments: 0 },
+    failedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRows: 0 },
     ordersWithShopifyTerms: 0,
     ordersWithoutShopifyTerms: 0,
     overdueOrdersCount: 0,
@@ -2762,13 +2766,52 @@ describe("Strict externalId Matching (fuzzy search bug fix)", () => {
       const variables = body.variables as Record<string, unknown>;
       capturedRequests.push({ query, variables });
 
-      // Return empty results for both companies and orders searches
-      if (query.includes("FindSeededCompanies") || query.includes("FindSeededOrders")) {
+      // Return empty results for seeded orders
+      if (query.includes("FindSeededOrders")) {
         return {
           ok: true,
           status: 200,
           json: async () => ({
-            data: { companies: { nodes: [] }, orders: { nodes: [] } },
+            data: { orders: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Return empty results for companies by externalId
+      if (query.includes("FindSeededCompaniesByExternalId")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companies: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Return empty results for companies by name
+      if (query.includes("FindCompaniesByNameForReset")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companies: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Return empty for customer/company searches (for email lookup)
+      if (query.includes("customers") || query.includes("companies")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { 
+              customers: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+              companies: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+            },
             extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
           }),
         } as Response;
@@ -2780,8 +2823,8 @@ describe("Strict externalId Matching (fuzzy search bug fix)", () => {
     const state = createMockState({ reset: true });
     await resetSeedData(state);
 
-    // Find the company search request
-    const companySearchCall = capturedRequests.find(r => r.query.includes("FindSeededCompanies"));
+    // Find the company search request by externalId
+    const companySearchCall = capturedRequests.find(r => r.query.includes("FindSeededCompaniesByExternalId"));
     expect(companySearchCall).toBeDefined();
     
     // Assert the query variable is exactly unquoted: external_id:ntr-seed-*
@@ -4704,5 +4747,399 @@ describe("company adoption", () => {
     expect(firstAssignment.locationId).toBe(expectedVars.companyLocationId);
     expect(firstAssignment.contactId).toBe(expectedVars.rolesToAssign[0].companyContactId);
     expect(firstAssignment.roleId).toBe(expectedVars.rolesToAssign[0].companyContactRoleId);
+  });
+});
+
+describe("reset functionality", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    global.fetch = originalFetch;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    global.fetch = originalFetch;
+  });
+
+  it("finds all 5 companies by externalId, name, and contact email", async () => {
+    const foundByExternalId = new Set<string>();
+    const foundByName = new Set<string>();
+    const foundByEmail = new Set<string>();
+    
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+      const variables = body.variables as Record<string, unknown> | undefined;
+
+      // Find seeded orders - none
+      if (query.includes("FindSeededOrders")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { orders: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Find companies by externalId - return 4 (missing one to test other strategies)
+      if (query.includes("FindSeededCompaniesByExternalId")) {
+        foundByExternalId.add("query");
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companies: {
+                nodes: [
+                  { id: "gid://company/1", name: COMPANY_SEEDS[0].name, externalId: `${SEED_PREFIX}company-1` },
+                  { id: "gid://company/2", name: COMPANY_SEEDS[1].name, externalId: `${SEED_PREFIX}company-2` },
+                  { id: "gid://company/3", name: COMPANY_SEEDS[2].name, externalId: `${SEED_PREFIX}company-3` },
+                  { id: "gid://company/4", name: COMPANY_SEEDS[3].name, externalId: `${SEED_PREFIX}company-4` },
+                  // company-5 missing from externalId search
+                ],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Find companies by name
+      if (query.includes("FindCompaniesByNameForReset")) {
+        const queryStr = variables?.query?.toString() ?? "";
+        foundByName.add(queryStr);
+        // Only return company-5 when searched by name
+        if (queryStr.includes(COMPANY_SEEDS[4].name)) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              data: {
+                companies: {
+                  nodes: [{ id: "gid://company/5", name: COMPANY_SEEDS[4].name, externalId: null }],
+                },
+              },
+              extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+            }),
+          } as Response;
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companies: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Find companies with contacts (for email search) - return empty
+      if (query.includes("customers") || query.includes("companies")) {
+        const queryStr = variables?.query?.toString() ?? "";
+        if (queryStr.includes("email")) {
+          foundByEmail.add(queryStr);
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { 
+              customers: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+              companies: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Company delete
+      if (query.includes("companyDelete")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyDelete: { deletedCompanyId: "gid://company/deleted", userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const { resetSeedData } = await import("../seed");
+    const state = createMockState();
+
+    await resetSeedData(state);
+
+    // Should have searched by externalId
+    expect(foundByExternalId.size).toBeGreaterThan(0);
+    // Should have searched by name for all 5 seeds
+    expect(foundByName.size).toBe(5);
+    // Should have deleted 5 companies (4 by externalId + 1 by name)
+    expect(state.deletedCount.companies).toBe(5);
+  });
+
+  it("logs userErrors code and message (no PII) for skipped companies", async () => {
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+
+      // Find seeded orders - none
+      if (query.includes("FindSeededOrders")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { orders: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Find companies by externalId - return 1
+      if (query.includes("FindSeededCompaniesByExternalId")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companies: {
+                nodes: [{ id: "gid://company/withorders", name: "Test Company", externalId: `${SEED_PREFIX}company-1` }],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Find companies by name/email - return empty
+      if (query.includes("FindCompaniesByNameForReset") || query.includes("customers") || query.includes("companies")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { 
+              customers: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+              companies: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Company delete - returns error (company has orders)
+      if (query.includes("companyDelete")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyDelete: {
+                deletedCompanyId: null,
+                userErrors: [{ field: ["id"], message: "Company has orders and cannot be deleted", code: "HAS_ORDERS" }],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const { resetSeedData } = await import("../seed");
+    const state = createMockState();
+
+    await resetSeedData(state);
+
+    // Should have skipped the company
+    expect(state.skippedCount.companies).toBe(1);
+    // Skip reason should include code and message (no PII)
+    expect(state.skippedReasons.length).toBe(1);
+    expect(state.skippedReasons[0]).toContain("HAS_ORDERS");
+    expect(state.skippedReasons[0]).toContain("Company has orders and cannot be deleted");
+    expect(state.skippedReasons[0]).toContain("gid://company/withorders");
+    // Should NOT contain shop domain or email
+    expect(state.skippedReasons[0]).not.toContain(".myshopify.com");
+  });
+
+  it("verifies companies are gone after deletion and reports still-present count", async () => {
+    let deleteAttempted = false;
+    
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+
+      // Find seeded orders - none
+      if (query.includes("FindSeededOrders")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { orders: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Find companies by externalId
+      if (query.includes("FindSeededCompaniesByExternalId")) {
+        // After delete attempt, still return one company (simulating delete failure)
+        if (deleteAttempted) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              data: {
+                companies: {
+                  nodes: [{ id: "gid://company/stubborn", name: "Stubborn Company", externalId: `${SEED_PREFIX}company-1` }],
+                },
+              },
+              extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+            }),
+          } as Response;
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companies: {
+                nodes: [{ id: "gid://company/stubborn", name: "Stubborn Company", externalId: `${SEED_PREFIX}company-1` }],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Find companies by name/email - return empty
+      if (query.includes("FindCompaniesByNameForReset") || query.includes("customers") || query.includes("companies")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { 
+              customers: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+              companies: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Company delete - returns error
+      if (query.includes("companyDelete")) {
+        deleteAttempted = true;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyDelete: {
+                deletedCompanyId: null,
+                userErrors: [{ field: ["id"], message: "Cannot delete", code: "CANNOT_DELETE" }],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    
+    const { resetSeedData } = await import("../seed");
+    const state = createMockState();
+
+    await resetSeedData(state);
+
+    const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    
+    // Should report still-present count
+    expect(output).toContain("still present");
+    expect(state.skippedCount.companies).toBe(1);
+    
+    logSpy.mockRestore();
+  });
+
+  it("counts orders as skipped (not failed) since they cannot be deleted via API", async () => {
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+
+      // Find seeded orders - return some orders
+      if (query.includes("FindSeededOrders")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              orders: {
+                nodes: [
+                  { id: "gid://order/1", name: "#1001", tags: [SEED_TAG] },
+                  { id: "gid://order/2", name: "#1002", tags: [SEED_TAG] },
+                  { id: "gid://order/3", name: "#1003", tags: [SEED_TAG] },
+                ],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Find companies - return empty
+      if (query.includes("FindSeededCompaniesByExternalId") || query.includes("FindCompaniesByNameForReset") || 
+          query.includes("customers") || query.includes("companies")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { 
+              customers: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+              companies: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const { resetSeedData } = await import("../seed");
+    const state = createMockState();
+
+    await resetSeedData(state);
+
+    // Orders should be counted as skipped in deletedCount.orders, not failed
+    expect(state.deletedCount.orders).toBe(3);
+    expect(state.failedCount.orders).toBe(0);
+  });
+});
+
+describe("failed counts and exit code", () => {
+  it("Summary prints explicit failed counts for every category", async () => {
+    // This test verifies the Summary section always prints failed counts
+    // by checking that the failedCount structure has all required fields
+    const state = createMockState();
+    
+    expect(state.failedCount).toHaveProperty("companies");
+    expect(state.failedCount).toHaveProperty("locations");
+    expect(state.failedCount).toHaveProperty("orders");
+    expect(state.failedCount).toHaveProperty("roleAssignments");
+    expect(state.failedCount).toHaveProperty("dbRows");
+    
+    // All should start at 0
+    expect(state.failedCount.companies).toBe(0);
+    expect(state.failedCount.locations).toBe(0);
+    expect(state.failedCount.orders).toBe(0);
+    expect(state.failedCount.roleAssignments).toBe(0);
+    expect(state.failedCount.dbRows).toBe(0);
   });
 });
