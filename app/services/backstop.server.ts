@@ -682,7 +682,8 @@ export async function resolveInvoiceForOrder(
     WHERE "shopId" = ${shopId} AND "orderGid" = ${orderGid}
     LIMIT 1
   `;
-  return invoice ?? null;
+  if (!invoice) return null;
+  return { invoiceId: invoice.id, buyerAccountId: invoice.buyerAccountId };
 }
 
 /**
@@ -737,7 +738,7 @@ export async function applyBackstop(
 
   try {
     // Check if buyer was held BEFORE this order
-    const { held, bypass, holdState, reason } = await isBuyerHeldBeforeOrder(
+    const { held, bypass, holdState: _holdState, reason } = await isBuyerHeldBeforeOrder(
       sql,
       buyerAccountId,
       invoiceId,

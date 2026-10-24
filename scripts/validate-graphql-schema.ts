@@ -485,6 +485,7 @@ const ADMIN_GRAPHQL_CONST_ALLOWLIST = [
   "after-auth.server.ts", // Uses SHOP_TIMEZONE_QUERY constant
   "metafield-definitions.server.ts", // Uses METAFIELD_DEFINITION_CREATE_MUTATION constant
   "validation-registration.server.ts", // Uses VALIDATIONS_QUERY, VALIDATION_CREATE_MUTATION constants
+  "payment-customization-registration.server.ts", // Uses PAYMENT_CUSTOMIZATIONS_QUERY, PAYMENT_CUSTOMIZATION_CREATE_MUTATION constants
   "shopify-client.server.ts", // Generic wrapper that takes query as parameter
 ];
 

@@ -65,7 +65,6 @@ describe("backstop.server", () => {
   const baseInput: BackstopInput = {
     shopDomain: "test.myshopify.com",
     shopId: "shop-123",
-    orderId: "inv-456",
     orderGid: "gid://shopify/Order/789",
     buyerAccountId: "buyer-abc",
     invoiceId: "inv-456",
@@ -84,8 +83,9 @@ describe("backstop.server", () => {
     });
 
     it("skips when already processed (idempotent)", async () => {
-      // Mock: backstop already completed (status='held')
-      mockSql._setResult("backstop_processed_orders", [{ status: "held" }]);
+      // Mock: backstop already completed - INSERT returns [] (conflict), SELECT returns existing row
+      mockSql._setResult("INSERT INTO backstop_processed_orders", []); // Conflict - already exists
+      mockSql._setResult("SELECT action FROM backstop_processed_orders", [{ action: "held" }]);
 
       const result = await applyBackstop(mockSql as never, baseInput);
 
@@ -95,35 +95,47 @@ describe("backstop.server", () => {
     });
 
     it("skips when account is OK (not held)", async () => {
-      // Mock: claim succeeds (returns pending)
-      mockSql._setResult("backstop_processed_orders", [{ status: "pending" }]);
+      // Mock: claim succeeds (INSERT returns the inserted row)
+      mockSql._setResult("INSERT INTO backstop_processed_orders", [{ action: "pending" }]);
       // Mock: account is OK
       mockSql._setResult("BuyerAccount", [
-        { holdState: "OK", bypass: false, creditLimit: "100000.00", manualHold: false },
+        { holdState: "OK", bypass: false, creditLimit: "100000.00", manualHold: false, holdReasonCode: null },
       ]);
+      // Mock hasOverdueInvoices - no overdue invoices
+      mockSql._setResult('status = \'open\'$?$AND "dueDate"', []);
+      // Mock exposure calculation - under limit
+      mockSql._setResult("FROM \"Invoice\"", [{ total_paise: "0" }]);
+      mockSql._setResult("s8_draft_orders", [{ total_paise: "0" }]);
 
       const result = await applyBackstop(mockSql as never, baseInput);
 
       expect(result.applied).toBe(false);
       expect(result.skipped).toBe(true);
+      // With pre-order hold state calculation, reason indicates this order pushed over limit
       expect(result.skipReason).toContain("not held");
     });
 
     it("skips when account is NEAR_LIMIT (not held)", async () => {
-      mockSql._setResult("backstop_processed_orders", [{ status: "pending" }]);
+      mockSql._setResult("INSERT INTO backstop_processed_orders", [{ action: "pending" }]);
       mockSql._setResult("BuyerAccount", [
-        { holdState: "NEAR_LIMIT", bypass: false, creditLimit: "100000.00", manualHold: false },
+        { holdState: "NEAR_LIMIT", bypass: false, creditLimit: "100000.00", manualHold: false, holdReasonCode: null },
       ]);
+      // Mock hasOverdueInvoices - no overdue invoices
+      mockSql._setResult('status = \'open\'$?$AND "dueDate"', []);
+      // Mock exposure calculation - under limit (near but not over)
+      mockSql._setResult("FROM \"Invoice\"", [{ total_paise: "9000000" }]); // 90% of 10M limit
+      mockSql._setResult("s8_draft_orders", [{ total_paise: "0" }]);
 
       const result = await applyBackstop(mockSql as never, baseInput);
 
       expect(result.applied).toBe(false);
       expect(result.skipped).toBe(true);
+      // With pre-order hold state calculation, reason indicates this order pushed over limit
       expect(result.skipReason).toContain("not held");
     });
 
     it("skips when account has bypass", async () => {
-      mockSql._setResult("backstop_processed_orders", [{ status: "pending" }]);
+      mockSql._setResult("INSERT INTO backstop_processed_orders", [{ action: "pending" }]);
       mockSql._setResult("BuyerAccount", [
         { holdState: "HELD", bypass: true, creditLimit: "100000.00", manualHold: false },
       ]);
@@ -132,12 +144,12 @@ describe("backstop.server", () => {
 
       expect(result.applied).toBe(false);
       expect(result.skipped).toBe(true);
-      // Bypass accounts have holdState BYPASS and are not held
-      expect(result.skipReason).toContain("BYPASS");
+      // Bypass accounts are not held - reason is "Bypass active"
+      expect(result.skipReason).toContain("Bypass active");
     });
 
     it("applies holds when account is HELD (manual hold) and not bypassed", async () => {
-      mockSql._setResult("backstop_processed_orders", [{ status: "pending" }]);
+      mockSql._setResult("INSERT INTO backstop_processed_orders", [{ action: "pending" }]);
       mockSql._setResult("BuyerAccount", [
         { holdState: "HELD", bypass: false, creditLimit: "100000.00", manualHold: true },
       ]);
@@ -231,7 +243,7 @@ describe("backstop.server", () => {
     });
 
     it("throws RetryableBackstopError when 0 fulfillment orders found", async () => {
-      mockSql._setResult("backstop_processed_orders", [{ status: "pending" }]);
+      mockSql._setResult("INSERT INTO backstop_processed_orders", [{ action: "pending" }]);
       mockSql._setResult("BuyerAccount", [
         { holdState: "HELD", bypass: false, creditLimit: "100000.00", manualHold: true },
       ]);
@@ -254,7 +266,7 @@ describe("backstop.server", () => {
     });
 
     it("throws RetryableBackstopError on partial failure", async () => {
-      mockSql._setResult("backstop_processed_orders", [{ status: "pending" }]);
+      mockSql._setResult("INSERT INTO backstop_processed_orders", [{ action: "pending" }]);
       mockSql._setResult("BuyerAccount", [
         { holdState: "HELD", bypass: false, creditLimit: "100000.00", manualHold: true },
       ]);
@@ -316,7 +328,7 @@ describe("backstop.server", () => {
     });
 
     it("handles already-held fulfillment orders as success", async () => {
-      mockSql._setResult("backstop_processed_orders", [{ status: "pending" }]);
+      mockSql._setResult("INSERT INTO backstop_processed_orders", [{ action: "pending" }]);
       mockSql._setResult("BuyerAccount", [
         { holdState: "HELD", bypass: false, creditLimit: "100000.00", manualHold: true },
       ]);
@@ -369,7 +381,7 @@ describe("backstop.server", () => {
     });
 
     it("handles unknown buyer account", async () => {
-      mockSql._setResult("backstop_processed_orders", [{ status: "pending" }]);
+      mockSql._setResult("INSERT INTO backstop_processed_orders", [{ action: "pending" }]);
       // Return empty array - account not found
       mockSql._setResult("BuyerAccount", []);
 
@@ -377,11 +389,11 @@ describe("backstop.server", () => {
 
       expect(result.applied).toBe(false);
       expect(result.skipped).toBe(true);
-      expect(result.skipReason).toContain("not held");
+      expect(result.skipReason).toContain("Account not found");
     });
 
     it("skips non-merchant-managed fulfillment orders with audit note", async () => {
-      mockSql._setResult("backstop_processed_orders", [{ status: "pending" }]);
+      mockSql._setResult("INSERT INTO backstop_processed_orders", [{ action: "pending" }]);
       mockSql._setResult("BuyerAccount", [
         { holdState: "HELD", bypass: false, creditLimit: "100000.00", manualHold: true },
       ]);
@@ -449,42 +461,48 @@ describe("backstop.server", () => {
       it("skips when order itself pushed account over limit (was OK before)", async () => {
         // This tests the pre-order hold state logic:
         // Account is currently HELD, but was OK before this order
-        mockSql._setResult("backstop_processed_orders", [{ status: "pending" }]);
+        mockSql._setResult("INSERT INTO backstop_processed_orders", [{ action: "pending" }]);
         mockSql._setResult("BuyerAccount", [
           {
             holdState: "HELD", // Currently held
             bypass: false,
             creditLimit: "100000.00", // 100,000.00 = 10,000,000 paise
             manualHold: false, // Not manual, so auto-hold due to over limit
+            holdReasonCode: null,
           },
         ]);
-        // Exposure without this order is under limit
-        mockSql._setResult("exposureWithoutThisOrder", [
-          { exposureWithoutThisOrder: "5000000" }, // 50,000 paise = 500.00
-        ]);
+        // Mock hasOverdueInvoices - no overdue invoices
+        mockSql._setResult('status = \'open\'$?$AND "dueDate"', []);
+        // Exposure without this order is under limit (Invoice query returns 0)
+        mockSql._setResult("FROM \"Invoice\"", [{ total_paise: "5000000" }]); // 50,000 paise
+        // Draft orders also under limit
+        mockSql._setResult("s8_draft_orders", [{ total_paise: "0" }]);
 
         const result = await applyBackstop(mockSql as never, baseInput);
 
         // Should skip because account wasn't held BEFORE this order
         expect(result.applied).toBe(false);
         expect(result.skipped).toBe(true);
-        expect(result.skipReason).toContain("not held before this order");
+        expect(result.skipReason).toContain("This order pushed account over limit");
       });
 
       it("applies hold when account was already held before this order", async () => {
-        mockSql._setResult("backstop_processed_orders", [{ status: "pending" }]);
+        mockSql._setResult("INSERT INTO backstop_processed_orders", [{ action: "pending" }]);
         mockSql._setResult("BuyerAccount", [
           {
             holdState: "HELD",
             bypass: false,
             creditLimit: "100000.00", // 100,000.00 = 10,000,000 paise
             manualHold: false,
+            holdReasonCode: null,
           },
         ]);
-        // Exposure without this order is ALREADY over limit
-        mockSql._setResult("exposureWithoutThisOrder", [
-          { exposureWithoutThisOrder: "15000000" }, // 150,000 paise > 10,000,000 limit
-        ]);
+        // Mock hasOverdueInvoices - no overdue invoices
+        mockSql._setResult('status = \'open\'$?$AND "dueDate"', []);
+        // Exposure without this order is ALREADY over limit (15,000,000 paise > 10,000,000 limit)
+        mockSql._setResult("FROM \"Invoice\"", [{ total_paise: "15000000" }]);
+        // Draft orders return 0
+        mockSql._setResult("s8_draft_orders", [{ total_paise: "0" }]);
 
         // Mock FOs query
         mockShopifyGraphQLRequest.mockResolvedValueOnce({
@@ -531,7 +549,7 @@ describe("backstop.server", () => {
       });
 
       it("always applies hold for manual holds (not affected by pre-order state)", async () => {
-        mockSql._setResult("backstop_processed_orders", [{ status: "pending" }]);
+        mockSql._setResult("INSERT INTO backstop_processed_orders", [{ action: "pending" }]);
         mockSql._setResult("BuyerAccount", [
           {
             holdState: "HELD",

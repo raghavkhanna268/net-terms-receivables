@@ -375,7 +375,6 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
         const backstopResult = await applyBackstop(sql, {
           shopDomain: message.shop,
           shopId: invoiceInfo.shopId,
-          orderId: orderResult.entityId,
           orderGid: message.resourceGid,
           buyerAccountId: invoiceInfo.buyerAccountId,
           invoiceId: invoiceInfo.invoiceId,
