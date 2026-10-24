@@ -357,11 +357,10 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
         )
       `;
 
-      const remindersModule = await import("../reminders.server");
-      const { sendPaymentReminder } = remindersModule;
+      const { sendPaymentReminder } = await import("../reminders.server");
 
-      // Stub the cap check to always succeed (avoid relying on shared DB state)
-      const capSpy = vi.spyOn(remindersModule, "reserveGlobalSendSlot").mockResolvedValue({
+      // Stub the cap check via deps injection (avoids relying on shared DB state)
+      const mockReserveSlot = vi.fn().mockResolvedValue({
         reserved: true,
         daily: 1,
         monthly: 1,
@@ -386,20 +385,20 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
           TEST_RULE_ID,
           0,
           "Asia/Kolkata",
-          validEnv
+          validEnv,
+          { reserveGlobalSendSlot: mockReserveSlot }
         );
 
         // With gating OFF, gated account should pass Gate 3 and send
         expect(result.success).toBe(true);
         expect(result.action).toBe("sent");
 
-        // Cap reservation was called (proves send path was taken)
-        expect(capSpy).toHaveBeenCalledTimes(1);
+        // Cap reservation stub was called (proves send path was taken)
+        expect(mockReserveSlot).toHaveBeenCalledTimes(1);
 
         expect(mockFetch).toHaveBeenCalledTimes(1);
       } finally {
         luxonSpy.mockRestore();
-        capSpy.mockRestore();
       }
     });
   });
@@ -920,7 +919,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
           WHERE id = ${invoiceId}
         `;
 
-        // Mock shopify client for metafield write
+        // Mock shopify client for metafield write - must resetModules for doMock to take effect
         vi.doMock("../shopify-client.server", () => ({
           shopifyGraphQLRequest: vi.fn().mockResolvedValue({
             success: true,
@@ -932,11 +931,15 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
             },
           }),
         }));
+        vi.resetModules();
 
         const { recomputeCreditStatus } = await import("../credit-status-recompute.server");
         const result = await recomputeCreditStatus(sql, TEST_GATED_ACCOUNT_ID);
 
         // Recompute should succeed and clear the hold (gated accounts still get credit status updates)
+        if (!result.success) {
+          throw new Error(`Expected recomputeCreditStatus success but got error: ${result.error}`);
+        }
         expect(result.success).toBe(true);
         expect(result.previousHold).toBe(true);
         expect(result.newHold).toBe(false);

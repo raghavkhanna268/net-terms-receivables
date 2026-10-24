@@ -483,7 +483,8 @@ export async function sendPaymentReminder(
   ruleId: string,
   offsetDays: number,
   timezone: string,
-  env: { RESEND_API_KEY?: string; RESEND_FROM?: string } = {}
+  env: { RESEND_API_KEY?: string; RESEND_FROM?: string } = {},
+  deps: { reserveGlobalSendSlot?: typeof reserveGlobalSendSlot } = {}
 ): Promise<ReminderSendResult> {
   const resendKey = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
   const fromEmail = getResendFrom(env);
@@ -568,7 +569,8 @@ export async function sendPaymentReminder(
   }
 
   // Gate 8: Reserve global cap slot atomically (checks both daily and monthly)
-  const reservation = await reserveGlobalSendSlot(sql);
+  const reserveSlot = deps.reserveGlobalSendSlot ?? reserveGlobalSendSlot;
+  const reservation = await reserveSlot(sql);
   if (!reservation.reserved) {
     // Release reminder slot so it can retry later
     await releaseReminderSlot(sql, ruleId, invoiceId);
