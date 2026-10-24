@@ -119,25 +119,53 @@ describe("webhooks.app.uninstalled", () => {
     expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledWith(TEST_SHOP);
   });
 
-  it("logs but does not fail on session database errors", async () => {
+  it("session delete failure returns 5xx", async () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     mockSessionStorage.deleteAllForShop.mockRejectedValue(new Error("DB error"));
 
     const response = await action(createActionArgs());
 
-    expect(response).toBeInstanceOf(Response);
+    expect(response.status).toBe(500);
     expect(consoleSpy).toHaveBeenCalled();
     consoleSpy.mockRestore();
   });
 
-  it("logs but does not fail on mark uninstalled database errors", async () => {
+  it("uninstalledAt write failure returns 5xx", async () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     mockSessionStorage.deleteAllForShop.mockResolvedValue(1);
     mockMarkShopUninstalled.mockRejectedValue(new Error("DB error"));
 
     const response = await action(createActionArgs());
 
-    expect(response).toBeInstanceOf(Response);
+    expect(response.status).toBe(500);
+    expect(consoleSpy).toHaveBeenCalled();
+    consoleSpy.mockRestore();
+  });
+
+  it("retry after success is idempotent", async () => {
+    mockSessionStorage.deleteAllForShop.mockResolvedValue(0);
+    mockMarkShopUninstalled.mockResolvedValue(false);
+    mockDeleteWebhookReceiptsForShop.mockResolvedValue(0);
+
+    const response1 = await action(createActionArgs());
+    expect(response1.status).toBe(200);
+
+    const response2 = await action(createActionArgs());
+    expect(response2.status).toBe(200);
+
+    expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledTimes(2);
+    expect(mockMarkShopUninstalled).toHaveBeenCalledTimes(2);
+  });
+
+  it("webhook receipt purge failure is non-fatal", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockSessionStorage.deleteAllForShop.mockResolvedValue(1);
+    mockMarkShopUninstalled.mockResolvedValue(true);
+    mockDeleteWebhookReceiptsForShop.mockRejectedValue(new Error("Receipt purge failed"));
+
+    const response = await action(createActionArgs());
+
+    expect(response.status).toBe(200);
     expect(consoleSpy).toHaveBeenCalled();
     consoleSpy.mockRestore();
   });

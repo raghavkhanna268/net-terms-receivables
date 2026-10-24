@@ -32,6 +32,9 @@ import { deleteWebhookReceiptsForShop } from "~/lib/webhook-receipts.server";
  * not read them - deleteAllForShop runs a single DELETE query.
  *
  * CPU savings: ~5-10ms by avoiding session DB round-trip.
+ *
+ * Error handling: Returns 500 on session delete or uninstalledAt write failure
+ * so Shopify retries. Webhook receipt purge failure is non-fatal.
  */
 export const action = async ({ request, context }: ActionFunctionArgs) => {
   const apiSecret = process.env.SHOPIFY_API_SECRET;
@@ -60,6 +63,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     console.log(`Deleted ${count} session(s) for ${shop}`);
   } catch (error) {
     console.error(`Error deleting sessions for ${shop}:`, error);
+    return new Response(null, { status: 500 });
   }
 
   try {
@@ -73,9 +77,10 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     }
   } catch (error) {
     console.error(`Error marking shop ${shop} as uninstalled:`, error);
+    return new Response(null, { status: 500 });
   }
 
-  // Purge webhook receipts for the shop (S20 compliance)
+  // Purge webhook receipts for the shop (S20 compliance) - non-fatal on failure
   try {
     const receiptsDeleted = await deleteWebhookReceiptsForShop(sql, shop);
     console.log(`[uninstalled] Deleted ${receiptsDeleted} webhook receipts for ${shop}`);
