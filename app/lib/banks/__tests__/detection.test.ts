@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { detectBank, detectHeaderRow, detectFooterRows, isNarrationContinuation } from "../detection.js";
+import { detectBank, detectHeaderRow, detectFooterRows, isNarrationContinuation, isNarrationContinuationWithDateCol } from "../detection.js";
 import type { SheetData } from "../types.js";
 
 describe("detection", () => {
@@ -519,8 +519,23 @@ describe("detection", () => {
       expect(isNarrationContinuation(row)).toBe(true);
     });
 
+    it("returns true for row with empty first cell and narration only", () => {
+      const row = ["", "SYNTHETIC CONTINUATION TEXT", null, null, null, null, null];
+      expect(isNarrationContinuation(row)).toBe(true);
+    });
+
     it("returns false for row with date", () => {
       const row = ["01/10/26", "Normal transaction", "REF", "01/10/26", "", "1000", "101000"];
+      expect(isNarrationContinuation(row)).toBe(false);
+    });
+
+    it("returns false for row with non-date text in first cell", () => {
+      const row = ["BADDATE", "SYNTHETIC NO AMT ROW", null, null, null, null, null];
+      expect(isNarrationContinuation(row)).toBe(false);
+    });
+
+    it("returns false for row with text in first cell even with 2 cells", () => {
+      const row = ["PENDING", "SYNTHETIC HELD TXN"];
       expect(isNarrationContinuation(row)).toBe(false);
     });
 
@@ -532,6 +547,62 @@ describe("detection", () => {
     it("returns false for empty row", () => {
       const row: (string | null)[] = [];
       expect(isNarrationContinuation(row)).toBe(false);
+    });
+
+    it("returns false for fully blank row (all empty strings)", () => {
+      const row = ["", "", "", "", "", "", ""];
+      expect(isNarrationContinuation(row)).toBe(false);
+    });
+
+    it("returns false for fully blank row (all nulls)", () => {
+      const row = [null, null, null, null, null, null, null];
+      expect(isNarrationContinuation(row)).toBe(false);
+    });
+
+    it("returns false for fully blank row (whitespace only)", () => {
+      const row = ["  ", "", "   ", null, "", "", ""];
+      expect(isNarrationContinuation(row)).toBe(false);
+    });
+  });
+
+  describe("isNarrationContinuationWithDateCol", () => {
+    it("returns true when date column is empty", () => {
+      // ICICI format: S No., Transaction Date, Cheque Number, Remarks, ...
+      // dateCol = 1
+      const row = ["", "", "", "SYNTHETIC CONTINUATION LINE", "", "", ""];
+      expect(isNarrationContinuationWithDateCol(row, 1)).toBe(true);
+    });
+
+    it("returns false when date column has text (BADDATE case)", () => {
+      // ICICI format: dateCol = 1
+      const row = ["", "BADDATE", "", "TEXT", "", "", ""];
+      expect(isNarrationContinuationWithDateCol(row, 1)).toBe(false);
+    });
+
+    it("returns false when date column has valid date", () => {
+      const row = ["1", "01.10.2026", "", "Normal transaction", "", "1000", ""];
+      expect(isNarrationContinuationWithDateCol(row, 1)).toBe(false);
+    });
+
+    it("returns true for ICICI-style continuation with empty S No. and empty date", () => {
+      // Row with empty S No. (col 0) and empty date (col 1), just narration
+      const row = [null, null, null, "Continuation text", null, null, null];
+      expect(isNarrationContinuationWithDateCol(row, 1)).toBe(true);
+    });
+
+    it("returns false for fully blank row (all empty strings)", () => {
+      const row = ["", "", "", "", "", "", ""];
+      expect(isNarrationContinuationWithDateCol(row, 1)).toBe(false);
+    });
+
+    it("returns false for fully blank row (all nulls)", () => {
+      const row = [null, null, null, null, null, null, null];
+      expect(isNarrationContinuationWithDateCol(row, 1)).toBe(false);
+    });
+
+    it("returns false for empty row array", () => {
+      const row: (string | null)[] = [];
+      expect(isNarrationContinuationWithDateCol(row, 1)).toBe(false);
     });
   });
 });
