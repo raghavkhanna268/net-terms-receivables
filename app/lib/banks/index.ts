@@ -112,6 +112,7 @@ export async function parseBankStatement(
         errors: [
           {
             row: 0,
+            code: "UNKNOWN_BANK_FORMAT",
             message: `Unknown bank format. Confidence: ${detection.confidence.toFixed(2)}. ${detection.reason}`,
           },
         ],

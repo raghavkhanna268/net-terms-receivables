@@ -101,11 +101,19 @@ export interface ParseResult {
   skippedRows: number;
 }
 
+/** Error codes for row parsing failures */
+export type ParseErrorCode =
+  | "NORMALIZE_FAILED"
+  | "ROW_PARSE_FAILED"
+  | "NO_HEADER_ROW"
+  | "COLUMN_MAP_FAILED"
+  | "UNKNOWN_BANK_FORMAT";
+
 /** Error during row parsing */
 export interface ParseError {
   row: number;
+  code: ParseErrorCode;
   message: string;
-  rawData?: unknown;
 }
 
 /** Options for bank statement parsing */
