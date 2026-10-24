@@ -705,13 +705,33 @@ describeWithDb("Over-allocation prevention (P1.1)", () => {
       reasons: [],
     });
 
+    // Count audit events before
+    const [beforeCount] = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text AS count FROM "AuditEvent"
+      WHERE "shopId" = ${testShopId} AND type = 'match.confirmed' AND data->>'matchId' = ${matchId}
+    `;
+
     // Confirm once - should succeed
     const result1 = await confirmMatch(sql, testShopId, matchId, "test-user");
     expect(result1.success).toBe(true);
 
+    // Verify one audit event written
+    const [afterFirstCount] = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text AS count FROM "AuditEvent"
+      WHERE "shopId" = ${testShopId} AND type = 'match.confirmed' AND data->>'matchId' = ${matchId}
+    `;
+    expect(parseInt(afterFirstCount.count)).toBe(parseInt(beforeCount.count) + 1);
+
     // Confirm again - should be idempotent success (no side effects)
     const result2 = await confirmMatch(sql, testShopId, matchId, "test-user");
     expect(result2.success).toBe(true);
+
+    // Verify NO extra audit event written (idempotent)
+    const [afterSecondCount] = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text AS count FROM "AuditEvent"
+      WHERE "shopId" = ${testShopId} AND type = 'match.confirmed' AND data->>'matchId' = ${matchId}
+    `;
+    expect(parseInt(afterSecondCount.count)).toBe(parseInt(afterFirstCount.count));
   });
 
   it("correctly handles partial re-allocation after first confirm", async () => {
@@ -2274,15 +2294,36 @@ describeWithDb("Already confirmed match error (P3)", () => {
       reasons: [],
     });
 
+    // Count audit events before
+    const [beforeCount] = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text AS count FROM "AuditEvent"
+      WHERE "shopId" = ${testShopId} AND type = 'match.confirmed' AND data->>'matchId' = ${matchId}
+    `;
+
     // Confirm once - should succeed
     const result1 = await confirmMatch(sql, testShopId, matchId, "user-1");
     expect(result1.success).toBe(true);
+
+    // Verify one audit event written
+    const [afterFirstCount] = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text AS count FROM "AuditEvent"
+      WHERE "shopId" = ${testShopId} AND type = 'match.confirmed' AND data->>'matchId' = ${matchId}
+    `;
+    expect(parseInt(afterFirstCount.count)).toBe(parseInt(beforeCount.count) + 1);
 
     // Try to confirm again - should be idempotent success (no additional audit events)
     const result2 = await confirmMatch(sql, testShopId, matchId, "user-2");
     expect(result2.success).toBe(true);
 
+    // Verify NO extra audit event written (idempotent)
+    const [afterSecondCount] = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text AS count FROM "AuditEvent"
+      WHERE "shopId" = ${testShopId} AND type = 'match.confirmed' AND data->>'matchId' = ${matchId}
+    `;
+    expect(parseInt(afterSecondCount.count)).toBe(parseInt(afterFirstCount.count));
+
     // Cleanup
+    await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${testShopId} AND data->>'matchId' = ${matchId}`;
     await sql`DELETE FROM "Match" WHERE "invoiceId" = ${invoice.id}`;
     await sql`DELETE FROM "Payment" WHERE id = ${payment.id}`;
     await sql`DELETE FROM "Invoice" WHERE id = ${invoice.id}`;

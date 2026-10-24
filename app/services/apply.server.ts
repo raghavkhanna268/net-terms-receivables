@@ -587,50 +587,119 @@ async function handleStalePushingMatch(
 
     if (isAlreadyPaid) {
       // Shopify already marked as paid - finalize locally without re-pushing
+      // MUST lock invoice FOR UPDATE, re-check status, and decide partial vs full from LOCKED outstanding
       try {
-        await sql.begin(async (tx) => {
-          await tx`
-            UPDATE "Invoice"
-            SET outstanding = 0, status = 'paid', "updatedAt" = NOW()
+        const result = await sql.begin(async (tx) => {
+          const [lockedInvoice] = await tx<{ outstandingPaise: string; status: string }[]>`
+            SELECT
+              (ROUND(outstanding * 100))::text AS "outstandingPaise",
+              status
+            FROM "Invoice"
             WHERE id = ${invoiceRow.id}
               AND "shopId" = ${shopId}
+            FOR UPDATE
           `;
 
-          await tx`
-            UPDATE "Match"
-            SET state = 'pushed', "updatedAt" = NOW()
-            WHERE id = ${matchId}
-              AND "shopId" = ${shopId}
-          `;
+          if (!lockedInvoice) {
+            throw new Error("Invoice not found during stale reclaim");
+          }
 
-          await writeAuditEvent(tx, shopId, actor, "match.applied", {
-            matchId,
-            invoiceId: invoiceRow.id,
-            paymentId: matchRow.paymentId,
-            amountPaise: matchRow.amountPaise,
-            previousOutstandingPaise: invoiceRow.outstandingPaise,
-            newOutstandingPaise: "0",
-            staleReclaim: true,
-            shopifyAlreadyPaid: true,
-          });
+          // Re-check status after locking
+          if (lockedInvoice.status !== "open") {
+            // Invoice already paid/cancelled - just finalize match
+            await tx`
+              UPDATE "Match"
+              SET state = 'pushed', "updatedAt" = NOW()
+              WHERE id = ${matchId}
+                AND "shopId" = ${shopId}
+            `;
+            return { invoicePaid: lockedInvoice.status === "paid", isPartial: false, alreadyFinalized: true };
+          }
 
-          await writeAuditEvent(tx, shopId, actor, "invoice.paid", {
-            invoiceId: invoiceRow.id,
-            matchId,
-            orderGid: invoiceRow.orderId,
-            shopifyPushSucceeded: true,
-            staleReclaim: true,
-            shopifyAlreadyPaid: true,
-          });
+          // Decide partial vs full from LOCKED outstanding
+          const matchAmountPaise = BigInt(matchRow.amountPaise);
+          const currentOutstanding = BigInt(lockedInvoice.outstandingPaise);
+          const reduction = matchAmountPaise > currentOutstanding ? currentOutstanding : matchAmountPaise;
+          const newOutstanding = currentOutstanding - reduction;
+          const isFullPayment = newOutstanding === 0n;
+
+          if (isFullPayment) {
+            // Full payment - mark invoice as paid
+            await tx`
+              UPDATE "Invoice"
+              SET outstanding = 0, status = 'paid', "updatedAt" = NOW()
+              WHERE id = ${invoiceRow.id}
+                AND "shopId" = ${shopId}
+            `;
+
+            await tx`
+              UPDATE "Match"
+              SET state = 'pushed', "updatedAt" = NOW()
+              WHERE id = ${matchId}
+                AND "shopId" = ${shopId}
+            `;
+
+            await writeAuditEvent(tx, shopId, actor, "match.applied", {
+              matchId,
+              invoiceId: invoiceRow.id,
+              paymentId: matchRow.paymentId,
+              amountPaise: reduction.toString(),
+              previousOutstandingPaise: currentOutstanding.toString(),
+              newOutstandingPaise: "0",
+              staleReclaim: true,
+              shopifyAlreadyPaid: true,
+            });
+
+            await writeAuditEvent(tx, shopId, actor, "invoice.paid", {
+              invoiceId: invoiceRow.id,
+              matchId,
+              orderGid: invoiceRow.orderId,
+              shopifyPushSucceeded: true,
+              staleReclaim: true,
+              shopifyAlreadyPaid: true,
+            });
+
+            return { invoicePaid: true, isPartial: false, alreadyFinalized: false };
+          } else {
+            // Partial payment - reduce outstanding but don't mark paid
+            await tx`
+              UPDATE "Invoice"
+              SET outstanding = ${Number(newOutstanding) / 100}, "updatedAt" = NOW()
+              WHERE id = ${invoiceRow.id}
+                AND "shopId" = ${shopId}
+            `;
+
+            await tx`
+              UPDATE "Match"
+              SET state = 'pushed', "updatedAt" = NOW()
+              WHERE id = ${matchId}
+                AND "shopId" = ${shopId}
+            `;
+
+            await writeAuditEvent(tx, shopId, actor, "match.applied", {
+              matchId,
+              invoiceId: invoiceRow.id,
+              paymentId: matchRow.paymentId,
+              amountPaise: reduction.toString(),
+              previousOutstandingPaise: currentOutstanding.toString(),
+              newOutstandingPaise: newOutstanding.toString(),
+              staleReclaim: true,
+              shopifyAlreadyPaid: true,
+            });
+
+            return { invoicePaid: false, isPartial: true, alreadyFinalized: false };
+          }
         });
 
         await safeEnqueueRecompute(sql, invoiceRow.id);
 
         return {
           success: true,
-          invoicePaid: true,
+          invoicePaid: result.invoicePaid,
           shopifyPushSucceeded: true,
-          reasonCode: "STALE_RECLAIM_SHOPIFY_ALREADY_PAID",
+          reasonCode: result.isPartial
+            ? "STALE_RECLAIM_SHOPIFY_ALREADY_PAID_PARTIAL"
+            : "STALE_RECLAIM_SHOPIFY_ALREADY_PAID",
         };
       } catch (error) {
         return {

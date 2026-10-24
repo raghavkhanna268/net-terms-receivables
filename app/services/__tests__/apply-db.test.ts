@@ -21,6 +21,8 @@ import { sqlOptions } from "~/lib/db-light.server";
 let mockShopifySuccess = true;
 let mockAlreadyPaid = false;
 let shopifyCallCount = 0;
+let verifyOrderIsPaidCallCount = 0;
+let orderMarkAsPaidCallCount = 0;
 
 // Callback that runs DURING the Shopify orderMarkAsPaid call (for race condition testing)
 let onOrderMarkAsPaidCallback: (() => Promise<void>) | null = null;
@@ -35,6 +37,7 @@ vi.mock("../shopify-client.server", async (importOriginal) => {
       // Handle ORDER_QUERY for verifyOrderIsPaid (Issue #5)
       const isOrderQuery = query.includes("query GetOrder");
       if (isOrderQuery) {
+        verifyOrderIsPaidCallCount++;
         return {
           success: true,
           data: {
@@ -47,6 +50,7 @@ vi.mock("../shopify-client.server", async (importOriginal) => {
       }
 
       // Handle OrderMarkAsPaid mutation
+      orderMarkAsPaidCallCount++;
       // Execute callback DURING the Shopify call (for race condition testing)
       if (onOrderMarkAsPaidCallback) {
         await onOrderMarkAsPaidCallback();
@@ -140,6 +144,8 @@ describeWithDb("S17 apply service DB integration", () => {
     mockShopifySuccess = true;
     mockAlreadyPaid = false;
     shopifyCallCount = 0;
+    verifyOrderIsPaidCallCount = 0;
+    orderMarkAsPaidCallCount = 0;
     onOrderMarkAsPaidCallback = null;
 
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
@@ -1103,7 +1109,7 @@ describeWithDb("S17 apply service DB integration", () => {
       expect(auditEvent?.data.staleReclaim).toBe(true);
     });
 
-    it("stale partial re-claim completes without Shopify call", async () => {
+    it("stale partial re-claim (local-only) completes without Shopify call", async () => {
       const paymentId = await createPayment(500000n); // 5000 INR partial
       // Create invoice WITHOUT orderId (local-only invoice, no Shopify call needed)
       const invoiceId = await createInvoice(1000000n, null); // 10000 INR, no orderId
@@ -1115,8 +1121,10 @@ describeWithDb("S17 apply service DB integration", () => {
         VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 5000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushing', NOW() - interval '10 minutes', NOW() - interval '10 minutes')
       `;
 
-      // Reset call count
+      // Reset call counts
       shopifyCallCount = 0;
+      verifyOrderIsPaidCallCount = 0;
+      orderMarkAsPaidCallCount = 0;
 
       // Apply - should reclaim and finalize partial (no Shopify call needed)
       const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
@@ -1127,6 +1135,8 @@ describeWithDb("S17 apply service DB integration", () => {
 
       // No Shopify call for local-only invoice partial
       expect(shopifyCallCount).toBe(0);
+      expect(verifyOrderIsPaidCallCount).toBe(0);
+      expect(orderMarkAsPaidCallCount).toBe(0);
 
       // Match should now be 'pushed'
       const [match] = await sql<{ state: string }[]>`
@@ -1135,6 +1145,98 @@ describeWithDb("S17 apply service DB integration", () => {
       expect(match.state).toBe("pushed");
 
       // Invoice should have reduced outstanding but still open
+      const [invoice] = await sql<{ status: string; outstanding: string }[]>`
+        SELECT status, outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+      expect(invoice.status).toBe("open");
+      expect(parseFloat(invoice.outstanding)).toBe(5000); // 5000 remaining
+    });
+
+    it("stale partial re-claim WITH orderId: one verifyOrderIsPaid, zero orderMarkAsPaid", async () => {
+      // Test case (b): stale partial with orderId
+      // When Shopify reports NOT paid, we still only do partial local finalization
+      mockAlreadyPaid = false; // Shopify says order is NOT paid yet
+      const paymentId = await createPayment(500000n); // 5000 INR partial
+      // Create invoice WITH orderId (Shopify-linked invoice)
+      const invoiceId = await createInvoice(1000000n); // 10000 INR, has orderId by default
+
+      // Create a match in 'pushing' state with old updatedAt (> 5 min)
+      const matchId = `match-stale-partial-order-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 5000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushing', NOW() - interval '10 minutes', NOW() - interval '10 minutes')
+      `;
+
+      // Reset call counts
+      shopifyCallCount = 0;
+      verifyOrderIsPaidCallCount = 0;
+      orderMarkAsPaidCallCount = 0;
+
+      // Apply - should reclaim, check Shopify status, then finalize partial locally
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      expect(result.success).toBe(true);
+      expect(result.invoicePaid).toBe(false); // Partial - Shopify not called for orderMarkAsPaid
+      expect(result.reasonCode).toBe("STALE_RECLAIM_PARTIAL");
+
+      // Exactly ONE verifyOrderIsPaid call (to check if already paid)
+      expect(verifyOrderIsPaidCallCount).toBe(1);
+      // ZERO orderMarkAsPaid calls (partial doesn't call Shopify to mark paid)
+      expect(orderMarkAsPaidCallCount).toBe(0);
+      // Total calls = 1
+      expect(shopifyCallCount).toBe(1);
+
+      // Match should now be 'pushed'
+      const [match] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId}
+      `;
+      expect(match.state).toBe("pushed");
+
+      // Invoice should have reduced outstanding but still open
+      const [invoice] = await sql<{ status: string; outstanding: string }[]>`
+        SELECT status, outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+      expect(invoice.status).toBe("open");
+      expect(parseFloat(invoice.outstanding)).toBe(5000); // 5000 remaining
+    });
+
+    it("stale partial re-claim when Shopify already paid: uses LOCKED outstanding", async () => {
+      // Test case: Shopify reports PAID, but we must decide partial vs full from LOCKED outstanding
+      mockAlreadyPaid = true; // Shopify says order IS paid
+      const paymentId = await createPayment(500000n); // 5000 INR partial
+      const invoiceId = await createInvoice(1000000n); // 10000 INR, has orderId
+
+      // Create a match in 'pushing' state with old updatedAt (> 5 min)
+      const matchId = `match-stale-partial-shopify-paid-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 5000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushing', NOW() - interval '10 minutes', NOW() - interval '10 minutes')
+      `;
+
+      // Reset call counts
+      verifyOrderIsPaidCallCount = 0;
+      orderMarkAsPaidCallCount = 0;
+
+      // Apply - should reclaim, check Shopify (which says PAID), then finalize as PARTIAL
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      expect(result.success).toBe(true);
+      // Should still be partial because match amount (5000) < invoice outstanding (10000)
+      expect(result.invoicePaid).toBe(false);
+      expect(result.reasonCode).toBe("STALE_RECLAIM_SHOPIFY_ALREADY_PAID_PARTIAL");
+
+      // Exactly ONE verifyOrderIsPaid call
+      expect(verifyOrderIsPaidCallCount).toBe(1);
+      // ZERO orderMarkAsPaid calls
+      expect(orderMarkAsPaidCallCount).toBe(0);
+
+      // Match should now be 'pushed'
+      const [match] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId}
+      `;
+      expect(match.state).toBe("pushed");
+
+      // Invoice should have reduced outstanding but still open (partial, not full)
       const [invoice] = await sql<{ status: string; outstanding: string }[]>`
         SELECT status, outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
       `;
