@@ -22,7 +22,17 @@ import type {
   ParseResult,
   DetectionResult,
 } from "../types.js";
-import { detectHeaderRow, detectFooterRows, isNarrationContinuation } from "../detection.js";
+import { detectHeaderRow, detectFooterRows, isNarrationContinuationWithDateCol } from "../detection.js";
+
+/** Check if a row is fully blank (all cells empty or whitespace) */
+function isFullyBlankRow(row: (string | number | Date | boolean | null)[]): boolean {
+  for (const cell of row) {
+    if (cell !== null && cell !== undefined && String(cell).trim() !== "") {
+      return false;
+    }
+  }
+  return true;
+}
 import { parseIndianDate, parseIndianAmount, isBlankOrZero } from "../normalisers.js";
 import { parseNarration, extractUtrForDedupe } from "../narration-parser.js";
 import { generateDedupeKey, dedupeTransactions } from "../dedupe.js";
@@ -79,7 +89,7 @@ export async function parseIciciStatement(
 
   // Detect footer rows to skip
   const footerRows = detectFooterRows(sheet, headerRow + 1);
-  skippedRows = headerRow + 1 + footerRows.size;
+  skippedRows = headerRow + 1;
 
   // Process data rows
   let pendingNarration: string[] = [];
@@ -91,6 +101,12 @@ export async function parseIciciStatement(
 
     // Skip footer rows
     if (footerRows.has(i)) {
+      skippedRows++;
+      continue;
+    }
+
+    // Check for fully blank rows FIRST - skip without touching lastValidRow/pendingNarration
+    if (isFullyBlankRow(row)) {
       skippedRows++;
       continue;
     }
@@ -109,7 +125,17 @@ export async function parseIciciStatement(
     }
 
     // Check if this is a narration continuation row (ICICI wraps narrations too)
-    if (isNarrationContinuation(row)) {
+    // Use dateCol check since ICICI's first column is S No., not the date
+    if (isNarrationContinuationWithDateCol(row, columns.dateCol)) {
+      // Orphan continuation (no valid previous transaction) is an error
+      if (!lastValidRow) {
+        errors.push({
+          row: i + 1,
+          code: "ROW_PARSE_FAILED",
+          message: "Failed to parse row",
+        });
+        continue;
+      }
       const narrationPart = String(row[columns.narrationCol] ?? "").trim();
       if (narrationPart) {
         pendingNarration.push(narrationPart);
@@ -140,7 +166,27 @@ export async function parseIciciStatement(
     // Parse this row
     const rawRow = extractIciciRow(row, columns, i + 1);
     if (!rawRow) {
-      skippedRows++;
+      const dateCell = String(row[columns.dateCol] ?? "").trim();
+      const narrationContent = String(row[columns.narrationCol] ?? "").trim();
+      const debitCell = String(row[columns.withdrawalCol] ?? "").trim();
+      const creditCell = String(row[columns.depositCol] ?? "").trim();
+      const hasAmount = (debitCell && !debitCell.match(/^[\d.,\s]*$/)) ||
+                        (creditCell && !creditCell.match(/^[\d.,\s]*$/)) ||
+                        (debitCell && parseFloat(debitCell.replace(/[,\s]/g, "")) > 0) ||
+                        (creditCell && parseFloat(creditCell.replace(/[,\s]/g, "")) > 0);
+      const hasNonNumericNarration = narrationContent && !narrationContent.match(/^[\d.,\s]*$/);
+      const hasDate = dateCell.length > 0;
+      if (hasAmount || hasNonNumericNarration || hasDate) {
+        errors.push({
+          row: i + 1,
+          code: "ROW_PARSE_FAILED",
+          message: "Failed to parse row",
+        });
+        // Clear pending narration to avoid carrying orphan text forward
+        pendingNarration = [];
+      } else {
+        skippedRows++;
+      }
       continue;
     }
 

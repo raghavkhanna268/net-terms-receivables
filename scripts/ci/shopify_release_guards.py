@@ -200,6 +200,19 @@ def main(root):
         else:
             print("deploy_flags_guard: PASS")
 
+        # CLI 4.9.4: the preview flag and the allow-updates flag are mutually exclusive
+        # (oclif exit 2), so neither may sit in the shared base args of the deploy command.
+        base = re.search(r"args=\(app deploy[^)]*\)", body)
+        base_bad = base is None or "--allow-updates" in base.group(0) or "--no-release" in base.group(0)
+        same_line = any("--allow-updates" in l and "--no-release" in l for l in body.splitlines())
+        print(f"exclusive_flags_guard: base_args_found={str(base is not None).lower()} "
+              f"release_flag_in_base_args={str(base_bad).lower()} both_on_one_line={str(same_line).lower()}")
+        if base_bad or same_line:
+            print("exclusive_flags_guard: FAIL")
+            ok = False
+        else:
+            print("exclusive_flags_guard: PASS")
+
         # Pipefail: every run step must use bash (-eo pipefail) so `| tee` cannot mask failures.
         has_bash_default = re.search(r"^    defaults:\n      run:\n        shell: bash\s*$", body, re.M) is not None
         print(f"pipefail_guard: job_default_shell_bash={str(has_bash_default).lower()}")
