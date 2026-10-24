@@ -550,10 +550,12 @@ describeWithDb("Bank Import Action Integration Tests", () => {
       expect(data.counts?.total).toBe(3);
 
       // Query specifically for this test's UTRs to ensure isolation
+      // Use IN ${sql(array)} instead of ANY() - postgres.js with fetch_types:false
+      // needs explicit array handling (see db-light.server.ts comments)
       const testUtrs = [neftUtr, rtgsUtr, impsUtr];
       const payments = await sql<{ utr: string; amount: string; rail: string }[]>`
         SELECT utr, amount::text, rail FROM "Payment" 
-        WHERE "shopId" = ${testShopId} AND utr = ANY(${testUtrs})
+        WHERE "shopId" = ${testShopId} AND utr IN ${sql(testUtrs)}
         ORDER BY amount::numeric
       `;
       expect(payments).toHaveLength(3);

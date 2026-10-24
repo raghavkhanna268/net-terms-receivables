@@ -27,7 +27,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "test:build": "vitest run app/routes/__tests__/build-no-xlsx.test.ts",
+    "test:build": "vitest run --config vitest.build.config.ts",
     "benchmark:cpu": "node scripts/benchmark-cpu.mjs",
     "seed": "tsx scripts/seed.ts"
   },
