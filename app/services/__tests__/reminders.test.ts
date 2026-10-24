@@ -563,7 +563,7 @@ describe("Payment Reminders (S18)", () => {
       expect(capReleaseCalls.length).toBeGreaterThan(0);
     });
 
-    it("handles 5xx server errors as retryable and does NOT release cap (S18-14)", async () => {
+    it("handles 5xx server errors as retryable AND releases cap (only success counts)", async () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
       mockSql.setMockResult("invoice", [mockInvoiceData]);
@@ -590,10 +590,43 @@ describe("Payment Reminders (S18)", () => {
       expect(result.success).toBe(false);
       expect(result.retryable).toBe(true);
 
-      // Verify cap was NOT released (no GREATEST(0, daily_count - 1) for retryable errors)
+      // Verify cap WAS released - only successful sends count toward cap
       const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
       const capReleaseCalls = sqlCalls.filter((q: string) => q.includes("GREATEST(0, daily_count - 1)"));
-      expect(capReleaseCalls).toHaveLength(0);
+      expect(capReleaseCalls.length).toBeGreaterThan(0);
+    });
+
+    it("handles 429 rate limit as retryable AND releases cap (only success counts)", async () => {
+      const { sendPaymentReminder } = await import("../reminders.server");
+
+      mockSql.setMockResult("invoice", [mockInvoiceData]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
+      mockSql.setMockResult("global_increment", [{ dailyCount: 1, monthlyTotal: 1 }]);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        text: async () => "Rate limited",
+      });
+
+      const result = await sendPaymentReminder(
+        mockSql,
+        "shop-123",
+        "inv-123",
+        "rule-123",
+        0,
+        "Asia/Kolkata",
+        validEnv
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.retryable).toBe(true);
+
+      // Verify cap WAS released - only successful sends count toward cap
+      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const capReleaseCalls = sqlCalls.filter((q: string) => q.includes("GREATEST(0, daily_count - 1)"));
+      expect(capReleaseCalls.length).toBeGreaterThan(0);
     });
 
     it("sends Idempotency-Key HTTP header to Resend", async () => {
@@ -652,6 +685,74 @@ describe("Payment Reminders (S18)", () => {
       const [, options] = mockFetch.mock.calls[0];
       const body = JSON.parse(options.body);
       expect(body.from).toBe("reminders@myapp.com");
+    });
+  });
+
+  describe("sendPaymentReminder - network errors", () => {
+    const mockInvoiceData = {
+      invoiceId: "inv-123",
+      shopId: "shop-123",
+      shopDomain: "test-shop.myshopify.com",
+      shopTimezone: "Asia/Kolkata",
+      invoiceName: "#1001",
+      total: "1000.00",
+      currency: "INR",
+      dueAt: new Date(),
+      status: "open",
+      buyerAccountId: "buyer-123",
+      customerId: "gid://shopify/Customer/456",
+    };
+
+    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" };
+
+    it("releases cap slot on network error (only success counts)", async () => {
+      const { sendPaymentReminder } = await import("../reminders.server");
+
+      mockSql.setMockResult("invoice", [mockInvoiceData]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
+      mockSql.setMockResult("global_increment", [{ dailyCount: 1, monthlyTotal: 1 }]);
+
+      // Simulate network error
+      mockFetch.mockRejectedValueOnce(new Error("Network timeout"));
+
+      const result = await sendPaymentReminder(
+        mockSql,
+        "shop-123",
+        "inv-123",
+        "rule-123",
+        0,
+        "Asia/Kolkata",
+        validEnv
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.retryable).toBe(true);
+      expect(result.error).toContain("Network timeout");
+
+      // Verify cap WAS released - only successful sends count toward cap
+      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const capReleaseCalls = sqlCalls.filter((q: string) => q.includes("GREATEST(0, daily_count - 1)"));
+      expect(capReleaseCalls.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("validateTimezone safety", () => {
+    it("returns fallback for invalid timezone strings", async () => {
+      const { validateTimezone } = await import("~/lib/aging-dates.server");
+
+      // Invalid timezone should return fallback (Asia/Kolkata)
+      expect(validateTimezone("Invalid/Zone")).toBe("Asia/Kolkata");
+      expect(validateTimezone("")).toBe("Asia/Kolkata");
+      expect(validateTimezone("Not_A_Timezone")).toBe("Asia/Kolkata");
+    });
+
+    it("returns valid timezone unchanged", async () => {
+      const { validateTimezone } = await import("~/lib/aging-dates.server");
+
+      expect(validateTimezone("America/New_York")).toBe("America/New_York");
+      expect(validateTimezone("Europe/London")).toBe("Europe/London");
+      expect(validateTimezone("Asia/Kolkata")).toBe("Asia/Kolkata");
     });
   });
 

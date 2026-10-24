@@ -587,11 +587,9 @@ export async function sendPaymentReminder(
       // Release reminder slot so it can retry
       await releaseReminderSlot(sql, ruleId, invoiceId);
 
-      // Release cap slot on non-retryable errors to avoid wasting quota
-      // (retryable errors like 429/5xx keep the reservation since we'll retry)
-      if (!isRetryable) {
-        await releaseGlobalSendSlot(sql);
-      }
+      // Release cap slot on ALL failures so only successful sends count
+      // This keeps the cap atomic: reserve before send, release on any failure
+      await releaseGlobalSendSlot(sql);
 
       return {
         success: false,
@@ -609,10 +607,9 @@ export async function sendPaymentReminder(
       resendId: result.id,
     };
   } catch (err) {
-    // Release slots so it can retry
+    // Release both slots so it can retry - only successful sends count toward cap
     await releaseReminderSlot(sql, ruleId, invoiceId);
-    // Network errors are retryable, keep the cap reservation
-    // (it will be released if we hit cap on retry)
+    await releaseGlobalSendSlot(sql);
 
     const errorMsg = err instanceof Error ? err.message : String(err);
     return {
