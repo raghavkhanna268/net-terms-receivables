@@ -12,7 +12,7 @@
 -- payment terms in ('open','invoice_sent'), compared with creditLimit.
 -- Var: since (ISO-8601 UTC of the sweep run, e.g. 2026-10-24T19:00:00Z). The sweep's
 --      dedupe key date is since's UTC date.
--- @col kind, "holdState", proname: enum
+-- @col kind, "holdState", proname, dep_table: enum
 -- @col "manualHold", bypass, "syncPending": boolean
 -- @col "defaultTermsDays": config_int
 \set ON_ERROR_STOP 1
@@ -164,7 +164,7 @@ SELECT ba.id AS buyer_account_id,
        (SELECT COUNT(*) FROM "Invoice" i WHERE i."buyerAccountId" = ba.id) AS invoices,
        (SELECT COUNT(*) FROM "Match" m JOIN "Invoice" i ON i.id = m."invoiceId" WHERE i."buyerAccountId" = ba.id) AS matches,
        (SELECT COUNT(DISTINCT m."paymentId") FROM "Match" m JOIN "Invoice" i ON i.id = m."invoiceId" WHERE i."buyerAccountId" = ba.id) AS matched_payments,
-       (SELECT COUNT(*) FROM "RejectedMatch" r JOIN "Invoice" i ON i.id = r."invoiceId" WHERE i."buyerAccountId" = ba.id) AS rejected_matches,
+       (SELECT COUNT(*) FROM rejected_matches r JOIN "Invoice" i ON i.id = r."invoiceId" WHERE i."buyerAccountId" = ba.id) AS rejected_matches,
        (SELECT COUNT(*) FROM "ReminderLog" rl JOIN "Invoice" i ON i.id = rl."invoiceId" WHERE i."buyerAccountId" = ba.id) AS reminder_logs,
        (SELECT COUNT(*) FROM "PayerAlias" pa WHERE pa."buyerAccountId" = ba.id) AS payer_aliases,
        (SELECT COUNT(*) FROM s8_draft_orders d WHERE d.buyer_account_id = ba.id) AS draft_orders,
@@ -174,6 +174,26 @@ FROM "BuyerAccount" ba
 WHERE ba.id LIKE 'seed-account-%'
 ORDER BY ba.id
 LIMIT 200;
+
+\echo '== C3 dependent-row totals per table, seed vs non-seed (all BuyerAccounts; tables with 0 rows for a split are omitted)'
+SELECT 'buyer_accounts' AS dep_table, ba.id LIKE 'seed-account-%' AS is_seed, COUNT(*) AS n FROM "BuyerAccount" ba GROUP BY 2
+UNION ALL
+SELECT 'invoices' AS dep_table, ba.id LIKE 'seed-account-%' AS is_seed, COUNT(*) AS n FROM "Invoice" i JOIN "BuyerAccount" ba ON ba.id = i."buyerAccountId" GROUP BY 2
+UNION ALL
+SELECT 'matches' AS dep_table, ba.id LIKE 'seed-account-%' AS is_seed, COUNT(*) AS n FROM "Match" m JOIN "Invoice" i ON i.id = m."invoiceId" JOIN "BuyerAccount" ba ON ba.id = i."buyerAccountId" GROUP BY 2
+UNION ALL
+SELECT 'rejected_matches' AS dep_table, ba.id LIKE 'seed-account-%' AS is_seed, COUNT(*) AS n FROM rejected_matches r JOIN "Invoice" i ON i.id = r."invoiceId" JOIN "BuyerAccount" ba ON ba.id = i."buyerAccountId" GROUP BY 2
+UNION ALL
+SELECT 'reminder_logs' AS dep_table, ba.id LIKE 'seed-account-%' AS is_seed, COUNT(*) AS n FROM "ReminderLog" rl JOIN "Invoice" i ON i.id = rl."invoiceId" JOIN "BuyerAccount" ba ON ba.id = i."buyerAccountId" GROUP BY 2
+UNION ALL
+SELECT 'payer_aliases' AS dep_table, ba.id LIKE 'seed-account-%' AS is_seed, COUNT(*) AS n FROM "PayerAlias" pa JOIN "BuyerAccount" ba ON ba.id = pa."buyerAccountId" GROUP BY 2
+UNION ALL
+SELECT 'draft_orders' AS dep_table, ba.id LIKE 'seed-account-%' AS is_seed, COUNT(*) AS n FROM s8_draft_orders d JOIN "BuyerAccount" ba ON ba.id = d.buyer_account_id GROUP BY 2
+UNION ALL
+SELECT 'audit_events' AS dep_table, ba.id LIKE 'seed-account-%' AS is_seed, COUNT(*) AS n FROM "AuditEvent" ae JOIN "BuyerAccount" ba ON ba."shopId" = ae."shopId" AND ba.id = ae.data->>'buyerAccountId' GROUP BY 2
+UNION ALL
+SELECT 'recompute_dedupe_rows' AS dep_table, ba.id LIKE 'seed-account-%' AS is_seed, COUNT(*) AS n FROM s6_processed_webhooks pw JOIN "BuyerAccount" ba ON pw.webhook_id LIKE 'credit_recompute:' || ba.id || ':%' GROUP BY 2
+ORDER BY 1, 2;
 
 \echo '== C2 BuyerAccount totals by seed / kind (non-seed node-null needs the Admin API; not checked here)'
 SELECT ba.id LIKE 'seed-account-%' AS is_seed, ba.kind, COUNT(*) AS accounts
