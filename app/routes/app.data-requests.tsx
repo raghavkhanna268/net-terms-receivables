@@ -170,10 +170,19 @@ export default function DataRequestsPage() {
           <s-text type="strong">Data included:</s-text>
         </s-paragraph>
         <s-unordered-list>
-          <s-list-item>Tagged customer records (tags, status)</s-list-item>
+          <s-list-item>Tagged customer records (tags, status, email, name)</s-list-item>
           <s-list-item>Draft orders</s-list-item>
           <s-list-item>Buyer account details</s-list-item>
           <s-list-item>Invoice history</s-list-item>
+          <s-list-item>Payment matches</s-list-item>
+        </s-unordered-list>
+        <s-paragraph>
+          <s-text type="strong">Data NOT included:</s-text>
+        </s-paragraph>
+        <s-unordered-list>
+          <s-list-item>Phone numbers (never stored)</s-list-item>
+          <s-list-item>Addresses (never stored)</s-list-item>
+          <s-list-item>Bank statement details (PII redacted)</s-list-item>
         </s-unordered-list>
         <s-paragraph>
           <s-text type="strong">Delivery:</s-text>

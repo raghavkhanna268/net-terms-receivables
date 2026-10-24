@@ -245,6 +245,12 @@ export async function redactCustomer(
 
 /**
  * Customer data export for data_request webhook.
+ *
+ * IMPORTANT: This export is limited to Protected Customer Data Level 1 fields:
+ * - Email and display name (when CUSTOMER_PII_FIELDS is enabled)
+ * - NO phone numbers or addresses are ever stored or exported
+ *
+ * See: https://shopify.dev/docs/apps/launch/protected-customer-data
  */
 interface CustomerDataExport {
   customerGid: string;
@@ -281,6 +287,14 @@ interface CustomerDataExport {
       status: string;
       issuedAt: string;
       dueAt: string | null;
+    }>;
+    paymentMatches: Array<{
+      id: string;
+      invoiceId: string;
+      amount: string;
+      state: string;
+      confirmedAt: string | null;
+      createdAt: string;
     }>;
   };
 }
@@ -366,6 +380,32 @@ export async function generateCustomerDataExport(
       `
     : [];
 
+  // Fetch payment matches for the customer's invoices (S16)
+  // NOTE: We intentionally exclude Payment.payerText and Payment.narration
+  // as they may contain PII from bank statements. Only match metadata is exported.
+  const paymentMatches = buyerAccount
+    ? await sql<{
+        id: string;
+        invoiceId: string;
+        amount: string;
+        state: string;
+        confirmedAt: Date | null;
+        createdAt: Date;
+      }[]>`
+        SELECT 
+          m.id, 
+          m."invoiceId",
+          m.amount::text,
+          m.state::text,
+          m."confirmedAt",
+          m."createdAt"
+        FROM "Match" m
+        JOIN "Invoice" i ON m."invoiceId" = i.id
+        WHERE i."buyerAccountId" = ${buyerAccount.id}
+        ORDER BY m."createdAt" DESC
+      `
+    : [];
+
   return {
     customerGid,
     requestId,
@@ -405,6 +445,14 @@ export async function generateCustomerDataExport(
         status: i.status,
         issuedAt: i.issuedAt.toISOString(),
         dueAt: i.dueAt?.toISOString() ?? null,
+      })),
+      paymentMatches: paymentMatches.map((m) => ({
+        id: m.id,
+        invoiceId: m.invoiceId,
+        amount: m.amount,
+        state: m.state,
+        confirmedAt: m.confirmedAt?.toISOString() ?? null,
+        createdAt: m.createdAt.toISOString(),
       })),
     },
   };

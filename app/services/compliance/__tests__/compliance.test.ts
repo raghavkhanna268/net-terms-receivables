@@ -190,7 +190,8 @@ describe("compliance.server", () => {
   });
 
   describe("generateCustomerDataExport", () => {
-    it("generates export for known customer with data", async () => {
+    it("generates export for known customer with data including payment matches", async () => {
+      // 1. SELECT s8_tagged_customers
       mockSql.mockResolvedValueOnce([{
         tags: ["net-terms"],
         tag_active: true,
@@ -198,6 +199,7 @@ describe("compliance.server", () => {
         display_name: "Test Customer",
         created_at: new Date("2026-01-01"),
       }]);
+      // 2. SELECT s8_draft_orders
       mockSql.mockResolvedValueOnce([{
         id: "do-1",
         name: "#D1",
@@ -205,6 +207,7 @@ describe("compliance.server", () => {
         status: "open",
         created_at: new Date("2026-01-15"),
       }]);
+      // 3. SELECT BuyerAccount
       mockSql.mockResolvedValueOnce([{
         id: "ba-1",
         name: "Test Customer",
@@ -213,6 +216,7 @@ describe("compliance.server", () => {
         defaultTermsDays: 30,
         holdState: "OK",
       }]);
+      // 4. SELECT Invoice
       mockSql.mockResolvedValueOnce([{
         id: "inv-1",
         name: "#1001",
@@ -221,6 +225,15 @@ describe("compliance.server", () => {
         status: "open",
         issuedAt: new Date("2026-01-10"),
         dueAt: new Date("2026-02-10"),
+      }]);
+      // 5. SELECT Match (payment matches)
+      mockSql.mockResolvedValueOnce([{
+        id: "match-1",
+        invoiceId: "inv-1",
+        amount: "250.00",
+        state: "confirmed",
+        confirmedAt: new Date("2026-01-20"),
+        createdAt: new Date("2026-01-18"),
       }]);
 
       const result = await generateCustomerDataExport(
@@ -237,12 +250,25 @@ describe("compliance.server", () => {
       expect(result.data.draftOrders).toHaveLength(1);
       expect(result.data.buyerAccount).toBeTruthy();
       expect(result.data.invoices).toHaveLength(1);
+      expect(result.data.paymentMatches).toHaveLength(1);
+      expect(result.data.paymentMatches[0]).toEqual({
+        id: "match-1",
+        invoiceId: "inv-1",
+        amount: "250.00",
+        state: "confirmed",
+        confirmedAt: "2026-01-20T00:00:00.000Z",
+        createdAt: "2026-01-18T00:00:00.000Z",
+      });
     });
 
     it("generates empty export for unknown customer", async () => {
+      // 1. SELECT s8_tagged_customers (not found)
       mockSql.mockResolvedValueOnce([]);
+      // 2. SELECT s8_draft_orders (no buyer account, so empty)
       mockSql.mockResolvedValueOnce([]);
+      // 3. SELECT BuyerAccount (not found)
       mockSql.mockResolvedValueOnce([]);
+      // Note: Invoice and Match queries are skipped when no buyerAccount
 
       const result = await generateCustomerDataExport(
         mockSql,
@@ -257,6 +283,124 @@ describe("compliance.server", () => {
       expect(result.data.draftOrders).toHaveLength(0);
       expect(result.data.buyerAccount).toBeNull();
       expect(result.data.invoices).toHaveLength(0);
+      expect(result.data.paymentMatches).toHaveLength(0);
+    });
+
+    it("excludes phone and address from export (PCD Level 1 compliance)", async () => {
+      // This test verifies that the export structure does NOT contain
+      // phone or address fields, even if they were hypothetically stored.
+      // Per Shopify Protected Customer Data docs, we only store Level 1 data
+      // (email, name) - phone and address are never stored or exported.
+      //
+      // See: https://shopify.dev/docs/apps/launch/protected-customer-data
+
+      // 1. SELECT s8_tagged_customers - only email/display_name, NO phone/address
+      mockSql.mockResolvedValueOnce([{
+        tags: ["wholesale"],
+        tag_active: true,
+        email: "customer@example.com",
+        display_name: "Wholesale Customer",
+        created_at: new Date("2026-01-01"),
+      }]);
+      // 2. SELECT s8_draft_orders
+      mockSql.mockResolvedValueOnce([]);
+      // 3. SELECT BuyerAccount
+      mockSql.mockResolvedValueOnce([{
+        id: "ba-1",
+        name: "Wholesale Customer",
+        kind: "TAGGED_CUSTOMER",
+        creditLimit: null,
+        defaultTermsDays: 30,
+        holdState: "OK",
+      }]);
+      // 4. SELECT Invoice
+      mockSql.mockResolvedValueOnce([]);
+      // 5. SELECT Match
+      mockSql.mockResolvedValueOnce([]);
+
+      const result = await generateCustomerDataExport(
+        mockSql,
+        "shop-123",
+        "gid://shopify/Customer/789",
+        "req-pii-check"
+      );
+
+      // Verify the export structure
+      const exportJson = JSON.stringify(result);
+
+      // Phone and address must NOT be present in the export
+      expect(exportJson).not.toContain("phone");
+      expect(exportJson).not.toContain("Phone");
+      expect(exportJson).not.toContain("address");
+      expect(exportJson).not.toContain("Address");
+      expect(exportJson).not.toContain("street");
+      expect(exportJson).not.toContain("city");
+      expect(exportJson).not.toContain("zip");
+      expect(exportJson).not.toContain("postal");
+
+      // Email and displayName ARE present (Level 1 PCD)
+      expect(result.data.taggedCustomer?.email).toBe("customer@example.com");
+      expect(result.data.taggedCustomer?.displayName).toBe("Wholesale Customer");
+    });
+
+    it("excludes payment PII (payerText, narration) from export", async () => {
+      // Payment matches export only match metadata, not bank statement PII
+      // 1. SELECT s8_tagged_customers
+      mockSql.mockResolvedValueOnce([{
+        tags: ["net-terms"],
+        tag_active: true,
+        email: null,
+        display_name: null,
+        created_at: new Date("2026-01-01"),
+      }]);
+      // 2. SELECT s8_draft_orders
+      mockSql.mockResolvedValueOnce([]);
+      // 3. SELECT BuyerAccount
+      mockSql.mockResolvedValueOnce([{
+        id: "ba-1",
+        name: "Account Name",
+        kind: "TAGGED_CUSTOMER",
+        creditLimit: null,
+        defaultTermsDays: 30,
+        holdState: "OK",
+      }]);
+      // 4. SELECT Invoice
+      mockSql.mockResolvedValueOnce([{
+        id: "inv-1",
+        name: "#1001",
+        total: "1000.00",
+        outstanding: "0.00",
+        status: "paid",
+        issuedAt: new Date("2026-01-10"),
+        dueAt: new Date("2026-02-10"),
+      }]);
+      // 5. SELECT Match - note: payerText and narration are NOT selected
+      mockSql.mockResolvedValueOnce([{
+        id: "match-1",
+        invoiceId: "inv-1",
+        amount: "1000.00",
+        state: "confirmed",
+        confirmedAt: new Date("2026-01-15"),
+        createdAt: new Date("2026-01-14"),
+      }]);
+
+      const result = await generateCustomerDataExport(
+        mockSql,
+        "shop-123",
+        "gid://shopify/Customer/456",
+        "req-payment-pii"
+      );
+
+      const exportJson = JSON.stringify(result);
+
+      // Payment PII fields must NOT be present
+      expect(exportJson).not.toContain("payerText");
+      expect(exportJson).not.toContain("narration");
+
+      // Match metadata IS present
+      expect(result.data.paymentMatches).toHaveLength(1);
+      expect(result.data.paymentMatches[0].amount).toBe("1000.00");
+      expect(result.data.paymentMatches[0].state).toBe("confirmed");
     });
   });
 
@@ -269,7 +413,7 @@ describe("compliance.server", () => {
         customerGid: "gid://shopify/Customer/456",
         requestId: "req-789",
         requestedAt: new Date().toISOString(),
-        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [] },
+        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [], paymentMatches: [] },
       };
 
       const result = await persistDataRequest(
@@ -291,7 +435,7 @@ describe("compliance.server", () => {
         customerGid: "gid://shopify/Customer/456",
         requestId: "req-duplicate",
         requestedAt: new Date().toISOString(),
-        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [] },
+        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [], paymentMatches: [] },
       };
 
       const result = await persistDataRequest(
