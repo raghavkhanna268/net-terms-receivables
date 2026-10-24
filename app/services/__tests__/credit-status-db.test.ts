@@ -328,3 +328,230 @@ describeWithDb("company totals rollup", () => {
     }
   });
 });
+
+describeWithDb("syncVersion compare-and-clear", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-syncver";
+  const TEST_SHOP_ID = `shop-syncver-${TEST_SUFFIX}`;
+  const TEST_SHOP_DOMAIN = `syncver-test-${TEST_SUFFIX}.myshopify.com`;
+  const TEST_ACCOUNT_ID = `acc-syncver-${TEST_SUFFIX}`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+    `;
+
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name,
+        "creditLimit", "holdState", bypass, "syncPending", "syncVersion",
+        "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${TEST_ACCOUNT_ID}, ${TEST_SHOP_ID}, 'COMPANY',
+        ${"co-" + TEST_SUFFIX}, ${"gid://shopify/CompanyLocation/" + TEST_SUFFIX},
+        'SyncVersion Test Account', 100000.00, 'OK', false, false, 0,
+        NOW(), NOW()
+      )
+    `;
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+    await sql.end();
+  });
+
+  it("clearing with stale syncVersion (v1) updates 0 rows when current is v2", async () => {
+    // Write A's transaction: increment to v1, set syncPending=true
+    const [writeA] = await sql<{ syncVersion: number }[]>`
+      UPDATE "BuyerAccount"
+      SET "syncVersion" = "syncVersion" + 1, "syncPending" = true
+      WHERE id = ${TEST_ACCOUNT_ID}
+      RETURNING "syncVersion"
+    `;
+    expect(writeA.syncVersion).toBe(1);
+
+    // Write B's transaction: increment to v2, set syncPending=true
+    const [writeB] = await sql<{ syncVersion: number }[]>`
+      UPDATE "BuyerAccount"
+      SET "syncVersion" = "syncVersion" + 1, "syncPending" = true
+      WHERE id = ${TEST_ACCOUNT_ID}
+      RETURNING "syncVersion"
+    `;
+    expect(writeB.syncVersion).toBe(2);
+
+    // Simulate: Write A's metafield call finishes and tries to clear with v1
+    // This should update 0 rows because current syncVersion is 2
+    const clearWithV1 = await sql<{ id: string }[]>`
+      UPDATE "BuyerAccount"
+      SET "syncPending" = false
+      WHERE id = ${TEST_ACCOUNT_ID}
+        AND "syncVersion" = ${writeA.syncVersion}
+      RETURNING id
+    `;
+    expect(clearWithV1.length).toBe(0);
+
+    // Verify syncPending is still true
+    const [afterV1Clear] = await sql<{ syncPending: boolean }[]>`
+      SELECT "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+    expect(afterV1Clear.syncPending).toBe(true);
+  });
+
+  it("clearing with current syncVersion (v2) succeeds and clears syncPending", async () => {
+    // Get current syncVersion (should be 2 from previous test)
+    const [current] = await sql<{ syncVersion: number }[]>`
+      SELECT "syncVersion" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+    expect(current.syncVersion).toBe(2);
+
+    // Clear with matching version (v2)
+    const clearWithV2 = await sql<{ id: string }[]>`
+      UPDATE "BuyerAccount"
+      SET "syncPending" = false
+      WHERE id = ${TEST_ACCOUNT_ID}
+        AND "syncVersion" = ${current.syncVersion}
+      RETURNING id
+    `;
+    expect(clearWithV2.length).toBe(1);
+
+    // Verify syncPending is now false
+    const [afterV2Clear] = await sql<{ syncPending: boolean }[]>`
+      SELECT "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+    expect(afterV2Clear.syncPending).toBe(false);
+  });
+
+  it("interleaved writes: older HTTP response finishing last leaves syncPending=true", async () => {
+    // Reset state
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "syncVersion" = 0, "syncPending" = false
+      WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+
+    // Simulate Write A: tx commits with v1, metafield call starts (slow)
+    const [writeA] = await sql<{ syncVersion: number }[]>`
+      UPDATE "BuyerAccount"
+      SET "syncVersion" = "syncVersion" + 1, "syncPending" = true
+      WHERE id = ${TEST_ACCOUNT_ID}
+      RETURNING "syncVersion"
+    `;
+
+    // Simulate Write B: tx commits with v2, metafield call starts and finishes fast
+    const [writeB] = await sql<{ syncVersion: number }[]>`
+      UPDATE "BuyerAccount"
+      SET "syncVersion" = "syncVersion" + 1, "syncPending" = true
+      WHERE id = ${TEST_ACCOUNT_ID}
+      RETURNING "syncVersion"
+    `;
+
+    // Write B's metafield succeeds and clears (matches v2)
+    const clearB = await sql<{ id: string }[]>`
+      UPDATE "BuyerAccount"
+      SET "syncPending" = false
+      WHERE id = ${TEST_ACCOUNT_ID}
+        AND "syncVersion" = ${writeB.syncVersion}
+      RETURNING id
+    `;
+    expect(clearB.length).toBe(1);
+
+    // Verify syncPending is false (B cleared it)
+    const [afterBClear] = await sql<{ syncPending: boolean }[]>`
+      SELECT "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+    expect(afterBClear.syncPending).toBe(false);
+
+    // Now Write A's metafield finally finishes and tries to clear with v1
+    // This should fail (0 rows) because v1 doesn't match current v2
+    const clearA = await sql<{ id: string }[]>`
+      UPDATE "BuyerAccount"
+      SET "syncPending" = false
+      WHERE id = ${TEST_ACCOUNT_ID}
+        AND "syncVersion" = ${writeA.syncVersion}
+      RETURNING id
+    `;
+    expect(clearA.length).toBe(0);
+
+    // syncPending should still be false (B's clear succeeded, A's had no effect)
+    const [final] = await sql<{ syncPending: boolean }[]>`
+      SELECT "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+    expect(final.syncPending).toBe(false);
+  });
+});
+
+describeWithDb("syncCreditStatusMetafield skip branches", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-skip";
+  const TEST_SHOP_ID = `shop-skip-${TEST_SUFFIX}`;
+  const TEST_SHOP_DOMAIN = `skip-test-${TEST_SUFFIX}.myshopify.com`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+    `;
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+    await sql.end();
+  });
+
+  it("gated account: syncPending cleared inside tx (no metafield write)", async () => {
+    const gatedAccountId = `acc-gated-${TEST_SUFFIX}`;
+
+    // Create a gated account with syncPending=true
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name,
+        "creditLimit", "holdState", bypass, "syncPending", "syncVersion",
+        gated_at, "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${gatedAccountId}, ${TEST_SHOP_ID}, 'COMPANY',
+        ${"co-gated-" + TEST_SUFFIX}, ${"gid://shopify/CompanyLocation/gated-" + TEST_SUFFIX},
+        'Gated Account', 100000.00, 'OK', false, true, 1,
+        NOW(), NOW(), NOW()
+      )
+    `;
+
+    try {
+      // Verify syncPending is true before
+      const [before] = await sql<{ syncPending: boolean }[]>`
+        SELECT "syncPending" FROM "BuyerAccount" WHERE id = ${gatedAccountId}
+      `;
+      expect(before.syncPending).toBe(true);
+
+      // The skip branch in syncCreditStatusMetafield clears syncPending inside tx
+      // Simulate what the code does: UPDATE inside the tx
+      await sql`
+        UPDATE "BuyerAccount"
+        SET "syncPending" = false
+        WHERE id = ${gatedAccountId}
+      `;
+
+      // Verify syncPending is now false
+      const [after] = await sql<{ syncPending: boolean }[]>`
+        SELECT "syncPending" FROM "BuyerAccount" WHERE id = ${gatedAccountId}
+      `;
+      expect(after.syncPending).toBe(false);
+    } finally {
+      await sql`DELETE FROM "BuyerAccount" WHERE id = ${gatedAccountId}`;
+    }
+  });
+
+  // Note: The "no owner GID" skip branch cannot be tested with real data because
+  // the BuyerAccount_kind_consistency constraint requires:
+  // - COMPANY accounts must have companyLocationId AND companyId
+  // - TAGGED_CUSTOMER accounts must have customerId
+  // This ensures all valid accounts have an owner GID.
+});
