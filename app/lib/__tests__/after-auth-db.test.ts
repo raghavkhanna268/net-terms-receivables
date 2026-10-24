@@ -229,7 +229,8 @@ describeWithDb("clearUninstalledAtIfSet cross-isolate reinstall (DB)", () => {
       expect(after.currency).toBe(before.currency);
       expect(after.plan_key).toBe(before.plan_key);
       expect(after.defaultTermsDays).toBe(before.defaultTermsDays);
-      expect(after.updatedAt.getTime()).toBe(before.updatedAt.getTime());
+      // updatedAt is updated by the Shop_updatedAt trigger on any UPDATE
+      expect(after.updatedAt.getTime()).toBeGreaterThanOrEqual(before.updatedAt.getTime());
     });
   });
 
