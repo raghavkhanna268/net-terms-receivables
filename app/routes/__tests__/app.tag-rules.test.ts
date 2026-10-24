@@ -4,9 +4,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
  * Tests for S23-03 tag rules route (app/routes/app.tag-rules.tsx).
  *
  * Covers:
- * - Validation: empty tag, too long tag, bad chars, duplicate with different case, {} body
+ * - Validation: empty tag, too long tag, commas/control chars, duplicate with different case, {} body
  * - Successful create scoped by shop
- * - Hidden for B2B stores (mode detection)
+ * - Hidden for B2B stores (mode detection in loader)
+ * - B2B rejection in action (400 before any write)
+ * - ON CONFLICT duplicate handling (race-safe)
+ * - 23505 unique violation error code handling
  * - 401 on auth failure
  * - Real safeLog test: no tag value, domain, or raw id in output
  */
@@ -15,13 +18,61 @@ vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(),
 }));
 
-vi.mock("~/services/gating.server", () => ({
-  isGatingEnforced: vi.fn().mockReturnValue(false),
-}));
-
 vi.mock("@shopify/shopify-app-react-router/server", () => ({
   boundary: { headers: vi.fn(() => ({})) },
 }));
+
+/**
+ * ActionData type for test assertions.
+ */
+interface TestActionData {
+  success?: boolean;
+  error?: string;
+  fieldErrors?: Record<string, string>;
+  createdRuleId?: string;
+}
+
+/**
+ * LoaderData type for test assertions.
+ */
+interface TestLoaderData {
+  storeMode?: string;
+  tagRules?: Array<{ id: string; tag: string; defaultTermsDays: number }>;
+  shopId?: string | null;
+  error?: string | null;
+}
+
+/**
+ * Helper to extract loader data from result.
+ */
+function extractLoaderData(result: unknown): TestLoaderData {
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    "type" in result &&
+    (result as { type: string }).type === "DataWithResponseInit" &&
+    "data" in result
+  ) {
+    return (result as { data: TestLoaderData }).data;
+  }
+  return result as TestLoaderData;
+}
+
+/**
+ * Helper to extract action data from result.
+ */
+function extractActionData(result: unknown): TestActionData {
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    "type" in result &&
+    (result as { type: string }).type === "DataWithResponseInit" &&
+    "data" in result
+  ) {
+    return (result as { data: TestActionData }).data;
+  }
+  return result as TestActionData;
+}
 
 describe("Tag Rules Route", () => {
   const mockSession = { shop: "test-store.myshopify.com" };
@@ -64,7 +115,7 @@ describe("Tag Rules Route", () => {
       mockSql.mockResolvedValueOnce([]);
 
       const { loader } = await import("../app.tag-rules");
-      const result = await loader({
+      const rawResult = await loader({
         request: mockRequest,
         context: mockContext as never,
         params: {},
@@ -72,6 +123,7 @@ describe("Tag Rules Route", () => {
         pattern: mockPattern,
       });
 
+      const result = extractLoaderData(rawResult);
       expect(result.storeMode).toBe("tag_based");
       expect(result.tagRules).toEqual([]);
       expect(result.error).toBeNull();
@@ -89,7 +141,7 @@ describe("Tag Rules Route", () => {
       mockSql.mockResolvedValueOnce([]);
 
       const { loader } = await import("../app.tag-rules");
-      const result = await loader({
+      const rawResult = await loader({
         request: mockRequest,
         context: mockContext as never,
         params: {},
@@ -97,6 +149,7 @@ describe("Tag Rules Route", () => {
         pattern: mockPattern,
       });
 
+      const result = extractLoaderData(rawResult);
       expect(result.storeMode).toBe("b2b");
     });
 
@@ -116,7 +169,7 @@ describe("Tag Rules Route", () => {
       ]);
 
       const { loader } = await import("../app.tag-rules");
-      const result = await loader({
+      const rawResult = await loader({
         request: mockRequest,
         context: mockContext as never,
         params: {},
@@ -124,9 +177,11 @@ describe("Tag Rules Route", () => {
         pattern: mockPattern,
       });
 
-      expect(result.tagRules).toHaveLength(2);
-      expect(result.tagRules[0].tag).toBe("net30");
-      expect(result.tagRules[1].tag).toBe("wholesale");
+      const result = extractLoaderData(rawResult);
+      const tagRules = result.tagRules as Array<{ tag: string }>;
+      expect(tagRules).toHaveLength(2);
+      expect(tagRules[0].tag).toBe("net30");
+      expect(tagRules[1].tag).toBe("wholesale");
     });
 
     it("returns error when shop not found", async () => {
@@ -137,7 +192,7 @@ describe("Tag Rules Route", () => {
       mockSql.mockResolvedValueOnce([]);
 
       const { loader } = await import("../app.tag-rules");
-      const result = await loader({
+      const rawResult = await loader({
         request: mockRequest,
         context: mockContext as never,
         params: {},
@@ -145,6 +200,7 @@ describe("Tag Rules Route", () => {
         pattern: mockPattern,
       });
 
+      const result = extractLoaderData(rawResult);
       expect(result.error).toBe("Shop not found");
       expect(result.shopId).toBeNull();
     });
@@ -157,6 +213,8 @@ describe("Tag Rules Route", () => {
 
       // Shop lookup
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
@@ -169,7 +227,7 @@ describe("Tag Rules Route", () => {
       });
 
       const { action } = await import("../app.tag-rules");
-      const result = await action({
+      const rawResult = await action({
         request: postRequest,
         context: mockContext as never,
         params: {},
@@ -177,6 +235,7 @@ describe("Tag Rules Route", () => {
         pattern: mockPattern,
       });
 
+      const result = extractActionData(rawResult);
       expect(result.success).toBe(false);
       expect(result.fieldErrors?.tag).toBe("Tag is required");
     });
@@ -187,6 +246,8 @@ describe("Tag Rules Route", () => {
 
       // Shop lookup
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
 
       const longTag = "a".repeat(256);
       const formData = new FormData();
@@ -200,7 +261,7 @@ describe("Tag Rules Route", () => {
       });
 
       const { action } = await import("../app.tag-rules");
-      const result = await action({
+      const rawResult = await action({
         request: postRequest,
         context: mockContext as never,
         params: {},
@@ -208,20 +269,23 @@ describe("Tag Rules Route", () => {
         pattern: mockPattern,
       });
 
+      const result = extractActionData(rawResult);
       expect(result.success).toBe(false);
       expect(result.fieldErrors?.tag).toContain("at most 255 characters");
     });
 
-    it("returns 400 field errors for invalid tag characters", async () => {
+    it("returns 400 field errors for tag with comma", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
-      formData.append("tag", "net<30>"); // Invalid chars
+      formData.append("tag", "net30,wholesale"); // Comma not allowed
       formData.append("defaultTermsDays", "30");
 
       const postRequest = new Request("https://example.com/app/tag-rules", {
@@ -230,7 +294,7 @@ describe("Tag Rules Route", () => {
       });
 
       const { action } = await import("../app.tag-rules");
-      const result = await action({
+      const rawResult = await action({
         request: postRequest,
         context: mockContext as never,
         params: {},
@@ -238,18 +302,54 @@ describe("Tag Rules Route", () => {
         pattern: mockPattern,
       });
 
+      const result = extractActionData(rawResult);
       expect(result.success).toBe(false);
-      expect(result.fieldErrors?.tag).toContain("letters, numbers, spaces, hyphens");
+      expect(result.fieldErrors?.tag).toContain("commas");
     });
 
-    it("returns 400 for duplicate tag (case-insensitive match)", async () => {
+    it("returns 400 field errors for tag with control characters", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
-      // Duplicate check - found existing with different case
-      mockSql.mockResolvedValueOnce([{ id: "existing-rule" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
+
+      const formData = new FormData();
+      formData.append("intent", "create_tag_rule");
+      formData.append("tag", "net30\ttab"); // Tab not allowed
+      formData.append("defaultTermsDays", "30");
+
+      const postRequest = new Request("https://example.com/app/tag-rules", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.tag-rules");
+      const rawResult = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const result = extractActionData(rawResult);
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors?.tag).toContain("control characters");
+    });
+
+    it("returns 400 for duplicate tag via ON CONFLICT (case-insensitive match)", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      // Shop lookup
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
+      // Insert returns empty due to ON CONFLICT DO NOTHING
+      mockSql.mockResolvedValueOnce([]);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
@@ -262,7 +362,7 @@ describe("Tag Rules Route", () => {
       });
 
       const { action } = await import("../app.tag-rules");
-      const result = await action({
+      const rawResult = await action({
         request: postRequest,
         context: mockContext as never,
         params: {},
@@ -270,6 +370,7 @@ describe("Tag Rules Route", () => {
         pattern: mockPattern,
       });
 
+      const result = extractActionData(rawResult);
       expect(result.success).toBe(false);
       expect(result.fieldErrors?.tag).toContain("already exists");
       expect(result.fieldErrors?.tag).toContain("case-insensitive");
@@ -281,6 +382,8 @@ describe("Tag Rules Route", () => {
 
       // Shop lookup
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
 
       // Send empty JSON body
       const postRequest = new Request("https://example.com/app/tag-rules", {
@@ -290,7 +393,7 @@ describe("Tag Rules Route", () => {
       });
 
       const { action } = await import("../app.tag-rules");
-      const result = await action({
+      const rawResult = await action({
         request: postRequest,
         context: mockContext as never,
         params: {},
@@ -298,6 +401,7 @@ describe("Tag Rules Route", () => {
         pattern: mockPattern,
       });
 
+      const result = extractActionData(rawResult);
       expect(result.success).toBe(false);
       // Should get error (either invalid body or unknown action)
       expect(result.error).toBeDefined();
@@ -309,6 +413,8 @@ describe("Tag Rules Route", () => {
 
       // Shop lookup
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
@@ -320,7 +426,7 @@ describe("Tag Rules Route", () => {
       });
 
       const { action } = await import("../app.tag-rules");
-      const result = await action({
+      const rawResult = await action({
         request: postRequest,
         context: mockContext as never,
         params: {},
@@ -328,6 +434,7 @@ describe("Tag Rules Route", () => {
         pattern: mockPattern,
       });
 
+      const result = extractActionData(rawResult);
       expect(result.success).toBe(false);
       expect(result.fieldErrors?.tag).toBe("Tag is required");
       expect(result.fieldErrors?.defaultTermsDays).toBe("Default terms days is required");
@@ -339,6 +446,8 @@ describe("Tag Rules Route", () => {
 
       // Shop lookup
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
@@ -351,7 +460,7 @@ describe("Tag Rules Route", () => {
       });
 
       const { action } = await import("../app.tag-rules");
-      const result = await action({
+      const rawResult = await action({
         request: postRequest,
         context: mockContext as never,
         params: {},
@@ -359,6 +468,7 @@ describe("Tag Rules Route", () => {
         pattern: mockPattern,
       });
 
+      const result = extractActionData(rawResult);
       expect(result.success).toBe(false);
       expect(result.fieldErrors?.defaultTermsDays).toContain("whole number");
     });
@@ -369,6 +479,8 @@ describe("Tag Rules Route", () => {
 
       // Shop lookup
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
@@ -381,7 +493,7 @@ describe("Tag Rules Route", () => {
       });
 
       const { action } = await import("../app.tag-rules");
-      const result = await action({
+      const rawResult = await action({
         request: postRequest,
         context: mockContext as never,
         params: {},
@@ -389,6 +501,7 @@ describe("Tag Rules Route", () => {
         pattern: mockPattern,
       });
 
+      const result = extractActionData(rawResult);
       expect(result.success).toBe(false);
       expect(result.fieldErrors?.defaultTermsDays).toContain("at least 1");
     });
@@ -399,6 +512,8 @@ describe("Tag Rules Route", () => {
 
       // Shop lookup
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
@@ -411,7 +526,7 @@ describe("Tag Rules Route", () => {
       });
 
       const { action } = await import("../app.tag-rules");
-      const result = await action({
+      const rawResult = await action({
         request: postRequest,
         context: mockContext as never,
         params: {},
@@ -419,6 +534,7 @@ describe("Tag Rules Route", () => {
         pattern: mockPattern,
       });
 
+      const result = extractActionData(rawResult);
       expect(result.success).toBe(false);
       expect(result.fieldErrors?.defaultTermsDays).toContain("at most 365");
     });
@@ -431,7 +547,7 @@ describe("Tag Rules Route", () => {
 
       // Shop lookup
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
-      // Duplicate check - not found
+      // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Insert returning id
       mockSql.mockResolvedValueOnce([{ id: "new-rule-id" }]);
@@ -447,7 +563,7 @@ describe("Tag Rules Route", () => {
       });
 
       const { action } = await import("../app.tag-rules");
-      const result = await action({
+      const rawResult = await action({
         request: postRequest,
         context: mockContext as never,
         params: {},
@@ -455,6 +571,7 @@ describe("Tag Rules Route", () => {
         pattern: mockPattern,
       });
 
+      const result = extractActionData(rawResult);
       expect(result.success).toBe(true);
       expect(result.createdRuleId).toBe("new-rule-id");
 
@@ -471,7 +588,7 @@ describe("Tag Rules Route", () => {
 
       // Shop lookup
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
-      // Duplicate check - not found
+      // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Insert returning id
       mockSql.mockResolvedValueOnce([{ id: "new-rule-id" }]);
@@ -487,7 +604,7 @@ describe("Tag Rules Route", () => {
       });
 
       const { action } = await import("../app.tag-rules");
-      const result = await action({
+      const rawResult = await action({
         request: postRequest,
         context: mockContext as never,
         params: {},
@@ -495,6 +612,7 @@ describe("Tag Rules Route", () => {
         pattern: mockPattern,
       });
 
+      const result = extractActionData(rawResult);
       expect(result.success).toBe(true);
     });
   });
@@ -518,7 +636,7 @@ describe("Tag Rules Route", () => {
       });
 
       const { action } = await import("../app.tag-rules");
-      const result = await action({
+      const rawResult = await action({
         request: postRequest,
         context: mockContext as never,
         params: {},
@@ -526,6 +644,7 @@ describe("Tag Rules Route", () => {
         pattern: mockPattern,
       });
 
+      const result = extractActionData(rawResult);
       expect(result.success).toBe(false);
       expect(result.error).toBe("Shop not found");
     });
@@ -538,6 +657,8 @@ describe("Tag Rules Route", () => {
 
       // Shop lookup
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
 
       const formData = new FormData();
       formData.append("intent", "delete_tag_rule");
@@ -548,7 +669,7 @@ describe("Tag Rules Route", () => {
       });
 
       const { action } = await import("../app.tag-rules");
-      const result = await action({
+      const rawResult = await action({
         request: postRequest,
         context: mockContext as never,
         params: {},
@@ -556,8 +677,124 @@ describe("Tag Rules Route", () => {
         pattern: mockPattern,
       });
 
+      const result = extractActionData(rawResult);
       expect(result.success).toBe(false);
       expect(result.error).toBe("Unknown action");
+    });
+  });
+
+  describe("action - B2B store rejection", () => {
+    it("returns 400 when action called on B2B store", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      // Shop lookup
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Store mode check - has COMPANY account (B2B)
+      mockSql.mockResolvedValueOnce([{ id: "company-acc" }]);
+
+      const formData = new FormData();
+      formData.append("intent", "create_tag_rule");
+      formData.append("tag", "net30");
+      formData.append("defaultTermsDays", "30");
+
+      const postRequest = new Request("https://example.com/app/tag-rules", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.tag-rules");
+      const rawResult = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const result = extractActionData(rawResult);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("B2B stores");
+
+      // Verify no INSERT was attempted
+      const insertCall = mockSql.mock.calls.find((call) =>
+        call[0]?.some?.((s: string) => s?.includes?.("INSERT INTO"))
+      );
+      expect(insertCall).toBeUndefined();
+    });
+  });
+
+  describe("action - 23505 unique constraint handling", () => {
+    it("returns 400 duplicate error when 23505 error occurs (race condition)", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      // Shop lookup
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
+      // Insert throws 23505 unique violation
+      const uniqueError = new Error("duplicate key value violates unique constraint");
+      (uniqueError as Error & { code: string }).code = "23505";
+      mockSql.mockRejectedValueOnce(uniqueError);
+
+      const formData = new FormData();
+      formData.append("intent", "create_tag_rule");
+      formData.append("tag", "net30");
+      formData.append("defaultTermsDays", "30");
+
+      const postRequest = new Request("https://example.com/app/tag-rules", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.tag-rules");
+      const rawResult = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const result = extractActionData(rawResult);
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors?.tag).toContain("already exists");
+    });
+
+    it("returns 400 duplicate error when error message contains 23505", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      // Shop lookup
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
+      // Insert throws error with 23505 in message
+      mockSql.mockRejectedValueOnce(new Error("ERROR 23505: duplicate key value"));
+
+      const formData = new FormData();
+      formData.append("intent", "create_tag_rule");
+      formData.append("tag", "net30");
+      formData.append("defaultTermsDays", "30");
+
+      const postRequest = new Request("https://example.com/app/tag-rules", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.tag-rules");
+      const rawResult = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const result = extractActionData(rawResult);
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors?.tag).toContain("already exists");
     });
   });
 });
@@ -571,16 +808,39 @@ describe("Tag rule validation helpers", () => {
     expect(validateTag("VIP_Tier_1")).toBeNull();
     expect(validateTag("Net Terms")).toBeNull();
     expect(validateTag("a".repeat(255))).toBeNull();
+    // Now also valid under the new pattern (only commas/control chars forbidden)
+    expect(validateTag("tag<script>")).toBeNull();
+    expect(validateTag("tag@email")).toBeNull();
+    expect(validateTag("special!#$%^&*()")).toBeNull();
   });
 
-  it("validateTag rejects invalid tags", async () => {
+  it("validateTag rejects empty tags", async () => {
     const { validateTag } = await import("../app.tag-rules");
 
     expect(validateTag("")).not.toBeNull();
     expect(validateTag("   ")).not.toBeNull();
+  });
+
+  it("validateTag rejects tags over 255 chars", async () => {
+    const { validateTag } = await import("../app.tag-rules");
+
     expect(validateTag("a".repeat(256))).toContain("255");
-    expect(validateTag("tag<script>")).not.toBeNull();
-    expect(validateTag("tag@email")).not.toBeNull();
+  });
+
+  it("validateTag rejects tags with commas", async () => {
+    const { validateTag } = await import("../app.tag-rules");
+
+    expect(validateTag("tag,other")).toContain("commas");
+    expect(validateTag("a,b,c")).toContain("commas");
+  });
+
+  it("validateTag rejects tags with control characters", async () => {
+    const { validateTag } = await import("../app.tag-rules");
+
+    expect(validateTag("tag\ttab")).toContain("control characters");
+    expect(validateTag("tag\nnewline")).toContain("control characters");
+    expect(validateTag("tag\rreturn")).toContain("control characters");
+    expect(validateTag("tag\x00null")).toContain("control characters");
   });
 
   it("validateTermsDays accepts valid values", async () => {
@@ -601,7 +861,6 @@ describe("Tag rule validation helpers", () => {
     expect(validateTermsDays("30.5")).not.toBeNull();
     expect(validateTermsDays("abc")).not.toBeNull();
   });
-
 });
 
 describe("Tag rules safeLog (R2 PII prevention)", () => {
@@ -633,7 +892,7 @@ describe("Tag rules safeLog (R2 PII prevention)", () => {
 
     // Shop lookup
     mockSql.mockResolvedValueOnce([{ id: "shop-xyz" }]);
-    // Duplicate check
+    // Store mode check (tag_based)
     mockSql.mockResolvedValueOnce([]);
     // Insert
     mockSql.mockResolvedValueOnce([{ id: "rule-abc" }]);
@@ -697,9 +956,11 @@ describe("Tag rules safeLog (R2 PII prevention)", () => {
 
     // Shop lookup
     mockSql.mockResolvedValueOnce([{ id: "shop-xyz" }]);
-    // Duplicate check - throw error
+    // Store mode check (tag_based)
+    mockSql.mockResolvedValueOnce([]);
+    // Insert - throw error
     const dbError = new Error(
-      "Unique constraint failed for sensitive-store.myshopify.com tag secret-tier-99"
+      "Database error for sensitive-store.myshopify.com tag secret-tier-99"
     );
     mockSql.mockRejectedValueOnce(dbError);
 
@@ -741,7 +1002,7 @@ describe("Tag rules safeLog (R2 PII prevention)", () => {
         expect(output).not.toContain("myshopify.com");
         expect(output).not.toContain("sensitive-store");
         // Must not contain raw error message
-        expect(output).not.toContain("Unique constraint");
+        expect(output).not.toContain("Database error");
         // Should contain safe fields
         expect(output).toContain("tag_rule_create_error");
         expect(output).toContain("shopId");

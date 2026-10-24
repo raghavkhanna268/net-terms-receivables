@@ -4,20 +4,18 @@
  * Provides a UI for merchants on tag-based stores to create tag rules.
  * Tag rules map customer tags to default payment terms for non-B2B wholesale.
  *
- * Mode detection:
+ * Mode detection (server-side, checked in both loader and action):
  * - B2B stores: Have any BuyerAccount with kind=COMPANY
- * - Tag-based stores: No COMPANY accounts OR have AccountSource rules
+ * - Tag-based stores: No COMPANY accounts
  *
  * The create form is shown only for tag-based stores.
  * B2B Company stores see a not-applicable state.
+ * The action rejects POSTs from B2B stores with a 400.
  *
  * Validation constraints:
- * - Tag: trimmed, max 255 chars, Shopify-allowed characters only
+ * - Tag: trimmed, max 255 chars, no commas or control characters
  * - Case-insensitive duplicate check per shop
- * - Default terms days: positive integer, max 365
- * - Credit limit (optional): non-negative decimal, max 2 decimal places
- *
- * Gating: credit-limit editing follows existing gating.server.ts patterns.
+ * - Default terms days: positive integer, 1-365
  */
 
 import { useState } from "react";
@@ -26,18 +24,18 @@ import type {
   LoaderFunctionArgs,
   ActionFunctionArgs,
 } from "react-router";
-import { useLoaderData, useActionData, Form, useNavigation } from "react-router";
+import { useLoaderData, useActionData, Form, useNavigation, data } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
-import { isGatingEnforced } from "~/services/gating.server";
 
 /**
  * Shopify tag character validation pattern.
- * Tags can contain: letters, numbers, spaces, hyphens, underscores.
+ * Tags can contain any character except commas (Shopify's only restriction)
+ * and control characters (newlines, tabs, etc.).
  * Must not be empty after trimming.
  */
-const TAG_PATTERN = /^[a-zA-Z0-9\s\-_]+$/;
+const TAG_PATTERN = /^[^,\x00-\x1f]+$/;
 const TAG_MAX_LENGTH = 255;
 const TERMS_DAYS_MIN = 1;
 const TERMS_DAYS_MAX = 365;
@@ -58,7 +56,6 @@ interface LoaderData {
   storeMode: StoreMode;
   tagRules: TagRule[];
   shopId: string | null;
-  gatingEnforced: boolean;
   error: string | null;
 }
 
@@ -130,7 +127,7 @@ export function validateTag(tag: string): string | null {
   }
 
   if (!TAG_PATTERN.test(trimmed)) {
-    return "Tag can only contain letters, numbers, spaces, hyphens, and underscores";
+    return "Tag cannot contain commas or control characters (newlines, tabs)";
   }
 
   return null;
@@ -163,25 +160,6 @@ export function validateTermsDays(value: string): string | null {
   return null;
 }
 
-
-/**
- * Check if a tag already exists for this shop (case-insensitive).
- */
-async function checkDuplicateTag(
-  sql: ReturnType<typeof getRequestSql>,
-  shopId: string,
-  tag: string
-): Promise<boolean> {
-  const normalizedTag = tag.trim().toLowerCase();
-  const [existing] = await sql<{ id: string }[]>`
-    SELECT id FROM "AccountSource"
-    WHERE "shopId" = ${shopId}
-      AND LOWER(tag) = ${normalizedTag}
-    LIMIT 1
-  `;
-  return !!existing;
-}
-
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { shopify } = context;
   const { session } = await shopify.authenticate.admin(request);
@@ -193,13 +171,15 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   `;
 
   if (!shop) {
-    return {
-      storeMode: "tag_based" as StoreMode,
-      tagRules: [],
-      shopId: null,
-      gatingEnforced: isGatingEnforced(),
-      error: "Shop not found",
-    } satisfies LoaderData;
+    return data(
+      {
+        storeMode: "tag_based" as StoreMode,
+        tagRules: [],
+        shopId: null,
+        error: "Shop not found",
+      } satisfies LoaderData,
+      { status: 404 }
+    );
   }
 
   try {
@@ -212,7 +192,6 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       storeMode,
       tagRules,
       shopId: shop.id,
-      gatingEnforced: isGatingEnforced(),
       error: null,
     } satisfies LoaderData;
   } catch (err) {
@@ -225,7 +204,6 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       storeMode: "tag_based" as StoreMode,
       tagRules: [],
       shopId: shop.id,
-      gatingEnforced: isGatingEnforced(),
       error: "Failed to load tag rules",
     } satisfies LoaderData;
   }
@@ -242,23 +220,43 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   `;
 
   if (!shop) {
-    return { success: false, error: "Shop not found" } satisfies ActionData;
+    return data(
+      { success: false, error: "Shop not found" } satisfies ActionData,
+      { status: 404 }
+    );
+  }
+
+  const storeMode = await detectStoreMode(sql, shop.id);
+  if (storeMode === "b2b") {
+    return data(
+      {
+        success: false,
+        error: "Tag rules are not available for B2B stores",
+      } satisfies ActionData,
+      { status: 400 }
+    );
   }
 
   let formData: FormData;
   try {
     formData = await request.formData();
   } catch {
-    return {
-      success: false,
-      error: "Invalid request body",
-    } satisfies ActionData;
+    return data(
+      {
+        success: false,
+        error: "Invalid request body",
+      } satisfies ActionData,
+      { status: 400 }
+    );
   }
 
   const intent = formData.get("intent");
 
   if (intent !== "create_tag_rule") {
-    return { success: false, error: "Unknown action" } satisfies ActionData;
+    return data(
+      { success: false, error: "Unknown action" } satisfies ActionData,
+      { status: 400 }
+    );
   }
 
   const tagRaw = formData.get("tag");
@@ -275,7 +273,10 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   }
 
   if (Object.keys(fieldErrors).length > 0) {
-    return { success: false, fieldErrors } satisfies ActionData;
+    return data(
+      { success: false, fieldErrors } satisfies ActionData,
+      { status: 400 }
+    );
   }
 
   const tag = (tagRaw as string).trim();
@@ -292,48 +293,74 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   }
 
   if (Object.keys(fieldErrors).length > 0) {
-    return { success: false, fieldErrors } satisfies ActionData;
+    return data(
+      { success: false, fieldErrors } satisfies ActionData,
+      { status: 400 }
+    );
   }
 
   try {
-    const isDuplicate = await checkDuplicateTag(sql, shop.id, tag);
-    if (isDuplicate) {
-      return {
-        success: false,
-        fieldErrors: {
-          tag: "A tag rule with this tag already exists (case-insensitive match)",
-        },
-      } satisfies ActionData;
-    }
-
     const parsedTermsDays = parseInt(termsDays, 10);
 
-    const [result] = await sql<{ id: string }[]>`
+    const result = await sql<{ id: string }[]>`
       INSERT INTO "AccountSource" ("shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")
       VALUES (${shop.id}, ${tag}, ${parsedTermsDays}, NOW(), NOW())
+      ON CONFLICT ("shopId", LOWER(tag)) DO NOTHING
       RETURNING id
     `;
 
+    if (result.length === 0) {
+      return data(
+        {
+          success: false,
+          fieldErrors: {
+            tag: "A tag rule with this tag already exists (case-insensitive match)",
+          },
+        } satisfies ActionData,
+        { status: 400 }
+      );
+    }
+
     safeLog("info", "tag_rule_created", {
       shopId: shop.id,
-      ruleId: result.id,
+      ruleId: result[0].id,
       termsDays: parsedTermsDays,
     });
 
     return {
       success: true,
-      createdRuleId: result.id,
+      createdRuleId: result[0].id,
     } satisfies ActionData;
   } catch (err) {
+    const errCode = toErrorCode(err);
+
+    if (
+      errCode === "pg_unique_violation" ||
+      (err instanceof Error && err.message.includes("23505"))
+    ) {
+      return data(
+        {
+          success: false,
+          fieldErrors: {
+            tag: "A tag rule with this tag already exists (case-insensitive match)",
+          },
+        } satisfies ActionData,
+        { status: 400 }
+      );
+    }
+
     safeLog("error", "tag_rule_create_error", {
       shopId: shop.id,
-      err: toErrorCode(err),
+      err: errCode,
     });
 
-    return {
-      success: false,
-      error: "Failed to create tag rule",
-    } satisfies ActionData;
+    return data(
+      {
+        success: false,
+        error: "Failed to create tag rule",
+      } satisfies ActionData,
+      { status: 500 }
+    );
   }
 };
 
@@ -433,13 +460,13 @@ export default function TagRulesPage() {
       {actionData?.success && (
         <s-section>
           <s-banner tone="info" heading="Tag rule created">
-            The tag rule has been saved. Customers with this tag will now be
-            eligible for net terms.
+            The tag rule has been saved. Customers with this tag are picked up
+            on the next sync.
           </s-banner>
         </s-section>
       )}
 
-      {actionData && !actionData.success && actionData.error && (
+      {actionData && !actionData.success && "error" in actionData && actionData.error && (
         <s-section>
           <s-banner tone="critical" heading="Error">
             {actionData.error}
@@ -456,7 +483,7 @@ export default function TagRulesPage() {
               name="tag"
               placeholder="e.g., net30, wholesale-gold"
               value={tag}
-              error={actionData?.fieldErrors?.tag}
+              error={actionData && "fieldErrors" in actionData ? (actionData.fieldErrors as Record<string, string> | undefined)?.tag : undefined}
               onChange={(e: Event) => {
                 const target = e.currentTarget as HTMLInputElement | null;
                 setTag(target?.value ?? "");
@@ -472,7 +499,7 @@ export default function TagRulesPage() {
               name="defaultTermsDays"
               placeholder="e.g., 30"
               value={termsDays}
-              error={actionData?.fieldErrors?.defaultTermsDays}
+              error={actionData && "fieldErrors" in actionData ? (actionData.fieldErrors as Record<string, string> | undefined)?.defaultTermsDays : undefined}
               onChange={(e: Event) => {
                 const target = e.currentTarget as HTMLInputElement | null;
                 setTermsDays(target?.value ?? "");
