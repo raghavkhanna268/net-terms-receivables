@@ -564,13 +564,13 @@ jobs:
           EXPECTED_MIGRATIONS=$(ls -1 prisma/migrations 2>/dev/null | grep -E '^[0-9]+_' | sort || true)
           if [ -z "$EXPECTED_MIGRATIONS" ]; then
             echo "No migrations found in prisma/migrations directory"
-            EXPECTED_ARRAY="ARRAY[]::text[]"
+            EXPECTED_LIST=""
           else
             echo "Expected migrations from repo:"
             echo "$EXPECTED_MIGRATIONS"
             echo ""
-            # Build SQL array
-            EXPECTED_ARRAY="ARRAY[$(echo "$EXPECTED_MIGRATIONS" | sed "s/^/'/" | sed "s/$/'/" | tr '\n' ',' | sed 's/,$//'))]"
+            # Build comma-separated list for SQL
+            EXPECTED_LIST=$(echo "$EXPECTED_MIGRATIONS" | tr '\n' ',' | sed 's/,$//')
           fi
 
           # Get applied migrations from database
@@ -592,10 +592,16 @@ jobs:
 
           # P3: A migration counts as failed only if it has no successful finished_at row
           # with rolled_back_at NULL. Ignore rows that were rolled back and later re-applied.
-          MIGRATION_CHECK=$(psql -X -q -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<EOSQL
+          # Use string_to_array with psql variable to avoid shell quoting issues.
+          # Empty string produces empty text[] array.
+          MIGRATION_CHECK=$(psql -X -q -v ON_ERROR_STOP=1 -v expected="$EXPECTED_LIST" -t -A "$DATABASE_URL" <<'EOSQL'
           BEGIN READ ONLY;
           WITH expected AS (
-            SELECT unnest($EXPECTED_ARRAY) AS name
+            SELECT unnest(
+              CASE WHEN :'expected' = '' THEN ARRAY[]::text[]
+              ELSE string_to_array(:'expected', ',')
+              END
+            ) AS name
           ),
           successful_applied AS (
             SELECT DISTINCT migration_name
@@ -610,7 +616,7 @@ jobs:
               WHERE a.migration_name IS NULL
             ),
             'failed', (
-              SELECT COALESCE(json_agg(m.migration_name), '[]'::json)
+              SELECT COALESCE(json_agg(DISTINCT m.migration_name), '[]'::json)
               FROM _prisma_migrations m
               WHERE m.finished_at IS NULL
                 AND NOT EXISTS (
@@ -764,7 +770,17 @@ jobs:
           echo "=== BuyerAccount Counts ==="
           echo ""
 
-          psql -X -q -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          # Check if s6_processed_webhooks table exists for deleted-location query
+          PROCESSED_EXISTS=$(psql -X -q -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
+          SELECT to_regclass('public.s6_processed_webhooks') IS NOT NULL;
+          ROLLBACK;
+          EOSQL
+          )
+
+          if [ "$PROCESSED_EXISTS" = "t" ]; then
+            # Topic 'COMPANY_LOCATIONS_DELETE' matches processor.server.ts:209,239,482
+            psql -X -q -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
           BEGIN READ ONLY;
           SELECT json_build_object(
             'distinct_buyer_accounts', (SELECT COUNT(DISTINCT id) FROM "BuyerAccount"),
@@ -781,6 +797,18 @@ jobs:
           );
           ROLLBACK;
           EOSQL
+          else
+            # s6_processed_webhooks not found - only report distinct count
+            psql -X -q -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
+          SELECT json_build_object(
+            'distinct_buyer_accounts', (SELECT COUNT(DISTINCT id) FROM "BuyerAccount"),
+            'buyer_accounts_with_deleted_company_location', null,
+            's6_processed_webhooks_exists', false
+          );
+          ROLLBACK;
+          EOSQL
+          fi
 
           echo ""
           echo "=== Bulk Operations by Type and Status ==="
