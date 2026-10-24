@@ -6,26 +6,28 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
  * Covers:
  * - Loader: default disabled, not-configured state, caps and usage present, shop not found
  * - Action: toggle_enabled, update_rule, create_rule, delete_rule, offset validation, invalid intent
- * - ensureDefaultReminderRules: seeds 3 on empty shop, no-op when rules exist, concurrency safety
+ * - ensureDefaultReminderRules: seeds 3 on first settings creation, no-op when settings exist
+ *
+ * Uses partial mocking: DB functions are mocked, pure helpers (isValidOffset,
+ * isReminderSendingEnabled) use real implementations.
  */
 
-vi.mock("~/services/reminders.server", () => ({
-  getShopReminderSettings: vi.fn(),
-  getShopReminderRules: vi.fn(),
-  updateShopReminderSettings: vi.fn(),
-  updateReminderRule: vi.fn(),
-  createReminderRule: vi.fn(),
-  deleteReminderRule: vi.fn(),
-  isReminderSendingEnabled: vi.fn(),
-  isValidOffset: vi.fn(),
-  getGlobalSendCounts: vi.fn(),
-  ensureDefaultReminderRules: vi.fn(),
-  DAILY_SEND_CAP: 100,
-  MONTHLY_SEND_CAP: 3000,
-  OFFSET_MIN: -30,
-  OFFSET_MAX: 90,
-  DEFAULT_RULE_OFFSETS: [-3, 0, 7],
-}));
+vi.mock("~/services/reminders.server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/services/reminders.server")>();
+  return {
+    ...actual,
+    // Only mock DB-accessing functions
+    getShopReminderSettings: vi.fn(),
+    getShopReminderRules: vi.fn(),
+    updateShopReminderSettings: vi.fn(),
+    updateReminderRule: vi.fn(),
+    createReminderRule: vi.fn(),
+    deleteReminderRule: vi.fn(),
+    getGlobalSendCounts: vi.fn(),
+    ensureDefaultReminderRules: vi.fn(),
+    // Pure helpers use real implementations: isValidOffset, isReminderSendingEnabled
+  };
+});
 
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(),
@@ -72,7 +74,6 @@ describe("Reminder Settings Route", () => {
       const {
         getShopReminderSettings,
         getShopReminderRules,
-        isReminderSendingEnabled,
         getGlobalSendCounts,
         ensureDefaultReminderRules,
       } = await import("~/services/reminders.server");
@@ -84,9 +85,6 @@ describe("Reminder Settings Route", () => {
         null
       );
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-      (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-        false
-      );
       (getGlobalSendCounts as ReturnType<typeof vi.fn>).mockResolvedValue({
         daily: 0,
         monthly: 0,
@@ -95,6 +93,9 @@ describe("Reminder Settings Route", () => {
         seeded: true,
         count: 3,
       });
+
+      // No env vars = not configured (real isReminderSendingEnabled)
+      mockContext.cloudflare.env = {};
 
       const { loader } = await import("../app.settings.reminders");
       const result = await loader({
@@ -113,7 +114,6 @@ describe("Reminder Settings Route", () => {
       const {
         getShopReminderSettings,
         getShopReminderRules,
-        isReminderSendingEnabled,
         getGlobalSendCounts,
         ensureDefaultReminderRules,
       } = await import("~/services/reminders.server");
@@ -125,9 +125,6 @@ describe("Reminder Settings Route", () => {
         enabled: false,
       });
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-      (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-        false
-      );
       (getGlobalSendCounts as ReturnType<typeof vi.fn>).mockResolvedValue({
         daily: 0,
         monthly: 0,
@@ -136,6 +133,9 @@ describe("Reminder Settings Route", () => {
         seeded: false,
         count: 0,
       });
+
+      // Only RESEND_FROM set, RESEND_API_KEY missing (real isReminderSendingEnabled)
+      mockContext.cloudflare.env = { RESEND_FROM: "noreply@example.com" };
 
       const { loader } = await import("../app.settings.reminders");
       const result = await loader({
@@ -153,7 +153,6 @@ describe("Reminder Settings Route", () => {
       const {
         getShopReminderSettings,
         getShopReminderRules,
-        isReminderSendingEnabled,
         getGlobalSendCounts,
         ensureDefaultReminderRules,
       } = await import("~/services/reminders.server");
@@ -165,10 +164,6 @@ describe("Reminder Settings Route", () => {
         enabled: false,
       });
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-      // Only RESEND_API_KEY is set, RESEND_FROM is missing
-      (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-        false
-      );
       (getGlobalSendCounts as ReturnType<typeof vi.fn>).mockResolvedValue({
         daily: 0,
         monthly: 0,
@@ -178,6 +173,7 @@ describe("Reminder Settings Route", () => {
         count: 0,
       });
 
+      // Only RESEND_API_KEY set, RESEND_FROM missing (real isReminderSendingEnabled)
       mockContext.cloudflare.env = { RESEND_API_KEY: "re_test_123" };
 
       const { loader } = await import("../app.settings.reminders");
@@ -196,7 +192,6 @@ describe("Reminder Settings Route", () => {
       const {
         getShopReminderSettings,
         getShopReminderRules,
-        isReminderSendingEnabled,
         getGlobalSendCounts,
         ensureDefaultReminderRules,
       } = await import("~/services/reminders.server");
@@ -208,9 +203,6 @@ describe("Reminder Settings Route", () => {
         enabled: true,
       });
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-      (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-        true
-      );
       (getGlobalSendCounts as ReturnType<typeof vi.fn>).mockResolvedValue({
         daily: 50,
         monthly: 1500,
@@ -220,6 +212,7 @@ describe("Reminder Settings Route", () => {
         count: 0,
       });
 
+      // Both keys set (real isReminderSendingEnabled)
       mockContext.cloudflare.env = {
         RESEND_API_KEY: "re_test_123",
         RESEND_FROM: "noreply@example.com",
@@ -241,7 +234,6 @@ describe("Reminder Settings Route", () => {
       const {
         getShopReminderSettings,
         getShopReminderRules,
-        isReminderSendingEnabled,
         getGlobalSendCounts,
         ensureDefaultReminderRules,
         DAILY_SEND_CAP,
@@ -255,9 +247,6 @@ describe("Reminder Settings Route", () => {
         enabled: false,
       });
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-      (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-        true
-      );
       (getGlobalSendCounts as ReturnType<typeof vi.fn>).mockResolvedValue({
         daily: 42,
         monthly: 1234,
@@ -287,7 +276,6 @@ describe("Reminder Settings Route", () => {
       const {
         getShopReminderSettings,
         getShopReminderRules,
-        isReminderSendingEnabled,
         getGlobalSendCounts,
         ensureDefaultReminderRules,
       } = await import("~/services/reminders.server");
@@ -299,9 +287,6 @@ describe("Reminder Settings Route", () => {
         enabled: false,
       });
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-      (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-        true
-      );
       (getGlobalSendCounts as ReturnType<typeof vi.fn>).mockRejectedValue(
         new Error("Database error")
       );
@@ -309,6 +294,12 @@ describe("Reminder Settings Route", () => {
         seeded: false,
         count: 0,
       });
+
+      // Both keys set (real isReminderSendingEnabled)
+      mockContext.cloudflare.env = {
+        RESEND_API_KEY: "re_test_123",
+        RESEND_FROM: "noreply@example.com",
+      };
 
       const consoleErrorSpy = vi
         .spyOn(console, "error")
@@ -355,7 +346,6 @@ describe("Reminder Settings Route", () => {
       const {
         getShopReminderSettings,
         getShopReminderRules,
-        isReminderSendingEnabled,
         getGlobalSendCounts,
         ensureDefaultReminderRules,
       } = await import("~/services/reminders.server");
@@ -371,9 +361,6 @@ describe("Reminder Settings Route", () => {
         { id: "rule-2", offsetDays: 0, channel: "email", enabled: true },
         { id: "rule-3", offsetDays: 7, channel: "email", enabled: true },
       ]);
-      (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-        false
-      );
       (getGlobalSendCounts as ReturnType<typeof vi.fn>).mockResolvedValue({
         daily: 0,
         monthly: 0,
@@ -382,6 +369,9 @@ describe("Reminder Settings Route", () => {
         seeded: true,
         count: 3,
       });
+
+      // No env vars (real isReminderSendingEnabled)
+      mockContext.cloudflare.env = {};
 
       const { loader } = await import("../app.settings.reminders");
       await loader({
@@ -400,17 +390,48 @@ describe("Reminder Settings Route", () => {
   });
 
   describe("action - toggle_enabled", () => {
-    it("blocks enabling when provider is not configured", async () => {
-      const { isReminderSendingEnabled } = await import(
-        "~/services/reminders.server"
-      );
+    it("blocks enabling when only RESEND_API_KEY is set (real isReminderSendingEnabled)", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
 
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-      (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-        false
+
+      // Only RESEND_API_KEY, no RESEND_FROM
+      mockContext.cloudflare.env = { RESEND_API_KEY: "re_test_123" };
+
+      const formData = new FormData();
+      formData.append("intent", "toggle_enabled");
+      formData.append("enabled", "true");
+
+      const postRequest = new Request(
+        "https://example.com/app/settings/reminders",
+        {
+          method: "POST",
+          body: formData,
+        }
       );
+
+      const { action } = await import("../app.settings.reminders");
+      const result = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("email provider is configured");
+    });
+
+    it("blocks enabling when only RESEND_FROM is set (real isReminderSendingEnabled)", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      // Only RESEND_FROM, no RESEND_API_KEY
+      mockContext.cloudflare.env = { RESEND_FROM: "noreply@example.com" };
 
       const formData = new FormData();
       formData.append("intent", "toggle_enabled");
@@ -438,18 +459,19 @@ describe("Reminder Settings Route", () => {
     });
 
     it("allows disabling even when provider is not configured", async () => {
-      const { isReminderSendingEnabled, updateShopReminderSettings } =
-        await import("~/services/reminders.server");
+      const { updateShopReminderSettings } = await import(
+        "~/services/reminders.server"
+      );
       const { getRequestSql } = await import("~/lib/request-context.server");
 
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-      (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-        false
-      );
       (
         updateShopReminderSettings as ReturnType<typeof vi.fn>
       ).mockResolvedValue(undefined);
+
+      // No env vars (real isReminderSendingEnabled returns false)
+      mockContext.cloudflare.env = {};
 
       const formData = new FormData();
       formData.append("intent", "toggle_enabled");
@@ -476,19 +498,23 @@ describe("Reminder Settings Route", () => {
       expect(result.message).toBe("Reminders disabled");
     });
 
-    it("allows enabling when provider is configured", async () => {
-      const { isReminderSendingEnabled, updateShopReminderSettings } =
-        await import("~/services/reminders.server");
+    it("allows enabling when both RESEND_API_KEY and RESEND_FROM are set (real isReminderSendingEnabled)", async () => {
+      const { updateShopReminderSettings } = await import(
+        "~/services/reminders.server"
+      );
       const { getRequestSql } = await import("~/lib/request-context.server");
 
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-      (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-        true
-      );
       (
         updateShopReminderSettings as ReturnType<typeof vi.fn>
       ).mockResolvedValue(undefined);
+
+      // Both keys set (real isReminderSendingEnabled returns true)
+      mockContext.cloudflare.env = {
+        RESEND_API_KEY: "re_test_123",
+        RESEND_FROM: "noreply@example.com",
+      };
 
       const formData = new FormData();
       formData.append("intent", "toggle_enabled");
@@ -501,11 +527,6 @@ describe("Reminder Settings Route", () => {
           body: formData,
         }
       );
-
-      mockContext.cloudflare.env = {
-        RESEND_API_KEY: "re_test_123",
-        RESEND_FROM: "noreply@example.com",
-      };
 
       const { action } = await import("../app.settings.reminders");
       const result = await action({
@@ -521,19 +542,20 @@ describe("Reminder Settings Route", () => {
     });
   });
 
-  describe("action - update_rule", () => {
-    it("updates rule with valid offset", async () => {
-      const { isReminderSendingEnabled, isValidOffset, updateReminderRule } =
-        await import("~/services/reminders.server");
+  describe("action - update_rule (real isValidOffset)", () => {
+    it("updates rule with valid offset (7)", async () => {
+      const { updateReminderRule } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-      (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-        true
-      );
-      (isValidOffset as ReturnType<typeof vi.fn>).mockReturnValue(true);
       (updateReminderRule as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+
+      // Provider configured (real isReminderSendingEnabled)
+      mockContext.cloudflare.env = {
+        RESEND_API_KEY: "re_test_123",
+        RESEND_FROM: "noreply@example.com",
+      };
 
       const formData = new FormData();
       formData.append("intent", "update_rule");
@@ -562,17 +584,19 @@ describe("Reminder Settings Route", () => {
       expect(result.message).toBe("Rule updated");
     });
 
-    it("rejects offset at -31 (below OFFSET_MIN)", async () => {
-      const { isReminderSendingEnabled, isValidOffset, OFFSET_MIN, OFFSET_MAX } =
-        await import("~/services/reminders.server");
+    it("rejects offset at -31 (below OFFSET_MIN, real isValidOffset)", async () => {
+      const { OFFSET_MIN, OFFSET_MAX } = await import(
+        "~/services/reminders.server"
+      );
       const { getRequestSql } = await import("~/lib/request-context.server");
 
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-      (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-        true
-      );
-      (isValidOffset as ReturnType<typeof vi.fn>).mockReturnValue(false);
+
+      mockContext.cloudflare.env = {
+        RESEND_API_KEY: "re_test_123",
+        RESEND_FROM: "noreply@example.com",
+      };
 
       const formData = new FormData();
       formData.append("intent", "update_rule");
@@ -602,17 +626,19 @@ describe("Reminder Settings Route", () => {
       expect(result.error).toContain(`${OFFSET_MAX}`);
     });
 
-    it("rejects offset at 91 (above OFFSET_MAX)", async () => {
-      const { isReminderSendingEnabled, isValidOffset, OFFSET_MIN, OFFSET_MAX } =
-        await import("~/services/reminders.server");
+    it("rejects offset at 91 (above OFFSET_MAX, real isValidOffset)", async () => {
+      const { OFFSET_MIN, OFFSET_MAX } = await import(
+        "~/services/reminders.server"
+      );
       const { getRequestSql } = await import("~/lib/request-context.server");
 
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-      (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-        true
-      );
-      (isValidOffset as ReturnType<typeof vi.fn>).mockReturnValue(false);
+
+      mockContext.cloudflare.env = {
+        RESEND_API_KEY: "re_test_123",
+        RESEND_FROM: "noreply@example.com",
+      };
 
       const formData = new FormData();
       formData.append("intent", "update_rule");
@@ -642,18 +668,18 @@ describe("Reminder Settings Route", () => {
       expect(result.error).toContain(`${OFFSET_MAX}`);
     });
 
-    it("accepts offset at -30 (OFFSET_MIN boundary)", async () => {
-      const { isReminderSendingEnabled, isValidOffset, updateReminderRule } =
-        await import("~/services/reminders.server");
+    it("accepts offset at -30 (OFFSET_MIN boundary, real isValidOffset)", async () => {
+      const { updateReminderRule } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-      (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-        true
-      );
-      (isValidOffset as ReturnType<typeof vi.fn>).mockReturnValue(true);
       (updateReminderRule as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+
+      mockContext.cloudflare.env = {
+        RESEND_API_KEY: "re_test_123",
+        RESEND_FROM: "noreply@example.com",
+      };
 
       const formData = new FormData();
       formData.append("intent", "update_rule");
@@ -681,17 +707,12 @@ describe("Reminder Settings Route", () => {
       expect(result.success).toBe(true);
     });
 
-    it("accepts offset at 90 (OFFSET_MAX boundary)", async () => {
-      const { isReminderSendingEnabled, isValidOffset, updateReminderRule } =
-        await import("~/services/reminders.server");
+    it("accepts offset at 90 (OFFSET_MAX boundary, real isValidOffset)", async () => {
+      const { updateReminderRule } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-      (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-        true
-      );
-      (isValidOffset as ReturnType<typeof vi.fn>).mockReturnValue(true);
       (updateReminderRule as ReturnType<typeof vi.fn>).mockResolvedValue(true);
 
       const formData = new FormData();
@@ -721,17 +742,17 @@ describe("Reminder Settings Route", () => {
     });
 
     it("returns error when rule not found", async () => {
-      const { isReminderSendingEnabled, isValidOffset, updateReminderRule } =
-        await import("~/services/reminders.server");
+      const { updateReminderRule } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-      (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-        true
-      );
-      (isValidOffset as ReturnType<typeof vi.fn>).mockReturnValue(true);
       (updateReminderRule as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+
+      mockContext.cloudflare.env = {
+        RESEND_API_KEY: "re_test_123",
+        RESEND_FROM: "noreply@example.com",
+      };
 
       const formData = new FormData();
       formData.append("intent", "update_rule");
@@ -762,25 +783,23 @@ describe("Reminder Settings Route", () => {
   });
 
   describe("action - create_rule", () => {
-    it("creates rule with valid offset", async () => {
-      const {
-        isReminderSendingEnabled,
-        isValidOffset,
-        getShopReminderRules,
-        createReminderRule,
-      } = await import("~/services/reminders.server");
+    it("creates rule with valid offset (real isValidOffset)", async () => {
+      const { getShopReminderRules, createReminderRule } = await import(
+        "~/services/reminders.server"
+      );
       const { getRequestSql } = await import("~/lib/request-context.server");
 
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-      (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-        true
-      );
-      (isValidOffset as ReturnType<typeof vi.fn>).mockReturnValue(true);
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
       (createReminderRule as ReturnType<typeof vi.fn>).mockResolvedValue(
         "new-rule-id"
       );
+
+      mockContext.cloudflare.env = {
+        RESEND_API_KEY: "re_test_123",
+        RESEND_FROM: "noreply@example.com",
+      };
 
       const formData = new FormData();
       formData.append("intent", "create_rule");
@@ -808,19 +827,21 @@ describe("Reminder Settings Route", () => {
     });
 
     it("rejects duplicate offset", async () => {
-      const { isReminderSendingEnabled, isValidOffset, getShopReminderRules } =
-        await import("~/services/reminders.server");
+      const { getShopReminderRules } = await import(
+        "~/services/reminders.server"
+      );
       const { getRequestSql } = await import("~/lib/request-context.server");
 
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-      (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-        true
-      );
-      (isValidOffset as ReturnType<typeof vi.fn>).mockReturnValue(true);
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([
         { id: "rule-1", offsetDays: 7, channel: "email", enabled: true },
       ]);
+
+      mockContext.cloudflare.env = {
+        RESEND_API_KEY: "re_test_123",
+        RESEND_FROM: "noreply@example.com",
+      };
 
       const formData = new FormData();
       formData.append("intent", "create_rule");
@@ -850,17 +871,17 @@ describe("Reminder Settings Route", () => {
 
   describe("action - delete_rule", () => {
     it("deletes rule successfully", async () => {
-      const { isReminderSendingEnabled, deleteReminderRule } = await import(
-        "~/services/reminders.server"
-      );
+      const { deleteReminderRule } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-      (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-        true
-      );
       (deleteReminderRule as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+
+      mockContext.cloudflare.env = {
+        RESEND_API_KEY: "re_test_123",
+        RESEND_FROM: "noreply@example.com",
+      };
 
       const formData = new FormData();
       formData.append("intent", "delete_rule");
@@ -888,17 +909,17 @@ describe("Reminder Settings Route", () => {
     });
 
     it("returns error when rule has reminder history", async () => {
-      const { isReminderSendingEnabled, deleteReminderRule } = await import(
-        "~/services/reminders.server"
-      );
+      const { deleteReminderRule } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-      (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-        true
-      );
       (deleteReminderRule as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+
+      mockContext.cloudflare.env = {
+        RESEND_API_KEY: "re_test_123",
+        RESEND_FROM: "noreply@example.com",
+      };
 
       const formData = new FormData();
       formData.append("intent", "delete_rule");
@@ -928,16 +949,15 @@ describe("Reminder Settings Route", () => {
 
   describe("action - invalid intent", () => {
     it("returns error for unknown intent", async () => {
-      const { isReminderSendingEnabled } = await import(
-        "~/services/reminders.server"
-      );
       const { getRequestSql } = await import("~/lib/request-context.server");
 
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-      (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-        true
-      );
+
+      mockContext.cloudflare.env = {
+        RESEND_API_KEY: "re_test_123",
+        RESEND_FROM: "noreply@example.com",
+      };
 
       const formData = new FormData();
       formData.append("intent", "invalid_action");
@@ -1003,7 +1023,6 @@ describe("ensureDefaultReminderRules (via loader)", () => {
     const {
       getShopReminderSettings,
       getShopReminderRules,
-      isReminderSendingEnabled,
       getGlobalSendCounts,
       ensureDefaultReminderRules,
     } = await import("~/services/reminders.server");
@@ -1015,9 +1034,6 @@ describe("ensureDefaultReminderRules (via loader)", () => {
       enabled: false,
     });
     (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-    (isReminderSendingEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
-      false
-    );
     (getGlobalSendCounts as ReturnType<typeof vi.fn>).mockResolvedValue({
       daily: 0,
       monthly: 0,
@@ -1034,7 +1050,7 @@ describe("ensureDefaultReminderRules (via loader)", () => {
           admin: vi.fn().mockResolvedValue({ session: mockSession }),
         },
       },
-      cloudflare: { env: {} },
+      cloudflare: { env: {} }, // No env vars (real isReminderSendingEnabled)
     };
     const mockRequest = new Request("https://example.com/app/settings/reminders");
 
