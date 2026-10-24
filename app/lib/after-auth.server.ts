@@ -16,6 +16,7 @@ import { ensureValidation } from "./validation-registration.server";
 import { ensurePaymentCustomization } from "./payment-customization-registration.server";
 import { getRequestSql } from "./request-context.server";
 import { validateTimezone } from "./aging-dates.server";
+import { safeLog, shopHash } from "./log.server";
 import type { Sql } from "./db-light.server";
 
 /**
@@ -166,7 +167,9 @@ async function clearUninstalledAtIfSet(sql: Sql, shop: string): Promise<boolean>
       RETURNING id
     `;
     if (result.length > 0) {
-      console.log(`[afterAuth] cleared_uninstalled_at_and_onboarding shop_id=${result[0].id}`);
+      safeLog("info", "cleared_uninstalled_at_and_onboarding", {
+        shopHash: await shopHash(shop),
+      });
       return true;
     }
     return false;
@@ -349,6 +352,10 @@ export async function upsertShopOnAuth(
     DO UPDATE SET
       timezone = COALESCE(${timezone}, "Shop".timezone),
       "uninstalledAt" = NULL,
+      onboarding_dismissed_at = CASE
+        WHEN "Shop"."uninstalledAt" IS NOT NULL THEN NULL
+        ELSE "Shop".onboarding_dismissed_at
+      END,
       "updatedAt" = NOW()
     RETURNING id
   `;

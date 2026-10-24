@@ -346,18 +346,21 @@ describeWithDb("S23-09: reinstall resets onboarding_dismissed_at (DB)", () => {
       expect(after.uninstalledAt).toBeNull();
     });
 
-    it("reinstall preserves plan, timezone, credit, and other columns while clearing onboarding", async () => {
+    it("reinstall preserves plan, timezone, terms, and subscription columns while clearing onboarding", async () => {
       const TEST_SHOP = `reinstall-preserve-${TEST_SUFFIX}.myshopify.com`;
       const dismissedDate = new Date("2026-09-15T12:00:00Z");
+      const planCachedAt = new Date("2026-09-20T10:00:00Z");
 
       await sql`
         INSERT INTO "Shop" (
           domain, timezone, currency, plan_key, "defaultTermsDays",
+          subscription_id, subscription_name, is_test, plan_cached_at,
           onboarding_dismissed_at, "uninstalledAt",
           "createdAt", "updatedAt"
         )
         VALUES (
           ${TEST_SHOP}, 'America/Los_Angeles', 'USD', 'growth', 45,
+          'gid://shopify/AppSubscription/123', 'Growth Plan', true, ${planCachedAt},
           ${dismissedDate}, NOW(),
           NOW(), NOW()
         )
@@ -368,12 +371,20 @@ describeWithDb("S23-09: reinstall resets onboarding_dismissed_at (DB)", () => {
         currency: string;
         plan_key: string;
         defaultTermsDays: number | null;
+        subscription_id: string | null;
+        subscription_name: string | null;
+        is_test: boolean;
+        plan_cached_at: Date | null;
         onboarding_dismissed_at: Date | null;
       }[]>`
-        SELECT timezone, currency, plan_key, "defaultTermsDays", onboarding_dismissed_at
+        SELECT timezone, currency, plan_key, "defaultTermsDays",
+               subscription_id, subscription_name, is_test, plan_cached_at,
+               onboarding_dismissed_at
         FROM "Shop" WHERE domain = ${TEST_SHOP}
       `;
       expect(before.onboarding_dismissed_at).not.toBeNull();
+      expect(before.subscription_id).toBe("gid://shopify/AppSubscription/123");
+      expect(before.is_test).toBe(true);
 
       const { _clearUninstalledAtIfSetForTesting } = await import("../after-auth.server");
       await _clearUninstalledAtIfSetForTesting(sql, TEST_SHOP);
@@ -383,10 +394,15 @@ describeWithDb("S23-09: reinstall resets onboarding_dismissed_at (DB)", () => {
         currency: string;
         plan_key: string;
         defaultTermsDays: number | null;
+        subscription_id: string | null;
+        subscription_name: string | null;
+        is_test: boolean;
+        plan_cached_at: Date | null;
         onboarding_dismissed_at: Date | null;
         uninstalledAt: Date | null;
       }[]>`
         SELECT timezone, currency, plan_key, "defaultTermsDays",
+               subscription_id, subscription_name, is_test, plan_cached_at,
                onboarding_dismissed_at, "uninstalledAt"
         FROM "Shop" WHERE domain = ${TEST_SHOP}
       `;
@@ -397,6 +413,53 @@ describeWithDb("S23-09: reinstall resets onboarding_dismissed_at (DB)", () => {
       expect(after.currency).toBe(before.currency);
       expect(after.plan_key).toBe(before.plan_key);
       expect(after.defaultTermsDays).toBe(before.defaultTermsDays);
+      expect(after.subscription_id).toBe(before.subscription_id);
+      expect(after.subscription_name).toBe(before.subscription_name);
+      expect(after.is_test).toBe(before.is_test);
+      expect(after.plan_cached_at?.getTime()).toBe(before.plan_cached_at?.getTime());
+    });
+  });
+
+  describe("upsertShopOnAuth race condition fix", () => {
+    it("upsertShopOnAuth resets onboarding when uninstalledAt was set (race fix)", async () => {
+      const TEST_SHOP = `upsert-race-${TEST_SUFFIX}.myshopify.com`;
+      const dismissedDate = new Date("2026-10-01T00:00:00Z");
+
+      await sql`
+        INSERT INTO "Shop" (
+          domain, timezone, currency, plan_key,
+          onboarding_dismissed_at, "uninstalledAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${TEST_SHOP}, 'America/New_York', 'INR', 'starter',
+          ${dismissedDate}, NOW(),
+          NOW(), NOW()
+        )
+      `;
+
+      const [before] = await sql<{
+        onboarding_dismissed_at: Date | null;
+        uninstalledAt: Date | null;
+      }[]>`
+        SELECT onboarding_dismissed_at, "uninstalledAt"
+        FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(before.onboarding_dismissed_at).not.toBeNull();
+      expect(before.uninstalledAt).not.toBeNull();
+
+      const { upsertShopOnAuth } = await import("../after-auth.server");
+      await upsertShopOnAuth(sql, TEST_SHOP, "America/New_York");
+
+      const [after] = await sql<{
+        onboarding_dismissed_at: Date | null;
+        uninstalledAt: Date | null;
+      }[]>`
+        SELECT onboarding_dismissed_at, "uninstalledAt"
+        FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(after.onboarding_dismissed_at).toBeNull();
+      expect(after.uninstalledAt).toBeNull();
     });
   });
 

@@ -674,6 +674,54 @@ describe("after-auth", () => {
 
       consoleSpy.mockRestore();
     });
+
+    it("S23-09: reinstall log uses safeLog with shopHash, no raw id or domain", async () => {
+      const consoleLogSpy = vi
+        .spyOn(console, "log")
+        .mockImplementation(() => {});
+
+      mockEnsureValidation.mockResolvedValue({
+        id: "gid://shopify/Validation/123",
+        created: true,
+      });
+
+      mockSqlQuery.mockResolvedValueOnce([{ id: "shop-uuid-123" }]);
+
+      const mockAdmin = createMockAdmin();
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
+
+      runAfterAuth(
+        "safelog-test.myshopify.com",
+        mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
+      );
+
+      await Promise.allSettled(waitUntilPromises);
+
+      await vi.waitFor(() => {
+        const safeLogCall = consoleLogSpy.mock.calls.find(
+          (call) =>
+            typeof call[0] === "string" &&
+            call[0].includes("cleared_uninstalled_at_and_onboarding"),
+        );
+        expect(safeLogCall).toBeDefined();
+
+        const logOutput = safeLogCall![0] as string;
+        const parsed = JSON.parse(logOutput);
+
+        expect(parsed.event).toBe("cleared_uninstalled_at_and_onboarding");
+        expect(parsed.shopHash).toBeDefined();
+        expect(typeof parsed.shopHash).toBe("string");
+        expect(parsed.shopHash.length).toBeGreaterThan(0);
+
+        expect(logOutput).not.toContain("shop-uuid-123");
+        expect(logOutput).not.toContain("safelog-test.myshopify.com");
+        expect(logOutput).not.toContain("shop_id=");
+      });
+
+      consoleLogSpy.mockRestore();
+    });
   });
 
 });
