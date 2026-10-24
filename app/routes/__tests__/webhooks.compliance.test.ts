@@ -355,10 +355,10 @@ describe("webhooks.compliance", () => {
       );
     });
 
-    it("returns 401 when shop mismatch (via verifyPayloadShopMatch)", async () => {
+    it("returns 400 when shop mismatch (via verifyPayloadShopMatch)", async () => {
       const badRequestResponse = new Response(undefined, {
-        status: 401,
-        statusText: "Payload shop_domain does not match header shop",
+        status: 400,
+        statusText: "Bad Request",
       });
       mockVerifyPayloadShopMatch.mockImplementation(() => {
         throw badRequestResponse;
@@ -389,7 +389,7 @@ describe("webhooks.compliance", () => {
         expect.fail("Expected action to throw");
       } catch (error) {
         expect(error).toBeInstanceOf(Response);
-        expect((error as Response).status).toBe(401);
+        expect((error as Response).status).toBe(400);
       }
 
       expect(mockGenerateCustomerDataExport).not.toHaveBeenCalled();
@@ -545,10 +545,10 @@ describe("webhooks.compliance", () => {
       mockVerifyPayloadShopMatch.mockImplementation((headerShop: string) => headerShop);
     });
 
-    it("returns 401 when header shop differs from payload shop_domain (no deletes)", async () => {
+    it("returns 400 when header shop differs from payload shop_domain (no deletes)", async () => {
       const badRequestResponse = new Response(undefined, {
-        status: 401,
-        statusText: "Payload shop_domain does not match header shop",
+        status: 400,
+        statusText: "Bad Request",
       });
       mockVerifyPayloadShopMatch.mockImplementation(() => {
         throw badRequestResponse;
@@ -576,7 +576,7 @@ describe("webhooks.compliance", () => {
         expect.fail("Expected action to throw");
       } catch (error) {
         expect(error).toBeInstanceOf(Response);
-        expect((error as Response).status).toBe(401);
+        expect((error as Response).status).toBe(400);
       }
 
       expect(mockRedactCustomer).not.toHaveBeenCalled();
@@ -728,10 +728,10 @@ describe("webhooks.compliance", () => {
       expect(mockDeleteShop).toHaveBeenCalled();
     });
 
-    it("returns 401 when payload shop_domain does not match header shop", async () => {
+    it("returns 400 when payload shop_domain does not match header shop", async () => {
       const badRequestResponse = new Response(undefined, {
-        status: 401,
-        statusText: "Payload shop_domain does not match header shop",
+        status: 400,
+        statusText: "Bad Request",
       });
       mockVerifyPayloadShopMatch.mockImplementation(() => {
         throw badRequestResponse;
@@ -759,7 +759,7 @@ describe("webhooks.compliance", () => {
         expect.fail("Expected action to throw");
       } catch (error) {
         expect(error).toBeInstanceOf(Response);
-        expect((error as Response).status).toBe(401);
+        expect((error as Response).status).toBe(400);
       }
 
       expect(mockDeleteAllForShop).not.toHaveBeenCalled();
@@ -769,7 +769,7 @@ describe("webhooks.compliance", () => {
     it("returns 400 when payload shop_domain is missing", async () => {
       const badRequestResponse = new Response(undefined, {
         status: 400,
-        statusText: "Missing shop_domain in payload",
+        statusText: "Bad Request",
       });
       mockVerifyPayloadShopMatch.mockImplementation(() => {
         throw badRequestResponse;

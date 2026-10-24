@@ -23,14 +23,14 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     return new Response(null, { status: 500 });
   }
 
-  const { shop, topic, payload } = await verifyWebhook(request, apiSecret);
+  const { shop, topic, webhookId, payload } = await verifyWebhook(request, apiSecret);
   const normalizedTopic = normalizeWebhookTopic(topic);
 
-  console.log(`Received ${normalizedTopic} webhook for ${shop}`);
+  console.log(`[scopes_update] Received ${normalizedTopic} wh=${webhookId}`);
 
   if (normalizedTopic !== "APP_SCOPES_UPDATE") {
     console.log(
-      `[scopes_update] Ignoring unexpected topic ${normalizedTopic} for ${shop}`
+      `[scopes_update] Ignoring unexpected topic ${normalizedTopic} wh=${webhookId}`
     );
     return new Response();
   }
@@ -44,10 +44,10 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     if (currentScopes) {
       const { sessionStorage } = context;
       const count = await sessionStorage.updateScopeForShop(shop, currentScopes);
-      console.log(`Updated scopes for ${count} session(s) to: ${currentScopes}`);
+      console.log(`[scopes_update] Updated scopes for ${count} session(s) to: ${currentScopes}`);
     }
-  } catch (error) {
-    console.error(`Error updating scopes for ${shop}:`, error);
+  } catch {
+    console.error(`[scopes_update] Error updating scopes wh=${webhookId}`);
   }
 
   return new Response();
