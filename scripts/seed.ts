@@ -530,7 +530,7 @@ export async function checkDevStore(state: SeedState): Promise<boolean> {
   const result = await graphql<{ shop: ShopInfo }>(state, query);
 
   if (result.errors) {
-    console.error("  ❌ Failed to get shop info:", result.errors.map((e) => e.message).join(", "));
+    console.error(`  ❌ Failed to get shop info: ${result.errors.length} GraphQL error(s)`);
     return false;
   }
 
@@ -580,11 +580,10 @@ export async function checkB2BSupport(state: SeedState): Promise<boolean> {
       );
       if (b2bError) {
         console.error("  ❌ B2B not available on this store");
-        console.error(`     Error: ${b2bError.message}`);
         console.error("     B2B requires Shopify Plus or a dev store with B2B enabled.");
         return false;
       }
-      console.error("  ❌ GraphQL errors:", result.errors.map((e) => e.message).join(", "));
+      console.error(`  ❌ GraphQL errors: ${result.errors.length} error(s)`);
       return false;
     }
 
@@ -613,7 +612,7 @@ export async function fetchPaymentTermsTemplates(state: SeedState): Promise<bool
   const result = await graphql<{ paymentTermsTemplates: PaymentTermsTemplate[] }>(state, query);
 
   if (result.errors) {
-    console.error("  ❌ Failed to fetch payment terms templates:", result.errors.map((e) => e.message).join(", "));
+    console.error(`  ❌ Failed to fetch payment terms templates: ${result.errors.length} GraphQL error(s)`);
     return false;
   }
 
@@ -2571,7 +2570,7 @@ export async function hasContactRoleOnLocation(
  * Assign a role to a contact on a company location.
  * Returns true if successful, false on failure.
  */
-async function assignRoleToContactOnLocation(
+export async function assignRoleToContactOnLocation(
   state: SeedState,
   locationId: string,
   contactId: string,
@@ -2599,7 +2598,8 @@ async function assignRoleToContactOnLocation(
   }
 
   if (payload.userErrors.length) {
-    console.error(`    ❌ Failed to assign role: ${payload.userErrors[0].message}${payload.userErrors[0].code ? ` [${payload.userErrors[0].code}]` : ""}`);
+    const code = payload.userErrors[0].code ?? "UNKNOWN";
+    console.error(`    ❌ Failed to assign role: [${code}]`);
     return false;
   }
 
@@ -2856,7 +2856,7 @@ interface CustomersSearchResult {
  *
  * @returns Customer ID or null on failure
  */
-async function ensureTaggedCustomer(
+export async function ensureTaggedCustomer(
   state: SeedState,
   email: string,
   termsDays: number
@@ -2878,7 +2878,7 @@ async function ensureTaggedCustomer(
     );
 
     if (response.errors) {
-      console.log(`    ⚠️  GraphQL error finding customer: ${response.errors.map((e: { message: string }) => e.message).join(", ")}`);
+      console.log(`    ⚠️  GraphQL error finding customer: ${response.errors.length} error(s)`);
       return null;
     }
 
@@ -2912,7 +2912,7 @@ async function ensureTaggedCustomer(
       mutation CreateCustomer($input: CustomerInput!) {
         customerCreate(input: $input) {
           customer { id }
-          userErrors { field message }
+          userErrors { field message code }
         }
       }
     `, {
@@ -2923,12 +2923,13 @@ async function ensureTaggedCustomer(
     }, { isMutation: true });
 
     if (createResult.errors) {
-      console.log(`    ⚠️  GraphQL error creating customer: ${createResult.errors.map(e => e.message).join(", ")}`);
+      console.log(`    ⚠️  GraphQL error creating customer: ${createResult.errors.length} error(s)`);
       return null;
     }
 
     if (createResult.data?.customerCreate.userErrors.length) {
-      console.log(`    ⚠️  Failed to create customer: ${createResult.data.customerCreate.userErrors[0].message}`);
+      const code = createResult.data.customerCreate.userErrors[0].code ?? "UNKNOWN";
+      console.log(`    ⚠️  Failed to create customer: [${code}]`);
       return null;
     }
 
@@ -2950,7 +2951,7 @@ async function ensureTaggedCustomer(
     mutation TagCustomer($id: ID!, $tags: [String!]!) {
       tagsAdd(id: $id, tags: $tags) {
         node { ... on Customer { id } }
-        userErrors { field message }
+        userErrors { field message code }
       }
     }
   `, {
@@ -2959,11 +2960,12 @@ async function ensureTaggedCustomer(
   }, { isMutation: true });
 
   if (tagResult.errors) {
-    console.log(`    ⚠️  GraphQL error tagging customer: ${tagResult.errors.map(e => e.message).join(", ")}`);
+    console.log(`    ⚠️  GraphQL error tagging customer: ${tagResult.errors.length} error(s)`);
   }
 
   if (tagResult.data?.tagsAdd.userErrors.length) {
-    console.log(`    ⚠️  Failed to tag customer: ${tagResult.data.tagsAdd.userErrors[0].message}`);
+    const code = tagResult.data.tagsAdd.userErrors[0].code ?? "UNKNOWN";
+    console.log(`    ⚠️  Failed to tag customer: [${code}]`);
   }
 
   return customerId;
@@ -3614,8 +3616,7 @@ function validateEnv(): { shop: string; token: string; databaseUrl: string | nul
 
   // Security: enforce hardcoded dev store domain
   if (shop !== ALLOWED_DEV_STORE) {
-    console.error(`❌ Security: seed script only runs on ${ALLOWED_DEV_STORE}`);
-    console.error(`   Received SHOP=${shop}`);
+    console.error("❌ Security: SHOP is not a valid dev-store domain");
     console.error("   This guard prevents accidental mutation of production data.");
     return null;
   }

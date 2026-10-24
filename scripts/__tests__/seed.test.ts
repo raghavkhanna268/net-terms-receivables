@@ -6123,6 +6123,107 @@ describe("reset functionality", () => {
     logSpy.mockRestore();
     errorSpy.mockRestore();
   });
+
+  it("GraphQL errors path prints error count, not message text", async () => {
+    const sentinelMessage = "GRAPHQL_SENTINEL_MESSAGE_12345";
+    
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+
+      // Simulate GraphQL error for ensureTaggedCustomer's customer search
+      // Note: Do NOT use THROTTLED code as it triggers retry logic
+      if (query.includes("customers") && query.includes("email")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            errors: [
+              { message: sentinelMessage, extensions: { code: "INTERNAL_ERROR" } },
+              { message: "Second error", extensions: { code: "ACCESS_DENIED" } },
+            ],
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    
+    const { ensureTaggedCustomer } = await import("../seed");
+    const state = createMockState();
+
+    await ensureTaggedCustomer(state, "test@example.com", 30);
+
+    const logOutput = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    const errorOutput = errorSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    const allOutput = logOutput + "\n" + errorOutput;
+    
+    // Output should NOT contain the sentinel error message
+    expect(allOutput).not.toContain(sentinelMessage);
+    expect(allOutput).not.toContain("GRAPHQL_SENTINEL");
+    expect(allOutput).not.toContain("Second error");
+    
+    // Should contain the error count instead
+    expect(allOutput).toContain("2 error(s)");
+    
+    logSpy.mockRestore();
+    errorSpy.mockRestore();
+  });
+
+  it("role-assignment userErrors prints code only, not message text", async () => {
+    const sentinelMessage = "ROLE_ASSIGNMENT_SENTINEL_MESSAGE_99999";
+    
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+
+      // Simulate companyLocationAssignRoles userError
+      if (query.includes("companyLocationAssignRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyLocationAssignRoles: {
+                roleAssignments: [],
+                userErrors: [{ field: ["roleId"], message: sentinelMessage, code: "ROLE_NOT_FOUND" }],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    
+    const { assignRoleToContactOnLocation } = await import("../seed");
+    const state = createMockState();
+
+    await assignRoleToContactOnLocation(state, "gid://location/1", "gid://contact/1", "gid://role/1", "Ordering only");
+
+    const logOutput = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    const errorOutput = errorSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    const allOutput = logOutput + "\n" + errorOutput;
+    
+    // Output should NOT contain the sentinel error message
+    expect(allOutput).not.toContain(sentinelMessage);
+    expect(allOutput).not.toContain("ROLE_ASSIGNMENT_SENTINEL");
+    
+    // Should contain only the error code
+    expect(allOutput).toContain("[ROLE_NOT_FOUND]");
+    expect(allOutput).toContain("Failed to assign role");
+    
+    logSpy.mockRestore();
+    errorSpy.mockRestore();
+  });
 });
 
 describe("failed counts and exit code", () => {
