@@ -75,6 +75,10 @@ const ALLOWED_KEY_PATTERNS: RegExp[] = [
   /^byteOffset$/,
   /^ownerType$/,
   /^lineCount$/,
+  /^metric$/,
+  /^value$/,
+  /^rating$/,
+  /^route$/,
 ];
 
 /**
@@ -92,6 +96,42 @@ const SENSITIVE_VALUE_PATTERNS: RegExp[] = [
 ];
 
 const REDACTED = "<redacted>";
+
+/**
+ * Web Vitals metric names (S23-30).
+ * Only these exact values are allowed for the `metric` key.
+ */
+const WEB_VITALS_METRICS = new Set(["LCP", "CLS", "INP"]);
+
+/**
+ * Web Vitals rating values.
+ * Computed server-side from Google's standard thresholds.
+ */
+const WEB_VITALS_RATINGS = new Set(["good", "needs-improvement", "poor"]);
+
+/**
+ * Valid route-id enum values for Web Vitals logging.
+ * Maps from validated paths to safe identifiers. Never log raw paths.
+ */
+const WEB_VITALS_ROUTES = new Set([
+  "app_home",
+  "app_accounts",
+  "app_data_requests",
+  "app_data_requests_download",
+  "app_imports",
+  "app_onboarding",
+  "app_plan",
+  "app_reconcile",
+  "app_settings_reminders",
+  "other",
+]);
+
+/**
+ * Value bounds for Web Vitals metrics.
+ * - LCP/INP: 0 to 60000 ms
+ * - CLS: 0 to 10
+ */
+const WEB_VITALS_VALUE_BOUNDS = { min: 0, maxMs: 60000, maxCls: 10 };
 
 /**
  * Pattern for valid error codes.
@@ -166,10 +206,61 @@ function redactValue(value: unknown, key: string): unknown {
 }
 
 /**
+ * Validate and transform a Web Vitals `metric` value.
+ * Only LCP, CLS, INP are allowed.
+ */
+function validateMetricValue(value: unknown): string | null {
+  if (typeof value === "string" && WEB_VITALS_METRICS.has(value)) {
+    return value;
+  }
+  return null;
+}
+
+/**
+ * Validate and transform a Web Vitals `value` field.
+ * Must be a finite number, clamped to bounds, rounded.
+ */
+function validateWebVitalsValue(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  const clamped = Math.max(WEB_VITALS_VALUE_BOUNDS.min, Math.min(value, WEB_VITALS_VALUE_BOUNDS.maxMs));
+  return Math.round(clamped * 10000) / 10000;
+}
+
+/**
+ * Validate and transform a Web Vitals `rating` value.
+ * Only good, needs-improvement, poor are allowed.
+ */
+function validateRatingValue(value: unknown): string | null {
+  if (typeof value === "string" && WEB_VITALS_RATINGS.has(value)) {
+    return value;
+  }
+  return null;
+}
+
+/**
+ * Validate and transform a Web Vitals `route` value.
+ * Must be a valid route-id enum value.
+ */
+function validateRouteValue(value: unknown): string | null {
+  if (typeof value === "string" && WEB_VITALS_ROUTES.has(value)) {
+    return value;
+  }
+  return null;
+}
+
+/**
  * Redact all fields in an object, keeping only allowlisted keys.
  * Non-allowlisted keys have all values redacted (including numbers, per #174 money rule).
  * Only booleans pass through for non-allowlisted keys.
  * The `err` key is special: it is routed through toErrorCode to ensure only safe codes.
+ *
+ * Web Vitals keys (S23-30) have strict validation:
+ * - metric: must be LCP, CLS, or INP
+ * - value: must be finite number, clamped and rounded
+ * - rating: must be good, needs-improvement, or poor
+ * - route: must be a valid route-id enum
  */
 function redactFields(fields: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
@@ -177,6 +268,18 @@ function redactFields(fields: Record<string, unknown>): Record<string, unknown> 
   for (const [key, value] of Object.entries(fields)) {
     if (key === "err") {
       result[key] = toErrorCode(value);
+    } else if (key === "metric") {
+      const validated = validateMetricValue(value);
+      result[key] = validated ?? REDACTED;
+    } else if (key === "value") {
+      const validated = validateWebVitalsValue(value);
+      result[key] = validated ?? REDACTED;
+    } else if (key === "rating") {
+      const validated = validateRatingValue(value);
+      result[key] = validated ?? REDACTED;
+    } else if (key === "route") {
+      const validated = validateRouteValue(value);
+      result[key] = validated ?? REDACTED;
     } else if (isAllowedKey(key)) {
       result[key] = redactValue(value, key);
     } else {

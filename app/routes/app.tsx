@@ -3,6 +3,7 @@ import { Outlet, useLoaderData, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 import { runAfterAuth } from "~/lib/after-auth.server";
+import { useEffect } from "react";
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   // Session storage is injected per-request via loadContext in workers/app.ts
@@ -18,6 +19,20 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
 export default function App() {
   const { apiKey } = useLoaderData<typeof loader>();
+
+  useEffect(() => {
+    let cleanup: (() => void) | undefined;
+
+    import("~/lib/web-vitals.client").then(({ registerWebVitalsReporter }) => {
+      cleanup = registerWebVitalsReporter();
+    }).catch(() => {
+      // Silently ignore - Web Vitals reporting is optional
+    });
+
+    return () => {
+      cleanup?.();
+    };
+  }, []);
 
   return (
     <AppProvider apiKey={apiKey}>
