@@ -32,6 +32,7 @@ import type { Sql } from "~/lib/db-light.server";
 import { renderPaymentReminderEmail } from "~/emails/PaymentReminderEmail";
 import { validateTimezone } from "~/lib/aging-dates.server";
 import { DateTime } from "luxon";
+import { isAccountActive } from "~/services/gating.server";
 
 /**
  * Daily send cap (Resend free tier: 100 emails/day).
@@ -123,6 +124,7 @@ export interface ReminderInvoiceData {
   status: "open" | "paid" | "cancelled";
   buyerEmail: string | null;
   buyerName: string | null;
+  buyerAccountGatedAt: Date | null;
 }
 
 /**
@@ -159,6 +161,7 @@ export async function getInvoiceForReminder(
       status: string;
       buyerAccountId: string;
       customerId: string | null;
+      buyerAccountGatedAt: Date | null;
     }[]
   >`
     SELECT
@@ -172,7 +175,8 @@ export async function getInvoiceForReminder(
       i."dueAt",
       i.status,
       i."buyerAccountId",
-      ba."customerId"
+      ba."customerId",
+      ba.gated_at AS "buyerAccountGatedAt"
     FROM "Invoice" i
     INNER JOIN "Shop" s ON s.id = i."shopId"
     INNER JOIN "BuyerAccount" ba ON ba.id = i."buyerAccountId"
@@ -218,6 +222,7 @@ export async function getInvoiceForReminder(
     status: row.status as "open" | "paid" | "cancelled",
     buyerEmail,
     buyerName,
+    buyerAccountGatedAt: row.buyerAccountGatedAt,
   };
 }
 
@@ -434,13 +439,14 @@ export function getReminderLabel(offsetDays: number): string {
  * This function:
  * 1. Checks provider gate (RESEND_API_KEY + RESEND_FROM) - if missing, acks WITHOUT consuming slot/cap
  * 2. Checks send window (09:00-19:00 in shop's timezone)
- * 3. Re-checks if reminder day matches today in shop's timezone
+ * 3. Checks if buyer account is gated (over plan limit) - skips when PLAN_GATING_ENFORCED=true
  * 4. Verifies invoice is still open
- * 5. Checks buyer has email (via CUSTOMER_PII_FIELDS mechanism)
- * 6. Claims the reminder slot (idempotency)
- * 7. Reserves global cap slot atomically
- * 8. Sends via Resend API with Idempotency-Key header
- * 9. On non-retryable error (401, 4xx): releases cap slot to avoid waste
+ * 5. Re-checks if reminder day matches today in shop's timezone
+ * 6. Checks buyer has email (via CUSTOMER_PII_FIELDS mechanism)
+ * 7. Claims the reminder slot (idempotency)
+ * 8. Reserves global cap slot atomically
+ * 9. Sends via Resend API with Idempotency-Key header
+ * 10. On non-retryable error (401, 4xx): releases cap slot to avoid waste
  *
  * @param sql - Database connection
  * @param shopId - Shop ID
@@ -493,7 +499,17 @@ export async function sendPaymentReminder(
     };
   }
 
-  // Gate 3: Re-check invoice status at send time
+  // Gate 3: Check if buyer account is gated (over plan limit)
+  // When PLAN_GATING_ENFORCED is on, no reminders to gated accounts
+  if (!isAccountActive(invoice.buyerAccountGatedAt)) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Buyer account is gated (over plan limit)",
+    };
+  }
+
+  // Gate 4: Re-check invoice status at send time
   if (invoice.status !== "open") {
     return {
       success: true,
@@ -502,7 +518,7 @@ export async function sendPaymentReminder(
     };
   }
 
-  // Gate 4: Re-check if this is the right day in shop's timezone
+  // Gate 5: Re-check if this is the right day in shop's timezone
   if (!isReminderDueToday(invoice.dueAt, offsetDays, invoice.shopTimezone)) {
     return {
       success: true,
@@ -511,7 +527,7 @@ export async function sendPaymentReminder(
     };
   }
 
-  // Gate 5: Check buyer has email (via CUSTOMER_PII_FIELDS)
+  // Gate 6: Check buyer has email (via CUSTOMER_PII_FIELDS)
   // If PII field is off or email missing, skip without consuming slot or cap
   if (!invoice.buyerEmail) {
     return {
@@ -521,7 +537,7 @@ export async function sendPaymentReminder(
     };
   }
 
-  // Gate 6: Claim the reminder slot (idempotency via unique index)
+  // Gate 7: Claim the reminder slot (idempotency via unique index)
   const claimed = await claimReminderSlot(sql, shopId, ruleId, invoiceId);
   if (!claimed) {
     return {
@@ -531,7 +547,7 @@ export async function sendPaymentReminder(
     };
   }
 
-  // Gate 7: Reserve global cap slot atomically (checks both daily and monthly)
+  // Gate 8: Reserve global cap slot atomically (checks both daily and monthly)
   const reservation = await reserveGlobalSendSlot(sql);
   if (!reservation.reserved) {
     // Release reminder slot so it can retry later
