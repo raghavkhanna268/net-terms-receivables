@@ -54,4 +54,26 @@ SELECT
   (SELECT MIN(received_at) FROM webhook_receipts)                           AS oldest_receipt_at
 FROM _j;
 
+\echo '== ORDERS_UPDATED messages: receipts vs drain idempotency (s6_processed_webhooks, PK webhook_id)'
+WITH _msgs AS (
+  SELECT message FROM pgmq.a_s6_sync
+  WHERE msg_id = ANY (string_to_array(:'msg_ids', ',')::bigint[])
+  UNION ALL
+  SELECT message FROM pgmq.q_s6_sync
+  WHERE msg_id = ANY (string_to_array(:'msg_ids', ',')::bigint[])
+),
+_ou AS (
+  SELECT message->>'shop' AS shop, message->>'webhookId' AS webhook_id
+  FROM _msgs WHERE message->>'topic' = 'ORDERS_UPDATED'
+)
+SELECT
+  (SELECT COUNT(*) FROM _ou)                                   AS messages,
+  (SELECT COUNT(DISTINCT webhook_id) FROM _ou)                 AS distinct_webhook_ids,
+  (SELECT COUNT(DISTINCT o.webhook_id) FROM _ou o
+     WHERE EXISTS (SELECT 1 FROM webhook_receipts r
+                   WHERE r.shop = o.shop AND r.webhook_id = o.webhook_id)) AS with_webhook_receipt,
+  (SELECT COUNT(DISTINCT o.webhook_id) FROM _ou o
+     WHERE EXISTS (SELECT 1 FROM s6_processed_webhooks p
+                   WHERE p.webhook_id = o.webhook_id))         AS with_s6_processed_row;
+
 ROLLBACK;
