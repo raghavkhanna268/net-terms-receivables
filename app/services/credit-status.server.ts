@@ -27,6 +27,45 @@ import { safeLog, toErrorCode } from "~/lib/log.server";
 export type { HoldReasonCode };
 
 /**
+ * Permanent sync error codes that should not be retried nightly.
+ * These are fixed codes only - never raw Shopify/GraphQL error text.
+ * Maps to metafieldSyncErrorCode column.
+ */
+export const PERMANENT_SYNC_ERROR_CODES = [
+  "no_session",
+  "access_denied",
+  "missing_credentials",
+  "token_refresh_failed",
+  "user_error",
+  "owner_not_found",
+  "redacted",
+  "unknown_permanent",
+] as const;
+
+export type PermanentSyncErrorCode = (typeof PERMANENT_SYNC_ERROR_CODES)[number];
+
+/**
+ * Maps raw error codes to permanent sync error codes.
+ * Unknown codes map to 'unknown_permanent' to avoid storing raw error text.
+ */
+export function toPermanentSyncErrorCode(errorCode: string | undefined): PermanentSyncErrorCode {
+  if (!errorCode) return "unknown_permanent";
+  
+  // Direct matches
+  if ((PERMANENT_SYNC_ERROR_CODES as readonly string[]).includes(errorCode)) {
+    return errorCode as PermanentSyncErrorCode;
+  }
+  
+  // Map related codes
+  if (errorCode === "http_403") return "access_denied";
+  if (errorCode === "token_refresh_failed" || errorCode === "invalid_grant") return "token_refresh_failed";
+  if (errorCode.startsWith("graphql_error:")) return "unknown_permanent";
+  if (errorCode === "graphql_query_error") return "unknown_permanent";
+  
+  return "unknown_permanent";
+}
+
+/**
  * Valid sources of a credit status change (for audit trail).
  * Exported const so processor.server.ts can validate message.source against it.
  */
@@ -101,6 +140,10 @@ export interface CreditStatusUpdate {
 export interface CreditStatusUpdateResult {
   success: boolean;
   error?: string;
+  /** Error code for safe logging (no PII). */
+  errorCode?: string;
+  /** Whether the error is retryable (for queue retry logic). */
+  retryable?: boolean;
   /** Whether the metafield write failed (DB was updated but metafield not synced). */
   metafieldSyncPending?: boolean;
   /** Shopify userErrors from metafieldsSet mutation. */
@@ -839,14 +882,55 @@ export async function syncCreditStatusMetafield(
   );
 
   if (!metafieldResult.success) {
+    const errorCode = metafieldResult.errorCode ?? toErrorCode(metafieldResult.error);
+    const retryable = metafieldResult.retryable;
+
     safeLog("error", "credit_status_metafield_sync_failed", {
       buyerAccountId,
-      err: toErrorCode(metafieldResult.error),
+      err: errorCode,
+      retryable,
     });
+
+    // Write credit_status.sync_failed audit event (ids and codes only)
+    // Fetch shopId for audit
+    const [accountInfo] = await sql<{ shopId: string }[]>`
+      SELECT "shopId" FROM "BuyerAccount" WHERE id = ${buyerAccountId}
+    `;
+    if (accountInfo) {
+      await sql`
+        INSERT INTO "AuditEvent" ("shopId", actor, type, data, at)
+        VALUES (
+          ${accountInfo.shopId},
+          'system',
+          'credit_status.sync_failed',
+          ${sql.json({
+            buyerAccountId,
+            errorCode,
+            syncVersion: txResult.syncVersion,
+          })},
+          NOW()
+        )
+      `;
+    }
+
+    // Set permanent error marker if not retryable (respecting syncVersion guard)
+    if (retryable === false) {
+      const permanentCode = toPermanentSyncErrorCode(errorCode);
+      await sql`
+        UPDATE "BuyerAccount"
+        SET "metafieldSyncErrorCode" = ${permanentCode},
+            "metafieldSyncErrorAt" = NOW()
+        WHERE id = ${buyerAccountId}
+          AND "syncVersion" = ${txResult.syncVersion}
+      `;
+    }
+
     return {
       success: true,
       metafieldSyncPending: true,
       error: `metafield_sync_failed`,
+      errorCode,
+      retryable,
     };
   }
 
@@ -856,18 +940,55 @@ export async function syncCreditStatusMetafield(
       buyerAccountId,
       errorCount: userErrors.length,
     });
+
+    // Write credit_status.sync_failed audit event for userErrors
+    const [accountInfo] = await sql<{ shopId: string }[]>`
+      SELECT "shopId" FROM "BuyerAccount" WHERE id = ${buyerAccountId}
+    `;
+    if (accountInfo) {
+      await sql`
+        INSERT INTO "AuditEvent" ("shopId", actor, type, data, at)
+        VALUES (
+          ${accountInfo.shopId},
+          'system',
+          'credit_status.sync_failed',
+          ${sql.json({
+            buyerAccountId,
+            errorCode: "user_error",
+            syncVersion: txResult.syncVersion,
+          })},
+          NOW()
+        )
+      `;
+    }
+
+    // userErrors are permanent failures - set marker
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "metafieldSyncErrorCode" = 'user_error',
+          "metafieldSyncErrorAt" = NOW()
+      WHERE id = ${buyerAccountId}
+        AND "syncVersion" = ${txResult.syncVersion}
+    `;
+
     return {
       success: true,
       metafieldSyncPending: true,
       userErrors,
       error: `metafield_user_errors`,
+      errorCode: "user_error",
+      retryable: false,
     };
   }
 
-  // Clear syncPending and set metafieldSyncedAt only if syncVersion matches
+  // Clear syncPending, set metafieldSyncedAt, and clear any error marker
+  // Only if syncVersion matches (no newer write occurred)
   const clearResult = await sql<{ id: string }[]>`
     UPDATE "BuyerAccount"
-    SET "syncPending" = false, "metafieldSyncedAt" = NOW()
+    SET "syncPending" = false,
+        "metafieldSyncedAt" = NOW(),
+        "metafieldSyncErrorCode" = NULL,
+        "metafieldSyncErrorAt" = NULL
     WHERE id = ${buyerAccountId}
       AND "syncVersion" = ${txResult.syncVersion}
     RETURNING id

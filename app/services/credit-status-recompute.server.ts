@@ -43,6 +43,8 @@ export interface RecomputeResult {
   newHold: boolean;
   /** Error message if failed */
   error?: string;
+  /** Error code for safe logging (no PII) */
+  errorCode?: string;
   /** Whether the error is retryable */
   retryable?: boolean;
 }
@@ -150,7 +152,8 @@ export async function recomputeCreditStatus(
       previousHold,
       newHold,
       error: syncResult.error,
-      retryable: true,
+      errorCode: syncResult.errorCode,
+      retryable: syncResult.retryable ?? true,
     };
   }
 
@@ -165,7 +168,8 @@ export async function recomputeCreditStatus(
       previousHold,
       newHold,
       error: syncResult.error,
-      retryable: true,
+      errorCode: syncResult.errorCode,
+      retryable: syncResult.retryable ?? true,
     };
   }
 
