@@ -785,6 +785,82 @@ describeWithDb("Order Sync", () => {
       expect(result.outstanding).toBe("0.00");
     });
 
+    it("sets status cancelled and outstanding 0 for REFUNDED orders", () => {
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/refunded-1",
+        name: "#REFUNDED",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "REFUNDED",
+        totalPriceSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        totalRefundedSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt-refunded",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      const result = mapOrderToInvoice("shop-1", "account-1", order);
+
+      expect(result.status).toBe("cancelled");
+      expect(result.outstanding).toBe("0.00");
+    });
+
+    it("sets status cancelled and outstanding 0 for VOIDED orders", () => {
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/voided-1",
+        name: "#VOIDED",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "VOIDED",
+        totalPriceSet: {
+          shopMoney: { amount: "30000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt-voided",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      const result = mapOrderToInvoice("shop-1", "account-1", order);
+
+      expect(result.status).toBe("cancelled");
+      expect(result.outstanding).toBe("0.00");
+    });
+
+    it("reduces outstanding by refund amount for PARTIALLY_REFUNDED orders", () => {
+      const order: ShopifyOrder = {
+        id: "gid://shopify/Order/partial-refund-1",
+        name: "#PARTIAL_REFUND",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PARTIALLY_REFUNDED",
+        totalPriceSet: {
+          shopMoney: { amount: "100000.00", currencyCode: "INR" },
+        },
+        totalRefundedSet: {
+          shopMoney: { amount: "25000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt-partial",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      const result = mapOrderToInvoice("shop-1", "account-1", order);
+
+      // Status is still open (balance remains)
+      expect(result.status).toBe("open");
+      // Outstanding = total - refunded = 100000 - 25000 = 75000
+      expect(result.outstanding).toBe("75000.00");
+      // Total should remain unchanged
+      expect(result.total).toBe("100000.00");
+    });
+
     it("uses processedAt for issuedAt when processedAt is 35 days before createdAt", () => {
       // Simulate a backdated order via orderCreate: processedAt is 35 days before createdAt
       // S6 sync must use processedAt (not createdAt) for issuedAt

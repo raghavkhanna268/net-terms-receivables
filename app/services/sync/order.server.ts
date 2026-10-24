@@ -192,12 +192,38 @@ export function mapOrderToInvoiceWithEligibility(
   // Use due date from S9 inference (eligibility result)
   const dueDate = eligibility.dueDate;
 
-  // Determine status
+  // Determine status and outstanding based on displayFinancialStatus
   let status: "open" | "paid" | "cancelled" = "open";
+  let outstanding = total;
+
   if (order.cancelledAt) {
     status = "cancelled";
-  } else if (order.displayFinancialStatus === "PAID") {
-    status = "paid";
+    outstanding = total; // Preserve total for cancelled orders
+  } else {
+    switch (order.displayFinancialStatus) {
+      case "PAID":
+        status = "paid";
+        outstanding = "0.00";
+        break;
+      case "REFUNDED":
+      case "VOIDED":
+        // Fully refunded/voided orders are effectively cancelled
+        status = "cancelled";
+        outstanding = "0.00";
+        break;
+      case "PARTIALLY_REFUNDED": {
+        // Reduce outstanding by the refunded amount
+        status = "open"; // Still has balance due
+        const refunded = parseFloat(order.totalRefundedSet?.shopMoney.amount ?? "0.00");
+        const totalAmount = parseFloat(total);
+        outstanding = Math.max(0, totalAmount - refunded).toFixed(2);
+        break;
+      }
+      default:
+        // PENDING, PARTIALLY_PAID, AUTHORIZED, etc.
+        status = "open";
+        outstanding = total;
+    }
   }
 
   return {
@@ -206,7 +232,7 @@ export function mapOrderToInvoiceWithEligibility(
     orderId: order.id,
     name: order.name,
     total,
-    outstanding: status === "paid" ? "0.00" : total,
+    outstanding,
     issuedAt,
     dueAt: dueDate?.dueAt ?? null,
     dueSource: dueDate?.dueSource ?? "none",
@@ -249,11 +275,35 @@ export function mapOrderToInvoice(
     dueReason = `${order.paymentTerms.paymentTermsName}: Net ${order.paymentTerms.dueInDays} days`;
   }
 
+  // Determine status and outstanding based on displayFinancialStatus
   let status: "open" | "paid" | "cancelled" = "open";
+  let outstanding = total;
+
   if (order.cancelledAt) {
     status = "cancelled";
-  } else if (order.displayFinancialStatus === "PAID") {
-    status = "paid";
+    outstanding = total;
+  } else {
+    switch (order.displayFinancialStatus) {
+      case "PAID":
+        status = "paid";
+        outstanding = "0.00";
+        break;
+      case "REFUNDED":
+      case "VOIDED":
+        status = "cancelled";
+        outstanding = "0.00";
+        break;
+      case "PARTIALLY_REFUNDED": {
+        status = "open";
+        const refunded = parseFloat(order.totalRefundedSet?.shopMoney.amount ?? "0.00");
+        const totalAmount = parseFloat(total);
+        outstanding = Math.max(0, totalAmount - refunded).toFixed(2);
+        break;
+      }
+      default:
+        status = "open";
+        outstanding = total;
+    }
   }
 
   return {
@@ -262,7 +312,7 @@ export function mapOrderToInvoice(
     orderId: order.id,
     name: order.name,
     total,
-    outstanding: status === "paid" ? "0.00" : total,
+    outstanding,
     issuedAt,
     dueAt,
     dueSource,

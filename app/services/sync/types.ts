@@ -126,6 +126,13 @@ export interface ShopifyOrder {
       currencyCode: string;
     };
   };
+  /** Total refunded amount (for PARTIALLY_REFUNDED/REFUNDED orders) */
+  totalRefundedSet?: {
+    shopMoney: {
+      amount: string;
+      currencyCode: string;
+    };
+  };
   paymentTerms?: {
     id: string;
     paymentTermsName: string;
