@@ -639,7 +639,7 @@ describe("compliance.server", () => {
     it("returns false when shop not found", async () => {
       mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
 
-      const result = await markShopUninstalled(mockSql, "unknown-shop.myshopify.com");
+      const result = await markShopUninstalled(mockSql, "test-unknown-shop.myshopify.com");
 
       expect(result).toBe(false);
     });

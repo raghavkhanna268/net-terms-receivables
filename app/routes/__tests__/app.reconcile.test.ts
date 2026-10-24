@@ -43,7 +43,7 @@ vi.mock("@shopify/shopify-app-react-router/server", () => ({
 }));
 
 describe("Reconcile Route (M5)", () => {
-  const mockSession = { shop: "sensitive-store.myshopify.com" };
+  const mockSession = { shop: "test-sensitive-store.myshopify.com" };
   const mockContext = {
     shopify: {
       authenticate: {
@@ -82,7 +82,7 @@ describe("Reconcile Route (M5)", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       const sensitiveError = new Error(
-        "Database error for sensitive-store.myshopify.com: user@example.com owes 125000"
+        "Database error for test-sensitive-store.myshopify.com: user@example.com owes 125000"
       );
       (resolvePlan as ReturnType<typeof vi.fn>).mockRejectedValue(
         sensitiveError
@@ -360,6 +360,218 @@ describe("Reconcile Route (M5)", () => {
       expect(logOutput).not.toContain("x@y.com");
 
       consoleWarnSpy.mockRestore();
+    });
+  });
+
+  describe("toHumanError mapping (P2.6)", () => {
+    it("maps error codes with prefixes to generic message", async () => {
+      const { applyMatch } = await import("~/services/apply.server");
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-human-error" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      (applyMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+        error: "retryable:shopify_api_error",
+      });
+
+      const formData = new FormData();
+      formData.append("intent", "apply");
+      formData.append("matchId", "match-123");
+
+      const postRequest = new Request("https://example.com/app/reconcile", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.reconcile");
+      const result = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("An error occurred. Please try again.");
+      expect(result.error).not.toContain("retryable:");
+      expect(result.error).not.toContain("shopify_api_error");
+    });
+
+    it("preserves human-readable error messages", async () => {
+      const { unmatchMatch } = await import("~/services/apply.server");
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-human-readable" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      (unmatchMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+        error: "Cannot unmatch: push is in progress",
+      });
+
+      const formData = new FormData();
+      formData.append("intent", "unmatch");
+      formData.append("matchId", "match-456");
+
+      const postRequest = new Request("https://example.com/app/reconcile", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.reconcile");
+      const result = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("Cannot unmatch: push is in progress");
+    });
+
+    it("maps plain error codes (no prefix) to generic message", async () => {
+      const { unmatchMatch } = await import("~/services/apply.server");
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-code-only" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      (unmatchMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+        error: "unknown_error",
+      });
+
+      const formData = new FormData();
+      formData.append("intent", "unmatch");
+      formData.append("matchId", "match-789");
+
+      const postRequest = new Request("https://example.com/app/reconcile", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.reconcile");
+      const result = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("An error occurred. Please try again.");
+    });
+
+    it("maps free text errors to generic message (fail-closed)", async () => {
+      const { applyMatch } = await import("~/services/apply.server");
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-free-text" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      (applyMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+        error: "Database error: connection refused to sensitive-host.example.com",
+      });
+
+      const formData = new FormData();
+      formData.append("intent", "apply");
+      formData.append("matchId", "match-free-text");
+
+      const postRequest = new Request("https://example.com/app/reconcile", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.reconcile");
+      const result = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("An error occurred. Please try again.");
+      expect(result.error).not.toContain("Database");
+      expect(result.error).not.toContain("sensitive-host");
+    });
+
+    it("maps error codes with digits to generic message", async () => {
+      const { applyMatch } = await import("~/services/apply.server");
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-digits" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      (applyMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+        error: "error_code_123",
+      });
+
+      const formData = new FormData();
+      formData.append("intent", "apply");
+      formData.append("matchId", "match-digits");
+
+      const postRequest = new Request("https://example.com/app/reconcile", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.reconcile");
+      const result = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("An error occurred. Please try again.");
+    });
+
+    it("maps prefixed error codes to generic message", async () => {
+      const { applyMatch } = await import("~/services/apply.server");
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-prefixed" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      (applyMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+        error: "permanent:shopify_rate_limit_exceeded",
+      });
+
+      const formData = new FormData();
+      formData.append("intent", "apply");
+      formData.append("matchId", "match-prefixed");
+
+      const postRequest = new Request("https://example.com/app/reconcile", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.reconcile");
+      const result = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("An error occurred. Please try again.");
+      expect(result.error).not.toContain("permanent:");
+      expect(result.error).not.toContain("shopify");
     });
   });
 

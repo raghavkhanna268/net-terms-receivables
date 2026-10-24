@@ -19,7 +19,7 @@ import crypto from "node:crypto";
 import type { ActionFunctionArgs } from "react-router";
 
 const SYNTHETIC_TEST_SECRET = "synthetic-test-secret-uninstalled";
-const TEST_SHOP = "uninstall-test.myshopify.com";
+const TEST_SHOP = "test-uninstall.myshopify.com";
 
 function generateShopifyHmac(body: string, secret: string): string {
   return crypto.createHmac("sha256", secret).update(body, "utf8").digest("base64");

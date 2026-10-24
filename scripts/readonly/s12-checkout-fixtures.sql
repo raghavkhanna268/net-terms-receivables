@@ -5,6 +5,10 @@
 -- (open invoice, outstanding > 0, dueAt < NOW() - 1 day).
 -- Output: one JSON object per line (psql -t -A).
 -- Usage: psql -v ON_ERROR_STOP=1 -v shop_id=<Shop.id> -t -A -f scripts/readonly/s12-checkout-fixtures.sql
+-- Output column kinds for passthrough columns (scripts/ci/check-readonly-columns.ts,
+-- see scripts/readonly/README.md). Derived counts/booleans/CASE enums need no entry.
+-- @col kind, hold_state: enum
+-- @col manual_hold, bypass: boolean
 \set ON_ERROR_STOP 1
 BEGIN TRANSACTION READ ONLY;
 SELECT json_build_object(

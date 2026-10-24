@@ -452,7 +452,7 @@ async function handlePushedMatch(
       success: false,
       invoicePaid: false,
       shopifyPushSucceeded: false,
-      error: `Failed to recover inconsistent match: ${error instanceof Error ? error.message : String(error)}`,
+      error: `permanent:${toErrorCode(error)}`,
       reasonCode: "RECOVERY_FAILED",
     };
   }
@@ -739,7 +739,7 @@ async function handleStalePushingMatch(
           success: false,
           invoicePaid: false,
           shopifyPushSucceeded: false,
-          error: `Stale reclaim finalization failed: ${error instanceof Error ? error.message : String(error)}`,
+          error: `retryable:${toErrorCode(error)}`,
         };
       }
     }
@@ -884,7 +884,7 @@ async function handleStalePushingMatch(
           success: false,
           invoicePaid: false,
           shopifyPushSucceeded: false,
-          error: shopifyResult.error ?? "Shopify call failed during stale reclaim",
+          error: shopifyResult.retryable ? "retryable:shopify_api_error" : "permanent:shopify_api_error",
           retryable: shopifyResult.retryable,
         };
       }
@@ -1060,12 +1060,11 @@ async function handleStalePushingMatch(
       reasonCode: reasonCode ?? "STALE_RECLAIM_FULL",
     };
   } catch (error) {
-    // DB error - leave in 'pushing' for stale re-claim
     return {
       success: false,
       invoicePaid: false,
       shopifyPushSucceeded: false,
-      error: `Stale reclaim failed: ${error instanceof Error ? error.message : String(error)}`,
+      error: `retryable:${toErrorCode(error)}`,
     };
   }
 }
@@ -1236,7 +1235,7 @@ async function claimMatchAndDecide(
   } catch (error) {
     return {
       success: false,
-      error: error instanceof Error ? error.message : String(error),
+      error: toErrorCode(error),
     };
   }
 }
@@ -1370,7 +1369,9 @@ async function finalizeFullApply(
           return { success: true, backstopTriggered: true };
         }
 
-        // Shopify didn't succeed - safe to release claim back to 'confirmed'
+        // Defensive: Shopify didn't succeed but invoice state changed.
+        // Currently unreachable: if Shopify fails, applyMatch returns early at L287-293.
+        // Kept as safety net in case future code paths reach here with pushSucceeded=false.
         await tx`
           UPDATE "Match"
           SET state = 'confirmed', "updatedAt" = NOW()
@@ -1380,7 +1381,7 @@ async function finalizeFullApply(
         `;
         return {
           raceDetected: true,
-          error: `Invoice state changed during push (status=${lockedInvoice.status}, outstanding=${lockedInvoice.outstandingPaise})`,
+          error: "invoice_state_changed_during_push",
         };
       }
 
@@ -1666,7 +1667,7 @@ export async function unmatchMatch(
   } catch (error) {
     return {
       success: false,
-      error: error instanceof Error ? error.message : String(error),
+      error: toErrorCode(error),
     };
   }
 }
@@ -2010,7 +2011,7 @@ async function callOrderMarkAsPaid(
   if (!result.success) {
     return {
       success: false,
-      error: result.error ?? "Shopify request failed",
+      error: result.retryable ? "retryable:shopify_api_error" : "permanent:shopify_api_error",
       retryable: result.retryable,
     };
   }
@@ -2019,7 +2020,7 @@ async function callOrderMarkAsPaid(
   if (!data) {
     return {
       success: false,
-      error: "Invalid Shopify response",
+      error: "retryable:shopify_invalid_response",
       retryable: true,
     };
   }

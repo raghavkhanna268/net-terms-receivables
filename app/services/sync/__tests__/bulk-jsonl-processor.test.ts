@@ -1555,3 +1555,35 @@ describe("Processor-level tests: batch cut and due date handling", () => {
     });
   });
 });
+
+describe("Error code format: no raw messages in returned errors", () => {
+  const SENTINEL = "SENTINEL_RAW_9f3";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+  });
+
+  it("fetchJsonlChunk network error returns error code, not raw message", async () => {
+    const { fetchJsonlChunk } = await import("../bulk-jsonl-processor.server");
+
+    global.fetch = vi.fn().mockRejectedValue(new Error(`Network failed: ${SENTINEL}`));
+
+    const result = await fetchJsonlChunk("https://example.com/test.jsonl", 0, 1024);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/^retryable:/);
+    expect(result.error).not.toContain(SENTINEL);
+  });
+
+  it("error codes use toErrorCode with retryable prefix", async () => {
+    const { fetchJsonlChunk } = await import("../bulk-jsonl-processor.server");
+
+    global.fetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
+
+    const result = await fetchJsonlChunk("https://example.com/test.jsonl", 0, 1024);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("retryable:connection_refused");
+  });
+});
