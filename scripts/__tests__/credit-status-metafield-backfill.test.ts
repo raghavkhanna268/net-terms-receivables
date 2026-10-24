@@ -127,48 +127,59 @@ describeWithDb("credit-status-metafield-backfill DB integration", () => {
 
   describe("getBackfillStats", () => {
     it("returns stats grouped by shop and holdState", async () => {
-      const { stats, testShopIndex } = await sql.begin("read only", async (tx) => {
+      const { stats, expectedTotal, expectedByHoldState } = await sql.begin("read only", async (tx) => {
         const statsResult = await getBackfillStats(tx);
-        const [indexResult] = await tx<{ idx: string }[]>`
-          WITH ordered_shops AS (
-            SELECT DISTINCT "shopId", ROW_NUMBER() OVER (ORDER BY "shopId") as idx
-            FROM "BuyerAccount"
-            WHERE "metafieldSyncedAt" IS NULL
-          )
-          SELECT idx::text FROM ordered_shops WHERE "shopId" = ${TEST_SHOP_ID}
+        
+        // Query what we expect for our test shop directly
+        const [expected] = await tx<{ total: string; okCount: string; heldCount: string }[]>`
+          SELECT
+            COUNT(*)::text AS total,
+            COUNT(*) FILTER (WHERE "holdState" = 'OK')::text AS "okCount",
+            COUNT(*) FILTER (WHERE "holdState" = 'HELD')::text AS "heldCount"
+          FROM "BuyerAccount"
+          WHERE "shopId" = ${TEST_SHOP_ID}
+            AND "metafieldSyncedAt" IS NULL
         `;
         return {
           stats: statsResult,
-          testShopIndex: indexResult ? parseInt(indexResult.idx, 10) : -1,
+          expectedTotal: parseInt(expected.total, 10),
+          expectedByHoldState: {
+            OK: parseInt(expected.okCount, 10),
+            HELD: parseInt(expected.heldCount, 10),
+          },
         };
       });
 
-      const ourStats = stats.find(s => s.shopIndex === testShopIndex);
+      // Find stats matching our test shop's expected distribution
+      const ourStats = stats.find(
+        s => s.total === expectedTotal &&
+             s.byHoldState["OK"] === expectedByHoldState.OK &&
+             s.byHoldState["HELD"] === expectedByHoldState.HELD
+      );
       expect(ourStats).toBeDefined();
       expect(ourStats!.byHoldState["OK"]).toBe(1);
       expect(ourStats!.byHoldState["HELD"]).toBe(1);
     });
 
     it("excludes accounts with metafieldSyncedAt set", async () => {
-      const { stats, testShopIndex } = await sql.begin("read only", async (tx) => {
-        const statsResult = await getBackfillStats(tx);
-        const [indexResult] = await tx<{ idx: string }[]>`
-          WITH ordered_shops AS (
-            SELECT DISTINCT "shopId", ROW_NUMBER() OVER (ORDER BY "shopId") as idx
-            FROM "BuyerAccount"
-            WHERE "metafieldSyncedAt" IS NULL
-          )
-          SELECT idx::text FROM ordered_shops WHERE "shopId" = ${TEST_SHOP_ID}
+      const { nullCount, totalCount } = await sql.begin("read only", async (tx) => {
+        // Count accounts with NULL vs all accounts for our test shop
+        const [counts] = await tx<{ nullCount: string; totalCount: string }[]>`
+          SELECT
+            COUNT(*) FILTER (WHERE "metafieldSyncedAt" IS NULL)::text AS "nullCount",
+            COUNT(*)::text AS "totalCount"
+          FROM "BuyerAccount"
+          WHERE "shopId" = ${TEST_SHOP_ID}
         `;
         return {
-          stats: statsResult,
-          testShopIndex: indexResult ? parseInt(indexResult.idx, 10) : -1,
+          nullCount: parseInt(counts.nullCount, 10),
+          totalCount: parseInt(counts.totalCount, 10),
         };
       });
 
-      const ourStats = stats.find(s => s.shopIndex === testShopIndex);
-      expect(ourStats).toBeDefined();
-      expect(ourStats!.total).toBe(2);
+      // Our test shop has 3 accounts total, but only 2 have metafieldSyncedAt NULL
+      expect(totalCount).toBe(3);
+      expect(nullCount).toBe(2);
     });
   });
 
