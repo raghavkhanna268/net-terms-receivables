@@ -182,6 +182,8 @@ model Shop {
   dataRequests    S22DataRequest[]
   // S13: Backstop processed orders
   backstopProcessedOrders BackstopProcessedOrder[]
+  // S18: Payment reminder settings
+  reminderSettings S18ShopReminderSettings?
 
   // S21: Index for finding shops by plan (analytics, batch operations)
   @@index([planKey])
@@ -916,4 +918,43 @@ model BackstopProcessedOrder {
   @@index([processedAt], map: "idx_backstop_processed_orders_processed_at")
   @@index([shopId], map: "idx_backstop_processed_orders_shop")
   @@map("backstop_processed_orders")
+}
+
+// =============================================================================
+// S18 PAYMENT REMINDERS
+// =============================================================================
+
+/// Global send count tracking (S18).
+/// Tracks GLOBAL reminder email counts for Resend free tier caps.
+/// Resend limits are per API key/account (100/day, 3000/month), not per shop.
+/// 35-day retention via pg_cron purge job.
+model S18GlobalSends {
+  /// Fixed key 'global' since Resend limits are per API key/account
+  sendKey      String   @map("send_key")
+  sendDate     DateTime @map("send_date") @db.Date
+  /// YYYY-MM format for monthly tracking
+  sendMonth    String   @map("send_month")
+  dailyCount   Int      @default(0) @map("daily_count")
+  monthlyCount Int      @default(0) @map("monthly_count")
+  updatedAt    DateTime @default(now()) @map("updated_at") @db.Timestamptz(3)
+
+  @@id([sendKey, sendDate])
+  @@index([sendKey, sendMonth], map: "idx_s18_global_sends_month")
+  @@index([sendDate], map: "idx_s18_global_sends_date")
+  @@map("s18_global_sends")
+}
+
+/// Per-shop reminder settings (S18).
+/// Stores the enabled toggle for payment reminders.
+/// enabled defaults to FALSE - merchants must explicitly enable.
+/// FK to Shop with ON DELETE CASCADE.
+model S18ShopReminderSettings {
+  shopId    String   @id @map("shop_id")
+  enabled   Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(3)
+
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade, map: "s18_shop_reminder_settings_shop_fkey")
+
+  @@map("s18_shop_reminder_settings")
 }

@@ -12,6 +12,8 @@ export type WaitUntilFn = (promise: Promise<unknown>) => void;
  */
 export interface WorkerEnv {
   CUSTOMER_PII_FIELDS?: string;
+  RESEND_API_KEY?: string;
+  RESEND_FROM?: string;
 }
 
 export interface RequestStore {
