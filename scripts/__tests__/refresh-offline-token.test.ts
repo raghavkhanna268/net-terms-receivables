@@ -170,12 +170,14 @@ describeWithDb("scripts/lib/refresh-offline-token", () => {
 
     expect(result.success).toBe(false);
     expect(result.errorCode).toBe("invalid_grant");
-    expect(result.error).toBeDefined();
+    // X6: error field removed - only errorCode is returned (no raw messages)
+    expect("error" in result).toBe(false);
 
-    // Verify error does NOT contain any token values
+    // Verify no tokens in any string fields
+    const resultStr = JSON.stringify(result);
     const tokenPatterns = [/shpat_/, /shprt_/, /shpua_/, /shpss_/];
     for (const pattern of tokenPatterns) {
-      expect(result.error).not.toMatch(pattern);
+      expect(resultStr).not.toMatch(pattern);
     }
   });
 
@@ -190,7 +192,23 @@ describeWithDb("scripts/lib/refresh-offline-token", () => {
 
     expect(result.success).toBe(false);
     expect(result.errorCode).toBe("no_session");
-    // Error must NOT contain shop domain (redaction rule)
-    expect(result.error).not.toContain("myshopify.com");
+  });
+
+  it("X6: error result has errorCode only, no raw error message (per #174)", async () => {
+    const result = await refreshOfflineTokenIfNeeded(
+      TEST_DATABASE_URL!,
+      "nonexistent-shop.myshopify.com",
+      TEST_CLIENT_ID,
+      TEST_CLIENT_SECRET,
+      0
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBeDefined();
+    // X6: Should NOT have error field with raw message (can contain domain)
+    expect("error" in result).toBe(false);
+    // Should NOT contain shop domain in any string value
+    const resultStr = JSON.stringify(result);
+    expect(resultStr).not.toContain("myshopify.com");
   });
 });

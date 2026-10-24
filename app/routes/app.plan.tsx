@@ -29,6 +29,7 @@ import {
   PLAN_DISPLAY_NAMES,
   FEATURE_DISPLAY_NAMES,
 } from "~/components/UpgradePrompt";
+import { safeLog, toErrorCode } from "~/lib/log.server";
 
 const FEATURE_DESCRIPTIONS: Record<FeatureKey, string> = {
   aging_dashboard: "Track outstanding receivables with aging buckets",
@@ -67,7 +68,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         getGatedAccountCount(sql, shop.id),
       ]);
     } catch (err) {
-      console.error("[app.plan] Error loading plan data:", err);
+      safeLog("error", "app.plan.load_plan_data_failed", { err: toErrorCode(err) });
       error = "Failed to load plan information. Please try again.";
     }
   }

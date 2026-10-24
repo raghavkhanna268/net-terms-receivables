@@ -354,6 +354,57 @@ describe("app.onboarding", () => {
   });
 });
 
+describe("P6: error logging uses safeLog JSON (no raw errors)", () => {
+  const TEST_SHOP = "test-onboard-log.myshopify.com";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("fetchValidationInfo logs safeLog JSON with error code, not raw error", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const mockGraphql = vi.fn().mockRejectedValue(new Error("GraphQL network error"));
+
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+        return Promise.resolve([{ id: "shop-log-test", defaultTermsDays: 30, onboardingDismissedAt: null }]);
+      }
+      if (query.includes("COUNT(*)")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const { loader } = await import("../app.onboarding");
+
+    await loader({
+      request: new Request("https://example.com/app/onboarding"),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+              admin: { graphql: mockGraphql },
+            }),
+          },
+        },
+      },
+      params: {},
+    } as never);
+
+    const allLogs = consoleSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+    // safeLog outputs JSON with "event" field
+    expect(allLogs).toContain('"event":"onboarding.fetch_validations_failed"');
+    expect(allLogs).toContain('"err":');
+    expect(allLogs).not.toContain("GraphQL network error");
+    expect(allLogs).not.toContain(".myshopify.com");
+
+    consoleSpy.mockRestore();
+  });
+});
+
 describe("app._index redirect", () => {
   const TEST_SHOP = "test-shop.myshopify.com";
   const TEST_SHOP_ID = "shop-123";
