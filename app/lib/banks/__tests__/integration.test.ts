@@ -243,8 +243,22 @@ describe("bank statement parsing integration", () => {
       expect(result.detection.confidence).toBeGreaterThanOrEqual(0.5);
     });
 
-    it("parses multiple transactions", () => {
-      expect(result.transactions.length).toBeGreaterThan(5);
+    it("parses exactly 14 transactions (matching fixture)", () => {
+      expect(result.transactions.length).toBe(14);
+    });
+
+    it("credit total matches fixture footer (7,93,500.00 = 79350000 paise)", () => {
+      const creditTotal = result.transactions
+        .filter((t) => t.direction === "CR")
+        .reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(creditTotal).toBe(79350000);
+    });
+
+    it("debit total matches fixture footer (2,46,850.00 = 24685000 paise)", () => {
+      const debitTotal = result.transactions
+        .filter((t) => t.direction === "DR")
+        .reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(debitTotal).toBe(24685000);
     });
 
     it("skips preamble and footer rows", () => {
@@ -274,6 +288,14 @@ describe("bank statement parsing integration", () => {
     it("extracts RTGS transactions correctly", () => {
       const rtgsTxns = result.transactions.filter((t) => t.parsed.rail === "RTGS");
       expect(rtgsTxns.length).toBeGreaterThan(0);
+    });
+
+    it("extracts ACH D as debit (not credit)", () => {
+      const achTxns = result.transactions.filter((t) => t.parsed.rail === "ACH");
+      const achDebit = achTxns.find((t) => t.narration.includes("ACH D"));
+      expect(achDebit).toBeDefined();
+      expect(achDebit?.direction).toBe("DR");
+      expect(achDebit?.amountPaise).toBe(1000000); // 10,000.00
     });
 
     it("parses dates correctly (DD/MM/YYYY format)", () => {
@@ -313,8 +335,22 @@ describe("bank statement parsing integration", () => {
       expect(result.detection.confidence).toBeGreaterThanOrEqual(0.5);
     });
 
-    it("parses multiple transactions from XLSX", () => {
-      expect(result.transactions.length).toBeGreaterThan(5);
+    it("parses exactly 14 transactions from XLSX (matching fixture)", () => {
+      expect(result.transactions.length).toBe(14);
+    });
+
+    it("XLSX credit total matches fixture footer (7,93,500.00 = 79350000 paise)", () => {
+      const creditTotal = result.transactions
+        .filter((t) => t.direction === "CR")
+        .reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(creditTotal).toBe(79350000);
+    });
+
+    it("XLSX debit total matches fixture footer (2,46,850.00 = 24685000 paise)", () => {
+      const debitTotal = result.transactions
+        .filter((t) => t.direction === "DR")
+        .reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(debitTotal).toBe(24685000);
     });
 
     it("extracts all four rails from XLSX", () => {
@@ -351,8 +387,22 @@ describe("bank statement parsing integration", () => {
       expect(result.detection.confidence).toBeGreaterThanOrEqual(0.5);
     });
 
-    it("parses multiple transactions", () => {
-      expect(result.transactions.length).toBeGreaterThan(5);
+    it("parses exactly 14 transactions (matching fixture)", () => {
+      expect(result.transactions.length).toBe(14);
+    });
+
+    it("credit total matches fixture footer (8,74,000.00 = 87400000 paise)", () => {
+      const creditTotal = result.transactions
+        .filter((t) => t.direction === "CR")
+        .reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(creditTotal).toBe(87400000);
+    });
+
+    it("debit total matches fixture footer (2,97,350.00 = 29735000 paise)", () => {
+      const debitTotal = result.transactions
+        .filter((t) => t.direction === "DR")
+        .reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(debitTotal).toBe(29735000);
     });
 
     it("skips preamble and footer rows", () => {
@@ -426,8 +476,22 @@ describe("bank statement parsing integration", () => {
       expect(result.detection.confidence).toBeGreaterThanOrEqual(0.5);
     });
 
-    it("parses multiple transactions from XLSX", () => {
-      expect(result.transactions.length).toBeGreaterThan(5);
+    it("parses exactly 14 transactions from XLSX (matching fixture)", () => {
+      expect(result.transactions.length).toBe(14);
+    });
+
+    it("XLSX credit total matches fixture footer (8,74,000.00 = 87400000 paise)", () => {
+      const creditTotal = result.transactions
+        .filter((t) => t.direction === "CR")
+        .reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(creditTotal).toBe(87400000);
+    });
+
+    it("XLSX debit total matches fixture footer (2,97,350.00 = 29735000 paise)", () => {
+      const debitTotal = result.transactions
+        .filter((t) => t.direction === "DR")
+        .reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(debitTotal).toBe(29735000);
     });
 
     it("extracts all four rails from XLSX", () => {
