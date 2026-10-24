@@ -30,12 +30,20 @@ import { getRequestSql } from "~/lib/request-context.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 
 /**
- * Shopify tag character validation pattern.
- * Tags can contain any character except commas (Shopify's only restriction)
- * and control characters (newlines, tabs, etc.).
- * Must not be empty after trimming.
+ * Check if a character is forbidden in Shopify tags.
+ * Forbidden: commas, control characters (0x00-0x1f, 0x7f), and line/paragraph separators (U+2028/U+2029).
  */
-const TAG_PATTERN = /^[^,\x00-\x1f]+$/;
+function isForbiddenTagChar(char: string): boolean {
+  const code = char.charCodeAt(0);
+  return (
+    char === "," ||
+    (code >= 0x00 && code <= 0x1f) ||
+    code === 0x7f ||
+    code === 0x2028 ||
+    code === 0x2029
+  );
+}
+
 const TAG_MAX_LENGTH = 255;
 const TERMS_DAYS_MIN = 1;
 const TERMS_DAYS_MAX = 365;
@@ -126,8 +134,10 @@ export function validateTag(tag: string): string | null {
     return `Tag must be at most ${TAG_MAX_LENGTH} characters`;
   }
 
-  if (!TAG_PATTERN.test(trimmed)) {
-    return "Tag cannot contain commas or control characters (newlines, tabs)";
+  for (const char of trimmed) {
+    if (isForbiddenTagChar(char)) {
+      return "Tag cannot contain commas or control characters";
+    }
   }
 
   return null;
@@ -302,19 +312,40 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   try {
     const parsedTermsDays = parseInt(termsDays, 10);
 
-    const result = await sql<{ id: string }[]>`
-      INSERT INTO "AccountSource" ("shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")
-      VALUES (${shop.id}, ${tag}, ${parsedTermsDays}, NOW(), NOW())
-      ON CONFLICT ("shopId", LOWER(tag)) DO NOTHING
-      RETURNING id
+    // Pre-check for case-insensitive duplicate (no matching unique index for LOWER)
+    const [existingRule] = await sql<{ id: string }[]>`
+      SELECT id FROM "AccountSource"
+      WHERE "shopId" = ${shop.id} AND LOWER(tag) = LOWER(${tag})
+      LIMIT 1
     `;
 
-    if (result.length === 0) {
+    if (existingRule) {
       return data(
         {
           success: false,
           fieldErrors: {
             tag: "A tag rule with this tag already exists (case-insensitive match)",
+          },
+        } satisfies ActionData,
+        { status: 400 }
+      );
+    }
+
+    // Insert with ON CONFLICT on existing unique index ("shopId", tag)
+    const result = await sql<{ id: string }[]>`
+      INSERT INTO "AccountSource" ("shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")
+      VALUES (${shop.id}, ${tag}, ${parsedTermsDays}, NOW(), NOW())
+      ON CONFLICT ("shopId", tag) DO NOTHING
+      RETURNING id
+    `;
+
+    if (result.length === 0) {
+      // Exact-case duplicate detected via ON CONFLICT
+      return data(
+        {
+          success: false,
+          fieldErrors: {
+            tag: "A tag rule with this tag already exists",
           },
         } satisfies ActionData,
         { status: 400 }
@@ -334,6 +365,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   } catch (err) {
     const errCode = toErrorCode(err);
 
+    // Catch 23505 unique violation (race condition fallback)
     if (
       errCode === "pg_unique_violation" ||
       (err instanceof Error && err.message.includes("23505"))
@@ -342,7 +374,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         {
           success: false,
           fieldErrors: {
-            tag: "A tag rule with this tag already exists (case-insensitive match)",
+            tag: "A tag rule with this tag already exists",
           },
         } satisfies ActionData,
         { status: 400 }
@@ -460,7 +492,7 @@ export default function TagRulesPage() {
       {actionData?.success && (
         <s-section>
           <s-banner tone="success" heading="Tag rule saved">
-            The new tag rule is now active.
+            Matching customers are picked up on the next sync.
           </s-banner>
         </s-section>
       )}

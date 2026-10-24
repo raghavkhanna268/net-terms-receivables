@@ -368,7 +368,7 @@ describe("Tag Rules Route", () => {
       expect(result.fieldErrors?.tag).toContain("control characters");
     });
 
-    it("returns 400 for duplicate tag via ON CONFLICT (case-insensitive match)", async () => {
+    it("returns 400 for case-variant duplicate via pre-check (no INSERT attempted)", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
@@ -376,8 +376,8 @@ describe("Tag Rules Route", () => {
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
-      // Insert returns empty due to ON CONFLICT DO NOTHING
-      mockSql.mockResolvedValueOnce([]);
+      // Pre-check finds existing rule with different case
+      mockSql.mockResolvedValueOnce([{ id: "existing-rule-id" }]);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
@@ -404,6 +404,66 @@ describe("Tag Rules Route", () => {
       expect(result.success).toBe(false);
       expect(result.fieldErrors?.tag).toContain("already exists");
       expect(result.fieldErrors?.tag).toContain("case-insensitive");
+
+      // Verify pre-check uses LOWER for case-insensitive match
+      const preCheckCall = mockSql.mock.calls.find((call) =>
+        call[0]?.some?.((s: string) => s?.includes?.("LOWER(tag)"))
+      );
+      expect(preCheckCall).toBeDefined();
+      expect(preCheckCall?.[0]?.some?.((s: string) => s?.includes?.("SELECT id FROM"))).toBe(true);
+
+      // Verify NO INSERT was attempted (pre-check returned early)
+      const insertCall = mockSql.mock.calls.find((call) =>
+        call[0]?.some?.((s: string) => s?.includes?.("INSERT INTO"))
+      );
+      expect(insertCall).toBeUndefined();
+    });
+
+    it("returns 400 for exact-case duplicate via ON CONFLICT empty RETURNING", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      // Shop lookup
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
+      // Pre-check finds no case-variant duplicate
+      mockSql.mockResolvedValueOnce([]);
+      // Insert returns empty due to ON CONFLICT DO NOTHING (exact-case match)
+      mockSql.mockResolvedValueOnce([]);
+
+      const formData = new FormData();
+      formData.append("intent", "create_tag_rule");
+      formData.append("tag", "net30"); // Exact match exists
+      formData.append("defaultTermsDays", "30");
+
+      const postRequest = new Request("https://example.com/app/tag-rules", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.tag-rules");
+      const rawResult = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const result = extractActionData(rawResult);
+      const status = extractStatus(rawResult);
+      expect(status).toBe(400);
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors?.tag).toContain("already exists");
+
+      // Verify INSERT was attempted with correct ON CONFLICT target
+      const insertCall = mockSql.mock.calls.find((call) =>
+        call[0]?.some?.((s: string) => s?.includes?.("INSERT INTO"))
+      );
+      expect(insertCall).toBeDefined();
+      // Assert conflict target is exactly ("shopId", tag) - no LOWER
+      expect(insertCall?.[0]?.some?.((s: string) => s?.includes?.('ON CONFLICT ("shopId", tag)'))).toBe(true);
     });
 
     it("returns 400 for empty body (no form data)", async () => {
@@ -589,6 +649,8 @@ describe("Tag Rules Route", () => {
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
+      // Pre-check for case-insensitive duplicate - none found
+      mockSql.mockResolvedValueOnce([]);
       // Insert returning id
       mockSql.mockResolvedValueOnce([{ id: "new-rule-id" }]);
 
@@ -625,6 +687,8 @@ describe("Tag Rules Route", () => {
       // Assert the bound values: shopId="shop-123", tag="net30"
       expect(insertCall?.[1]).toBe("shop-123");
       expect(insertCall?.[2]).toBe("net30");
+      // Assert conflict target is exactly ("shopId", tag) - not LOWER(tag)
+      expect(insertCall?.[0]?.some?.((s: string) => s?.includes?.('ON CONFLICT ("shopId", tag)'))).toBe(true);
     });
 
     it("creates tag rule with trimmed tag", async () => {
@@ -634,6 +698,8 @@ describe("Tag Rules Route", () => {
       // Shop lookup
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
+      // Pre-check - none found
       mockSql.mockResolvedValueOnce([]);
       // Insert returning id
       mockSql.mockResolvedValueOnce([{ id: "new-rule-id" }]);
@@ -784,7 +850,9 @@ describe("Tag Rules Route", () => {
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
-      // Insert throws 23505 unique violation
+      // Pre-check finds no duplicate
+      mockSql.mockResolvedValueOnce([]);
+      // Insert throws 23505 unique violation (race condition)
       const uniqueError = new Error("duplicate key value violates unique constraint");
       (uniqueError as Error & { code: string }).code = "23505";
       mockSql.mockRejectedValueOnce(uniqueError);
@@ -822,6 +890,8 @@ describe("Tag Rules Route", () => {
       // Shop lookup
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
+      // Pre-check finds no duplicate
       mockSql.mockResolvedValueOnce([]);
       // Insert throws error with 23505 in message
       mockSql.mockRejectedValueOnce(new Error("ERROR 23505: duplicate key value"));
@@ -908,6 +978,11 @@ describe("Tag rule validation helpers", () => {
     expect(validateTag("tag\nnewline")).toContain("control characters");
     expect(validateTag("tag\rreturn")).toContain("control characters");
     expect(validateTag("tag\x00null")).toContain("control characters");
+    // DEL character (0x7f)
+    expect(validateTag("tag\x7fdel")).toContain("control characters");
+    // Line separator (U+2028) and paragraph separator (U+2029)
+    expect(validateTag("tag\u2028linesep")).toContain("control characters");
+    expect(validateTag("tag\u2029parasep")).toContain("control characters");
   });
 
   it("validateTermsDays accepts valid values", async () => {
