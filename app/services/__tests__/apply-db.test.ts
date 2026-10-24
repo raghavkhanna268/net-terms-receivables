@@ -2362,6 +2362,40 @@ describeWithDb("S17 apply service DB integration", () => {
       expect(result.error).not.toContain("Paise");
     });
 
+    it("backstop race condition: no amount/status leak in result (issue #190)", async () => {
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      mockShopifySuccess = true;
+      mockAlreadyPaid = false;
+
+      const AMOUNT_SENTINEL = "777666555";
+      const paymentId = await createPayment(BigInt(AMOUNT_SENTINEL));
+      const invoiceId = await createInvoice(BigInt(AMOUNT_SENTINEL));
+      const matchId = await createConfirmedMatch(paymentId, invoiceId, BigInt(AMOUNT_SENTINEL));
+
+      onOrderMarkAsPaidCallback = async () => {
+        await sql`
+          UPDATE "Invoice"
+          SET status = 'paid', outstanding = 0, "updatedAt" = NOW()
+          WHERE id = ${invoiceId}
+        `;
+      };
+
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+      onOrderMarkAsPaidCallback = null;
+
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(AMOUNT_SENTINEL);
+      expect(serialized).not.toContain("outstanding");
+      expect(result.success).toBe(true);
+
+      const allLogs = consoleSpy.mock.calls.map(c => String(c[0])).join("\n");
+      expect(allLogs).toContain("apply_backstop_triggered");
+      expect(allLogs).not.toContain(AMOUNT_SENTINEL);
+      expect(allLogs).not.toContain("outstanding");
+
+      consoleSpy.mockRestore();
+    });
+
     it("error codes use toErrorCode pattern (retryable: or permanent: prefix)", async () => {
       mockShopifySuccess = false;
       const paymentId = await createPayment(1000000n);

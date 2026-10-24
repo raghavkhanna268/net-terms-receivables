@@ -1367,7 +1367,9 @@ async function finalizeFullApply(
           return { success: true, backstopTriggered: true };
         }
 
-        // Shopify didn't succeed - safe to release claim back to 'confirmed'
+        // Defensive: Shopify didn't succeed but invoice state changed.
+        // Currently unreachable: if Shopify fails, applyMatch returns early at L287-293.
+        // Kept as safety net in case future code paths reach here with pushSucceeded=false.
         await tx`
           UPDATE "Match"
           SET state = 'confirmed', "updatedAt" = NOW()

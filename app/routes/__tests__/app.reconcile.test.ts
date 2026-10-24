@@ -467,6 +467,112 @@ describe("Reconcile Route (M5)", () => {
       expect(result.success).toBe(false);
       expect(result.error).toBe("An error occurred. Please try again.");
     });
+
+    it("maps free text errors to generic message (fail-closed)", async () => {
+      const { applyMatch } = await import("~/services/apply.server");
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-free-text" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      (applyMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+        error: "Database error: connection refused to sensitive-host.example.com",
+      });
+
+      const formData = new FormData();
+      formData.append("intent", "apply");
+      formData.append("matchId", "match-free-text");
+
+      const postRequest = new Request("https://example.com/app/reconcile", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.reconcile");
+      const result = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("An error occurred. Please try again.");
+      expect(result.error).not.toContain("Database");
+      expect(result.error).not.toContain("sensitive-host");
+    });
+
+    it("maps error codes with digits to generic message", async () => {
+      const { applyMatch } = await import("~/services/apply.server");
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-digits" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      (applyMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+        error: "error_code_123",
+      });
+
+      const formData = new FormData();
+      formData.append("intent", "apply");
+      formData.append("matchId", "match-digits");
+
+      const postRequest = new Request("https://example.com/app/reconcile", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.reconcile");
+      const result = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("An error occurred. Please try again.");
+    });
+
+    it("maps prefixed error codes to generic message", async () => {
+      const { applyMatch } = await import("~/services/apply.server");
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-prefixed" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      (applyMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+        error: "permanent:shopify_rate_limit_exceeded",
+      });
+
+      const formData = new FormData();
+      formData.append("intent", "apply");
+      formData.append("matchId", "match-prefixed");
+
+      const postRequest = new Request("https://example.com/app/reconcile", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.reconcile");
+      const result = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("An error occurred. Please try again.");
+      expect(result.error).not.toContain("permanent:");
+      expect(result.error).not.toContain("shopify");
+    });
   });
 
   describe("loader success paths (no errors)", () => {
