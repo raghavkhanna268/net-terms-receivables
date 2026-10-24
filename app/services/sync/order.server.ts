@@ -35,6 +35,7 @@ import {
   type EligibilityResult,
 } from "~/lib/invoice-eligibility";
 import { incrementOrderOutstandingMissing } from "../drain/reconcile-handlers.server";
+import { enqueueRecomputeForInvoice } from "../credit-status-recompute.server";
 
 /**
  * Process an Order webhook event.
@@ -137,6 +138,15 @@ export async function processOrderWebhook(
       }
     }
 
+    // Enqueue credit status recompute (event-driven)
+    if (result.entityId) {
+      try {
+        await enqueueRecomputeForInvoice(sql, result.entityId);
+      } catch (err) {
+        console.warn(`[order.server] Failed to enqueue credit recompute: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
     await markWebhookProcessed(sql, webhookId, topic, order.id, shopDomain);
     return result;
   }
@@ -182,6 +192,15 @@ export async function processOrderWebhook(
       console.warn(
         `[order.server] Failed to increment order_outstanding_missing counter: ${err instanceof Error ? err.message : String(err)}`
       );
+    }
+  }
+
+  // Enqueue credit status recompute (event-driven)
+  if (result.entityId) {
+    try {
+      await enqueueRecomputeForInvoice(sql, result.entityId);
+    } catch (err) {
+      console.warn(`[order.server] Failed to enqueue credit recompute: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -556,6 +575,13 @@ async function cancelInvoice(
     };
   }
 
+  // Enqueue credit status recompute (event-driven)
+  try {
+    await enqueueRecomputeForInvoice(sql, result.id);
+  } catch (err) {
+    console.warn(`[order.server] Failed to enqueue credit recompute: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   return {
     success: true,
     action: "updated",
@@ -587,6 +613,13 @@ async function markInvoicePaid(
       action: "skipped",
       skipReason: "Invoice not found for paid order",
     };
+  }
+
+  // Enqueue credit status recompute (event-driven)
+  try {
+    await enqueueRecomputeForInvoice(sql, result.id);
+  } catch (err) {
+    console.warn(`[order.server] Failed to enqueue credit recompute: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   return {
