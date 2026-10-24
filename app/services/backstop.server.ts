@@ -36,6 +36,7 @@
 
 import type { Sql } from "~/lib/db-light.server";
 import { shopifyGraphQLRequest } from "./shopify-client.server";
+import { hasOverdueInvoices } from "./overdue.server";
 
 /**
  * Tag added to orders from held accounts.
@@ -451,27 +452,6 @@ async function computeExposureExcludingInvoice(
   const draftPaise = BigInt(draftResult?.total_paise ?? "0");
 
   return invoicePaise + draftPaise;
-}
-
-/**
- * Check if there are overdue invoices for this buyer.
- * Same logic as S11's hasOverdueInvoices.
- */
-async function hasOverdueInvoices(
-  sql: Sql,
-  buyerAccountId: string,
-): Promise<boolean> {
-  const [result] = await sql<{ has_overdue: boolean }[]>`
-    SELECT EXISTS (
-      SELECT 1 FROM "Invoice"
-      WHERE "buyerAccountId" = ${buyerAccountId}
-        AND status = 'open'
-        AND outstanding > 0
-        AND "dueAt" IS NOT NULL
-        AND "dueAt" < NOW() - INTERVAL '1 day'
-    ) AS has_overdue
-  `;
-  return result?.has_overdue ?? false;
 }
 
 /**
