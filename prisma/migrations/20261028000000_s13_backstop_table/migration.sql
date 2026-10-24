@@ -30,7 +30,8 @@ CREATE INDEX idx_backstop_processed_orders_shop ON backstop_processed_orders (sh
 ALTER TABLE backstop_processed_orders
   ADD CONSTRAINT backstop_processed_orders_shop_fkey
   FOREIGN KEY (shop_id) REFERENCES "Shop" (id)
-  ON DELETE CASCADE;
+  ON DELETE CASCADE
+  ON UPDATE CASCADE;
 
 -- pg_cron job to purge old records (30 day retention)
 -- Runs daily at 03:00 UTC. Idempotent: unschedules existing job before scheduling.
