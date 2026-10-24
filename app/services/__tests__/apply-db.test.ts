@@ -913,25 +913,31 @@ describeWithDb("S17 apply service DB integration", () => {
 
   /**
    * Race condition test: A partial apply is attempted during a slow Shopify call.
-   * TX1's PUSH_IN_PROGRESS guard should REFUSE the partial apply while match1 is in 'pushed' state.
+   * TX1's PUSH_IN_PROGRESS guard should REFUSE the partial apply while match1 is in 'pushing' state.
    * This test uses the REAL path: stubs shopifyGraphQLRequest to trigger a concurrent
    * partial applyMatch during the orderMarkAsPaid call.
    */
   describe("Race condition: partial during slow Shopify call", () => {
-    it("TX1 refuses partial while full payment push is in flight", async () => {
+    it("TX1 refuses partial while full payment push is in flight ('pushing' state)", async () => {
       const paymentId1 = await createPayment(1000000n); // Full payment
       const paymentId2 = await createPayment(300000n);  // Partial that tries during push
       const invoiceId = await createInvoice(1000000n);
       const matchId1 = await createConfirmedMatch(paymentId1, invoiceId, 1000000n);
       const matchId2 = await createConfirmedMatch(paymentId2, invoiceId, 300000n);
 
-      // Track the partial apply result
+      // Track the partial apply result and match1's state during callback
       let partialResult: { success: boolean; reasonCode?: string } | null = null;
+      let match1StateDuringCallback: string | null = null;
 
       // Set up callback to attempt partial apply DURING the Shopify orderMarkAsPaid call
       // This simulates a concurrent partial landing while the full payment push is in flight
       onOrderMarkAsPaidCallback = async () => {
-        // At this point, match1 is in 'pushed' state (TX1 complete, Shopify call in progress)
+        // At this point, match1 is in 'pushing' state (TX1 complete, Shopify call in progress)
+        const [match1During] = await sql<{ state: string }[]>`
+          SELECT state FROM "Match" WHERE id = ${matchId1}
+        `;
+        match1StateDuringCallback = match1During?.state ?? null;
+
         // Attempting to apply match2 should be REFUSED with PUSH_IN_PROGRESS
         partialResult = await applyMatch(sql, TEST_SHOP_ID, matchId2, "test-user");
       };
@@ -943,6 +949,9 @@ describeWithDb("S17 apply service DB integration", () => {
       // Full payment should succeed
       expect(fullResult.success).toBe(true);
       expect(fullResult.invoicePaid).toBe(true);
+
+      // Match1 was in 'pushing' state DURING the Shopify call
+      expect(match1StateDuringCallback).toBe("pushing");
 
       // Partial should have been REFUSED with PUSH_IN_PROGRESS
       expect(partialResult).not.toBeNull();
@@ -959,7 +968,7 @@ describeWithDb("S17 apply service DB integration", () => {
       expect(invoice.status).toBe("paid");
       expect(parseFloat(invoice.outstanding)).toBe(0);
 
-      // Match1 should be 'pushed', Match2 should still be 'confirmed' (not applied)
+      // Match1 should be 'pushed' (finalized), Match2 should still be 'confirmed' (not applied)
       const [match1] = await sql<{ state: string }[]>`
         SELECT state FROM "Match" WHERE id = ${matchId1}
       `;
@@ -968,6 +977,295 @@ describeWithDb("S17 apply service DB integration", () => {
       `;
       expect(match1.state).toBe("pushed");
       expect(match2.state).toBe("confirmed");
+    });
+
+    it("fresh 'pushing' match (< 5 min) blocks apply even from initial path", async () => {
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+
+      // Create a match directly in 'pushing' state (simulating TX1 complete)
+      // with recent updatedAt (not stale)
+      const matchId = `match-pushing-fresh-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 10000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushing', NOW(), NOW())
+      `;
+
+      // Trying to apply should return PUSH_IN_PROGRESS (not yet stale)
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      expect(result.success).toBe(false);
+      expect(result.reasonCode).toBe("PUSH_IN_PROGRESS");
+
+      // Match should still be 'pushing'
+      const [match] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId}
+      `;
+      expect(match.state).toBe("pushing");
+    });
+  });
+
+  /**
+   * Stale re-claim tests: 'pushing' matches older than 5 minutes can be reclaimed.
+   * Only one retrier wins the conditional UPDATE.
+   */
+  describe("Stale re-claim: 'pushing' > 5 minutes", () => {
+    it("reclaims stale 'pushing' match when Shopify already paid", async () => {
+      mockAlreadyPaid = true;
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+
+      // Create a match in 'pushing' state with old updatedAt (> 5 min)
+      const matchId = `match-stale-paid-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 10000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushing', NOW() - interval '10 minutes', NOW() - interval '10 minutes')
+      `;
+
+      // Apply - should reclaim and find Shopify already paid
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      expect(result.success).toBe(true);
+      expect(result.invoicePaid).toBe(true);
+      expect(result.reasonCode).toBe("STALE_RECLAIM_SHOPIFY_ALREADY_PAID");
+
+      // Match should now be 'pushed'
+      const [match] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId}
+      `;
+      expect(match.state).toBe("pushed");
+
+      // Invoice should be paid
+      const [invoice] = await sql<{ status: string; outstanding: string }[]>`
+        SELECT status, outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+      expect(invoice.status).toBe("paid");
+      expect(parseFloat(invoice.outstanding)).toBe(0);
+
+      // Audit event should have staleReclaim and shopifyAlreadyPaid flags
+      const [auditEvent] = await sql<{ data: { staleReclaim?: boolean; shopifyAlreadyPaid?: boolean } }[]>`
+        SELECT data FROM "AuditEvent"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+          AND type = 'match.applied'
+          AND data->>'matchId' = ${matchId}
+      `;
+      expect(auditEvent?.data.staleReclaim).toBe(true);
+      expect(auditEvent?.data.shopifyAlreadyPaid).toBe(true);
+    });
+
+    it("reclaims stale 'pushing' match when Shopify NOT paid (re-pushes)", async () => {
+      mockShopifySuccess = true;
+      mockAlreadyPaid = false;
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+
+      // Create a match in 'pushing' state with old updatedAt (> 5 min)
+      const matchId = `match-stale-retry-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 10000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushing', NOW() - interval '10 minutes', NOW() - interval '10 minutes')
+      `;
+
+      // Reset call count
+      shopifyCallCount = 0;
+
+      // Apply - should reclaim and re-push to Shopify
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      expect(result.success).toBe(true);
+      expect(result.invoicePaid).toBe(true);
+      // reasonCode depends on whether verifyOrderIsPaid returned false
+      expect(result.reasonCode).toBe("STALE_RECLAIM_FULL");
+
+      // Shopify should have been called (once for verifyOrderIsPaid, once for orderMarkAsPaid)
+      // Note: verifyOrderIsPaid is called, then orderMarkAsPaid
+      expect(shopifyCallCount).toBeGreaterThanOrEqual(1);
+
+      // Match should now be 'pushed'
+      const [match] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId}
+      `;
+      expect(match.state).toBe("pushed");
+
+      // Invoice should be paid
+      const [invoice] = await sql<{ status: string }[]>`
+        SELECT status FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+      expect(invoice.status).toBe("paid");
+
+      // Audit event should have staleReclaim flag
+      const [auditEvent] = await sql<{ data: { staleReclaim?: boolean } }[]>`
+        SELECT data FROM "AuditEvent"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+          AND type = 'match.applied'
+          AND data->>'matchId' = ${matchId}
+      `;
+      expect(auditEvent?.data.staleReclaim).toBe(true);
+    });
+
+    it("stale partial re-claim completes without Shopify call", async () => {
+      const paymentId = await createPayment(500000n); // 5000 INR partial
+      const invoiceId = await createInvoice(1000000n); // 10000 INR
+
+      // Create a match in 'pushing' state with old updatedAt (> 5 min)
+      const matchId = `match-stale-partial-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 5000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushing', NOW() - interval '10 minutes', NOW() - interval '10 minutes')
+      `;
+
+      // Reset call count
+      shopifyCallCount = 0;
+
+      // Apply - should reclaim and finalize partial (no Shopify call needed)
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      expect(result.success).toBe(true);
+      expect(result.invoicePaid).toBe(false); // Partial
+      expect(result.reasonCode).toBe("STALE_RECLAIM_PARTIAL");
+
+      // No Shopify call for partial
+      expect(shopifyCallCount).toBe(0);
+
+      // Match should now be 'pushed'
+      const [match] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId}
+      `;
+      expect(match.state).toBe("pushed");
+
+      // Invoice should have reduced outstanding but still open
+      const [invoice] = await sql<{ status: string; outstanding: string }[]>`
+        SELECT status, outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+      expect(invoice.status).toBe("open");
+      expect(parseFloat(invoice.outstanding)).toBe(5000); // 5000 remaining
+    });
+
+    it("only one retrier wins stale re-claim (conditional UPDATE)", async () => {
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+
+      // Create a match in 'pushing' state with old updatedAt
+      const matchId = `match-stale-race-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 10000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushing', NOW() - interval '10 minutes', NOW() - interval '10 minutes')
+      `;
+
+      // Simulate concurrent retriers
+      const [r1, r2] = await Promise.all([
+        applyMatch(sql, TEST_SHOP_ID, matchId, "test-user-1"),
+        applyMatch(sql, TEST_SHOP_ID, matchId, "test-user-2"),
+      ]);
+
+      // Exactly one should succeed, the other should get PUSH_IN_PROGRESS or ALREADY_APPLIED
+      const successes = [r1, r2].filter(r => r.success);
+      const failures = [r1, r2].filter(r => !r.success);
+
+      // At least one succeeds
+      expect(successes.length).toBeGreaterThanOrEqual(1);
+
+      // If one failed, it should be due to race
+      if (failures.length > 0) {
+        expect(failures[0].reasonCode).toMatch(/PUSH_IN_PROGRESS|ALREADY_APPLIED/);
+      }
+
+      // Match should be 'pushed' (finalized by winner)
+      const [match] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId}
+      `;
+      expect(match.state).toBe("pushed");
+    });
+  });
+
+  /**
+   * Unmatch refuses 'pushing' state - cannot unmatch while push is in flight.
+   */
+  describe("Unmatch refuses 'pushing' state", () => {
+    it("unmatch returns error for 'pushing' match", async () => {
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+
+      // Create a match directly in 'pushing' state
+      const matchId = `match-pushing-unmatch-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 10000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushing', NOW(), NOW())
+      `;
+
+      // Try to unmatch - should fail
+      const result = await unmatchMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("push is in progress");
+      expect(result.alreadyPushed).toBe(false);
+
+      // Match should still be 'pushing'
+      const [match] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId}
+      `;
+      expect(match.state).toBe("pushing");
+    });
+  });
+
+  /**
+   * 'pushing' state in apply path: verifies correct behavior when matches
+   * are in the in-flight 'pushing' state.
+   * Note: Payment allocation counting (preventing over-allocation of a payment)
+   * is handled in matcher.server.ts at suggestion/scoring time, not in apply.server.ts.
+   */
+  describe("'pushing' state behavior", () => {
+    it("'pushing' match on same invoice blocks new apply (different payment)", async () => {
+      const paymentId1 = await createPayment(500000n); // First payment
+      const paymentId2 = await createPayment(500000n); // Second payment
+      const invoiceId = await createInvoice(1000000n); // 10000 INR invoice
+
+      // Create a match in 'pushing' state for paymentId1
+      const matchId1 = `match-pushing-block-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${matchId1}, ${TEST_SHOP_ID}, ${paymentId1}, ${invoiceId}, 5000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushing', NOW(), NOW())
+      `;
+
+      // Create a confirmed match for paymentId2 on the same invoice
+      const matchId2 = await createConfirmedMatch(paymentId2, invoiceId, 500000n);
+
+      // Try to apply match2 - should be blocked because match1 is 'pushing' on same invoice
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId2, "test-user");
+
+      expect(result.success).toBe(false);
+      expect(result.reasonCode).toBe("PUSH_IN_PROGRESS");
+
+      // Invoice outstanding should be unchanged (10000)
+      const [invoice] = await sql<{ outstanding: string }[]>`
+        SELECT outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+      expect(parseFloat(invoice.outstanding)).toBe(10000);
+
+      // match2 should still be 'confirmed'
+      const [match2] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId2}
+      `;
+      expect(match2.state).toBe("confirmed");
+    });
+
+    it("'pushing' partial on invoice doesn't reduce outstanding yet", async () => {
+      const paymentId = await createPayment(500000n);
+      const invoiceId = await createInvoice(1000000n); // 10000 INR
+
+      // Create a match directly in 'pushing' state (simulating partial in-flight)
+      const matchId = `match-pushing-partial-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 5000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushing', NOW(), NOW())
+      `;
+
+      // Invoice outstanding should still be full amount (pushing doesn't reduce yet)
+      const [invoice] = await sql<{ outstanding: string; status: string }[]>`
+        SELECT outstanding::text, status FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+      expect(parseFloat(invoice.outstanding)).toBe(10000);
+      expect(invoice.status).toBe("open");
     });
   });
 

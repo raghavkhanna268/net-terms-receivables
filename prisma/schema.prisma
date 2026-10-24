@@ -74,6 +74,7 @@ enum PaymentStatus {
 enum MatchState {
   suggested
   confirmed
+  pushing   // S17: In-flight push (claimed but not finalized)
   pushed
   unmatched
 }

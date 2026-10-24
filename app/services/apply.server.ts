@@ -118,9 +118,14 @@ export async function applyMatch(
     };
   }
 
-  // Handle already-pushed state (idempotency and crash recovery - Issue #6)
+  // Handle already-pushed state (idempotency)
   if (matchRow.state === "pushed") {
     return handlePushedMatch(sql, shopId, matchId, matchRow, actor);
+  }
+
+  // Handle 'pushing' state (stale re-claim recovery)
+  if (matchRow.state === "pushing") {
+    return handleStalePushingMatch(sql, shopId, matchId, matchRow, actor);
   }
 
   if (matchRow.state !== "confirmed") {
@@ -491,6 +496,309 @@ async function handlePushedMatch(
 }
 
 /**
+ * Handle a match that's in 'pushing' state (stale re-claim recovery).
+ *
+ * Uses conditional UPDATE with 5-minute timeout to ensure only one retrier wins.
+ * Before re-pushing, checks Shopify order status - if already PAID, finalizes locally.
+ */
+async function handleStalePushingMatch(
+  sql: Sql,
+  shopId: string,
+  matchId: string,
+  matchRow: { id: string; shopId: string; paymentId: string; invoiceId: string; amountPaise: string },
+  actor: string
+): Promise<ApplyMatchResult> {
+  // Try to claim the stale 'pushing' match (only if > 5 minutes old)
+  // Conditional UPDATE ensures only one retrier wins
+  const [claimed] = await sql<{ id: string }[]>`
+    UPDATE "Match"
+    SET "updatedAt" = NOW()
+    WHERE id = ${matchId}
+      AND "shopId" = ${shopId}
+      AND state = 'pushing'
+      AND "updatedAt" < NOW() - interval '5 minutes'
+    RETURNING id
+  `;
+
+  if (!claimed) {
+    // Either not stale yet (< 5 minutes) or another retrier won
+    return {
+      success: false,
+      invoicePaid: false,
+      shopifyPushSucceeded: false,
+      error: "Push in progress (not yet stale)",
+      reasonCode: "PUSH_IN_PROGRESS",
+    };
+  }
+
+  // We won the re-claim. Now check invoice and Shopify status.
+  const [invoiceRow] = await sql<{
+    id: string;
+    status: string;
+    orderId: string | null;
+    shopDomain: string;
+    outstandingPaise: string;
+  }[]>`
+    SELECT
+      i.id,
+      i.status,
+      i."orderId" AS "orderId",
+      s.domain AS "shopDomain",
+      (ROUND(i.outstanding * 100))::text AS "outstandingPaise"
+    FROM "Invoice" i
+    JOIN "Shop" s ON s.id = i."shopId"
+    WHERE i.id = ${matchRow.invoiceId}
+      AND i."shopId" = ${shopId}
+  `;
+
+  if (!invoiceRow) {
+    // Release claim back to confirmed
+    await sql`
+      UPDATE "Match"
+      SET state = 'confirmed', "updatedAt" = NOW()
+      WHERE id = ${matchId} AND "shopId" = ${shopId}
+    `;
+    return {
+      success: false,
+      invoicePaid: false,
+      shopifyPushSucceeded: false,
+      error: "Invoice not found",
+    };
+  }
+
+  // If invoice is already paid locally, just finalize the match
+  if (invoiceRow.status === "paid") {
+    await sql`
+      UPDATE "Match"
+      SET state = 'pushed', "updatedAt" = NOW()
+      WHERE id = ${matchId} AND "shopId" = ${shopId}
+    `;
+    return {
+      success: true,
+      invoicePaid: true,
+      shopifyPushSucceeded: true,
+      reasonCode: "STALE_RECLAIM_ALREADY_PAID",
+    };
+  }
+
+  // Check Shopify order status before re-pushing
+  if (invoiceRow.orderId) {
+    const isAlreadyPaid = await verifyOrderIsPaid(invoiceRow.shopDomain, invoiceRow.orderId);
+
+    if (isAlreadyPaid) {
+      // Shopify already marked as paid - finalize locally without re-pushing
+      try {
+        await sql.begin(async (tx) => {
+          await tx`
+            UPDATE "Invoice"
+            SET outstanding = 0, status = 'paid', "updatedAt" = NOW()
+            WHERE id = ${invoiceRow.id}
+              AND "shopId" = ${shopId}
+          `;
+
+          await tx`
+            UPDATE "Match"
+            SET state = 'pushed', "updatedAt" = NOW()
+            WHERE id = ${matchId}
+              AND "shopId" = ${shopId}
+          `;
+
+          await writeAuditEvent(tx, shopId, actor, "match.applied", {
+            matchId,
+            invoiceId: invoiceRow.id,
+            paymentId: matchRow.paymentId,
+            amountPaise: matchRow.amountPaise,
+            previousOutstandingPaise: invoiceRow.outstandingPaise,
+            newOutstandingPaise: "0",
+            staleReclaim: true,
+            shopifyAlreadyPaid: true,
+          });
+
+          await writeAuditEvent(tx, shopId, actor, "invoice.paid", {
+            invoiceId: invoiceRow.id,
+            matchId,
+            orderGid: invoiceRow.orderId,
+            shopifyPushSucceeded: true,
+            staleReclaim: true,
+            shopifyAlreadyPaid: true,
+          });
+        });
+
+        await safeEnqueueRecompute(sql, invoiceRow.id);
+
+        return {
+          success: true,
+          invoicePaid: true,
+          shopifyPushSucceeded: true,
+          reasonCode: "STALE_RECLAIM_SHOPIFY_ALREADY_PAID",
+        };
+      } catch (error) {
+        return {
+          success: false,
+          invoicePaid: false,
+          shopifyPushSucceeded: false,
+          error: `Stale reclaim finalization failed: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
+  }
+
+  // Shopify not yet paid - need to re-push
+  // Determine if this is a partial or full payment
+  const matchAmountPaise = BigInt(matchRow.amountPaise);
+  const outstandingPaise = BigInt(invoiceRow.outstandingPaise);
+  const isFullPayment = matchAmountPaise >= outstandingPaise;
+
+  if (!isFullPayment) {
+    // Partial payment stale re-claim - finalize locally
+    try {
+      await sql.begin(async (tx) => {
+        const [lockedInvoice] = await tx<{ outstandingPaise: string }[]>`
+          SELECT (ROUND(outstanding * 100))::text AS "outstandingPaise"
+          FROM "Invoice"
+          WHERE id = ${invoiceRow.id}
+            AND "shopId" = ${shopId}
+          FOR UPDATE
+        `;
+
+        if (!lockedInvoice) {
+          throw new Error("Invoice not found during stale reclaim");
+        }
+
+        const currentOutstanding = BigInt(lockedInvoice.outstandingPaise);
+        const reduction = matchAmountPaise > currentOutstanding ? currentOutstanding : matchAmountPaise;
+        const newOutstanding = currentOutstanding - reduction;
+
+        await tx`
+          UPDATE "Invoice"
+          SET outstanding = ${Number(newOutstanding) / 100}, "updatedAt" = NOW()
+          WHERE id = ${invoiceRow.id}
+            AND "shopId" = ${shopId}
+        `;
+
+        await tx`
+          UPDATE "Match"
+          SET state = 'pushed', "updatedAt" = NOW()
+          WHERE id = ${matchId}
+            AND "shopId" = ${shopId}
+        `;
+
+        await writeAuditEvent(tx, shopId, actor, "match.applied", {
+          matchId,
+          invoiceId: invoiceRow.id,
+          paymentId: matchRow.paymentId,
+          amountPaise: reduction.toString(),
+          previousOutstandingPaise: currentOutstanding.toString(),
+          newOutstandingPaise: newOutstanding.toString(),
+          staleReclaim: true,
+        });
+      });
+
+      await safeEnqueueRecompute(sql, invoiceRow.id);
+
+      return {
+        success: true,
+        invoicePaid: false,
+        shopifyPushSucceeded: false,
+        reasonCode: "STALE_RECLAIM_PARTIAL",
+      };
+    } catch (error) {
+      return {
+        success: false,
+        invoicePaid: false,
+        shopifyPushSucceeded: false,
+        error: `Stale reclaim failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  // Full payment stale re-claim - need to call Shopify
+  let shopifySuccess = false;
+  let reasonCode: string | undefined;
+
+  if (invoiceRow.orderId) {
+    const shopifyResult = await callOrderMarkAsPaid(
+      invoiceRow.shopDomain,
+      invoiceRow.orderId
+    );
+
+    if (shopifyResult.success) {
+      shopifySuccess = true;
+    } else if (shopifyResult.alreadyPaid) {
+      shopifySuccess = true;
+      reasonCode = "STALE_RECLAIM_ALREADY_PAID_IN_SHOPIFY";
+    } else {
+      // Shopify call failed - leave in 'pushing' for another retry
+      return {
+        success: false,
+        invoicePaid: false,
+        shopifyPushSucceeded: false,
+        error: shopifyResult.error ?? "Shopify call failed during stale reclaim",
+        retryable: shopifyResult.retryable,
+      };
+    }
+  } else {
+    shopifySuccess = true;
+  }
+
+  // Finalize the stale re-claimed full payment
+  try {
+    await sql.begin(async (tx) => {
+      await tx`
+        UPDATE "Invoice"
+        SET outstanding = 0, status = 'paid', "updatedAt" = NOW()
+        WHERE id = ${invoiceRow.id}
+          AND "shopId" = ${shopId}
+      `;
+
+      await tx`
+        UPDATE "Match"
+        SET state = 'pushed', "updatedAt" = NOW()
+        WHERE id = ${matchId}
+          AND "shopId" = ${shopId}
+      `;
+
+      await writeAuditEvent(tx, shopId, actor, "match.applied", {
+        matchId,
+        invoiceId: invoiceRow.id,
+        paymentId: matchRow.paymentId,
+        amountPaise: matchRow.amountPaise,
+        previousOutstandingPaise: invoiceRow.outstandingPaise,
+        newOutstandingPaise: "0",
+        reasonCode,
+        staleReclaim: true,
+      });
+
+      await writeAuditEvent(tx, shopId, actor, "invoice.paid", {
+        invoiceId: invoiceRow.id,
+        matchId,
+        orderGid: invoiceRow.orderId,
+        shopifyPushSucceeded: shopifySuccess,
+        reasonCode,
+        staleReclaim: true,
+      });
+    });
+
+    await safeEnqueueRecompute(sql, invoiceRow.id);
+
+    return {
+      success: true,
+      invoicePaid: true,
+      shopifyPushSucceeded: shopifySuccess,
+      reasonCode: reasonCode ?? "STALE_RECLAIM_FULL",
+    };
+  } catch (error) {
+    // DB error after Shopify succeeded - leave in 'pushing' for stale re-claim
+    return {
+      success: false,
+      invoicePaid: false,
+      shopifyPushSucceeded: shopifySuccess,
+      error: `Stale reclaim finalization failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+/**
  * TX1: Lock invoice, claim match, compute reduction under lock.
  *
  * This addresses Issue #2: partial vs full must be decided UNDER THE LOCK.
@@ -537,13 +845,13 @@ async function claimMatchAndDecide(
       }
 
       // RACE CHECK: Refuse apply while another match on this invoice has an in-flight push
-      // (state='pushed' means TX1 claimed it but TX2 hasn't finalized yet)
+      // (state='pushing' means TX1 claimed it but TX2 hasn't finalized yet)
       const [inFlightPush] = await tx<{ id: string }[]>`
         SELECT id FROM "Match"
         WHERE "invoiceId" = ${invoiceRow.id}
           AND "shopId" = ${shopId}
           AND id != ${matchId}
-          AND state = 'pushed'
+          AND state = 'pushing'
         LIMIT 1
       `;
 
@@ -555,10 +863,11 @@ async function claimMatchAndDecide(
         };
       }
 
-      // Claim the match with conditional UPDATE - IDOR protection: filter by shopId
+      // Claim the match with conditional UPDATE - transition to 'pushing' (in-flight)
+      // IDOR protection: filter by shopId
       const [transitioned] = await tx<{ id: string }[]>`
         UPDATE "Match"
-        SET state = 'pushed', "updatedAt" = NOW()
+        SET state = 'pushing', "updatedAt" = NOW()
         WHERE id = ${matchId}
           AND "shopId" = ${shopId}
           AND state = 'confirmed'
@@ -573,6 +882,10 @@ async function claimMatchAndDecide(
         if (currentMatch?.state === "pushed") {
           return { success: true, reasonCode: "ALREADY_APPLIED", isPartial: false };
         }
+        if (currentMatch?.state === "pushing") {
+          // In-flight push - refuse with retryable error
+          return { success: false, error: "Push in progress", reasonCode: "PUSH_IN_PROGRESS" };
+        }
         return { success: false, error: `Match state is '${currentMatch?.state ?? "unknown"}'` };
       }
 
@@ -586,7 +899,7 @@ async function claimMatchAndDecide(
       const isFullPayment = newOutstandingPaise === 0n;
 
       if (!isFullPayment) {
-        // PARTIAL PAYMENT: complete in same transaction
+        // PARTIAL PAYMENT: complete in same transaction (no Shopify call needed)
         if (reductionPaise < 0n) {
           throw new Error("Match amount exceeds outstanding");
         }
@@ -595,6 +908,14 @@ async function claimMatchAndDecide(
           UPDATE "Invoice"
           SET outstanding = ${Number(newOutstandingPaise) / 100}, "updatedAt" = NOW()
           WHERE id = ${invoiceRow.id}
+            AND "shopId" = ${shopId}
+        `;
+
+        // Finalize state to 'pushed' (partial applies complete in same TX)
+        await tx`
+          UPDATE "Match"
+          SET state = 'pushed', "updatedAt" = NOW()
+          WHERE id = ${matchId}
             AND "shopId" = ${shopId}
         `;
 
@@ -644,7 +965,7 @@ async function releaseMatchClaim(sql: Sql, shopId: string, matchId: string): Pro
       SET state = 'confirmed', "updatedAt" = NOW()
       WHERE id = ${matchId}
         AND "shopId" = ${shopId}
-        AND state = 'pushed'
+        AND state = 'pushing'
     `;
   } catch (error) {
     console.error(
@@ -713,6 +1034,14 @@ async function finalizeFullApply(
               AND "shopId" = ${shopId}
           `;
 
+          // Finalize match state to 'pushed'
+          await tx`
+            UPDATE "Match"
+            SET state = 'pushed', "updatedAt" = NOW()
+            WHERE id = ${matchId}
+              AND "shopId" = ${shopId}
+          `;
+
           // Write audit events with backstop flag
           await writeAuditEvent(tx, shopId, actor, "match.applied", {
             matchId,
@@ -737,13 +1066,13 @@ async function finalizeFullApply(
           return { success: true, backstopTriggered: true };
         }
 
-        // Shopify didn't succeed - safe to release claim
+        // Shopify didn't succeed - safe to release claim back to 'confirmed'
         await tx`
           UPDATE "Match"
           SET state = 'confirmed', "updatedAt" = NOW()
           WHERE id = ${matchId}
             AND "shopId" = ${shopId}
-            AND state = 'pushed'
+            AND state = 'pushing'
         `;
         return {
           raceDetected: true,
@@ -758,6 +1087,14 @@ async function finalizeFullApply(
         UPDATE "Invoice"
         SET outstanding = 0, status = 'paid', "updatedAt" = NOW()
         WHERE id = ${invoiceRow.id}
+          AND "shopId" = ${shopId}
+      `;
+
+      // Finalize match state to 'pushed'
+      await tx`
+        UPDATE "Match"
+        SET state = 'pushed', "updatedAt" = NOW()
+        WHERE id = ${matchId}
           AND "shopId" = ${shopId}
       `;
 
@@ -850,6 +1187,15 @@ export async function unmatchMatch(
       // Already unmatched or suggested - idempotent success
       if (matchRow.state === "unmatched" || matchRow.state === "suggested") {
         return { success: true };
+      }
+
+      // Refuse unmatch while push is in flight
+      if (matchRow.state === "pushing") {
+        return {
+          success: false,
+          error: "Cannot unmatch: push is in progress",
+          alreadyPushed: false,
+        };
       }
 
       if (matchRow.state === "pushed") {
@@ -1008,13 +1354,13 @@ async function updatePaymentStatusAfterUnmatch(
   shopId: string,
   paymentId: string
 ): Promise<void> {
-  // Check if there are any remaining confirmed/pushed matches
+  // Check if there are any remaining confirmed/pushing/pushed matches
   const [activeCount] = await sql<{ count: string }[]>`
     SELECT COUNT(*)::text AS count
     FROM "Match"
     WHERE "paymentId" = ${paymentId}
       AND "shopId" = ${shopId}
-      AND state IN ('confirmed', 'pushed')
+      AND state IN ('confirmed', 'pushing', 'pushed')
   `;
 
   if (parseInt(activeCount?.count ?? "0", 10) === 0) {
@@ -1151,6 +1497,8 @@ type AuditData = {
   reasonCode?: string;
   recoveredFromCrash?: boolean;
   backstopTriggered?: boolean;
+  staleReclaim?: boolean;
+  shopifyAlreadyPaid?: boolean;
   previousState?: string;
 };
 

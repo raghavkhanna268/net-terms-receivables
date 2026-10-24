@@ -108,10 +108,10 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   // P3: Get real tab counts from COUNT queries (not page length)
   // Run resolvePlan in parallel with tab counts to avoid extra round trip on cache miss
-  let tabCounts = { suggested: 0, unmatched: 0, confirmed: 0 };
+  let tabCounts = { suggested: 0, unmatched: 0, confirmed: 0, pushing: 0 };
   let planData = { plan: { key: "free" as PlanKey } };
   try {
-    const [planResult, suggestedCount, unmatchedCount, confirmedCount] = await Promise.all([
+    const [planResult, suggestedCount, unmatchedCount, confirmedCount, pushingCount] = await Promise.all([
       resolvePlan(sql, shopDomain),
       sql<{ count: string }[]>`
         SELECT COUNT(*)::text AS count
@@ -131,12 +131,19 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         WHERE "shopId" = ${shop.id}
           AND state = 'confirmed'
       `.then(r => r[0]),
+      sql<{ count: string }[]>`
+        SELECT COUNT(*)::text AS count
+        FROM "Match"
+        WHERE "shopId" = ${shop.id}
+          AND state = 'pushing'
+      `.then(r => r[0]),
     ]);
     planData = planResult;
     tabCounts = {
       suggested: parseInt(suggestedCount?.count ?? "0", 10),
       unmatched: parseInt(unmatchedCount?.count ?? "0", 10),
       confirmed: parseInt(confirmedCount?.count ?? "0", 10),
+      pushing: parseInt(pushingCount?.count ?? "0", 10),
     };
   } catch (err) {
     console.error("[app.reconcile] Error getting tab counts or plan:", err);

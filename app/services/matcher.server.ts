@@ -446,8 +446,9 @@ export async function confirmMatch(
 
       const invoiceMap = new Map(invoiceRows.map((i) => [i.id, BigInt(i.outstanding_paise)]));
 
-      // STEP 4: Query ALL 'confirmed' matches across ALL payments for these invoices
-      // P2: Count only 'confirmed' (not 'pushed') because 'pushed' is already reflected in Invoice.outstanding
+      // STEP 4: Query ALL 'confirmed'/'pushing' matches across ALL payments for these invoices
+      // P2: Count 'confirmed' and 'pushing' (not 'pushed') because 'pushed' is already reflected in Invoice.outstanding
+      // S17: 'pushing' is in-flight, must be counted to prevent double-allocation
       const allConfirmedForInvoices = await tx<
         { invoice_id: string; total_paise: string }[]
       >`
@@ -457,15 +458,16 @@ export async function confirmMatch(
         FROM "Match"
         WHERE "invoiceId" IN ${tx(invoiceIds)}
           AND "shopId" = ${shopId}
-          AND state = 'confirmed'
+          AND state IN ('confirmed', 'pushing')
         GROUP BY "invoiceId"
       `;
       const invoiceAllocatedCrossPayment = new Map(
         allConfirmedForInvoices.map((r) => [r.invoice_id, BigInt(r.total_paise)])
       );
 
-      // Calculate total already allocated (confirmed + pushed) for this payment
-      const confirmedMatches = matchRows.filter((m) => m.state === "confirmed" || m.state === "pushed");
+      // Calculate total already allocated (confirmed + pushing + pushed) for this payment
+      // S17: Include 'pushing' to prevent double-allocation while push is in flight
+      const confirmedMatches = matchRows.filter((m) => m.state === "confirmed" || m.state === "pushing" || m.state === "pushed");
       const paymentAmountPaise = BigInt(payment.amount_paise);
       const alreadyAllocatedPaise = confirmedMatches.reduce(
         (sum, m) => sum + BigInt(m.amount_paise),
@@ -794,8 +796,9 @@ export async function updateMatchAllocation(
 
       const invoiceMap = new Map(invoiceRows.map((i) => [i.id, BigInt(i.outstanding_paise)]));
 
-      // STEP 4: Query ALL 'confirmed' matches across ALL payments for these invoices
-      // P2: Count only 'confirmed' (not 'pushed') because 'pushed' is already reflected in Invoice.outstanding
+      // STEP 4: Query ALL 'confirmed'/'pushing' matches across ALL payments for these invoices
+      // P2: Count 'confirmed' and 'pushing' (not 'pushed') because 'pushed' is already reflected in Invoice.outstanding
+      // S17: 'pushing' is in-flight, must be counted to prevent double-allocation
       const allConfirmedForInvoices = await tx<
         { invoice_id: string; total_paise: string }[]
       >`
@@ -805,15 +808,16 @@ export async function updateMatchAllocation(
         FROM "Match"
         WHERE "invoiceId" IN ${tx(invoiceIds)}
           AND "shopId" = ${shopId}
-          AND state = 'confirmed'
+          AND state IN ('confirmed', 'pushing')
         GROUP BY "invoiceId"
       `;
       const invoiceAllocatedCrossPayment = new Map(
         allConfirmedForInvoices.map((r) => [r.invoice_id, BigInt(r.total_paise)])
       );
 
-      // Calculate remaining payment (after confirmed + pushed)
-      const confirmedMatches = matchRows.filter((m) => m.state === "confirmed" || m.state === "pushed");
+      // Calculate remaining payment (after confirmed + pushing + pushed)
+      // S17: Include 'pushing' to prevent double-allocation while push is in flight
+      const confirmedMatches = matchRows.filter((m) => m.state === "confirmed" || m.state === "pushing" || m.state === "pushed");
       const paymentAmountPaise = BigInt(payment.amount_paise);
       const alreadyAllocatedPaise = confirmedMatches.reduce(
         (sum, m) => sum + BigInt(m.amount_paise),

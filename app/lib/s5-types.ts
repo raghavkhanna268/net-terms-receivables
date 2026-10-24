@@ -21,7 +21,7 @@ export type DefaultTermsSource = "explicit" | "tag";
 export type DueSource = "schedule" | "override" | "inferred" | "none";
 export type InvoiceStatus = "open" | "paid" | "cancelled";
 export type PaymentStatus = "unmatched" | "partial" | "matched";
-export type MatchState = "suggested" | "confirmed" | "pushed" | "unmatched";
+export type MatchState = "suggested" | "confirmed" | "pushing" | "pushed" | "unmatched";
 export type ReminderChannel = "native" | "email";
 
 /**
