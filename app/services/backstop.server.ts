@@ -13,11 +13,15 @@
  *
  * IMPORTANT DESIGN DECISIONS:
  *
- * 1. PRE-ORDER HOLD STATE: The backstop judges the account's hold state as it was
- *    BEFORE this order. An order that itself pushes the buyer over the limit is
- *    NOT held by the backstop - it only affects future orders. This is controlled
- *    by USE_PRE_ORDER_HOLD_STATE constant. Set to false to hold all orders from
- *    accounts that are currently held (including the one that caused the hold).
+ * 1. PRE-ORDER HOLD STATE: The backstop judges whether the account was held
+ *    BEFORE this order was placed. Controlled by USE_PRE_ORDER_HOLD_STATE.
+ *
+ *    - Manual holds (manualHold=true): Always held, regardless of this order.
+ *    - PAYMENT_OVERDUE holds: Always held (overdue invoices exist independently).
+ *    - CREDIT_REVIEW auto-holds (over limit): Only held if account was ALREADY
+ *      over the limit BEFORE this order's invoice. An order that itself pushes
+ *      the buyer over the limit is NOT held - it makes the account held for
+ *      future orders.
  *
  * 2. MERCHANT-MANAGED ONLY: Our scope (write_merchant_managed_fulfillment_orders)
  *    only allows holding merchant-managed fulfillment orders. Third-party/app FOs
@@ -48,11 +52,11 @@ const HOLD_HANDLE = "ntr-credit-hold";
  * USE_PRE_ORDER_HOLD_STATE controls whether the backstop uses the hold state
  * from BEFORE this order was placed.
  *
- * When true (default): An order that pushes the buyer over the limit is NOT held.
- * The buyer becomes held for FUTURE orders, but this order proceeds.
+ * When true (default):
+ * - Manual holds and PAYMENT_OVERDUE: always held (not affected by this order)
+ * - Over-limit (CREDIT_REVIEW): only held if ALREADY over limit before this order
  *
- * When false: Any order from a currently-held account is held, even if this
- * specific order caused the hold.
+ * When false: Any order from a currently-held account is held.
  *
  * This is a named constant so the decision is easy to find and change.
  */
@@ -77,7 +81,6 @@ export class RetryableBackstopError extends Error {
 export interface BackstopInput {
   shopDomain: string;
   shopId: string;
-  orderId: string;
   orderGid: string;
   buyerAccountId: string | null;
   /** Invoice ID for this order, used for pre-order hold state calculation */
@@ -207,39 +210,34 @@ const TAGS_ADD_MUTATION = `#graphql
 
 /**
  * Claim processing for this order atomically.
- * Returns the claim status:
- * - 'claimed': This call claimed the order for processing
- * - 'already_processing': Another call is processing (status='pending')
- * - 'already_done': Already completed (status='held' or 'skipped')
+ * Uses INSERT...ON CONFLICT DO NOTHING RETURNING to atomically claim.
+ * Returns true if we claimed it, false if already claimed/completed.
  */
 async function claimBackstopProcessing(
   sql: Sql,
   shopId: string,
   orderGid: string,
-): Promise<"claimed" | "already_processing" | "already_done"> {
-  // Try to insert with status='pending'. If conflict, check existing status.
-  const [result] = await sql<{ status: string }[]>`
+): Promise<{ claimed: boolean; existingAction?: string }> {
+  // Try to insert with status='pending'. RETURNING gives us the row if inserted.
+  const [inserted] = await sql<{ action: string }[]>`
     INSERT INTO backstop_processed_orders (shop_id, order_gid, action, reason, processed_at)
     VALUES (${shopId}, ${orderGid}, 'pending', NULL, NOW())
-    ON CONFLICT (shop_id, order_gid) DO UPDATE
-      SET shop_id = backstop_processed_orders.shop_id
-    RETURNING action AS status
+    ON CONFLICT (shop_id, order_gid) DO NOTHING
+    RETURNING action
   `;
 
-  if (!result) {
-    // INSERT succeeded (no conflict), we claimed it
-    return "claimed";
+  if (inserted) {
+    // We inserted the row, we have the claim
+    return { claimed: true };
   }
 
-  const status = result.status;
-  if (status === "pending") {
-    // We just updated our own pending row, or it was already pending from us
-    // Either way, we have the claim
-    return "claimed";
-  }
+  // Row already exists - check what state it's in
+  const [existing] = await sql<{ action: string }[]>`
+    SELECT action FROM backstop_processed_orders
+    WHERE shop_id = ${shopId} AND order_gid = ${orderGid}
+  `;
 
-  // Status is 'held' or 'skipped' - already completed
-  return "already_done";
+  return { claimed: false, existingAction: existing?.action };
 }
 
 /**
@@ -304,7 +302,7 @@ async function recordBackstopAlert(
 }
 
 /**
- * Record a failed backstop attempt for alerting (after max retries).
+ * Record a failed backstop attempt for alerting (after max retries / DLQ).
  */
 export async function recordBackstopFailure(
   sql: Sql,
@@ -358,86 +356,151 @@ async function recordNonMerchantManagedSkipped(
 }
 
 /**
+ * Compute exposure excluding a specific invoice (for pre-order hold state).
+ * Uses the same logic as S11's computeExposure but excludes one invoice.
+ *
+ * @param sql Database connection
+ * @param buyerAccountId Buyer account ID
+ * @param excludeInvoiceId Invoice to exclude from exposure calculation
+ * @returns Exposure in paise (smallest currency unit)
+ */
+async function computeExposureExcludingInvoice(
+  sql: Sql,
+  buyerAccountId: string,
+  excludeInvoiceId: string,
+): Promise<bigint> {
+  // Sum outstanding amounts from open invoices, excluding the specified invoice
+  // Uses ROUND(outstanding * 100) to convert rupees to paise, same as S11
+  const [invoiceResult] = await sql<{ total_paise: string | null }[]>`
+    SELECT COALESCE(SUM((ROUND(outstanding * 100))::bigint), 0)::text AS total_paise
+    FROM "Invoice"
+    WHERE "buyerAccountId" = ${buyerAccountId}
+      AND id != ${excludeInvoiceId}
+      AND status = 'open'
+      AND outstanding > 0
+  `;
+
+  // Also include draft orders with payment terms (same as S11)
+  const [draftResult] = await sql<{ total_paise: string | null }[]>`
+    SELECT COALESCE(SUM((ROUND(total * 100))::bigint), 0)::text AS total_paise
+    FROM "s8_draft_orders"
+    WHERE buyer_account_id = ${buyerAccountId}
+      AND has_payment_terms = true
+      AND status IN ('open', 'invoice_sent')
+  `;
+
+  const invoicePaise = BigInt(invoiceResult?.total_paise ?? "0");
+  const draftPaise = BigInt(draftResult?.total_paise ?? "0");
+
+  return invoicePaise + draftPaise;
+}
+
+/**
+ * Check if there are overdue invoices for this buyer.
+ * Same logic as S11's hasOverdueInvoices.
+ */
+async function hasOverdueInvoices(
+  sql: Sql,
+  buyerAccountId: string,
+): Promise<boolean> {
+  const [result] = await sql<{ has_overdue: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1 FROM "Invoice"
+      WHERE "buyerAccountId" = ${buyerAccountId}
+        AND status = 'open'
+        AND outstanding > 0
+        AND "dueAt" IS NOT NULL
+        AND "dueAt" < NOW() - INTERVAL '1 day'
+    ) AS has_overdue
+  `;
+  return result?.has_overdue ?? false;
+}
+
+/**
  * Check if the buyer account was held BEFORE this order.
  *
- * If USE_PRE_ORDER_HOLD_STATE is true and invoiceId is provided, this excludes
- * the invoice's amount from the exposure calculation to determine if the account
- * was already held before this order.
- *
- * If the account was OK but this order pushed it over the limit, returns held=false
- * (the order proceeds, but the account is now held for future orders).
+ * Logic:
+ * - Manual holds (manualHold=true): Always held
+ * - PAYMENT_OVERDUE (overdue invoices exist): Always held
+ * - Over-limit auto-holds: Only held if exposure BEFORE this order exceeded limit
+ * - Bypass: Never held
  */
 async function isBuyerHeldBeforeOrder(
   sql: Sql,
   buyerAccountId: string,
   invoiceId: string | null | undefined,
-): Promise<{ held: boolean; bypass: boolean; holdState: string | null }> {
+): Promise<{ held: boolean; bypass: boolean; holdState: string | null; reason: string }> {
   // Get the account's current state
   const [account] = await sql<{
     holdState: string;
     bypass: boolean;
     creditLimit: string | null;
     manualHold: boolean;
+    holdReasonCode: string | null;
   }[]>`
-    SELECT "holdState", bypass, "creditLimit"::text, "manualHold"
+    SELECT "holdState", bypass, "creditLimit"::text, "manualHold", "holdReasonCode"
     FROM "BuyerAccount"
     WHERE id = ${buyerAccountId}
   `;
 
   if (!account) {
-    return { held: false, bypass: false, holdState: null };
+    return { held: false, bypass: false, holdState: null, reason: "Account not found" };
   }
 
   // If bypass is true, never held
   if (account.bypass) {
-    return { held: false, bypass: true, holdState: "BYPASS" };
+    return { held: false, bypass: true, holdState: "BYPASS", reason: "Bypass active" };
   }
 
   // If manual hold, always held (not affected by this order's amount)
   if (account.manualHold) {
-    return { held: true, bypass: false, holdState: "HELD" };
+    return { held: true, bypass: false, holdState: "HELD", reason: "Manual hold" };
   }
 
-  // For automatic holds (over limit), we need to check pre-order state
-  if (USE_PRE_ORDER_HOLD_STATE && invoiceId && account.holdState === "HELD") {
-    // Check if the account was ALREADY over limit before this invoice
-    // by computing exposure excluding this invoice
-    const [preOrderState] = await sql<{
-      exposureWithoutThisOrder: string;
-    }[]>`
-      SELECT COALESCE(SUM(i.total_paise)::text, '0') AS "exposureWithoutThisOrder"
-      FROM "Invoice" i
-      WHERE i."buyerAccountId" = ${buyerAccountId}
-        AND i.id != ${invoiceId}
-        AND i.status NOT IN ('paid', 'cancelled', 'voided')
-    `;
+  // Check for overdue invoices - PAYMENT_OVERDUE holds always apply
+  const isOverdue = await hasOverdueInvoices(sql, buyerAccountId);
+  if (isOverdue) {
+    return { held: true, bypass: false, holdState: "HELD", reason: "Payment overdue" };
+  }
 
-    const creditLimitPaise = account.creditLimit
-      ? BigInt(Math.round(parseFloat(account.creditLimit) * 100))
-      : null;
-
-    if (creditLimitPaise === null) {
-      // No limit = never over limit
-      return { held: false, bypass: false, holdState: "OK" };
-    }
-
-    const exposureBeforeOrder = BigInt(preOrderState?.exposureWithoutThisOrder ?? "0");
-
-    // If exposure BEFORE this order was already over limit, account was held
-    const wasAlreadyHeld = exposureBeforeOrder > creditLimitPaise;
-
+  // For auto-holds (over limit), check pre-order state
+  if (!USE_PRE_ORDER_HOLD_STATE || !invoiceId) {
+    // Use current holdState
+    const isHeld = account.holdState === "HELD";
     return {
-      held: wasAlreadyHeld,
+      held: isHeld,
       bypass: false,
-      holdState: wasAlreadyHeld ? "HELD" : "OK",
+      holdState: account.holdState,
+      reason: isHeld ? "Over credit limit" : "Not held",
     };
   }
 
-  // Otherwise, use current holdState
+  // Compute exposure excluding this order's invoice
+  const creditLimitPaise = account.creditLimit
+    ? BigInt(Math.round(parseFloat(account.creditLimit) * 100))
+    : null;
+
+  if (creditLimitPaise === null) {
+    // No limit = never over limit
+    return { held: false, bypass: false, holdState: "OK", reason: "No credit limit" };
+  }
+
+  const exposureBeforeOrder = await computeExposureExcludingInvoice(
+    sql,
+    buyerAccountId,
+    invoiceId,
+  );
+
+  // If exposure BEFORE this order was already over limit, account was held
+  const wasAlreadyOverLimit = exposureBeforeOrder > creditLimitPaise;
+
   return {
-    held: account.holdState === "HELD",
+    held: wasAlreadyOverLimit,
     bypass: false,
-    holdState: account.holdState,
+    holdState: wasAlreadyOverLimit ? "HELD" : "OK",
+    reason: wasAlreadyOverLimit
+      ? "Already over limit before this order"
+      : "This order pushed account over limit (not held)",
   };
 }
 
@@ -504,7 +567,7 @@ async function holdFulfillmentOrders(
   // If no holdable FOs, check if order has any FOs at all
   if (holdableFOs.length === 0) {
     if (openFulfillmentOrders.length === 0 && fulfillmentOrders.length === 0) {
-      // No FOs at all - they may not have been created yet
+      // No FOs at all - they may not have been created yet. RETRY.
       throw new RetryableBackstopError(
         "No fulfillment orders found - may not be created yet",
         "no_fulfillment_orders",
@@ -557,7 +620,7 @@ async function holdFulfillmentOrders(
     heldCount++;
   }
 
-  // Partial failure - some succeeded, some failed
+  // Partial failure - some succeeded, some failed. Don't mark processed, allow retry.
   if (errors.length > 0 && heldCount < holdableFOs.length) {
     throw new RetryableBackstopError(
       `Partial failure: held ${heldCount}/${holdableFOs.length} FOs. Errors: ${errors.join("; ")}`,
@@ -605,6 +668,24 @@ async function tagOrder(
 }
 
 /**
+ * Resolve invoice and buyer account for an order, independently of webhook result.
+ * This allows backstop to run on retries even when webhook is already processed.
+ */
+export async function resolveInvoiceForOrder(
+  sql: Sql,
+  shopId: string,
+  orderGid: string,
+): Promise<{ invoiceId: string; buyerAccountId: string | null } | null> {
+  const [invoice] = await sql<{ id: string; buyerAccountId: string | null }[]>`
+    SELECT id, "buyerAccountId"
+    FROM "Invoice"
+    WHERE "shopId" = ${shopId} AND "orderGid" = ${orderGid}
+    LIMIT 1
+  `;
+  return invoice ?? null;
+}
+
+/**
  * Apply backstop holds to an order from a held account.
  *
  * This is called after order creation is processed. If the buyer account
@@ -634,18 +715,29 @@ export async function applyBackstop(
   }
 
   // Claim processing atomically
-  const claimStatus = await claimBackstopProcessing(sql, shopId, orderGid);
-  if (claimStatus === "already_done") {
+  const { claimed, existingAction } = await claimBackstopProcessing(sql, shopId, orderGid);
+
+  if (!claimed) {
+    // Already claimed or completed
+    if (existingAction === "held" || existingAction === "skipped") {
+      return {
+        applied: false,
+        skipped: true,
+        skipReason: `Already processed (${existingAction})`,
+      };
+    }
+    // existingAction === 'pending' means another process has it
+    // This shouldn't happen with proper message visibility, but handle it
     return {
       applied: false,
       skipped: true,
-      skipReason: "Already processed (idempotent)",
+      skipReason: "Processing in progress by another worker",
     };
   }
 
   try {
     // Check if buyer was held BEFORE this order
-    const { held, bypass, holdState } = await isBuyerHeldBeforeOrder(
+    const { held, bypass, holdState, reason } = await isBuyerHeldBeforeOrder(
       sql,
       buyerAccountId,
       invoiceId,
@@ -657,27 +749,27 @@ export async function applyBackstop(
         shopId,
         orderGid,
         "skipped",
-        `Account not held (state: ${holdState ?? "unknown"})`,
+        reason,
       );
       return {
         applied: false,
         skipped: true,
-        skipReason: `Account not held before this order (state: ${holdState ?? "unknown"})`,
+        skipReason: reason,
       };
     }
 
     if (bypass) {
-      await markBackstopCompleted(sql, shopId, orderGid, "skipped", "Account has bypass");
+      await markBackstopCompleted(sql, shopId, orderGid, "skipped", "Bypass active");
       return {
         applied: false,
         skipped: true,
-        skipReason: "Account has bypass active",
+        skipReason: "Bypass active",
       };
     }
 
     // Account was held before this order - apply backstop
     console.warn(
-      `[backstop] Applying holds for order ${orderGid} from held account ${buyerAccountId}`,
+      `[backstop] Applying holds for order ${orderGid} from held account ${buyerAccountId} (${reason})`,
     );
 
     // Hold fulfillment orders (throws on retryable failure)
