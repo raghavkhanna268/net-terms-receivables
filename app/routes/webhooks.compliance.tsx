@@ -159,11 +159,8 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
             `[Compliance] customers/data_request: Email notification sent wh=${webhookId}`
           );
         } else if (emailResult.error) {
-          const errorCode = typeof emailResult.error === "string"
-            ? emailResult.error.split(":")[0]
-            : "email_send_failed";
           console.log(
-            `[Compliance] customers/data_request: Email notification failed wh=${webhookId} error=${errorCode}`
+            `[Compliance] customers/data_request: Email notification failed wh=${webhookId} error=email_send_failed`
           );
         }
         // Note: skipped emails are logged inside sendDataRequestNotification

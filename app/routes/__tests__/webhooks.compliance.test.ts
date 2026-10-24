@@ -930,7 +930,7 @@ describe("webhooks.compliance", () => {
       expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
     });
 
-    it("CUSTOMERS_DATA_REQUEST email failed path logs error code not raw error", async () => {
+    it("CUSTOMERS_DATA_REQUEST email failed path logs fixed code not raw error", async () => {
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       mockSendDataRequestNotification.mockResolvedValue({
         sent: false,
@@ -961,9 +961,52 @@ describe("webhooks.compliance", () => {
       expect(response.status).toBe(200);
       expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
 
-      // Verify error code is logged, not the full error message
+      // Verify fixed error code is logged, not the raw error message
       expect(consoleSpy.log).toHaveBeenCalledWith(
-        expect.stringContaining("error=resend_api_error")
+        expect.stringContaining("error=email_send_failed")
+      );
+    });
+
+    it("CUSTOMERS_DATA_REQUEST email failed with domain in error does not leak domain", async () => {
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Simulate compliance.server.ts returning raw err.message with domain (finding C5)
+      mockSendDataRequestNotification.mockResolvedValue({
+        sent: false,
+        error: "Failed to send email to owner@evil-shop.myshopify.com",
+      });
+
+      const payload = {
+        shop_domain: TEST_SHOP,
+        customer: { id: 456 },
+        data_request: { id: 789 },
+      };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "customers/data_request",
+        webhookId: "wh-email-domain-leak",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      const response = await action(createMockActionArgs(request));
+      expect(response.status).toBe(200);
+
+      // Must not leak the domain from the error message
+      expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
+      expect(consoleSpy.log).not.toHaveBeenCalledWith(
+        expect.stringContaining("evil-shop.myshopify.com")
+      );
+
+      // Should log fixed code instead
+      expect(consoleSpy.log).toHaveBeenCalledWith(
+        expect.stringContaining("error=email_send_failed")
       );
     });
 
