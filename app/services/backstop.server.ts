@@ -36,6 +36,7 @@
 
 import type { Sql } from "~/lib/db-light.server";
 import { shopifyGraphQLRequest } from "./shopify-client.server";
+import { hasOverdueInvoices } from "./overdue.server";
 
 /**
  * Tag added to orders from held accounts.
@@ -452,9 +453,6 @@ async function computeExposureExcludingInvoice(
 
   return invoicePaise + draftPaise;
 }
-
-// Import shared overdue predicate (Team Lead ruling: ONE overdue definition)
-import { hasOverdueInvoices } from "./overdue.server";
 
 /**
  * Check if the buyer account was held BEFORE this order.

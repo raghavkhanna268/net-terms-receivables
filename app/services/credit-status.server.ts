@@ -20,6 +20,7 @@ import {
   type HoldReasonCode,
 } from "~/lib/metafields-contract";
 import { shopifyGraphQLRequest, type ShopifyClientResult } from "./shopify-client.server";
+import { hasOverdueInvoices } from "./overdue.server";
 
 // Re-export HoldReasonCode for use by credit-status-recompute.server.ts
 export type { HoldReasonCode };
@@ -303,9 +304,6 @@ async function computeExposure(
     currency,
   };
 }
-
-// Import shared overdue predicate (Team Lead ruling: ONE overdue definition)
-import { hasOverdueInvoices } from "./overdue.server";
 
 /**
  * Write credit_status metafield via the Admin GraphQL API.

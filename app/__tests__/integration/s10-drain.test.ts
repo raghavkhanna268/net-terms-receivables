@@ -170,13 +170,12 @@ describeWithDb("S10 Drain Integration", () => {
       expect(sendResult.send).toBeDefined();
       const msgId = sendResult.send;
 
-      // Read it back
+      // Read our specific message by msg_id from the queue table
       const [readResult] = await sql<{
         msg_id: string;
         message: typeof reconcileMsg;
       }[]>`
-        SELECT msg_id, message FROM pgmq.read('s6_sync', 0, 1)
-        WHERE message->>'topic' = 'RECONCILE_COMPANIES'
+        SELECT msg_id, message FROM pgmq.q_s6_sync WHERE msg_id = ${msgId}::bigint
       `;
 
       // Clean up
