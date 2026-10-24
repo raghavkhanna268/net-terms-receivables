@@ -131,10 +131,11 @@ export async function handleReminderSend(
   }
 
   // Non-retryable errors should not silently archive
+  // R1: Use errorCode (no raw provider message)
   return {
     success: false,
     action: "skipped",
-    error: result.error,
+    error: result.errorCode ?? result.error,
     retryable: result.retryable ?? false,
   };
 }

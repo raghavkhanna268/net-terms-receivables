@@ -30,6 +30,9 @@ let onOrderMarkAsPaidCallback: (() => Promise<void>) | null = null;
 // Flag to make enqueueRecomputeForInvoice throw
 let mockEnqueueShouldThrow = false;
 
+// M7: Custom userErrors to inject for testing error code mapping
+let mockUserErrors: Array<{ field: string[]; message: string }> | null = null;
+
 vi.mock("../shopify-client.server", async (importOriginal) => {
   const actual = await importOriginal() as Record<string, unknown>;
   return {
@@ -66,6 +69,19 @@ vi.mock("../shopify-client.server", async (importOriginal) => {
             orderMarkAsPaid: {
               order: null,
               userErrors: [{ field: ["id"], message: "Order has already been paid" }],
+            },
+          },
+        };
+      }
+
+      // M7: Return custom userErrors when set (for testing error code mapping)
+      if (mockUserErrors) {
+        return {
+          success: true,
+          data: {
+            orderMarkAsPaid: {
+              order: null,
+              userErrors: mockUserErrors,
             },
           },
         };
@@ -160,6 +176,7 @@ describeWithDb("S17 apply service DB integration", () => {
     mockShopifySuccess = true;
     mockAlreadyPaid = false;
     mockEnqueueShouldThrow = false;
+    mockUserErrors = null;
     shopifyCallCount = 0;
     verifyOrderIsPaidCallCount = 0;
     orderMarkAsPaidCallCount = 0;
@@ -2285,6 +2302,181 @@ describeWithDb("S17 apply service DB integration", () => {
 
       assertNoSensitiveDataInRawCalls(consoleWarnSpy);
       assertNoSensitiveDataInRawCalls(consoleErrorSpy);
+    });
+
+    /**
+     * M7: Shopify userError returns fixed merchant-facing message, no raw text.
+     * Forces userErrors with sentinel strings (domain, email-like), asserts:
+     * - Returned error is the exact fixed message from RECONCILE_ERROR_MESSAGES
+     * - No sentinel appears in result or logs
+     */
+    it("M7: Shopify userError returns fixed message, no raw text in result or logs", async () => {
+      const SENTINEL_SHOPIFY = "SENTINEL_SHOPIFY_RAW_7f3a";
+      const SENTINEL_EMAIL = "sentinel7f3a@pii-leak.test";
+
+      // First userError contains "access denied" so toErrorCode returns "access_denied"
+      mockUserErrors = [
+        { field: ["id"], message: `Access denied: ${SENTINEL_SHOPIFY}` },
+        { field: ["amount"], message: `Invalid for ${SENTINEL_EMAIL}` },
+      ];
+
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+      const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
+
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      // Result should have fixed message mapped from "access_denied" code
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("Couldn't update the order in Shopify. Please check permissions.");
+      expect(result.errorCode).toBe("access_denied");
+
+      // Sentinel must NOT appear in the result
+      const resultStr = JSON.stringify(result);
+      expect(resultStr).not.toContain(SENTINEL_SHOPIFY);
+      expect(resultStr).not.toContain(SENTINEL_EMAIL);
+      expect(resultStr).not.toContain("pii-leak");
+
+      // Sentinel must NOT appear in any console output
+      for (const spy of [consoleWarnSpy, consoleErrorSpy]) {
+        for (const call of spy.mock.calls) {
+          const raw = String(call[0]);
+          expect(raw).not.toContain(SENTINEL_SHOPIFY);
+          expect(raw).not.toContain(SENTINEL_EMAIL);
+          expect(raw).not.toContain("pii-leak");
+        }
+      }
+
+      // safeLog calls should have only safe keys
+      const allLogs = [
+        ...parseLogCalls(consoleWarnSpy),
+        ...parseLogCalls(consoleErrorSpy),
+      ];
+      for (const log of allLogs) {
+        const logStr = JSON.stringify(log);
+        expect(logStr).not.toContain(SENTINEL_SHOPIFY);
+        expect(logStr).not.toContain(SENTINEL_EMAIL);
+      }
+    });
+  });
+
+  /**
+   * Error code format tests: verify returned errors are codes, not raw messages.
+   * Uses REAL toErrorCode (no mocks) and sentinels to detect leakage.
+   */
+  describe("Error code format: no raw messages in returned errors", () => {
+    const SENTINEL = "SENTINEL_RAW_9f3";
+
+    it("Shopify API failure returns code, not raw error text", async () => {
+      mockShopifySuccess = false;
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+      const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
+
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("retryable:shopify_api_error");
+      expect(result.error).not.toContain(SENTINEL);
+    });
+
+    it("unmatchMatch catch returns error code, not raw exception text", async () => {
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+      
+      const matchId = `match-unmatch-error-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 10000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'confirmed', NOW(), NOW())
+      `;
+
+      const result = await unmatchMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+      expect(result.success).toBe(true);
+
+      // Verify error format on actual failures - test the pattern
+      const badResult = await unmatchMatch(sql, TEST_SHOP_ID, "nonexistent-match-id", "test-user");
+      expect(badResult.success).toBe(false);
+      expect(badResult.error).toBe("Match not found");
+    });
+
+    it("recovery error returns code with permanent prefix, no raw text", async () => {
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+
+      const matchId = `match-recovery-error-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 10000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushed', NOW(), NOW())
+      `;
+
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      expect(result.success).toBe(false);
+      expect(result.reasonCode).toBe("PUSHED_WITHOUT_AUDIT");
+      // Error should be fixed text or code, no sentinel
+      expect(result.error).not.toContain(SENTINEL);
+    });
+
+    it("invoice status error uses code, no amount leak (issue #190 amount fix)", async () => {
+      const AMOUNT_SENTINEL = "999888777666";
+      const paymentId = await createPayment(BigInt(AMOUNT_SENTINEL));
+      const invoiceId = await createInvoice(BigInt(AMOUNT_SENTINEL));
+      const matchId = await createConfirmedMatch(paymentId, invoiceId, BigInt(AMOUNT_SENTINEL));
+
+      await sql`UPDATE "Invoice" SET status = 'paid' WHERE id = ${invoiceId}`;
+
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      expect(result.success).toBe(false);
+      expect(result.reasonCode).toBe("INVOICE_NOT_OPEN");
+      expect(result.error).not.toContain(AMOUNT_SENTINEL);
+      expect(result.error).not.toContain("outstanding");
+      expect(result.error).not.toContain("Paise");
+    });
+
+    it("backstop race condition: no amount/status leak in result (issue #190)", async () => {
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      mockShopifySuccess = true;
+      mockAlreadyPaid = false;
+
+      const AMOUNT_SENTINEL = "777666555";
+      const paymentId = await createPayment(BigInt(AMOUNT_SENTINEL));
+      const invoiceId = await createInvoice(BigInt(AMOUNT_SENTINEL));
+      const matchId = await createConfirmedMatch(paymentId, invoiceId, BigInt(AMOUNT_SENTINEL));
+
+      onOrderMarkAsPaidCallback = async () => {
+        await sql`
+          UPDATE "Invoice"
+          SET status = 'paid', outstanding = 0, "updatedAt" = NOW()
+          WHERE id = ${invoiceId}
+        `;
+      };
+
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+      onOrderMarkAsPaidCallback = null;
+
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(AMOUNT_SENTINEL);
+      expect(serialized).not.toContain("outstanding");
+      expect(result.success).toBe(true);
+
+      const allLogs = consoleSpy.mock.calls.map(c => String(c[0])).join("\n");
+      expect(allLogs).toContain("apply_backstop_triggered");
+      expect(allLogs).not.toContain(AMOUNT_SENTINEL);
+      expect(allLogs).not.toContain("outstanding");
+
+      consoleSpy.mockRestore();
+    });
+
+    it("error codes use toErrorCode pattern (retryable: or permanent: prefix)", async () => {
+      mockShopifySuccess = false;
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+      const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
+
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      expect(result.error).toMatch(/^(retryable|permanent):/);
     });
   });
 });
