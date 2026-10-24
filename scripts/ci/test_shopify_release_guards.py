@@ -3,6 +3,7 @@
 import importlib.util
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -82,6 +83,10 @@ if scratch(add_ext) == 0:
 if scratch(lambda d: edit(os.path.join(d, ".github/workflows/shopify-app-release.yml"),
                           "--allow-updates", "--allow-updates --allow-deletes")) == 0:
     fails.append("--allow-deletes not failed")
+# 9b. Preview/allow-updates flags in the shared base args fail (mutually exclusive in CLI 4.9.4).
+if scratch(lambda d: edit(os.path.join(d, ".github/workflows/shopify-app-release.yml"),
+                          "args=(app deploy --config", "args=(app deploy --allow-updates --config")) == 0:
+    fails.append("allow-updates in base deploy args not failed")
 # 10. Missing pipefail default fails.
 if scratch(lambda d: edit(os.path.join(d, ".github/workflows/shopify-app-release.yml"),
                           "        shell: bash", "        shell: sh")) == 0:
@@ -94,9 +99,13 @@ if scratch(lambda d: edit(os.path.join(d, ".github/workflows/shopify-app-release
 if scratch(lambda d: edit(os.path.join(d, "package.json"), '"@shopify/cli": "4.9.4"', '"@shopify/cli": "^4.9.4"')) == 0:
     fails.append("unpinned CLI devDependency not failed")
 
+# 13. Deploy step prints no CLI text and classifies errors (stub CLI, fake values only).
+if subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "ci", "test_shopify_deploy_step.py")]).returncode != 0:
+    fails.append("deploy step stub-CLI self-test failed")
+
 if fails:
     print("shopify release guards self-test: FAIL")
     for f in fails:
         print(" -", f)
     sys.exit(1)
-print("shopify release guards self-test: OK (16/16)")
+print("shopify release guards self-test: OK (18/18)")
