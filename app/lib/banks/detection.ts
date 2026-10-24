@@ -58,6 +58,9 @@ const ICICI_DETAILED_HEADERS = ["Date", "Particulars", "Chq. No.", "Withdrawals"
  * Sources:
  * - https://www.tieout.in/banks/sbi/
  * - https://www.cleanstatement.in/sbi-bank-statement-to-excel
+ * 
+ * Note: Only using primary SBI header format to avoid collision with ICICI
+ * headers that share similar column names (Transaction Date, Withdrawal, Deposit).
  */
 const SBI_HEADERS = [
   "Txn Date",
@@ -68,8 +71,6 @@ const SBI_HEADERS = [
   "Credit",
   "Balance",
 ];
-
-const SBI_HEADERS_ALT = ["Transaction Date", "Value Date", "Transaction Remarks", "Cheque/Ref No", "Withdrawal", "Deposit", "Balance"];
 
 /**
  * Axis Bank Header patterns (SYNTHETIC / UNVERIFIED)
@@ -118,17 +119,14 @@ const ICICI_PREAMBLE_PATTERNS = [
 
 const SBI_PREAMBLE_PATTERNS = [
   /STATE\s*BANK\s*OF\s*INDIA/i,
-  /SBI/i,
   /www\.onlinesbi\.com/i,
   /www\.sbi\.co\.in/i,
-  /Account\s*Statement/i,
 ];
 
 const AXIS_PREAMBLE_PATTERNS = [
   /AXIS\s*BANK/i,
   /www\.axisbank\.com/i,
   /Axis\s*Bank\s*Ltd/i,
-  /Statement\s*of\s*Account/i,
 ];
 
 /**
@@ -273,10 +271,12 @@ export function detectBank(sheet: SheetData, fileName?: string): DetectionResult
   }
 
   const winningBank = scores[0].bank;
+  // Filter reasons case-insensitively to handle banks like "AXIS" vs "Axis" in reason text
+  const winningBankLower = winningBank.toLowerCase();
   return {
     bank: winningBank,
     confidence: Math.min(maxScore, 1),
-    reason: reasons.filter((r) => r.includes(winningBank)).join("; "),
+    reason: reasons.filter((r) => r.toLowerCase().includes(winningBankLower)).join("; "),
   };
 }
 
@@ -335,10 +335,7 @@ export function detectHeaderRow(
     }
 
     // Check SBI patterns (UNVERIFIED)
-    if (
-      matchesHeaderPattern(cells, SBI_HEADERS) ||
-      matchesHeaderPattern(cells, SBI_HEADERS_ALT)
-    ) {
+    if (matchesHeaderPattern(cells, SBI_HEADERS)) {
       return { bank: "SBI", row: i, columns: cells };
     }
   }
@@ -358,6 +355,12 @@ function normalizeHeaderCell(cell: unknown): string {
 }
 
 /**
+ * Short headers that must match as whole words/cells to avoid false positives.
+ * E.g., "DR" should not match "Withdrawals" via substring.
+ */
+const WHOLE_WORD_ONLY_HEADERS = new Set(["dr", "cr"]);
+
+/**
  * Check if row cells match a header pattern (fuzzy match).
  */
 function matchesHeaderPattern(cells: string[], pattern: string[]): boolean {
@@ -367,9 +370,17 @@ function matchesHeaderPattern(cells: string[], pattern: string[]): boolean {
 
   for (const expected of pattern) {
     const normalizedExpected = expected.toLowerCase().replace(/[./]/g, "").replace(/\s+/g, " ");
+    const requireWholeWord = WHOLE_WORD_ONLY_HEADERS.has(normalizedExpected);
+
     for (const cell of cells) {
       const normalizedCell = cell.toLowerCase().replace(/[./]/g, "").replace(/\s+/g, " ");
-      if (normalizedCell === normalizedExpected || normalizedCell.includes(normalizedExpected)) {
+      
+      if (normalizedCell === normalizedExpected) {
+        // Exact match always counts
+        matches++;
+        break;
+      } else if (!requireWholeWord && normalizedCell.includes(normalizedExpected)) {
+        // Substring match only for non-whole-word headers
         matches++;
         break;
       }
