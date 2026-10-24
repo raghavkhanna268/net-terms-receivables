@@ -170,9 +170,11 @@ describe("S22 Migration Verification", () => {
         VALUES (${testShopId}, ${testShopDomain}, ${now}, ${now})
       `;
 
+      const testCustomerId = `gid://shopify/Customer/${testId}`;
+
       await sql!`
-        INSERT INTO "BuyerAccount" (id, "shopId", kind, name, "createdAt", "updatedAt")
-        VALUES (${testAccountId}, ${testShopId}, 'TAGGED_CUSTOMER', 'Test Buyer', ${now}, ${now})
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, name, "customerId", "createdAt", "updatedAt")
+        VALUES (${testAccountId}, ${testShopId}, 'TAGGED_CUSTOMER', 'Test Buyer', ${testCustomerId}, ${now}, ${now})
       `;
 
       await sql!`
