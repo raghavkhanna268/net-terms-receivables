@@ -32,6 +32,10 @@ import {
   rejectMatch,
   MAX_PAYMENTS_PER_REQUEST,
 } from "~/services/matcher.server";
+import {
+  applyMatch,
+  unmatchMatch,
+} from "~/services/apply.server";
 import { formatPaiseAmount } from "~/lib/aging";
 
 const PAGE_SIZE = 20;
@@ -82,7 +86,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       pagination: { page: 1, pageSize: PAGE_SIZE, totalCount: 0 },
       view,
       error: "Shop not found",
-      tabCounts: { suggested: 0, unmatched: 0 },
+      tabCounts: { suggested: 0, unmatched: 0, confirmed: 0 },
     };
   }
 
@@ -95,7 +99,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   let totalCount = 0;
 
   // P3: Get real tab counts from COUNT queries (not page length)
-  let tabCounts = { suggested: 0, unmatched: 0 };
+  let tabCounts = { suggested: 0, unmatched: 0, confirmed: 0 };
   try {
     const [suggestedCount] = await sql<{ count: string }[]>`
       SELECT COUNT(*)::text AS count
@@ -109,9 +113,16 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       WHERE "shopId" = ${shop.id}
         AND status IN ('unmatched', 'partial')
     `;
+    const [confirmedCount] = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text AS count
+      FROM "Match"
+      WHERE "shopId" = ${shop.id}
+        AND state = 'confirmed'
+    `;
     tabCounts = {
       suggested: parseInt(suggestedCount?.count ?? "0", 10),
       unmatched: parseInt(unmatchedCount?.count ?? "0", 10),
+      confirmed: parseInt(confirmedCount?.count ?? "0", 10),
     };
   } catch (err) {
     console.error("[app.reconcile] Error getting tab counts:", err);
@@ -165,6 +176,26 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         payerText: p.payerText,
         utr: p.utr,
         rail: p.rail,
+      }));
+      totalCount = result.totalCount;
+    } else if (view === "confirmed") {
+      // View confirmed matches ready to apply (S17)
+      const result = await getSuggestedMatches(sql, shop.id, {
+        limit: PAGE_SIZE,
+        offset: (page - 1) * PAGE_SIZE,
+        state: "confirmed",
+      });
+
+      matches = result.matches.map((m) => ({
+        id: m.id,
+        paymentId: m.paymentId,
+        invoiceId: m.invoiceId,
+        invoiceName: m.invoiceName,
+        amountPaise: m.amountPaise.toString(),
+        score: m.score,
+        reasons: m.reasons,
+        state: m.state,
+        buyerName: m.buyerName,
       }));
       totalCount = result.totalCount;
     } else {
@@ -268,6 +299,32 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         return {
           success: result.success,
           error: result.success ? null : "Failed to reject match",
+        };
+      }
+
+      case "apply": {
+        const matchId = formData.get("matchId") as string;
+        if (!matchId) {
+          return { success: false, error: "Match ID required" };
+        }
+        const result = await applyMatch(sql, matchId, userId);
+        return {
+          success: result.success,
+          error: result.success ? null : (result.error ?? "Failed to apply match"),
+          invoicePaid: result.invoicePaid,
+        };
+      }
+
+      case "unmatch": {
+        const matchId = formData.get("matchId") as string;
+        if (!matchId) {
+          return { success: false, error: "Match ID required" };
+        }
+        const result = await unmatchMatch(sql, matchId, userId);
+        return {
+          success: result.success,
+          error: result.success ? null : (result.error ?? "Failed to unmatch"),
+          alreadyPushed: result.alreadyPushed,
         };
       }
 
@@ -646,6 +703,108 @@ function SuggestedMatchesView({
   );
 }
 
+function ConfirmedMatchesView({
+  matches,
+  currency,
+  page,
+  totalCount,
+  pageSize,
+}: {
+  matches: MatchSummary[];
+  currency: string;
+  page: number;
+  totalCount: number;
+  pageSize: number;
+}) {
+  const navigation = useNavigation();
+  const isSubmitting = navigation.state === "submitting";
+  const totalPages = Math.ceil(totalCount / pageSize);
+
+  if (matches.length === 0) {
+    return (
+      <s-empty-state heading="No confirmed matches">
+        <s-text slot="subheading">
+          There are no confirmed matches ready to apply. Confirm suggested
+          matches to see them here.
+        </s-text>
+      </s-empty-state>
+    );
+  }
+
+  return (
+    <s-stack>
+      <s-table>
+        <s-table-header-row>
+          <s-table-header>Invoice</s-table-header>
+          <s-table-header>Buyer</s-table-header>
+          <s-table-header format="currency">Amount</s-table-header>
+          <s-table-header>Score</s-table-header>
+          <s-table-header>Actions</s-table-header>
+        </s-table-header-row>
+        <s-table-body>
+          {matches.map((match) => (
+            <s-table-row key={match.id}>
+              <s-table-cell>{match.invoiceName}</s-table-cell>
+              <s-table-cell>{match.buyerName}</s-table-cell>
+              <s-table-cell>
+                {formatPaiseAmount(BigInt(match.amountPaise), currency)}
+              </s-table-cell>
+              <s-table-cell>
+                <ScoreBadge score={match.score} />
+              </s-table-cell>
+              <s-table-cell>
+                <s-stack direction="inline">
+                  <Form method="post" style={{ display: "inline" }}>
+                    <input type="hidden" name="intent" value="apply" />
+                    <input type="hidden" name="matchId" value={match.id} />
+                    <s-button
+                      variant="primary"
+                      type="submit"
+                      disabled={isSubmitting}
+                    >
+                      Apply
+                    </s-button>
+                  </Form>
+                  <Form method="post" style={{ display: "inline" }}>
+                    <input type="hidden" name="intent" value="unmatch" />
+                    <input type="hidden" name="matchId" value={match.id} />
+                    <s-button
+                      variant="secondary"
+                      tone="critical"
+                      type="submit"
+                      disabled={isSubmitting}
+                    >
+                      Unmatch
+                    </s-button>
+                  </Form>
+                </s-stack>
+              </s-table-cell>
+            </s-table-row>
+          ))}
+        </s-table-body>
+      </s-table>
+
+      {totalPages > 1 && (
+        <s-stack direction="inline">
+          {page > 1 && (
+            <s-button href={`/app/reconcile?view=confirmed&page=${page - 1}`}>
+              Previous
+            </s-button>
+          )}
+          <s-text>
+            Page {page} of {totalPages} ({totalCount} matches)
+          </s-text>
+          {page < totalPages && (
+            <s-button href={`/app/reconcile?view=confirmed&page=${page + 1}`}>
+              Next
+            </s-button>
+          )}
+        </s-stack>
+      )}
+    </s-stack>
+  );
+}
+
 export default function ReconcilePage() {
   const {
     shopCurrency,
@@ -691,6 +850,12 @@ export default function ReconcilePage() {
           >
             Unmatched ({tabCounts.unmatched})
           </s-button>
+          <s-button
+            href="/app/reconcile?view=confirmed"
+            variant={view === "confirmed" ? "primary" : "secondary"}
+          >
+            Confirmed ({tabCounts.confirmed})
+          </s-button>
         </s-stack>
       </s-section>
 
@@ -705,6 +870,16 @@ export default function ReconcilePage() {
         <s-section heading="Unmatched Payments">
           <UnmatchedPaymentsView
             payments={payments}
+            currency={shopCurrency}
+            page={pagination.page}
+            totalCount={pagination.totalCount}
+            pageSize={pagination.pageSize}
+          />
+        </s-section>
+      ) : view === "confirmed" ? (
+        <s-section heading="Confirmed Matches (Ready to Apply)">
+          <ConfirmedMatchesView
+            matches={matches}
             currency={shopCurrency}
             page={pagination.page}
             totalCount={pagination.totalCount}
@@ -734,16 +909,22 @@ export default function ReconcilePage() {
           </s-list-item>
           <s-list-item>
             <s-text type="strong">Confirm:</s-text> Mark a suggested match as
-            correct
+            correct (moves to Confirmed tab)
           </s-list-item>
           <s-list-item>
             <s-text type="strong">Reject:</s-text> Mark a suggested match as
             incorrect
           </s-list-item>
+          <s-list-item>
+            <s-text type="strong">Apply:</s-text> Apply a confirmed match to
+            reduce invoice outstanding. Full payments mark the Shopify order as
+            paid.
+          </s-list-item>
+          <s-list-item>
+            <s-text type="strong">Unmatch:</s-text> Reverse a confirmed match
+            before it is applied
+          </s-list-item>
         </s-unordered-list>
-        <s-paragraph>
-          Confirmed matches will be applied to orders in a future update (S17).
-        </s-paragraph>
       </s-section>
 
       <s-section slot="aside" heading="Match Scoring">

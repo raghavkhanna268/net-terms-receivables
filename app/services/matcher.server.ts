@@ -572,6 +572,31 @@ export async function confirmMatch(
       const newStatus = isFullyAllocated ? "matched" : "partial";
       await updatePaymentStatus(tx, shopId, payment.id, newStatus);
 
+      // S17: Write match.confirmed audit event (idempotent)
+      const auditEventId = `match-confirmed-${matchId}`;
+      const [existingAudit] = await tx<{ id: string }[]>`
+        SELECT id FROM "AuditEvent" WHERE id = ${auditEventId}
+      `;
+
+      if (!existingAudit) {
+        await tx`
+          INSERT INTO "AuditEvent" (id, "shopId", actor, type, data, at)
+          VALUES (
+            ${auditEventId},
+            ${shopId},
+            ${userId},
+            'match.confirmed',
+            ${tx.json({
+              matchId,
+              invoiceId: match.invoice_id,
+              paymentId: payment.id,
+              amountPaise: finalAllocationPaise.toString(),
+            })},
+            NOW()
+          )
+        `;
+      }
+
       return { success: true };
     });
   } catch (error) {
