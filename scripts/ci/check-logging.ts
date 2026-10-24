@@ -154,10 +154,10 @@ const DOMAIN_LITERAL_PATTERN = /myshopify\.com/i;
 
 /**
  * Validation regex patterns that are safe (these test strings, not log them).
+ * P1: Removed `/\.test\(/` - line-wide skip was too broad.
+ * Keep only: escaped-regex pattern and isValidShopDomain helper.
  */
 const VALIDATION_PATTERNS = [
-  /\.test\(/,
-  /RegExp\(/,
   /isValidShopDomain/,
   /\\\.myshopify\\\.com/,
 ];
@@ -1544,37 +1544,32 @@ function matchesFakePrefix(subdomain: string): boolean {
 
 /**
  * Check if ALL domains on a line are explicitly fake (safe for test files).
- * P1: Strict fail-closed - a domain is fake only if:
+ * P1 Round 4: All checks are PER-MATCH, not line-wide.
+ * A domain is fake only if:
  * 1. Its subdomain EXACTLY equals a value in FAKE_SUBDOMAINS, OR
  * 2. Its subdomain starts with test-/fake-/mock-/example-/sentinel- with proper boundary, OR
  * 3. Its subdomain starts with s##- (test suite prefix), OR
- * 4. The line is a template interpolation (${...}.myshopify.com), OR
- * 5. The line is an SQL/string concatenation pattern, OR
- * 6. The subdomain is ALL_CAPS (test constant), OR
- * 7. The domain uses a fake TLD (.test, .invalid, .example, .localhost)
+ * 4. The subdomain is an ALL_CAPS constant with underscore (e.g., TEST_SHOP), OR
+ * 5. The full domain uses a fake TLD (.test, .invalid, .example, .localhost)
  *
+ * Template interpolations like `${x}.myshopify.com` are detected separately.
  * Returns true only if ALL domains on the line are fake. Returns false if ANY domain is real.
- * P1: Must check EVERY domain on the line using global regex.
  */
 function allDomainsAreFake(line: string): boolean {
-  if (/\$\{[^}]+\}\.myshopify\.com/i.test(line)) return true;
-
-  if (/['"`]\s*[-+%]\s*.*\.myshopify\.com/i.test(line)) return true;
-  if (/\+\s*['"`]\.myshopify\.com/i.test(line)) return true;
-
-  for (const tld of FAKE_TLDS) {
-    if (line.toLowerCase().includes(tld)) return true;
-  }
-
-  const domainRegex = /([a-z0-9][-_a-z0-9]*)\.myshopify\.com/gi;
+  const domainRegex = /([a-z0-9][-_a-z0-9]*)\.(myshopify\.com|test|invalid|example|localhost)/gi;
   let match;
-  let foundAnyDomain = false;
+  let foundAnyLiteralDomain = false;
+  
   while ((match = domainRegex.exec(line)) !== null) {
-    foundAnyDomain = true;
     const subdomain = match[1].toLowerCase();
     const originalCase = match[1];
+    const tld = match[2].toLowerCase();
 
-    if (/^[A-Z_]+$/.test(originalCase)) continue;
+    if (tld !== "myshopify.com") continue;
+
+    foundAnyLiteralDomain = true;
+
+    if (/^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(originalCase)) continue;
 
     if (FAKE_SUBDOMAINS.has(subdomain)) continue;
 
@@ -1583,7 +1578,19 @@ function allDomainsAreFake(line: string): boolean {
     return false;
   }
 
-  return foundAnyDomain;
+  if (foundAnyLiteralDomain) {
+    return true;
+  }
+
+  if (/\$\{[^}]+\}\.myshopify\.com/i.test(line)) {
+    return true;
+  }
+
+  if (/['"`]\s*\+\s*[a-zA-Z_$][\w$]*\s*\+?\s*['"`]?[^'"]*\.myshopify\.com/i.test(line)) {
+    return true;
+  }
+
+  return false;
 }
 
 /**
@@ -1612,12 +1619,16 @@ function analyzeTestFile(testFile: TestFile): Violation[] {
 
     // Check for token prefixes (shpat_, shpua_, shpss_, shpca_, shppa_)
     // P2: Decide fake vs real based on the token VALUE only
-    // P2: Don't apply assertion patterns to tokens - if VALUE looks real, flag it
+    // P2: Only skip when token is in actual regex literal or RegExp constructor
     if (TOKEN_PREFIX_PATTERN.test(line)) {
-      // Skip regex patterns (used for validation/redaction)
-      if (/\/.*shp(?:at|ua|ss|ca|pa)_/.test(line) || /RegExp|\.test\(|\.replace\(/.test(line)) continue;
       // Skip if it's in a file that handles token redaction
       if (/\/log\.server|lib\/log/i.test(testFile.relPath) || testFile.relPath.includes("sentry")) continue;
+
+      // P2: Check if token is in an actual regex literal or RegExp constructor
+      // Regex literal: /...shpat_.../flags or new RegExp("...shpat_...")
+      const isInRegexLiteral = /\/[^/]*shp(?:at|ua|ss|ca|pa)_[^/]*\/[gimsuy]*/.test(line);
+      const isInRegExpConstructor = /RegExp\s*\([^)]*shp(?:at|ua|ss|ca|pa)_/.test(line);
+      if (isInRegexLiteral || isInRegExpConstructor) continue;
 
       // P1: Check if the token VALUE looks real (32+ hex chars, not synthetic)
       if (hasRealLookingToken(line)) {

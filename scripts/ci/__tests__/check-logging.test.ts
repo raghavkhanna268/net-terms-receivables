@@ -1105,6 +1105,131 @@ export function test() { return domains; }`
       const { exitCode } = runGuard();
       expect(exitCode).toBe(0);
     });
+
+    // P1 Round 4: FAIL tests for removed line-wide skips
+    it("fails for real domain on same line as template domain", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const realDomain = "clearwater" + "-wholesale" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domains = [\`\${shopId}.myshopify.com\`, "${realDomain}"];
+export function test() { return domains; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for real domain with quote-plus-operator concat on same line", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const realDomain = "clearwater" + "-wholesale" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const x = "prefix" + shopVar; const d = "${realDomain}";
+export function test() { return x + d; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for real domain on line containing .test(", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const realDomain = "clearwater" + "-wholesale" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `if (/pattern/.test(x)) { const d = "${realDomain}"; }
+export function test() { return d; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for real domain on line containing foo.test.ts path", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const realDomain = "clearwater" + "-wholesale" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `import { x } from "./foo.test.ts"; const d = "${realDomain}";
+export function test() { return d; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for ALL_CAPS domain without underscore (CLEARWATER)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "CLEARWATER.myshopify.com"; export function test() { return domain; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("allows ALL_CAPS constant with underscore (TEST_SHOP)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "TEST_SHOP.myshopify.com"; export function test() { return domain; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    // P2 Round 4: Token tests for fetch-header and URL/path cases
+    it("fails for real token in fetch header (not in regex)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      // Build real-looking token at test generation time
+      const realToken = "shpat_" + "a1b2c3d4e5f67890abcdef1234567890";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `fetch(url, { headers: { "X-Shopify-Access-Token": "${realToken}" } });
+export function test() { return true; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("token-prefix");
+    });
+
+    it("fails for real token in URL/path string (not in regex)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      // Build real-looking token at test generation time
+      const realToken = "shpat_" + "a1b2c3d4e5f67890abcdef1234567890";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const url = "/admin/api/2024-01/shop.json?token=${realToken}";
+export function test() { return url; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("token-prefix");
+    });
+
+    it("allows token in actual regex literal", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const pattern = /shpat_[a-f0-9]{32}/gi;
+export function test() { return pattern; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("allows token in RegExp constructor", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const pattern = new RegExp("shpat_[a-f0-9]{32}", "gi");
+export function test() { return pattern; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
   });
 
   // =========================================================================
