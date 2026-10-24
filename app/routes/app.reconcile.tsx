@@ -325,12 +325,13 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       }
 
       // S17: Apply confirmed match to reduce invoice outstanding
+      // IDOR protection: pass shop.id from authenticated session
       case "apply": {
         const matchId = formData.get("matchId") as string;
         if (!matchId) {
           return { success: false, error: "Match ID required" };
         }
-        const result = await applyMatch(sql, matchId, userId);
+        const result = await applyMatch(sql, shop.id, matchId, userId);
         return {
           success: result.success,
           error: result.success ? null : (result.error ?? "Failed to apply match"),
@@ -338,12 +339,13 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       }
 
       // S17: Unmatch a confirmed or pushed match
+      // IDOR protection: pass shop.id from authenticated session
       case "unmatch": {
         const matchId = formData.get("matchId") as string;
         if (!matchId) {
           return { success: false, error: "Match ID required" };
         }
-        const result = await unmatchMatch(sql, matchId, userId);
+        const result = await unmatchMatch(sql, shop.id, matchId, userId);
         return {
           success: result.success,
           error: result.success ? null : (result.error ?? "Failed to unmatch"),

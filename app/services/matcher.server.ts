@@ -515,25 +515,37 @@ export async function confirmMatch(
         RETURNING id
       `;
 
-      // S17: Write audit event only if the transition actually happened
-      if (confirmedRow) {
-        await tx`
-          INSERT INTO "AuditEvent" (id, "shopId", actor, type, data, at)
-          VALUES (
-            gen_random_uuid(),
-            ${shopId},
-            ${userId},
-            'match.confirmed',
-            ${tx.json({
-              matchId,
-              invoiceId: match.invoice_id,
-              paymentId: payment.id,
-              amountPaise: finalAllocationPaise.toString(),
-            })}::jsonb,
-            NOW()
-          )
+      // If no transition happened (match wasn't in 'suggested' state), return early
+      // This handles idempotent retry of already-confirmed matches
+      if (!confirmedRow) {
+        // Check current state for better error message
+        const [currentMatch] = await tx<{ state: string }[]>`
+          SELECT state FROM "Match" WHERE id = ${matchId} AND "shopId" = ${shopId}
         `;
+        if (currentMatch?.state === "confirmed" || currentMatch?.state === "pushed") {
+          // Already confirmed - idempotent success
+          return { success: true };
+        }
+        return { success: false, error: `Match state is '${currentMatch?.state ?? "unknown"}'` };
       }
+
+      // S17: Write audit event for the transition
+      await tx`
+        INSERT INTO "AuditEvent" (id, "shopId", actor, type, data, at)
+        VALUES (
+          gen_random_uuid(),
+          ${shopId},
+          ${userId},
+          'match.confirmed',
+          ${tx.json({
+            matchId,
+            invoiceId: match.invoice_id,
+            paymentId: payment.id,
+            amountPaise: finalAllocationPaise.toString(),
+          })}::jsonb,
+          NOW()
+        )
+      `;
 
       // Calculate new remaining payment after this confirmation
       const newRemainingPaymentPaise = remainingPaymentPaise - finalAllocationPaise;

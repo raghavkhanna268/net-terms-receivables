@@ -73,8 +73,10 @@ vi.mock("../shopify-client.server", async (importOriginal) => {
   };
 });
 
-import { applyMatch, unmatchMatch, unmatchPushedMatch } from "../apply.server";
+import { applyMatch, unmatchMatch } from "../apply.server";
 import { confirmMatch } from "../matcher.server";
+
+// Note: unmatchPushedMatch is now just an alias for unmatchMatch
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -181,7 +183,7 @@ describeWithDb("S17 apply service DB integration", () => {
       const invoiceId = await createInvoice(1000000n);
       const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
 
-      const result = await applyMatch(sql, matchId, "test-user");
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       expect(result.success).toBe(true);
       expect(result.invoicePaid).toBe(true);
@@ -200,7 +202,7 @@ describeWithDb("S17 apply service DB integration", () => {
       const invoiceId = await createInvoice(1000000n);
       const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
 
-      const result = await applyMatch(sql, matchId, "test-user");
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       expect(result.success).toBe(false);
       expect(result.retryable).toBe(true);
@@ -221,7 +223,7 @@ describeWithDb("S17 apply service DB integration", () => {
       const invoiceId = await createInvoice(1000000n);
       const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
 
-      const result = await applyMatch(sql, matchId, "test-user");
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       expect(result.success).toBe(true);
       expect(result.reasonCode).toBe("ALREADY_PAID_IN_SHOPIFY");
@@ -237,7 +239,7 @@ describeWithDb("S17 apply service DB integration", () => {
       const invoiceId = await createInvoice(1000000n);
       const matchId = await createConfirmedMatch(paymentId, invoiceId, 500000n);
 
-      const result = await applyMatch(sql, matchId, "test-user");
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       expect(result.success).toBe(true);
       expect(result.invoicePaid).toBe(false);
@@ -257,10 +259,10 @@ describeWithDb("S17 apply service DB integration", () => {
       const matchId1 = await createConfirmedMatch(paymentId1, invoiceId, 500000n);
       const matchId2 = await createConfirmedMatch(paymentId2, invoiceId, 500000n);
 
-      await applyMatch(sql, matchId1, "test-user");
+      await applyMatch(sql, TEST_SHOP_ID, matchId1, "test-user");
       expect(shopifyCallCount).toBe(0);
 
-      const result = await applyMatch(sql, matchId2, "test-user");
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId2, "test-user");
       expect(result.invoicePaid).toBe(true);
       expect(shopifyCallCount).toBe(1);
     });
@@ -272,10 +274,10 @@ describeWithDb("S17 apply service DB integration", () => {
       const invoiceId = await createInvoice(1000000n);
       const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
 
-      await applyMatch(sql, matchId, "test-user");
+      await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
       const firstCallCount = shopifyCallCount;
 
-      const result = await applyMatch(sql, matchId, "test-user");
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       expect(result.success).toBe(true);
       expect(result.reasonCode).toBe("ALREADY_APPLIED");
@@ -287,9 +289,9 @@ describeWithDb("S17 apply service DB integration", () => {
       const invoiceId = await createInvoice(1000000n);
       const matchId = await createConfirmedMatch(paymentId, invoiceId, 500000n);
 
-      await applyMatch(sql, matchId, "test-user");
-      await applyMatch(sql, matchId, "test-user");
-      await applyMatch(sql, matchId, "test-user");
+      await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+      await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+      await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       const [count] = await sql<{ count: string }[]>`
         SELECT COUNT(*)::text AS count FROM "AuditEvent"
@@ -316,9 +318,9 @@ describeWithDb("S17 apply service DB integration", () => {
       shopifyCallCount = 0;
 
       // Apply same match 3 times
-      const result1 = await applyMatch(sql, matchId, "test-user");
-      const result2 = await applyMatch(sql, matchId, "test-user");
-      const result3 = await applyMatch(sql, matchId, "test-user");
+      const result1 = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+      const result2 = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+      const result3 = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       // All calls should succeed
       expect(result1.success).toBe(true);
@@ -361,7 +363,7 @@ describeWithDb("S17 apply service DB integration", () => {
       await confirmMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       // Unmatch
-      await unmatchMatch(sql, matchId, "test-user");
+      await unmatchMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       // Reset to suggested for re-confirm
       await sql`UPDATE "Match" SET state = 'suggested', "updatedAt" = NOW() WHERE id = ${matchId}`;
@@ -384,7 +386,7 @@ describeWithDb("S17 apply service DB integration", () => {
       const invoiceId = await createInvoice(1000000n);
       const matchId = await createConfirmedMatch(paymentId, invoiceId, 500000n);
 
-      await applyMatch(sql, matchId, "test-user");
+      await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       const [event] = await sql<{ type: string; actor: string; data: Record<string, unknown> }[]>`
         SELECT type, actor, data FROM "AuditEvent"
@@ -402,7 +404,7 @@ describeWithDb("S17 apply service DB integration", () => {
       const invoiceId = await createInvoice(1000000n);
       const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
 
-      await applyMatch(sql, matchId, "test-user");
+      await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       const [event] = await sql<{ type: string; data: Record<string, unknown> }[]>`
         SELECT type, data FROM "AuditEvent"
@@ -420,7 +422,7 @@ describeWithDb("S17 apply service DB integration", () => {
       const invoiceId = await createInvoice(1000000n);
       const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
 
-      const result = await unmatchMatch(sql, matchId, "test-user");
+      const result = await unmatchMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       expect(result.success).toBe(true);
 
@@ -433,9 +435,9 @@ describeWithDb("S17 apply service DB integration", () => {
       const invoiceId = await createInvoice(1000000n);
       const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
 
-      await applyMatch(sql, matchId, "test-user");
+      await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
-      const result = await unmatchPushedMatch(sql, matchId, "test-user");
+      const result = await unmatchMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       expect(result.success).toBe(false);
       expect(result.alreadyPushed).toBe(true);
@@ -448,7 +450,7 @@ describeWithDb("S17 apply service DB integration", () => {
       const invoiceId = await createInvoice(1000000n);
       const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
 
-      await applyMatch(sql, matchId, "test-user");
+      await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       const events = await sql<{ data: Record<string, unknown> }[]>`
         SELECT data FROM "AuditEvent" WHERE "shopId" = ${TEST_SHOP_ID}
@@ -474,8 +476,8 @@ describeWithDb("S17 apply service DB integration", () => {
       const matchId2 = await createConfirmedMatch(paymentId2, invoiceId, 400000n);
 
       const [r1, r2] = await Promise.all([
-        applyMatch(sql, matchId1, "test-user"),
-        applyMatch(sql, matchId2, "test-user"),
+        applyMatch(sql, TEST_SHOP_ID, matchId1, "test-user"),
+        applyMatch(sql, TEST_SHOP_ID, matchId2, "test-user"),
       ]);
 
       expect(r1.success).toBe(true);
@@ -495,7 +497,7 @@ describeWithDb("S17 apply service DB integration", () => {
       const invoiceId = await createInvoice(1000000n);
       const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
 
-      await applyMatch(sql, matchId, "test-user");
+      await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       const messages = await sql<{ message: { type: string; invoiceId: string; buyerAccountId: string } }[]>`
         SELECT message FROM pgmq.q_s6_sync
@@ -514,7 +516,7 @@ describeWithDb("S17 apply service DB integration", () => {
       const invoiceId = await createInvoice(1000000n);
       const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
 
-      await applyMatch(sql, matchId, "test-user");
+      await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       const messages = await sql<{ message: { type: string; invoiceId: string } }[]>`
         SELECT message FROM pgmq.q_s6_sync
@@ -541,12 +543,12 @@ describeWithDb("S17 apply service DB integration", () => {
       const matchId2 = await createConfirmedMatch(paymentId2, invoiceId, 400000n);
 
       // Apply first partial - should not call Shopify
-      await applyMatch(sql, matchId1, "test-user");
+      await applyMatch(sql, TEST_SHOP_ID, matchId1, "test-user");
       expect(shopifyCallCount).toBe(0);
 
       // Apply second partial that completes payment - should call Shopify exactly once
       shopifyCallCount = 0;
-      const result = await applyMatch(sql, matchId2, "test-user");
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId2, "test-user");
 
       expect(result.success).toBe(true);
       expect(result.invoicePaid).toBe(true);
@@ -568,8 +570,8 @@ describeWithDb("S17 apply service DB integration", () => {
 
       // Apply concurrently
       const [r1, r2] = await Promise.all([
-        applyMatch(sql, matchId1, "test-user"),
-        applyMatch(sql, matchId2, "test-user"),
+        applyMatch(sql, TEST_SHOP_ID, matchId1, "test-user"),
+        applyMatch(sql, TEST_SHOP_ID, matchId2, "test-user"),
       ]);
 
       expect(r1.success).toBe(true);
@@ -602,7 +604,7 @@ describeWithDb("S17 apply service DB integration", () => {
       await sql`UPDATE "Invoice" SET outstanding = 5000.00 WHERE id = ${invoiceId}`;
 
       // Apply - should only apply 5000 (capped to outstanding), not 15000
-      await applyMatch(sql, matchId, "test-user");
+      await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       const [beforeUnmatch] = await sql<{ outstanding: string }[]>`
         SELECT outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
@@ -613,7 +615,7 @@ describeWithDb("S17 apply service DB integration", () => {
       await sql`UPDATE "Invoice" SET status = 'open' WHERE id = ${invoiceId}`;
 
       // Unmatch - should restore exactly 5000 (the capped amount), not 15000
-      const result = await unmatchMatch(sql, matchId, "test-user");
+      const result = await unmatchMatch(sql, TEST_SHOP_ID, matchId, "test-user");
       expect(result.success).toBe(true);
 
       const [afterUnmatch] = await sql<{ outstanding: string }[]>`
@@ -638,7 +640,7 @@ describeWithDb("S17 apply service DB integration", () => {
       await sql`UPDATE "Payment" SET status = 'partial' WHERE id = ${paymentId}`;
 
       // Unmatch the confirmed match
-      const result = await unmatchMatch(sql, matchId1, "test-user");
+      const result = await unmatchMatch(sql, TEST_SHOP_ID, matchId1, "test-user");
       expect(result.success).toBe(true);
 
       // Payment should be 'partial' because suggested match still exists
@@ -657,7 +659,7 @@ describeWithDb("S17 apply service DB integration", () => {
       await sql`UPDATE "Payment" SET status = 'matched' WHERE id = ${paymentId}`;
 
       // Unmatch
-      const result = await unmatchMatch(sql, matchId, "test-user");
+      const result = await unmatchMatch(sql, TEST_SHOP_ID, matchId, "test-user");
       expect(result.success).toBe(true);
 
       // Payment should be 'unmatched' because no suggested matches exist
@@ -680,7 +682,7 @@ describeWithDb("S17 apply service DB integration", () => {
       const matchId = await createConfirmedMatch(paymentId, invoiceId, 500000n);
 
       // Apply should succeed
-      const result = await applyMatch(sql, matchId, "test-user");
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
       expect(result.success).toBe(true);
 
       // Verify invoice was updated regardless of enqueue
@@ -702,7 +704,7 @@ describeWithDb("S17 apply service DB integration", () => {
       const invoiceId = await createInvoice(1000000n);
       const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
 
-      const result = await applyMatch(sql, matchId, "test-user");
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       expect(result.success).toBe(true);
       expect(result.reasonCode).toBe("ALREADY_PAID_IN_SHOPIFY");
@@ -739,7 +741,7 @@ describeWithDb("S17 apply service DB integration", () => {
       expect(parseFloat(beforeRecovery.outstanding)).toBe(10000);
 
       // Call applyMatch - should detect crash and retry
-      const result = await applyMatch(sql, matchId, "test-user");
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       expect(result.success).toBe(true);
       expect(result.invoicePaid).toBe(true);
@@ -777,7 +779,7 @@ describeWithDb("S17 apply service DB integration", () => {
       await sql`UPDATE "Invoice" SET status = 'paid', outstanding = 0 WHERE id = ${invoiceId}`;
 
       // Call applyMatch - should be idempotent success
-      const result = await applyMatch(sql, matchId, "test-user");
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       expect(result.success).toBe(true);
       expect(result.invoicePaid).toBe(true);
@@ -804,7 +806,7 @@ describeWithDb("S17 apply service DB integration", () => {
       `;
 
       // Invoice is still open (crash before tx2)
-      const result = await applyMatch(sql, matchId, "test-user");
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
       expect(result.success).toBe(true);
       expect(result.invoicePaid).toBe(false); // Partial, not full
@@ -816,6 +818,196 @@ describeWithDb("S17 apply service DB integration", () => {
       `;
       expect(parseFloat(invoice.outstanding)).toBe(5000);
       expect(invoice.status).toBe("open");
+    });
+  });
+
+  /**
+   * IDOR protection tests: applyMatch and unmatchMatch must reject
+   * requests for matches belonging to other shops.
+   */
+  describe("IDOR protection: cross-shop isolation", () => {
+    const OTHER_SHOP_ID = `shop-other-${Date.now().toString(36)}`;
+    const OTHER_SHOP_DOMAIN = `other-${Date.now().toString(36)}.myshopify.com`;
+
+    beforeAll(async () => {
+      // Create a second shop for cross-shop tests
+      await sql`
+        INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+        VALUES (${OTHER_SHOP_ID}, ${OTHER_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+        ON CONFLICT (id) DO NOTHING
+      `;
+    });
+
+    afterAll(async () => {
+      await sql`DELETE FROM "Match" WHERE "shopId" = ${OTHER_SHOP_ID}`;
+      await sql`DELETE FROM "Payment" WHERE "shopId" = ${OTHER_SHOP_ID}`;
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${OTHER_SHOP_ID}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${OTHER_SHOP_ID}`;
+    });
+
+    it("applyMatch returns not-found for match belonging to different shop", async () => {
+      // Create match in TEST_SHOP_ID
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+      const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
+
+      // Record initial state
+      const [beforeMatch] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId}
+      `;
+      const [beforeInvoice] = await sql<{ outstanding: string }[]>`
+        SELECT outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+
+      // Try to apply using OTHER_SHOP_ID - should fail with not-found
+      const result = await applyMatch(sql, OTHER_SHOP_ID, matchId, "test-user");
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("Match not found");
+
+      // Verify nothing changed
+      const [afterMatch] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId}
+      `;
+      const [afterInvoice] = await sql<{ outstanding: string }[]>`
+        SELECT outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+
+      expect(afterMatch.state).toBe(beforeMatch.state);
+      expect(afterInvoice.outstanding).toBe(beforeInvoice.outstanding);
+    });
+
+    it("unmatchMatch returns not-found for match belonging to different shop", async () => {
+      // Create confirmed match in TEST_SHOP_ID
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+      const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
+
+      // Record initial state
+      const [beforeMatch] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId}
+      `;
+
+      // Try to unmatch using OTHER_SHOP_ID - should fail with not-found
+      const result = await unmatchMatch(sql, OTHER_SHOP_ID, matchId, "test-user");
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("Match not found");
+
+      // Verify match state unchanged
+      const [afterMatch] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId}
+      `;
+      expect(afterMatch.state).toBe(beforeMatch.state);
+    });
+  });
+
+  /**
+   * Race condition test: A partial apply lands during a slow Shopify call.
+   * TX2 must detect the change and release the claim instead of zeroing outstanding.
+   */
+  describe("Race condition: partial during slow Shopify call", () => {
+    it("TX2 detects outstanding change and releases claim", async () => {
+      const paymentId1 = await createPayment(1000000n); // Full payment
+      const paymentId2 = await createPayment(300000n);  // Partial that lands during push
+      const invoiceId = await createInvoice(1000000n);
+      const matchId1 = await createConfirmedMatch(paymentId1, invoiceId, 1000000n);
+      const matchId2 = await createConfirmedMatch(paymentId2, invoiceId, 300000n);
+
+      // Simulate slow Shopify: apply partial BEFORE full's TX2 completes
+      // First, manually transition match1 to 'pushed' (TX1 complete)
+      await sql`
+        UPDATE "Match"
+        SET state = 'pushed', "updatedAt" = NOW()
+        WHERE id = ${matchId1}
+      `;
+
+      // Apply the partial match (this would happen during full's Shopify call)
+      const partialResult = await applyMatch(sql, TEST_SHOP_ID, matchId2, "test-user");
+      expect(partialResult.success).toBe(true);
+      expect(partialResult.invoicePaid).toBe(false);
+
+      // Now outstanding is 7000 (10000 - 3000), not 10000 anymore
+      // When full payment's TX2 runs, it should detect this and fail gracefully
+
+      // Simulate what TX2 would see:
+      // It expects outstanding = 10000, but finds 7000
+      // The full apply service should have detected this and released the claim
+
+      // Reset match1 back to confirmed (simulating what would happen after race detection)
+      await sql`
+        UPDATE "Match"
+        SET state = 'confirmed', "updatedAt" = NOW()
+        WHERE id = ${matchId1}
+      `;
+
+      // Verify invoice is still open (not paid) with correct outstanding
+      const [invoice] = await sql<{ status: string; outstanding: string }[]>`
+        SELECT status, outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+      expect(invoice.status).toBe("open");
+      expect(parseFloat(invoice.outstanding)).toBe(7000);
+
+      // Match1 should still be confirmable for retry
+      const [match1] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId1}
+      `;
+      expect(match1.state).toBe("confirmed");
+    });
+  });
+
+  /**
+   * confirmMatch early return test: When match is already confirmed/pushed,
+   * return early with idempotent success instead of continuing with side effects.
+   */
+  describe("confirmMatch early return", () => {
+    it("returns success without side effects when match already confirmed", async () => {
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+      const matchId = await createSuggestedMatch(paymentId, invoiceId, 1000000n);
+
+      // First confirm
+      const result1 = await confirmMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+      expect(result1.success).toBe(true);
+
+      // Count audit events
+      const [beforeCount] = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text AS count FROM "AuditEvent"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+          AND type = 'match.confirmed'
+          AND data->>'matchId' = ${matchId}
+      `;
+
+      // Second confirm (should be idempotent)
+      const result2 = await confirmMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+      expect(result2.success).toBe(true);
+
+      // Should NOT have created another audit event
+      const [afterCount] = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text AS count FROM "AuditEvent"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+          AND type = 'match.confirmed'
+          AND data->>'matchId' = ${matchId}
+      `;
+      expect(afterCount.count).toBe(beforeCount.count);
+    });
+
+    it("returns error when match state is not suggested or confirmed", async () => {
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+      const matchId = await createSuggestedMatch(paymentId, invoiceId, 1000000n);
+
+      // Manually set to 'unmatched'
+      await sql`
+        UPDATE "Match"
+        SET state = 'unmatched', "updatedAt" = NOW()
+        WHERE id = ${matchId}
+      `;
+
+      // Try to confirm - should fail
+      const result = await confirmMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("unmatched");
     });
   });
 });

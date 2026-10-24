@@ -68,6 +68,9 @@ export interface UnmatchResult {
 /**
  * Apply a confirmed match to reduce invoice outstanding.
  *
+ * SECURITY: shopId must come from the authenticated session (route), not from user input.
+ * All queries include AND "shopId" = ... to prevent IDOR attacks.
+ *
  * The decision between partial and full payment is made UNDER THE LOCK to prevent
  * race conditions where concurrent applies could miscalculate (Issue #2).
  *
@@ -76,14 +79,16 @@ export interface UnmatchResult {
  *    - If partial: complete in same TX, write audit, return
  *    - If full: record need for Shopify push, commit
  * 2. Call Shopify orderMarkAsPaid (only for full payment)
- * 3. TX2: Finalize - set invoice to paid, write audit events
+ * 3. TX2: Finalize - re-verify invoice state, set to paid, write audit events
  */
 export async function applyMatch(
   sql: Sql,
+  shopId: string,
   matchId: string,
   actor: string
 ): Promise<ApplyMatchResult> {
   // Phase 1: Fetch match metadata (outside transaction)
+  // IDOR protection: filter by shopId from authenticated session
   const [matchRow] = await sql<{
     id: string;
     shopId: string;
@@ -101,6 +106,7 @@ export async function applyMatch(
       state
     FROM "Match"
     WHERE id = ${matchId}
+      AND "shopId" = ${shopId}
   `;
 
   if (!matchRow) {
@@ -114,7 +120,7 @@ export async function applyMatch(
 
   // Handle already-pushed state (idempotency and crash recovery - Issue #6)
   if (matchRow.state === "pushed") {
-    return handlePushedMatch(sql, matchId, matchRow, actor);
+    return handlePushedMatch(sql, shopId, matchId, matchRow, actor);
   }
 
   if (matchRow.state !== "confirmed") {
@@ -126,7 +132,7 @@ export async function applyMatch(
     };
   }
 
-  // Fetch invoice metadata
+  // Fetch invoice metadata - IDOR protection: filter by shopId
   const [invoiceRow] = await sql<{
     id: string;
     orderId: string | null;
@@ -141,6 +147,7 @@ export async function applyMatch(
     FROM "Invoice" i
     JOIN "Shop" s ON s.id = i."shopId"
     WHERE i.id = ${matchRow.invoiceId}
+      AND i."shopId" = ${shopId}
   `;
 
   if (!invoiceRow) {
@@ -155,6 +162,7 @@ export async function applyMatch(
   // TX1: Lock invoice, claim match, decide partial vs full UNDER LOCK
   const tx1Result = await claimMatchAndDecide(
     sql,
+    shopId,
     matchId,
     matchRow,
     invoiceRow,
@@ -201,7 +209,7 @@ export async function applyMatch(
       reasonCode = "ALREADY_PAID_IN_SHOPIFY";
     } else {
       // Shopify call failed - release the claim
-      await releaseMatchClaim(sql, matchId);
+      await releaseMatchClaim(sql, shopId, matchId);
       return {
         success: false,
         invoicePaid: false,
@@ -216,15 +224,18 @@ export async function applyMatch(
   }
 
   // TX2: Finalize - mark invoice as paid, write audit events
+  // Pass the outstanding TX1 saw for race condition check
   const tx2Result = await finalizeFullApply(
     sql,
+    shopId,
     matchId,
     matchRow,
     invoiceRow,
     actor,
     shopifySuccess,
     reasonCode,
-    tx1Result.appliedAmountPaise ?? matchRow.amountPaise
+    tx1Result.appliedAmountPaise ?? matchRow.amountPaise,
+    tx1Result.previousOutstandingPaise ?? "0"
   );
 
   if (!tx2Result.success) {
@@ -260,11 +271,13 @@ export async function applyMatch(
  */
 async function handlePushedMatch(
   sql: Sql,
+  shopId: string,
   matchId: string,
   matchRow: { id: string; shopId: string; paymentId: string; invoiceId: string; amountPaise: string },
   actor: string
 ): Promise<ApplyMatchResult> {
   // Check invoice status to determine if this is idempotent or crash recovery
+  // IDOR protection: filter by shopId
   const [invoiceRow] = await sql<{
     id: string;
     status: string;
@@ -281,6 +294,7 @@ async function handlePushedMatch(
     FROM "Invoice" i
     JOIN "Shop" s ON s.id = i."shopId"
     WHERE i.id = ${matchRow.invoiceId}
+      AND i."shopId" = ${shopId}
   `;
 
   if (!invoiceRow) {
@@ -330,11 +344,12 @@ async function handlePushedMatch(
     // Partial payment crash recovery - just finalize the partial apply
     try {
       await sql.begin(async (tx) => {
-        // Lock and update invoice
+        // Lock and update invoice - IDOR protection: filter by shopId
         const [lockedInvoice] = await tx<{ outstandingPaise: string }[]>`
           SELECT (ROUND(outstanding * 100))::text AS "outstandingPaise"
           FROM "Invoice"
           WHERE id = ${invoiceRow.id}
+            AND "shopId" = ${shopId}
           FOR UPDATE
         `;
 
@@ -350,10 +365,11 @@ async function handlePushedMatch(
           UPDATE "Invoice"
           SET outstanding = ${Number(newOutstanding) / 100}, "updatedAt" = NOW()
           WHERE id = ${invoiceRow.id}
+            AND "shopId" = ${shopId}
         `;
 
         // Write audit event for the recovered apply
-        await writeAuditEvent(tx, matchRow.shopId, actor, "match.applied", {
+        await writeAuditEvent(tx, shopId, actor, "match.applied", {
           matchId,
           invoiceId: invoiceRow.id,
           paymentId: matchRow.paymentId,
@@ -413,10 +429,12 @@ async function handlePushedMatch(
   // Finalize the full payment
   try {
     await sql.begin(async (tx) => {
+      // IDOR protection: filter by shopId
       const [lockedInvoice] = await tx<{ outstandingPaise: string }[]>`
         SELECT (ROUND(outstanding * 100))::text AS "outstandingPaise"
         FROM "Invoice"
         WHERE id = ${invoiceRow.id}
+          AND "shopId" = ${shopId}
         FOR UPDATE
       `;
 
@@ -430,9 +448,10 @@ async function handlePushedMatch(
         UPDATE "Invoice"
         SET outstanding = 0, status = 'paid', "updatedAt" = NOW()
         WHERE id = ${invoiceRow.id}
+          AND "shopId" = ${shopId}
       `;
 
-      await writeAuditEvent(tx, matchRow.shopId, actor, "match.applied", {
+      await writeAuditEvent(tx, shopId, actor, "match.applied", {
         matchId,
         invoiceId: invoiceRow.id,
         paymentId: matchRow.paymentId,
@@ -443,7 +462,7 @@ async function handlePushedMatch(
         recoveredFromCrash: true,
       });
 
-      await writeAuditEvent(tx, matchRow.shopId, actor, "invoice.paid", {
+      await writeAuditEvent(tx, shopId, actor, "invoice.paid", {
         invoiceId: invoiceRow.id,
         matchId,
         orderGid: invoiceRow.orderId,
@@ -475,9 +494,11 @@ async function handlePushedMatch(
  * TX1: Lock invoice, claim match, compute reduction under lock.
  *
  * This addresses Issue #2: partial vs full must be decided UNDER THE LOCK.
+ * Returns previousOutstandingPaise for TX2's race condition check.
  */
 async function claimMatchAndDecide(
   sql: Sql,
+  shopId: string,
   matchId: string,
   matchRow: { id: string; shopId: string; paymentId: string; invoiceId: string; amountPaise: string },
   invoiceRow: { id: string },
@@ -486,12 +507,14 @@ async function claimMatchAndDecide(
   success: boolean;
   isPartial?: boolean;
   appliedAmountPaise?: string;
+  previousOutstandingPaise?: string;
   error?: string;
   reasonCode?: string;
 }> {
   try {
     return await sql.begin(async (tx) => {
       // Lock invoice FIRST (consistent lock order)
+      // IDOR protection: filter by shopId
       const [lockedInvoice] = await tx<{
         outstandingPaise: string;
         status: string;
@@ -501,6 +524,7 @@ async function claimMatchAndDecide(
           status
         FROM "Invoice"
         WHERE id = ${invoiceRow.id}
+          AND "shopId" = ${shopId}
         FOR UPDATE
       `;
 
@@ -512,18 +536,20 @@ async function claimMatchAndDecide(
         return { success: false, error: `Invoice status is '${lockedInvoice.status}', expected 'open'` };
       }
 
-      // Claim the match with conditional UPDATE
+      // Claim the match with conditional UPDATE - IDOR protection: filter by shopId
       const [transitioned] = await tx<{ id: string }[]>`
         UPDATE "Match"
         SET state = 'pushed', "updatedAt" = NOW()
-        WHERE id = ${matchId} AND state = 'confirmed'
+        WHERE id = ${matchId}
+          AND "shopId" = ${shopId}
+          AND state = 'confirmed'
         RETURNING id
       `;
 
       if (!transitioned) {
         // Check current state for idempotency
         const [currentMatch] = await tx<{ state: string }[]>`
-          SELECT state FROM "Match" WHERE id = ${matchId}
+          SELECT state FROM "Match" WHERE id = ${matchId} AND "shopId" = ${shopId}
         `;
         if (currentMatch?.state === "pushed") {
           return { success: true, reasonCode: "ALREADY_APPLIED", isPartial: false };
@@ -550,10 +576,11 @@ async function claimMatchAndDecide(
           UPDATE "Invoice"
           SET outstanding = ${Number(newOutstandingPaise) / 100}, "updatedAt" = NOW()
           WHERE id = ${invoiceRow.id}
+            AND "shopId" = ${shopId}
         `;
 
         // Write audit event for partial apply
-        await writeAuditEvent(tx, matchRow.shopId, actor, "match.applied", {
+        await writeAuditEvent(tx, shopId, actor, "match.applied", {
           matchId,
           invoiceId: invoiceRow.id,
           paymentId: matchRow.paymentId,
@@ -566,14 +593,17 @@ async function claimMatchAndDecide(
           success: true,
           isPartial: true,
           appliedAmountPaise: reductionPaise.toString(),
+          previousOutstandingPaise: invoiceOutstandingPaise.toString(),
         };
       }
 
       // FULL PAYMENT: just claim, don't update invoice yet (need Shopify call)
+      // Return previousOutstandingPaise for TX2's race condition check
       return {
         success: true,
         isPartial: false,
         appliedAmountPaise: reductionPaise.toString(),
+        previousOutstandingPaise: invoiceOutstandingPaise.toString(),
       };
     });
   } catch (error) {
@@ -586,13 +616,16 @@ async function claimMatchAndDecide(
 
 /**
  * Release a match claim if Shopify call fails.
+ * IDOR protection: filter by shopId
  */
-async function releaseMatchClaim(sql: Sql, matchId: string): Promise<void> {
+async function releaseMatchClaim(sql: Sql, shopId: string, matchId: string): Promise<void> {
   try {
     await sql`
       UPDATE "Match"
       SET state = 'confirmed', "updatedAt" = NOW()
-      WHERE id = ${matchId} AND state = 'pushed'
+      WHERE id = ${matchId}
+        AND "shopId" = ${shopId}
+        AND state = 'pushed'
     `;
   } catch (error) {
     console.error(
@@ -604,29 +637,67 @@ async function releaseMatchClaim(sql: Sql, matchId: string): Promise<void> {
 
 /**
  * TX2: Finalize full payment - mark invoice as paid, write audit events.
+ *
+ * RACE CONDITION CHECK: Re-verify under FOR UPDATE that invoice is still:
+ * - status = 'open'
+ * - outstanding matches what TX1 saw
+ * If not (e.g. a partial landed during Shopify call), release the claim and fail gracefully.
  */
 async function finalizeFullApply(
   sql: Sql,
+  shopId: string,
   matchId: string,
   matchRow: { id: string; shopId: string; paymentId: string; invoiceId: string; amountPaise: string },
   invoiceRow: { id: string; orderId: string | null },
   actor: string,
   shopifySuccess: boolean,
   reasonCode: string | undefined,
-  appliedAmountPaise: string
-): Promise<{ success: boolean; error?: string }> {
+  appliedAmountPaise: string,
+  expectedOutstandingPaise: string
+): Promise<{ success: boolean; error?: string; raceDetected?: boolean }> {
   try {
-    await sql.begin(async (tx) => {
-      // Lock invoice
-      const [lockedInvoice] = await tx<{ outstandingPaise: string }[]>`
-        SELECT (ROUND(outstanding * 100))::text AS "outstandingPaise"
+    const result = await sql.begin(async (tx) => {
+      // Lock invoice - IDOR protection: filter by shopId
+      const [lockedInvoice] = await tx<{ outstandingPaise: string; status: string }[]>`
+        SELECT
+          (ROUND(outstanding * 100))::text AS "outstandingPaise",
+          status
         FROM "Invoice"
         WHERE id = ${invoiceRow.id}
+          AND "shopId" = ${shopId}
         FOR UPDATE
       `;
 
       if (!lockedInvoice) {
         throw new Error("Invoice not found");
+      }
+
+      // RACE CONDITION CHECK: Verify invoice state hasn't changed during Shopify call
+      if (lockedInvoice.status !== "open") {
+        // Invoice was paid by another process - release claim and fail gracefully
+        await tx`
+          UPDATE "Match"
+          SET state = 'confirmed', "updatedAt" = NOW()
+          WHERE id = ${matchId}
+            AND "shopId" = ${shopId}
+            AND state = 'pushed'
+        `;
+        return { raceDetected: true, error: `Invoice status changed to '${lockedInvoice.status}' during push` };
+      }
+
+      if (lockedInvoice.outstandingPaise !== expectedOutstandingPaise) {
+        // Outstanding changed (partial apply landed during Shopify call) - release claim
+        await tx`
+          UPDATE "Match"
+          SET state = 'confirmed', "updatedAt" = NOW()
+          WHERE id = ${matchId}
+            AND "shopId" = ${shopId}
+            AND state = 'pushed'
+        `;
+        return {
+          raceDetected: true,
+          error: `Outstanding changed from ${expectedOutstandingPaise} to ${lockedInvoice.outstandingPaise} during push`,
+        };
       }
 
       const previousOutstanding = lockedInvoice.outstandingPaise;
@@ -636,10 +707,11 @@ async function finalizeFullApply(
         UPDATE "Invoice"
         SET outstanding = 0, status = 'paid', "updatedAt" = NOW()
         WHERE id = ${invoiceRow.id}
+          AND "shopId" = ${shopId}
       `;
 
       // Write match.applied audit event
-      await writeAuditEvent(tx, matchRow.shopId, actor, "match.applied", {
+      await writeAuditEvent(tx, shopId, actor, "match.applied", {
         matchId,
         invoiceId: invoiceRow.id,
         paymentId: matchRow.paymentId,
@@ -650,14 +722,20 @@ async function finalizeFullApply(
       });
 
       // Write invoice.paid audit event
-      await writeAuditEvent(tx, matchRow.shopId, actor, "invoice.paid", {
+      await writeAuditEvent(tx, shopId, actor, "invoice.paid", {
         invoiceId: invoiceRow.id,
         matchId,
         orderGid: invoiceRow.orderId,
         shopifyPushSucceeded: shopifySuccess,
         reasonCode,
       });
+
+      return { success: true };
     });
+
+    if (result.raceDetected) {
+      return { success: false, error: result.error, raceDetected: true };
+    }
 
     return { success: true };
   } catch (error) {
@@ -675,6 +753,9 @@ async function finalizeFullApply(
 /**
  * Unmatch a confirmed or pushed match.
  *
+ * SECURITY: shopId must come from the authenticated session (route), not from user input.
+ * All queries include AND "shopId" = ... to prevent IDOR attacks.
+ *
  * - Confirmed matches: simply revert to 'unmatched'
  * - Pushed matches (partial): restore the EXACT applied amount to invoice outstanding (Issue #3)
  * - Pushed matches (full/paid): blocked with clear message
@@ -683,12 +764,13 @@ async function finalizeFullApply(
  */
 export async function unmatchMatch(
   sql: Sql,
+  shopId: string,
   matchId: string,
   actor: string
 ): Promise<UnmatchResult> {
   try {
     const result = await sql.begin(async (tx) => {
-      // Lock and fetch match
+      // Lock and fetch match - IDOR protection: filter by shopId
       const [matchRow] = await tx<{
         id: string;
         shopId: string;
@@ -706,6 +788,7 @@ export async function unmatchMatch(
           state
         FROM "Match"
         WHERE id = ${matchId}
+          AND "shopId" = ${shopId}
         FOR UPDATE
       `;
 
@@ -720,6 +803,7 @@ export async function unmatchMatch(
 
       if (matchRow.state === "pushed") {
         // Pushed match - need to check invoice status and restore outstanding
+        // IDOR protection: filter by shopId
         const [invoiceRow] = await tx<{
           outstandingPaise: string;
           status: string;
@@ -729,6 +813,7 @@ export async function unmatchMatch(
             status
           FROM "Invoice"
           WHERE id = ${matchRow.invoiceId}
+            AND "shopId" = ${shopId}
           FOR UPDATE
         `;
 
@@ -748,16 +833,18 @@ export async function unmatchMatch(
         // Find the actual applied amount from the audit trail (Issue #3)
         const appliedAmount = await getAppliedAmountFromAudit(
           tx,
-          matchRow.shopId,
+          shopId,
           matchId
         );
         const restoreAmount = appliedAmount ?? BigInt(matchRow.amountPaise);
 
-        // Transition to unmatched
+        // Transition to unmatched - IDOR protection: filter by shopId
         const [transitioned] = await tx<{ id: string }[]>`
           UPDATE "Match"
           SET state = 'unmatched', "updatedAt" = NOW()
-          WHERE id = ${matchId} AND state = 'pushed'
+          WHERE id = ${matchId}
+            AND "shopId" = ${shopId}
+            AND state = 'pushed'
           RETURNING id
         `;
 
@@ -766,14 +853,16 @@ export async function unmatchMatch(
           const currentOutstanding = BigInt(invoiceRow.outstandingPaise);
           const newOutstanding = currentOutstanding + restoreAmount;
 
+          // IDOR protection: filter by shopId
           await tx`
             UPDATE "Invoice"
             SET outstanding = ${Number(newOutstanding) / 100}, "updatedAt" = NOW()
             WHERE id = ${matchRow.invoiceId}
+              AND "shopId" = ${shopId}
           `;
 
           // Write audit event
-          await writeAuditEvent(tx, matchRow.shopId, actor, "match.unmatched", {
+          await writeAuditEvent(tx, shopId, actor, "match.unmatched", {
             matchId: matchRow.id,
             invoiceId: matchRow.invoiceId,
             paymentId: matchRow.paymentId,
@@ -782,7 +871,7 @@ export async function unmatchMatch(
           });
 
           // Update Payment.status (Issue #3)
-          await updatePaymentStatusAfterUnmatch(tx, matchRow.paymentId);
+          await updatePaymentStatusAfterUnmatch(tx, shopId, matchRow.paymentId);
 
           return { success: true, invoiceId: matchRow.invoiceId };
         }
@@ -790,17 +879,19 @@ export async function unmatchMatch(
         return { success: true };
       }
 
-      // Confirmed state - simple unmatch
+      // Confirmed state - simple unmatch - IDOR protection: filter by shopId
       const [transitioned] = await tx<{ id: string }[]>`
         UPDATE "Match"
         SET state = 'unmatched', "updatedAt" = NOW()
-        WHERE id = ${matchId} AND state = 'confirmed'
+        WHERE id = ${matchId}
+          AND "shopId" = ${shopId}
+          AND state = 'confirmed'
         RETURNING id
       `;
 
       if (transitioned) {
         // Write audit event
-        await writeAuditEvent(tx, matchRow.shopId, actor, "match.unmatched", {
+        await writeAuditEvent(tx, shopId, actor, "match.unmatched", {
           matchId: matchRow.id,
           invoiceId: matchRow.invoiceId,
           paymentId: matchRow.paymentId,
@@ -809,7 +900,7 @@ export async function unmatchMatch(
         });
 
         // Update Payment.status (Issue #3)
-        await updatePaymentStatusAfterUnmatch(tx, matchRow.paymentId);
+        await updatePaymentStatusAfterUnmatch(tx, shopId, matchRow.paymentId);
       }
 
       return { success: true };
@@ -859,9 +950,11 @@ async function getAppliedAmountFromAudit(
 /**
  * Update Payment.status after unmatching.
  * Sets to 'partial' if there are remaining suggested matches, otherwise 'unmatched'.
+ * IDOR protection: filter by shopId
  */
 async function updatePaymentStatusAfterUnmatch(
   sql: Sql,
+  shopId: string,
   paymentId: string
 ): Promise<void> {
   // Check if there are any remaining confirmed/pushed matches
@@ -869,6 +962,7 @@ async function updatePaymentStatusAfterUnmatch(
     SELECT COUNT(*)::text AS count
     FROM "Match"
     WHERE "paymentId" = ${paymentId}
+      AND "shopId" = ${shopId}
       AND state IN ('confirmed', 'pushed')
   `;
 
@@ -878,6 +972,7 @@ async function updatePaymentStatusAfterUnmatch(
       SELECT COUNT(*)::text AS count
       FROM "Match"
       WHERE "paymentId" = ${paymentId}
+        AND "shopId" = ${shopId}
         AND state = 'suggested'
     `;
 
@@ -888,6 +983,7 @@ async function updatePaymentStatusAfterUnmatch(
       UPDATE "Payment"
       SET status = ${newStatus}, "updatedAt" = NOW()
       WHERE id = ${paymentId}
+        AND "shopId" = ${shopId}
     `;
   }
 }
