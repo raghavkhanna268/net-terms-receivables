@@ -42,30 +42,17 @@ describe("Auth Login Route", () => {
       const { loader } = await import("../auth.login/route");
       const request = new Request("https://example.com/auth/login");
 
-      await expect(
-        loader({
-          request,
-          context: mockContext as never,
-          params: {},
-          url: new URL(request.url),
-          pattern: "/auth/login",
-        })
-      ).rejects.toMatchObject({
-        status: 302,
-      });
+      const response = await loader({
+        request,
+        context: mockContext as never,
+        params: {},
+        url: new URL(request.url),
+        pattern: "/auth/login",
+      }).catch((r: Response) => r);
 
-      try {
-        await loader({
-          request,
-          context: mockContext as never,
-          params: {},
-          url: new URL(request.url),
-          pattern: "/auth/login",
-        });
-      } catch (response: unknown) {
-        const r = response as Response;
-        expect(r.headers.get("Location")).toBe("/");
-      }
+      expect(response).toBeInstanceOf(Response);
+      expect((response as Response).status).toBe(302);
+      expect((response as Response).headers.get("Location")).toBe("/");
     });
 
     it("redirects to / when shopify.login returns empty object (GET without shop)", async () => {
@@ -81,19 +68,17 @@ describe("Auth Login Route", () => {
       const { loader } = await import("../auth.login/route");
       const request = new Request("https://example.com/auth/login");
 
-      try {
-        await loader({
-          request,
-          context: mockContext as never,
-          params: {},
-          url: new URL(request.url),
-          pattern: "/auth/login",
-        });
-      } catch (response: unknown) {
-        const r = response as Response;
-        expect(r.status).toBe(302);
-        expect(r.headers.get("Location")).toBe("/");
-      }
+      const response = await loader({
+        request,
+        context: mockContext as never,
+        params: {},
+        url: new URL(request.url),
+        pattern: "/auth/login",
+      }).catch((r: Response) => r);
+
+      expect(response).toBeInstanceOf(Response);
+      expect((response as Response).status).toBe(302);
+      expect((response as Response).headers.get("Location")).toBe("/");
     });
 
     it("redirects to / when shopify.login returns null", async () => {
@@ -108,19 +93,17 @@ describe("Auth Login Route", () => {
       const { loader } = await import("../auth.login/route");
       const request = new Request("https://example.com/auth/login");
 
-      try {
-        await loader({
-          request,
-          context: mockContext as never,
-          params: {},
-          url: new URL(request.url),
-          pattern: "/auth/login",
-        });
-      } catch (response: unknown) {
-        const r = response as Response;
-        expect(r.status).toBe(302);
-        expect(r.headers.get("Location")).toBe("/");
-      }
+      const response = await loader({
+        request,
+        context: mockContext as never,
+        params: {},
+        url: new URL(request.url),
+        pattern: "/auth/login",
+      }).catch((r: Response) => r);
+
+      expect(response).toBeInstanceOf(Response);
+      expect((response as Response).status).toBe(302);
+      expect((response as Response).headers.get("Location")).toBe("/");
     });
 
     it("redirects to / when shopify.login returns undefined", async () => {
@@ -135,19 +118,17 @@ describe("Auth Login Route", () => {
       const { loader } = await import("../auth.login/route");
       const request = new Request("https://example.com/auth/login");
 
-      try {
-        await loader({
-          request,
-          context: mockContext as never,
-          params: {},
-          url: new URL(request.url),
-          pattern: "/auth/login",
-        });
-      } catch (response: unknown) {
-        const r = response as Response;
-        expect(r.status).toBe(302);
-        expect(r.headers.get("Location")).toBe("/");
-      }
+      const response = await loader({
+        request,
+        context: mockContext as never,
+        params: {},
+        url: new URL(request.url),
+        pattern: "/auth/login",
+      }).catch((r: Response) => r);
+
+      expect(response).toBeInstanceOf(Response);
+      expect((response as Response).status).toBe(302);
+      expect((response as Response).headers.get("Location")).toBe("/");
     });
 
     it("calls shopify.login with the request", async () => {
@@ -162,17 +143,15 @@ describe("Auth Login Route", () => {
       const { loader } = await import("../auth.login/route");
       const request = new Request("https://example.com/auth/login?shop=test.myshopify.com");
 
-      try {
-        await loader({
+      await expect(
+        loader({
           request,
           context: mockContext as never,
           params: {},
           url: new URL(request.url),
           pattern: "/auth/login",
-        });
-      } catch {
-        // Expected redirect
-      }
+        })
+      ).rejects.toBeInstanceOf(Response);
 
       expect(mockShopifyLogin).toHaveBeenCalledWith(request);
     });
@@ -194,30 +173,17 @@ describe("Auth Login Route", () => {
         body: new URLSearchParams({}),
       });
 
-      await expect(
-        action({
-          request,
-          context: mockContext as never,
-          params: {},
-          url: new URL(request.url),
-          pattern: "/auth/login",
-        })
-      ).rejects.toMatchObject({
-        status: 302,
-      });
+      const response = await action({
+        request,
+        context: mockContext as never,
+        params: {},
+        url: new URL(request.url),
+        pattern: "/auth/login",
+      }).catch((r: Response) => r);
 
-      try {
-        await action({
-          request,
-          context: mockContext as never,
-          params: {},
-          url: new URL(request.url),
-          pattern: "/auth/login",
-        });
-      } catch (response: unknown) {
-        const r = response as Response;
-        expect(r.headers.get("Location")).toBe("/");
-      }
+      expect(response).toBeInstanceOf(Response);
+      expect((response as Response).status).toBe(302);
+      expect((response as Response).headers.get("Location")).toBe("/");
     });
 
     it("redirects to / when shopify.login returns null in POST", async () => {
@@ -235,19 +201,17 @@ describe("Auth Login Route", () => {
         body: new URLSearchParams({}),
       });
 
-      try {
-        await action({
-          request,
-          context: mockContext as never,
-          params: {},
-          url: new URL(request.url),
-          pattern: "/auth/login",
-        });
-      } catch (response: unknown) {
-        const r = response as Response;
-        expect(r.status).toBe(302);
-        expect(r.headers.get("Location")).toBe("/");
-      }
+      const response = await action({
+        request,
+        context: mockContext as never,
+        params: {},
+        url: new URL(request.url),
+        pattern: "/auth/login",
+      }).catch((r: Response) => r);
+
+      expect(response).toBeInstanceOf(Response);
+      expect((response as Response).status).toBe(302);
+      expect((response as Response).headers.get("Location")).toBe("/");
     });
   });
 

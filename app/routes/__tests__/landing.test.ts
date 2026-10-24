@@ -26,35 +26,19 @@ describe("Landing Page Loader (_index)", () => {
       "https://example.com/?shop=test-store.myshopify.com&host=abc123"
     );
 
-    await expect(
-      loader({
-        request,
-        context: {} as never,
-        params: {},
-        url: new URL(request.url),
-        pattern: "/",
-      })
-    ).rejects.toMatchObject({
-      status: 302,
-      headers: expect.objectContaining({
-        get: expect.any(Function),
-      }),
-    });
+    const response = await loader({
+      request,
+      context: {} as never,
+      params: {},
+      url: new URL(request.url),
+      pattern: "/",
+    }).catch((r: Response) => r);
 
-    try {
-      await loader({
-        request,
-        context: {} as never,
-        params: {},
-        url: new URL(request.url),
-        pattern: "/",
-      });
-    } catch (response: unknown) {
-      const r = response as Response;
-      expect(r.headers.get("Location")).toBe(
-        "/app?shop=test-store.myshopify.com&host=abc123"
-      );
-    }
+    expect(response).toBeInstanceOf(Response);
+    expect((response as Response).status).toBe(302);
+    expect((response as Response).headers.get("Location")).toBe(
+      "/app?shop=test-store.myshopify.com&host=abc123"
+    );
   });
 
   it("returns null when no shop param (landing page view)", async () => {
@@ -96,21 +80,19 @@ describe("Landing Page Loader (_index)", () => {
       "https://example.com/?shop=test-store.myshopify.com&host=abc123&locale=en"
     );
 
-    try {
-      await loader({
-        request,
-        context: {} as never,
-        params: {},
-        url: new URL(request.url),
-        pattern: "/",
-      });
-    } catch (response: unknown) {
-      const r = response as Response;
-      const location = r.headers.get("Location");
-      expect(location).toContain("shop=test-store.myshopify.com");
-      expect(location).toContain("host=abc123");
-      expect(location).toContain("locale=en");
-    }
+    const response = await loader({
+      request,
+      context: {} as never,
+      params: {},
+      url: new URL(request.url),
+      pattern: "/",
+    }).catch((r: Response) => r);
+
+    expect(response).toBeInstanceOf(Response);
+    const location = (response as Response).headers.get("Location");
+    expect(location).toContain("shop=test-store.myshopify.com");
+    expect(location).toContain("host=abc123");
+    expect(location).toContain("locale=en");
   });
 });
 
