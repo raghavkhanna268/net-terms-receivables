@@ -398,17 +398,18 @@ describeWithDb("redactCustomer DB integration", () => {
       await createPayerAlias(ACCOUNT_A_ID, `alias-atomic-${TEST_SUFFIX}`, 'payer-key');
 
       // Create a trigger that raises an exception when BuyerAccount is updated
-      await sql`
+      // Note: We use a fixed pattern match since we can't interpolate into CREATE FUNCTION
+      await sql.unsafe(`
         CREATE OR REPLACE FUNCTION test_redact_fail_trigger()
         RETURNS TRIGGER AS $$
         BEGIN
-          IF NEW."customerId" LIKE '%_redacted_%' AND OLD.id = ${ACCOUNT_A_ID} THEN
+          IF NEW."customerId" LIKE '%_redacted_%' AND OLD.id LIKE 'acc-a-%-redact' THEN
             RAISE EXCEPTION 'Test failure injection';
           END IF;
           RETURN NEW;
         END;
         $$ LANGUAGE plpgsql
-      `;
+      `);
       await sql`
         CREATE TRIGGER test_redact_fail
         BEFORE UPDATE ON "BuyerAccount"
