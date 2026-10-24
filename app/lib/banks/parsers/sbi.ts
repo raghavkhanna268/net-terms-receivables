@@ -32,6 +32,16 @@ import type {
   DetectionResult,
 } from "../types.js";
 import { detectHeaderRow, detectFooterRows, isNarrationContinuation } from "../detection.js";
+
+/** Check if a row is fully blank (all cells empty or whitespace) */
+function isFullyBlankRow(row: (string | number | Date | boolean | null)[]): boolean {
+  for (const cell of row) {
+    if (cell !== null && cell !== undefined && String(cell).trim() !== "") {
+      return false;
+    }
+  }
+  return true;
+}
 import { parseIndianDate, parseIndianAmount, isBlankOrZero } from "../normalisers.js";
 import { parseNarration, extractUtrForDedupe } from "../narration-parser.js";
 import { generateDedupeKey, dedupeTransactions } from "../dedupe.js";
@@ -102,6 +112,12 @@ export async function parseSbiStatement(
       continue;
     }
 
+    // Check for fully blank rows FIRST - skip without touching lastValidRow/pendingNarration
+    if (isFullyBlankRow(row)) {
+      skippedRows++;
+      continue;
+    }
+
     // Check for Opening Balance / Closing Balance / B/F rows
     const firstCell = String(row[0] ?? "").trim().toUpperCase();
     const descCell = String(row[columns.descriptionCol] ?? "").trim().toUpperCase();
@@ -120,6 +136,15 @@ export async function parseSbiStatement(
 
     // Check if this is a narration continuation row
     if (isNarrationContinuation(row)) {
+      // Orphan continuation (no valid previous transaction) is an error
+      if (!lastValidRow) {
+        errors.push({
+          row: i + 1,
+          code: "ROW_PARSE_FAILED",
+          message: "Failed to parse row",
+        });
+        continue;
+      }
       const narrationPart = String(row[columns.descriptionCol] ?? "").trim();
       if (narrationPart) {
         pendingNarration.push(narrationPart);
@@ -166,6 +191,8 @@ export async function parseSbiStatement(
           code: "ROW_PARSE_FAILED",
           message: "Failed to parse row",
         });
+        // Clear pending narration to avoid carrying orphan text forward
+        pendingNarration = [];
       } else {
         skippedRows++;
       }
