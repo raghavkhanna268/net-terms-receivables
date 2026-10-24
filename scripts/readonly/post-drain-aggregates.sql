@@ -22,17 +22,17 @@ SELECT original_queue, message->>'topic' AS topic, COUNT(*) AS total,
        COUNT(*) FILTER (WHERE dead_lettered_at >= (:'since')::timestamptz) AS since_start
 FROM s6_dead_letter GROUP BY 1, 2 ORDER BY 1, 2;
 
-\echo '== DLQ entries since redrive start (ids + redacted error class, same redaction as prod-diagnostics)'
+\echo '== DLQ entries since redrive start (ids + error class before first colon, redacted, max 80 chars; same as prod-diagnostics)'
 SELECT original_msg_id, message->>'topic' AS topic, dead_lettered_at,
-       LEFT(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(error,
+       LEFT(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(error, ':.*$', ''),
          '[^[:space:]@]+@[^[:space:]]+', '<email>', 'g'),
          '[A-Za-z0-9_.-]+\.(local|com|net|org|io|co|dev|in|app)\M', '<host>', 'g'),
-         '\m[0-9a-fA-F]{12,}\M', '<hex>', 'g'), '[0-9]{4,}', '<n>', 'g'), 300) AS error_redacted
+         '\m[0-9a-fA-F]{12,}\M', '<hex>', 'g'), '[0-9]{4,}', '<n>', 'g'), 80) AS error_class_truncated
 FROM s6_dead_letter WHERE dead_lettered_at >= (:'since')::timestamptz
 ORDER BY dead_lettered_at LIMIT 50;
 
 \echo '== Invoice totals by status / past-due bucket / dueBasis (dueAt; overdue_rule = backstop rule dueAt < now()-1d)'
-SELECT s.domain AS shop, i.status,
+SELECT i."shopId" AS shop_id, i.status,
        CASE WHEN i.status <> 'open' THEN '-'
             WHEN i."dueAt" IS NULL THEN 'open_no_due'
             WHEN i."dueAt" < NOW() THEN 'past_due'
@@ -43,7 +43,7 @@ SELECT s.domain AS shop, i.status,
        SUM(i.outstanding) AS outstanding_amount,
        COUNT(*) FILTER (WHERE i.status = 'open' AND i.outstanding > 0
                         AND i."dueAt" < NOW() - INTERVAL '1 day') AS overdue_rule_count
-FROM "Invoice" i JOIN "Shop" s ON s.id = i."shopId"
+FROM "Invoice" i
 GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4;
 
 \echo '== backstop_processed_orders by action/reason (all-time / since redrive start)'
@@ -70,7 +70,7 @@ ORDER BY e.at;
 
 \echo '== held account drill-down: account hold fields (no name)'
 SELECT a.id, a.kind, a."holdState", a."holdReasonCode", a."manualHold", a.bypass,
-       a."syncPending", a."syncVersion", a."creditLimit", a."defaultTermsDays",
+       a."syncPending", a."syncVersion", (a."creditLimit" IS NOT NULL) AS has_credit_limit, a."defaultTermsDays",
        a."defaultTermsSource", a.gated_at, a."updatedAt"
 FROM "BuyerAccount" a
 WHERE a."companyLocationId" = 'gid://shopify/CompanyLocation/' || :'location_id';
