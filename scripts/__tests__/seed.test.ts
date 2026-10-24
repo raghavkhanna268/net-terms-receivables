@@ -29,7 +29,6 @@ import {
   COMPANY_CONTACT_ROLES_QUERY,
   COMPANY_LOCATION_ROLE_ASSIGNMENTS_QUERY,
   COMPANY_LOCATION_ASSIGN_ROLES_MUTATION,
-  FIND_ORDER_BY_TAG_QUERY,
   buildCompanyCreateInput,
   buildCompanyLocationCreateInput,
   buildCompanyLocationAssignRolesInput,
@@ -93,6 +92,8 @@ function createMockState(overrides: Partial<SeedState> = {}): SeedState {
       { id: "gid://shopify/PaymentTermsTemplate/60", name: "Net 60", paymentTermsType: "NET", dueInDays: 60 },
     ],
     createdCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRules: 0, dbAccounts: 0 },
+    updatedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0 },
+    unchangedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0 },
     skippedCount: { companies: 0, orders: 0, roleAssignments: 0 },
     deletedCount: { companies: 0, orders: 0 },
     failedCount: { locations: 0, orders: 0, roleAssignments: 0 },
@@ -166,15 +167,17 @@ function setupMockFetch() {
     // Find company by external ID
     else if (query.includes("FindCompany") || (query.includes("companies") && variables?.query)) {
       const externalIdQuery = variables?.query as string;
+      // Extract the actual externalId from query like "external_id:'ntr-seed-company-1'"
+      const extractedExternalId = externalIdQuery?.replace(/^external_id:'/, "").replace(/'$/, "");
       const existingCompanies = mockResponses.get("existingCompanies") as string[] | undefined;
-      if (existingCompanies?.some((id) => externalIdQuery?.includes(id))) {
+      if (existingCompanies?.some((id) => id === extractedExternalId)) {
         responseData = {
           data: {
             companies: {
               nodes: [{
                 id: "gid://shopify/Company/existing-1",
                 name: "Existing Company",
-                externalId: externalIdQuery?.replace("external_id:", ""),
+                externalId: extractedExternalId, // Return exact match
                 locations: { edges: [
                   { node: { id: "gid://shopify/CompanyLocation/loc-15", name: "Existing - Net-15" } },
                   { node: { id: "gid://shopify/CompanyLocation/loc-30", name: "Existing - Net-30" } },
@@ -297,10 +300,14 @@ function setupMockFetch() {
     // Find order by tag (idempotency check)
     else if (query.includes("FindOrder") || (query.includes("orders(first:") && variables?.query)) {
       const existingOrders = mockResponses.get("existingOrders") as string[] | undefined;
-      const tag = variables?.query as string;
-      if (existingOrders?.some((t) => tag?.includes(t))) {
+      const tagQuery = variables?.query as string;
+      // Extract tag from query like "tag:'ntr-seed-order-1'"
+      const extractedTag = tagQuery?.replace(/^tag:'/, "").replace(/'$/, "");
+      const matchedTag = existingOrders?.find((t) => t === extractedTag);
+      if (matchedTag) {
+        // Return the order with the exact tag so strict matching succeeds
         responseData = {
-          data: { orders: { nodes: [{ id: "gid://shopify/Order/existing-1", name: "#1001", tags: [SEED_TAG] }] } },
+          data: { orders: { nodes: [{ id: "gid://shopify/Order/existing-1", name: "#1001", tags: [SEED_TAG, matchedTag] }] } },
           extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
         };
       } else {
@@ -2154,11 +2161,7 @@ describe("New GraphQL Documents Validation against Admin API 2026-10 Schema", ()
     expect(errors).toEqual([]);
   });
 
-  it("FIND_ORDER_BY_TAG_QUERY is valid against 2026-10 schema", () => {
-    const document = parse(FIND_ORDER_BY_TAG_QUERY);
-    const errors = validate(schema, document);
-    expect(errors).toEqual([]);
-  });
+  // FIND_ORDER_BY_TAG_QUERY was inlined into findOrderByTag for strict matching
 });
 
 describe("New Variable Builders Input Coercion", () => {
@@ -2197,5 +2200,405 @@ describe("New Variable Builders Input Coercion", () => {
       const errors = coerceAndCollectErrors(roleAssign, "CompanyLocationRoleAssign");
       expect(errors).toEqual([]);
     }
+  });
+});
+
+describe("Strict externalId Matching (fuzzy search bug fix)", () => {
+  beforeEach(() => {
+    capturedRequests = [];
+  });
+
+  afterEach(() => {
+    restoreFetch();
+    capturedRequests = [];
+  });
+
+  it("findCompanyByExternalId returns null when search returns non-matching company", async () => {
+    // Simulate Shopify's fuzzy search returning "ntr-seed-company-10" when searching for "ntr-seed-company-1"
+    global.fetch = vi.fn(async () => {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            companies: {
+              nodes: [{
+                id: "gid://shopify/Company/wrong",
+                name: "Wrong Company",
+                externalId: `${SEED_PREFIX}company-10`, // Fuzzy match - NOT the one we want
+                locations: { edges: [] },
+                contacts: { edges: [] },
+              }],
+            },
+          },
+          extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+        }),
+      } as Response;
+    });
+
+    const state = createMockState();
+    const result = await findCompanyByExternalId(state, `${SEED_PREFIX}company-1`);
+
+    // Should return null because externalId doesn't match exactly
+    expect(result).toBeNull();
+  });
+
+  it("findCompanyByExternalId returns company when externalId matches exactly", async () => {
+    global.fetch = vi.fn(async () => {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            companies: {
+              nodes: [
+                {
+                  id: "gid://shopify/Company/wrong",
+                  name: "Wrong Company",
+                  externalId: `${SEED_PREFIX}company-10`, // Non-matching
+                  locations: { edges: [] },
+                  contacts: { edges: [] },
+                },
+                {
+                  id: "gid://shopify/Company/correct",
+                  name: "Correct Company",
+                  externalId: `${SEED_PREFIX}company-1`, // Exact match
+                  locations: { edges: [{ node: { id: "loc-1", name: "HQ" } }] },
+                  contacts: { edges: [{ node: { id: "contact-1", customer: { id: "cust-1", email: "test@example.com" } } }] },
+                },
+              ],
+            },
+          },
+          extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+        }),
+      } as Response;
+    });
+
+    const state = createMockState();
+    const result = await findCompanyByExternalId(state, `${SEED_PREFIX}company-1`);
+
+    // Should return the exact match
+    expect(result).not.toBeNull();
+    expect(result?.externalId).toBe(`${SEED_PREFIX}company-1`);
+    expect(result?.id).toBe("gid://shopify/Company/correct");
+  });
+
+  it("findOrderByTag returns null when search returns order without exact tag", async () => {
+    global.fetch = vi.fn(async () => {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            orders: {
+              nodes: [{
+                id: "gid://shopify/Order/wrong",
+                name: "#1001",
+                tags: [`${SEED_PREFIX}order-10`], // Fuzzy match - NOT the one we want
+              }],
+            },
+          },
+          extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+        }),
+      } as Response;
+    });
+
+    const state = createMockState();
+    const result = await findOrderByTag(state, `${SEED_PREFIX}order-1`);
+
+    // Should return null because tags don't include the exact tag
+    expect(result).toBeNull();
+  });
+
+  it("findOrderByTag returns order when tags include exact match", async () => {
+    global.fetch = vi.fn(async () => {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            orders: {
+              nodes: [
+                {
+                  id: "gid://shopify/Order/wrong",
+                  name: "#1001",
+                  tags: [`${SEED_PREFIX}order-10`], // Non-matching
+                },
+                {
+                  id: "gid://shopify/Order/correct",
+                  name: "#1002",
+                  tags: [SEED_TAG, `${SEED_PREFIX}order-1`], // Exact match
+                },
+              ],
+            },
+          },
+          extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+        }),
+      } as Response;
+    });
+
+    const state = createMockState();
+    const result = await findOrderByTag(state, `${SEED_PREFIX}order-1`);
+
+    // Should return the exact match
+    expect(result).not.toBeNull();
+    expect(result?.id).toBe("gid://shopify/Order/correct");
+    expect(result?.tags).toContain(`${SEED_PREFIX}order-1`);
+  });
+
+  it("rerun with 5 fixtures creates 5 distinct companies even when search returns Acme for all", async () => {
+    // Simulate the bug: Shopify's fuzzy search returns "Acme" (company-1) for ALL queries
+    const acmeCompany = {
+      id: "gid://shopify/Company/acme",
+      name: "Acme Wholesale Pvt Ltd",
+      externalId: `${SEED_PREFIX}company-1`, // Always returns company-1
+      locations: {
+        edges: [
+          { node: { id: "gid://shopify/CompanyLocation/acme-15", name: "Acme - Net-15" } },
+          { node: { id: "gid://shopify/CompanyLocation/acme-30", name: "Acme - Net-30" } },
+          { node: { id: "gid://shopify/CompanyLocation/acme-60", name: "Acme - Net-60" } },
+        ],
+      },
+      contacts: { edges: [{ node: { id: "gid://shopify/CompanyContact/acme", customer: { id: "gid://shopify/Customer/acme", email: "acme@example.com" } } }] },
+    };
+
+    let createCallCount = 0;
+
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+      const variables = body.variables as Record<string, unknown>;
+      capturedRequests.push({ query, variables });
+
+      // Find company - always return Acme (simulating fuzzy search bug)
+      if (query.includes("companies") && variables?.query) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companies: { nodes: [acmeCompany] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Company create
+      if (query.includes("companyCreate")) {
+        createCallCount++;
+        const externalId = ((variables?.input as Record<string, unknown>)?.company as Record<string, unknown>)?.externalId as string;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyCreate: {
+                company: {
+                  id: `gid://shopify/Company/new-${createCallCount}`,
+                  name: `New Company ${createCallCount}`,
+                  externalId,
+                  locations: { edges: [{ node: { id: `gid://shopify/CompanyLocation/new-${createCallCount}`, name: "HQ" } }] },
+                  contacts: { edges: [{ node: { id: `gid://shopify/CompanyContact/new-${createCallCount}`, customer: { id: `gid://shopify/Customer/new-${createCallCount}`, email: `new${createCallCount}@example.com` } } }] },
+                },
+                userErrors: [],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Contact roles
+      if (query.includes("contactRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { company: { contactRoles: { nodes: [{ id: "gid://role/1", name: "Ordering only" }] } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Role assignments - empty
+      if (query.includes("roleAssignments") && !query.includes("companyLocationAssignRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocation: { roleAssignments: { nodes: [] } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Role assign mutation
+      if (query.includes("companyLocationAssignRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocationAssignRoles: { roleAssignments: [], userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Location create
+      if (query.includes("companyLocationCreate")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocationCreate: { companyLocation: { id: `gid://loc/${Date.now()}`, name: "New" }, userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const state = createMockState();
+    await seedCompanies(state);
+
+    // With strict matching, only company-1 should be skipped (Acme matches exactly)
+    // The other 4 companies should be created because their externalIds don't match
+    expect(state.skippedCount.companies).toBe(1); // Only company-1 (Acme)
+    expect(state.createdCount.companies).toBe(4); // company-2, company-3, company-4, company-5
+
+    // Should have 5 companies in state (1 existing + 4 created)
+    expect(state.companies.size).toBe(5);
+
+    // Verify companyCreate was called 4 times
+    expect(createCallCount).toBe(4);
+  });
+
+  it("counts are correctly reported: created vs skipped", async () => {
+    // Setup: 2 companies exist, 3 need to be created
+    const existingExternalIds = [`${SEED_PREFIX}company-1`, `${SEED_PREFIX}company-3`];
+
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+      const variables = body.variables as Record<string, unknown>;
+
+      // Find company
+      if (query.includes("companies") && variables?.query) {
+        const searchQuery = variables.query as string;
+        const matchedId = existingExternalIds.find(id => searchQuery.includes(id));
+        
+        if (matchedId) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              data: {
+                companies: {
+                  nodes: [{
+                    id: `gid://shopify/Company/${matchedId}`,
+                    name: "Existing Company",
+                    externalId: matchedId,
+                    locations: { edges: [
+                      { node: { id: `gid://loc/${matchedId}-15`, name: "Net-15" } },
+                      { node: { id: `gid://loc/${matchedId}-30`, name: "Net-30" } },
+                      { node: { id: `gid://loc/${matchedId}-60`, name: "Net-60" } },
+                    ] },
+                    contacts: { edges: [{ node: { id: `gid://contact/${matchedId}`, customer: { id: `gid://cust/${matchedId}`, email: "test@example.com" } } }] },
+                  }],
+                },
+              },
+              extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+            }),
+          } as Response;
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ data: { companies: { nodes: [] } } }),
+        } as Response;
+      }
+
+      // Company create
+      if (query.includes("companyCreate")) {
+        const externalId = ((variables?.input as Record<string, unknown>)?.company as Record<string, unknown>)?.externalId as string;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyCreate: {
+                company: {
+                  id: `gid://shopify/Company/${externalId}`,
+                  name: "New Company",
+                  externalId,
+                  locations: { edges: [{ node: { id: `gid://loc/${externalId}`, name: "HQ" } }] },
+                  contacts: { edges: [{ node: { id: `gid://contact/${externalId}`, customer: { id: `gid://cust/${externalId}`, email: "new@example.com" } } }] },
+                },
+                userErrors: [],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Contact roles
+      if (query.includes("contactRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { company: { contactRoles: { nodes: [{ id: "gid://role/1", name: "Ordering only" }] } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Role assignments
+      if (query.includes("roleAssignments") && !query.includes("companyLocationAssignRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocation: { roleAssignments: { nodes: [] } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Role assign
+      if (query.includes("companyLocationAssignRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocationAssignRoles: { roleAssignments: [], userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Location create
+      if (query.includes("companyLocationCreate")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocationCreate: { companyLocation: { id: `gid://loc/${Date.now()}`, name: "New" }, userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const state = createMockState();
+    await seedCompanies(state);
+
+    // Verify counts
+    expect(state.skippedCount.companies).toBe(2); // company-1, company-3
+    expect(state.createdCount.companies).toBe(3); // company-2, company-4, company-5
+    expect(state.companies.size).toBe(5); // All 5 in state
   });
 });

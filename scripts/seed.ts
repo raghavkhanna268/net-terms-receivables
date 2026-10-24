@@ -327,6 +327,8 @@ export interface SeedState {
   companies: Map<string, CompanyData>;
   paymentTermsTemplates: PaymentTermsTemplate[];
   createdCount: { companies: number; locations: number; orders: number; roleAssignments: number; dbRules: number; dbAccounts: number };
+  updatedCount: { companies: number; locations: number; orders: number; roleAssignments: number };
+  unchangedCount: { companies: number; locations: number; orders: number; roleAssignments: number };
   skippedCount: { companies: number; orders: number; roleAssignments: number };
   deletedCount: { companies: number; orders: number };
   failedCount: { locations: number; orders: number; roleAssignments: number };
@@ -670,14 +672,16 @@ async function deleteSeededOrders(state: SeedState): Promise<void> {
         nodes { id name tags }
       }
     }
-  `, { query: `tag:${SEED_TAG}` });
+  `, { query: `tag:'${SEED_TAG}'` });
 
-  const orders = result.data?.orders.nodes ?? [];
-  console.log(`  Found ${orders.length} seeded orders`);
+  // Strict match: only count orders that actually have the exact SEED_TAG
+  const allOrders = result.data?.orders.nodes ?? [];
+  const seededOrders = allOrders.filter(o => o.tags.includes(SEED_TAG));
+  console.log(`  Found ${seededOrders.length} seeded orders (strict match)`);
   // Note: orders cannot be deleted via Admin API
-  state.deletedCount.orders = orders.length;
+  state.deletedCount.orders = seededOrders.length;
 
-  if (orders.length > 0) {
+  if (seededOrders.length > 0) {
     console.log("  ⚠️  Orders cannot be deleted via API. They remain tagged for identification.");
   }
 }
@@ -691,12 +695,20 @@ async function deleteSeededCompanies(state: SeedState): Promise<void> {
         nodes { id name externalId }
       }
     }
-  `, { query: `external_id:${SEED_PREFIX}*` });
+  `, { query: `external_id:'${SEED_PREFIX}*'` });
 
-  const companies = result.data?.companies.nodes ?? [];
-  console.log(`  Found ${companies.length} seeded companies`);
+  // Strict match: only delete companies whose externalId actually starts with SEED_PREFIX
+  const allCompanies = result.data?.companies.nodes ?? [];
+  const seededCompanies = allCompanies.filter(c => c.externalId?.startsWith(SEED_PREFIX));
+  console.log(`  Found ${seededCompanies.length} seeded companies (strict match)`);
 
-  for (const company of companies) {
+  for (const company of seededCompanies) {
+    // Safety: verify externalId matches our seed fixture before deleting
+    if (!company.externalId?.startsWith(SEED_PREFIX)) {
+      console.log(`    ⚠️  Skipping ${company.name}: externalId '${company.externalId}' does not match seed prefix`);
+      continue;
+    }
+
     // Mutations must not retry on network errors (may have executed)
     const deleteResult = await graphql<{ companyDelete: { deletedCompanyId: string; userErrors: UserError[] } }>(
       state,
@@ -825,13 +837,22 @@ export async function seedCompanies(state: SeedState): Promise<void> {
   }
 }
 
+/**
+ * Find a company by exact externalId match.
+ * 
+ * IMPORTANT: Shopify's `companies(query: "external_id:...")` uses fuzzy, tokenised search.
+ * A search for "ntr-seed-company-1" can return "ntr-seed-company-10" or other partial matches.
+ * We request first:10 and filter client-side for an exact node.externalId === externalId match.
+ * 
+ * @returns The company with exact externalId match, or null if not found
+ */
 export async function findCompanyByExternalId(
   state: SeedState,
   externalId: string
 ): Promise<CompanyNode | null> {
   const query = `
     query FindCompany($query: String!) {
-      companies(first: 1, query: $query) {
+      companies(first: 10, query: $query) {
         nodes {
           id
           name
@@ -848,10 +869,14 @@ export async function findCompanyByExternalId(
   `;
 
   const result = await graphql<{ companies: { nodes: CompanyNode[] } }>(state, query, {
-    query: `external_id:${externalId}`,
+    query: `external_id:'${externalId}'`,
   });
 
-  return result.data?.companies.nodes[0] ?? null;
+  const companies = result.data?.companies.nodes ?? [];
+  
+  // Strict match: only return if externalId matches exactly
+  const exactMatch = companies.find(c => c.externalId === externalId);
+  return exactMatch ?? null;
 }
 
 /**
@@ -1384,19 +1409,27 @@ export async function seedOrders(state: SeedState): Promise<void> {
 }
 
 /**
- * Query to find an order by tag (used for idempotency check).
+ * Find an order by exact tag match.
+ * 
+ * IMPORTANT: Shopify's `orders(query: "tag:...")` uses fuzzy, tokenised search.
+ * We request first:10 and filter client-side for an exact tag match in node.tags.
+ * 
+ * @returns The order with exact tag match, or null if not found
  */
-export const FIND_ORDER_BY_TAG_QUERY = `
-  query FindOrder($query: String!) {
-    orders(first: 1, query: $query) {
-      nodes { id name tags }
-    }
-  }
-`;
-
 export async function findOrderByTag(state: SeedState, tag: string): Promise<OrderNode | null> {
-  const result = await graphql<{ orders: { nodes: OrderNode[] } }>(state, FIND_ORDER_BY_TAG_QUERY, { query: `tag:'${tag}'` });
-  return result.data?.orders.nodes[0] ?? null;
+  const query = `
+    query FindOrder($query: String!) {
+      orders(first: 10, query: $query) {
+        nodes { id name tags }
+      }
+    }
+  `;
+  const result = await graphql<{ orders: { nodes: OrderNode[] } }>(state, query, { query: `tag:'${tag}'` });
+  const orders = result.data?.orders.nodes ?? [];
+  
+  // Strict match: only return if tags array includes the exact tag
+  const exactMatch = orders.find(o => o.tags.includes(tag));
+  return exactMatch ?? null;
 }
 
 // Tagged customer seeds - one per term (Net 15, 30, 60)
@@ -1423,6 +1456,9 @@ export const TAGGED_ORDER_DISTRIBUTION = [
 /**
  * Find or create a tagged customer, then tag with tagsAdd (idempotent).
  * Does NOT tag B2B contacts - their terms come from location/DB defaults.
+ * 
+ * IMPORTANT: Shopify's `customers(query: "email:...")` uses fuzzy search.
+ * We request first:10, include email in response, and filter for exact email match.
  *
  * @returns Customer ID or null on failure
  */
@@ -1433,23 +1469,26 @@ async function ensureTaggedCustomer(
 ): Promise<string | null> {
   const tag = `${SEED_TAG}-net${termsDays}`;
 
-  // First, try to find existing customer by email
+  // First, try to find existing customer by email (strict match)
   const findResult = await graphql<{
-    customers: { nodes: Array<{ id: string; tags: string[] }> };
+    customers: { nodes: Array<{ id: string; email: string | null; tags: string[] }> };
   }>(state, `
     query FindCustomer($query: String!) {
-      customers(first: 1, query: $query) {
-        nodes { id tags }
+      customers(first: 10, query: $query) {
+        nodes { id email tags }
       }
     }
-  `, { query: `email:${email}` });
+  `, { query: `email:'${email}'` });
 
   if (findResult.errors) {
     console.log(`    ⚠️  GraphQL error finding customer: ${findResult.errors.map(e => e.message).join(", ")}`);
     return null;
   }
 
-  let customerId = findResult.data?.customers.nodes[0]?.id;
+  // Strict match: find customer with exact email
+  const customers = findResult.data?.customers.nodes ?? [];
+  const exactMatch = customers.find(c => c.email?.toLowerCase() === email.toLowerCase());
+  let customerId = exactMatch?.id;
 
   // If not found, create new customer
   if (!customerId) {
@@ -2200,6 +2239,8 @@ export async function main(): Promise<void> {
     companies: new Map(),
     paymentTermsTemplates: [],
     createdCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRules: 0, dbAccounts: 0 },
+    updatedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0 },
+    unchangedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0 },
     skippedCount: { companies: 0, orders: 0, roleAssignments: 0 },
     deletedCount: { companies: 0, orders: 0 },
     failedCount: { locations: 0, orders: 0, roleAssignments: 0 },
@@ -2273,23 +2314,50 @@ export async function main(): Promise<void> {
   }
   console.log(`  Total companies with all 3 locations: ${companiesWithAllLocations}/${state.companies.size}`);
 
-  console.log("\n  Shopify Created:");
-  console.log(`    Companies:        ${state.createdCount.companies}`);
-  console.log(`    Locations:        ${state.createdCount.locations}`);
-  console.log(`    Role assignments: ${state.createdCount.roleAssignments}`);
-  console.log(`    Orders (total):   ${state.createdCount.orders}`);
+  console.log("\n  Shopify Results:");
+  console.log("    Created:");
+  console.log(`      Companies:        ${state.createdCount.companies}`);
+  console.log(`      Locations:        ${state.createdCount.locations}`);
+  console.log(`      Role assignments: ${state.createdCount.roleAssignments}`);
+  console.log(`      Orders:           ${state.createdCount.orders}`);
 
-  console.log("\n  Skipped (already exist):");
-  console.log(`    Companies:        ${state.skippedCount.companies}`);
-  console.log(`    Role assignments: ${state.skippedCount.roleAssignments}`);
-  console.log(`    Orders:           ${state.skippedCount.orders}`);
+  const hasUpdates = state.updatedCount.companies > 0 || state.updatedCount.locations > 0 || 
+                     state.updatedCount.orders > 0 || state.updatedCount.roleAssignments > 0;
+  if (hasUpdates) {
+    console.log("    Updated:");
+    console.log(`      Companies:        ${state.updatedCount.companies}`);
+    console.log(`      Locations:        ${state.updatedCount.locations}`);
+    console.log(`      Role assignments: ${state.updatedCount.roleAssignments}`);
+    console.log(`      Orders:           ${state.updatedCount.orders}`);
+  }
+
+  const hasUnchanged = state.unchangedCount.companies > 0 || state.unchangedCount.locations > 0 ||
+                       state.unchangedCount.orders > 0 || state.unchangedCount.roleAssignments > 0;
+  if (hasUnchanged) {
+    console.log("    Unchanged:");
+    console.log(`      Companies:        ${state.unchangedCount.companies}`);
+    console.log(`      Locations:        ${state.unchangedCount.locations}`);
+    console.log(`      Role assignments: ${state.unchangedCount.roleAssignments}`);
+    console.log(`      Orders:           ${state.unchangedCount.orders}`);
+  }
+
+  if (state.deletedCount.companies > 0 || state.deletedCount.orders > 0) {
+    console.log("    Deleted:");
+    console.log(`      Companies:        ${state.deletedCount.companies}`);
+    console.log(`      Orders:           ${state.deletedCount.orders}`);
+  }
+
+  console.log("    Skipped (already exist):");
+  console.log(`      Companies:        ${state.skippedCount.companies}`);
+  console.log(`      Role assignments: ${state.skippedCount.roleAssignments}`);
+  console.log(`      Orders:           ${state.skippedCount.orders}`);
 
   const totalFailures = state.failedCount.locations + state.failedCount.orders + state.failedCount.roleAssignments;
   if (totalFailures > 0) {
-    console.log("\n  ❌ Failed:");
-    console.log(`    Locations:        ${state.failedCount.locations}`);
-    console.log(`    Role assignments: ${state.failedCount.roleAssignments}`);
-    console.log(`    Orders:           ${state.failedCount.orders}`);
+    console.log("    ❌ Failed:");
+    console.log(`      Locations:        ${state.failedCount.locations}`);
+    console.log(`      Role assignments: ${state.failedCount.roleAssignments}`);
+    console.log(`      Orders:           ${state.failedCount.orders}`);
   }
 
   // Order breakdown
