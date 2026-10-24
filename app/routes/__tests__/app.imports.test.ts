@@ -26,24 +26,37 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
 import { computeDateBounds } from "../app.imports";
 
+// Pin the clock for deterministic date calculations across all tests.
+// This avoids issues where local date and UTC date differ (e.g., at midnight IST).
+// Only mock Date to avoid interfering with database connection timers.
+const PINNED_DATE = new Date("2026-10-15T12:00:00Z");
+beforeAll(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(PINNED_DATE);
+});
+afterAll(() => {
+  vi.useRealTimers();
+});
+
 /**
  * Get ISO date string for N days ago (or in the future if negative).
+ * Uses UTC date manipulation to match toISOString() output.
  */
 function daysAgo(n: number, referenceDate: Date = new Date()): string {
   const d = new Date(referenceDate);
-  d.setDate(d.getDate() - n);
+  d.setUTCDate(d.getUTCDate() - n);
   return d.toISOString().slice(0, 10);
 }
 
 /**
- * Get ISO date string for today.
+ * Get ISO date string for today (UTC).
  */
 function today(): string {
   return daysAgo(0);
 }
 
 /**
- * Get ISO date string for yesterday.
+ * Get ISO date string for yesterday (UTC).
  */
 function yesterday(): string {
   return daysAgo(1);
@@ -56,7 +69,7 @@ function yesterday(): string {
 function justInsideWindow(referenceDate: Date = new Date()): string {
   const { minDateIso } = computeDateBounds(referenceDate);
   const minDate = new Date(minDateIso + "T00:00:00Z");
-  minDate.setDate(minDate.getDate() + 1);
+  minDate.setUTCDate(minDate.getUTCDate() + 1);
   return minDate.toISOString().slice(0, 10);
 }
 
@@ -67,7 +80,7 @@ function justInsideWindow(referenceDate: Date = new Date()): string {
 function justOutsideWindow(referenceDate: Date = new Date()): string {
   const { minDateIso } = computeDateBounds(referenceDate);
   const minDate = new Date(minDateIso + "T00:00:00Z");
-  minDate.setDate(minDate.getDate() - 1);
+  minDate.setUTCDate(minDate.getUTCDate() - 1);
   return minDate.toISOString().slice(0, 10);
 }
 
@@ -668,8 +681,8 @@ describeWithDb("Bank Import Action Integration Tests", () => {
         expect(outsideData.success).toBe(false);
         expect(outsideData.error).toContain("dates outside valid range");
       } finally {
-        // Restore real timers
-        vi.useRealTimers();
+        // Restore pinned time for other tests
+        vi.setSystemTime(PINNED_DATE);
       }
     });
   });

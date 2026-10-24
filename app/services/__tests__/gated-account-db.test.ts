@@ -56,6 +56,10 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 // Set PLAN_GATING_ENFORCED=true for these tests
 const originalEnv = process.env.PLAN_GATING_ENFORCED;
 
+// Pin the clock to a fixed time for deterministic as-of date comparisons.
+// This ensures JS `new Date()` is consistent with DB `NOW()` for aging buckets.
+const PINNED_TIME = new Date("2026-10-15T12:00:00Z");
+
 describeWithDb("gated account behavior (PLAN_GATING_ENFORCED=true)", () => {
   let sql: ReturnType<typeof postgres>;
   const TEST_SUFFIX = Date.now().toString(36) + "-gated-full";
@@ -67,6 +71,11 @@ describeWithDb("gated account behavior (PLAN_GATING_ENFORCED=true)", () => {
   const TEST_NONGATED_COMPANY_LOCATION_ID = `gid://shopify/CompanyLocation/nongated-${TEST_SUFFIX}`;
 
   beforeAll(async () => {
+    // Pin the JS clock for deterministic date comparisons
+    // Only mock Date to avoid interfering with database connection timers
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(PINNED_TIME);
+
     (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
 
@@ -108,6 +117,7 @@ describeWithDb("gated account behavior (PLAN_GATING_ENFORCED=true)", () => {
   });
 
   afterAll(async () => {
+    vi.useRealTimers();
     if (originalEnv === undefined) {
       delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
     } else {
