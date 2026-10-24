@@ -52,7 +52,7 @@ import { verifyReadOnlyTransaction } from "./ci/backfill-dry-run-preflight";
 
 interface BackfillStats {
   shopIndex: number;
-  total: number;
+  candidateCount: number;
   byHoldState: Record<string, number>;
 }
 
@@ -235,11 +235,11 @@ async function getBackfillStats(
       `;
 
   // Group by shopId and assign indices
-  const shopMap = new Map<string, { total: number; byHoldState: Record<string, number> }>();
+  const shopMap = new Map<string, { candidateCount: number; byHoldState: Record<string, number> }>();
   for (const row of rows) {
-    const existing = shopMap.get(row.shopId) ?? { total: 0, byHoldState: {} };
+    const existing = shopMap.get(row.shopId) ?? { candidateCount: 0, byHoldState: {} };
     const count = parseInt(row.count, 10);
-    existing.total += count;
+    existing.candidateCount += count;
     existing.byHoldState[row.holdState] = count;
     shopMap.set(row.shopId, existing);
   }
@@ -250,7 +250,7 @@ async function getBackfillStats(
   for (const [, data] of shopMap) {
     stats.push({
       shopIndex: idx++,
-      total: data.total,
+      candidateCount: data.candidateCount,
       byHoldState: data.byHoldState,
     });
   }
@@ -311,7 +311,7 @@ async function runDryRun(
     return getBackfillStats(tx, idPrefix);
   });
 
-  const grandTotal = stats.reduce((sum, s) => sum + s.total, 0);
+  const grandTotal = stats.reduce((sum, s) => sum + s.candidateCount, 0);
 
   return { success: true, stats, grandTotal };
 }
@@ -568,7 +568,7 @@ async function main() {
 
       for (const stat of stats) {
         console.log(`Shop ${stat.shopIndex}:`);
-        console.log(`  Total: ${stat.total}`);
+        console.log(`  Candidates: ${stat.candidateCount}`);
         for (const [holdState, count] of Object.entries(stat.byHoldState)) {
           console.log(`    ${holdState}: ${count}`);
           grandByHoldState[holdState] = (grandByHoldState[holdState] ?? 0) + count;

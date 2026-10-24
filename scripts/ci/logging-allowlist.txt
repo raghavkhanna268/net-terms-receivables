@@ -2,8 +2,42 @@
 # These are existing violations pending cleanup.
 # Adding a new violation will fail CI even if existing ones are allowlisted.
 # DO NOT add new entries without fixing the underlying code.
+#
+# AST-based checker (check-logging.ts) with comprehensive PII detection.
+# Stale entries fail CI (ratchet mode).
 
-# Burn-down list from initial audit
-app/services/sync/draft-order.server.ts:shop-interpolation:1
-app/services/sync/customer.server.ts:shop-interpolation:2
-app/services/sync/company-location.server.ts:shop-interpolation:1
+# =============================================================================
+# App - root error boundary
+# =============================================================================
+app/root.tsx:raw-error-arg:1
+
+# =============================================================================
+# App routes - shop interpolation
+# =============================================================================
+# app.imports.tsx: 1 console.log with ${shopDomain} interpolation
+app/routes/app.imports.tsx:shop-interpolation:1
+
+# =============================================================================
+# Scripts - shop interpolation and domain literals
+# =============================================================================
+# refresh-offline-token.ts: 1 help text with myshopify.com example
+scripts/lib/refresh-offline-token.ts:domain-literal:1
+
+# credit-status-metafield-backfill.ts:
+# - 2 ${grandTotal} interpolations (count but ends with 'total')
+scripts/credit-status-metafield-backfill.ts:shop-interpolation:2
+
+# seed.ts:
+# - ${shopDomain} placeholder, ${accountName}, code-controlled .name endings
+scripts/seed.ts:shop-interpolation:10
+scripts/seed.ts:domain-literal:1
+
+# validate-graphql-schema.ts:
+# - 2 ${errName} + 17 ${...message} validation errors
+scripts/validate-graphql-schema.ts:shop-interpolation:19
+
+# =============================================================================
+# Benchmark scripts - intentionally fake domains for testing
+# =============================================================================
+scripts/benchmark-cpu-breakdown.mjs:script-domain:1
+scripts/benchmark-db-cpu.mjs:script-domain:1

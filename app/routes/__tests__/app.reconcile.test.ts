@@ -320,6 +320,47 @@ describe("Reconcile Route (M5)", () => {
       expect(logOutput).not.toContain("narration");
       expect(logOutput).not.toContain("INVOICE-PAY");
     });
+
+    it("logs hostile intent as 'other' (toSafeIntent)", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-hostile-intent" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      const consoleWarnSpy = vi
+        .spyOn(console, "warn")
+        .mockImplementation(() => {});
+
+      const formData = new FormData();
+      // Hostile intent that could be an email or XSS attempt
+      formData.append("intent", "x@y.com");
+
+      const postRequest = new Request("https://example.com/app/reconcile", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.reconcile");
+      const result = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("Unknown action");
+
+      const logOutput = consoleWarnSpy.mock.calls[0][0];
+      // Should log "other" instead of the hostile intent
+      expect(logOutput).toContain('"event":"reconcile_unknown_action"');
+      expect(logOutput).toContain('"action":"other"');
+      // Should NOT contain the hostile input
+      expect(logOutput).not.toContain("x@y.com");
+
+      consoleWarnSpy.mockRestore();
+    });
   });
 
   describe("loader success paths (no errors)", () => {

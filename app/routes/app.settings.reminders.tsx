@@ -35,6 +35,13 @@ import {
 } from "~/services/reminders.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 
+const VALID_INTENTS = ["toggle_enabled", "update_rule", "create_rule", "delete_rule"] as const;
+type ReminderIntent = (typeof VALID_INTENTS)[number];
+
+function toSafeIntent(raw: string): ReminderIntent | "other" {
+  return VALID_INTENTS.includes(raw as ReminderIntent) ? (raw as ReminderIntent) : "other";
+}
+
 interface ReminderRule {
   id: string;
   offsetDays: number;
@@ -213,12 +220,16 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       }
 
       default:
+        safeLog("warn", "reminders_unknown_action", {
+          shopId: shop.id,
+          action: toSafeIntent(intent),
+        });
         return { success: false, error: "Unknown action" };
     }
   } catch (err) {
     safeLog("error", "reminders_action_error", {
       shopId: shop.id,
-      action: intent,
+      action: toSafeIntent(intent),
       err: toErrorCode(err),
     });
     return { success: false, error: "Action failed" };
