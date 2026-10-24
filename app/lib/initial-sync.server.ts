@@ -19,7 +19,7 @@
 import type { Sql } from "./db-light.server";
 import { safeLog, shopHash } from "./log.server";
 import { S6_QUEUES } from "./pgmq.server";
-import { ReconcileMessage } from "~/services/drain/reconcile.server";
+import type { ReconcileMessage } from "~/services/drain/reconcile.server";
 
 /**
  * Maximum failure count before considering an operation failed.
@@ -53,13 +53,15 @@ interface BulkOperation {
 /**
  * Get the initial sync status for a shop.
  *
- * Derives status from the LATEST s6_bulk_operations row per stage:
+ * Derives status from the LATEST companies op as the "current run":
  * - not_started: No bulk operations with origin='reconcile' exist for the shop
- * - in_progress: Latest run exists but not all stages have completed_at
- * - done: Both companies and orders stages have completed_at set
- * - failed: Latest run has failure_count >= MAX_FAILURE_COUNT or in DLQ for that run
+ * - in_progress: Current run exists but not all stages have completed_at
+ * - done: Both companies and orders stages have completed_at set in current run
+ * - failed: Current run has failure_count >= MAX_FAILURE_COUNT or in DLQ
  *
- * DLQ lookups are scoped to the latest run's bulk_op_id.
+ * Orders ops are only considered if they started at or after the latest
+ * companies op's started_at (to avoid mixing old failed orders with new runs).
+ * DLQ lookups are scoped to the current run's bulk_op_ids.
  *
  * @param sql - postgres.js SQL client
  * @param shopDomain - Shop domain
@@ -69,52 +71,58 @@ export async function getInitialSyncState(
   sql: Sql,
   shopDomain: string
 ): Promise<InitialSyncState> {
-  const operations = await sql<BulkOperation[]>`
-    SELECT DISTINCT ON (reconcile_stage)
-      bulk_op_id, reconcile_stage, completed_at, failure_count, started_at
+  const [companiesOp] = await sql<BulkOperation[]>`
+    SELECT bulk_op_id, reconcile_stage, completed_at, failure_count, started_at
     FROM s6_bulk_operations
-    WHERE shop = ${shopDomain} AND origin = 'reconcile'
-    ORDER BY reconcile_stage, started_at DESC
+    WHERE shop = ${shopDomain} AND origin = 'reconcile' AND reconcile_stage = 'companies'
+    ORDER BY started_at DESC
+    LIMIT 1
   `;
 
-  if (operations.length === 0) {
+  if (!companiesOp) {
     return { status: "not_started" };
   }
 
-  const companiesOp = operations.find((op) => op.reconcile_stage === "companies");
-  const ordersOp = operations.find((op) => op.reconcile_stage === "orders");
+  const [ordersOp] = await sql<BulkOperation[]>`
+    SELECT bulk_op_id, reconcile_stage, completed_at, failure_count, started_at
+    FROM s6_bulk_operations
+    WHERE shop = ${shopDomain}
+      AND origin = 'reconcile'
+      AND reconcile_stage = 'orders'
+      AND started_at >= ${companiesOp.started_at}
+    ORDER BY started_at DESC
+    LIMIT 1
+  `;
 
-  const bulkOpIds = operations.map((op) => op.bulk_op_id).filter(Boolean);
+  const bulkOpIds = [companiesOp.bulk_op_id];
+  if (ordersOp) {
+    bulkOpIds.push(ordersOp.bulk_op_id);
+  }
 
-  const dlqCount = bulkOpIds.length > 0 ? await sql<{ count: string }[]>`
+  const dlqCount = await sql<{ count: string }[]>`
     SELECT COUNT(*)::text as count
     FROM s6_dead_letter
     WHERE message->>'bulkOperationId' = ANY(${bulkOpIds})
       AND message->>'topic' IN ('RECONCILE_COMPANIES', 'RECONCILE_ORDERS', 'BULK_OPERATIONS_FINISH')
-  ` : [{ count: "0" }];
+  `;
 
   const hasDlqEntries = parseInt(dlqCount[0]?.count ?? "0", 10) > 0;
 
-  const hasFailedOperation = operations.some(
-    (op) => op.failure_count >= MAX_FAILURE_COUNT
-  );
+  const hasFailedCompanies = companiesOp.failure_count >= MAX_FAILURE_COUNT;
+  const hasFailedOrders = ordersOp != null && ordersOp.failure_count >= MAX_FAILURE_COUNT;
 
-  if (hasFailedOperation || hasDlqEntries) {
+  if (hasFailedCompanies || hasFailedOrders || hasDlqEntries) {
     return { status: "failed" };
   }
 
-  const companiesComplete = companiesOp != null && companiesOp.completed_at !== null;
+  const companiesComplete = companiesOp.completed_at !== null;
   const ordersComplete = ordersOp != null && ordersOp.completed_at !== null;
 
   if (companiesComplete && ordersComplete) {
     return { status: "done" };
   }
 
-  if (companiesOp || ordersOp) {
-    return { status: "in_progress" };
-  }
-
-  return { status: "not_started" };
+  return { status: "in_progress" };
 }
 
 /**

@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Sql } from "../db-light.server";
-import { ReconcileMessage } from "~/services/drain/reconcile.server";
+import type { ReconcileMessage } from "~/services/drain/reconcile.server";
 
 /**
  * Tests for initial-sync.server.ts (S23-04).
  *
  * Tests verify:
- * 1. getInitialSyncState derives status from LATEST run only
+ * 1. getInitialSyncState derives status from current run (latest companies op + orders ops at/after it)
  * 2. enqueueInitialSync uses manual idempotency key with in-flight protection
  * 3. canStartSync logic
  * 4. Logs use shopHash, no PII (no domain or webhookId)
@@ -36,7 +36,7 @@ describe("initial-sync.server", () => {
     it("returns not_started when no bulk operations exist", async () => {
       mockSql.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
-        if (query.includes("s6_bulk_operations")) {
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([]);
         }
         return Promise.resolve([]);
@@ -49,18 +49,22 @@ describe("initial-sync.server", () => {
     });
 
     it("returns in_progress when companies operation exists without completed_at", async () => {
+      const companiesStarted = new Date("2026-10-24T10:00:00Z");
       mockSql.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
-        if (query.includes("s6_bulk_operations")) {
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([
             {
               bulk_op_id: "gid://shopify/BulkOperation/1",
               reconcile_stage: "companies",
               completed_at: null,
               failure_count: 0,
-              started_at: new Date(),
+              started_at: companiesStarted,
             },
           ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([]);
         }
         if (query.includes("s6_dead_letter")) {
           return Promise.resolve([{ count: "0" }]);
@@ -74,19 +78,23 @@ describe("initial-sync.server", () => {
       expect(result.status).toBe("in_progress");
     });
 
-    it("returns in_progress when companies complete but orders not", async () => {
+    it("returns in_progress when companies complete but no orders op yet", async () => {
+      const companiesStarted = new Date("2026-10-24T10:00:00Z");
       mockSql.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
-        if (query.includes("s6_bulk_operations")) {
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([
             {
               bulk_op_id: "gid://shopify/BulkOperation/1",
               reconcile_stage: "companies",
-              completed_at: new Date(),
+              completed_at: new Date("2026-10-24T10:05:00Z"),
               failure_count: 0,
-              started_at: new Date(),
+              started_at: companiesStarted,
             },
           ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([]);
         }
         if (query.includes("s6_dead_letter")) {
           return Promise.resolve([{ count: "0" }]);
@@ -100,24 +108,29 @@ describe("initial-sync.server", () => {
       expect(result.status).toBe("in_progress");
     });
 
-    it("returns done when both companies and orders are completed", async () => {
+    it("returns done when both companies and orders are completed in current run", async () => {
+      const companiesStarted = new Date("2026-10-24T10:00:00Z");
       mockSql.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
-        if (query.includes("s6_bulk_operations")) {
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([
             {
               bulk_op_id: "gid://shopify/BulkOperation/1",
               reconcile_stage: "companies",
-              completed_at: new Date(),
+              completed_at: new Date("2026-10-24T10:05:00Z"),
               failure_count: 0,
-              started_at: new Date(),
+              started_at: companiesStarted,
             },
+          ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([
             {
               bulk_op_id: "gid://shopify/BulkOperation/2",
               reconcile_stage: "orders",
-              completed_at: new Date(),
+              completed_at: new Date("2026-10-24T10:10:00Z"),
               failure_count: 0,
-              started_at: new Date(),
+              started_at: new Date("2026-10-24T10:06:00Z"),
             },
           ]);
         }
@@ -133,19 +146,23 @@ describe("initial-sync.server", () => {
       expect(result.status).toBe("done");
     });
 
-    it("returns failed when failure_count >= 5", async () => {
+    it("returns failed when companies failure_count >= 5", async () => {
+      const companiesStarted = new Date("2026-10-24T10:00:00Z");
       mockSql.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
-        if (query.includes("s6_bulk_operations")) {
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([
             {
               bulk_op_id: "gid://shopify/BulkOperation/1",
               reconcile_stage: "companies",
               completed_at: null,
               failure_count: 5,
-              started_at: new Date(),
+              started_at: companiesStarted,
             },
           ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([]);
         }
         if (query.includes("s6_dead_letter")) {
           return Promise.resolve([{ count: "0" }]);
@@ -159,19 +176,23 @@ describe("initial-sync.server", () => {
       expect(result.status).toBe("failed");
     });
 
-    it("returns failed when DLQ entries exist for latest run's bulk_op_id", async () => {
+    it("returns failed when DLQ entries exist for current run's bulk_op_id", async () => {
+      const companiesStarted = new Date("2026-10-24T10:00:00Z");
       mockSql.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
-        if (query.includes("s6_bulk_operations")) {
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([
             {
               bulk_op_id: "gid://shopify/BulkOperation/1",
               reconcile_stage: "companies",
               completed_at: null,
               failure_count: 0,
-              started_at: new Date(),
+              started_at: companiesStarted,
             },
           ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([]);
         }
         if (query.includes("s6_dead_letter") && query.includes("bulkOperationId")) {
           return Promise.resolve([{ count: "1" }]);
@@ -185,24 +206,65 @@ describe("initial-sync.server", () => {
       expect(result.status).toBe("failed");
     });
 
-    it("an older failure followed by a newer success gives done", async () => {
+    it("companies in_progress + OLD failed orders = in_progress (not failed), retry blocked", async () => {
+      const companiesStarted = new Date("2026-10-24T10:00:00Z");
       mockSql.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
-        if (query.includes("s6_bulk_operations")) {
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([
             {
               bulk_op_id: "gid://shopify/BulkOperation/2",
               reconcile_stage: "companies",
-              completed_at: new Date(),
+              completed_at: null,
               failure_count: 0,
-              started_at: new Date("2026-10-24"),
+              started_at: companiesStarted,
             },
+          ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("pgmq.q_s6_sync") && query.includes("manual")) {
+          return Promise.resolve([]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { getInitialSyncState, enqueueInitialSync } = await import("../initial-sync.server");
+      const state = await getInitialSyncState(mockSql as unknown as Sql, "test.myshopify.com");
+      expect(state.status).toBe("in_progress");
+
+      const enqueueResult = await enqueueInitialSync(mockSql as unknown as Sql, "test.myshopify.com");
+      expect(enqueueResult.enqueued).toBe(false);
+      expect(enqueueResult.reason).toBe("in_progress");
+    });
+
+    it("companies done + newer orders failed = failed", async () => {
+      const companiesStarted = new Date("2026-10-24T10:00:00Z");
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
+          return Promise.resolve([
             {
-              bulk_op_id: "gid://shopify/BulkOperation/3",
-              reconcile_stage: "orders",
-              completed_at: new Date(),
+              bulk_op_id: "gid://shopify/BulkOperation/1",
+              reconcile_stage: "companies",
+              completed_at: new Date("2026-10-24T10:05:00Z"),
               failure_count: 0,
-              started_at: new Date("2026-10-24"),
+              started_at: companiesStarted,
+            },
+          ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([
+            {
+              bulk_op_id: "gid://shopify/BulkOperation/2",
+              reconcile_stage: "orders",
+              completed_at: null,
+              failure_count: 5,
+              started_at: new Date("2026-10-24T10:06:00Z"),
             },
           ]);
         }
@@ -215,27 +277,32 @@ describe("initial-sync.server", () => {
       const { getInitialSyncState } = await import("../initial-sync.server");
       const result = await getInitialSyncState(mockSql as unknown as Sql, "test.myshopify.com");
 
-      expect(result.status).toBe("done");
+      expect(result.status).toBe("failed");
     });
 
-    it("non-reconcile DLQ row doesn't make it failed", async () => {
+    it("an older failure followed by a newer success gives done", async () => {
+      const companiesStarted = new Date("2026-10-24T10:00:00Z");
       mockSql.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
-        if (query.includes("s6_bulk_operations")) {
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([
             {
-              bulk_op_id: "gid://shopify/BulkOperation/1",
-              reconcile_stage: "companies",
-              completed_at: new Date(),
-              failure_count: 0,
-              started_at: new Date(),
-            },
-            {
               bulk_op_id: "gid://shopify/BulkOperation/2",
-              reconcile_stage: "orders",
-              completed_at: new Date(),
+              reconcile_stage: "companies",
+              completed_at: new Date("2026-10-24T10:05:00Z"),
               failure_count: 0,
-              started_at: new Date(),
+              started_at: companiesStarted,
+            },
+          ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([
+            {
+              bulk_op_id: "gid://shopify/BulkOperation/3",
+              reconcile_stage: "orders",
+              completed_at: new Date("2026-10-24T10:10:00Z"),
+              failure_count: 0,
+              started_at: new Date("2026-10-24T10:06:00Z"),
             },
           ]);
         }
@@ -254,21 +321,25 @@ describe("initial-sync.server", () => {
 
   describe("enqueueInitialSync", () => {
     it("returns in_progress when latest run is still running", async () => {
+      const companiesStarted = new Date("2026-10-24T10:00:00Z");
       mockSql.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("pgmq.q_s6_sync") && query.includes("manual")) {
           return Promise.resolve([]);
         }
-        if (query.includes("s6_bulk_operations")) {
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([
             {
               bulk_op_id: "gid://shopify/BulkOperation/1",
               reconcile_stage: "companies",
               completed_at: null,
               failure_count: 0,
-              started_at: new Date(),
+              started_at: companiesStarted,
             },
           ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([]);
         }
         if (query.includes("s6_dead_letter")) {
           return Promise.resolve([{ count: "0" }]);
@@ -302,22 +373,26 @@ describe("initial-sync.server", () => {
     it("enqueues message when latest run failed (even if day-key processed)", async () => {
       let enqueued = false;
       let sentMessage: ReconcileMessage | null = null;
+      const companiesStarted = new Date("2026-10-24T10:00:00Z");
 
       mockSql.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
         const query = strings.join("?");
         if (query.includes("pgmq.q_s6_sync") && query.includes("manual")) {
           return Promise.resolve([]);
         }
-        if (query.includes("s6_bulk_operations")) {
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([
             {
               bulk_op_id: "gid://shopify/BulkOperation/1",
               reconcile_stage: "companies",
               completed_at: null,
               failure_count: 5,
-              started_at: new Date(),
+              started_at: companiesStarted,
             },
           ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([]);
         }
         if (query.includes("s6_dead_letter")) {
           return Promise.resolve([{ count: "0" }]);
@@ -350,7 +425,7 @@ describe("initial-sync.server", () => {
         if (query.includes("pgmq.q_s6_sync") && query.includes("manual")) {
           return Promise.resolve([]);
         }
-        if (query.includes("s6_bulk_operations")) {
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([]);
         }
         if (query.includes("pgmq.send")) {
@@ -378,7 +453,7 @@ describe("initial-sync.server", () => {
         if (query.includes("pgmq.q_s6_sync") && query.includes("manual")) {
           return Promise.resolve([]);
         }
-        if (query.includes("s6_bulk_operations")) {
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([]);
         }
         if (query.includes("pgmq.send")) {
@@ -431,7 +506,7 @@ describe("initial-sync.server", () => {
         if (query.includes("pgmq.q_s6_sync") && query.includes("manual")) {
           return Promise.resolve([]);
         }
-        if (query.includes("s6_bulk_operations")) {
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([]);
         }
         if (query.includes("pgmq.send")) {
