@@ -8,12 +8,36 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
  * 1. Dismiss action updates Shop.onboarding_dismissed_at
  * 2. Reopen action clears Shop.onboarding_dismissed_at
  * 3. Loader returns correct onboarding state
+ * 4. S23-02: Registration status mapping (ok/missing/error)
+ * 5. S23-02: Retry action calls only missing ensure* helpers
+ * 6. S23-02: In-flight guard prevents double registration
+ * 7. S23-02: safeLog with no PII
  */
 
 const mockSql = Object.assign(vi.fn(), { unsafe: vi.fn((s) => s) });
 
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
+}));
+
+const mockEnsureValidation = vi.fn();
+const mockEnsurePaymentCustomization = vi.fn();
+const mockEnsureMetafieldDefinitions = vi.fn();
+
+vi.mock("~/lib/validation-registration.server", () => ({
+  ensureValidation: mockEnsureValidation,
+}));
+
+vi.mock("~/lib/payment-customization-registration.server", () => ({
+  ensurePaymentCustomization: mockEnsurePaymentCustomization,
+}));
+
+vi.mock("~/lib/metafield-definitions.server", () => ({
+  ensureMetafieldDefinitions: mockEnsureMetafieldDefinitions,
+  getMetafieldDefinitionSpecs: vi.fn(() => [{
+    definition: { namespace: "$app", key: "credit_status", type: "json" },
+    ownerTypes: ["COMPANY_LOCATION", "CUSTOMER"],
+  }]),
 }));
 
 vi.mock("~/services/plan.server", () => ({
@@ -55,6 +79,9 @@ describe("app.onboarding", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockEnsureValidation.mockReset();
+    mockEnsurePaymentCustomization.mockReset();
+    mockEnsureMetafieldDefinitions.mockReset();
   });
 
   describe("action - dismiss", () => {
@@ -283,6 +310,22 @@ describe("app.onboarding", () => {
               },
             },
           }),
+        })
+        .mockResolvedValue({
+          json: () => Promise.resolve({
+            data: {
+              metafieldDefinitions: {
+                edges: [{
+                  node: {
+                    id: "gid://shopify/MetafieldDefinition/789",
+                    namespace: "$app",
+                    key: "credit_status",
+                    ownerType: "COMPANY_LOCATION",
+                  },
+                }],
+              },
+            },
+          }),
         });
 
       const { loader } = await import("../app.onboarding");
@@ -307,6 +350,7 @@ describe("app.onboarding", () => {
       expect(result.state?.steps).toHaveLength(5);
       expect(result.state?.isComplete).toBe(true);
       expect(result.shopId).toBe(TEST_SHOP_ID);
+      expect(result.registrationStatus).not.toBeNull();
     });
 
     it("returns dismissed state when onboarding was dismissed", async () => {
@@ -352,13 +396,599 @@ describe("app.onboarding", () => {
       expect(result.state?.dismissedAt).toBe(dismissedDate.toISOString());
     });
   });
+
+  describe("S23-02: registration status", () => {
+    it("loader returns ok status when all registrations exist", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+          return Promise.resolve([{
+            id: TEST_SHOP_ID,
+            defaultTermsDays: 30,
+            onboardingDismissedAt: null,
+          }]);
+        }
+        if (query.includes("COUNT(*)")) {
+          return Promise.resolve([{ count: "1" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const mockGraphql = vi.fn()
+        .mockResolvedValueOnce({
+          json: () => Promise.resolve({
+            data: {
+              validations: {
+                edges: [{
+                  node: {
+                    id: "gid://shopify/Validation/123",
+                    shopifyFunction: { handle: "credit-check-validation" },
+                    title: "Test",
+                    enabled: true,
+                  },
+                }],
+              },
+            },
+          }),
+        })
+        .mockResolvedValueOnce({
+          json: () => Promise.resolve({
+            data: {
+              paymentCustomizations: {
+                edges: [{
+                  node: {
+                    id: "gid://shopify/PaymentCustomization/456",
+                    shopifyFunction: { handle: "hide-terms-payment" },
+                    title: "Test",
+                    enabled: true,
+                  },
+                }],
+              },
+            },
+          }),
+        })
+        .mockResolvedValue({
+          json: () => Promise.resolve({
+            data: {
+              metafieldDefinitions: {
+                edges: [{
+                  node: {
+                    id: "gid://shopify/MetafieldDefinition/789",
+                    namespace: "$app",
+                    key: "credit_status",
+                    ownerType: "COMPANY_LOCATION",
+                  },
+                }],
+              },
+            },
+          }),
+        });
+
+      const { loader } = await import("../app.onboarding");
+
+      const result = await loader({
+        request: new Request("https://example.com/app/onboarding"),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+                admin: { graphql: mockGraphql },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as unknown as LoaderFunctionArgs);
+
+      expect(result.registrationStatus).not.toBeNull();
+      expect(result.registrationStatus?.validation.status).toBe("ok");
+      expect(result.registrationStatus?.paymentCustomization.status).toBe("ok");
+      expect(result.registrationStatus?.metafieldDefinitions.status).toBe("ok");
+    });
+
+    it("metafield check matches on key only with app--123 namespace", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+          return Promise.resolve([{
+            id: TEST_SHOP_ID,
+            defaultTermsDays: 30,
+            onboardingDismissedAt: null,
+          }]);
+        }
+        if (query.includes("COUNT(*)")) {
+          return Promise.resolve([{ count: "1" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const mockGraphql = vi.fn()
+        .mockResolvedValueOnce({
+          json: () => Promise.resolve({ data: { validations: { edges: [] } } }),
+        })
+        .mockResolvedValueOnce({
+          json: () => Promise.resolve({ data: { paymentCustomizations: { edges: [] } } }),
+        })
+        .mockResolvedValue({
+          json: () => Promise.resolve({
+            data: {
+              metafieldDefinitions: {
+                edges: [{
+                  node: {
+                    id: "gid://shopify/MetafieldDefinition/789",
+                    namespace: "app--123",
+                    key: "credit_status",
+                    ownerType: "COMPANY_LOCATION",
+                  },
+                }],
+              },
+            },
+          }),
+        });
+
+      const { loader } = await import("../app.onboarding");
+
+      const result = await loader({
+        request: new Request("https://example.com/app/onboarding"),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+                admin: { graphql: mockGraphql },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as unknown as LoaderFunctionArgs);
+
+      expect(result.registrationStatus?.metafieldDefinitions.status).toBe("ok");
+    });
+
+    it("loader returns missing status when registrations not found", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+          return Promise.resolve([{
+            id: TEST_SHOP_ID,
+            defaultTermsDays: 30,
+            onboardingDismissedAt: null,
+          }]);
+        }
+        if (query.includes("COUNT(*)")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const mockGraphql = vi.fn().mockResolvedValue({
+        json: () => Promise.resolve({ data: {} }),
+      });
+
+      const { loader } = await import("../app.onboarding");
+
+      const result = await loader({
+        request: new Request("https://example.com/app/onboarding"),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+                admin: { graphql: mockGraphql },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as unknown as LoaderFunctionArgs);
+
+      expect(result.registrationStatus).not.toBeNull();
+      expect(result.registrationStatus?.validation.status).toBe("missing");
+      expect(result.registrationStatus?.paymentCustomization.status).toBe("missing");
+      expect(result.registrationStatus?.metafieldDefinitions.status).toBe("missing");
+    });
+
+    it("loader returns error status when validation query returns GraphQL errors", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+          return Promise.resolve([{
+            id: TEST_SHOP_ID,
+            defaultTermsDays: 30,
+            onboardingDismissedAt: null,
+          }]);
+        }
+        if (query.includes("COUNT(*)")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const mockGraphql = vi.fn()
+        .mockResolvedValueOnce({
+          json: () => Promise.resolve({ errors: [{ message: "Validation access denied" }] }),
+        })
+        .mockResolvedValueOnce({
+          json: () => Promise.resolve({ data: { paymentCustomizations: { edges: [] } } }),
+        })
+        .mockResolvedValue({
+          json: () => Promise.resolve({ data: { metafieldDefinitions: { edges: [] } } }),
+        });
+
+      const { loader } = await import("../app.onboarding");
+
+      const result = await loader({
+        request: new Request("https://example.com/app/onboarding"),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+                admin: { graphql: mockGraphql },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as unknown as LoaderFunctionArgs);
+
+      expect(result.registrationStatus?.validation.status).toBe("error");
+    });
+
+    it("loader returns error status when payment customization query returns GraphQL errors", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+          return Promise.resolve([{
+            id: TEST_SHOP_ID,
+            defaultTermsDays: 30,
+            onboardingDismissedAt: null,
+          }]);
+        }
+        if (query.includes("COUNT(*)")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const mockGraphql = vi.fn()
+        .mockResolvedValueOnce({
+          json: () => Promise.resolve({ data: { validations: { edges: [] } } }),
+        })
+        .mockResolvedValueOnce({
+          json: () => Promise.resolve({ errors: [{ message: "Payment access denied" }] }),
+        })
+        .mockResolvedValue({
+          json: () => Promise.resolve({ data: { metafieldDefinitions: { edges: [] } } }),
+        });
+
+      const { loader } = await import("../app.onboarding");
+
+      const result = await loader({
+        request: new Request("https://example.com/app/onboarding"),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+                admin: { graphql: mockGraphql },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as unknown as LoaderFunctionArgs);
+
+      expect(result.registrationStatus?.paymentCustomization.status).toBe("error");
+    });
+
+    it("loader returns error status when metafield query returns GraphQL errors", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+          return Promise.resolve([{
+            id: TEST_SHOP_ID,
+            defaultTermsDays: 30,
+            onboardingDismissedAt: null,
+          }]);
+        }
+        if (query.includes("COUNT(*)")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const mockGraphql = vi.fn().mockResolvedValue({
+        json: () => Promise.resolve({ errors: [{ message: "Access denied" }] }),
+      });
+
+      const { loader } = await import("../app.onboarding");
+
+      const result = await loader({
+        request: new Request("https://example.com/app/onboarding"),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+                admin: { graphql: mockGraphql },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as unknown as LoaderFunctionArgs);
+
+      expect(result.registrationStatus).not.toBeNull();
+      expect(result.registrationStatus?.metafieldDefinitions.status).toBe("error");
+    });
+  });
+
+  describe("S23-02: retry action", () => {
+    it("recomputes status server-side and calls only missing ensure* helpers", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id FROM")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      mockEnsureValidation.mockResolvedValue({ id: "gid://shopify/Validation/123", created: true });
+      mockEnsureMetafieldDefinitions.mockResolvedValue([]);
+
+      const { action } = await import("../app.onboarding");
+
+      const formData = new FormData();
+      formData.set("_action", "retry_registration");
+
+      const mockGraphql = vi.fn()
+        .mockResolvedValueOnce({
+          json: () => Promise.resolve({ data: { validations: { edges: [] } } }),
+        })
+        .mockResolvedValueOnce({
+          json: () => Promise.resolve({
+            data: {
+              paymentCustomizations: {
+                edges: [{
+                  node: {
+                    id: "gid://shopify/PaymentCustomization/456",
+                    shopifyFunction: { handle: "hide-terms-payment" },
+                    title: "Test",
+                    enabled: true,
+                  },
+                }],
+              },
+            },
+          }),
+        })
+        .mockResolvedValue({
+          json: () => Promise.resolve({ data: { metafieldDefinitions: { edges: [] } } }),
+        });
+
+      const result = await action({
+        request: new Request("https://example.com/app/onboarding", {
+          method: "POST",
+          body: formData,
+        }),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+                admin: { graphql: mockGraphql },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as unknown as ActionFunctionArgs);
+
+      expect(mockEnsureValidation).toHaveBeenCalledOnce();
+      expect(mockEnsurePaymentCustomization).not.toHaveBeenCalled();
+      expect(mockEnsureMetafieldDefinitions).toHaveBeenCalledOnce();
+      expect(result.action).toBe("retry_registration");
+      expect(result.success).toBe(true);
+    });
+
+    it("returns error status when ensure* helper fails", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id FROM")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      mockEnsureValidation.mockRejectedValue(new Error("Registration failed"));
+
+      const { action } = await import("../app.onboarding");
+
+      const formData = new FormData();
+      formData.set("_action", "retry_registration");
+
+      const mockGraphql = vi.fn()
+        .mockResolvedValueOnce({
+          json: () => Promise.resolve({ data: { validations: { edges: [] } } }),
+        })
+        .mockResolvedValueOnce({
+          json: () => Promise.resolve({
+            data: {
+              paymentCustomizations: {
+                edges: [{
+                  node: {
+                    id: "gid://shopify/PaymentCustomization/456",
+                    shopifyFunction: { handle: "hide-terms-payment" },
+                    title: "Test",
+                    enabled: true,
+                  },
+                }],
+              },
+            },
+          }),
+        })
+        .mockResolvedValue({
+          json: () => Promise.resolve({
+            data: {
+              metafieldDefinitions: {
+                edges: [{
+                  node: {
+                    id: "gid://shopify/MetafieldDefinition/789",
+                    namespace: "app--123",
+                    key: "credit_status",
+                    ownerType: "COMPANY_LOCATION",
+                  },
+                }],
+              },
+            },
+          }),
+        });
+
+      const result = await action({
+        request: new Request("https://example.com/app/onboarding", {
+          method: "POST",
+          body: formData,
+        }),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+                admin: { graphql: mockGraphql },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as unknown as ActionFunctionArgs);
+
+      expect(result.action).toBe("retry_registration");
+      expect(result.success).toBe(false);
+      expect(result.registrationStatus?.validation.status).toBe("error");
+    });
+
+    it("in-flight guard prevents double registration", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id FROM")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      let resolveFirst: () => void;
+      const firstCallPromise = new Promise<void>((resolve) => {
+        resolveFirst = resolve;
+      });
+
+      mockEnsureValidation.mockImplementation(async () => {
+        await firstCallPromise;
+        return { id: "gid://shopify/Validation/123", created: true };
+      });
+
+      const { action } = await import("../app.onboarding");
+
+      const formData = new FormData();
+      formData.set("_action", "retry_registration");
+
+      const mockGraphql = vi.fn().mockResolvedValue({
+        json: () => Promise.resolve({ data: {} }),
+      });
+
+      const context = {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+              admin: { graphql: mockGraphql },
+            }),
+          },
+        },
+      };
+
+      const firstRequest = action({
+        request: new Request("https://example.com/app/onboarding", {
+          method: "POST",
+          body: formData,
+        }),
+        context,
+        params: {},
+      } as unknown as ActionFunctionArgs);
+
+      await new Promise((r) => setTimeout(r, 10));
+
+      const secondFormData = new FormData();
+      secondFormData.set("_action", "retry_registration");
+
+      const secondResult = await action({
+        request: new Request("https://example.com/app/onboarding", {
+          method: "POST",
+          body: secondFormData,
+        }),
+        context,
+        params: {},
+      } as unknown as ActionFunctionArgs);
+
+      expect(secondResult.success).toBe(false);
+      expect(secondResult.error).toBe("Retry already in progress");
+
+      resolveFirst!();
+      await firstRequest;
+    });
+
+    it("empty body does not 500", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id FROM")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { action } = await import("../app.onboarding");
+
+      const formData = new FormData();
+      formData.set("_action", "retry_registration");
+
+      const mockGraphql = vi.fn().mockResolvedValue({
+        json: () => Promise.resolve({ data: {} }),
+      });
+
+      const result = await action({
+        request: new Request("https://example.com/app/onboarding", {
+          method: "POST",
+          body: formData,
+        }),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+                admin: { graphql: mockGraphql },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as unknown as ActionFunctionArgs);
+
+      expect(result.action).toBe("retry_registration");
+      expect(result.registrationStatus).toBeDefined();
+    });
+  });
 });
 
 describe("P6: error logging uses safeLog JSON (no raw errors)", () => {
   const TEST_SHOP = "test-onboard-log.myshopify.com";
+  const TEST_SHOP_ID = "shop-log-test";
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockEnsureValidation.mockReset();
+    mockEnsurePaymentCustomization.mockReset();
+    mockEnsureMetafieldDefinitions.mockReset();
   });
 
   it("fetchValidationInfo logs safeLog JSON with error code, not raw error", async () => {
@@ -369,7 +999,7 @@ describe("P6: error logging uses safeLog JSON (no raw errors)", () => {
     mockSql.mockImplementation((strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
-        return Promise.resolve([{ id: "shop-log-test", defaultTermsDays: 30, onboardingDismissedAt: null }]);
+        return Promise.resolve([{ id: TEST_SHOP_ID, defaultTermsDays: 30, onboardingDismissedAt: null }]);
       }
       if (query.includes("COUNT(*)")) {
         return Promise.resolve([{ count: "0" }]);
@@ -395,13 +1025,71 @@ describe("P6: error logging uses safeLog JSON (no raw errors)", () => {
     } as never);
 
     const allLogs = consoleSpy.mock.calls.map((c) => c.join(" ")).join("\n");
-    // safeLog outputs JSON with "event" field
     expect(allLogs).toContain('"event":"onboarding.fetch_validations_failed"');
     expect(allLogs).toContain('"err":');
     expect(allLogs).not.toContain("GraphQL network error");
     expect(allLogs).not.toContain(".myshopify.com");
 
     consoleSpy.mockRestore();
+  });
+
+  it("S23-02: retry action logs use shopHash, not raw domain or ids", async () => {
+    const consoleInfoSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id FROM")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    mockEnsureValidation.mockResolvedValue({ id: "gid://shopify/Validation/123", created: true });
+
+    const { action } = await import("../app.onboarding");
+
+    const currentStatus = {
+      validation: { name: "Validation Function", status: "missing" },
+      paymentCustomization: { name: "Payment Customization", status: "ok" },
+      metafieldDefinitions: { name: "Metafield Definitions", status: "ok" },
+    };
+
+    const formData = new FormData();
+    formData.set("_action", "retry_registration");
+    formData.set("currentStatus", JSON.stringify(currentStatus));
+
+    const mockGraphql = vi.fn();
+
+    await action({
+      request: new Request("https://example.com/app/onboarding", {
+        method: "POST",
+        body: formData,
+      }),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+              admin: { graphql: mockGraphql },
+            }),
+          },
+        },
+      },
+      params: {},
+    } as unknown as ActionFunctionArgs);
+
+    const allInfoLogs = consoleInfoSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+    const allErrorLogs = consoleErrorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+    const allLogs = allInfoLogs + allErrorLogs;
+
+    expect(allLogs).toContain('"shopHash":');
+    expect(allLogs).not.toContain(".myshopify.com");
+    expect(allLogs).not.toContain(TEST_SHOP);
+    expect(allLogs).not.toContain(TEST_SHOP_ID);
+
+    consoleInfoSpy.mockRestore();
+    consoleErrorSpy.mockRestore();
   });
 });
 
