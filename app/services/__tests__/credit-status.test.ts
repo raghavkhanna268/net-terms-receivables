@@ -14,9 +14,11 @@ import type { Sql } from "~/lib/db-light.server";
 
 const mockShopifyGraphQLRequest = vi.fn();
 
-vi.mock("../shopify-client.server", () => ({
-  shopifyGraphQLRequest: mockShopifyGraphQLRequest,
-}));
+vi.mock("../shopify-client.server", () => {
+  return {
+    shopifyGraphQLRequest: (...args: unknown[]) => mockShopifyGraphQLRequest(...args),
+  };
+});
 
 const createMockSql = () => {
   const mockResults: Map<string, unknown[]> = new Map();
@@ -96,6 +98,7 @@ describe("credit-status.server", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSql = createMockSql();
+    mockShopifyGraphQLRequest.mockReset();
   });
 
   afterEach(() => {
@@ -369,6 +372,248 @@ describe("credit-status.server", () => {
 
       expect(result.success).toBe(true);
     });
+
+    it("allows transition from no-limit to limit", async () => {
+      const { updateCreditStatus } = await import("../credit-status.server");
+
+      mockSql.setMockResult("account", [{
+        id: "acc-123",
+        shopId: "shop-123",
+        kind: "COMPANY",
+        companyLocationId: "gid://shopify/CompanyLocation/456",
+        customerId: null,
+        creditLimit: null,
+        holdState: "OK",
+        bypass: false,
+        manualHold: false,
+        holdReasonCode: null,
+        holdNote: null,
+        syncPending: false,
+        gatedAt: null,
+      }]);
+
+      mockSql.setMockResult("shop", [{ domain: "test.myshopify.com", currency: "INR" }]);
+      mockSql.setMockResult("invoice_exposure", [{ total_paise: "0" }]);
+      mockSql.setMockResult("draft_exposure", [{ total_paise: "0" }]);
+      mockSql.setMockResult("overdue_check", [{ has_overdue: false }]);
+
+      mockShopifyGraphQLRequest.mockImplementation(() => Promise.resolve({
+        success: true,
+        data: {
+          metafieldsSet: {
+            metafields: [{ id: "gid://shopify/Metafield/123" }],
+            userErrors: [],
+          },
+        },
+      }));
+
+      const result = await updateCreditStatus(mockSql, "acc-123", {
+        creditLimitAmount: 50000,
+        noLimit: false,
+        manualHold: false,
+        holdReasonCode: undefined,
+      });
+
+      expect(result.success).toBe(true);
+
+      const [, , variables] = mockShopifyGraphQLRequest.mock.calls[0];
+      const metafieldValue = JSON.parse(variables.metafields[0].value);
+      expect(metafieldValue.limitPaise).toBe("5000000");
+    });
+
+
+    it("requires holdReasonCode when manualHold is true", async () => {
+      const { updateCreditStatus } = await import("../credit-status.server");
+
+      const result = await updateCreditStatus(mockSql, "acc-123", {
+        creditLimitAmount: 100000,
+        manualHold: true,
+        holdReasonCode: undefined,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("holdReasonCode is required");
+    });
+
+    it("uses provided holdReasonCode for manual hold", async () => {
+      const { updateCreditStatus } = await import("../credit-status.server");
+
+      mockSql.setMockResult("account", [{
+        id: "acc-123",
+        shopId: "shop-123",
+        kind: "COMPANY",
+        companyLocationId: "gid://shopify/CompanyLocation/456",
+        customerId: null,
+        creditLimit: "100000",
+        holdState: "OK",
+        bypass: false,
+        manualHold: false,
+        holdReasonCode: null,
+        holdNote: null,
+        syncPending: false,
+        gatedAt: null,
+      }]);
+
+      mockSql.setMockResult("shop", [{ domain: "test.myshopify.com", currency: "INR" }]);
+      mockSql.setMockResult("invoice_exposure", [{ total_paise: "0" }]);
+      mockSql.setMockResult("draft_exposure", [{ total_paise: "0" }]);
+      mockSql.setMockResult("overdue_check", [{ has_overdue: false }]);
+
+      mockShopifyGraphQLRequest.mockImplementation(() => Promise.resolve({
+        success: true,
+        data: {
+          metafieldsSet: {
+            metafields: [{ id: "gid://shopify/Metafield/123" }],
+            userErrors: [],
+          },
+        },
+      }));
+
+      const result = await updateCreditStatus(mockSql, "acc-123", {
+        creditLimitAmount: 100000,
+        manualHold: true,
+        holdReasonCode: "FRAUD_SUSPECTED",
+      });
+
+      expect(result.success).toBe(true);
+
+      const [, , variables] = mockShopifyGraphQLRequest.mock.calls[0];
+      const metafieldValue = JSON.parse(variables.metafields[0].value);
+      expect(metafieldValue.hold).toBe(true);
+      expect(metafieldValue.holdReasonCode).toBe("FRAUD_SUSPECTED");
+    });
+
+    it("metafield is written outside transaction (syncPending=true survives metafield failure)", async () => {
+      const { updateCreditStatus } = await import("../credit-status.server");
+
+      mockSql.setMockResult("account", [{
+        id: "acc-123",
+        shopId: "shop-123",
+        kind: "COMPANY",
+        companyLocationId: "gid://shopify/CompanyLocation/456",
+        customerId: null,
+        creditLimit: "100000",
+        holdState: "OK",
+        bypass: false,
+        manualHold: false,
+        holdReasonCode: null,
+        holdNote: null,
+        syncPending: false,
+        gatedAt: null,
+      }]);
+
+      mockSql.setMockResult("shop", [{ domain: "test.myshopify.com", currency: "INR" }]);
+      mockSql.setMockResult("invoice_exposure", [{ total_paise: "0" }]);
+      mockSql.setMockResult("draft_exposure", [{ total_paise: "0" }]);
+      mockSql.setMockResult("overdue_check", [{ has_overdue: false }]);
+
+      mockShopifyGraphQLRequest.mockImplementation(() => Promise.resolve({
+        success: false,
+        error: "Network timeout",
+      }));
+
+      const result = await updateCreditStatus(mockSql, "acc-123", {
+        creditLimitAmount: 100000,
+        manualHold: false,
+        holdReasonCode: undefined,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.metafieldSyncPending).toBe(true);
+      expect(result.error).toContain("sync failed");
+    });
+
+    it("clears syncPending on successful metafield write", async () => {
+      const { updateCreditStatus } = await import("../credit-status.server");
+
+      mockSql.setMockResult("account", [{
+        id: "acc-123",
+        shopId: "shop-123",
+        kind: "COMPANY",
+        companyLocationId: "gid://shopify/CompanyLocation/456",
+        customerId: null,
+        creditLimit: "100000",
+        holdState: "OK",
+        bypass: false,
+        manualHold: false,
+        holdReasonCode: null,
+        holdNote: null,
+        syncPending: true,
+        gatedAt: null,
+      }]);
+
+      mockSql.setMockResult("shop", [{ domain: "test.myshopify.com", currency: "INR" }]);
+      mockSql.setMockResult("invoice_exposure", [{ total_paise: "0" }]);
+      mockSql.setMockResult("draft_exposure", [{ total_paise: "0" }]);
+      mockSql.setMockResult("overdue_check", [{ has_overdue: false }]);
+
+      mockShopifyGraphQLRequest.mockImplementation(() => Promise.resolve({
+        success: true,
+        data: {
+          metafieldsSet: {
+            metafields: [{ id: "gid://shopify/Metafield/123" }],
+            userErrors: [],
+          },
+        },
+      }));
+
+      const result = await updateCreditStatus(mockSql, "acc-123", {
+        creditLimitAmount: 100000,
+        manualHold: false,
+        holdReasonCode: undefined,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.metafieldSyncPending).toBe(false);
+    });
+
+    it("sets metafieldSyncPending and returns userErrors when metafield has userErrors", async () => {
+      const { updateCreditStatus } = await import("../credit-status.server");
+
+      mockSql.setMockResult("account", [{
+        id: "acc-123",
+        shopId: "shop-123",
+        kind: "COMPANY",
+        companyLocationId: "gid://shopify/CompanyLocation/456",
+        customerId: null,
+        creditLimit: "100000",
+        holdState: "OK",
+        bypass: false,
+        manualHold: false,
+        holdReasonCode: null,
+        holdNote: null,
+        syncPending: false,
+        gatedAt: null,
+      }]);
+
+      mockSql.setMockResult("shop", [{ domain: "test.myshopify.com", currency: "INR" }]);
+      mockSql.setMockResult("invoice_exposure", [{ total_paise: "0" }]);
+      mockSql.setMockResult("draft_exposure", [{ total_paise: "0" }]);
+      mockSql.setMockResult("overdue_check", [{ has_overdue: false }]);
+
+      mockShopifyGraphQLRequest.mockImplementation(() => Promise.resolve({
+        success: true,
+        data: {
+          metafieldsSet: {
+            metafields: null,
+            userErrors: [
+              { field: ["metafields", "0", "value"], message: "Invalid JSON" },
+            ],
+          },
+        },
+      }));
+
+      const result = await updateCreditStatus(mockSql, "acc-123", {
+        creditLimitAmount: 100000,
+        manualHold: false,
+        holdReasonCode: undefined,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.metafieldSyncPending).toBe(true);
+      expect(result.userErrors).toHaveLength(1);
+      expect(result.userErrors?.[0].message).toBe("Invalid JSON");
+    });
   });
 
   describe("updateCreditStatus", () => {
@@ -550,94 +795,6 @@ describe("credit-status.server", () => {
       expect(metafieldValue.holdReasonCode).toBe("MANUAL_HOLD");
     });
 
-    it("sets metafieldSyncPending when API call fails", async () => {
-      const { updateCreditStatus } = await import("../credit-status.server");
-
-      mockSql.setMockResult("account", [{
-        id: "acc-123",
-        shopId: "shop-123",
-        kind: "COMPANY",
-        companyLocationId: "gid://shopify/CompanyLocation/456",
-        customerId: null,
-        creditLimit: "100000",
-        holdState: "OK",
-        bypass: false,
-        manualHold: false,
-        holdReasonCode: null,
-        holdNote: null,
-        syncPending: false,
-        gatedAt: null,
-      }]);
-
-      mockSql.setMockResult("shop", [{ domain: "test.myshopify.com", currency: "INR" }]);
-      mockSql.setMockResult("invoice_exposure", [{ total_paise: "0" }]);
-      mockSql.setMockResult("draft_exposure", [{ total_paise: "0" }]);
-      mockSql.setMockResult("overdue_check", [{ has_overdue: false }]);
-
-      mockShopifyGraphQLRequest.mockResolvedValueOnce({
-        success: false,
-        error: "Network error",
-        retryable: true,
-      });
-
-      const result = await updateCreditStatus(mockSql, "acc-123", {
-        creditLimitAmount: 100000,
-        manualHold: false,
-        holdReasonCode: "MANUAL_HOLD",
-      });
-
-      expect(result.success).toBe(true);
-      expect(result.metafieldSyncPending).toBe(true);
-      expect(result.error).toContain("sync failed");
-    });
-
-    it("surfaces userErrors from metafieldsSet mutation", async () => {
-      const { updateCreditStatus } = await import("../credit-status.server");
-
-      mockSql.setMockResult("account", [{
-        id: "acc-123",
-        shopId: "shop-123",
-        kind: "COMPANY",
-        companyLocationId: "gid://shopify/CompanyLocation/456",
-        customerId: null,
-        creditLimit: "100000",
-        holdState: "OK",
-        bypass: false,
-        manualHold: false,
-        holdReasonCode: null,
-        holdNote: null,
-        syncPending: false,
-        gatedAt: null,
-      }]);
-
-      mockSql.setMockResult("shop", [{ domain: "test.myshopify.com", currency: "INR" }]);
-      mockSql.setMockResult("invoice_exposure", [{ total_paise: "0" }]);
-      mockSql.setMockResult("draft_exposure", [{ total_paise: "0" }]);
-      mockSql.setMockResult("overdue_check", [{ has_overdue: false }]);
-
-      mockShopifyGraphQLRequest.mockResolvedValueOnce({
-        success: true,
-        data: {
-          metafieldsSet: {
-            metafields: null,
-            userErrors: [
-              { field: ["metafields", "0", "value"], message: "Invalid JSON" },
-            ],
-          },
-        },
-      });
-
-      const result = await updateCreditStatus(mockSql, "acc-123", {
-        creditLimitAmount: 100000,
-        manualHold: false,
-        holdReasonCode: "MANUAL_HOLD",
-      });
-
-      expect(result.success).toBe(true);
-      expect(result.metafieldSyncPending).toBe(true);
-      expect(result.userErrors).toHaveLength(1);
-      expect(result.userErrors?.[0].message).toBe("Invalid JSON");
-    });
   });
 
   describe("getCreditStatusDisplay", () => {

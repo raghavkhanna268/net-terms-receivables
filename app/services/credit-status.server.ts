@@ -403,16 +403,23 @@ function validateHoldReasonCode(code: HoldReasonCode | null | undefined, manualH
 }
 
 /**
+ * Data needed to write the metafield after transaction commits.
+ */
+interface MetafieldWriteData {
+  shopDomain: string;
+  ownerGid: string;
+  metafieldValue: string;
+}
+
+/**
  * Update a buyer account's credit status.
  *
  * This function:
  * 1. Validates the input
- * 2. Locks the BuyerAccount row with FOR UPDATE
- * 3. Updates the database in a transaction
- * 4. Computes the full credit status using computeHoldState
- * 5. Writes the metafield to Shopify
- *
- * If the metafield write fails, syncPending is set to true in the DB.
+ * 2. In a transaction: locks the BuyerAccount row, computes state, writes DB with syncPending=true
+ * 3. After transaction commits: writes the metafield to Shopify
+ * 4. On metafield success: clears syncPending
+ * 5. On metafield failure: leaves syncPending=true and logs
  *
  * @param sql - Database connection
  * @param buyerAccountId - The buyer account to update
@@ -434,7 +441,11 @@ export async function updateCreditStatus(
     return { success: false, error: reasonValidation.error };
   }
 
-  return sql.begin(async (tx) => {
+  type TxSuccess = { success: true; metafieldWriteData: MetafieldWriteData };
+  type TxError = { success: false; error: string };
+  type TxResult = TxSuccess | TxError;
+
+  const txResult: TxResult = await sql.begin(async (tx) => {
     const [account] = await tx<BuyerAccountData[]>`
       SELECT
         id,
@@ -456,11 +467,11 @@ export async function updateCreditStatus(
     `;
 
     if (!account) {
-      return { success: false, error: "Buyer account not found" };
+      return { success: false, error: "Buyer account not found" } as const;
     }
 
     if (account.gatedAt !== null) {
-      return { success: false, error: "Cannot update credit status for gated accounts" };
+      return { success: false, error: "Cannot update credit status for gated accounts" } as const;
     }
 
     const [shop] = await tx<ShopData[]>`
@@ -468,7 +479,7 @@ export async function updateCreditStatus(
     `;
 
     if (!shop) {
-      return { success: false, error: "Shop not found" };
+      return { success: false, error: "Shop not found" } as const;
     }
 
     const owner = getOwnerGid(account);
@@ -476,7 +487,7 @@ export async function updateCreditStatus(
       return { 
         success: false, 
         error: `Cannot determine metafield owner for account kind ${account.kind}` 
-      };
+      } as const;
     }
 
     const newCreditLimit = limitValidation.value !== undefined 
@@ -530,42 +541,59 @@ export async function updateCreditStatus(
       exposurePaise,
     });
 
-    const metafieldResult = await writeMetafield(shop.domain, owner.gid, metafieldValue);
-
-    if (!metafieldResult.success) {
-      console.error(
-        `[credit-status] Metafield write failed for ${buyerAccountId}:`,
-        metafieldResult.error
-      );
-      return {
-        success: true,
-        metafieldSyncPending: true,
-        error: `Database updated but metafield sync failed: ${metafieldResult.error}`,
-      };
-    }
-
-    const userErrors = metafieldResult.data?.metafieldsSet?.userErrors ?? [];
-    if (userErrors.length > 0) {
-      console.error(
-        `[credit-status] Metafield userErrors for ${buyerAccountId}:`,
-        JSON.stringify(userErrors)
-      );
-      return {
-        success: true,
-        metafieldSyncPending: true,
-        userErrors,
-        error: `Database updated but metafield had userErrors: ${userErrors.map(e => e.message).join("; ")}`,
-      };
-    }
-
-    await tx`
-      UPDATE "BuyerAccount"
-      SET "syncPending" = false
-      WHERE id = ${buyerAccountId}
-    `;
-
-    return { success: true, metafieldSyncPending: false };
+    return { 
+      success: true, 
+      metafieldWriteData: {
+        shopDomain: shop.domain,
+        ownerGid: owner.gid,
+        metafieldValue,
+      }
+    } as TxSuccess;
   });
+
+  if (!txResult.success) {
+    return txResult;
+  }
+
+  const metafieldResult = await writeMetafield(
+    txResult.metafieldWriteData.shopDomain,
+    txResult.metafieldWriteData.ownerGid,
+    txResult.metafieldWriteData.metafieldValue
+  );
+
+  if (!metafieldResult.success) {
+    console.error(
+      `[credit-status] Metafield write failed for ${buyerAccountId}:`,
+      metafieldResult.error
+    );
+    return {
+      success: true,
+      metafieldSyncPending: true,
+      error: `Database updated but metafield sync failed: ${metafieldResult.error}`,
+    };
+  }
+
+  const userErrors = metafieldResult.data?.metafieldsSet?.userErrors ?? [];
+  if (userErrors.length > 0) {
+    console.error(
+      `[credit-status] Metafield userErrors for ${buyerAccountId}:`,
+      JSON.stringify(userErrors)
+    );
+    return {
+      success: true,
+      metafieldSyncPending: true,
+      userErrors,
+      error: `Database updated but metafield had userErrors: ${userErrors.map(e => e.message).join("; ")}`,
+    };
+  }
+
+  await sql`
+    UPDATE "BuyerAccount"
+    SET "syncPending" = false
+    WHERE id = ${buyerAccountId}
+  `;
+
+  return { success: true, metafieldSyncPending: false };
 }
 
 /**
@@ -575,6 +603,12 @@ export async function updateCreditStatus(
  * Computes the current state from DB and writes the metafield.
  * Reads bypass flag and uses computeHoldState for consistency.
  *
+ * Structure:
+ * 1. In transaction: lock, compute, update holdState with syncPending=true
+ * 2. After commit: write metafield
+ * 3. On success: clear syncPending
+ * 4. On failure: leave syncPending=true and log
+ *
  * @param sql - Database connection
  * @param buyerAccountId - The buyer account to sync
  * @returns Result indicating success or failure
@@ -583,7 +617,12 @@ export async function syncCreditStatusMetafield(
   sql: Sql,
   buyerAccountId: string
 ): Promise<CreditStatusUpdateResult> {
-  return sql.begin(async (tx) => {
+  type SyncTxSuccess = { success: true; metafieldWriteData: MetafieldWriteData };
+  type SyncTxSkip = { success: true; skipMetafield: true };
+  type SyncTxError = { success: false; error: string };
+  type SyncTxResult = SyncTxSuccess | SyncTxSkip | SyncTxError;
+
+  const txResult: SyncTxResult = await sql.begin(async (tx) => {
     const [account] = await tx<BuyerAccountData[]>`
       SELECT
         id,
@@ -605,12 +644,12 @@ export async function syncCreditStatusMetafield(
     `;
 
     if (!account) {
-      return { success: false, error: "Buyer account not found" };
+      return { success: false, error: "Buyer account not found" } as const;
     }
 
     if (account.gatedAt !== null) {
       await tx`UPDATE "BuyerAccount" SET "syncPending" = false WHERE id = ${buyerAccountId}`;
-      return { success: true };
+      return { success: true, skipMetafield: true } as const;
     }
 
     const [shop] = await tx<ShopData[]>`
@@ -618,13 +657,13 @@ export async function syncCreditStatusMetafield(
     `;
 
     if (!shop) {
-      return { success: false, error: "Shop not found" };
+      return { success: false, error: "Shop not found" } as const;
     }
 
     const owner = getOwnerGid(account);
     if (!owner) {
       await tx`UPDATE "BuyerAccount" SET "syncPending" = false WHERE id = ${buyerAccountId}`;
-      return { success: true };
+      return { success: true, skipMetafield: true } as const;
     }
 
     const { exposurePaise, currency } = await computeExposure(tx, buyerAccountId, account.shopId);
@@ -646,6 +685,14 @@ export async function syncCreditStatusMetafield(
       account.holdReasonCode as HoldReasonCode
     );
 
+    await tx`
+      UPDATE "BuyerAccount"
+      SET 
+        "holdState" = ${holdStateResult.holdState}::"HoldState",
+        "syncPending" = true
+      WHERE id = ${buyerAccountId}
+    `;
+
     const metafieldValue = serializeCreditStatusFromDb({
       currencyCode: currency,
       hold: holdStateResult.metafieldHold,
@@ -654,36 +701,63 @@ export async function syncCreditStatusMetafield(
       exposurePaise,
     });
 
-    const metafieldResult = await writeMetafield(shop.domain, owner.gid, metafieldValue);
-
-    if (!metafieldResult.success) {
-      return {
-        success: false,
-        metafieldSyncPending: true,
-        error: `Metafield sync failed: ${metafieldResult.error}`,
-      };
-    }
-
-    const userErrors = metafieldResult.data?.metafieldsSet?.userErrors ?? [];
-    if (userErrors.length > 0) {
-      return {
-        success: false,
-        metafieldSyncPending: true,
-        userErrors,
-        error: `Metafield userErrors: ${userErrors.map(e => e.message).join("; ")}`,
-      };
-    }
-
-    await tx`
-      UPDATE "BuyerAccount"
-      SET 
-        "holdState" = ${holdStateResult.holdState}::"HoldState",
-        "syncPending" = false
-      WHERE id = ${buyerAccountId}
-    `;
-
-    return { success: true, metafieldSyncPending: false };
+    return { 
+      success: true,
+      metafieldWriteData: {
+        shopDomain: shop.domain,
+        ownerGid: owner.gid,
+        metafieldValue,
+      }
+    } as SyncTxSuccess;
   });
+
+  if (!txResult.success) {
+    return { success: false, error: txResult.error };
+  }
+
+  if ('skipMetafield' in txResult) {
+    return { success: true, metafieldSyncPending: false };
+  }
+
+  const metafieldResult = await writeMetafield(
+    txResult.metafieldWriteData.shopDomain,
+    txResult.metafieldWriteData.ownerGid,
+    txResult.metafieldWriteData.metafieldValue
+  );
+
+  if (!metafieldResult.success) {
+    console.error(
+      `[credit-status] Metafield sync failed for ${buyerAccountId}:`,
+      metafieldResult.error
+    );
+    return {
+      success: true,
+      metafieldSyncPending: true,
+      error: `Metafield sync failed: ${metafieldResult.error}`,
+    };
+  }
+
+  const userErrors = metafieldResult.data?.metafieldsSet?.userErrors ?? [];
+  if (userErrors.length > 0) {
+    console.error(
+      `[credit-status] Metafield userErrors for ${buyerAccountId}:`,
+      JSON.stringify(userErrors)
+    );
+    return {
+      success: true,
+      metafieldSyncPending: true,
+      userErrors,
+      error: `Metafield userErrors: ${userErrors.map(e => e.message).join("; ")}`,
+    };
+  }
+
+  await sql`
+    UPDATE "BuyerAccount"
+    SET "syncPending" = false
+    WHERE id = ${buyerAccountId}
+  `;
+
+  return { success: true, metafieldSyncPending: false };
 }
 
 /**
@@ -751,7 +825,7 @@ export async function getCompanyTotals(
       "buyerAccountId",
       COALESCE(SUM((ROUND(outstanding * 100))::bigint), 0)::text AS "totalPaise"
     FROM "Invoice"
-    WHERE "buyerAccountId" = ANY(${sql.array(locationIds)})
+    WHERE "buyerAccountId" IN ${sql(locationIds)}
       AND status = 'open'
       AND outstanding > 0
     GROUP BY "buyerAccountId"
@@ -765,7 +839,7 @@ export async function getCompanyTotals(
       buyer_account_id AS "buyerAccountId",
       COALESCE(SUM((ROUND(total * 100))::bigint), 0)::text AS "totalPaise"
     FROM "s8_draft_orders"
-    WHERE buyer_account_id = ANY(${sql.array(locationIds)})
+    WHERE buyer_account_id IN ${sql(locationIds)}
       AND has_payment_terms = true
       AND status IN ('open', 'invoice_sent')
     GROUP BY buyer_account_id

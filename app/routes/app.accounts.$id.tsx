@@ -17,6 +17,7 @@
  * Uses Polaris web components only.
  */
 
+import { useState, useEffect } from "react";
 import type {
   HeadersFunction,
   LoaderFunctionArgs,
@@ -289,8 +290,18 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
     const noLimit = formData.get("noLimit") === "true";
     const holdOnly = formData.get("holdOnly") === "true";
     const manualHold = formData.get("manualHold") === "true";
-    const holdReasonCode = formData.get("holdReasonCode") as HoldReasonCode | null;
+    const holdReasonCodeRaw = formData.get("holdReasonCode") as string | null;
+    const holdReasonCode = (holdReasonCodeRaw && holdReasonCodeRaw.trim() !== "") 
+      ? holdReasonCodeRaw as HoldReasonCode 
+      : undefined;
     const holdNote = formData.get("holdNote") as string | null;
+
+    if (holdNote && holdNote.length > 500) {
+      return {
+        success: false,
+        error: "Hold note cannot exceed 500 characters.",
+      } satisfies ActionData;
+    }
 
     let creditLimitAmount: number | null | undefined;
 
@@ -299,11 +310,18 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
     } else if (noLimit) {
       creditLimitAmount = null;
     } else if (creditLimitStr && creditLimitStr.trim() !== "") {
-      const parsed = parseFloat(creditLimitStr);
-      if (isNaN(parsed) || parsed < 0) {
+      const trimmed = creditLimitStr.trim();
+      if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) {
         return {
           success: false,
-          error: "Invalid credit limit. Must be a non-negative number.",
+          error: "Invalid credit limit format. Use a number with up to 2 decimal places (e.g., 100000 or 100000.50).",
+        } satisfies ActionData;
+      }
+      const parsed = Number(trimmed);
+      if (parsed < 0) {
+        return {
+          success: false,
+          error: "Credit limit must be non-negative.",
         } satisfies ActionData;
       }
       creditLimitAmount = parsed;
@@ -318,7 +336,7 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
       creditLimitAmount,
       noLimit,
       manualHold,
-      holdReasonCode: manualHold ? (holdReasonCode ?? "MANUAL_HOLD") : "MANUAL_HOLD",
+      holdReasonCode: manualHold ? (holdReasonCode || "MANUAL_HOLD") : undefined,
       holdNote: holdNote || null,
     };
 
@@ -414,6 +432,13 @@ export default function AccountPage() {
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
+
+  const serverNoLimit = creditStatus?.creditLimitAmount === null;
+  const [noLimitChecked, setNoLimitChecked] = useState(serverNoLimit);
+
+  useEffect(() => {
+    setNoLimitChecked(serverNoLimit);
+  }, [serverNoLimit]);
 
   if (error || !account) {
     return (
@@ -610,8 +635,8 @@ export default function AccountPage() {
                   name="creditLimit"
                   min={0}
                   placeholder="e.g., 100000"
-                  value={creditStatus?.creditLimitAmount?.toString() ?? ""}
-                  disabled={creditStatus?.creditLimitAmount === null}
+                  value={noLimitChecked ? "" : (creditStatus?.creditLimitAmount?.toString() ?? "")}
+                  disabled={noLimitChecked}
                 ></s-money-field>
                 <s-text>{currency}</s-text>
               </s-grid>
@@ -620,7 +645,8 @@ export default function AccountPage() {
                 label="No credit limit"
                 name="noLimit"
                 value="true"
-                checked={creditStatus?.creditLimitAmount === null}
+                checked={noLimitChecked}
+                onChange={() => setNoLimitChecked(!noLimitChecked)}
               ></s-checkbox>
 
               <s-checkbox

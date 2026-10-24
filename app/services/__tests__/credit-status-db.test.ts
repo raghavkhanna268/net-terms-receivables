@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import postgres from "postgres";
-import { sqlOptions, type Sql } from "~/lib/db-light.server";
+import { sqlOptions } from "~/lib/db-light.server";
 import { getCreditStatusDisplay, getCompanyTotals } from "../credit-status.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -49,7 +49,7 @@ describeWithDb("credit-status DB integration", () => {
   });
 
   it("getCreditStatusDisplay returns correct data from DB", async () => {
-    const status = await getCreditStatusDisplay(sql as unknown as Sql, TEST_ACCOUNT_ID);
+    const status = await getCreditStatusDisplay(sql, TEST_ACCOUNT_ID);
 
     expect(status).not.toBeNull();
     expect(status?.creditLimitAmount).toBe(100000);
@@ -60,20 +60,21 @@ describeWithDb("credit-status DB integration", () => {
 
   it("exposure calculation includes open invoices", async () => {
     const invoiceId = `inv-db-${TEST_SUFFIX}`;
+    const orderId = `gid://shopify/Order/db-${TEST_SUFFIX}`;
 
     await sql`
       INSERT INTO "Invoice" (
-        id, "shopId", "buyerAccountId", name, total, outstanding,
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
         status, "issuedAt", "createdAt", "updatedAt"
       )
       VALUES (
-        ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID},
+        ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
         '#TEST-DB-1', 50000.00, 50000.00, 'open', NOW(), NOW(), NOW()
       )
     `;
 
     try {
-      const status = await getCreditStatusDisplay(sql as unknown as Sql, TEST_ACCOUNT_ID);
+      const status = await getCreditStatusDisplay(sql, TEST_ACCOUNT_ID);
 
       expect(status).not.toBeNull();
       expect(status?.exposurePaise.toString()).toBe("5000000");
@@ -85,20 +86,21 @@ describeWithDb("credit-status DB integration", () => {
 
   it("available credit is limit minus exposure", async () => {
     const invoiceId = `inv-avail-${TEST_SUFFIX}`;
+    const orderId = `gid://shopify/Order/avail-${TEST_SUFFIX}`;
 
     await sql`
       INSERT INTO "Invoice" (
-        id, "shopId", "buyerAccountId", name, total, outstanding,
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
         status, "issuedAt", "createdAt", "updatedAt"
       )
       VALUES (
-        ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID},
+        ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
         '#TEST-AVAIL-1', 30000.00, 30000.00, 'open', NOW(), NOW(), NOW()
       )
     `;
 
     try {
-      const status = await getCreditStatusDisplay(sql as unknown as Sql, TEST_ACCOUNT_ID);
+      const status = await getCreditStatusDisplay(sql, TEST_ACCOUNT_ID);
 
       expect(status).not.toBeNull();
       // Limit: 100000.00 = 10000000 paise
@@ -112,20 +114,21 @@ describeWithDb("credit-status DB integration", () => {
 
   it("detects over-limit condition", async () => {
     const invoiceId = `inv-over-${TEST_SUFFIX}`;
+    const orderId = `gid://shopify/Order/over-${TEST_SUFFIX}`;
 
     await sql`
       INSERT INTO "Invoice" (
-        id, "shopId", "buyerAccountId", name, total, outstanding,
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
         status, "issuedAt", "createdAt", "updatedAt"
       )
       VALUES (
-        ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID},
+        ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
         '#TEST-OVER-1', 150000.00, 150000.00, 'open', NOW(), NOW(), NOW()
       )
     `;
 
     try {
-      const status = await getCreditStatusDisplay(sql as unknown as Sql, TEST_ACCOUNT_ID);
+      const status = await getCreditStatusDisplay(sql, TEST_ACCOUNT_ID);
 
       expect(status).not.toBeNull();
       expect(status?.isOverLimit).toBe(true);
@@ -137,14 +140,15 @@ describeWithDb("credit-status DB integration", () => {
 
   it("detects overdue invoices", async () => {
     const invoiceId = `inv-due-${TEST_SUFFIX}`;
+    const orderId = `gid://shopify/Order/due-${TEST_SUFFIX}`;
 
     await sql`
       INSERT INTO "Invoice" (
-        id, "shopId", "buyerAccountId", name, total, outstanding,
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
         status, "issuedAt", "dueAt", "createdAt", "updatedAt"
       )
       VALUES (
-        ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID},
+        ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
         '#TEST-DUE-1', 1000.00, 1000.00, 'open', 
         NOW() - INTERVAL '30 days',
         NOW() - INTERVAL '10 days',
@@ -153,7 +157,7 @@ describeWithDb("credit-status DB integration", () => {
     `;
 
     try {
-      const status = await getCreditStatusDisplay(sql as unknown as Sql, TEST_ACCOUNT_ID);
+      const status = await getCreditStatusDisplay(sql, TEST_ACCOUNT_ID);
 
       expect(status).not.toBeNull();
       expect(status?.isOverdue).toBe(true);
@@ -167,23 +171,26 @@ describeWithDb("credit-status DB integration", () => {
     const openInvoiceId = `inv-open-${TEST_SUFFIX}`;
     const paidInvoiceId = `inv-paid-${TEST_SUFFIX}`;
     const cancelledInvoiceId = `inv-cancel-${TEST_SUFFIX}`;
+    const orderIdOpen = `gid://shopify/Order/open-${TEST_SUFFIX}`;
+    const orderIdPaid = `gid://shopify/Order/paid-${TEST_SUFFIX}`;
+    const orderIdCancel = `gid://shopify/Order/cancel-${TEST_SUFFIX}`;
 
     await sql`
       INSERT INTO "Invoice" (
-        id, "shopId", "buyerAccountId", name, total, outstanding,
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
         status, "issuedAt", "createdAt", "updatedAt"
       )
       VALUES 
-        (${openInvoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID},
+        (${openInvoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderIdOpen},
          '#OPEN-1', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW()),
-        (${paidInvoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID},
+        (${paidInvoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderIdPaid},
          '#PAID-1', 20000.00, 0.00, 'paid', NOW(), NOW(), NOW()),
-        (${cancelledInvoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID},
+        (${cancelledInvoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderIdCancel},
          '#CANCEL-1', 30000.00, 30000.00, 'cancelled', NOW(), NOW(), NOW())
     `;
 
     try {
-      const status = await getCreditStatusDisplay(sql as unknown as Sql, TEST_ACCOUNT_ID);
+      const status = await getCreditStatusDisplay(sql, TEST_ACCOUNT_ID);
 
       expect(status).not.toBeNull();
       // Only the open invoice with outstanding > 0 should count
@@ -250,22 +257,24 @@ describeWithDb("company totals rollup", () => {
     // Add invoices to each location
     const inv1 = `inv-loc1-${TEST_SUFFIX}`;
     const inv2 = `inv-loc2-${TEST_SUFFIX}`;
+    const orderId1 = `gid://shopify/Order/loc1-${TEST_SUFFIX}`;
+    const orderId2 = `gid://shopify/Order/loc2-${TEST_SUFFIX}`;
 
     await sql`
       INSERT INTO "Invoice" (
-        id, "shopId", "buyerAccountId", name, total, outstanding,
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
         status, "issuedAt", "createdAt", "updatedAt"
       )
       VALUES 
-        (${inv1}, ${TEST_SHOP_ID}, ${TEST_LOCATION_1_ID},
+        (${inv1}, ${TEST_SHOP_ID}, ${TEST_LOCATION_1_ID}, ${orderId1},
          '#LOC1-1', 30000.00, 30000.00, 'open', NOW(), NOW(), NOW()),
-        (${inv2}, ${TEST_SHOP_ID}, ${TEST_LOCATION_2_ID},
+        (${inv2}, ${TEST_SHOP_ID}, ${TEST_LOCATION_2_ID}, ${orderId2},
          '#LOC2-1', 20000.00, 20000.00, 'open', NOW(), NOW(), NOW())
     `;
 
     try {
       const totals = await getCompanyTotals(
-        sql as unknown as Sql,
+        sql,
         TEST_COMPANY_ID,
         TEST_SHOP_ID
       );
@@ -304,7 +313,7 @@ describeWithDb("company totals rollup", () => {
 
     try {
       const totals = await getCompanyTotals(
-        sql as unknown as Sql,
+        sql,
         TEST_COMPANY_ID,
         TEST_SHOP_ID
       );
