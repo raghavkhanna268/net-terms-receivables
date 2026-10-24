@@ -746,7 +746,7 @@ describe("credit-status.server", () => {
       expect(result.error).toContain("not found");
     });
 
-    it("returns error for gated accounts", async () => {
+    it("succeeds for gated accounts (gating applies only to value-add actions)", async () => {
       const { updateCreditStatus } = await import("../credit-status.server");
 
       mockSql.setMockResult("account", [{
@@ -764,15 +764,30 @@ describe("credit-status.server", () => {
         syncPending: false,
         gatedAt: new Date(),
       }]);
+      mockSql.setMockResult("shop", [{ domain: "test-gated.myshopify.com", currency: "INR" }]);
+      mockSql.setMockResult("invoice_exposure", [{ total_paise: "0" }]);
+      mockSql.setMockResult("draft_exposure", [{ total_paise: "0" }]);
+      mockSql.setMockResult("overdue_check", [{ has_overdue: false }]);
+
+      mockShopifyGraphQLRequest.mockImplementation(() => Promise.resolve({
+        success: true,
+        data: {
+          metafieldsSet: {
+            metafields: [{ id: "gid://shopify/Metafield/123" }],
+            userErrors: [],
+          },
+        },
+      }));
 
       const result = await updateCreditStatus(mockSql, "acc-123", {
         creditLimitAmount: 100000,
         manualHold: false,
-        holdReasonCode: "MANUAL_HOLD",
+        holdReasonCode: null,
       });
 
-      expect(result.success).toBe(false);
-      expect(result.error).toContain("gated");
+      // Gated accounts can now have their credit status updated
+      // (gating only applies to value-add actions like reminders, not holds)
+      expect(result.success).toBe(true);
     });
 
     it("calls metafieldsSet with correct variables for COMPANY account", async () => {

@@ -470,10 +470,6 @@ export async function updateCreditStatus(
       return { success: false, error: "Buyer account not found" } as const;
     }
 
-    if (account.gatedAt !== null) {
-      return { success: false, error: "Cannot update credit status for gated accounts" } as const;
-    }
-
     const [shop] = await tx<ShopData[]>`
       SELECT domain, currency FROM "Shop" WHERE id = ${account.shopId}
     `;
@@ -657,11 +653,6 @@ export async function syncCreditStatusMetafield(
 
     if (!account) {
       return { success: false, error: "Buyer account not found" } as const;
-    }
-
-    if (account.gatedAt !== null) {
-      await tx`UPDATE "BuyerAccount" SET "syncPending" = false WHERE id = ${buyerAccountId}`;
-      return { success: true, skipMetafield: true } as const;
     }
 
     const [shop] = await tx<ShopData[]>`
