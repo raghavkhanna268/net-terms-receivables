@@ -17,13 +17,14 @@
  * is never included in SSR builds.
  */
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import type { HeadersFunction, LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useLoaderData, useFetcher } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { runMatcher, MAX_PAYMENTS_PER_REQUEST } from "~/services/matcher.server";
-import { generateDedupeKey } from "~/lib/banks/dedupe";
+import { generateDedupeKey, isValidUtrForRail } from "~/lib/banks/dedupe";
+import type { PaymentRail } from "~/lib/banks/types";
 
 /**
  * Maximum rows per import request.
@@ -32,16 +33,9 @@ import { generateDedupeKey } from "~/lib/banks/dedupe";
 const MAX_IMPORT_ROWS = 1000;
 
 /**
- * Valid date range for imports: 2 years past to 1 week future.
- * Prevents obviously incorrect dates.
+ * Maximum validation errors to return (avoid huge response).
  */
-const MIN_DATE = new Date();
-MIN_DATE.setFullYear(MIN_DATE.getFullYear() - 2);
-const MAX_DATE = new Date();
-MAX_DATE.setDate(MAX_DATE.getDate() + 7);
-
-const MIN_DATE_ISO = MIN_DATE.toISOString().slice(0, 10);
-const MAX_DATE_ISO = MAX_DATE.toISOString().slice(0, 10);
+const MAX_VALIDATION_ERRORS = 10;
 
 /**
  * Valid payment rails for Indian bank transfers.
@@ -62,11 +56,11 @@ interface CreditRow {
   date: string;
   valueDate?: string;
   amountPaise: number;
+  balancePaise?: number;
   rail: ValidRail;
   utr?: string;
   payerName?: string;
   narration: string;
-  dedupeKey: string;
   refNo?: string;
 }
 
@@ -119,6 +113,11 @@ function validateCreditRow(row: unknown, index: number): ValidationError[] {
     errors.push({ path: `${prefix}.amountPaise`, message: "Amount must be a positive integer" });
   }
 
+  // Optional: balancePaise (integer)
+  if (r.balancePaise !== undefined && (typeof r.balancePaise !== "number" || !Number.isInteger(r.balancePaise))) {
+    errors.push({ path: `${prefix}.balancePaise`, message: "Balance must be an integer" });
+  }
+
   // Required: rail (valid rail type)
   if (typeof r.rail !== "string" || !VALID_RAILS.has(r.rail)) {
     errors.push({ path: `${prefix}.rail`, message: `Rail must be one of: ${[...VALID_RAILS].join(", ")}` });
@@ -139,11 +138,6 @@ function validateCreditRow(row: unknown, index: number): ValidationError[] {
     errors.push({ path: `${prefix}.narration`, message: "Narration must be 1-2000 characters" });
   }
 
-  // Required: dedupeKey (string, 1-200)
-  if (typeof r.dedupeKey !== "string" || r.dedupeKey.length < 1 || r.dedupeKey.length > 200) {
-    errors.push({ path: `${prefix}.dedupeKey`, message: "Dedupe key must be 1-200 characters" });
-  }
-
   // Optional: refNo (string, max 100)
   if (r.refNo !== undefined && (typeof r.refNo !== "string" || r.refNo.length > 100)) {
     errors.push({ path: `${prefix}.refNo`, message: "Ref number must be a string (max 100 chars)" });
@@ -155,6 +149,7 @@ function validateCreditRow(row: unknown, index: number): ValidationError[] {
 /**
  * Validate import request body.
  * Returns tuple of [validRequest, errors].
+ * Validates ALL rows but caps returned errors to MAX_VALIDATION_ERRORS.
  * Exported for testing.
  */
 export function validateImportRequest(body: unknown): { valid: ImportRequest | null; errors: ValidationError[] } {
@@ -191,9 +186,21 @@ export function validateImportRequest(body: unknown): { valid: ImportRequest | n
     errors.push({ path: "credits", message: `Maximum ${MAX_IMPORT_ROWS} rows per import` });
   }
 
-  // Validate each credit row (limit error count to 10)
-  for (let i = 0; i < Math.min(b.credits.length, 10); i++) {
-    errors.push(...validateCreditRow(b.credits[i], i));
+  // Validate ALL credit rows, but cap errors returned
+  let totalRowErrors = 0;
+  for (let i = 0; i < b.credits.length; i++) {
+    const rowErrors = validateCreditRow(b.credits[i], i);
+    if (rowErrors.length > 0) {
+      totalRowErrors++;
+      if (errors.length < MAX_VALIDATION_ERRORS) {
+        errors.push(...rowErrors.slice(0, MAX_VALIDATION_ERRORS - errors.length));
+      }
+    }
+  }
+
+  // Add summary if errors were capped
+  if (totalRowErrors > MAX_VALIDATION_ERRORS) {
+    errors.push({ path: "credits", message: `...and ${totalRowErrors - MAX_VALIDATION_ERRORS} more rows with errors` });
   }
 
   if (errors.length > 0) {
@@ -216,13 +223,12 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
-  const [shop] = await sql<{ id: string; currency: string }[]>`
-    SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ currency: string }[]>`
+    SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
   return {
     shopDomain,
-    shopId: shop?.id ?? null,
     shopCurrency: shop?.currency ?? "INR",
   };
 };
@@ -241,6 +247,15 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const { session } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
+
+  // Compute date range per request (not at module load)
+  const now = new Date();
+  const minDate = new Date(now);
+  minDate.setFullYear(minDate.getFullYear() - 2);
+  const maxDate = new Date(now);
+  maxDate.setDate(maxDate.getDate() + 7);
+  const minDateIso = minDate.toISOString().slice(0, 10);
+  const maxDateIso = maxDate.toISOString().slice(0, 10);
 
   // Get shop ID and currency
   const [shop] = await sql<{ id: string; currency: string }[]>`
@@ -282,184 +297,197 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     );
   }
 
-  // Validate date range for all credits
+  // Validate date range for all credits (both date and valueDate)
   const invalidDates = importData.credits.filter(
-    (c) => c.date < MIN_DATE_ISO || c.date > MAX_DATE_ISO
+    (c) => c.date < minDateIso || c.date > maxDateIso ||
+           (c.valueDate && (c.valueDate < minDateIso || c.valueDate > maxDateIso))
   );
   if (invalidDates.length > 0) {
     return Response.json(
       { 
         success: false, 
-        error: `${invalidDates.length} row(s) have dates outside valid range (${MIN_DATE_ISO} to ${MAX_DATE_ISO})` 
+        error: `${invalidDates.length} row(s) have dates outside valid range (${minDateIso} to ${maxDateIso})` 
       },
       { status: 400 }
     );
   }
 
   const shopId = shop.id;
-  const now = new Date();
-
-  // Tracking counts
-  let inserted = 0;
-  let duplicates = 0;
-  let rejected = 0;
 
   try {
-    // Create BankImport record
-    const [bankImport] = await sql<{ id: string }[]>`
-      INSERT INTO "BankImport" (
-        "shopId", bank, "fileName", "rowCount", "createdAt"
-      )
-      VALUES (
-        ${shopId},
-        ${importData.bank.toLowerCase()},
-        ${importData.fileName},
-        ${importData.credits.length},
-        ${now}
-      )
-      RETURNING id
-    `;
-
-    const importId = bankImport.id;
-
-    // Log import start (counts only, no PII)
-    console.log(
-      `[import] Starting import: shop=${shopDomain} importId=${importId} rows=${importData.credits.length}`
-    );
-
-    // Get existing UTRs for this shop to detect duplicates efficiently
-    const existingUtrs = await sql<{ utr: string }[]>`
-      SELECT utr FROM "Payment" 
-      WHERE "shopId" = ${shopId} AND utr IS NOT NULL
-    `;
-    const utrSet = new Set(existingUtrs.map((r) => r.utr.toUpperCase().trim()));
-
-    // Process each credit row
+    // Compute dedupe keys server-side for all credits
+    // Use isValidUtrForRail to validate UTRs - fall back to hash for invalid/untrusted rails
+    const creditsWithKeys: Array<CreditRow & { dedupeKey: string }> = [];
     for (const credit of importData.credits) {
-      try {
-        // Determine the UTR to use for deduplication
-        const normalizedUtr = credit.utr?.toUpperCase().trim() || null;
-        
-        // Check UTR-based duplicate first (fast path)
-        if (normalizedUtr && utrSet.has(normalizedUtr)) {
-          duplicates++;
-          continue;
-        }
+      let dedupeKey: string;
+      
+      // Only trust UTR if it's valid for the rail
+      const hasValidUtr = credit.utr && isValidUtrForRail(credit.utr, credit.rail as PaymentRail);
+      
+      if (hasValidUtr) {
+        // Use UTR-based key
+        dedupeKey = await generateDedupeKey(
+          credit.date,
+          credit.amountPaise,
+          "CR",
+          credit.narration,
+          credit.rail as PaymentRail,
+          credit.utr,
+          credit.balancePaise,
+          credit.valueDate,
+          credit.refNo
+        );
+      } else {
+        // Generate hash-based key (includes balancePaise for identical same-day distinction)
+        dedupeKey = await generateDedupeKey(
+          credit.date,
+          credit.amountPaise,
+          "CR",
+          credit.narration,
+          credit.rail as PaymentRail,
+          undefined, // Don't pass untrusted UTR
+          credit.balancePaise,
+          credit.valueDate,
+          credit.refNo
+        );
+      }
+      
+      creditsWithKeys.push({ ...credit, dedupeKey });
+    }
 
-        // For rows without UTR, generate a fallback dedupe key
-        let dedupeUtr: string | null = normalizedUtr;
-        if (!dedupeUtr) {
-          // Use the client's dedupe key (sha256 hash) as a synthetic UTR
-          // This allows idempotent reimports even without real UTR
-          const fallbackKey = await generateDedupeKey(
-            credit.date,
-            credit.amountPaise,
-            "CR",
-            credit.narration,
-            credit.rail,
-            undefined,
-            undefined,
-            credit.valueDate,
-            credit.refNo
-          );
-          // Prefix with SYNTH- to distinguish from real UTRs
-          dedupeUtr = `SYNTH-${fallbackKey}`;
-          
-          // Check if synthetic key already exists
-          const [existing] = await sql<{ id: string }[]>`
-            SELECT id FROM "Payment"
-            WHERE "shopId" = ${shopId} AND utr = ${dedupeUtr}
-            LIMIT 1
-          `;
-          if (existing) {
-            duplicates++;
-            continue;
-          }
-        }
+    // Normalize dedupe keys for DB storage
+    // UTR-based keys stay as-is, hash-based get SYNTH- prefix
+    const normalizeForDb = (key: string): string => {
+      if (key.startsWith("utr:")) {
+        // Extract the actual UTR value from utr:RAIL:DIR:VALUE format
+        const parts = key.split(":");
+        return parts[3] || key;
+      }
+      return `SYNTH-${key}`;
+    };
 
-        // Convert paise to decimal for DB storage
-        const amountDecimal = credit.amountPaise / 100;
+    // Use batched INSERT ... ON CONFLICT DO NOTHING in a transaction
+    const result = await sql.begin(async (tx) => {
+      // Create BankImport record
+      const [bankImport] = await tx<{ id: string }[]>`
+        INSERT INTO "BankImport" (
+          "shopId", bank, "fileName", "rowCount", "createdAt"
+        )
+        VALUES (
+          ${shopId},
+          ${importData.bank.toLowerCase()},
+          ${importData.fileName},
+          ${importData.credits.length},
+          ${now}
+        )
+        RETURNING id
+      `;
+
+      const importId = bankImport.id;
+
+      // Log import start (counts only, no PII)
+      console.log(
+        `[import] Starting import: shop=${shopDomain} importId=${importId} rows=${importData.credits.length}`
+      );
+
+      // Prepare all rows for batch insert
+      const rows = creditsWithKeys.map((credit) => {
+        const dbUtr = normalizeForDb(credit.dedupeKey);
         const valueDate = credit.valueDate 
           ? new Date(credit.valueDate + "T00:00:00Z")
           : new Date(credit.date + "T00:00:00Z");
-
-        // Insert payment row
-        await sql`
-          INSERT INTO "Payment" (
-            "shopId",
-            "importId",
-            "valueDate",
-            amount,
-            rail,
-            utr,
-            "payerText",
-            narration,
-            status,
-            "createdAt",
-            "updatedAt"
-          )
-          VALUES (
-            ${shopId},
-            ${importId},
-            ${valueDate},
-            ${amountDecimal},
-            ${credit.rail},
-            ${dedupeUtr},
-            ${credit.payerName ?? null},
-            ${credit.narration},
-            'unmatched',
-            ${now},
-            ${now}
-          )
-        `;
-
-        inserted++;
+        // Use exact decimal string to avoid float precision issues
+        const amountString = (credit.amountPaise / 100).toFixed(2);
         
-        // Track for future duplicate detection within this batch
-        if (normalizedUtr) {
-          utrSet.add(normalizedUtr);
-        }
-      } catch (err) {
-        // Check if it's a unique constraint violation (duplicate UTR)
-        if (err instanceof Error && err.message.includes("unique")) {
-          duplicates++;
-        } else {
-          // Log error without PII (just row index and error type)
-          console.error(
-            `[import] Row insert failed: importId=${importId} error=${err instanceof Error ? err.name : "unknown"}`
-          );
-          rejected++;
-        }
-      }
-    }
+        return {
+          shopId,
+          importId,
+          valueDate,
+          amount: amountString,
+          rail: credit.rail,
+          utr: dbUtr,
+          payerText: credit.payerName ?? null,
+          narration: credit.narration,
+        };
+      });
 
-    // Log import completion (counts only, no PII)
-    console.log(
-      `[import] Completed: importId=${importId} inserted=${inserted} duplicates=${duplicates} rejected=${rejected}`
-    );
+      // Batch insert with ON CONFLICT DO NOTHING
+      // Returns only the inserted rows (not duplicates)
+      const insertedRows = await tx<{ id: string }[]>`
+        INSERT INTO "Payment" (
+          "shopId",
+          "importId",
+          "valueDate",
+          amount,
+          rail,
+          utr,
+          "payerText",
+          narration,
+          status,
+          "createdAt",
+          "updatedAt"
+        )
+        SELECT
+          r."shopId",
+          r."importId",
+          r."valueDate"::timestamptz,
+          r.amount::decimal(14,2),
+          r.rail,
+          r.utr,
+          r."payerText",
+          r.narration,
+          'unmatched',
+          ${now},
+          ${now}
+        FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS r(
+          "shopId" text,
+          "importId" text,
+          "valueDate" text,
+          amount text,
+          rail text,
+          utr text,
+          "payerText" text,
+          narration text
+        )
+        ON CONFLICT ("shopId", utr) DO NOTHING
+        RETURNING id
+      `;
+
+      const inserted = insertedRows.length;
+      const duplicates = rows.length - inserted;
+
+      // Log import completion (counts only, no PII)
+      console.log(
+        `[import] Completed: importId=${importId} inserted=${inserted} duplicates=${duplicates}`
+      );
+
+      return { importId, inserted, duplicates };
+    });
 
     // Trigger matcher for newly imported payments
     let matcherResult = null;
-    if (inserted > 0) {
+    if (result.inserted > 0) {
       try {
         matcherResult = await runMatcher(sql, shopId, { limit: MAX_PAYMENTS_PER_REQUEST });
         console.log(
           `[import] Matcher run: shopId=${shopId} processed=${matcherResult.paymentsProcessed} matches=${matcherResult.matchesCreated}`
         );
       } catch (err) {
+        // Log error without message content (may contain data)
+        const errCode = err instanceof Error && "code" in err ? (err as { code: string }).code : undefined;
         console.error(
-          `[import] Matcher failed: shopId=${shopId} error=${err instanceof Error ? err.message : "unknown"}`
+          `[import] Matcher failed: shopId=${shopId} errorName=${err instanceof Error ? err.name : "unknown"} code=${errCode ?? "none"}`
         );
       }
     }
 
     return Response.json({
       success: true,
-      importId,
+      importId: result.importId,
       counts: {
-        inserted,
-        duplicates,
-        rejected,
+        inserted: result.inserted,
+        duplicates: result.duplicates,
+        rejected: 0,
         total: importData.credits.length,
       },
       matcher: matcherResult ? {
@@ -470,9 +498,10 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       } : null,
     });
   } catch (err) {
-    // Log error without PII
+    // Log error without message content (may contain row data)
+    const errCode = err instanceof Error && "code" in err ? (err as { code: string }).code : undefined;
     console.error(
-      `[import] Import failed: shop=${shopDomain} error=${err instanceof Error ? err.message : "unknown"}`
+      `[import] Import failed: shop=${shopDomain} errorName=${err instanceof Error ? err.name : "unknown"} code=${errCode ?? "none"}`
     );
     return Response.json(
       { success: false, error: "Import failed" },
@@ -553,14 +582,21 @@ export default function ImportsPage() {
   const [result, setResult] = useState<ParseResultSummary | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
+  // Track a reset key to properly clear importResult when user resets
+  const [resetKey, setResetKey] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const isImporting = fetcher.state === "submitting";
 
-  // Update import result when fetcher completes
-  if (fetcher.data && fetcher.data !== importResult) {
-    setImportResult(fetcher.data);
-  }
+  // Update import result when fetcher completes (transitions from non-idle to idle)
+  // Using effect to avoid re-setting on every render
+  const prevFetcherState = useRef(fetcher.state);
+  useEffect(() => {
+    if (prevFetcherState.current !== "idle" && fetcher.state === "idle" && fetcher.data) {
+      setImportResult(fetcher.data);
+    }
+    prevFetcherState.current = fetcher.state;
+  }, [fetcher.state, fetcher.data]);
 
   const handleFileSelect = useCallback(
     async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -572,6 +608,7 @@ export default function ImportsPage() {
       setErrorMessage(null);
       setResult(null);
       setImportResult(null);
+      setResetKey((k) => k + 1);
 
       try {
         // Dynamic import from .client.ts module keeps xlsx out of server bundle
@@ -623,7 +660,7 @@ export default function ImportsPage() {
     if (!result || result.credits.length === 0) return;
 
     // Prepare import payload (only normalised credit data)
-    // Omit undefined values for JSON compatibility
+    // Include balancePaise for dedupe, omit undefined values for JSON compatibility
     const payload = {
       bank: result.bank,
       fileName: fileName ?? "statement.csv",
@@ -633,8 +670,8 @@ export default function ImportsPage() {
           amountPaise: c.amountPaise,
           rail: c.rail,
           narration: c.narration,
-          dedupeKey: c.dedupeKey,
         };
+        if (c.balancePaise !== undefined) credit.balancePaise = c.balancePaise;
         if (c.utr) credit.utr = c.utr;
         if (c.payerName) credit.payerName = c.payerName;
         if (c.refNo) credit.refNo = c.refNo;
@@ -654,13 +691,14 @@ export default function ImportsPage() {
     setResult(null);
     setErrorMessage(null);
     setImportResult(null);
+    setResetKey((k) => k + 1);
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
   }, []);
 
   return (
-    <s-page heading="Import Bank Statement">
+    <s-page heading="Import Bank Statement" key={resetKey}>
       {/* File upload section */}
       <s-section heading="Upload Statement">
         <s-stack>
