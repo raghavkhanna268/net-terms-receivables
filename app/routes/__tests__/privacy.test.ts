@@ -303,4 +303,49 @@ describe("markdownToHtml function", () => {
     expect(html).not.toContain("<code>s22<em>purge</em>");
     expect(html).not.toContain("<code>CUSTOMER<em>PII</em>");
   });
+
+  it("preserves email*/displayName* asterisk markers in privacy-implementation.md", async () => {
+    const { _markdownToHtml } = await import("../privacy");
+
+    const implPath = resolve(
+      process.cwd(),
+      "docs/privacy-implementation.md"
+    );
+    const implContent = readFileSync(implPath, "utf-8");
+
+    const html = _markdownToHtml(implContent);
+
+    expect(html).toContain("email*");
+    expect(html).toContain("displayName*");
+    expect(html).not.toMatch(/email<em>/);
+    expect(html).not.toMatch(/displayName<em>/);
+  });
+});
+
+describe("privacy.md / shopify.app.toml scope sync", () => {
+  it("lists all scopes from shopify.app.toml in docs/privacy.md", () => {
+    const tomlPath = resolve(process.cwd(), "shopify.app.toml");
+    const tomlContent = readFileSync(tomlPath, "utf-8");
+
+    const scopesMatch = tomlContent.match(/^scopes\s*=\s*"([^"]+)"/m);
+    expect(scopesMatch, "Could not find scopes line in shopify.app.toml").not.toBeNull();
+
+    const scopesLine = scopesMatch![1];
+    const scopes = scopesLine
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    expect(scopes.length).toBeGreaterThan(0);
+
+    const privacyPath = resolve(process.cwd(), "docs/privacy.md");
+    const privacyContent = readFileSync(privacyPath, "utf-8");
+
+    for (const scope of scopes) {
+      expect(
+        privacyContent,
+        `Scope "${scope}" from shopify.app.toml not found in docs/privacy.md`
+      ).toContain(`\`${scope}\``);
+    }
+  });
 });
