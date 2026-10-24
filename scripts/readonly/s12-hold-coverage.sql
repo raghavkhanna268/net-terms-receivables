@@ -1,8 +1,8 @@
 -- s12-hold-coverage.sql (READ-ONLY)
 -- Why the 00:30 IST credit_status_daily_sweep held only some past-due accounts (S12),
 -- plus the #200 orphan-location confirmation. SELECT only, inside a READ ONLY transaction.
--- Prints only ids, gids, enums, booleans, timestamps, counts, day integers and the
--- config_int defaultTermsDays. Never selects name, holdNote, emails, domains, money
+-- Prints only ids, gids, enums, booleans, timestamps, counts and the
+-- shop-level config_int defaultTermsDays (H1 only; per-account terms print as booleans). Never selects name, holdNote, emails, domains, money
 -- amounts (outstanding/total/creditLimit only appear inside comparisons), payloads
 -- or free-text fields.
 -- "past_due"  = open invoice, outstanding > 0, dueAt < NOW().
@@ -14,7 +14,6 @@
 --      dedupe key date is since's UTC date.
 -- @col kind, "holdState", proname: enum
 -- @col "manualHold", bypass, "syncPending": boolean
--- @col max_days_past_due, min_days_past_due: timestamp
 -- @col "defaultTermsDays": config_int
 \set ON_ERROR_STOP 1
 BEGIN TRANSACTION READ ONLY;
@@ -54,9 +53,10 @@ SELECT ba.id AS buyer_account_id,
        ba.gated_at IS NOT NULL AS gated,
        pd.past_due_invoices,
        pd.overdue_invoices,
-       EXTRACT(DAY FROM NOW() - pd.oldest_due_at)::int AS max_days_past_due,
-       EXTRACT(DAY FROM NOW() - pd.newest_due_at)::int AS min_days_past_due,
-       CASE WHEN ba."defaultTermsDays" BETWEEN 0 AND 365 THEN ba."defaultTermsDays" END AS "defaultTermsDays",
+       pd.oldest_due_at,
+       pd.newest_due_at,
+       ba."defaultTermsDays" IS NOT NULL AS has_account_terms,
+       ba."defaultTermsDays" IS DISTINCT FROM s."defaultTermsDays" AS account_terms_differ_from_shop,
        ba."creditLimit" IS NOT NULL AS has_credit_limit,
        (ba."creditLimit" IS NOT NULL AND
         (COALESCE((SELECT SUM(i2.outstanding) FROM "Invoice" i2
@@ -95,7 +95,7 @@ SELECT ba."holdState", ba."manualHold", ba.bypass,
        pd.overdue_invoices > 0 AS has_overdue,
        ba.id LIKE 'seed-account-%' AS is_seed,
        COUNT(*) AS accounts,
-       COUNT(*) FILTER (WHERE pd.past_due_invoices > 0) AS accounts_past_due
+       COUNT(*) FILTER (WHERE ba."syncPending") AS accounts_sync_pending
 FROM pd JOIN "BuyerAccount" ba ON ba.id = pd.buyer_account_id
 GROUP BY 1, 2, 3, 4, 5 ORDER BY 1, 2, 3, 4, 5;
 
@@ -125,7 +125,7 @@ UNION ALL
 SELECT 'dlq_daily_sweep_since', COUNT(*) FROM s6_dead_letter
 WHERE message->>'source' = 'daily_sweep' AND dead_lettered_at >= (:'since')::timestamptz;
 
-\echo '== B #200 orphan gids: COMPANY_LOCATIONS_DELETE dedupe rows + account sync state'
+\echo '== B #200 orphan gids: COMPANY_LOCATIONS_DELETE dedupe rows + account sync state. NOTE: s6_processed_webhooks rows are purged after 7 days (pg_cron), so 0 delete rows may only mean they aged out; webhook_receipts (B2) keeps 30 days'
 WITH g(company_location_gid) AS (
   SELECT 'gid://shopify/CompanyLocation/24539463845' UNION ALL
   SELECT 'gid://shopify/CompanyLocation/24539529381' UNION ALL
