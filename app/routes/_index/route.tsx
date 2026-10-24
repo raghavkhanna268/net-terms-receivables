@@ -1,35 +1,34 @@
 import type { LoaderFunctionArgs, HeadersFunction } from "react-router";
-import { redirect, Form, useLoaderData } from "react-router";
+import { redirect } from "react-router";
 
 import styles from "./styles.module.css";
 
 /**
  * Cache-Control for the landing page.
- * - private: response may contain user-specific content (login form)
- * - max-age=60: browser caches for 1 minute
+ * - public: no user-specific content (no login form)
+ * - max-age=300: browser caches for 5 minutes
+ *
+ * App Store compliance: Per Shopify requirement 2.3.1, App Store apps must not
+ * request manual entry of a myshopify.com URL or shop domain during installation
+ * or configuration. Install/login must start from the Shopify App Store or admin.
+ * @see https://shopify.dev/docs/apps/launch/shopify-app-store/app-store-requirements
  */
 export const headers: HeadersFunction = () => ({
-  "Cache-Control": "private, max-age=60",
+  "Cache-Control": "public, max-age=300",
 });
 
-export const loader = async ({ request, context }: LoaderFunctionArgs) => {
+export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
 
-  // Redirect shop parameter to /app without loading heavy Shopify modules
+  // Redirect shop parameter to /app for OAuth flow (managed installation)
   if (url.searchParams.get("shop")) {
     throw redirect(`/app?${url.searchParams.toString()}`);
   }
 
-  // For App Store distribution apps, login form is always available.
-  // We access shopify.login to determine this, but for public apps
-  // this is a lightweight check (no DB access, no session).
-  const { shopify } = context;
-  return { showForm: Boolean(shopify.login) };
+  return null;
 };
 
 export default function App() {
-  const { showForm } = useLoaderData<typeof loader>();
-
   return (
     <div className={styles.index}>
       <div className={styles.content}>
@@ -38,18 +37,9 @@ export default function App() {
           B2B wholesale net-terms management for Shopify. Track invoices, manage credit limits,
           and match Indian bank payments (NEFT/RTGS/IMPS/UPI) to orders.
         </p>
-        {showForm && (
-          <Form className={styles.form} method="post" action="/auth/login">
-            <label className={styles.label}>
-              <span>Shop domain</span>
-              <input className={styles.input} type="text" name="shop" />
-              <span>e.g: my-shop-domain.myshopify.com</span>
-            </label>
-            <button className={styles.button} type="submit">
-              Log in
-            </button>
-          </Form>
-        )}
+        <p className={styles.text}>
+          <strong>Install from the Shopify App Store</strong> to get started.
+        </p>
         <ul className={styles.list}>
           <li>
             <strong>Invoice Tracking</strong>. Track unpaid invoices per wholesale buyer
