@@ -382,7 +382,7 @@ describe("webhooks.compliance", () => {
       });
 
       const payload = {
-        shop_domain: "other-shop.myshopify.com",
+        shop_domain: "test-other-shop.myshopify.com",
         customer: { id: 456 },
         data_request: { id: 789 },
       };
@@ -571,7 +571,7 @@ describe("webhooks.compliance", () => {
         throw badRequestResponse;
       });
 
-      const payload = { shop_domain: "other-shop.myshopify.com", customer: { id: 456 } };
+      const payload = { shop_domain: "test-other-shop.myshopify.com", customer: { id: 456 } };
 
       mockVerifyWebhook.mockResolvedValue({
         shop: "test-shop.myshopify.com",
@@ -633,10 +633,10 @@ describe("webhooks.compliance", () => {
     it("returns 200 without redact when shop not found", async () => {
       mockSql.mockResolvedValueOnce([]);
 
-      const payload = { shop_domain: "unknown-shop.myshopify.com", customer: { id: 456 } };
+      const payload = { shop_domain: "test-unknown-shop.myshopify.com", customer: { id: 456 } };
 
       mockVerifyWebhook.mockResolvedValue({
-        shop: "unknown-shop.myshopify.com",
+        shop: "test-unknown-shop.myshopify.com",
         topic: "customers/redact",
         webhookId: "test-webhook-unknown",
         payload,
@@ -721,10 +721,10 @@ describe("webhooks.compliance", () => {
       mockDeleteAllForShop.mockResolvedValue(0);
       mockDeleteShop.mockResolvedValue({ deleted: false, shopId: null });
 
-      const payload = { shop_domain: "no-sessions-shop.myshopify.com", shop_id: 999 };
+      const payload = { shop_domain: "test-no-sessions-shop.myshopify.com", shop_id: 999 };
 
       mockVerifyWebhook.mockResolvedValue({
-        shop: "no-sessions-shop.myshopify.com",
+        shop: "test-no-sessions-shop.myshopify.com",
         topic: "shop/redact",
         webhookId: "test-webhook-idempotent",
         payload,
@@ -741,7 +741,7 @@ describe("webhooks.compliance", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-      expect(mockDeleteAllForShop).toHaveBeenCalledWith("no-sessions-shop.myshopify.com");
+      expect(mockDeleteAllForShop).toHaveBeenCalledWith("test-no-sessions-shop.myshopify.com");
       expect(mockDeleteShop).toHaveBeenCalled();
     });
 
@@ -754,7 +754,7 @@ describe("webhooks.compliance", () => {
         throw badRequestResponse;
       });
 
-      const payload = { shop_domain: "other-shop.myshopify.com", shop_id: 123 };
+      const payload = { shop_domain: "test-other-shop.myshopify.com", shop_id: 123 };
 
       mockVerifyWebhook.mockResolvedValue({
         shop: "test-shop.myshopify.com",
@@ -829,10 +829,10 @@ describe("webhooks.compliance", () => {
 
     it("uses sessionStorage from context (not module-level state)", async () => {
       mockDeleteAllForShop.mockResolvedValue(1);
-      const payload = { shop_domain: "context-test.myshopify.com" };
+      const payload = { shop_domain: "test-context.myshopify.com" };
 
       mockVerifyWebhook.mockResolvedValue({
-        shop: "context-test.myshopify.com",
+        shop: "test-context.myshopify.com",
         topic: "shop/redact",
         webhookId: "context-webhook",
         payload,
@@ -972,7 +972,7 @@ describe("webhooks.compliance", () => {
       // Simulate compliance.server.ts returning raw err.message with domain (finding C5)
       mockSendDataRequestNotification.mockResolvedValue({
         sent: false,
-        error: "Failed to send email to owner@evil-shop.myshopify.com",
+        error: "Failed to send email to owner@test-evil-shop.myshopify.com",
       });
 
       const payload = {
@@ -1001,7 +1001,7 @@ describe("webhooks.compliance", () => {
       // Must not leak the domain from the error message
       expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
       expect(consoleSpy.log).not.toHaveBeenCalledWith(
-        expect.stringContaining("evil-shop.myshopify.com")
+        expect.stringContaining("test-evil-shop.myshopify.com")
       );
 
       // Should log fixed code instead

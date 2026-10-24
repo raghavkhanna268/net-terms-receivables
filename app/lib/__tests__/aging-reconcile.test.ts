@@ -679,7 +679,7 @@ describeWithDb("shop totals = sum of ledger (gating test)", () => {
  */
 
 const SHOPIFY_ADMIN_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
-const DEV_SHOP = "net-terms-receivables.myshopify.com";
+const DEV_SHOP = "test-dev-store.myshopify.com";
 const API_VERSION = "2026-10";
 
 const describeIfToken = SHOPIFY_ADMIN_TOKEN ? describe : describe.skip;

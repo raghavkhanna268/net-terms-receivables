@@ -253,7 +253,7 @@ describe("AsyncLocalStorage Request Isolation", () => {
       const directClient = createMockPrismaClient("direct-client");
       directClient.session.findUnique.mockResolvedValue({
         id: "direct-session",
-        shop: "direct.myshopify.com",
+        shop: "test-direct.myshopify.com",
         state: "active",
         isOnline: false,
         accessToken: "direct-token",

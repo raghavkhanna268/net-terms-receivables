@@ -25,7 +25,7 @@ describe("parseArgs", () => {
     const result = parseArgs([]);
     expect(result.dryRun).toBe(true);
     expect(result.apply).toBe(false);
-    expect(result.error).toBeUndefined();
+    expect(result.argError).toBeUndefined();
   });
 
   it("explicit --dry-run works", () => {
@@ -42,46 +42,46 @@ describe("parseArgs", () => {
 
   it("--dry-run --apply is rejected as mutually exclusive", () => {
     const result = parseArgs(["--dry-run", "--apply"]);
-    expect(result.error).toContain("mutually exclusive");
+    expect(result.argError).toContain("mutually exclusive");
   });
 
   it("--shop without --apply is rejected", () => {
     const result = parseArgs(["--shop", "1"]);
-    expect(result.error).toContain("only valid with --apply");
+    expect(result.argError).toContain("only valid with --apply");
   });
 
   it("--shop with --apply works", () => {
     const result = parseArgs(["--apply", "--shop", "1"]);
     expect(result.apply).toBe(true);
     expect(result.shopFilter).toBe(1);
-    expect(result.error).toBeUndefined();
+    expect(result.argError).toBeUndefined();
   });
 
   it("--shop requires a numeric value", () => {
     const result = parseArgs(["--apply", "--shop"]);
-    expect(result.error).toContain("requires a numeric value");
+    expect(result.argError).toContain("requires a numeric value");
   });
 
   it("--shop rejects non-numeric value", () => {
     const result = parseArgs(["--apply", "--shop", "abc"]);
-    expect(result.error).toContain("must be a positive integer");
+    expect(result.argError).toContain("must be a positive integer");
   });
 
   it("--shop error does not echo the raw value (X3 fix)", () => {
     const domainLikeValue = "sentinel-shop.myshopify.com";
     const result = parseArgs(["--apply", "--shop", domainLikeValue]);
-    expect(result.error).toBeDefined();
-    expect(result.error).not.toContain(domainLikeValue);
-    expect(result.error).not.toContain("myshopify");
-    expect(result.error).not.toContain("sentinel");
+    expect(result.argError).toBeDefined();
+    expect(result.argError).not.toContain(domainLikeValue);
+    expect(result.argError).not.toContain("myshopify");
+    expect(result.argError).not.toContain("sentinel");
   });
 
   it("--shop rejects zero or negative", () => {
     const result1 = parseArgs(["--apply", "--shop", "0"]);
-    expect(result1.error).toContain("must be a positive integer");
+    expect(result1.argError).toContain("must be a positive integer");
 
     const result2 = parseArgs(["--apply", "--shop", "-1"]);
-    expect(result2.error).toContain("must be a positive integer");
+    expect(result2.argError).toContain("must be a positive integer");
   });
 
   describe("--id-prefix", () => {
@@ -89,47 +89,47 @@ describe("parseArgs", () => {
       const result = parseArgs(["--id-prefix", "seed-account-"]);
       expect(result.dryRun).toBe(true);
       expect(result.idPrefix).toBe("seed-account-");
-      expect(result.error).toBeUndefined();
+      expect(result.argError).toBeUndefined();
     });
 
     it("accepts valid prefix in apply mode", () => {
       const result = parseArgs(["--apply", "--id-prefix", "abc_123-XYZ"]);
       expect(result.apply).toBe(true);
       expect(result.idPrefix).toBe("abc_123-XYZ");
-      expect(result.error).toBeUndefined();
+      expect(result.argError).toBeUndefined();
     });
 
     it("rejects empty prefix", () => {
       const result = parseArgs(["--id-prefix", ""]);
-      expect(result.error).toContain("--id-prefix requires a value");
+      expect(result.argError).toContain("--id-prefix requires a value");
     });
 
     it("rejects prefix with wildcard character %", () => {
       const result = parseArgs(["--id-prefix", "a%"]);
-      expect(result.error).toContain("--id-prefix must match pattern");
+      expect(result.argError).toContain("--id-prefix must match pattern");
     });
 
     it("rejects prefix with SQL injection character '", () => {
       const result = parseArgs(["--id-prefix", "a'b"]);
-      expect(result.error).toContain("--id-prefix must match pattern");
+      expect(result.argError).toContain("--id-prefix must match pattern");
     });
 
     it("rejects prefix longer than 64 characters", () => {
       const longPrefix = "a".repeat(65);
       const result = parseArgs(["--id-prefix", longPrefix]);
-      expect(result.error).toContain("--id-prefix must match pattern");
+      expect(result.argError).toContain("--id-prefix must match pattern");
     });
 
     it("accepts prefix of exactly 64 characters", () => {
       const maxPrefix = "a".repeat(64);
       const result = parseArgs(["--id-prefix", maxPrefix]);
       expect(result.idPrefix).toBe(maxPrefix);
-      expect(result.error).toBeUndefined();
+      expect(result.argError).toBeUndefined();
     });
 
     it("rejects missing value after --id-prefix", () => {
       const result = parseArgs(["--id-prefix"]);
-      expect(result.error).toContain("--id-prefix requires a value");
+      expect(result.argError).toContain("--id-prefix requires a value");
     });
   });
 
@@ -138,56 +138,56 @@ describe("parseArgs", () => {
       const result = parseArgs(["--expect", "5"]);
       expect(result.dryRun).toBe(true);
       expect(result.expect).toBe(5);
-      expect(result.error).toBeUndefined();
+      expect(result.argError).toBeUndefined();
     });
 
     it("accepts zero as valid expect value", () => {
       const result = parseArgs(["--expect", "0"]);
       expect(result.expect).toBe(0);
-      expect(result.error).toBeUndefined();
+      expect(result.argError).toBeUndefined();
     });
 
     it("accepts valid expect in apply mode", () => {
       const result = parseArgs(["--apply", "--expect", "100"]);
       expect(result.apply).toBe(true);
       expect(result.expect).toBe(100);
-      expect(result.error).toBeUndefined();
+      expect(result.argError).toBeUndefined();
     });
 
     it("rejects negative value", () => {
       const result = parseArgs(["--expect", "-1"]);
-      expect(result.error).toContain("--expect must be a non-negative integer");
+      expect(result.argError).toContain("--expect must be a non-negative integer");
     });
 
     it("rejects decimal value", () => {
       const result = parseArgs(["--expect", "1.5"]);
-      expect(result.error).toContain("--expect must be a non-negative integer");
+      expect(result.argError).toContain("--expect must be a non-negative integer");
     });
 
     it("rejects non-numeric value", () => {
       const result = parseArgs(["--expect", "abc"]);
-      expect(result.error).toContain("--expect must be a non-negative integer");
+      expect(result.argError).toContain("--expect must be a non-negative integer");
     });
 
     it("rejects empty value", () => {
       const result = parseArgs(["--expect", ""]);
-      expect(result.error).toContain("--expect requires a non-negative integer value");
+      expect(result.argError).toContain("--expect requires a non-negative integer value");
     });
 
     it("rejects missing value after --expect", () => {
       const result = parseArgs(["--expect"]);
-      expect(result.error).toContain("--expect requires a non-negative integer value");
+      expect(result.argError).toContain("--expect requires a non-negative integer value");
     });
 
     it("accepts up to 6-digit value (max 999999)", () => {
       const result = parseArgs(["--expect", "999999"]);
       expect(result.expect).toBe(999999);
-      expect(result.error).toBeUndefined();
+      expect(result.argError).toBeUndefined();
     });
 
     it("rejects 7-digit value", () => {
       const result = parseArgs(["--expect", "1000000"]);
-      expect(result.error).toContain("--expect must be a non-negative integer");
+      expect(result.argError).toContain("--expect must be a non-negative integer");
     });
   });
 });

@@ -366,7 +366,7 @@ describe("log.server", () => {
 
   describe("toErrorCode validation", () => {
     it("rejects domain-like strings as codes", () => {
-      const err = { code: "acme.myshopify.com" };
+      const err = { code: "test-acme.myshopify.com" };
       expect(toErrorCode(err)).toBe("unknown");
     });
 

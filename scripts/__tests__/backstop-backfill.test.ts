@@ -85,17 +85,17 @@ describeWithDb("scripts/backstop-backfill", () => {
 
     it("rejects --shop with flag as value", () => {
       const result = parseArgs(["--shop", "--apply", "--since", "2026-10-01", "--until", "2026-10-15"]);
-      expect(result.error).toBe("--shop requires a value, got flag '--apply'");
+      expect(result.argError).toBe("--shop requires a value, got flag '--apply'");
     });
 
     it("rejects --since with flag as value", () => {
       const result = parseArgs(["--since", "--until", "2026-10-15"]);
-      expect(result.error).toBe("--since requires a value, got flag '--until'");
+      expect(result.argError).toBe("--since requires a value, got flag '--until'");
     });
 
     it("rejects --until with flag as value", () => {
       const result = parseArgs(["--since", "2026-10-01", "--until", "--apply"]);
-      expect(result.error).toBe("--until requires a value, got flag '--apply'");
+      expect(result.argError).toBe("--until requires a value, got flag '--apply'");
     });
   });
 
