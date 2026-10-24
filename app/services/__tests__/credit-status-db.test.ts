@@ -2,13 +2,26 @@
  * DB-backed integration tests for credit-status persistence.
  * Uses the CI pgmq Postgres service.
  *
- * This file is separate from credit-status.test.ts to avoid vitest
- * mock hoisting issues - these tests need the real implementation.
+ * This file tests the real DB operations while mocking only the HTTP layer
+ * (shopifyGraphQLRequest) for syncVersion race condition tests.
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
-import { getCreditStatusDisplay, getCompanyTotals } from "../credit-status.server";
+
+// Mock the HTTP layer only - the rest uses real DB
+const mockShopifyGraphQLRequest = vi.fn();
+vi.mock("../shopify-client.server", () => ({
+  shopifyGraphQLRequest: (...args: unknown[]) => mockShopifyGraphQLRequest(...args),
+}));
+
+// Import after mock setup
+import { 
+  getCreditStatusDisplay, 
+  getCompanyTotals,
+  updateCreditStatus,
+  syncCreditStatusMetafield,
+} from "../credit-status.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -329,7 +342,7 @@ describeWithDb("company totals rollup", () => {
   });
 });
 
-describeWithDb("syncVersion compare-and-clear", () => {
+describeWithDb("syncVersion race condition (real functions)", () => {
   let sql: ReturnType<typeof postgres>;
   const TEST_SUFFIX = Date.now().toString(36) + "-syncver";
   const TEST_SHOP_ID = `shop-syncver-${TEST_SUFFIX}`;
@@ -359,137 +372,184 @@ describeWithDb("syncVersion compare-and-clear", () => {
     `;
   });
 
+  beforeEach(async () => {
+    // Reset fixture state before each test
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "syncVersion" = 0, "syncPending" = false, "creditLimit" = 100000.00,
+          "holdState" = 'OK', "manualHold" = false, "holdReasonCode" = NULL
+      WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+    mockShopifyGraphQLRequest.mockReset();
+  });
+
   afterAll(async () => {
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
     await sql.end();
   });
 
-  it("clearing with stale syncVersion (v1) updates 0 rows when current is v2", async () => {
-    // Write A's transaction: increment to v1, set syncPending=true
-    const [writeA] = await sql<{ syncVersion: number }[]>`
-      UPDATE "BuyerAccount"
-      SET "syncVersion" = "syncVersion" + 1, "syncPending" = true
-      WHERE id = ${TEST_ACCOUNT_ID}
-      RETURNING "syncVersion"
-    `;
-    expect(writeA.syncVersion).toBe(1);
+  it("race: A deferred, B succeeds → syncPending=false, A resolves → stays false at B's version", async () => {
+    // Deferred promise for call A
+    let resolveA: (value: unknown) => void;
+    const deferredA = new Promise((resolve) => { resolveA = resolve; });
 
-    // Write B's transaction: increment to v2, set syncPending=true
-    const [writeB] = await sql<{ syncVersion: number }[]>`
-      UPDATE "BuyerAccount"
-      SET "syncVersion" = "syncVersion" + 1, "syncPending" = true
-      WHERE id = ${TEST_ACCOUNT_ID}
-      RETURNING "syncVersion"
-    `;
-    expect(writeB.syncVersion).toBe(2);
+    let callCount = 0;
+    mockShopifyGraphQLRequest.mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) {
+        // Call A - deferred
+        return deferredA;
+      }
+      // Call B - immediate success
+      return Promise.resolve({
+        success: true,
+        data: { metafieldsSet: { metafields: [{ id: "mf-b" }], userErrors: [] } },
+      });
+    });
 
-    // Simulate: Write A's metafield call finishes and tries to clear with v1
-    // This should update 0 rows because current syncVersion is 2
-    const clearWithV1 = await sql<{ id: string }[]>`
-      UPDATE "BuyerAccount"
-      SET "syncPending" = false
-      WHERE id = ${TEST_ACCOUNT_ID}
-        AND "syncVersion" = ${writeA.syncVersion}
-      RETURNING id
-    `;
-    expect(clearWithV1.length).toBe(0);
+    // Start call A (will wait on deferred promise)
+    const promiseA = updateCreditStatus(sql, TEST_ACCOUNT_ID, {
+      creditLimitAmount: 90000,
+      manualHold: false,
+    });
 
-    // Verify syncPending is still true
-    const [afterV1Clear] = await sql<{ syncPending: boolean }[]>`
-      SELECT "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
-    `;
-    expect(afterV1Clear.syncPending).toBe(true);
-  });
+    // Wait a tick for A's transaction to complete
+    await new Promise(r => setTimeout(r, 50));
 
-  it("clearing with current syncVersion (v2) succeeds and clears syncPending", async () => {
-    // Get current syncVersion (should be 2 from previous test)
-    const [current] = await sql<{ syncVersion: number }[]>`
+    // Get A's syncVersion
+    const [afterA] = await sql<{ syncVersion: number }[]>`
       SELECT "syncVersion" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
     `;
-    expect(current.syncVersion).toBe(2);
+    const versionA = afterA.syncVersion;
+    expect(versionA).toBe(1);
 
-    // Clear with matching version (v2)
-    const clearWithV2 = await sql<{ id: string }[]>`
-      UPDATE "BuyerAccount"
-      SET "syncPending" = false
-      WHERE id = ${TEST_ACCOUNT_ID}
-        AND "syncVersion" = ${current.syncVersion}
-      RETURNING id
-    `;
-    expect(clearWithV2.length).toBe(1);
+    // Call B runs fully and succeeds
+    const resultB = await updateCreditStatus(sql, TEST_ACCOUNT_ID, {
+      creditLimitAmount: 80000,
+      manualHold: false,
+    });
+    expect(resultB.success).toBe(true);
+    expect(resultB.metafieldSyncPending).toBe(false);
 
-    // Verify syncPending is now false
-    const [afterV2Clear] = await sql<{ syncPending: boolean }[]>`
-      SELECT "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
+    // Verify B's state: syncPending=false, syncVersion=2
+    const [afterB] = await sql<{ syncVersion: number; syncPending: boolean }[]>`
+      SELECT "syncVersion", "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
     `;
-    expect(afterV2Clear.syncPending).toBe(false);
+    expect(afterB.syncVersion).toBe(2);
+    expect(afterB.syncPending).toBe(false);
+
+    // Now resolve A successfully
+    resolveA!({
+      success: true,
+      data: { metafieldsSet: { metafields: [{ id: "mf-a" }], userErrors: [] } },
+    });
+    const resultA = await promiseA;
+
+    // A succeeds but its stale version (1) can't clear B's state
+    expect(resultA.success).toBe(true);
+    // A's clear returned 0 rows, so metafieldSyncPending=true for A's perspective
+    expect(resultA.metafieldSyncPending).toBe(true);
+
+    // Final state: syncPending still false (B owns it), syncVersion still 2
+    const [final] = await sql<{ syncVersion: number; syncPending: boolean }[]>`
+      SELECT "syncVersion", "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+    expect(final.syncVersion).toBe(2);
+    expect(final.syncPending).toBe(false);
   });
 
-  it("interleaved writes: older HTTP response finishing last leaves syncPending=true", async () => {
-    // Reset state
-    await sql`
-      UPDATE "BuyerAccount"
-      SET "syncVersion" = 0, "syncPending" = false
-      WHERE id = ${TEST_ACCOUNT_ID}
-    `;
+  it("race: A deferred, B fails → syncPending=true, A resolves → still true (stale can't clear)", async () => {
+    // Deferred promise for call A
+    let resolveA: (value: unknown) => void;
+    const deferredA = new Promise((resolve) => { resolveA = resolve; });
 
-    // Simulate Write A: tx commits with v1, metafield call starts (slow)
-    const [writeA] = await sql<{ syncVersion: number }[]>`
-      UPDATE "BuyerAccount"
-      SET "syncVersion" = "syncVersion" + 1, "syncPending" = true
-      WHERE id = ${TEST_ACCOUNT_ID}
-      RETURNING "syncVersion"
-    `;
+    let callCount = 0;
+    mockShopifyGraphQLRequest.mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) {
+        // Call A - deferred
+        return deferredA;
+      }
+      // Call B - fails
+      return Promise.resolve({
+        success: false,
+        error: "Network timeout",
+      });
+    });
 
-    // Simulate Write B: tx commits with v2, metafield call starts and finishes fast
-    const [writeB] = await sql<{ syncVersion: number }[]>`
-      UPDATE "BuyerAccount"
-      SET "syncVersion" = "syncVersion" + 1, "syncPending" = true
-      WHERE id = ${TEST_ACCOUNT_ID}
-      RETURNING "syncVersion"
-    `;
+    // Start call A (will wait on deferred promise)
+    const promiseA = updateCreditStatus(sql, TEST_ACCOUNT_ID, {
+      creditLimitAmount: 90000,
+      manualHold: false,
+    });
 
-    // Write B's metafield succeeds and clears (matches v2)
-    const clearB = await sql<{ id: string }[]>`
-      UPDATE "BuyerAccount"
-      SET "syncPending" = false
-      WHERE id = ${TEST_ACCOUNT_ID}
-        AND "syncVersion" = ${writeB.syncVersion}
-      RETURNING id
-    `;
-    expect(clearB.length).toBe(1);
+    // Wait for A's transaction
+    await new Promise(r => setTimeout(r, 50));
 
-    // Verify syncPending is false (B cleared it)
-    const [afterBClear] = await sql<{ syncPending: boolean }[]>`
-      SELECT "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
-    `;
-    expect(afterBClear.syncPending).toBe(false);
+    // Call B runs but metafield fails → syncPending stays true
+    const resultB = await updateCreditStatus(sql, TEST_ACCOUNT_ID, {
+      creditLimitAmount: 80000,
+      manualHold: false,
+    });
+    expect(resultB.success).toBe(true);
+    expect(resultB.metafieldSyncPending).toBe(true);
 
-    // Now Write A's metafield finally finishes and tries to clear with v1
-    // This should fail (0 rows) because v1 doesn't match current v2
-    const clearA = await sql<{ id: string }[]>`
-      UPDATE "BuyerAccount"
-      SET "syncPending" = false
-      WHERE id = ${TEST_ACCOUNT_ID}
-        AND "syncVersion" = ${writeA.syncVersion}
-      RETURNING id
+    // Verify B's state: syncPending=true, syncVersion=2
+    const [afterB] = await sql<{ syncVersion: number; syncPending: boolean }[]>`
+      SELECT "syncVersion", "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
     `;
-    expect(clearA.length).toBe(0);
+    expect(afterB.syncVersion).toBe(2);
+    expect(afterB.syncPending).toBe(true);
 
-    // syncPending should still be false (B's clear succeeded, A's had no effect)
-    const [final] = await sql<{ syncPending: boolean }[]>`
-      SELECT "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
+    // Now resolve A successfully
+    resolveA!({
+      success: true,
+      data: { metafieldsSet: { metafields: [{ id: "mf-a" }], userErrors: [] } },
+    });
+    const resultA = await promiseA;
+
+    // A succeeds but its stale version (1) can't clear B's pending sync
+    expect(resultA.success).toBe(true);
+    expect(resultA.metafieldSyncPending).toBe(true);
+
+    // Final state: syncPending STILL true (B's pending sync preserved)
+    const [final] = await sql<{ syncVersion: number; syncPending: boolean }[]>`
+      SELECT "syncVersion", "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
     `;
+    expect(final.syncVersion).toBe(2);
+    expect(final.syncPending).toBe(true);
+  });
+
+  it("happy path: single call clears syncPending", async () => {
+    mockShopifyGraphQLRequest.mockResolvedValue({
+      success: true,
+      data: { metafieldsSet: { metafields: [{ id: "mf-1" }], userErrors: [] } },
+    });
+
+    const result = await updateCreditStatus(sql, TEST_ACCOUNT_ID, {
+      creditLimitAmount: 75000,
+      manualHold: false,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.metafieldSyncPending).toBe(false);
+
+    // Verify DB state
+    const [final] = await sql<{ syncVersion: number; syncPending: boolean }[]>`
+      SELECT "syncVersion", "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+    expect(final.syncVersion).toBe(1);
     expect(final.syncPending).toBe(false);
   });
 });
 
-describeWithDb("syncCreditStatusMetafield skip branches", () => {
+describeWithDb("syncCreditStatusMetafield gated account skip", () => {
   let sql: ReturnType<typeof postgres>;
-  const TEST_SUFFIX = Date.now().toString(36) + "-skip";
-  const TEST_SHOP_ID = `shop-skip-${TEST_SUFFIX}`;
-  const TEST_SHOP_DOMAIN = `skip-test-${TEST_SUFFIX}.myshopify.com`;
+  const TEST_SUFFIX = Date.now().toString(36) + "-gated";
+  const TEST_SHOP_ID = `shop-gated-${TEST_SUFFIX}`;
+  const TEST_SHOP_DOMAIN = `gated-test-${TEST_SUFFIX}.myshopify.com`;
+  const TEST_GATED_ACCOUNT_ID = `acc-gated-${TEST_SUFFIX}`;
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
@@ -498,16 +558,6 @@ describeWithDb("syncCreditStatusMetafield skip branches", () => {
       INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
       VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', NOW(), NOW())
     `;
-  });
-
-  afterAll(async () => {
-    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
-    await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
-    await sql.end();
-  });
-
-  it("gated account: syncPending cleared inside tx (no metafield write)", async () => {
-    const gatedAccountId = `acc-gated-${TEST_SUFFIX}`;
 
     // Create a gated account with syncPending=true
     await sql`
@@ -517,41 +567,57 @@ describeWithDb("syncCreditStatusMetafield skip branches", () => {
         gated_at, "createdAt", "updatedAt"
       )
       VALUES (
-        ${gatedAccountId}, ${TEST_SHOP_ID}, 'COMPANY',
+        ${TEST_GATED_ACCOUNT_ID}, ${TEST_SHOP_ID}, 'COMPANY',
         ${"co-gated-" + TEST_SUFFIX}, ${"gid://shopify/CompanyLocation/gated-" + TEST_SUFFIX},
         'Gated Account', 100000.00, 'OK', false, true, 1,
         NOW(), NOW(), NOW()
       )
     `;
-
-    try {
-      // Verify syncPending is true before
-      const [before] = await sql<{ syncPending: boolean }[]>`
-        SELECT "syncPending" FROM "BuyerAccount" WHERE id = ${gatedAccountId}
-      `;
-      expect(before.syncPending).toBe(true);
-
-      // The skip branch in syncCreditStatusMetafield clears syncPending inside tx
-      // Simulate what the code does: UPDATE inside the tx
-      await sql`
-        UPDATE "BuyerAccount"
-        SET "syncPending" = false
-        WHERE id = ${gatedAccountId}
-      `;
-
-      // Verify syncPending is now false
-      const [after] = await sql<{ syncPending: boolean }[]>`
-        SELECT "syncPending" FROM "BuyerAccount" WHERE id = ${gatedAccountId}
-      `;
-      expect(after.syncPending).toBe(false);
-    } finally {
-      await sql`DELETE FROM "BuyerAccount" WHERE id = ${gatedAccountId}`;
-    }
   });
 
-  // Note: The "no owner GID" skip branch cannot be tested with real data because
-  // the BuyerAccount_kind_consistency constraint requires:
-  // - COMPANY accounts must have companyLocationId AND companyId
-  // - TAGGED_CUSTOMER accounts must have customerId
-  // This ensures all valid accounts have an owner GID.
+  beforeEach(async () => {
+    // Reset fixture state
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "syncPending" = true, "syncVersion" = 1
+      WHERE id = ${TEST_GATED_ACCOUNT_ID}
+    `;
+    mockShopifyGraphQLRequest.mockReset();
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+    await sql.end();
+  });
+
+  it("gated account: syncPending cleared inside tx, writeMetafield never called", async () => {
+    // Verify syncPending is true before
+    const [before] = await sql<{ syncPending: boolean }[]>`
+      SELECT "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}
+    `;
+    expect(before.syncPending).toBe(true);
+
+    // Call the real syncCreditStatusMetafield
+    const result = await syncCreditStatusMetafield(sql, TEST_GATED_ACCOUNT_ID);
+
+    // Should succeed without calling writeMetafield
+    expect(result.success).toBe(true);
+    expect(result.metafieldSyncPending).toBe(false);
+
+    // writeMetafield (shopifyGraphQLRequest) should NOT have been called
+    expect(mockShopifyGraphQLRequest).not.toHaveBeenCalled();
+
+    // Verify syncPending is now false
+    const [after] = await sql<{ syncPending: boolean }[]>`
+      SELECT "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}
+    `;
+    expect(after.syncPending).toBe(false);
+  });
 });
+
+// Note: The "no owner GID" skip branch in syncCreditStatusMetafield cannot be tested
+// with real data. The BuyerAccount_kind_consistency constraint requires:
+// - COMPANY accounts must have companyLocationId AND companyId
+// - TAGGED_CUSTOMER accounts must have customerId
+// This ensures all valid accounts have an owner GID, making the skip branch unreachable.
