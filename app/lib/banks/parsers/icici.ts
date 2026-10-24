@@ -23,6 +23,16 @@ import type {
   DetectionResult,
 } from "../types.js";
 import { detectHeaderRow, detectFooterRows, isNarrationContinuationWithDateCol } from "../detection.js";
+
+/** Check if a row is fully blank (all cells empty or whitespace) */
+function isFullyBlankRow(row: (string | number | Date | boolean | null)[]): boolean {
+  for (const cell of row) {
+    if (cell !== null && cell !== undefined && String(cell).trim() !== "") {
+      return false;
+    }
+  }
+  return true;
+}
 import { parseIndianDate, parseIndianAmount, isBlankOrZero } from "../normalisers.js";
 import { parseNarration, extractUtrForDedupe } from "../narration-parser.js";
 import { generateDedupeKey, dedupeTransactions } from "../dedupe.js";
@@ -91,6 +101,12 @@ export async function parseIciciStatement(
 
     // Skip footer rows
     if (footerRows.has(i)) {
+      skippedRows++;
+      continue;
+    }
+
+    // Check for fully blank rows FIRST - skip without touching lastValidRow/pendingNarration
+    if (isFullyBlankRow(row)) {
       skippedRows++;
       continue;
     }

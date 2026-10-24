@@ -570,17 +570,17 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       expect(badDateNoAmtInTxns).toBeUndefined();
 
       expect(result.errors.length).toBe(6);
-      expect(result.errors[0].row).toBe(19);
+      expect(result.errors[0].row).toBe(20);
       expect(result.errors[0].code).toBe("ROW_PARSE_FAILED");
-      expect(result.errors[1].row).toBe(20);
+      expect(result.errors[1].row).toBe(21);
       expect(result.errors[1].code).toBe("ROW_PARSE_FAILED");
-      expect(result.errors[2].row).toBe(21);
+      expect(result.errors[2].row).toBe(22);
       expect(result.errors[2].code).toBe("ROW_PARSE_FAILED");
-      expect(result.errors[3].row).toBe(29);
+      expect(result.errors[3].row).toBe(30);
       expect(result.errors[3].code).toBe("ROW_PARSE_FAILED");
-      expect(result.errors[4].row).toBe(30);
+      expect(result.errors[4].row).toBe(31);
       expect(result.errors[4].code).toBe("NORMALIZE_FAILED");
-      expect(result.errors[5].row).toBe(31);
+      expect(result.errors[5].row).toBe(32);
       expect(result.errors[5].code).toBe("ROW_PARSE_FAILED");
     });
 
@@ -591,11 +591,11 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
 
       expect(result.transactions.length).toBe(13);
       expect(result.errors.length).toBe(3);
-      expect(result.errors[0].row).toBe(18);
+      expect(result.errors[0].row).toBe(19);
       expect(result.errors[0].code).toBe("NORMALIZE_FAILED");
-      expect(result.errors[1].row).toBe(19);
+      expect(result.errors[1].row).toBe(20);
       expect(result.errors[1].code).toBe("ROW_PARSE_FAILED");
-      expect(result.errors[2].row).toBe(20);
+      expect(result.errors[2].row).toBe(21);
       expect(result.errors[2].code).toBe("ROW_PARSE_FAILED");
 
       const malformedInTxns = result.transactions.find((t) =>
@@ -641,19 +641,19 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       expect(badDateNoAmtInTxns).toBeUndefined();
 
       expect(result.errors.length).toBe(7);
-      expect(result.errors[0].row).toBe(19);
+      expect(result.errors[0].row).toBe(20);
       expect(result.errors[0].code).toBe("ROW_PARSE_FAILED");
-      expect(result.errors[1].row).toBe(20);
+      expect(result.errors[1].row).toBe(21);
       expect(result.errors[1].code).toBe("ROW_PARSE_FAILED");
-      expect(result.errors[2].row).toBe(21);
+      expect(result.errors[2].row).toBe(22);
       expect(result.errors[2].code).toBe("ROW_PARSE_FAILED");
-      expect(result.errors[3].row).toBe(29);
+      expect(result.errors[3].row).toBe(30);
       expect(result.errors[3].code).toBe("ROW_PARSE_FAILED");
-      expect(result.errors[4].row).toBe(30);
+      expect(result.errors[4].row).toBe(31);
       expect(result.errors[4].code).toBe("ROW_PARSE_FAILED");
-      expect(result.errors[5].row).toBe(31);
+      expect(result.errors[5].row).toBe(32);
       expect(result.errors[5].code).toBe("NORMALIZE_FAILED");
-      expect(result.errors[6].row).toBe(32);
+      expect(result.errors[6].row).toBe(33);
       expect(result.errors[6].code).toBe("ROW_PARSE_FAILED");
     });
 
@@ -689,19 +689,19 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       expect(badDateNoAmtInTxns).toBeUndefined();
 
       expect(result.errors.length).toBe(7);
-      expect(result.errors[0].row).toBe(19);
+      expect(result.errors[0].row).toBe(20);
       expect(result.errors[0].code).toBe("ROW_PARSE_FAILED");
-      expect(result.errors[1].row).toBe(20);
+      expect(result.errors[1].row).toBe(21);
       expect(result.errors[1].code).toBe("ROW_PARSE_FAILED");
-      expect(result.errors[2].row).toBe(21);
+      expect(result.errors[2].row).toBe(22);
       expect(result.errors[2].code).toBe("ROW_PARSE_FAILED");
-      expect(result.errors[3].row).toBe(29);
+      expect(result.errors[3].row).toBe(30);
       expect(result.errors[3].code).toBe("ROW_PARSE_FAILED");
-      expect(result.errors[4].row).toBe(30);
+      expect(result.errors[4].row).toBe(31);
       expect(result.errors[4].code).toBe("ROW_PARSE_FAILED");
-      expect(result.errors[5].row).toBe(31);
+      expect(result.errors[5].row).toBe(32);
       expect(result.errors[5].code).toBe("NORMALIZE_FAILED");
-      expect(result.errors[6].row).toBe(32);
+      expect(result.errors[6].row).toBe(33);
       expect(result.errors[6].code).toBe("ROW_PARSE_FAILED");
     });
   });
@@ -715,8 +715,8 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       expect(result.transactions.length + result.errors.length + result.skippedRows).toBe(result.totalRows);
       expect(result.transactions.length).toBe(13);
       expect(result.errors.length).toBe(6);
-      expect(result.errors.filter((e) => e.code === "ROW_PARSE_FAILED").map((e) => e.row)).toEqual([19, 20, 21, 29, 31]);
-      expect(result.errors.filter((e) => e.code === "NORMALIZE_FAILED").map((e) => e.row)).toEqual([30]);
+      expect(result.errors.filter((e) => e.code === "ROW_PARSE_FAILED").map((e) => e.row)).toEqual([20, 21, 22, 30, 32]);
+      expect(result.errors.filter((e) => e.code === "NORMALIZE_FAILED").map((e) => e.row)).toEqual([31]);
     });
 
     it("SBI: transactions + errors + skippedRows === totalRows", async () => {
@@ -727,8 +727,8 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       expect(result.transactions.length + result.errors.length + result.skippedRows).toBe(result.totalRows);
       expect(result.transactions.length).toBe(13);
       expect(result.errors.length).toBe(7);
-      expect(result.errors.filter((e) => e.code === "ROW_PARSE_FAILED").map((e) => e.row)).toEqual([19, 20, 21, 29, 30, 32]);
-      expect(result.errors.filter((e) => e.code === "NORMALIZE_FAILED").map((e) => e.row)).toEqual([31]);
+      expect(result.errors.filter((e) => e.code === "ROW_PARSE_FAILED").map((e) => e.row)).toEqual([20, 21, 22, 30, 31, 33]);
+      expect(result.errors.filter((e) => e.code === "NORMALIZE_FAILED").map((e) => e.row)).toEqual([32]);
     });
 
     it("Axis: transactions + errors + skippedRows === totalRows", async () => {
@@ -739,8 +739,8 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       expect(result.transactions.length + result.errors.length + result.skippedRows).toBe(result.totalRows);
       expect(result.transactions.length).toBe(13);
       expect(result.errors.length).toBe(7);
-      expect(result.errors.filter((e) => e.code === "ROW_PARSE_FAILED").map((e) => e.row)).toEqual([19, 20, 21, 29, 30, 32]);
-      expect(result.errors.filter((e) => e.code === "NORMALIZE_FAILED").map((e) => e.row)).toEqual([31]);
+      expect(result.errors.filter((e) => e.code === "ROW_PARSE_FAILED").map((e) => e.row)).toEqual([20, 21, 22, 30, 31, 33]);
+      expect(result.errors.filter((e) => e.code === "NORMALIZE_FAILED").map((e) => e.row)).toEqual([32]);
     });
 
     it("ICICI: transactions + errors + skippedRows === totalRows", async () => {
@@ -751,8 +751,8 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       expect(result.transactions.length + result.errors.length + result.skippedRows).toBe(result.totalRows);
       expect(result.transactions.length).toBe(13);
       expect(result.errors.length).toBe(3);
-      expect(result.errors.filter((e) => e.code === "ROW_PARSE_FAILED").map((e) => e.row)).toEqual([19, 20]);
-      expect(result.errors.filter((e) => e.code === "NORMALIZE_FAILED").map((e) => e.row)).toEqual([18]);
+      expect(result.errors.filter((e) => e.code === "ROW_PARSE_FAILED").map((e) => e.row)).toEqual([20, 21]);
+      expect(result.errors.filter((e) => e.code === "NORMALIZE_FAILED").map((e) => e.row)).toEqual([19]);
     });
 
     it("HDFC retail: matches main error list, no spurious error at row 28", async () => {
@@ -799,7 +799,7 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       const file = new File([content], "hdfc-edgecases-synthetic.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
 
-      const orphanError = result.errors.find((e) => e.row === 21);
+      const orphanError = result.errors.find((e) => e.row === 22);
       expect(orphanError).toBeDefined();
       expect(orphanError!.code).toBe("ROW_PARSE_FAILED");
 
@@ -808,6 +808,21 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       );
       expect(nextTxn).toBeDefined();
       expect(nextTxn!.narration).toBe("NEFT CR-SYNTHETIC ENTERPRISE-PAYMENT");
+    });
+
+    it("HDFC: blank row between transaction and continuation does not break merge", async () => {
+      const content = readFileSync(join(FIXTURES_DIR, "hdfc-edgecases-synthetic.csv"));
+      const file = new File([content], "hdfc-edgecases-synthetic.csv", { type: "text/csv" });
+      const result = await parseBankStatement(file);
+
+      const rtgsTxn = result.transactions.find((t) =>
+        t.narration.includes("RTGS CR-SYNTHETIC WHOLESALE LTD-INV")
+      );
+      expect(rtgsTxn).toBeDefined();
+      expect(rtgsTxn!.narration).toBe("RTGS CR-SYNTHETIC WHOLESALE LTD-INV SYNTHETIC CONTINUATION LINE");
+
+      const blankRowErrors = result.errors.filter((e) => e.row === 18);
+      expect(blankRowErrors.length).toBe(0);
     });
 
     it("SBI: genuine continuation row merges into previous transaction", async () => {
@@ -827,7 +842,7 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       const file = new File([content], "sbi-edgecases-synthetic.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
 
-      const orphanError = result.errors.find((e) => e.row === 21);
+      const orphanError = result.errors.find((e) => e.row === 22);
       expect(orphanError).toBeDefined();
       expect(orphanError!.code).toBe("ROW_PARSE_FAILED");
 
@@ -836,6 +851,21 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       );
       expect(nextTxn).toBeDefined();
       expect(nextTxn!.narration).toBe("NEFT CR-SYNTHETIC ENTERPRISE-PAYMENT");
+    });
+
+    it("SBI: blank row between transaction and continuation does not break merge", async () => {
+      const content = readFileSync(join(FIXTURES_DIR, "sbi-edgecases-synthetic.csv"));
+      const file = new File([content], "sbi-edgecases-synthetic.csv", { type: "text/csv" });
+      const result = await parseBankStatement(file);
+
+      const rtgsTxn = result.transactions.find((t) =>
+        t.narration.includes("RTGS CR-SYNTHETIC WHOLESALE-INV")
+      );
+      expect(rtgsTxn).toBeDefined();
+      expect(rtgsTxn!.narration).toBe("RTGS CR-SYNTHETIC WHOLESALE-INV SYNTHETIC CONTINUATION LINE");
+
+      const blankRowErrors = result.errors.filter((e) => e.row === 18);
+      expect(blankRowErrors.length).toBe(0);
     });
 
     it("Axis: genuine continuation row merges into previous transaction", async () => {
@@ -855,7 +885,7 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       const file = new File([content], "axis-edgecases-synthetic.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
 
-      const orphanError = result.errors.find((e) => e.row === 21);
+      const orphanError = result.errors.find((e) => e.row === 22);
       expect(orphanError).toBeDefined();
       expect(orphanError!.code).toBe("ROW_PARSE_FAILED");
 
@@ -864,6 +894,21 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       );
       expect(nextTxn).toBeDefined();
       expect(nextTxn!.narration).toBe("NEFT CR-SYNTHETIC ENTERPRISE-PAYMENT");
+    });
+
+    it("Axis: blank row between transaction and continuation does not break merge", async () => {
+      const content = readFileSync(join(FIXTURES_DIR, "axis-edgecases-synthetic.csv"));
+      const file = new File([content], "axis-edgecases-synthetic.csv", { type: "text/csv" });
+      const result = await parseBankStatement(file);
+
+      const rtgsTxn = result.transactions.find((t) =>
+        t.narration.includes("RTGS CR-SYNTHETIC WHOLESALE-INV")
+      );
+      expect(rtgsTxn).toBeDefined();
+      expect(rtgsTxn!.narration).toBe("RTGS CR-SYNTHETIC WHOLESALE-INV SYNTHETIC CONTINUATION LINE");
+
+      const blankRowErrors = result.errors.filter((e) => e.row === 18);
+      expect(blankRowErrors.length).toBe(0);
     });
 
     it("ICICI: genuine continuation row merges into previous transaction", async () => {
@@ -883,7 +928,7 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       const file = new File([content], "icici-edgecases-synthetic.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
 
-      const badDateError = result.errors.find((e) => e.row === 19);
+      const badDateError = result.errors.find((e) => e.row === 20);
       expect(badDateError).toBeDefined();
       expect(badDateError!.code).toBe("ROW_PARSE_FAILED");
 
@@ -899,7 +944,7 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       const file = new File([content], "icici-edgecases-synthetic.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
 
-      const orphanError = result.errors.find((e) => e.row === 20);
+      const orphanError = result.errors.find((e) => e.row === 21);
       expect(orphanError).toBeDefined();
       expect(orphanError!.code).toBe("ROW_PARSE_FAILED");
 
@@ -908,6 +953,21 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       );
       expect(nextTxn).toBeDefined();
       expect(nextTxn!.narration).toBe("NEFT CR-SYNTHETIC ENTERPRISE-PAYMENT");
+    });
+
+    it("ICICI: blank row between transaction and continuation does not break merge", async () => {
+      const content = readFileSync(join(FIXTURES_DIR, "icici-edgecases-synthetic.csv"));
+      const file = new File([content], "icici-edgecases-synthetic.csv", { type: "text/csv" });
+      const result = await parseBankStatement(file);
+
+      const rtgsTxn = result.transactions.find((t) =>
+        t.narration.includes("RTGS CR-SYNTHETIC WHOLESALE-INV")
+      );
+      expect(rtgsTxn).toBeDefined();
+      expect(rtgsTxn!.narration).toBe("RTGS CR-SYNTHETIC WHOLESALE-INV SYNTHETIC CONTINUATION LINE");
+
+      const blankRowErrors = result.errors.filter((e) => e.row === 17);
+      expect(blankRowErrors.length).toBe(0);
     });
   });
 
@@ -919,7 +979,7 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
 
       expect(result.transactions.length + result.errors.length + result.skippedRows).toBe(result.totalRows);
       const blankRowErrors = result.errors.filter(
-        (e) => e.code === "ROW_PARSE_FAILED" && ![19, 20, 21, 29, 31].includes(e.row)
+        (e) => e.code === "ROW_PARSE_FAILED" && ![20, 21, 22, 30, 32].includes(e.row)
       );
       expect(blankRowErrors.length).toBe(0);
     });
@@ -931,7 +991,7 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
 
       expect(result.transactions.length + result.errors.length + result.skippedRows).toBe(result.totalRows);
       const blankRowErrors = result.errors.filter(
-        (e) => e.code === "ROW_PARSE_FAILED" && ![19, 20, 21, 29, 30, 32].includes(e.row)
+        (e) => e.code === "ROW_PARSE_FAILED" && ![20, 21, 22, 30, 31, 33].includes(e.row)
       );
       expect(blankRowErrors.length).toBe(0);
     });
@@ -943,7 +1003,7 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
 
       expect(result.transactions.length + result.errors.length + result.skippedRows).toBe(result.totalRows);
       const blankRowErrors = result.errors.filter(
-        (e) => e.code === "ROW_PARSE_FAILED" && ![19, 20, 21, 29, 30, 32].includes(e.row)
+        (e) => e.code === "ROW_PARSE_FAILED" && ![20, 21, 22, 30, 31, 33].includes(e.row)
       );
       expect(blankRowErrors.length).toBe(0);
     });
@@ -955,7 +1015,7 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
 
       expect(result.transactions.length + result.errors.length + result.skippedRows).toBe(result.totalRows);
       const blankRowErrors = result.errors.filter(
-        (e) => e.code === "ROW_PARSE_FAILED" && ![19, 20].includes(e.row)
+        (e) => e.code === "ROW_PARSE_FAILED" && ![20, 21].includes(e.row)
       );
       expect(blankRowErrors.length).toBe(0);
     });
