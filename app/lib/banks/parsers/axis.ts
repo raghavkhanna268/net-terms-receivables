@@ -65,7 +65,7 @@ export async function parseAxisStatement(
     return {
       detection,
       transactions: [],
-      errors: [{ row: 0, message: "Could not find header row" }],
+      errors: [{ row: 0, code: "NO_HEADER_ROW", message: "Could not find header row" }],
       totalRows: sheet.rows.length,
       skippedRows: sheet.rows.length,
     };
@@ -78,7 +78,7 @@ export async function parseAxisStatement(
     return {
       detection,
       transactions: [],
-      errors: [{ row: headerRow, message: "Could not map Axis columns" }],
+      errors: [{ row: headerRow, code: "COLUMN_MAP_FAILED", message: "Could not map Axis columns" }],
       totalRows: sheet.rows.length,
       skippedRows: sheet.rows.length,
     };
@@ -136,8 +136,8 @@ export async function parseAxisStatement(
       } else {
         errors.push({
           row: lastValidRow.sourceRow,
+          code: "NORMALIZE_FAILED",
           message: "Failed to normalize transaction",
-          rawData: lastValidRow,
         });
       }
       lastValidRow = null;
@@ -147,6 +147,14 @@ export async function parseAxisStatement(
     // Parse this row
     const rawRow = extractAxisRow(row, columns, i + 1);
     if (!rawRow) {
+      const particularsContent = String(row[columns.particularsCol] ?? "").trim();
+      if (particularsContent && !particularsContent.match(/^[\d.,\s]+$/)) {
+        errors.push({
+          row: i + 1,
+          code: "ROW_PARSE_FAILED",
+          message: "Failed to parse row",
+        });
+      }
       skippedRows++;
       continue;
     }
@@ -165,8 +173,8 @@ export async function parseAxisStatement(
     } else {
       errors.push({
         row: lastValidRow.sourceRow,
+        code: "NORMALIZE_FAILED",
         message: "Failed to normalize transaction",
-        rawData: lastValidRow,
       });
     }
   }
