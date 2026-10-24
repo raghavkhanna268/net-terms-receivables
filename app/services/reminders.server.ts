@@ -817,6 +817,10 @@ export const DEFAULT_RULE_OFFSETS = [-3, 0, 7] as const;
  * After initial setup, a shop with zero rules stays at zero - no re-seeding.
  * If a merchant deletes all rules, they stay deleted on subsequent page loads.
  *
+ * Skips seeding entirely if:
+ * - Shop already has a settings row (not first visit)
+ * - Shop has any ReminderLog history (has used reminders before)
+ *
  * Concurrency-safe: Uses pg_advisory_xact_lock plus INSERT ... ON CONFLICT
  * to prevent duplicate inserts from concurrent requests.
  *
@@ -827,9 +831,28 @@ export async function ensureDefaultReminderRules(
   sql: Sql,
   shopId: string
 ): Promise<{ seeded: boolean; count: number }> {
+  // Cheap EXISTS check before acquiring lock - skip early if already set up
+  const [existsCheck] = await sql<{ hasSettings: boolean; hasHistory: boolean }[]>`
+    SELECT
+      EXISTS(SELECT 1 FROM s18_shop_reminder_settings WHERE shop_id = ${shopId}) AS "hasSettings",
+      EXISTS(SELECT 1 FROM "ReminderLog" WHERE "shopId" = ${shopId}) AS "hasHistory"
+  `;
+
+  if (existsCheck?.hasSettings || existsCheck?.hasHistory) {
+    return { seeded: false, count: 0 };
+  }
+
   const result = await sql.begin(async (tx) => {
-    // Acquire advisory lock for this shop (released at end of transaction)
+    // Acquire advisory lock keyed on shop ID (released at end of transaction)
     await tx`SELECT pg_advisory_xact_lock(hashtext('s18_rules_' || ${shopId}))`;
+
+    // Re-check ReminderLog inside transaction (may have changed since EXISTS check)
+    const [historyCheck] = await tx<{ hasHistory: boolean }[]>`
+      SELECT EXISTS(SELECT 1 FROM "ReminderLog" WHERE "shopId" = ${shopId}) AS "hasHistory"
+    `;
+    if (historyCheck?.hasHistory) {
+      return { seeded: false, count: 0 };
+    }
 
     // Try to insert settings row (enabled=false). ON CONFLICT DO NOTHING
     // returns empty if row already exists, returns the row if newly created.
