@@ -271,4 +271,67 @@ describeWithDb("credit-status-metafield-backfill DB integration", () => {
       }
     });
   });
+
+  describe("dry-run transaction_read_only enforcement", () => {
+    it("dry-run succeeds and count SELECT runs with transaction_read_only='on'", async () => {
+      let capturedReadOnly: string | null = null;
+
+      // Simulate the real dry-run main path: read-only transaction with in-place check
+      const stats = await sql.begin("read only", async (tx) => {
+        // This is the exact in-place check from the script
+        const [setting] = await tx<{ transaction_read_only: string }[]>`
+          SELECT current_setting('transaction_read_only') AS transaction_read_only
+        `;
+        capturedReadOnly = setting?.transaction_read_only ?? null;
+        
+        if (setting?.transaction_read_only !== "on") {
+          throw new Error("READ ONLY transaction check failed: transaction_read_only is not 'on'");
+        }
+
+        return getBackfillStats(tx);
+      });
+
+      // Assert the transaction was read-only
+      expect(capturedReadOnly).toBe("on");
+      // Assert stats query succeeded (array returned)
+      expect(Array.isArray(stats)).toBe(true);
+    });
+
+    it("negative: in-place check throws when transaction_read_only is 'off'", async () => {
+      // Simulate a scenario where transaction_read_only is 'off' (normal transaction)
+      await expect(
+        sql.begin(async (tx) => {
+          const [setting] = await tx<{ transaction_read_only: string }[]>`
+            SELECT current_setting('transaction_read_only') AS transaction_read_only
+          `;
+          if (setting?.transaction_read_only !== "on") {
+            throw new Error("READ ONLY transaction check failed: transaction_read_only is not 'on'");
+          }
+          return getBackfillStats(tx);
+        })
+      ).rejects.toThrow("READ ONLY transaction check failed: transaction_read_only is not 'on'");
+    });
+
+    it("regression: verifyReadOnlyTransaction requires a top-level Sql, not TransactionSql", async () => {
+      // This test verifies that verifyReadOnlyTransaction() is designed for top-level sql
+      // and should NOT be called with a TransactionSql (which has no begin() method).
+      // The function internally calls sql.begin(), which would fail on TransactionSql.
+      
+      const { verifyReadOnlyTransaction } = await import("../ci/backfill-dry-run-preflight");
+      
+      // Calling with top-level sql works
+      const result = await verifyReadOnlyTransaction(sql);
+      expect(result.ok).toBe(true);
+
+      // Attempting to call it inside a transaction would fail because
+      // TransactionSql has no begin() method. We don't actually call it
+      // inside a tx (that would error), but we verify the design by checking
+      // that the function signature expects a postgres Sql instance and
+      // that it successfully uses begin() internally.
+      await sql.begin("read only", async (tx) => {
+        // TransactionSql has no 'begin' method - verify this is true
+        expect(typeof (tx as unknown as { begin?: unknown }).begin).toBe("undefined");
+      });
+    });
+  });
 });

@@ -26,6 +26,16 @@ import { hasOverdueInvoices } from "./overdue.server";
 export type { HoldReasonCode };
 
 /**
+ * Source of a credit status change (for audit trail).
+ */
+export type CreditStatusSource =
+  | "invoice_change"
+  | "daily_sweep"
+  | "manual"
+  | "sync"
+  | "unknown";
+
+/**
  * Valid hold reason codes - used for validation.
  */
 export const VALID_HOLD_REASON_CODES: readonly HoldReasonCode[] = [
@@ -244,6 +254,54 @@ export function computeHoldState(
     metafieldHold: false,
     holdReasonCode: null,
   };
+}
+
+/**
+ * Compute effective hold status taking bypass into account.
+ * Returns true if the account is effectively held (HELD and not bypassed).
+ */
+function isEffectivelyHeld(
+  holdState: "OK" | "NEAR_LIMIT" | "HELD" | "BYPASS",
+  bypass: boolean
+): boolean {
+  return holdState === "HELD" && !bypass;
+}
+
+/**
+ * Record an audit event for a hold state transition.
+ * Only call this when the effective hold actually changes.
+ */
+async function recordHoldTransitionAudit(
+  tx: Sql,
+  shopId: string,
+  buyerAccountId: string,
+  previousHoldState: "OK" | "NEAR_LIMIT" | "HELD" | "BYPASS",
+  newHoldState: "OK" | "NEAR_LIMIT" | "HELD" | "BYPASS",
+  holdReasonCode: HoldReasonCode | null,
+  source: CreditStatusSource,
+  wasHeld: boolean,
+  isNowHeld: boolean,
+): Promise<void> {
+  const eventType = isNowHeld
+    ? "credit_status.hold_applied"
+    : "credit_status.hold_released";
+
+  await tx`
+    INSERT INTO "AuditEvent" ("shopId", actor, type, data, at)
+    VALUES (
+      ${shopId},
+      'system',
+      ${eventType},
+      ${tx.json({
+        buyerAccountId,
+        holdReasonCode,
+        source,
+        previousHoldState,
+        newHoldState,
+      })},
+      NOW()
+    )
+  `;
 }
 
 /**
@@ -517,6 +575,9 @@ export async function updateCreditStatus(
     const holdReasonCodeValue = update.manualHold ? (update.holdReasonCode ?? null) : null;
     const holdNoteValue = update.manualHold ? (update.holdNote ?? null) : null;
 
+    // Capture previous effective hold state before update
+    const wasHeld = isEffectivelyHeld(account.holdState, account.bypass);
+
     const [updatedRow] = await tx<{ syncVersion: number }[]>`
       UPDATE "BuyerAccount"
       SET
@@ -533,6 +594,22 @@ export async function updateCreditStatus(
     `;
 
     const syncVersion = updatedRow?.syncVersion ?? 0;
+
+    // Check if effective hold changed and record audit event in same transaction
+    const isNowHeld = isEffectivelyHeld(holdStateResult.holdState, account.bypass);
+    if (wasHeld !== isNowHeld) {
+      await recordHoldTransitionAudit(
+        tx,
+        account.shopId,
+        buyerAccountId,
+        account.holdState,
+        holdStateResult.holdState,
+        holdStateResult.holdReasonCode,
+        "manual",
+        wasHeld,
+        isNowHeld,
+      );
+    }
 
     const metafieldValue = serializeCreditStatusFromDb({
       currencyCode: currency,
@@ -619,11 +696,13 @@ export async function updateCreditStatus(
  *
  * @param sql - Database connection
  * @param buyerAccountId - The buyer account to sync
+ * @param source - Source of the sync (for audit trail), defaults to 'sync'
  * @returns Result indicating success or failure
  */
 export async function syncCreditStatusMetafield(
   sql: Sql,
-  buyerAccountId: string
+  buyerAccountId: string,
+  source: CreditStatusSource = "sync"
 ): Promise<CreditStatusUpdateResult> {
   type SyncTxSuccess = { success: true; metafieldWriteData: MetafieldWriteData; syncVersion: number };
   type SyncTxSkip = { success: true; skipMetafield: true };
@@ -689,6 +768,9 @@ export async function syncCreditStatusMetafield(
       account.holdReasonCode as HoldReasonCode
     );
 
+    // Capture previous effective hold state before update
+    const wasHeld = isEffectivelyHeld(account.holdState, account.bypass);
+
     const [updatedRow] = await tx<{ syncVersion: number }[]>`
       UPDATE "BuyerAccount"
       SET 
@@ -700,6 +782,22 @@ export async function syncCreditStatusMetafield(
     `;
 
     const syncVersion = updatedRow?.syncVersion ?? 0;
+
+    // Check if effective hold changed and record audit event in same transaction
+    const isNowHeld = isEffectivelyHeld(holdStateResult.holdState, account.bypass);
+    if (wasHeld !== isNowHeld) {
+      await recordHoldTransitionAudit(
+        tx,
+        account.shopId,
+        buyerAccountId,
+        account.holdState,
+        holdStateResult.holdState,
+        holdStateResult.holdReasonCode,
+        source,
+        wasHeld,
+        isNowHeld,
+      );
+    }
 
     const metafieldValue = serializeCreditStatusFromDb({
       currencyCode: currency,

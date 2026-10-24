@@ -791,8 +791,9 @@ async function handleCreditStatusRecompute(sql: Sql, message: SyncMessage): Prom
     };
   }
 
-  // Extract buyerAccountId from message
-  const buyerAccountId = (message as SyncMessage & { buyerAccountId?: string }).buyerAccountId;
+  // Extract buyerAccountId and source from message
+  const extendedMessage = message as SyncMessage & { buyerAccountId?: string; source?: string };
+  const buyerAccountId = extendedMessage.buyerAccountId;
   if (!buyerAccountId) {
     return {
       success: false,
@@ -804,7 +805,15 @@ async function handleCreditStatusRecompute(sql: Sql, message: SyncMessage): Prom
 
   const { recomputeCreditStatus } = await import("~/services/credit-status-recompute.server");
 
-  const result = await recomputeCreditStatus(sql, buyerAccountId);
+  // Map source string from message to CreditStatusSource (defaults to 'unknown')
+  const validSources = ["invoice_change", "daily_sweep", "manual", "sync", "unknown"] as const;
+  type CreditStatusSource = typeof validSources[number];
+  const messageSource = extendedMessage.source;
+  const source: CreditStatusSource = 
+    messageSource && validSources.includes(messageSource as CreditStatusSource) 
+      ? (messageSource as CreditStatusSource) 
+      : "unknown";
+  const result = await recomputeCreditStatus(sql, buyerAccountId, source);
 
   if (!result.success) {
     return {
