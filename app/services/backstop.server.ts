@@ -118,11 +118,6 @@ interface FulfillmentOrdersQueryResult {
         node: {
           id: string;
           status: string;
-          assignedLocation: {
-            location: {
-              id: string;
-            } | null;
-          } | null;
           supportedActions: Array<{
             action: string;
           }>;
@@ -166,11 +161,6 @@ const FULFILLMENT_ORDERS_QUERY = `#graphql
           node {
             id
             status
-            assignedLocation {
-              location {
-                id
-              }
-            }
             supportedActions {
               action
             }

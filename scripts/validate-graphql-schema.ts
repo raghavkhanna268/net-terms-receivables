@@ -94,6 +94,45 @@ export const CONNECTION_FIELDS = [
 ];
 
 /**
+ * SCOPE DENYLIST: Fields that require scopes we don't have.
+ *
+ * Our production scopes (shopify.app.toml): 11 scopes total.
+ * We do NOT have: read_locations, read_inventory, read_markets.
+ *
+ * This denylist prevents queries that would fail at runtime with
+ * "Access denied for <field>. Required access: <scope>".
+ *
+ * Format: { parentType: { fieldName: "required_scope" } }
+ *
+ * To add a new entry:
+ * 1. Add the field here with the required scope
+ * 2. Add a negative test fixture to verify detection
+ * 3. Document the scope in docs/scopes.md (NOT_USED section)
+ *
+ * @see https://shopify.dev/docs/api/admin-graphql#access_scopes
+ */
+export const SCOPE_DENYLIST: Record<string, Record<string, string>> = {
+  FulfillmentOrder: {
+    assignedLocation: "read_locations",
+  },
+  Location: {
+    id: "read_locations",
+    name: "read_locations",
+    address: "read_locations",
+  },
+  InventoryItem: {
+    id: "read_inventory",
+  },
+  InventoryLevel: {
+    id: "read_inventory",
+  },
+  Market: {
+    id: "read_markets",
+    name: "read_markets",
+  },
+};
+
+/**
  * Negative test fixtures to verify the validator catches errors.
  */
 const NEGATIVE_FIXTURES = {
@@ -139,6 +178,56 @@ const NEGATIVE_FIXTURES = {
   unvalidatablePropertyAccess: {
     fileContent: 'const result = await admin.graphql(QUERIES.getShop, { variables });',
     expectedError: "uses a property reference that cannot be statically validated",
+  },
+  scopeDenylistViolation: {
+    name: "NEGATIVE_TEST_SCOPE_DENYLIST",
+    source: `query FulfillmentOrderWithLocation($orderId: ID!) {
+      order(id: $orderId) {
+        id
+        fulfillmentOrders(first: 10) {
+          edges {
+            node {
+              id
+              assignedLocation {
+                location {
+                  id
+                }
+              }
+            }
+          }
+        }
+      }
+    }`,
+    expectedError: "requires scope 'read_locations'",
+  },
+  scopeDenylistInlineFragment: {
+    name: "NEGATIVE_TEST_SCOPE_INLINE_FRAGMENT",
+    source: `query NodeWithLocation($id: ID!) {
+      node(id: $id) {
+        ... on FulfillmentOrder {
+          id
+          assignedLocation {
+            location { id }
+          }
+        }
+      }
+    }`,
+    expectedError: "requires scope 'read_locations'",
+  },
+  scopeDenylistFragmentDefinition: {
+    name: "NEGATIVE_TEST_SCOPE_FRAGMENT_DEF",
+    source: `query WithFragment($id: ID!) {
+      node(id: $id) {
+        ...FOFields
+      }
+    }
+    fragment FOFields on FulfillmentOrder {
+      id
+      assignedLocation {
+        location { id }
+      }
+    }`,
+    expectedError: "requires scope 'read_locations'",
   },
 };
 
@@ -296,6 +385,7 @@ function findGraphQLFiles(rootDir: string): string[] {
 /**
  * Validate a GraphQL document against the schema.
  * For bulkOperationRunQuery mutations, ALWAYS extracts and validates the inner query.
+ * Also checks for fields requiring scopes we don't have (scope denylist).
  */
 function validateDocument(schema: GraphQLSchema, doc: GraphQLDocument): GraphQLError[] {
   const allErrors: GraphQLError[] = [];
@@ -316,6 +406,10 @@ function validateDocument(schema: GraphQLSchema, doc: GraphQLDocument): GraphQLE
           // Additional bulk query rules validation using AST
           const bulkRuleErrors = validateBulkQueryRulesAST(parsed, doc.name);
           allErrors.push(...bulkRuleErrors);
+
+          // Check scope denylist for inner query
+          const scopeErrors = checkScopeDenylist(schema, parsed, doc.name);
+          allErrors.push(...scopeErrors);
         } catch (innerParseError) {
           allErrors.push(
             new GraphQLError(
@@ -336,6 +430,10 @@ function validateDocument(schema: GraphQLSchema, doc: GraphQLDocument): GraphQLE
         const parsed = parse(doc.source);
         const errors = validate(schema, parsed);
         allErrors.push(...errors);
+
+        // Check scope denylist
+        const scopeErrors = checkScopeDenylist(schema, parsed, doc.name);
+        allErrors.push(...scopeErrors);
       } catch (parseError) {
         allErrors.push(
           new GraphQLError(
@@ -420,6 +518,115 @@ export function validateBulkQueryRulesAST(doc: DocumentNode, docName: string): G
       )
     );
   }
+
+  return errors;
+}
+
+/**
+ * Check for fields that require scopes we don't have (scope denylist).
+ *
+ * This validation catches queries that would fail at runtime with
+ * "Access denied for <field>. Required access: <scope>".
+ *
+ * Handles:
+ * - Regular field selections
+ * - InlineFragment typeCondition (... on Type { field })
+ * - FragmentDefinition typeCondition (fragment F on Type { field })
+ *
+ * Uses schema introspection to determine parent type names.
+ */
+export function checkScopeDenylist(
+  schema: GraphQLSchema,
+  doc: DocumentNode,
+  docName: string
+): GraphQLError[] {
+  const errors: GraphQLError[] = [];
+
+  // Track the current type context
+  const typeStack: string[] = [];
+
+  visit(doc, {
+    OperationDefinition: {
+      enter(node) {
+        const opType = node.operation;
+        if (opType === "query") {
+          typeStack.push("QueryRoot");
+        } else if (opType === "mutation") {
+          typeStack.push("Mutation");
+        }
+      },
+      leave() {
+        typeStack.pop();
+      },
+    },
+    FragmentDefinition: {
+      enter(node) {
+        // Fragment definitions have a typeCondition
+        const typeName = node.typeCondition.name.value;
+        typeStack.push(typeName);
+      },
+      leave() {
+        typeStack.pop();
+      },
+    },
+    InlineFragment: {
+      enter(node) {
+        // Inline fragments may have a typeCondition
+        if (node.typeCondition) {
+          const typeName = node.typeCondition.name.value;
+          typeStack.push(typeName);
+        }
+      },
+      leave(node) {
+        if (node.typeCondition) {
+          typeStack.pop();
+        }
+      },
+    },
+    Field: {
+      enter(node) {
+        const fieldName = node.name.value;
+        const parentType = typeStack[typeStack.length - 1];
+
+        // Check if this field is in the denylist for the current parent type
+        const denylistEntry = SCOPE_DENYLIST[parentType];
+        if (denylistEntry && denylistEntry[fieldName]) {
+          const requiredScope = denylistEntry[fieldName];
+          errors.push(
+            new GraphQLError(
+              `${docName}: Field '${fieldName}' on type '${parentType}' requires scope '${requiredScope}' which is not in our production scopes. Remove this field.`
+            )
+          );
+        }
+
+        // Determine the return type of this field to push onto the type stack
+        if (parentType) {
+          const type = schema.getType(parentType);
+          if (type && "getFields" in type) {
+            const fields = type.getFields();
+            const field = fields[fieldName];
+            if (field) {
+              // Get the named type (unwrap NonNull and List)
+              let namedType = field.type;
+              while ("ofType" in namedType && namedType.ofType) {
+                namedType = namedType.ofType;
+              }
+              if ("name" in namedType) {
+                typeStack.push(namedType.name);
+                return;
+              }
+            }
+          }
+        }
+
+        // If we couldn't determine the type, push a placeholder
+        typeStack.push("Unknown");
+      },
+      leave() {
+        typeStack.pop();
+      },
+    },
+  });
 
   return errors;
 }
@@ -566,6 +773,81 @@ function runSelfTests(schema: GraphQLSchema): boolean {
       console.log(`  ❌ SELF-TEST FAILED: unvalidatablePropertyAccess - wrong error type`);
       console.log(`     Expected: ${NEGATIVE_FIXTURES.unvalidatablePropertyAccess.expectedError}`);
       console.log(`     Got: ${propertyErrors[0].message}`);
+      allPassed = false;
+    }
+  }
+
+  // Test scope denylist: query using field that requires scope we don't have
+  const scopeDenylistDoc: GraphQLDocument = {
+    name: NEGATIVE_FIXTURES.scopeDenylistViolation.name,
+    source: NEGATIVE_FIXTURES.scopeDenylistViolation.source,
+    filePath: "<self-test>",
+  };
+
+  const scopeDenylistErrors = validateDocument(schema, scopeDenylistDoc);
+  if (scopeDenylistErrors.length === 0) {
+    console.log(`  ❌ SELF-TEST FAILED: scopeDenylistViolation - expected error but got none`);
+    allPassed = false;
+  } else {
+    const hasExpectedError = scopeDenylistErrors.some((e) =>
+      e.message.includes(NEGATIVE_FIXTURES.scopeDenylistViolation.expectedError)
+    );
+    if (hasExpectedError) {
+      console.log(`  ✓ scopeDenylistViolation: correctly detected error`);
+    } else {
+      console.log(`  ❌ SELF-TEST FAILED: scopeDenylistViolation - wrong error type`);
+      console.log(`     Expected: ${NEGATIVE_FIXTURES.scopeDenylistViolation.expectedError}`);
+      console.log(`     Got: ${scopeDenylistErrors[0].message}`);
+      allPassed = false;
+    }
+  }
+
+  // Test scope denylist: InlineFragment typeCondition
+  const scopeInlineDoc: GraphQLDocument = {
+    name: NEGATIVE_FIXTURES.scopeDenylistInlineFragment.name,
+    source: NEGATIVE_FIXTURES.scopeDenylistInlineFragment.source,
+    filePath: "<self-test>",
+  };
+
+  const scopeInlineErrors = validateDocument(schema, scopeInlineDoc);
+  if (scopeInlineErrors.length === 0) {
+    console.log(`  ❌ SELF-TEST FAILED: scopeDenylistInlineFragment - expected error but got none`);
+    allPassed = false;
+  } else {
+    const hasExpectedError = scopeInlineErrors.some((e) =>
+      e.message.includes(NEGATIVE_FIXTURES.scopeDenylistInlineFragment.expectedError)
+    );
+    if (hasExpectedError) {
+      console.log(`  ✓ scopeDenylistInlineFragment: correctly detected error`);
+    } else {
+      console.log(`  ❌ SELF-TEST FAILED: scopeDenylistInlineFragment - wrong error type`);
+      console.log(`     Expected: ${NEGATIVE_FIXTURES.scopeDenylistInlineFragment.expectedError}`);
+      console.log(`     Got: ${scopeInlineErrors[0].message}`);
+      allPassed = false;
+    }
+  }
+
+  // Test scope denylist: FragmentDefinition typeCondition
+  const scopeFragmentDoc: GraphQLDocument = {
+    name: NEGATIVE_FIXTURES.scopeDenylistFragmentDefinition.name,
+    source: NEGATIVE_FIXTURES.scopeDenylistFragmentDefinition.source,
+    filePath: "<self-test>",
+  };
+
+  const scopeFragmentErrors = validateDocument(schema, scopeFragmentDoc);
+  if (scopeFragmentErrors.length === 0) {
+    console.log(`  ❌ SELF-TEST FAILED: scopeDenylistFragmentDefinition - expected error but got none`);
+    allPassed = false;
+  } else {
+    const hasExpectedError = scopeFragmentErrors.some((e) =>
+      e.message.includes(NEGATIVE_FIXTURES.scopeDenylistFragmentDefinition.expectedError)
+    );
+    if (hasExpectedError) {
+      console.log(`  ✓ scopeDenylistFragmentDefinition: correctly detected error`);
+    } else {
+      console.log(`  ❌ SELF-TEST FAILED: scopeDenylistFragmentDefinition - wrong error type`);
+      console.log(`     Expected: ${NEGATIVE_FIXTURES.scopeDenylistFragmentDefinition.expectedError}`);
+      console.log(`     Got: ${scopeFragmentErrors[0].message}`);
       allPassed = false;
     }
   }
