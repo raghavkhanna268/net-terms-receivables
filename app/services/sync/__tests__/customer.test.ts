@@ -645,6 +645,139 @@ describeWithDb("Customer Sync", () => {
       const count = await bulkUpsertTaggedCustomers(sql, []);
       expect(count).toBe(0);
     });
+
+    it("piiMode 'fetched' writes values as-is including null (overwrites existing)", async () => {
+      const customerId = `gid://shopify/Customer/bulk-${TEST_SUFFIX}-fetched`;
+
+      await sql`
+        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, email, display_name)
+        VALUES (${TEST_SHOP_ID}, ${customerId}, '["net-terms"]'::jsonb, true, 'existing@example.com', 'Existing Name')
+      `;
+
+      const customers = [
+        {
+          shopId: TEST_SHOP_ID,
+          customerId,
+          tags: ["net-terms", "updated"],
+          tagActive: true,
+          email: null,
+          displayName: "Updated Name",
+        },
+      ];
+
+      await bulkUpsertTaggedCustomers(sql, customers, "fetched");
+
+      const [record] = await sql<{ email: string | null; display_name: string | null; tags: string[] }[]>`
+        SELECT email, display_name, tags FROM s8_tagged_customers WHERE customer_id = ${customerId}
+      `;
+      expect(record.email).toBeNull();
+      expect(record.display_name).toBe("Updated Name");
+      expect(record.tags).toContain("updated");
+    });
+
+    it("piiMode 'fallback' preserves existing values with COALESCE", async () => {
+      const customerId = `gid://shopify/Customer/bulk-${TEST_SUFFIX}-fallback`;
+
+      await sql`
+        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, email, display_name)
+        VALUES (${TEST_SHOP_ID}, ${customerId}, '["net-terms"]'::jsonb, true, 'preserve@example.com', 'Preserve Name')
+      `;
+
+      const customers = [
+        {
+          shopId: TEST_SHOP_ID,
+          customerId,
+          tags: ["net-terms", "updated"],
+          tagActive: true,
+          email: null,
+          displayName: null,
+        },
+      ];
+
+      await bulkUpsertTaggedCustomers(sql, customers, "fallback");
+
+      const [record] = await sql<{ email: string | null; display_name: string | null; tags: string[] }[]>`
+        SELECT email, display_name, tags FROM s8_tagged_customers WHERE customer_id = ${customerId}
+      `;
+      expect(record.email).toBe("preserve@example.com");
+      expect(record.display_name).toBe("Preserve Name");
+      expect(record.tags).toContain("updated");
+    });
+
+    it("piiMode 'disabled' always writes NULL regardless of provided values", async () => {
+      const customerId = `gid://shopify/Customer/bulk-${TEST_SUFFIX}-disabled`;
+
+      await sql`
+        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, email, display_name)
+        VALUES (${TEST_SHOP_ID}, ${customerId}, '["net-terms"]'::jsonb, true, 'existing@example.com', 'Existing Name')
+      `;
+
+      const customers = [
+        {
+          shopId: TEST_SHOP_ID,
+          customerId,
+          tags: ["net-terms", "updated"],
+          tagActive: true,
+          email: "ignored@example.com",
+          displayName: "Ignored Name",
+        },
+      ];
+
+      await bulkUpsertTaggedCustomers(sql, customers, "disabled");
+
+      const [record] = await sql<{ email: string | null; display_name: string | null; tags: string[] }[]>`
+        SELECT email, display_name, tags FROM s8_tagged_customers WHERE customer_id = ${customerId}
+      `;
+      expect(record.email).toBeNull();
+      expect(record.display_name).toBeNull();
+      expect(record.tags).toContain("updated");
+    });
+
+    it("piiMode 'fetched' on INSERT writes provided values", async () => {
+      const customerId = `gid://shopify/Customer/bulk-${TEST_SUFFIX}-fetched-new`;
+
+      const customers = [
+        {
+          shopId: TEST_SHOP_ID,
+          customerId,
+          tags: ["net-terms"],
+          tagActive: true,
+          email: "new@example.com",
+          displayName: "New Customer",
+        },
+      ];
+
+      await bulkUpsertTaggedCustomers(sql, customers, "fetched");
+
+      const [record] = await sql<{ email: string | null; display_name: string | null }[]>`
+        SELECT email, display_name FROM s8_tagged_customers WHERE customer_id = ${customerId}
+      `;
+      expect(record.email).toBe("new@example.com");
+      expect(record.display_name).toBe("New Customer");
+    });
+
+    it("piiMode 'disabled' on INSERT writes NULL even with PII provided", async () => {
+      const customerId = `gid://shopify/Customer/bulk-${TEST_SUFFIX}-disabled-new`;
+
+      const customers = [
+        {
+          shopId: TEST_SHOP_ID,
+          customerId,
+          tags: ["net-terms"],
+          tagActive: true,
+          email: "ignored@example.com",
+          displayName: "Ignored Name",
+        },
+      ];
+
+      await bulkUpsertTaggedCustomers(sql, customers, "disabled");
+
+      const [record] = await sql<{ email: string | null; display_name: string | null }[]>`
+        SELECT email, display_name FROM s8_tagged_customers WHERE customer_id = ${customerId}
+      `;
+      expect(record.email).toBeNull();
+      expect(record.display_name).toBeNull();
+    });
   });
 
   describe("findMatchingTagRule", () => {
