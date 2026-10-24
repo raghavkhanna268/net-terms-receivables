@@ -71,6 +71,15 @@ on:
         required: false
         default: "100"
         type: string
+      post_redrive_verify:
+        description: "Run post-redrive verification SQL script (read-only)"
+        required: false
+        default: false
+        type: boolean
+      redrive_started_at:
+        description: "UTC timestamp when redrive started (for post_redrive_verify, e.g. 2026-10-24T10:00:00Z)"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -89,11 +98,23 @@ jobs:
       - name: Validate inputs
         env:
           SHOP_DOMAIN: ${{ inputs.shop }}
+          REDRIVE_STARTED_AT: ${{ inputs.redrive_started_at }}
         run: |
           set -euo pipefail
+
+          # Validate shop domain format
           if [[ ! "$SHOP_DOMAIN" =~ ^[a-z0-9-]+\.myshopify\.com$ ]]; then
             echo "::error::Invalid shop domain format. Expected: example.myshopify.com"
             exit 1
+          fi
+
+          # Validate redrive_started_at if provided: strict ISO-8601 UTC format
+          # Accepts: YYYY-MM-DDTHH:MMZ or YYYY-MM-DDTHH:MM:SSZ (seconds optional)
+          if [[ -n "${REDRIVE_STARTED_AT:-}" ]]; then
+            if [[ ! "$REDRIVE_STARTED_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?Z$ ]]; then
+              echo "::error::Invalid redrive_started_at format. Expected ISO-8601 UTC: YYYY-MM-DDTHH:MM:SSZ or YYYY-MM-DDTHH:MMZ"
+              exit 1
+            fi
           fi
 
       - name: Session check
@@ -218,6 +239,54 @@ jobs:
           fi
 
           echo "✓ Psql capture self-check passed (output = 't')"
+
+      - name: Post-redrive verification (read-only)
+        if: ${{ inputs.post_redrive_verify }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          SHOP_DOMAIN: ${{ inputs.shop }}
+          REDRIVE_STARTED_AT: ${{ inputs.redrive_started_at }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
+        run: |
+          set -euo pipefail
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL_MIGRATIONS secret not set"
+            exit 1
+          fi
+
+          # Install psql client if not available
+          if ! command -v psql &> /dev/null; then
+            echo "Installing PostgreSQL client..."
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq postgresql-client
+          fi
+
+          echo "=== Post-Redrive Verification ==="
+          echo ""
+          echo "Shop: $SHOP_DOMAIN"
+          echo "Read-only mode: enforced via PGOPTIONS and BEGIN TRANSACTION READ ONLY"
+          echo ""
+
+          # Build psql args as a bash array (no eval, no shell injection)
+          PSQL_ARGS=(-v ON_ERROR_STOP=1 -v "shop=${SHOP_DOMAIN}")
+
+          if [[ -n "${REDRIVE_STARTED_AT:-}" ]]; then
+            echo "Redrive started at: $REDRIVE_STARTED_AT"
+            PSQL_ARGS+=(-v "redrive_started_at=${REDRIVE_STARTED_AT}")
+          else
+            echo "Redrive started at: (defaulting to now - 24h)"
+          fi
+          echo ""
+
+          # Run the verification script
+          # The script uses BEGIN TRANSACTION READ ONLY and ROLLBACK, and only outputs
+          # counts, booleans, and enum labels - no customer PII.
+          # -X: ignore .psqlrc, -q: suppress command tags (BEGIN/ROLLBACK) from stdout
+          psql -X -q "${PSQL_ARGS[@]}" -f scripts/post-redrive-verify.sql "$DATABASE_URL"
+
+          echo ""
+          echo "::notice::Post-redrive verification completed"
 
       - name: Setup Node
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0

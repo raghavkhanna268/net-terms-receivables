@@ -1,10 +1,12 @@
 import { describe, it, expect } from "vitest";
 import {
   serializeCreditStatus,
+  serializeCreditStatusFromDb,
   parseCreditStatus,
   checkCreditStatus,
   toPaiseString,
   fromPaiseString,
+  parsePaiseString,
   type CreditStatus,
 } from "../metafields-contract";
 import fixturesJson from "../../../tests/fixtures/credit-status.json";
@@ -192,6 +194,149 @@ describe("metafields-contract", () => {
 
       const check2 = checkCreditStatus(status, 5000001n, "INR");
       expect(check2.blocked).toBe(true);
+    });
+  });
+
+  describe("serializeCreditStatusFromDb", () => {
+    it("creates valid JSON from DB values (amounts already in paise)", () => {
+      const json = serializeCreditStatusFromDb({
+        currencyCode: "INR",
+        hold: false,
+        holdReasonCode: null,
+        limitPaise: 10000000n,
+        exposurePaise: 5000000n,
+      });
+
+      const parsed = JSON.parse(json);
+      expect(parsed.schemaVersion).toBe(1);
+      expect(parsed.currencyCode).toBe("INR");
+      expect(parsed.hold).toBe(false);
+      expect(parsed.holdReasonCode).toBe(null);
+      expect(parsed.limitPaise).toBe("10000000");
+      expect(parsed.exposurePaise).toBe("5000000");
+      expect(parsed.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    });
+
+    it("handles null limitPaise as very large limit", () => {
+      const json = serializeCreditStatusFromDb({
+        currencyCode: "INR",
+        hold: false,
+        holdReasonCode: null,
+        limitPaise: null,
+        exposurePaise: 5000000n,
+      });
+
+      const parsed = JSON.parse(json);
+      expect(parsed.limitPaise).toBe("999999999999999");
+    });
+
+    it("includes holdReasonCode when on hold", () => {
+      const json = serializeCreditStatusFromDb({
+        currencyCode: "INR",
+        hold: true,
+        holdReasonCode: "MANUAL_HOLD",
+        limitPaise: 10000000n,
+        exposurePaise: 5000000n,
+      });
+
+      const parsed = JSON.parse(json);
+      expect(parsed.hold).toBe(true);
+      expect(parsed.holdReasonCode).toBe("MANUAL_HOLD");
+    });
+
+    it("produces JSON that matches fixture format exactly", () => {
+      const json = serializeCreditStatusFromDb({
+        currencyCode: "INR",
+        hold: true,
+        holdReasonCode: "PAYMENT_OVERDUE",
+        limitPaise: 10000000n,
+        exposurePaise: 5000000n,
+      });
+
+      const parsed = JSON.parse(json);
+      const fixture = fixtures.valid.onHold;
+
+      expect(parsed.schemaVersion).toBe(fixture.schemaVersion);
+      expect(parsed.currencyCode).toBe(fixture.currencyCode);
+      expect(parsed.hold).toBe(fixture.hold);
+      expect(parsed.holdReasonCode).toBe(fixture.holdReasonCode);
+      expect(parsed.limitPaise).toBe(fixture.limitPaise);
+      expect(parsed.exposurePaise).toBe(fixture.exposurePaise);
+    });
+
+    it("produces JSON parseable by the TS parser", () => {
+      const json = serializeCreditStatusFromDb({
+        currencyCode: "USD",
+        hold: false,
+        holdReasonCode: null,
+        limitPaise: 500000n,
+        exposurePaise: 100000n,
+      });
+
+      const parsed = parseCreditStatus(json);
+      expect(parsed).not.toBeNull();
+      expect(parsed?.currencyCode).toBe("USD");
+      expect(parsed?.limitPaise).toBe("500000");
+      expect(parsed?.exposurePaise).toBe("100000");
+    });
+  });
+
+  describe("parsePaiseString", () => {
+    it("parses valid paise strings", () => {
+      expect(parsePaiseString("10000000")).toBe(10000000n);
+      expect(parsePaiseString("0")).toBe(0n);
+      expect(parsePaiseString("999999999999999")).toBe(999999999999999n);
+    });
+
+    it("returns null for invalid inputs", () => {
+      expect(parsePaiseString(null)).toBeNull();
+      expect(parsePaiseString(undefined)).toBeNull();
+      expect(parsePaiseString("")).toBeNull();
+      expect(parsePaiseString("not-a-number")).toBeNull();
+      expect(parsePaiseString("-100")).toBeNull();
+      expect(parsePaiseString("100.50")).toBeNull();
+    });
+  });
+
+  describe("golden fixture validation for Rust compatibility", () => {
+    it("all valid fixtures parse correctly", () => {
+      for (const [name, fixture] of Object.entries(fixtures.valid)) {
+        const json = JSON.stringify(fixture);
+        const parsed = parseCreditStatus(json);
+        expect(parsed, `fixture ${name} should parse`).not.toBeNull();
+        expect(parsed?.schemaVersion).toBe(1);
+      }
+    });
+
+    it("valid.notOnHold blocks when cart would exceed limit", () => {
+      const status = fixtures.valid.notOnHold;
+      const cartPaise = 5000001n;
+      const result = checkCreditStatus(status, cartPaise, "INR");
+      expect(result.blocked).toBe(true);
+      expect(result.reason).toBe("over_limit");
+    });
+
+    it("valid.onHold always blocks regardless of cart amount", () => {
+      const status = fixtures.valid.onHold;
+      const result = checkCreditStatus(status, 0n, "INR");
+      expect(result.blocked).toBe(true);
+      expect(result.reason).toBe("hold");
+    });
+
+    it("valid.atLimit blocks when any cart amount is added", () => {
+      const status = fixtures.valid.atLimit;
+      const result = checkCreditStatus(status, 1n, "INR");
+      expect(result.blocked).toBe(true);
+      expect(result.reason).toBe("over_limit");
+    });
+
+    it("valid.usdCurrency only blocks for USD carts", () => {
+      const status = fixtures.valid.usdCurrency;
+      const resultUsd = checkCreditStatus(status, 500000n, "USD");
+      expect(resultUsd.blocked).toBe(true);
+
+      const resultInr = checkCreditStatus(status, 500000n, "INR");
+      expect(resultInr.blocked).toBe(false);
     });
   });
 });

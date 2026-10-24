@@ -14,9 +14,8 @@ declare module "react-router" {
 }
 
 // Workaround for missing Polaris web component types
-// The @shopify/polaris-types package derives types from preact which may not
-// include all components. This declares missing elements.
-// TODO: Remove this workaround when polaris-types properly exports these
+// Only declare elements that @shopify/polaris-types genuinely doesn't export.
+// Verified by typecheck failure when removed.
 declare global {
   namespace JSX {
     interface IntrinsicElements {
