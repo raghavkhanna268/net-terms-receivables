@@ -43,7 +43,7 @@ vi.mock("@shopify/shopify-app-react-router/server", () => ({
 }));
 
 describe("Reconcile Route (M5)", () => {
-  const mockSession = { shop: "sensitive-store.myshopify.com" };
+  const mockSession = { shop: "test-sensitive-store.myshopify.com" };
   const mockContext = {
     shopify: {
       authenticate: {
@@ -82,7 +82,7 @@ describe("Reconcile Route (M5)", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       const sensitiveError = new Error(
-        "Database error for sensitive-store.myshopify.com: user@example.com owes 125000"
+        "Database error for test-sensitive-store.myshopify.com: user@example.com owes 125000"
       );
       (resolvePlan as ReturnType<typeof vi.fn>).mockRejectedValue(
         sensitiveError

@@ -179,7 +179,7 @@ describe("after-auth", () => {
       const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
       runAfterAuth(
-        "reinstall-shop.myshopify.com",
+        "test-reinstall-shop.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
@@ -187,7 +187,7 @@ describe("after-auth", () => {
       await Promise.allSettled(waitUntilPromises);
 
       await vi.waitFor(() => {
-        expect(_isShopSetupComplete("reinstall-shop.myshopify.com")).toBe(true);
+        expect(_isShopSetupComplete("test-reinstall-shop.myshopify.com")).toBe(true);
       });
 
       expect(mockEnsureMetafieldDefinitions).toHaveBeenCalledTimes(1);
@@ -198,7 +198,7 @@ describe("after-auth", () => {
       mockSqlQuery.mockResolvedValueOnce([{ id: "shop-123" }]);
 
       runAfterAuth(
-        "reinstall-shop.myshopify.com",
+        "test-reinstall-shop.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
@@ -209,7 +209,7 @@ describe("after-auth", () => {
         expect(mockEnsureMetafieldDefinitions).toHaveBeenCalledTimes(2);
         expect(mockEnsureValidation).toHaveBeenCalledTimes(2);
         expect(mockEnsurePaymentCustomization).toHaveBeenCalledTimes(2);
-        expect(_isShopSetupComplete("reinstall-shop.myshopify.com")).toBe(true);
+        expect(_isShopSetupComplete("test-reinstall-shop.myshopify.com")).toBe(true);
       });
     });
 
@@ -225,7 +225,7 @@ describe("after-auth", () => {
 
       expect(() =>
         runAfterAuth(
-          "failing-shop.myshopify.com",
+          "test-failing-shop.myshopify.com",
           mockAdmin as Parameters<typeof runAfterAuth>[1],
           mockWaitUntil,
         ),
@@ -239,7 +239,7 @@ describe("after-auth", () => {
         );
       });
 
-      expect(_isShopSetupComplete("failing-shop.myshopify.com")).toBe(false);
+      expect(_isShopSetupComplete("test-failing-shop.myshopify.com")).toBe(false);
 
       consoleSpy.mockRestore();
     });
@@ -261,7 +261,7 @@ describe("after-auth", () => {
       const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
       runAfterAuth(
-        "retry-shop.myshopify.com",
+        "test-retry-shop.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
@@ -270,14 +270,14 @@ describe("after-auth", () => {
 
       await vi.waitFor(() => {
         expect(consoleSpy).toHaveBeenCalled();
-        expect(_isShopSetupComplete("retry-shop.myshopify.com")).toBe(false);
-        expect(_isShopSetupInFlight("retry-shop.myshopify.com")).toBe(false);
+        expect(_isShopSetupComplete("test-retry-shop.myshopify.com")).toBe(false);
+        expect(_isShopSetupInFlight("test-retry-shop.myshopify.com")).toBe(false);
       });
 
       waitUntilPromises.length = 0;
 
       runAfterAuth(
-        "retry-shop.myshopify.com",
+        "test-retry-shop.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
@@ -285,7 +285,7 @@ describe("after-auth", () => {
       await Promise.allSettled(waitUntilPromises);
 
       await vi.waitFor(() => {
-        expect(_isShopSetupComplete("retry-shop.myshopify.com")).toBe(true);
+        expect(_isShopSetupComplete("test-retry-shop.myshopify.com")).toBe(true);
         expect(mockEnsureValidation).toHaveBeenCalledTimes(2);
       });
 
@@ -332,7 +332,7 @@ describe("after-auth", () => {
       const ctx = new ThisDependentCtx();
 
       runAfterAuth(
-        "bound-shop.myshopify.com",
+        "test-bound-shop.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         (p) => ctx.waitUntil(p),
       );
@@ -342,7 +342,7 @@ describe("after-auth", () => {
       await Promise.all(ctx.capturedPromises);
 
       await vi.waitFor(() => {
-        expect(_isShopSetupComplete("bound-shop.myshopify.com")).toBe(true);
+        expect(_isShopSetupComplete("test-bound-shop.myshopify.com")).toBe(true);
       });
     });
 
@@ -363,7 +363,7 @@ describe("after-auth", () => {
 
       expect(() =>
         runAfterAuth(
-          "unbound-shop.myshopify.com",
+          "test-unbound-shop.myshopify.com",
           mockAdmin as Parameters<typeof runAfterAuth>[1],
           unboundWaitUntil,
         ),
@@ -382,29 +382,29 @@ describe("after-auth", () => {
       const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
       runAfterAuth(
-        "concurrent-shop.myshopify.com",
+        "test-concurrent-shop.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
 
       await vi.waitFor(() => {
-        expect(_isShopSetupInFlight("concurrent-shop.myshopify.com")).toBe(true);
+        expect(_isShopSetupInFlight("test-concurrent-shop.myshopify.com")).toBe(true);
       });
 
       runAfterAuth(
-        "concurrent-shop.myshopify.com",
+        "test-concurrent-shop.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
       runAfterAuth(
-        "concurrent-shop.myshopify.com",
+        "test-concurrent-shop.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
 
       await new Promise((r) => setTimeout(r, 10));
 
-      expect(_isShopSetupComplete("concurrent-shop.myshopify.com")).toBe(false);
+      expect(_isShopSetupComplete("test-concurrent-shop.myshopify.com")).toBe(false);
 
       await vi.waitFor(() => {
         expect(mockEnsureValidation).toHaveBeenCalledTimes(1);
@@ -417,8 +417,8 @@ describe("after-auth", () => {
       await Promise.allSettled(waitUntilPromises);
 
       await vi.waitFor(() => {
-        expect(_isShopSetupComplete("concurrent-shop.myshopify.com")).toBe(true);
-        expect(_isShopSetupInFlight("concurrent-shop.myshopify.com")).toBe(false);
+        expect(_isShopSetupComplete("test-concurrent-shop.myshopify.com")).toBe(true);
+        expect(_isShopSetupInFlight("test-concurrent-shop.myshopify.com")).toBe(false);
       });
     });
 
@@ -438,13 +438,13 @@ describe("after-auth", () => {
       const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
       runAfterAuth(
-        "failing-concurrent.myshopify.com",
+        "test-failing-concurrent.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
 
       await vi.waitFor(() => {
-        expect(_isShopSetupInFlight("failing-concurrent.myshopify.com")).toBe(true);
+        expect(_isShopSetupInFlight("test-failing-concurrent.myshopify.com")).toBe(true);
       });
 
       rejectSetup(new Error("API error"));
@@ -455,8 +455,8 @@ describe("after-auth", () => {
         expect(consoleSpy).toHaveBeenCalled();
       });
 
-      expect(_isShopSetupInFlight("failing-concurrent.myshopify.com")).toBe(false);
-      expect(_isShopSetupComplete("failing-concurrent.myshopify.com")).toBe(false);
+      expect(_isShopSetupInFlight("test-failing-concurrent.myshopify.com")).toBe(false);
+      expect(_isShopSetupComplete("test-failing-concurrent.myshopify.com")).toBe(false);
 
       waitUntilPromises.length = 0;
       mockEnsureValidation.mockResolvedValueOnce({
@@ -465,7 +465,7 @@ describe("after-auth", () => {
       });
 
       runAfterAuth(
-        "failing-concurrent.myshopify.com",
+        "test-failing-concurrent.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
@@ -473,7 +473,7 @@ describe("after-auth", () => {
       await Promise.allSettled(waitUntilPromises);
 
       await vi.waitFor(() => {
-        expect(_isShopSetupComplete("failing-concurrent.myshopify.com")).toBe(true);
+        expect(_isShopSetupComplete("test-failing-concurrent.myshopify.com")).toBe(true);
       });
 
       expect(mockEnsureValidation).toHaveBeenCalledTimes(2);
@@ -491,7 +491,7 @@ describe("after-auth", () => {
       const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
       runAfterAuth(
-        "reinstall-test.myshopify.com",
+        "test-reinstall.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
@@ -499,18 +499,18 @@ describe("after-auth", () => {
       await Promise.allSettled(waitUntilPromises);
 
       await vi.waitFor(() => {
-        expect(_isShopSetupComplete("reinstall-test.myshopify.com")).toBe(true);
+        expect(_isShopSetupComplete("test-reinstall.myshopify.com")).toBe(true);
       });
 
       expect(mockEnsureValidation).toHaveBeenCalledTimes(1);
 
-      evictShopFromSetupCache("reinstall-test.myshopify.com");
-      expect(_isShopSetupComplete("reinstall-test.myshopify.com")).toBe(false);
+      evictShopFromSetupCache("test-reinstall.myshopify.com");
+      expect(_isShopSetupComplete("test-reinstall.myshopify.com")).toBe(false);
 
       waitUntilPromises.length = 0;
 
       runAfterAuth(
-        "reinstall-test.myshopify.com",
+        "test-reinstall.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
@@ -518,7 +518,7 @@ describe("after-auth", () => {
       await Promise.allSettled(waitUntilPromises);
 
       await vi.waitFor(() => {
-        expect(_isShopSetupComplete("reinstall-test.myshopify.com")).toBe(true);
+        expect(_isShopSetupComplete("test-reinstall.myshopify.com")).toBe(true);
       });
 
       expect(mockEnsureValidation).toHaveBeenCalledTimes(2);
@@ -535,7 +535,7 @@ describe("after-auth", () => {
       const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
       runAfterAuth(
-        "cached-shop.myshopify.com",
+        "test-cached-shop.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
@@ -543,14 +543,14 @@ describe("after-auth", () => {
       await Promise.allSettled(waitUntilPromises);
 
       await vi.waitFor(() => {
-        expect(_isShopSetupComplete("cached-shop.myshopify.com")).toBe(true);
+        expect(_isShopSetupComplete("test-cached-shop.myshopify.com")).toBe(true);
       });
 
       mockSqlQuery.mockClear();
       waitUntilPromises.length = 0;
 
       runAfterAuth(
-        "cached-shop.myshopify.com",
+        "test-cached-shop.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
@@ -566,7 +566,7 @@ describe("after-auth", () => {
       const templateStr = Array.isArray(sqlTemplate) ? sqlTemplate.join("") : String(sqlTemplate);
       expect(templateStr).toContain('"uninstalledAt" = NULL');
       expect(templateStr).toContain('"uninstalledAt" IS NOT NULL');
-      expect(sqlValues).toContain("cached-shop.myshopify.com");
+      expect(sqlValues).toContain("test-cached-shop.myshopify.com");
 
       expect(mockEnsureValidation).toHaveBeenCalledTimes(1);
     });
@@ -582,7 +582,7 @@ describe("after-auth", () => {
       const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
       runAfterAuth(
-        "onboarding-reset-shop.myshopify.com",
+        "test-onboarding-reset.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
@@ -617,7 +617,7 @@ describe("after-auth", () => {
 
       expect(() =>
         runAfterAuth(
-          "clear-failed-shop.myshopify.com",
+          "test-clear-failed-shop.myshopify.com",
           mockAdmin as Parameters<typeof runAfterAuth>[1],
           mockWaitUntil,
         ),
@@ -626,7 +626,7 @@ describe("after-auth", () => {
       await Promise.allSettled(waitUntilPromises);
 
       await vi.waitFor(() => {
-        expect(_isShopSetupComplete("clear-failed-shop.myshopify.com")).toBe(true);
+        expect(_isShopSetupComplete("test-clear-failed-shop.myshopify.com")).toBe(true);
       });
 
       expect(consoleSpy).toHaveBeenCalledWith(
@@ -656,7 +656,7 @@ describe("after-auth", () => {
 
       expect(() =>
         runAfterAuth(
-          "no-context-shop.myshopify.com",
+          "test-no-context-shop.myshopify.com",
           mockAdmin as Parameters<typeof runAfterAuth>[1],
           mockWaitUntil,
         ),
@@ -665,7 +665,7 @@ describe("after-auth", () => {
       await Promise.allSettled(waitUntilPromises);
 
       await vi.waitFor(() => {
-        expect(_isShopSetupComplete("no-context-shop.myshopify.com")).toBe(true);
+        expect(_isShopSetupComplete("test-no-context-shop.myshopify.com")).toBe(true);
       });
 
       expect(consoleSpy).toHaveBeenCalledWith(
@@ -692,7 +692,7 @@ describe("after-auth", () => {
       const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
       runAfterAuth(
-        "safelog-test.myshopify.com",
+        "test-safelog.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
@@ -716,7 +716,7 @@ describe("after-auth", () => {
         expect(parsed.shopHash.length).toBeGreaterThan(0);
 
         expect(logOutput).not.toContain("shop-uuid-123");
-        expect(logOutput).not.toContain("safelog-test.myshopify.com");
+        expect(logOutput).not.toContain("test-safelog.myshopify.com");
         expect(logOutput).not.toContain("shop_id=");
       });
 

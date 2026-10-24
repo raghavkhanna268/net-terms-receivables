@@ -119,7 +119,7 @@ describe("Route context storage verification", () => {
       sessionStorage.deleteAllForShop.mockResolvedValue(5);
 
       mockVerifyWebhook.mockResolvedValue({
-        shop: "uninstall-test.myshopify.com",
+        shop: "test-uninstall.myshopify.com",
         topic: "app/uninstalled",
         webhookId: "webhook-456",
         payload: {},
@@ -135,7 +135,7 @@ describe("Route context storage verification", () => {
       await action(args);
 
       expect(sessionStorage.deleteAllForShop).toHaveBeenCalledWith(
-        "uninstall-test.myshopify.com"
+        "test-uninstall.myshopify.com"
       );
     });
 
@@ -183,7 +183,7 @@ describe("Route context storage verification", () => {
       sessionStorage.updateScopeForShop.mockResolvedValue(2);
 
       mockVerifyWebhook.mockResolvedValue({
-        shop: "scopes-test.myshopify.com",
+        shop: "test-scopes.myshopify.com",
         topic: "app/scopes_update",
         webhookId: "webhook-789",
         payload: { current: ["read_orders", "read_customers", "write_orders"] },
@@ -199,7 +199,7 @@ describe("Route context storage verification", () => {
       await action(args);
 
       expect(sessionStorage.updateScopeForShop).toHaveBeenCalledWith(
-        "scopes-test.myshopify.com",
+        "test-scopes.myshopify.com",
         "read_orders,read_customers,write_orders"
       );
     });
@@ -208,7 +208,7 @@ describe("Route context storage verification", () => {
       const sessionStorage = createMockSessionStorage();
 
       mockVerifyWebhook.mockResolvedValue({
-        shop: "scopes-test.myshopify.com",
+        shop: "test-scopes.myshopify.com",
         topic: "app/uninstalled",
         webhookId: "webhook-wrong",
         payload: { current: ["read_orders"] },
@@ -233,7 +233,7 @@ describe("Route context storage verification", () => {
       sessionStorage.deleteAllForShop.mockResolvedValue(2);
 
       mockVerifyWebhook.mockResolvedValue({
-        shop: "compliance-test.myshopify.com",
+        shop: "test-compliance.myshopify.com",
         topic: "shop/redact",
         webhookId: "compliance-webhook-123",
         payload: {},
@@ -247,7 +247,7 @@ describe("Route context storage verification", () => {
       await action(args);
 
       expect(sessionStorage.deleteAllForShop).toHaveBeenCalledWith(
-        "compliance-test.myshopify.com"
+        "test-compliance.myshopify.com"
       );
     });
 
@@ -256,7 +256,7 @@ describe("Route context storage verification", () => {
       sessionStorage.deleteAllForShop.mockResolvedValue(0);
 
       mockVerifyWebhook.mockResolvedValue({
-        shop: "empty-shop.myshopify.com",
+        shop: "test-empty-shop.myshopify.com",
         topic: "shop/redact",
         webhookId: "compliance-webhook-empty",
         payload: {},

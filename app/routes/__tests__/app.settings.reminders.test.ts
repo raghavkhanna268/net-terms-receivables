@@ -1078,7 +1078,7 @@ describe("ensureDefaultReminderRules (via loader)", () => {
 });
 
 describe("Reminder Settings Route error logging (R2)", () => {
-  const mockSession = { shop: "sensitive-store.myshopify.com" };
+  const mockSession = { shop: "test-sensitive-store.myshopify.com" };
   const mockContext = {
     shopify: {
       authenticate: {
@@ -1134,7 +1134,7 @@ describe("Reminder Settings Route error logging (R2)", () => {
       });
 
       const sensitiveError = new Error(
-        "Database error for admin@sensitive-store.myshopify.com: balance 99500"
+        "Database error for admin@test-sensitive-store.myshopify.com: balance 99500"
       );
       (getGlobalSendCounts as ReturnType<typeof vi.fn>).mockRejectedValue(
         sensitiveError

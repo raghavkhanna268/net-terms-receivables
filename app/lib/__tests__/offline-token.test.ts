@@ -178,7 +178,7 @@ describeWithDb("refreshOfflineTokenIfNeeded with real database", () => {
   it("returns no_session error for non-existent session", async () => {
     const result = await refreshOfflineTokenIfNeeded(
       sql,
-      "nonexistent-shop.myshopify.com",
+      "test-nonexistent-shop.myshopify.com",
       TEST_CLIENT_ID,
       TEST_CLIENT_SECRET
     );

@@ -89,7 +89,7 @@ describe("after-auth with payment customization (S13)", () => {
     const waitUntilPromises: Promise<unknown>[] = [];
     const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
-    runAfterAuth("log-test-shop.myshopify.com", mockAdmin, mockWaitUntil);
+    runAfterAuth("test-log.myshopify.com", mockAdmin, mockWaitUntil);
 
     let prevLen = 0;
     while (waitUntilPromises.length > prevLen) {
@@ -116,7 +116,7 @@ describe("after-auth with payment customization (S13)", () => {
     const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
     expect(() =>
-      runAfterAuth("s13-failing-shop.myshopify.com", mockAdmin, mockWaitUntil)
+      runAfterAuth("s13-test-failing-shop.myshopify.com", mockAdmin, mockWaitUntil)
     ).not.toThrow();
 
     let prevLen = 0;
@@ -129,7 +129,7 @@ describe("after-auth with payment customization (S13)", () => {
       expect.stringContaining("[afterAuth] payment_customization_failed reason=exception err=")
     );
 
-    expect(_isShopSetupComplete("s13-failing-shop.myshopify.com")).toBe(false);
+    expect(_isShopSetupComplete("s13-test-failing-shop.myshopify.com")).toBe(false);
 
     consoleSpy.mockRestore();
   });
@@ -145,7 +145,7 @@ describe("after-auth with payment customization (S13)", () => {
     const waitUntilPromises: Promise<unknown>[] = [];
     const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
-    runAfterAuth("error-log-shop.myshopify.com", mockAdmin, mockWaitUntil);
+    runAfterAuth("test-error-test-log-shop.myshopify.com", mockAdmin, mockWaitUntil);
 
     let prevLen = 0;
     while (waitUntilPromises.length > prevLen) {
@@ -172,7 +172,7 @@ describe("after-auth with payment customization (S13)", () => {
     const waitUntilPromises: Promise<unknown>[] = [];
     const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
-    runAfterAuth("s13-retry-shop.myshopify.com", mockAdmin, mockWaitUntil);
+    runAfterAuth("s13-test-retry-shop.myshopify.com", mockAdmin, mockWaitUntil);
 
     let prevLen = 0;
     while (waitUntilPromises.length > prevLen) {
@@ -180,13 +180,13 @@ describe("after-auth with payment customization (S13)", () => {
       await Promise.allSettled(waitUntilPromises);
     }
 
-    expect(_isShopSetupComplete("s13-retry-shop.myshopify.com")).toBe(false);
+    expect(_isShopSetupComplete("s13-test-retry-shop.myshopify.com")).toBe(false);
     expect(mockEnsurePaymentCustomization).toHaveBeenCalledTimes(1);
 
     waitUntilPromises.length = 0;
     mockEnsurePaymentCustomization.mockResolvedValueOnce({ id: "pc-789", created: true });
 
-    runAfterAuth("s13-retry-shop.myshopify.com", mockAdmin, mockWaitUntil);
+    runAfterAuth("s13-test-retry-shop.myshopify.com", mockAdmin, mockWaitUntil);
 
     prevLen = 0;
     while (waitUntilPromises.length > prevLen) {

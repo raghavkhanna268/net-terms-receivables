@@ -17,7 +17,7 @@ export const WORKFLOW_ARGV = ["--dry-run"] as const;
 
 export function argvIsDryRunOnly(argv: readonly string[]): boolean {
   const p = parseArgs([...argv]);
-  return p.dryRun === true && p.apply === false && !p.error && !argv.includes("--apply");
+  return p.dryRun === true && p.apply === false && !p.argError && !argv.includes("--apply");
 }
 
 async function main(): Promise<void> {

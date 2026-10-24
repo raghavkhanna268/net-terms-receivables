@@ -75,7 +75,8 @@ interface ParseArgsResult {
   shopFilter: number | undefined;
   idPrefix: string | undefined;
   expect: number | undefined;
-  error?: string;
+  // Named argError (not error) to avoid logging-guard false positives on destructuring
+  argError?: string;
 }
 
 /**
@@ -93,7 +94,7 @@ function parseArgs(args: string[]): ParseArgsResult {
       shopFilter: undefined,
       idPrefix: undefined,
       expect: undefined,
-      error: "--dry-run and --apply are mutually exclusive",
+      argError: "--dry-run and --apply are mutually exclusive",
     };
   }
 
@@ -116,7 +117,7 @@ function parseArgs(args: string[]): ParseArgsResult {
         shopFilter: undefined,
         idPrefix: undefined,
         expect: undefined,
-        error: "--shop requires a numeric value (shop index from dry-run output)",
+        argError: "--shop requires a numeric value (shop index from dry-run output)",
       };
     }
     const parsed = parseInt(shopValue, 10);
@@ -127,7 +128,7 @@ function parseArgs(args: string[]): ParseArgsResult {
         shopFilter: undefined,
         idPrefix: undefined,
         expect: undefined,
-        error: "--shop must be a positive integer (shop index from dry-run output)",
+        argError: "--shop must be a positive integer (shop index from dry-run output)",
       };
     }
     if (dryRun) {
@@ -137,7 +138,7 @@ function parseArgs(args: string[]): ParseArgsResult {
         shopFilter: undefined,
         idPrefix: undefined,
         expect: undefined,
-        error: "--shop filter is only valid with --apply",
+        argError: "--shop filter is only valid with --apply",
       };
     }
     shopFilter = parsed;
@@ -154,7 +155,7 @@ function parseArgs(args: string[]): ParseArgsResult {
         shopFilter,
         idPrefix: undefined,
         expect: undefined,
-        error: "--id-prefix requires a value",
+        argError: "--id-prefix requires a value",
       };
     }
     if (!ID_PREFIX_REGEX.test(prefixValue)) {
@@ -164,7 +165,7 @@ function parseArgs(args: string[]): ParseArgsResult {
         shopFilter,
         idPrefix: undefined,
         expect: undefined,
-        error: "--id-prefix must match pattern [A-Za-z0-9_-]{1,64}",
+        argError: "--id-prefix must match pattern [A-Za-z0-9_-]{1,64}",
       };
     }
     idPrefix = prefixValue;
@@ -181,7 +182,7 @@ function parseArgs(args: string[]): ParseArgsResult {
         shopFilter,
         idPrefix,
         expect: undefined,
-        error: "--expect requires a non-negative integer value",
+        argError: "--expect requires a non-negative integer value",
       };
     }
     if (!EXPECT_REGEX.test(expectValue)) {
@@ -191,7 +192,7 @@ function parseArgs(args: string[]): ParseArgsResult {
         shopFilter,
         idPrefix,
         expect: undefined,
-        error: "--expect must be a non-negative integer (0-999999)",
+        argError: "--expect must be a non-negative integer (0-999999)",
       };
     }
     expect = parseInt(expectValue, 10);
@@ -503,14 +504,14 @@ async function runApply(
 
 async function main() {
   const args = process.argv.slice(2);
-  const { dryRun, apply: _apply, shopFilter, idPrefix, expect, error } = parseArgs(args);
+  const { dryRun, apply: _apply, shopFilter, idPrefix, expect, argError: parseMsg } = parseArgs(args);
 
   console.log("=".repeat(60));
   console.log("Credit Status Metafield Backfill Script");
   console.log("=".repeat(60));
 
-  if (error) {
-    console.error(`ERROR: ${error}`);
+  if (parseMsg) {
+    console.error(`ERROR: ${parseMsg}`);
     process.exit(1);
   }
 

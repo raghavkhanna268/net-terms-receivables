@@ -113,7 +113,7 @@ const originalFetch = global.fetch;
 
 function createMockState(overrides: Partial<SeedState> = {}): SeedState {
   return {
-    shop: "example-store.myshopify.com",
+    shop: "test-dev-store.myshopify.com",
     token: "shpat_test_token",
     databaseUrl: null,
     dryRun: false,

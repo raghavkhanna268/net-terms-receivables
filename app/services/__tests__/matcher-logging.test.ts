@@ -12,7 +12,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-const SENSITIVE_DOMAIN = "pii-test-shop.myshopify.com";
+const SENSITIVE_DOMAIN = "test-pii.myshopify.com";
 const SENSITIVE_EMAIL = "buyer@pii-test.example.com";
 const SENSITIVE_UTR = "UTIB987654321098";
 const SENSITIVE_AMOUNT = "99500";

@@ -681,4 +681,691 @@ describe("check-logging.ts (AST-based)", () => {
       expect(exitCode).toBe(0);
     });
   });
+
+  // =========================================================================
+  // Gap 1: Sentry context vars - resolve const identifiers
+  // =========================================================================
+  describe("Gap 1: Sentry context vars with identifiers", () => {
+    it("fails for setContext with unresolved identifier", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `import * as Sentry from "@sentry/cloudflare";
+export function test(data: { shop: string }) {
+  Sentry.setContext("payment", data);
+}`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("sentry-context-unresolved");
+    });
+
+    it("fails for setExtras with unresolved identifier", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `import * as Sentry from "@sentry/cloudflare";
+export function test(extras: { email: string }) {
+  Sentry.setExtras(extras);
+}`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("sentry-context-unresolved");
+    });
+
+    it("passes for setContext with resolved const object literal", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `import * as Sentry from "@sentry/cloudflare";
+export function test() {
+  const ctx = { shopId: "uuid-123", status: "active" };
+  Sentry.setContext("payment", ctx);
+}`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("fails for setContext with resolved const containing sensitive key", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `import * as Sentry from "@sentry/cloudflare";
+export function test() {
+  const ctx = { shop: "example.myshopify.com" };
+  Sentry.setContext("payment", ctx);
+}`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("sensitive-key");
+    });
+  });
+
+  // =========================================================================
+  // Gap 2: Unwrap wrappers
+  // =========================================================================
+  describe("Gap 2: Wrapper unwrapping", () => {
+    it("fails for JSON.stringify wrapping error", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(err: Error) { console.log("Error:", JSON.stringify(err)); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("error");
+    });
+
+    it("fails for String() wrapping error", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(err: Error) { console.log("Error:", String(err)); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("error-stringify");
+    });
+
+    it("fails for ternary with sensitive value", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(shopDomain: string | null, fallback: string) {
+  console.log("Shop:", shopDomain ? shopDomain : fallback);
+}`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("sensitive-value");
+    });
+
+    it("fails for nullish coalescing with error", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(err: Error | undefined, defaultErr: Error) {
+  console.log("Error:", err ?? defaultErr);
+}`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("raw-error-arg");
+    });
+
+    it("fails for logical OR with sensitive value", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(shop: string | undefined, defaultShop: string) {
+  console.log("Shop:", shop || defaultShop);
+}`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("sensitive-value");
+    });
+
+    it("fails for parentheses wrapping sensitive value", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(email: string) { console.log("Contact:", (email)); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("sensitive-value");
+    });
+
+    it("fails for as cast wrapping sensitive value", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(domain: unknown) { console.log("Domain:", domain as string); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("sensitive-value");
+    });
+
+    it("passes for safe wrapped values", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(shopId: string | null, defaultId: string) {
+  console.log("Shop ID:", shopId ?? defaultId);
+}`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+  });
+
+  // =========================================================================
+  // Gap 3: Bare ${err} in template literals
+  // =========================================================================
+  describe("Gap 3: Bare error in template literals", () => {
+    it("fails for bare ${err} in console.log", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        "export function test(err: Error) { console.log(`Failed: ${err}`); }"
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("raw-error-arg");
+      expect(output).toContain("Bare error identifier");
+    });
+
+    it("fails for bare ${error} in console.error", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        "export function test(error: Error) { console.error(`Operation failed: ${error}`); }"
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("raw-error-arg");
+    });
+
+    it("fails for bare ${e} in console.warn", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        "export function test(e: Error) { console.warn(`Warning: ${e}`); }"
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("raw-error-arg");
+    });
+
+    it("fails for bare ${syncError} in console.log (ends with error)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        "export function test(syncError: Error) { console.log(`Sync failed: ${syncError}`); }"
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("raw-error-arg");
+    });
+
+    it("passes for ${toErrorCode(err)}", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `const toErrorCode = (e: Error) => e.name;
+export function test(err: Error) { console.log(\`Failed with code: \${toErrorCode(err)}\`); }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("passes for ${errorCount} (not an error-like identifier)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        "export function test(errorCount: number) { console.log(`Errors: ${errorCount}`); }"
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("passes for ${isError} (boolean flag prefix)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        "export function test(isError: boolean) { console.log(`Is error: ${isError}`); }"
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+  });
+
+  // =========================================================================
+  // Gap 4: Test file scanning for token-prefix and domain-literal only
+  // P1 fix: Now checks token VALUE - only flags real-looking 32+ hex tokens
+  // =========================================================================
+  describe("Gap 4: Test file scanning", () => {
+    it("fails for real-looking token in test file (32 hex chars)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      // Build real-looking token at test generation time (never committed to repo)
+      // This simulates what a developer might accidentally commit
+      const realLookingToken = "shpat_" + "a1b2c3d4e5f67890abcdef1234567890";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const token = "${realLookingToken}";
+export function test() { return token; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("token-prefix");
+      expect(output).toContain("Real-looking token");
+    });
+
+    it("allows synthetic tokens (short, repeated chars, contains test)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const shortToken = "shpat_1234567890";
+const repeatedToken = "shpat_${"a".repeat(32)}";
+const testToken = "shpat_test_token_1234567890123456";
+export function test() { return shortToken; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("does NOT fail for console.log with sensitive data in test file (logging rules skipped)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `export function test(shopDomain: string) { console.log("Shop:", shopDomain); }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("allows test mock domains like test-shop.myshopify.com", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const TEST_SHOP = "test-shop.myshopify.com";
+const EXAMPLE_SHOP = "example.myshopify.com";
+export function test() { return TEST_SHOP; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("fails for real-looking domain in test file (not in fake allowlist)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      // Build real-looking domain at test generation time (never committed to repo)
+      // This simulates what a developer might accidentally commit
+      const realLookingDomain = "bright" + "furniture" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "${realLookingDomain}";
+export function test() { return domain; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+      expect(output).toContain("Real-looking domain");
+    });
+
+    // P1 FAIL tests for specific real-looking domains (QA examples)
+    it("fails for acmewholesale.myshopify.com", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const domain = "acme" + "wholesale" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "${domain}"; export function test() { return domain; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for clearwater-wholesale.myshopify.com (prefix without boundary)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const domain = "clearwater" + "-wholesale" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "${domain}"; export function test() { return domain; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for brightfurniture-shop.myshopify.com (removed -shop$ rule)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const domain = "bright" + "furniture-shop" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "${domain}"; export function test() { return domain; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for customer-goods.myshopify.com (prefix needs boundary)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const domain = "customer" + "-goods" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "${domain}"; export function test() { return domain; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for log-cabin.myshopify.com (prefix needs boundary)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const domain = "log" + "-cabin" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "${domain}"; export function test() { return domain; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for urban-shop.myshopify.com (removed -shop$ rule)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const domain = "urban" + "-shop" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "${domain}"; export function test() { return domain; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for second real domain on line after fake domain", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      // Line has fake domain first, then real domain - both should be checked
+      const realDomain = "merchant" + "store" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domains = ["test-shop.myshopify.com", "${realDomain}"];
+export function test() { return domains; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    // PASS tests for fake domains
+    it("allows exact fake subdomain: test", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "test.myshopify.com"; export function test() { return domain; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("allows test- prefix with boundary", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "test-customer-goods.myshopify.com"; export function test() { return domain; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("allows test1 (prefix + digit boundary)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "test1.myshopify.com"; export function test() { return domain; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("allows s20- test suite prefix", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "s20-integration.myshopify.com"; export function test() { return domain; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    // P1 Round 4: FAIL tests for removed line-wide skips
+    it("fails for real domain on same line as template domain", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const realDomain = "clearwater" + "-wholesale" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domains = [\`\${shopId}.myshopify.com\`, "${realDomain}"];
+export function test() { return domains; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for real domain with quote-plus-operator concat on same line", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const realDomain = "clearwater" + "-wholesale" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const x = "prefix" + shopVar; const d = "${realDomain}";
+export function test() { return x + d; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for real domain on line containing .test(", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const realDomain = "clearwater" + "-wholesale" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `if (/pattern/.test(x)) { const d = "${realDomain}"; }
+export function test() { return d; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for real domain on line containing foo.test.ts path", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const realDomain = "clearwater" + "-wholesale" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `import { x } from "./foo.test.ts"; const d = "${realDomain}";
+export function test() { return d; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for ALL_CAPS domain without underscore (CLEARWATER)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "CLEARWATER.myshopify.com"; export function test() { return domain; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("allows ALL_CAPS constant with underscore (TEST_SHOP)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "TEST_SHOP.myshopify.com"; export function test() { return domain; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    // P2 Round 4: Token tests for fetch-header and URL/path cases
+    it("fails for real token in fetch header (not in regex)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      // Build real-looking token at test generation time
+      const realToken = "shpat_" + "a1b2c3d4e5f67890abcdef1234567890";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `fetch(url, { headers: { "X-Shopify-Access-Token": "${realToken}" } });
+export function test() { return true; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("token-prefix");
+    });
+
+    it("fails for real token in URL/path string (not in regex)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      // Build real-looking token at test generation time
+      const realToken = "shpat_" + "a1b2c3d4e5f67890abcdef1234567890";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const url = "/admin/api/2024-01/shop.json?token=${realToken}";
+export function test() { return url; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("token-prefix");
+    });
+
+    it("allows token in actual regex literal", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const pattern = /shpat_[a-f0-9]{32}/gi;
+export function test() { return pattern; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("allows token in RegExp constructor", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const pattern = new RegExp("shpat_[a-f0-9]{32}", "gi");
+export function test() { return pattern; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    // P2 Round 5: Token in URL path with trailing segment
+    it("fails for real token in URL path with trailing segment", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      // Build real-looking token at test generation time
+      const realToken = "shpat_" + "a1b2c3d4e5f67890abcdef1234567890";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const url = "/tokens/${realToken}/revoke";
+export function test() { return url; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("token-prefix");
+    });
+
+    // P1 Round 5: isValidShopDomain and escaped-regex tests
+    it("fails for isValidShopDomain with real domain (built by concat)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const realDomain = "clearwater" + "-wholesale" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `expect(isValidShopDomain("${realDomain}")).toBe(true);
+export function test() { return true; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("allows escaped-regex pattern (no literal domain)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const pattern = /^[a-z0-9-]+\\.myshopify\\.com$/;
+export function test() { return pattern; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("allows isValidShopDomain with fake domain", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `expect(isValidShopDomain("test-shop.myshopify.com")).toBe(true);
+export function test() { return true; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    // P3 Round 5: TLD boundary tests
+    it("fails for domain with fake TLD prefix (.testing)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const domain = "clearwater" + ".testing" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "${domain}"; export function test() { return domain; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for domain with suffix after TLD (.myshopify.com-evil)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "clearwater.myshopify.com-evil"; export function test() { return domain; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+  });
+
+  // =========================================================================
+  // Gap 5: No-mock-logger rule
+  // =========================================================================
+  describe("Gap 5: No-mock-logger rule", () => {
+    it("fails for vi.mock with log.server path", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "mock.test.ts"),
+        `import { vi } from "vitest";
+vi.mock("~/lib/log.server", () => ({
+  safeLog: vi.fn(),
+}));`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("logger mock violation");
+      expect(output).toContain("log.server");
+    });
+
+    it("fails for vi.mock with relative log.server path", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "mock.test.ts"),
+        `import { vi } from "vitest";
+vi.mock("../../lib/log.server", () => ({
+  safeLog: vi.fn(),
+}));`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("logger mock violation");
+      expect(output).toContain("log.server");
+    });
+
+    it("fails for vi.mock factory replacing safeLog", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "mock.test.ts"),
+        `import { vi } from "vitest";
+vi.mock("./utils", () => ({
+  safeLog: vi.fn(),
+  toErrorCode: vi.fn(),
+}));`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("logger mock violation");
+      expect(output).toContain("safeLog");
+    });
+
+    it("passes when test file uses console.log spy (not mocking logger)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "spy.test.ts"),
+        `import { vi } from "vitest";
+const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+  });
 });
