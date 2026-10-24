@@ -25,7 +25,10 @@ import {
   createReminderRule,
   deleteReminderRule,
   isReminderSendingEnabled,
+  isValidOffset,
   DAILY_SEND_CAP,
+  OFFSET_MIN,
+  OFFSET_MAX,
 } from "~/services/reminders.server";
 
 interface ReminderRule {
@@ -60,7 +63,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     getShopReminderRules(sql, shop.id),
   ]);
 
-  const env = (context as { cloudflare?: { env?: { RESEND_API_KEY?: string } } })
+  const env = (context as { cloudflare?: { env?: { RESEND_API_KEY?: string; RESEND_FROM_EMAIL?: string } } })
     .cloudflare?.env;
   const providerConfigured = isReminderSendingEnabled(env);
 
@@ -90,20 +93,22 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const formData = await request.formData();
   const intent = formData.get("intent") as string;
 
-  const env = (context as { cloudflare?: { env?: { RESEND_API_KEY?: string } } })
+  const env = (context as { cloudflare?: { env?: { RESEND_API_KEY?: string; RESEND_FROM_EMAIL?: string } } })
     .cloudflare?.env;
   const providerConfigured = isReminderSendingEnabled(env);
 
   try {
     switch (intent) {
       case "toggle_enabled": {
-        if (!providerConfigured) {
+        const enabled = formData.get("enabled") === "true";
+        // Always allow disabling, even if provider is not configured.
+        // Only block enabling when provider is not configured.
+        if (enabled && !providerConfigured) {
           return {
             success: false,
-            error: "Email reminders will be available soon",
+            error: "Email reminders will be available once the email provider is configured",
           };
         }
-        const enabled = formData.get("enabled") === "true";
         await updateShopReminderSettings(sql, shop.id, enabled);
         return { success: true, message: enabled ? "Reminders enabled" : "Reminders disabled" };
       }
@@ -115,6 +120,13 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
         if (isNaN(offsetDays)) {
           return { success: false, error: "Invalid offset days" };
+        }
+
+        if (!isValidOffset(offsetDays)) {
+          return {
+            success: false,
+            error: `Offset must be between ${OFFSET_MIN} and ${OFFSET_MAX} days`,
+          };
         }
 
         const updated = await updateReminderRule(sql, shop.id, ruleId, {
@@ -134,6 +146,13 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
         if (isNaN(offsetDays)) {
           return { success: false, error: "Invalid offset days" };
+        }
+
+        if (!isValidOffset(offsetDays)) {
+          return {
+            success: false,
+            error: `Offset must be between ${OFFSET_MIN} and ${OFFSET_MAX} days`,
+          };
         }
 
         const existingRules = await getShopReminderRules(sql, shop.id);
@@ -281,7 +300,7 @@ export default function RemindersSettingsPage() {
             <s-button
               variant={remindersEnabled ? "secondary" : "primary"}
               type="submit"
-              disabled={isSubmitting || !providerConfigured}
+              disabled={isSubmitting || (!remindersEnabled && !providerConfigured)}
             >
               {remindersEnabled ? "Disable Reminders" : "Enable Reminders"}
             </s-button>

@@ -18,8 +18,9 @@
  * }
  *
  * Gate behavior:
- * - When RESEND_API_KEY is missing: ack as no-op (no retry, no ReminderLog)
- *   This allows the reminder to fire again once a key is configured.
+ * - When RESEND_API_KEY or RESEND_FROM_EMAIL is missing: ack as no-op
+ *   (no retry, no ReminderLog). This allows the reminder to fire again
+ *   once both keys are configured.
  * - When caps are reached: ack as no-op
  * - When invoice is paid/cancelled: ack as no-op
  * - When buyer has no email (CUSTOMER_PII_FIELDS off): ack as no-op
@@ -116,7 +117,7 @@ export async function handleReminderSend(
     ruleId,
     offsetDays,
     timezone,
-    env as { RESEND_API_KEY?: string }
+    env as { RESEND_API_KEY?: string; RESEND_FROM_EMAIL?: string }
   );
 
   if (result.success) {
