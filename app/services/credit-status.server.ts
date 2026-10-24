@@ -21,6 +21,7 @@ import {
 } from "~/lib/metafields-contract";
 import { shopifyGraphQLRequest, type ShopifyClientResult } from "./shopify-client.server";
 import { hasOverdueInvoices } from "./overdue.server";
+import { safeLog, toErrorCode } from "~/lib/log.server";
 
 // Re-export HoldReasonCode for use by credit-status-recompute.server.ts
 export type { HoldReasonCode };
@@ -647,28 +648,28 @@ export async function updateCreditStatus(
   );
 
   if (!metafieldResult.success) {
-    console.error(
-      `[credit-status] Metafield write failed for ${buyerAccountId}:`,
-      metafieldResult.error
-    );
+    safeLog("error", "credit_status_metafield_write_failed", {
+      buyerAccountId,
+      err: toErrorCode(metafieldResult.error),
+    });
     return {
       success: true,
       metafieldSyncPending: true,
-      error: `Database updated but metafield sync failed: ${metafieldResult.error}`,
+      error: `metafield_sync_failed`,
     };
   }
 
   const userErrors = metafieldResult.data?.metafieldsSet?.userErrors ?? [];
   if (userErrors.length > 0) {
-    console.error(
-      `[credit-status] Metafield userErrors for ${buyerAccountId}:`,
-      JSON.stringify(userErrors)
-    );
+    safeLog("error", "credit_status_metafield_user_errors", {
+      buyerAccountId,
+      errorCount: userErrors.length,
+    });
     return {
       success: true,
       metafieldSyncPending: true,
       userErrors,
-      error: `Database updated but metafield had userErrors: ${userErrors.map(e => e.message).join("; ")}`,
+      error: `metafield_user_errors`,
     };
   }
 
@@ -838,32 +839,32 @@ export async function syncCreditStatusMetafield(
   );
 
   if (!metafieldResult.success) {
-    console.error(
-      `[credit-status] Metafield sync failed for ${buyerAccountId}:`,
-      metafieldResult.error
-    );
+    safeLog("error", "credit_status_metafield_sync_failed", {
+      buyerAccountId,
+      err: toErrorCode(metafieldResult.error),
+    });
     return {
       success: true,
       metafieldSyncPending: true,
-      error: `Metafield sync failed: ${metafieldResult.error}`,
+      error: `metafield_sync_failed`,
     };
   }
 
   const userErrors = metafieldResult.data?.metafieldsSet?.userErrors ?? [];
   if (userErrors.length > 0) {
-    console.error(
-      `[credit-status] Metafield userErrors for ${buyerAccountId}:`,
-      JSON.stringify(userErrors)
-    );
+    safeLog("error", "credit_status_metafield_user_errors", {
+      buyerAccountId,
+      errorCount: userErrors.length,
+    });
     return {
       success: true,
       metafieldSyncPending: true,
       userErrors,
-      error: `Metafield userErrors: ${userErrors.map(e => e.message).join("; ")}`,
+      error: `metafield_user_errors`,
     };
   }
 
-  // Clear syncPending and set metafieldSyncedAt only if syncVersion matches (no newer write occurred)
+  // Clear syncPending and set metafieldSyncedAt only if syncVersion matches
   const clearResult = await sql<{ id: string }[]>`
     UPDATE "BuyerAccount"
     SET "syncPending" = false, "metafieldSyncedAt" = NOW()

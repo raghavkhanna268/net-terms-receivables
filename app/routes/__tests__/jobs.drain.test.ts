@@ -51,20 +51,7 @@ vi.mock("~/services/drain/processor.server", () => ({
   },
 }));
 
-// Mock log.server for error logging tests
-vi.mock("~/lib/log.server", () => ({
-  safeLog: vi.fn(),
-  toErrorCode: vi.fn((err) => {
-    if (err && typeof err === "object" && "code" in err) {
-      return (err as { code: string }).code;
-    }
-    if (err instanceof Error) {
-      return err.name !== "Error" ? err.name : "error";
-    }
-    return "unknown";
-  }),
-}));
-
+// NOTE: log.server is NOT mocked - we test the real safeLog/toErrorCode
 // NOTE: reconcile.server is not mocked because reconcile is disabled (returns 501)
 
 describe("jobs.drain route", () => {
@@ -369,53 +356,83 @@ describe("jobs.drain route", () => {
   });
 
   describe("error logging (PII safety)", () => {
-    it("logs drain error with safeLog, not raw error", async () => {
-      const { safeLog } = await import("~/lib/log.server");
-      mockRunDrain.mockRejectedValueOnce(new TypeError("Connection failed"));
+    /**
+     * These tests use the REAL safeLog/toErrorCode (not mocked).
+     * They spy on console.error to capture actual output and verify:
+     * 1. Output contains expected event name and error code
+     * 2. Output does NOT contain PII (domain, email, free text)
+     */
 
-      const { action } = await import("../jobs.drain");
-      const request = createRequest();
-
-      await action(createActionArgs(request));
-
-      expect(safeLog).toHaveBeenCalledWith("error", "drain_error", {
-        err: "TypeError",
-      });
-
-      // Verify raw error was not logged to console
-      expect(consoleErrorSpy).not.toHaveBeenCalledWith(
-        expect.stringContaining("Connection failed")
+    it("logs drain error with error code, no raw message or PII", async () => {
+      // Error containing fictional domain, email, and free text
+      const piiError = new TypeError(
+        "Connection failed for shop pii-shop.myshopify.com, contact alice@example.com: sensitive details here"
       );
-    });
-
-    it("error log does not contain shop domain", async () => {
-      const { safeLog } = await import("~/lib/log.server");
-
-      // Error with shop domain in message
-      mockRunDrain.mockRejectedValueOnce(new Error("Failed for test.myshopify.com"));
+      mockRunDrain.mockRejectedValueOnce(piiError);
 
       const { action } = await import("../jobs.drain");
       const request = createRequest();
 
       await action(createActionArgs(request));
 
-      // Check safeLog was called
-      expect(safeLog).toHaveBeenCalled();
+      // Find the safeLog output in console.error calls
+      const errorCalls = consoleErrorSpy.mock.calls.map((c: unknown[]) => c[0]);
+      const drainErrorLog = errorCalls.find(
+        (c: unknown) => typeof c === "string" && c.includes("drain_error")
+      );
 
-      // Get all safeLog calls and verify none contain myshopify.com
-      const calls = (safeLog as ReturnType<typeof vi.fn>).mock.calls;
-      for (const call of calls) {
-        const callStr = JSON.stringify(call);
-        expect(callStr).not.toContain("myshopify.com");
-      }
+      expect(drainErrorLog).toBeDefined();
+
+      // Parse the JSON to verify structure
+      const parsed = JSON.parse(drainErrorLog as string);
+      expect(parsed.event).toBe("drain_error");
+      expect(parsed.err).toBe("TypeError");
+
+      // Verify NO PII leaked
+      expect(drainErrorLog).not.toContain("myshopify.com");
+      expect(drainErrorLog).not.toContain("pii-shop");
+      expect(drainErrorLog).not.toContain("alice@example.com");
+      expect(drainErrorLog).not.toContain("sensitive details");
+      expect(drainErrorLog).not.toContain("Connection failed");
     });
 
-    it("reconcile error uses safeLog with error code", async () => {
-      const { safeLog } = await import("~/lib/log.server");
+    it("drain error log redacts domain, email, and free text from error message", async () => {
+      // Error with multiple PII types in message
+      const piiError = new Error(
+        "Database error for merchant@shop.com at customer-store.myshopify.com: credit limit exceeded for John Doe"
+      );
+      mockRunDrain.mockRejectedValueOnce(piiError);
+
+      const { action } = await import("../jobs.drain");
+      const request = createRequest();
+
+      await action(createActionArgs(request));
+
+      // Capture all console.error output
+      const allOutput = consoleErrorSpy.mock.calls
+        .map((c: unknown[]) => String(c[0]))
+        .join("\n");
+
+      // Verify PII is NOT in any error output
+      expect(allOutput).not.toContain("merchant@shop.com");
+      expect(allOutput).not.toContain("customer-store.myshopify.com");
+      expect(allOutput).not.toContain("John Doe");
+      expect(allOutput).not.toContain("credit limit exceeded");
+
+      // Verify the drain_error event WAS logged with a code
+      expect(allOutput).toContain("drain_error");
+      expect(allOutput).toContain('"err"');
+    });
+
+    it("reconcile error uses error code, no raw message or PII", async () => {
+      // Error containing fictional domain, email, and free text
+      const piiError = new Error(
+        "Reconcile failed for admin@company.com at reconcile-shop.myshopify.com: internal auth token expired"
+      );
 
       // Mock the enqueueReconcileForAllShops to throw
       vi.doMock("~/services/drain/reconcile.server", () => ({
-        enqueueReconcileForAllShops: vi.fn().mockRejectedValue(new Error("Module error")),
+        enqueueReconcileForAllShops: vi.fn().mockRejectedValue(piiError),
       }));
 
       vi.resetModules();
@@ -424,12 +441,25 @@ describe("jobs.drain route", () => {
 
       await action(createActionArgs(request));
 
-      // Should have called safeLog for the error
-      expect(safeLog).toHaveBeenCalledWith(
-        "error",
-        "drain_reconcile_error",
-        expect.objectContaining({ err: expect.any(String) })
+      // Find the safeLog output in console.error calls
+      const errorCalls = consoleErrorSpy.mock.calls.map((c: unknown[]) => c[0]);
+      const reconcileErrorLog = errorCalls.find(
+        (c: unknown) => typeof c === "string" && c.includes("drain_reconcile_error")
       );
+
+      expect(reconcileErrorLog).toBeDefined();
+
+      // Parse the JSON to verify structure
+      const parsed = JSON.parse(reconcileErrorLog as string);
+      expect(parsed.event).toBe("drain_reconcile_error");
+      expect(parsed.err).toBe("error"); // Generic Error with name="Error" → "error"
+
+      // Verify NO PII leaked
+      expect(reconcileErrorLog).not.toContain("myshopify.com");
+      expect(reconcileErrorLog).not.toContain("reconcile-shop");
+      expect(reconcileErrorLog).not.toContain("admin@company.com");
+      expect(reconcileErrorLog).not.toContain("internal auth token");
+      expect(reconcileErrorLog).not.toContain("Reconcile failed");
     });
   });
 

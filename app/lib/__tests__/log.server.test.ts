@@ -329,6 +329,39 @@ describe("log.server", () => {
       const hash2 = await shopHash("test.myshopify.com");
       expect(hash1).toBe(hash2);
     });
+
+    it("matches exact 12-char hex format when logged", async () => {
+      const hash = await shopHash("test-shop.myshopify.com");
+      expect(hash).toMatch(/^[0-9a-f]{12}$/);
+    });
+  });
+
+  describe("safeLog Promise detection", () => {
+    it("throws when given an unawaited Promise for shopHash", () => {
+      expect(() => {
+        safeLog("info", "test_event", { shopHash: shopHash("test.myshopify.com") });
+      }).toThrow('safeLog received unawaited Promise for key "shopHash" - did you forget to await?');
+    });
+
+    it("throws descriptive error for any Promise value in allowlisted key", () => {
+      expect(() => {
+        safeLog("info", "test_event", { status: Promise.resolve("pending") });
+      }).toThrow('safeLog received unawaited Promise for key "status" - did you forget to await?');
+    });
+
+    it("works correctly with awaited shopHash", async () => {
+      const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const hash = await shopHash("test-shop.myshopify.com");
+      safeLog("info", "test_event", { shopHash: hash });
+      
+      const output = consoleLogSpy.mock.calls[0][0];
+      expect(output).toContain('"shopHash":"');
+      
+      const parsed = JSON.parse(output);
+      expect(parsed.shopHash).toMatch(/^[0-9a-f]{12}$/);
+      
+      consoleLogSpy.mockRestore();
+    });
   });
 
   describe("toErrorCode validation", () => {

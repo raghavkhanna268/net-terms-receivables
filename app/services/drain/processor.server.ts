@@ -317,18 +317,20 @@ async function executeBackstop(
 
     return null; // First-attempt: caller returns orderResult
   } catch (e) {
-    // ALL backstop errors are retryable so they reach DLQ (which writes backstop.failed)
-    const errorMsg = e instanceof Error ? e.message : String(e);
+    const errorCode = toErrorCode(e);
     const isRetryableError = e instanceof RetryableBackstopError;
 
-    console.warn(
-      `[backstop] ${context} ${isRetryableError ? "retryable" : "unexpected"} error for ${orderGid}: ${errorMsg}`
-    );
+    safeLog("warn", "backstop_error", {
+      orderGid,
+      err: errorCode,
+      retryable: isRetryableError,
+    });
 
     return {
       success: false,
       action: "skipped" as const,
-      error: `Backstop error: ${errorMsg}`,
+      error: errorCode,
+      errorCode,
       retryable: true,
     };
   }
@@ -607,15 +609,13 @@ async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResul
     piiMode
   );
 
-  // Best-effort counter increment after successful processing
-  // Wrapped in try/catch so a failed insert (e.g., migration not applied) never fails the message
   if (result.usedFallback && syncResult.success) {
     try {
       await incrementCustomerPiiAccessDeniedFallback(sql, message.shop);
     } catch (err) {
-      console.warn(
-        `[customer_pii_access_denied_fallback] counter increment failed: ${err instanceof Error ? err.message : String(err)}`
-      );
+      safeLog("warn", "customer_pii_access_denied_fallback_counter_failed", {
+        err: toErrorCode(err),
+      });
     }
   }
 
@@ -1010,7 +1010,6 @@ async function processSyncQueue(
 
     const handler = getSyncHandler(msg.message.topic);
 
-    // No handler registered - extend visibility and potentially DLQ
     if (!handler) {
       if (msg.read_ct >= config.noHandlerMaxReads) {
         await moveToDeadLetter(
@@ -1018,7 +1017,7 @@ async function processSyncQueue(
           S6_QUEUES.SYNC,
           msg.msg_id,
           msg.message,
-          `No handler registered for topic after ${msg.read_ct} reads: ${msg.message.topic}`
+          `permanent:no_handler`
         );
         result.deadLettered++;
       } else {
@@ -1165,7 +1164,6 @@ async function processBulkQueue(
 
     const handler = getBulkHandler(msg.message.topic);
 
-    // No handler - extend visibility (BULK_OPERATIONS_FINISH goes here for now)
     if (!handler) {
       if (msg.read_ct >= config.noHandlerMaxReads) {
         await moveToDeadLetter(
@@ -1173,7 +1171,7 @@ async function processBulkQueue(
           S6_QUEUES.BULK,
           msg.msg_id,
           msg.message,
-          `No handler registered for topic after ${msg.read_ct} reads: ${msg.message.topic}`
+          `permanent:no_handler`
         );
         result.deadLettered++;
       } else {

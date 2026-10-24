@@ -40,15 +40,10 @@ export function validateTimezone(timezone: string | null | undefined): string {
     return DEFAULT_TIMEZONE;
   }
 
-  // luxon's IANAZone.isValidZone is the authoritative check
   if (IANAZone.isValidZone(timezone)) {
     return timezone;
   }
 
-  // Log invalid timezone for observability but don't throw
-  console.warn(
-    `[aging-dates] Invalid timezone "${timezone}", falling back to ${DEFAULT_TIMEZONE}`
-  );
   return DEFAULT_TIMEZONE;
 }
 
