@@ -25,6 +25,7 @@ on:
           - offline-session-preflight
           - post-drain-aggregates
           - redriven-webhook-receipts
+          - s12-hold-coverage
           - s22-retention-purge-preview
       msg_ids:
         description: "Comma-separated pgmq msg_ids (e.g. 162,163); used by canary-orders-backstop and redriven-webhook-receipts"
@@ -32,7 +33,7 @@ on:
         default: "0"
         type: string
       since:
-        description: "ISO-8601 UTC timestamp, e.g. 2026-10-24T08:29:23Z (post-drain-aggregates, redriven-webhook-receipts baseline, hold-audit-s12)"
+        description: "ISO-8601 UTC timestamp, e.g. 2026-10-24T08:29:23Z (post-drain-aggregates, redriven-webhook-receipts baseline, hold-audit-s12, s12-hold-coverage sweep run time)"
         required: false
         default: "1970-01-01T00:00:00Z"
         type: string
