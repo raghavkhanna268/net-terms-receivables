@@ -71,6 +71,10 @@ const ALLOWED_KEY_PATTERNS: RegExp[] = [
   /^piiMode$/,
   /^holdState$/,
   /^bypass$/,
+  /^bulkType$/,
+  /^byteOffset$/,
+  /^ownerType$/,
+  /^lineCount$/,
 ];
 
 /**
@@ -90,6 +94,12 @@ const SENSITIVE_VALUE_PATTERNS: RegExp[] = [
 const REDACTED = "<redacted>";
 
 /**
+ * Pattern for valid error codes.
+ * Must start with a letter, contain only alphanumerics/underscores, max 64 chars.
+ */
+const SAFE_CODE_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+
+/**
  * Check if a field key is allowlisted.
  */
 function isAllowedKey(key: string): boolean {
@@ -104,11 +114,30 @@ function isSensitiveValue(value: string): boolean {
 }
 
 /**
+ * Check if a string is a safe error code.
+ * Must match safe pattern and not contain sensitive patterns.
+ */
+function isSafeCode(code: string): boolean {
+  return SAFE_CODE_PATTERN.test(code) && !isSensitiveValue(code);
+}
+
+const PROMISE_REDACTED = "<promise>";
+
+/**
  * Redact a value based on its type and content.
  */
 function redactValue(value: unknown, key: string): unknown {
   if (value === null || value === undefined) {
     return value;
+  }
+
+  // Detect unawaited Promises - common mistake with async functions like shopHash
+  if (value instanceof Promise || (typeof value === "object" && value !== null && "then" in value && typeof (value as { then: unknown }).then === "function")) {
+    // In test environment, throw to catch the bug immediately
+    if (process.env.NODE_ENV === "test" || process.env.VITEST) {
+      throw new Error(`safeLog received unawaited Promise for key "${key}" - did you forget to await?`);
+    }
+    return PROMISE_REDACTED;
   }
 
   if (typeof value === "boolean" || typeof value === "number") {
@@ -140,16 +169,17 @@ function redactValue(value: unknown, key: string): unknown {
  * Redact all fields in an object, keeping only allowlisted keys.
  * Non-allowlisted keys have all values redacted (including numbers, per #174 money rule).
  * Only booleans pass through for non-allowlisted keys.
+ * The `err` key is special: it is routed through toErrorCode to ensure only safe codes.
  */
 function redactFields(fields: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
 
   for (const [key, value] of Object.entries(fields)) {
-    if (isAllowedKey(key)) {
+    if (key === "err") {
+      result[key] = toErrorCode(value);
+    } else if (isAllowedKey(key)) {
       result[key] = redactValue(value, key);
     } else {
-      // Only booleans pass through for non-allowlisted keys
-      // Numbers are redacted (could be money amounts per #174)
       result[key] = typeof value === "boolean" ? value : REDACTED;
     }
   }
@@ -214,20 +244,6 @@ export function safeLog(
 }
 
 /**
- * Pattern for valid error codes.
- * Must start with a letter, contain only alphanumerics/underscores, max 64 chars.
- */
-const SAFE_CODE_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
-
-/**
- * Check if a string is a safe error code.
- * Must match safe pattern and not contain sensitive patterns.
- */
-function isSafeCode(code: string): boolean {
-  return SAFE_CODE_PATTERN.test(code) && !isSensitiveValue(code);
-}
-
-/**
  * Map an error to an error code for safe logging.
  *
  * Extracts code from error objects or maps known error types.
@@ -273,6 +289,7 @@ export function toErrorCode(err: unknown): string {
       if (msg.includes("unique constraint") || msg.includes("duplicate key")) return "pg_unique_violation";
       if (msg.includes("foreign key")) return "pg_foreign_key_violation";
       if (msg.includes("connection") && msg.includes("postgres")) return "pg_connection_error";
+      if (msg.includes("pgmq") || msg.includes("queue")) return "queue_error";
 
       if (err.name !== "Error" && isSafeCode(err.name)) {
         return err.name;

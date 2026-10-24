@@ -21,6 +21,7 @@
 import type { Sql } from "~/lib/db-light.server";
 import type { SyncResult } from "~/services/sync/types";
 import { markWebhookProcessed } from "~/services/sync/company.server";
+import { safeLog, shopHash } from "~/lib/log.server";
 import { adminGraphQL } from "./admin-client.server";
 import {
   BULK_COMPANIES_QUERY,
@@ -99,9 +100,11 @@ export async function startReconcileBulkOperation(
     parsed.bulkOperationId
   );
 
-  console.log(
-    `[reconcile] Started ${kind} bulk operation for ${shop}: ${parsed.bulkOperationId}`
-  );
+  safeLog("info", "reconcile_bulk_operation_started", {
+    shopHash: await shopHash(shop),
+    bulkType: kind,
+    operationId: parsed.bulkOperationId,
+  });
 
   return {
     success: true,
@@ -134,7 +137,9 @@ export async function enqueueReconcileOrders(
 
   await sql`SELECT pgmq.send('s6_sync', ${sql.json(message)})`;
 
-  console.log(`[reconcile] Enqueued RECONCILE_ORDERS for ${shop}`);
+  safeLog("info", "reconcile_orders_enqueued", {
+    shopHash: await shopHash(shop),
+  });
   return true;
 }
 

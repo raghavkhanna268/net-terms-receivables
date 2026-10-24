@@ -18,23 +18,6 @@ app/root.tsx:raw-error-arg:1
 app/routes/app.imports.tsx:shop-interpolation:1
 
 # =============================================================================
-# App services - shop interpolation and raw errors
-# =============================================================================
-# plan.server.ts: 10 violations (${shop}, ${shopDomain}, ${activeSubscription.name})
-app/services/plan.server.ts:shop-interpolation:10
-app/services/plan.server.ts:raw-capture:2
-app/services/plan.server.ts:raw-error-arg:2
-
-# bulk-jsonl-processor.server.ts: 3 console.log with ${shop} interpolation
-app/services/sync/bulk-jsonl-processor.server.ts:shop-interpolation:3
-
-# reconcile-handlers.server.ts: 2 console.log with ${shop} interpolation
-app/services/drain/reconcile-handlers.server.ts:shop-interpolation:2
-
-# order.server.ts: 4 raw captureException(error) without tags
-app/services/sync/order.server.ts:raw-capture:4
-
-# =============================================================================
 # Scripts - shop interpolation and domain literals
 # =============================================================================
 # refresh-offline-token.ts: 1 help text with myshopify.com example

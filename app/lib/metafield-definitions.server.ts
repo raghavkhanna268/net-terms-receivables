@@ -12,6 +12,7 @@
  */
 
 import { METAFIELD } from "./metafields-contract";
+import { safeLog, toErrorCode } from "./log.server";
 
 /**
  * Minimal type for the admin GraphQL client.
@@ -206,20 +207,22 @@ export async function ensureMetafieldDefinitions(
       results.push(result);
 
       if (result.error) {
-        console.error(
-          `[metafieldDefinitions] Failed to create ${definition.namespace}:${definition.key} for ${ownerType}: ${result.error}`,
-        );
+        safeLog("error", "metafield_definition_create_failed", {
+          ownerType,
+          err: toErrorCode(result.error),
+        });
         errors.push(
           `${definition.namespace}:${definition.key}@${ownerType}: ${result.error}`,
         );
       } else if (result.created) {
-        console.log(
-          `[metafieldDefinitions] Created ${definition.namespace}:${definition.key} for ${ownerType} (id: ${result.id})`,
-        );
+        safeLog("info", "metafield_definition_created", {
+          ownerType,
+          definitionId: result.id,
+        });
       } else if (result.alreadyExists) {
-        console.log(
-          `[metafieldDefinitions] ${definition.namespace}:${definition.key} for ${ownerType} already exists`,
-        );
+        safeLog("info", "metafield_definition_exists", {
+          ownerType,
+        });
       }
     }
   }

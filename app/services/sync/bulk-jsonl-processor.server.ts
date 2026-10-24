@@ -23,6 +23,7 @@
 import type { Sql } from "~/lib/db-light.server";
 import type { BulkMessage } from "~/lib/pgmq.server";
 import type { SyncResult } from "./types";
+import { safeLog, toErrorCode } from "~/lib/log.server";
 import {
   parseCompanyBulkJsonl,
   parseOrderBulkJsonl,
@@ -671,7 +672,7 @@ export async function processOrderLines(
         await incrementOrderOutstandingMissing(sql, shopRow.domain, outstandingMissingCount);
       }
     } catch (err) {
-      console.warn(`[bulk-jsonl] Failed to increment order_outstanding_missing: ${err}`);
+      safeLog("warn", "bulk_order_outstanding_missing_counter_failed", { shopId, err: toErrorCode(err) });
     }
   }
 
@@ -843,7 +844,7 @@ export async function processBulkOperation(
     return {
       success: false,
       action: "skipped",
-      error: `Shop not found: ${shop}`,
+      error: "shop_not_found",
       status: "error",
       errorType: "permanent", // Bad data, shop doesn't exist
     };
@@ -969,9 +970,12 @@ export async function processBulkOperation(
       bulkOperationId
     );
 
-    console.log(`[bulk-jsonl] Completed ${bulkType} for ${shop}: EOF reached`);
+    safeLog("info", "bulk_jsonl_completed", {
+      shopId,
+      bulkType,
+      status: "eof_reached",
+    });
 
-    // Check if we should chain to orders
     const metadata = await getBulkOperationMetadata(sql, bulkOperationId);
     const chainToOrders =
       metadata?.origin === "reconcile" &&
@@ -1120,11 +1124,13 @@ export async function processBulkOperation(
       bulkOperationId
     );
 
-    console.log(
-      `[bulk-jsonl] Completed ${bulkType} for ${shop}: ${linesToProcess.length} lines, ${totalUpserted} upserted`
-    );
+    safeLog("info", "bulk_jsonl_completed", {
+      shopId,
+      bulkType,
+      lineCount: linesToProcess.length,
+      upsertedCount: totalUpserted,
+    });
 
-    // Check if we should chain to orders
     const metadata = await getBulkOperationMetadata(sql, bulkOperationId);
     const chainToOrders =
       metadata?.origin === "reconcile" &&
@@ -1147,11 +1153,14 @@ export async function processBulkOperation(
   // Reset failure count on successful progress
   await resetBulkOperationFailureCount(sql, bulkOperationId);
 
-  console.log(
-    `[bulk-jsonl] Progress ${bulkType} for ${shop}: offset=${newByteOffset}, lines=${linesToProcess.length}, upserted=${totalUpserted}`
-  );
+  safeLog("info", "bulk_jsonl_progress", {
+    shopId,
+    bulkType,
+    byteOffset: newByteOffset,
+    lineCount: linesToProcess.length,
+    upsertedCount: totalUpserted,
+  });
 
-  // Return progress status
   return {
     success: true,
     action: "updated",

@@ -270,7 +270,7 @@ describeWithDb("processor backstop integration (DB-backed)", () => {
         // Attempt 1 should return retryable (not archived)
         expect(result1.success).toBe(false);
         expect(result1.retryable).toBe(true);
-        expect(result1.error).toContain("Backstop error");
+        expect(result1.error).toBe("RetryableBackstopError");
 
         // Verify: No backstop_processed_orders row (error before claim completion)
         const [afterAttempt1] = await sql<{ action: string }[]>`
@@ -421,7 +421,7 @@ describeWithDb("processor backstop integration (DB-backed)", () => {
         // KEY ASSERTION: Error should return retryable, NOT success
         expect(result.success).toBe(false);
         expect(result.retryable).toBe(true);
-        expect(result.error).toContain("Backstop error");
+        expect(result.error).toBe("RetryableBackstopError");
 
       } finally {
         await sql`DELETE FROM backstop_processed_orders WHERE order_gid = ${orderGid}`;

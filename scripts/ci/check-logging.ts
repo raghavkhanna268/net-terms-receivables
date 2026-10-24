@@ -566,6 +566,10 @@ function checkArgument(
  */
 function isErrorLikeIdentifier(name: string): boolean {
   const lower = name.toLowerCase();
+  // Exclude boolean indicator prefixes (isRetryableError, hasError, etc.)
+  if (/^(is|has|was|can|should|will|did)/.test(lower)) {
+    return false;
+  }
   return (
     lower === "err" ||
     lower === "error" ||

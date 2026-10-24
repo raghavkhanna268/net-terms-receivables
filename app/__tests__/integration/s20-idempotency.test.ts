@@ -280,7 +280,7 @@ describeWithDb("S20 Idempotency: recordAndEnqueueSync atomicity", () => {
 
     expect(result.status).toBe("error");
     if (result.status === "error") {
-      expect(result.error.message).toContain("Simulated pgmq failure");
+      expect(result.code).toBe("queue_error");
     }
 
     // Verify 0 receipts (rolled back)
@@ -493,13 +493,13 @@ describeWithDb("S20 Idempotency: Full webhook route with HMAC-signed request", (
       payload: { admin_graphql_api_id: "gid://shopify/Order/123" },
     });
 
-    // Action should throw when enqueue fails
+    // Action should throw when enqueue fails - error code is queue_error
     const url = new URL(request.url);
     await expect(
       requestContext.run({ getSql: () => sql }, () =>
         action({ request, params: {}, context: {} as never, url, pattern: "/webhooks/orders" })
       )
-    ).rejects.toThrow("Simulated pgmq failure");
+    ).rejects.toThrow("queue_error");
 
     // Verify 0 receipts (rolled back)
     const receipts = await sql`

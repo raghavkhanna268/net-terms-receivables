@@ -36,7 +36,8 @@ import {
 } from "~/lib/invoice-eligibility";
 import { incrementOrderOutstandingMissing } from "../drain/reconcile-handlers.server";
 import { enqueueRecomputeForInvoice } from "../credit-status-recompute.server";
-import { captureException } from "~/lib/sentry";
+import { captureExceptionWithTags } from "~/lib/sentry";
+import { safeLog, toErrorCode } from "~/lib/log.server";
 
 /**
  * Process an Order webhook event.
@@ -85,7 +86,8 @@ export async function processOrderWebhook(
     return {
       success: false,
       action: "skipped",
-      error: `Shop not found: ${shopDomain}`,
+      error: "shop_not_found",
+      errorCode: "shop_not_found",
     };
   }
 
@@ -128,23 +130,19 @@ export async function processOrderWebhook(
     );
     const result = await upsertInvoice(sql, invoiceData);
 
-    // Best-effort diagnostic counter increment - never fails the invoice write
     if (outstandingMissing) {
       try {
         await incrementOrderOutstandingMissing(sql, shopDomain);
       } catch (err) {
-        console.warn(
-          `[order.server] Failed to increment order_outstanding_missing counter: ${err instanceof Error ? err.message : String(err)}`
-        );
+        safeLog("warn", "order_outstanding_missing_counter_failed", { shopId, err: toErrorCode(err) });
       }
     }
 
-    // Enqueue credit status recompute (event-driven)
     if (result.entityId) {
       try {
         await enqueueRecomputeForInvoice(sql, result.entityId);
       } catch (err) {
-        captureException(err);
+        captureExceptionWithTags(err, { shopId });
       }
     }
 
@@ -156,18 +154,16 @@ export async function processOrderWebhook(
   const eligibility = await checkOrderEligibility(sql, order, context);
 
   if (!eligibility.eligible) {
-    // Check if this is a retryable failure (no_buyer_account)
     if (eligibility.retryable) {
-      // Do NOT mark webhook as processed - let it retry
       return {
         success: false,
         action: "skipped",
         error: eligibility.explanation,
+        errorCode: eligibility.reason,
         retryable: true,
       };
     }
 
-    // Permanent skip (retail, ineligible status)
     await markWebhookProcessed(sql, webhookId, topic, order.id, shopDomain);
     return {
       success: true,
@@ -185,23 +181,19 @@ export async function processOrderWebhook(
   );
   const result = await upsertInvoice(sql, invoiceData);
 
-  // Best-effort diagnostic counter increment - never fails the invoice write
   if (outstandingMissing) {
     try {
       await incrementOrderOutstandingMissing(sql, shopDomain);
     } catch (err) {
-      console.warn(
-        `[order.server] Failed to increment order_outstanding_missing counter: ${err instanceof Error ? err.message : String(err)}`
-      );
+      safeLog("warn", "order_outstanding_missing_counter_failed", { shopId, err: toErrorCode(err) });
     }
   }
 
-  // Enqueue credit status recompute (event-driven)
   if (result.entityId) {
     try {
       await enqueueRecomputeForInvoice(sql, result.entityId);
     } catch (err) {
-      captureException(err);
+      captureExceptionWithTags(err, { shopId });
     }
   }
 
@@ -323,16 +315,13 @@ export function mapOrderToInvoiceWithEligibility(
             status = "open";
           }
         } else {
-          // Field missing - log warning and set flag for diagnostic counter
           outstandingMissing = true;
           orderOutstandingMissingCounter++;
-          console.warn(
-            `[order.server] totalOutstandingSet missing for order ${order.id} ` +
-              `(status: ${order.displayFinancialStatus}). ` +
-              `Using ${existingInvoice !== undefined ? "existing" : "total"} value.`
-          );
-          // New invoice: use total, status "open"
-          // Existing invoice: keep BOTH existing outstanding AND existing status
+          safeLog("warn", "order_total_outstanding_missing", {
+            orderGid: order.id,
+            status: order.displayFinancialStatus,
+            usedFallback: existingInvoice !== undefined,
+          });
           if (existingInvoice !== undefined) {
             outstanding = existingInvoice.outstanding;
             status = existingInvoice.status;
@@ -428,9 +417,11 @@ export function mapOrderToInvoice(
           status = parseFloat(outstanding) === 0 ? "paid" : "open";
         } else {
           orderOutstandingMissingCounter++;
-          console.warn(
-            `[order.server] totalOutstandingSet missing for order ${order.id} (legacy mapper)`
-          );
+          safeLog("warn", "order_total_outstanding_missing", {
+            orderGid: order.id,
+            status: order.displayFinancialStatus,
+            usedFallback: false,
+          });
           outstanding = total;
           status = "open";
         }
@@ -576,11 +567,10 @@ async function cancelInvoice(
     };
   }
 
-  // Enqueue credit status recompute (event-driven)
   try {
     await enqueueRecomputeForInvoice(sql, result.id);
   } catch (err) {
-    captureException(err);
+    captureExceptionWithTags(err, { shopId });
   }
 
   return {
@@ -616,11 +606,10 @@ async function markInvoicePaid(
     };
   }
 
-  // Enqueue credit status recompute (event-driven)
   try {
     await enqueueRecomputeForInvoice(sql, result.id);
   } catch (err) {
-    captureException(err);
+    captureExceptionWithTags(err, { shopId });
   }
 
   return {

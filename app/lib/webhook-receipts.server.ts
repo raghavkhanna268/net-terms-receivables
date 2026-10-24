@@ -16,6 +16,7 @@
  */
 
 import type { Sql } from "./db-light.server";
+import { toErrorCode } from "./log.server";
 
 /**
  * Record a webhook receipt at the edge (INSIDE a transaction).
@@ -95,7 +96,7 @@ export function parseTriggeredAt(request: Request): Date | null {
 export type RecordAndEnqueueResult =
   | { status: "enqueued"; msgId: string }
   | { status: "duplicate" }
-  | { status: "error"; error: Error };
+  | { status: "error"; code: string };
 
 /**
  * S20 atomic receipt+enqueue helper for sync webhooks.
@@ -164,6 +165,6 @@ export async function recordAndEnqueueSync(
 
     return result;
   } catch (err) {
-    return { status: "error", error: err instanceof Error ? err : new Error(String(err)) };
+    return { status: "error", code: toErrorCode(err) };
   }
 }
