@@ -20,7 +20,7 @@ vi.mock("../payment-customization-registration.server", () => ({
 }));
 
 const mockSqlQuery = Object.assign(
-  vi.fn().mockResolvedValue({ count: 1 }),
+  vi.fn().mockResolvedValue([]),
   { json: (v: unknown) => JSON.stringify(v) }
 );
 vi.mock("../request-context.server", () => ({
@@ -30,12 +30,14 @@ vi.mock("../request-context.server", () => ({
 import { ensureMetafieldDefinitions } from "../metafield-definitions.server";
 import { ensureValidation } from "../validation-registration.server";
 import { ensurePaymentCustomization } from "../payment-customization-registration.server";
+import { getRequestSql } from "../request-context.server";
 
 const mockEnsureMetafieldDefinitions =
   ensureMetafieldDefinitions as ReturnType<typeof vi.fn>;
 const mockEnsureValidation = ensureValidation as ReturnType<typeof vi.fn>;
 const mockEnsurePaymentCustomization =
   ensurePaymentCustomization as ReturnType<typeof vi.fn>;
+const mockGetRequestSql = getRequestSql as ReturnType<typeof vi.fn>;
 
 /**
  * A fake ctx class whose waitUntil method reads `this`.
@@ -54,12 +56,20 @@ class ThisDependentCtx {
   }
 }
 
+const createMockAdmin = () => ({
+  graphql: vi.fn().mockResolvedValue({
+    json: () => Promise.resolve({ data: { shop: { ianaTimezone: "America/New_York" } } }),
+  }),
+});
+
 describe("after-auth", () => {
   beforeEach(() => {
     _resetSetupCacheForTesting();
     vi.clearAllMocks();
+    mockSqlQuery.mockResolvedValue([]);
     mockEnsureMetafieldDefinitions.mockResolvedValue([]);
     mockEnsurePaymentCustomization.mockResolvedValue({ id: "pc-123", created: false });
+    mockGetRequestSql.mockReturnValue(mockSqlQuery);
   });
 
   afterEach(() => {
@@ -74,8 +84,9 @@ describe("after-auth", () => {
       });
       mockEnsureValidation.mockReturnValue(setupPromise);
 
-      const mockAdmin = { graphql: vi.fn() };
-      const mockWaitUntil = vi.fn();
+      const mockAdmin = createMockAdmin();
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
       runAfterAuth(
         "test-shop.myshopify.com",
@@ -83,8 +94,10 @@ describe("after-auth", () => {
         mockWaitUntil,
       );
 
-      expect(mockWaitUntil).toHaveBeenCalledTimes(1);
+      expect(mockWaitUntil).toHaveBeenCalled();
       expect(mockWaitUntil).toHaveBeenCalledWith(expect.any(Promise));
+
+      await Promise.allSettled(waitUntilPromises);
 
       await vi.waitFor(() => {
         expect(mockEnsureValidation).toHaveBeenCalledWith(mockAdmin);
@@ -98,8 +111,9 @@ describe("after-auth", () => {
       });
       mockEnsureValidation.mockReturnValue(setupPromise);
 
-      const mockAdmin = { graphql: vi.fn() };
-      const mockWaitUntil = vi.fn();
+      const mockAdmin = createMockAdmin();
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
       runAfterAuth(
         "test-shop.myshopify.com",
@@ -110,38 +124,93 @@ describe("after-auth", () => {
       expect(_isShopSetupComplete("test-shop.myshopify.com")).toBe(false);
 
       resolveSetup();
+      await Promise.allSettled(waitUntilPromises);
+
       await vi.waitFor(() => {
         expect(_isShopSetupComplete("test-shop.myshopify.com")).toBe(true);
       });
     });
 
-    it("skips setup for already-completed shop", async () => {
+    it("skips setup for already-completed shop when clear returns no row", async () => {
       mockEnsureValidation.mockResolvedValue({
         id: "gid://shopify/Validation/123",
         created: true,
       });
+      mockSqlQuery.mockResolvedValue([]);
 
-      const mockAdmin = { graphql: vi.fn() };
-      const mockWaitUntil = vi.fn();
+      const mockAdmin = createMockAdmin();
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
       runAfterAuth(
         "test-shop.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
+
+      await Promise.allSettled(waitUntilPromises);
 
       await vi.waitFor(() => {
         expect(_isShopSetupComplete("test-shop.myshopify.com")).toBe(true);
       });
 
+      waitUntilPromises.length = 0;
+
       runAfterAuth(
         "test-shop.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
 
-      expect(mockWaitUntil).toHaveBeenCalledTimes(1);
+      await Promise.allSettled(waitUntilPromises);
+
       expect(mockEnsureValidation).toHaveBeenCalledTimes(1);
+    });
+
+    it("re-runs setup when clear returns a row (cross-isolate reinstall)", async () => {
+      mockEnsureValidation.mockResolvedValue({
+        id: "gid://shopify/Validation/123",
+        created: true,
+      });
+      mockSqlQuery.mockResolvedValue([]);
+
+      const mockAdmin = createMockAdmin();
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
+
+      runAfterAuth(
+        "reinstall-shop.myshopify.com",
+        mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
+      );
+
+      await Promise.allSettled(waitUntilPromises);
+
+      await vi.waitFor(() => {
+        expect(_isShopSetupComplete("reinstall-shop.myshopify.com")).toBe(true);
+      });
+
+      expect(mockEnsureMetafieldDefinitions).toHaveBeenCalledTimes(1);
+      expect(mockEnsureValidation).toHaveBeenCalledTimes(1);
+      expect(mockEnsurePaymentCustomization).toHaveBeenCalledTimes(1);
+
+      waitUntilPromises.length = 0;
+      mockSqlQuery.mockResolvedValueOnce([{ id: "shop-123" }]);
+
+      runAfterAuth(
+        "reinstall-shop.myshopify.com",
+        mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
+      );
+
+      await Promise.allSettled(waitUntilPromises);
+
+      await vi.waitFor(() => {
+        expect(mockEnsureMetafieldDefinitions).toHaveBeenCalledTimes(2);
+        expect(mockEnsureValidation).toHaveBeenCalledTimes(2);
+        expect(mockEnsurePaymentCustomization).toHaveBeenCalledTimes(2);
+        expect(_isShopSetupComplete("reinstall-shop.myshopify.com")).toBe(true);
+      });
     });
 
     it("does not throw on ensureValidation failure", async () => {
@@ -150,8 +219,9 @@ describe("after-auth", () => {
         .mockImplementation(() => {});
       mockEnsureValidation.mockRejectedValue(new Error("API error"));
 
-      const mockAdmin = { graphql: vi.fn() };
-      const mockWaitUntil = vi.fn();
+      const mockAdmin = createMockAdmin();
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
       expect(() =>
         runAfterAuth(
@@ -161,11 +231,11 @@ describe("after-auth", () => {
         ),
       ).not.toThrow();
 
+      await Promise.allSettled(waitUntilPromises);
+
       await vi.waitFor(() => {
-        // With separate try/catch blocks, each step logs its own error
         expect(consoleSpy).toHaveBeenCalledWith(
-          expect.stringContaining("[afterAuth] Failed to ensure validation for"),
-          expect.any(Error),
+          expect.stringContaining("[afterAuth] validation_registration_failed"),
         );
       });
 
@@ -186,20 +256,25 @@ describe("after-auth", () => {
           created: true,
         });
 
-      const mockAdmin = { graphql: vi.fn() };
-      const mockWaitUntil = vi.fn();
+      const mockAdmin = createMockAdmin();
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
       runAfterAuth(
         "retry-shop.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
+
+      await Promise.allSettled(waitUntilPromises);
 
       await vi.waitFor(() => {
         expect(consoleSpy).toHaveBeenCalled();
+        expect(_isShopSetupComplete("retry-shop.myshopify.com")).toBe(false);
+        expect(_isShopSetupInFlight("retry-shop.myshopify.com")).toBe(false);
       });
 
-      expect(_isShopSetupComplete("retry-shop.myshopify.com")).toBe(false);
+      waitUntilPromises.length = 0;
 
       runAfterAuth(
         "retry-shop.myshopify.com",
@@ -207,12 +282,13 @@ describe("after-auth", () => {
         mockWaitUntil,
       );
 
+      await Promise.allSettled(waitUntilPromises);
+
       await vi.waitFor(() => {
         expect(_isShopSetupComplete("retry-shop.myshopify.com")).toBe(true);
+        expect(mockEnsureValidation).toHaveBeenCalledTimes(2);
       });
 
-      expect(mockEnsureValidation).toHaveBeenCalledTimes(2);
-      expect(mockWaitUntil).toHaveBeenCalledTimes(2);
       consoleSpy.mockRestore();
     });
 
@@ -222,8 +298,9 @@ describe("after-auth", () => {
         created: true,
       });
 
-      const mockAdmin = { graphql: vi.fn() };
-      const mockWaitUntil = vi.fn();
+      const mockAdmin = createMockAdmin();
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
       runAfterAuth(
         "shop-a.myshopify.com",
@@ -236,13 +313,13 @@ describe("after-auth", () => {
         mockWaitUntil,
       );
 
+      await Promise.allSettled(waitUntilPromises);
+
       await vi.waitFor(() => {
         expect(mockEnsureValidation).toHaveBeenCalledTimes(2);
+        expect(_isShopSetupComplete("shop-a.myshopify.com")).toBe(true);
+        expect(_isShopSetupComplete("shop-b.myshopify.com")).toBe(true);
       });
-
-      expect(_isShopSetupComplete("shop-a.myshopify.com")).toBe(true);
-      expect(_isShopSetupComplete("shop-b.myshopify.com")).toBe(true);
-      expect(mockWaitUntil).toHaveBeenCalledTimes(2);
     });
 
     it("works with bound waitUntil (this-dependent ctx)", async () => {
@@ -251,17 +328,18 @@ describe("after-auth", () => {
         created: true,
       });
 
-      const mockAdmin = { graphql: vi.fn() };
+      const mockAdmin = createMockAdmin();
       const ctx = new ThisDependentCtx();
 
-      // Pass bound waitUntil - this is how app.tsx should call it
       runAfterAuth(
         "bound-shop.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         (p) => ctx.waitUntil(p),
       );
 
-      expect(ctx.capturedPromises).toHaveLength(1);
+      expect(ctx.capturedPromises.length).toBeGreaterThan(0);
+
+      await Promise.all(ctx.capturedPromises);
 
       await vi.waitFor(() => {
         expect(_isShopSetupComplete("bound-shop.myshopify.com")).toBe(true);
@@ -269,16 +347,18 @@ describe("after-auth", () => {
     });
 
     it("throws when waitUntil is passed unbound (loses this)", () => {
+      mockGetRequestSql.mockImplementationOnce(() => {
+        throw new Error("No request context");
+      });
+
       mockEnsureValidation.mockResolvedValue({
         id: "gid://shopify/Validation/123",
         created: true,
       });
 
-      const mockAdmin = { graphql: vi.fn() };
+      const mockAdmin = createMockAdmin();
       const ctx = new ThisDependentCtx();
 
-      // Pass unbound waitUntil - this simulates the bug that causes
-      // "Illegal invocation" on workerd (here it throws due to lost this)
       const unboundWaitUntil = ctx.waitUntil;
 
       expect(() =>
@@ -297,10 +377,20 @@ describe("after-auth", () => {
       });
       mockEnsureValidation.mockReturnValue(setupPromise);
 
-      const mockAdmin = { graphql: vi.fn() };
-      const mockWaitUntil = vi.fn();
+      const mockAdmin = createMockAdmin();
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
-      // Simulate concurrent first loads
+      runAfterAuth(
+        "concurrent-shop.myshopify.com",
+        mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
+      );
+
+      await vi.waitFor(() => {
+        expect(_isShopSetupInFlight("concurrent-shop.myshopify.com")).toBe(true);
+      });
+
       runAfterAuth(
         "concurrent-shop.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
@@ -311,40 +401,25 @@ describe("after-auth", () => {
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
-      runAfterAuth(
-        "concurrent-shop.myshopify.com",
-        mockAdmin as Parameters<typeof runAfterAuth>[1],
-        mockWaitUntil,
-      );
 
-      // But waitUntil should be called for each concurrent request
-      expect(mockWaitUntil).toHaveBeenCalledTimes(3);
-      // All should receive the same promise
-      const firstPromise = mockWaitUntil.mock.calls[0][0];
-      expect(mockWaitUntil.mock.calls[1][0]).toBe(firstPromise);
-      expect(mockWaitUntil.mock.calls[2][0]).toBe(firstPromise);
+      await new Promise((r) => setTimeout(r, 10));
 
-      // Shop should be in-flight
-      expect(_isShopSetupInFlight("concurrent-shop.myshopify.com")).toBe(true);
       expect(_isShopSetupComplete("concurrent-shop.myshopify.com")).toBe(false);
 
-      // Wait for ensureMetafieldDefinitions to resolve before checking ensureValidation
       await vi.waitFor(() => {
         expect(mockEnsureValidation).toHaveBeenCalledTimes(1);
       });
 
-      // Should only call metafield definitions once too
       expect(mockEnsureMetafieldDefinitions).toHaveBeenCalledTimes(1);
 
-      // Complete setup
       resolveSetup();
+
+      await Promise.allSettled(waitUntilPromises);
 
       await vi.waitFor(() => {
         expect(_isShopSetupComplete("concurrent-shop.myshopify.com")).toBe(true);
+        expect(_isShopSetupInFlight("concurrent-shop.myshopify.com")).toBe(false);
       });
-
-      // In-flight should be cleared
-      expect(_isShopSetupInFlight("concurrent-shop.myshopify.com")).toBe(false);
     });
 
     it("clears in-flight on failure and allows retry", async () => {
@@ -358,31 +433,32 @@ describe("after-auth", () => {
       });
       mockEnsureValidation.mockReturnValueOnce(failingPromise);
 
-      const mockAdmin = { graphql: vi.fn() };
-      const mockWaitUntil = vi.fn();
+      const mockAdmin = createMockAdmin();
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
-      // First load starts setup
       runAfterAuth(
         "failing-concurrent.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
 
-      expect(_isShopSetupInFlight("failing-concurrent.myshopify.com")).toBe(true);
+      await vi.waitFor(() => {
+        expect(_isShopSetupInFlight("failing-concurrent.myshopify.com")).toBe(true);
+      });
 
-      // Fail the setup
       rejectSetup(new Error("API error"));
+
+      await Promise.allSettled(waitUntilPromises);
 
       await vi.waitFor(() => {
         expect(consoleSpy).toHaveBeenCalled();
       });
 
-      // In-flight should be cleared
       expect(_isShopSetupInFlight("failing-concurrent.myshopify.com")).toBe(false);
-      // Shop not marked complete
       expect(_isShopSetupComplete("failing-concurrent.myshopify.com")).toBe(false);
 
-      // Second attempt should trigger new ensureValidation
+      waitUntilPromises.length = 0;
       mockEnsureValidation.mockResolvedValueOnce({
         id: "gid://shopify/Validation/123",
         created: true,
@@ -393,6 +469,8 @@ describe("after-auth", () => {
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
+
+      await Promise.allSettled(waitUntilPromises);
 
       await vi.waitFor(() => {
         expect(_isShopSetupComplete("failing-concurrent.myshopify.com")).toBe(true);
@@ -408,14 +486,17 @@ describe("after-auth", () => {
         created: true,
       });
 
-      const mockAdmin = { graphql: vi.fn() };
-      const mockWaitUntil = vi.fn();
+      const mockAdmin = createMockAdmin();
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
       runAfterAuth(
         "reinstall-test.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
+
+      await Promise.allSettled(waitUntilPromises);
 
       await vi.waitFor(() => {
         expect(_isShopSetupComplete("reinstall-test.myshopify.com")).toBe(true);
@@ -426,18 +507,144 @@ describe("after-auth", () => {
       evictShopFromSetupCache("reinstall-test.myshopify.com");
       expect(_isShopSetupComplete("reinstall-test.myshopify.com")).toBe(false);
 
+      waitUntilPromises.length = 0;
+
       runAfterAuth(
         "reinstall-test.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
 
+      await Promise.allSettled(waitUntilPromises);
+
       await vi.waitFor(() => {
         expect(_isShopSetupComplete("reinstall-test.myshopify.com")).toBe(true);
       });
 
       expect(mockEnsureValidation).toHaveBeenCalledTimes(2);
-      expect(mockWaitUntil).toHaveBeenCalledTimes(2);
+    });
+
+    it("clearUninstalledAt SQL is correct on cached shop (cross-isolate reinstall)", async () => {
+      mockEnsureValidation.mockResolvedValue({
+        id: "gid://shopify/Validation/123",
+        created: true,
+      });
+
+      const mockAdmin = createMockAdmin();
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
+
+      runAfterAuth(
+        "cached-shop.myshopify.com",
+        mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
+      );
+
+      await Promise.allSettled(waitUntilPromises);
+
+      await vi.waitFor(() => {
+        expect(_isShopSetupComplete("cached-shop.myshopify.com")).toBe(true);
+      });
+
+      mockSqlQuery.mockClear();
+      waitUntilPromises.length = 0;
+
+      runAfterAuth(
+        "cached-shop.myshopify.com",
+        mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
+      );
+
+      await Promise.allSettled(waitUntilPromises);
+
+      expect(mockSqlQuery).toHaveBeenCalled();
+
+      const sqlCall = mockSqlQuery.mock.calls[0];
+      const sqlTemplate = sqlCall[0];
+      const sqlValues = sqlCall.slice(1);
+
+      const templateStr = Array.isArray(sqlTemplate) ? sqlTemplate.join("") : String(sqlTemplate);
+      expect(templateStr).toContain('"uninstalledAt" = NULL');
+      expect(templateStr).toContain('"uninstalledAt" IS NOT NULL');
+      expect(sqlValues).toContain("cached-shop.myshopify.com");
+
+      expect(mockEnsureValidation).toHaveBeenCalledTimes(1);
+    });
+
+    it("clearUninstalledAt failure does not break /app load", async () => {
+      const consoleSpy = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
+      
+      mockSqlQuery.mockRejectedValueOnce(new Error("DB error"));
+      mockEnsureValidation.mockResolvedValue({
+        id: "gid://shopify/Validation/123",
+        created: true,
+      });
+
+      const mockAdmin = createMockAdmin();
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
+
+      expect(() =>
+        runAfterAuth(
+          "clear-failed-shop.myshopify.com",
+          mockAdmin as Parameters<typeof runAfterAuth>[1],
+          mockWaitUntil,
+        ),
+      ).not.toThrow();
+
+      await Promise.allSettled(waitUntilPromises);
+
+      await vi.waitFor(() => {
+        expect(_isShopSetupComplete("clear-failed-shop.myshopify.com")).toBe(true);
+      });
+
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining("[afterAuth] clear_uninstalled_at_failed"),
+      );
+
+      consoleSpy.mockRestore();
+    });
+
+    it("continues without clear when getRequestSql throws", async () => {
+      const consoleSpy = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
+
+      mockGetRequestSql.mockImplementationOnce(() => {
+        throw new Error("getRequestSql() called outside of request context");
+      });
+
+      mockEnsureValidation.mockResolvedValue({
+        id: "gid://shopify/Validation/123",
+        created: true,
+      });
+
+      const mockAdmin = createMockAdmin();
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
+
+      expect(() =>
+        runAfterAuth(
+          "no-context-shop.myshopify.com",
+          mockAdmin as Parameters<typeof runAfterAuth>[1],
+          mockWaitUntil,
+        ),
+      ).not.toThrow();
+
+      await Promise.allSettled(waitUntilPromises);
+
+      await vi.waitFor(() => {
+        expect(_isShopSetupComplete("no-context-shop.myshopify.com")).toBe(true);
+      });
+
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining("[afterAuth] clear_uninstalled_at_failed reason=no_request_context"),
+      );
+
+      consoleSpy.mockRestore();
     });
   });
+
 });
