@@ -609,5 +609,198 @@ describe("backstop.server", () => {
         expect(result.applied).toBe(true);
       });
     });
+
+    describe("error code format: no raw messages", () => {
+      const SENTINEL = "SENTINEL_RAW_9f3";
+
+      it("fulfillment query failure throws error code, not raw API error", async () => {
+        mockSql._setResult("INSERT INTO backstop_processed_orders", [{ action: "pending" }]);
+        mockSql._setResult("BuyerAccount", [
+          { holdState: "HELD", bypass: false, creditLimit: "100000.00", manualHold: true },
+        ]);
+
+        mockShopifyGraphQLRequest.mockResolvedValueOnce({
+          success: false,
+          error: `API Error: ${SENTINEL}`,
+        } as ShopifyClientResult<unknown>);
+
+        let thrownError: unknown;
+        try {
+          await applyBackstop(mockSql as never, baseInput);
+        } catch (error) {
+          thrownError = error;
+        }
+
+        expect(thrownError).toBeInstanceOf(RetryableBackstopError);
+        const msg = (thrownError as RetryableBackstopError).message;
+        expect(msg).toBe("retryable:shopify_fulfillment_query_failed");
+        expect(msg).not.toContain(SENTINEL);
+      });
+
+      it("hold failure uses error code, not raw userErrors", async () => {
+        mockSql._setResult("INSERT INTO backstop_processed_orders", [{ action: "pending" }]);
+        mockSql._setResult("BuyerAccount", [
+          { holdState: "HELD", bypass: false, creditLimit: "100000.00", manualHold: true },
+        ]);
+
+        mockShopifyGraphQLRequest.mockResolvedValueOnce({
+          success: true,
+          data: {
+            order: {
+              fulfillmentOrders: {
+                edges: [
+                  {
+                    node: {
+                      id: "gid://shopify/FulfillmentOrder/1",
+                      status: "OPEN",
+                      supportedActions: [{ action: "HOLD" }],
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        } as ShopifyClientResult<unknown>);
+
+        mockShopifyGraphQLRequest.mockResolvedValueOnce({
+          success: true,
+          data: {
+            fulfillmentOrderHold: {
+              fulfillmentOrder: null,
+              userErrors: [{ field: ["id"], message: `Error: ${SENTINEL}`, code: "INVALID" }],
+            },
+          },
+        } as ShopifyClientResult<unknown>);
+
+        let thrownError: unknown;
+        try {
+          await applyBackstop(mockSql as never, baseInput);
+        } catch (error) {
+          thrownError = error;
+        }
+
+        expect(thrownError).toBeInstanceOf(RetryableBackstopError);
+        const msg = (thrownError as RetryableBackstopError).message;
+        expect(msg).toBe("retryable:shopify_hold_all_failed");
+        expect(msg).not.toContain(SENTINEL);
+      });
+
+      it("tag error uses error code format", async () => {
+        mockSql._setResult("INSERT INTO backstop_processed_orders", [{ action: "pending" }]);
+        mockSql._setResult("BuyerAccount", [
+          { holdState: "HELD", bypass: false, creditLimit: "100000.00", manualHold: true },
+        ]);
+
+        mockShopifyGraphQLRequest.mockResolvedValueOnce({
+          success: true,
+          data: {
+            order: {
+              fulfillmentOrders: {
+                edges: [
+                  {
+                    node: {
+                      id: "gid://shopify/FulfillmentOrder/1",
+                      status: "OPEN",
+                      supportedActions: [{ action: "HOLD" }],
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        } as ShopifyClientResult<unknown>);
+
+        mockShopifyGraphQLRequest.mockResolvedValueOnce({
+          success: true,
+          data: {
+            fulfillmentOrderHold: {
+              fulfillmentOrder: { id: "gid://shopify/FulfillmentOrder/1", status: "ON_HOLD" },
+              userErrors: [],
+            },
+          },
+        } as ShopifyClientResult<unknown>);
+
+        mockShopifyGraphQLRequest.mockResolvedValueOnce({
+          success: true,
+          data: {
+            tagsAdd: {
+              node: null,
+              userErrors: [{ field: ["tags"], message: `Error: ${SENTINEL}` }],
+            },
+          },
+        } as ShopifyClientResult<unknown>);
+
+        const result = await applyBackstop(mockSql as never, baseInput);
+
+        // Tag errors don't fail the backstop, just log
+        expect(result.applied).toBe(true);
+        expect(result.tagged).toBe(false);
+      });
+
+      it("partial failure: some holds succeed, some fail", async () => {
+        mockSql._setResult("INSERT INTO backstop_processed_orders", [{ action: "pending" }]);
+        mockSql._setResult("BuyerAccount", [
+          { holdState: "HELD", bypass: false, creditLimit: "100000.00", manualHold: true },
+        ]);
+
+        mockShopifyGraphQLRequest.mockResolvedValueOnce({
+          success: true,
+          data: {
+            order: {
+              fulfillmentOrders: {
+                edges: [
+                  {
+                    node: {
+                      id: "gid://shopify/FulfillmentOrder/1",
+                      status: "OPEN",
+                      supportedActions: [{ action: "HOLD" }],
+                    },
+                  },
+                  {
+                    node: {
+                      id: "gid://shopify/FulfillmentOrder/2",
+                      status: "OPEN",
+                      supportedActions: [{ action: "HOLD" }],
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        } as ShopifyClientResult<unknown>);
+
+        mockShopifyGraphQLRequest.mockResolvedValueOnce({
+          success: true,
+          data: {
+            fulfillmentOrderHold: {
+              fulfillmentOrder: { id: "gid://shopify/FulfillmentOrder/1", status: "ON_HOLD" },
+              userErrors: [],
+            },
+          },
+        } as ShopifyClientResult<unknown>);
+
+        mockShopifyGraphQLRequest.mockResolvedValueOnce({
+          success: true,
+          data: {
+            fulfillmentOrderHold: {
+              fulfillmentOrder: null,
+              userErrors: [{ field: ["id"], message: `Error: ${SENTINEL}`, code: "INVALID" }],
+            },
+          },
+        } as ShopifyClientResult<unknown>);
+
+        let thrownError: unknown;
+        try {
+          await applyBackstop(mockSql as never, baseInput);
+        } catch (error) {
+          thrownError = error;
+        }
+
+        expect(thrownError).toBeInstanceOf(RetryableBackstopError);
+        const msg = (thrownError as RetryableBackstopError).message;
+        expect(msg).toBe("retryable:shopify_hold_partial_failure");
+        expect(msg).not.toContain(SENTINEL);
+      });
+    });
   });
 });

@@ -43,6 +43,40 @@ import { safeLog, toErrorCode } from "~/lib/log.server";
 
 const PAGE_SIZE = 20;
 
+const GENERIC_ERROR = "An error occurred. Please try again.";
+
+/**
+ * Known human-readable error messages that are safe to display to merchants.
+ * These are explicit, hand-written messages - not codes or raw error text.
+ */
+const KNOWN_HUMAN_MESSAGES = new Set([
+  "Match not found",
+  "Invoice not found",
+  "Cannot unmatch: push is in progress",
+  "Cannot unmatch: order already marked as paid in Shopify",
+  "Cannot unmatch: no applied audit found for this match",
+  "Match ID required",
+  "Shop not found",
+  "Unknown action",
+  "Action failed",
+  "Failed to load reconciliation data",
+  "Failed to confirm match",
+  "Failed to reject match",
+  "Failed to apply match",
+  "Failed to unmatch",
+]);
+
+/**
+ * Map error codes to human-readable messages for display to merchants.
+ * Fail-closed: any string not in the known set maps to the generic message.
+ * Known codes match ^(retryable:|permanent:)?[a-z0-9_]+$ and are never shown.
+ */
+function toHumanError(error: string | null | undefined): string | null {
+  if (!error) return null;
+  if (KNOWN_HUMAN_MESSAGES.has(error)) return error;
+  return GENERIC_ERROR;
+}
+
 const VALID_VIEWS = ["suggested", "unmatched", "confirmed", "pushing"] as const;
 type ReconcileView = (typeof VALID_VIEWS)[number];
 
@@ -384,7 +418,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         const result = await applyMatch(sql, shop.id, matchId, userId);
         return {
           success: result.success,
-          error: result.success ? null : (result.error ?? "Failed to apply match"),
+          error: result.success ? null : toHumanError(result.error) ?? "Failed to apply match",
         };
       }
 
@@ -398,7 +432,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         const result = await unmatchMatch(sql, shop.id, matchId, userId);
         return {
           success: result.success,
-          error: result.success ? null : (result.error ?? "Failed to unmatch"),
+          error: result.success ? null : toHumanError(result.error) ?? "Failed to unmatch",
         };
       }
 

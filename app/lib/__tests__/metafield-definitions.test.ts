@@ -190,7 +190,7 @@ describe("metafield-definitions", () => {
         ensureMetafieldDefinitions(
           mockAdmin as Parameters<typeof ensureMetafieldDefinitions>[0],
         ),
-      ).rejects.toThrow("Failed to create metafield definitions");
+      ).rejects.toThrow("metafield_definition_create_failed");
 
       expect(consoleSpy).toHaveBeenCalled();
 
@@ -232,9 +232,10 @@ describe("metafield-definitions", () => {
 
       const errorCall = consoleSpy.mock.calls[0];
       expect(errorCall[0]).toContain("metafield_definition_create_failed");
-      // safeLog redacts non-allowlisted values - just verify no PII leaked
-      expect(errorCall[0]).not.toContain("shop");
-      expect(errorCall[0]).not.toContain("myshopify");
+      // safeLog redacts non-allowlisted values - verify no PII leaked
+      // Note: "shopify" in error codes is fine (brand name), but shop domains are not
+      expect(errorCall[0]).not.toContain(".myshopify.com");
+      expect(errorCall[0]).not.toContain("@");
 
       consoleSpy.mockRestore();
     });
@@ -257,7 +258,7 @@ describe("metafield-definitions", () => {
         ensureMetafieldDefinitions(
           mockAdmin as Parameters<typeof ensureMetafieldDefinitions>[0],
         ),
-      ).rejects.toThrow("Failed to create metafield definitions");
+      ).rejects.toThrow("metafield_definition_create_failed");
 
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining("metafield_definition_create_failed"),
@@ -279,7 +280,7 @@ describe("metafield-definitions", () => {
         ensureMetafieldDefinitions(
           mockAdmin as Parameters<typeof ensureMetafieldDefinitions>[0],
         ),
-      ).rejects.toThrow("Failed to create metafield definitions");
+      ).rejects.toThrow("metafield_definition_create_failed");
 
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining("metafield_definition_create_failed"),
@@ -395,6 +396,68 @@ describe("metafield-definitions", () => {
 
       consoleSpy.mockRestore();
       consoleLogSpy.mockRestore();
+    });
+
+    it("error code format: no raw messages in result.error", async () => {
+      const SENTINEL = "SENTINEL_RAW_9f3";
+      const consoleSpy = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
+
+      const mockAdmin = {
+        graphql: vi.fn().mockResolvedValue({
+          json: () =>
+            Promise.resolve({
+              data: {
+                metafieldDefinitionCreate: {
+                  createdDefinition: null,
+                  userErrors: [
+                    {
+                      field: ["definition", "type"],
+                      message: `Invalid type: ${SENTINEL}`,
+                      code: "TYPE_INVALID",
+                    },
+                  ],
+                },
+              },
+            }),
+        }),
+      };
+
+      await expect(
+        ensureMetafieldDefinitions(
+          mockAdmin as Parameters<typeof ensureMetafieldDefinitions>[0],
+        ),
+      ).rejects.toThrow("metafield_definition_create_failed");
+
+      // Verify no sentinel in error logs
+      const errorCalls = consoleSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(errorCalls).not.toContain(SENTINEL);
+
+      consoleSpy.mockRestore();
+    });
+
+    it("exception uses toErrorCode, not raw message", async () => {
+      const SENTINEL = "SENTINEL_RAW_9f3";
+      const consoleSpy = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
+
+      const mockAdmin = {
+        graphql: vi.fn().mockRejectedValue(new Error(`Network failed: ${SENTINEL}`)),
+      };
+
+      await expect(
+        ensureMetafieldDefinitions(
+          mockAdmin as Parameters<typeof ensureMetafieldDefinitions>[0],
+        ),
+      ).rejects.toThrow("metafield_definition_create_failed");
+
+      // toErrorCode maps "network failed" type errors to codes
+      const errorCalls = consoleSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(errorCalls).not.toContain(SENTINEL);
+
+      consoleSpy.mockRestore();
     });
   });
 });

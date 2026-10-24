@@ -262,12 +262,11 @@ export async function fetchJsonlChunk(
 
     return { success: true, bytes, isEof, totalSize };
   } catch (err) {
-    // Network errors are retryable
     return {
       success: false,
       isEof: false,
-      error: err instanceof Error ? err.message : "Network error",
-      httpStatus: 0, // Network error, not an HTTP response
+      error: `retryable:${toErrorCode(err)}`,
+      httpStatus: 0,
     };
   }
 }
@@ -1084,7 +1083,7 @@ export async function processBulkOperation(
       return {
         success: false,
         action: "skipped",
-        error: err instanceof Error ? err.message : "Processing error",
+        error: `retryable:${toErrorCode(err)}`,
         status: "error",
       };
     }
