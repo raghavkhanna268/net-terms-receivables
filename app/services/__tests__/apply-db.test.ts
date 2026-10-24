@@ -1299,6 +1299,239 @@ describeWithDb("S17 apply service DB integration", () => {
   });
 
   /**
+   * Stale invoice-not-open scenarios: when a stale 'pushing' match is retried
+   * but the invoice is no longer open (paid by sibling, webhook, or cancelled).
+   * INVARIANT: Every state='pushed' must have a match.applied audit in same TX.
+   */
+  describe("Stale invoice-not-open scenarios", () => {
+    it("sibling B pays invoice in full, Retry A: A unmatched with audit, Payment.status recomputed", async () => {
+      // Scenario: Match A is stale 'pushing', Match B fully pays the invoice, then A is retried
+      const paymentIdA = await createPayment(1000000n); // 10000 INR
+      const paymentIdB = await createPayment(1000000n); // 10000 INR
+      const invoiceId = await createInvoice(1000000n); // 10000 INR
+
+      // Create match A in 'pushing' state with old updatedAt (> 5 min)
+      // Also need a push_claimed audit for it
+      const matchIdA = `match-stale-sibling-a-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${matchIdA}, ${TEST_SHOP_ID}, ${paymentIdA}, ${invoiceId}, 10000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushing', NOW() - interval '10 minutes', NOW() - interval '10 minutes')
+      `;
+
+      // Write push_claimed audit for match A (simulating TX1 that happened 10 min ago)
+      await sql`
+        INSERT INTO "AuditEvent" (id, "shopId", actor, type, data, at)
+        VALUES (
+          gen_random_uuid(),
+          ${TEST_SHOP_ID},
+          'test-user',
+          'match.push_claimed',
+          ${sql.json({ matchId: matchIdA, invoiceId, paymentId: paymentIdA, outstandingAtClaimPaise: '1000000' })}::jsonb,
+          NOW() - interval '10 minutes'
+        )
+      `;
+
+      // Create and confirm match B
+      const matchIdB = await createConfirmedMatch(paymentIdB, invoiceId, 1000000n);
+
+      // Apply match B - this should succeed and pay the invoice
+      mockShopifySuccess = true;
+      mockAlreadyPaid = false;
+      orderMarkAsPaidCallCount = 0;
+      const resultB = await applyMatch(sql, TEST_SHOP_ID, matchIdB, "test-user");
+      expect(resultB.success).toBe(true);
+      expect(resultB.invoicePaid).toBe(true);
+      expect(orderMarkAsPaidCallCount).toBe(1);
+
+      // Verify invoice is now paid with outstanding 0
+      const [invoiceAfterB] = await sql<{ status: string; outstanding: string }[]>`
+        SELECT status, outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+      expect(invoiceAfterB.status).toBe("paid");
+      expect(parseFloat(invoiceAfterB.outstanding)).toBe(0);
+
+      // Reset counts
+      orderMarkAsPaidCallCount = 0;
+
+      // Now retry match A - should be unmatched since sibling B paid it
+      const resultA = await applyMatch(sql, TEST_SHOP_ID, matchIdA, "test-user");
+
+      // A should NOT succeed since it's being unmatched
+      expect(resultA.success).toBe(false);
+      expect(resultA.reasonCode).toBe("STALE_INVOICE_NOT_OPEN");
+
+      // Zero orderMarkAsPaid calls for A
+      expect(orderMarkAsPaidCallCount).toBe(0);
+
+      // Match A should be 'unmatched'
+      const [matchA] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchIdA}
+      `;
+      expect(matchA.state).toBe("unmatched");
+
+      // Invoice outstanding should still be 0 (unchanged)
+      const [invoiceFinal] = await sql<{ status: string; outstanding: string }[]>`
+        SELECT status, outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+      expect(invoiceFinal.status).toBe("paid");
+      expect(parseFloat(invoiceFinal.outstanding)).toBe(0);
+
+      // Match A's unmatched audit should exist with reason INVOICE_NOT_OPEN
+      const [unmatchedAudit] = await sql<{ data: { reason?: string; appliedPaise?: string } }[]>`
+        SELECT data FROM "AuditEvent"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+          AND type = 'match.unmatched'
+          AND data->>'matchId' = ${matchIdA}
+      `;
+      expect(unmatchedAudit).toBeDefined();
+      expect(unmatchedAudit?.data.reason).toBe("INVOICE_NOT_OPEN");
+      expect(unmatchedAudit?.data.appliedPaise).toBe("0");
+
+      // Payment A's status should be recomputed (not allocated)
+      const [paymentA] = await sql<{ status: string }[]>`
+        SELECT status FROM "Payment" WHERE id = ${paymentIdA}
+      `;
+      expect(paymentA.status).toBe("unmatched");
+    });
+
+    it("webhook marks invoice paid (no sibling), Retry A: A pushed WITH match.applied", async () => {
+      // Scenario: Match A is stale 'pushing', webhook marks invoice paid, then A is retried
+      const paymentId = await createPayment(1000000n); // 10000 INR
+      const invoiceId = await createInvoice(1000000n); // 10000 INR
+
+      // Create match A in 'pushing' state with old updatedAt (> 5 min)
+      const matchIdA = `match-stale-webhook-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${matchIdA}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 10000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushing', NOW() - interval '10 minutes', NOW() - interval '10 minutes')
+      `;
+
+      // Write push_claimed audit for match A (simulating TX1 that happened 10 min ago)
+      await sql`
+        INSERT INTO "AuditEvent" (id, "shopId", actor, type, data, at)
+        VALUES (
+          gen_random_uuid(),
+          ${TEST_SHOP_ID},
+          'test-user',
+          'match.push_claimed',
+          ${sql.json({ matchId: matchIdA, invoiceId, paymentId, outstandingAtClaimPaise: '1000000' })}::jsonb,
+          NOW() - interval '10 minutes'
+        )
+      `;
+
+      // Simulate webhook marking invoice as paid (no sibling match.applied)
+      await sql`
+        UPDATE "Invoice"
+        SET status = 'paid', outstanding = 0, "updatedAt" = NOW()
+        WHERE id = ${invoiceId}
+      `;
+
+      // Reset counts
+      orderMarkAsPaidCallCount = 0;
+
+      // Now retry match A - should finalize with match.applied (STALE_FINALIZED_EXTERNALLY_PAID)
+      const resultA = await applyMatch(sql, TEST_SHOP_ID, matchIdA, "test-user");
+
+      // A should succeed (finalized with match.applied)
+      // Note: success depends on the implementation - if it returns success=true for externally paid
+      // or success=false with reasonCode. Let me check the actual behavior.
+      // Based on handleStaleInvoiceNotOpen, when invoice is 'paid' and no sibling paid,
+      // it finalizes with match.applied, which should be success.
+      expect(resultA.invoicePaid).toBe(true);
+
+      // Zero orderMarkAsPaid calls (invoice already paid)
+      expect(orderMarkAsPaidCallCount).toBe(0);
+
+      // Match A should be 'pushed' (finalized)
+      const [matchA] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchIdA}
+      `;
+      expect(matchA.state).toBe("pushed");
+
+      // Match A should have match.applied audit
+      const [appliedAudit] = await sql<{ data: { reasonCode?: string; amountPaise?: string } }[]>`
+        SELECT data FROM "AuditEvent"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+          AND type = 'match.applied'
+          AND data->>'matchId' = ${matchIdA}
+      `;
+      expect(appliedAudit).toBeDefined();
+      expect(appliedAudit?.data.reasonCode).toBe("STALE_FINALIZED_EXTERNALLY_PAID");
+      expect(appliedAudit?.data.amountPaise).toBe("1000000"); // min(10000, 10000) = 10000 paise
+    });
+
+    it("cancelled invoice, Retry A: A unmatched with audit, invoice unchanged", async () => {
+      // Scenario: Match A is stale 'pushing', invoice is cancelled, then A is retried
+      const paymentId = await createPayment(1000000n); // 10000 INR
+      const invoiceId = await createInvoice(1000000n); // 10000 INR
+
+      // Create match A in 'pushing' state with old updatedAt (> 5 min)
+      const matchIdA = `match-stale-cancelled-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${matchIdA}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 10000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushing', NOW() - interval '10 minutes', NOW() - interval '10 minutes')
+      `;
+
+      // Write push_claimed audit for match A
+      await sql`
+        INSERT INTO "AuditEvent" (id, "shopId", actor, type, data, at)
+        VALUES (
+          gen_random_uuid(),
+          ${TEST_SHOP_ID},
+          'test-user',
+          'match.push_claimed',
+          ${sql.json({ matchId: matchIdA, invoiceId, paymentId, outstandingAtClaimPaise: '1000000' })}::jsonb,
+          NOW() - interval '10 minutes'
+        )
+      `;
+
+      // Cancel the invoice
+      await sql`
+        UPDATE "Invoice"
+        SET status = 'cancelled', "updatedAt" = NOW()
+        WHERE id = ${invoiceId}
+      `;
+
+      // Reset counts
+      orderMarkAsPaidCallCount = 0;
+
+      // Now retry match A - should be unmatched
+      const resultA = await applyMatch(sql, TEST_SHOP_ID, matchIdA, "test-user");
+
+      // A should NOT succeed since it's being unmatched
+      expect(resultA.success).toBe(false);
+      expect(resultA.reasonCode).toBe("STALE_INVOICE_NOT_OPEN");
+
+      // Zero orderMarkAsPaid calls
+      expect(orderMarkAsPaidCallCount).toBe(0);
+
+      // Match A should be 'unmatched'
+      const [matchA] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchIdA}
+      `;
+      expect(matchA.state).toBe("unmatched");
+
+      // Invoice should still be cancelled with original outstanding
+      const [invoice] = await sql<{ status: string; outstanding: string }[]>`
+        SELECT status, outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+      expect(invoice.status).toBe("cancelled");
+      expect(parseFloat(invoice.outstanding)).toBe(10000); // Unchanged
+
+      // Match A's unmatched audit should exist with reason INVOICE_NOT_OPEN
+      const [unmatchedAudit] = await sql<{ data: { reason?: string; invoiceStatus?: string } }[]>`
+        SELECT data FROM "AuditEvent"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+          AND type = 'match.unmatched'
+          AND data->>'matchId' = ${matchIdA}
+      `;
+      expect(unmatchedAudit).toBeDefined();
+      expect(unmatchedAudit?.data.reason).toBe("INVOICE_NOT_OPEN");
+      expect(unmatchedAudit?.data.invoiceStatus).toBe("cancelled");
+    });
+  });
+
+  /**
    * Unmatch refuses 'pushing' state - cannot unmatch while push is in flight.
    */
   describe("Unmatch refuses 'pushing' state", () => {

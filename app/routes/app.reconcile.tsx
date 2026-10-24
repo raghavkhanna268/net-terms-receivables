@@ -1,11 +1,12 @@
 /**
- * Payment reconciliation review queue (S16).
+ * Payment reconciliation review queue (S16/S17).
  *
  * Displays unmatched/suggested payment matches for merchant review.
  * Confirm/Reject/Edit allocation actions are POST requests, idempotent and shop-scoped.
  *
- * This is v1 CONFIRM-ONLY: merchants review suggestions but no mutations are
- * applied to orders. S17 will read confirmed matches and apply them.
+ * S16: CONFIRM flow - merchants review suggested matches and confirm/reject them.
+ * S17: APPLY flow - confirmed matches are pushed to Shopify (orderMarkAsPaid).
+ *      Pushing matches show in "In Progress" tab with Retry action.
  *
  * Polaris web component patterns from #68:
  * - s-table with s-table-header-row directly under s-table
@@ -891,8 +892,8 @@ function PushingMatchesView({
     <s-stack>
       <s-banner tone="warning" heading="Matches In Progress">
         These matches started applying but have not completed. Click Retry to
-        attempt completion, or wait for automatic recovery (stale matches are
-        retried after 5 minutes).
+        attempt completion. Stale matches (older than 5 minutes) can be retried
+        immediately.
       </s-banner>
 
       <s-table>

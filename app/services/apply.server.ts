@@ -451,18 +451,24 @@ async function handleStalePushingMatch(
     };
   }
 
-  // If invoice is already paid locally, just finalize the match
-  if (invoiceRow.status === "paid") {
-    await sql`
-      UPDATE "Match"
-      SET state = 'pushed', "updatedAt" = NOW()
-      WHERE id = ${matchId} AND "shopId" = ${shopId}
-    `;
+  // If invoice is already paid or not open locally, handle appropriately
+  if (invoiceRow.status !== "open") {
+    const result = await sql.begin(async (tx) => {
+      return handleStaleInvoiceNotOpen(tx, shopId, matchId, matchRow, invoiceRow.status, actor);
+    });
+
+    if (result.action === "unmatched") {
+      // Recompute credit status for the invoice
+      await safeEnqueueRecompute(sql, matchRow.invoiceId);
+    }
+
     return {
-      success: true,
-      invoicePaid: true,
-      shopifyPushSucceeded: true,
-      reasonCode: "STALE_RECLAIM_ALREADY_PAID",
+      success: result.action === "pushed",
+      invoicePaid: result.invoicePaid,
+      shopifyPushSucceeded: result.action === "pushed",
+      reasonCode: result.action === "pushed"
+        ? "STALE_RECLAIM_ALREADY_PAID"
+        : "STALE_INVOICE_NOT_OPEN",
     };
   }
 
@@ -491,14 +497,21 @@ async function handleStalePushingMatch(
 
           // Re-check status after locking
           if (lockedInvoice.status !== "open") {
-            // Invoice already paid/cancelled - just finalize match
-            await tx`
-              UPDATE "Match"
-              SET state = 'pushed', "updatedAt" = NOW()
-              WHERE id = ${matchId}
-                AND "shopId" = ${shopId}
-            `;
-            return { invoicePaid: lockedInvoice.status === "paid", isPartial: false, alreadyFinalized: true };
+            // Invoice already paid/cancelled - use proper stale handling
+            const staleResult = await handleStaleInvoiceNotOpen(
+              tx,
+              shopId,
+              matchId,
+              matchRow,
+              lockedInvoice.status,
+              actor
+            );
+            return {
+              invoicePaid: staleResult.invoicePaid,
+              isPartial: false,
+              alreadyFinalized: true,
+              wasUnmatched: staleResult.action === "unmatched",
+            };
           }
 
           // Decide partial vs full from LOCKED outstanding
@@ -578,6 +591,16 @@ async function handleStalePushingMatch(
 
         await safeEnqueueRecompute(sql, invoiceRow.id);
 
+        // Handle unmatched case from stale recovery
+        if (result.wasUnmatched) {
+          return {
+            success: false,
+            invoicePaid: result.invoicePaid,
+            shopifyPushSucceeded: false,
+            reasonCode: "STALE_INVOICE_NOT_OPEN",
+          };
+        }
+
         return {
           success: true,
           invoicePaid: result.invoicePaid,
@@ -620,14 +643,20 @@ async function handleStalePushingMatch(
 
       // Re-check status after locking
       if (lockedInvoice.status !== "open") {
-        // Invoice no longer open - just finalize match
-        await tx`
-          UPDATE "Match"
-          SET state = 'pushed', "updatedAt" = NOW()
-          WHERE id = ${matchId}
-            AND "shopId" = ${shopId}
-        `;
-        return { alreadyFinalized: true, invoicePaid: lockedInvoice.status === "paid" };
+        // Invoice no longer open - use proper stale handling
+        const staleResult = await handleStaleInvoiceNotOpen(
+          tx,
+          shopId,
+          matchId,
+          matchRow,
+          lockedInvoice.status,
+          actor
+        );
+        return {
+          alreadyFinalized: true,
+          invoicePaid: staleResult.invoicePaid,
+          wasUnmatched: staleResult.action === "unmatched",
+        };
       }
 
       const currentOutstanding = BigInt(lockedInvoice.outstandingPaise);
@@ -678,6 +707,18 @@ async function handleStalePushingMatch(
     }
 
     if (decisionResult.alreadyFinalized) {
+      await safeEnqueueRecompute(sql, invoiceRow.id);
+
+      // Handle unmatched case from stale recovery
+      if (decisionResult.wasUnmatched) {
+        return {
+          success: false,
+          invoicePaid: decisionResult.invoicePaid ?? false,
+          shopifyPushSucceeded: false,
+          reasonCode: "STALE_INVOICE_NOT_OPEN",
+        };
+      }
+
       return {
         success: true,
         invoicePaid: decisionResult.invoicePaid ?? false,
@@ -727,7 +768,7 @@ async function handleStalePushingMatch(
     }
 
     // Finalize: lock invoice again, re-check status, then mark paid
-    await sql.begin(async (tx) => {
+    const finalizeResult = await sql.begin(async (tx) => {
       const [lockedInvoice] = await tx<{ outstandingPaise: string; status: string }[]>`
         SELECT
           (ROUND(outstanding * 100))::text AS "outstandingPaise",
@@ -744,14 +785,16 @@ async function handleStalePushingMatch(
 
       // Re-check status after locking
       if (lockedInvoice.status !== "open") {
-        // Just finalize match if invoice already changed
-        await tx`
-          UPDATE "Match"
-          SET state = 'pushed', "updatedAt" = NOW()
-          WHERE id = ${matchId}
-            AND "shopId" = ${shopId}
-        `;
-        return;
+        // Invoice no longer open - use proper stale handling
+        const staleResult = await handleStaleInvoiceNotOpen(
+          tx,
+          shopId,
+          matchId,
+          matchRow,
+          lockedInvoice.status,
+          actor
+        );
+        return { wasUnmatched: staleResult.action === "unmatched", invoicePaid: staleResult.invoicePaid };
       }
 
       await tx`
@@ -787,7 +830,20 @@ async function handleStalePushingMatch(
         reasonCode,
         staleReclaim: true,
       });
+
+      return { wasUnmatched: false, invoicePaid: true };
     });
+
+    // Handle case where match was unmatched during finalize
+    if (finalizeResult.wasUnmatched) {
+      await safeEnqueueRecompute(sql, invoiceRow.id);
+      return {
+        success: false,
+        invoicePaid: finalizeResult.invoicePaid,
+        shopifyPushSucceeded: false,
+        reasonCode: "STALE_INVOICE_NOT_OPEN",
+      };
+    }
 
     await safeEnqueueRecompute(sql, invoiceRow.id);
 
@@ -950,6 +1006,15 @@ async function claimMatchAndDecide(
       }
 
       // FULL PAYMENT: just claim, don't update invoice yet (need Shopify call)
+      // Write push_claimed audit event to record claim time and outstanding
+      // This is used by stale recovery to determine if a sibling paid the invoice
+      await writeAuditEvent(tx, shopId, actor, "match.push_claimed", {
+        matchId,
+        invoiceId: invoiceRow.id,
+        paymentId: matchRow.paymentId,
+        outstandingAtClaimPaise: invoiceOutstandingPaise.toString(),
+      });
+
       // Return previousOutstandingPaise for TX2's race condition check
       return {
         success: true,
@@ -1369,6 +1434,184 @@ async function getAppliedAmountFromAudit(
 }
 
 /**
+ * Get the push_claimed audit event for a match.
+ * Returns null if no push_claimed exists (shouldn't happen after the fix).
+ */
+async function getPushClaimedAudit(
+  sql: Sql,
+  shopId: string,
+  matchId: string
+): Promise<{ at: Date; outstandingAtClaimPaise: string } | null> {
+  const [auditRow] = await sql<{ at: Date; data: { outstandingAtClaimPaise?: string } }[]>`
+    SELECT at, data
+    FROM "AuditEvent"
+    WHERE "shopId" = ${shopId}
+      AND type = 'match.push_claimed'
+      AND data->>'matchId' = ${matchId}
+    ORDER BY at DESC
+    LIMIT 1
+  `;
+
+  if (auditRow?.data?.outstandingAtClaimPaise) {
+    return {
+      at: auditRow.at,
+      outstandingAtClaimPaise: auditRow.data.outstandingAtClaimPaise,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Check if another match on this invoice has a match.applied audit created
+ * AFTER the given timestamp and zeroed the invoice (newOutstandingPaise = '0').
+ */
+async function didSiblingPayInvoice(
+  sql: Sql,
+  shopId: string,
+  invoiceId: string,
+  matchId: string,
+  afterTime: Date
+): Promise<boolean> {
+  const [siblingApplied] = await sql<{ matchId: string }[]>`
+    SELECT data->>'matchId' AS "matchId"
+    FROM "AuditEvent"
+    WHERE "shopId" = ${shopId}
+      AND type = 'match.applied'
+      AND data->>'invoiceId' = ${invoiceId}
+      AND data->>'matchId' != ${matchId}
+      AND data->>'newOutstandingPaise' = '0'
+      AND at > ${afterTime}
+    LIMIT 1
+  `;
+
+  return siblingApplied !== undefined;
+}
+
+/**
+ * Handle stale 'pushing' match when invoice is not open.
+ * Applies the following rules:
+ * 1. If a sibling paid the invoice after our push_claimed → unmatch, recompute Payment.status
+ * 2. If invoice is 'paid' (e.g. webhook) and no sibling paid → finalize with match.applied
+ * 3. If invoice is 'cancelled' or no push_claimed exists → unmatch
+ *
+ * INVARIANT: Every state='pushed' must have a match.applied audit in the same TX.
+ */
+async function handleStaleInvoiceNotOpen(
+  tx: Sql,
+  shopId: string,
+  matchId: string,
+  matchRow: { id: string; paymentId: string; invoiceId: string; amountPaise: string },
+  invoiceStatus: string,
+  actor: string
+): Promise<{ action: "unmatched" | "pushed"; invoicePaid: boolean }> {
+  // Get the push_claimed audit to determine when this match was claimed
+  const pushClaimed = await getPushClaimedAudit(tx, shopId, matchId);
+
+  if (!pushClaimed) {
+    // No push_claimed record - this is legacy data or a bug. Unmatch it.
+    await tx`
+      UPDATE "Match"
+      SET state = 'unmatched', "updatedAt" = NOW()
+      WHERE id = ${matchId}
+        AND "shopId" = ${shopId}
+    `;
+
+    await writeAuditEvent(tx, shopId, actor, "match.unmatched", {
+      matchId,
+      invoiceId: matchRow.invoiceId,
+      paymentId: matchRow.paymentId,
+      reason: "INVOICE_NOT_OPEN",
+      appliedPaise: "0",
+      invoiceStatus,
+    });
+
+    await updatePaymentStatusAfterUnmatch(tx, shopId, matchRow.paymentId);
+
+    return { action: "unmatched", invoicePaid: invoiceStatus === "paid" };
+  }
+
+  // Check if a sibling match paid the invoice after our claim
+  const siblingPaid = await didSiblingPayInvoice(
+    tx,
+    shopId,
+    matchRow.invoiceId,
+    matchId,
+    pushClaimed.at
+  );
+
+  if (siblingPaid) {
+    // A sibling paid the invoice after our claim. Unmatch this match.
+    await tx`
+      UPDATE "Match"
+      SET state = 'unmatched', "updatedAt" = NOW()
+      WHERE id = ${matchId}
+        AND "shopId" = ${shopId}
+    `;
+
+    await writeAuditEvent(tx, shopId, actor, "match.unmatched", {
+      matchId,
+      invoiceId: matchRow.invoiceId,
+      paymentId: matchRow.paymentId,
+      reason: "INVOICE_NOT_OPEN",
+      appliedPaise: "0",
+      invoiceStatus,
+    });
+
+    await updatePaymentStatusAfterUnmatch(tx, shopId, matchRow.paymentId);
+
+    return { action: "unmatched", invoicePaid: invoiceStatus === "paid" };
+  }
+
+  // No sibling paid it. If invoice is 'paid', our push likely reached Shopify
+  // and the ORDERS_PAID webhook marked it locally. Finalize with audit.
+  if (invoiceStatus === "paid") {
+    const outstandingAtClaim = BigInt(pushClaimed.outstandingAtClaimPaise);
+    const matchAmount = BigInt(matchRow.amountPaise);
+    const appliedAmount = matchAmount > outstandingAtClaim ? outstandingAtClaim : matchAmount;
+
+    await tx`
+      UPDATE "Match"
+      SET state = 'pushed', "updatedAt" = NOW()
+      WHERE id = ${matchId}
+        AND "shopId" = ${shopId}
+    `;
+
+    await writeAuditEvent(tx, shopId, actor, "match.applied", {
+      matchId,
+      invoiceId: matchRow.invoiceId,
+      paymentId: matchRow.paymentId,
+      amountPaise: appliedAmount.toString(),
+      reasonCode: "STALE_FINALIZED_EXTERNALLY_PAID",
+      staleReclaim: true,
+    });
+
+    return { action: "pushed", invoicePaid: true };
+  }
+
+  // Invoice is cancelled or other non-open, non-paid status. Unmatch.
+  await tx`
+    UPDATE "Match"
+    SET state = 'unmatched', "updatedAt" = NOW()
+    WHERE id = ${matchId}
+      AND "shopId" = ${shopId}
+  `;
+
+  await writeAuditEvent(tx, shopId, actor, "match.unmatched", {
+    matchId,
+    invoiceId: matchRow.invoiceId,
+    paymentId: matchRow.paymentId,
+    reason: "INVOICE_NOT_OPEN",
+    appliedPaise: "0",
+    invoiceStatus,
+  });
+
+  await updatePaymentStatusAfterUnmatch(tx, shopId, matchRow.paymentId);
+
+  return { action: "unmatched", invoicePaid: false };
+}
+
+/**
  * Update Payment.status after unmatching.
  * Sets to 'partial' if there are remaining suggested matches, otherwise 'unmatched'.
  * IDOR protection: filter by shopId
@@ -1526,6 +1769,8 @@ type AuditData = {
   previousState?: string;
   reason?: string;
   invoiceStatus?: string;
+  outstandingAtClaimPaise?: string;
+  appliedPaise?: string;
 };
 
 /**
