@@ -482,6 +482,7 @@ function runSelfTests(schema: GraphQLSchema): boolean {
  * - Are generic wrapper functions where queries are passed in (validated elsewhere)
  */
 const ADMIN_GRAPHQL_CONST_ALLOWLIST = [
+  "after-auth.server.ts", // Uses SHOP_TIMEZONE_QUERY constant
   "metafield-definitions.server.ts", // Uses METAFIELD_DEFINITION_CREATE_MUTATION constant
   "validation-registration.server.ts", // Uses VALIDATIONS_QUERY, VALIDATION_CREATE_MUTATION constants
   "shopify-client.server.ts", // Generic wrapper that takes query as parameter
@@ -493,12 +494,13 @@ const ADMIN_GRAPHQL_CONST_ALLOWLIST = [
  *
  * Allowed patterns:
  * - admin.graphql(`query { ... }`) - inline static template (extracted by this script)
- * - admin.graphql(CONSTANT_NAME, ...) - uses a const (validated by this script)
- * - admin.graphql(query, ...) in wrapper functions - query passed in (validated elsewhere)
+ * - admin.graphql(CONSTANT_NAME, ...) - uses a const (validated by this script, file must be in allowlist)
+ * - admin.graphql(query, ...) in wrapper functions - query passed in (validated elsewhere, file must be in allowlist)
  *
  * Disallowed patterns:
  * - admin.graphql(`query ${variable}`) - template with interpolation
  * - admin.graphql(buildQuery(args)) - function call building query dynamically
+ * - admin.graphql(variableName) - variable reference (not a template literal)
  * - gql`query ${variable}` - gql tag with interpolation
  */
 function checkForUnvalidatableQueries(filePath: string, content: string): GraphQLError[] {
@@ -525,6 +527,40 @@ function checkForUnvalidatableQueries(filePath: string, content: string): GraphQ
       new GraphQLError(
         `${filePath}:${lineNumber}: admin.graphql() with template interpolation cannot be statically validated. ` +
           `Extract to a const or use a function that this script can evaluate.`
+      )
+    );
+  }
+
+  // Check for admin.graphql() with function calls (builder pattern)
+  // Pattern: admin.graphql(someFunction(...))
+  const adminGraphqlBuilderPattern = /admin\.graphql\s*\(\s*(\w+)\s*\(/g;
+  while ((match = adminGraphqlBuilderPattern.exec(content)) !== null) {
+    const lineNumber = content.substring(0, match.index).split("\n").length;
+    const functionName = match[1];
+    errors.push(
+      new GraphQLError(
+        `${filePath}:${lineNumber}: admin.graphql(${functionName}(...)) uses a dynamic builder that cannot be statically validated. ` +
+          `Add file to ADMIN_GRAPHQL_CONST_ALLOWLIST or extract query to a const.`
+      )
+    );
+  }
+
+  // Check for admin.graphql() with variable references (not template literals)
+  // Pattern: admin.graphql(variableName, ...) or admin.graphql(variableName)
+  // But NOT: admin.graphql(`...`) which is a template literal (already extracted)
+  const adminGraphqlVariablePattern = /admin\.graphql\s*\(\s*([a-zA-Z_]\w*)(?:\s*,|\s*\))/g;
+  while ((match = adminGraphqlVariablePattern.exec(content)) !== null) {
+    const variableName = match[1];
+    const lineNumber = content.substring(0, match.index).split("\n").length;
+    // Check if this is actually a template literal start (false positive prevention)
+    const afterMatch = content.substring(match.index);
+    if (afterMatch.match(/^admin\.graphql\s*\(\s*`/)) {
+      continue; // This is a template literal, skip
+    }
+    errors.push(
+      new GraphQLError(
+        `${filePath}:${lineNumber}: admin.graphql(${variableName}) uses a variable reference that cannot be statically validated. ` +
+          `Add file to ADMIN_GRAPHQL_CONST_ALLOWLIST if the variable is a validated const.`
       )
     );
   }
@@ -596,10 +632,11 @@ async function validateDynamicQueryBuilders(schema: GraphQLSchema): Promise<{ re
     const errors = validateDocument(schema, doc);
     if (errors.length > 0) {
       results.push({ document: doc, errors });
+      console.log(`  ✗ getBulkCustomersQuery (no PII): FAILED`);
     } else {
       validatedCount++;
+      console.log(`  ✓ getBulkCustomersQuery (no PII): validated`);
     }
-    console.log(`  ✓ getBulkCustomersQuery (no PII): validated`);
   }
 
   // Variant 2: With tag rules, with PII fields
@@ -615,10 +652,11 @@ async function validateDynamicQueryBuilders(schema: GraphQLSchema): Promise<{ re
     const errors = validateDocument(schema, doc);
     if (errors.length > 0) {
       results.push({ document: doc, errors });
+      console.log(`  ✗ getBulkCustomersQuery (with PII): FAILED`);
     } else {
       validatedCount++;
+      console.log(`  ✓ getBulkCustomersQuery (with PII): validated`);
     }
-    console.log(`  ✓ getBulkCustomersQuery (with PII): validated`);
   }
 
   // Variant 3: Empty tag rules (should return null - no validation needed)
@@ -642,10 +680,11 @@ async function validateDynamicQueryBuilders(schema: GraphQLSchema): Promise<{ re
     const errors = validateDocument(schema, doc);
     if (errors.length > 0) {
       results.push({ document: doc, errors });
+      console.log(`  ✗ getBulkCustomersQuery (special chars): FAILED`);
     } else {
       validatedCount++;
+      console.log(`  ✓ getBulkCustomersQuery (special chars): validated`);
     }
-    console.log(`  ✓ getBulkCustomersQuery (special chars): validated`);
   }
 
   // ===== getCustomerQuery variants =====
@@ -660,10 +699,11 @@ async function validateDynamicQueryBuilders(schema: GraphQLSchema): Promise<{ re
   const customerErrorsNoPii = validateDocument(schema, customerDocNoPii);
   if (customerErrorsNoPii.length > 0) {
     results.push({ document: customerDocNoPii, errors: customerErrorsNoPii });
+    console.log(`  ✗ getCustomerQuery (no PII): FAILED`);
   } else {
     validatedCount++;
+    console.log(`  ✓ getCustomerQuery (no PII): validated`);
   }
-  console.log(`  ✓ getCustomerQuery (no PII): validated`);
 
   // Variant 6: getCustomerQuery with PII
   const customerQueryWithPii = getCustomerQuery(envWithPii);
@@ -675,10 +715,11 @@ async function validateDynamicQueryBuilders(schema: GraphQLSchema): Promise<{ re
   const customerErrorsWithPii = validateDocument(schema, customerDocWithPii);
   if (customerErrorsWithPii.length > 0) {
     results.push({ document: customerDocWithPii, errors: customerErrorsWithPii });
+    console.log(`  ✗ getCustomerQuery (with PII): FAILED`);
   } else {
     validatedCount++;
+    console.log(`  ✓ getCustomerQuery (with PII): validated`);
   }
-  console.log(`  ✓ getCustomerQuery (with PII): validated`);
 
   // ===== getCustomerByNodeQuery variants (S8 drain processor) =====
 
@@ -832,7 +873,8 @@ async function main(): Promise<void> {
 }
 
 // Only run main() if this file is executed directly (not imported as a module)
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("validate-graphql-schema.ts")) {
+// Uses resolved paths to handle symlinks and relative paths correctly
+if (fileURLToPath(import.meta.url) === path.resolve(process.argv[1] ?? "")) {
   main().catch((err) => {
     console.error("Fatal error:", err);
     process.exit(1);

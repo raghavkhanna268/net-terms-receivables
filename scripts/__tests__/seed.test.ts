@@ -17,6 +17,7 @@ import {
   createOrder,
   findCompanyByExternalId,
   findOrderByTag,
+  resetSeedData,
   formatCurrency,
   printDatabaseSeedSQL,
   seedTaggedCustomerOrders,
@@ -29,7 +30,10 @@ import {
   COMPANY_CONTACT_ROLES_QUERY,
   COMPANY_LOCATION_ROLE_ASSIGNMENTS_QUERY,
   COMPANY_LOCATION_ASSIGN_ROLES_MUTATION,
+  FIND_COMPANY_BY_EXTERNAL_ID_QUERY,
   FIND_ORDER_BY_TAG_QUERY,
+  FIND_CUSTOMER_BY_EMAIL_QUERY,
+  MAX_SEARCH_PAGES,
   buildCompanyCreateInput,
   buildCompanyLocationCreateInput,
   buildCompanyLocationAssignRolesInput,
@@ -93,6 +97,8 @@ function createMockState(overrides: Partial<SeedState> = {}): SeedState {
       { id: "gid://shopify/PaymentTermsTemplate/60", name: "Net 60", paymentTermsType: "NET", dueInDays: 60 },
     ],
     createdCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRules: 0, dbAccounts: 0 },
+    unchangedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0 },
+    driftedCount: { companies: 0 },
     skippedCount: { companies: 0, orders: 0, roleAssignments: 0 },
     deletedCount: { companies: 0, orders: 0 },
     failedCount: { locations: 0, orders: 0, roleAssignments: 0 },
@@ -166,29 +172,36 @@ function setupMockFetch() {
     // Find company by external ID
     else if (query.includes("FindCompany") || (query.includes("companies") && variables?.query)) {
       const externalIdQuery = variables?.query as string;
+      // Extract the actual externalId from query like "external_id:'ntr-seed-company-1'"
+      const extractedExternalId = externalIdQuery?.replace(/^external_id:'/, "").replace(/'$/, "");
       const existingCompanies = mockResponses.get("existingCompanies") as string[] | undefined;
-      if (existingCompanies?.some((id) => externalIdQuery?.includes(id))) {
+      
+      // Find matching seed to get correct fixture values for unchanged/drifted comparison
+      const matchingSeed = COMPANY_SEEDS.find(s => `${SEED_PREFIX}${s.key}` === extractedExternalId);
+      
+      if (existingCompanies?.some((id) => id === extractedExternalId)) {
         responseData = {
           data: {
             companies: {
               nodes: [{
                 id: "gid://shopify/Company/existing-1",
-                name: "Existing Company",
-                externalId: externalIdQuery?.replace("external_id:", ""),
+                name: matchingSeed?.name ?? "Existing Company", // Use fixture name for unchanged tests
+                externalId: extractedExternalId, // Return exact match
                 locations: { edges: [
                   { node: { id: "gid://shopify/CompanyLocation/loc-15", name: "Existing - Net-15" } },
                   { node: { id: "gid://shopify/CompanyLocation/loc-30", name: "Existing - Net-30" } },
                   { node: { id: "gid://shopify/CompanyLocation/loc-60", name: "Existing - Net-60" } },
                 ] },
-                contacts: { edges: [{ node: { id: "gid://shopify/CompanyContact/contact-1", customer: { id: "gid://shopify/Customer/cust-1", email: "test@example.com" } } }] },
+                contacts: { edges: [{ node: { id: "gid://shopify/CompanyContact/contact-1", customer: { id: "gid://shopify/Customer/cust-1", email: matchingSeed?.contact.email ?? "test@example.com" } } }] },
               }],
+              pageInfo: { hasNextPage: false, endCursor: null },
             },
           },
           extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
         };
       } else {
         responseData = {
-          data: { companies: { nodes: [] } },
+          data: { companies: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
           extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
         };
       }
@@ -297,15 +310,24 @@ function setupMockFetch() {
     // Find order by tag (idempotency check)
     else if (query.includes("FindOrder") || (query.includes("orders(first:") && variables?.query)) {
       const existingOrders = mockResponses.get("existingOrders") as string[] | undefined;
-      const tag = variables?.query as string;
-      if (existingOrders?.some((t) => tag?.includes(t))) {
+      const tagQuery = variables?.query as string;
+      // Extract tag from query like "tag:'ntr-seed-order-1'"
+      const extractedTag = tagQuery?.replace(/^tag:'/, "").replace(/'$/, "");
+      const matchedTag = existingOrders?.find((t) => t === extractedTag);
+      if (matchedTag) {
+        // Return the order with the exact tag so strict matching succeeds
         responseData = {
-          data: { orders: { nodes: [{ id: "gid://shopify/Order/existing-1", name: "#1001", tags: [SEED_TAG] }] } },
+          data: { 
+            orders: { 
+              nodes: [{ id: "gid://shopify/Order/existing-1", name: "#1001", tags: [SEED_TAG, matchedTag] }],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            } 
+          },
           extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
         };
       } else {
         responseData = {
-          data: { orders: { nodes: [] } },
+          data: { orders: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
           extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 }, requestedQueryCost: 10, actualQueryCost: 5 } },
         };
       }
@@ -820,7 +842,7 @@ describe("Idempotency", () => {
     const state = createMockState();
     await seedCompanies(state);
 
-    expect(state.skippedCount.companies).toBe(5);
+    expect(state.unchangedCount.companies).toBe(5);
     expect(state.createdCount.companies).toBe(0);
 
     const createCalls = capturedRequests.filter((r) => r.query.includes("companyCreate"));
@@ -852,7 +874,7 @@ describe("Idempotency", () => {
     await vi.advanceTimersByTimeAsync(600000); // Fast-forward through order delays
     await seedPromise;
 
-    expect(state.skippedCount.orders).toBeGreaterThanOrEqual(1);
+    expect(state.unchangedCount.orders).toBeGreaterThanOrEqual(1);
   });
 });
 
@@ -1865,7 +1887,7 @@ describe("Role Assignment Idempotency", () => {
     const result = await ensureContactRoleOnLocation(state, companyData, "gid://shopify/CompanyLocation/loc-30");
 
     expect(result).toBe(true);
-    expect(state.skippedCount.roleAssignments).toBe(1);
+    expect(state.unchangedCount.roleAssignments).toBe(1);
     expect(state.createdCount.roleAssignments).toBe(0);
     
     // Should NOT have called assign mutation
@@ -1885,7 +1907,7 @@ describe("Role Assignment Idempotency", () => {
 
     expect(result).toBe(true);
     expect(state.createdCount.roleAssignments).toBe(1);
-    expect(state.skippedCount.roleAssignments).toBe(0);
+    expect(state.unchangedCount.roleAssignments).toBe(0);
     
     // Should have called assign mutation
     const assignCalls = capturedRequests.filter(r => r.query.includes("companyLocationAssignRoles"));
@@ -1933,7 +1955,7 @@ describe("Location Backfill for All Companies", () => {
 
     // Should have all 5 companies in state
     expect(state.companies.size).toBe(5);
-    expect(state.skippedCount.companies).toBe(5);
+    expect(state.unchangedCount.companies).toBe(5);
     
     // Verify all company keys are present
     for (const seed of COMPANY_SEEDS) {
@@ -2154,8 +2176,20 @@ describe("New GraphQL Documents Validation against Admin API 2026-10 Schema", ()
     expect(errors).toEqual([]);
   });
 
+  it("FIND_COMPANY_BY_EXTERNAL_ID_QUERY is valid against 2026-10 schema", () => {
+    const document = parse(FIND_COMPANY_BY_EXTERNAL_ID_QUERY);
+    const errors = validate(schema, document);
+    expect(errors).toEqual([]);
+  });
+
   it("FIND_ORDER_BY_TAG_QUERY is valid against 2026-10 schema", () => {
     const document = parse(FIND_ORDER_BY_TAG_QUERY);
+    const errors = validate(schema, document);
+    expect(errors).toEqual([]);
+  });
+
+  it("FIND_CUSTOMER_BY_EMAIL_QUERY is valid against 2026-10 schema", () => {
+    const document = parse(FIND_CUSTOMER_BY_EMAIL_QUERY);
     const errors = validate(schema, document);
     expect(errors).toEqual([]);
   });
@@ -2197,5 +2231,797 @@ describe("New Variable Builders Input Coercion", () => {
       const errors = coerceAndCollectErrors(roleAssign, "CompanyLocationRoleAssign");
       expect(errors).toEqual([]);
     }
+  });
+});
+
+describe("Strict externalId Matching (fuzzy search bug fix)", () => {
+  beforeEach(() => {
+    capturedRequests = [];
+  });
+
+  afterEach(() => {
+    restoreFetch();
+    capturedRequests = [];
+  });
+
+  it("findCompanyByExternalId returns null when search returns non-matching company", async () => {
+    // Simulate Shopify's fuzzy search returning "ntr-seed-company-10" when searching for "ntr-seed-company-1"
+    global.fetch = vi.fn(async () => {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            companies: {
+              nodes: [{
+                id: "gid://shopify/Company/wrong",
+                name: "Wrong Company",
+                externalId: `${SEED_PREFIX}company-10`, // Fuzzy match - NOT the one we want
+                locations: { edges: [] },
+                contacts: { edges: [] },
+              }],
+            },
+          },
+          extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+        }),
+      } as Response;
+    });
+
+    const state = createMockState();
+    const result = await findCompanyByExternalId(state, `${SEED_PREFIX}company-1`);
+
+    // Should return null because externalId doesn't match exactly
+    expect(result).toBeNull();
+  });
+
+  it("findCompanyByExternalId returns company when externalId matches exactly", async () => {
+    global.fetch = vi.fn(async () => {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            companies: {
+              nodes: [
+                {
+                  id: "gid://shopify/Company/wrong",
+                  name: "Wrong Company",
+                  externalId: `${SEED_PREFIX}company-10`, // Non-matching
+                  locations: { edges: [] },
+                  contacts: { edges: [] },
+                },
+                {
+                  id: "gid://shopify/Company/correct",
+                  name: "Correct Company",
+                  externalId: `${SEED_PREFIX}company-1`, // Exact match
+                  locations: { edges: [{ node: { id: "loc-1", name: "HQ" } }] },
+                  contacts: { edges: [{ node: { id: "contact-1", customer: { id: "cust-1", email: "test@example.com" } } }] },
+                },
+              ],
+            },
+          },
+          extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+        }),
+      } as Response;
+    });
+
+    const state = createMockState();
+    const result = await findCompanyByExternalId(state, `${SEED_PREFIX}company-1`);
+
+    // Should return the exact match
+    expect(result).not.toBeNull();
+    expect(result?.externalId).toBe(`${SEED_PREFIX}company-1`);
+    expect(result?.id).toBe("gid://shopify/Company/correct");
+  });
+
+  it("findOrderByTag returns null when search returns order without exact tag", async () => {
+    global.fetch = vi.fn(async () => {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            orders: {
+              nodes: [{
+                id: "gid://shopify/Order/wrong",
+                name: "#1001",
+                tags: [`${SEED_PREFIX}order-10`], // Fuzzy match - NOT the one we want
+              }],
+            },
+          },
+          extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+        }),
+      } as Response;
+    });
+
+    const state = createMockState();
+    const result = await findOrderByTag(state, `${SEED_PREFIX}order-1`);
+
+    // Should return null because tags don't include the exact tag
+    expect(result).toBeNull();
+  });
+
+  it("findOrderByTag returns order when tags include exact match", async () => {
+    global.fetch = vi.fn(async () => {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            orders: {
+              nodes: [
+                {
+                  id: "gid://shopify/Order/wrong",
+                  name: "#1001",
+                  tags: [`${SEED_PREFIX}order-10`], // Non-matching
+                },
+                {
+                  id: "gid://shopify/Order/correct",
+                  name: "#1002",
+                  tags: [SEED_TAG, `${SEED_PREFIX}order-1`], // Exact match
+                },
+              ],
+            },
+          },
+          extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+        }),
+      } as Response;
+    });
+
+    const state = createMockState();
+    const result = await findOrderByTag(state, `${SEED_PREFIX}order-1`);
+
+    // Should return the exact match
+    expect(result).not.toBeNull();
+    expect(result?.id).toBe("gid://shopify/Order/correct");
+    expect(result?.tags).toContain(`${SEED_PREFIX}order-1`);
+  });
+
+  it("rerun with 5 fixtures creates 5 distinct companies even when search returns Acme for all", async () => {
+    // Simulate the bug: Shopify's fuzzy search returns "Acme" (company-1) for ALL queries
+    // Use correct fixture values so company-1 is counted as unchanged
+    const company1Seed = COMPANY_SEEDS[0];
+    const acmeCompany = {
+      id: "gid://shopify/Company/acme",
+      name: company1Seed.name,
+      externalId: `${SEED_PREFIX}company-1`, // Always returns company-1
+      locations: {
+        edges: [
+          { node: { id: "gid://shopify/CompanyLocation/acme-15", name: "Acme - Net-15" } },
+          { node: { id: "gid://shopify/CompanyLocation/acme-30", name: "Acme - Net-30" } },
+          { node: { id: "gid://shopify/CompanyLocation/acme-60", name: "Acme - Net-60" } },
+        ],
+      },
+      contacts: { edges: [{ node: { id: "gid://shopify/CompanyContact/acme", customer: { id: "gid://shopify/Customer/acme", email: company1Seed.contact.email } } }] },
+    };
+
+    let createCallCount = 0;
+
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+      const variables = body.variables as Record<string, unknown>;
+      capturedRequests.push({ query, variables });
+
+      // Find company - always return Acme (simulating fuzzy search bug)
+      if (query.includes("companies") && variables?.query) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companies: { nodes: [acmeCompany], pageInfo: { hasNextPage: false, endCursor: null } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Company create
+      if (query.includes("companyCreate")) {
+        createCallCount++;
+        const externalId = ((variables?.input as Record<string, unknown>)?.company as Record<string, unknown>)?.externalId as string;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyCreate: {
+                company: {
+                  id: `gid://shopify/Company/new-${createCallCount}`,
+                  name: `New Company ${createCallCount}`,
+                  externalId,
+                  locations: { edges: [{ node: { id: `gid://shopify/CompanyLocation/new-${createCallCount}`, name: "HQ" } }] },
+                  contacts: { edges: [{ node: { id: `gid://shopify/CompanyContact/new-${createCallCount}`, customer: { id: `gid://shopify/Customer/new-${createCallCount}`, email: `new${createCallCount}@example.com` } } }] },
+                },
+                userErrors: [],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Contact roles
+      if (query.includes("contactRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { company: { contactRoles: { nodes: [{ id: "gid://role/1", name: "Ordering only" }] } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Role assignments - empty
+      if (query.includes("roleAssignments") && !query.includes("companyLocationAssignRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocation: { roleAssignments: { nodes: [] } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Role assign mutation
+      if (query.includes("companyLocationAssignRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocationAssignRoles: { roleAssignments: [], userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Location create
+      if (query.includes("companyLocationCreate")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocationCreate: { companyLocation: { id: `gid://loc/${Date.now()}`, name: "New" }, userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const state = createMockState();
+    await seedCompanies(state);
+
+    // With strict matching, only company-1 should be unchanged (Acme matches exactly)
+    // The other 4 companies should be created because their externalIds don't match
+    expect(state.unchangedCount.companies).toBe(1); // Only company-1 (Acme)
+    expect(state.createdCount.companies).toBe(4); // company-2, company-3, company-4, company-5
+
+    // Should have 5 companies in state (1 existing + 4 created)
+    expect(state.companies.size).toBe(5);
+
+    // Verify companyCreate was called 4 times
+    expect(createCallCount).toBe(4);
+    
+    // P3 assertion: companyDelete should never be called
+    const deleteCalls = capturedRequests.filter(r => r.query.includes("companyDelete"));
+    expect(deleteCalls).toHaveLength(0);
+    
+    // P3 assertion: Acme location IDs should NOT end up on companies 2-5
+    const acmeLocationIds = ["gid://shopify/CompanyLocation/acme-15", "gid://shopify/CompanyLocation/acme-30", "gid://shopify/CompanyLocation/acme-60"];
+    for (const [key, companyData] of state.companies) {
+      if (key !== "company-1") {
+        // Companies 2-5 should not have any Acme location IDs
+        for (const [_dueInDays, locationId] of companyData.locations) {
+          expect(acmeLocationIds).not.toContain(locationId);
+        }
+      }
+    }
+  });
+
+  it("counts are correctly reported: created vs unchanged", async () => {
+    // Setup: 2 companies exist, 3 need to be created
+    const existingExternalIds = [`${SEED_PREFIX}company-1`, `${SEED_PREFIX}company-3`];
+
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+      const variables = body.variables as Record<string, unknown>;
+
+      // Find company
+      if (query.includes("companies") && variables?.query) {
+        const searchQuery = variables.query as string;
+        const matchedId = existingExternalIds.find(id => searchQuery.includes(id));
+        
+        if (matchedId) {
+          // Find the matching seed to get correct fixture values
+          const matchingSeed = COMPANY_SEEDS.find(s => `${SEED_PREFIX}${s.key}` === matchedId);
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              data: {
+                companies: {
+                  nodes: [{
+                    id: `gid://shopify/Company/${matchedId}`,
+                    name: matchingSeed?.name ?? "Existing Company",
+                    externalId: matchedId,
+                    locations: { edges: [
+                      { node: { id: `gid://loc/${matchedId}-15`, name: "Net-15" } },
+                      { node: { id: `gid://loc/${matchedId}-30`, name: "Net-30" } },
+                      { node: { id: `gid://loc/${matchedId}-60`, name: "Net-60" } },
+                    ] },
+                    contacts: { edges: [{ node: { id: `gid://contact/${matchedId}`, customer: { id: `gid://cust/${matchedId}`, email: matchingSeed?.contact.email ?? "test@example.com" } } }] },
+                  }],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
+              extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+            }),
+          } as Response;
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ data: { companies: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } }),
+        } as Response;
+      }
+
+      // Company create
+      if (query.includes("companyCreate")) {
+        const externalId = ((variables?.input as Record<string, unknown>)?.company as Record<string, unknown>)?.externalId as string;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyCreate: {
+                company: {
+                  id: `gid://shopify/Company/${externalId}`,
+                  name: "New Company",
+                  externalId,
+                  locations: { edges: [{ node: { id: `gid://loc/${externalId}`, name: "HQ" } }] },
+                  contacts: { edges: [{ node: { id: `gid://contact/${externalId}`, customer: { id: `gid://cust/${externalId}`, email: "new@example.com" } } }] },
+                },
+                userErrors: [],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Contact roles
+      if (query.includes("contactRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { company: { contactRoles: { nodes: [{ id: "gid://role/1", name: "Ordering only" }] } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Role assignments
+      if (query.includes("roleAssignments") && !query.includes("companyLocationAssignRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocation: { roleAssignments: { nodes: [] } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Role assign
+      if (query.includes("companyLocationAssignRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocationAssignRoles: { roleAssignments: [], userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Location create
+      if (query.includes("companyLocationCreate")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocationCreate: { companyLocation: { id: `gid://loc/${Date.now()}`, name: "New" }, userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const state = createMockState();
+    await seedCompanies(state);
+
+    // Verify counts
+    expect(state.unchangedCount.companies).toBe(2); // company-1, company-3
+    expect(state.createdCount.companies).toBe(3); // company-2, company-4, company-5
+    expect(state.companies.size).toBe(5); // All 5 in state
+  });
+
+  it("reset search sends unquoted wildcard query external_id:ntr-seed-*", async () => {
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+      const variables = body.variables as Record<string, unknown>;
+      capturedRequests.push({ query, variables });
+
+      // Return empty results for both companies and orders searches
+      if (query.includes("FindSeededCompanies") || query.includes("FindSeededOrders")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companies: { nodes: [] }, orders: { nodes: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const state = createMockState({ reset: true });
+    await resetSeedData(state);
+
+    // Find the company search request
+    const companySearchCall = capturedRequests.find(r => r.query.includes("FindSeededCompanies"));
+    expect(companySearchCall).toBeDefined();
+    
+    // Assert the query variable is exactly unquoted: external_id:ntr-seed-*
+    expect(companySearchCall?.variables?.query).toBe(`external_id:${SEED_PREFIX}*`);
+    // Must NOT be quoted
+    expect(companySearchCall?.variables?.query).not.toContain("'");
+    expect(companySearchCall?.variables?.query).not.toContain('"');
+  });
+});
+
+describe("Paginated Search", () => {
+  beforeEach(() => {
+    capturedRequests = [];
+  });
+
+  afterEach(() => {
+    restoreFetch();
+    capturedRequests = [];
+  });
+
+  it("MAX_SEARCH_PAGES is 10", () => {
+    expect(MAX_SEARCH_PAGES).toBe(10);
+  });
+
+  it("findCompanyByExternalId paginates until exact match found", async () => {
+    let pageCount = 0;
+    global.fetch = vi.fn(async () => {
+      pageCount++;
+      // Return match on page 3
+      if (pageCount === 3) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companies: {
+                nodes: [{
+                  id: "gid://shopify/Company/found",
+                  name: "Found Company",
+                  externalId: `${SEED_PREFIX}company-1`,
+                  locations: { edges: [] },
+                  contacts: { edges: [] },
+                }],
+                pageInfo: { hasNextPage: true, endCursor: "cursor3" },
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+      // Return non-matching results with more pages
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            companies: {
+              nodes: [{
+                id: `gid://shopify/Company/wrong-${pageCount}`,
+                name: "Wrong Company",
+                externalId: `${SEED_PREFIX}company-${pageCount + 10}`, // Non-matching
+                locations: { edges: [] },
+                contacts: { edges: [] },
+              }],
+              pageInfo: { hasNextPage: true, endCursor: `cursor${pageCount}` },
+            },
+          },
+          extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+        }),
+      } as Response;
+    });
+
+    const state = createMockState();
+    const result = await findCompanyByExternalId(state, `${SEED_PREFIX}company-1`);
+
+    expect(result).not.toBeNull();
+    expect(result?.externalId).toBe(`${SEED_PREFIX}company-1`);
+    expect(pageCount).toBe(3); // Should stop at page 3 when match found
+  });
+
+  it("findCompanyByExternalId stops and warns when max pages exceeded", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    let pageCount = 0;
+    
+    global.fetch = vi.fn(async () => {
+      pageCount++;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            companies: {
+              nodes: [{
+                id: `gid://shopify/Company/wrong-${pageCount}`,
+                name: "Wrong Company",
+                externalId: `${SEED_PREFIX}company-${pageCount + 100}`, // Never matches
+                locations: { edges: [] },
+                contacts: { edges: [] },
+              }],
+              pageInfo: { hasNextPage: true, endCursor: `cursor${pageCount}` }, // Always has more
+            },
+          },
+          extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+        }),
+      } as Response;
+    });
+
+    const state = createMockState();
+    const result = await findCompanyByExternalId(state, `${SEED_PREFIX}company-1`);
+
+    expect(result).toBeNull();
+    expect(pageCount).toBe(MAX_SEARCH_PAGES);
+    
+    const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    expect(output).toContain(`exceeded ${MAX_SEARCH_PAGES} pages`);
+    
+    logSpy.mockRestore();
+  });
+
+  it("findOrderByTag paginates until exact match found", async () => {
+    let pageCount = 0;
+    global.fetch = vi.fn(async () => {
+      pageCount++;
+      // Return match on page 2
+      if (pageCount === 2) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              orders: {
+                nodes: [{ id: "gid://shopify/Order/found", name: "#1001", tags: [SEED_TAG, `${SEED_PREFIX}order-1`] }],
+                pageInfo: { hasNextPage: true, endCursor: "cursor2" },
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            orders: {
+              nodes: [{ id: `gid://shopify/Order/wrong-${pageCount}`, name: `#100${pageCount}`, tags: [`${SEED_PREFIX}order-${pageCount + 100}`] }],
+              pageInfo: { hasNextPage: true, endCursor: `cursor${pageCount}` },
+            },
+          },
+          extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+        }),
+      } as Response;
+    });
+
+    const state = createMockState();
+    const result = await findOrderByTag(state, `${SEED_PREFIX}order-1`);
+
+    expect(result).not.toBeNull();
+    expect(result?.tags).toContain(`${SEED_PREFIX}order-1`);
+    expect(pageCount).toBe(2);
+  });
+
+  it("FIND queries include pageInfo in GraphQL document", () => {
+    expect(FIND_COMPANY_BY_EXTERNAL_ID_QUERY).toContain("pageInfo");
+    expect(FIND_COMPANY_BY_EXTERNAL_ID_QUERY).toContain("hasNextPage");
+    expect(FIND_COMPANY_BY_EXTERNAL_ID_QUERY).toContain("endCursor");
+    expect(FIND_COMPANY_BY_EXTERNAL_ID_QUERY).toContain("$after");
+
+    expect(FIND_ORDER_BY_TAG_QUERY).toContain("pageInfo");
+    expect(FIND_ORDER_BY_TAG_QUERY).toContain("hasNextPage");
+    expect(FIND_ORDER_BY_TAG_QUERY).toContain("endCursor");
+    expect(FIND_ORDER_BY_TAG_QUERY).toContain("$after");
+
+    expect(FIND_CUSTOMER_BY_EMAIL_QUERY).toContain("pageInfo");
+    expect(FIND_CUSTOMER_BY_EMAIL_QUERY).toContain("hasNextPage");
+    expect(FIND_CUSTOMER_BY_EMAIL_QUERY).toContain("endCursor");
+    expect(FIND_CUSTOMER_BY_EMAIL_QUERY).toContain("$after");
+  });
+});
+
+describe("Updated and Unchanged Counting", () => {
+  beforeEach(() => {
+    setupMockFetch();
+    mockResponses.clear();
+  });
+
+  afterEach(() => {
+    restoreFetch();
+    capturedRequests = [];
+  });
+
+  it("existing company with matching fixture fields counts as unchanged", async () => {
+    // All companies exist
+    mockResponses.set("existingCompanies", COMPANY_SEEDS.map(c => `${SEED_PREFIX}${c.key}`));
+
+    const state = createMockState();
+    await seedCompanies(state);
+
+    // All companies should be unchanged
+    expect(state.unchangedCount.companies).toBe(5);
+    expect(state.createdCount.companies).toBe(0);
+  });
+
+  it("existing company with different name counts as drifted", async () => {
+    const seed = COMPANY_SEEDS[0];
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    
+    // Custom mock that returns different name for company-1
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+      const variables = body.variables as Record<string, unknown>;
+
+      // Find company
+      if (query.includes("companies") && variables?.query) {
+        const searchQuery = variables.query as string;
+        const matchedSeed = COMPANY_SEEDS.find(s => searchQuery.includes(`${SEED_PREFIX}${s.key}`));
+        
+        if (matchedSeed) {
+          const isCompany1 = matchedSeed.key === "company-1";
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              data: {
+                companies: {
+                  nodes: [{
+                    id: `gid://shopify/Company/${matchedSeed.key}`,
+                    name: isCompany1 ? "Different Name" : matchedSeed.name, // Different for company-1
+                    externalId: `${SEED_PREFIX}${matchedSeed.key}`,
+                    locations: { edges: [
+                      { node: { id: `gid://loc/${matchedSeed.key}-15`, name: `${matchedSeed.name} - Net-15` } },
+                      { node: { id: `gid://loc/${matchedSeed.key}-30`, name: `${matchedSeed.name} - Net-30` } },
+                      { node: { id: `gid://loc/${matchedSeed.key}-60`, name: `${matchedSeed.name} - Net-60` } },
+                    ] },
+                    contacts: { edges: [{ node: {
+                      id: `gid://contact/${matchedSeed.key}`,
+                      customer: { id: `gid://cust/${matchedSeed.key}`, email: matchedSeed.contact.email },
+                    } }] },
+                  }],
+                },
+              },
+              extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+            }),
+          } as Response;
+        }
+        return { ok: true, status: 200, json: async () => ({ data: { companies: { nodes: [] } } }) } as Response;
+      }
+
+      // Contact roles
+      if (query.includes("contactRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { company: { contactRoles: { nodes: [{ id: "gid://role/1", name: "Ordering only" }] } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Role assignments
+      if (query.includes("roleAssignments") && !query.includes("companyLocationAssignRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocation: { roleAssignments: { nodes: [] } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Role assign
+      if (query.includes("companyLocationAssignRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocationAssignRoles: { roleAssignments: [], userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const state = createMockState();
+    await seedCompanies(state);
+
+    // Should log warning about drifted company
+    const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    expect(output).toContain("drifted from fixture");
+    expect(output).toContain("Different Name");
+    expect(output).toContain(seed.name);
+
+    // Company-1 drifted, companies 2-5 unchanged
+    expect(state.driftedCount.companies).toBe(1);
+    expect(state.unchangedCount.companies).toBe(4);
+    
+    logSpy.mockRestore();
+  });
+
+  it("existing locations are counted as unchanged", async () => {
+    // All companies exist with all locations
+    mockResponses.set("existingCompanies", COMPANY_SEEDS.map(c => `${SEED_PREFIX}${c.key}`));
+
+    const state = createMockState();
+    await seedCompanies(state);
+
+    // 5 companies × 3 locations each = 15 unchanged locations
+    expect(state.unchangedCount.locations).toBe(15);
+    expect(state.createdCount.locations).toBe(0);
+  });
+
+  it("existing orders are counted as unchanged, not skipped", async () => {
+    vi.useFakeTimers();
+    
+    // All B2B orders exist
+    const existingOrders = ORDER_DISTRIBUTION.map((_, i) => `${SEED_PREFIX}order-${i + 1}`);
+    mockResponses.set("existingOrders", existingOrders);
+
+    const state = createMockState();
+    
+    // Add all companies for orders
+    for (const seed of COMPANY_SEEDS) {
+      state.companies.set(seed.key, createMockCompanyData({
+        id: `gid://shopify/Company/${seed.key}`,
+        contactCustomerId: `gid://shopify/Customer/${seed.key}`,
+      }));
+    }
+
+    const seedPromise = seedOrders(state);
+    await vi.advanceTimersByTimeAsync(600000);
+    await seedPromise;
+
+    // All orders should be unchanged, none skipped
+    expect(state.unchangedCount.orders).toBe(ORDER_DISTRIBUTION.length);
+    expect(state.skippedCount.orders).toBe(0);
+    expect(state.createdCount.orders).toBe(0);
+    
+    vi.useRealTimers();
   });
 });
