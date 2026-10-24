@@ -170,8 +170,10 @@ rg "paymentCustomization" app/ --glob "*.ts" --glob "*.tsx"
 
 **Verification:** `shopify.app.toml` scopes string does not include `write_draft_orders`.
 
-**Per `shopify.app.toml` line 26:**
-> NOT in production: write_draft_orders (seed-only, in shopify.app.dev.toml)
+**Per `shopify.app.toml` lines 26–28:**
+> NOT in production: write_draft_orders. To add it for local development, run
+> `shopify app config link` to create a local shopify.app.dev.toml (gitignored).
+> See https://shopify.dev/docs/apps/build/cli-for-apps/manage-app-config-files
 
 **Per `docs/scopes.md` line 128:**
 > **No `write_draft_orders`**: The seed uses `orderCreate` with custom line items instead of draft orders.
