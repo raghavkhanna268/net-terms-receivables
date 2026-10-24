@@ -3,7 +3,9 @@ import { useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { resolvePlan, type ResolvedPlan } from "~/services/plan.server";
-import { getUsageStats } from "~/services/gating.server";
+import { getUsageStats, isGatingEnforced } from "~/services/gating.server";
+import type { PlanKey } from "~/lib/entitlements";
+import { PlanBanner } from "~/components/UpgradePrompt";
 import {
   getShopAgingTotals,
   getBuyerLedger,
@@ -128,6 +130,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   }
 
   const storeHandle = shopDomain.replace(".myshopify.com", "");
+  const gatingEnforced = isGatingEnforced();
 
   return {
     shopName: storeHandle,
@@ -146,6 +149,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       importsThisMonth: { current: 0, limit: 1 },
     },
     appHandle: process.env.APP_HANDLE ?? "net-terms-receivables",
+    gatingEnforced,
     agingTotals,
     buyerLedger,
     selectedBuyerInvoices,
@@ -160,10 +164,6 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     error,
   };
 };
-
-function formatLimit(limit: number): string {
-  return limit === -1 ? "Unlimited" : String(limit);
-}
 
 const BUCKET_LABELS: Record<AgingBucketKey, string> = {
   current: "Current",
@@ -463,6 +463,7 @@ export default function Index() {
     plan,
     usage,
     appHandle,
+    gatingEnforced,
     agingTotals,
     buyerLedger,
     selectedBuyerInvoices,
@@ -472,7 +473,7 @@ export default function Index() {
     error,
   } = useLoaderData<typeof loader>();
 
-  const planKey = plan?.key ?? "free";
+  const planKey = (plan?.key ?? "free") as PlanKey;
   const planName = plan?.name ?? "Free";
   const isTest = plan?.isTest ?? false;
 
@@ -480,14 +481,6 @@ export default function Index() {
 
   const companiesUsed = usage.companies.current;
   const companiesLimit = usage.companies.limit;
-  const companiesText =
-    companiesLimit === -1
-      ? `${companiesUsed} companies`
-      : `${companiesUsed} / ${formatLimit(companiesLimit)} companies`;
-  const companiesAtLimit =
-    companiesLimit !== -1 && companiesUsed >= companiesLimit;
-
-  const displayPlanName = planName.charAt(0).toUpperCase() + planName.slice(1);
 
   const hasInvoices =
     agingTotals && Object.keys(agingTotals.totalByCurrency).length > 0;
@@ -501,27 +494,15 @@ export default function Index() {
     <s-page heading="Net Terms Receivables">
       {/* S21: Plan Banner */}
       <s-section heading="Your Plan">
-        <s-stack>
-          <s-paragraph>
-            <s-text type="strong">Current Plan: </s-text>
-            <s-text>
-              {displayPlanName}
-              {isTest ? " (Test)" : ""}
-            </s-text>
-          </s-paragraph>
-          <s-paragraph>
-            <s-text type="strong">Companies: </s-text>
-            <s-text>{companiesText}</s-text>
-            {companiesAtLimit && (
-              <s-text> — Limit reached, upgrade to add more</s-text>
-            )}
-          </s-paragraph>
-          {planKey !== "scale" && (
-            <s-button href={upgradeUrl} target="_top">
-              Upgrade Plan
-            </s-button>
-          )}
-        </s-stack>
+        <PlanBanner
+          planKey={planKey}
+          planName={planName}
+          isTest={isTest}
+          companiesUsed={companiesUsed}
+          companiesLimit={companiesLimit}
+          gatingEnforced={gatingEnforced}
+          upgradeUrl={upgradeUrl}
+        />
       </s-section>
 
       {/* Error State */}
