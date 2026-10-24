@@ -32,7 +32,27 @@ import type { Sql } from "~/lib/db-light.server";
 import { renderPaymentReminderEmail } from "~/emails/PaymentReminderEmail";
 import { validateTimezone } from "~/lib/aging-dates.server";
 import { DateTime } from "luxon";
-import { isAccountActive } from "~/services/gating.server";
+
+/**
+ * Check if plan gating enforcement is enabled (inlined to avoid import chain issues).
+ * Mirrors gating.server.ts:isGatingEnforced().
+ */
+function isGatingEnforcedForReminders(): boolean {
+  const env = process.env.PLAN_GATING_ENFORCED as string | undefined;
+  return env === "1" || env === "true";
+}
+
+/**
+ * Check if a buyer account is active (not gated) for reminder purposes.
+ * Mirrors gating.server.ts:isAccountActive() - inlined to avoid import chain
+ * that breaks test mocking in app.settings.reminders.test.ts.
+ */
+function isBuyerAccountActiveForReminders(gatedAt: Date | null): boolean {
+  if (!isGatingEnforcedForReminders()) {
+    return true;
+  }
+  return gatedAt === null;
+}
 
 /**
  * Daily send cap (Resend free tier: 100 emails/day).
@@ -501,7 +521,7 @@ export async function sendPaymentReminder(
 
   // Gate 3: Check if buyer account is gated (over plan limit)
   // When PLAN_GATING_ENFORCED is on, no reminders to gated accounts
-  if (!isAccountActive(invoice.buyerAccountGatedAt)) {
+  if (!isBuyerAccountActiveForReminders(invoice.buyerAccountGatedAt)) {
     return {
       success: true,
       action: "skipped",
