@@ -37,7 +37,6 @@
 import postgres from "postgres";
 import { pathToFileURL } from "node:url";
 import { sqlOptions } from "~/lib/db-light.server";
-import { verifyReadOnlyTransaction } from "./ci/backfill-dry-run-preflight";
 
 interface BackfillStats {
   shopIndex: number;
@@ -271,9 +270,13 @@ async function main() {
     if (dryRun) {
       // Dry-run: all reads inside a single explicit READ ONLY transaction.
       const stats = await sql.begin("read only", async (tx) => {
-        const verifyResult = await verifyReadOnlyTransaction(tx);
-        if (!verifyResult.ok) {
-          throw new Error(`READ ONLY transaction check failed: ${verifyResult.error}`);
+        // Assert in-place: verifyReadOnlyTransaction() opens its own transaction and
+        // cannot run inside this one (TransactionSql has no begin()).
+        const [setting] = await tx<{ transaction_read_only: string }[]>`
+          SELECT current_setting('transaction_read_only') AS transaction_read_only
+        `;
+        if (setting?.transaction_read_only !== "on") {
+          throw new Error("READ ONLY transaction check failed: transaction_read_only is not 'on'");
         }
 
         return getBackfillStats(tx);
