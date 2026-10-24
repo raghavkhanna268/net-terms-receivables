@@ -25,6 +25,7 @@ export default function App() {
         <s-link href="/app">Dashboard</s-link>
         <s-link href="/app/reconcile">Reconcile</s-link>
         <s-link href="/app/plan">Plan</s-link>
+        <s-link href="/app/onboarding">Setup Guide</s-link>
         {/* Future navigation items for B2B features */}
         {/* <s-link href="/app/buyers">Buyers</s-link> */}
         {/* <s-link href="/app/invoices">Invoices</s-link> */}

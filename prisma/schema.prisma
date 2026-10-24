@@ -184,6 +184,8 @@ model Shop {
   backstopProcessedOrders BackstopProcessedOrder[]
   // S18: Payment reminder settings
   reminderSettings S18ShopReminderSettings?
+  // S23: When the merchant dismissed the onboarding checklist (NULL = not dismissed)
+  onboardingDismissedAt DateTime? @map("onboarding_dismissed_at") @db.Timestamptz
 
   // S21: Index for finding shops by plan (analytics, batch operations)
   @@index([planKey])

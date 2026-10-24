@@ -50,9 +50,40 @@ function parseSortOrder(value: string | null): SortOrder {
   return "desc";
 }
 
+async function checkOnboardingRedirect(
+  sql: ReturnType<typeof getRequestSql>,
+  shopId: string
+): Promise<boolean> {
+  try {
+    const [shop] = await sql<{ onboarding_dismissed_at: Date | null }[]>`
+      SELECT onboarding_dismissed_at FROM "Shop" WHERE id = ${shopId}
+    `;
+
+    if (shop?.onboarding_dismissed_at !== null) {
+      return false;
+    }
+
+    const buyerCountResult = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+    `;
+    const buyerCount = parseInt(buyerCountResult[0]?.count ?? "0", 10);
+    if (buyerCount > 0) return false;
+
+    const tagRuleCountResult = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "AccountSource" WHERE "shopId" = ${shopId}
+    `;
+    const tagRuleCount = parseInt(tagRuleCountResult[0]?.count ?? "0", 10);
+    if (tagRuleCount > 0) return false;
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { shopify } = context;
-  const { session } = await shopify.authenticate.admin(request);
+  const { session, redirect: shopifyRedirect } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
@@ -61,10 +92,18 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const sortBy = parseSortBy(url.searchParams.get("sortBy"));
   const sortOrder = parseSortOrder(url.searchParams.get("sortOrder"));
   const selectedBuyerId = url.searchParams.get("buyer") ?? null;
+  const skipOnboarding = url.searchParams.get("skipOnboarding") === "true";
 
   const [shop] = await sql<{ id: string; currency: string; timezone: string }[]>`
     SELECT id, currency, timezone FROM "Shop" WHERE domain = ${shopDomain}
   `;
+
+  if (shop && !skipOnboarding) {
+    const shouldRedirect = await checkOnboardingRedirect(sql, shop.id);
+    if (shouldRedirect) {
+      throw shopifyRedirect("/app/onboarding");
+    }
+  }
 
   let planData: ResolvedPlan | null = null;
   let usage: {
