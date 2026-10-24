@@ -571,6 +571,35 @@ describe("after-auth", () => {
       expect(mockEnsureValidation).toHaveBeenCalledTimes(1);
     });
 
+    it("S23-09: reinstall SQL resets onboarding_dismissed_at", async () => {
+      mockEnsureValidation.mockResolvedValue({
+        id: "gid://shopify/Validation/123",
+        created: true,
+      });
+
+      const mockAdmin = createMockAdmin();
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
+
+      runAfterAuth(
+        "onboarding-reset-shop.myshopify.com",
+        mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
+      );
+
+      await Promise.allSettled(waitUntilPromises);
+
+      expect(mockSqlQuery).toHaveBeenCalled();
+
+      const sqlCall = mockSqlQuery.mock.calls[0];
+      const sqlTemplate = sqlCall[0];
+
+      const templateStr = Array.isArray(sqlTemplate) ? sqlTemplate.join("") : String(sqlTemplate);
+      expect(templateStr).toContain('"uninstalledAt" = NULL');
+      expect(templateStr).toContain('onboarding_dismissed_at = NULL');
+      expect(templateStr).toContain('"uninstalledAt" IS NOT NULL');
+    });
+
     it("clearUninstalledAt failure does not break /app load", async () => {
       const consoleSpy = vi
         .spyOn(console, "error")
@@ -644,6 +673,54 @@ describe("after-auth", () => {
       );
 
       consoleSpy.mockRestore();
+    });
+
+    it("S23-09: reinstall log uses safeLog with shopHash, no raw id or domain", async () => {
+      const consoleLogSpy = vi
+        .spyOn(console, "log")
+        .mockImplementation(() => {});
+
+      mockEnsureValidation.mockResolvedValue({
+        id: "gid://shopify/Validation/123",
+        created: true,
+      });
+
+      mockSqlQuery.mockResolvedValueOnce([{ id: "shop-uuid-123" }]);
+
+      const mockAdmin = createMockAdmin();
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
+
+      runAfterAuth(
+        "safelog-test.myshopify.com",
+        mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
+      );
+
+      await Promise.allSettled(waitUntilPromises);
+
+      await vi.waitFor(() => {
+        const safeLogCall = consoleLogSpy.mock.calls.find(
+          (call) =>
+            typeof call[0] === "string" &&
+            call[0].includes("cleared_uninstalled_at_and_onboarding"),
+        );
+        expect(safeLogCall).toBeDefined();
+
+        const logOutput = safeLogCall![0] as string;
+        const parsed = JSON.parse(logOutput);
+
+        expect(parsed.event).toBe("cleared_uninstalled_at_and_onboarding");
+        expect(parsed.shopHash).toBeDefined();
+        expect(typeof parsed.shopHash).toBe("string");
+        expect(parsed.shopHash.length).toBeGreaterThan(0);
+
+        expect(logOutput).not.toContain("shop-uuid-123");
+        expect(logOutput).not.toContain("safelog-test.myshopify.com");
+        expect(logOutput).not.toContain("shop_id=");
+      });
+
+      consoleLogSpy.mockRestore();
     });
   });
 

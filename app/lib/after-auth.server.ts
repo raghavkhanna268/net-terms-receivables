@@ -16,7 +16,7 @@ import { ensureValidation } from "./validation-registration.server";
 import { ensurePaymentCustomization } from "./payment-customization-registration.server";
 import { getRequestSql } from "./request-context.server";
 import { validateTimezone } from "./aging-dates.server";
-import { toErrorCode } from "./log.server";
+import { safeLog, shopHash, toErrorCode } from "./log.server";
 import type { Sql } from "./db-light.server";
 
 /**
@@ -142,14 +142,17 @@ function runSetupIfNeeded(
 }
 
 /**
- * Clear uninstalledAt if set for the given shop.
+ * Clear uninstalledAt and reset onboarding state if the shop was uninstalled.
  *
  * This is called on every /app load BEFORE the cache early-return to handle
  * cross-isolate reinstall scenarios. It's a single cheap, shop-scoped conditional
  * UPDATE using the indexed domain column - no extra SELECT or round-trip.
  *
- * IMPORTANT: Only sets uninstalledAt to NULL. Never touches plan, gating,
- * credit, timezone, or any other column.
+ * S23-09: Also resets onboarding_dismissed_at on reinstall so the merchant sees
+ * the Setup Guide again. This is in the same UPDATE to remain a single statement.
+ *
+ * IMPORTANT: Only sets uninstalledAt and onboarding_dismissed_at to NULL.
+ * Never touches plan, gating, credit, timezone, or any other column.
  *
  * @param sql - postgres.js SQL client
  * @param shop - The shop domain
@@ -159,12 +162,14 @@ async function clearUninstalledAtIfSet(sql: Sql, shop: string): Promise<boolean>
   try {
     const result = await sql<{ id: string }[]>`
       UPDATE "Shop"
-      SET "uninstalledAt" = NULL
+      SET "uninstalledAt" = NULL, onboarding_dismissed_at = NULL
       WHERE domain = ${shop} AND "uninstalledAt" IS NOT NULL
       RETURNING id
     `;
     if (result.length > 0) {
-      console.log(`[afterAuth] cleared_uninstalled_at shop_id=${result[0].id}`);
+      safeLog("info", "cleared_uninstalled_at_and_onboarding", {
+        shopHash: await shopHash(shop),
+      });
       return true;
     }
     return false;
@@ -346,6 +351,10 @@ export async function upsertShopOnAuth(
     DO UPDATE SET
       timezone = COALESCE(${timezone}, "Shop".timezone),
       "uninstalledAt" = NULL,
+      onboarding_dismissed_at = CASE
+        WHEN "Shop"."uninstalledAt" IS NOT NULL THEN NULL
+        ELSE "Shop".onboarding_dismissed_at
+      END,
       "updatedAt" = NOW()
     RETURNING id
   `;
