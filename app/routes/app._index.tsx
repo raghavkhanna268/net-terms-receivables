@@ -20,8 +20,123 @@ import {
   type BuyerLedgerRow,
   type BuyerInvoiceRow,
 } from "~/lib/aging";
+import type { Sql } from "~/lib/db-light.server";
 
 const PAGE_SIZE = 20;
+
+/**
+ * Get the count of over-limit (gated) accounts for a shop.
+ * Exported for testing.
+ */
+export async function getOverLimitCount(
+  sql: Sql,
+  shopId: string
+): Promise<number> {
+  const [result] = await sql<{ count: string }[]>`
+    SELECT COUNT(*)::text as count
+    FROM "BuyerAccount"
+    WHERE "shopId" = ${shopId}
+      AND gated_at IS NOT NULL
+  `;
+  return parseInt(result?.count ?? "0", 10);
+}
+
+/**
+ * Get buyer ledger filtered to only over-limit (gated) accounts.
+ * Mirrors getBuyerLedger SQL but adds AND ba.gated_at IS NOT NULL.
+ * Exported for testing.
+ */
+export async function getOverLimitBuyerLedger(
+  sql: Sql,
+  shopId: string,
+  asOf: Date,
+  options: {
+    limit: number;
+    offset: number;
+    sortBy: "outstanding" | "overdue" | "name";
+    sortOrder: "asc" | "desc";
+  }
+): Promise<{ rows: BuyerLedgerRow[]; totalCount: number }> {
+  const { limit, offset, sortBy, sortOrder } = options;
+
+  const baseFilteredQuery = (orderClause: ReturnType<typeof sql>) => sql<BuyerLedgerRow[]>`
+    WITH buyer_invoices AS (
+      SELECT
+        i."buyerAccountId",
+        s.currency,
+        (ROUND(i.outstanding * 100))::bigint AS outstanding_paise,
+        CASE
+          WHEN i."dueAt" IS NULL THEN 0
+          ELSE EXTRACT(DAY FROM (
+            DATE_TRUNC('day', ${asOf}::timestamptz AT TIME ZONE s.timezone) -
+            DATE_TRUNC('day', i."dueAt" AT TIME ZONE s.timezone)
+          ))::int
+        END AS days_past_due
+      FROM "Invoice" i
+      JOIN "Shop" s ON s.id = i."shopId"
+      JOIN "BuyerAccount" ba ON ba.id = i."buyerAccountId"
+      WHERE i."shopId" = ${shopId}
+        AND i.status = 'open'
+        AND i.outstanding > 0
+        AND ba.gated_at IS NOT NULL
+    ),
+    buyer_totals AS (
+      SELECT
+        "buyerAccountId",
+        currency,
+        SUM(outstanding_paise) AS outstanding_paise,
+        COALESCE(SUM(outstanding_paise) FILTER (WHERE days_past_due > 0), 0) AS overdue_paise,
+        MAX(days_past_due) FILTER (WHERE days_past_due > 0) AS oldest_overdue_days
+      FROM buyer_invoices
+      GROUP BY "buyerAccountId", currency
+    )
+    SELECT
+      ba.id AS buyer_account_id,
+      ba.name AS buyer_name,
+      CASE WHEN ba."creditLimit" IS NULL THEN NULL ELSE (ROUND(ba."creditLimit" * 100))::text END AS credit_limit_paise,
+      ba."holdState" AS hold_state,
+      bt.currency,
+      bt.outstanding_paise::text AS outstanding_paise,
+      bt.overdue_paise::text AS overdue_paise,
+      bt.oldest_overdue_days,
+      ba.gated_at IS NOT NULL AS is_gated
+    FROM buyer_totals bt
+    JOIN "BuyerAccount" ba ON ba.id = bt."buyerAccountId"
+    ${orderClause}
+    LIMIT ${limit}
+    OFFSET ${offset}
+  `;
+
+  let rows: BuyerLedgerRow[];
+  if (sortBy === "name") {
+    rows = sortOrder === "asc"
+      ? await baseFilteredQuery(sql`ORDER BY ba.name ASC, bt.outstanding_paise DESC`)
+      : await baseFilteredQuery(sql`ORDER BY ba.name DESC, bt.outstanding_paise DESC`);
+  } else if (sortBy === "overdue") {
+    rows = sortOrder === "asc"
+      ? await baseFilteredQuery(sql`ORDER BY bt.overdue_paise ASC, ba.name ASC`)
+      : await baseFilteredQuery(sql`ORDER BY bt.overdue_paise DESC, ba.name ASC`);
+  } else {
+    rows = sortOrder === "asc"
+      ? await baseFilteredQuery(sql`ORDER BY bt.outstanding_paise ASC, ba.name ASC`)
+      : await baseFilteredQuery(sql`ORDER BY bt.outstanding_paise DESC, ba.name ASC`);
+  }
+
+  const [countResult] = await sql<{ count: string }[]>`
+    SELECT COUNT(DISTINCT i."buyerAccountId")::text AS count
+    FROM "Invoice" i
+    JOIN "BuyerAccount" ba ON ba.id = i."buyerAccountId"
+    WHERE i."shopId" = ${shopId}
+      AND i.status = 'open'
+      AND i.outstanding > 0
+      AND ba.gated_at IS NOT NULL
+  `;
+
+  return {
+    rows,
+    totalCount: parseInt(countResult?.count ?? "0", 10),
+  };
+}
 
 const VALID_SORT_BY = ["outstanding", "overdue", "name"] as const;
 type SortBy = (typeof VALID_SORT_BY)[number];
@@ -139,54 +254,16 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       ]);
 
       // Get overLimitCount via SQL (total across all accounts, not just current page)
-      const [overLimitResult] = await sql<{ count: string }[]>`
-        SELECT COUNT(*)::text as count
-        FROM "BuyerAccount"
-        WHERE "shopId" = ${shop.id}
-          AND gated_at IS NOT NULL
-      `;
-      overLimitCount = parseInt(overLimitResult?.count ?? "0", 10);
+      overLimitCount = await getOverLimitCount(sql, shop.id);
 
-      // When filtering to only over-limit accounts, query directly with pagination
+      // When filtering to only over-limit accounts, use the exported query function
       if (onlyOverLimit) {
-        const sortColumn = sortBy === "name" ? "ba.name" : sortBy === "overdue" ? "overdue_paise" : "outstanding_paise";
-        const sortDir = sortOrder === "asc" ? sql`ASC` : sql`DESC`;
-
-        const filteredRows = await sql<BuyerLedgerRow[]>`
-          WITH invoice_totals AS (
-            SELECT
-              ba.id as buyer_account_id,
-              ba.name as buyer_name,
-              ba."creditLimitPaise"::text as credit_limit_paise,
-              ba."holdState" as hold_state,
-              i.currency,
-              COALESCE(SUM(i.outstanding), 0)::text as outstanding_paise,
-              COALESCE(SUM(CASE WHEN i.due_at < ${asOf} THEN i.outstanding ELSE 0 END), 0)::text as overdue_paise,
-              MAX(CASE WHEN i.due_at < ${asOf} THEN EXTRACT(DAY FROM ${asOf}::timestamp - i.due_at::timestamp)::integer ELSE NULL END) as oldest_overdue_days,
-              ba.gated_at IS NOT NULL as is_gated
-            FROM "BuyerAccount" ba
-            LEFT JOIN "Invoice" i ON i."buyerAccountId" = ba.id AND i.status = 'open' AND i.outstanding > 0
-            WHERE ba."shopId" = ${shop.id}
-              AND ba.gated_at IS NOT NULL
-            GROUP BY ba.id, ba.name, ba."creditLimitPaise", ba."holdState", i.currency, ba.gated_at
-            HAVING COALESCE(SUM(i.outstanding), 0) > 0
-          )
-          SELECT * FROM invoice_totals
-          ORDER BY ${sql.unsafe(sortColumn)} ${sortDir}
-          LIMIT ${PAGE_SIZE}
-          OFFSET ${(page - 1) * PAGE_SIZE}
-        `;
-
-        const [filteredCountResult] = await sql<{ count: string }[]>`
-          SELECT COUNT(DISTINCT ba.id)::text as count
-          FROM "BuyerAccount" ba
-          JOIN "Invoice" i ON i."buyerAccountId" = ba.id AND i.status = 'open' AND i.outstanding > 0
-          WHERE ba."shopId" = ${shop.id}
-            AND ba.gated_at IS NOT NULL
-        `;
-        const filteredTotalCount = parseInt(filteredCountResult?.count ?? "0", 10);
-
-        buyerLedger = { rows: filteredRows, totalCount: filteredTotalCount };
+        buyerLedger = await getOverLimitBuyerLedger(sql, shop.id, asOf, {
+          limit: PAGE_SIZE,
+          offset: (page - 1) * PAGE_SIZE,
+          sortBy,
+          sortOrder,
+        });
       }
 
       if (selectedBuyerId) {
