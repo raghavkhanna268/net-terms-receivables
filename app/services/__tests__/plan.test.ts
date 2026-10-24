@@ -12,6 +12,9 @@ import { requestContext, type RequestStore } from "~/lib/request-context.server"
  * 4. API error uses cached plan (fail-to-cached), only free when no cache
  * 5. Cache is used when fresh
  * 6. Stale cache returns cached plan and triggers background refresh (via ALS waitUntil)
+ * 7. Background refresh is deduplicated (multiple stale requests share one refresh)
+ * 8. Background refresh errors are captured to Sentry
+ * 9. Background refresh is a no-op when waitUntil is not available
  */
 
 // Mock adminGraphQL before importing plan.server
@@ -19,11 +22,24 @@ vi.mock("../drain/admin-client.server", () => ({
   adminGraphQL: vi.fn(),
 }));
 
-// Import after mock is set up
+// Mock Sentry before importing plan.server
+vi.mock("~/lib/sentry", () => ({
+  captureException: vi.fn(),
+  captureMessage: vi.fn(),
+}));
+
+// Import after mocks are set up
 import { adminGraphQL as _adminGraphQL } from "../drain/admin-client.server";
-import { resolvePlan, getPlanByShopId } from "../plan.server";
+import { captureException as _captureException } from "~/lib/sentry";
+import {
+  resolvePlan,
+  getPlanByShopId,
+  _resetInFlightRefreshesForTesting,
+  _isRefreshInFlight,
+} from "../plan.server";
 
 const adminGraphQL = _adminGraphQL as ReturnType<typeof vi.fn>;
+const captureException = _captureException as ReturnType<typeof vi.fn>;
 
 // Mock SQL client
 const createMockSql = () => {
@@ -78,6 +94,8 @@ describe("Plan Resolution Service", () => {
     // Use resetAllMocks to clear both calls and pending mockResolvedValueOnce
     vi.resetAllMocks();
     mockSql = createMockSql();
+    // Clear in-flight refresh map between tests
+    _resetInFlightRefreshesForTesting();
   });
   
   afterEach(() => {
@@ -541,6 +559,433 @@ describe("Plan Resolution Service", () => {
       
       // Should trigger background refresh via ALS waitUntil
       expect(mockWaitUntil).toHaveBeenCalledTimes(1);
+    });
+
+    it("skips domain query when waitUntil is not available", async () => {
+      let domainQueryCalled = false;
+      
+      const specialMockSql = Object.assign(
+        vi.fn(async (strings: TemplateStringsArray) => {
+          const query = strings.join("?");
+          
+          // getCachedPlan - returns stale cache
+          if (query.includes("plan_key") && query.includes("plan_cached_at")) {
+            const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
+            return [{
+              plan_key: "growth",
+              subscription_id: "sub-123",
+              subscription_name: "Growth",
+              is_test: false,
+              plan_cached_at: staleCacheTime,
+            }];
+          }
+          
+          // Domain query - should NOT be called
+          if (query.includes("domain") && query.includes('"Shop"')) {
+            domainQueryCalled = true;
+            return [{ domain: TEST_SHOP }];
+          }
+          
+          return [];
+        }),
+        { json: vi.fn((v) => v) }
+      );
+      
+      // Call without request context - no waitUntil available
+      const plan = await getPlanByShopId(specialMockSql as unknown as Sql, TEST_SHOP_ID);
+      
+      // Should return cached plan
+      expect(plan.key).toBe("growth");
+      
+      // Domain query should NOT have been called (skipped because no waitUntil)
+      expect(domainQueryCalled).toBe(false);
+      
+      // Shopify API should NOT be called
+      expect(adminGraphQL).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("background refresh deduplication", () => {
+    it("deduplicates concurrent refreshes for the same shop", async () => {
+      const mockWaitUntil = vi.fn();
+      
+      // Create a mock that simulates the full flow
+      let shopifyCallCount = 0;
+      const specialMockSql = Object.assign(
+        vi.fn(async (strings: TemplateStringsArray) => {
+          const query = strings.join("?");
+          
+          if (query.includes("plan_key") && query.includes("plan_cached_at")) {
+            // Stale cache
+            const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
+            return [{
+              plan_key: "growth",
+              subscription_id: "sub-123",
+              subscription_name: "Growth",
+              is_test: false,
+              plan_cached_at: staleCacheTime,
+            }];
+          }
+          
+          if (query.includes('SELECT') && query.includes('"Shop"') && query.includes('id')) {
+            return [{ id: TEST_SHOP_ID }];
+          }
+          
+          if (query.includes("UPDATE")) {
+            return [];
+          }
+          
+          return [];
+        }),
+        { json: vi.fn((v) => v) }
+      );
+      
+      // Track Shopify API calls
+      adminGraphQL.mockImplementation(async () => {
+        shopifyCallCount++;
+        // Add small delay to ensure concurrency
+        await new Promise(resolve => setTimeout(resolve, 10));
+        return {
+          success: true,
+          data: {
+            currentAppInstallation: {
+              activeSubscriptions: [{
+                id: "gid://shopify/AppSubscription/456",
+                name: "Scale",
+                status: "ACTIVE",
+                test: false,
+                lineItems: [],
+              }],
+            },
+          },
+        };
+      });
+      
+      const store: RequestStore = {
+        getSql: () => specialMockSql as unknown as Sql,
+        waitUntil: mockWaitUntil,
+      };
+      
+      // Fire two concurrent resolvePlan calls for the same shop
+      const [result1, result2] = await requestContext.run(store, async () => {
+        return Promise.all([
+          resolvePlan(specialMockSql as unknown as Sql, TEST_SHOP),
+          resolvePlan(specialMockSql as unknown as Sql, TEST_SHOP),
+        ]);
+      });
+      
+      // Both should return stale cached plan immediately
+      expect(result1.plan.key).toBe("growth");
+      expect(result2.plan.key).toBe("growth");
+      
+      // waitUntil should be called exactly once (second request just returns)
+      expect(mockWaitUntil).toHaveBeenCalledTimes(1);
+      
+      // Wait for background refresh to complete
+      const promise = mockWaitUntil.mock.calls[0][0];
+      await promise;
+      
+      // Shopify API should only be called once due to deduplication
+      expect(shopifyCallCount).toBe(1);
+    });
+
+    it("removes shop from in-flight map after refresh completes", async () => {
+      const mockWaitUntil = vi.fn();
+      
+      const specialMockSql = Object.assign(
+        vi.fn(async (strings: TemplateStringsArray) => {
+          const query = strings.join("?");
+          
+          if (query.includes("plan_key") && query.includes("plan_cached_at")) {
+            const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
+            return [{
+              plan_key: "growth",
+              subscription_id: "sub-123",
+              subscription_name: "Growth",
+              is_test: false,
+              plan_cached_at: staleCacheTime,
+            }];
+          }
+          
+          if (query.includes('SELECT') && query.includes('"Shop"') && query.includes('id')) {
+            return [{ id: TEST_SHOP_ID }];
+          }
+          
+          if (query.includes("UPDATE")) {
+            return [];
+          }
+          
+          return [];
+        }),
+        { json: vi.fn((v) => v) }
+      );
+      
+      adminGraphQL.mockResolvedValueOnce({
+        success: true,
+        data: {
+          currentAppInstallation: {
+            activeSubscriptions: [],
+          },
+        },
+      });
+      
+      const store: RequestStore = {
+        getSql: () => specialMockSql as unknown as Sql,
+        waitUntil: mockWaitUntil,
+      };
+      
+      await requestContext.run(store, async () => {
+        await resolvePlan(specialMockSql as unknown as Sql, TEST_SHOP);
+        
+        // Should be in-flight immediately after triggering
+        expect(_isRefreshInFlight(TEST_SHOP)).toBe(true);
+      });
+      
+      // Wait for background refresh to complete
+      const promise = mockWaitUntil.mock.calls[0][0];
+      await promise;
+      
+      // Should no longer be in-flight after completion
+      expect(_isRefreshInFlight(TEST_SHOP)).toBe(false);
+    });
+  });
+
+  describe("background refresh error handling", () => {
+    it("captures errors to Sentry when background refresh fails", async () => {
+      const mockWaitUntil = vi.fn();
+      const testError = new Error("Shopify API timeout");
+      
+      const specialMockSql = Object.assign(
+        vi.fn(async (strings: TemplateStringsArray) => {
+          const query = strings.join("?");
+          
+          if (query.includes("plan_key") && query.includes("plan_cached_at")) {
+            const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
+            return [{
+              plan_key: "starter",
+              subscription_id: "sub-123",
+              subscription_name: "Starter",
+              is_test: false,
+              plan_cached_at: staleCacheTime,
+            }];
+          }
+          
+          if (query.includes('SELECT') && query.includes('"Shop"') && query.includes('id')) {
+            return [{ id: TEST_SHOP_ID }];
+          }
+          
+          return [];
+        }),
+        { json: vi.fn((v) => v) }
+      );
+      
+      // Throw an error from Shopify API
+      adminGraphQL.mockRejectedValueOnce(testError);
+      
+      const store: RequestStore = {
+        getSql: () => specialMockSql as unknown as Sql,
+        waitUntil: mockWaitUntil,
+      };
+      
+      const result = await requestContext.run(store, async () => {
+        return resolvePlan(specialMockSql as unknown as Sql, TEST_SHOP);
+      });
+      
+      // Should still return stale cached plan
+      expect(result.plan.key).toBe("starter");
+      expect(result.fromCache).toBe(true);
+      
+      // Wait for background refresh to complete (and fail)
+      const promise = mockWaitUntil.mock.calls[0][0];
+      await promise;
+      
+      // Should have captured the error to Sentry
+      expect(captureException).toHaveBeenCalledWith(testError);
+    });
+
+    it("removes shop from in-flight map even when refresh fails", async () => {
+      const mockWaitUntil = vi.fn();
+      
+      const specialMockSql = Object.assign(
+        vi.fn(async (strings: TemplateStringsArray) => {
+          const query = strings.join("?");
+          
+          if (query.includes("plan_key") && query.includes("plan_cached_at")) {
+            const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
+            return [{
+              plan_key: "growth",
+              subscription_id: "sub-123",
+              subscription_name: "Growth",
+              is_test: false,
+              plan_cached_at: staleCacheTime,
+            }];
+          }
+          
+          if (query.includes('SELECT') && query.includes('"Shop"') && query.includes('id')) {
+            return [{ id: TEST_SHOP_ID }];
+          }
+          
+          return [];
+        }),
+        { json: vi.fn((v) => v) }
+      );
+      
+      adminGraphQL.mockRejectedValueOnce(new Error("Network error"));
+      
+      const store: RequestStore = {
+        getSql: () => specialMockSql as unknown as Sql,
+        waitUntil: mockWaitUntil,
+      };
+      
+      await requestContext.run(store, async () => {
+        await resolvePlan(specialMockSql as unknown as Sql, TEST_SHOP);
+        expect(_isRefreshInFlight(TEST_SHOP)).toBe(true);
+      });
+      
+      // Wait for background refresh to fail
+      const promise = mockWaitUntil.mock.calls[0][0];
+      await promise;
+      
+      // Should be removed from in-flight map after failure
+      expect(_isRefreshInFlight(TEST_SHOP)).toBe(false);
+    });
+  });
+
+  describe("background refresh no-op behavior", () => {
+    it("is a no-op when waitUntil is not available (outside request context)", async () => {
+      mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+      
+      const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "growth",
+        subscription_id: "sub-123",
+        subscription_name: "Growth",
+        is_test: false,
+        plan_cached_at: staleCacheTime,
+      }]);
+      
+      // Call without request context - no waitUntil available
+      const result = await resolvePlan(mockSql as unknown as Sql, TEST_SHOP);
+      
+      // Should return stale cached plan
+      expect(result.plan.key).toBe("growth");
+      expect(result.fromCache).toBe(true);
+      
+      // Shopify API should NOT be called (no background refresh)
+      expect(adminGraphQL).not.toHaveBeenCalled();
+      
+      // Should not be in-flight (refresh was not triggered)
+      expect(_isRefreshInFlight(TEST_SHOP)).toBe(false);
+    });
+
+    it("does not trigger background refresh when cache is fresh", async () => {
+      const mockWaitUntil = vi.fn();
+      
+      mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+      
+      // Fresh cache (cached 1 hour ago, TTL is 6 hours)
+      const freshCacheTime = new Date(Date.now() - 60 * 60 * 1000);
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "growth",
+        subscription_id: "sub-123",
+        subscription_name: "Growth",
+        is_test: false,
+        plan_cached_at: freshCacheTime,
+      }]);
+      
+      const store: RequestStore = {
+        getSql: () => mockSql as unknown as Sql,
+        waitUntil: mockWaitUntil,
+      };
+      
+      const result = await requestContext.run(store, async () => {
+        return resolvePlan(mockSql as unknown as Sql, TEST_SHOP);
+      });
+      
+      // Should return cached plan
+      expect(result.plan.key).toBe("growth");
+      expect(result.fromCache).toBe(true);
+      
+      // waitUntil should NOT be called (cache is fresh)
+      expect(mockWaitUntil).not.toHaveBeenCalled();
+      
+      // Shopify API should NOT be called
+      expect(adminGraphQL).not.toHaveBeenCalled();
+    });
+
+    it("does not block or await the refresh in the response path", async () => {
+      const mockWaitUntil = vi.fn();
+      let refreshCompleted = false;
+      
+      const specialMockSql = Object.assign(
+        vi.fn(async (strings: TemplateStringsArray) => {
+          const query = strings.join("?");
+          
+          if (query.includes("plan_key") && query.includes("plan_cached_at")) {
+            const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
+            return [{
+              plan_key: "growth",
+              subscription_id: "sub-123",
+              subscription_name: "Growth",
+              is_test: false,
+              plan_cached_at: staleCacheTime,
+            }];
+          }
+          
+          if (query.includes('SELECT') && query.includes('"Shop"') && query.includes('id')) {
+            return [{ id: TEST_SHOP_ID }];
+          }
+          
+          if (query.includes("UPDATE")) {
+            return [];
+          }
+          
+          return [];
+        }),
+        { json: vi.fn((v) => v) }
+      );
+      
+      // Track refresh completion
+      adminGraphQL.mockImplementation(async () => {
+        // Simulate slow API call
+        await new Promise(resolve => setTimeout(resolve, 50));
+        refreshCompleted = true;
+        return {
+          success: true,
+          data: {
+            currentAppInstallation: {
+              activeSubscriptions: [{
+                id: "gid://shopify/AppSubscription/456",
+                name: "Scale",
+                status: "ACTIVE",
+                test: false,
+                lineItems: [],
+              }],
+            },
+          },
+        };
+      });
+      
+      const store: RequestStore = {
+        getSql: () => specialMockSql as unknown as Sql,
+        waitUntil: mockWaitUntil,
+      };
+      
+      const result = await requestContext.run(store, async () => {
+        return resolvePlan(specialMockSql as unknown as Sql, TEST_SHOP);
+      });
+      
+      // Response should be returned before refresh completes
+      expect(result.plan.key).toBe("growth");
+      expect(result.fromCache).toBe(true);
+      expect(refreshCompleted).toBe(false);
+      
+      // Now wait for the background refresh
+      const promise = mockWaitUntil.mock.calls[0][0];
+      await promise;
+      
+      // Refresh should now be completed
+      expect(refreshCompleted).toBe(true);
     });
   });
 });
