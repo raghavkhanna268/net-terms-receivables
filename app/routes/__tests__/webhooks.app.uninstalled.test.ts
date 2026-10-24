@@ -21,6 +21,11 @@ vi.mock("~/services/compliance", () => ({
   markShopUninstalled: (...args: unknown[]) => mockMarkShopUninstalled(...args),
 }));
 
+const mockEvictShopFromSetupCache = vi.fn();
+vi.mock("~/lib/after-auth.server", () => ({
+  evictShopFromSetupCache: (...args: unknown[]) => mockEvictShopFromSetupCache(...args),
+}));
+
 const mockSql = vi.fn();
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
@@ -76,6 +81,7 @@ describe("webhooks.app.uninstalled", () => {
     mockRecordWebhookReceipt.mockResolvedValue(true);
     mockParseTriggeredAt.mockReturnValue(null);
     mockDeleteWebhookReceiptsForShop.mockResolvedValue(0);
+    mockEvictShopFromSetupCache.mockReturnValue(undefined);
   });
 
   afterEach(() => {
@@ -99,6 +105,24 @@ describe("webhooks.app.uninstalled", () => {
     expect(mockMarkShopUninstalled).toHaveBeenCalledWith(expect.anything(), TEST_SHOP);
   });
 
+  it("evicts shop from setup cache after successful uninstall", async () => {
+    mockSessionStorage.deleteAllForShop.mockResolvedValue(1);
+    mockMarkShopUninstalled.mockResolvedValue(true);
+
+    await action(createActionArgs());
+
+    expect(mockEvictShopFromSetupCache).toHaveBeenCalledWith(TEST_SHOP);
+  });
+
+  it("evicts shop from setup cache even if shop not found in DB", async () => {
+    mockSessionStorage.deleteAllForShop.mockResolvedValue(0);
+    mockMarkShopUninstalled.mockResolvedValue(false);
+
+    await action(createActionArgs());
+
+    expect(mockEvictShopFromSetupCache).toHaveBeenCalledWith(TEST_SHOP);
+  });
+
   it("handles shops with no sessions gracefully", async () => {
     mockSessionStorage.deleteAllForShop.mockResolvedValue(0);
 
@@ -119,25 +143,53 @@ describe("webhooks.app.uninstalled", () => {
     expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledWith(TEST_SHOP);
   });
 
-  it("logs but does not fail on session database errors", async () => {
+  it("session delete failure returns 5xx", async () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     mockSessionStorage.deleteAllForShop.mockRejectedValue(new Error("DB error"));
 
     const response = await action(createActionArgs());
 
-    expect(response).toBeInstanceOf(Response);
+    expect(response.status).toBe(500);
     expect(consoleSpy).toHaveBeenCalled();
     consoleSpy.mockRestore();
   });
 
-  it("logs but does not fail on mark uninstalled database errors", async () => {
+  it("uninstalledAt write failure returns 5xx", async () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     mockSessionStorage.deleteAllForShop.mockResolvedValue(1);
     mockMarkShopUninstalled.mockRejectedValue(new Error("DB error"));
 
     const response = await action(createActionArgs());
 
-    expect(response).toBeInstanceOf(Response);
+    expect(response.status).toBe(500);
+    expect(consoleSpy).toHaveBeenCalled();
+    consoleSpy.mockRestore();
+  });
+
+  it("retry after success is idempotent", async () => {
+    mockSessionStorage.deleteAllForShop.mockResolvedValue(0);
+    mockMarkShopUninstalled.mockResolvedValue(false);
+    mockDeleteWebhookReceiptsForShop.mockResolvedValue(0);
+
+    const response1 = await action(createActionArgs());
+    expect(response1.status).toBe(200);
+
+    const response2 = await action(createActionArgs());
+    expect(response2.status).toBe(200);
+
+    expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledTimes(2);
+    expect(mockMarkShopUninstalled).toHaveBeenCalledTimes(2);
+  });
+
+  it("webhook receipt purge failure is non-fatal", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockSessionStorage.deleteAllForShop.mockResolvedValue(1);
+    mockMarkShopUninstalled.mockResolvedValue(true);
+    mockDeleteWebhookReceiptsForShop.mockRejectedValue(new Error("Receipt purge failed"));
+
+    const response = await action(createActionArgs());
+
+    expect(response.status).toBe(200);
     expect(consoleSpy).toHaveBeenCalled();
     consoleSpy.mockRestore();
   });
