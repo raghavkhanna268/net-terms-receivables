@@ -389,4 +389,246 @@ describe("log.server", () => {
       expect(toErrorCode(err)).toBe("TypeError");
     });
   });
+
+  describe("Web Vitals allowlist keys (S23-30)", () => {
+    let consoleLogSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      consoleLogSpy.mockRestore();
+    });
+
+    describe("metric key", () => {
+      it("allows LCP", () => {
+        safeLog("info", "test", { metric: "LCP" });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.metric).toBe("LCP");
+      });
+
+      it("allows CLS", () => {
+        safeLog("info", "test", { metric: "CLS" });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.metric).toBe("CLS");
+      });
+
+      it("allows INP", () => {
+        safeLog("info", "test", { metric: "INP" });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.metric).toBe("INP");
+      });
+
+      it("redacts invalid metric name", () => {
+        safeLog("info", "test", { metric: "FCP" });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.metric).toBe("<redacted>");
+      });
+
+      it("redacts non-string metric", () => {
+        safeLog("info", "test", { metric: 123 });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.metric).toBe("<redacted>");
+      });
+
+      it("redacts metric with domain pattern", () => {
+        safeLog("info", "test", { metric: "test.myshopify.com" });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.metric).toBe("<redacted>");
+      });
+    });
+
+    describe("value key", () => {
+      it("allows valid numeric value", () => {
+        safeLog("info", "test", { value: 2500 });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.value).toBe(2500);
+      });
+
+      it("allows zero value", () => {
+        safeLog("info", "test", { value: 0 });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.value).toBe(0);
+      });
+
+      it("allows decimal value and rounds", () => {
+        safeLog("info", "test", { value: 0.123456789 });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.value).toBe(0.1235);
+      });
+
+      it("clamps value to max 60000", () => {
+        safeLog("info", "test", { value: 100000 });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.value).toBe(60000);
+      });
+
+      it("clamps negative value to 0", () => {
+        safeLog("info", "test", { value: -100 });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.value).toBe(0);
+      });
+
+      it("redacts non-number value", () => {
+        safeLog("info", "test", { value: "2500" });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.value).toBe("<redacted>");
+      });
+
+      it("redacts NaN", () => {
+        safeLog("info", "test", { value: NaN });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.value).toBe("<redacted>");
+      });
+
+      it("redacts Infinity", () => {
+        safeLog("info", "test", { value: Infinity });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.value).toBe("<redacted>");
+      });
+    });
+
+    describe("rating key", () => {
+      it("allows good", () => {
+        safeLog("info", "test", { rating: "good" });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.rating).toBe("good");
+      });
+
+      it("allows needs-improvement", () => {
+        safeLog("info", "test", { rating: "needs-improvement" });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.rating).toBe("needs-improvement");
+      });
+
+      it("allows poor", () => {
+        safeLog("info", "test", { rating: "poor" });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.rating).toBe("poor");
+      });
+
+      it("redacts invalid rating", () => {
+        safeLog("info", "test", { rating: "excellent" });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.rating).toBe("<redacted>");
+      });
+
+      it("redacts non-string rating", () => {
+        safeLog("info", "test", { rating: 1 });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.rating).toBe("<redacted>");
+      });
+    });
+
+    describe("route key", () => {
+      it("allows app_home", () => {
+        safeLog("info", "test", { route: "app_home" });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.route).toBe("app_home");
+      });
+
+      it("allows app_accounts", () => {
+        safeLog("info", "test", { route: "app_accounts" });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.route).toBe("app_accounts");
+      });
+
+      it("allows app_onboarding", () => {
+        safeLog("info", "test", { route: "app_onboarding" });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.route).toBe("app_onboarding");
+      });
+
+      it("allows other", () => {
+        safeLog("info", "test", { route: "other" });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.route).toBe("other");
+      });
+
+      it("redacts raw path", () => {
+        safeLog("info", "test", { route: "/app/onboarding" });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.route).toBe("<redacted>");
+      });
+
+      it("redacts path with query string", () => {
+        safeLog("info", "test", { route: "/app?shop=test.myshopify.com" });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.route).toBe("<redacted>");
+      });
+
+      it("redacts invalid route-id", () => {
+        safeLog("info", "test", { route: "invalid_route" });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.route).toBe("<redacted>");
+      });
+
+      it("redacts shop domain in route", () => {
+        safeLog("info", "test", { route: "test.myshopify.com" });
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.route).toBe("<redacted>");
+      });
+    });
+
+    describe("combined Web Vitals log", () => {
+      it("logs all four fields correctly", () => {
+        safeLog("info", "web_vitals", {
+          metric: "LCP",
+          value: 2500,
+          rating: "good",
+          route: "app_home",
+        });
+
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.event).toBe("web_vitals");
+        expect(output.metric).toBe("LCP");
+        expect(output.value).toBe(2500);
+        expect(output.rating).toBe("good");
+        expect(output.route).toBe("app_home");
+      });
+
+      it("redacts invalid fields in combined log", () => {
+        safeLog("info", "web_vitals", {
+          metric: "INVALID",
+          value: "not-a-number",
+          rating: "excellent",
+          route: "/raw/path",
+        });
+
+        const output = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+        expect(output.metric).toBe("<redacted>");
+        expect(output.value).toBe("<redacted>");
+        expect(output.rating).toBe("<redacted>");
+        expect(output.route).toBe("<redacted>");
+      });
+
+      it("output never contains shop domain", () => {
+        safeLog("info", "web_vitals", {
+          metric: "LCP",
+          value: 2500,
+          rating: "good",
+          route: "app_home",
+        });
+
+        const logOutput = consoleLogSpy.mock.calls[0][0];
+        expect(logOutput).not.toContain(".myshopify.com");
+        expect(logOutput).not.toContain("shop=");
+      });
+
+      it("output never contains query string", () => {
+        safeLog("info", "web_vitals", {
+          metric: "LCP",
+          value: 2500,
+          rating: "good",
+          route: "app_home",
+        });
+
+        const logOutput = consoleLogSpy.mock.calls[0][0];
+        expect(logOutput).not.toContain("?");
+        expect(logOutput).not.toContain("session=");
+        expect(logOutput).not.toContain("hmac=");
+      });
+    });
+  });
 });
