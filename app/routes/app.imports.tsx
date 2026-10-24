@@ -426,6 +426,8 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
       // Batch insert with ON CONFLICT DO NOTHING
       // Returns only the inserted rows (not duplicates)
+      // Use tx.json() for proper JSON serialization - JSON.stringify() causes
+      // postgres.js to double-encode, sending a JSON string scalar instead of array
       const insertedRows = await tx<{ id: string }[]>`
         INSERT INTO "Payment" (
           "shopId",
@@ -452,7 +454,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
           'unmatched',
           ${now},
           ${now}
-        FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS r(
+        FROM jsonb_to_recordset(${tx.json(rows)}) AS r(
           "shopId" text,
           "importId" text,
           "valueDate" text,

@@ -495,6 +495,63 @@ describeWithDb("Bank Import Action Integration Tests", () => {
       const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
       expect(response.status).toBe(400);
     });
+
+    it("(f.4) batched insert via jsonb_to_recordset handles JSON serialization correctly", async () => {
+      // This test verifies the tx.json() serialization works correctly.
+      // Previously JSON.stringify(rows) caused postgres.js to double-encode,
+      // sending a JSON string scalar instead of array, causing PostgresError 22023.
+      const payload = {
+        bank: "HDFC",
+        fileName: "json-serial.csv",
+        credits: [
+          {
+            date: yesterday(),
+            amountPaise: 100000,
+            rail: "NEFT",
+            utr: "HDFCN26296JSON001",
+            payerName: "Test Corp",
+            narration: "NEFT CR-JSON SERIALIZATION TEST",
+          },
+          {
+            date: today(),
+            amountPaise: 200000,
+            rail: "RTGS",
+            utr: "HDFCR26296JSON002",
+            narration: "RTGS CR-JSON TEST 2",
+          },
+          {
+            date: yesterday(),
+            amountPaise: 50000,
+            balancePaise: 1500000,
+            rail: "IMPS",
+            utr: "123456789012",
+            payerName: "Payer With Special Chars: \"quotes\" & <brackets>",
+            narration: "IMPS with special chars: éàü",
+          },
+        ],
+      };
+
+      const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      
+      // Should NOT get 500 (PostgresError 22023 from jsonb_to_recordset)
+      expect(response.status).toBe(200);
+
+      const data = await parseResponse(response);
+      expect(data.success).toBe(true);
+      expect(data.counts?.inserted).toBe(3);
+      expect(data.counts?.total).toBe(3);
+
+      // Verify all rows were inserted with correct data
+      const payments = await sql<{ utr: string; amount: string; rail: string }[]>`
+        SELECT utr, amount::text, rail FROM "Payment" 
+        WHERE "shopId" = ${testShopId}
+        ORDER BY amount
+      `;
+      expect(payments).toHaveLength(3);
+      expect(payments[0].amount).toBe("500.00");
+      expect(payments[1].amount).toBe("1000.00");
+      expect(payments[2].amount).toBe("2000.00");
+    });
   });
 
   describe("Date boundary tests", () => {
