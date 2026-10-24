@@ -307,7 +307,7 @@ describeWithDb("credit-status-metafield-backfill DB integration", () => {
 
       // Find stats matching our test shop's expected distribution
       const ourStats = stats.find(
-        s => s.total === expectedTotal &&
+        s => s.candidateCount === expectedTotal &&
              s.byHoldState["OK"] === expectedByHoldState.OK &&
              s.byHoldState["HELD"] === expectedByHoldState.HELD
       );
@@ -495,7 +495,7 @@ describeWithDb("credit-status-metafield-backfill DB integration", () => {
       expect(expectedPrefixCount).toBe(2);
 
       // Stats should contain an entry with exactly 2 accounts
-      const matchingStats = stats.find(s => s.total === 2);
+      const matchingStats = stats.find(s => s.candidateCount === 2);
       expect(matchingStats).toBeDefined();
     });
 
