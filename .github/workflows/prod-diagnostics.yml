@@ -819,24 +819,35 @@ jobs:
           )
 
           if [ "$DLQ_EXISTS" = "t" ]; then
-            echo "DLQ messages by topic/handler (no payloads; error class enum, error text never printed):"
+            # #174/#176: s6_dead_letter.error is now "[non_retryable:|permanent:]<code>".
+            # Rows written before #176 hold raw text; they are bucketed as legacy_* (or
+            # no_handler, still text) and the text itself is never printed. Same
+            # classification as scripts/readonly/post-drain-aggregates.sql.
+            echo "DLQ messages by queue/topic/error code (no payloads; error text never printed):"
             psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
-          SELECT
-            original_queue,
-            message->>'topic' AS topic,
-            CASE
-              WHEN error LIKE 'Order has payment terms but no matching BuyerAccount found%' THEN 'nba_payment_terms'
-              WHEN error LIKE 'Customer matches tag rule % but no BuyerAccount found%'      THEN 'nba_tag_rule'
-              WHEN error LIKE 'CompanyLocation exists but no BuyerAccount synced yet%'      THEN 'nba_company_location'
-              WHEN error LIKE 'No handler registered for topic after %'                     THEN 'no_handler'
-              WHEN error LIKE 'Non-retryable error:%'                                       THEN 'non_retryable'
-              WHEN error IS NULL                                                            THEN NULL
-              ELSE 'other'
-            END AS error_class,
-            COUNT(*) AS count
-          FROM s6_dead_letter
-          GROUP BY original_queue, message->>'topic', error_class
-          ORDER BY count DESC
+          SELECT original_queue, message->>'topic' AS topic,
+                 error_format, error_disposition, error_code, COUNT(*) AS count
+          FROM
+          (SELECT d.*,
+            CASE WHEN d.error IS NULL THEN NULL
+                 WHEN m.m IS NOT NULL THEN 'code'
+                 WHEN d.error LIKE 'No handler registered for topic after %' THEN 'no_handler_text'
+                 ELSE 'legacy_text' END AS error_format,
+            CASE WHEN d.error IS NULL THEN NULL
+                 WHEN m.m IS NOT NULL THEN COALESCE(m.m[1], 'none')
+                 WHEN d.error LIKE 'Non-retryable error:%' THEN 'non_retryable'
+                 ELSE 'none' END AS error_disposition,
+            CASE WHEN d.error IS NULL THEN NULL
+                 WHEN m.m IS NOT NULL THEN m.m[2]
+                 WHEN d.error LIKE 'No handler registered for topic after %' THEN 'no_handler'
+                 WHEN d.error LIKE 'Order has payment terms but no matching BuyerAccount found%' THEN 'legacy_nba_payment_terms'
+                 WHEN d.error LIKE 'Customer matches tag rule % but no BuyerAccount found%' THEN 'legacy_nba_tag_rule'
+                 WHEN d.error LIKE 'CompanyLocation exists but no BuyerAccount synced yet%' THEN 'legacy_nba_company_location'
+                 ELSE 'legacy_unclassified' END AS error_code
+          FROM s6_dead_letter d
+          CROSS JOIN LATERAL (SELECT regexp_match(d.error, '^(?:(non_retryable|permanent):)?([A-Za-z][A-Za-z0-9_]{0,63}|graphql_error:[A-Za-z0-9_,]{1,200})$') AS m) m) dlq
+          GROUP BY 1, 2, 3, 4, 5
+          ORDER BY count DESC, 1, 2, 3, 4, 5
           LIMIT 50;
           EOSQL
 
@@ -859,6 +870,32 @@ jobs:
                 SELECT message->>'topic' AS topic, COUNT(*) AS cnt
                 FROM s6_dead_letter
                 GROUP BY message->>'topic'
+              ) sub
+            ),
+            'by_error_code', (
+              SELECT json_object_agg(COALESCE(error_code, '(null)'), cnt)
+              FROM (
+                SELECT error_code, COUNT(*) AS cnt
+                FROM
+                (SELECT d.*,
+                  CASE WHEN d.error IS NULL THEN NULL
+                       WHEN m.m IS NOT NULL THEN 'code'
+                       WHEN d.error LIKE 'No handler registered for topic after %' THEN 'no_handler_text'
+                       ELSE 'legacy_text' END AS error_format,
+                  CASE WHEN d.error IS NULL THEN NULL
+                       WHEN m.m IS NOT NULL THEN COALESCE(m.m[1], 'none')
+                       WHEN d.error LIKE 'Non-retryable error:%' THEN 'non_retryable'
+                       ELSE 'none' END AS error_disposition,
+                  CASE WHEN d.error IS NULL THEN NULL
+                       WHEN m.m IS NOT NULL THEN m.m[2]
+                       WHEN d.error LIKE 'No handler registered for topic after %' THEN 'no_handler'
+                       WHEN d.error LIKE 'Order has payment terms but no matching BuyerAccount found%' THEN 'legacy_nba_payment_terms'
+                       WHEN d.error LIKE 'Customer matches tag rule % but no BuyerAccount found%' THEN 'legacy_nba_tag_rule'
+                       WHEN d.error LIKE 'CompanyLocation exists but no BuyerAccount synced yet%' THEN 'legacy_nba_company_location'
+                       ELSE 'legacy_unclassified' END AS error_code
+                FROM s6_dead_letter d
+                CROSS JOIN LATERAL (SELECT regexp_match(d.error, '^(?:(non_retryable|permanent):)?([A-Za-z][A-Za-z0-9_]{0,63}|graphql_error:[A-Za-z0-9_,]{1,200})$') AS m) m) dlq
+                GROUP BY error_code
               ) sub
             )
           );

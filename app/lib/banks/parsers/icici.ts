@@ -58,7 +58,7 @@ export async function parseIciciStatement(
     return {
       detection,
       transactions: [],
-      errors: [{ row: 0, message: "Could not find header row" }],
+      errors: [{ row: 0, code: "NO_HEADER_ROW", message: "Could not find header row" }],
       totalRows: sheet.rows.length,
       skippedRows: sheet.rows.length,
     };
@@ -71,7 +71,7 @@ export async function parseIciciStatement(
     return {
       detection,
       transactions: [],
-      errors: [{ row: headerRow, message: "Could not map ICICI columns" }],
+      errors: [{ row: headerRow, code: "COLUMN_MAP_FAILED", message: "Could not map ICICI columns" }],
       totalRows: sheet.rows.length,
       skippedRows: sheet.rows.length,
     };
@@ -129,8 +129,8 @@ export async function parseIciciStatement(
       } else {
         errors.push({
           row: lastValidRow.sourceRow,
+          code: "NORMALIZE_FAILED",
           message: "Failed to normalize transaction",
-          rawData: lastValidRow,
         });
       }
       lastValidRow = null;
@@ -158,8 +158,8 @@ export async function parseIciciStatement(
     } else {
       errors.push({
         row: lastValidRow.sourceRow,
+        code: "NORMALIZE_FAILED",
         message: "Failed to normalize transaction",
-        rawData: lastValidRow,
       });
     }
   }

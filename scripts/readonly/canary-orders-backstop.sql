@@ -41,6 +41,7 @@ SELECT m.msg_id, b.order_gid, b.action,
        CASE b.reason
          WHEN 'Order placed from held account - backstop applied'                   THEN 'hold_applied'
          WHEN 'Backstop failed after all retries - manual intervention required'     THEN 'failed_after_retries'
+         WHEN 'backstop_max_retries'                                                THEN 'failed_after_retries'
          WHEN 'Skipped non-merchant-managed fulfillment orders (outside our scope)'  THEN 'non_merchant_managed_skipped'
          WHEN 'Account not found'                                                   THEN 'account_not_found'
          WHEN 'Bypass active'                                                       THEN 'bypass_active'

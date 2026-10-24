@@ -57,7 +57,7 @@ export async function parseHdfcStatement(
     return {
       detection,
       transactions: [],
-      errors: [{ row: 0, message: "Could not find header row" }],
+      errors: [{ row: 0, code: "NO_HEADER_ROW", message: "Could not find header row" }],
       totalRows: sheet.rows.length,
       skippedRows: sheet.rows.length,
     };
@@ -70,7 +70,7 @@ export async function parseHdfcStatement(
     return {
       detection,
       transactions: [],
-      errors: [{ row: headerRow, message: "Could not map HDFC columns" }],
+      errors: [{ row: headerRow, code: "COLUMN_MAP_FAILED", message: "Could not map HDFC columns" }],
       totalRows: sheet.rows.length,
       skippedRows: sheet.rows.length,
     };
@@ -94,9 +94,23 @@ export async function parseHdfcStatement(
       continue;
     }
 
+    // Check for Opening Balance / Closing Balance / B/F rows
+    const firstCell = String(row[0] ?? "").trim().toUpperCase();
+    const narrationCell = String(row[columns.narrationCol] ?? "").trim().toUpperCase();
+    if (
+      firstCell.includes("OPENING") ||
+      firstCell.includes("CLOSING") ||
+      narrationCell.includes("OPENING BALANCE") ||
+      narrationCell.includes("CLOSING BALANCE") ||
+      narrationCell === "B/F" ||
+      narrationCell.includes("BROUGHT FORWARD")
+    ) {
+      skippedRows++;
+      continue;
+    }
+
     // Check if this is a narration continuation row
     if (isNarrationContinuation(row)) {
-      // Append narration to pending
       const narrationPart = String(row[columns.narrationCol] ?? "").trim();
       if (narrationPart) {
         pendingNarration.push(narrationPart);
@@ -116,8 +130,8 @@ export async function parseHdfcStatement(
       } else {
         errors.push({
           row: lastValidRow.sourceRow,
+          code: "NORMALIZE_FAILED",
           message: "Failed to normalize transaction",
-          rawData: lastValidRow,
         });
       }
       lastValidRow = null;
@@ -127,7 +141,14 @@ export async function parseHdfcStatement(
     // Parse this row
     const rawRow = extractHdfcRow(row, columns, i + 1);
     if (!rawRow) {
-      // Empty or invalid row
+      const narrationContent = String(row[columns.narrationCol] ?? "").trim();
+      if (narrationContent && !narrationContent.match(/^[\d.,\s]+$/)) {
+        errors.push({
+          row: i + 1,
+          code: "ROW_PARSE_FAILED",
+          message: "Failed to parse row",
+        });
+      }
       skippedRows++;
       continue;
     }
@@ -147,8 +168,8 @@ export async function parseHdfcStatement(
     } else {
       errors.push({
         row: lastValidRow.sourceRow,
+        code: "NORMALIZE_FAILED",
         message: "Failed to normalize transaction",
-        rawData: lastValidRow,
       });
     }
   }
