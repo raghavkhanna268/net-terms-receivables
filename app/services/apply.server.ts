@@ -8,10 +8,15 @@
  * - Unmatching confirmed or pushed matches (blocked after Shopify push for paid invoices)
  * - Immutable audit trail with random UUIDs
  *
- * CRASH EDGE CASE (Issue #6):
- * A crash between tx1 (claiming the match) and tx2 (finalizing) leaves Match.state='pushed'
- * but nothing actually pushed and outstanding unchanged. On retry, we detect this by checking
- * if the invoice status isn't 'paid' AND outstanding wasn't reduced, and retry the push.
+ * TWO-PHASE COMMIT with 'pushing' STATE:
+ * Full payments use a two-phase commit to safely call Shopify:
+ * - TX1: Transition match confirmed→pushing, record push_claimed audit with outstanding
+ * - Shopify call: Outside any transaction, call orderMarkAsPaid
+ * - TX2: Finalize pushing→pushed, write match.applied and invoice.paid audits
+ *
+ * Stale 'pushing' matches (> 5 min old) can be reclaimed by another retrier. If a match
+ * is found in 'pushed' state without a match.applied audit, it's transitioned to 'unmatched'
+ * with PUSHED_WITHOUT_AUDIT reason rather than attempting crash recovery.
  */
 
 import type { Sql } from "~/lib/db-light.server";
@@ -164,6 +169,42 @@ export async function applyMatch(
     };
   }
 
+  // Before TX1, check for stale 'pushing' siblings and try to recover them
+  // This prevents a crashed 'pushing' match from blocking the invoice forever
+  const staleSiblings = await sql<{
+    id: string;
+    paymentId: string;
+    amountPaise: string;
+  }[]>`
+    SELECT id, "paymentId" AS "paymentId", (ROUND(amount * 100))::text AS "amountPaise"
+    FROM "Match"
+    WHERE "invoiceId" = ${invoiceRow.id}
+      AND "shopId" = ${shopId}
+      AND id != ${matchId}
+      AND state = 'pushing'
+      AND "updatedAt" < NOW() - interval '5 minutes'
+  `;
+
+  for (const sibling of staleSiblings) {
+    // Try to recover the stale sibling
+    const siblingMatchRow = {
+      id: sibling.id,
+      shopId,
+      paymentId: sibling.paymentId,
+      invoiceId: matchRow.invoiceId,
+      amountPaise: sibling.amountPaise,
+    };
+    const recoveryResult = await handleStalePushingMatch(sql, shopId, sibling.id, siblingMatchRow, actor);
+
+    // If recovery failed with an error (not just "not stale"), warn but continue
+    // The TX1 guard will catch any remaining issues
+    if (!recoveryResult.success && recoveryResult.reasonCode !== "PUSH_IN_PROGRESS") {
+      console.warn(
+        `[applyMatch] Failed to recover stale sibling matchId=${sibling.id}: ${recoveryResult.error}`
+      );
+    }
+  }
+
   // TX1: Lock invoice, claim match, decide partial vs full UNDER LOCK
   const tx1Result = await claimMatchAndDecide(
     sql,
@@ -267,12 +308,15 @@ export async function applyMatch(
  * Handle a match that's already in 'pushed' state.
  *
  * This handles two cases:
- * 1. Idempotent retry - match was already successfully applied
- * 2. Crash recovery (Issue #6) - match was claimed but push never completed
+ * 1. Idempotent retry - match was already successfully applied (has match.applied audit)
+ * 2. Inconsistent state - match is 'pushed' but has no match.applied audit
  *
- * We detect crash recovery by checking:
- * - For full payments: invoice status is not 'paid'
- * - For partial payments: no match.applied audit event exists
+ * For case 2, we refuse to proceed and transition the match to 'unmatched' with
+ * PUSHED_WITHOUT_AUDIT audit. The user must re-confirm and apply again.
+ *
+ * We detect successful application by looking for a match.applied audit event:
+ * - For full payments: also check invoice status is 'paid'
+ * - For partial payments: presence of match.applied audit is sufficient
  */
 async function handlePushedMatch(
   sql: Sql,
@@ -281,7 +325,7 @@ async function handlePushedMatch(
   matchRow: { id: string; shopId: string; paymentId: string; invoiceId: string; amountPaise: string },
   actor: string
 ): Promise<ApplyMatchResult> {
-  // Check invoice status to determine if this is idempotent or crash recovery
+  // Check invoice and audit state to determine if this is idempotent or inconsistent
   // IDOR protection: filter by shopId
   const [invoiceRow] = await sql<{
     id: string;
@@ -565,12 +609,14 @@ async function handleStalePushingMatch(
           const isFullPayment = newOutstanding === 0n;
 
           if (isFullPayment) {
-            // Full payment - mark invoice as paid
-            await tx`
+            // Full payment - conditionally mark invoice as paid (only if still open)
+            const [flippedInvoice] = await tx<{ id: string }[]>`
               UPDATE "Invoice"
               SET outstanding = 0, status = 'paid', "updatedAt" = NOW()
               WHERE id = ${invoiceRow.id}
                 AND "shopId" = ${shopId}
+                AND status = 'open'
+              RETURNING id
             `;
 
             await tx`
@@ -591,14 +637,17 @@ async function handleStalePushingMatch(
               shopifyAlreadyPaid: true,
             });
 
-            await writeAuditEvent(tx, shopId, actor, "invoice.paid", {
-              invoiceId: invoiceRow.id,
-              matchId,
-              orderGid: invoiceRow.orderId,
-              shopifyPushSucceeded: true,
-              staleReclaim: true,
-              shopifyAlreadyPaid: true,
-            });
+            // Only write invoice.paid if THIS transaction flipped open→paid
+            if (flippedInvoice) {
+              await writeAuditEvent(tx, shopId, actor, "invoice.paid", {
+                invoiceId: invoiceRow.id,
+                matchId,
+                orderGid: invoiceRow.orderId,
+                shopifyPushSucceeded: true,
+                staleReclaim: true,
+                shopifyAlreadyPaid: true,
+              });
+            }
 
             return { invoicePaid: true, isPartial: false, alreadyFinalized: false };
           } else {
@@ -840,11 +889,14 @@ async function handleStalePushingMatch(
         return { wasUnmatched: staleResult.action === "unmatched", invoicePaid: staleResult.invoicePaid };
       }
 
-      await tx`
+      // Conditionally mark invoice as paid (only if still open, atomic with check)
+      const [flippedInvoice] = await tx<{ id: string }[]>`
         UPDATE "Invoice"
         SET outstanding = 0, status = 'paid', "updatedAt" = NOW()
         WHERE id = ${invoiceRow.id}
           AND "shopId" = ${shopId}
+          AND status = 'open'
+        RETURNING id
       `;
 
       await tx`
@@ -865,14 +917,17 @@ async function handleStalePushingMatch(
         staleReclaim: true,
       });
 
-      await writeAuditEvent(tx, shopId, actor, "invoice.paid", {
-        invoiceId: invoiceRow.id,
-        matchId,
-        orderGid: invoiceRow.orderId,
-        shopifyPushSucceeded: shopifySuccess,
-        reasonCode,
-        staleReclaim: true,
-      });
+      // Only write invoice.paid if THIS transaction flipped open→paid
+      if (flippedInvoice) {
+        await writeAuditEvent(tx, shopId, actor, "invoice.paid", {
+          invoiceId: invoiceRow.id,
+          matchId,
+          orderGid: invoiceRow.orderId,
+          shopifyPushSucceeded: shopifySuccess,
+          reasonCode,
+          staleReclaim: true,
+        });
+      }
 
       return { wasUnmatched: false, invoicePaid: true };
     });
@@ -1147,12 +1202,25 @@ async function finalizeFullApply(
         if (shopifySuccess) {
           // Shopify already paid - finalize locally to match Shopify state
           // Don't revert the match, instead force-finalize to stay consistent with Shopify
-          await tx`
+          // Use conditional UPDATE to detect if THIS transaction actually flips open→paid
+          const [flippedInvoice] = await tx<{ id: string }[]>`
             UPDATE "Invoice"
             SET outstanding = 0, status = 'paid', "updatedAt" = NOW()
             WHERE id = ${invoiceRow.id}
               AND "shopId" = ${shopId}
+              AND status = 'open'
+            RETURNING id
           `;
+
+          // If invoice wasn't open, force outstanding=0 to match Shopify (status might be 'paid' already)
+          if (!flippedInvoice) {
+            await tx`
+              UPDATE "Invoice"
+              SET outstanding = 0, "updatedAt" = NOW()
+              WHERE id = ${invoiceRow.id}
+                AND "shopId" = ${shopId}
+            `;
+          }
 
           // Finalize match state to 'pushed'
           await tx`
@@ -1174,14 +1242,17 @@ async function finalizeFullApply(
             backstopTriggered: true,
           });
 
-          await writeAuditEvent(tx, shopId, actor, "invoice.paid", {
-            invoiceId: invoiceRow.id,
-            matchId,
-            orderGid: invoiceRow.orderId,
-            shopifyPushSucceeded: shopifySuccess,
-            reasonCode,
-            backstopTriggered: true,
-          });
+          // Only write invoice.paid if THIS transaction flipped open→paid
+          if (flippedInvoice) {
+            await writeAuditEvent(tx, shopId, actor, "invoice.paid", {
+              invoiceId: invoiceRow.id,
+              matchId,
+              orderGid: invoiceRow.orderId,
+              shopifyPushSucceeded: shopifySuccess,
+              reasonCode,
+              backstopTriggered: true,
+            });
+          }
 
           return { success: true, backstopTriggered: true };
         }
@@ -1202,12 +1273,14 @@ async function finalizeFullApply(
 
       const previousOutstanding = lockedInvoice.outstandingPaise;
 
-      // Mark invoice as paid
-      await tx`
+      // Conditionally mark invoice as paid (atomic check-and-update)
+      const [flippedInvoice] = await tx<{ id: string }[]>`
         UPDATE "Invoice"
         SET outstanding = 0, status = 'paid', "updatedAt" = NOW()
         WHERE id = ${invoiceRow.id}
           AND "shopId" = ${shopId}
+          AND status = 'open'
+        RETURNING id
       `;
 
       // Finalize match state to 'pushed'
@@ -1229,14 +1302,16 @@ async function finalizeFullApply(
         reasonCode,
       });
 
-      // Write invoice.paid audit event
-      await writeAuditEvent(tx, shopId, actor, "invoice.paid", {
-        invoiceId: invoiceRow.id,
-        matchId,
-        orderGid: invoiceRow.orderId,
-        shopifyPushSucceeded: shopifySuccess,
-        reasonCode,
-      });
+      // Only write invoice.paid if THIS transaction flipped open→paid
+      if (flippedInvoice) {
+        await writeAuditEvent(tx, shopId, actor, "invoice.paid", {
+          invoiceId: invoiceRow.id,
+          matchId,
+          orderGid: invoiceRow.orderId,
+          shopifyPushSucceeded: shopifySuccess,
+          reasonCode,
+        });
+      }
 
       return { success: true };
     });

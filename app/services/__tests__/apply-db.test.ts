@@ -1718,7 +1718,7 @@ describeWithDb("S17 apply service DB integration", () => {
       expect(match2.state).toBe("confirmed");
     });
 
-    it("STALE 'pushing' sibling (> 5 min) does NOT block new apply", async () => {
+    it("STALE 'pushing' sibling (> 5 min) is recovered before new apply proceeds", async () => {
       const paymentId1 = await createPayment(500000n); // First payment (stale pushing)
       const paymentId2 = await createPayment(500000n); // Second payment (new apply)
       const invoiceId = await createInvoice(1000000n); // 10000 INR invoice
@@ -1730,33 +1730,64 @@ describeWithDb("S17 apply service DB integration", () => {
         VALUES (${matchId1}, ${TEST_SHOP_ID}, ${paymentId1}, ${invoiceId}, 5000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushing', NOW() - interval '10 minutes', NOW() - interval '10 minutes')
       `;
 
+      // Add push_claimed audit for match1 (simulating TX1 that happened 10 min ago)
+      await sql`
+        INSERT INTO "AuditEvent" (id, "shopId", actor, type, data, at)
+        VALUES (
+          gen_random_uuid(),
+          ${TEST_SHOP_ID},
+          'test-user',
+          'match.push_claimed',
+          ${sql.json({ matchId: matchId1, invoiceId, paymentId: paymentId1, outstandingAtClaimPaise: '1000000' })}::jsonb,
+          NOW() - interval '10 minutes'
+        )
+      `;
+
       // Create a confirmed match for paymentId2 on the same invoice
       const matchId2 = await createConfirmedMatch(paymentId2, invoiceId, 500000n);
 
-      // Try to apply match2 - should NOT be blocked because match1 is STALE (> 5 min)
+      // Reset call counts
+      orderMarkAsPaidCallCount = 0;
+
+      // Try to apply match2 - should first recover stale match1, then apply match2
       const result = await applyMatch(sql, TEST_SHOP_ID, matchId2, "test-user");
 
-      // Should succeed (stale sibling doesn't block)
+      // Should succeed (stale sibling was recovered first)
       expect(result.success).toBe(true);
-      expect(result.invoicePaid).toBe(false); // Partial
 
-      // Invoice outstanding should be reduced by 5000
-      const [invoice] = await sql<{ outstanding: string }[]>`
-        SELECT outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
+      // match1 should now be recovered ('pushed' with match.applied since it's a partial)
+      const [match1] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId1}
       `;
-      expect(parseFloat(invoice.outstanding)).toBe(5000);
+      expect(match1.state).toBe("pushed");
 
-      // match2 should now be 'pushed'
+      // match1 should have match.applied audit
+      const [match1Audit] = await sql<{ data: { staleReclaim?: boolean } }[]>`
+        SELECT data FROM "AuditEvent"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+          AND type = 'match.applied'
+          AND data->>'matchId' = ${matchId1}
+      `;
+      expect(match1Audit).toBeDefined();
+      expect(match1Audit?.data.staleReclaim).toBe(true);
+
+      // match2 should also be 'pushed'
       const [match2] = await sql<{ state: string }[]>`
         SELECT state FROM "Match" WHERE id = ${matchId2}
       `;
       expect(match2.state).toBe("pushed");
 
-      // match1 should still be 'pushing' (it wasn't recovered, just ignored)
-      const [match1] = await sql<{ state: string }[]>`
-        SELECT state FROM "Match" WHERE id = ${matchId1}
+      // Invoice outstanding should be reduced by both (5000 + 5000 = 10000, so 0 remaining)
+      const [invoice] = await sql<{ outstanding: string; status: string }[]>`
+        SELECT outstanding::text, status FROM "Invoice" WHERE id = ${invoiceId}
       `;
-      expect(match1.state).toBe("pushing");
+      expect(parseFloat(invoice.outstanding)).toBe(0);
+      expect(invoice.status).toBe("paid");
+
+      // No orderMarkAsPaid calls (both are partials that together make full, but
+      // each partial completes locally without Shopify)
+      // Actually, the second apply (match2) will trigger full payment and call Shopify
+      expect(orderMarkAsPaidCallCount).toBe(1);
     });
 
   });
