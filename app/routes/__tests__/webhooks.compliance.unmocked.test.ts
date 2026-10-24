@@ -263,8 +263,8 @@ describe("webhooks.compliance unmocked HMAC tests (#39)", () => {
     });
   });
 
-  describe("missing required headers return 400", () => {
-    it("missing X-Shopify-Topic returns 400", async () => {
+  describe("missing required headers return 400 (after valid HMAC)", () => {
+    it("missing X-Shopify-Topic returns 400 when HMAC is valid", async () => {
       const payload = { shop_id: 123, shop_domain: TEST_SHOP };
       const body = JSON.stringify(payload);
       const request = createSignedRequest(body, "shop/redact", SYNTHETIC_TEST_SECRET, {
@@ -276,7 +276,7 @@ describe("webhooks.compliance unmocked HMAC tests (#39)", () => {
       });
     });
 
-    it("missing X-Shopify-Shop-Domain returns 400", async () => {
+    it("missing X-Shopify-Shop-Domain returns 400 when HMAC is valid", async () => {
       const payload = { shop_id: 123, shop_domain: TEST_SHOP };
       const body = JSON.stringify(payload);
       const request = createSignedRequest(body, "shop/redact", SYNTHETIC_TEST_SECRET, {
@@ -286,6 +286,102 @@ describe("webhooks.compliance unmocked HMAC tests (#39)", () => {
       await expect(action(createMockActionArgs(request))).rejects.toMatchObject({
         status: 400,
       });
+    });
+  });
+
+  describe("HMAC-first verification (E9 security fix)", () => {
+    it("returns 401 when HMAC is missing, even if topic is also missing", async () => {
+      const payload = { shop_id: 123, shop_domain: TEST_SHOP };
+      const body = JSON.stringify(payload);
+      const request = createSignedRequest(body, "shop/redact", SYNTHETIC_TEST_SECRET, {
+        omitHmac: true,
+        omitTopic: true,
+      });
+
+      await expect(action(createMockActionArgs(request))).rejects.toMatchObject({
+        status: 401,
+      });
+    });
+
+    it("returns 401 when HMAC is missing, even if shop domain is also missing", async () => {
+      const payload = { shop_id: 123, shop_domain: TEST_SHOP };
+      const body = JSON.stringify(payload);
+      const request = createSignedRequest(body, "shop/redact", SYNTHETIC_TEST_SECRET, {
+        omitHmac: true,
+        omitShop: true,
+      });
+
+      await expect(action(createMockActionArgs(request))).rejects.toMatchObject({
+        status: 401,
+      });
+    });
+
+    it("returns 401 when HMAC is wrong, even if topic is missing", async () => {
+      const payload = { shop_id: 123, shop_domain: TEST_SHOP };
+      const body = JSON.stringify(payload);
+      const wrongHmac = generateShopifyHmac(body, "wrong-secret");
+      const request = createSignedRequest(body, "shop/redact", SYNTHETIC_TEST_SECRET, {
+        wrongHmac,
+        omitTopic: true,
+      });
+
+      await expect(action(createMockActionArgs(request))).rejects.toMatchObject({
+        status: 401,
+      });
+    });
+
+    it("returns 401 when HMAC is wrong, even if shop domain is missing", async () => {
+      const payload = { shop_id: 123, shop_domain: TEST_SHOP };
+      const body = JSON.stringify(payload);
+      const wrongHmac = generateShopifyHmac(body, "wrong-secret");
+      const request = createSignedRequest(body, "shop/redact", SYNTHETIC_TEST_SECRET, {
+        wrongHmac,
+        omitShop: true,
+      });
+
+      await expect(action(createMockActionArgs(request))).rejects.toMatchObject({
+        status: 401,
+      });
+    });
+
+    it("returns 401 when HMAC is wrong with all other headers missing (no info leak)", async () => {
+      const payload = { shop_id: 123, shop_domain: TEST_SHOP };
+      const body = JSON.stringify(payload);
+      const wrongHmac = generateShopifyHmac(body, "wrong-secret");
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Hmac-Sha256": wrongHmac,
+        },
+        body,
+      });
+
+      await expect(action(createMockActionArgs(request))).rejects.toMatchObject({
+        status: 401,
+      });
+    });
+
+    it("error response body does not reveal which header was missing", async () => {
+      const payload = { shop_id: 123, shop_domain: TEST_SHOP };
+      const body = JSON.stringify(payload);
+      const request = createSignedRequest(body, "shop/redact", SYNTHETIC_TEST_SECRET, {
+        omitTopic: true,
+      });
+
+      try {
+        await action(createMockActionArgs(request));
+        expect.fail("Expected action to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        const response = error as Response;
+        expect(response.status).toBe(400);
+        expect(response.statusText).toBe("Bad Request");
+        expect(response.statusText).not.toContain("Topic");
+        expect(response.statusText).not.toContain("topic");
+        expect(response.statusText).not.toContain("header");
+      }
     });
   });
 

@@ -210,7 +210,7 @@ describe("verifyWebhook", () => {
       }
     });
 
-    it("rejects request missing shop domain header with 400", async () => {
+    it("rejects request missing shop domain header with 400 (after valid HMAC)", async () => {
       const body = JSON.stringify({ shop_id: 123 });
       const hmac = await generateHmac(TEST_API_SECRET, body);
       const request = new Request("https://example.com/webhooks/compliance", {
@@ -230,7 +230,189 @@ describe("verifyWebhook", () => {
       } catch (error) {
         expect(error).toBeInstanceOf(Response);
         expect((error as Response).status).toBe(400);
+        expect((error as Response).statusText).toBe("Bad Request");
       }
+    });
+
+    it("rejects missing topic header with 400 (after valid HMAC)", async () => {
+      const body = JSON.stringify({ shop_id: 123 });
+      const hmac = await generateHmac(TEST_API_SECRET, body);
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        headers: {
+          "X-Shopify-Shop-Domain": TEST_SHOP,
+          "X-Shopify-Hmac-Sha256": hmac,
+          "X-Shopify-Webhook-Id": "test-id",
+          "X-Shopify-API-Version": "2026-10",
+        },
+        body,
+      });
+
+      try {
+        await verifyWebhook(request, TEST_API_SECRET);
+        expect.fail("Expected verifyWebhook to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(400);
+        expect((error as Response).statusText).toBe("Bad Request");
+      }
+    });
+
+    it("rejects missing webhook ID header with 400 (after valid HMAC)", async () => {
+      const body = JSON.stringify({ shop_id: 123 });
+      const hmac = await generateHmac(TEST_API_SECRET, body);
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        headers: {
+          "X-Shopify-Topic": "shop/redact",
+          "X-Shopify-Shop-Domain": TEST_SHOP,
+          "X-Shopify-Hmac-Sha256": hmac,
+          "X-Shopify-API-Version": "2026-10",
+        },
+        body,
+      });
+
+      try {
+        await verifyWebhook(request, TEST_API_SECRET);
+        expect.fail("Expected verifyWebhook to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(400);
+        expect((error as Response).statusText).toBe("Bad Request");
+      }
+    });
+
+    it("rejects missing API version header with 400 (after valid HMAC)", async () => {
+      const body = JSON.stringify({ shop_id: 123 });
+      const hmac = await generateHmac(TEST_API_SECRET, body);
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        headers: {
+          "X-Shopify-Topic": "shop/redact",
+          "X-Shopify-Shop-Domain": TEST_SHOP,
+          "X-Shopify-Hmac-Sha256": hmac,
+          "X-Shopify-Webhook-Id": "test-id",
+        },
+        body,
+      });
+
+      try {
+        await verifyWebhook(request, TEST_API_SECRET);
+        expect.fail("Expected verifyWebhook to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(400);
+        expect((error as Response).statusText).toBe("Bad Request");
+      }
+    });
+  });
+
+  describe("HMAC-first verification (E9 security fix)", () => {
+    it("returns 401 when HMAC is missing, even if other headers are also missing", async () => {
+      const body = JSON.stringify({ shop_id: 123 });
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body,
+      });
+
+      try {
+        await verifyWebhook(request, TEST_API_SECRET);
+        expect.fail("Expected verifyWebhook to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(401);
+        expect((error as Response).statusText).toBe("Unauthorized");
+      }
+    });
+
+    it("returns 401 when HMAC is wrong, even if other headers are missing", async () => {
+      const body = JSON.stringify({ shop_id: 123 });
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Hmac-Sha256": "invalid-hmac-signature",
+        },
+        body,
+      });
+
+      try {
+        await verifyWebhook(request, TEST_API_SECRET);
+        expect.fail("Expected verifyWebhook to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(401);
+        expect((error as Response).statusText).toBe("Unauthorized");
+      }
+    });
+
+    it("returns 401 for wrong HMAC even when topic/shop/id are all missing", async () => {
+      const body = JSON.stringify({ shop_id: 123 });
+      const wrongHmac = await generateHmac("wrong-secret", body);
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Hmac-Sha256": wrongHmac,
+        },
+        body,
+      });
+
+      try {
+        await verifyWebhook(request, TEST_API_SECRET);
+        expect.fail("Expected verifyWebhook to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(401);
+        expect((error as Response).statusText).toBe("Unauthorized");
+      }
+    });
+
+    it("uses generic error messages that don't reveal which header was missing", async () => {
+      const body = JSON.stringify({ shop_id: 123 });
+      const hmac = await generateHmac(TEST_API_SECRET, body);
+      
+      const testCases: Array<{ missing: string; headers: Record<string, string> }> = [
+        { missing: "topic", headers: { "X-Shopify-Shop-Domain": TEST_SHOP, "X-Shopify-Hmac-Sha256": hmac, "X-Shopify-Webhook-Id": "id", "X-Shopify-API-Version": "2026-10" } },
+        { missing: "shop", headers: { "X-Shopify-Topic": "shop/redact", "X-Shopify-Hmac-Sha256": hmac, "X-Shopify-Webhook-Id": "id", "X-Shopify-API-Version": "2026-10" } },
+        { missing: "webhookId", headers: { "X-Shopify-Topic": "shop/redact", "X-Shopify-Shop-Domain": TEST_SHOP, "X-Shopify-Hmac-Sha256": hmac, "X-Shopify-API-Version": "2026-10" } },
+        { missing: "apiVersion", headers: { "X-Shopify-Topic": "shop/redact", "X-Shopify-Shop-Domain": TEST_SHOP, "X-Shopify-Hmac-Sha256": hmac, "X-Shopify-Webhook-Id": "id" } },
+      ];
+
+      for (const testCase of testCases) {
+        const request = new Request("https://example.com/webhooks/compliance", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...testCase.headers },
+          body,
+        });
+
+        try {
+          await verifyWebhook(request, TEST_API_SECRET);
+          expect.fail(`Expected verifyWebhook to throw for missing ${testCase.missing}`);
+        } catch (error) {
+          expect(error).toBeInstanceOf(Response);
+          expect((error as Response).status).toBe(400);
+          expect((error as Response).statusText).toBe("Bad Request");
+          expect((error as Response).statusText).not.toContain(testCase.missing);
+        }
+      }
+    });
+
+    it("valid HMAC with all headers passes verification", async () => {
+      const body = JSON.stringify({ shop_id: 123, shop_domain: TEST_SHOP });
+      const hmac = await generateHmac(TEST_API_SECRET, body);
+      const request = createWebhookRequest(body, "shop/redact", hmac);
+
+      const result = await verifyWebhook(request, TEST_API_SECRET);
+
+      expect(result.shop).toBe(TEST_SHOP);
+      expect(result.topic).toBe("shop/redact");
+      expect(result.webhookId).toBe("test-webhook-id-123");
+      expect(result.apiVersion).toBe("2026-10");
+      expect(result.payload).toEqual({ shop_id: 123, shop_domain: TEST_SHOP });
     });
   });
 
@@ -256,7 +438,7 @@ describe("verifyWebhook", () => {
       } catch (error) {
         expect(error).toBeInstanceOf(Response);
         expect((error as Response).status).toBe(400);
-        expect((error as Response).statusText).toBe("Invalid shop domain format");
+        expect((error as Response).statusText).toBe("Bad Request");
       }
     });
 
@@ -412,7 +594,7 @@ describe("verifyWebhook", () => {
       } catch (error) {
         expect(error).toBeInstanceOf(Response);
         expect((error as Response).status).toBe(400);
-        expect((error as Response).statusText).toBe("Invalid JSON payload");
+        expect((error as Response).statusText).toBe("Bad Request");
       }
     });
   });

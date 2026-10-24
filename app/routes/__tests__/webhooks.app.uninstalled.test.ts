@@ -269,4 +269,63 @@ describe("webhooks.app.uninstalled", () => {
       consoleSpy.mockRestore();
     });
   });
+
+  describe("E9 HMAC-first verification (security)", () => {
+    it("returns 401 when verifyWebhook throws 401 (missing HMAC)", async () => {
+      const unauthorizedResponse = new Response(null, {
+        status: 401,
+        statusText: "Unauthorized",
+      });
+      mockVerifyWebhook.mockRejectedValue(unauthorizedResponse);
+
+      try {
+        await action(createActionArgs());
+        expect.fail("Expected action to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(401);
+        expect((error as Response).statusText).toBe("Unauthorized");
+      }
+
+      expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
+      expect(mockMarkShopUninstalled).not.toHaveBeenCalled();
+    });
+
+    it("returns 401 when verifyWebhook throws 401 (invalid HMAC)", async () => {
+      const unauthorizedResponse = new Response(null, {
+        status: 401,
+        statusText: "Unauthorized",
+      });
+      mockVerifyWebhook.mockRejectedValue(unauthorizedResponse);
+
+      try {
+        await action(createActionArgs());
+        expect.fail("Expected action to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(401);
+      }
+
+      expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
+    });
+
+    it("returns 400 when verifyWebhook throws 400 (missing header after valid HMAC)", async () => {
+      const badRequestResponse = new Response(null, {
+        status: 400,
+        statusText: "Bad Request",
+      });
+      mockVerifyWebhook.mockRejectedValue(badRequestResponse);
+
+      try {
+        await action(createActionArgs());
+        expect.fail("Expected action to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(400);
+        expect((error as Response).statusText).toBe("Bad Request");
+      }
+
+      expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
+    });
+  });
 });
