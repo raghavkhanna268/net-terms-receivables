@@ -1,22 +1,14 @@
 name: CI
 
-# Minutes budget (private repo, free plan): CI runs only on PRs and on pushes
-# to main. Docs-only changes are skipped. Superseded runs on the same ref are
-# cancelled. Note: this repo has no branch protection/required checks (not
-# available on the free plan for private repos), so paths-ignore cannot leave
-# a required check stuck "pending" on docs-only PRs. If required checks are
-# ever enabled, revisit paths-ignore.
+# Minutes budget: CI runs only on PRs and on pushes to main, and superseded
+# runs on the same ref are cancelled. No paths filters: "Lint, typecheck,
+# test, build" is a REQUIRED status check, and a required workflow skipped by
+# a paths filter would leave docs-only PRs stuck on a pending check.
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - 'docs/**'
-      - '**/*.md'
   pull_request:
     # Run on PRs to any branch (supports stacked PRs)
-    paths-ignore:
-      - 'docs/**'
-      - '**/*.md'
 
 permissions:
   contents: read

@@ -1,19 +1,14 @@
 name: Rust Functions
 
-# Split out of ci.yml to save Actions minutes: the Rust/WASM job only runs when
-# Shopify Function code (or this workflow) changes, instead of on every CI run.
+# Split out of ci.yml as its own workflow. Runs on every PR and every push to
+# main (no paths filter) because "Rust functions (test, build WASM)" is a
+# REQUIRED status check. Swatinem/rust-cache keeps runs short.
 # The Worker deploy (deploy.yml) does not depend on this workflow; Shopify
 # Functions ship via the Shopify CLI, not the Worker deploy.
 on:
   push:
     branches: [main]
-    paths:
-      - 'extensions/**'
-      - '.github/workflows/rust-functions.yml'
   pull_request:
-    paths:
-      - 'extensions/**'
-      - '.github/workflows/rust-functions.yml'
   workflow_dispatch:
 
 permissions:
