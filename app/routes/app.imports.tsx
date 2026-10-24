@@ -25,7 +25,7 @@ import { getRequestSql } from "~/lib/request-context.server";
 import { runMatcher, MAX_PAYMENTS_PER_REQUEST } from "~/services/matcher.server";
 import { generateDedupeKey, isValidUtrForRail } from "~/lib/banks/dedupe";
 import type { PaymentRail } from "~/lib/banks/types";
-import { checkImportLimit } from "~/services/gating.server";
+import { checkImportLimit, enforceImportLimit, UpgradeRequiredError } from "~/services/gating.server";
 
 /**
  * Maximum rows per import request.
@@ -350,18 +350,21 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   const shopId = shop.id;
 
-  // Check monthly import allowance before creating any records
-  const importLimitCheck = await checkImportLimit(sql, shopId);
-  if (!importLimitCheck.allowed) {
-    const limitDisplay = importLimitCheck.limit === -1 ? "unlimited" : importLimitCheck.limit.toString();
-    return Response.json(
-      {
-        success: false,
-        error: `Monthly import limit reached. You have used ${importLimitCheck.currentUsage} of ${limitDisplay} imports this month. Upgrade your plan for unlimited imports.`,
-        limitReached: true,
-      },
-      { status: 403 }
-    );
+  // Enforce monthly import allowance before creating any records
+  try {
+    await enforceImportLimit(sql, shopId);
+  } catch (err) {
+    if (err instanceof UpgradeRequiredError) {
+      return Response.json(
+        {
+          success: false,
+          error: `Monthly import limit reached. You have used ${err.currentUsage} of ${err.limit} imports this month. Upgrade your plan for unlimited imports.`,
+          limitReached: true,
+        },
+        { status: 403 }
+      );
+    }
+    throw err;
   }
 
   try {
@@ -774,7 +777,7 @@ export default function ImportsPage() {
           {importsThisMonth.limit !== -1 && (
             <s-banner 
               tone={importsThisMonth.allowed ? "info" : "warning"} 
-              heading="Monthly Import Allowance"
+              heading="Monthly import allowance"
             >
               {importsThisMonth.allowed ? (
                 <>
@@ -790,7 +793,7 @@ export default function ImportsPage() {
             </s-banner>
           )}
 
-          <s-banner tone="info" heading="Per-Import Limit">
+          <s-banner tone="info" heading="Per-import limit">
             Each import can include up to <s-text type="strong">{maxImportRows.toLocaleString()}</s-text> credit rows.
             For larger statements, split them into multiple files.
           </s-banner>
@@ -811,7 +814,7 @@ export default function ImportsPage() {
           )}
 
           {status === "error" && (
-            <s-banner tone="critical" heading="Parse Error">
+            <s-banner tone="critical" heading="Parse error">
               {errorMessage}
             </s-banner>
           )}
@@ -824,7 +827,7 @@ export default function ImportsPage() {
           <s-section heading="Parse Results">
             <s-stack>
               {result.bank === "UNKNOWN" ? (
-                <s-banner tone="warning" heading="Unknown Bank Format">
+                <s-banner tone="warning" heading="Unknown bank format">
                   Could not detect HDFC or ICICI format. Please ensure you are
                   uploading a standard bank statement export.
                 </s-banner>
@@ -852,7 +855,7 @@ export default function ImportsPage() {
               )}
 
               {result.errors.length > 0 && (
-                <s-banner tone="warning" heading="Parse Warnings">
+                <s-banner tone="warning" heading="Parse warnings">
                   {result.errors.length} row(s) could not be parsed. First
                   error: Row {result.errors[0].row}: {result.errors[0].message}
                 </s-banner>
@@ -860,7 +863,7 @@ export default function ImportsPage() {
 
               {/* Over-limit error banner - blocks submit */}
               {overLimitError && (
-                <s-banner tone="critical" heading="Too Many Rows">
+                <s-banner tone="critical" heading="Too many rows">
                   This file contains <s-text type="strong">{overLimitError.rowCount.toLocaleString()}</s-text> credit rows,
                   which exceeds the per-import limit of <s-text type="strong">{overLimitError.limit.toLocaleString()}</s-text> rows.
                   Please split your statement into smaller files before importing.
@@ -870,7 +873,7 @@ export default function ImportsPage() {
               {/* Import result banner */}
               {importResult && (
                 importResult.success ? (
-                  <s-banner tone="success" heading="Import Complete">
+                  <s-banner tone="success" heading="Import complete">
                     <s-paragraph>
                       <s-text type="strong">{importResult.counts?.inserted}</s-text> credits imported,{" "}
                       <s-text type="strong">{importResult.counts?.duplicates}</s-text> duplicates skipped
@@ -894,13 +897,8 @@ export default function ImportsPage() {
                     </s-paragraph>
                   </s-banner>
                 ) : (
-                  <s-banner tone="critical" heading={importResult.limitReached ? "Monthly Import Limit Reached" : "Import Failed"}>
+                  <s-banner tone="critical" heading={importResult.limitReached ? "Monthly import limit reached" : "Import failed"}>
                     {importResult.error}
-                    {importResult.limitReached && (
-                      <s-paragraph>
-                        <s-link href="/app/plan">Upgrade your plan</s-link> for unlimited imports.
-                      </s-paragraph>
-                    )}
                     {importResult.details && importResult.details.length > 0 && (
                       <s-unordered-list>
                         {importResult.details.slice(0, 5).map((detail, idx) => (
@@ -1028,7 +1026,7 @@ export default function ImportsPage() {
       </s-section>
 
       <s-section slot="aside" heading="Privacy">
-        <s-banner tone="info" heading="Privacy-First Import">
+        <s-banner tone="info" heading="Privacy-first import">
           Your bank statement file is parsed entirely in your browser. The raw
           file (CSV/XLS/XLSX) <s-text type="strong">never</s-text> leaves your device.
         </s-banner>

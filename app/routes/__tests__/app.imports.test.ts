@@ -1177,8 +1177,7 @@ describeWithDb("Monthly import limit enforcement", () => {
 
   it("first import succeeds when under monthly limit", async () => {
     // Enable gating for this test
-    const originalEnv = process.env.PLAN_GATING_ENFORCED;
-    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
+    vi.stubEnv("PLAN_GATING_ENFORCED", "true");
 
     try {
       const payload = {
@@ -1202,14 +1201,13 @@ describeWithDb("Monthly import limit enforcement", () => {
       expect(data.success).toBe(true);
       expect(data.counts?.inserted).toBe(1);
     } finally {
-      process.env.PLAN_GATING_ENFORCED = originalEnv;
+      vi.unstubAllEnvs();
     }
   });
 
   it("second import in same month is rejected when on free plan (1/month)", async () => {
     // Enable gating for this test
-    const originalEnv = process.env.PLAN_GATING_ENFORCED;
-    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
+    vi.stubEnv("PLAN_GATING_ENFORCED", "true");
 
     try {
       // Create a BankImport record to simulate a previous import this month
@@ -1246,14 +1244,13 @@ describeWithDb("Monthly import limit enforcement", () => {
       `;
       expect(parseInt(count.c, 10)).toBe(1); // Only the original import
     } finally {
-      process.env.PLAN_GATING_ENFORCED = originalEnv;
+      vi.unstubAllEnvs();
     }
   });
 
   it("import succeeds when on unlimited plan (starter/growth/scale)", async () => {
     // Enable gating for this test
-    const originalEnv = process.env.PLAN_GATING_ENFORCED;
-    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
+    vi.stubEnv("PLAN_GATING_ENFORCED", "true");
 
     try {
       // Upgrade to starter plan (unlimited imports)
@@ -1289,14 +1286,13 @@ describeWithDb("Monthly import limit enforcement", () => {
       expect(data.success).toBe(true);
       expect(data.counts?.inserted).toBe(1);
     } finally {
-      process.env.PLAN_GATING_ENFORCED = originalEnv;
+      vi.unstubAllEnvs();
     }
   });
 
   it("gating off allows unlimited imports on free plan", async () => {
     // Ensure gating is OFF
-    const originalEnv = process.env.PLAN_GATING_ENFORCED;
-    process.env.PLAN_GATING_ENFORCED = "false";
+    vi.stubEnv("PLAN_GATING_ENFORCED", "false");
 
     try {
       // Ensure free plan
@@ -1330,14 +1326,13 @@ describeWithDb("Monthly import limit enforcement", () => {
       const data = await parseResponse(response);
       expect(data.success).toBe(true);
     } finally {
-      process.env.PLAN_GATING_ENFORCED = originalEnv;
+      vi.unstubAllEnvs();
     }
   });
 
   it("monthly limit error message includes usage info", async () => {
     // Enable gating
-    const originalEnv = process.env.PLAN_GATING_ENFORCED;
-    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
+    vi.stubEnv("PLAN_GATING_ENFORCED", "true");
 
     try {
       // Ensure free plan
@@ -1369,7 +1364,7 @@ describeWithDb("Monthly import limit enforcement", () => {
       expect(data.error).toContain("1 of 1"); // "used 1 of 1 imports"
       expect(data.error).toContain("Upgrade");
     } finally {
-      process.env.PLAN_GATING_ENFORCED = originalEnv;
+      vi.unstubAllEnvs();
     }
   });
 });
