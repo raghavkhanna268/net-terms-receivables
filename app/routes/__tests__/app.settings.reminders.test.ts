@@ -1310,6 +1310,55 @@ describe("Reminder Settings Route error logging (R2)", () => {
       expect(logOutput).not.toContain("INV-2024-001");
       expect(logOutput).not.toContain("Reminder failed");
     });
+
+    it("logs hostile intent as 'other' (toSafeIntent)", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-hostile-intent" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      mockContext.cloudflare.env = {
+        RESEND_API_KEY: "re_test_123",
+        RESEND_FROM: "noreply@example.com",
+      };
+
+      const consoleWarnSpy = vi
+        .spyOn(console, "warn")
+        .mockImplementation(() => {});
+
+      const formData = new FormData();
+      // Hostile intent that could be an email or XSS attempt
+      formData.append("intent", "x@y.com");
+
+      const postRequest = new Request(
+        "https://example.com/app/settings/reminders",
+        {
+          method: "POST",
+          body: formData,
+        }
+      );
+
+      const { action } = await import("../app.settings.reminders");
+      const result = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("Unknown action");
+
+      const logOutput = consoleWarnSpy.mock.calls[0][0];
+      // Should log "other" instead of the hostile intent
+      expect(logOutput).toContain('"event":"reminders_unknown_action"');
+      expect(logOutput).toContain('"action":"other"');
+      // Should NOT contain the hostile input
+      expect(logOutput).not.toContain("x@y.com");
+
+      consoleWarnSpy.mockRestore();
+    });
   });
 
   describe("loader success paths (no errors)", () => {
