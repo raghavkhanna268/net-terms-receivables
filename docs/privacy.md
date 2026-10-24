@@ -53,9 +53,16 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | Data Category | Fields | Purpose | Retention |
 |---------------|--------|---------|-----------|
 | Payment | Value date, amount, rail (NEFT/RTGS/IMPS/UPI), UTR | Payment reconciliation | Until shop/redact |
-| Payment (PII) | Payer name/text, narration | Payment matching | Until shop/redact or customers/redact |
+| Payment (PII) | Payer name/text, narration | Payment matching | Until shop/redact, customers/redact, or retention purge |
+| PayerAlias | Normalized payer key, buyer account link | Payment matching | Until customers/redact or shop/redact |
 
-**Note:** `Payment.narration` and `Payment.payerText` may contain personal data from bank statements. These fields are anonymized during customers/redact if they contain the customer's identifier.
+**Note:** `Payment.narration` and `Payment.payerText` may contain personal data from bank statements. These fields are:
+- Redacted to `[REDACTED]` during customers/redact if the payment is matched to the customer's buyer account
+- Purged to `[RETENTION_PURGED]` after **180 days** (provisional) for **unmatched** payments via nightly pg_cron job
+
+**Retention purge:** The `s22_purge_unmatched_narration` pg_cron job runs daily at 04:00 UTC and clears narration/payerText on unmatched payments older than the retention window. This preserves amounts, UTR, rail, value date, and status for reconciliation purposes while removing potentially PII-bearing text. Matched payments retain their narration until explicitly redacted via customers/redact or shop/redact.
+
+**PROVISIONAL:** The 180-day retention window is provisional, pending product decision. See `UNMATCHED_NARRATION_RETENTION_DAYS` in `app/services/compliance/compliance.server.ts`.
 
 ### 2.5 Data Request Records (S22)
 
@@ -134,7 +141,9 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | Shop and Account Data | Until 48 hours after uninstall | `shop/redact` webhook (sent by Shopify 48h after uninstall) |
 | Tagged Customer Data | Until customers/redact or shop/redact | Compliance webhooks |
 | Invoices | Retained (no customer-identifying fields) | Buyer relationship anonymized on customers/redact |
-| Payments | Until shop/redact | Redacted on customers/redact if linked to customer via Match→Invoice→BuyerAccount |
+| Payments (matched) | Until shop/redact | Narration/payerText redacted on customers/redact if linked to customer via Match→Invoice→BuyerAccount |
+| Payments (unmatched narration) | **180 days (provisional)** | Narration/payerText cleared nightly via pg_cron `s22_purge_unmatched_narration`; amounts/UTR/status retained |
+| PayerAlias | Until customers/redact or shop/redact | Deleted on customers/redact for the customer's buyer account; cascades on shop/redact |
 | Data Request Records | 30 days (DPDP minimisation) | Purged on next access, and nightly where pg_cron is enabled; also on customers/redact or shop/redact (CASCADE) |
 | Audit Events | Until shop/redact | Automatic cascade |
 | Bulk Operation Progress | Until operation completes or shop/redact | Automatic via S6 migration CASCADE |
@@ -176,6 +185,8 @@ When a customer requests their data:
 - **Notification:** Email to shop owner via Resend API (gated on `RESEND_API_KEY` and `RESEND_FROM` env vars)
 - **Retention:** Exports are retained for **30 days** (DPDP minimisation), purged on next access and nightly where pg_cron is enabled
 
+**Shopify compliance deadline:** Per [Shopify compliance webhook documentation](https://shopify.dev/docs/apps/build/privacy-law-compliance#customers-data_request), merchants must provide the customer's data within **30 days** of receiving the request. Our 30-day export retention ensures exports remain available for the full compliance window.
+
 **Email notification details:**
 - Email contains ONLY a notice and link to the in-admin download page
 - **NO customer PII** is included in the email (no GID, email, name, or tags)
@@ -192,11 +203,12 @@ When a customer must be deleted (GDPR/CCPA erasure request):
 2. **Delete** `s8_tagged_customers` row for the customer
 3. **Delete** `s8_draft_orders` linked to customer's buyer account
 4. **Delete** `s22_data_requests` for the customer (contains PII in export)
-5. **Anonymize** `BuyerAccount`:
+5. **Delete** `PayerAlias` rows for the customer's buyer account (learned payer keys)
+6. **Anonymize** `BuyerAccount`:
    - Set `name` to "Redacted Customer"
    - Append timestamp to `customerId` to prevent FK conflicts
-6. **Redact** `Payment` fields (`payerText`, `narration`) for payments linked via Match→Invoice→BuyerAccount relationship (not pattern matching on customer ID)
-7. **Preserve** `Invoice` records for legal/tax compliance (Invoice has no customer-identifying fields; buyer relationship is through BuyerAccount which is anonymized)
+7. **Redact** `Payment` fields (`payerText`, `narration`) for payments linked via Match→Invoice→BuyerAccount relationship (not pattern matching on customer ID)
+8. **Preserve** `Invoice` records for legal/tax compliance (Invoice has no customer-identifying fields; buyer relationship is through BuyerAccount which is anonymized)
 
 **Legal retention reasoning:** Invoices must be retained for tax compliance (typically 7+ years in India). The invoice itself is a business record; the buyer link is anonymized.
 

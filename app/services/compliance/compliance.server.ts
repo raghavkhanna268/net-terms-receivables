@@ -6,6 +6,7 @@
  * - customers/redact: Customer data purge and anonymization
  * - customers/data_request: Data export for customer
  * - PII minimisation: Null inactive customer PII
+ * - Retention: Scheduled purge of raw narration on old unmatched payments
  *
  * All operations are designed for the 10ms CPU budget:
  * - Small, targeted queries
@@ -14,6 +15,26 @@
  */
 
 import type { Sql } from "~/lib/db-light.server";
+
+// ============================================================================
+// RETENTION CONSTANTS
+// ============================================================================
+
+/**
+ * Retention window (in days) for raw narration/payerText on UNMATCHED payments.
+ *
+ * After this window, the pg_cron job s22_purge_unmatched_narration clears:
+ * - Payment.narration → '[RETENTION_PURGED]'
+ * - Payment.payerText → NULL
+ *
+ * This preserves: amount, UTR, rail, valueDate, and match history.
+ *
+ * Matched payments retain narration until customers/redact or shop/redact.
+ *
+ * PROVISIONAL: 180 days, pending product decision from Raghav.
+ * See migration 20261031000000_s22_followups and docs/privacy.md.
+ */
+export const UNMATCHED_NARRATION_RETENTION_DAYS = 180;
 
 /**
  * Delete a shop and all its data via ON DELETE CASCADE.
@@ -100,6 +121,7 @@ export async function purgePgmqMessages(
  * - s8_tagged_customers: DELETE (no legal retention requirement)
  * - s8_draft_orders: DELETE (no legal retention requirement)
  * - s22_data_requests: DELETE or null export_data (contains customer PII)
+ * - PayerAlias: DELETE (contains payer keys learned from matching)
  * - BuyerAccount: Keep for financial history, anonymize name
  * - Payments: Redact payments linked via Match→Invoice→BuyerAccount
  *
@@ -124,6 +146,7 @@ export async function redactCustomer(
   taggedCustomersDeleted: number;
   draftOrdersDeleted: number;
   dataRequestsDeleted: number;
+  payerAliasesDeleted: number;
   buyerAccountAnonymized: boolean;
   paymentsRedacted: number;
 }> {
@@ -157,8 +180,18 @@ export async function redactCustomer(
 
   let buyerAccountAnonymized = false;
   let paymentsRedacted = 0;
+  let payerAliasesDeleted = 0;
 
   if (buyerAccount) {
+    // Delete PayerAlias rows for this buyer account (learned payer keys)
+    // Must be deleted before anonymizing the account since aliases contain
+    // payer identification data derived from payment matching.
+    const aliasResult = await sql`
+      DELETE FROM "PayerAlias"
+      WHERE "buyerAccountId" = ${buyerAccount.id}
+    `;
+    payerAliasesDeleted = aliasResult.count;
+
     // Anonymize buyer account (keep for financial history)
     await sql`
       UPDATE "BuyerAccount"
@@ -198,6 +231,7 @@ export async function redactCustomer(
     taggedCustomersDeleted: taggedResult.count,
     draftOrdersDeleted: draftResult.count,
     dataRequestsDeleted: dataRequestResult.count,
+    payerAliasesDeleted,
     buyerAccountAnonymized,
     paymentsRedacted,
   };

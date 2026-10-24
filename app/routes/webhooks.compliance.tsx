@@ -197,7 +197,8 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         const counts = await redactCustomer(sql, shopRecord.id, customerGid);
         console.log(
           `[Compliance] customers/redact: Deleted tagged=${counts.taggedCustomersDeleted} ` +
-            `draft_orders=${counts.draftOrdersDeleted} data_requests=${counts.dataRequestsDeleted}, ` +
+            `draft_orders=${counts.draftOrdersDeleted} data_requests=${counts.dataRequestsDeleted} ` +
+            `payer_aliases=${counts.payerAliasesDeleted}, ` +
             `anonymized account=${counts.buyerAccountAnonymized}, ` +
             `redacted payments=${counts.paymentsRedacted} shop=${payloadShop}`
         );

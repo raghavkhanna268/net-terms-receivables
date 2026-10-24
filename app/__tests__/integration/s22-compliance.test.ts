@@ -155,5 +155,52 @@ describe("S22 Migration Verification", () => {
       `;
       expect(parseInt(after.count, 10)).toBe(0);
     });
+
+    it.skipIf(!DATABASE_URL)("deleting Shop cascades to PayerAlias via BuyerAccount", async () => {
+      const testId = Date.now();
+      const testShopId = `shop-alias-cascade-${testId}`;
+      const testAccountId = `account-alias-cascade-${testId}`;
+      const testAliasId = `alias-cascade-${testId}`;
+      const testShopDomain = `test-alias-cascade-${testId}.myshopify.com`;
+
+      const now = new Date();
+
+      await sql!`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${testShopId}, ${testShopDomain}, ${now}, ${now})
+      `;
+
+      await sql!`
+        INSERT INTO "BuyerAccount" (id, "shopId", kind, name, "createdAt", "updatedAt")
+        VALUES (${testAccountId}, ${testShopId}, 'TAGGED_CUSTOMER', 'Test Buyer', ${now}, ${now})
+      `;
+
+      await sql!`
+        INSERT INTO "PayerAlias" (id, "buyerAccountId", "payerKey", "createdAt")
+        VALUES (${testAliasId}, ${testAccountId}, 'test-payer-key', ${now})
+      `;
+
+      const [aliasBefore] = await sql!<{ count: string }[]>`
+        SELECT COUNT(*)::text as count FROM "PayerAlias" WHERE id = ${testAliasId}
+      `;
+      expect(parseInt(aliasBefore.count, 10)).toBe(1);
+
+      const [accountBefore] = await sql!<{ count: string }[]>`
+        SELECT COUNT(*)::text as count FROM "BuyerAccount" WHERE id = ${testAccountId}
+      `;
+      expect(parseInt(accountBefore.count, 10)).toBe(1);
+
+      await sql!`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+
+      const [aliasAfter] = await sql!<{ count: string }[]>`
+        SELECT COUNT(*)::text as count FROM "PayerAlias" WHERE id = ${testAliasId}
+      `;
+      expect(parseInt(aliasAfter.count, 10)).toBe(0);
+
+      const [accountAfter] = await sql!<{ count: string }[]>`
+        SELECT COUNT(*)::text as count FROM "BuyerAccount" WHERE id = ${testAccountId}
+      `;
+      expect(parseInt(accountAfter.count, 10)).toBe(0);
+    });
   });
 });
