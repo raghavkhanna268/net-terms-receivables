@@ -25,7 +25,8 @@ import type { Sql } from "~/lib/db-light.server";
 const PAGE_SIZE = 20;
 
 /**
- * Get the count of over-limit (gated) accounts for a shop.
+ * Get the count of over-limit (gated) accounts with open outstanding invoices.
+ * Counts the same set that getOverLimitBuyerLedger lists.
  * Exported for testing.
  */
 export async function getOverLimitCount(
@@ -33,10 +34,13 @@ export async function getOverLimitCount(
   shopId: string
 ): Promise<number> {
   const [result] = await sql<{ count: string }[]>`
-    SELECT COUNT(*)::text as count
-    FROM "BuyerAccount"
-    WHERE "shopId" = ${shopId}
-      AND gated_at IS NOT NULL
+    SELECT COUNT(DISTINCT i."buyerAccountId")::text AS count
+    FROM "Invoice" i
+    JOIN "BuyerAccount" ba ON ba.id = i."buyerAccountId"
+    WHERE i."shopId" = ${shopId}
+      AND i.status = 'open'
+      AND i.outstanding > 0
+      AND ba.gated_at IS NOT NULL
   `;
   return parseInt(result?.count ?? "0", 10);
 }

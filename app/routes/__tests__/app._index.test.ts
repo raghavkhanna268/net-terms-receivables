@@ -75,8 +75,8 @@ describe("app._index loader", () => {
       if (query.includes("onboarding_dismissed_at")) {
         return Promise.resolve([{ onboarding_dismissed_at: new Date() }]);
       }
-      // Mock overLimitCount query (gated accounts count)
-      if (query.includes("COUNT(*)") && query.includes("gated_at IS NOT NULL")) {
+      // Mock overLimitCount query (gated accounts with open invoices)
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
         return Promise.resolve([{ count: "0" }]);
       }
       if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
@@ -468,16 +468,16 @@ describe("app._index loader", () => {
         if (query.includes("onboarding_dismissed_at")) {
           return Promise.resolve([{ onboarding_dismissed_at: new Date() }]);
         }
-        // overLimitCount query
-        if (query.includes("COUNT(*)") && query.includes("gated_at IS NOT NULL")) {
+        // overLimitCount query (now uses COUNT(DISTINCT) with Invoice join)
+        if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
           return Promise.resolve([{ count: "1" }]);
         }
-        // Filtered count query for overlimit=true
+        // Filtered count query for getOverLimitBuyerLedger
         if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL")) {
           return Promise.resolve([{ count: "1" }]);
         }
-        // Filtered rows query for overlimit=true (WITH invoice_totals)
-        if (query.includes("WITH invoice_totals") && query.includes("gated_at IS NOT NULL")) {
+        // Filtered rows query for overlimit=true (WITH buyer_invoices)
+        if (query.includes("WITH buyer_invoices") && query.includes("gated_at IS NOT NULL")) {
           return Promise.resolve([{
             buyer_account_id: "buyer-gated",
             buyer_name: "Gated Buyer",
@@ -515,8 +515,8 @@ describe("app._index loader", () => {
         if (query.includes("onboarding_dismissed_at")) {
           return Promise.resolve([{ onboarding_dismissed_at: new Date() }]);
         }
-        // overLimitCount query - returns 2 gated accounts total
-        if (query.includes("COUNT(*)") && query.includes("gated_at IS NOT NULL")) {
+        // overLimitCount query - returns 2 gated accounts with open invoices
+        if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
           return Promise.resolve([{ count: "2" }]);
         }
         if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
@@ -563,11 +563,11 @@ describe("app._index loader", () => {
         if (query.includes("onboarding_dismissed_at")) {
           return Promise.resolve([{ onboarding_dismissed_at: new Date() }]);
         }
-        // overLimitCount query
-        if (query.includes("COUNT(*)") && query.includes("gated_at IS NOT NULL") && !query.includes("DISTINCT")) {
+        // overLimitCount query (uses COUNT(DISTINCT) with Invoice join)
+        if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
           return Promise.resolve([{ count: "2" }]);
         }
-        // Filtered count query
+        // Filtered count query for getOverLimitBuyerLedger
         if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL")) {
           return Promise.resolve([{ count: "2" }]);
         }
@@ -796,5 +796,41 @@ describeWithDb("app._index over-limit queries (DB integration)", () => {
 
     // Different accounts on each page
     expect(page1.rows[0].buyer_account_id).not.toBe(page2.rows[0].buyer_account_id);
+  });
+
+  it("gated account with no open invoice is excluded from both count and list", async () => {
+    const { getOverLimitCount, getOverLimitBuyerLedger } = await import("../app._index");
+
+    const GATED_NO_INVOICE_ID = `acc-gated-noinv-${TEST_SUFFIX}`;
+
+    // Create a gated account with no open invoice
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, gated_at, "createdAt", "updatedAt")
+      VALUES (${GATED_NO_INVOICE_ID}, ${TEST_SHOP_ID}, 'COMPANY', ${"co-noinv-" + TEST_SUFFIX}, ${"loc-noinv-" + TEST_SUFFIX}, 'Gated Account No Invoice', NOW(), NOW(), NOW())
+    `;
+
+    try {
+      // Count should still be 2 (only gated accounts WITH open invoices)
+      const count = await getOverLimitCount(sql, TEST_SHOP_ID);
+      expect(count).toBe(2);
+
+      // List should also have 2 entries (same set)
+      const result = await getOverLimitBuyerLedger(sql, TEST_SHOP_ID, new Date(), {
+        limit: 20,
+        offset: 0,
+        sortBy: "outstanding",
+        sortOrder: "desc",
+      });
+
+      expect(result.rows.length).toBe(2);
+      expect(result.totalCount).toBe(2);
+
+      // The new account should NOT be in the list
+      const noInvoiceRow = result.rows.find(r => r.buyer_account_id === GATED_NO_INVOICE_ID);
+      expect(noInvoiceRow).toBeUndefined();
+    } finally {
+      // Clean up the test account
+      await sql`DELETE FROM "BuyerAccount" WHERE id = ${GATED_NO_INVOICE_ID}`;
+    }
   });
 });
