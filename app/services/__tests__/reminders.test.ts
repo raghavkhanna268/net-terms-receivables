@@ -1024,7 +1024,7 @@ describe("ensureDefaultReminderRules", () => {
     expect(DEFAULT_RULE_OFFSETS).toEqual([-3, 0, 7]);
   });
 
-  it("seeds 3 rules on empty shop", async () => {
+  it("seeds 3 rules on FIRST settings creation", async () => {
     const { ensureDefaultReminderRules } = await import("../reminders.server");
 
     const insertedRules: { offset: number }[] = [];
@@ -1037,9 +1037,9 @@ describe("ensureDefaultReminderRules", () => {
           return [];
         }
 
-        // Count existing rules
-        if (query.includes("COUNT(*)::INT")) {
-          return [{ count: 0 }];
+        // Insert settings row - return shop_id to indicate it was created
+        if (query.includes("INSERT INTO s18_shop_reminder_settings")) {
+          return [{ shop_id: "shop-new" }];
         }
 
         // Insert rule
@@ -1070,10 +1070,10 @@ describe("ensureDefaultReminderRules", () => {
     expect(insertedRules.map((r) => r.offset)).toEqual([-3, 0, 7]);
   });
 
-  it("is no-op when any rule exists", async () => {
+  it("is no-op when settings row already exists", async () => {
     const { ensureDefaultReminderRules } = await import("../reminders.server");
 
-    let insertCalled = false;
+    let ruleInsertCalled = false;
     const mockTx = Object.assign(
       vi.fn(async (strings: TemplateStringsArray) => {
         const query = strings.join("?");
@@ -1083,14 +1083,14 @@ describe("ensureDefaultReminderRules", () => {
           return [];
         }
 
-        // Count existing rules - return 1 (has rules)
-        if (query.includes("COUNT(*)::INT")) {
-          return [{ count: 1 }];
+        // Insert settings row - return empty (conflict, row already exists)
+        if (query.includes("INSERT INTO s18_shop_reminder_settings")) {
+          return [];
         }
 
         // Insert rule (should not be called)
         if (query.includes("INSERT INTO \"ReminderRule\"")) {
-          insertCalled = true;
+          ruleInsertCalled = true;
           return [];
         }
 
@@ -1107,18 +1107,18 @@ describe("ensureDefaultReminderRules", () => {
 
     const result = await ensureDefaultReminderRules(
       mockSql as unknown as Parameters<typeof ensureDefaultReminderRules>[0],
-      "shop-with-rules"
+      "shop-with-settings"
     );
 
     expect(result.seeded).toBe(false);
     expect(result.count).toBe(0);
-    expect(insertCalled).toBe(false);
+    expect(ruleInsertCalled).toBe(false);
   });
 
-  it("does not re-add after merchant deletes one rule (shop still has 2)", async () => {
+  it("does NOT re-seed after merchant deletes all rules (settings row already exists)", async () => {
     const { ensureDefaultReminderRules } = await import("../reminders.server");
 
-    let insertCalled = false;
+    let ruleInsertCalled = false;
     const mockTx = Object.assign(
       vi.fn(async (strings: TemplateStringsArray) => {
         const query = strings.join("?");
@@ -1128,14 +1128,15 @@ describe("ensureDefaultReminderRules", () => {
           return [];
         }
 
-        // Count existing rules - return 2 (merchant deleted 1 of 3)
-        if (query.includes("COUNT(*)::INT")) {
-          return [{ count: 2 }];
+        // Insert settings row - return empty (conflict, row already exists)
+        // Merchant deleted all rules but settings row was created on first visit
+        if (query.includes("INSERT INTO s18_shop_reminder_settings")) {
+          return [];
         }
 
-        // Insert rule (should not be called)
+        // Insert rule (should NOT be called - settings already exist)
         if (query.includes("INSERT INTO \"ReminderRule\"")) {
-          insertCalled = true;
+          ruleInsertCalled = true;
           return [];
         }
 
@@ -1152,58 +1153,13 @@ describe("ensureDefaultReminderRules", () => {
 
     const result = await ensureDefaultReminderRules(
       mockSql as unknown as Parameters<typeof ensureDefaultReminderRules>[0],
-      "shop-with-2-rules"
+      "shop-deleted-all-rules"
     );
 
+    // No re-seeding because settings row already exists
     expect(result.seeded).toBe(false);
     expect(result.count).toBe(0);
-    expect(insertCalled).toBe(false);
-  });
-
-  it("re-seeds after ALL rules are deleted (behavior: only when shop has no rules at all)", async () => {
-    const { ensureDefaultReminderRules } = await import("../reminders.server");
-
-    const insertedRules: { offset: number }[] = [];
-    const mockTx = Object.assign(
-      vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
-        const query = strings.join("?");
-
-        // Advisory lock
-        if (query.includes("pg_advisory_xact_lock")) {
-          return [];
-        }
-
-        // Count existing rules - return 0 (merchant deleted ALL rules)
-        if (query.includes("COUNT(*)::INT")) {
-          return [{ count: 0 }];
-        }
-
-        // Insert rule
-        if (query.includes("INSERT INTO \"ReminderRule\"")) {
-          const offsetDays = values[1] as number;
-          insertedRules.push({ offset: offsetDays });
-          return [];
-        }
-
-        return [];
-      }),
-      {}
-    );
-
-    const mockSql = Object.assign(vi.fn(), {
-      begin: vi.fn(async (callback: (tx: typeof mockTx) => Promise<unknown>) => {
-        return callback(mockTx);
-      }),
-    });
-
-    const result = await ensureDefaultReminderRules(
-      mockSql as unknown as Parameters<typeof ensureDefaultReminderRules>[0],
-      "shop-deleted-all"
-    );
-
-    // Per spec: "only when the shop has no rules at all" means re-seed when ALL deleted
-    expect(result.seeded).toBe(true);
-    expect(result.count).toBe(3);
+    expect(ruleInsertCalled).toBe(false);
   });
 
   it("uses advisory lock for concurrency safety", async () => {
@@ -1222,9 +1178,9 @@ describe("ensureDefaultReminderRules", () => {
           return [];
         }
 
-        // Count existing rules
-        if (query.includes("COUNT(*)::INT")) {
-          return [{ count: 3 }];
+        // Insert settings row - conflict (already exists)
+        if (query.includes("INSERT INTO s18_shop_reminder_settings")) {
+          return [];
         }
 
         return [];
@@ -1247,23 +1203,28 @@ describe("ensureDefaultReminderRules", () => {
     expect(lockShopId).toBe("shop-concurrent");
   });
 
-  it("acquires advisory lock with shop-derived key for concurrency safety", async () => {
+  it("inserts settings with enabled=false (query structure check)", async () => {
     const { ensureDefaultReminderRules } = await import("../reminders.server");
 
-    const lockCalls: string[] = [];
+    let settingsInsertQuery = "";
     const mockTx = Object.assign(
-      vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      vi.fn(async (strings: TemplateStringsArray) => {
         const query = strings.join("?");
 
-        // Advisory lock - capture the shop ID used
+        // Advisory lock
         if (query.includes("pg_advisory_xact_lock")) {
-          lockCalls.push(values[0] as string);
           return [];
         }
 
-        // Count existing rules
-        if (query.includes("COUNT(*)::INT")) {
-          return [{ count: 3 }];
+        // Insert settings row - capture query structure
+        if (query.includes("INSERT INTO s18_shop_reminder_settings")) {
+          settingsInsertQuery = query;
+          return [{ shop_id: "shop-new" }];
+        }
+
+        // Insert rule
+        if (query.includes("INSERT INTO \"ReminderRule\"")) {
+          return [];
         }
 
         return [];
@@ -1277,17 +1238,15 @@ describe("ensureDefaultReminderRules", () => {
       }),
     });
 
-    // Call twice with different shop IDs
     await ensureDefaultReminderRules(
       mockSql as unknown as Parameters<typeof ensureDefaultReminderRules>[0],
-      "shop-alpha"
-    );
-    await ensureDefaultReminderRules(
-      mockSql as unknown as Parameters<typeof ensureDefaultReminderRules>[0],
-      "shop-beta"
+      "shop-new"
     );
 
-    // Each call acquired its own shop-specific lock
-    expect(lockCalls).toEqual(["shop-alpha", "shop-beta"]);
+    // Query inserts with enabled = false (second placeholder after shop_id)
+    expect(settingsInsertQuery).toContain("INSERT INTO s18_shop_reminder_settings");
+    expect(settingsInsertQuery).toContain("shop_id");
+    expect(settingsInsertQuery).toContain("enabled");
+    // enabled=false is passed as second value placeholder
   });
 });

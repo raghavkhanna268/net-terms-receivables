@@ -808,18 +808,19 @@ export async function deleteReminderRule(
 export const DEFAULT_RULE_OFFSETS = [-3, 0, 7] as const;
 
 /**
- * Ensure default reminder rules exist for a shop.
+ * Ensure default reminder rules exist for a shop on FIRST settings creation.
  *
- * Seeds the 3 default rules (offsets -3, 0, +7) ONLY when the shop has no rules
- * at all. If any rule exists (even just one), this is a no-op.
+ * Seeds the 3 default rules (offsets -3, 0, +7) ONLY when creating the
+ * s18_shop_reminder_settings row for the first time. Uses INSERT ... ON CONFLICT
+ * DO NOTHING with RETURNING to detect first-time creation atomically.
  *
- * Edge case: If a merchant deletes ALL rules, the next page load will re-seed.
- * This matches "only when the shop has no rules at all" behavior.
+ * After initial setup, a shop with zero rules stays at zero - no re-seeding.
+ * If a merchant deletes all rules, they stay deleted on subsequent page loads.
  *
- * Concurrency-safe: Uses pg_advisory_xact_lock to prevent duplicate inserts
- * when multiple concurrent requests hit the loader.
+ * Concurrency-safe: Uses pg_advisory_xact_lock plus INSERT ... ON CONFLICT
+ * to prevent duplicate inserts from concurrent requests.
  *
- * Does NOT enable reminders - they stay disabled by default.
+ * Does NOT enable reminders - they stay disabled (enabled=false) by default.
  * Does NOT send any emails.
  */
 export async function ensureDefaultReminderRules(
@@ -828,15 +829,19 @@ export async function ensureDefaultReminderRules(
 ): Promise<{ seeded: boolean; count: number }> {
   const result = await sql.begin(async (tx) => {
     // Acquire advisory lock for this shop (released at end of transaction)
-    // Uses S18 prefix (0x12 = 18) to namespace the lock
     await tx`SELECT pg_advisory_xact_lock(hashtext('s18_rules_' || ${shopId}))`;
 
-    // Check if any rules exist
-    const [existing] = await tx<{ count: number }[]>`
-      SELECT COUNT(*)::INT as count FROM "ReminderRule" WHERE "shopId" = ${shopId}
+    // Try to insert settings row (enabled=false). ON CONFLICT DO NOTHING
+    // returns empty if row already exists, returns the row if newly created.
+    const inserted = await tx<{ shop_id: string }[]>`
+      INSERT INTO s18_shop_reminder_settings (shop_id, enabled, created_at, updated_at)
+      VALUES (${shopId}, false, NOW(), NOW())
+      ON CONFLICT (shop_id) DO NOTHING
+      RETURNING shop_id
     `;
 
-    if (existing.count > 0) {
+    // Only seed rules if we just created the settings row for the first time
+    if (inserted.length === 0) {
       return { seeded: false, count: 0 };
     }
 

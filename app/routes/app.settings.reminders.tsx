@@ -345,38 +345,16 @@ export default function RemindersSettingsPage() {
         </s-stack>
       </s-section>
 
-      {/* Send Limits Section */}
+      {/* Send Limits - shared across all shops using this app's email account */}
       <s-section heading="Email Send Limits">
-        <s-stack>
-          <s-paragraph>
-            <s-text tone="neutral">
-              These limits are shared across the app&apos;s email account (all
-              shops using this app share the same sending quota).
-            </s-text>
-          </s-paragraph>
-
-          {usageError ? (
-            <s-paragraph>
-              <s-text tone="neutral">
-                Daily limit: {dailyCap} emails. Monthly limit: {monthlyCap}{" "}
-                emails.
-              </s-text>
-            </s-paragraph>
-          ) : (
-            <>
-              <s-paragraph>
-                <s-text>
-                  Today: {dailyUsage} of {dailyCap} sent
-                </s-text>
-              </s-paragraph>
-              <s-paragraph>
-                <s-text>
-                  This month: {monthlyUsage} of {monthlyCap} sent
-                </s-text>
-              </s-paragraph>
-            </>
-          )}
-        </s-stack>
+        <s-paragraph>
+          <s-text tone="neutral">
+            Shared across all shops.{" "}
+            {usageError
+              ? `Daily: ${dailyCap}, Monthly: ${monthlyCap}`
+              : `Today: ${dailyUsage}/${dailyCap}. Month: ${monthlyUsage}/${monthlyCap}`}
+          </s-text>
+        </s-paragraph>
       </s-section>
 
       {/* Reminder Rules */}
