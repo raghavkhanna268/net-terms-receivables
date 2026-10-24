@@ -734,6 +734,18 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       expect(result.errors.filter((e) => e.code === "ROW_PARSE_FAILED").map((e) => e.row)).toEqual([19, 20, 28, 29, 31]);
       expect(result.errors.filter((e) => e.code === "NORMALIZE_FAILED").map((e) => e.row)).toEqual([30]);
     });
+
+    it("ICICI: transactions + errors + skippedRows === totalRows", async () => {
+      const content = readFileSync(join(FIXTURES_DIR, "icici-edgecases-synthetic.csv"));
+      const file = new File([content], "icici-edgecases-synthetic.csv", { type: "text/csv" });
+      const result = await parseBankStatement(file);
+
+      expect(result.transactions.length + result.errors.length + result.skippedRows).toBe(result.totalRows);
+      expect(result.transactions.length).toBe(13);
+      expect(result.errors.length).toBe(2);
+      expect(result.errors.filter((e) => e.code === "ROW_PARSE_FAILED").map((e) => e.row)).toEqual([19]);
+      expect(result.errors.filter((e) => e.code === "NORMALIZE_FAILED").map((e) => e.row)).toEqual([18]);
+    });
   });
 
   describe("narration continuation handling", () => {

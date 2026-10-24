@@ -119,6 +119,15 @@ export async function parseAxisStatement(
 
     // Check if this is a narration continuation row
     if (isNarrationContinuation(row)) {
+      // Orphan continuation (no valid previous transaction) is an error
+      if (!lastValidRow) {
+        errors.push({
+          row: i + 1,
+          code: "ROW_PARSE_FAILED",
+          message: "Failed to parse row",
+        });
+        continue;
+      }
       const narrationPart = String(row[columns.particularsCol] ?? "").trim();
       if (narrationPart) {
         pendingNarration.push(narrationPart);
@@ -165,6 +174,8 @@ export async function parseAxisStatement(
           code: "ROW_PARSE_FAILED",
           message: "Failed to parse row",
         });
+        // Clear pending narration to avoid carrying orphan text forward
+        pendingNarration = [];
       } else {
         skippedRows++;
       }

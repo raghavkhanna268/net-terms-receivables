@@ -501,3 +501,44 @@ export function isNarrationContinuation(row: (string | number | Date | boolean |
   // - No amount-like values
   return nonEmptyCount <= 2 && !hasAmountLike;
 }
+
+/**
+ * Column-aware continuation check for formats where date is not in the first column.
+ * Used by ICICI where column 0 is S No., not the date.
+ */
+export function isNarrationContinuationWithDateCol(
+  row: (string | number | Date | boolean | null)[],
+  dateCol: number
+): boolean {
+  if (!row || row.length === 0) return false;
+
+  // Date column must be empty for continuation
+  const dateCell = row[dateCol];
+  if (dateCell !== null && dateCell !== undefined && String(dateCell).trim() !== "") {
+    return false;
+  }
+
+  // Count non-empty cells and check for amount-like values
+  let nonEmptyCount = 0;
+  let hasAmountLike = false;
+
+  for (let i = 0; i < row.length; i++) {
+    const cell = row[i];
+    if (cell === null || cell === undefined || String(cell).trim() === "") {
+      continue;
+    }
+    nonEmptyCount++;
+    const str = String(cell).trim();
+
+    // Check if any cell looks like an amount
+    if (str.match(/^-?[\d,]+\.?\d*$/)) {
+      hasAmountLike = true;
+    }
+  }
+
+  // Continuation rows typically have:
+  // - Empty date cell (checked above)
+  // - Very few non-empty cells (just narration text)
+  // - No amount-like values
+  return nonEmptyCount <= 2 && !hasAmountLike;
+}
