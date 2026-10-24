@@ -1521,6 +1521,18 @@ describe("Variable Builder Input Coercion against Schema", () => {
     expect(errors).toEqual([]);
   });
 
+  it("buildCompanyCreateInputWithoutContact produces valid CompanyCreateInput without companyContact", () => {
+    const seed = COMPANY_SEEDS[0];
+    const variables = buildCompanyCreateInputWithoutContact(seed, "ntr-seed-test", "Net-15", "gid://template/1");
+    const errors = coerceAndCollectErrors(variables.input, "CompanyCreateInput");
+    expect(errors).toEqual([]);
+    // Must NOT have companyContact field (that's the point of this function)
+    expect(variables.input).not.toHaveProperty("companyContact");
+    // Should still have company and companyLocation
+    expect(variables.input).toHaveProperty("company");
+    expect(variables.input).toHaveProperty("companyLocation");
+  });
+
   it("buildCompanyLocationCreateInput produces valid CompanyLocationInput", () => {
     const variables = buildCompanyLocationCreateInput(
       "gid://company/1",
@@ -4308,5 +4320,389 @@ describe("company adoption", () => {
     
     // Should record as created (via recovery)
     expect(state.createdCount.companies).toBe(1);
+  });
+
+  it("idempotent rerun: no second companyAssignCustomerAsContact or companyCreate when customer already attached", async () => {
+    const seed = COMPANY_SEEDS[0];
+    const targetExternalId = `${SEED_PREFIX}${seed.key}`;
+    const existingCompanyId = "gid://shopify/Company/existing";
+    const existingContactId = "gid://shopify/CompanyContact/contact1";
+    const existingCustomerId = "gid://shopify/Customer/cust1";
+    
+    let companyCreateCallCount = 0;
+    let companyAssignCustomerAsContactCallCount = 0;
+    let companyAssignMainContactCallCount = 0;
+
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+      const variables = body.variables as Record<string, unknown> | undefined;
+
+      // Find company by externalId - for seed[0], return existing company with contact already attached
+      if (query.includes("FindCompany") && variables?.query?.toString().includes("external_id")) {
+        const queryStr = variables?.query?.toString() ?? "";
+        // Only return existing company for the first seed
+        if (queryStr.includes(targetExternalId)) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              data: {
+                companies: {
+                  nodes: [{
+                    id: existingCompanyId,
+                    name: seed.name,
+                    externalId: targetExternalId,
+                    locations: { edges: [
+                      { node: { id: "gid://loc/1", name: `${seed.name} - Net-15` } },
+                      { node: { id: "gid://loc/2", name: `${seed.name} - Net-30` } },
+                      { node: { id: "gid://loc/3", name: `${seed.name} - Net-60` } },
+                    ] },
+                    contacts: { edges: [{ node: { id: existingContactId, customer: { id: existingCustomerId, email: seed.contact.email } } }] },
+                  }],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
+              extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+            }),
+          } as Response;
+        }
+        // For other seeds, return empty (no company)
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companies: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Find customer by email - return empty for all (other seeds shouldn't need adoption)
+      if (query.includes("customers") && variables?.query?.toString().includes("email")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { customers: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Find companies with contacts - return empty
+      if (query.includes("companies") && query.includes("contacts")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companies: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Find companies by name - return empty
+      if (query.includes("companies") && variables?.query?.toString().includes("name:")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companies: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyCreate - count calls (for other seeds that need creation)
+      if (query.includes("companyCreate")) {
+        companyCreateCallCount++;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyCreate: {
+                company: {
+                  id: `gid://shopify/Company/${companyCreateCallCount}`,
+                  name: "Created Company",
+                  externalId: "ntr-seed-other",
+                  locations: { edges: [{ node: { id: "gid://loc/new", name: "New Location" } }] },
+                  contacts: { edges: [{ node: { id: "gid://contact/new", customer: { id: "gid://cust/new", email: "new@example.com" } } }] },
+                },
+                userErrors: [],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyAssignCustomerAsContact - count calls
+      if (query.includes("companyAssignCustomerAsContact")) {
+        companyAssignCustomerAsContactCallCount++;
+        return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+      }
+
+      // companyAssignMainContact - count calls
+      if (query.includes("companyAssignMainContact")) {
+        companyAssignMainContactCallCount++;
+        return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+      }
+
+      // Contact roles
+      if (query.includes("contactRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { company: { contactRoles: { nodes: [{ id: "gid://role/1", name: "Ordering only" }] } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Role assignments - contact already has role on all locations
+      if (query.includes("roleAssignments")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyLocation: {
+                roleAssignments: {
+                  nodes: [{ id: "gid://assignment/1", companyContact: { id: existingContactId }, role: { id: "gid://role/1", name: "Ordering only" } }],
+                },
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyLocationAssignRoles
+      if (query.includes("companyLocationAssignRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocationAssignRoles: { roleAssignments: [], userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyLocationCreate
+      if (query.includes("companyLocationCreate")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocationCreate: { companyLocation: { id: "gid://loc/new", name: "New Location" }, userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const { seedCompanies } = await import("../seed");
+    const state = createMockState();
+    state.paymentTermsTemplates = [
+      { id: "gid://template/15", name: "Net 15", paymentTermsType: "NET", dueInDays: 15 },
+      { id: "gid://template/30", name: "Net 30", paymentTermsType: "NET", dueInDays: 30 },
+      { id: "gid://template/60", name: "Net 60", paymentTermsType: "NET", dueInDays: 60 },
+    ];
+
+    await seedCompanies(state);
+
+    // For the first seed (which already exists with contact attached):
+    // - No companyAssignCustomerAsContact should be called
+    // - No companyAssignMainContact should be called
+    // These only happen for the reuse-existing-customer path, which shouldn't trigger for seed[0]
+    // since it already has the company with contact attached
+    expect(companyAssignCustomerAsContactCallCount).toBe(0);
+    expect(companyAssignMainContactCallCount).toBe(0);
+    
+    // First company should be recorded as unchanged
+    expect(state.unchangedCount.companies).toBeGreaterThan(0);
+  });
+
+  it("role parity: reuse-existing-customer path assigns same role/location as inline-contact path", async () => {
+    const seed = COMPANY_SEEDS[0];
+    const targetExternalId = `${SEED_PREFIX}${seed.key}`;
+    const existingCustomerId = "gid://shopify/Customer/existing456";
+    const newCompanyId = "gid://shopify/Company/new";
+    const newContactId = "gid://shopify/CompanyContact/newContact";
+    const firstLocationId = "gid://shopify/CompanyLocation/loc1";
+    const roleId = "gid://shopify/CompanyContactRole/orderingOnly";
+    
+    const roleAssignmentCalls: Array<{ locationId: string; contactId: string; roleId: string }> = [];
+
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+      const variables = body.variables as Record<string, unknown> | undefined;
+
+      // Find customer by email - returns existing customer
+      if (query.includes("FindCustomer") && variables?.query?.toString().includes("email")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              customers: {
+                nodes: [{ id: existingCustomerId, email: seed.contact.email, tags: [] }],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyCreate - succeeds (created without contact)
+      if (query.includes("companyCreate")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyCreate: {
+                company: {
+                  id: newCompanyId,
+                  name: seed.name,
+                  externalId: targetExternalId,
+                  locations: { edges: [{ node: { id: firstLocationId, name: `${seed.name} - Net-15` } }] },
+                  contacts: { edges: [] }, // No contact initially
+                },
+                userErrors: [],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyAssignCustomerAsContact
+      if (query.includes("companyAssignCustomerAsContact")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyAssignCustomerAsContact: {
+                companyContact: {
+                  id: newContactId,
+                  customer: { id: existingCustomerId, email: seed.contact.email },
+                },
+                userErrors: [],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyAssignMainContact
+      if (query.includes("companyAssignMainContact")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyAssignMainContact: { company: { id: newCompanyId }, userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Contact roles
+      if (query.includes("contactRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { company: { contactRoles: { nodes: [{ id: roleId, name: "Ordering only" }] } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyLocationAssignRoles - capture the variables (check BEFORE roleAssignments query)
+      if (query.includes("companyLocationAssignRoles") && query.includes("mutation")) {
+        const locationId = variables?.companyLocationId as string;
+        const rolesToAssign = variables?.rolesToAssign as Array<{ companyContactId: string; companyContactRoleId: string }>;
+        if (rolesToAssign?.[0]) {
+          roleAssignmentCalls.push({
+            locationId,
+            contactId: rolesToAssign[0].companyContactId,
+            roleId: rolesToAssign[0].companyContactRoleId,
+          });
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocationAssignRoles: { roleAssignments: [], userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Role assignments query - no existing assignments
+      if (query.includes("roleAssignments") && query.includes("query")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocation: { roleAssignments: { nodes: [] } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyLocationCreate - additional locations
+      if (query.includes("companyLocationCreate")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyLocationCreate: {
+                companyLocation: { id: "gid://loc/additional", name: "Additional Location" },
+                userErrors: [],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const { createCompanyWithLocations } = await import("../seed");
+    const state = createMockState();
+
+    const result = await createCompanyWithLocations(state, seed, targetExternalId);
+
+    // Should succeed
+    expect(result).not.toBeNull();
+    
+    // Should have made at least one role assignment call
+    expect(roleAssignmentCalls.length).toBeGreaterThan(0);
+    
+    // First role assignment should be for the first location with the correct contact and role
+    const firstAssignment = roleAssignmentCalls[0];
+    expect(firstAssignment.locationId).toBe(firstLocationId);
+    expect(firstAssignment.contactId).toBe(newContactId); // The attached contact
+    expect(firstAssignment.roleId).toBe(roleId); // The "Ordering only" role
+    
+    // The inline-contact path would use buildCompanyLocationAssignRolesInput with same structure
+    const expectedVars = buildCompanyLocationAssignRolesInput(firstLocationId, newContactId, roleId);
+    expect(firstAssignment.locationId).toBe(expectedVars.companyLocationId);
+    expect(firstAssignment.contactId).toBe(expectedVars.rolesToAssign[0].companyContactId);
+    expect(firstAssignment.roleId).toBe(expectedVars.rolesToAssign[0].companyContactRoleId);
   });
 });
