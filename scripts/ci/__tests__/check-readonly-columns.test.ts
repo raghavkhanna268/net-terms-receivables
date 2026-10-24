@@ -561,6 +561,66 @@ SELECT (SELECT COUNT(*) FROM _m) AS messages, COUNT(DISTINCT m.msg_id) AS ids FR
   });
 });
 
+describe("check-readonly-columns: QA review at fa8739d (derived-table shapes)", () => {
+  it("1. redundant parentheses around a FROM-list subquery", () => {
+    expect(
+      issues(`SELECT q.a_id FROM ((SELECT email AS a_id FROM s)) q;`),
+    ).toEqual(["a_id:sensitive"]);
+    expect(
+      issues(`SELECT q.a_id FROM (((SELECT email AS a_id FROM s))) AS q;`),
+    ).toEqual(["a_id:sensitive"]);
+    expect(
+      issues(
+        `SELECT q.a_id FROM ((SELECT email AS a_id FROM s) q JOIN t ON t.id = q.a_id);`,
+      ),
+    ).toEqual(["a_id:sensitive"]);
+  });
+
+  it("2. an alias reused in an inner scope keeps every definition", () => {
+    expect(
+      issues(
+        `SELECT q.a_id FROM (SELECT email AS a_id FROM s) q WHERE EXISTS (SELECT 1 FROM (SELECT id AS a_id FROM s) q);`,
+      ),
+    ).toEqual(["a_id:sensitive"]);
+    // order reversed: inner definition first
+    expect(
+      issues(
+        `SELECT q.a_id FROM (SELECT id AS a_id FROM s WHERE EXISTS (SELECT 1 FROM (SELECT email AS a_id FROM s) q)) q;`,
+      ),
+    ).toEqual(["a_id:sensitive"]);
+  });
+
+  it("3. subquery column list shorter than the select list", () => {
+    expect(
+      issues(`SELECT q.b_id FROM (SELECT 1 AS k, email AS b_id FROM s) q(k);`),
+    ).toEqual(["b_id:sensitive"]);
+  });
+
+  it("4. CTE column list shorter than the select list", () => {
+    expect(
+      issues(
+        `WITH c(k) AS (SELECT 1, email AS b_id FROM s) SELECT b_id FROM c;`,
+      ),
+    ).toEqual(["b_id:sensitive"]);
+    expect(
+      issues(
+        `WITH c(k) AS (SELECT 1, email AS b_id FROM s) SELECT c.b_id FROM c;`,
+      ),
+    ).toEqual(["b_id:sensitive"]);
+  });
+
+  it("safe shapes with these forms still pass", () => {
+    expect(
+      issues(`SELECT q.a_id FROM ((SELECT id AS a_id FROM s)) q;`),
+    ).toEqual([]);
+    expect(
+      issues(
+        `WITH c(k_id) AS (SELECT 1, id AS b_id FROM s) SELECT k_id, b_id FROM c;`,
+      ),
+    ).toEqual([]);
+  });
+});
+
 describe("check-readonly-columns: CLI", () => {
   const script = path.join(__dirname, "..", "check-readonly-columns.ts");
   const runCli = (files: Record<string, string>, allow: AllowlistEntry[]) => {

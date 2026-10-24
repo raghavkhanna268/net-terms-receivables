@@ -1588,6 +1588,8 @@ const isName = (tk: Tok | undefined) =>
 function inFromList(toks: Tok[], d: number[], k: number): boolean {
   const prev = toks[k - 1];
   if (isKw(prev, "from", "join", "lateral", "only")) return true;
+  // parenthesised FROM item: FROM ((SELECT ...) q JOIN ...)
+  if (isP(prev, "(") && k >= 2) return inFromList(toks, d, k - 1);
   if (!isP(prev, ",")) return false;
   for (let j = k - 2; j >= 0; j--) {
     if (d[j] < d[k]) return false;
@@ -1625,9 +1627,9 @@ function parseBody(body: Tok[], colList: string[] | null): Derived {
         rel.stars.push(e[e.length - 3].v);
         continue;
       }
-      const name = colList ? colList[pos] : (names0[pos] ?? col.name);
+      // past a short column list Postgres keeps the original names
+      const name = colList?.[pos] ?? names0[pos] ?? col.name;
       pos++;
-      if (name === undefined) continue;
       const list = rel.cols.get(name) ?? [];
       list.push(e);
       rel.cols.set(name, list);
@@ -1659,9 +1661,16 @@ function columnList(
  * aliases of CTE references (`FROM c x`). An unaliased subquery is registered
  * under a synthetic name so unqualified refs still resolve.
  */
-export function derivedRelations(stmt: Tok[]): Map<string, Derived> {
+export function derivedRelations(stmt: Tok[]): Map<string, Derived[]> {
   const d = depths(stmt);
-  const rels = new Map<string, Derived>();
+  // every definition per name (an alias can be reused in an inner scope);
+  // a ref to the name must pass for each of them
+  const rels = new Map<string, Derived[]>();
+  const add = (name: string, rel: Derived) => {
+    const list = rels.get(name) ?? [];
+    if (!list.includes(rel)) list.push(rel);
+    rels.set(name, list);
+  };
   for (let k = 0; k < stmt.length; k++) {
     const tk = stmt[k];
     // CTE
@@ -1684,7 +1693,7 @@ export function derivedRelations(stmt: Tok[]): Map<string, Derived> {
       const close = matchParen(stmt, j);
       if (close < 0) continue;
       const body = stmt.slice(j + 1, close);
-      rels.set(
+      add(
         tk.v,
         isKw(body[0], "select", "with")
           ? parseBody(body, cols)
@@ -1693,14 +1702,18 @@ export function derivedRelations(stmt: Tok[]): Map<string, Derived> {
       continue;
     }
     // FROM-list subquery
-    if (
-      isP(tk, "(") &&
-      isKw(stmt[k + 1], "select", "with", "values", "table") &&
-      inFromList(stmt, d, k)
-    ) {
+    if (isP(tk, "(") && inFromList(stmt, d, k)) {
       const close = matchParen(stmt, k);
       if (close < 0) continue;
-      const body = stmt.slice(k + 1, close);
+      // redundant parentheses: FROM ((SELECT ...)) q
+      let open = k;
+      while (
+        isP(stmt[open + 1], "(") &&
+        matchParen(stmt, open + 1) === close - (open + 1 - k)
+      )
+        open++;
+      if (!isKw(stmt[open + 1], "select", "with", "values", "table")) continue;
+      const body = stmt.slice(open + 1, close - (open - k));
       let j = close + 1;
       if (isKw(stmt[j], "as")) j++;
       let name = `(subquery@${k})`;
@@ -1710,7 +1723,7 @@ export function derivedRelations(stmt: Tok[]): Map<string, Derived> {
         const cl = columnList(stmt, j + 1);
         if (cl) cols = cl.names;
       }
-      rels.set(
+      add(
         name,
         isKw(body[0], "select", "with")
           ? parseBody(body, cols)
@@ -1725,8 +1738,8 @@ export function derivedRelations(stmt: Tok[]): Map<string, Derived> {
     if (isP(stmt[k + 1], "(") || isP(stmt[k + 1], ".")) continue;
     let j = k + 1;
     if (isKw(stmt[j], "as")) j++;
-    if (isName(stmt[j]) && !rels.has(stmt[j].v))
-      rels.set(stmt[j].v, rels.get(tk.v)!);
+    if (isName(stmt[j]) && stmt[j].v !== tk.v)
+      for (const r of rels.get(tk.v)!) add(stmt[j].v, r);
   }
   return rels;
 }
@@ -1783,7 +1796,7 @@ const NOT_REF = new Set([
  */
 export function resolveExpr(
   e: Tok[],
-  rels: Map<string, Derived>,
+  rels: Map<string, Derived[]>,
   chain: Set<Derived>,
   depth: number,
 ): Tok[][] {
@@ -1852,12 +1865,17 @@ export function resolveExpr(
     const orig = e.slice(k, end + 1);
     k = end;
     if (parts.length === 2) {
-      const rel = rels.get(parts[0].v);
-      append(rel && !chain.has(rel) ? lookup(rel, parts[1].v, orig) : [orig]);
+      const defs = (rels.get(parts[0].v) ?? []).filter((r) => !chain.has(r));
+      if (defs.length === 0) append([orig]);
+      else {
+        const alts: Tok[][] = [];
+        for (const r of defs) alts.push(...lookup(r, parts[1].v, orig));
+        append(alts);
+      }
       continue;
     }
     if (parts.length === 1) {
-      const cands = [...new Set(rels.values())].filter(
+      const cands = [...new Set([...rels.values()].flat())].filter(
         (r) => !chain.has(r) && (r.opaque || r.cols.has(parts[0].v)),
       );
       const named = cands.filter((r) => !r.opaque);
