@@ -38,6 +38,24 @@ const MAX_IMPORT_ROWS = 1000;
 const MAX_VALIDATION_ERRORS = 10;
 
 /**
+ * Compute the valid date range for imports.
+ * Exported for testing to ensure tests use the same logic.
+ * 
+ * @param now - The reference date (defaults to current time)
+ * @returns Object with minDate, maxDate as ISO strings (YYYY-MM-DD)
+ */
+export function computeDateBounds(now: Date = new Date()): { minDateIso: string; maxDateIso: string } {
+  const minDate = new Date(now);
+  minDate.setFullYear(minDate.getFullYear() - 2);
+  const maxDate = new Date(now);
+  maxDate.setDate(maxDate.getDate() + 7);
+  return {
+    minDateIso: minDate.toISOString().slice(0, 10),
+    maxDateIso: maxDate.toISOString().slice(0, 10),
+  };
+}
+
+/**
  * Valid payment rails for Indian bank transfers.
  */
 const VALID_RAILS = new Set(["NEFT", "RTGS", "IMPS", "UPI", "ACH", "CHEQUE", "OTHER"]);
@@ -250,12 +268,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   // Compute date range per request (not at module load)
   const now = new Date();
-  const minDate = new Date(now);
-  minDate.setFullYear(minDate.getFullYear() - 2);
-  const maxDate = new Date(now);
-  maxDate.setDate(maxDate.getDate() + 7);
-  const minDateIso = minDate.toISOString().slice(0, 10);
-  const maxDateIso = maxDate.toISOString().slice(0, 10);
+  const { minDateIso, maxDateIso } = computeDateBounds(now);
 
   // Get shop ID and currency
   const [shop] = await sql<{ id: string; currency: string }[]>`

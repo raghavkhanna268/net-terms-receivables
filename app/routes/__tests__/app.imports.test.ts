@@ -21,14 +21,16 @@ const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
 // ============================================================================
-// Date helpers - all test dates are relative to today
+// Date helpers - use shared computeDateBounds from action for consistency
 // ============================================================================
+
+import { computeDateBounds } from "../app.imports";
 
 /**
  * Get ISO date string for N days ago (or in the future if negative).
  */
-function daysAgo(n: number): string {
-  const d = new Date();
+function daysAgo(n: number, referenceDate: Date = new Date()): string {
+  const d = new Date(referenceDate);
   d.setDate(d.getDate() - n);
   return d.toISOString().slice(0, 10);
 }
@@ -48,17 +50,25 @@ function yesterday(): string {
 }
 
 /**
- * Get a date just inside the valid window (2 years - 1 day ago).
+ * Get a date just inside the valid window (minDate + 1 day).
+ * Uses the same computation as the action to handle leap years correctly.
  */
-function justInsideWindow(): string {
-  return daysAgo(365 * 2 - 1);
+function justInsideWindow(referenceDate: Date = new Date()): string {
+  const { minDateIso } = computeDateBounds(referenceDate);
+  const minDate = new Date(minDateIso + "T00:00:00Z");
+  minDate.setDate(minDate.getDate() + 1);
+  return minDate.toISOString().slice(0, 10);
 }
 
 /**
- * Get a date just outside the valid window (2 years + 1 day ago).
+ * Get a date just outside the valid window (minDate - 1 day).
+ * Uses the same computation as the action to handle leap years correctly.
  */
-function justOutsideWindow(): string {
-  return daysAgo(365 * 2 + 1);
+function justOutsideWindow(referenceDate: Date = new Date()): string {
+  const { minDateIso } = computeDateBounds(referenceDate);
+  const minDate = new Date(minDateIso + "T00:00:00Z");
+  minDate.setDate(minDate.getDate() - 1);
+  return minDate.toISOString().slice(0, 10);
 }
 
 // ============================================================================
@@ -488,7 +498,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
   });
 
   describe("Date boundary tests", () => {
-    it("date just inside window (2 years - 1 day ago) passes", async () => {
+    it("date just inside window (minDate + 1 day) passes", async () => {
       const payload = {
         bank: "HDFC",
         fileName: "old-valid.csv",
@@ -511,7 +521,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
       expect(data.counts?.inserted).toBe(1);
     });
 
-    it("date just outside window (2 years + 1 day ago) is rejected", async () => {
+    it("date just outside window (minDate - 1 day) is rejected", async () => {
       const payload = {
         bank: "HDFC",
         fileName: "too-old.csv",
@@ -532,6 +542,62 @@ describeWithDb("Bank Import Action Integration Tests", () => {
       const data = await parseResponse(response);
       expect(data.success).toBe(false);
       expect(data.error).toContain("dates outside valid range");
+    });
+
+    it("date boundaries hold across leap year (faked clock at 2028-06-01)", async () => {
+      // Fake system time to 2028-06-01 (after Feb 29, 2028 leap day)
+      const fakeNow = new Date("2028-06-01T12:00:00Z");
+      vi.setSystemTime(fakeNow);
+
+      try {
+        // Compute boundaries using the faked time
+        const insideDate = justInsideWindow(fakeNow);
+        const outsideDate = justOutsideWindow(fakeNow);
+
+        // Inside date should pass
+        const insidePayload = {
+          bank: "HDFC",
+          fileName: "leap-inside.csv",
+          credits: [
+            {
+              date: insideDate,
+              amountPaise: 1000000,
+              rail: "NEFT",
+              utr: "HDFCN26296LEAPIN",
+              narration: "NEFT CR-LEAP INSIDE",
+            },
+          ],
+        };
+
+        const insideResponse = await callAction(sql, TEST_SHOP_DOMAIN, insidePayload);
+        expect(insideResponse.status).toBe(200);
+        const insideData = await parseResponse(insideResponse);
+        expect(insideData.success).toBe(true);
+
+        // Outside date should be rejected
+        const outsidePayload = {
+          bank: "HDFC",
+          fileName: "leap-outside.csv",
+          credits: [
+            {
+              date: outsideDate,
+              amountPaise: 1000000,
+              rail: "NEFT",
+              utr: "HDFCN26296LEAPOUT",
+              narration: "NEFT CR-LEAP OUTSIDE",
+            },
+          ],
+        };
+
+        const outsideResponse = await callAction(sql, TEST_SHOP_DOMAIN, outsidePayload);
+        expect(outsideResponse.status).toBe(400);
+        const outsideData = await parseResponse(outsideResponse);
+        expect(outsideData.success).toBe(false);
+        expect(outsideData.error).toContain("dates outside valid range");
+      } finally {
+        // Restore real timers
+        vi.useRealTimers();
+      }
     });
   });
 
