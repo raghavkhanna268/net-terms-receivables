@@ -100,7 +100,7 @@ async function hasOfflineSession(
       WHERE shop = ${shopDomain}
         AND "isOnline" = false
         AND "accessToken" IS NOT NULL
-        AND (expires IS NULL OR expires > NOW())
+        AND (expires IS NULL OR expires > (NOW() AT TIME ZONE 'UTC'))
     ) AS exists
   `;
   return session?.exists ?? false;

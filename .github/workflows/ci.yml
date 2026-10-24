@@ -141,6 +141,13 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Test full suite with Pacific/Auckland TZ
+        run: |
+          # Run full test suite with Pacific/Auckland timezone (UTC+13)
+          # This catches clock/timezone bugs that only appear east of UTC
+          # See issue #153 for background
+          TZ=Pacific/Auckland npm test
+
       - name: Test session storage with non-UTC process TZ
         run: |
           # Run session storage tests with Asia/Calcutta process timezone
