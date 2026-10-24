@@ -171,7 +171,7 @@ export default function ImportsPage() {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".csv,.xls,.xlsx,.txt"
+            accept=".csv,.xls,.xlsx"
             onChange={handleFileSelect}
             disabled={status === "loading"}
             style={{ marginBottom: "1rem" }}
