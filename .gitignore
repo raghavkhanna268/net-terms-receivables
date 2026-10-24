@@ -53,3 +53,5 @@ app/generated/prisma-node/
 .vscode
 *.swp
 *.swo
+
+__pycache__/
