@@ -1226,9 +1226,8 @@ describeWithDb("scripts/backstop-backfill", () => {
           expect(allOutput).not.toContain("ECONNREFUSED");
 
           const errorLogs = logs.filter(l => l.includes("✗ error"));
-          for (const log of errorLogs) {
-            expect(log).toMatch(/err=[A-Za-z][A-Za-z0-9_]*/);
-          }
+          expect(errorLogs).toHaveLength(1);
+          expect(errorLogs[0]).toContain("err=connection_refused");
         } finally {
           console.log = originalLog;
           vi.doUnmock("~/services/backstop.server");

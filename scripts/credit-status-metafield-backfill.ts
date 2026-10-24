@@ -127,7 +127,7 @@ function parseArgs(args: string[]): ParseArgsResult {
         shopFilter: undefined,
         idPrefix: undefined,
         expect: undefined,
-        error: `--shop must be a positive integer, got '${shopValue}'`,
+        error: "--shop must be a positive integer (shop index from dry-run output)",
       };
     }
     if (dryRun) {
@@ -265,6 +265,15 @@ interface DryRunResult {
   success: true;
   stats: BackfillStats[];
   grandTotal: number;
+}
+
+/**
+ * Format a dry-run error for logging (X3 fix).
+ * Uses toErrorCode to avoid leaking raw error messages.
+ * Exported for testing.
+ */
+export function formatDryRunError(err: unknown): string {
+  return `ERROR: err=${toErrorCode(err)}`;
 }
 
 /**
@@ -533,7 +542,7 @@ async function main() {
         stats = result.stats;
         grandTotal = result.grandTotal;
       } catch (err) {
-        console.error(`ERROR: err=${toErrorCode(err)}`);
+        console.error(formatDryRunError(err));
         process.exit(1);
       }
 
