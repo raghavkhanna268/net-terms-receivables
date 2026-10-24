@@ -342,6 +342,115 @@ describe("check-logging.ts (AST-based)", () => {
   });
 
   // =========================================================================
+  // Boolean-prefix exclusion for isErrorLikeIdentifier
+  // =========================================================================
+  describe("Boolean-prefix error identifier exclusion", () => {
+    // These should NOT be flagged (boolean indicator prefixes)
+    it("does NOT flag isRetryableError (boolean flag)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(e: Error) {
+          const isRetryableError = e instanceof TypeError;
+          console.log("Info", { retryable: isRetryableError });
+        }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("does NOT flag hasError (boolean flag)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test() {
+          const hasError = false;
+          console.log("Status", { hasError });
+        }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    // These SHOULD be flagged (real error variables that happen to start with prefix letters)
+    it("flags issueError (not a boolean prefix)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test() {
+          const issueError = new Error("issue");
+          console.error(issueError);
+        }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("raw-error-arg");
+    });
+
+    it("flags cancelError (not a boolean prefix)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test() {
+          const cancelError = new Error("cancelled");
+          console.error(cancelError);
+        }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("raw-error-arg");
+    });
+
+    it("flags hashErr (not a boolean prefix)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test() {
+          const hashErr = new Error("hash failed");
+          console.error(hashErr);
+        }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("raw-error-arg");
+    });
+
+    it("flags wasmError (not a boolean prefix)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test() {
+          const wasmError = new Error("wasm failed");
+          console.error(wasmError);
+        }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("raw-error-arg");
+    });
+
+    it("flags hashError (not a boolean prefix)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test() {
+          const hashError = new Error("hash failed");
+          console.error(hashError);
+        }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("raw-error-arg");
+    });
+
+    it("flags canonicalError (not a boolean prefix)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test() {
+          const canonicalError = new Error("canonical failed");
+          console.error(canonicalError);
+        }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("raw-error-arg");
+    });
+  });
+
+  // =========================================================================
   // P2 Extended: Template spans with .message/.stack and sensitive property
   // =========================================================================
   describe("P2 Extended: Template property access", () => {

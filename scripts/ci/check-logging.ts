@@ -566,10 +566,17 @@ function checkArgument(
  */
 function isErrorLikeIdentifier(name: string): boolean {
   const lower = name.toLowerCase();
-  // Exclude boolean indicator prefixes (isRetryableError, hasError, etc.)
-  if (/^(is|has|was|can|should|will|did)/.test(lower)) {
+
+  // Exclude boolean indicator prefixes with proper camelCase/snake_case boundary.
+  // Match original name (not lowercased) to detect camelCase boundary.
+  // Examples that should be EXCLUDED (boolean flags, not error objects):
+  //   isRetryableError, hasError, wasHandled, canRetry
+  // Examples that should NOT be excluded (real error variables):
+  //   issueError, cancelError, hashErr, wasmError, hashError, canonicalError
+  if (/^(is|has|was|can|should|will|did)[A-Z_]/.test(name)) {
     return false;
   }
+
   return (
     lower === "err" ||
     lower === "error" ||
