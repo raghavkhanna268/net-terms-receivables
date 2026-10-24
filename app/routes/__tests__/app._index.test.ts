@@ -33,6 +33,7 @@ vi.mock("~/services/gating.server", () => ({
     importsThisMonth: { current: 0, limit: 1 },
   }),
   isGatingEnforced: vi.fn().mockReturnValue(false),
+  parseGatedFilter: vi.fn().mockReturnValue("all"),
 }));
 
 vi.mock("~/lib/aging-queries.server", () => ({
@@ -215,6 +216,7 @@ describe("app._index loader", () => {
           offset: 0,
           sortBy: "outstanding",
           sortOrder: "desc",
+          filterMode: "all",
         }
       );
     });
@@ -387,7 +389,7 @@ describe("app._index loader", () => {
         TEST_SHOP_ID,
         "buyer-1",
         expect.any(Date),
-        { limit: 50, offset: 0 }
+        { limit: 50, offset: 0, filterMode: "all" }
       );
       expect(result.selectedBuyerInvoices?.rows).toHaveLength(1);
       expect(result.selectedBuyerInvoices?.buyerName).toBe("Acme Corp");
@@ -441,6 +443,92 @@ describe("app._index loader", () => {
       expect(result.shopDomain).toBe(TEST_SHOP);
       expect(result.shopCurrency).toBe("INR");
       expect(result.storeHandle).toBe("test-shop");
+    });
+  });
+
+  describe("gated account filter", () => {
+    it("defaults gatedFilter to 'all' when no query param", async () => {
+      const { loader } = await import("../app._index");
+      const result = await loader(createLoaderArgs());
+
+      expect(result.gatedFilter).toBe("all");
+    });
+
+    it("passes filterMode to getBuyerLedger based on gated param", async () => {
+      const { parseGatedFilter } = await import("~/services/gating.server");
+      const mockParseGatedFilter = vi.mocked(parseGatedFilter);
+
+      mockParseGatedFilter.mockReturnValueOnce("active");
+      const { loader } = await import("../app._index");
+      await loader(createLoaderArgs({ gated: "hide" }));
+
+      expect(mockGetBuyerLedger).toHaveBeenCalledWith(
+        expect.anything(),
+        TEST_SHOP_ID,
+        expect.any(Date),
+        expect.objectContaining({ filterMode: "active" })
+      );
+    });
+
+    it("passes filterMode to getShopAgingTotals", async () => {
+      const { parseGatedFilter } = await import("~/services/gating.server");
+      const mockParseGatedFilter = vi.mocked(parseGatedFilter);
+
+      mockParseGatedFilter.mockReturnValueOnce("gated");
+      const { loader } = await import("../app._index");
+      await loader(createLoaderArgs({ gated: "show" }));
+
+      expect(mockGetShopAgingTotals).toHaveBeenCalledWith(
+        expect.anything(),
+        TEST_SHOP_ID,
+        expect.any(Date),
+        "gated"
+      );
+    });
+
+    it("passes filterMode to getBuyerInvoices when buyer selected", async () => {
+      const { parseGatedFilter } = await import("~/services/gating.server");
+      const mockParseGatedFilter = vi.mocked(parseGatedFilter);
+
+      mockGetBuyerLedger.mockResolvedValue({
+        rows: [
+          {
+            buyer_account_id: "buyer-1",
+            buyer_name: "Test Buyer",
+            credit_limit_paise: null,
+            hold_state: "OK",
+            currency: "INR",
+            outstanding_paise: "100000",
+            overdue_paise: "0",
+            oldest_overdue_days: null,
+            is_gated: false,
+          },
+        ],
+        totalCount: 1,
+      });
+
+      mockParseGatedFilter.mockReturnValueOnce("active");
+      const { loader } = await import("../app._index");
+      await loader(createLoaderArgs({ buyer: "buyer-1", gated: "hide" }));
+
+      expect(mockGetBuyerInvoices).toHaveBeenCalledWith(
+        expect.anything(),
+        TEST_SHOP_ID,
+        "buyer-1",
+        expect.any(Date),
+        expect.objectContaining({ filterMode: "active" })
+      );
+    });
+
+    it("returns gatedFilter in response for UI state", async () => {
+      const { parseGatedFilter } = await import("~/services/gating.server");
+      const mockParseGatedFilter = vi.mocked(parseGatedFilter);
+
+      mockParseGatedFilter.mockReturnValueOnce("gated");
+      const { loader } = await import("../app._index");
+      const result = await loader(createLoaderArgs({ gated: "show" }));
+
+      expect(result.gatedFilter).toBe("gated");
     });
   });
 });

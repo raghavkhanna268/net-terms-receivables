@@ -3,7 +3,12 @@ import { useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { resolvePlan, type ResolvedPlan } from "~/services/plan.server";
-import { getUsageStats, isGatingEnforced } from "~/services/gating.server";
+import {
+  getUsageStats,
+  isGatingEnforced,
+  parseGatedFilter,
+  type GatedFilterMode,
+} from "~/services/gating.server";
 import type { PlanKey } from "~/lib/entitlements";
 import { PlanBanner } from "~/components/UpgradePrompt";
 import {
@@ -93,6 +98,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const sortOrder = parseSortOrder(url.searchParams.get("sortOrder"));
   const selectedBuyerId = url.searchParams.get("buyer") ?? null;
   const skipOnboarding = url.searchParams.get("skipOnboarding") === "true";
+  const gatedFilter = parseGatedFilter(url.searchParams.get("gated"));
 
   const [shop] = await sql<{ id: string; currency: string; timezone: string }[]>`
     SELECT id, currency, timezone FROM "Shop" WHERE domain = ${shopDomain}
@@ -126,12 +132,13 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       [planData, usage, agingTotals, buyerLedger] = await Promise.all([
         resolvePlan(sql, shopDomain),
         getUsageStats(sql, shop.id),
-        getShopAgingTotals(sql, shop.id, asOf),
+        getShopAgingTotals(sql, shop.id, asOf, gatedFilter),
         getBuyerLedger(sql, shop.id, asOf, {
           limit: PAGE_SIZE,
           offset: (page - 1) * PAGE_SIZE,
           sortBy,
           sortOrder,
+          filterMode: gatedFilter,
         }),
       ]);
 
@@ -141,7 +148,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
           shop.id,
           selectedBuyerId,
           asOf,
-          { limit: 50, offset: 0 }
+          { limit: 50, offset: 0, filterMode: gatedFilter }
         );
 
         const buyerRow = buyerLedger?.rows.find(
@@ -200,6 +207,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     },
     sortBy,
     sortOrder,
+    gatedFilter,
     error,
   };
 };
@@ -286,6 +294,7 @@ function BuyerLedgerTable({
   page,
   totalCount,
   pageSize,
+  gatedFilter,
   onNextPage,
   onPreviousPage,
 }: {
@@ -295,18 +304,13 @@ function BuyerLedgerTable({
   page: number;
   totalCount: number;
   pageSize: number;
+  gatedFilter: GatedFilterMode;
   onNextPage: string;
   onPreviousPage: string;
 }) {
   const totalPages = Math.ceil(totalCount / pageSize);
-  const hasNextPage = page < totalPages;
-  const hasPreviousPage = page > 1;
-
-  const buildSortUrl = (newSortBy: string) => {
-    const newOrder =
-      sortBy === newSortBy && sortOrder === "desc" ? "asc" : "desc";
-    return `?sortBy=${newSortBy}&sortOrder=${newOrder}&page=1`;
-  };
+  const gp = gatedFilter !== "all" ? `&gated=${gatedFilter === "gated" ? "show" : "hide"}` : "";
+  const buildSortUrl = (col: string) => `?sortBy=${col}&sortOrder=${sortBy === col && sortOrder === "desc" ? "asc" : "desc"}${gp}`;
 
   const getSortIndicator = (column: string) => {
     if (sortBy !== column) return "";
@@ -355,12 +359,10 @@ function BuyerLedgerTable({
             return (
               <s-table-row key={`${row.buyer_account_id}-${row.currency}`}>
                 <s-table-cell>
-                  <s-link
-                    href={`?buyer=${row.buyer_account_id}&sortBy=${sortBy}&sortOrder=${sortOrder}&page=${page}`}
-                  >
+                  <s-link href={`?buyer=${row.buyer_account_id}&sortBy=${sortBy}&sortOrder=${sortOrder}&page=${page}${gp}`}>
                     {row.buyer_name}
                   </s-link>
-                  {row.is_gated && <s-text tone="critical"> (gated)</s-text>}
+                  {row.is_gated && <s-badge tone="warning">gated</s-badge>}
                 </s-table-cell>
                 <s-table-cell>
                   {creditLimit !== null
@@ -403,15 +405,9 @@ function BuyerLedgerTable({
 
       {totalPages > 1 && (
         <s-stack direction="inline">
-          {hasPreviousPage && (
-            <s-button href={onPreviousPage}>Previous</s-button>
-          )}
-          <s-text>
-            Page {page} of {totalPages} ({totalCount} buyers)
-          </s-text>
-          {hasNextPage && (
-            <s-button href={onNextPage}>Next</s-button>
-          )}
+          {page > 1 && <s-button href={onPreviousPage}>Previous</s-button>}
+          <s-text>Page {page} of {totalPages} ({totalCount} buyers)</s-text>
+          {page < totalPages && <s-button href={onNextPage}>Next</s-button>}
         </s-stack>
       )}
     </s-stack>
@@ -509,6 +505,7 @@ export default function Index() {
     pagination,
     sortBy,
     sortOrder,
+    gatedFilter,
     error,
   } = useLoaderData<typeof loader>();
 
@@ -597,68 +594,46 @@ export default function Index() {
           {/* Buyer Ledger */}
           {!selectedBuyerInvoices && (
             <s-section heading="Buyer Ledger">
-              {buyerLedger ? (
-                <BuyerLedgerTable
-                  rows={buyerLedger.rows}
-                  sortBy={sortBy}
-                  sortOrder={sortOrder}
-                  page={pagination.page}
-                  totalCount={pagination.totalCount}
-                  pageSize={pagination.pageSize}
-                  onNextPage={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page + 1}`}
-                  onPreviousPage={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page - 1}`}
-                />
-              ) : (
-                <s-empty-state heading="No buyer accounts">
-                  <s-text slot="subheading">
-                    You don&apos;t have any buyer accounts with outstanding
-                    invoices.
-                  </s-text>
-                </s-empty-state>
-              )}
+              <s-stack>
+                <s-paragraph>
+                  <s-text type="strong">Show: </s-text>
+                  {gatedFilter === "all" ? "All" : <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}`}>All</s-link>}
+                  {" | "}
+                  {gatedFilter === "active" ? "Active" : <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}&gated=hide`}>Active</s-link>}
+                  {" | "}
+                  {gatedFilter === "gated" ? "Gated" : <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}&gated=show`}>Gated</s-link>}
+                </s-paragraph>
+                {buyerLedger ? (
+                  <BuyerLedgerTable
+                    rows={buyerLedger.rows}
+                    sortBy={sortBy}
+                    sortOrder={sortOrder}
+                    page={pagination.page}
+                    totalCount={pagination.totalCount}
+                    pageSize={pagination.pageSize}
+                    gatedFilter={gatedFilter}
+                    onNextPage={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page + 1}${gatedFilter !== "all" ? `&gated=${gatedFilter === "gated" ? "show" : "hide"}` : ""}`}
+                    onPreviousPage={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page - 1}${gatedFilter !== "all" ? `&gated=${gatedFilter === "gated" ? "show" : "hide"}` : ""}`}
+                  />
+                ) : (
+                  <s-empty-state heading="No buyer accounts">
+                    <s-text slot="subheading">
+                      No {gatedFilter === "gated" ? "gated" : gatedFilter === "active" ? "active" : ""} accounts with outstanding invoices.
+                    </s-text>
+                  </s-empty-state>
+                )}
+              </s-stack>
             </s-section>
           )}
         </>
       )}
 
-      <s-section slot="aside" heading="Getting Started">
-        <s-paragraph>Features included in this app:</s-paragraph>
-        <s-unordered-list>
-          <s-list-item>Track unpaid invoices per wholesale buyer</s-list-item>
-          <s-list-item>
-            Manage credit limits and automatic credit holds
-          </s-list-item>
-          <s-list-item>Send payment reminders</s-list-item>
-          <s-list-item>
-            Match Indian bank transfer payments (NEFT/RTGS/IMPS/UPI) to orders
-          </s-list-item>
-        </s-unordered-list>
+      <s-section slot="aside" heading="Features">
+        <s-paragraph>Track invoices, manage credit limits, send reminders, match payments.</s-paragraph>
       </s-section>
 
-      <s-section slot="aside" heading="About Aging Buckets">
-        <s-paragraph>
-          Invoices are categorized by how many days past due they are:
-        </s-paragraph>
-        <s-unordered-list>
-          <s-list-item>
-            <s-text type="strong">Current</s-text>: Not yet due
-          </s-list-item>
-          <s-list-item>
-            <s-text type="strong">1-30 days</s-text>: 1 to 30 days past due
-          </s-list-item>
-          <s-list-item>
-            <s-text type="strong">31-60 days</s-text>: 31 to 60 days past due
-          </s-list-item>
-          <s-list-item>
-            <s-text type="strong">61-90 days</s-text>: 61 to 90 days past due
-          </s-list-item>
-          <s-list-item>
-            <s-text type="strong">90+ days</s-text>: Over 90 days past due
-          </s-list-item>
-        </s-unordered-list>
-        <s-paragraph>
-          All calculations use the Asia/Kolkata timezone.
-        </s-paragraph>
+      <s-section slot="aside" heading="Aging Buckets">
+        <s-paragraph>Days past due: Current (not due), 1-30, 31-60, 61-90, 90+. Timezone: Asia/Kolkata.</s-paragraph>
       </s-section>
     </s-page>
   );
