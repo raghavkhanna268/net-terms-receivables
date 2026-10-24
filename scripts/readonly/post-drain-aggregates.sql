@@ -7,6 +7,7 @@
 -- Output column kinds for passthrough columns (scripts/ci/check-readonly-columns.ts,
 -- see scripts/readonly/README.md). Derived counts/booleans/CASE enums need no entry.
 -- @col topic, original_queue, error_format, error_disposition, error_code, status, due_basis, action, account_hold_state, kind, holdState, defaultTermsSource, dueSource, dueBasis: enum
+-- dueBasis (and due_basis) is a TEXT column holding app-written fixed codes, not free text, so enum.
 -- @col fo_held, non_mm_skipped, syncVersion: count
 -- @col manualHold, bypass, syncPending: boolean
 -- @col issued_at_days_ago: timestamp

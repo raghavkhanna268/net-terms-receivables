@@ -13,7 +13,7 @@ Every printed column must be one of:
 | `count`     | `COUNT(*)`, `read_ct`, `syncVersion`                            |
 | `enum`      | `status`, `topic`, regex-guarded codes, `CASE` mappings to literals |
 | `boolean`   | `x IS NOT NULL`, `outstanding > 0`, `bool_or(...)`              |
-| `timestamp` | `*_at`, `MIN(at)`, and time-derived values (intervals, day ages) |
+| `timestamp` | `*_at`, `MIN(at)`; includes ages/intervals derived from timestamps (e.g. `issued_at_days_ago`, `past_due_by`) |
 
 Never: shop domains, PII (names, emails, phones, addresses, notes, narration,
 payer text), free text, raw error/reason text, payloads, tokens, or per-shop
