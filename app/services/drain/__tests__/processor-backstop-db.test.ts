@@ -463,10 +463,8 @@ describeWithDb("processor backstop integration (DB-backed)", () => {
       expect(beforeDrain).toBeDefined();
       const msgId = beforeDrain.msg_id;
 
-      let totalDeadLettered = 0;
       for (let i = 0; i < 10; i++) {
-        const result = await runDrain(sql, { batchSize: 50, timeBudgetMs: 10000 });
-        totalDeadLettered += result.deadLettered;
+        await runDrain(sql, { batchSize: 50, timeBudgetMs: 10000 });
 
         const [dlqEntry] = await sql<{ message: Record<string, unknown>; error: string }[]>`
           SELECT message, error FROM s6_dead_letter
