@@ -48,6 +48,7 @@ import postgres from "postgres";
 import { pathToFileURL } from "node:url";
 import { requestContext } from "~/lib/request-context.server";
 import { sqlOptions } from "~/lib/db-light.server";
+import { toErrorCode } from "~/lib/log.server";
 
 /**
  * Asserts that the current transaction is read-only.
@@ -252,8 +253,7 @@ async function processBackfill(
             result.wouldSkip++;
           }
         } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          console.log(`    ✗ error: ${msg}`);
+          console.log(`    ✗ error: err=${toErrorCode(e)}`);
           result.errors++;
         }
         continue;
@@ -272,9 +272,8 @@ async function processBackfill(
           result.skipped++;
         }
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
         const isRetryable = e instanceof RetryableBackstopError;
-        console.log(`    ✗ error (${isRetryable ? "retryable" : "fatal"}): ${msg}`);
+        console.log(`    ✗ error (${isRetryable ? "retryable" : "fatal"}): err=${toErrorCode(e)}`);
         result.errors++;
       }
     }
@@ -429,9 +428,17 @@ async function main() {
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
-    console.error("Fatal error:", err);
+    console.error(`\n❌ Fatal error: [${formatFatal(err)}]`);
     process.exit(1);
   });
+}
+
+/**
+ * Format a fatal error for logging without exposing message/stack.
+ * Only returns the error type (constructor name or typeof).
+ */
+export function formatFatal(err: unknown): string {
+  return err instanceof Error ? err.constructor.name : typeof err;
 }
 
 export { findCandidates, hasOfflineSession, processBackfill, parseArgs };
