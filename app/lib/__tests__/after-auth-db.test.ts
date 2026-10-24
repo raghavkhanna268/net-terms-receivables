@@ -11,11 +11,12 @@
  *    - Order sync (processOrderWebhook)
  *    - Customer sync (processCustomerWebhook)
  *    - CompanyLocation sync (processCompanyLocationWebhook)
- *    - Reconcile (enqueueReconcileForAllShops)
- *    - Reminders (s18_enqueue_reminders skips uninstalled shops)
+ *    - Reconcile (enqueueReconcileForAllShops excludes uninstalled shops)
  *    - Compliance webhooks (customers/data_request, customers/redact)
+ * 5. Cross-isolate reinstall: clearUninstalledAtIfSet clears uninstalledAt
+ *    even when shop is in setupCompletedShops cache
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 
@@ -138,6 +139,266 @@ describeWithDb("after-auth Shop row upsert (DB)", () => {
       `;
       expect(shop.timezone).toBe("Asia/Kolkata");
     });
+  });
+});
+
+describeWithDb("clearUninstalledAtIfSet cross-isolate reinstall (DB)", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-clearuninstalled";
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}`;
+    await sql.end();
+  });
+
+  beforeEach(async () => {
+    await sql`DELETE FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}`;
+  });
+
+  describe("clears uninstalledAt even when shop is in cache", () => {
+    it("clearUninstalledAtIfSet clears uninstalledAt for shop marked uninstalled", async () => {
+      const TEST_SHOP = `cached-reinstall-${TEST_SUFFIX}.myshopify.com`;
+      
+      await sql`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
+      `;
+
+      const [before] = await sql<{ uninstalledAt: Date | null }[]>`
+        SELECT "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(before.uninstalledAt).not.toBeNull();
+
+      const { _clearUninstalledAtIfSetForTesting } = await import("../after-auth.server");
+      await _clearUninstalledAtIfSetForTesting(sql, TEST_SHOP);
+
+      const [after] = await sql<{ uninstalledAt: Date | null }[]>`
+        SELECT "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(after.uninstalledAt).toBeNull();
+    });
+  });
+
+  describe("does not touch other columns", () => {
+    it("clearUninstalledAtIfSet only sets uninstalledAt, preserves plan/timezone/other columns", async () => {
+      const TEST_SHOP = `preserve-columns-${TEST_SUFFIX}.myshopify.com`;
+      
+      await sql`
+        INSERT INTO "Shop" (
+          domain, timezone, currency, plan_key, "defaultTermsDays",
+          "uninstalledAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${TEST_SHOP}, 'America/Los_Angeles', 'USD', 'growth', 45,
+          NOW(), NOW(), NOW()
+        )
+      `;
+
+      const [before] = await sql<{
+        timezone: string;
+        currency: string;
+        plan_key: string;
+        defaultTermsDays: number | null;
+        updatedAt: Date;
+      }[]>`
+        SELECT timezone, currency, plan_key, "defaultTermsDays", "updatedAt"
+        FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+
+      const { _clearUninstalledAtIfSetForTesting } = await import("../after-auth.server");
+      await _clearUninstalledAtIfSetForTesting(sql, TEST_SHOP);
+
+      const [after] = await sql<{
+        timezone: string;
+        currency: string;
+        plan_key: string;
+        defaultTermsDays: number | null;
+        uninstalledAt: Date | null;
+        updatedAt: Date;
+      }[]>`
+        SELECT timezone, currency, plan_key, "defaultTermsDays", "uninstalledAt", "updatedAt"
+        FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+
+      expect(after.uninstalledAt).toBeNull();
+      expect(after.timezone).toBe(before.timezone);
+      expect(after.currency).toBe(before.currency);
+      expect(after.plan_key).toBe(before.plan_key);
+      expect(after.defaultTermsDays).toBe(before.defaultTermsDays);
+      // updatedAt is updated by the Shop_updatedAt trigger on any UPDATE
+      expect(after.updatedAt.getTime()).toBeGreaterThanOrEqual(before.updatedAt.getTime());
+    });
+  });
+
+  describe("does not touch other shops", () => {
+    it("clearUninstalledAtIfSet does not affect another shop's uninstalledAt", async () => {
+      const SHOP_A = `shop-a-${TEST_SUFFIX}.myshopify.com`;
+      const SHOP_B = `shop-b-${TEST_SUFFIX}.myshopify.com`;
+      
+      await sql`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
+        VALUES 
+          (${SHOP_A}, 'UTC', 'INR', 'free', NOW(), NOW(), NOW()),
+          (${SHOP_B}, 'UTC', 'INR', 'free', NOW(), NOW(), NOW())
+      `;
+
+      const { _clearUninstalledAtIfSetForTesting } = await import("../after-auth.server");
+      await _clearUninstalledAtIfSetForTesting(sql, SHOP_A);
+
+      const [shopA] = await sql<{ uninstalledAt: Date | null }[]>`
+        SELECT "uninstalledAt" FROM "Shop" WHERE domain = ${SHOP_A}
+      `;
+      const [shopB] = await sql<{ uninstalledAt: Date | null }[]>`
+        SELECT "uninstalledAt" FROM "Shop" WHERE domain = ${SHOP_B}
+      `;
+
+      expect(shopA.uninstalledAt).toBeNull();
+      expect(shopB.uninstalledAt).not.toBeNull();
+    });
+  });
+
+  describe("is a no-op when uninstalledAt is already NULL", () => {
+    it("clearUninstalledAtIfSet does nothing when shop is not uninstalled", async () => {
+      const TEST_SHOP = `not-uninstalled-${TEST_SUFFIX}.myshopify.com`;
+      
+      await sql`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP}, 'UTC', 'INR', 'free', NOW(), NOW())
+      `;
+
+      const [before] = await sql<{ updatedAt: Date }[]>`
+        SELECT "updatedAt" FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+
+      const { _clearUninstalledAtIfSetForTesting } = await import("../after-auth.server");
+      await _clearUninstalledAtIfSetForTesting(sql, TEST_SHOP);
+
+      const [after] = await sql<{ updatedAt: Date; uninstalledAt: Date | null }[]>`
+        SELECT "updatedAt", "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+
+      expect(after.uninstalledAt).toBeNull();
+      expect(after.updatedAt.getTime()).toBe(before.updatedAt.getTime());
+    });
+  });
+});
+
+describeWithDb("runAfterAuth cross-isolate reinstall via getRequestSql mock (DB)", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-runafterauth";
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}`;
+    await sql.end();
+  });
+
+  beforeEach(async () => {
+    await sql`DELETE FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}`;
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.resetModules();
+  });
+
+  it("runAfterAuth clears uninstalledAt and preserves other columns when shop is cached", async () => {
+    const TEST_SHOP = `cached-runafterauth-${TEST_SUFFIX}.myshopify.com`;
+
+    await sql`
+      INSERT INTO "Shop" (
+        domain, timezone, currency, plan_key, "defaultTermsDays",
+        "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${TEST_SHOP}, 'America/Chicago', 'USD', 'growth', 30,
+        NOW(), NOW()
+      )
+    `;
+
+    const [beforeSetup] = await sql<{
+      timezone: string;
+      currency: string;
+      plan_key: string;
+      defaultTermsDays: number | null;
+    }[]>`
+      SELECT timezone, currency, plan_key, "defaultTermsDays"
+      FROM "Shop" WHERE domain = ${TEST_SHOP}
+    `;
+
+    vi.doMock("../request-context.server", () => ({
+      getRequestSql: vi.fn(() => sql),
+    }));
+
+    vi.doMock("../metafield-definitions.server", () => ({
+      ensureMetafieldDefinitions: vi.fn().mockResolvedValue([]),
+    }));
+    vi.doMock("../validation-registration.server", () => ({
+      ensureValidation: vi.fn().mockResolvedValue({ id: "test", created: false }),
+    }));
+    vi.doMock("../payment-customization-registration.server", () => ({
+      ensurePaymentCustomization: vi.fn().mockResolvedValue({ id: "pc-test", created: false }),
+    }));
+
+    const { runAfterAuth, _resetSetupCacheForTesting, _isShopSetupComplete } =
+      await import("../after-auth.server");
+
+    _resetSetupCacheForTesting();
+
+    const mockAdmin = {
+      graphql: vi.fn().mockResolvedValue({
+        json: () => Promise.resolve({ data: { shop: { ianaTimezone: "America/Chicago" } } }),
+      }),
+    };
+
+    const waitUntilPromises: Promise<unknown>[] = [];
+    const mockWaitUntil = (p: Promise<unknown>) => waitUntilPromises.push(p);
+
+    runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
+
+    await Promise.all(waitUntilPromises);
+    await vi.waitFor(() => expect(_isShopSetupComplete(TEST_SHOP)).toBe(true));
+
+    await sql`
+      UPDATE "Shop"
+      SET "uninstalledAt" = NOW()
+      WHERE domain = ${TEST_SHOP}
+    `;
+
+    const [afterUninstall] = await sql<{ uninstalledAt: Date | null }[]>`
+      SELECT "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP}
+    `;
+    expect(afterUninstall.uninstalledAt).not.toBeNull();
+
+    waitUntilPromises.length = 0;
+
+    runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
+
+    await Promise.all(waitUntilPromises);
+
+    const [afterReinstall] = await sql<{
+      uninstalledAt: Date | null;
+      timezone: string;
+      currency: string;
+      plan_key: string;
+      defaultTermsDays: number | null;
+    }[]>`
+      SELECT "uninstalledAt", timezone, currency, plan_key, "defaultTermsDays"
+      FROM "Shop" WHERE domain = ${TEST_SHOP}
+    `;
+
+    expect(afterReinstall.uninstalledAt).toBeNull();
+    expect(afterReinstall.timezone).toBe(beforeSetup.timezone);
+    expect(afterReinstall.currency).toBe(beforeSetup.currency);
+    expect(afterReinstall.plan_key).toBe(beforeSetup.plan_key);
+    expect(afterReinstall.defaultTermsDays).toBe(beforeSetup.defaultTermsDays);
   });
 });
 
