@@ -20,38 +20,51 @@ import { parseArgs } from "../backstop-backfill";
 
 /**
  * Verifies that an explicit READ ONLY transaction is enforced.
- * Returns true if the transaction is read-only and rejects writes with SQLSTATE 25006.
+ * Returns ok:true only if the transaction is read-only AND writes are rejected with SQLSTATE 25006.
+ * Any other outcome returns ok:false (fail closed).
  */
+type VerifyResult = { ok: boolean; error?: string };
+
 export async function verifyReadOnlyTransaction(
   sql: ReturnType<typeof postgres>
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<VerifyResult> {
+  let innerResult: VerifyResult | null = null;
+
   try {
-    return await sql.begin("read only", async (tx) => {
+    await sql.begin("read only", async (tx) => {
       const [setting] = await tx<{ transaction_read_only: string }[]>`
         SELECT current_setting('transaction_read_only') AS transaction_read_only
       `;
       if (setting?.transaction_read_only !== "on") {
-        return { ok: false, error: "transaction_read_only is not 'on'" };
+        innerResult = { ok: false, error: "transaction_read_only is not 'on'" };
+        return;
       }
 
       try {
         await tx`CREATE TEMP TABLE _preflight_write_test (id int)`;
-        return { ok: false, error: "write succeeded inside READ ONLY transaction" };
+        innerResult = { ok: false, error: "write succeeded inside READ ONLY transaction" };
       } catch (e) {
         const pgError = e as { code?: string };
         if (pgError.code === "25006") {
-          return { ok: true };
+          innerResult = { ok: true };
+        } else {
+          innerResult = { ok: false, error: `unexpected error: ${pgError.code ?? "unknown"}` };
         }
-        return { ok: false, error: `unexpected error: ${pgError.code ?? "unknown"}` };
       }
     });
   } catch (e) {
     const pgError = e as { code?: string };
-    if (pgError.code === "25006") {
-      return { ok: true };
+    const result = innerResult as VerifyResult | null;
+    if (result !== null && result.ok === true && pgError.code === "25006") {
+      return result;
     }
     return { ok: false, error: `transaction failed: ${pgError.code ?? "unknown"}` };
   }
+
+  if (innerResult === null) {
+    return { ok: false, error: "no result from transaction" };
+  }
+  return innerResult;
 }
 
 async function main(): Promise<void> {

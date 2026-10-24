@@ -63,5 +63,19 @@ describeWithDb("scripts/ci/backfill-dry-run-preflight", () => {
       `;
       expect(setting.transaction_read_only).toBe("off");
     });
+
+    it("returns ok:false for a non-read-only transaction (plain sql.begin)", async () => {
+      const result = await sql.begin(async (tx) => {
+        const [setting] = await tx<{ transaction_read_only: string }[]>`
+          SELECT current_setting('transaction_read_only') AS transaction_read_only
+        `;
+        if (setting?.transaction_read_only !== "on") {
+          return { ok: false, error: "transaction_read_only is not 'on'" };
+        }
+        return { ok: true };
+      });
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe("transaction_read_only is not 'on'");
+    });
   });
 });
