@@ -33,6 +33,10 @@ import {
   MAX_PAYMENTS_PER_REQUEST,
 } from "~/services/matcher.server";
 import { formatPaiseAmount } from "~/lib/aging";
+import { resolvePlan } from "~/services/plan.server";
+import { isGatingEnforced } from "~/services/gating.server";
+import type { PlanKey } from "~/lib/entitlements";
+import { UpgradePrompt } from "~/components/UpgradePrompt";
 
 const PAGE_SIZE = 20;
 
@@ -83,8 +87,16 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       view,
       error: "Shop not found",
       tabCounts: { suggested: 0, unmatched: 0 },
+      planKey: "free" as PlanKey,
+      gatingEnforced: false,
+      storeHandle: shopDomain.replace(".myshopify.com", ""),
+      appHandle: process.env.APP_HANDLE ?? "net-terms-receivables",
     };
   }
+
+  const planData = await resolvePlan(sql, shopDomain);
+  const gatingEnforced = isGatingEnforced();
+  const storeHandle = shopDomain.replace(".myshopify.com", "");
 
   let payments: PaymentSummary[] = [];
   let matches: MatchSummary[] = [];
@@ -199,6 +211,10 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       view,
       error: "Failed to load reconciliation data",
       tabCounts,
+      planKey: planData.plan.key,
+      gatingEnforced,
+      storeHandle,
+      appHandle: process.env.APP_HANDLE ?? "net-terms-receivables",
     };
   }
 
@@ -211,6 +227,10 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     view,
     error: null,
     tabCounts,
+    planKey: planData.plan.key,
+    gatingEnforced,
+    storeHandle,
+    appHandle: process.env.APP_HANDLE ?? "net-terms-receivables",
   };
 };
 
@@ -656,9 +676,15 @@ export default function ReconcilePage() {
     view,
     error,
     tabCounts,
+    planKey,
+    gatingEnforced,
+    storeHandle,
+    appHandle,
   } = useLoaderData<typeof loader>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
+
+  const upgradeUrl = `https://admin.shopify.com/store/${storeHandle}/charges/${appHandle}/pricing_plans`;
 
   return (
     <s-page heading="Payment Reconciliation">
@@ -667,6 +693,18 @@ export default function ReconcilePage() {
           <s-banner tone="critical" heading="Error">
             {error}
           </s-banner>
+        </s-section>
+      )}
+
+      {/* S21: Upgrade prompt for matching feature (requires Starter+) */}
+      {planKey === "free" && (
+        <s-section>
+          <UpgradePrompt
+            currentPlan={planKey}
+            feature="matching"
+            gatingEnforced={gatingEnforced}
+            upgradeUrl={upgradeUrl}
+          />
         </s-section>
       )}
 
