@@ -287,6 +287,7 @@ function parseArgs(args: string[]): {
   since: Date | null;
   until: Date | null;
   shopFilter: string | undefined;
+  // Named argError (not error) to avoid logging-guard false positives on destructuring
   argError?: string;
 } {
   const dryRun = !args.includes("--apply");

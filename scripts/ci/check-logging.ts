@@ -252,7 +252,9 @@ function walkDirectory(
     } else if (entry.isFile()) {
       const relPath = path.relative(rootDir, fullPath);
       const isTestFile = entry.name.endsWith(".test.ts") || entry.name.endsWith(".test.tsx");
-      const isInTestDir = relDir.includes("__tests__") || relDir.includes("/test/");
+      // P3 fix: Match "/test/" as a path segment, not substring. Also match "test" at start/end.
+      const pathSegments = relDir.split(path.sep);
+      const isInTestDir = relDir.includes("__tests__") || pathSegments.includes("test");
       const isTestOrTestDir = isTestFile || isInTestDir;
 
       // TypeScript files
@@ -364,8 +366,8 @@ function analyzeFile(filePath: string): Violation[] {
       if (line.trim().startsWith("//") || line.trim().startsWith("*")) continue;
       // Skip regex patterns (used for validation/redaction)
       if (/\/.*shp[atu]{2}_/.test(line) || /RegExp|\.test\(|\.replace\(/.test(line)) continue;
-      // Skip if it's in a file that handles token redaction
-      if (relPath.includes("log.server") || relPath.includes("sentry")) continue;
+      // Skip if it's in a file that handles token redaction (anchored on /log.server or lib/log)
+      if (/\/log\.server|lib\/log/i.test(relPath) || relPath.includes("sentry")) continue;
 
       violations.push({
         file: relPath,
@@ -920,6 +922,7 @@ function checkSentryCall(
 /**
  * Gap 1: Check Sentry setContext/setExtras argument for identifier/object.
  * Resolves const initializers in same scope.
+ * P2 fix: Fail closed for call expressions, property access, spread - flag as unresolved.
  */
 function checkSentryContextArg(
   arg: ts.Node,
@@ -928,15 +931,31 @@ function checkSentryContextArg(
   relPath: string,
   violations: Violation[]
 ): void {
-  // If it's an object literal, the existing checkObjectLiteral handles it
+  // If it's an object literal, check it and also check spread elements inside
   if (ts.isObjectLiteralExpression(arg)) {
+    // Check for spread elements - they could bring in unknown properties
+    for (const prop of arg.properties) {
+      if (ts.isSpreadAssignment(prop)) {
+        const spreadExpr = prop.expression;
+        const spreadText = spreadExpr.getText(sourceFile);
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(prop.getStart());
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          column: character + 1,
+          rule: "sentry-context-unresolved",
+          message: `Sentry.${methodName} object literal contains spread '...${spreadText}' (inline all properties)`,
+          snippet: truncate(arg.getText(), 100),
+        });
+      }
+    }
     return;
   }
 
   // If it's an identifier, try to resolve it
   if (ts.isIdentifier(arg)) {
     const name = arg.text;
-    
+
     // Check if the identifier is in SAFE_KEY_ALLOWLIST
     if (SAFE_KEY_ALLOWLIST[name]) {
       return;
@@ -945,8 +964,9 @@ function checkSentryContextArg(
     // Try to resolve the const initializer
     const initializer = resolveConstInitializer(arg, sourceFile);
     if (initializer) {
-      // If resolved to an object literal, check it
+      // If resolved to an object literal, check it (including spreads)
       if (ts.isObjectLiteralExpression(initializer)) {
+        checkSentryContextArg(initializer, methodName, sourceFile, relPath, violations);
         checkObjectLiteral(initializer, sourceFile, relPath, violations);
         return;
       }
@@ -962,7 +982,49 @@ function checkSentryContextArg(
       message: `Sentry.${methodName} called with unresolved identifier '${name}' (use inline object literal or add to SAFE_KEY_ALLOWLIST)`,
       snippet: truncate(arg.getText(), 100),
     });
+    return;
   }
+
+  // P2: Fail closed - flag call expressions, property access, and any other unknown forms
+  if (ts.isCallExpression(arg)) {
+    const callText = arg.getText(sourceFile);
+    const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
+    violations.push({
+      file: relPath,
+      line: line + 1,
+      column: character + 1,
+      rule: "sentry-context-unresolved",
+      message: `Sentry.${methodName} called with function result '${truncate(callText, 50)}' (inline the object literal)`,
+      snippet: truncate(callText, 100),
+    });
+    return;
+  }
+
+  if (ts.isPropertyAccessExpression(arg)) {
+    const propText = arg.getText(sourceFile);
+    const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
+    violations.push({
+      file: relPath,
+      line: line + 1,
+      column: character + 1,
+      rule: "sentry-context-unresolved",
+      message: `Sentry.${methodName} called with property access '${propText}' (inline the object literal)`,
+      snippet: truncate(propText, 100),
+    });
+    return;
+  }
+
+  // Any other expression type - fail closed
+  const argText = arg.getText(sourceFile);
+  const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
+  violations.push({
+    file: relPath,
+    line: line + 1,
+    column: character + 1,
+    rule: "sentry-context-unresolved",
+    message: `Sentry.${methodName} called with unresolved expression (use inline object literal)`,
+    snippet: truncate(argText, 100),
+  });
 }
 
 /**
@@ -1406,98 +1468,157 @@ function truncate(text: string, maxLen: number): string {
 // ============================================================================
 
 /**
- * Patterns that indicate test/mock token data (not real secrets).
- * Test files frequently use fake tokens in fixture data.
+ * Real-looking Shopify token pattern for test-file scanning.
+ * Matches shpat_/shpua_/shpss_/shpca_/shppa_ followed by 32 hex-like characters.
+ * If a token matches this pattern AND isn't obviously synthetic, it's flagged.
  */
-const TEST_TOKEN_PATTERNS = [
-  // Test/mock token patterns
-  /_test/i,
-  /test[-_]/i,
-  /mock[-_]?token/i,
-  /fake[-_]?token/i,
-  /[-_]token/i,
-  /token[-_]/i,
-  /legacy[-_]?token/i,
-  /online[-_]?token/i,
-  /offline[-_]?token/i,
-  /valid[-_]?token/i,
-  /bigint[-_]?token/i,
-  /expired[-_]?token/i,
-  /apply[-_]?token/i,
-  /access[-_]?token/i,
-  
-  // Template interpolations with tokens
-  /shp[atu]{2}_token_\$\{/i,
-  /shp[atu]{2}_.*\$\{/i,
-  
-  // Any token that's clearly test data (simple names)
-  /shpat_[a-z_-]+["'`]/i,
-  /shpua_[a-z_-]+["'`]/i,
-  /shpss_[a-z_-]+["'`]/i,
-];
+const REAL_TOKEN_PATTERN = /shp(?:at|ua|ss|ca|pa)_([0-9a-f]{32,})/gi;
 
 /**
- * Patterns that indicate test/mock domain data (not real domains).
- * Test files use these for fixtures and assertions.
- * 
- * In test files, we're very permissive - we only flag domains that look
- * like they could be REAL production domains (not test/mock data).
- * Since test files are not deployed, the risk is lower.
+ * Patterns that indicate a synthetic/fake token body (not a real secret).
+ * Applied to the 32+ char suffix after the prefix.
  */
-const TEST_DOMAIN_PATTERNS = [
-  // Common test patterns
-  /test[-.]?.*\.myshopify\.com/i,
-  /example\.myshopify\.com/i,
-  /fake\.myshopify\.com/i,
-  /placeholder\.myshopify\.com/i,
-  /mock[-.]?.*\.myshopify\.com/i,
-  /shop[12a-z]\.myshopify\.com/i,
-  /qa[-.]?.*\.myshopify\.com/i,
-  /dev[-.]?.*\.myshopify\.com/i,
-  /staging[-.]?.*\.myshopify\.com/i,
-  /demo[-.]?.*\.myshopify\.com/i,
-  /sample[-.]?.*\.myshopify\.com/i,
-  
-  // Template interpolations
-  /\$\{.*\}\.myshopify\.com/i,
-  
-  // Descriptive test domain names
-  /[a-z]+-test.*\.myshopify\.com/i,
-  /sentinel.*\.myshopify\.com/i,
-  /nonexistent.*\.myshopify\.com/i,
-  /unknown.*\.myshopify\.com/i,
-  /deleted[-.]?.*\.myshopify\.com/i,
-  /revoked[-.]?.*\.myshopify\.com/i,
-  /expired[-.]?.*\.myshopify\.com/i,
-  /missing[-.]?.*\.myshopify\.com/i,
-  /other[-.]?.*\.myshopify\.com/i,
-  /empty[-.]?.*\.myshopify\.com/i,
-  /failing[-.]?.*\.myshopify\.com/i,
-  /sensitive[-.]?.*\.myshopify\.com/i,
-  /reinstall[-.]?.*\.myshopify\.com/i,
-  /fresh[-.]?.*\.myshopify\.com/i,
-  /idempotent[-.]?.*\.myshopify\.com/i,
-  /retry[-.]?.*\.myshopify\.com/i,
-  /error[-.]?.*\.myshopify\.com/i,
-  /context[-.]?.*\.myshopify\.com/i,
-  /scopes[-.]?.*\.myshopify\.com/i,
-  /uninstall[-.]?.*\.myshopify\.com/i,
-  /direct[-.]?.*\.myshopify\.com/i,
-  /my[-.]?.*\.myshopify\.com/i,
-  /no[-.]?sessions[-.]?.*\.myshopify\.com/i,
-  /events[-.]?.*\.myshopify\.com/i,
-  /traditional[-.]?.*\.myshopify\.com/i,
-  /customer[-.]?.*\.myshopify\.com/i,
-  /reconcile[-.]?.*\.myshopify\.com/i,
-  /redact[-.]?.*\.myshopify\.com/i,
-  
-  // Known internal/dev stores
-  /net-terms-receivables\.myshopify\.com/i,
-  
-  // Generic patterns (test fixture domains often follow these)
-  /[a-z]+-[a-z]+\.myshopify\.com/i,
-  /[a-z]+\.myshopify\.com/,
-];
+function isSyntheticTokenBody(body: string): boolean {
+  const lower = body.toLowerCase();
+  // Repeated single character: aaaa..., 0000..., ffff...
+  if (/^(.)\1+$/.test(lower)) return true;
+  // Sequential patterns: 1234567890..., abcdef...
+  if (/^0123456789|^123456789|^abcdef|^0{4,}|^f{4,}/.test(lower)) return true;
+  // Contains 'test', 'fake', 'mock', 'xxx', 'placeholder', 'example'
+  if (/test|fake|mock|xxx|placeholder|example|demo|sample/i.test(lower)) return true;
+  // Too short for a real token (real tokens are 32+ chars)
+  if (lower.length < 32) return true;
+  // Short sequential prefixes followed by padding
+  if (/^[0-9]+0{10,}$/.test(lower)) return true;
+  return false;
+}
+
+/**
+ * Check if a line contains a real-looking token (not synthetic test data).
+ * Returns true if the line has what appears to be a real Shopify token.
+ */
+function hasRealLookingToken(line: string): boolean {
+  const matches = line.matchAll(REAL_TOKEN_PATTERN);
+  for (const match of matches) {
+    const body = match[1];
+    if (!isSyntheticTokenBody(body)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Explicit set of fake domain prefixes that are safe in test files.
+ * Only domains starting with these (case-insensitive) are considered fake.
+ * Any other domain is flagged as potentially real.
+ */
+const FAKE_DOMAIN_PREFIXES = new Set([
+  "example",
+  "test",
+  "my-store",
+  "dev-store",
+  "fake",
+  "placeholder",
+  "mock",
+  "demo",
+  "sample",
+  "qa",
+  "staging",
+  "sentinel",
+  "shop1",
+  "shop2",
+  "shopa",
+  "shopb",
+  "shopc",
+]);
+
+/**
+ * TLDs that indicate test/fake domains.
+ */
+const FAKE_TLDS = [".test", ".invalid", ".example", ".localhost"];
+
+/**
+ * Check if a domain is explicitly fake (safe for test files).
+ * A domain is fake if:
+ * 1. Its subdomain contains known test indicators (test, mock, fake, etc.), OR
+ * 2. Its subdomain starts with a known fake prefix, OR
+ * 3. Its subdomain is a generic placeholder (shop-a, shop-1, etc.), OR
+ * 4. It uses a fake TLD (.test, .invalid), OR
+ * 5. It's a template interpolation (${...}.myshopify.com), OR
+ * 6. It's an SQL pattern or template literal interpolation
+ */
+function isFakeDomain(line: string): boolean {
+  // Template interpolation: ${...}.myshopify.com
+  if (/\$\{[^}]+\}\.myshopify\.com/i.test(line)) return true;
+
+  // SQL/template string patterns (e.g., LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'})
+  if (/['"`]\s*[-+%]\s*.*\.myshopify\.com/i.test(line)) return true;
+  if (/\+\s*['"`]\.myshopify\.com/i.test(line)) return true;
+
+  // Email embedded in domain string (e.g., "owner@shop.myshopify.com")
+  if (/@[^@\s]*\.myshopify\.com/i.test(line)) return true;
+
+  // Extract the subdomain from myshopify.com
+  const match = line.match(/([a-z0-9][-_a-z0-9]*)\.myshopify\.com/i);
+  if (match) {
+    const subdomain = match[1].toLowerCase();
+
+    // Check if subdomain starts with a fake prefix
+    for (const prefix of FAKE_DOMAIN_PREFIXES) {
+      if (subdomain === prefix || subdomain.startsWith(prefix + "-") || subdomain.startsWith(prefix + ".")) {
+        return true;
+      }
+    }
+
+    // Check if subdomain CONTAINS test indicators anywhere
+    if (/test|mock|fake|demo|sample|example|placeholder|sentinel|nonexistent|invalid|dummy|acme|evil/i.test(subdomain)) {
+      return true;
+    }
+
+    // Check for generic single-letter or single-digit suffixes: shop-a, shop-1, shop1
+    if (/^shop[-_]?[a-z0-9]$/i.test(subdomain)) {
+      return true;
+    }
+
+    // Check for test suite prefixes like s20-, s13-, s1- etc.
+    if (/^s\d+-/i.test(subdomain)) {
+      return true;
+    }
+
+    // Check for descriptive test patterns at START of subdomain
+    if (/^(dev|qa|staging|other|deleted|revoked|expired|missing|empty|failing|sensitive|reinstall|fresh|idempotent|retry|error|context|scopes|uninstall|direct|traditional|reconcile|redact|unknown|no-sessions|no-context|events|customer|handle|bound|ssr|log|compliance|my-?shop|net-terms|unbound|concurrent|pii|cached|clear)/i.test(subdomain)) {
+      return true;
+    }
+
+    // Check for subdomains ending with -shop (common test naming pattern)
+    if (/-shop$/i.test(subdomain)) {
+      return true;
+    }
+
+    // Check for shop with underscore (shop_name) or camelCase (MyShop)
+    if (/^shop[_A-Z]/i.test(subdomain)) {
+      return true;
+    }
+
+    // Check for numbered shop patterns (my-shop123, shop123, etc.)
+    if (/^(my-?)?shop\d+$/i.test(subdomain)) {
+      return true;
+    }
+
+    // All-uppercase indicates test constant (e.g., SENTINEL_DOMAIN)
+    if (/^[A-Z_]+$/.test(match[1])) {
+      return true;
+    }
+  }
+
+  // Check for fake TLDs
+  for (const tld of FAKE_TLDS) {
+    if (line.toLowerCase().includes(tld)) return true;
+  }
+
+  return false;
+}
 
 /**
  * Assertion and test description patterns.
@@ -1529,48 +1650,50 @@ function analyzeTestFile(testFile: TestFile): Violation[] {
     // Skip comments
     if (line.trim().startsWith("//") || line.trim().startsWith("*")) continue;
 
-    // Check for token prefixes (shpat_, shpua_, shpss_)
+    // Check for token prefixes (shpat_, shpua_, shpss_, shpca_, shppa_)
+    // P1 fix: Decide fake vs real based on the token VALUE, not context words
     if (TOKEN_PREFIX_PATTERN.test(line)) {
       // Skip regex patterns (used for validation/redaction)
       if (/\/.*shp[atu]{2}_/.test(line) || /RegExp|\.test\(|\.replace\(/.test(line)) continue;
       // Skip if it's in a file that handles token redaction
-      if (testFile.relPath.includes("log.server") || testFile.relPath.includes("sentry")) continue;
-      // Skip test/mock token patterns (clearly fake tokens in test data)
-      if (TEST_TOKEN_PATTERNS.some((p) => p.test(line))) continue;
+      if (/\/log\.server|lib\/log/i.test(testFile.relPath) || testFile.relPath.includes("sentry")) continue;
       // Skip assertions about tokens
       if (ASSERTION_PATTERNS.some((p) => p.test(line))) continue;
 
-      violations.push({
-        file: testFile.relPath,
-        line: lineNum,
-        column: 1,
-        rule: "token-prefix",
-        message: "Token prefix pattern found in test file (shpat_/shpua_/shpss_)",
-        snippet: truncate(line, 100),
-      });
+      // P1: Check if the token VALUE looks real (32+ hex chars, not synthetic)
+      if (hasRealLookingToken(line)) {
+        violations.push({
+          file: testFile.relPath,
+          line: lineNum,
+          column: 1,
+          rule: "token-prefix",
+          message: "Real-looking token found in test file (shpat_/shpua_/shpss_/shpca_/shppa_ + 32 hex)",
+          snippet: truncate(line, 100),
+        });
+      }
     }
 
     // Check for myshopify.com domain literal
+    // P1 fix: Only allow explicitly fake domains, flag anything else
     if (DOMAIN_LITERAL_PATTERN.test(line)) {
       // Skip comments
       if (line.trim().startsWith("//") || line.trim().startsWith("*")) continue;
       // Skip validation patterns
       if (VALIDATION_PATTERNS.some((p) => p.test(line))) continue;
-      // Skip if it's in a help/usage/example context
-      if (line.includes("e.g.") || line.includes("example") || line.includes("placeholder")) continue;
-      // Skip test/mock domain patterns (clearly fake domains in test data)
-      if (TEST_DOMAIN_PATTERNS.some((p) => p.test(line))) continue;
       // Skip assertion patterns (tests checking domains are NOT logged)
       if (ASSERTION_PATTERNS.some((p) => p.test(line))) continue;
 
-      violations.push({
-        file: testFile.relPath,
-        line: lineNum,
-        column: 1,
-        rule: "domain-literal",
-        message: "Literal myshopify.com domain in test file",
-        snippet: truncate(line, 100),
-      });
+      // P1: Only allow explicitly fake domains
+      if (!isFakeDomain(line)) {
+        violations.push({
+          file: testFile.relPath,
+          line: lineNum,
+          column: 1,
+          rule: "domain-literal",
+          message: "Real-looking domain in test file (not in fake domain allowlist)",
+          snippet: truncate(line, 100),
+        });
+      }
     }
   }
 
@@ -1610,6 +1733,30 @@ function analyzeTestFileForLoggerMocks(testFile: TestFile): Violation[] {
 }
 
 /**
+ * Mock method patterns that indicate implementation replacement.
+ */
+const MOCK_METHOD_PATTERNS = new Set([
+  "mockImplementation",
+  "mockImplementationOnce",
+  "mockReturnValue",
+  "mockReturnValueOnce",
+  "mockResolvedValue",
+  "mockResolvedValueOnce",
+  "mockRejectedValue",
+  "mockRejectedValueOnce",
+]);
+
+/**
+ * Logger function names that should not be mocked.
+ */
+const LOGGER_FUNCTIONS = new Set(["safeLog", "toErrorCode", "shopHash"]);
+
+/**
+ * Track variable assignments from vi.spyOn for two-statement mock detection.
+ */
+const spyOnAssignments = new Map<string, { methodName: string; node: ts.Node }>();
+
+/**
  * Check if a call expression is mocking the logger.
  */
 function checkLoggerMock(
@@ -1619,14 +1766,15 @@ function checkLoggerMock(
   violations: Violation[]
 ): void {
   const callName = getCallName(call);
-  
-  // Check vi.mock with log.server path
-  if (callName === "vi.mock") {
+
+  // Check vi.mock / vi.doMock / jest.mock / jest.doMock with log.server path
+  if (callName === "vi.mock" || callName === "vi.doMock" || 
+      callName === "jest.mock" || callName === "jest.doMock") {
     const pathArg = call.arguments[0];
     if (pathArg && (ts.isStringLiteral(pathArg) || ts.isNoSubstitutionTemplateLiteral(pathArg))) {
       const pathText = pathArg.text;
-      // Match various forms of log.server import path
-      if (/log\.server|~\/lib\/log|\.\.\/.*lib\/log|app\/lib\/log/i.test(pathText)) {
+      // Match log.server with proper anchoring (not catalog.server, etc.)
+      if (/\/log\.server|lib\/log|^~\/lib\/log|^\.\.\/.*\/log\.server/i.test(pathText)) {
         const { line, character } = sourceFile.getLineAndCharacterOfPosition(call.getStart());
         violations.push({
           file: relPath,
@@ -1640,10 +1788,11 @@ function checkLoggerMock(
       }
     }
 
-    // Check vi.mock factory that replaces safeLog/toErrorCode
+    // Check factory argument (arrow function or function expression)
     const factoryArg = call.arguments[1];
-    if (factoryArg && ts.isArrowFunction(factoryArg)) {
+    if (factoryArg && (ts.isArrowFunction(factoryArg) || ts.isFunctionExpression(factoryArg))) {
       const factoryText = factoryArg.getText(sourceFile);
+      // Check for safeLog/toErrorCode/shopHash replacements
       if (/safeLog\s*:|toErrorCode\s*:|shopHash\s*:/i.test(factoryText)) {
         const { line, character } = sourceFile.getLineAndCharacterOfPosition(call.getStart());
         violations.push({
@@ -1651,7 +1800,21 @@ function checkLoggerMock(
           line: line + 1,
           column: character + 1,
           rule: "no-mock-logger",
-          message: "Test vi.mock factory replaces safeLog/toErrorCode/shopHash. Use the real implementations instead.",
+          message: `Test ${callName} factory replaces safeLog/toErrorCode/shopHash. Use the real implementations instead.`,
+          snippet: truncate(call.getText(sourceFile), 100),
+        });
+        return;
+      }
+      // Check for importOriginal spread with overrides
+      if (/importOriginal|\.\.\..*actual/i.test(factoryText) && 
+          /safeLog|toErrorCode|shopHash/i.test(factoryText)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(call.getStart());
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          column: character + 1,
+          rule: "no-mock-logger",
+          message: `Test ${callName} factory with importOriginal overrides safeLog/toErrorCode/shopHash.`,
           snippet: truncate(call.getText(sourceFile), 100),
         });
         return;
@@ -1659,17 +1822,17 @@ function checkLoggerMock(
     }
   }
 
-  // Check vi.spyOn with safeLog/toErrorCode/shopHash and mockImplementation/mockReturnValue
-  if (callName === "vi.spyOn") {
+  // Check vi.spyOn with safeLog/toErrorCode/shopHash
+  if (callName === "vi.spyOn" || callName === "jest.spyOn") {
     const methodArg = call.arguments[1];
     if (methodArg && ts.isStringLiteral(methodArg)) {
       const methodName = methodArg.text;
-      if (methodName === "safeLog" || methodName === "toErrorCode" || methodName === "shopHash") {
-        // Check if there's a chained mockImplementation/mockReturnValue
-        let parent = call.parent;
+      if (LOGGER_FUNCTIONS.has(methodName)) {
+        // Check if there's a chained mock method
+        let parent: ts.Node = call.parent;
         while (parent && ts.isPropertyAccessExpression(parent)) {
           const propName = parent.name.text;
-          if (propName === "mockImplementation" || propName === "mockReturnValue") {
+          if (MOCK_METHOD_PATTERNS.has(propName)) {
             // Check if the parent is a call (mockImplementation())
             if (parent.parent && ts.isCallExpression(parent.parent)) {
               const { line, character } = sourceFile.getLineAndCharacterOfPosition(call.getStart());
@@ -1686,6 +1849,41 @@ function checkLoggerMock(
           }
           parent = parent.parent;
         }
+
+        // Track for two-statement form: const spy = vi.spyOn(log, "safeLog"); spy.mockImplementation(...)
+        // Check if this is a variable assignment
+        let assignParent: ts.Node = call.parent;
+        while (assignParent) {
+          if (ts.isVariableDeclaration(assignParent) && ts.isIdentifier(assignParent.name)) {
+            spyOnAssignments.set(assignParent.name.text, { methodName, node: call });
+            break;
+          }
+          assignParent = assignParent.parent;
+        }
+      }
+    }
+  }
+
+  // Check for two-statement spy form: spy.mockImplementation(...)
+  // where spy was assigned from vi.spyOn(log, "safeLog")
+  if (ts.isPropertyAccessExpression(call.expression)) {
+    const propName = call.expression.name.text;
+    if (MOCK_METHOD_PATTERNS.has(propName)) {
+      const objExpr = call.expression.expression;
+      if (ts.isIdentifier(objExpr)) {
+        const varName = objExpr.text;
+        const spyInfo = spyOnAssignments.get(varName);
+        if (spyInfo && LOGGER_FUNCTIONS.has(spyInfo.methodName)) {
+          const { line, character } = sourceFile.getLineAndCharacterOfPosition(call.getStart());
+          violations.push({
+            file: relPath,
+            line: line + 1,
+            column: character + 1,
+            rule: "no-mock-logger",
+            message: `Test calls ${propName} on spy of ${spyInfo.methodName}. Use the real implementation instead.`,
+            snippet: truncate(call.getText(sourceFile), 100),
+          });
+        }
       }
     }
   }
@@ -1695,30 +1893,48 @@ function checkLoggerMock(
 // Logger Mock Allowlist
 // ============================================================================
 
-function loadLoggerMockAllowlist(filePath: string): Map<string, string> {
-  const allowlist = new Map<string, string>();
+interface LoggerMockAllowlistResult {
+  entries: Map<string, string>;
+  invalidEntries: Array<{ line: number; text: string; issue: string }>;
+}
+
+function loadLoggerMockAllowlist(filePath: string): LoggerMockAllowlistResult {
+  const entries = new Map<string, string>();
+  const invalidEntries: Array<{ line: number; text: string; issue: string }> = [];
 
   if (!fs.existsSync(filePath)) {
-    return allowlist;
+    return { entries, invalidEntries };
   }
 
   const content = fs.readFileSync(filePath, "utf-8");
-  for (const line of content.split("\n")) {
-    const trimmed = line.trim();
+  const lines = content.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
 
     // Format: path: reason
     const colonIndex = trimmed.indexOf(":");
     if (colonIndex > 0) {
-      const path = trimmed.slice(0, colonIndex).trim();
+      const entryPath = trimmed.slice(0, colonIndex).trim();
       const reason = trimmed.slice(colonIndex + 1).trim();
-      if (path && reason && reason.toLowerCase() !== "legacy") {
-        allowlist.set(path, reason);
+
+      // P3: Fail CI on empty or 'legacy' reason
+      if (!reason) {
+        invalidEntries.push({ line: i + 1, text: trimmed, issue: "empty reason" });
+        continue;
+      }
+      if (reason.toLowerCase() === "legacy") {
+        invalidEntries.push({ line: i + 1, text: trimmed, issue: "reason cannot be 'legacy'" });
+        continue;
+      }
+
+      if (entryPath) {
+        entries.set(entryPath, reason);
       }
     }
   }
 
-  return allowlist;
+  return { entries, invalidEntries };
 }
 
 // ============================================================================
@@ -1805,7 +2021,7 @@ function main(): void {
   const allowlist = loadAllowlist(ALLOWLIST_FILE);
 
   // Load logger mock allowlist
-  const loggerMockAllowlist = loadLoggerMockAllowlist(LOGGER_MOCK_ALLOWLIST_FILE);
+  const { entries: loggerMockAllowlist, invalidEntries: invalidLoggerMockEntries } = loadLoggerMockAllowlist(LOGGER_MOCK_ALLOWLIST_FILE);
 
   let newViolations = 0;
   const overAllowlist: Array<{
@@ -1859,7 +2075,8 @@ function main(): void {
   let shouldFail = false;
 
   if (newViolations === 0 && staleEntries.length === 0 && 
-      newLoggerMockViolations.length === 0 && staleLoggerMockEntries.length === 0) {
+      newLoggerMockViolations.length === 0 && staleLoggerMockEntries.length === 0 &&
+      invalidLoggerMockEntries.length === 0) {
     console.log("\x1b[32m✓ No logging violations found\x1b[0m");
     process.exit(0);
   }
@@ -1920,10 +2137,22 @@ function main(): void {
     console.log(
       `\x1b[31m✗ Found ${staleLoggerMockEntries.length} stale logger-mock-allowlist entry(ies):\x1b[0m\n`
     );
-    for (const { path, reason } of staleLoggerMockEntries) {
-      console.log(`  ${path}: ${reason}`);
+    for (const { path: entryPath, reason } of staleLoggerMockEntries) {
+      console.log(`  ${entryPath}: ${reason}`);
     }
     console.log("\n\x1b[33mTo fix: Remove the stale entry from scripts/ci/logger-mock-allowlist.txt\x1b[0m\n");
+  }
+
+  // P3: Invalid logger mock allowlist entries (empty or 'legacy' reason)
+  if (invalidLoggerMockEntries.length > 0) {
+    shouldFail = true;
+    console.log(
+      `\x1b[31m✗ Found ${invalidLoggerMockEntries.length} invalid logger-mock-allowlist entry(ies):\x1b[0m\n`
+    );
+    for (const { line, text, issue } of invalidLoggerMockEntries) {
+      console.log(`  Line ${line}: ${text} (${issue})`);
+    }
+    console.log("\n\x1b[33mTo fix: Provide a valid reason (not 'legacy' or empty) in scripts/ci/logger-mock-allowlist.txt\x1b[0m\n");
   }
 
   process.exit(shouldFail ? 1 : 0);

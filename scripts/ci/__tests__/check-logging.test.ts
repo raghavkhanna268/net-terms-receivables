@@ -908,18 +908,36 @@ export function test(err: Error) { console.log(\`Failed with code: \${toErrorCod
 
   // =========================================================================
   // Gap 4: Test file scanning for token-prefix and domain-literal only
+  // P1 fix: Now checks token VALUE - only flags real-looking 32+ hex tokens
   // =========================================================================
   describe("Gap 4: Test file scanning", () => {
-    it("fails for token prefix in test file", () => {
+    it("fails for real-looking token in test file (32 hex chars)", () => {
       fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      // Build real-looking token at test generation time (never committed to repo)
+      // This simulates what a developer might accidentally commit
+      const realLookingToken = "shpat_" + "a1b2c3d4e5f67890abcdef1234567890";
       fs.writeFileSync(
         path.join(appDir, "__tests__", "example.test.ts"),
-        `const token = "shpat_1234567890";
+        `const token = "${realLookingToken}";
 export function test() { return token; }`
       );
       const { exitCode, output } = runGuard();
       expect(exitCode).not.toBe(0);
       expect(output).toContain("token-prefix");
+      expect(output).toContain("Real-looking token");
+    });
+
+    it("allows synthetic tokens (short, repeated chars, contains test)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const shortToken = "shpat_1234567890";
+const repeatedToken = "shpat_${"a".repeat(32)}";
+const testToken = "shpat_test_token_1234567890123456";
+export function test() { return shortToken; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
     });
 
     it("does NOT fail for console.log with sensitive data in test file (logging rules skipped)", () => {
@@ -942,6 +960,22 @@ export function test() { return TEST_SHOP; }`
       );
       const { exitCode } = runGuard();
       expect(exitCode).toBe(0);
+    });
+
+    it("fails for real-looking domain in test file (not in fake allowlist)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      // Build real-looking domain at test generation time (never committed to repo)
+      // This simulates what a developer might accidentally commit
+      const realLookingDomain = "bright" + "furniture" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "${realLookingDomain}";
+export function test() { return domain; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+      expect(output).toContain("Real-looking domain");
     });
   });
 

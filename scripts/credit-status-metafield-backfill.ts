@@ -75,6 +75,7 @@ interface ParseArgsResult {
   shopFilter: number | undefined;
   idPrefix: string | undefined;
   expect: number | undefined;
+  // Named argError (not error) to avoid logging-guard false positives on destructuring
   argError?: string;
 }
 
