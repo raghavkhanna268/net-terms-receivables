@@ -32,7 +32,7 @@ FROM s6_dead_letter WHERE dead_lettered_at >= (:'since')::timestamptz
 ORDER BY dead_lettered_at LIMIT 50;
 
 \echo '== Invoice totals by status / past-due bucket / dueBasis (dueAt; overdue_rule = backstop rule dueAt < now()-1d)'
-SELECT i."shopId" AS shop_id, i.status,
+SELECT DENSE_RANK() OVER (ORDER BY i."shopId") AS shop_idx, i.status,
        CASE WHEN i.status <> 'open' THEN '-'
             WHEN i."dueAt" IS NULL THEN 'open_no_due'
             WHEN i."dueAt" < NOW() THEN 'past_due'
@@ -44,7 +44,7 @@ SELECT i."shopId" AS shop_id, i.status,
        COUNT(*) FILTER (WHERE i.status = 'open' AND i.outstanding > 0
                         AND i."dueAt" < NOW() - INTERVAL '1 day') AS overdue_rule_count
 FROM "Invoice" i
-GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4;
+GROUP BY i."shopId", 2, 3, 4 ORDER BY 1, 2, 3, 4;
 
 \echo '== backstop_processed_orders by action/reason (all-time / since redrive start)'
 SELECT action, COALESCE(reason, '(null)') AS reason, COUNT(*) AS total,
