@@ -5,7 +5,9 @@
  * This test runs against the built artifacts to catch any bundler config
  * or import path changes that would pull xlsx into the server.
  *
- * Run after `npm run build` to verify.
+ * IMPORTANT: In CI, this test FAILS if dist/ is absent.
+ * Locally, it skips gracefully to allow running tests without building.
+ * Run `npm run build` before running tests locally to verify the bundle.
  */
 
 import { describe, it, expect } from "vitest";
@@ -13,6 +15,13 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 const DIST_SERVER_DIR = join(process.cwd(), "dist/server/assets");
+
+/**
+ * Check if we're running in CI (GitHub Actions, etc.)
+ */
+function isCI(): boolean {
+  return process.env.CI === "true" || process.env.GITHUB_ACTIONS === "true";
+}
 
 /**
  * Recursively get all .js files in a directory.
@@ -50,7 +59,15 @@ async function buildExists(): Promise<boolean> {
 describe("Build output: no xlsx in server bundle", () => {
   it("server bundle does not contain xlsx code markers", async () => {
     const hasBuild = await buildExists();
+    
     if (!hasBuild) {
+      if (isCI()) {
+        throw new Error(
+          "FAIL: dist/server not found in CI. " +
+          "This test must run after `npm run build`. " +
+          "Ensure the build step runs before tests in CI workflow."
+        );
+      }
       console.log("Skipping: dist/server not found. Run `npm run build` first.");
       return;
     }
@@ -74,7 +91,6 @@ describe("Build output: no xlsx in server bundle", () => {
     ];
 
     for (const file of jsFiles) {
-      // Skip source maps
       if (file.endsWith(".map")) continue;
       
       const content = await readFile(file, "utf-8");
@@ -96,7 +112,15 @@ describe("Build output: no xlsx in server bundle", () => {
 
   it("worker-entry bundle stays under 400 KiB gzip", async () => {
     const hasBuild = await buildExists();
+    
     if (!hasBuild) {
+      if (isCI()) {
+        throw new Error(
+          "FAIL: dist/server not found in CI. " +
+          "This test must run after `npm run build`. " +
+          "Ensure the build step runs before tests in CI workflow."
+        );
+      }
       console.log("Skipping: dist/server not found. Run `npm run build` first.");
       return;
     }
@@ -105,18 +129,19 @@ describe("Build output: no xlsx in server bundle", () => {
     const workerEntry = jsFiles.find((f) => f.includes("worker-entry"));
     
     if (!workerEntry) {
+      if (isCI()) {
+        throw new Error("FAIL: worker-entry not found in build output in CI.");
+      }
       console.log("Skipping: worker-entry not found in build.");
       return;
     }
 
     const content = await readFile(workerEntry);
     
-    // Compress with gzip to check actual deployed size
     const { gzipSync } = await import("node:zlib");
     const gzipped = gzipSync(content);
     const gzipKiB = gzipped.length / 1024;
 
-    // Cloudflare Workers limit is 1 MiB, but we target 400 KiB for headroom
     const BUDGET_KIB = 400;
     
     console.log(`Worker bundle: ${gzipKiB.toFixed(2)} KiB gzip (budget: ${BUDGET_KIB} KiB)`);
@@ -127,16 +152,27 @@ describe("Build output: no xlsx in server bundle", () => {
   it("client bundle DOES contain xlsx (correct split)", async () => {
     const clientDir = join(process.cwd(), "dist/client/assets");
     
+    let hasBuild = false;
     try {
       await stat(clientDir);
+      hasBuild = true;
     } catch {
+      // Not built
+    }
+
+    if (!hasBuild) {
+      if (isCI()) {
+        throw new Error(
+          "FAIL: dist/client not found in CI. " +
+          "This test must run after `npm run build`."
+        );
+      }
       console.log("Skipping: dist/client not found. Run `npm run build` first.");
       return;
     }
 
     const jsFiles = await getJsFiles(clientDir);
 
-    // Should find xlsx in client bundle
     let foundXlsx = false;
     for (const file of jsFiles) {
       const content = await readFile(file, "utf-8");

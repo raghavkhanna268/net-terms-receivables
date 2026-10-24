@@ -1,25 +1,100 @@
 /**
  * Tests for bank statement import endpoint (S14/S15/S16).
  *
- * Tests verify:
- * 1. Action endpoint inserts payments correctly
+ * Tests verify by calling the REAL exported action:
+ * 1. Inserted count matches credits sent
  * 2. Re-importing same rows yields all duplicates
- * 3. Another shop's session can't write or affect rows
- * 4. Oversized and invalid payloads are rejected
- * 5. The matcher job is enqueued after import
- * 6. PII (remitter names, narrations) is never logged
- * 7. Identical same-day credits with different balances are both inserted
- * 8. Invalid UTRs fall back to hash-based dedupe
+ * 3. Two same-day credits with different balancePaise both insert
+ * 4. CHEQUE/ACH non-UTR refs get SYNTH- keys
+ * 5. Cross-shop isolation: shop B's session can't see or affect shop A's rows
+ * 6. Oversized and invalid payloads are rejected
+ * 7. runMatcher is invoked after successful import
+ * 8. PII (remitter names, narrations) is NEVER logged
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi, afterEach } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
-import { validateImportRequest } from "../app.imports";
+import { requestContext } from "~/lib/request-context.server";
+import { action, validateImportRequest } from "../app.imports";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
+/**
+ * Create a mock request with JSON body.
+ */
+function createMockRequest(body: unknown, method = "POST"): Request {
+  return new Request("http://localhost/app/imports", {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * Create mock Shopify context with authenticated session.
+ */
+function createMockContext(shopDomain: string) {
+  return {
+    shopify: {
+      authenticate: {
+        admin: vi.fn().mockResolvedValue({
+          session: { shop: shopDomain },
+        }),
+      },
+    },
+  };
+}
+
+interface ImportActionResult {
+  success: boolean;
+  importId?: string;
+  error?: string;
+  details?: string[];
+  counts?: {
+    inserted: number;
+    duplicates: number;
+    rejected: number;
+    total: number;
+  };
+  matcher?: {
+    paymentsProcessed: number;
+    matchesCreated: number;
+    highConfidenceMatches: number;
+    hasMore: boolean;
+  } | null;
+}
+
+/**
+ * Call the real action inside request context.
+ */
+async function callAction(
+  sql: ReturnType<typeof postgres>,
+  shopDomain: string,
+  body: unknown
+): Promise<Response> {
+  const request = createMockRequest(body);
+  const context = createMockContext(shopDomain);
+  const url = new URL(request.url);
+  
+  return requestContext.run({ getSql: () => sql }, async () => {
+    return action({
+      request,
+      context: context as never,
+      params: {},
+      url,
+      pattern: "/app/imports",
+    });
+  });
+}
+
+/**
+ * Parse response JSON with type.
+ */
+async function parseResponse(response: Response): Promise<ImportActionResult> {
+  return response.json() as Promise<ImportActionResult>;
+}
 
 describeWithDb("Bank Import Action Integration Tests", () => {
   let sql: ReturnType<typeof postgres>;
@@ -27,10 +102,9 @@ describeWithDb("Bank Import Action Integration Tests", () => {
   let testShop2Id: string;
   let TEST_SHOP_DOMAIN: string;
   let TEST_SHOP2_DOMAIN: string;
-
-  // Store original console methods
-  const originalConsoleLog = console.log;
-  const originalConsoleError = console.error;
+  
+  // Spy on matcher to verify it's called
+  let matcherSpy: ReturnType<typeof vi.fn>;
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
@@ -56,10 +130,6 @@ describeWithDb("Bank Import Action Integration Tests", () => {
   });
 
   afterAll(async () => {
-    // Restore console
-    console.log = originalConsoleLog;
-    console.error = originalConsoleError;
-
     if (sql) {
       // Clean up test data
       await sql`DELETE FROM "Payment" WHERE "shopId" IN (${testShopId}, ${testShop2Id})`;
@@ -71,369 +141,483 @@ describeWithDb("Bank Import Action Integration Tests", () => {
 
   beforeEach(async () => {
     // Clean payments and imports before each test
-    await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
-    await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+    await sql`DELETE FROM "Payment" WHERE "shopId" IN (${testShopId}, ${testShop2Id})`;
+    await sql`DELETE FROM "BankImport" WHERE "shopId" IN (${testShopId}, ${testShop2Id})`;
+    
+    // Stub runMatcher to avoid side effects and track invocations
+    matcherSpy = vi.fn().mockResolvedValue({
+      paymentsProcessed: 1,
+      matchesCreated: 0,
+      highConfidenceMatches: 0,
+      hasMore: false,
+    });
+    
+    vi.doMock("~/services/matcher.server", () => ({
+      runMatcher: matcherSpy,
+      MAX_PAYMENTS_PER_REQUEST: 100,
+    }));
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.resetModules();
   });
 
-  describe("Payment insertion via action", () => {
-    it("inserts credit rows correctly", async () => {
-      // We need to dynamically import action to get the fresh module with mocked sql
-      // For now, test via direct SQL insertion verifying the expected data model
-      const now = new Date();
-      const valueDate = new Date("2025-01-15T00:00:00Z");
+  describe("Payment insertion via real action", () => {
+    it("(a) inserts correct count of credits", async () => {
+      const payload = {
+        bank: "HDFC",
+        fileName: "test.csv",
+        credits: [
+          {
+            date: "2025-01-15",
+            amountPaise: 1000000,
+            rail: "NEFT",
+            utr: "HDFCN26296000001",
+            payerName: "ACME Corp",
+            narration: "NEFT CR-ACME CORP-INV001",
+          },
+          {
+            date: "2025-01-16",
+            amountPaise: 2000000,
+            rail: "RTGS",
+            utr: "HDFCR26296000002",
+            payerName: "Beta Inc",
+            narration: "RTGS CR-BETA INC-INV002",
+          },
+        ],
+      };
 
-      // Create bank import
-      const [bankImport] = await sql<{ id: string }[]>`
-        INSERT INTO "BankImport" (
-          "shopId", bank, "fileName", "rowCount", "createdAt"
-        )
-        VALUES (
-          ${testShopId}, 'hdfc', 'test-statement.csv', 2, ${now}
-        )
-        RETURNING id
+      const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      expect(response.status).toBe(200);
+
+      const data = await parseResponse(response);
+      expect(data.success).toBe(true);
+      expect(data.counts?.inserted).toBe(2);
+      expect(data.counts?.duplicates).toBe(0);
+      expect(data.counts?.total).toBe(2);
+
+      // Verify DB state
+      const [count] = await sql<{ c: string }[]>`
+        SELECT COUNT(*)::text AS c FROM "Payment" WHERE "shopId" = ${testShopId}
       `;
-
-      // Insert test payments (simulating what action would do)
-      await sql`
-        INSERT INTO "Payment" (
-          "shopId", "importId", "valueDate", amount, rail, utr,
-          "payerText", narration, status, "createdAt", "updatedAt"
-        )
-        VALUES (
-          ${testShopId},
-          ${bankImport.id},
-          ${valueDate},
-          10000.50,
-          'NEFT',
-          'HDFCN26296000001',
-          'SYNTH CORP PVT LTD',
-          'NEFT CR-SYNTH CORP-INV1001',
-          'unmatched',
-          ${now},
-          ${now}
-        )
-      `;
-
-      // Verify insertion
-      const payments = await sql<{
-        id: string;
-        amount: string;
-        utr: string;
-        rail: string;
-      }[]>`
-        SELECT id, amount::text, utr, rail
-        FROM "Payment"
-        WHERE "shopId" = ${testShopId}
-      `;
-
-      expect(payments).toHaveLength(1);
-      expect(payments[0].utr).toBe("HDFCN26296000001");
-      expect(payments[0].amount).toBe("10000.50");
-      expect(payments[0].rail).toBe("NEFT");
+      expect(parseInt(count.c, 10)).toBe(2);
     });
 
-    it("re-import yields all duplicates via ON CONFLICT", async () => {
-      const now = new Date();
-      const valueDate = new Date("2025-01-15T00:00:00Z");
+    it("(b) re-import yields all duplicates", async () => {
+      const payload = {
+        bank: "HDFC",
+        fileName: "test.csv",
+        credits: [
+          {
+            date: "2025-01-15",
+            amountPaise: 1000000,
+            rail: "NEFT",
+            utr: "HDFCN26296REIMPORT",
+            narration: "NEFT CR-REIMPORT TEST",
+          },
+        ],
+      };
 
-      // Create bank import
-      const [bankImport] = await sql<{ id: string }[]>`
-        INSERT INTO "BankImport" (
-          "shopId", bank, "fileName", "rowCount", "createdAt"
-        )
-        VALUES (
-          ${testShopId}, 'hdfc', 'first-import.csv', 2, ${now}
-        )
-        RETURNING id
-      `;
+      // First import
+      const response1 = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      expect(response1.status).toBe(200);
+      const data1 = await parseResponse(response1);
+      expect(data1.counts?.inserted).toBe(1);
+      expect(data1.counts?.duplicates).toBe(0);
 
-      // First insert
-      await sql`
-        INSERT INTO "Payment" (
-          "shopId", "importId", "valueDate", amount, rail, utr,
-          narration, status, "createdAt", "updatedAt"
-        )
-        VALUES (
-          ${testShopId},
-          ${bankImport.id},
-          ${valueDate},
-          5000.00,
-          'NEFT',
-          'HDFCN26296DEDUPE1',
-          'NEFT CR-DEDUPE TEST',
-          'unmatched',
-          ${now},
-          ${now}
-        )
-      `;
+      // Re-import same data
+      const response2 = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      expect(response2.status).toBe(200);
+      const data2 = await parseResponse(response2);
+      expect(data2.counts?.inserted).toBe(0);
+      expect(data2.counts?.duplicates).toBe(1);
 
-      // Re-import with ON CONFLICT DO NOTHING should return no rows
-      const reimportResult = await sql<{ id: string }[]>`
-        INSERT INTO "Payment" (
-          "shopId", "importId", "valueDate", amount, rail, utr,
-          narration, status, "createdAt", "updatedAt"
-        )
-        VALUES (
-          ${testShopId},
-          ${bankImport.id},
-          ${valueDate},
-          5000.00,
-          'NEFT',
-          'HDFCN26296DEDUPE1',
-          'NEFT CR-DEDUPE TEST RETRY',
-          'unmatched',
-          ${now},
-          ${now}
-        )
-        ON CONFLICT ("shopId", utr) DO NOTHING
-        RETURNING id
-      `;
-
-      // Should return empty (duplicate was skipped)
-      expect(reimportResult).toHaveLength(0);
-
-      // Verify only one payment exists
+      // Verify only 1 payment in DB
       const [count] = await sql<{ c: string }[]>`
-        SELECT COUNT(*)::text AS c
-        FROM "Payment"
-        WHERE "shopId" = ${testShopId} AND utr = 'HDFCN26296DEDUPE1'
+        SELECT COUNT(*)::text AS c FROM "Payment" 
+        WHERE "shopId" = ${testShopId} AND utr = 'HDFCN26296REIMPORT'
       `;
       expect(parseInt(count.c, 10)).toBe(1);
     });
 
-    it("allows same UTR for different shops (cross-shop isolation)", async () => {
-      const now = new Date();
-      const valueDate = new Date("2025-01-15T00:00:00Z");
-      const sharedUtr = "HDFCN26296SHARED1";
+    it("(c) two same-day credits with different balancePaise both insert", async () => {
+      const payload = {
+        bank: "HDFC",
+        fileName: "same-day.csv",
+        credits: [
+          {
+            date: "2025-01-15",
+            amountPaise: 500000,
+            balancePaise: 10000000,
+            rail: "CHEQUE",
+            narration: "CHEQUE DEPOSIT",
+          },
+          {
+            date: "2025-01-15",
+            amountPaise: 500000,
+            balancePaise: 10500000, // Different balance = different hash
+            rail: "CHEQUE",
+            narration: "CHEQUE DEPOSIT",
+          },
+        ],
+      };
 
-      // Create imports for both shops
-      const [import1] = await sql<{ id: string }[]>`
-        INSERT INTO "BankImport" (
-          "shopId", bank, "fileName", "rowCount", "createdAt"
-        )
-        VALUES (${testShopId}, 'hdfc', 'shop1.csv', 1, ${now})
-        RETURNING id
-      `;
+      const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      expect(response.status).toBe(200);
 
-      const [import2] = await sql<{ id: string }[]>`
-        INSERT INTO "BankImport" (
-          "shopId", bank, "fileName", "rowCount", "createdAt"
-        )
-        VALUES (${testShop2Id}, 'hdfc', 'shop2.csv', 1, ${now})
-        RETURNING id
-      `;
+      const data = await parseResponse(response);
+      expect(data.counts?.inserted).toBe(2);
+      expect(data.counts?.duplicates).toBe(0);
 
-      // Insert payment for shop1
-      await sql`
-        INSERT INTO "Payment" (
-          "shopId", "importId", "valueDate", amount, rail, utr,
-          narration, status, "createdAt", "updatedAt"
-        )
-        VALUES (
-          ${testShopId},
-          ${import1.id},
-          ${valueDate},
-          5000.00,
-          'NEFT',
-          ${sharedUtr},
-          'NEFT CR-SHOP1',
-          'unmatched',
-          ${now},
-          ${now}
-        )
-      `;
-
-      // Insert same UTR for shop2 - should succeed
-      await sql`
-        INSERT INTO "Payment" (
-          "shopId", "importId", "valueDate", amount, rail, utr,
-          narration, status, "createdAt", "updatedAt"
-        )
-        VALUES (
-          ${testShop2Id},
-          ${import2.id},
-          ${valueDate},
-          5000.00,
-          'NEFT',
-          ${sharedUtr},
-          'NEFT CR-SHOP2',
-          'unmatched',
-          ${now},
-          ${now}
-        )
-      `;
-
-      // Verify both exist
-      const [count1] = await sql<{ c: string }[]>`
-        SELECT COUNT(*)::text AS c
-        FROM "Payment"
-        WHERE "shopId" = ${testShopId} AND utr = ${sharedUtr}
-      `;
-      const [count2] = await sql<{ c: string }[]>`
-        SELECT COUNT(*)::text AS c
-        FROM "Payment"
-        WHERE "shopId" = ${testShop2Id} AND utr = ${sharedUtr}
-      `;
-
-      expect(parseInt(count1.c, 10)).toBe(1);
-      expect(parseInt(count2.c, 10)).toBe(1);
-
-      // Cleanup shop2 data
-      await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShop2Id}`;
-      await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShop2Id}`;
-    });
-
-    it("inserts two identical same-day credits with different balances (fallback dedupe key)", async () => {
-      const now = new Date();
-      const valueDate = new Date("2025-01-15T00:00:00Z");
-
-      // Create bank import
-      const [bankImport] = await sql<{ id: string }[]>`
-        INSERT INTO "BankImport" (
-          "shopId", bank, "fileName", "rowCount", "createdAt"
-        )
-        VALUES (${testShopId}, 'hdfc', 'identical-credits.csv', 2, ${now})
-        RETURNING id
-      `;
-
-      // Two payments with same amount, date, narration but different synthetic UTRs (hash includes balance)
-      // Simulating server-side generateDedupeKey with different balancePaise
-      await sql`
-        INSERT INTO "Payment" (
-          "shopId", "importId", "valueDate", amount, rail, utr,
-          narration, status, "createdAt", "updatedAt"
-        )
-        VALUES (
-          ${testShopId},
-          ${bankImport.id},
-          ${valueDate},
-          10000.00,
-          'CHEQUE',
-          'SYNTH-sha256:abc123balance100000',
-          'CHEQUE DEPOSIT',
-          'unmatched',
-          ${now},
-          ${now}
-        ),
-        (
-          ${testShopId},
-          ${bankImport.id},
-          ${valueDate},
-          10000.00,
-          'CHEQUE',
-          'SYNTH-sha256:abc123balance200000',
-          'CHEQUE DEPOSIT',
-          'unmatched',
-          ${now},
-          ${now}
-        )
-      `;
-
-      // Verify both were inserted (different balances = different keys)
-      const [count] = await sql<{ c: string }[]>`
-        SELECT COUNT(*)::text AS c
-        FROM "Payment"
-        WHERE "shopId" = ${testShopId} AND narration = 'CHEQUE DEPOSIT'
-      `;
-      expect(parseInt(count.c, 10)).toBe(2);
-    });
-
-    it("invalid UTR falls back to hash (ACH/CHEQUE rails)", async () => {
-      const now = new Date();
-      const valueDate = new Date("2025-01-15T00:00:00Z");
-
-      // Create bank import
-      const [bankImport] = await sql<{ id: string }[]>`
-        INSERT INTO "BankImport" (
-          "shopId", bank, "fileName", "rowCount", "createdAt"
-        )
-        VALUES (${testShopId}, 'hdfc', 'ach-cheques.csv', 2, ${now})
-        RETURNING id
-      `;
-
-      // Two different buyers' cheques with same cheque number
-      // Since cheque numbers aren't valid UTRs, they should get SYNTH- prefix hashes
-      // that include balance to distinguish them
-      await sql`
-        INSERT INTO "Payment" (
-          "shopId", "importId", "valueDate", amount, rail, utr,
-          "payerText", narration, status, "createdAt", "updatedAt"
-        )
-        VALUES (
-          ${testShopId},
-          ${bankImport.id},
-          ${valueDate},
-          5000.00,
-          'CHEQUE',
-          'SYNTH-sha256:buyer1cheque123bal50000',
-          'BUYER ONE',
-          'CHEQUE 000123 DEPOSIT',
-          'unmatched',
-          ${now},
-          ${now}
-        ),
-        (
-          ${testShopId},
-          ${bankImport.id},
-          ${valueDate},
-          5000.00,
-          'CHEQUE',
-          'SYNTH-sha256:buyer2cheque123bal100000',
-          'BUYER TWO',
-          'CHEQUE 000123 DEPOSIT',
-          'unmatched',
-          ${now},
-          ${now}
-        )
-      `;
-
-      // Verify both were inserted (different buyers with same cheque # = different hash keys)
-      const [count] = await sql<{ c: string }[]>`
-        SELECT COUNT(*)::text AS c
-        FROM "Payment"
+      // Verify both inserted with SYNTH- prefix (cheques don't have valid UTRs)
+      const payments = await sql<{ utr: string }[]>`
+        SELECT utr FROM "Payment" 
         WHERE "shopId" = ${testShopId} AND rail = 'CHEQUE'
       `;
-      expect(parseInt(count.c, 10)).toBe(2);
+      expect(payments).toHaveLength(2);
+      expect(payments.every(p => p.utr.startsWith("SYNTH-"))).toBe(true);
+    });
+
+    it("(d) CHEQUE/ACH non-UTR refs get SYNTH- keys", async () => {
+      const payload = {
+        bank: "HDFC",
+        fileName: "cheques.csv",
+        credits: [
+          {
+            date: "2025-01-15",
+            amountPaise: 500000,
+            rail: "CHEQUE",
+            utr: "000123", // Invalid UTR for cheque
+            narration: "CHEQUE 000123 FROM BUYER A",
+          },
+          {
+            date: "2025-01-15",
+            amountPaise: 600000,
+            rail: "ACH",
+            utr: "ACH-REF-456", // Invalid UTR for ACH
+            narration: "ACH CREDIT FROM BUYER B",
+          },
+        ],
+      };
+
+      const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      expect(response.status).toBe(200);
+
+      const data = await parseResponse(response);
+      expect(data.counts?.inserted).toBe(2);
+
+      // Verify all have SYNTH- prefix (no valid UTRs)
+      const payments = await sql<{ utr: string; rail: string }[]>`
+        SELECT utr, rail FROM "Payment" 
+        WHERE "shopId" = ${testShopId} AND rail IN ('CHEQUE', 'ACH')
+      `;
+      expect(payments).toHaveLength(2);
+      expect(payments.every(p => p.utr.startsWith("SYNTH-"))).toBe(true);
+    });
+
+    it("(e) cross-shop isolation: shop B's session can't see or affect shop A's rows", async () => {
+      // Import to shop A
+      const payloadA = {
+        bank: "HDFC",
+        fileName: "shopA.csv",
+        credits: [
+          {
+            date: "2025-01-15",
+            amountPaise: 1000000,
+            rail: "NEFT",
+            utr: "HDFCN26296SHOPA1",
+            narration: "NEFT CR-SHOP A",
+          },
+        ],
+      };
+
+      const responseA = await callAction(sql, TEST_SHOP_DOMAIN, payloadA);
+      expect(responseA.status).toBe(200);
+      const dataA = await parseResponse(responseA);
+      expect(dataA.counts?.inserted).toBe(1);
+
+      // Import same UTR to shop B (should succeed - different shop)
+      const payloadB = {
+        bank: "HDFC",
+        fileName: "shopB.csv",
+        credits: [
+          {
+            date: "2025-01-15",
+            amountPaise: 1000000,
+            rail: "NEFT",
+            utr: "HDFCN26296SHOPA1", // Same UTR!
+            narration: "NEFT CR-SHOP B",
+          },
+        ],
+      };
+
+      const responseB = await callAction(sql, TEST_SHOP2_DOMAIN, payloadB);
+      expect(responseB.status).toBe(200);
+      const dataB = await parseResponse(responseB);
+      expect(dataB.counts?.inserted).toBe(1);
+      expect(dataB.counts?.duplicates).toBe(0);
+
+      // Verify each shop has exactly 1 payment
+      const [countA] = await sql<{ c: string }[]>`
+        SELECT COUNT(*)::text AS c FROM "Payment" WHERE "shopId" = ${testShopId}
+      `;
+      const [countB] = await sql<{ c: string }[]>`
+        SELECT COUNT(*)::text AS c FROM "Payment" WHERE "shopId" = ${testShop2Id}
+      `;
+      expect(parseInt(countA.c, 10)).toBe(1);
+      expect(parseInt(countB.c, 10)).toBe(1);
+    });
+
+    it("(f.1) rejects oversized payload (>1000 rows)", async () => {
+      const credits = Array.from({ length: 1001 }, (_, i) => ({
+        date: "2025-01-15",
+        amountPaise: 1000,
+        rail: "NEFT",
+        narration: `Payment ${i}`,
+      }));
+
+      const payload = {
+        bank: "HDFC",
+        fileName: "large.csv",
+        credits,
+      };
+
+      const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      expect(response.status).toBe(400);
+
+      const data = await parseResponse(response);
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("Validation failed");
+    });
+
+    it("(f.2) rejects invalid payload (negative amount)", async () => {
+      const payload = {
+        bank: "HDFC",
+        fileName: "invalid.csv",
+        credits: [
+          {
+            date: "2025-01-15",
+            amountPaise: -1000,
+            rail: "NEFT",
+            narration: "Negative",
+          },
+        ],
+      };
+
+      const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      expect(response.status).toBe(400);
+
+      const data = await parseResponse(response);
+      expect(data.success).toBe(false);
+    });
+
+    it("(f.3) rejects invalid bank type", async () => {
+      const payload = {
+        bank: "SBI",
+        fileName: "invalid.csv",
+        credits: [
+          {
+            date: "2025-01-15",
+            amountPaise: 1000,
+            rail: "NEFT",
+            narration: "Test",
+          },
+        ],
+      };
+
+      const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      expect(response.status).toBe(400);
     });
   });
 
-  describe("Data validation", () => {
-    it("rejects negative amounts (DB constraint)", async () => {
-      const now = new Date();
-      const valueDate = new Date("2025-01-15T00:00:00Z");
+  describe("runMatcher integration", () => {
+    it("(g) runMatcher is invoked after successful import with inserts", async () => {
+      // Re-import the matcher module to get fresh mock
+      vi.resetModules();
+      
+      // Create a trackable spy
+      const runMatcherCalls: Array<{ shopId: string }> = [];
+      vi.doMock("~/services/matcher.server", () => ({
+        runMatcher: vi.fn(async (_sql: unknown, shopId: string) => {
+          runMatcherCalls.push({ shopId });
+          return {
+            paymentsProcessed: 1,
+            matchesCreated: 0,
+            highConfidenceMatches: 0,
+            hasMore: false,
+          };
+        }),
+        MAX_PAYMENTS_PER_REQUEST: 100,
+      }));
 
-      const [bankImport] = await sql<{ id: string }[]>`
-        INSERT INTO "BankImport" (
-          "shopId", bank, "fileName", "rowCount", "createdAt"
-        )
-        VALUES (${testShopId}, 'hdfc', 'negative-amount.csv', 1, ${now})
-        RETURNING id
-      `;
+      // Need to re-import action to pick up the mock
+      const { action: freshAction } = await import("../app.imports");
 
-      // Attempt to insert negative amount
-      await expect(
-        sql`
-          INSERT INTO "Payment" (
-            "shopId", "importId", "valueDate", amount, rail,
-            narration, status, "createdAt", "updatedAt"
-          )
-          VALUES (
-            ${testShopId},
-            ${bankImport.id},
-            ${valueDate},
-            -1000.00,
-            'NEFT',
-            'NEGATIVE AMOUNT',
-            'unmatched',
-            ${now},
-            ${now}
-          )
-        `
-      ).rejects.toThrow(/Payment_amount_positive/i);
+      const payload = {
+        bank: "HDFC",
+        fileName: "matcher-test.csv",
+        credits: [
+          {
+            date: "2025-01-15",
+            amountPaise: 1000000,
+            rail: "NEFT",
+            utr: "HDFCN26296MATCHER1",
+            narration: "NEFT CR-MATCHER TEST",
+          },
+        ],
+      };
+
+      const request = createMockRequest(payload);
+      const context = createMockContext(TEST_SHOP_DOMAIN);
+      const url = new URL(request.url);
+
+      await requestContext.run({ getSql: () => sql }, async () => {
+        const response = await freshAction({
+          request,
+          context: context as never,
+          params: {},
+          url,
+          pattern: "/app/imports",
+        });
+        expect(response.status).toBe(200);
+        const data = await parseResponse(response);
+        expect(data.counts?.inserted).toBe(1);
+      });
+
+      // Verify matcher was called
+      expect(runMatcherCalls.length).toBe(1);
+      expect(runMatcherCalls[0].shopId).toBe(testShopId);
+    });
+  });
+
+  describe("(h) PII never logged", () => {
+    let consoleLogs: string[] = [];
+    let consoleErrors: string[] = [];
+    let logSpy: ReturnType<typeof vi.spyOn>;
+    let errorSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      consoleLogs = [];
+      consoleErrors = [];
+      logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
+        consoleLogs.push(args.map(String).join(" "));
+      });
+      errorSpy = vi.spyOn(console, "error").mockImplementation((...args) => {
+        consoleErrors.push(args.map(String).join(" "));
+      });
+    });
+
+    afterEach(() => {
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+    });
+
+    const PII_VALUES = [
+      "ACME Corp",
+      "Secret Buyer",
+      "NEFT CR-ACME CORP-INV001",
+      "Payment for invoice 12345",
+      "payer@example.com",
+      "9876543210",
+    ];
+
+    it("successful import logs contain no PII", async () => {
+      const payload = {
+        bank: "HDFC",
+        fileName: "pii-test.csv",
+        credits: [
+          {
+            date: "2025-01-15",
+            amountPaise: 1000000,
+            rail: "NEFT",
+            utr: "HDFCN26296PIITEST",
+            payerName: "ACME Corp",
+            narration: "NEFT CR-ACME CORP-INV001",
+          },
+          {
+            date: "2025-01-16",
+            amountPaise: 2000000,
+            rail: "RTGS",
+            utr: "HDFCR26296PIITEST",
+            payerName: "Secret Buyer",
+            narration: "Payment for invoice 12345",
+          },
+        ],
+      };
+
+      const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      expect(response.status).toBe(200);
+
+      // Check no PII in any log
+      for (const log of [...consoleLogs, ...consoleErrors]) {
+        for (const pii of PII_VALUES) {
+          expect(log).not.toContain(pii);
+        }
+        // Also check field names aren't being logged with values
+        expect(log).not.toMatch(/payerName=\w/);
+        expect(log).not.toMatch(/payerText=\w/);
+        expect(log).not.toMatch(/narration=\w/);
+      }
+    });
+
+    it("duplicate import logs contain no PII", async () => {
+      const payload = {
+        bank: "HDFC",
+        fileName: "pii-dupe.csv",
+        credits: [
+          {
+            date: "2025-01-15",
+            amountPaise: 1000000,
+            rail: "NEFT",
+            utr: "HDFCN26296PIIDUPE",
+            payerName: "ACME Corp",
+            narration: "NEFT CR-ACME CORP-INV001",
+          },
+        ],
+      };
+
+      // First import
+      await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      consoleLogs = [];
+      consoleErrors = [];
+
+      // Re-import (duplicate)
+      const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      expect(response.status).toBe(200);
+
+      for (const log of [...consoleLogs, ...consoleErrors]) {
+        for (const pii of PII_VALUES) {
+          expect(log).not.toContain(pii);
+        }
+      }
+    });
+
+    it("error path logs contain no PII", async () => {
+      // Force a DB error by using invalid shop domain (no shop found)
+      const payload = {
+        bank: "HDFC",
+        fileName: "error-test.csv",
+        credits: [
+          {
+            date: "2025-01-15",
+            amountPaise: 1000000,
+            rail: "NEFT",
+            payerName: "ACME Corp",
+            narration: "NEFT CR-ACME CORP-INV001",
+          },
+        ],
+      };
+
+      const response = await callAction(sql, "nonexistent-shop.myshopify.com", payload);
+      expect(response.status).toBe(404);
+
+      // Verify no PII even in error scenario
+      for (const log of [...consoleLogs, ...consoleErrors]) {
+        for (const pii of PII_VALUES) {
+          expect(log).not.toContain(pii);
+        }
+      }
     });
   });
 });
@@ -463,10 +647,9 @@ describe("Import validation (unit tests)", () => {
   });
 
   it("validates ALL rows (not just first 10)", () => {
-    // Create payload with 15 rows, row 12 has invalid data
     const credits = Array.from({ length: 15 }, (_, i) => ({
       date: "2025-01-15",
-      amountPaise: i === 11 ? -100 : 1000, // Row 12 (index 11) has negative amount
+      amountPaise: i === 11 ? -100 : 1000,
       rail: "NEFT",
       narration: `Payment ${i}`,
     }));
@@ -479,17 +662,15 @@ describe("Import validation (unit tests)", () => {
 
     const result = validateImportRequest(payload);
     expect(result.valid).toBeNull();
-    // Should have error for row 12 (index 11)
     expect(result.errors.some(e => e.path.includes("credits.11"))).toBe(true);
   });
 
   it("caps errors returned at 10 but validates all", () => {
-    // Create payload with 20 invalid rows
     const credits = Array.from({ length: 20 }, () => ({
       date: "invalid-date",
       amountPaise: -1,
       rail: "INVALID",
-      narration: "", // Too short
+      narration: "",
     }));
 
     const payload = {
@@ -500,8 +681,7 @@ describe("Import validation (unit tests)", () => {
 
     const result = validateImportRequest(payload);
     expect(result.valid).toBeNull();
-    // Should have capped errors plus summary
-    expect(result.errors.length).toBeLessThanOrEqual(12); // 10 errors + summary + possible bank/fileName
+    expect(result.errors.length).toBeLessThanOrEqual(12);
   });
 
   it("rejects empty credits array", () => {
@@ -513,7 +693,6 @@ describe("Import validation (unit tests)", () => {
 
     const result = validateImportRequest(payload);
     expect(result.valid).toBeNull();
-    expect(result.errors.length).toBeGreaterThan(0);
   });
 
   it("rejects oversized payload (>1000 rows)", () => {
@@ -577,7 +756,7 @@ describe("Import validation (unit tests)", () => {
       fileName: "statement.csv",
       credits: [
         {
-          date: "15-01-2025", // DD-MM-YYYY instead of YYYY-MM-DD
+          date: "15-01-2025",
           amountPaise: 1000,
           rail: "NEFT",
           narration: "Invalid date",
@@ -597,7 +776,7 @@ describe("Import validation (unit tests)", () => {
         {
           date: "2025-01-15",
           amountPaise: 1000,
-          rail: "SWIFT", // Invalid rail
+          rail: "SWIFT",
           narration: "Invalid rail",
         },
       ],
@@ -609,7 +788,7 @@ describe("Import validation (unit tests)", () => {
 
   it("rejects invalid bank type", () => {
     const payload = {
-      bank: "SBI", // Invalid bank
+      bank: "SBI",
       fileName: "statement.csv",
       credits: [
         {
@@ -633,7 +812,6 @@ describe("Import validation (unit tests)", () => {
         {
           date: "2025-01-15",
           amountPaise: 1000,
-          // missing rail, narration
         },
       ],
     };
@@ -693,124 +871,11 @@ describe("Import validation (unit tests)", () => {
           amountPaise: 1000,
           rail: "NEFT",
           narration: "No dedupe key",
-          // No dedupeKey field
         },
       ],
     };
 
     const result = validateImportRequest(payload);
     expect(result.valid).not.toBeNull();
-  });
-});
-
-describe("PII logging guard", () => {
-  it("log patterns should not contain PII field names", () => {
-    // These are the actual log format strings used in the action
-    const logPatterns = [
-      "[import] Starting import: shop={shopDomain} importId={importId} rows={count}",
-      "[import] Completed: importId={importId} inserted={inserted} duplicates={duplicates}",
-      "[import] Matcher run: shopId={shopId} processed={processed} matches={matches}",
-      "[import] Matcher failed: shopId={shopId} errorName={errorName} code={code}",
-      "[import] Import failed: shop={shopDomain} errorName={errorName} code={code}",
-    ];
-    
-    for (const pattern of logPatterns) {
-      expect(pattern).not.toContain("payerName");
-      expect(pattern).not.toContain("payerText");
-      expect(pattern).not.toContain("narration");
-      expect(pattern).not.toContain("remitter");
-    }
-  });
-
-  it("error logs should use errorName/code, not err.message", () => {
-    // Verify the log patterns don't include err.message which could contain data
-    const errorLogPatterns = [
-      "[import] Matcher failed: shopId={shopId} errorName={errorName} code={code}",
-      "[import] Import failed: shop={shopDomain} errorName={errorName} code={code}",
-    ];
-    
-    for (const pattern of errorLogPatterns) {
-      expect(pattern).not.toContain("err.message");
-      expect(pattern).not.toContain("error.message");
-      expect(pattern).toContain("errorName");
-    }
-  });
-});
-
-describe("Console spy PII tests", () => {
-  let consoleLogs: string[] = [];
-  let consoleErrors: string[] = [];
-  const originalLog = console.log;
-  const originalError = console.error;
-
-  beforeEach(() => {
-    consoleLogs = [];
-    consoleErrors = [];
-    console.log = (...args: unknown[]) => {
-      consoleLogs.push(args.map(String).join(" "));
-    };
-    console.error = (...args: unknown[]) => {
-      consoleErrors.push(args.map(String).join(" "));
-    };
-  });
-
-  afterEach(() => {
-    console.log = originalLog;
-    console.error = originalError;
-  });
-
-  it("simulated import logs contain no PII", () => {
-    // Simulate what the action logs
-    const shopDomain = "test.myshopify.com";
-    const importId = "import-123";
-    const shopId = "shop-456";
-    const rowCount = 5;
-    const inserted = 4;
-    const duplicates = 1;
-    const processed = 4;
-    const matches = 2;
-
-    // These match the actual log statements in the action
-    console.log(`[import] Starting import: shop=${shopDomain} importId=${importId} rows=${rowCount}`);
-    console.log(`[import] Completed: importId=${importId} inserted=${inserted} duplicates=${duplicates}`);
-    console.log(`[import] Matcher run: shopId=${shopId} processed=${processed} matches=${matches}`);
-
-    // PII values that should NEVER appear
-    const piiValues = [
-      "ACME Corp",
-      "John Doe",
-      "NEFT CR-ACME CORP-INV001",
-      "payer@example.com",
-      "9876543210",
-    ];
-
-    for (const log of consoleLogs) {
-      for (const pii of piiValues) {
-        expect(log).not.toContain(pii);
-      }
-      // Also verify no PII field names appear (indicating we're logging the wrong thing)
-      expect(log).not.toContain("payerText");
-      expect(log).not.toContain("payerName");
-      expect(log).not.toContain("narration=");
-    }
-  });
-
-  it("simulated error logs contain no PII", () => {
-    const shopDomain = "test.myshopify.com";
-    const shopId = "shop-456";
-
-    // Simulate error logging (matching actual action code)
-    const err = new Error("Some error");
-    const errCode = "SOME_CODE";
-    
-    console.error(`[import] Matcher failed: shopId=${shopId} errorName=${err.name} code=${errCode}`);
-    console.error(`[import] Import failed: shop=${shopDomain} errorName=${err.name} code=${errCode}`);
-
-    for (const log of consoleErrors) {
-      // Should not contain actual error message content
-      expect(log).not.toContain("Some error");
-      // Should contain errorName and code patterns
-      expect(log).toMatch(/errorName=\w+/);
-    }
   });
 });
