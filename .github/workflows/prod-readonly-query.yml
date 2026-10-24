@@ -104,4 +104,5 @@ jobs:
             sudo apt-get update -qq
             sudo apt-get install -y -qq postgresql-client
           fi
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
           psql -X -q -v ON_ERROR_STOP=1 -v "msg_ids=${MSG_IDS}" -v "since=${SINCE}" -v "location_id=${LOCATION_ID}" -f "$FILE" "$DATABASE_URL"
