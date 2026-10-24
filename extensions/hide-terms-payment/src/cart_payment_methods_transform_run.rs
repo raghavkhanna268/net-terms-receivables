@@ -487,6 +487,64 @@ mod tests {
     }
 
     // =========================================================================
+    // Missing/Null $app:credit_status metafield = ALLOW (fail-open, nothing hidden)
+    // These tests verify that seed CompanyLocations without the metafield
+    // don't have payment methods hidden (deferred payment remains visible).
+    // =========================================================================
+
+    #[test]
+    fn test_missing_credit_status_metafield_shows_all_payment_methods() {
+        // When $app:credit_status is missing (null), ALL payment methods should be visible.
+        // This is the fail-open behavior required for seed CompanyLocations
+        // that haven't had their metafield synced yet.
+        let input = make_b2b_input(None, &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Missing credit_status metafield must show all payment methods (nothing hidden)");
+    }
+
+    #[test]
+    fn test_customer_missing_credit_status_metafield_shows_all_payment_methods() {
+        // Tagged customer with null $app:credit_status should see all payment methods.
+        let input = make_customer_input(None, &default_payment_methods(), None);
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Customer with missing credit_status metafield must show all payment methods");
+    }
+
+    #[test]
+    fn test_null_json_value_shows_all_payment_methods() {
+        // Even if the metafield object exists but jsonValue is null
+        let metafield_null = "null";
+        let location_metafield = format!(r#"{{ "metafield": {{ "jsonValue": {} }} }}"#, metafield_null);
+        let input = format!(
+            r#"{{
+                "cart": {{
+                    "buyerIdentity": {{
+                        "customer": null,
+                        "purchasingCompany": {{
+                            "location": {}
+                        }}
+                    }}
+                }},
+                "paymentMethods": [
+                    {{ "id": "pm1", "name": "Deferred Payment" }}
+                ],
+                "paymentCustomization": null
+            }}"#,
+            location_metafield
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Null jsonValue must show all payment methods (fail-open)");
+    }
+
+    #[test]
+    fn test_empty_object_metafield_shows_all_payment_methods() {
+        // Empty object {} should fail-open (no schemaVersion = not held)
+        let input = make_b2b_input(Some("{}"), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Empty object metafield must show all payment methods (fail-open)");
+    }
+
+    // =========================================================================
     // Edge Cases
     // =========================================================================
 
