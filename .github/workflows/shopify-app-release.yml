@@ -45,6 +45,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: shopify-release
+    # bash -eo pipefail for every run step, so `cmd | tee` cannot mask a failure.
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout
@@ -96,6 +100,7 @@ jobs:
       - name: Run Rust tests (credit-check-validation)
         working-directory: extensions/credit-check-validation
         run: |
+          set -o pipefail
           cargo test --verbose 2>&1 | tee test-output.txt
           echo ""
           echo "=== Test Summary ==="
@@ -104,6 +109,7 @@ jobs:
       - name: Run Rust tests (hide-terms-payment)
         working-directory: extensions/hide-terms-payment
         run: |
+          set -o pipefail
           cargo test --verbose 2>&1 | tee test-output.txt
           echo ""
           echo "=== Test Summary ==="
@@ -193,7 +199,7 @@ jobs:
           echo "release=$([ "$RELEASE" = "true" ] && echo true || echo false)"
           LOG="$RUNNER_TEMP/deploy.log"
           rc=0
-          npx -y @shopify/cli@4.9.4 "${args[@]}" > "$LOG" 2>&1 || rc=$?
+          ./node_modules/.bin/shopify "${args[@]}" > "$LOG" 2>&1 || rc=$?
           # Print only version/status/error lines with URLs, emails and hosts redacted.
           sed -E -e 's#https?://[^ )]+#<url>#g' \
                  -e 's#[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+#<email>#g' \

@@ -36,6 +36,7 @@ def scratch(mutate):
     d = tempfile.mkdtemp()
     shutil.copy(os.path.join(ROOT, "shopify.app.toml"), d)
     shutil.copy(os.path.join(ROOT, "wrangler.jsonc"), d)
+    shutil.copy(os.path.join(ROOT, "package.json"), d)
     shutil.copytree(os.path.join(ROOT, "extensions"), os.path.join(d, "extensions"),
                     ignore=shutil.ignore_patterns("target", "node_modules"))
     os.makedirs(os.path.join(d, "scripts", "ci"))
@@ -81,10 +82,21 @@ if scratch(add_ext) == 0:
 if scratch(lambda d: edit(os.path.join(d, ".github/workflows/shopify-app-release.yml"),
                           "--allow-updates", "--allow-updates --allow-deletes")) == 0:
     fails.append("--allow-deletes not failed")
+# 10. Missing pipefail default fails.
+if scratch(lambda d: edit(os.path.join(d, ".github/workflows/shopify-app-release.yml"),
+                          "        shell: bash", "        shell: sh")) == 0:
+    fails.append("missing bash/pipefail default not failed")
+# 11. Ad-hoc npx CLI fails.
+if scratch(lambda d: edit(os.path.join(d, ".github/workflows/shopify-app-release.yml"),
+                          "./node_modules/.bin/shopify ", "npx -y @shopify/cli@4.9.4 ")) == 0:
+    fails.append("ad-hoc npx CLI not failed")
+# 12. Unpinned devDependency fails.
+if scratch(lambda d: edit(os.path.join(d, "package.json"), '"@shopify/cli": "4.9.4"', '"@shopify/cli": "^4.9.4"')) == 0:
+    fails.append("unpinned CLI devDependency not failed")
 
 if fails:
     print("shopify release guards self-test: FAIL")
     for f in fails:
         print(" -", f)
     sys.exit(1)
-print("shopify release guards self-test: OK (13/13)")
+print("shopify release guards self-test: OK (16/16)")

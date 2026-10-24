@@ -18,6 +18,7 @@ Prints only booleans, counts and scope names (scope names are public config).
 Usage: shopify_release_guards.py [repo_root]
 """
 import glob
+import json
 import os
 import re
 import sys
@@ -117,6 +118,9 @@ def expected_extension_handles(root):
 
 
 FORBIDDEN_DEPLOY_FLAGS = ("--allow-deletes", "SHOPIFY_FLAG_ALLOW_DELETES", "--force", "SHOPIFY_FLAG_FORCE")
+# The CLI must come from the lockfile (devDependency), never an ad-hoc npx download.
+FORBIDDEN_CLI_SOURCES = ("npx -y", "npx --yes", "@shopify/cli@")
+PINNED_CLI_VERSION = "4.9.4"
 
 
 def main(root):
@@ -195,6 +199,28 @@ def main(root):
             ok = False
         else:
             print("deploy_flags_guard: PASS")
+
+        # Pipefail: every run step must use bash (-eo pipefail) so `| tee` cannot mask failures.
+        has_bash_default = re.search(r"^    defaults:\n      run:\n        shell: bash\s*$", body, re.M) is not None
+        print(f"pipefail_guard: job_default_shell_bash={str(has_bash_default).lower()}")
+        if not has_bash_default:
+            print("pipefail_guard: FAIL")
+            ok = False
+        else:
+            print("pipefail_guard: PASS")
+
+        bad_src = [f for f in FORBIDDEN_CLI_SOURCES if f in body]
+        pkg_path = os.path.join(root, "package.json")
+        pinned = None
+        if os.path.exists(pkg_path):
+            pinned = json.load(open(pkg_path)).get("devDependencies", {}).get("@shopify/cli")
+        pin_ok = pinned == PINNED_CLI_VERSION
+        print(f"cli_pin_guard: devdependency_exact={str(pin_ok).lower()} adhoc_npx={str(bool(bad_src)).lower()}")
+        if bad_src or not pin_ok:
+            print("cli_pin_guard: FAIL")
+            ok = False
+        else:
+            print("cli_pin_guard: PASS")
     return 0 if ok else 1
 
 
