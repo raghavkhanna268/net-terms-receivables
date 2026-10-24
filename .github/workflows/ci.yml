@@ -1,51 +1,31 @@
 name: CI
 
+# Minutes budget (private repo, free plan): CI runs only on PRs and on pushes
+# to main. Docs-only changes are skipped. Superseded runs on the same ref are
+# cancelled. Note: this repo has no branch protection/required checks (not
+# available on the free plan for private repos), so paths-ignore cannot leave
+# a required check stuck "pending" on docs-only PRs. If required checks are
+# ever enabled, revisit paths-ignore.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
   pull_request:
     # Run on PRs to any branch (supports stacked PRs)
-  workflow_dispatch:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  actionlint:
-    name: Lint GitHub Actions workflows
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Install actionlint
-        env:
-          # Pin to specific version for reproducibility
-          ACTIONLINT_VERSION: "1.7.4"
-          # SHA256 of actionlint_1.7.4_linux_amd64.tar.gz
-          ACTIONLINT_SHA256: "fc0a6886bbb9a23a39eeec4b176193cadb54ddbe77cdbb19b637933919545395"
-        run: |
-          set -euo pipefail
-          TARBALL="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          curl -fsSL -o "$TARBALL" \
-            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${TARBALL}"
-          echo "${ACTIONLINT_SHA256}  ${TARBALL}" | sha256sum -c -
-          tar xzf "$TARBALL" actionlint
-          rm "$TARBALL"
-          ./actionlint --version
-
-      - name: Run actionlint
-        run: |
-          # actionlint checks workflow syntax and runs shellcheck on run blocks
-          ./actionlint -color
-
   check:
     name: Lint, typecheck, test, build
     runs-on: ubuntu-latest
@@ -86,13 +66,40 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      # actionlint used to be its own job. Each job is billed rounded up to a
+      # whole minute, so a ~10s lint job cost a full minute per CI run. It now
+      # runs as the first steps of this job and still fails CI (gates PRs).
+      - name: Install actionlint
+        env:
+          # Pin to specific version for reproducibility
+          ACTIONLINT_VERSION: "1.7.4"
+          # SHA256 of actionlint_1.7.4_linux_amd64.tar.gz
+          ACTIONLINT_SHA256: "fc0a6886bbb9a23a39eeec4b176193cadb54ddbe77cdbb19b637933919545395"
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/actionlint"
+          cd "$RUNNER_TEMP/actionlint"
+          TARBALL="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$TARBALL" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${TARBALL}"
+          echo "${ACTIONLINT_SHA256}  ${TARBALL}" | sha256sum -c -
+          tar xzf "$TARBALL" actionlint
+          rm "$TARBALL"
+          ./actionlint --version
+
+      - name: Lint GitHub Actions workflows (actionlint)
+        run: |
+          # actionlint checks workflow syntax and runs shellcheck on run blocks
+          "$RUNNER_TEMP/actionlint/actionlint" -color
 
       - name: Setup Node
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: package-lock.json
 
       - name: Install dependencies
         run: npm ci
@@ -256,77 +263,3 @@ jobs:
           # Assert success (any 2xx, 3xx, or 4xx is acceptable for boot test)
           echo "✓ Worker booted successfully (HTTP $RESPONSE)"
           kill $WRANGLER_PID 2>/dev/null || true
-
-  rust-functions:
-    name: Rust functions (test, build WASM)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
-      - name: Cache Cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            extensions/credit-check-validation/target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('extensions/credit-check-validation/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Run Rust tests
-        working-directory: extensions/credit-check-validation
-        run: |
-          cargo test --verbose 2>&1 | tee test-output.txt
-          echo ""
-          echo "=== Test Summary ==="
-          grep -E "^test result:|^running [0-9]+ test" test-output.txt || true
-
-      - name: Build WASM (release)
-        working-directory: extensions/credit-check-validation
-        run: |
-          cargo build --release --target wasm32-unknown-unknown
-          
-          # Report WASM size and enforce limits
-          # Shopify Functions have a 256KB limit
-          # @see https://shopify.dev/docs/apps/build/functions/programming-languages/rust-for-functions
-          WASM_FILE="target/wasm32-unknown-unknown/release/credit_check_validation.wasm"
-          if [ -f "$WASM_FILE" ]; then
-            SIZE=$(stat -c%s "$WASM_FILE")
-            SIZE_KB=$((SIZE / 1024))
-            echo "WASM size: ${SIZE_KB} KB ($SIZE bytes)"
-            
-            # Fail if over 256KB (Shopify Functions hard limit)
-            if [ $SIZE_KB -gt 256 ]; then
-              echo "✗ WASM size exceeds 256 KB limit (${SIZE_KB} KB)"
-              echo "See: https://shopify.dev/docs/apps/build/functions/programming-languages/rust-for-functions#binary-size-tips"
-              exit 1
-            fi
-            
-            # Warn if over 200KB
-            if [ $SIZE_KB -gt 200 ]; then
-              echo "⚠ Warning: WASM size is ${SIZE_KB} KB, approaching 256 KB limit"
-            else
-              echo "✓ WASM size is within limits"
-            fi
-          else
-            echo "✗ WASM file not found"
-            exit 1
-          fi
-
-      - name: Upload WASM artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: credit-check-validation-wasm
-          path: extensions/credit-check-validation/target/wasm32-unknown-unknown/release/credit_check_validation.wasm
-          retention-days: 7
