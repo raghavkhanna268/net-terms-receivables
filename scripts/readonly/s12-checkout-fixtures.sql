@@ -16,7 +16,7 @@ SELECT json_build_object(
   'hold_state',            ba."holdState",
   'manual_hold',           ba."manualHold",
   'bypass',                ba.bypass,
-  'hold_reason_code',      ba."holdReasonCode",
+  'hold_reason_code',      CASE WHEN ba."holdReasonCode" ~ '^[A-Z0-9_]{1,40}$' THEN ba."holdReasonCode" WHEN ba."holdReasonCode" IS NULL THEN NULL ELSE '<other>' END,
   'overdue',               EXISTS (
                              SELECT 1 FROM "Invoice" i
                              WHERE i."buyerAccountId" = ba.id
