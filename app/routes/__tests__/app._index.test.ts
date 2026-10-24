@@ -691,12 +691,12 @@ describeWithDb("app._index over-limit queries (DB integration)", () => {
 
     // Create invoices for the accounts (outstanding in rupees, will be converted to paise)
     await sql`
-      INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", name, outstanding, status, "createdAt", "updatedAt")
+      INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", name, total, outstanding, "issuedAt", status, "createdAt", "updatedAt")
       VALUES
-        (${"inv-active-1-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, ${"acc-active-1-" + TEST_SUFFIX}, 'INV-001', 1000.00, 'open', NOW(), NOW()),
-        (${"inv-active-2-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, ${"acc-active-2-" + TEST_SUFFIX}, 'INV-002', 2000.00, 'open', NOW(), NOW()),
-        (${"inv-gated-1-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, ${"acc-gated-1-" + TEST_SUFFIX}, 'INV-003', 3000.00, 'open', NOW(), NOW()),
-        (${"inv-gated-2-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, ${"acc-gated-2-" + TEST_SUFFIX}, 'INV-004', 4000.00, 'open', NOW(), NOW())
+        (${"inv-active-1-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, ${"acc-active-1-" + TEST_SUFFIX}, 'INV-001', 1000.00, 1000.00, NOW(), 'open', NOW(), NOW()),
+        (${"inv-active-2-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, ${"acc-active-2-" + TEST_SUFFIX}, 'INV-002', 2000.00, 2000.00, NOW(), 'open', NOW(), NOW()),
+        (${"inv-gated-1-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, ${"acc-gated-1-" + TEST_SUFFIX}, 'INV-003', 3000.00, 3000.00, NOW(), 'open', NOW(), NOW()),
+        (${"inv-gated-2-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, ${"acc-gated-2-" + TEST_SUFFIX}, 'INV-004', 4000.00, 4000.00, NOW(), 'open', NOW(), NOW())
     `;
   });
 
