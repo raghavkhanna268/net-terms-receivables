@@ -1,9 +1,12 @@
-import type { LoaderFunctionArgs, HeadersFunction } from "react-router";
+import type { LoaderFunctionArgs } from "react-router";
 
 import privacyMarkdown from "../../docs/privacy.md?raw";
 
 /**
- * Public /privacy route - renders docs/privacy.md as HTML.
+ * Public /privacy RESOURCE route - renders docs/privacy.md as HTML.
+ *
+ * This is a RESOURCE ROUTE (no default export), so the loader's Response
+ * is returned directly to the client, not decoded as loader data.
  *
  * NO AUTHENTICATION REQUIRED. This route:
  * - Does not call authenticate.admin
@@ -15,19 +18,17 @@ import privacyMarkdown from "../../docs/privacy.md?raw";
  */
 
 /**
- * Cache-Control for the privacy page.
- * - public: no user-specific content (no auth)
- * - max-age=3600: browser caches for 1 hour
- */
-export const headers: HeadersFunction = () => ({
-  "Cache-Control": "public, max-age=3600",
-});
-
-/**
  * Simple markdown-to-HTML converter for Workers.
  *
- * Handles: headings, bold, italic, links, code, horizontal rules,
+ * Handles: headings, bold, links, code spans, code blocks, horizontal rules,
  * tables, lists (ordered and unordered), paragraphs.
+ *
+ * Key design choices:
+ * - Code spans (`code`) are extracted FIRST and protected from emphasis processing
+ * - Underscore emphasis (_text_) is only applied at word boundaries, not inside
+ *   identifiers like snake_case or s8_tagged_customers
+ * - Asterisk emphasis (*text*) requires whitespace boundaries, not attached to
+ *   identifiers like email* or displayName*
  *
  * This is intentionally minimal to keep the Worker bundle small.
  * It does NOT add any dependencies.
@@ -47,20 +48,32 @@ function markdownToHtml(md: string): string {
       .replace(/"/g, "&quot;");
 
   const processInline = (text: string): string => {
-    let result = escapeHtml(text);
-    // Bold: **text** or __text__
+    const codeSpans: string[] = [];
+
+    let result = text.replace(/`([^`]+)`/g, (_match, code) => {
+      const placeholder = `\x00CODE${codeSpans.length}\x00`;
+      codeSpans.push(`<code>${escapeHtml(code)}</code>`);
+      return placeholder;
+    });
+
+    result = escapeHtml(result);
+
     result = result.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
     result = result.replace(/__(.+?)__/g, "<strong>$1</strong>");
-    // Italic: *text* or _text_ (not already bold)
-    result = result.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, "<em>$1</em>");
-    result = result.replace(/(?<!_)_(?!_)(.+?)(?<!_)_(?!_)/g, "<em>$1</em>");
-    // Inline code: `code`
-    result = result.replace(/`([^`]+)`/g, "<code>$1</code>");
-    // Links: [text](url)
+
+    result = result.replace(/(?<=^|[\s(])\*(?!\s)([^*]+?)(?<!\s)\*(?=$|[\s,.):])/g, "<em>$1</em>");
+
+    result = result.replace(/(?<=^|[\s(])_(?!\s)([^_]+?)(?<!\s)_(?=$|[\s,.):])/g, "<em>$1</em>");
+
     result = result.replace(
       /\[([^\]]+)\]\(([^)]+)\)/g,
       '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>'
     );
+
+    for (let i = 0; i < codeSpans.length; i++) {
+      result = result.replace(`\x00CODE${i}\x00`, codeSpans[i]);
+    }
+
     return result;
   };
 
@@ -82,7 +95,6 @@ function markdownToHtml(md: string): string {
     const line = lines[i];
     const trimmed = line.trim();
 
-    // Code block
     if (trimmed.startsWith("```")) {
       closeList();
       closeTable();
@@ -101,14 +113,12 @@ function markdownToHtml(md: string): string {
       continue;
     }
 
-    // Empty line
     if (trimmed === "") {
       closeList();
       closeTable();
       continue;
     }
 
-    // Horizontal rule
     if (/^-{3,}$/.test(trimmed) || /^\*{3,}$/.test(trimmed)) {
       closeList();
       closeTable();
@@ -116,18 +126,16 @@ function markdownToHtml(md: string): string {
       continue;
     }
 
-    // Headings
     const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
     if (headingMatch) {
       closeList();
       closeTable();
       const level = headingMatch[1].length;
-      const text = processInline(headingMatch[2]);
-      htmlLines.push(`<h${level}>${text}</h${level}>`);
+      const headingText = processInline(headingMatch[2]);
+      htmlLines.push(`<h${level}>${headingText}</h${level}>`);
       continue;
     }
 
-    // Table row
     if (trimmed.startsWith("|") && trimmed.endsWith("|")) {
       closeList();
       const cells = trimmed
@@ -135,7 +143,6 @@ function markdownToHtml(md: string): string {
         .split("|")
         .map((c) => c.trim());
 
-      // Check if this is a separator row (|---|---|)
       if (cells.every((c) => /^[-:]+$/.test(c))) {
         continue;
       }
@@ -157,7 +164,6 @@ function markdownToHtml(md: string): string {
       continue;
     }
 
-    // Unordered list item
     const ulMatch = trimmed.match(/^[-*]\s+(.+)$/);
     if (ulMatch) {
       closeTable();
@@ -170,7 +176,6 @@ function markdownToHtml(md: string): string {
       continue;
     }
 
-    // Ordered list item
     const olMatch = trimmed.match(/^\d+\.\s+(.+)$/);
     if (olMatch) {
       closeTable();
@@ -183,7 +188,6 @@ function markdownToHtml(md: string): string {
       continue;
     }
 
-    // Paragraph
     closeList();
     closeTable();
     htmlLines.push(`<p>${processInline(trimmed)}</p>`);
@@ -271,10 +275,9 @@ ${htmlContent}
     status: 200,
     headers: {
       "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "public, max-age=3600",
     },
   });
 };
 
-export default function Privacy() {
-  return null;
-}
+export { markdownToHtml as _markdownToHtml };
