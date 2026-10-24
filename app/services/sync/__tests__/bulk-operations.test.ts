@@ -35,11 +35,14 @@ describe("Bulk Operations GraphQL", () => {
       expect(BULK_ORDERS_QUERY).toContain("PurchasingCompany");
     });
 
-    it("only requests customer.id (DPDP compliance)", () => {
-      // Should have customer { id } but not email, name, tags, etc.
-      expect(BULK_ORDERS_QUERY).toMatch(/customer\s*\{\s*id\s*\}/);
+    it("only requests customer id and tags (DPDP compliance)", () => {
+      // Should have customer { id tags } for tag-rule eligibility
+      // Tags are merchant-assigned labels (e.g., "wholesale", "net-terms"), NOT PII
+      expect(BULK_ORDERS_QUERY).toMatch(/customer\s*\{\s*id\s*\n?\s*tags\s*\}/);
+      // Must NOT contain customer PII fields
       expect(BULK_ORDERS_QUERY).not.toContain("customer.email");
       expect(BULK_ORDERS_QUERY).not.toContain("customer.name");
+      expect(BULK_ORDERS_QUERY).not.toContain("customer.phone");
     });
   });
 

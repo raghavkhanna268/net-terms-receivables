@@ -65,7 +65,7 @@ export type EligibilityReason =
   | "ineligible_status"          // Financial status not in eligible list
   | "terminal_status"            // Financial status indicates paid/refunded
   | "no_buyer_account"           // No matching buyer account found
-  | "no_customer"                // Customer not synced yet (no row in s8_tagged_customers)
+  | "no_customer_tags"           // Customer present but tags field missing from payload
   | "retail_order";              // None of (a), (b), (c) matched
 
 /**
@@ -350,58 +350,6 @@ async function findCustomerAccount(
 }
 
 /**
- * Result of looking up customer tags.
- */
-type CustomerTagsResult =
-  | { found: true; tags: string[] }
-  | { found: false };
-
-/**
- * Get customer tags from s8_tagged_customers table.
- *
- * @param sql - postgres.js SQL client
- * @param shopId - Internal shop ID
- * @param customerId - Shopify Customer GID
- * @returns Object with found=true and tags if customer row exists, found=false if not
- */
-async function getCustomerTagsWithStatus(
-  sql: Sql,
-  shopId: string,
-  customerId: string
-): Promise<CustomerTagsResult> {
-  const [row] = await sql<{ tags: string[] }[]>`
-    SELECT tags
-    FROM s8_tagged_customers
-    WHERE shop_id = ${shopId}
-      AND customer_id = ${customerId}
-      AND tag_active = true
-  `;
-
-  if (!row) {
-    return { found: false };
-  }
-
-  return { found: true, tags: row.tags ?? [] };
-}
-
-/**
- * Get customer tags from s8_tagged_customers table (legacy signature).
- * Returns empty array if customer not found.
- *
- * @param sql - postgres.js SQL client
- * @param shopId - Internal shop ID
- * @param customerId - Shopify Customer GID
- */
-async function getCustomerTags(
-  sql: Sql,
-  shopId: string,
-  customerId: string
-): Promise<string[]> {
-  const result = await getCustomerTagsWithStatus(sql, shopId, customerId);
-  return result.found ? result.tags : [];
-}
-
-/**
  * Check if a tag rule matches any customer tags.
  */
 function findMatchingTagRule(
@@ -513,9 +461,8 @@ export async function checkOrderEligibility(
       WHERE id = ${buyerAccountId}
     `;
 
-    const customerTags = order.customer?.id
-      ? await getCustomerTags(sql, shopId, order.customer.id)
-      : [];
+    // Use customer tags from the order payload (not from s8_tagged_customers)
+    const customerTags = order.customer?.tags ?? [];
 
     const dueDate = computeDueDate(
       order,
@@ -607,21 +554,23 @@ export async function checkOrderEligibility(
   }
 
   // Condition (c): Customer matches a configured tag rule
-  if (order.customer?.id && tagRules.length > 0) {
-    const customerTagsResult = await getCustomerTagsWithStatus(sql, shopId, order.customer.id);
+  // Evaluate tag rules against the ORDER's own customer.tags (not s8_tagged_customers)
+  if (tagRules.length > 0 && order.customer?.id) {
+    // Check if tags field is present in the order payload
+    const customerTags = order.customer.tags;
 
-    if (!customerTagsResult.found) {
-      // Customer has no row in s8_tagged_customers - not synced yet
-      // Return retryable so order can be processed once customer webhook is received
+    if (customerTags === undefined) {
+      // Customer present but tags field missing from payload (shouldn't happen)
+      // Return retryable - will become retail_order after max retry attempts
       return {
         eligible: false,
-        reason: "no_customer",
-        explanation: "Customer not synced yet - no row in s8_tagged_customers",
+        reason: "no_customer_tags",
+        explanation: "Customer present but tags field missing from order payload",
         retryable: true,
       };
     }
 
-    const customerTags = customerTagsResult.tags;
+    // Evaluate tag rules directly against order's customer tags
     const matchedRule = findMatchingTagRule(customerTags, tagRules);
 
     if (matchedRule) {
@@ -666,6 +615,7 @@ export async function checkOrderEligibility(
         customerTags,
       };
     }
+    // Customer tags don't match any rule - will fall through to retail_order
   }
 
   // None of the conditions matched

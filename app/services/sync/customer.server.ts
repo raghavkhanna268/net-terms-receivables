@@ -579,12 +579,14 @@ export function findMatchingTagRule(
  * @param sql - postgres.js SQL client
  * @param shop - Shop domain
  * @param customer - Customer data (id, tags, and optional email/displayName)
+ * @param piiMode - How to handle PII fields (default: 'fetched' for bulk with PII enabled)
  * @returns Sync result
  */
 export async function processBulkCustomer(
   sql: Sql,
   shop: string,
-  customer: ShopifyCustomer
+  customer: ShopifyCustomer,
+  piiMode: CustomerPiiMode = "fetched"
 ): Promise<SyncResult> {
   // Get shop with its tag rules
   const [shopRow] = await sql<{ id: string }[]>`
@@ -627,7 +629,6 @@ export async function processBulkCustomer(
   }
 
   // Upsert tagged customer tracking record
-  // Bulk operations use 'fetched' mode - they don't have fallback context
   await upsertTaggedCustomer(
     sql,
     shopId,
@@ -636,7 +637,7 @@ export async function processBulkCustomer(
     true,
     customer.email ?? null,
     customer.displayName ?? null,
-    "fetched"
+    piiMode
   );
 
   // Check if a company account already exists (precedence check)

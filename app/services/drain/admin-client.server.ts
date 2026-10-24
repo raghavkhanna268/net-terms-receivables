@@ -196,11 +196,14 @@ export const DRAFT_ORDER_QUERY = `
 
 /**
  * Fetch an Order by GID.
- * Fetches ids, amounts, statuses, payment terms - no customer PII.
+ * Fetches ids, amounts, statuses, payment terms, customer tags for eligibility.
  *
  * Note: PaymentSchedule.amount returns MoneyV2 directly (not MoneyBag).
  * The deprecated amount field is still used for compatibility; consider
  * migrating to balanceDue/totalBalance in a future update.
+ *
+ * Customer tags are fetched for tag-rule eligibility evaluation. Tags are
+ * not PII (they're merchant-assigned labels like "wholesale", "net-terms").
  */
 export const ORDER_QUERY = `
   query OrderById($id: ID!) {
@@ -251,6 +254,7 @@ export const ORDER_QUERY = `
         }
         customer {
           id
+          tags
         }
       }
     }
