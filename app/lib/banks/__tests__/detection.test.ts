@@ -519,8 +519,23 @@ describe("detection", () => {
       expect(isNarrationContinuation(row)).toBe(true);
     });
 
+    it("returns true for row with empty first cell and narration only", () => {
+      const row = ["", "SYNTHETIC CONTINUATION TEXT", null, null, null, null, null];
+      expect(isNarrationContinuation(row)).toBe(true);
+    });
+
     it("returns false for row with date", () => {
       const row = ["01/10/26", "Normal transaction", "REF", "01/10/26", "", "1000", "101000"];
+      expect(isNarrationContinuation(row)).toBe(false);
+    });
+
+    it("returns false for row with non-date text in first cell", () => {
+      const row = ["BADDATE", "SYNTHETIC NO AMT ROW", null, null, null, null, null];
+      expect(isNarrationContinuation(row)).toBe(false);
+    });
+
+    it("returns false for row with text in first cell even with 2 cells", () => {
+      const row = ["PENDING", "SYNTHETIC HELD TXN"];
       expect(isNarrationContinuation(row)).toBe(false);
     });
 

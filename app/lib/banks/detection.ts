@@ -462,13 +462,23 @@ export function detectFooterRows(sheet: SheetData, dataStartRow: number): Set<nu
 /**
  * Detect if a row is a continuation of the previous row's narration.
  * HDFC often wraps long narrations across multiple rows.
+ *
+ * A row may be treated as narration continuation ONLY if:
+ * - The first cell (date column) is empty
+ * - All amount-like cells are empty
+ * - Very few non-empty cells (just narration text)
  */
 export function isNarrationContinuation(row: (string | number | Date | boolean | null)[]): boolean {
   if (!row || row.length === 0) return false;
 
-  // Count non-empty cells
+  // First cell (date column) must be empty for continuation
+  const firstCell = row[0];
+  if (firstCell !== null && firstCell !== undefined && String(firstCell).trim() !== "") {
+    return false;
+  }
+
+  // Count non-empty cells and check for amount-like values
   let nonEmptyCount = 0;
-  let hasDateLikeFirst = false;
   let hasAmountLike = false;
 
   for (let i = 0; i < row.length; i++) {
@@ -479,11 +489,6 @@ export function isNarrationContinuation(row: (string | number | Date | boolean |
     nonEmptyCount++;
     const str = String(cell).trim();
 
-    // Check if first cell looks like a date
-    if (i === 0 && str.match(/^\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}/)) {
-      hasDateLikeFirst = true;
-    }
-
     // Check if any cell looks like an amount
     if (str.match(/^-?[\d,]+\.?\d*$/)) {
       hasAmountLike = true;
@@ -491,8 +496,8 @@ export function isNarrationContinuation(row: (string | number | Date | boolean |
   }
 
   // Continuation rows typically have:
-  // - No date in first column
+  // - Empty first cell (checked above)
   // - Very few non-empty cells (just narration text)
   // - No amount-like values
-  return !hasDateLikeFirst && nonEmptyCount <= 2 && !hasAmountLike;
+  return nonEmptyCount <= 2 && !hasAmountLike;
 }
