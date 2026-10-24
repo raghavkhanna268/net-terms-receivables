@@ -117,7 +117,6 @@ const SAFE_KEY_ALLOWLIST: Record<string, string> = {
   totalSkipped: "Count of skipped items, not money",
   totalFailures: "Count of failures, not money",
   totalAccountSources: "Count of account sources, not money",
-  total: "Generic count field in stat objects",
   orderCount: "Count of orders, not a money amount",
   invoiceCount: "Count of invoices, not a money amount",
   outstandingCount: "Count of outstanding items, not a money amount",

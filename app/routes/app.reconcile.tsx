@@ -50,6 +50,13 @@ function toSafeView(raw: string): ReconcileView | "other" {
   return VALID_VIEWS.includes(raw as ReconcileView) ? (raw as ReconcileView) : "other";
 }
 
+const VALID_INTENTS = ["run_matcher", "confirm", "reject", "apply", "unmatch"] as const;
+type ReconcileIntent = (typeof VALID_INTENTS)[number];
+
+function toSafeIntent(raw: string): ReconcileIntent | "other" {
+  return VALID_INTENTS.includes(raw as ReconcileIntent) ? (raw as ReconcileIntent) : "other";
+}
+
 interface PaymentSummary {
   id: string;
   amountPaise: string;
@@ -396,12 +403,16 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       }
 
       default:
+        safeLog("warn", "reconcile_unknown_action", {
+          shopId: shop.id,
+          action: toSafeIntent(intent),
+        });
         return { success: false, error: "Unknown action" };
     }
   } catch (err) {
     safeLog("error", "reconcile_action_error", {
       shopId: shop.id,
-      action: intent,
+      action: toSafeIntent(intent),
       err: toErrorCode(err),
     });
     return {

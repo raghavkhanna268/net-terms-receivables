@@ -21,8 +21,6 @@ app/routes/app.imports.tsx:shop-interpolation:1
 # App services - shop interpolation and raw errors
 # =============================================================================
 # plan.server.ts: 10 violations (${shop}, ${shopDomain}, ${activeSubscription.name})
-# - ${shop} interpolations: 8
-# - ${activeSubscription.name}: 2 (Shopify plan names, not person names, but ending with .name)
 app/services/plan.server.ts:shop-interpolation:10
 app/services/plan.server.ts:raw-capture:2
 app/services/plan.server.ts:raw-error-arg:2
@@ -37,31 +35,22 @@ app/services/drain/reconcile-handlers.server.ts:shop-interpolation:2
 app/services/sync/order.server.ts:raw-capture:4
 
 # =============================================================================
-# Scripts - shop interpolation and raw errors
+# Scripts - shop interpolation and domain literals
 # =============================================================================
 # refresh-offline-token.ts: 1 help text with myshopify.com example
 scripts/lib/refresh-offline-token.ts:domain-literal:1
 
 # credit-status-metafield-backfill.ts:
-# - 2 ${grandTotal} interpolations (count metrics, but ends with 'total')
+# - 2 ${grandTotal} interpolations (count but ends with 'total')
 scripts/credit-status-metafield-backfill.ts:shop-interpolation:2
-# - 1 raw error arg
-scripts/credit-status-metafield-backfill.ts:raw-error-arg:1
 
 # seed.ts:
-# - ${shopDomain} placeholder in printDatabaseSeedSQL
-# - ${accountName} seed data in SQL output
-# - ${t.name}, ${preferredRole.name}, ${existingOrder.name} (code-controlled names ending with .name)
-# - ${summary.totalBuyerAccounts}, ${summary.totalAccountSources} (counts, but 'name' in totalAccountSources triggers)
+# - ${shopDomain} placeholder, ${accountName}, code-controlled .name endings
 scripts/seed.ts:shop-interpolation:10
 scripts/seed.ts:domain-literal:1
 
-# backstop-backfill.ts: raw error arg
-scripts/backstop-backfill.ts:raw-error-arg:1
-
 # validate-graphql-schema.ts:
-# - 2 ${errName} interpolations (error name strings)
-# - 17 ${...message} interpolations (code-controlled validation error messages)
+# - 2 ${errName} + 17 ${...message} validation errors
 scripts/validate-graphql-schema.ts:shop-interpolation:19
 
 # =============================================================================
