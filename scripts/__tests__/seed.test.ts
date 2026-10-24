@@ -1041,6 +1041,35 @@ describe("(2) DB seeding idempotent - no duplicate rows", () => {
     // BuyerAccount: unique on (shopId, companyLocationId)
     expect(seedContent).toMatch(/ON CONFLICT \("shopId", "companyLocationId"\) DO UPDATE/);
   });
+
+  it("printDatabaseSeedSQL uses shop-scoped IDs with placeholder", () => {
+    const state = createMockState({
+      currencyCode: "INR",
+    });
+
+    state.companies.set("ACME01", {
+      id: "gid://shopify/Company/123",
+      contactId: "gid://shopify/CompanyContact/789",
+      contactCustomerId: "gid://shopify/Customer/101",
+      locations: new Map([[15, "gid://shopify/CompanyLocation/456"]]),
+      contactRoles: [{ id: "gid://shopify/CompanyContactRole/1", name: "Ordering only" }],
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    
+    printDatabaseSeedSQL(state);
+    
+    const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    logSpy.mockRestore();
+
+    // IDs should contain the placeholder shop id, not a literal "${shopId}"
+    expect(output).toContain("seed-shop-placeholder");
+    expect(output).toContain("seed-source-seed-shop-placeholder-");
+    expect(output).toContain("seed-account-seed-shop-placeholder-");
+    
+    // No uninterpolated template literals should remain in output
+    expect(output).not.toContain("${");
+  });
 });
 
 describe("Tagging strategy", () => {

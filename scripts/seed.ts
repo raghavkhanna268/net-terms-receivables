@@ -3637,7 +3637,7 @@ export function printDatabaseSeedSQL(state: SeedState): void {
   console.log(`-- Upsert AccountSource tag rules (IDs are shop-scoped to avoid cross-shop conflicts)`);
   for (const loc of LOCATION_TERMS) {
     const tag = `${SEED_TAG}-net${loc.dueInDays}`;
-    const sourceId = `seed-source-\${shopId}-${tag}`;
+    const sourceId = `seed-source-${shopId}-${tag}`;
     console.log(`INSERT INTO "AccountSource" (id, "shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")`);
     console.log(`VALUES ('${sourceId}', '${shopId}', '${tag}', ${loc.dueInDays}, NOW(), NOW())`);
     console.log(`ON CONFLICT ("shopId", tag) DO UPDATE SET "defaultTermsDays" = EXCLUDED."defaultTermsDays", "updatedAt" = NOW();`);
@@ -3650,7 +3650,7 @@ export function printDatabaseSeedSQL(state: SeedState): void {
       // Use externalId for account name (PII-free)
       const externalId = `${SEED_PREFIX}${companyKey}`;
       const accountName = `${externalId} - Net ${dueInDays}`;
-      const accountId = `seed-account-\${shopId}-${locationId}`;
+      const accountId = `seed-account-${shopId}-${locationId}`;
       console.log(`INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "defaultTermsDays", "defaultTermsSource", "holdState", "createdAt", "updatedAt")`);
       console.log(`VALUES ('${accountId}', '${shopId}', 'COMPANY', '${company.id}', '${locationId}', '${accountName}', ${dueInDays}, 'explicit', 'OK', NOW(), NOW())`);
       console.log(`ON CONFLICT ("shopId", "companyLocationId") DO UPDATE SET "defaultTermsDays" = EXCLUDED."defaultTermsDays", "defaultTermsSource" = EXCLUDED."defaultTermsSource", "updatedAt" = NOW();`);
