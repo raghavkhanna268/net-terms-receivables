@@ -561,7 +561,7 @@ export async function checkOrderEligibility(
 
     if (customerTags === undefined) {
       // Customer present but tags field missing from payload (shouldn't happen)
-      // Return retryable - will become retail_order after max retry attempts
+      // Return retryable - exhausted retries are dead-lettered (visible and redrivable)
       return {
         eligible: false,
         reason: "no_customer_tags",

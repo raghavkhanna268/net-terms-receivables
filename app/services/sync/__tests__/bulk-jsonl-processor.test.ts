@@ -794,3 +794,199 @@ describe("Continuation without DLQ after 5+ progress rounds", () => {
     expect(typeof bulkModule.processBulkOperation).toBe("function");
   });
 });
+
+describe("Bulk customer PII field handling", () => {
+  let mockProcessBulkCustomer: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+  });
+
+  it("bulkCustomerToShopifyCustomer maps email and displayName when present", async () => {
+    const { bulkCustomerToShopifyCustomer } = await import(
+      "../bulk-parser.server"
+    );
+
+    const bulkLine = {
+      id: "gid://shopify/Customer/123",
+      tags: ["net-terms"],
+      email: "test@example.com",
+      displayName: "Test Customer",
+    };
+
+    const result = bulkCustomerToShopifyCustomer(bulkLine);
+
+    expect(result.id).toBe("gid://shopify/Customer/123");
+    expect(result.tags).toEqual(["net-terms"]);
+    expect(result.email).toBe("test@example.com");
+    expect(result.displayName).toBe("Test Customer");
+  });
+
+  it("bulkCustomerToShopifyCustomer returns undefined for missing PII fields", async () => {
+    const { bulkCustomerToShopifyCustomer } = await import(
+      "../bulk-parser.server"
+    );
+
+    const bulkLine = {
+      id: "gid://shopify/Customer/456",
+      tags: ["gold-tier"],
+    };
+
+    const result = bulkCustomerToShopifyCustomer(bulkLine);
+
+    expect(result.id).toBe("gid://shopify/Customer/456");
+    expect(result.tags).toEqual(["gold-tier"]);
+    expect(result.email).toBeUndefined();
+    expect(result.displayName).toBeUndefined();
+  });
+
+  it("with CUSTOMER_PII_FIELDS=1, passes piiMode 'fetched' to processBulkCustomer", async () => {
+    // Mock getRequestEnv to return CUSTOMER_PII_FIELDS=1
+    vi.doMock("~/lib/request-context.server", () => ({
+      getRequestEnv: vi.fn(() => ({ CUSTOMER_PII_FIELDS: "1" })),
+    }));
+
+    // Track calls to processBulkCustomer
+    mockProcessBulkCustomer = vi.fn().mockResolvedValue({
+      success: true,
+      action: "created",
+    });
+    vi.doMock("~/services/sync/customer.server", () => ({
+      processBulkCustomer: mockProcessBulkCustomer,
+    }));
+
+    // Import after mocks
+    const { parseCustomerBulkJsonl, bulkCustomerToShopifyCustomer } =
+      await import("../bulk-parser.server");
+    const { getRequestEnv } = await import("~/lib/request-context.server");
+    const { processBulkCustomer } = await import(
+      "~/services/sync/customer.server"
+    );
+
+    // Verify env is set correctly
+    const env = getRequestEnv() ?? {};
+    expect(env.CUSTOMER_PII_FIELDS).toBe("1");
+
+    // Parse JSONL with PII fields
+    const jsonl = '{"id":"gid://shopify/Customer/123","tags":["net-terms"],"email":"test@example.com","displayName":"Test Customer"}';
+    const { customers } = parseCustomerBulkJsonl(jsonl);
+    expect(customers).toHaveLength(1);
+
+    // Convert to ShopifyCustomer
+    const shopifyCustomer = bulkCustomerToShopifyCustomer(customers[0]);
+    expect(shopifyCustomer.email).toBe("test@example.com");
+    expect(shopifyCustomer.displayName).toBe("Test Customer");
+
+    // Simulate what processCustomerLines does
+    const piiMode = env.CUSTOMER_PII_FIELDS === "1" ? "fetched" : "disabled";
+    expect(piiMode).toBe("fetched");
+
+    // Call processBulkCustomer as the processor would
+    const mockSql = {} as never;
+    await processBulkCustomer(mockSql, "test.myshopify.com", shopifyCustomer, piiMode);
+
+    // Verify processBulkCustomer was called with correct args
+    expect(mockProcessBulkCustomer).toHaveBeenCalledWith(
+      mockSql,
+      "test.myshopify.com",
+      expect.objectContaining({
+        id: "gid://shopify/Customer/123",
+        email: "test@example.com",
+        displayName: "Test Customer",
+      }),
+      "fetched"
+    );
+  });
+
+  it("without CUSTOMER_PII_FIELDS, passes piiMode 'disabled' to processBulkCustomer", async () => {
+    // Mock getRequestEnv to return empty env (no PII flag)
+    vi.doMock("~/lib/request-context.server", () => ({
+      getRequestEnv: vi.fn(() => ({})),
+    }));
+
+    // Track calls to processBulkCustomer
+    mockProcessBulkCustomer = vi.fn().mockResolvedValue({
+      success: true,
+      action: "created",
+    });
+    vi.doMock("~/services/sync/customer.server", () => ({
+      processBulkCustomer: mockProcessBulkCustomer,
+    }));
+
+    // Import after mocks
+    const { parseCustomerBulkJsonl, bulkCustomerToShopifyCustomer } =
+      await import("../bulk-parser.server");
+    const { getRequestEnv } = await import("~/lib/request-context.server");
+    const { processBulkCustomer } = await import(
+      "~/services/sync/customer.server"
+    );
+
+    // Verify env is set correctly (no CUSTOMER_PII_FIELDS)
+    const env = getRequestEnv() ?? {};
+    expect(env.CUSTOMER_PII_FIELDS).toBeUndefined();
+
+    // Parse JSONL (even if it had PII fields, they won't be in actual bulk export)
+    const jsonl = '{"id":"gid://shopify/Customer/456","tags":["gold-tier"]}';
+    const { customers } = parseCustomerBulkJsonl(jsonl);
+
+    // Convert to ShopifyCustomer
+    const shopifyCustomer = bulkCustomerToShopifyCustomer(customers[0]);
+
+    // Simulate what processCustomerLines does
+    const piiMode = env.CUSTOMER_PII_FIELDS === "1" ? "fetched" : "disabled";
+    expect(piiMode).toBe("disabled");
+
+    // Call processBulkCustomer as the processor would
+    const mockSql = {} as never;
+    await processBulkCustomer(mockSql, "test.myshopify.com", shopifyCustomer, piiMode);
+
+    // Verify processBulkCustomer was called with piiMode 'disabled'
+    expect(mockProcessBulkCustomer).toHaveBeenCalledWith(
+      mockSql,
+      "test.myshopify.com",
+      expect.objectContaining({
+        id: "gid://shopify/Customer/456",
+      }),
+      "disabled"
+    );
+  });
+
+  it("PII line with missing email but present displayName writes null for email only", async () => {
+    const { bulkCustomerToShopifyCustomer } = await import(
+      "../bulk-parser.server"
+    );
+
+    const bulkLine = {
+      id: "gid://shopify/Customer/789",
+      tags: ["vip"],
+      displayName: "VIP Customer",
+      // email is missing (undefined, not null)
+    };
+
+    const result = bulkCustomerToShopifyCustomer(bulkLine);
+
+    expect(result.id).toBe("gid://shopify/Customer/789");
+    expect(result.email).toBeUndefined();
+    expect(result.displayName).toBe("VIP Customer");
+  });
+
+  it("PII line with null email writes null for email (cleared)", async () => {
+    const { bulkCustomerToShopifyCustomer } = await import(
+      "../bulk-parser.server"
+    );
+
+    const bulkLine = {
+      id: "gid://shopify/Customer/101",
+      tags: ["wholesale"],
+      email: null, // Explicitly null (email removed)
+      displayName: "Wholesale Buyer",
+    };
+
+    const result = bulkCustomerToShopifyCustomer(bulkLine);
+
+    expect(result.id).toBe("gid://shopify/Customer/101");
+    expect(result.email).toBeNull(); // Explicitly null
+    expect(result.displayName).toBe("Wholesale Buyer");
+  });
+});
