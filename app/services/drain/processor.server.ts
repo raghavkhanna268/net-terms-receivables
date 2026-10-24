@@ -54,6 +54,7 @@ import {
   startReconcileBulkOperation,
   incrementOrderRefetchNull,
   enqueueReconcileOrders,
+  getManualKeyForBulkOp,
 } from "./reconcile-handlers.server";
 import { toErrorCode, safeLog, shopHash } from "~/lib/log.server";
 
@@ -719,7 +720,10 @@ async function handleBulkOperationsFinish(sql: Sql, message: BulkMessage): Promi
   // The chainToOrders flag is set based on origin='reconcile' and reconcile_stage='companies'
   // from the s6_bulk_operations row, not from webhookId
   if (result.chainToOrders) {
-    await enqueueReconcileOrders(sql, message.shop);
+    // Look up the manualKey from the original RECONCILE_COMPANIES webhookId
+    // For manual runs, this ensures orders uses the same key base (not the date key)
+    const manualKey = await getManualKeyForBulkOp(sql, message.bulkOperationId);
+    await enqueueReconcileOrders(sql, message.shop, manualKey);
   }
 
   return result;

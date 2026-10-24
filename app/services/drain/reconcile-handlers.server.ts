@@ -31,6 +31,39 @@ import {
 } from "~/services/sync/bulk-operations.server";
 
 /**
+ * Extract manualKey from a webhookId if it follows the manual pattern.
+ * Manual pattern: reconcile:<shop>:manual:<timestamp>:<stage>
+ * Returns the "manual:<timestamp>" portion, or undefined for cron pattern.
+ */
+export function extractManualKey(webhookId: string): string | undefined {
+  const match = webhookId.match(/^reconcile:[^:]+:(manual:\d+):/);
+  return match ? match[1] : undefined;
+}
+
+/**
+ * Get the manualKey for a bulk operation by looking up its source webhookId.
+ * Used when chaining from companies to orders after BULK_OPERATIONS_FINISH.
+ *
+ * @param sql - postgres.js SQL client
+ * @param bulkOperationId - The bulk operation GID
+ * @returns The manualKey if this was a manual run, undefined otherwise
+ */
+export async function getManualKeyForBulkOp(
+  sql: Sql,
+  bulkOperationId: string
+): Promise<string | undefined> {
+  const [row] = await sql<{ webhook_id: string }[]>`
+    SELECT webhook_id
+    FROM s6_processed_webhooks
+    WHERE resource_gid = ${bulkOperationId}
+      AND topic = 'RECONCILE_COMPANIES'
+    LIMIT 1
+  `;
+  if (!row) return undefined;
+  return extractManualKey(row.webhook_id);
+}
+
+/**
  * Start a reconcile bulk operation for a shop.
  *
  * Executes a bulkOperationRunQuery mutation and registers the operation
@@ -117,23 +150,37 @@ export async function startReconcileBulkOperation(
  * Enqueue RECONCILE_ORDERS message for a shop.
  * Called after companies reconcile completes to start orders reconcile.
  *
+ * For manual runs, pass the manualKey from the companies message so
+ * orders uses the same key base (allowing retry even if day key is used).
+ *
  * @param sql - postgres.js SQL client
  * @param shop - Shop domain
+ * @param manualKey - Optional manual key base from companies stage
  * @returns Whether the message was enqueued
  */
 export async function enqueueReconcileOrders(
   sql: Sql,
-  shop: string
+  shop: string,
+  manualKey?: string
 ): Promise<boolean> {
-  const today = new Date().toISOString().split("T")[0];
-  const webhookId = `reconcile:${shop}:${today}:orders`;
+  let webhookId: string;
+  if (manualKey) {
+    webhookId = `reconcile:${shop}:${manualKey}:orders`;
+  } else {
+    const today = new Date().toISOString().split("T")[0];
+    webhookId = `reconcile:${shop}:${today}:orders`;
+  }
 
-  const message = {
+  const message: { topic: string; shop: string; webhookId: string; enqueuedAt: string; manualKey?: string } = {
     topic: "RECONCILE_ORDERS",
     shop,
     webhookId,
     enqueuedAt: new Date().toISOString(),
   };
+
+  if (manualKey) {
+    message.manualKey = manualKey;
+  }
 
   await sql`SELECT pgmq.send('s6_sync', ${sql.json(message)})`;
 

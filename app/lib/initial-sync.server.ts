@@ -126,15 +126,19 @@ export async function getInitialSyncState(
 }
 
 /**
- * Generate a manual webhookId for initial sync.
+ * Generate a manual key base and webhookId for initial sync.
  * Format: reconcile:<shop>:manual:<timestamp>:companies
  *
  * Uses a timestamp instead of date to allow multiple manual retries per day.
  * The drain accepts any webhookId format.
+ *
+ * Returns both the manualKey (e.g. "manual:123456") and the full webhookId.
  */
-function makeManualWebhookId(shopDomain: string): string {
+function makeManualWebhookId(shopDomain: string): { manualKey: string; webhookId: string } {
   const timestamp = Date.now();
-  return `reconcile:${shopDomain}:manual:${timestamp}:companies`;
+  const manualKey = `manual:${timestamp}`;
+  const webhookId = `reconcile:${shopDomain}:${manualKey}:companies`;
+  return { manualKey, webhookId };
 }
 
 /**
@@ -187,7 +191,7 @@ export async function enqueueInitialSync(
     return { enqueued: false, reason: "in_progress" };
   }
 
-  const webhookId = makeManualWebhookId(shopDomain);
+  const { manualKey, webhookId } = makeManualWebhookId(shopDomain);
   const now = new Date().toISOString();
 
   const message: ReconcileMessage = {
@@ -195,6 +199,7 @@ export async function enqueueInitialSync(
     shop: shopDomain,
     webhookId,
     enqueuedAt: now,
+    manualKey,
   };
 
   await sql`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sql.json(message)})`;
