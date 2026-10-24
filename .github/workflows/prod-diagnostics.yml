@@ -80,6 +80,15 @@ on:
         description: "UTC timestamp when redrive started (for post_redrive_verify, e.g. 2026-10-24T10:00:00Z)"
         required: false
         type: string
+      drain_cron:
+        description: "NOT read-only unless none: pause/resume ONLY the s10_drain_every_minute pg_cron job (cron.alter_job active=false/true)"
+        required: false
+        default: "none"
+        type: choice
+        options:
+          - none
+          - pause
+          - resume
 
 permissions:
   contents: read
@@ -839,6 +848,58 @@ jobs:
           FROM "Shop" s
           WHERE s."uninstalledAt" IS NULL;
           EOSQL
+
+      - name: Drain cron control
+        # Runs before DLQ Redrive so pause can take effect first in the same run.
+        if: ${{ inputs.drain_cron == 'pause' || inputs.drain_cron == 'resume' }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          DRAIN_CRON: ${{ inputs.drain_cron }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL_MIGRATIONS secret not set (required for drain_cron)"
+            exit 1
+          fi
+
+          case "$DRAIN_CRON" in
+            pause)  TARGET_ACTIVE=false ;;
+            resume) TARGET_ACTIVE=true ;;
+            *) echo "::error::drain_cron must be none|pause|resume"; exit 1 ;;
+          esac
+
+          echo "=== Drain cron control: $DRAIN_CRON ==="
+
+          # Scoped to the single job named s10_drain_every_minute; never reads or prints cron.job.command.
+          # Fails (no change) unless exactly one such job exists.
+          RESULT=$(psql -X -v ON_ERROR_STOP=1 -v target_active="$TARGET_ACTIVE" -t -A "$DATABASE_URL" <<'EOSQL'
+          DO $$
+          DECLARE n int;
+          BEGIN
+            SELECT count(*) INTO n FROM cron.job WHERE jobname = 's10_drain_every_minute';
+            IF n <> 1 THEN
+              RAISE EXCEPTION 'expected exactly 1 s10_drain_every_minute job, found %', n;
+            END IF;
+          END $$;
+          SELECT cron.alter_job(
+            job_id := (SELECT jobid FROM cron.job WHERE jobname = 's10_drain_every_minute'),
+            active := :'target_active'::boolean
+          );
+          SELECT json_build_object(
+            'jobid', jobid,
+            'jobname', jobname,
+            'schedule', schedule,
+            'active', active
+          )
+          FROM cron.job
+          WHERE jobname = 's10_drain_every_minute';
+          EOSQL
+          )
+
+          echo "s10_drain_every_minute after alter_job:"
+          echo "$RESULT" | tail -n 1 | jq .
+          echo "::notice::drain_cron=$DRAIN_CRON applied to s10_drain_every_minute"
 
       - name: DLQ Redrive
         if: ${{ inputs.redrive_dlq }}
