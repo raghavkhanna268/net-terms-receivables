@@ -39,8 +39,16 @@ import { resolvePlan } from "~/services/plan.server";
 import { isGatingEnforced } from "~/services/gating.server";
 import type { PlanKey } from "~/lib/entitlements";
 import { UpgradePrompt } from "~/components/UpgradePrompt";
+import { safeLog, toErrorCode } from "~/lib/log.server";
 
 const PAGE_SIZE = 20;
+
+const VALID_VIEWS = ["suggested", "unmatched", "confirmed", "pushing"] as const;
+type ReconcileView = (typeof VALID_VIEWS)[number];
+
+function toSafeView(raw: string): ReconcileView | "other" {
+  return VALID_VIEWS.includes(raw as ReconcileView) ? (raw as ReconcileView) : "other";
+}
 
 interface PaymentSummary {
   id: string;
@@ -147,7 +155,10 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       pushing: parseInt(pushingCount?.count ?? "0", 10),
     };
   } catch (err) {
-    console.error("[app.reconcile] Error getting tab counts or plan:", err);
+    safeLog("error", "reconcile_tab_counts_error", {
+      shopId: shop.id,
+      err: toErrorCode(err),
+    });
   }
 
   try {
@@ -262,7 +273,11 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       totalCount = result.totalCount;
     }
   } catch (err) {
-    console.error("[app.reconcile] Error loading data:", err);
+    safeLog("error", "reconcile_loader_error", {
+      shopId: shop.id,
+      stage: toSafeView(view),
+      err: toErrorCode(err),
+    });
     return {
       shopCurrency: shop.currency,
       payments: [],
@@ -384,8 +399,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         return { success: false, error: "Unknown action" };
     }
   } catch (err) {
-    // P2.6: Log details server-side, return generic message to client
-    console.error("[app.reconcile] Action error:", err);
+    safeLog("error", "reconcile_action_error", {
+      shopId: shop.id,
+      action: intent,
+      err: toErrorCode(err),
+    });
     return {
       success: false,
       error: "Action failed",

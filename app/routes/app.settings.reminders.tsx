@@ -33,6 +33,7 @@ import {
   OFFSET_MIN,
   OFFSET_MAX,
 } from "~/services/reminders.server";
+import { safeLog, toErrorCode } from "~/lib/log.server";
 
 interface ReminderRule {
   id: string;
@@ -86,7 +87,10 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     dailyUsage = counts.daily;
     monthlyUsage = counts.monthly;
   } catch (err) {
-    console.error("[app.settings.reminders] Failed to fetch send counts:", err);
+    safeLog("error", "reminders_send_counts_error", {
+      shopId: shop.id,
+      err: toErrorCode(err),
+    });
     usageError = true;
   }
 
@@ -212,7 +216,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         return { success: false, error: "Unknown action" };
     }
   } catch (err) {
-    console.error("[app.settings.reminders] Action error:", err);
+    safeLog("error", "reminders_action_error", {
+      shopId: shop.id,
+      action: intent,
+      err: toErrorCode(err),
+    });
     return { success: false, error: "Action failed" };
   }
 };
