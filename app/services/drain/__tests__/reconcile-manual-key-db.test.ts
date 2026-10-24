@@ -104,7 +104,7 @@ describeWithDb("reconcile manual key propagation (DB-backed)", () => {
         VALUES (${manualWebhookId}, 'RECONCILE_COMPANIES', ${bulkOpId}, NOW())
       `;
 
-      const result = await getManualKeyForBulkOp(sql, bulkOpId);
+      const result = await getManualKeyForBulkOp(sql, bulkOpId, TEST_SHOP_DOMAIN);
 
       expect(result).toBe("manual:1729785600000");
     });
@@ -120,7 +120,7 @@ describeWithDb("reconcile manual key propagation (DB-backed)", () => {
         VALUES (${cronWebhookId}, 'RECONCILE_COMPANIES', ${bulkOpId}, NOW())
       `;
 
-      const result = await getManualKeyForBulkOp(sql, bulkOpId);
+      const result = await getManualKeyForBulkOp(sql, bulkOpId, TEST_SHOP_DOMAIN);
 
       expect(result).toBeUndefined();
     });
@@ -130,7 +130,24 @@ describeWithDb("reconcile manual key propagation (DB-backed)", () => {
 
       const bulkOpId = `gid://shopify/BulkOperation/unknown-${TEST_SUFFIX}`;
 
-      const result = await getManualKeyForBulkOp(sql, bulkOpId);
+      const result = await getManualKeyForBulkOp(sql, bulkOpId, TEST_SHOP_DOMAIN);
+
+      expect(result).toBeUndefined();
+    });
+
+    it("returns undefined when another shop has the same bulk op GID (cross-shop isolation)", async () => {
+      const { getManualKeyForBulkOp } = await import("../reconcile-handlers.server");
+
+      const bulkOpId = `gid://shopify/BulkOperation/cross-shop-${TEST_SUFFIX}`;
+      const otherShop = `other-shop-${TEST_SUFFIX}.myshopify.com`;
+      const otherShopWebhookId = `reconcile:${otherShop}:manual:1729785600000:companies`;
+
+      await sql`
+        INSERT INTO s6_processed_webhooks (webhook_id, topic, resource_gid, processed_at)
+        VALUES (${otherShopWebhookId}, 'RECONCILE_COMPANIES', ${bulkOpId}, NOW())
+      `;
+
+      const result = await getManualKeyForBulkOp(sql, bulkOpId, TEST_SHOP_DOMAIN);
 
       expect(result).toBeUndefined();
     });
@@ -280,7 +297,7 @@ describeWithDb("reconcile manual key propagation (DB-backed)", () => {
         VALUES (${manualWebhookId}, 'RECONCILE_COMPANIES', ${bulkOpId}, NOW())
       `;
 
-      const lookupKey = await getManualKeyForBulkOp(sql, bulkOpId);
+      const lookupKey = await getManualKeyForBulkOp(sql, bulkOpId, TEST_SHOP_DOMAIN);
       expect(lookupKey).toBe(manualKey);
 
       await enqueueReconcileOrders(sql, TEST_SHOP_DOMAIN, lookupKey);
@@ -344,7 +361,7 @@ describeWithDb("reconcile manual key propagation (DB-backed)", () => {
         VALUES (${cronWebhookId}, 'RECONCILE_COMPANIES', ${bulkOpId}, NOW())
       `;
 
-      const lookupKey = await getManualKeyForBulkOp(sql, bulkOpId);
+      const lookupKey = await getManualKeyForBulkOp(sql, bulkOpId, TEST_SHOP_DOMAIN);
       expect(lookupKey).toBeUndefined();
 
       await enqueueReconcileOrders(sql, TEST_SHOP_DOMAIN, lookupKey);

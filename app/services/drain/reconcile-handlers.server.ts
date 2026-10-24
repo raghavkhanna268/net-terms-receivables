@@ -44,19 +44,26 @@ export function extractManualKey(webhookId: string): string | undefined {
  * Get the manualKey for a bulk operation by looking up its source webhookId.
  * Used when chaining from companies to orders after BULK_OPERATIONS_FINISH.
  *
+ * Scoped to the shop to prevent cross-shop matches if two shops happen to
+ * have the same bulk operation GID (unlikely but defensive).
+ *
  * @param sql - postgres.js SQL client
  * @param bulkOperationId - The bulk operation GID
+ * @param shop - Shop domain (for scoping the lookup)
  * @returns The manualKey if this was a manual run, undefined otherwise
  */
 export async function getManualKeyForBulkOp(
   sql: Sql,
-  bulkOperationId: string
+  bulkOperationId: string,
+  shop: string
 ): Promise<string | undefined> {
+  const prefix = `reconcile:${shop}:`;
   const [row] = await sql<{ webhook_id: string }[]>`
     SELECT webhook_id
     FROM s6_processed_webhooks
     WHERE resource_gid = ${bulkOperationId}
       AND topic = 'RECONCILE_COMPANIES'
+      AND left(webhook_id, length(${prefix})) = ${prefix}
     LIMIT 1
   `;
   if (!row) return undefined;

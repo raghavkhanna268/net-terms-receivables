@@ -722,7 +722,8 @@ async function handleBulkOperationsFinish(sql: Sql, message: BulkMessage): Promi
   if (result.chainToOrders) {
     // Look up the manualKey from the original RECONCILE_COMPANIES webhookId
     // For manual runs, this ensures orders uses the same key base (not the date key)
-    const manualKey = await getManualKeyForBulkOp(sql, message.bulkOperationId);
+    // Shop is passed to scope the lookup and prevent cross-shop matches
+    const manualKey = await getManualKeyForBulkOp(sql, message.bulkOperationId, message.shop);
     await enqueueReconcileOrders(sql, message.shop, manualKey);
   }
 
