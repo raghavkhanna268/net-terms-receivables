@@ -24,13 +24,16 @@ export type PlanKey = "free" | "starter" | "growth" | "scale";
 /**
  * Feature keys for capability gating.
  * Some features are not yet implemented (marked with TODO comments).
+ *
+ * credit_holds is an all-plans feature: holds, recompute, sweep, and the
+ * Validation Function run on every plan. It must never be gated.
  */
 export type FeatureKey =
   | "aging_dashboard"
   | "unlimited_imports"
   | "matching"
   | "reminders" // TODO: Not implemented yet (S-future)
-  | "credit_holds"
+  | "credit_holds" // All-plans feature - never gate
   | "pdf_statements" // TODO: Not implemented yet (S-future)
   | "payer_memory" // TODO: Not implemented yet (S-future)
   | "audit_export"; // TODO: Not implemented yet (S-future)
@@ -63,7 +66,10 @@ const PLAN_CONFIGS: Record<PlanKey, PlanConfig> = {
       companies: 3,
       importsPerMonth: 1,
     },
-    features: new Set<FeatureKey>(["aging_dashboard"]),
+    features: new Set<FeatureKey>([
+      "aging_dashboard",
+      "credit_holds", // All-plans feature
+    ]),
   },
   starter: {
     key: "starter",
@@ -76,6 +82,7 @@ const PLAN_CONFIGS: Record<PlanKey, PlanConfig> = {
       "unlimited_imports",
       "matching",
       "reminders",
+      "credit_holds", // All-plans feature
     ]),
   },
   growth: {
@@ -89,7 +96,7 @@ const PLAN_CONFIGS: Record<PlanKey, PlanConfig> = {
       "unlimited_imports",
       "matching",
       "reminders",
-      "credit_holds",
+      "credit_holds", // All-plans feature
       "pdf_statements",
       "payer_memory",
     ]),
@@ -105,7 +112,7 @@ const PLAN_CONFIGS: Record<PlanKey, PlanConfig> = {
       "unlimited_imports",
       "matching",
       "reminders",
-      "credit_holds",
+      "credit_holds", // All-plans feature
       "pdf_statements",
       "payer_memory",
       "audit_export",
