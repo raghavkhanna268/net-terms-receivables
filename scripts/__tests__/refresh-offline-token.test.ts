@@ -190,6 +190,7 @@ describeWithDb("scripts/lib/refresh-offline-token", () => {
 
     expect(result.success).toBe(false);
     expect(result.errorCode).toBe("no_session");
-    expect(result.error).toContain("nonexistent-shop.myshopify.com");
+    // Error must NOT contain shop domain (redaction rule)
+    expect(result.error).not.toContain("myshopify.com");
   });
 });

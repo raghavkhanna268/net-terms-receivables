@@ -79,8 +79,8 @@ describe("shopify-client.server", () => {
 
       expect(result.success).toBe(false);
       expect(result.retryable).toBe(false);
+      // Error message is generic, doesn't expose which credential is missing (security rule)
       expect(result.error).toContain("credentials not configured");
-      expect(result.error).toContain("SHOPIFY_API_KEY");
       expect(result.retriesAttempted).toBe(0);
       // graphql should never be called
       expect(mockAdmin.graphql).not.toHaveBeenCalled();
@@ -430,7 +430,8 @@ describe("shopify-client.server", () => {
       // Other session errors are retryable - session refresh may recover
       expect(result.retryable).toBe(true);
       expect(result.retriesAttempted).toBe(0);
-      expect(result.error).toContain("session");
+      // Error message is generic (security rule - no raw error messages)
+      expect(result.error).toBe("Session error");
       expect(mockAdmin.graphql).not.toHaveBeenCalled();
     });
   });
@@ -482,7 +483,8 @@ describe("shopify-client.server", () => {
       expect(result.success).toBe(false);
       // P3: GraphQL validation errors are non-retryable - schema mismatch
       expect(result.retryable).toBe(false);
-      expect(result.error).toContain("nonExistentField");
+      // Error message includes error code, not field name (security rule)
+      expect(result.error).toContain("GRAPHQL_VALIDATION_FAILED");
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(1);
     });
   });

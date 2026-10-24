@@ -407,16 +407,19 @@ describe("Real handleCustomer tests with fallback", () => {
 
     expect(result.success).toBe(true);
 
-    // Verify warning was logged
-    expect(consoleWarnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("[customer_pii_access_denied_fallback]")
+    // Verify warning was logged via safeLog (JSON format)
+    expect(consoleWarnSpy).toHaveBeenCalled();
+    const warnCalls = consoleWarnSpy.mock.calls.map((c: unknown[]) => c[0]);
+    const fallbackLog = warnCalls.find((c: unknown) =>
+      typeof c === "string" && c.includes('"event":"customer_pii_access_denied_fallback"')
     );
-    expect(consoleWarnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("shop=test.myshopify.com")
-    );
-    expect(consoleWarnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("fields=email,displayName")
-    );
+    expect(fallbackLog).toBeDefined();
+    // Must NOT contain shop domain (redaction rule)
+    expect(fallbackLog).not.toContain("myshopify.com");
+    // Must contain shopHash (safe identifier)
+    expect(fallbackLog).toContain('"shopHash"');
+    // Must contain fields
+    expect(fallbackLog).toContain('"fields"');
 
     // Verify counter was incremented
     expect(mockIncrementCounter).toHaveBeenCalledWith(mockSql, "test.myshopify.com");

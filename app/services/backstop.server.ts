@@ -362,13 +362,19 @@ async function recordBackstopAlert(
 
 /**
  * Record a failed backstop attempt for alerting (after max retries / DLQ).
+ *
+ * @param sql - Database connection
+ * @param shopId - Shop ID
+ * @param orderGid - Order GID
+ * @param buyerAccountId - Buyer account ID (if known)
+ * @param errorCode - Error code (no PII, no raw message)
  */
 export async function recordBackstopFailure(
   sql: Sql,
   shopId: string,
   orderGid: string,
   buyerAccountId: string | null,
-  error: string,
+  errorCode: string,
 ): Promise<void> {
   await sql`
     INSERT INTO "AuditEvent" ("shopId", actor, type, data, at)
@@ -379,8 +385,8 @@ export async function recordBackstopFailure(
       ${sql.json({
         orderGid,
         buyerAccountId,
-        error,
-        reason: "Backstop failed after all retries - manual intervention required",
+        errorCode,
+        reason: "backstop_max_retries",
       })},
       NOW()
     )

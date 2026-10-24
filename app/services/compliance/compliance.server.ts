@@ -15,6 +15,7 @@
  */
 
 import type { Sql } from "~/lib/db-light.server";
+import { safeLog, shopHash, toErrorCode } from "~/lib/log.server";
 
 // ============================================================================
 // RETENTION CONSTANTS
@@ -668,18 +669,23 @@ export async function sendDataRequestNotification(
 ): Promise<DataRequestEmailResult> {
   const resendApiKey = process.env.RESEND_API_KEY;
   const resendFrom = process.env.RESEND_FROM;
+  const hash = await shopHash(shopDomain);
 
   if (!resendApiKey) {
-    console.log(
-      `data_request_email_skipped shop=${shopDomain} request_id=${requestId} reason=no_api_key`
-    );
+    safeLog("info", "data_request_email_skipped", {
+      shopHash: hash,
+      requestId,
+      reason: "no_api_key",
+    });
     return { sent: false, skippedReason: "no_api_key" };
   }
 
   if (!resendFrom) {
-    console.log(
-      `data_request_email_skipped shop=${shopDomain} request_id=${requestId} reason=no_sender`
-    );
+    safeLog("info", "data_request_email_skipped", {
+      shopHash: hash,
+      requestId,
+      reason: "no_sender",
+    });
     return { sent: false, skippedReason: "no_sender" };
   }
 
@@ -722,23 +728,26 @@ The export will be available for 30 days.
     });
 
     if (!response.ok) {
-      // Log only status code, never response body (may contain PII)
-      console.log(
-        `data_request_email_failed shop=${shopDomain} request_id=${requestId} status=${response.status}`
-      );
+      safeLog("info", "data_request_email_failed", {
+        shopHash: hash,
+        requestId,
+        httpStatus: response.status,
+      });
       return { sent: false, error: `resend_api_error_${response.status}` };
     }
 
-    console.log(
-      `data_request_email_sent shop=${shopDomain} request_id=${requestId}`
-    );
+    safeLog("info", "data_request_email_sent", {
+      shopHash: hash,
+      requestId,
+    });
     return { sent: true };
   } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : "Unknown error";
-    console.log(
-      `data_request_email_failed shop=${shopDomain} request_id=${requestId} error=${errorMessage}`
-    );
-    return { sent: false, error: errorMessage };
+    safeLog("info", "data_request_email_failed", {
+      shopHash: hash,
+      requestId,
+      err: toErrorCode(err),
+    });
+    return { sent: false, error: toErrorCode(err) };
   }
 }
 

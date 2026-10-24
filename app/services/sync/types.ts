@@ -184,8 +184,10 @@ export interface SyncResult {
   entityId?: string;
   /** Reason for skipping (if action is skipped) */
   skipReason?: string;
-  /** Error message if success is false */
+  /** Error message if success is false (internal use only, not exposed externally) */
   error?: string;
+  /** Error code for safe logging/response (no PII) */
+  errorCode?: string;
   /**
    * Whether the error is retryable (for failed results).
    * false = schema/validation/auth error → DLQ immediately

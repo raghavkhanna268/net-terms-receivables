@@ -658,15 +658,17 @@ describe("compliance.server", () => {
 
       expect(result.sent).toBe(false);
       expect(result.skippedReason).toBe("no_api_key");
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("data_request_email_skipped")
+      expect(consoleSpy).toHaveBeenCalled();
+      const logCalls = consoleSpy.mock.calls.map((c) => c[0]);
+      const skipLog = logCalls.find((c: string) =>
+        typeof c === "string" && c.includes('"event":"data_request_email_skipped"')
       );
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("shop=test-shop.myshopify.com")
-      );
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("request_id=req-123")
-      );
+      expect(skipLog).toBeDefined();
+      // Must NOT contain shop domain (redaction rule)
+      expect(skipLog).not.toContain("myshopify.com");
+      // Must contain shopHash and requestId
+      expect(skipLog).toContain('"shopHash"');
+      expect(skipLog).toContain('"requestId":"req-123"');
       expect(mockFetch).not.toHaveBeenCalled();
       consoleSpy.mockRestore();
     });
@@ -768,7 +770,8 @@ describe("compliance.server", () => {
       );
 
       expect(result.sent).toBe(false);
-      expect(result.error).toBe("Network error");
+      // Error code is returned, not raw message (per security rule)
+      expect(result.error).toBe("error");
       consoleSpy.mockRestore();
     });
   });

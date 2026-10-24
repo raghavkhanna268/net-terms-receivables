@@ -1,0 +1,339 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { safeLog, toErrorCode, shopHash, shopHashSync, redactString } from "../log.server";
+
+describe("log.server", () => {
+  describe("safeLog", () => {
+    let consoleLogSpy: ReturnType<typeof vi.spyOn>;
+    let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
+    let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+    let consoleDebugSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      consoleDebugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      consoleLogSpy.mockRestore();
+      consoleWarnSpy.mockRestore();
+      consoleErrorSpy.mockRestore();
+      consoleDebugSpy.mockRestore();
+    });
+
+    it("outputs single-line JSON with event name", () => {
+      safeLog("info", "test_event", { shopId: "shop-123" });
+
+      expect(consoleLogSpy).toHaveBeenCalledOnce();
+      const output = consoleLogSpy.mock.calls[0][0];
+      expect(output).toContain('"event":"test_event"');
+      expect(output).toContain('"shopId":"shop-123"');
+      expect(output).not.toContain("\n");
+    });
+
+    it("uses correct log level", () => {
+      safeLog("debug", "debug_event", {});
+      safeLog("info", "info_event", {});
+      safeLog("warn", "warn_event", {});
+      safeLog("error", "error_event", {});
+
+      expect(consoleDebugSpy).toHaveBeenCalledOnce();
+      expect(consoleLogSpy).toHaveBeenCalledOnce();
+      expect(consoleWarnSpy).toHaveBeenCalledOnce();
+      expect(consoleErrorSpy).toHaveBeenCalledOnce();
+    });
+
+    describe("allowlisted keys pass through", () => {
+      it("allows shopId", () => {
+        safeLog("info", "test", { shopId: "abc-123" });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"shopId":"abc-123"');
+      });
+
+      it("allows shopHash", () => {
+        safeLog("info", "test", { shopHash: "abc123def456" });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"shopHash":"abc123def456"');
+      });
+
+      it("allows webhookId", () => {
+        safeLog("info", "test", { webhookId: "wh-123" });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"webhookId":"wh-123"');
+      });
+
+      it("allows orderGid", () => {
+        safeLog("info", "test", { orderGid: "gid://shopify/Order/123" });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"orderGid":"gid://shopify/Order/123"');
+      });
+
+      it("allows topic", () => {
+        safeLog("info", "test", { topic: "ORDERS_CREATE" });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"topic":"ORDERS_CREATE"');
+      });
+
+      it("allows status", () => {
+        safeLog("info", "test", { status: "success" });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"status":"success"');
+      });
+
+      it("allows errorCode", () => {
+        safeLog("info", "test", { errorCode: "invalid_grant" });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"errorCode":"invalid_grant"');
+      });
+
+      it("allows count fields", () => {
+        safeLog("info", "test", { count: 5, processedCount: 10 });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"count":5');
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"processedCount":10');
+      });
+
+      it("allows boolean fields", () => {
+        safeLog("info", "test", { success: true, retryable: false });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"success":true');
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"retryable":false');
+      });
+
+      it("allows durationMs", () => {
+        safeLog("info", "test", { durationMs: 1500 });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"durationMs":1500');
+      });
+    });
+
+    describe("non-allowlisted keys are redacted", () => {
+      it("redacts unknown string keys", () => {
+        safeLog("info", "test", { message: "Hello world" });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"message":"<redacted>"');
+      });
+
+      it("redacts shop domain value", () => {
+        safeLog("info", "test", { shop: "test-shop.myshopify.com" });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"shop":"<redacted>"');
+      });
+
+      it("preserves numbers for unknown keys", () => {
+        safeLog("info", "test", { unknownNumber: 42 });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"unknownNumber":42');
+      });
+
+      it("preserves booleans for unknown keys", () => {
+        safeLog("info", "test", { unknownBool: true });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"unknownBool":true');
+      });
+    });
+
+    describe("sensitive value patterns are redacted", () => {
+      it("redacts myshopify.com in allowlisted string fields", () => {
+        safeLog("info", "test", { reason: "shop test.myshopify.com not found" });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"<redacted>"');
+      });
+
+      it("redacts email patterns", () => {
+        safeLog("info", "test", { reason: "user@example.com" });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"<redacted>"');
+      });
+
+      it("redacts Bearer tokens", () => {
+        safeLog("info", "test", { reason: "Bearer shpat_abc123" });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"<redacted>"');
+      });
+
+      it("redacts shpat_ tokens in context", () => {
+        safeLog("info", "test", { reason: "token shpat_abcdef123456" });
+        // Token is redacted but surrounding text is preserved
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"token <redacted>"');
+      });
+
+      it("redacts shpua_ tokens in context", () => {
+        safeLog("info", "test", { reason: "token shpua_abcdef123456" });
+        // Token is redacted but surrounding text is preserved
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"token <redacted>"');
+      });
+
+      it("redacts shpss_ tokens in context", () => {
+        safeLog("info", "test", { reason: "token shpss_abcdef123456" });
+        // Token is redacted but surrounding text is preserved
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"token <redacted>"');
+      });
+
+      it("redacts JWT-like patterns", () => {
+        safeLog("info", "test", { reason: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U" });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"<redacted>"');
+      });
+    });
+
+    describe("nested values", () => {
+      it("handles nested objects - non-allowlisted keys are fully redacted", () => {
+        safeLog("info", "test", {
+          shopId: "shop-123",
+          data: { secret: "should-be-redacted" },
+        });
+        const output = consoleLogSpy.mock.calls[0][0];
+        expect(output).toContain('"shopId":"shop-123"');
+        // 'data' is not allowlisted, so entire value is redacted
+        expect(output).toContain('"data":"<redacted>"');
+      });
+
+      it("handles arrays", () => {
+        safeLog("info", "test", {
+          shopId: "shop-123",
+          items: ["item1", "item2"],
+        });
+        const output = consoleLogSpy.mock.calls[0][0];
+        expect(output).toContain('"shopId":"shop-123"');
+        // Array items should be redacted since 'items' is not allowlisted
+        expect(output).toContain("<redacted>");
+      });
+    });
+  });
+
+  describe("redactString", () => {
+    it("redacts myshopify.com domains", () => {
+      expect(redactString("shop test-shop.myshopify.com failed")).toBe(
+        "shop <redacted> failed"
+      );
+    });
+
+    it("redacts Bearer tokens", () => {
+      expect(redactString("Authorization: Bearer shpat_abc123")).toBe(
+        "Authorization: <redacted>"
+      );
+    });
+
+    it("redacts shpat_ tokens", () => {
+      expect(redactString("token=shpat_abcdefghijk")).toBe("token=<redacted>");
+    });
+
+    it("redacts email addresses", () => {
+      expect(redactString("user user@example.com logged in")).toBe(
+        "user <redacted> logged in"
+      );
+    });
+
+    it("handles multiple patterns", () => {
+      expect(
+        redactString("shop test.myshopify.com token shpat_abc user@test.com")
+      ).toBe("shop <redacted> token <redacted> <redacted>");
+    });
+  });
+
+  describe("toErrorCode", () => {
+    it("returns unknown for null", () => {
+      expect(toErrorCode(null)).toBe("unknown");
+    });
+
+    it("returns unknown for undefined", () => {
+      expect(toErrorCode(undefined)).toBe("unknown");
+    });
+
+    it("extracts code from error object", () => {
+      expect(toErrorCode({ code: "ECONNREFUSED" })).toBe("ECONNREFUSED");
+    });
+
+    it("extracts errorCode from object", () => {
+      expect(toErrorCode({ errorCode: "invalid_grant" })).toBe("invalid_grant");
+    });
+
+    it("uses name from Error object", () => {
+      const err = new TypeError("test");
+      expect(toErrorCode(err)).toBe("TypeError");
+    });
+
+    it("maps connection_refused", () => {
+      const err = new Error("ECONNREFUSED: connection refused");
+      expect(toErrorCode(err)).toBe("connection_refused");
+    });
+
+    it("maps timeout", () => {
+      const err = new Error("Request timeout");
+      expect(toErrorCode(err)).toBe("timeout");
+    });
+
+    it("maps invalid_grant", () => {
+      const err = new Error("invalid_grant error");
+      expect(toErrorCode(err)).toBe("invalid_grant");
+    });
+
+    it("maps access_denied", () => {
+      const err = new Error("ACCESS_DENIED");
+      expect(toErrorCode(err)).toBe("access_denied");
+    });
+
+    it("maps throttled", () => {
+      const err = new Error("THROTTLED by API");
+      expect(toErrorCode(err)).toBe("throttled");
+    });
+
+    it("maps unique constraint violation", () => {
+      const err = new Error("unique constraint violation");
+      expect(toErrorCode(err)).toBe("pg_unique_violation");
+    });
+
+    it("returns error name for unknown errors", () => {
+      class CustomError extends Error {
+        name = "CustomError";
+      }
+      expect(toErrorCode(new CustomError("test"))).toBe("CustomError");
+    });
+
+    it("returns short strings as-is", () => {
+      expect(toErrorCode("network_error")).toBe("network_error");
+    });
+
+    it("returns string_error for long strings", () => {
+      expect(toErrorCode("This is a very long error message with spaces")).toBe(
+        "string_error"
+      );
+    });
+  });
+
+  describe("shopHash", () => {
+    it("returns 12-character hex string", async () => {
+      const hash = await shopHash("test-shop.myshopify.com");
+      expect(hash).toHaveLength(12);
+      expect(hash).toMatch(/^[0-9a-f]+$/);
+    });
+
+    it("is case-insensitive", async () => {
+      const hash1 = await shopHash("Test-Shop.myshopify.com");
+      const hash2 = await shopHash("test-shop.myshopify.com");
+      expect(hash1).toBe(hash2);
+    });
+
+    it("produces different hashes for different domains", async () => {
+      const hash1 = await shopHash("shop1.myshopify.com");
+      const hash2 = await shopHash("shop2.myshopify.com");
+      expect(hash1).not.toBe(hash2);
+    });
+
+    it("is deterministic", async () => {
+      const hash1 = await shopHash("test.myshopify.com");
+      const hash2 = await shopHash("test.myshopify.com");
+      expect(hash1).toBe(hash2);
+    });
+  });
+
+  describe("shopHashSync", () => {
+    it("returns 8-character hex string (djb2 produces 32-bit hash)", () => {
+      const hash = shopHashSync("test-shop.myshopify.com");
+      expect(hash).toHaveLength(8);
+      expect(hash).toMatch(/^[0-9a-f]+$/);
+    });
+
+    it("is case-insensitive", () => {
+      const hash1 = shopHashSync("Test-Shop.myshopify.com");
+      const hash2 = shopHashSync("test-shop.myshopify.com");
+      expect(hash1).toBe(hash2);
+    });
+
+    it("produces different hashes for different domains", () => {
+      const hash1 = shopHashSync("shop1.myshopify.com");
+      const hash2 = shopHashSync("shop2.myshopify.com");
+      expect(hash1).not.toBe(hash2);
+    });
+
+    it("is deterministic", () => {
+      const hash1 = shopHashSync("test.myshopify.com");
+      const hash2 = shopHashSync("test.myshopify.com");
+      expect(hash1).toBe(hash2);
+    });
+  });
+});

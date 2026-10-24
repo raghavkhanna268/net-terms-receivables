@@ -344,16 +344,19 @@ describe("Order null refetch behavior", () => {
 
     const result = await handler!(mockSql as never, message);
 
-    // Should log order_refetch_null warning
-    expect(consoleWarnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("[order_refetch_null]")
+    // Should log order_refetch_null warning via safeLog (JSON format)
+    expect(consoleWarnSpy).toHaveBeenCalled();
+    const warnCalls = consoleWarnSpy.mock.calls.map((c: unknown[]) => c[0]);
+    const orderRefetchLog = warnCalls.find((c: unknown) =>
+      typeof c === "string" && c.includes('"event":"order_refetch_null"')
     );
-    expect(consoleWarnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("shop=test.myshopify.com")
-    );
-    expect(consoleWarnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("order=gid://shopify/Order/456")
-    );
+    expect(orderRefetchLog).toBeDefined();
+    // Must NOT contain shop domain (redaction rule)
+    expect(orderRefetchLog).not.toContain("myshopify.com");
+    // Must contain shopHash (safe identifier)
+    expect(orderRefetchLog).toContain('"shopHash"');
+    // Must contain the order GID
+    expect(orderRefetchLog).toContain("gid://shopify/Order/456");
 
     // Should call processOrderWebhook with minimal order (goes through markInvoicePaid)
     expect(mockProcessOrderWebhook).toHaveBeenCalledWith(
@@ -403,9 +406,9 @@ describe("Order null refetch behavior", () => {
 
     const result = await handler!(mockSql as never, message);
 
-    // Should log warning
+    // Should log warning via safeLog (JSON format)
     expect(consoleWarnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("[order_refetch_null]")
+      expect.stringContaining('"event":"order_refetch_null"')
     );
 
     // Should call processOrderWebhook (goes through cancelInvoice)
@@ -446,9 +449,9 @@ describe("Order null refetch behavior", () => {
 
     const result = await handler!(mockSql as never, message);
 
-    // Should log warning
+    // Should log warning via safeLog (JSON format)
     expect(consoleWarnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("[order_refetch_null]")
+      expect.stringContaining('"event":"order_refetch_null"')
     );
 
     // Should NOT call processOrderWebhook (can't create invoice without data)
@@ -495,9 +498,9 @@ describe("Order null refetch behavior", () => {
 
     const result = await handler!(mockSql as never, message);
 
-    // Should log warning
+    // Should log warning via safeLog (JSON format)
     expect(consoleWarnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("[order_refetch_null]")
+      expect.stringContaining('"event":"order_refetch_null"')
     );
 
     // Should NOT call processOrderWebhook

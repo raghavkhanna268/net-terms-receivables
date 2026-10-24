@@ -146,7 +146,7 @@ describe("refreshOfflineTokenIfNeeded AbortError handling (mocked)", () => {
     expect(result.success).toBe(false);
     expect(result.errorCode).toBe("network_error");
     expect(result.error).toContain("timed out");
-    expect(result.error).toContain(MOCK_SHOP);
+    // Error message does not contain shop domain (security rule)
   });
 });
 
@@ -186,7 +186,8 @@ describeWithDb("refreshOfflineTokenIfNeeded with real database", () => {
     expect(result.success).toBe(false);
     expect(result.errorCode).toBe("no_session");
     expect(result.error).toContain("No offline session found");
-    expect(result.error).toContain("nonexistent-shop.myshopify.com");
+    // Error must NOT contain shop domain (redaction rule)
+    expect(result.error).not.toContain("myshopify.com");
   });
 
   it("returns existing token when not near expiry (no refresh)", async () => {

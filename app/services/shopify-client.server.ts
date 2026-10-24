@@ -55,7 +55,10 @@ export type ShopifyClientContext = "request" | "queue";
 export interface ShopifyClientResult<T = unknown> {
   success: boolean;
   data?: T;
+  /** Error description (no PII, no shop domain) */
   error?: string;
+  /** Error code for safe logging/response (no PII) */
+  errorCode?: string;
   /** Whether the error is retryable (for queue retry logic) */
   retryable: boolean;
   /** Whether rate limited (for metrics) */
@@ -233,13 +236,10 @@ export async function shopifyGraphQL<T = unknown>(
   const clientSecret = process.env.SHOPIFY_API_SECRET;
   
   if (!clientId || !clientSecret) {
-    // P2: Fail loudly - this is a configuration error that should be fixed
-    console.error(
-      `[shopify-client] SHOPIFY_API_KEY or SHOPIFY_API_SECRET missing for shop=${shop}`
-    );
     return {
       success: false,
-      error: `Shopify credentials not configured. SHOPIFY_API_KEY or SHOPIFY_API_SECRET is missing.`,
+      error: "Shopify credentials not configured",
+      errorCode: "missing_credentials",
       retryable: false,
       retriesAttempted: 0,
     };
@@ -258,7 +258,8 @@ export async function shopifyGraphQL<T = unknown>(
     // This includes invalid_grant (needs re-auth) and no_refresh_token
     return {
       success: false,
-      error: refreshResult.error ?? `Token refresh failed for ${shop}`,
+      error: refreshResult.error ?? "Token refresh failed",
+      errorCode: refreshResult.errorCode ?? "token_refresh_failed",
       retryable: false,
       retriesAttempted: 0,
     };
@@ -276,7 +277,8 @@ export async function shopifyGraphQL<T = unknown>(
     if (err instanceof InvalidSession) {
       return {
         success: false,
-        error: `Invalid session for ${shop}. Session may need refresh.`,
+        error: "Invalid session",
+        errorCode: "invalid_session",
         retryable: true, // Retryable: #76 session refresh can recover
         retriesAttempted: 0,
       };
@@ -286,7 +288,8 @@ export async function shopifyGraphQL<T = unknown>(
     if (message.includes("No session found") || message.includes("no session")) {
       return {
         success: false,
-        error: `No session found for ${shop}. Shop may have uninstalled or never installed.`,
+        error: "No session found",
+        errorCode: "no_session",
         retryable: false, // Non-retryable: no session to refresh
         retriesAttempted: 0,
       };
@@ -296,7 +299,8 @@ export async function shopifyGraphQL<T = unknown>(
       // Session exists but may be expired - retryable
       return {
         success: false,
-        error: `Session error for ${shop}: ${message}`,
+        error: "Session error",
+        errorCode: "session_error",
         retryable: true, // Retryable: may be recoverable
         retriesAttempted: 0,
       };
@@ -334,22 +338,28 @@ export async function shopifyGraphQL<T = unknown>(
           // No budget for retry
           return {
             success: false,
-            error: `GraphQL THROTTLED. Wait ${waitMs}ms recommended.`,
+            error: "Rate limited (THROTTLED)",
+            errorCode: "throttled",
             retryable: true,
             wasRateLimited: true,
             retriesAttempted: attempt,
           };
         }
 
+        // Extract error codes from extensions for safe logging
+        const errorCodes = json.errors
+          .map((e) => e.extensions?.code)
+          .filter((c): c is string => typeof c === "string");
+        const errorCodeList = errorCodes.length > 0 ? errorCodes.join(",") : "unknown";
+
         // Check for ACCESS_DENIED - scope not granted, permanent until reinstall
-        const hasAccessDenied = json.errors.some((e) =>
-          e.extensions?.code === "ACCESS_DENIED"
-        );
+        const hasAccessDenied = errorCodes.includes("ACCESS_DENIED");
 
         if (hasAccessDenied) {
           return {
             success: false,
-            error: `Access denied: ${json.errors.map((e) => e.message).join("; ")}`,
+            error: "Access denied",
+            errorCode: "access_denied",
             retryable: false, // Non-retryable: scope not granted
             retriesAttempted: attempt,
           };
@@ -364,7 +374,8 @@ export async function shopifyGraphQL<T = unknown>(
         if (hasUserErrors) {
           return {
             success: false,
-            error: `User errors: ${json.errors.map((e) => e.message).join("; ")}`,
+            error: `User errors (${json.errors.length})`,
+            errorCode: "user_error",
             retryable: false, // Non-retryable: invalid input
             retriesAttempted: attempt,
           };
@@ -373,7 +384,8 @@ export async function shopifyGraphQL<T = unknown>(
         // Other GraphQL errors (schema/validation) - not retryable
         return {
           success: false,
-          error: `GraphQL errors: ${json.errors.map((e) => e.message).join("; ")}`,
+          error: `GraphQL errors (${json.errors.length}): ${errorCodeList}`,
+          errorCode: `graphql_error:${errorCodeList}`,
           retryable: false, // Non-retryable: schema mismatch or query syntax error
           retriesAttempted: attempt,
         };
@@ -409,7 +421,8 @@ export async function shopifyGraphQL<T = unknown>(
 
         return {
           success: false,
-          error: `Rate limited (429). Retry after ${waitMs}ms.`,
+          error: "Rate limited (429)",
+          errorCode: "http_429",
           retryable: true,
           wasRateLimited: true,
           retriesAttempted: attempt,
@@ -432,7 +445,8 @@ export async function shopifyGraphQL<T = unknown>(
 
         return {
           success: false,
-          error: `Server error (${err.response.code}). Exhausted retries.`,
+          error: `Server error (${err.response.code})`,
+          errorCode: `http_${err.response.code}`,
           retryable: true,
           retriesAttempted: attempt,
         };
@@ -445,7 +459,8 @@ export async function shopifyGraphQL<T = unknown>(
         if (code === 401) {
           return {
             success: false,
-            error: `Authentication failed for ${shop} (401). Token may need refresh.`,
+            error: "Authentication failed (401)",
+            errorCode: "http_401",
             retryable: true, // Retryable: session refresh can recover expired token
             retriesAttempted: attempt,
           };
@@ -454,7 +469,8 @@ export async function shopifyGraphQL<T = unknown>(
         if (code === 403) {
           return {
             success: false,
-            error: `Forbidden for ${shop} (403). Scope may not be granted.`,
+            error: "Forbidden (403)",
+            errorCode: "http_403",
             retryable: false, // Non-retryable: needs app reinstall with correct scopes
             retriesAttempted: attempt,
           };
@@ -462,7 +478,8 @@ export async function shopifyGraphQL<T = unknown>(
         // Other 4xx (400 Bad Request, 404 Not Found) - not retryable
         return {
           success: false,
-          error: `HTTP error ${code}: ${err.message}`,
+          error: `HTTP error (${code})`,
+          errorCode: `http_${code}`,
           retryable: false,
           retriesAttempted: attempt,
         };
@@ -472,7 +489,8 @@ export async function shopifyGraphQL<T = unknown>(
       if (err instanceof GraphqlQueryError) {
         return {
           success: false,
-          error: `GraphQL query error: ${err.message}`,
+          error: "GraphQL query error",
+          errorCode: "graphql_query_error",
           retryable: false,
           retriesAttempted: attempt,
         };
@@ -482,7 +500,8 @@ export async function shopifyGraphQL<T = unknown>(
       if (err instanceof InvalidSession) {
         return {
           success: false,
-          error: `Invalid session for ${shop}. Session may need refresh.`,
+          error: "Invalid session",
+          errorCode: "invalid_session",
           retryable: true, // Retryable: #76 session refresh can recover
           retriesAttempted: attempt,
         };
@@ -513,16 +532,19 @@ export async function shopifyGraphQL<T = unknown>(
 
         return {
           success: false,
-          error: `Network error: ${message}`,
+          error: "Network error",
+          errorCode: "network_error",
           retryable: true,
           retriesAttempted: attempt,
         };
       }
 
       // Unknown errors - not retryable to avoid infinite loops
+      const { toErrorCode } = await import("~/lib/log.server");
       return {
         success: false,
-        error: message,
+        error: "Unknown error",
+        errorCode: toErrorCode(err),
         retryable: false,
         retriesAttempted: attempt,
       };
@@ -533,6 +555,7 @@ export async function shopifyGraphQL<T = unknown>(
   return {
     success: false,
     error: "Max retries exceeded",
+    errorCode: "max_retries_exceeded",
     retryable: true,
     retriesAttempted: attempt,
   };
