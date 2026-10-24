@@ -14,13 +14,9 @@
  * - Cr suffix in balance columns (ICICI fixtures)
  * - Missing/blank UTR/reference
  * - Date format variations (DD/MM/YYYY, DD-MMM-YYYY, 2-digit year)
- * - Malformed rows handling
+ * - Malformed rows handling with coded errors (code + row index only)
+ * - Opening/closing balance row skipping
  * - Console output safety (no narration/remitter leakage)
- *
- * Known bugs documented in error handling tests:
- * - HDFC/SBI/Axis: silently skip malformed rows instead of coded error
- * - HDFC: false positive error for Opening Balance row
- * These will be fixed in a follow-up PR.
  */
 
 import { describe, it, expect, beforeAll, vi, beforeEach, afterEach } from "vitest";
@@ -544,8 +540,8 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
     });
   });
 
-  describe("malformed row handling (documents current behavior)", () => {
-    it("HDFC: silently skips malformed row at line 18, false error for Opening Balance at row 11", async () => {
+  describe("malformed row handling", () => {
+    it("HDFC: reports coded error for malformed row at line 18, skips Opening Balance without error", async () => {
       const content = readFileSync(join(FIXTURES_DIR, "hdfc-edgecases-synthetic.csv"));
       const file = new File([content], "hdfc-edgecases-synthetic.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
@@ -558,11 +554,14 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       );
       expect(malformedInTxns).toBeUndefined();
 
-      // Known bug: HDFC parser reports a false positive error for Opening Balance row
-      // This will be fixed in a follow-up PR
+      const openingBalanceInTxns = result.transactions.find((t) =>
+        t.narration.includes("Opening Balance")
+      );
+      expect(openingBalanceInTxns).toBeUndefined();
+
       expect(result.errors.length).toBe(1);
-      expect(result.errors[0].row).toBe(11);
-      expect(result.errors[0].message).toContain("Failed to normalize");
+      expect(result.errors[0].row).toBe(18);
+      expect(result.errors[0].code).toBe("ROW_PARSE_FAILED");
     });
 
     it("ICICI: produces exactly 1 error at row 17 for impossible date", async () => {
@@ -573,7 +572,7 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       expect(result.transactions.length).toBe(13);
       expect(result.errors.length).toBe(1);
       expect(result.errors[0].row).toBe(17);
-      expect(result.errors[0].message).toContain("Failed to normalize");
+      expect(result.errors[0].code).toBe("NORMALIZE_FAILED");
 
       const malformedInTxns = result.transactions.find((t) =>
         t.narration.includes("impossible date")
@@ -581,7 +580,7 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       expect(malformedInTxns).toBeUndefined();
     });
 
-    it("SBI: silently skips malformed row at line 18, no error produced", async () => {
+    it("SBI: reports coded error for malformed row at line 18", async () => {
       const content = readFileSync(join(FIXTURES_DIR, "sbi-edgecases-synthetic.csv"));
       const file = new File([content], "sbi-edgecases-synthetic.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
@@ -594,12 +593,12 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       );
       expect(malformedInTxns).toBeUndefined();
 
-      // Known bug: SBI parser silently skips malformed row instead of coded error
-      // This will be fixed in a follow-up PR
-      expect(result.errors.length).toBe(0);
+      expect(result.errors.length).toBe(1);
+      expect(result.errors[0].row).toBe(18);
+      expect(result.errors[0].code).toBe("ROW_PARSE_FAILED");
     });
 
-    it("Axis: silently skips malformed row at line 18, no error produced", async () => {
+    it("Axis: reports coded error for malformed row at line 18", async () => {
       const content = readFileSync(join(FIXTURES_DIR, "axis-edgecases-synthetic.csv"));
       const file = new File([content], "axis-edgecases-synthetic.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
@@ -612,9 +611,9 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       );
       expect(malformedInTxns).toBeUndefined();
 
-      // Known bug: Axis parser silently skips malformed row instead of coded error
-      // This will be fixed in a follow-up PR
-      expect(result.errors.length).toBe(0);
+      expect(result.errors.length).toBe(1);
+      expect(result.errors[0].row).toBe(18);
+      expect(result.errors[0].code).toBe("ROW_PARSE_FAILED");
     });
   });
 

@@ -65,7 +65,7 @@ export async function parseSbiStatement(
     return {
       detection,
       transactions: [],
-      errors: [{ row: 0, message: "Could not find header row" }],
+      errors: [{ row: 0, code: "NO_HEADER_ROW", message: "Could not find header row" }],
       totalRows: sheet.rows.length,
       skippedRows: sheet.rows.length,
     };
@@ -78,7 +78,7 @@ export async function parseSbiStatement(
     return {
       detection,
       transactions: [],
-      errors: [{ row: headerRow, message: "Could not map SBI columns" }],
+      errors: [{ row: headerRow, code: "COLUMN_MAP_FAILED", message: "Could not map SBI columns" }],
       totalRows: sheet.rows.length,
       skippedRows: sheet.rows.length,
     };
@@ -135,8 +135,8 @@ export async function parseSbiStatement(
       } else {
         errors.push({
           row: lastValidRow.sourceRow,
+          code: "NORMALIZE_FAILED",
           message: "Failed to normalize transaction",
-          rawData: lastValidRow,
         });
       }
       lastValidRow = null;
@@ -146,6 +146,14 @@ export async function parseSbiStatement(
     // Parse this row
     const rawRow = extractSbiRow(row, columns, i + 1);
     if (!rawRow) {
+      const descContent = String(row[columns.descriptionCol] ?? "").trim();
+      if (descContent && !descContent.match(/^[\d.,\s]+$/)) {
+        errors.push({
+          row: i + 1,
+          code: "ROW_PARSE_FAILED",
+          message: "Failed to parse row",
+        });
+      }
       skippedRows++;
       continue;
     }
@@ -164,8 +172,8 @@ export async function parseSbiStatement(
     } else {
       errors.push({
         row: lastValidRow.sourceRow,
+        code: "NORMALIZE_FAILED",
         message: "Failed to normalize transaction",
-        rawData: lastValidRow,
       });
     }
   }
