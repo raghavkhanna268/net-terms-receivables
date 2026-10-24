@@ -1,0 +1,21 @@
+# SYNTHETIC TEST DATA - NOT REAL BANK DATA
+# UNVERIFIED LAYOUT - Pending redacted real samples
+# Malformed data for error handling tests
+# All names, accounts, UTRs are fabricated with SYNT marker
+
+STATE BANK OF INDIA
+Account Statement
+Account Number: 00987654321098
+
+Txn Date,Value Date,Description,Ref No./Cheque No.,Debit,Credit,Balance
+01/10/2026,01/10/2026,Opening Balance,,,,"1,00,000.00"
+01/10/2026,01/10/2026,NEFT CR-SYNTHETIC VALID TRANSACTION,SYNTN26296000020,,"50,000.00","1,50,000.00"
+INVALID,02/10/2026,Invalid date row,REF001,100.00,,"1,49,900.00"
+,03/10/2026,Missing date,REF002,,"1,000.00","1,50,900.00"
+04/10/2026,04/10/2026,,REF003,500.00,,"1,50,400.00"
+45/13/2026,45/13/2026,Impossible date,REF004,200.00,,"1,50,200.00"
+05/10/2026,05/10/2026,Valid row after bad rows,SYNTN26296000021,,"25,000.00","1,75,200.00"
+06/10/2026,06/10/2026,Row with no amounts,REF005,,,"1,75,200.00"
+07/10/2026,07/10/2026,UPI/987654321012/valid@synthetic/PURCHASE,987654321012,750.00,,"1,74,450.00"
+
+Closing Balance: 1,74,450.00

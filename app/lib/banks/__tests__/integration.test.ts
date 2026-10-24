@@ -229,6 +229,296 @@ describe("bank statement parsing integration", () => {
     });
   });
 
+  describe("SBI retail format (synthetic, UNVERIFIED LAYOUT)", () => {
+    let result: ParseResult;
+
+    beforeAll(async () => {
+      const content = readFileSync(join(FIXTURES_DIR, "sbi-retail-synthetic.csv"));
+      const file = new File([content], "sbi-retail-synthetic.csv", { type: "text/csv" });
+      result = await parseBankStatement(file);
+    });
+
+    it("detects SBI bank", () => {
+      expect(result.detection.bank).toBe("SBI");
+      expect(result.detection.confidence).toBeGreaterThanOrEqual(0.5);
+    });
+
+    it("parses exactly 14 transactions (matching fixture)", () => {
+      expect(result.transactions.length).toBe(14);
+    });
+
+    it("credit total matches fixture footer (7,93,500.00 = 79350000 paise)", () => {
+      const creditTotal = result.transactions
+        .filter((t) => t.direction === "CR")
+        .reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(creditTotal).toBe(79350000);
+    });
+
+    it("debit total matches fixture footer (2,46,850.00 = 24685000 paise)", () => {
+      const debitTotal = result.transactions
+        .filter((t) => t.direction === "DR")
+        .reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(debitTotal).toBe(24685000);
+    });
+
+    it("skips preamble and footer rows", () => {
+      expect(result.skippedRows).toBeGreaterThan(0);
+    });
+
+    it("extracts NEFT transactions correctly", () => {
+      const neftTxns = result.transactions.filter((t) => t.parsed.rail === "NEFT");
+      expect(neftTxns.length).toBeGreaterThan(0);
+
+      const salary = neftTxns.find((t) => t.narration.includes("SALARY"));
+      expect(salary).toBeDefined();
+      expect(salary?.direction).toBe("CR");
+      expect(salary?.amountPaise).toBe(9000000); // 90,000.00
+    });
+
+    it("extracts UPI transactions correctly", () => {
+      const upiTxns = result.transactions.filter((t) => t.parsed.rail === "UPI");
+      expect(upiTxns.length).toBeGreaterThan(0);
+    });
+
+    it("extracts IMPS transactions correctly", () => {
+      const impsTxns = result.transactions.filter((t) => t.parsed.rail === "IMPS");
+      expect(impsTxns.length).toBeGreaterThan(0);
+    });
+
+    it("extracts RTGS transactions correctly", () => {
+      const rtgsTxns = result.transactions.filter((t) => t.parsed.rail === "RTGS");
+      expect(rtgsTxns.length).toBeGreaterThan(0);
+    });
+
+    it("extracts ACH D as debit (not credit)", () => {
+      const achTxns = result.transactions.filter((t) => t.parsed.rail === "ACH");
+      const achDebit = achTxns.find((t) => t.narration.includes("ACH D"));
+      expect(achDebit).toBeDefined();
+      expect(achDebit?.direction).toBe("DR");
+      expect(achDebit?.amountPaise).toBe(1000000); // 10,000.00
+    });
+
+    it("parses dates correctly (DD/MM/YYYY format)", () => {
+      for (const txn of result.transactions) {
+        expect(txn.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+        expect(txn.date.startsWith("2026")).toBe(true);
+      }
+    });
+
+    it("generates dedupe keys", () => {
+      for (const txn of result.transactions) {
+        expect(txn.dedupeKey).toBeDefined();
+        expect(txn.dedupeKey.length).toBeGreaterThan(5);
+      }
+    });
+
+    it("has unique dedupe keys", () => {
+      const keys = result.transactions.map((t) => t.dedupeKey);
+      const uniqueKeys = new Set(keys);
+      expect(uniqueKeys.size).toBe(keys.length);
+    });
+  });
+
+  describe("SBI XLSX format (synthetic, UNVERIFIED LAYOUT)", () => {
+    let result: ParseResult;
+
+    beforeAll(async () => {
+      const content = readFileSync(join(FIXTURES_DIR, "sbi-retail-synthetic.xlsx"));
+      const file = new File([content], "sbi-retail-synthetic.xlsx", {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      result = await parseBankStatement(file);
+    });
+
+    it("detects SBI bank from XLSX", () => {
+      expect(result.detection.bank).toBe("SBI");
+      expect(result.detection.confidence).toBeGreaterThanOrEqual(0.5);
+    });
+
+    it("parses exactly 14 transactions from XLSX (matching fixture)", () => {
+      expect(result.transactions.length).toBe(14);
+    });
+
+    it("XLSX credit total matches fixture footer (7,93,500.00 = 79350000 paise)", () => {
+      const creditTotal = result.transactions
+        .filter((t) => t.direction === "CR")
+        .reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(creditTotal).toBe(79350000);
+    });
+
+    it("XLSX debit total matches fixture footer (2,46,850.00 = 24685000 paise)", () => {
+      const debitTotal = result.transactions
+        .filter((t) => t.direction === "DR")
+        .reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(debitTotal).toBe(24685000);
+    });
+
+    it("extracts all four rails from XLSX", () => {
+      const neftTxns = result.transactions.filter((t) => t.parsed.rail === "NEFT");
+      const rtgsTxns = result.transactions.filter((t) => t.parsed.rail === "RTGS");
+      const impsTxns = result.transactions.filter((t) => t.parsed.rail === "IMPS");
+      const upiTxns = result.transactions.filter((t) => t.parsed.rail === "UPI");
+
+      expect(neftTxns.length).toBeGreaterThan(0);
+      expect(rtgsTxns.length).toBeGreaterThan(0);
+      expect(impsTxns.length).toBeGreaterThan(0);
+      expect(upiTxns.length).toBeGreaterThan(0);
+    });
+
+    it("parses dates correctly from XLSX", () => {
+      for (const txn of result.transactions) {
+        expect(txn.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+        expect(txn.date.startsWith("2026")).toBe(true);
+      }
+    });
+  });
+
+  describe("Axis Bank retail format (synthetic, UNVERIFIED LAYOUT)", () => {
+    let result: ParseResult;
+
+    beforeAll(async () => {
+      const content = readFileSync(join(FIXTURES_DIR, "axis-retail-synthetic.csv"));
+      const file = new File([content], "axis-retail-synthetic.csv", { type: "text/csv" });
+      result = await parseBankStatement(file);
+    });
+
+    it("detects Axis bank", () => {
+      expect(result.detection.bank).toBe("AXIS");
+      expect(result.detection.confidence).toBeGreaterThanOrEqual(0.5);
+    });
+
+    it("parses exactly 14 transactions (matching fixture)", () => {
+      expect(result.transactions.length).toBe(14);
+    });
+
+    it("credit total matches fixture footer (8,74,000.00 = 87400000 paise)", () => {
+      const creditTotal = result.transactions
+        .filter((t) => t.direction === "CR")
+        .reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(creditTotal).toBe(87400000);
+    });
+
+    it("debit total matches fixture footer (2,97,350.00 = 29735000 paise)", () => {
+      const debitTotal = result.transactions
+        .filter((t) => t.direction === "DR")
+        .reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(debitTotal).toBe(29735000);
+    });
+
+    it("skips preamble and footer rows", () => {
+      expect(result.skippedRows).toBeGreaterThan(0);
+    });
+
+    it("extracts NEFT transactions correctly", () => {
+      const neftTxns = result.transactions.filter((t) => t.parsed.rail === "NEFT");
+      expect(neftTxns.length).toBeGreaterThan(0);
+
+      const salary = neftTxns.find((t) => t.narration.includes("SALARY"));
+      expect(salary).toBeDefined();
+      expect(salary?.direction).toBe("CR");
+      expect(salary?.amountPaise).toBe(9500000); // 95,000.00
+    });
+
+    it("extracts UPI transactions correctly", () => {
+      const upiTxns = result.transactions.filter((t) => t.parsed.rail === "UPI");
+      expect(upiTxns.length).toBeGreaterThan(0);
+    });
+
+    it("extracts IMPS transactions correctly", () => {
+      const impsTxns = result.transactions.filter((t) => t.parsed.rail === "IMPS");
+      expect(impsTxns.length).toBeGreaterThan(0);
+    });
+
+    it("extracts RTGS transactions correctly", () => {
+      const rtgsTxns = result.transactions.filter((t) => t.parsed.rail === "RTGS");
+      expect(rtgsTxns.length).toBeGreaterThan(0);
+    });
+
+    it("parses dates correctly (DD-MM-YYYY format)", () => {
+      for (const txn of result.transactions) {
+        expect(txn.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+        expect(txn.date.startsWith("2026")).toBe(true);
+      }
+    });
+
+    it("generates dedupe keys", () => {
+      for (const txn of result.transactions) {
+        expect(txn.dedupeKey).toBeDefined();
+        expect(txn.dedupeKey.length).toBeGreaterThan(5);
+      }
+    });
+
+    it("has unique dedupe keys", () => {
+      const keys = result.transactions.map((t) => t.dedupeKey);
+      const uniqueKeys = new Set(keys);
+      expect(uniqueKeys.size).toBe(keys.length);
+    });
+
+    it("skips Opening Balance row", () => {
+      const opening = result.transactions.find((t) => t.narration.includes("Opening Balance"));
+      expect(opening).toBeUndefined();
+    });
+  });
+
+  describe("Axis Bank XLSX format (synthetic, UNVERIFIED LAYOUT)", () => {
+    let result: ParseResult;
+
+    beforeAll(async () => {
+      const content = readFileSync(join(FIXTURES_DIR, "axis-retail-synthetic.xlsx"));
+      const file = new File([content], "axis-retail-synthetic.xlsx", {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      result = await parseBankStatement(file);
+    });
+
+    it("detects Axis bank from XLSX", () => {
+      expect(result.detection.bank).toBe("AXIS");
+      expect(result.detection.confidence).toBeGreaterThanOrEqual(0.5);
+    });
+
+    it("parses exactly 14 transactions from XLSX (matching fixture)", () => {
+      expect(result.transactions.length).toBe(14);
+    });
+
+    it("XLSX credit total matches fixture footer (8,74,000.00 = 87400000 paise)", () => {
+      const creditTotal = result.transactions
+        .filter((t) => t.direction === "CR")
+        .reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(creditTotal).toBe(87400000);
+    });
+
+    it("XLSX debit total matches fixture footer (2,97,350.00 = 29735000 paise)", () => {
+      const debitTotal = result.transactions
+        .filter((t) => t.direction === "DR")
+        .reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(debitTotal).toBe(29735000);
+    });
+
+    it("extracts all four rails from XLSX", () => {
+      const neftTxns = result.transactions.filter((t) => t.parsed.rail === "NEFT");
+      const rtgsTxns = result.transactions.filter((t) => t.parsed.rail === "RTGS");
+      const impsTxns = result.transactions.filter((t) => t.parsed.rail === "IMPS");
+      const upiTxns = result.transactions.filter((t) => t.parsed.rail === "UPI");
+
+      expect(neftTxns.length).toBeGreaterThan(0);
+      expect(rtgsTxns.length).toBeGreaterThan(0);
+      expect(impsTxns.length).toBeGreaterThan(0);
+      expect(upiTxns.length).toBeGreaterThan(0);
+    });
+
+    it("parses dates correctly from XLSX", () => {
+      for (const txn of result.transactions) {
+        expect(txn.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+        expect(txn.date.startsWith("2026")).toBe(true);
+      }
+    });
+
+    it("skips Opening Balance row from XLSX", () => {
+      const opening = result.transactions.find((t) => t.narration.includes("Opening Balance"));
+      expect(opening).toBeUndefined();
+    });
+  });
+
   describe("malformed data handling (synthetic)", () => {
     describe("HDFC malformed CSV", () => {
       let result: ParseResult;
@@ -317,6 +607,118 @@ describe("bank statement parsing integration", () => {
 
       it("still detects as ICICI from XLSX", () => {
         expect(result.detection.bank).toBe("ICICI");
+      });
+
+      it("parses valid rows from XLSX", () => {
+        expect(result.transactions.length).toBeGreaterThan(0);
+      });
+
+      it("skips malformed rows from XLSX", () => {
+        expect(result.transactions.length).toBeLessThan(result.totalRows);
+      });
+    });
+
+    describe("SBI malformed CSV (UNVERIFIED LAYOUT)", () => {
+      let result: ParseResult;
+
+      beforeAll(async () => {
+        const content = readFileSync(join(FIXTURES_DIR, "sbi-malformed-synthetic.csv"));
+        const file = new File([content], "sbi-malformed-synthetic.csv", { type: "text/csv" });
+        result = await parseBankStatement(file);
+      });
+
+      it("still detects as SBI", () => {
+        expect(result.detection.bank).toBe("SBI");
+      });
+
+      it("parses valid rows", () => {
+        expect(result.transactions.length).toBeGreaterThan(0);
+      });
+
+      it("skips rows with invalid dates", () => {
+        const invalidDate = result.transactions.find((t) => t.date === "INVALID");
+        expect(invalidDate).toBeUndefined();
+      });
+
+      it("handles impossible dates gracefully", () => {
+        const impossibleDate = result.transactions.find((t) => t.date.includes("45"));
+        expect(impossibleDate).toBeUndefined();
+      });
+
+      it("skips rows with missing required fields", () => {
+        expect(result.transactions.length).toBeLessThan(result.totalRows);
+      });
+    });
+
+    describe("SBI malformed XLSX (UNVERIFIED LAYOUT)", () => {
+      let result: ParseResult;
+
+      beforeAll(async () => {
+        const content = readFileSync(join(FIXTURES_DIR, "sbi-malformed-synthetic.xlsx"));
+        const file = new File([content], "sbi-malformed-synthetic.xlsx", {
+          type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        });
+        result = await parseBankStatement(file);
+      });
+
+      it("still detects as SBI from XLSX", () => {
+        expect(result.detection.bank).toBe("SBI");
+      });
+
+      it("parses valid rows from XLSX", () => {
+        expect(result.transactions.length).toBeGreaterThan(0);
+      });
+
+      it("skips malformed rows from XLSX", () => {
+        expect(result.transactions.length).toBeLessThan(result.totalRows);
+      });
+    });
+
+    describe("Axis Bank malformed CSV (UNVERIFIED LAYOUT)", () => {
+      let result: ParseResult;
+
+      beforeAll(async () => {
+        const content = readFileSync(join(FIXTURES_DIR, "axis-malformed-synthetic.csv"));
+        const file = new File([content], "axis-malformed-synthetic.csv", { type: "text/csv" });
+        result = await parseBankStatement(file);
+      });
+
+      it("still detects as Axis", () => {
+        expect(result.detection.bank).toBe("AXIS");
+      });
+
+      it("parses valid rows", () => {
+        expect(result.transactions.length).toBeGreaterThan(0);
+      });
+
+      it("skips rows with invalid dates", () => {
+        const invalidDate = result.transactions.find((t) => t.date === "BAD-DATE");
+        expect(invalidDate).toBeUndefined();
+      });
+
+      it("handles impossible dates gracefully", () => {
+        const impossibleDate = result.transactions.find((t) => t.date.includes("40"));
+        expect(impossibleDate).toBeUndefined();
+      });
+
+      it("skips rows with missing required fields", () => {
+        expect(result.transactions.length).toBeLessThan(result.totalRows);
+      });
+    });
+
+    describe("Axis Bank malformed XLSX (UNVERIFIED LAYOUT)", () => {
+      let result: ParseResult;
+
+      beforeAll(async () => {
+        const content = readFileSync(join(FIXTURES_DIR, "axis-malformed-synthetic.xlsx"));
+        const file = new File([content], "axis-malformed-synthetic.xlsx", {
+          type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        });
+        result = await parseBankStatement(file);
+      });
+
+      it("still detects as Axis from XLSX", () => {
+        expect(result.detection.bank).toBe("AXIS");
       });
 
       it("parses valid rows from XLSX", () => {

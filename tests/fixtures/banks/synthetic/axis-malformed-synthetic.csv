@@ -1,0 +1,21 @@
+# SYNTHETIC TEST DATA - NOT REAL BANK DATA
+# UNVERIFIED LAYOUT - Pending redacted real samples
+# Malformed data for error handling tests
+# All names, accounts, UTRs are fabricated with SYNT marker
+
+AXIS BANK LIMITED
+Statement of Account
+Account No.: 00112233445566
+
+Tran Date,Chq No,Particulars,DR,CR,Balance
+01-10-2026,,Opening Balance,,,"1,00,000.00"
+01-10-2026,,NEFT CR-SYNTHETIC VALID-SYNTN26296000040,,"55,000.00","1,55,000.00"
+BAD-DATE,,Invalid date row,150.00,,"1,54,850.00"
+,,,200.00,,"1,54,650.00"
+03-10-2026,,,,"1,000.00","1,55,650.00"
+40/15/2026,,Impossible date,300.00,,"1,55,350.00"
+04-10-2026,,Valid row after errors-SYNTN26296000041,,"30,000.00","1,85,350.00"
+05-10-2026,,Row with no amounts,,,"1,85,350.00"
+06-10-2026,,UPI/876543210987/valid@synthetic/VALID,850.00,,"1,84,500.00"
+
+Closing Balance: 1,84,500.00

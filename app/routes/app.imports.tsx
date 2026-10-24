@@ -64,8 +64,8 @@ type ValidRail = "NEFT" | "RTGS" | "IMPS" | "UPI" | "ACH" | "CHEQUE" | "OTHER";
 /**
  * Valid bank types.
  */
-const VALID_BANKS = new Set(["HDFC", "ICICI", "UNKNOWN"]);
-type ValidBank = "HDFC" | "ICICI" | "UNKNOWN";
+const VALID_BANKS = new Set(["HDFC", "ICICI", "SBI", "AXIS", "UNKNOWN"]);
+type ValidBank = "HDFC" | "ICICI" | "SBI" | "AXIS" | "UNKNOWN";
 
 /**
  * Credit row type for import.
@@ -907,6 +907,14 @@ export default function ImportsPage() {
           </s-list-item>
           <s-list-item>
             <s-text type="strong">ICICI Bank</s-text> — Retail and corporate
+            statement exports
+          </s-list-item>
+          <s-list-item>
+            <s-text type="strong">SBI (State Bank of India)</s-text> — Retail
+            statement exports
+          </s-list-item>
+          <s-list-item>
+            <s-text type="strong">Axis Bank</s-text> — Retail and corporate
             statement exports
           </s-list-item>
         </s-unordered-list>
