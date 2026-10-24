@@ -4,6 +4,14 @@
 -- Vars: since (ISO timestamp, redrive start), location_id (CompanyLocation numeric id
 --       of one held account for the overdue drill-down).
 -- Usage: psql -v since='2026-10-24T08:29:23Z' -v location_id='24544084133' -f ...
+-- Output column kinds for passthrough columns (scripts/ci/check-readonly-columns.ts,
+-- see scripts/readonly/README.md). Derived counts/booleans/CASE enums need no entry.
+-- @col topic, original_queue, error_format, error_disposition, error_code, status, due_basis, action, account_hold_state, kind, holdState, defaultTermsSource, dueSource, dueBasis: enum
+-- dueBasis / due_basis and dueSource are TEXT columns holding app-written fixed codes (not free text), so enum.
+-- @col fo_held, non_mm_skipped, syncVersion: count
+-- @col defaultTermsDays: config_int
+-- @col manualHold, bypass, syncPending: boolean
+-- @col issued_at_days_ago: timestamp
 \set ON_ERROR_STOP 1
 BEGIN TRANSACTION READ ONLY;
 
@@ -33,11 +41,32 @@ FROM
          WHEN d.error LIKE 'No handler registered for topic after %' THEN 'no_handler_text'
          ELSE 'legacy_text' END AS error_format,
     CASE WHEN d.error IS NULL THEN NULL
-         WHEN m.m IS NOT NULL THEN COALESCE(m.m[1], 'none')
+         WHEN m.m[1] = 'non_retryable' THEN 'non_retryable'
+         WHEN m.m[1] = 'permanent' THEN 'permanent'
+         WHEN m.m IS NOT NULL THEN 'none'
          WHEN d.error LIKE 'Non-retryable error:%' THEN 'non_retryable'
          ELSE 'none' END AS error_disposition,
     CASE WHEN d.error IS NULL THEN NULL
-         WHEN m.m IS NOT NULL THEN m.m[2]
+         -- the code is a regex capture of the error column, so only literal
+         -- codes print (toErrorCode's fixed set in app/lib/log.server.ts); other
+         -- codes bucket. Per-code counts: the backstop.failed errorCode section.
+         WHEN m.m[2] = 'no_handler' THEN 'no_handler'
+         WHEN m.m[2] = 'unknown' THEN 'unknown'
+         WHEN m.m[2] = 'error' THEN 'error'
+         WHEN m.m[2] = 'connection_refused' THEN 'connection_refused'
+         WHEN m.m[2] = 'timeout' THEN 'timeout'
+         WHEN m.m[2] = 'dns_error' THEN 'dns_error'
+         WHEN m.m[2] = 'fetch_error' THEN 'fetch_error'
+         WHEN m.m[2] = 'invalid_grant' THEN 'invalid_grant'
+         WHEN m.m[2] = 'access_denied' THEN 'access_denied'
+         WHEN m.m[2] = 'throttled' THEN 'throttled'
+         WHEN m.m[2] = 'rate_limited' THEN 'rate_limited'
+         WHEN m.m[2] = 'pg_unique_violation' THEN 'pg_unique_violation'
+         WHEN m.m[2] = 'pg_foreign_key_violation' THEN 'pg_foreign_key_violation'
+         WHEN m.m[2] = 'pg_connection_error' THEN 'pg_connection_error'
+         WHEN m.m[2] = 'queue_error' THEN 'queue_error'
+         WHEN m.m[2] LIKE 'graphql_error:%' THEN 'graphql_error:<code>'
+         WHEN m.m IS NOT NULL THEN '<other_code>'
          WHEN d.error LIKE 'No handler registered for topic after %' THEN 'no_handler'
          WHEN d.error LIKE 'Order has payment terms but no matching BuyerAccount found%' THEN 'legacy_nba_payment_terms'
          WHEN d.error LIKE 'Customer matches tag rule % but no BuyerAccount found%' THEN 'legacy_nba_tag_rule'
@@ -58,11 +87,32 @@ FROM
          WHEN d.error LIKE 'No handler registered for topic after %' THEN 'no_handler_text'
          ELSE 'legacy_text' END AS error_format,
     CASE WHEN d.error IS NULL THEN NULL
-         WHEN m.m IS NOT NULL THEN COALESCE(m.m[1], 'none')
+         WHEN m.m[1] = 'non_retryable' THEN 'non_retryable'
+         WHEN m.m[1] = 'permanent' THEN 'permanent'
+         WHEN m.m IS NOT NULL THEN 'none'
          WHEN d.error LIKE 'Non-retryable error:%' THEN 'non_retryable'
          ELSE 'none' END AS error_disposition,
     CASE WHEN d.error IS NULL THEN NULL
-         WHEN m.m IS NOT NULL THEN m.m[2]
+         -- the code is a regex capture of the error column, so only literal
+         -- codes print (toErrorCode's fixed set in app/lib/log.server.ts); other
+         -- codes bucket. Per-code counts: the backstop.failed errorCode section.
+         WHEN m.m[2] = 'no_handler' THEN 'no_handler'
+         WHEN m.m[2] = 'unknown' THEN 'unknown'
+         WHEN m.m[2] = 'error' THEN 'error'
+         WHEN m.m[2] = 'connection_refused' THEN 'connection_refused'
+         WHEN m.m[2] = 'timeout' THEN 'timeout'
+         WHEN m.m[2] = 'dns_error' THEN 'dns_error'
+         WHEN m.m[2] = 'fetch_error' THEN 'fetch_error'
+         WHEN m.m[2] = 'invalid_grant' THEN 'invalid_grant'
+         WHEN m.m[2] = 'access_denied' THEN 'access_denied'
+         WHEN m.m[2] = 'throttled' THEN 'throttled'
+         WHEN m.m[2] = 'rate_limited' THEN 'rate_limited'
+         WHEN m.m[2] = 'pg_unique_violation' THEN 'pg_unique_violation'
+         WHEN m.m[2] = 'pg_foreign_key_violation' THEN 'pg_foreign_key_violation'
+         WHEN m.m[2] = 'pg_connection_error' THEN 'pg_connection_error'
+         WHEN m.m[2] = 'queue_error' THEN 'queue_error'
+         WHEN m.m[2] LIKE 'graphql_error:%' THEN 'graphql_error:<code>'
+         WHEN m.m IS NOT NULL THEN '<other_code>'
          WHEN d.error LIKE 'No handler registered for topic after %' THEN 'no_handler'
          WHEN d.error LIKE 'Order has payment terms but no matching BuyerAccount found%' THEN 'legacy_nba_payment_terms'
          WHEN d.error LIKE 'Customer matches tag rule % but no BuyerAccount found%' THEN 'legacy_nba_tag_rule'
@@ -141,7 +191,10 @@ ORDER BY e.at;
 
 \echo '== backstop.failed AuditEvents by error code (all-time / since redrive start; data.errorCode since #176, legacy data.error text never printed)'
 SELECT CASE WHEN e.data ? 'errorCode' THEN
-              CASE WHEN e.data->>'errorCode' ~ '^(?:(non_retryable|permanent):)?([A-Za-z][A-Za-z0-9_]{0,63}|graphql_error:[A-Za-z0-9_,]{1,200})$' THEN e.data->>'errorCode' ELSE '<other>' END
+              CASE WHEN e.data->>'errorCode' ~ '^(?:(non_retryable|permanent):)?[A-Za-z][A-Za-z0-9_]{0,63}$' THEN e.data->>'errorCode'
+                   WHEN e.data->>'errorCode' ~ '^graphql_error:[A-Za-z0-9_]{1,64}$' THEN e.data->>'errorCode'
+                   WHEN e.data->>'errorCode' LIKE 'graphql_error:%' THEN 'graphql_error:<multiple>'
+                   ELSE '<other>' END
             WHEN e.data ? 'error' THEN 'legacy_unclassified'
             ELSE '(none)' END AS error_code,
        COUNT(*) AS total,
@@ -152,7 +205,8 @@ GROUP BY 1 ORDER BY 1;
 
 \echo '== held account drill-down: account hold fields (no name)'
 SELECT a.id, a.kind, a."holdState", CASE WHEN a."holdReasonCode" ~ '^[A-Z0-9_]{1,40}$' THEN a."holdReasonCode" WHEN a."holdReasonCode" IS NULL THEN NULL ELSE '<other>' END AS hold_reason_code, a."manualHold", a.bypass,
-       a."syncPending", a."syncVersion", (a."creditLimit" IS NOT NULL) AS has_credit_limit, a."defaultTermsDays",
+       a."syncPending", a."syncVersion", (a."creditLimit" IS NOT NULL) AS has_credit_limit,
+       CASE WHEN a."defaultTermsDays" BETWEEN 0 AND 365 THEN a."defaultTermsDays" END AS "defaultTermsDays", -- config_int, clamped: out of range prints NULL
        a."defaultTermsSource", a.gated_at, a."updatedAt"
 FROM "BuyerAccount" a
 WHERE a."companyLocationId" = 'gid://shopify/CompanyLocation/' || :'location_id';
