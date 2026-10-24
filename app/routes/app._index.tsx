@@ -165,10 +165,6 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   };
 };
 
-function formatLimit(limit: number): string {
-  return limit === -1 ? "Unlimited" : String(limit);
-}
-
 const BUCKET_LABELS: Record<AgingBucketKey, string> = {
   current: "Current",
   "1-30": "1-30 days",

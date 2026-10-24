@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import type { Sql } from "~/lib/db-light.server";
 
 /**
  * Tests for plan page loader (S21).
