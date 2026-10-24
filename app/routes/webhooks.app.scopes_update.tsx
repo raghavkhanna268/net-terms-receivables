@@ -44,7 +44,8 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     if (currentScopes) {
       const { sessionStorage } = context;
       const count = await sessionStorage.updateScopeForShop(shop, currentScopes);
-      console.log(`[scopes_update] Updated scopes for ${count} session(s) to: ${currentScopes}`);
+      const scopeCount = (payload as { current?: string[] })?.current?.length ?? 0;
+      console.log(`[scopes_update] Updated ${count} session(s) with ${scopeCount} scopes wh=${webhookId}`);
     }
   } catch {
     console.error(`[scopes_update] Error updating scopes wh=${webhookId}`);

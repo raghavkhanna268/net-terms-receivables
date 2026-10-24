@@ -80,9 +80,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   });
   const normalizedTopic = normalizeWebhookTopic(topic);
 
-  console.log(
-    `[Compliance] Received ${normalizedTopic} webhook for shop=${shop}, webhook_id=${webhookId}`
-  );
+  console.log(`[Compliance] Received ${normalizedTopic} wh=${webhookId}`);
 
   const sql = getRequestSql();
 
@@ -97,14 +95,14 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
       if (!typedPayload.customer?.id) {
         console.log(
-          `[Compliance] customers/data_request: No customer ID in payload for shop=${payloadShop}`
+          `[Compliance] customers/data_request: No customer ID in payload wh=${webhookId}`
         );
         break;
       }
 
       if (!typedPayload.data_request?.id) {
         console.log(
-          `[Compliance] customers/data_request: No data_request.id in payload for shop=${payloadShop}`
+          `[Compliance] customers/data_request: No data_request.id in payload wh=${webhookId}`
         );
         break;
       }
@@ -115,7 +113,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
       if (!shopRecord) {
         console.log(
-          `[Compliance] customers/data_request: Shop not found for domain=${payloadShop}`
+          `[Compliance] customers/data_request: Shop not found wh=${webhookId}`
         );
         break;
       }
@@ -143,7 +141,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
       console.log(
         `[Compliance] customers/data_request: ${alreadyExists ? "Duplicate" : "Created"} ` +
-          `data request id=${id} shop=${payloadShop}`
+          `data request id=${id} wh=${webhookId}`
       );
 
       // Send email notification to shop owner (gated on RESEND_API_KEY)
@@ -158,17 +156,20 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         );
         if (emailResult.sent) {
           console.log(
-            `[Compliance] customers/data_request: Email notification sent for shop=${payloadShop}`
+            `[Compliance] customers/data_request: Email notification sent wh=${webhookId}`
           );
         } else if (emailResult.error) {
+          const errorCode = typeof emailResult.error === "string"
+            ? emailResult.error.split(":")[0]
+            : "email_send_failed";
           console.log(
-            `[Compliance] customers/data_request: Email notification failed for shop=${payloadShop} error=${emailResult.error}`
+            `[Compliance] customers/data_request: Email notification failed wh=${webhookId} error=${errorCode}`
           );
         }
         // Note: skipped emails are logged inside sendDataRequestNotification
       } else {
         console.log(
-          `data_request_email_skipped shop=${payloadShop} request_id=${requestId} reason=no_shop_email`
+          `data_request_email_skipped wh=${webhookId} request_id=${requestId} reason=no_shop_email`
         );
       }
       break;
@@ -183,7 +184,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
       if (!typedPayload.customer?.id) {
         console.log(
-          `[Compliance] customers/redact: No customer ID in payload for shop=${payloadShop}`
+          `[Compliance] customers/redact: No customer ID in payload wh=${webhookId}`
         );
         break;
       }
@@ -200,11 +201,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
             `draft_orders=${counts.draftOrdersDeleted} data_requests=${counts.dataRequestsDeleted} ` +
             `payer_aliases=${counts.payerAliasesDeleted}, ` +
             `anonymized account=${counts.buyerAccountAnonymized}, ` +
-            `redacted payments=${counts.paymentsRedacted} shop=${payloadShop}`
+            `redacted payments=${counts.paymentsRedacted} shop_id=${shopRecord.id} wh=${webhookId}`
         );
       } else {
         console.log(
-          `[Compliance] customers/redact: Shop not found for domain=${payloadShop}`
+          `[Compliance] customers/redact: Shop not found wh=${webhookId}`
         );
       }
       break;
@@ -216,7 +217,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       const { sessionStorage } = context;
       const sessionCount = await sessionStorage.deleteAllForShop(payloadShop);
       console.log(
-        `[Compliance] shop/redact: Deleted ${sessionCount} session(s) for shop=${payloadShop}`
+        `[Compliance] shop/redact: Deleted ${sessionCount} session(s) wh=${webhookId}`
       );
 
       const pgmqResult = await purgePgmqMessages(sql, payloadShop);
@@ -227,19 +228,19 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       // Purge webhook receipts for the shop (S20 compliance)
       const receiptsDeleted = await deleteWebhookReceiptsForShop(sql, payloadShop);
       console.log(
-        `[Compliance] shop/redact: Deleted ${receiptsDeleted} webhook receipts for shop=${payloadShop}`
+        `[Compliance] shop/redact: Deleted ${receiptsDeleted} webhook receipts wh=${webhookId}`
       );
 
       const { deleted, shopId } = await deleteShop(sql, payloadShop);
 
       if (deleted) {
         console.log(
-          `[Compliance] shop/redact: Deleted Shop id=${shopId} domain=${payloadShop} ` +
+          `[Compliance] shop/redact: Deleted Shop id=${shopId} wh=${webhookId} ` +
             `(all data cascaded via FKs)`
         );
       } else {
         console.log(
-          `[Compliance] shop/redact: Shop not found for domain=${payloadShop} ` +
+          `[Compliance] shop/redact: Shop not found wh=${webhookId} ` +
             `(may have been deleted already or never installed)`
         );
       }
