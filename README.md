@@ -59,7 +59,7 @@ This creates/updates `shopify.app.toml` with your `client_id`.
 ```bash
 npx @shopify/cli@latest store create dev
 # Name it something like: net-terms-receivables
-# Or use existing dev store: net-terms-receivables.myshopify.com
+# Or use existing dev store: <your-dev-store>.myshopify.com
 ```
 
 ### 5. Set Up Hyperdrive (for Database Connection)

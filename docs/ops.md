@@ -20,7 +20,7 @@ A manually-triggered GitHub Actions workflow for read-only diagnostics against t
 1. Go to **Actions** → **Prod Diagnostics** in GitHub
 2. Click **Run workflow**
 3. Select `main` branch (required - workflow only runs from main)
-4. Enter the shop domain (e.g., `net-terms-receivables.myshopify.com`)
+4. Enter the shop domain (e.g., `<your-dev-store>.myshopify.com`)
 5. Optionally check **fail_on_expired** for strict mode (fails if token expired)
 6. Click **Run workflow**
 
@@ -28,7 +28,7 @@ A manually-triggered GitHub Actions workflow for read-only diagnostics against t
 
 | Input | Default | Description |
 |-------|---------|-------------|
-| `shop` | `net-terms-receivables.myshopify.com` | Shopify shop domain |
+| `shop` | `<your-dev-store>.myshopify.com` | Shopify shop domain |
 | `fail_on_expired` | `false` | If true, fail the workflow when the offline token has expired |
 
 ### Output Interpretation
