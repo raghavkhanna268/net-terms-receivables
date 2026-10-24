@@ -425,6 +425,8 @@ model Payment {
   @@unique([shopId, utr])
   @@index([shopId, status])
   @@index([importId])
+  // S22: Supports retention purge of unmatched narration (status + valueDate filter)
+  @@index([status, valueDate], map: "idx_payment_status_valuedate")
 }
 
 /// Match: payment-to-invoice allocation (confirm-only model)

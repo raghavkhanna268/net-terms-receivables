@@ -26,7 +26,10 @@ import {
   deleteReminderRule,
   isReminderSendingEnabled,
   isValidOffset,
+  getGlobalSendCounts,
+  ensureDefaultReminderRules,
   DAILY_SEND_CAP,
+  MONTHLY_SEND_CAP,
   OFFSET_MIN,
   OFFSET_MAX,
 } from "~/services/reminders.server";
@@ -55,8 +58,15 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       rules: [],
       providerConfigured: false,
       dailyCap: DAILY_SEND_CAP,
+      monthlyCap: MONTHLY_SEND_CAP,
+      dailyUsage: 0,
+      monthlyUsage: 0,
+      usageError: false,
     };
   }
+
+  // Ensure default rules exist (idempotent, only seeds when shop has no rules)
+  await ensureDefaultReminderRules(sql, shop.id);
 
   const [settings, rules] = await Promise.all([
     getShopReminderSettings(sql, shop.id),
@@ -67,12 +77,29 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     .cloudflare?.env;
   const providerConfigured = isReminderSendingEnabled(env);
 
+  // Fetch global send counts with graceful error handling
+  let dailyUsage = 0;
+  let monthlyUsage = 0;
+  let usageError = false;
+  try {
+    const counts = await getGlobalSendCounts(sql);
+    dailyUsage = counts.daily;
+    monthlyUsage = counts.monthly;
+  } catch (err) {
+    console.error("[app.settings.reminders] Failed to fetch send counts:", err);
+    usageError = true;
+  }
+
   return {
     error: null,
     settings: settings ?? { enabled: false },
     rules,
     providerConfigured,
     dailyCap: DAILY_SEND_CAP,
+    monthlyCap: MONTHLY_SEND_CAP,
+    dailyUsage,
+    monthlyUsage,
+    usageError,
   };
 };
 
@@ -249,8 +276,17 @@ function RuleRow({
 }
 
 export default function RemindersSettingsPage() {
-  const { error, settings, rules, providerConfigured, dailyCap } =
-    useLoaderData<typeof loader>();
+  const {
+    error,
+    settings,
+    rules,
+    providerConfigured,
+    dailyCap,
+    monthlyCap,
+    dailyUsage,
+    monthlyUsage,
+    usageError,
+  } = useLoaderData<typeof loader>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
 
@@ -269,10 +305,11 @@ export default function RemindersSettingsPage() {
       {/* Provider Status Banner */}
       {!providerConfigured && (
         <s-section>
-          <s-banner tone="warning" heading="Email reminders will be available soon">
+          <s-banner tone="warning" heading="Email sending not configured yet">
             <s-text>
               Payment reminder emails are not yet enabled. This feature will be
-              available once the email provider is configured.
+              available once the email provider is configured. You can still
+              configure your reminder settings below.
             </s-text>
           </s-banner>
         </s-section>
@@ -305,13 +342,19 @@ export default function RemindersSettingsPage() {
               {remindersEnabled ? "Disable Reminders" : "Enable Reminders"}
             </s-button>
           </Form>
-
-          <s-paragraph>
-            <s-text tone="neutral">
-              Daily limit: {dailyCap} reminder emails per day.
-            </s-text>
-          </s-paragraph>
         </s-stack>
+      </s-section>
+
+      {/* Send Limits - shared across all shops using this app's email account */}
+      <s-section heading="Email Send Limits">
+        <s-paragraph>
+          <s-text tone="neutral">
+            Shared across all shops.{" "}
+            {usageError
+              ? `Daily: ${dailyCap}, Monthly: ${monthlyCap}`
+              : `Today: ${dailyUsage}/${dailyCap}. Month: ${monthlyUsage}/${monthlyCap}`}
+          </s-text>
+        </s-paragraph>
       </s-section>
 
       {/* Reminder Rules */}
