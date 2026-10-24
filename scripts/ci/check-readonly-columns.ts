@@ -6,11 +6,19 @@
  * these files into PUBLIC Actions logs. Team Lead's public-logs rule
  * (2026-10-24 17:58 IST): output columns may only be
  *
- *     id | count | enum | boolean | timestamp
+ *     id | count | enum | boolean | timestamp | config_int
  *
  * (id includes row indexes such as shop_idx; timestamp includes time-derived
  * values such as intervals and day ages). Never shop domains, PII/emails,
  * free text, raw errors or per-shop money.
+ *
+ * config_int (Team Lead ruling via QA on #193): a whole number 0..365 that is
+ * a NAMED merchant setting. Only columns listed in CONFIG_INT_COLUMNS may use
+ * it (currently just defaultTermsDays), and every source column the value
+ * passes through must be on that list too, so it cannot relabel another
+ * integer. It never bypasses the sensitive check: money, balances, credit
+ * limits and any per-buyer value stay forbidden. Clamp the range in SQL, e.g.
+ * CASE WHEN x BETWEEN 0 AND 365 THEN x END.
  *
  * How it works (deliberately small, no SQL grammar dependency):
  *   1. Strip comments and psql meta lines (\set, \echo ...), split on `;`.
@@ -36,7 +44,7 @@
  *         This is how plain passthrough columns (status, type, kind,
  *         "holdState", "manualHold", read_ct ...) are declared. A reviewer
  *         reads the annotation, so annotate only what is truly one of the
- *         five kinds.
+ *         six kinds.
  *      c. Naming convention on the output name:
  *         id, *_id, *Id, *_gid, *_idx      -> id
  *         at, *_at, *At, *_date, *Date     -> timestamp
@@ -51,8 +59,9 @@
  *      expressions (`unclassified`), statements that are not SELECT/WITH/
  *      SHOW/BEGIN/COMMIT/ROLLBACK (`unsupported_statement`), unparseable
  *      select lists (`unparseable`), annotations naming a column that is not
- *      in the output (`stale_annotation`) or an invalid kind
- *      (`bad_annotation`).
+ *      in the output (`stale_annotation`), an invalid kind
+ *      (`bad_annotation`) or config_int on a column / source that is not in
+ *      CONFIG_INT_COLUMNS (`config_int_not_listed`).
  *
  * Burn-down allowlist: scripts/ci/readonly-columns-allowlist.json, entries
  * {file, column, issue, count}. CI fails on any violation not covered, and on
@@ -67,8 +76,14 @@ import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
 
-export const KINDS = ["id", "count", "enum", "boolean", "timestamp"] as const;
+export const KINDS = ["id", "count", "enum", "boolean", "timestamp", "config_int"] as const;
 export type Kind = (typeof KINDS)[number];
+
+/**
+ * Named merchant settings allowed to print as config_int (whole number 0..365).
+ * Adding a name here needs Team Lead / QA sign-off.
+ */
+export const CONFIG_INT_COLUMNS: readonly string[] = ["defaultTermsDays"];
 
 export type Issue =
   | "sensitive"
@@ -77,7 +92,8 @@ export type Issue =
   | "unparseable"
   | "unsupported_statement"
   | "stale_annotation"
-  | "bad_annotation";
+  | "bad_annotation"
+  | "config_int_not_listed";
 
 export interface Violation {
   file: string;
@@ -753,6 +769,7 @@ export function checkSql(file: string, sql: string): { violations: Violation[]; 
       if (k) used.add(nm);
       columns.push({ column: nm, kind: k, via: k ? "annotation" : null });
       if (!k) violations.push({ file, column: nm, issue: "unclassified", detail: "SHOW output needs an @col annotation" });
+      else if (k === "config_int" && !CONFIG_INT_COLUMNS.includes(nm)) violations.push({ file, column: nm, issue: "config_int_not_listed", detail: "config_int is only for named settings" });
       continue;
     }
     if (!isKw(head, "select", "with") && !(isP(head, "(") && stmt.some((t) => isKw(t, "select")))) {
@@ -799,6 +816,13 @@ export function checkSql(file: string, sql: string): { violations: Violation[]; 
           const hits = [nm, ...ctx.sources].map((s) => [s, sensitiveWord(s)] as const).filter(([, w]) => w);
           if (hits.length) {
             violations.push({ file, column: nm, issue: "sensitive", detail: `looks like '${hits[0][1]}' (from ${hits[0][0] === nm ? "output name" : "source " + hits[0][0]})` });
+            return;
+          }
+        }
+        if (kind === "config_int") {
+          const offList = [nm, ...ctx.sources].filter((s) => !CONFIG_INT_COLUMNS.includes(s));
+          if (offList.length) {
+            violations.push({ file, column: nm, issue: "config_int_not_listed", detail: `config_int is only for named settings (${CONFIG_INT_COLUMNS.join(", ")}); not listed: ${offList[0]}` });
             return;
           }
         }

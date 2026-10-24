@@ -6,6 +6,7 @@ import * as path from "path";
 import {
   checkSql,
   compareAllowlist,
+  CONFIG_INT_COLUMNS,
   isSafeGuardRegex,
   sensitiveWord,
   type AllowlistEntry,
@@ -91,6 +92,20 @@ describe("check-readonly-columns: classification", () => {
     expect(issues(`DELETE FROM t;`)).toEqual(["(statement):unsupported_statement"]);
     expect(issues(`-- @col gone: enum\nSELECT COUNT(*) AS n FROM t;`)).toEqual(["gone:stale_annotation"]);
     expect(issues(`-- @col status: text\nSELECT 'a' AS status;`)).toEqual(["status:bad_annotation"]);
+  });
+
+  it("config_int passes only for a listed merchant setting", () => {
+    expect(CONFIG_INT_COLUMNS).toEqual(["defaultTermsDays"]);
+    expect(issues(`-- @col defaultTermsDays: config_int
+SELECT CASE WHEN a."defaultTermsDays" BETWEEN 0 AND 365 THEN a."defaultTermsDays" END AS "defaultTermsDays" FROM "BuyerAccount" a;`)).toEqual([]);
+    expect(issues(`-- @col "defaultTermsDays": config_int\nSELECT a."defaultTermsDays" FROM "BuyerAccount" a;`)).toEqual([]);
+  });
+
+  it("config_int fails on an unlisted name or a relabelled source, and never launders money", () => {
+    expect(issues(`-- @col retryDays: config_int\nSELECT a."retryDays" FROM t a;`)).toEqual(["retryDays:config_int_not_listed"]);
+    expect(issues(`-- @col defaultTermsDays: config_int\nSELECT a."graceDays" AS "defaultTermsDays" FROM t a;`)).toEqual(["defaultTermsDays:config_int_not_listed"]);
+    expect(issues(`-- @col defaultTermsDays: config_int\nSELECT a."creditLimit" AS "defaultTermsDays" FROM t a;`)).toEqual(["defaultTermsDays:sensitive"]);
+    expect(issues(`-- @col "creditLimit": config_int\nSELECT a."creditLimit" FROM t a;`)).toEqual(["creditLimit:sensitive"]);
   });
 
   it("helpers", () => {

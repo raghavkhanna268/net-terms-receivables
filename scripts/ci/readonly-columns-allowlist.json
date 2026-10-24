@@ -1,12 +1,4 @@
 {
   "_comment": "Burn-down allowlist for scripts/ci/check-readonly-columns.ts (#190 F5). Existing violations only. CI fails on any new violation and on any entry whose count is higher than the actual count (stale), so entries can only shrink. Never add sensitive columns here: fix the SQL.",
-  "entries": [
-    {
-      "file": "scripts/readonly/post-drain-aggregates.sql",
-      "column": "defaultTermsDays",
-      "issue": "unclassified",
-      "count": 1,
-      "note": "Integer net-terms setting (days). Not sensitive, but not one of the five kinds. Burn down by printing a bucket/enum or a boolean instead."
-    }
-  ]
+  "entries": []
 }

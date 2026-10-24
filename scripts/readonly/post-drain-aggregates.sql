@@ -9,6 +9,7 @@
 -- @col topic, original_queue, error_format, error_disposition, error_code, status, due_basis, action, account_hold_state, kind, holdState, defaultTermsSource, dueSource, dueBasis: enum
 -- dueBasis (and due_basis) is a TEXT column holding app-written fixed codes, not free text, so enum.
 -- @col fo_held, non_mm_skipped, syncVersion: count
+-- @col defaultTermsDays: config_int
 -- @col manualHold, bypass, syncPending: boolean
 -- @col issued_at_days_ago: timestamp
 \set ON_ERROR_STOP 1
@@ -159,7 +160,8 @@ GROUP BY 1 ORDER BY 1;
 
 \echo '== held account drill-down: account hold fields (no name)'
 SELECT a.id, a.kind, a."holdState", CASE WHEN a."holdReasonCode" ~ '^[A-Z0-9_]{1,40}$' THEN a."holdReasonCode" WHEN a."holdReasonCode" IS NULL THEN NULL ELSE '<other>' END AS hold_reason_code, a."manualHold", a.bypass,
-       a."syncPending", a."syncVersion", (a."creditLimit" IS NOT NULL) AS has_credit_limit, a."defaultTermsDays",
+       a."syncPending", a."syncVersion", (a."creditLimit" IS NOT NULL) AS has_credit_limit,
+       CASE WHEN a."defaultTermsDays" BETWEEN 0 AND 365 THEN a."defaultTermsDays" END AS "defaultTermsDays", -- config_int, clamped: out of range prints NULL
        a."defaultTermsSource", a.gated_at, a."updatedAt"
 FROM "BuyerAccount" a
 WHERE a."companyLocationId" = 'gid://shopify/CompanyLocation/' || :'location_id';

@@ -14,6 +14,15 @@ Every printed column must be one of:
 | `enum`      | `status`, `topic`, regex-guarded codes, `CASE` mappings to literals |
 | `boolean`   | `x IS NOT NULL`, `outstanding > 0`, `bool_or(...)`              |
 | `timestamp` | `*_at`, `MIN(at)`; includes ages/intervals derived from timestamps (e.g. `issued_at_days_ago`, `past_due_by`) |
+| `config_int` | named merchant settings only, whole numbers 0 to 365: currently just `defaultTermsDays` |
+
+`config_int` (Team Lead ruling via QA on #193) is for named merchant settings
+on the explicit list `CONFIG_INT_COLUMNS` in the checker. Its value must be a
+whole number from 0 to 365, so clamp it in SQL
+(`CASE WHEN x BETWEEN 0 AND 365 THEN x END`). The check fails
+(`config_int_not_listed`) if the output name, or any source column it passes
+through, is not on the list. Adding a name needs Team Lead / QA sign-off. It
+never bypasses the sensitive check below.
 
 Never: shop domains, PII (names, emails, phones, addresses, notes, narration,
 payer text), free text, raw error/reason text, payloads, tokens, or per-shop
@@ -43,7 +52,7 @@ output column:
 
    Names are Postgres output names (alias, else column name; unquoted names
    fold to lower case). Annotations that name no output column fail
-   (`stale_annotation`). Only annotate what really is one of the five kinds;
+   (`stale_annotation`). Only annotate what really is one of the six kinds;
    the annotation is the reviewer's checklist.
 3. **Naming convention** on the output name: `id`, `*_id`, `*Id`, `*_gid`,
    `*_idx` → id; `at`, `*_at`, `*At`, `*_date`, `*Date` → timestamp.
@@ -62,7 +71,8 @@ unclassifiable expressions fail too, as does any statement other than
 `scripts/ci/readonly-columns-allowlist.json` lists existing violations as
 `{file, column, issue, count}`. CI fails on any violation not covered and on
 any entry whose count is higher than what the checker now finds (stale), so
-the list can only shrink. Do not add new entries; fix the SQL.
+the list can only shrink. Do not add new entries; fix the SQL. It is currently
+empty (`"entries": []`); the mechanism stays for future burn-downs.
 
 Local run: `npx tsx scripts/ci/check-readonly-columns.ts` (add `--report` to
 list every column with its kind and how it was classified).
