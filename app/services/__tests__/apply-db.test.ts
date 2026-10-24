@@ -166,10 +166,13 @@ describeWithDb("S17 apply service DB integration", () => {
 
   async function createInvoice(outstandingPaise: bigint, orderId?: string | null, id?: string): Promise<string> {
     const invoiceId = id ?? `inv-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    // When orderId is explicitly null (local-only invoice), use a synthetic draftOrderId
+    // because the CHECK constraint requires exactly one of orderId/draftOrderId
     const orderGid = orderId === undefined ? `gid://shopify/Order/${invoiceId}` : orderId;
+    const draftOrderGid = orderId === null ? `gid://shopify/DraftOrder/999${invoiceId.slice(-6)}` : null;
     await sql`
-      INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, status, "issuedAt", "createdAt", "updatedAt")
-      VALUES (${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderGid}, ${'#' + invoiceId.slice(-6)}, ${Number(outstandingPaise) / 100}, ${Number(outstandingPaise) / 100}, 'open', NOW(), NOW(), NOW())
+      INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", "draftOrderId", name, total, outstanding, status, "issuedAt", "createdAt", "updatedAt")
+      VALUES (${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderGid}, ${draftOrderGid}, ${'#' + invoiceId.slice(-6)}, ${Number(outstandingPaise) / 100}, ${Number(outstandingPaise) / 100}, 'open', NOW(), NOW(), NOW())
     `;
     return invoiceId;
   }
@@ -514,13 +517,13 @@ describeWithDb("S17 apply service DB integration", () => {
 
       await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
-      const messages = await sql<{ message: { type: string; invoiceId: string; buyerAccountId: string } }[]>`
+      const messages = await sql<{ message: { topic: string; buyerAccountId: string } }[]>`
         SELECT message FROM pgmq.q_s6_sync
         WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
-          AND message->>'type' = 'CREDIT_STATUS_RECOMPUTE'
+          AND message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
       `;
 
-      const recomputeMsg = messages.find(m => m.message.invoiceId === invoiceId);
+      const recomputeMsg = messages.find(m => m.message.buyerAccountId === TEST_ACCOUNT_ID);
       expect(recomputeMsg).toBeDefined();
       expect(recomputeMsg?.message.buyerAccountId).toBe(TEST_ACCOUNT_ID);
     });
@@ -533,11 +536,11 @@ describeWithDb("S17 apply service DB integration", () => {
 
       await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
-      const messages = await sql<{ message: { type: string; invoiceId: string } }[]>`
+      const messages = await sql<{ message: { topic: string; buyerAccountId: string } }[]>`
         SELECT message FROM pgmq.q_s6_sync
         WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
-          AND message->>'type' = 'CREDIT_STATUS_RECOMPUTE'
-          AND message->>'invoiceId' = ${invoiceId}
+          AND message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+          AND message->>'buyerAccountId' = ${TEST_ACCOUNT_ID}
       `;
 
       expect(messages.length).toBe(0);
@@ -1308,10 +1311,20 @@ describeWithDb("S17 apply service DB integration", () => {
    * Stale invoice-not-open scenarios: when a stale 'pushing' match is retried
    * but the invoice is no longer open (paid by sibling, webhook, or cancelled).
    * INVARIANT: Every state='pushed' must have a match.applied audit in same TX.
+   *
+   * NOTE: An Apply on B can finalize a stale sibling A first. When B tries to apply
+   * and finds stale A (> 5 min) on the same invoice, the pre-TX1 recovery finalizes A.
    */
   describe("Stale invoice-not-open scenarios", () => {
-    it("sibling B pays invoice in full, Retry A: A unmatched with audit, Payment.status recomputed", async () => {
-      // Scenario: Match A is stale 'pushing', Match B fully pays the invoice, then A is retried
+    /**
+     * Apply on B can finalize a stale sibling A first: when B tries to apply and finds
+     * a stale 'pushing' sibling A (> 5 min) on the same invoice, the pre-TX1 recovery
+     * finalizes A first. Then B is refused because the invoice is no longer open.
+     */
+    it("Apply B finalizes stale sibling A first: A pushed with audit, B refused, Payment B not allocated", async () => {
+      // Scenario: Match A is stale 'pushing' (full payment), Match B is confirmed (full payment)
+      // When B applies, pre-TX1 recovery should finalize A first, making invoice paid
+      // Then B should fail because invoice is no longer open
       const paymentIdA = await createPayment(1000000n); // 10000 INR
       const paymentIdB = await createPayment(1000000n); // 10000 INR
       const invoiceId = await createInvoice(1000000n); // 10000 INR
@@ -1340,68 +1353,73 @@ describeWithDb("S17 apply service DB integration", () => {
       // Create and confirm match B
       const matchIdB = await createConfirmedMatch(paymentIdB, invoiceId, 1000000n);
 
-      // Apply match B - this should succeed and pay the invoice
+      // Reset counts
       mockShopifySuccess = true;
       mockAlreadyPaid = false;
       orderMarkAsPaidCallCount = 0;
+
+      // Apply match B - this should:
+      // 1. Find stale sibling A and recover it first (pre-TX1 recovery)
+      // 2. A gets finalized → invoice is now paid
+      // 3. B should fail because invoice is no longer open
       const resultB = await applyMatch(sql, TEST_SHOP_ID, matchIdB, "test-user");
-      expect(resultB.success).toBe(true);
-      expect(resultB.invoicePaid).toBe(true);
-      expect(orderMarkAsPaidCallCount).toBe(1);
 
-      // Verify invoice is now paid with outstanding 0
-      const [invoiceAfterB] = await sql<{ status: string; outstanding: string }[]>`
-        SELECT status, outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
-      `;
-      expect(invoiceAfterB.status).toBe("paid");
-      expect(parseFloat(invoiceAfterB.outstanding)).toBe(0);
+      // B should NOT succeed - invoice is no longer open (A paid it)
+      expect(resultB.success).toBe(false);
+      expect(resultB.reasonCode).toBe("INVOICE_NOT_OPEN");
 
-      // Reset counts
-      orderMarkAsPaidCallCount = 0;
-
-      // Now retry match A - should be unmatched since sibling B paid it
-      const resultA = await applyMatch(sql, TEST_SHOP_ID, matchIdA, "test-user");
-
-      // A should NOT succeed since it's being unmatched
-      expect(resultA.success).toBe(false);
-      expect(resultA.reasonCode).toBe("STALE_INVOICE_NOT_OPEN");
-
-      // Zero orderMarkAsPaid calls for A
-      expect(orderMarkAsPaidCallCount).toBe(0);
-
-      // Match A should be 'unmatched'
+      // Match A should be 'pushed' (recovered by pre-TX1 sibling recovery)
       const [matchA] = await sql<{ state: string }[]>`
         SELECT state FROM "Match" WHERE id = ${matchIdA}
       `;
-      expect(matchA.state).toBe("unmatched");
+      expect(matchA.state).toBe("pushed");
 
-      // Invoice outstanding should still be 0 (unchanged)
+      // Match A should have match.applied audit
+      const [matchAAppliedAudit] = await sql<{ data: { staleReclaim?: boolean; amountPaise?: string } }[]>`
+        SELECT data FROM "AuditEvent"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+          AND type = 'match.applied'
+          AND data->>'matchId' = ${matchIdA}
+      `;
+      expect(matchAAppliedAudit).toBeDefined();
+      expect(matchAAppliedAudit?.data.staleReclaim).toBe(true);
+
+      // Match B should still be 'confirmed' (unchanged, apply was refused)
+      const [matchB] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchIdB}
+      `;
+      expect(matchB.state).toBe("confirmed");
+
+      // NO match.applied audit for B
+      const [matchBAudit] = await sql<{ id: string }[]>`
+        SELECT id FROM "AuditEvent"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+          AND type = 'match.applied'
+          AND data->>'matchId' = ${matchIdB}
+      `;
+      expect(matchBAudit).toBeUndefined();
+
+      // Invoice outstanding should be 0 (paid by A)
       const [invoiceFinal] = await sql<{ status: string; outstanding: string }[]>`
         SELECT status, outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
       `;
       expect(invoiceFinal.status).toBe("paid");
       expect(parseFloat(invoiceFinal.outstanding)).toBe(0);
 
-      // Match A's unmatched audit should exist with reason INVOICE_NOT_OPEN
-      const [unmatchedAudit] = await sql<{ data: { reason?: string; appliedPaise?: string } }[]>`
-        SELECT data FROM "AuditEvent"
-        WHERE "shopId" = ${TEST_SHOP_ID}
-          AND type = 'match.unmatched'
-          AND data->>'matchId' = ${matchIdA}
+      // Payment B's status should still be 'unmatched' (or unchanged - not allocated)
+      // Since B was refused, its payment should still be available
+      const [paymentB] = await sql<{ status: string }[]>`
+        SELECT status FROM "Payment" WHERE id = ${paymentIdB}
       `;
-      expect(unmatchedAudit).toBeDefined();
-      expect(unmatchedAudit?.data.reason).toBe("INVOICE_NOT_OPEN");
-      expect(unmatchedAudit?.data.appliedPaise).toBe("0");
+      expect(paymentB.status).toBe("unmatched");
 
-      // Payment A's status should be recomputed (not allocated)
-      const [paymentA] = await sql<{ status: string }[]>`
-        SELECT status FROM "Payment" WHERE id = ${paymentIdA}
-      `;
-      expect(paymentA.status).toBe("unmatched");
+      // orderMarkAsPaid should be called exactly once (for A's recovery)
+      expect(orderMarkAsPaidCallCount).toBe(1);
     });
 
-    it("webhook marks invoice paid (no sibling), Retry A: A pushed WITH match.applied", async () => {
+    it("webhook marks invoice paid (no sibling), Retry A: A UNMATCHED (can't prove our push worked)", async () => {
       // Scenario: Match A is stale 'pushing', webhook marks invoice paid, then A is retried
+      // Decision: We can't prove our push reached Shopify, so unmatch A and let payment be used elsewhere
       const paymentId = await createPayment(1000000n); // 10000 INR
       const invoiceId = await createInvoice(1000000n); // 10000 INR
 
@@ -1435,31 +1453,38 @@ describeWithDb("S17 apply service DB integration", () => {
       // Reset counts
       orderMarkAsPaidCallCount = 0;
 
-      // Now retry match A - should finalize with match.applied (STALE_FINALIZED_EXTERNALLY_PAID)
+      // Now retry match A - should be UNMATCHED because we can't prove our push worked
       const resultA = await applyMatch(sql, TEST_SHOP_ID, matchIdA, "test-user");
 
-      expect(resultA.success).toBe(true);
-      expect(resultA.invoicePaid).toBe(true);
+      // A should NOT succeed - it's being unmatched
+      expect(resultA.success).toBe(false);
+      expect(resultA.reasonCode).toBe("INVOICE_NOT_OPEN");
 
-      // Zero orderMarkAsPaid calls (invoice already paid)
+      // Zero orderMarkAsPaid calls
       expect(orderMarkAsPaidCallCount).toBe(0);
 
-      // Match A should be 'pushed' (finalized)
+      // Match A should be 'unmatched'
       const [matchA] = await sql<{ state: string }[]>`
         SELECT state FROM "Match" WHERE id = ${matchIdA}
       `;
-      expect(matchA.state).toBe("pushed");
+      expect(matchA.state).toBe("unmatched");
 
-      // Match A should have match.applied audit
-      const [appliedAudit] = await sql<{ data: { reasonCode?: string; amountPaise?: string } }[]>`
+      // Match A should have match.UNMATCHED audit (not match.applied)
+      const [unmatchedAudit] = await sql<{ data: { reason?: string; appliedPaise?: string } }[]>`
         SELECT data FROM "AuditEvent"
         WHERE "shopId" = ${TEST_SHOP_ID}
-          AND type = 'match.applied'
+          AND type = 'match.unmatched'
           AND data->>'matchId' = ${matchIdA}
       `;
-      expect(appliedAudit).toBeDefined();
-      expect(appliedAudit?.data.reasonCode).toBe("STALE_FINALIZED_EXTERNALLY_PAID");
-      expect(appliedAudit?.data.amountPaise).toBe("1000000"); // min(10000, 10000) = 10000 paise
+      expect(unmatchedAudit).toBeDefined();
+      expect(unmatchedAudit?.data.reason).toBe("INVOICE_NO_LONGER_OPEN");
+      expect(unmatchedAudit?.data.appliedPaise).toBe("0");
+
+      // Payment status should be recomputed (not allocated)
+      const [payment] = await sql<{ status: string }[]>`
+        SELECT status FROM "Payment" WHERE id = ${paymentId}
+      `;
+      expect(payment.status).toBe("unmatched");
     });
 
     it("cancelled invoice, Retry A: A unmatched with audit, invoice unchanged", async () => {
@@ -1502,7 +1527,7 @@ describeWithDb("S17 apply service DB integration", () => {
 
       // A should NOT succeed since it's being unmatched
       expect(resultA.success).toBe(false);
-      expect(resultA.reasonCode).toBe("STALE_INVOICE_NOT_OPEN");
+      expect(resultA.reasonCode).toBe("INVOICE_NOT_OPEN");
 
       // Zero orderMarkAsPaid calls
       expect(orderMarkAsPaidCallCount).toBe(0);
@@ -1520,7 +1545,7 @@ describeWithDb("S17 apply service DB integration", () => {
       expect(invoice.status).toBe("cancelled");
       expect(parseFloat(invoice.outstanding)).toBe(10000); // Unchanged
 
-      // Match A's unmatched audit should exist with reason INVOICE_NOT_OPEN
+      // Match A's unmatched audit should exist with reason INVOICE_NO_LONGER_OPEN
       const [unmatchedAudit] = await sql<{ data: { reason?: string; invoiceStatus?: string } }[]>`
         SELECT data FROM "AuditEvent"
         WHERE "shopId" = ${TEST_SHOP_ID}
@@ -1528,7 +1553,7 @@ describeWithDb("S17 apply service DB integration", () => {
           AND data->>'matchId' = ${matchIdA}
       `;
       expect(unmatchedAudit).toBeDefined();
-      expect(unmatchedAudit?.data.reason).toBe("INVOICE_NOT_OPEN");
+      expect(unmatchedAudit?.data.reason).toBe("INVOICE_NO_LONGER_OPEN");
       expect(unmatchedAudit?.data.invoiceStatus).toBe("cancelled");
     });
 
@@ -1784,9 +1809,8 @@ describeWithDb("S17 apply service DB integration", () => {
       expect(parseFloat(invoice.outstanding)).toBe(0);
       expect(invoice.status).toBe("paid");
 
-      // No orderMarkAsPaid calls (both are partials that together make full, but
-      // each partial completes locally without Shopify)
-      // Actually, the second apply (match2) will trigger full payment and call Shopify
+      // match1 recovery is a partial (5000 of 10000), match2 completes it (5000 → full)
+      // The second apply triggers full payment and calls Shopify
       expect(orderMarkAsPaidCallCount).toBe(1);
     });
 

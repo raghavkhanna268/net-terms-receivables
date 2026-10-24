@@ -890,10 +890,9 @@ function PushingMatchesView({
 
   return (
     <s-stack>
-      <s-banner tone="warning" heading="Matches In Progress">
-        These matches started applying but have not completed. Click Retry to
-        attempt completion. Stale matches (older than 5 minutes) can be retried
-        immediately.
+      <s-banner tone="warning" heading="Matches in progress">
+        These matches started applying but have not completed. Stale matches
+        (older than 5 minutes) can be retried using the Retry action below.
       </s-banner>
 
       <s-table>
@@ -1028,7 +1027,7 @@ export default function ReconcilePage() {
               href="/app/reconcile?view=pushing"
               variant={view === "pushing" ? "primary" : "secondary"}
             >
-              In Progress ({tabCounts.pushing})
+              In progress ({tabCounts.pushing})
             </s-button>
           )}
         </s-stack>
@@ -1062,7 +1061,7 @@ export default function ReconcilePage() {
           />
         </s-section>
       ) : view === "pushing" ? (
-        <s-section heading="In Progress">
+        <s-section heading="In progress">
           <PushingMatchesView
             matches={matches}
             currency={shopCurrency}
