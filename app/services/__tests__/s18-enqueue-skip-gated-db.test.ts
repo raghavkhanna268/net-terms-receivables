@@ -6,22 +6,16 @@
  * 2. Non-gated accounts ARE enqueued when invoices are due
  * 3. When gating is OFF (gated_at is NULL for all), behavior is unchanged
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
-// Pin the clock to a fixed time so JS and DB clocks are consistent.
-// Using 12:00 UTC means the Etc/GMT zone where local hour is ~12 is simply "Etc/GMT".
-const PINNED_TIME = new Date("2026-10-15T12:00:00Z");
-
 /**
  * Compute a fixed-offset Etc/GMT±N timezone where current local hour is ~12.
  * PostgreSQL uses POSIX convention where Etc/GMT+5 means UTC-5 (opposite of ISO).
- *
- * When the clock is pinned to 12:00 UTC, this returns "Etc/GMT".
  */
 function getTestTimezone(): string {
   const utcHour = new Date().getUTCHours();
@@ -48,11 +42,6 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
   let testTimezone: string;
 
   beforeAll(async () => {
-    // Pin the JS clock so getTestTimezone() is deterministic
-    // Only mock Date to avoid interfering with database connection timers
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(PINNED_TIME);
-
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
     testTimezone = getTestTimezone();
 
@@ -101,7 +90,6 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
   });
 
   afterAll(async () => {
-    vi.useRealTimers();
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM "ReminderLog" WHERE "shopId" = ${TEST_SHOP_ID}`;

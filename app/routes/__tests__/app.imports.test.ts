@@ -26,18 +26,6 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
 import { computeDateBounds } from "../app.imports";
 
-// Pin the clock for deterministic date calculations across all tests.
-// This avoids issues where local date and UTC date differ (e.g., at midnight IST).
-// Only mock Date to avoid interfering with database connection timers.
-const PINNED_DATE = new Date("2026-10-15T12:00:00Z");
-beforeAll(() => {
-  vi.useFakeTimers({ toFake: ["Date"] });
-  vi.setSystemTime(PINNED_DATE);
-});
-afterAll(() => {
-  vi.useRealTimers();
-});
-
 /**
  * Get ISO date string for N days ago (or in the future if negative).
  * Uses UTC date manipulation to match toISOString() output.
@@ -584,6 +572,18 @@ describeWithDb("Bank Import Action Integration Tests", () => {
   });
 
   describe("Date boundary tests", () => {
+    // Pin the clock for deterministic date calculations.
+    // This avoids issues where local date and UTC date differ (e.g., at midnight IST).
+    // Scoped to this describe block to avoid affecting plan-limit tests that use DB NOW().
+    const PINNED_DATE = new Date("2026-10-15T12:00:00Z");
+    beforeAll(() => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(PINNED_DATE);
+    });
+    afterAll(() => {
+      vi.useRealTimers();
+    });
+
     it("date just inside window (minDate + 1 day) passes", async () => {
       const payload = {
         bank: "HDFC",
