@@ -25,10 +25,6 @@ import { getRequestSql } from "~/lib/request-context.server";
 import { runMatcher, MAX_PAYMENTS_PER_REQUEST } from "~/services/matcher.server";
 import { generateDedupeKey, isValidUtrForRail } from "~/lib/banks/dedupe";
 import type { PaymentRail } from "~/lib/banks/types";
-import {
-  checkImportLimit,
-  isGatingEnforced,
-} from "~/services/gating.server";
 
 /**
  * Maximum rows per import request.
@@ -245,36 +241,13 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
-  const [shop] = await sql<{ id: string; currency: string }[]>`
-    SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ currency: string }[]>`
+    SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
-
-  // Get import limit info for UI
-  const gatingEnforced = isGatingEnforced();
-  let importLimit: { current: number; limit: number; allowed: boolean } = {
-    current: 0,
-    limit: -1,
-    allowed: true,
-  };
-
-  if (shop) {
-    const limitCheck = await checkImportLimit(sql, shop.id);
-    importLimit = {
-      current: limitCheck.currentUsage,
-      limit: limitCheck.limit,
-      allowed: limitCheck.allowed,
-    };
-  }
-
-  const storeHandle = shopDomain.replace(".myshopify.com", "");
-  const upgradeUrl = `https://admin.shopify.com/store/${storeHandle}/charges/${process.env.APP_HANDLE ?? "net-terms-receivables"}/pricing_plans`;
 
   return {
     shopDomain,
     shopCurrency: shop?.currency ?? "INR",
-    gatingEnforced,
-    importLimit,
-    upgradeUrl,
   };
 };
 
@@ -314,24 +287,6 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     return Response.json(
       { success: false, error: "Only INR currency is supported for bank imports" },
       { status: 400 }
-    );
-  }
-
-  // Check import limit (plan feature, enforced when PLAN_GATING_ENFORCED is on)
-  const importLimit = await checkImportLimit(sql, shop.id);
-  if (!importLimit.allowed) {
-    return Response.json(
-      {
-        success: false,
-        error: "Import limit reached",
-        upgradeRequired: true,
-        reason: importLimit.reason,
-        usage: {
-          current: importLimit.currentUsage,
-          limit: importLimit.limit,
-        },
-      },
-      { status: 403 }
     );
   }
 
@@ -635,9 +590,8 @@ function RailBadge({ rail }: { rail: string }) {
 }
 
 export default function ImportsPage() {
-  const { shopCurrency, gatingEnforced, importLimit, upgradeUrl } = useLoaderData<typeof loader>();
+  const { shopCurrency } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<ImportResult>();
-  const isAtLimit = !importLimit.allowed;
 
   const [status, setStatus] = useState<ParseStatus>("idle");
   const [fileName, setFileName] = useState<string | null>(null);
@@ -761,34 +715,6 @@ export default function ImportsPage() {
 
   return (
     <s-page heading="Import Bank Statement" key={resetKey}>
-      {/* Import limit banner */}
-      {isAtLimit && gatingEnforced && (
-        <s-section>
-          <s-banner tone="warning" heading="Import Limit Reached">
-            <s-stack>
-              <s-text>
-                You&apos;ve reached your monthly import limit ({importLimit.current}/{importLimit.limit}).
-                Upgrade your plan to import more bank statements.
-              </s-text>
-              <s-button href={upgradeUrl} target="_top">
-                Upgrade Plan
-              </s-button>
-            </s-stack>
-          </s-banner>
-        </s-section>
-      )}
-
-      {/* Import usage info (when not at limit but has limit) */}
-      {!isAtLimit && gatingEnforced && importLimit.limit !== -1 && (
-        <s-section>
-          <s-banner tone="info" heading="Import Usage">
-            <s-text>
-              Imports this month: {importLimit.current}/{importLimit.limit}
-            </s-text>
-          </s-banner>
-        </s-section>
-      )}
-
       {/* File upload section */}
       <s-section heading="Upload Statement">
         <s-stack>
@@ -803,7 +729,7 @@ export default function ImportsPage() {
             type="file"
             accept=".csv,.xls,.xlsx"
             onChange={handleFileSelect}
-            disabled={status === "loading" || isAtLimit}
+            disabled={status === "loading"}
             style={{ marginBottom: "1rem" }}
           />
 
@@ -912,9 +838,9 @@ export default function ImportsPage() {
                   <s-button 
                     variant="primary" 
                     onClick={handleImport}
-                    disabled={isImporting || isAtLimit}
+                    disabled={isImporting}
                   >
-                    {isImporting ? "Importing..." : isAtLimit ? "Import Limit Reached" : `Import ${result.creditCount} Credits`}
+                    {isImporting ? "Importing..." : `Import ${result.creditCount} Credits`}
                   </s-button>
                 )}
               </s-stack>
