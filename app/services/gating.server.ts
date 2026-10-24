@@ -4,21 +4,24 @@
  * Provides server-side limit checking and feature gating.
  * Called before creating resources that have plan-based limits.
  *
+ * What is enforced (when PLAN_GATING_ENFORCED=true):
+ * - Company limit: new BuyerAccounts over limit are created with gated_at set
+ * - Import limit: enforceImportLimit() blocks imports over monthly allowance
+ *   (wired in app/routes/app.imports.tsx)
+ *
+ * What is NOT enforced:
+ * - credit_holds: runs on all plans (holds, recompute, sweep, Validation Function)
+ * - Feature checks via checkFeature/hasFeature are exported but currently unused
+ *
  * Design decisions:
  * - Downgrades NEVER delete data: over-limit shops keep read access
  * - Over-limit accounts are gated (gated_at set) not blocked/skipped
  * - Gated accounts are excluded from limit count and enforcement
  * - On upgrade, gated accounts are reactivated up to new limit (oldest first)
- * - Feature checks are exported for later steps to call hasFeature()
  *
  * Environment:
  * - PLAN_GATING_ENFORCED: Set to '1' or 'true' to enable enforcement
  *   Default is off (plan resolution, banner, usage work but no blocking)
- *
- * TODO (S13): hasFeature('credit_holds') is exported but the Validation Function
- * fail-open/fail-closed behavior on downgrade needs to be decided in S13.
- * This PR does NOT disable the Validation Function when credit_holds is unavailable.
- * See docs/plans-and-gating.md for details.
  */
 
 import type { Sql } from "~/lib/db-light.server";

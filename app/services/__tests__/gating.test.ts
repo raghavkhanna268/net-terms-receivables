@@ -519,23 +519,25 @@ describe("Gating Service", () => {
         plan_cached_at: new Date(),
       }]);
       
-      const result = await checkFeature(mockSql as unknown as Sql, TEST_SHOP_ID, "credit_holds");
+      // pdf_statements is Growth+ only
+      const result = await checkFeature(mockSql as unknown as Sql, TEST_SHOP_ID, "pdf_statements");
       
       expect(result).toBe(false);
     });
 
-    it("returns true for credit_holds on growth plan", async () => {
+    it("returns true for credit_holds on free plan (all-plans feature)", async () => {
       const { checkFeature } = await import("../gating.server");
       
-      // Growth plan cached
+      // Free plan cached
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "growth",
-        subscription_id: "sub-123",
-        subscription_name: "Growth",
+        plan_key: "free",
+        subscription_id: null,
+        subscription_name: null,
         is_test: false,
         plan_cached_at: new Date(),
       }]);
       
+      // credit_holds is on all plans including free
       const result = await checkFeature(mockSql as unknown as Sql, TEST_SHOP_ID, "credit_holds");
       
       expect(result).toBe(true);
