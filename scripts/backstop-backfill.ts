@@ -45,6 +45,7 @@
 import postgres from "postgres";
 import { pathToFileURL } from "node:url";
 import { requestContext } from "~/lib/request-context.server";
+import { sqlOptions } from "~/lib/db-light.server";
 
 interface BackfillCandidate {
   invoiceId: string;
@@ -266,31 +267,45 @@ function parseArgs(args: string[]): {
   since: Date | null;
   until: Date | null;
   shopFilter: string | undefined;
+  error?: string;
 } {
   const dryRun = !args.includes("--apply");
   
   const sinceIndex = args.indexOf("--since");
   const sinceStr = sinceIndex !== -1 ? args[sinceIndex + 1] : undefined;
+  if (sinceStr?.startsWith("--")) {
+    return { dryRun, since: null, until: null, shopFilter: undefined, error: `--since requires a value, got flag '${sinceStr}'` };
+  }
   const since = sinceStr ? new Date(sinceStr) : null;
   
   const untilIndex = args.indexOf("--until");
   const untilStr = untilIndex !== -1 ? args[untilIndex + 1] : undefined;
+  if (untilStr?.startsWith("--")) {
+    return { dryRun, since: null, until: null, shopFilter: undefined, error: `--until requires a value, got flag '${untilStr}'` };
+  }
   const until = untilStr ? new Date(untilStr) : null;
   
   const shopIndex = args.indexOf("--shop");
   const shopFilter = shopIndex !== -1 ? args[shopIndex + 1] : undefined;
+  if (shopFilter?.startsWith("--")) {
+    return { dryRun, since: null, until: null, shopFilter: undefined, error: `--shop requires a value, got flag '${shopFilter}'` };
+  }
 
   return { dryRun, since, until, shopFilter };
 }
 
 async function main() {
   const args = process.argv.slice(2);
-  const { dryRun, since, until, shopFilter } = parseArgs(args);
+  const { dryRun, since, until, shopFilter, error } = parseArgs(args);
 
   console.log("=".repeat(60));
   console.log("Backstop Backfill Script (S13)");
   console.log("=".repeat(60));
 
+  if (error) {
+    console.error(`ERROR: ${error}`);
+    process.exit(1);
+  }
   if (!since || isNaN(since.getTime())) {
     console.error("ERROR: --since is required (ISO timestamp, e.g. 2026-10-01)");
     process.exit(1);
@@ -324,7 +339,7 @@ async function main() {
     }
   }
 
-  const sql = postgres(databaseUrl, { max: 1 });
+  const sql = postgres(databaseUrl, sqlOptions);
 
   try {
     console.log("Finding candidates (held accounts with missing backstop)...\n");

@@ -8,15 +8,18 @@
  * - Order outside --since/--until window (by issuedAt) is never a candidate
  * - createdAt inside window but issuedAt outside = not a candidate
  * - Dry-run evaluates isBuyerHeldBeforeOrder (would-hold/would-skip with reason codes)
- * - --apply holds via applyBackstop with real shopify-client (fetch stubbed)
+ * - --apply with held account ends in action='held' (global.fetch stubbed)
  * - --apply with bypass account ends in 'skipped'
  * - Second --apply run is a no-op (already processed)
  * - evaluateBackstop decision equals applyBackstop outcome
+ * - parseArgs rejects flag used as value (e.g. --shop --apply)
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { requestContext } from "~/lib/request-context.server";
+import { _resetShopifyAppForTesting } from "~/shopify.server";
+import { setAbstractFetchFunc } from "@shopify/shopify-api/runtime";
 import { findCandidates, hasOfflineSession, processBackfill, parseArgs } from "../backstop-backfill";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -55,6 +58,7 @@ describeWithDb("scripts/backstop-backfill", () => {
 
   afterEach(() => {
     global.fetch = originalFetch;
+    setAbstractFetchFunc(originalFetch);
     process.env = { ...originalEnv };
   });
 
@@ -76,6 +80,21 @@ describeWithDb("scripts/backstop-backfill", () => {
       expect(result.since?.toISOString()).toContain("2026-10-01");
       expect(result.until?.toISOString()).toContain("2026-10-15");
       expect(result.shopFilter).toBe("test.myshopify.com");
+    });
+
+    it("rejects --shop with flag as value", () => {
+      const result = parseArgs(["--shop", "--apply", "--since", "2026-10-01", "--until", "2026-10-15"]);
+      expect(result.error).toBe("--shop requires a value, got flag '--apply'");
+    });
+
+    it("rejects --since with flag as value", () => {
+      const result = parseArgs(["--since", "--until", "2026-10-15"]);
+      expect(result.error).toBe("--since requires a value, got flag '--until'");
+    });
+
+    it("rejects --until with flag as value", () => {
+      const result = parseArgs(["--since", "2026-10-01", "--until", "--apply"]);
+      expect(result.error).toBe("--until requires a value, got flag '--apply'");
     });
   });
 
@@ -671,7 +690,7 @@ describeWithDb("scripts/backstop-backfill", () => {
     const BYPASS_ORDER_GID = `gid://shopify/Order/backfill-apply-bypass-${TEST_SUFFIX}`;
     const INVOICE_ID = `inv-backfill-apply-${TEST_SUFFIX}`;
     const BYPASS_INVOICE_ID = `inv-backfill-apply-bypass-${TEST_SUFFIX}`;
-    const _FO_GID = `gid://shopify/FulfillmentOrder/apply-${TEST_SUFFIX}`;
+    const FO_GID = `gid://shopify/FulfillmentOrder/apply-${TEST_SUFFIX}`;
 
     beforeAll(async () => {
       await sql`
@@ -751,6 +770,120 @@ describeWithDb("scripts/backstop-backfill", () => {
       await sql`DELETE FROM backstop_processed_orders WHERE order_gid IN (${ORDER_GID}, ${BYPASS_ORDER_GID})`;
       await sql`DELETE FROM "Invoice" WHERE id IN (${INVOICE_ID}, ${BYPASS_INVOICE_ID})`;
       await sql`DELETE FROM "BuyerAccount" WHERE id IN (${HELD_ACCOUNT_ID}, ${BYPASS_ACCOUNT_ID})`;
+    });
+
+    it("--apply with held account ends in action='held' (fetch stubbed)", async () => {
+      const fetchCalls: { url: string; body: string }[] = [];
+
+      const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        let url: string;
+        let body = "";
+
+        if (input instanceof Request) {
+          url = input.url;
+          body = await input.clone().text().catch(() => "");
+        } else {
+          url = typeof input === "string" ? input : input.toString();
+          body = typeof init?.body === "string" ? init.body : "";
+        }
+
+        fetchCalls.push({ url, body });
+
+        if (url.includes("/admin/api/") && url.includes("/graphql.json")) {
+          let query = "";
+          try {
+            const parsed = JSON.parse(body);
+            query = parsed.query || "";
+          } catch {
+            query = body;
+          }
+
+          if (query.includes("GetFulfillmentOrders") || query.includes("fulfillmentOrders")) {
+            return new Response(JSON.stringify({
+              data: {
+                order: {
+                  fulfillmentOrders: {
+                    edges: [{
+                      node: {
+                        id: FO_GID,
+                        status: "OPEN",
+                        supportedActions: [{ action: "HOLD" }],
+                      }
+                    }]
+                  }
+                }
+              }
+            }), { status: 200, headers: { "Content-Type": "application/json" } });
+          }
+
+          if (query.includes("FulfillmentOrderHold") || query.includes("fulfillmentOrderHold")) {
+            return new Response(JSON.stringify({
+              data: {
+                fulfillmentOrderHold: {
+                  fulfillmentOrder: { id: FO_GID, status: "ON_HOLD" },
+                  userErrors: []
+                }
+              }
+            }), { status: 200, headers: { "Content-Type": "application/json" } });
+          }
+
+          if (query.includes("TagsAdd") || query.includes("tagsAdd")) {
+            return new Response(JSON.stringify({
+              data: {
+                tagsAdd: {
+                  node: { id: ORDER_GID },
+                  userErrors: []
+                }
+              }
+            }), { status: 200, headers: { "Content-Type": "application/json" } });
+          }
+
+          return new Response(JSON.stringify({ data: {} }), { status: 200, headers: { "Content-Type": "application/json" } });
+        }
+
+        return originalFetch(input, init);
+      });
+
+      setAbstractFetchFunc(mockFetch as typeof fetch);
+
+      _resetShopifyAppForTesting();
+      process.env.SHOPIFY_API_KEY = "test-api-key";
+      process.env.SHOPIFY_API_SECRET = "test-api-secret";
+      (process.env as Record<string, string>).SHOPIFY_APP_URL = "https://test.example.com";
+
+      const candidates = [{
+        invoiceId: INVOICE_ID,
+        orderId: ORDER_GID,
+        shopId: TEST_SHOP_ID,
+        shopDomain: TEST_SHOP_DOMAIN,
+        buyerAccountId: HELD_ACCOUNT_ID,
+      }];
+
+      const result = await requestContext.run({ getSql: () => sql }, async () => {
+        return processBackfill(sql, candidates, false);
+      });
+
+      expect(result.applied).toBe(1);
+      expect(result.skipped).toBe(0);
+      expect(result.errors).toBe(0);
+
+      const [row] = await sql<{ action: string }[]>`
+        SELECT action FROM backstop_processed_orders
+        WHERE shop_id = ${TEST_SHOP_ID} AND order_gid = ${ORDER_GID}
+      `;
+      expect(row).toBeDefined();
+      expect(row.action).toBe("held");
+
+      const tagsCalls = fetchCalls.filter(c => c.body.includes("tagsAdd") || c.body.includes("TagsAdd"));
+      expect(tagsCalls.length).toBeGreaterThan(0);
+
+      const [auditEvent] = await sql<{ type: string; data: { orderGid: string } }[]>`
+        SELECT type, data FROM "AuditEvent"
+        WHERE "shopId" = ${TEST_SHOP_ID} AND type = 'backstop.hold_applied'
+      `;
+      expect(auditEvent).toBeDefined();
+      expect(auditEvent.type).toBe("backstop.hold_applied");
+      expect(auditEvent.data.orderGid).toBe(ORDER_GID);
     });
 
     it("--apply with bypass account ends in 'skipped' (no GraphQL needed)", async () => {
