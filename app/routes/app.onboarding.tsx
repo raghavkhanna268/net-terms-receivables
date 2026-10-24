@@ -84,9 +84,16 @@ export interface RegistrationStatus {
 
 const retryInFlightShops = new Set<string>();
 
+interface ValidationQueryResult {
+  data?: {
+    validations?: { edges: Array<{ node: ValidationNode }> };
+  };
+  errors?: Array<{ message: string }>;
+}
+
 async function fetchValidationInfo(
   admin: AdminGraphqlClient
-): Promise<ValidationInfo | null> {
+): Promise<{ info: ValidationInfo | null; error: string | null }> {
   try {
     const response = await admin.graphql(`#graphql
       query GetValidations {
@@ -102,33 +109,48 @@ async function fetchValidationInfo(
         }
       }
     `);
-    const data = (await response.json()) as {
-      data?: {
-        validations?: { edges: Array<{ node: ValidationNode }> };
-      };
-    };
+    const data = (await response.json()) as ValidationQueryResult;
+
+    if (data.errors?.length) {
+      const errCode = toErrorCode({ message: data.errors[0].message });
+      safeLog("error", "onboarding.fetch_validations_failed", { err: errCode });
+      return { info: null, error: errCode };
+    }
 
     const validation = data.data?.validations?.edges.find(
       (e) => e.node.shopifyFunction.handle === VALIDATION_FUNCTION_HANDLE
     );
 
-    if (!validation) return null;
+    if (!validation) return { info: null, error: null };
 
     return {
-      id: validation.node.id,
-      handle: validation.node.shopifyFunction.handle,
-      enabled: validation.node.enabled,
-      title: validation.node.title,
+      info: {
+        id: validation.node.id,
+        handle: validation.node.shopifyFunction.handle,
+        enabled: validation.node.enabled,
+        title: validation.node.title,
+      },
+      error: null,
     };
   } catch (error) {
-    safeLog("error", "onboarding.fetch_validations_failed", { err: toErrorCode(error) });
-    return null;
+    const errCode = toErrorCode(error);
+    safeLog("error", "onboarding.fetch_validations_failed", { err: errCode });
+    return { info: null, error: errCode };
   }
+}
+
+interface PaymentCustomizationQueryResult {
+  data?: {
+    paymentCustomizations?: {
+      edges: Array<{ node: PaymentCustomizationNode }>;
+    };
+  };
+  errors?: Array<{ message: string }>;
 }
 
 async function fetchPaymentCustomizationInfo(
   admin: AdminGraphqlClient
-): Promise<PaymentCustomizationInfo | null> {
+): Promise<{ info: PaymentCustomizationInfo | null; error: string | null }> {
   try {
     const response = await admin.graphql(`#graphql
       query GetPaymentCustomizations {
@@ -144,29 +166,33 @@ async function fetchPaymentCustomizationInfo(
         }
       }
     `);
-    const data = (await response.json()) as {
-      data?: {
-        paymentCustomizations?: {
-          edges: Array<{ node: PaymentCustomizationNode }>;
-        };
-      };
-    };
+    const data = (await response.json()) as PaymentCustomizationQueryResult;
+
+    if (data.errors?.length) {
+      const errCode = toErrorCode({ message: data.errors[0].message });
+      safeLog("error", "onboarding.fetch_payment_customizations_failed", { err: errCode });
+      return { info: null, error: errCode };
+    }
 
     const customization = data.data?.paymentCustomizations?.edges.find(
       (e) => e.node.shopifyFunction.handle === PAYMENT_CUSTOMIZATION_HANDLE
     );
 
-    if (!customization) return null;
+    if (!customization) return { info: null, error: null };
 
     return {
-      id: customization.node.id,
-      handle: customization.node.shopifyFunction.handle,
-      enabled: customization.node.enabled,
-      title: customization.node.title,
+      info: {
+        id: customization.node.id,
+        handle: customization.node.shopifyFunction.handle,
+        enabled: customization.node.enabled,
+        title: customization.node.title,
+      },
+      error: null,
     };
   } catch (error) {
-    safeLog("error", "onboarding.fetch_payment_customizations_failed", { err: toErrorCode(error) });
-    return null;
+    const errCode = toErrorCode(error);
+    safeLog("error", "onboarding.fetch_payment_customizations_failed", { err: errCode });
+    return { info: null, error: errCode };
   }
 }
 
@@ -226,7 +252,7 @@ async function checkMetafieldDefinitionsStatus(
       }
 
       const hasCreditStatus = data.data?.metafieldDefinitions?.edges.some(
-        (e) => e.node.key === METAFIELD.key && e.node.namespace === METAFIELD.namespace
+        (e) => e.node.key === METAFIELD.key
       );
 
       if (hasCreditStatus) {
@@ -312,23 +338,16 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     };
   }
 
-  let validationError: string | null = null;
-  let paymentCustomizationError: string | null = null;
-
   const [validationResult, paymentCustomizationResult, metafieldStatus] = await Promise.all([
-    fetchValidationInfo(admin).catch((e) => {
-      validationError = toErrorCode(e);
-      return null;
-    }),
-    fetchPaymentCustomizationInfo(admin).catch((e) => {
-      paymentCustomizationError = toErrorCode(e);
-      return null;
-    }),
+    fetchValidationInfo(admin),
+    fetchPaymentCustomizationInfo(admin),
     checkMetafieldDefinitionsStatus(admin),
   ]);
 
-  const validation = validationResult;
-  const paymentCustomization = paymentCustomizationResult;
+  const validation = validationResult.info;
+  const validationError = validationResult.error;
+  const paymentCustomization = paymentCustomizationResult.info;
+  const paymentCustomizationError = paymentCustomizationResult.error;
 
   const resendApiKeyConfigured = Boolean(process.env.RESEND_API_KEY);
 
@@ -403,17 +422,19 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     const hash = await shopHash(shopDomain);
 
     try {
-      const currentStatusStr = formData.get("currentStatus");
-      if (!currentStatusStr || typeof currentStatusStr !== "string") {
-        return { success: false, error: "Missing status data", action: "retry_registration" };
-      }
+      const [validationResult, paymentCustomizationResult, metafieldStatus] = await Promise.all([
+        fetchValidationInfo(admin),
+        fetchPaymentCustomizationInfo(admin),
+        checkMetafieldDefinitionsStatus(admin),
+      ]);
 
-      let currentStatus: RegistrationStatus;
-      try {
-        currentStatus = JSON.parse(currentStatusStr) as RegistrationStatus;
-      } catch {
-        return { success: false, error: "Invalid status data", action: "retry_registration" };
-      }
+      const currentStatus = computeRegistrationStatus(
+        validationResult.info,
+        validationResult.error,
+        paymentCustomizationResult.info,
+        paymentCustomizationResult.error,
+        metafieldStatus
+      );
 
       const results: {
         validation: RegistrationItem;
@@ -477,9 +498,6 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       safeLog("info", "onboarding.retry_registration_complete", {
         shopHash: hash,
         success: allOk,
-        validationStatus: results.validation.status,
-        paymentCustomizationStatus: results.paymentCustomization.status,
-        metafieldDefinitionsStatus: results.metafieldDefinitions.status,
       });
 
       return {
@@ -566,7 +584,6 @@ function RegistrationStatusSection({
       {!allOk && (
         <Form method="post">
           <input type="hidden" name="_action" value="retry_registration" />
-          <input type="hidden" name="currentStatus" value={JSON.stringify(status)} />
           <s-button type="submit" disabled={isRetrying}>
             {isRetrying ? "Retrying..." : "Retry"}
           </s-button>
