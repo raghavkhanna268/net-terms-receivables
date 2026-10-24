@@ -60,6 +60,8 @@ import { detectFileType, loadSpreadsheet } from "./spreadsheet-loader.js";
 import { detectBank } from "./detection.js";
 import { parseHdfcStatement } from "./parsers/hdfc.js";
 import { parseIciciStatement } from "./parsers/icici.js";
+import { parseSbiStatement } from "./parsers/sbi.js";
+import { parseAxisStatement } from "./parsers/axis.js";
 
 /**
  * Parse a bank statement file.
@@ -98,6 +100,10 @@ export async function parseBankStatement(
       return parseHdfcStatement(sheet, detection, options.existingKeys);
     case "ICICI":
       return parseIciciStatement(sheet, detection, options.existingKeys);
+    case "SBI":
+      return parseSbiStatement(sheet, detection, options.existingKeys);
+    case "AXIS":
+      return parseAxisStatement(sheet, detection, options.existingKeys);
     default:
       // Unknown bank - return empty result with detection info
       return {

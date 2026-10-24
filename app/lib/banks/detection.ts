@@ -1,5 +1,5 @@
 /**
- * Bank statement detection for HDFC and ICICI banks.
+ * Bank statement detection for HDFC, ICICI, SBI, and Axis banks.
  * Detects bank from headers, preamble lines, and filename.
  *
  * Part of S14/S15: Net Terms Receivables bank statement parsing.
@@ -53,10 +53,52 @@ const ICICI_CORPORATE_HEADERS = [
 
 const ICICI_DETAILED_HEADERS = ["Date", "Particulars", "Chq. No.", "Withdrawals", "Deposits", "Balance"];
 
+/**
+ * SBI Header patterns (SYNTHETIC / UNVERIFIED)
+ * Sources:
+ * - https://www.tieout.in/banks/sbi/
+ * - https://www.cleanstatement.in/sbi-bank-statement-to-excel
+ * 
+ * Note: Only using primary SBI header format to avoid collision with ICICI
+ * headers that share similar column names (Transaction Date, Withdrawal, Deposit).
+ */
+const SBI_HEADERS = [
+  "Txn Date",
+  "Value Date",
+  "Description",
+  "Ref No./Cheque No.",
+  "Debit",
+  "Credit",
+  "Balance",
+];
+
+/**
+ * Axis Bank Header patterns (SYNTHETIC / UNVERIFIED)
+ * Sources:
+ * - https://www.tieout.in/banks/axis/
+ * - https://www.cleanstatement.in/axis-bank-statement-to-excel
+ */
+const AXIS_HEADERS = [
+  "Tran Date",
+  "Chq No",
+  "Particulars",
+  "DR",
+  "CR",
+  "Balance",
+];
+
+const AXIS_HEADERS_ALT = ["Transaction Date", "Value Date", "Particulars", "Chq./Ref.No.", "Debit", "Credit", "Balance"];
+
+const AXIS_HEADERS_CORPORATE = ["Tran Date", "Value Date", "Particulars", "Chq No", "Debit", "Credit", "Balance"];
+
 /** Filename patterns */
 const HDFC_FILENAME_PATTERNS = [/hdfc/i, /^AC_\d+_/i, /opStatement/i];
 
 const ICICI_FILENAME_PATTERNS = [/icici/i, /^[0-9]+_statement/i, /e-statement/i];
+
+const SBI_FILENAME_PATTERNS = [/sbi/i, /state\s*bank/i, /^SB\d+/i];
+
+const AXIS_FILENAME_PATTERNS = [/axis/i, /^AXIS/i, /^SA\d+/i];
 
 /** Preamble text patterns */
 const HDFC_PREAMBLE_PATTERNS = [
@@ -75,6 +117,18 @@ const ICICI_PREAMBLE_PATTERNS = [
   /Statement\s*of\s*transactions/i,
 ];
 
+const SBI_PREAMBLE_PATTERNS = [
+  /STATE\s*BANK\s*OF\s*INDIA/i,
+  /www\.onlinesbi\.com/i,
+  /www\.sbi\.co\.in/i,
+];
+
+const AXIS_PREAMBLE_PATTERNS = [
+  /AXIS\s*BANK/i,
+  /www\.axisbank\.com/i,
+  /Axis\s*Bank\s*Ltd/i,
+];
+
 /**
  * Detect bank from statement data.
  *
@@ -85,6 +139,8 @@ const ICICI_PREAMBLE_PATTERNS = [
 export function detectBank(sheet: SheetData, fileName?: string): DetectionResult {
   let hdfcScore = 0;
   let iciciScore = 0;
+  let sbiScore = 0;
+  let axisScore = 0;
   const reasons: string[] = [];
 
   // Check filename
@@ -104,12 +160,32 @@ export function detectBank(sheet: SheetData, fileName?: string): DetectionResult
         break;
       }
     }
+    for (const pattern of SBI_FILENAME_PATTERNS) {
+      if (pattern.test(fileName)) {
+        sbiScore += 0.3;
+        reasons.push(`Filename matches SBI pattern: ${pattern}`);
+        break;
+      }
+    }
+    for (const pattern of AXIS_FILENAME_PATTERNS) {
+      if (pattern.test(fileName)) {
+        axisScore += 0.3;
+        reasons.push(`Filename matches Axis pattern: ${pattern}`);
+        break;
+      }
+    }
     // Direct name match
-    if (fnLower.includes("hdfc") && !fnLower.includes("icici")) {
+    if (fnLower.includes("hdfc") && !fnLower.includes("icici") && !fnLower.includes("sbi") && !fnLower.includes("axis")) {
       hdfcScore += 0.2;
     }
-    if (fnLower.includes("icici") && !fnLower.includes("hdfc")) {
+    if (fnLower.includes("icici") && !fnLower.includes("hdfc") && !fnLower.includes("sbi") && !fnLower.includes("axis")) {
       iciciScore += 0.2;
+    }
+    if (fnLower.includes("sbi") && !fnLower.includes("hdfc") && !fnLower.includes("icici") && !fnLower.includes("axis")) {
+      sbiScore += 0.2;
+    }
+    if (fnLower.includes("axis") && !fnLower.includes("hdfc") && !fnLower.includes("icici") && !fnLower.includes("sbi")) {
+      axisScore += 0.2;
     }
   }
 
@@ -131,6 +207,20 @@ export function detectBank(sheet: SheetData, fileName?: string): DetectionResult
         break;
       }
     }
+    for (const pattern of SBI_PREAMBLE_PATTERNS) {
+      if (pattern.test(rowText)) {
+        sbiScore += 0.2;
+        reasons.push(`Preamble matches SBI pattern: ${pattern}`);
+        break;
+      }
+    }
+    for (const pattern of AXIS_PREAMBLE_PATTERNS) {
+      if (pattern.test(rowText)) {
+        axisScore += 0.2;
+        reasons.push(`Preamble matches Axis pattern: ${pattern}`);
+        break;
+      }
+    }
   }
 
   // Check header rows
@@ -142,11 +232,27 @@ export function detectBank(sheet: SheetData, fileName?: string): DetectionResult
     } else if (headerResult.bank === "ICICI") {
       iciciScore += 0.5;
       reasons.push(`Header row matches ICICI format at row ${headerResult.row + 1}`);
+    } else if (headerResult.bank === "SBI") {
+      sbiScore += 0.5;
+      reasons.push(`Header row matches SBI format at row ${headerResult.row + 1}`);
+    } else if (headerResult.bank === "AXIS") {
+      axisScore += 0.5;
+      reasons.push(`Header row matches Axis format at row ${headerResult.row + 1}`);
     }
   }
 
   // Determine winner
-  const maxScore = Math.max(hdfcScore, iciciScore);
+  const scores = [
+    { bank: "HDFC" as BankId, score: hdfcScore },
+    { bank: "ICICI" as BankId, score: iciciScore },
+    { bank: "SBI" as BankId, score: sbiScore },
+    { bank: "AXIS" as BankId, score: axisScore },
+  ];
+  scores.sort((a, b) => b.score - a.score);
+
+  const maxScore = scores[0].score;
+  const secondScore = scores[1].score;
+
   if (maxScore < 0.3) {
     return {
       bank: "UNKNOWN",
@@ -155,26 +261,23 @@ export function detectBank(sheet: SheetData, fileName?: string): DetectionResult
     };
   }
 
-  if (hdfcScore > iciciScore) {
-    return {
-      bank: "HDFC",
-      confidence: Math.min(hdfcScore, 1),
-      reason: reasons.filter((r) => r.includes("HDFC")).join("; "),
-    };
-  } else if (iciciScore > hdfcScore) {
-    return {
-      bank: "ICICI",
-      confidence: Math.min(iciciScore, 1),
-      reason: reasons.filter((r) => r.includes("ICICI")).join("; "),
-    };
-  } else {
-    // Equal scores - need more evidence
+  // Check for tie between top two
+  if (maxScore === secondScore) {
     return {
       bank: "UNKNOWN",
       confidence: maxScore * 0.5,
-      reason: "Ambiguous - matches both HDFC and ICICI patterns",
+      reason: `Ambiguous - matches both ${scores[0].bank} and ${scores[1].bank} patterns`,
     };
   }
+
+  const winningBank = scores[0].bank;
+  // Filter reasons case-insensitively to handle banks like "AXIS" vs "Axis" in reason text
+  const winningBankLower = winningBank.toLowerCase();
+  return {
+    bank: winningBank,
+    confidence: Math.min(maxScore, 1),
+    reason: reasons.filter((r) => r.toLowerCase().includes(winningBankLower)).join("; "),
+  };
 }
 
 /**
@@ -204,6 +307,19 @@ export function detectHeaderRow(
       return { bank: "HDFC", row: i, columns: cells };
     }
 
+    // Check Axis patterns BEFORE ICICI (UNVERIFIED)
+    // Axis has more specific header names like "Tran Date" which could be 
+    // falsely matched by ICICI's "Date" via substring matching
+    if (
+      matchesHeaderPattern(cells, AXIS_HEADERS) ||
+      matchesHeaderPattern(cells, AXIS_HEADERS_ALT)
+    ) {
+      return { bank: "AXIS", row: i, columns: cells };
+    }
+    if (matchesHeaderPattern(cells, AXIS_HEADERS_CORPORATE)) {
+      return { bank: "AXIS", row: i, columns: cells };
+    }
+
     // Check ICICI patterns
     if (
       matchesHeaderPattern(cells, ICICI_HEADERS) ||
@@ -216,6 +332,11 @@ export function detectHeaderRow(
     }
     if (matchesHeaderPattern(cells, ICICI_DETAILED_HEADERS)) {
       return { bank: "ICICI", row: i, columns: cells };
+    }
+
+    // Check SBI patterns (UNVERIFIED)
+    if (matchesHeaderPattern(cells, SBI_HEADERS)) {
+      return { bank: "SBI", row: i, columns: cells };
     }
   }
 
@@ -234,6 +355,12 @@ function normalizeHeaderCell(cell: unknown): string {
 }
 
 /**
+ * Short headers that must match as whole words/cells to avoid false positives.
+ * E.g., "DR" should not match "Withdrawals" via substring.
+ */
+const WHOLE_WORD_ONLY_HEADERS = new Set(["dr", "cr"]);
+
+/**
  * Check if row cells match a header pattern (fuzzy match).
  */
 function matchesHeaderPattern(cells: string[], pattern: string[]): boolean {
@@ -243,9 +370,17 @@ function matchesHeaderPattern(cells: string[], pattern: string[]): boolean {
 
   for (const expected of pattern) {
     const normalizedExpected = expected.toLowerCase().replace(/[./]/g, "").replace(/\s+/g, " ");
+    const requireWholeWord = WHOLE_WORD_ONLY_HEADERS.has(normalizedExpected);
+
     for (const cell of cells) {
       const normalizedCell = cell.toLowerCase().replace(/[./]/g, "").replace(/\s+/g, " ");
-      if (normalizedCell === normalizedExpected || normalizedCell.includes(normalizedExpected)) {
+      
+      if (normalizedCell === normalizedExpected) {
+        // Exact match always counts
+        matches++;
+        break;
+      } else if (!requireWholeWord && normalizedCell.includes(normalizedExpected)) {
+        // Substring match only for non-whole-word headers
         matches++;
         break;
       }

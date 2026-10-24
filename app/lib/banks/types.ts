@@ -6,7 +6,7 @@
  */
 
 /** Known bank identifiers */
-export type BankId = "HDFC" | "ICICI" | "UNKNOWN";
+export type BankId = "HDFC" | "ICICI" | "SBI" | "AXIS" | "UNKNOWN";
 
 /** Transaction direction */
 export type TxnDirection = "CR" | "DR";
