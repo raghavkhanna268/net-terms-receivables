@@ -7,7 +7,7 @@
 -- Output column kinds for passthrough columns (scripts/ci/check-readonly-columns.ts,
 -- see scripts/readonly/README.md). Derived counts/booleans/CASE enums need no entry.
 -- @col topic, original_queue, error_format, error_disposition, error_code, status, due_basis, action, account_hold_state, kind, holdState, defaultTermsSource, dueSource, dueBasis: enum
--- dueBasis (and due_basis) is a TEXT column holding app-written fixed codes, not free text, so enum.
+-- dueBasis / due_basis and dueSource are TEXT columns holding app-written fixed codes (not free text), so enum.
 -- @col fo_held, non_mm_skipped, syncVersion: count
 -- @col defaultTermsDays: config_int
 -- @col manualHold, bypass, syncPending: boolean
@@ -149,7 +149,10 @@ ORDER BY e.at;
 
 \echo '== backstop.failed AuditEvents by error code (all-time / since redrive start; data.errorCode since #176, legacy data.error text never printed)'
 SELECT CASE WHEN e.data ? 'errorCode' THEN
-              CASE WHEN e.data->>'errorCode' ~ '^(?:(non_retryable|permanent):)?([A-Za-z][A-Za-z0-9_]{0,63}|graphql_error:[A-Za-z0-9_,]{1,200})$' THEN e.data->>'errorCode' ELSE '<other>' END
+              CASE WHEN e.data->>'errorCode' ~ '^(?:(non_retryable|permanent):)?[A-Za-z][A-Za-z0-9_]{0,63}$' THEN e.data->>'errorCode'
+                   WHEN e.data->>'errorCode' ~ '^graphql_error:[A-Za-z0-9_]{1,64}$' THEN e.data->>'errorCode'
+                   WHEN e.data->>'errorCode' LIKE 'graphql_error:%' THEN 'graphql_error:<multiple>'
+                   ELSE '<other>' END
             WHEN e.data ? 'error' THEN 'legacy_unclassified'
             ELSE '(none)' END AS error_code,
        COUNT(*) AS total,

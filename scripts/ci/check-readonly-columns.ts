@@ -39,15 +39,24 @@
  *                                         -> enum
  *         COALESCE(x, literal...), x::type, (x) -> kind of x
  *         MIN/MAX(x)                      -> kind of x
- *         NOW() - x                       -> timestamp (interval)
+ *         NOW() - x (whole expression only, x a ref/cast/INTERVAL literal)
+ *                                         -> timestamp (interval)
+ *         Guards: WHEN must be exactly x ~ 're' / x IN (...) or an AND-only
+ *         conjunction containing it (no OR). Regex: see isSafeGuardRegex
+ *         (A-Za-z0-9_:- classes, no negation/escapes/./@, bound <= 64).
+ *         The guarded column still gets the sensitive check (step 4).
  *      b. An explicit file annotation:   -- @col <name>[, <name>...]: <kind>
  *         This is how plain passthrough columns (status, type, kind,
  *         "holdState", "manualHold", read_ct ...) are declared. A reviewer
  *         reads the annotation, so annotate only what is truly one of the
  *         six kinds.
- *      c. Naming convention on the output name:
- *         id, *_id, *Id, *_gid, *_idx      -> id
- *         at, *_at, *At, *_date, *Date     -> timestamp
+ *      c. Naming convention, only for a plain column ref (optionally cast,
+ *         COALESCE(ref, literal) or ref->>'key') whose SOURCE name follows the
+ *         same convention as the output name:
+ *         id, *_id, *Id, *_gid, *Gid, *_idx -> id
+ *         at, *_at, *At, *_date, *Date      -> timestamp
+ *         A whole-row reference (SELECT s / row_to_json(s)) always fails
+ *         (`whole_row`).
  *   4. Independently of 3b/3c, a column is REJECTED as `sensitive` when it is
  *      not a derived count/boolean and its output name, or any column / JSON
  *      key it passes through, looks like a domain, shop, email, phone,
@@ -63,10 +72,15 @@
  *      (`bad_annotation`) or config_int on a column / source that is not in
  *      CONFIG_INT_COLUMNS (`config_int_not_listed`).
  *
+ *   5. psql meta commands: only `\set ON_ERROR_STOP 1` and `\echo '<literal>'`.
+ *      Anything else (\copy, \g*, \o, \!, \i, \qecho, :var ...) is
+ *      `unsupported_statement`. Set-operator branches must be plain SELECTs.
+ *
  * Burn-down allowlist: scripts/ci/readonly-columns-allowlist.json, entries
  * {file, column, issue, count}. CI fails on any violation not covered, and on
  * any entry whose count is now higher than the actual count (stale), so the
- * list can only shrink.
+ * list can only shrink. Never-allowlist issues (NEVER_ALLOWLIST) and duplicate
+ * keys are rejected; a test pins the committed entries (shrink-only).
  *
  * Usage: npx tsx scripts/ci/check-readonly-columns.ts
  * Env (tests): READONLY_COLUMNS_ROOT (repo root), READONLY_COLUMNS_ALLOWLIST.
@@ -76,7 +90,14 @@ import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
 
-export const KINDS = ["id", "count", "enum", "boolean", "timestamp", "config_int"] as const;
+export const KINDS = [
+  "id",
+  "count",
+  "enum",
+  "boolean",
+  "timestamp",
+  "config_int",
+] as const;
 export type Kind = (typeof KINDS)[number];
 
 /**
@@ -93,7 +114,18 @@ export type Issue =
   | "unsupported_statement"
   | "stale_annotation"
   | "bad_annotation"
-  | "config_int_not_listed";
+  | "config_int_not_listed"
+  | "whole_row";
+
+/** Issues that can never be allowlisted: fix the SQL instead. */
+export const NEVER_ALLOWLIST: readonly Issue[] = [
+  "sensitive",
+  "star",
+  "unsupported_statement",
+  "bad_annotation",
+  "config_int_not_listed",
+  "whole_row",
+];
 
 export interface Violation {
   file: string;
@@ -114,22 +146,26 @@ export interface AllowlistEntry {
 // Tokenizer
 // ============================================================================
 
-type TokType = "ident" | "qident" | "string" | "number" | "op" | "punct" | "var";
+type TokType =
+  "ident" | "qident" | "string" | "number" | "op" | "punct" | "var";
 interface Tok {
   t: TokType;
   v: string; // normalized value: unquoted idents lower-cased, strings unquoted
   raw: string;
 }
 
-export function tokenize(sql: string): Tok[] {
+/**
+ * Tokenize SQL. psql meta commands (a backslash outside strings/comments, at
+ * line start or mid-line) are removed from the token stream and, when `metas`
+ * is given, collected there (the backslash to end of line) for checkMeta().
+ */
+export function tokenize(sql: string, metas?: string[]): Tok[] {
   const toks: Tok[] = [];
   let i = 0;
-  let lineStart = true;
   const n = sql.length;
   while (i < n) {
     const c = sql[i];
     if (c === "\n") {
-      lineStart = true;
       i++;
       continue;
     }
@@ -137,12 +173,13 @@ export function tokenize(sql: string): Tok[] {
       i++;
       continue;
     }
-    // psql meta command: whole line
-    if (lineStart && c === "\\") {
+    // psql meta command: backslash to end of line (line start or mid-line)
+    if (c === "\\") {
+      const start = i;
       while (i < n && sql[i] !== "\n") i++;
+      metas?.push(sql.slice(start, i).trim());
       continue;
     }
-    lineStart = false;
     if (c === "-" && sql[i + 1] === "-") {
       while (i < n && sql[i] !== "\n") i++;
       continue;
@@ -190,7 +227,9 @@ export function tokenize(sql: string): Tok[] {
     }
     // psql variable :'x' / :"x" / :x  (but not the :: cast operator)
     if (c === ":" && sql[i + 1] !== ":" && sql[i - 1] !== ":") {
-      const m = /^:(?:'[^']*'|"[^"]*"|[A-Za-z_][A-Za-z0-9_]*)/.exec(sql.slice(i));
+      const m = /^:(?:'[^']*'|"[^"]*"|[A-Za-z_][A-Za-z0-9_]*)/.exec(
+        sql.slice(i),
+      );
       if (m) {
         toks.push({ t: "var", v: m[0], raw: m[0] });
         i += m[0].length;
@@ -214,7 +253,10 @@ export function tokenize(sql: string): Tok[] {
       i++;
       continue;
     }
-    const m = /^(?:->>|->|#>>|#>|::|<>|!=|<=|>=|!~\*|!~|~\*|\|\||[-+*/%<>=~!?@#&|^])/.exec(sql.slice(i));
+    const m =
+      /^(?:->>|->|#>>|#>|::|<>|!=|<=|>=|!~\*|!~|~\*|\|\||[-+*/%<>=~!?@#&|^])/.exec(
+        sql.slice(i),
+      );
     if (m) {
       toks.push({ t: "op", v: m[0], raw: m[0] });
       i += m[0].length;
@@ -225,8 +267,27 @@ export function tokenize(sql: string): Tok[] {
   return toks;
 }
 
-const isKw = (tok: Tok | undefined, ...kws: string[]) => !!tok && tok.t === "ident" && kws.includes(tok.v);
-const isP = (tok: Tok | undefined, p: string) => !!tok && (tok.t === "punct" || tok.t === "op") && tok.v === p;
+/**
+ * psql meta commands allowed in scripts/readonly: only `\set ON_ERROR_STOP 1`
+ * and `\echo` followed by single-quoted literals (psql does not interpolate
+ * :vars inside single quotes). Everything else (\copy, \g*, \o, \!, \i,
+ * \qecho, \x, \pset, an unquoted :var, backticks ...) can print or run
+ * something the column check cannot see. Returns the offending commands.
+ */
+export function checkMeta(metas: string[]): string[] {
+  const bad: string[] = [];
+  for (const m of metas) {
+    if (/^\\set\s+ON_ERROR_STOP\s+(1|on)\s*$/i.test(m)) continue;
+    if (/^\\echo(\s+'(?:[^'\\]|''|\\[nt'\\])*')+\s*$/.test(m)) continue;
+    bad.push(m);
+  }
+  return bad;
+}
+
+const isKw = (tok: Tok | undefined, ...kws: string[]) =>
+  !!tok && tok.t === "ident" && kws.includes(tok.v);
+const isP = (tok: Tok | undefined, p: string) =>
+  !!tok && (tok.t === "punct" || tok.t === "op") && tok.v === p;
 
 function splitStatements(toks: Tok[]): Tok[][] {
   const out: Tok[][] = [];
@@ -298,15 +359,39 @@ interface OutCol {
   expr: Tok[];
 }
 
-const SELECT_END = new Set(["from", "where", "group", "order", "limit", "having", "window", "offset", "fetch", "into", "union", "intersect", "except"]);
+const SELECT_END = new Set([
+  "from",
+  "where",
+  "group",
+  "order",
+  "limit",
+  "having",
+  "window",
+  "offset",
+  "fetch",
+  "into",
+  "union",
+  "intersect",
+  "except",
+]);
 
 /** Return the select lists (one per UNION branch) of the outermost query. */
 function outerSelectLists(stmt: Tok[]): Tok[][] | null {
   const d = depths(stmt);
   const lists: Tok[][] = [];
   let i = 0;
-  // skip WITH ... : first depth-0 SELECT
-  while (i < stmt.length && !(d[i] === 0 && isKw(stmt[i], "select"))) i++;
+  // skip WITH ... : first depth-0 SELECT. Between CTE bodies only `,` / AS /
+  // SELECT may follow a depth-0 `)`, so `WITH x AS (...) TABLE x` / `VALUES`
+  // is unparseable (fail closed) rather than silently skipped.
+  while (i < stmt.length && !(d[i] === 0 && isKw(stmt[i], "select"))) {
+    if (
+      d[i] === 0 &&
+      isP(stmt[i], ")") &&
+      !(isP(stmt[i + 1], ",") || isKw(stmt[i + 1], "as", "select"))
+    )
+      return null;
+    i++;
+  }
   if (i >= stmt.length) return null;
   while (i < stmt.length) {
     i++; // past SELECT
@@ -345,10 +430,13 @@ function outerSelectLists(stmt: Tok[]): Tok[][] | null {
     let found = false;
     while (i < stmt.length) {
       if (d[i] === 0 && isKw(stmt[i], "union", "intersect", "except")) {
+        // the next branch must be a plain SELECT; VALUES / TABLE / (subquery)
+        // branches are not inspected, so fail closed (unparseable)
         let j = i + 1;
-        while (j < stmt.length && !(d[j] === 0 && isKw(stmt[j], "select"))) j++;
+        if (isKw(stmt[j], "all", "distinct")) j++;
+        if (!isKw(stmt[j], "select")) return null;
         i = j;
-        found = j < stmt.length;
+        found = true;
         break;
       }
       i++;
@@ -372,9 +460,11 @@ function defaultName(expr: Tok[]): string {
   if (e.length === 0) return "?column?";
   const last = e[e.length - 1];
   // column ref: ident(.ident)*
-  const isRef = e.every((tk, k) => (k % 2 === 0 ? tk.t === "ident" || tk.t === "qident" : isP(tk, ".")));
+  const isRef = e.every((tk, k) =>
+    k % 2 === 0 ? tk.t === "ident" || tk.t === "qident" : isP(tk, "."),
+  );
   if (isRef) return last.v;
-  if ((e[0].t === "ident") && isP(e[1], "(")) {
+  if (e[0].t === "ident" && isP(e[1], "(")) {
     // function call spanning the whole expression (incl. FILTER / OVER)
     if (isKw(e[0], "exists")) return "exists";
     return e[0].v;
@@ -385,16 +475,59 @@ function defaultName(expr: Tok[]): string {
 
 function splitAlias(item: Tok[]): { expr: Tok[]; alias: string | null } {
   const n = item.length;
-  if (n >= 3 && isKw(item[n - 2], "as") && (item[n - 1].t === "ident" || item[n - 1].t === "qident")) {
+  if (
+    n >= 3 &&
+    isKw(item[n - 2], "as") &&
+    (item[n - 1].t === "ident" || item[n - 1].t === "qident")
+  ) {
     return { expr: item.slice(0, n - 2), alias: item[n - 1].v };
   }
   // bare alias: `expr alias`
   if (n >= 2 && (item[n - 1].t === "ident" || item[n - 1].t === "qident")) {
     const prev = item[n - 2];
-    const reserved = ["null", "true", "false", "end", "and", "or", "not", "is", "in", "like", "ilike", "then", "else", "when", "distinct", "from", "as", "zone"];
-    const lastIsKw = item[n - 1].t === "ident" && reserved.includes(item[n - 1].v);
-    const prevOk = isP(prev, ")") || isKw(prev, "end") || prev.t === "string" || prev.t === "number" ||
-      prev.t === "qident" || (prev.t === "ident" && !["is", "not", "and", "or", "as", "distinct", "time", "zone", "in", "like", "ilike", "at"].includes(prev.v));
+    const reserved = [
+      "null",
+      "true",
+      "false",
+      "end",
+      "and",
+      "or",
+      "not",
+      "is",
+      "in",
+      "like",
+      "ilike",
+      "then",
+      "else",
+      "when",
+      "distinct",
+      "from",
+      "as",
+      "zone",
+    ];
+    const lastIsKw =
+      item[n - 1].t === "ident" && reserved.includes(item[n - 1].v);
+    const prevOk =
+      isP(prev, ")") ||
+      isKw(prev, "end") ||
+      prev.t === "string" ||
+      prev.t === "number" ||
+      prev.t === "qident" ||
+      (prev.t === "ident" &&
+        ![
+          "is",
+          "not",
+          "and",
+          "or",
+          "as",
+          "distinct",
+          "time",
+          "zone",
+          "in",
+          "like",
+          "ilike",
+          "at",
+        ].includes(prev.v));
     if (!lastIsKw && prevOk && !isP(prev, ".") && prev.t !== "op") {
       return { expr: item.slice(0, n - 1), alias: item[n - 1].v };
     }
@@ -412,10 +545,19 @@ export function outputColumns(stmt: Tok[]): OutCol[][] | null {
       if (item.length === 0) continue;
       const { expr, alias } = splitAlias(item);
       const u = unwrap(expr);
-      if (!alias && u.length > 3 && isKw(u[0], "json_build_object", "jsonb_build_object") && isP(u[1], "(") && isP(u[u.length - 1], ")")) {
+      if (
+        !alias &&
+        u.length > 3 &&
+        isKw(u[0], "json_build_object", "jsonb_build_object") &&
+        isP(u[1], "(") &&
+        isP(u[u.length - 1], ")")
+      ) {
         const args = splitTop(u.slice(2, -1));
         for (let k = 0; k + 1 < args.length; k += 2) {
-          const key = args[k].length === 1 && args[k][0].t === "string" ? args[k][0].v : "?key?";
+          const key =
+            args[k].length === 1 && args[k][0].t === "string"
+              ? args[k][0].v
+              : "?key?";
           cols.push({ name: key, expr: args[k + 1] });
         }
         continue;
@@ -433,20 +575,85 @@ export function outputColumns(stmt: Tok[]): OutCol[][] | null {
 function words(id: string): string[] {
   return id
     .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/([A-Za-z])([0-9])/g, "$1_$2") // address1 -> address_1
     .toLowerCase()
     .split(/[^a-z0-9]+/)
     .filter(Boolean);
 }
 
 const SENSITIVE_WORDS = new Set([
-  "domain", "domains", "myshopify", "email", "emails", "phone", "address", "addresses", "name", "names",
-  "firstname", "lastname", "note", "notes", "narration", "payer", "remitter", "text", "message", "messages",
-  "payload", "body", "raw", "amount", "amounts", "price", "balance", "outstanding", "paise", "money",
-  "limit", "token", "secret", "password", "error", "errors", "reason", "description", "comment", "data",
+  "domain",
+  "domains",
+  "myshopify",
+  "email",
+  "emails",
+  "phone",
+  "address",
+  "addresses",
+  "name",
+  "names",
+  "firstname",
+  "lastname",
+  "note",
+  "notes",
+  "narration",
+  "payer",
+  "remitter",
+  "text",
+  "message",
+  "messages",
+  "payload",
+  "body",
+  "raw",
+  "amount",
+  "amounts",
+  "price",
+  "balance",
+  "outstanding",
+  "paise",
+  "money",
+  "limit",
+  "token",
+  "secret",
+  "password",
+  "error",
+  "errors",
+  "reason",
+  "description",
+  "comment",
+  "data",
 ]);
 /** Words that make error/reason/shop/limit/message names enum- or id-shaped. */
-const SAFE_QUALIFIERS = new Set(["code", "codes", "kind", "format", "disposition", "class", "category", "idx", "index", "id", "gid", "ids", "count", "pos", "exists", "present", "match", "type"]);
-const QUALIFIABLE = new Set(["error", "errors", "reason", "shop", "message", "messages", "limit", "data"]);
+const SAFE_QUALIFIERS = new Set([
+  "code",
+  "codes",
+  "kind",
+  "format",
+  "disposition",
+  "class",
+  "category",
+  "idx",
+  "index",
+  "id",
+  "gid",
+  "ids",
+  "count",
+  "pos",
+  "exists",
+  "present",
+  "match",
+  "type",
+]);
+const QUALIFIABLE = new Set([
+  "error",
+  "errors",
+  "reason",
+  "shop",
+  "message",
+  "messages",
+  "limit",
+  "data",
+]);
 
 /** Return the offending word, or null. */
 export function sensitiveWord(id: string): string | null {
@@ -462,39 +669,147 @@ export function sensitiveWord(id: string): string | null {
   return null;
 }
 
+/** Naming convention on a single name (see plainRef for when it applies). */
 function nameConvention(name: string): Kind | null {
-  if (/^(id|.*_id|.*[a-z0-9]Id|.*_gid|.*_idx)$/.test(name)) return "id";
-  if (/^(at|.*_at|.*[a-z0-9]At|.*_date|.*[a-z0-9]Date)$/.test(name)) return "timestamp";
+  if (/^(id|.*_id|.*[a-z0-9]Id|.*_gid|.*[a-z0-9]Gid|.*_idx)$/.test(name))
+    return "id";
+  if (/^(at|.*_at|.*[a-z0-9]At|.*_date|.*[a-z0-9]Date)$/.test(name))
+    return "timestamp";
   return null;
 }
 
-const BOOL_OPS = new Set(["=", "<>", "!=", "<", ">", "<=", ">=", "~", "~*", "!~", "!~*"]);
+const BOOL_OPS = new Set([
+  "=",
+  "<>",
+  "!=",
+  "<",
+  ">",
+  "<=",
+  ">=",
+  "~",
+  "~*",
+  "!~",
+  "!~*",
+]);
 
-/** A regex literal that can only match a short identifier-like token. */
+/**
+ * A regex literal that can only match a short code-like token.
+ * Allowed: anchored ^...$; literal characters and non-negated [...] classes
+ * drawn only from A-Z a-z 0-9 _ : - ; groups ( ) (?: ) and |; the quantifiers
+ * ? and {m,n} with n <= 64. Rejected: . @ / , spaces, any backslash escape,
+ * negated classes [^...], POSIX classes, * + and unbounded {m,}.
+ */
+export const GUARD_MAX_REPEAT = 64;
 export function isSafeGuardRegex(re: string): boolean {
-  if (!re.startsWith("^") || !re.endsWith("$")) return false;
-  if (/[*+]/.test(re)) return false;
-  // no '.' or whitespace outside/inside char classes
-  let inClass = false;
-  for (let k = 0; k < re.length; k++) {
-    const ch = re[k];
-    if (ch === "\\") {
-      // \s, \S, \W can match spaces / arbitrary text
-      if (/[sSW]/.test(re[k + 1] ?? "")) return false;
+  if (re.length < 3 || !re.startsWith("^") || !re.endsWith("$")) return false;
+  const body = re.slice(1, -1);
+  const lit = /[A-Za-z0-9_:-]/;
+  let k = 0;
+  while (k < body.length) {
+    const ch = body[k];
+    if (ch === "[") {
+      const close = body.indexOf("]", k + 1);
+      if (close < 0) return false;
+      const cls = body.slice(k + 1, close);
+      if (cls.length === 0 || cls.startsWith("^") || cls.includes("["))
+        return false;
+      if (![...cls].every((c) => lit.test(c))) return false;
+      // ranges must stay inside one of A-Z, a-z, 0-9
+      for (const m of cls.matchAll(/(.)-(.)/g)) {
+        const [a, b] = [m[1], m[2]];
+        const ok =
+          (/[A-Z]/.test(a) && /[A-Z]/.test(b)) ||
+          (/[a-z]/.test(a) && /[a-z]/.test(b)) ||
+          (/[0-9]/.test(a) && /[0-9]/.test(b));
+        if (!ok || a > b) return false;
+      }
+      k = close + 1;
+      continue;
+    }
+    if (ch === "{") {
+      const m = /^\{(\d+)(?:,(\d+))?\}/.exec(body.slice(k));
+      if (!m) return false;
+      if (Number(m[2] ?? m[1]) > GUARD_MAX_REPEAT) return false;
+      k += m[0].length;
+      continue;
+    }
+    if (ch === "(" && body.startsWith("(?:", k)) {
+      k += 3;
+      continue;
+    }
+    if (ch === "(" || ch === ")" || ch === "|" || ch === "?") {
       k++;
       continue;
     }
-    if (ch === "[") inClass = true;
-    else if (ch === "]") inClass = false;
-    else if (ch === " ") return false;
-    else if (ch === "." && !inClass) return false;
-  }
-  // every repetition must be bounded {m,n} with n <= 200
-  for (const m of re.matchAll(/\{(\d+)(?:,(\d*))?\}/g)) {
-    if (m[2] === "") return false;
-    if (Number(m[2] ?? m[1]) > 200) return false;
+    if (lit.test(ch)) {
+      k++;
+      continue;
+    }
+    return false; // . @ / , space, backslash, * + $ ^ ...
   }
   return true;
+}
+
+/** ident(.ident)* */
+function isRef(e: Tok[]): boolean {
+  return (
+    e.length > 0 &&
+    e.length % 2 === 1 &&
+    e.every((tk, k) =>
+      k % 2 === 0 ? tk.t === "ident" || tk.t === "qident" : isP(tk, "."),
+    )
+  );
+}
+
+/**
+ * The column a passthrough expression prints, or null: a plain ref, optionally
+ * wrapped in parens, ::casts or COALESCE(ref, literal...).
+ */
+function plainRef(exprIn: Tok[]): Tok[] | null {
+  let e = unwrap(exprIn);
+  for (;;) {
+    const d = depths(e);
+    const castAt = e.findIndex((tk, k) => d[k] === 0 && isP(tk, "::"));
+    if (castAt > 0) {
+      e = unwrap(e.slice(0, castAt));
+      continue;
+    }
+    if (
+      isKw(e[0], "coalesce") &&
+      isP(e[1], "(") &&
+      isP(e[e.length - 1], ")") &&
+      !d.slice(2, -1).some((x) => x === 0)
+    ) {
+      const args = splitTop(e.slice(2, -1));
+      if (
+        args
+          .slice(1)
+          .every(
+            (a) =>
+              a.length === 1 &&
+              (a[0].t === "string" ||
+                a[0].t === "number" ||
+                isKw(a[0], "null")),
+          )
+      ) {
+        e = unwrap(args[0]);
+        continue;
+      }
+      return null;
+    }
+    break;
+  }
+  if (isRef(e)) return e;
+  // JSON key: ref ->> 'key' (the key is the printed source name)
+  if (
+    e.length >= 3 &&
+    isP(e[e.length - 2], "->>") &&
+    e[e.length - 1].t === "string" &&
+    isRef(e.slice(0, -2))
+  ) {
+    return [{ t: "qident", v: e[e.length - 1].v, raw: e[e.length - 1].raw }];
+  }
+  return null;
 }
 
 interface Ctx {
@@ -507,7 +822,8 @@ function deriveKind(exprIn: Tok[], ctx: Ctx): Kind | null {
   const e = unwrap(exprIn);
   if (e.length === 0) return null;
   const d = depths(e);
-  const top = (pred: (tk: Tok, k: number) => boolean) => e.some((tk, k) => d[k] === 0 && pred(tk, k));
+  const top = (pred: (tk: Tok, k: number) => boolean) =>
+    e.some((tk, k) => d[k] === 0 && pred(tk, k));
 
   // CASE ... END spanning the whole expression (possibly followed by ::cast)
   if (isKw(e[0], "case")) {
@@ -524,7 +840,8 @@ function deriveKind(exprIn: Tok[], ctx: Ctx): Kind | null {
         }
       }
     }
-    if (endIdx === e.length - 1 || (endIdx > 0 && isP(e[endIdx + 1], "::"))) return caseKind(e.slice(0, endIdx + 1), ctx);
+    if (endIdx === e.length - 1 || (endIdx > 0 && isP(e[endIdx + 1], "::")))
+      return caseKind(e.slice(0, endIdx + 1), ctx);
   }
 
   // boolean shapes at depth 0 (outside nested CASE)
@@ -537,7 +854,20 @@ function deriveKind(exprIn: Tok[], ctx: Ctx): Kind | null {
       else if (isKw(tk, "end")) cd--;
       else if (cd === 0) {
         if (tk.t === "op" && BOOL_OPS.has(tk.v)) bool = true;
-        if (isKw(tk, "is", "like", "ilike", "in", "and", "or", "between", "similar")) bool = true;
+        if (
+          isKw(
+            tk,
+            "is",
+            "like",
+            "ilike",
+            "in",
+            "and",
+            "or",
+            "between",
+            "similar",
+          )
+        )
+          bool = true;
         if (isKw(tk, "not", "exists") && k === 0) bool = true;
       }
     });
@@ -556,8 +886,48 @@ function deriveKind(exprIn: Tok[], ctx: Ctx): Kind | null {
     // passthrough cast (x::text) keeps the inner kind; else needs annotation
     return deriveKind(e.slice(0, castAt), ctx);
   }
-  // NOW() - x  (interval) / x - NOW()
-  if (top((tk) => isP(tk, "-")) && e.some((tk) => isKw(tk, "now", "current_timestamp"))) return "timestamp";
+  // NOW() - x  (interval) / x - NOW(): only when the whole expression is
+  // exactly now()/current_timestamp minus a ref / cast ref / INTERVAL literal
+  {
+    const minus = e.findIndex((tk, k) => d[k] === 0 && isP(tk, "-"));
+    if (minus > 0 && top((tk) => isKw(tk, "now", "current_timestamp"))) {
+      const isNow = (x: Tok[]) => {
+        const u = unwrap(x);
+        return (
+          (u.length === 1 && isKw(u[0], "current_timestamp")) ||
+          (u.length === 3 &&
+            isKw(u[0], "now") &&
+            isP(u[1], "(") &&
+            isP(u[2], ")"))
+        );
+      };
+      const isOperand = (x: Tok[]) => {
+        const u = unwrap(x);
+        return (
+          plainRef(u) !== null ||
+          (u.length === 2 && isKw(u[0], "interval") && u[1].t === "string")
+        );
+      };
+      const lhs = e.slice(0, minus);
+      const rhs = e.slice(minus + 1);
+      const otherOps = e.some(
+        (tk, k) =>
+          k !== minus &&
+          d[k] === 0 &&
+          ((tk.t === "op" && tk.v !== "::") ||
+            isKw(tk, "and", "or", "is", "in", "like", "between")),
+      );
+      if (
+        !otherOps &&
+        ((isNow(lhs) && isOperand(rhs)) || (isOperand(lhs) && isNow(rhs)))
+      ) {
+        collectSources(isNow(lhs) ? rhs : lhs, ctx);
+        return "timestamp";
+      }
+      collectSources(e, ctx);
+      return null;
+    }
+  }
 
   // function call spanning whole expression
   if (e[0].t === "ident" && isP(e[1], "(")) {
@@ -579,7 +949,11 @@ function deriveKind(exprIn: Tok[], ctx: Ctx): Kind | null {
       const fn = e[0].v;
       const args = splitTop(e.slice(2, close));
       if (fn === "count") return "count";
-      if (["row_number", "rank", "dense_rank"].includes(fn) && isKw(rest[0], "over")) return "id";
+      if (
+        ["row_number", "rank", "dense_rank"].includes(fn) &&
+        isKw(rest[0], "over")
+      )
+        return "id";
       if (["bool_and", "bool_or", "every"].includes(fn)) return "boolean";
       if (fn === "exists") return "boolean";
       if (fn === "coalesce" || fn === "nullif") {
@@ -587,7 +961,14 @@ function deriveKind(exprIn: Tok[], ctx: Ctx): Kind | null {
         const firstUnresolved = kinds[0] === null;
         // COALESCE(x, 'literal') where x is a passthrough: kind of x (annotation/convention), keep sources
         const others = kinds.slice(1).filter((k) => k !== null);
-        if (!firstUnresolved && others.every((k) => k === kinds[0] || (kinds[0] === "boolean" && k === "boolean"))) return kinds[0];
+        if (
+          !firstUnresolved &&
+          others.every(
+            (k) =>
+              k === kinds[0] || (kinds[0] === "boolean" && k === "boolean"),
+          )
+        )
+          return kinds[0];
         if (!firstUnresolved && kinds[0] === "boolean") return "boolean";
         collectSources(args[0], ctx);
         return null;
@@ -595,9 +976,9 @@ function deriveKind(exprIn: Tok[], ctx: Ctx): Kind | null {
       if (fn === "min" || fn === "max") {
         const inner = deriveKind(args[0] ?? [], ctx);
         if (inner) return inner;
-        const nm = defaultName(args[0] ?? []);
         collectSources(args[0] ?? [], ctx);
-        return nameConvention(nm);
+        const ref = plainRef(args[0] ?? []);
+        return ref ? nameConvention(ref[ref.length - 1].v) : null;
       }
       if (fn === "to_regclass" || fn === "to_regprocedure") return null;
     }
@@ -619,9 +1000,38 @@ function deriveKind(exprIn: Tok[], ctx: Ctx): Kind | null {
 function collectSources(e: Tok[], ctx: Ctx) {
   e.forEach((tk, k) => {
     const next = e[k + 1];
-    const isJsonContainer = !!next && next.t === "op" && ["->>", "->", "#>>", "#>"].includes(next.v);
-    if ((tk.t === "ident" || tk.t === "qident") && !isP(next, "(") && !isP(next, ".") && !isJsonContainer) {
-      if (tk.t === "ident" && ["null", "true", "false", "now", "interval", "text", "int", "bigint", "integer", "boolean", "timestamptz", "date", "in", "from", "day", "zone", "time", "at"].includes(tk.v)) return;
+    const isJsonContainer =
+      !!next && next.t === "op" && ["->>", "->", "#>>", "#>"].includes(next.v);
+    if (
+      (tk.t === "ident" || tk.t === "qident") &&
+      !isP(next, "(") &&
+      !isP(next, ".") &&
+      !isJsonContainer
+    ) {
+      if (
+        tk.t === "ident" &&
+        [
+          "null",
+          "true",
+          "false",
+          "now",
+          "interval",
+          "text",
+          "int",
+          "bigint",
+          "integer",
+          "boolean",
+          "timestamptz",
+          "date",
+          "in",
+          "from",
+          "day",
+          "zone",
+          "time",
+          "at",
+        ].includes(tk.v)
+      )
+        return;
       if (isP(e[k - 1], "::")) return; // type name
       ctx.sources.push(tk.v);
     }
@@ -671,6 +1081,7 @@ function caseKind(e: Tok[], ctx: Ctx): Kind | null {
     const r = unwrap(s.toks);
     if (r.length === 1 && isKw(r[0], "null")) continue;
     if (s.kw === "then" && isGuarded(r, lastWhen)) {
+      collectSources(r, ctx); // guarded source still gets the sensitive-name check
       kinds.push("enum");
       continue;
     }
@@ -682,7 +1093,8 @@ function caseKind(e: Tok[], ctx: Ctx): Kind | null {
     }
     // passthrough result: classify by its own name convention, keep sources
     ctx.sources.push(...sub.sources);
-    const conv = nameConvention(defaultName(r));
+    const ref = plainRef(r);
+    const conv = ref ? nameConvention(ref[ref.length - 1].v) : null;
     if (!conv) return null;
     kinds.push(conv);
   }
@@ -690,44 +1102,68 @@ function caseKind(e: Tok[], ctx: Ctx): Kind | null {
   return kinds.every((k) => k === kinds[0]) ? kinds[0] : null;
 }
 
-/** THEN x guarded by WHEN x ~ '^[...]{1,N}$' or WHEN x IN ('a', ...). */
+/**
+ * THEN x guarded by WHEN x ~ '^[...]{1,N}$' or WHEN x IN ('a', ...). The WHEN
+ * condition must be exactly that test, or an AND-only conjunction (at depth 0)
+ * with one conjunct exactly that test. Any depth-0 OR disqualifies it.
+ */
 function isGuarded(result: Tok[], when: Tok[]): boolean {
-  const r = text(result);
-  for (let k = 0; k < when.length; k++) {
-    const tk = when[k];
-    if (tk.t === "op" && (tk.v === "~" || tk.v === "~*")) {
-      const lhs = when.slice(0, k);
-      // allow `AND` chains: take the operand after the last AND/OR
-      let s = 0;
-      lhs.forEach((x, i) => {
-        if (isKw(x, "and", "or")) s = i + 1;
-      });
-      const re = when[k + 1];
-      if (text(unwrap(lhs.slice(s))) === r && re?.t === "string" && isSafeGuardRegex(re.v)) return true;
+  const r = text(unwrap(result));
+  const w = unwrap(when);
+  const d = depths(w);
+  let cd = 0;
+  const conjuncts: Tok[][] = [[]];
+  for (let k = 0; k < w.length; k++) {
+    const tk = w[k];
+    if (d[k] === 0 && isKw(tk, "case")) cd++;
+    if (d[k] === 0 && isKw(tk, "end")) cd--;
+    if (d[k] === 0 && cd === 0 && isKw(tk, "or")) return false;
+    if (
+      d[k] === 0 &&
+      cd === 0 &&
+      isKw(tk, "and") &&
+      !w.slice(0, k).some((x, j) => d[j] === 0 && isKw(x, "between"))
+    ) {
+      conjuncts.push([]);
+      continue;
     }
-    if (isKw(tk, "in") && isP(when[k + 1], "(")) {
-      let s = 0;
-      when.slice(0, k).forEach((x, i) => {
-        if (isKw(x, "and", "or")) s = i + 1;
-      });
-      const lhs = text(unwrap(when.slice(s, k)));
-      let j = k + 2;
-      let allLit = true;
-      while (j < when.length && !isP(when[j], ")")) {
-        if (!(when[j].t === "string" || isP(when[j], ","))) allLit = false;
-        j++;
-      }
-      if (lhs === r && allLit) return true;
-    }
+    conjuncts[conjuncts.length - 1].push(tk);
   }
-  return false;
+  return conjuncts.some((cIn) => {
+    const c = unwrap(cIn);
+    // x ~ 're'
+    const opAt = c.findIndex(
+      (tk) => tk.t === "op" && (tk.v === "~" || tk.v === "~*"),
+    );
+    if (opAt > 0 && opAt === c.length - 2) {
+      const re = c[opAt + 1];
+      return (
+        text(unwrap(c.slice(0, opAt))) === r &&
+        re.t === "string" &&
+        isSafeGuardRegex(re.v)
+      );
+    }
+    // x IN ('a', 'b')
+    const inAt = c.findIndex((tk) => isKw(tk, "in"));
+    if (inAt > 0 && isP(c[inAt + 1], "(") && isP(c[c.length - 1], ")")) {
+      const list = c.slice(inAt + 2, -1);
+      const allLit =
+        list.length > 0 &&
+        list.every((tk, j) => (j % 2 === 0 ? tk.t === "string" : isP(tk, ",")));
+      return allLit && text(unwrap(c.slice(0, inAt))) === r;
+    }
+    return false;
+  });
 }
 
 // ============================================================================
 // File check
 // ============================================================================
 
-export function parseAnnotations(sql: string): { ann: Map<string, Kind>; bad: string[] } {
+export function parseAnnotations(sql: string): {
+  ann: Map<string, Kind>;
+  bad: string[];
+} {
   const ann = new Map<string, Kind>();
   const bad: string[] = [];
   for (const line of sql.split("\n")) {
@@ -739,7 +1175,8 @@ export function parseAnnotations(sql: string): { ann: Map<string, Kind>; bad: st
     const kind = m[2].toLowerCase();
     for (const raw of m[1].split(",")) {
       const nm = raw.trim().replace(/^"(.*)"$/, "$1");
-      if (!(KINDS as readonly string[]).includes(kind)) bad.push(`${nm}: ${kind}`);
+      if (!(KINDS as readonly string[]).includes(kind))
+        bad.push(`${nm}: ${kind}`);
       else ann.set(nm, kind as Kind);
     }
   }
@@ -752,14 +1189,34 @@ export interface ColumnReport {
   via: "derived" | "annotation" | "convention" | null;
 }
 
-export function checkSql(file: string, sql: string): { violations: Violation[]; columns: ColumnReport[] } {
+export function checkSql(
+  file: string,
+  sql: string,
+): { violations: Violation[]; columns: ColumnReport[] } {
   const violations: Violation[] = [];
   const columns: ColumnReport[] = [];
   const { ann, bad } = parseAnnotations(sql);
-  for (const b of bad) violations.push({ file, column: b.split(":")[0].replace(/^--\s*@col\s*/, ""), issue: "bad_annotation", detail: "kind must be one of " + KINDS.join("|") });
+  for (const b of bad)
+    violations.push({
+      file,
+      column: b.split(":")[0].replace(/^--\s*@col\s*/, ""),
+      issue: "bad_annotation",
+      detail: "kind must be one of " + KINDS.join("|"),
+    });
   const used = new Set<string>();
+  const metas: string[] = [];
+  const toks = tokenize(sql, metas);
+  for (const m of checkMeta(metas)) {
+    violations.push({
+      file,
+      column: "(psql)",
+      issue: "unsupported_statement",
+      detail: `psql meta command not allowed: ${m.split(/\s/)[0]}`,
+    });
+  }
 
-  for (const stmt of splitStatements(tokenize(sql))) {
+  for (const stmt of splitStatements(toks)) {
+    const relations = relationNames(stmt);
     const head = stmt[0];
     if (isKw(head, "begin", "commit", "rollback", "end", "start")) continue;
     if (isKw(head, "set") && !stmt.some((t) => isKw(t, "select"))) continue;
@@ -768,29 +1225,69 @@ export function checkSql(file: string, sql: string): { violations: Violation[]; 
       const k = ann.get(nm) ?? null;
       if (k) used.add(nm);
       columns.push({ column: nm, kind: k, via: k ? "annotation" : null });
-      if (!k) violations.push({ file, column: nm, issue: "unclassified", detail: "SHOW output needs an @col annotation" });
-      else if (k === "config_int" && !CONFIG_INT_COLUMNS.includes(nm)) violations.push({ file, column: nm, issue: "config_int_not_listed", detail: "config_int is only for named settings" });
+      if (!k)
+        violations.push({
+          file,
+          column: nm,
+          issue: "unclassified",
+          detail: "SHOW output needs an @col annotation",
+        });
+      else if (k === "config_int" && !CONFIG_INT_COLUMNS.includes(nm))
+        violations.push({
+          file,
+          column: nm,
+          issue: "config_int_not_listed",
+          detail: "config_int is only for named settings",
+        });
       continue;
     }
-    if (!isKw(head, "select", "with") && !(isP(head, "(") && stmt.some((t) => isKw(t, "select")))) {
-      violations.push({ file, column: "(statement)", issue: "unsupported_statement", detail: `starts with '${head.raw}'` });
+    if (
+      !isKw(head, "select", "with") &&
+      !(isP(head, "(") && stmt.some((t) => isKw(t, "select")))
+    ) {
+      violations.push({
+        file,
+        column: "(statement)",
+        issue: "unsupported_statement",
+        detail: `starts with '${head.raw}'`,
+      });
       continue;
     }
     const branches = outputColumns(stmt);
     if (!branches || branches.length === 0 || branches[0].length === 0) {
-      violations.push({ file, column: "(statement)", issue: "unparseable", detail: "could not find the outer select list" });
+      violations.push({
+        file,
+        column: "(statement)",
+        issue: "unparseable",
+        detail: "could not find the outer select list",
+      });
       continue;
     }
     const names = branches[0].map((c) => c.name);
     branches.forEach((cols, bi) => {
       if (cols.length !== names.length) {
-        violations.push({ file, column: "(statement)", issue: "unparseable", detail: "UNION branches differ in width" });
+        violations.push({
+          file,
+          column: "(statement)",
+          issue: "unparseable",
+          detail: "UNION branches differ in width",
+        });
         return;
       }
       cols.forEach((col, ci) => {
         const nm = names[ci];
-        if (col.expr.length === 1 && isP(col.expr[0], "*") || (col.expr.length >= 3 && isP(col.expr[col.expr.length - 1], "*") && isP(col.expr[col.expr.length - 2], "."))) {
-          violations.push({ file, column: "*", issue: "star", detail: "SELECT * prints every column" });
+        if (
+          (col.expr.length === 1 && isP(col.expr[0], "*")) ||
+          (col.expr.length >= 3 &&
+            isP(col.expr[col.expr.length - 1], "*") &&
+            isP(col.expr[col.expr.length - 2], "."))
+        ) {
+          violations.push({
+            file,
+            column: "*",
+            issue: "star",
+            detail: "SELECT * prints every column",
+          });
           return;
         }
         const ctx: Ctx = { sources: [] };
@@ -802,45 +1299,168 @@ export function checkSql(file: string, sql: string): { violations: Violation[]; 
           kind = annK;
           via = "annotation";
         }
-        if (!kind) {
+        // whole-row reference (`SELECT s ...`, row_to_json(s)): always fails
+        const wholeRow = ctx.sources.find((src) => relations.has(src));
+        const ref = plainRef(col.expr);
+        if (wholeRow || (ref && ref.length === 1 && relations.has(ref[0].v))) {
+          violations.push({
+            file,
+            column: nm,
+            issue: "whole_row",
+            detail: `prints a whole row of ${wholeRow ?? ref![0].v}`,
+          });
+          return;
+        }
+        // naming convention: only for a plain column ref whose SOURCE name
+        // has the same convention (an alias alone proves nothing)
+        if (!kind && ref) {
           const conv = nameConvention(nm);
-          if (conv) {
+          if (conv && nameConvention(ref[ref.length - 1].v) === conv) {
             kind = conv;
             via = "convention";
           }
         }
         if (bi === 0) columns.push({ column: nm, kind, via });
         // sensitive check: skip only for derived count/boolean (they cannot carry the value)
-        const derivedSafe = via === "derived" && (kind === "count" || kind === "boolean");
+        const derivedSafe =
+          via === "derived" && (kind === "count" || kind === "boolean");
         if (!derivedSafe) {
-          const hits = [nm, ...ctx.sources].map((s) => [s, sensitiveWord(s)] as const).filter(([, w]) => w);
+          const hits = [nm, ...ctx.sources]
+            .map((s) => [s, sensitiveWord(s)] as const)
+            .filter(([, w]) => w);
           if (hits.length) {
-            violations.push({ file, column: nm, issue: "sensitive", detail: `looks like '${hits[0][1]}' (from ${hits[0][0] === nm ? "output name" : "source " + hits[0][0]})` });
+            violations.push({
+              file,
+              column: nm,
+              issue: "sensitive",
+              detail: `looks like '${hits[0][1]}' (from ${hits[0][0] === nm ? "output name" : "source " + hits[0][0]})`,
+            });
             return;
           }
         }
         if (kind === "config_int") {
-          const offList = [nm, ...ctx.sources].filter((s) => !CONFIG_INT_COLUMNS.includes(s));
+          const offList = [nm, ...ctx.sources].filter(
+            (s) => !CONFIG_INT_COLUMNS.includes(s),
+          );
           if (offList.length) {
-            violations.push({ file, column: nm, issue: "config_int_not_listed", detail: `config_int is only for named settings (${CONFIG_INT_COLUMNS.join(", ")}); not listed: ${offList[0]}` });
+            violations.push({
+              file,
+              column: nm,
+              issue: "config_int_not_listed",
+              detail: `config_int is only for named settings (${CONFIG_INT_COLUMNS.join(", ")}); not listed: ${offList[0]}`,
+            });
             return;
           }
         }
-        if (!kind) violations.push({ file, column: nm, issue: "unclassified", detail: `no derived kind, @col annotation or naming convention for: ${text(col.expr).slice(0, 80)}` });
+        if (!kind)
+          violations.push({
+            file,
+            column: nm,
+            issue: "unclassified",
+            detail: `no derived kind, @col annotation or naming convention for: ${text(col.expr).slice(0, 80)}`,
+          });
       });
     });
   }
   for (const nm of ann.keys()) {
-    if (!used.has(nm)) violations.push({ file, column: nm, issue: "stale_annotation", detail: "@col names a column that is not in any output" });
+    if (!used.has(nm))
+      violations.push({
+        file,
+        column: nm,
+        issue: "stale_annotation",
+        detail: "@col names a column that is not in any output",
+      });
   }
   return { violations, columns };
+}
+
+/** Table names and aliases introduced by FROM / JOIN anywhere in a statement. */
+function relationNames(stmt: Tok[]): Set<string> {
+  const out = new Set<string>();
+  const notAlias = new Set([
+    "on",
+    "using",
+    "where",
+    "group",
+    "order",
+    "limit",
+    "join",
+    "left",
+    "right",
+    "inner",
+    "outer",
+    "full",
+    "cross",
+    "natural",
+    "lateral",
+    "union",
+    "intersect",
+    "except",
+    "having",
+    "window",
+    "offset",
+    "fetch",
+    "for",
+    "as",
+    "with",
+    "select",
+  ]);
+  for (let k = 0; k < stmt.length; k++) {
+    if (!isKw(stmt[k], "from", "join") || isKw(stmt[k - 1], "distinct"))
+      continue;
+    let j = k + 1;
+    if (isKw(stmt[j], "lateral", "only")) j++;
+    if (stmt[j] && (stmt[j].t === "ident" || stmt[j].t === "qident")) {
+      while (isP(stmt[j + 1], ".") && stmt[j + 2]) j += 2;
+      out.add(stmt[j].v);
+      j++;
+    } else if (isP(stmt[j], "(")) {
+      let depth = 0;
+      do {
+        if (isP(stmt[j], "(")) depth++;
+        if (isP(stmt[j], ")")) depth--;
+        j++;
+      } while (j < stmt.length && depth > 0);
+    } else continue;
+    if (isKw(stmt[j], "as")) j++;
+    const a = stmt[j];
+    if (a && (a.t === "qident" || (a.t === "ident" && !notAlias.has(a.v))))
+      out.add(a.v);
+  }
+  return out;
 }
 
 // ============================================================================
 // Allowlist ratchet
 // ============================================================================
 
-export function compareAllowlist(violations: Violation[], allowlist: AllowlistEntry[]) {
+/**
+ * Structural checks on the allowlist itself: never-allowlist issues, duplicate
+ * keys and non-positive counts are errors. Shrink-only across commits is
+ * pinned by a test on the committed entry set (see the test file), so any
+ * growth needs a visible test edit in review.
+ */
+export function validateAllowlist(allowlist: AllowlistEntry[]): string[] {
+  const errs: string[] = [];
+  const seen = new Set<string>();
+  for (const e of allowlist) {
+    const k = `${e.file}:${e.column}:${e.issue}`;
+    if (NEVER_ALLOWLIST.includes(e.issue))
+      errs.push(
+        `${k}: issue '${e.issue}' can never be allowlisted; fix the SQL`,
+      );
+    if (seen.has(k)) errs.push(`${k}: duplicate entry`);
+    if (!Number.isInteger(e.count) || e.count < 1)
+      errs.push(`${k}: count must be a positive integer`);
+    seen.add(k);
+  }
+  return errs;
+}
+
+export function compareAllowlist(
+  violations: Violation[],
+  allowlist: AllowlistEntry[],
+) {
   const key = (f: string, c: string, i: string) => `${f}\u0000${c}\u0000${i}`;
   const actual = new Map<string, Violation[]>();
   for (const v of violations) {
@@ -872,7 +1492,12 @@ const __dirname = path.dirname(__filename);
 
 export function run(root: string, allowlistPath: string): number {
   const dir = path.join(root, "scripts", "readonly");
-  const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith(".sql")).sort() : [];
+  const files = fs.existsSync(dir)
+    ? fs
+        .readdirSync(dir)
+        .filter((f) => f.endsWith(".sql"))
+        .sort()
+    : [];
   const all: Violation[] = [];
   let columnCount = 0;
   for (const f of files) {
@@ -884,14 +1509,26 @@ export function run(root: string, allowlistPath: string): number {
   let allowlist: AllowlistEntry[] = [];
   if (fs.existsSync(allowlistPath)) {
     const parsed = JSON.parse(fs.readFileSync(allowlistPath, "utf8"));
-    allowlist = Array.isArray(parsed) ? parsed : parsed.entries ?? [];
+    allowlist = Array.isArray(parsed) ? parsed : (parsed.entries ?? []);
   }
+  const invalid = validateAllowlist(allowlist);
   const { newViolations, stale } = compareAllowlist(all, allowlist);
-  console.log(`readonly column guard: ${files.length} files, ${columnCount} output columns, ${all.length} violations, ${allowlist.length} allowlist entries`);
-  for (const v of newViolations) console.log(`::error file=${v.file}::${v.file}: column ${v.column}: ${v.issue}: ${v.detail}`);
-  for (const s of stale) console.log(`::error file=${s.entry.file}::stale allowlist entry ${s.entry.file}:${s.entry.column}:${s.entry.issue} allows ${s.entry.count}, found ${s.actual}. Lower or remove it (counts only go down).`);
-  if (newViolations.length || stale.length) {
-    console.log("FAIL: see scripts/readonly/README.md for allowed kinds and @col annotations.");
+  console.log(
+    `readonly column guard: ${files.length} files, ${columnCount} output columns, ${all.length} violations, ${allowlist.length} allowlist entries`,
+  );
+  for (const v of newViolations)
+    console.log(
+      `::error file=${v.file}::${v.file}: column ${v.column}: ${v.issue}: ${v.detail}`,
+    );
+  for (const s of stale)
+    console.log(
+      `::error file=${s.entry.file}::stale allowlist entry ${s.entry.file}:${s.entry.column}:${s.entry.issue} allows ${s.entry.count}, found ${s.actual}. Lower or remove it (counts only go down).`,
+    );
+  for (const e of invalid) console.log(`::error::invalid allowlist entry ${e}`);
+  if (newViolations.length || stale.length || invalid.length) {
+    console.log(
+      "FAIL: see scripts/readonly/README.md for allowed kinds and @col annotations.",
+    );
     return 1;
   }
   console.log("OK");
@@ -899,14 +1536,25 @@ export function run(root: string, allowlistPath: string): number {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
-  const root = process.env.READONLY_COLUMNS_ROOT ?? path.resolve(__dirname, "../..");
-  const allow = process.env.READONLY_COLUMNS_ALLOWLIST ?? path.join(__dirname, "readonly-columns-allowlist.json");
+  const root =
+    process.env.READONLY_COLUMNS_ROOT ?? path.resolve(__dirname, "../..");
+  const allow =
+    process.env.READONLY_COLUMNS_ALLOWLIST ??
+    path.join(__dirname, "readonly-columns-allowlist.json");
   if (process.argv.includes("--report")) {
     const dir = path.join(root, "scripts", "readonly");
-    for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".sql")).sort()) {
-      const res = checkSql(`scripts/readonly/${f}`, fs.readFileSync(path.join(dir, f), "utf8"));
-      for (const c of res.columns) console.log(`${f}\t${c.column}\t${c.kind ?? "-"}\t${c.via ?? "-"}`);
-      for (const v of res.violations) console.log(`VIOLATION\t${f}\t${v.column}\t${v.issue}\t${v.detail}`);
+    for (const f of fs
+      .readdirSync(dir)
+      .filter((x) => x.endsWith(".sql"))
+      .sort()) {
+      const res = checkSql(
+        `scripts/readonly/${f}`,
+        fs.readFileSync(path.join(dir, f), "utf8"),
+      );
+      for (const c of res.columns)
+        console.log(`${f}\t${c.column}\t${c.kind ?? "-"}\t${c.via ?? "-"}`);
+      for (const v of res.violations)
+        console.log(`VIOLATION\t${f}\t${v.column}\t${v.issue}\t${v.detail}`);
     }
     process.exit(0);
   }
