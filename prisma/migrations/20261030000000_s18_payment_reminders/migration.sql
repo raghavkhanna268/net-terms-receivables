@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS s18_shop_reminder_settings (
     created_at TIMESTAMPTZ(3) NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ(3) NOT NULL DEFAULT NOW(),
     CONSTRAINT s18_shop_reminder_settings_shop_fkey
-      FOREIGN KEY (shop_id) REFERENCES "Shop"(id) ON DELETE CASCADE
+      FOREIGN KEY (shop_id) REFERENCES "Shop"(id) ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 COMMENT ON TABLE s18_shop_reminder_settings IS 'S18: Per-shop reminder settings. enabled defaults to FALSE - merchants must explicitly enable.';
