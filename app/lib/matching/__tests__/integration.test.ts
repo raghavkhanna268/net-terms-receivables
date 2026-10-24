@@ -709,9 +709,9 @@ describeWithDb("Over-allocation prevention (P1.1)", () => {
     const result1 = await confirmMatch(sql, testShopId, matchId, "test-user");
     expect(result1.success).toBe(true);
 
-    // Confirm again - should fail (already confirmed)
+    // Confirm again - should be idempotent success (no side effects)
     const result2 = await confirmMatch(sql, testShopId, matchId, "test-user");
-    expect(result2.success).toBe(false);
+    expect(result2.success).toBe(true);
   });
 
   it("correctly handles partial re-allocation after first confirm", async () => {
@@ -2278,10 +2278,9 @@ describeWithDb("Already confirmed match error (P3)", () => {
     const result1 = await confirmMatch(sql, testShopId, matchId, "user-1");
     expect(result1.success).toBe(true);
 
-    // Try to confirm again - should fail with specific error
+    // Try to confirm again - should be idempotent success (no additional audit events)
     const result2 = await confirmMatch(sql, testShopId, matchId, "user-2");
-    expect(result2.success).toBe(false);
-    expect(result2.error).toBe("This match is already confirmed");
+    expect(result2.success).toBe(true);
 
     // Cleanup
     await sql`DELETE FROM "Match" WHERE "invoiceId" = ${invoice.id}`;

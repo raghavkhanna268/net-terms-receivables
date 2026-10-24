@@ -1105,7 +1105,8 @@ describeWithDb("S17 apply service DB integration", () => {
 
     it("stale partial re-claim completes without Shopify call", async () => {
       const paymentId = await createPayment(500000n); // 5000 INR partial
-      const invoiceId = await createInvoice(1000000n); // 10000 INR
+      // Create invoice WITHOUT orderId (local-only invoice, no Shopify call needed)
+      const invoiceId = await createInvoice(1000000n, null); // 10000 INR, no orderId
 
       // Create a match in 'pushing' state with old updatedAt (> 5 min)
       const matchId = `match-stale-partial-${Date.now().toString(36)}`;
@@ -1124,7 +1125,7 @@ describeWithDb("S17 apply service DB integration", () => {
       expect(result.invoicePaid).toBe(false); // Partial
       expect(result.reasonCode).toBe("STALE_RECLAIM_PARTIAL");
 
-      // No Shopify call for partial
+      // No Shopify call for local-only invoice partial
       expect(shopifyCallCount).toBe(0);
 
       // Match should now be 'pushed'
@@ -1317,10 +1318,10 @@ describeWithDb("S17 apply service DB integration", () => {
         WHERE id = ${matchId}
       `;
 
-      // Try to confirm - should fail
+      // Try to confirm - should fail (state is 'unmatched', not 'suggested')
       const result = await confirmMatch(sql, TEST_SHOP_ID, matchId, "test-user");
       expect(result.success).toBe(false);
-      expect(result.error).toContain("unmatched");
+      expect(result.error).toBe("Match not found or already processed");
     });
   });
 });
