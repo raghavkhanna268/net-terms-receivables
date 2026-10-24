@@ -268,17 +268,112 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
  *
  * S20: triggeredAt is stored for audit, not used for ordering (re-fetch gets latest state).
  */
+
+/**
+ * Run backstop only for ORDERS_CREATE redelivery.
+ *
+ * When a webhook was already processed but backstop failed (returned retryable),
+ * on redelivery we skip order processing but must still run backstop.
+ * Backstop is idempotent via backstop_processed_orders table.
+ */
+async function runBackstopOnly(sql: Sql, message: SyncMessage): Promise<SyncResult> {
+  const {
+    applyBackstop,
+    RetryableBackstopError,
+    recordBackstopFailure,
+    resolveInvoiceForOrder,
+  } = await import("~/services/backstop.server");
+
+  // Resolve invoice by shop domain + order GID
+  const invoiceInfo = await resolveInvoiceForOrder(sql, message.shop, message.resourceGid);
+
+  if (!invoiceInfo) {
+    // No invoice found - this order may not be a net-terms order
+    // Return success to avoid infinite retries for non-net-terms orders
+    console.log(
+      `[backstop] Redelivery skipped - no invoice found for ${message.resourceGid} (not a net-terms order?)`
+    );
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Webhook already processed, no invoice to backstop",
+    };
+  }
+
+  try {
+    const backstopResult = await applyBackstop(sql, {
+      shopDomain: message.shop,
+      shopId: invoiceInfo.shopId,
+      orderGid: message.resourceGid,
+      buyerAccountId: invoiceInfo.buyerAccountId,
+      invoiceId: invoiceInfo.invoiceId,
+    });
+
+    if (backstopResult.applied) {
+      console.log(
+        `[backstop] Applied on redelivery to ${message.resourceGid}: ${backstopResult.fulfillmentOrdersHeld} FOs held`
+      );
+    }
+
+    // Backstop succeeded or skipped - return success
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: backstopResult.skipped
+        ? `Webhook processed, backstop skipped: ${backstopResult.skipReason}`
+        : "Webhook processed, backstop applied on redelivery",
+    };
+  } catch (e) {
+    if (e instanceof RetryableBackstopError) {
+      console.warn(
+        `[backstop] Redelivery retryable error for ${message.resourceGid}: ${e.message}`
+      );
+      return {
+        success: false,
+        action: "skipped" as const,
+        error: `Backstop retryable error: ${e.message}`,
+        retryable: true,
+      };
+    }
+
+    // Non-retryable error: log, record failure, but allow message to complete
+    console.error(`[backstop] Redelivery unexpected error for ${message.resourceGid}:`, e);
+    await recordBackstopFailure(
+      sql,
+      invoiceInfo.shopId,
+      message.resourceGid,
+      invoiceInfo.buyerAccountId,
+      e instanceof Error ? e.message : String(e),
+    );
+
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Webhook processed, backstop failed (recorded)",
+    };
+  }
+}
+
 async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> {
   // Parse triggeredAt from message (S20: stored for audit, not used for ordering)
   const triggeredAt = message.triggeredAt ? new Date(message.triggeredAt) : null;
 
   // Idempotency check
-  if (await isWebhookProcessed(sql, message.webhookId, message.shop)) {
+  const webhookAlreadyProcessed = await isWebhookProcessed(sql, message.webhookId, message.shop);
+
+  // For ORDERS_CREATE, backstop MUST run even on redelivery (backstop is idempotent via
+  // backstop_processed_orders table). For other topics, early return is fine.
+  if (webhookAlreadyProcessed && message.topic !== "ORDERS_CREATE") {
     return {
       success: true,
       action: "skipped",
       skipReason: "Webhook already processed (idempotent)",
     };
+  }
+
+  // ORDERS_CREATE redelivery: skip order processing but still run backstop
+  if (webhookAlreadyProcessed && message.topic === "ORDERS_CREATE") {
+    return runBackstopOnly(sql, message);
   }
 
   // Always fetch the real order - never fabricate data
