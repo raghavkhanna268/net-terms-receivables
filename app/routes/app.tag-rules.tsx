@@ -41,7 +41,6 @@ const TAG_PATTERN = /^[a-zA-Z0-9\s\-_]+$/;
 const TAG_MAX_LENGTH = 255;
 const TERMS_DAYS_MIN = 1;
 const TERMS_DAYS_MAX = 365;
-const CREDIT_LIMIT_MAX = 999999999999.99;
 
 /**
  * Store mode determines which UI to show.
@@ -164,32 +163,6 @@ export function validateTermsDays(value: string): string | null {
   return null;
 }
 
-/**
- * Validate credit limit (optional).
- */
-export function validateCreditLimit(value: string | null): string | null {
-  if (!value || value.trim().length === 0) {
-    return null;
-  }
-
-  const trimmed = value.trim();
-
-  if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) {
-    return "Credit limit must be a number with up to 2 decimal places";
-  }
-
-  const parsed = parseFloat(trimmed);
-
-  if (parsed < 0) {
-    return "Credit limit must be non-negative";
-  }
-
-  if (parsed > CREDIT_LIMIT_MAX) {
-    return `Credit limit must be at most ${CREDIT_LIMIT_MAX.toLocaleString()}`;
-  }
-
-  return null;
-}
 
 /**
  * Check if a tag already exists for this shop (case-insensitive).
@@ -290,7 +263,6 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   const tagRaw = formData.get("tag");
   const termsDaysRaw = formData.get("defaultTermsDays");
-  const creditLimitRaw = formData.get("creditLimit");
 
   const fieldErrors: Record<string, string> = {};
 
@@ -308,10 +280,6 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   const tag = (tagRaw as string).trim();
   const termsDays = (termsDaysRaw as string).trim();
-  const creditLimit =
-    typeof creditLimitRaw === "string" && creditLimitRaw.trim().length > 0
-      ? creditLimitRaw.trim()
-      : null;
 
   const tagError = validateTag(tag);
   if (tagError) {
@@ -321,11 +289,6 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const termsDaysError = validateTermsDays(termsDays);
   if (termsDaysError) {
     fieldErrors.defaultTermsDays = termsDaysError;
-  }
-
-  const creditLimitError = validateCreditLimit(creditLimit);
-  if (creditLimitError) {
-    fieldErrors.creditLimit = creditLimitError;
   }
 
   if (Object.keys(fieldErrors).length > 0) {
@@ -499,19 +462,14 @@ export default function TagRulesPage() {
                 setTag(target?.value ?? "");
               }}
             ></s-text-field>
-            <s-text>
-              <s-text type="subdued">
-                Enter the exact customer tag that identifies net-terms buyers.
-                Tags are matched case-insensitively.
-              </s-text>
-            </s-text>
+            <s-paragraph>
+              Enter the exact customer tag that identifies net-terms buyers.
+              Tags are matched case-insensitively.
+            </s-paragraph>
 
             <s-text-field
               label="Default Terms (Days)"
               name="defaultTermsDays"
-              type="number"
-              min={TERMS_DAYS_MIN}
-              max={TERMS_DAYS_MAX}
               placeholder="e.g., 30"
               value={termsDays}
               error={actionData?.fieldErrors?.defaultTermsDays}
@@ -520,12 +478,10 @@ export default function TagRulesPage() {
                 setTermsDays(target?.value ?? "");
               }}
             ></s-text-field>
-            <s-text>
-              <s-text type="subdued">
-                The default payment terms for customers with this tag (1-365
-                days).
-              </s-text>
-            </s-text>
+            <s-paragraph>
+              The default payment terms for customers with this tag (1-365
+              days).
+            </s-paragraph>
 
             <s-button type="submit" variant="primary" disabled={isSubmitting}>
               {isSubmitting ? "Creating..." : "Create Tag Rule"}

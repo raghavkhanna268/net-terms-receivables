@@ -602,25 +602,6 @@ describe("Tag rule validation helpers", () => {
     expect(validateTermsDays("abc")).not.toBeNull();
   });
 
-  it("validateCreditLimit accepts valid values", async () => {
-    const { validateCreditLimit } = await import("../app.tag-rules");
-
-    expect(validateCreditLimit(null)).toBeNull();
-    expect(validateCreditLimit("")).toBeNull();
-    expect(validateCreditLimit("0")).toBeNull();
-    expect(validateCreditLimit("1000")).toBeNull();
-    expect(validateCreditLimit("1000.50")).toBeNull();
-    expect(validateCreditLimit("999999999999.99")).toBeNull();
-  });
-
-  it("validateCreditLimit rejects invalid values", async () => {
-    const { validateCreditLimit } = await import("../app.tag-rules");
-
-    expect(validateCreditLimit("-1")).not.toBeNull();
-    expect(validateCreditLimit("1000.555")).not.toBeNull();
-    expect(validateCreditLimit("abc")).not.toBeNull();
-    expect(validateCreditLimit("1000000000000")).not.toBeNull();
-  });
 });
 
 describe("Tag rules safeLog (R2 PII prevention)", () => {
