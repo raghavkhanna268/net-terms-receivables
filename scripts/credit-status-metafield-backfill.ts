@@ -25,8 +25,8 @@
  * - Dry-run is the default and makes no mutations.
  * - Dry-run runs all reads inside an explicit READ ONLY transaction.
  * - --apply enqueues messages; it never writes Shopify metafields directly.
- * - Uses enqueueCreditStatusRecompute with 'manual' source.
- * - Dedupe key: 'credit_backfill:<id>:<date>' prevents duplicate enqueues on same day.
+ * - Sends CREDIT_STATUS_RECOMPUTE messages to pgmq with 'manual' source.
+ * - Dedupe key: 'credit_backfill:<id>:<date>' is used by the drain to prevent duplicate processing.
  * - Exit non-zero on any enqueue failure.
  * - This script must never run from CI or on its own in automated pipelines.
  *

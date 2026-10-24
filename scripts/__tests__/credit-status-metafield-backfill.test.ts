@@ -127,25 +127,48 @@ describeWithDb("credit-status-metafield-backfill DB integration", () => {
 
   describe("getBackfillStats", () => {
     it("returns stats grouped by shop and holdState", async () => {
-      const stats = await sql.begin("read only", async (tx) => {
-        return getBackfillStats(tx);
+      const { stats, testShopIndex } = await sql.begin("read only", async (tx) => {
+        const statsResult = await getBackfillStats(tx);
+        const [indexResult] = await tx<{ idx: string }[]>`
+          WITH ordered_shops AS (
+            SELECT DISTINCT "shopId", ROW_NUMBER() OVER (ORDER BY "shopId") as idx
+            FROM "BuyerAccount"
+            WHERE "metafieldSyncedAt" IS NULL
+          )
+          SELECT idx::text FROM ordered_shops WHERE "shopId" = ${TEST_SHOP_ID}
+        `;
+        return {
+          stats: statsResult,
+          testShopIndex: indexResult ? parseInt(indexResult.idx, 10) : -1,
+        };
       });
 
-      // Find our test shop in the stats
-      const ourStats = stats.find(s => s.total === 2);
+      const ourStats = stats.find(s => s.shopIndex === testShopIndex);
       expect(ourStats).toBeDefined();
       expect(ourStats!.byHoldState["OK"]).toBe(1);
       expect(ourStats!.byHoldState["HELD"]).toBe(1);
     });
 
     it("excludes accounts with metafieldSyncedAt set", async () => {
-      const stats = await sql.begin("read only", async (tx) => {
-        return getBackfillStats(tx);
+      const { stats, testShopIndex } = await sql.begin("read only", async (tx) => {
+        const statsResult = await getBackfillStats(tx);
+        const [indexResult] = await tx<{ idx: string }[]>`
+          WITH ordered_shops AS (
+            SELECT DISTINCT "shopId", ROW_NUMBER() OVER (ORDER BY "shopId") as idx
+            FROM "BuyerAccount"
+            WHERE "metafieldSyncedAt" IS NULL
+          )
+          SELECT idx::text FROM ordered_shops WHERE "shopId" = ${TEST_SHOP_ID}
+        `;
+        return {
+          stats: statsResult,
+          testShopIndex: indexResult ? parseInt(indexResult.idx, 10) : -1,
+        };
       });
 
-      // Our shop has 3 accounts, but only 2 have metafieldSyncedAt NULL
-      const ourStats = stats.find(s => s.total === 2 && s.byHoldState["OK"] === 1 && s.byHoldState["HELD"] === 1);
+      const ourStats = stats.find(s => s.shopIndex === testShopIndex);
       expect(ourStats).toBeDefined();
+      expect(ourStats!.total).toBe(2);
     });
   });
 
@@ -215,21 +238,16 @@ describeWithDb("credit-status-metafield-backfill DB integration", () => {
       }
     });
 
-    it("rerun on the same day is deduped by pgmq", async () => {
+    it("messages include dedupe keys for drain deduplication", async () => {
       const candidates = await getCandidates(sql);
       const ourCandidates = candidates.filter(c => c.shopId === TEST_SHOP_ID);
 
-      // First enqueue
-      const result1 = await enqueueBackfill(sql, ourCandidates);
-      expect(result1.enqueued).toBe(2);
+      // Enqueue messages
+      const result = await enqueueBackfill(sql, ourCandidates);
+      expect(result.enqueued).toBe(2);
 
-      // Second enqueue (same day, same dedupe keys)
-      const result2 = await enqueueBackfill(sql, ourCandidates);
-      expect(result2.enqueued).toBe(2); // pgmq.send succeeds but message is deduped
-
-      // Note: pgmq.send doesn't dedupe - it enqueues duplicate messages
-      // The drain processor dedupes via s6_processed_webhooks
-      // So we just verify the messages have proper dedupe keys
+      // Verify messages have proper dedupe keys for drain processor
+      // (drain dedupes via s6_processed_webhooks, not pgmq)
       const messages = await sql<{ message: { webhookId: string } }[]>`
         SELECT message FROM pgmq.q_s6_sync
         WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}

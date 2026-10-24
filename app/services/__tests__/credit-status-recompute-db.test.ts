@@ -437,7 +437,7 @@ describeWithDb("credit-status-recompute DB integration", () => {
   });
 
   describe("metafieldSyncedAt column", () => {
-    it("OK account with metafieldSyncedAt NULL gets exactly ONE metafield write on first recompute", async () => {
+    it("OK account with metafieldSyncedAt NULL gets exactly ONE write, then ZERO on subsequent no-op recomputes", async () => {
       // Ensure metafieldSyncedAt is NULL (set by beforeEach)
       const [before] = await sql<{ metafieldSyncedAt: Date | null }[]>`
         SELECT "metafieldSyncedAt" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
@@ -445,6 +445,7 @@ describeWithDb("credit-status-recompute DB integration", () => {
       expect(before.metafieldSyncedAt).toBeNull();
 
       // First recompute - should write metafield even though hold hasn't changed
+      // because metafieldSyncedAt is NULL
       const result1 = await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
       expect(result1.success).toBe(true);
       expect(metafieldWriteCount).toBe(1);
@@ -454,37 +455,18 @@ describeWithDb("credit-status-recompute DB integration", () => {
         SELECT "metafieldSyncedAt" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
       `;
       expect(after1.metafieldSyncedAt).not.toBeNull();
-    });
 
-    it("second recompute with no change does NOT write metafield (call count stays 0)", async () => {
-      // First, set up an account that already has metafieldSyncedAt set
-      await sql`
-        UPDATE "BuyerAccount"
-        SET "metafieldSyncedAt" = NOW()
-        WHERE id = ${TEST_ACCOUNT_ID}
-      `;
-
-      // Reset write count
-      metafieldWriteCount = 0;
-      mockShopifyGraphQLRequest.mockClear();
-
-      // Recompute should NOT write metafield (no change, already synced)
-      const result1 = await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
-      expect(result1.success).toBe(true);
-      expect(result1.metafieldWritten).toBe(false);
-      expect(metafieldWriteCount).toBe(0);
-
-      // Second recompute - also no write
+      // Second recompute - should NOT write (no change, already synced)
       const result2 = await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
       expect(result2.success).toBe(true);
       expect(result2.metafieldWritten).toBe(false);
-      expect(metafieldWriteCount).toBe(0);
+      expect(metafieldWriteCount).toBe(1); // Still 1, no additional write
 
       // Third recompute - also no write
       const result3 = await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
       expect(result3.success).toBe(true);
       expect(result3.metafieldWritten).toBe(false);
-      expect(metafieldWriteCount).toBe(0);
+      expect(metafieldWriteCount).toBe(1); // Still 1, no additional write
     });
 
     it("failed write or userErrors leave metafieldSyncedAt NULL and keep syncPending", async () => {
