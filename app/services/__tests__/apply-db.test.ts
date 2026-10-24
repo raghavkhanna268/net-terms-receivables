@@ -1477,7 +1477,7 @@ describeWithDb("S17 apply service DB integration", () => {
           AND data->>'matchId' = ${matchIdA}
       `;
       expect(unmatchedAudit).toBeDefined();
-      expect(unmatchedAudit?.data.reason).toBe("INVOICE_NO_LONGER_OPEN");
+      expect(unmatchedAudit?.data.reason).toBe("INVOICE_NOT_OPEN");
       expect(unmatchedAudit?.data.appliedPaise).toBe("0");
 
       // Payment status should be recomputed (not allocated)
@@ -1545,7 +1545,7 @@ describeWithDb("S17 apply service DB integration", () => {
       expect(invoice.status).toBe("cancelled");
       expect(parseFloat(invoice.outstanding)).toBe(10000); // Unchanged
 
-      // Match A's unmatched audit should exist with reason INVOICE_NO_LONGER_OPEN
+      // Match A's unmatched audit should exist with reason INVOICE_NOT_OPEN
       const [unmatchedAudit] = await sql<{ data: { reason?: string; invoiceStatus?: string } }[]>`
         SELECT data FROM "AuditEvent"
         WHERE "shopId" = ${TEST_SHOP_ID}
@@ -1553,7 +1553,7 @@ describeWithDb("S17 apply service DB integration", () => {
           AND data->>'matchId' = ${matchIdA}
       `;
       expect(unmatchedAudit).toBeDefined();
-      expect(unmatchedAudit?.data.reason).toBe("INVOICE_NO_LONGER_OPEN");
+      expect(unmatchedAudit?.data.reason).toBe("INVOICE_NOT_OPEN");
       expect(unmatchedAudit?.data.invoiceStatus).toBe("cancelled");
     });
 
@@ -1669,6 +1669,100 @@ describeWithDb("S17 apply service DB integration", () => {
         SELECT state FROM "Match" WHERE id = ${matchId}
       `;
       expect(match.state).toBe("pushed");
+    });
+
+    it("invoice flipped to paid during Shopify call: match pushed, one match.applied, payment allocated", async () => {
+      // INVARIANT: After successful Shopify push, never unmatch unless sibling or cancellation explains it.
+      // Scenario: Match A's orderMarkAsPaid succeeds, but webhook flips invoice to 'paid' before finalize TX.
+      // Expected: Match pushed with match.applied, no match.unmatched, payment allocated.
+      const paymentId = await createPayment(1000000n); // 10000 INR
+      const invoiceId = await createInvoice(1000000n); // 10000 INR
+
+      // Create a stale 'pushing' match (> 5 min) - this is the match being retried
+      const matchId = `match-stale-shopify-race-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 10000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushing', NOW() - interval '10 minutes', NOW() - interval '10 minutes')
+      `;
+
+      // Write push_claimed audit (simulating TX1 that happened 10 min ago)
+      await sql`
+        INSERT INTO "AuditEvent" (id, "shopId", actor, type, data, at)
+        VALUES (
+          gen_random_uuid(),
+          ${TEST_SHOP_ID},
+          'test-user',
+          'match.push_claimed',
+          ${sql.json({ matchId, invoiceId, paymentId, outstandingAtClaimPaise: '1000000' })}::jsonb,
+          NOW() - interval '10 minutes'
+        )
+      `;
+
+      // Configure mock to succeed and flip invoice to 'paid' DURING the Shopify call
+      // This simulates ORDERS_PAID webhook arriving before finalize TX
+      mockShopifySuccess = true;
+      mockAlreadyPaid = false;
+      orderMarkAsPaidCallCount = 0;
+
+      onOrderMarkAsPaidCallback = async () => {
+        // Simulate webhook: flip invoice to 'paid' DURING the Shopify call
+        await sql`
+          UPDATE "Invoice"
+          SET status = 'paid', outstanding = 0, "updatedAt" = NOW()
+          WHERE id = ${invoiceId}
+        `;
+      };
+
+      // Apply the match (handleStalePushingMatch FULL path)
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      // Clear callback
+      onOrderMarkAsPaidCallback = null;
+
+      // INVARIANT: After successful Shopify push, should be pushed not unmatched
+      expect(result.success).toBe(true);
+      expect(result.invoicePaid).toBe(true);
+
+      // Match should be 'pushed'
+      const [match] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId}
+      `;
+      expect(match.state).toBe("pushed");
+
+      // Exactly ONE match.applied audit
+      const matchAppliedAudits = await sql<{ id: string; data: { reasonCode?: string } }[]>`
+        SELECT id, data FROM "AuditEvent"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+          AND type = 'match.applied'
+          AND data->>'matchId' = ${matchId}
+      `;
+      expect(matchAppliedAudits.length).toBe(1);
+      expect(matchAppliedAudits[0].data.reasonCode).toBe("STALE_FINALIZED_EXTERNALLY_PAID");
+
+      // NO match.unmatched audit
+      const [unmatchedAudit] = await sql<{ id: string }[]>`
+        SELECT id FROM "AuditEvent"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+          AND type = 'match.unmatched'
+          AND data->>'matchId' = ${matchId}
+      `;
+      expect(unmatchedAudit).toBeUndefined();
+
+      // Payment should be allocated (not unmatched)
+      const [payment] = await sql<{ status: string }[]>`
+        SELECT status FROM "Payment" WHERE id = ${paymentId}
+      `;
+      expect(payment.status).toBe("allocated");
+
+      // Invoice should be paid with outstanding 0
+      const [invoice] = await sql<{ status: string; outstanding: string }[]>`
+        SELECT status, outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+      expect(invoice.status).toBe("paid");
+      expect(parseFloat(invoice.outstanding)).toBe(0);
+
+      // Exactly one orderMarkAsPaid call
+      expect(orderMarkAsPaidCallCount).toBe(1);
     });
   });
 
