@@ -57,11 +57,70 @@ const inFlightSetups = new Map<string, Promise<void>>();
  * - Allows retry on failure (shop not marked as complete)
  * - Logs errors for observability without affecting user experience
  *
+ * IMPORTANT: Before the cache early-return, we always clear uninstalledAt
+ * if set. This handles the case where:
+ * 1. Shop was uninstalled (uninstalledAt set)
+ * 2. Isolate A handled the uninstall and evicted from its cache
+ * 3. Isolate B still has the shop in its cache
+ * 4. Shop reinstalls and Isolate B handles the first /app load
+ * 5. Without this check, Isolate B would skip upsertShopOnAuth
+ *    and leave uninstalledAt set, breaking reconcile/reminders
+ *
+ * When clearUninstalledAtIfSet returns true (a row was cleared), we also
+ * re-run the full setup because Shopify drops app-owned metafield definitions,
+ * the validation function, and payment customization on uninstall.
+ *
+ * This adds one indexed conditional UPDATE on every /app load, but it's
+ * a single-row WHERE domain=$1 AND uninstalledAt IS NOT NULL update
+ * that is a no-op when already NULL (most requests).
+ *
  * @param shop - The shop domain (e.g., "example.myshopify.com")
  * @param admin - The authenticated admin GraphQL client
  * @param waitUntil - The ctx.waitUntil function from Cloudflare Workers context
  */
 export function runAfterAuth(
+  shop: string,
+  admin: AdminGraphqlClient,
+  waitUntil: WaitUntilFn,
+): void {
+  let sql: Sql | null = null;
+  try {
+    sql = getRequestSql();
+  } catch (error) {
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.error(`[afterAuth] clear_uninstalled_at_failed reason=no_request_context err=${errInfo}`);
+  }
+
+  if (sql) {
+    const clearAndSetupPromise = clearAndMaybeSetup(sql, shop, admin, waitUntil);
+    waitUntil(clearAndSetupPromise);
+  } else {
+    runSetupIfNeeded(shop, admin, waitUntil);
+  }
+}
+
+/**
+ * Clear uninstalledAt and run setup if the shop was reinstalled or not cached.
+ */
+async function clearAndMaybeSetup(
+  sql: Sql,
+  shop: string,
+  admin: AdminGraphqlClient,
+  waitUntil: WaitUntilFn,
+): Promise<void> {
+  const wasReinstalled = await clearUninstalledAtIfSet(sql, shop);
+
+  if (wasReinstalled) {
+    setupCompletedShops.delete(shop);
+  }
+
+  runSetupIfNeeded(shop, admin, waitUntil);
+}
+
+/**
+ * Run setup if the shop is not in cache and not already in-flight.
+ */
+function runSetupIfNeeded(
   shop: string,
   admin: AdminGraphqlClient,
   waitUntil: WaitUntilFn,
@@ -79,6 +138,40 @@ export function runAfterAuth(
   const setupPromise = runSetup(shop, admin);
   inFlightSetups.set(shop, setupPromise);
   waitUntil(setupPromise);
+}
+
+/**
+ * Clear uninstalledAt if set for the given shop.
+ *
+ * This is called on every /app load BEFORE the cache early-return to handle
+ * cross-isolate reinstall scenarios. It's a single cheap, shop-scoped conditional
+ * UPDATE using the indexed domain column - no extra SELECT or round-trip.
+ *
+ * IMPORTANT: Only sets uninstalledAt to NULL. Never touches plan, gating,
+ * credit, timezone, or any other column.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shop - The shop domain
+ * @returns true if a row was updated (shop was reinstalled), false otherwise
+ */
+async function clearUninstalledAtIfSet(sql: Sql, shop: string): Promise<boolean> {
+  try {
+    const result = await sql<{ id: string }[]>`
+      UPDATE "Shop"
+      SET "uninstalledAt" = NULL
+      WHERE domain = ${shop} AND "uninstalledAt" IS NOT NULL
+      RETURNING id
+    `;
+    if (result.length > 0) {
+      console.log(`[afterAuth] cleared_uninstalled_at shop_id=${result[0].id}`);
+      return true;
+    }
+    return false;
+  } catch (error) {
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.error(`[afterAuth] clear_uninstalled_at_failed reason=db_error err=${errInfo}`);
+    return false;
+  }
 }
 
 /**
@@ -119,8 +212,7 @@ async function syncShopTimezone(
 
     if (result.errors) {
       console.warn(
-        `[afterAuth] GraphQL errors fetching timezone for ${shop}:`,
-        result.errors.map((e) => e.message).join(", ")
+        `[afterAuth] timezone_query_failed reason=graphql_errors`
       );
     } else {
       const ianaTimezone = result.data?.shop?.ianaTimezone;
@@ -128,23 +220,24 @@ async function syncShopTimezone(
         const validatedTimezone = validateTimezone(ianaTimezone);
         if (validatedTimezone !== ianaTimezone) {
           console.warn(
-            `[afterAuth] Invalid timezone from Shopify for ${shop}: "${ianaTimezone}", ` +
-            `using fallback: "${validatedTimezone}"`
+            `[afterAuth] timezone_invalid fallback=${validatedTimezone}`
           );
         }
         timezone = validatedTimezone;
       } else {
-        console.warn(`[afterAuth] No timezone returned for ${shop}`);
+        console.warn(`[afterAuth] timezone_query_failed reason=no_timezone_returned`);
       }
     }
   } catch (error) {
-    console.warn(`[afterAuth] Failed to fetch timezone for ${shop}:`, error);
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.warn(`[afterAuth] timezone_query_failed reason=exception err=${errInfo}`);
   }
 
   try {
     await upsertShopOnAuth(sql, shop, timezone);
   } catch (error) {
-    console.error(`[afterAuth] Failed to upsert Shop row for ${shop}:`, error);
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.error(`[afterAuth] upsert_shop_failed reason=db_error err=${errInfo}`);
     throw error;
   }
 }
@@ -160,37 +253,41 @@ async function runSetup(
     await ensureMetafieldDefinitions(admin);
   } catch (error) {
     hasError = true;
-    console.error(`[afterAuth] Failed to ensure metafield definitions for ${shop}:`, error);
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.error(`[afterAuth] metafield_definitions_failed reason=exception err=${errInfo}`);
   }
   
   try {
     await ensureValidation(admin);
   } catch (error) {
     hasError = true;
-    console.error(`[afterAuth] Failed to ensure validation for ${shop}:`, error);
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.error(`[afterAuth] validation_registration_failed reason=exception err=${errInfo}`);
   }
   
-  // S13: Payment customization for hiding net-terms payment methods
-  // Failure is logged but doesn't break auth - can be retried on next request
+  // S13: Payment customization for hiding net-terms payment methods.
+  // Failure is logged but doesn't break auth - can be retried on next request.
   try {
     const result = await ensurePaymentCustomization(admin);
     if (result.created) {
-      console.log(`[afterAuth] Created payment customization for ${shop}: ${result.id}`);
+      console.log(`[afterAuth] payment_customization_created id=${result.id}`);
     }
   } catch (error) {
     hasError = true;
-    console.error(`[afterAuth] Failed to ensure payment customization for ${shop}:`, error);
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.error(`[afterAuth] payment_customization_failed reason=exception err=${errInfo}`);
   }
   
-  // Timezone sync runs even if earlier steps fail - it's independent
+  // Timezone sync runs even if earlier steps fail - it's independent.
   try {
     await syncShopTimezone(shop, admin);
   } catch (error) {
     hasError = true;
-    console.error(`[afterAuth] Failed to sync timezone for ${shop}:`, error);
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.error(`[afterAuth] sync_timezone_failed reason=exception err=${errInfo}`);
   }
   
-  // Only mark complete if all steps succeeded
+  // Only mark complete if all steps succeeded.
   if (!hasError) {
     setupCompletedShops.add(shop);
   }
@@ -242,7 +339,7 @@ export async function upsertShopOnAuth(
   shopDomain: string,
   timezone: string | null,
 ): Promise<void> {
-  await sql`
+  const result = await sql<{ id: string }[]>`
     INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
     VALUES (${shopDomain}, COALESCE(${timezone}, 'Asia/Kolkata'), 'INR', 'free', NOW(), NOW())
     ON CONFLICT (domain)
@@ -250,8 +347,10 @@ export async function upsertShopOnAuth(
       timezone = COALESCE(${timezone}, "Shop".timezone),
       "uninstalledAt" = NULL,
       "updatedAt" = NOW()
+    RETURNING id
   `;
-  console.log(`[afterAuth] Upserted Shop row for ${shopDomain} (timezone: ${timezone ?? 'preserved'})`);
+  const shopId = result[0]?.id ?? 'unknown';
+  console.log(`[afterAuth] shop_upserted shop_id=${shopId} timezone=${timezone ?? 'preserved'}`);
 }
 
 /**
@@ -264,3 +363,9 @@ export async function upsertShopOnAuth(
 export function evictShopFromSetupCache(shop: string): void {
   setupCompletedShops.delete(shop);
 }
+
+/**
+ * Exported for testing: clear uninstalledAt if set.
+ * @internal
+ */
+export { clearUninstalledAtIfSet as _clearUninstalledAtIfSetForTesting };

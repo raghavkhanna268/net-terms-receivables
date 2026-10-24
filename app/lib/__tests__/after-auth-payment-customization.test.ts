@@ -1,136 +1,201 @@
+/**
+ * S13: Payment customization tests for after-auth setup.
+ *
+ * Tests verify:
+ * 1. ensurePaymentCustomization is called during setup
+ * 2. Failure leaves shop NOT marked complete (does not throw)
+ * 3. Retry on next auth runs it again
+ * 4. Created id logged as id only (no raw objects)
+ */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+
+vi.mock("../metafield-definitions.server", () => ({
+  ensureMetafieldDefinitions: vi.fn(),
+}));
+
+vi.mock("../validation-registration.server", () => ({
+  ensureValidation: vi.fn(),
+}));
+
+vi.mock("../payment-customization-registration.server", () => ({
+  ensurePaymentCustomization: vi.fn(),
+}));
+
+const mockSqlQuery = Object.assign(
+  vi.fn(),
+  { json: (v: unknown) => JSON.stringify(v) }
+);
+vi.mock("../request-context.server", () => ({
+  getRequestSql: vi.fn(() => mockSqlQuery),
+}));
+
 import {
   runAfterAuth,
   _resetSetupCacheForTesting,
   _isShopSetupComplete,
 } from "../after-auth.server";
+import { ensureMetafieldDefinitions } from "../metafield-definitions.server";
+import { ensureValidation } from "../validation-registration.server";
+import { ensurePaymentCustomization } from "../payment-customization-registration.server";
 
-// Mock all dependencies
-vi.mock("../metafield-definitions.server", () => ({
-  ensureMetafieldDefinitions: vi.fn().mockResolvedValue(undefined),
-}));
+const mockEnsureMetafieldDefinitions = ensureMetafieldDefinitions as ReturnType<typeof vi.fn>;
+const mockEnsureValidation = ensureValidation as ReturnType<typeof vi.fn>;
+const mockEnsurePaymentCustomization = ensurePaymentCustomization as ReturnType<typeof vi.fn>;
 
-vi.mock("../validation-registration.server", () => ({
-  ensureValidation: vi.fn().mockResolvedValue(undefined),
-}));
+const createMockAdmin = () => ({
+  graphql: vi.fn().mockResolvedValue({
+    json: () => Promise.resolve({ data: { shop: { ianaTimezone: "America/New_York" } } }),
+  }),
+});
 
-vi.mock("../payment-customization-registration.server", () => ({
-  ensurePaymentCustomization: vi.fn().mockResolvedValue({ id: "pc-123", created: false }),
-}));
-
-vi.mock("../request-context.server", () => ({
-  getRequestSql: vi.fn().mockReturnValue(() => []),
-}));
-
-interface AdminGraphqlClient {
-  graphql: (
-    query: string,
-    options?: { variables?: Record<string, unknown> },
-  ) => Promise<{ json: () => Promise<unknown> }>;
-}
-
-describe("after-auth with payment customization", () => {
-  let mockAdmin: AdminGraphqlClient;
-  let waitUntilPromises: Promise<unknown>[];
-  let mockWaitUntil: (p: Promise<unknown>) => void;
-
-  beforeEach(async () => {
+describe("after-auth with payment customization (S13)", () => {
+  beforeEach(() => {
     _resetSetupCacheForTesting();
-    waitUntilPromises = [];
-    mockWaitUntil = (p) => waitUntilPromises.push(p);
-    
-    const mockGraphql = vi.fn().mockResolvedValue({
-      json: async () => ({
-        data: { shop: { ianaTimezone: "America/New_York" } },
-      }),
-    });
-    mockAdmin = { graphql: mockGraphql } as unknown as AdminGraphqlClient;
+    vi.clearAllMocks();
+    mockSqlQuery.mockResolvedValue([]);
+    mockEnsureMetafieldDefinitions.mockResolvedValue([]);
+    mockEnsureValidation.mockResolvedValue({ id: "val-123", created: false });
+    mockEnsurePaymentCustomization.mockResolvedValue({ id: "pc-123", created: false });
   });
 
   afterEach(() => {
-    vi.clearAllMocks();
+    _resetSetupCacheForTesting();
   });
 
   it("calls ensurePaymentCustomization during setup", async () => {
-    const { ensurePaymentCustomization } = await import(
-      "../payment-customization-registration.server"
-    );
+    const mockAdmin = createMockAdmin();
+    const waitUntilPromises: Promise<unknown>[] = [];
+    const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
     runAfterAuth("test-shop.myshopify.com", mockAdmin, mockWaitUntil);
 
-    // Wait for setup to complete
-    await Promise.all(waitUntilPromises);
+    let prevLen = 0;
+    while (waitUntilPromises.length > prevLen) {
+      prevLen = waitUntilPromises.length;
+      await Promise.allSettled(waitUntilPromises);
+    }
 
-    expect(ensurePaymentCustomization).toHaveBeenCalledWith(mockAdmin);
+    expect(mockEnsurePaymentCustomization).toHaveBeenCalledWith(mockAdmin);
   });
 
-  it("marks shop complete even if payment customization fails", async () => {
-    const { ensurePaymentCustomization } = await import(
-      "../payment-customization-registration.server"
-    );
-    const mockEnsurePaymentCustomization = ensurePaymentCustomization as ReturnType<typeof vi.fn>;
-    mockEnsurePaymentCustomization.mockRejectedValueOnce(new Error("Test error"));
+  it("logs payment customization created id only (no raw objects)", async () => {
+    mockEnsurePaymentCustomization.mockResolvedValue({ 
+      id: "gid://shopify/PaymentCustomization/pc-456", 
+      created: true 
+    });
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const mockAdmin = createMockAdmin();
+    const waitUntilPromises: Promise<unknown>[] = [];
+    const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
-    runAfterAuth("test-shop.myshopify.com", mockAdmin, mockWaitUntil);
-    await Promise.all(waitUntilPromises);
+    runAfterAuth("log-test-shop.myshopify.com", mockAdmin, mockWaitUntil);
 
-    // Error was logged
+    let prevLen = 0;
+    while (waitUntilPromises.length > prevLen) {
+      prevLen = waitUntilPromises.length;
+      await Promise.allSettled(waitUntilPromises);
+    }
+
     expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Failed to ensure payment customization"),
-      expect.any(Error),
+      expect.stringContaining("[afterAuth] payment_customization_created id=")
     );
-
-    // Shop is NOT marked complete because there was an error
-    expect(_isShopSetupComplete("test-shop.myshopify.com")).toBe(false);
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining("gid://shopify/PaymentCustomization/pc-456")
+    );
 
     consoleSpy.mockRestore();
   });
 
-  it("does not throw from runAfterAuth even if payment customization fails", async () => {
-    const { ensurePaymentCustomization } = await import(
-      "../payment-customization-registration.server"
-    );
-    const mockEnsurePaymentCustomization = ensurePaymentCustomization as ReturnType<typeof vi.fn>;
-    mockEnsurePaymentCustomization.mockRejectedValueOnce(new Error("API Error"));
+  it("failure leaves shop NOT marked complete and does not throw", async () => {
+    mockEnsurePaymentCustomization.mockRejectedValue(new Error("Test error"));
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    vi.spyOn(console, "error").mockImplementation(() => {});
+    const mockAdmin = createMockAdmin();
+    const waitUntilPromises: Promise<unknown>[] = [];
+    const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
-    // Should not throw
     expect(() =>
-      runAfterAuth("test-shop.myshopify.com", mockAdmin, mockWaitUntil),
+      runAfterAuth("s13-failing-shop.myshopify.com", mockAdmin, mockWaitUntil)
     ).not.toThrow();
 
-    // Wait for promises - they should not reject
-    await expect(Promise.all(waitUntilPromises)).resolves.not.toThrow();
+    let prevLen = 0;
+    while (waitUntilPromises.length > prevLen) {
+      prevLen = waitUntilPromises.length;
+      await Promise.allSettled(waitUntilPromises);
+    }
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[afterAuth] payment_customization_failed reason=exception err=")
+    );
+
+    expect(_isShopSetupComplete("s13-failing-shop.myshopify.com")).toBe(false);
+
+    consoleSpy.mockRestore();
   });
 
-  it("retries on next request if previous setup failed", async () => {
-    const { ensurePaymentCustomization } = await import(
-      "../payment-customization-registration.server"
+  it("error log contains err= with code/name only, no raw error object", async () => {
+    const testError = new Error("Test error");
+    testError.name = "TestError";
+    mockEnsurePaymentCustomization.mockRejectedValue(testError);
+    
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const mockAdmin = createMockAdmin();
+    const waitUntilPromises: Promise<unknown>[] = [];
+    const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
+
+    runAfterAuth("error-log-shop.myshopify.com", mockAdmin, mockWaitUntil);
+
+    let prevLen = 0;
+    while (waitUntilPromises.length > prevLen) {
+      prevLen = waitUntilPromises.length;
+      await Promise.allSettled(waitUntilPromises);
+    }
+
+    const pcFailedCall = consoleSpy.mock.calls.find(
+      (call) => call[0]?.includes?.("[afterAuth] payment_customization_failed")
     );
-    const mockEnsurePaymentCustomization = ensurePaymentCustomization as ReturnType<typeof vi.fn>;
+    expect(pcFailedCall).toBeDefined();
+    expect(pcFailedCall).toHaveLength(1);
+    expect(pcFailedCall![0]).toContain("err=TestError");
+    expect(pcFailedCall![0]).not.toContain("[object");
 
-    // First call fails
+    consoleSpy.mockRestore();
+  });
+
+  it("retry on next auth runs ensurePaymentCustomization again", async () => {
     mockEnsurePaymentCustomization.mockRejectedValueOnce(new Error("Temporary error"));
-    vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    runAfterAuth("retry-shop.myshopify.com", mockAdmin, mockWaitUntil);
-    await Promise.all(waitUntilPromises);
+    const mockAdmin = createMockAdmin();
+    const waitUntilPromises: Promise<unknown>[] = [];
+    const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
-    // Shop not marked complete
-    expect(_isShopSetupComplete("retry-shop.myshopify.com")).toBe(false);
+    runAfterAuth("s13-retry-shop.myshopify.com", mockAdmin, mockWaitUntil);
 
-    // Second call succeeds
-    mockEnsurePaymentCustomization.mockResolvedValueOnce({ id: "pc-456", created: true });
-    waitUntilPromises = [];
+    let prevLen = 0;
+    while (waitUntilPromises.length > prevLen) {
+      prevLen = waitUntilPromises.length;
+      await Promise.allSettled(waitUntilPromises);
+    }
 
-    runAfterAuth("retry-shop.myshopify.com", mockAdmin, mockWaitUntil);
-    await Promise.all(waitUntilPromises);
+    expect(_isShopSetupComplete("s13-retry-shop.myshopify.com")).toBe(false);
+    expect(mockEnsurePaymentCustomization).toHaveBeenCalledTimes(1);
 
-    // Now shop is complete (assuming all other steps also pass)
-    // Note: This depends on all mocked services succeeding
+    waitUntilPromises.length = 0;
+    mockEnsurePaymentCustomization.mockResolvedValueOnce({ id: "pc-789", created: true });
+
+    runAfterAuth("s13-retry-shop.myshopify.com", mockAdmin, mockWaitUntil);
+
+    prevLen = 0;
+    while (waitUntilPromises.length > prevLen) {
+      prevLen = waitUntilPromises.length;
+      await Promise.allSettled(waitUntilPromises);
+    }
+
     expect(mockEnsurePaymentCustomization).toHaveBeenCalledTimes(2);
+
+    consoleSpy.mockRestore();
   });
 });
