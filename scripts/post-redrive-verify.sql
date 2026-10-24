@@ -437,47 +437,93 @@ SELECT 'S20-3' AS check_id, count(*) AS orders_receipts,
          AS pass
 FROM webhook_receipts r WHERE r.shop = :'shop' AND r.topic LIKE 'ORDERS_%';
 
-\echo '== S20-4 DLQ by topic x error class for this shop (error text never printed)'
-SELECT 'S20-4' AS check_id, d.original_queue, d.message->>'topic' AS topic,
-       CASE
-         WHEN d.error LIKE 'Order has payment terms but no matching BuyerAccount found%'      THEN 'nba_payment_terms'
-         WHEN d.error LIKE 'Customer matches tag rule % but no BuyerAccount found%'           THEN 'nba_tag_rule'
-         WHEN d.error LIKE 'CompanyLocation exists but no BuyerAccount synced yet%'           THEN 'nba_company_location'
-         WHEN d.error LIKE 'No handler registered for topic after %'                          THEN 'no_handler'
-         WHEN d.error LIKE 'Non-retryable error:%'                                            THEN 'non_retryable'
-         ELSE 'other'
-       END AS error_class,
+-- S20-4/S20-5/S20-6 classify s6_dead_letter.error with the same parser as #179
+-- (prod-diagnostics.yml "Queue and webhook counts", scripts/readonly/post-drain-aggregates.sql):
+--   since #176/#184 error is "[non_retryable:|permanent:]<code>", e.g. no_buyer_account
+--   (retryable, order.server eligibility), permanent:no_handler, queue_error (pgmq).
+--   Rows written before #176 hold raw text; they map to fixed enums (no_handler,
+--   legacy_nba_*, legacy_unclassified) and the text itself is never printed.
+-- error_family groups legacy text and codes for one failure:
+--   no_buyer_account = legacy_nba_* + code no_buyer_account; no_handler = legacy text + code no_handler.
+-- The coded no_buyer_account does not say whether it came from the tag rule or a
+-- company path (legacy text did), so S20-5 counts coded rows separately as nba_code_unsplit.
+\echo '== S20-4 DLQ by topic x parsed error code for this shop (error text never printed)'
+WITH dlq AS (
+  SELECT d.original_queue, d.message->>'topic' AS topic, d.dead_lettered_at,
+    CASE WHEN d.error IS NULL THEN NULL
+         WHEN m.m IS NOT NULL THEN 'code'
+         WHEN d.error LIKE 'No handler registered for topic after %' THEN 'no_handler_text'
+         ELSE 'legacy_text' END AS error_format,
+    CASE WHEN d.error IS NULL THEN NULL
+         WHEN m.m IS NOT NULL THEN COALESCE(m.m[1], 'none')
+         WHEN d.error LIKE 'Non-retryable error:%' THEN 'non_retryable'
+         ELSE 'none' END AS error_disposition,
+    CASE WHEN d.error IS NULL THEN NULL
+         WHEN m.m IS NOT NULL THEN m.m[2]
+         WHEN d.error LIKE 'No handler registered for topic after %' THEN 'no_handler'
+         WHEN d.error LIKE 'Order has payment terms but no matching BuyerAccount found%' THEN 'legacy_nba_payment_terms'
+         WHEN d.error LIKE 'Customer matches tag rule % but no BuyerAccount found%' THEN 'legacy_nba_tag_rule'
+         WHEN d.error LIKE 'CompanyLocation exists but no BuyerAccount synced yet%' THEN 'legacy_nba_company_location'
+         ELSE 'legacy_unclassified' END AS error_code
+  FROM s6_dead_letter d
+  CROSS JOIN LATERAL (SELECT regexp_match(d.error, '^(?:(non_retryable|permanent):)?([A-Za-z][A-Za-z0-9_]{0,63}|graphql_error:[A-Za-z0-9_,]{1,200})$') AS m) m
+  WHERE d.message->>'shop' = :'shop'
+)
+SELECT 'S20-4' AS check_id, original_queue, topic, error_format, error_disposition, error_code,
+       CASE WHEN error_code IN ('no_buyer_account','legacy_nba_payment_terms','legacy_nba_tag_rule','legacy_nba_company_location')
+                 AND error_disposition = 'none' THEN 'no_buyer_account'  -- same rule as S20-5 is_nba
+            WHEN error_code = 'no_handler' THEN 'no_handler'
+            WHEN error_code IS NULL THEN NULL
+            ELSE 'other' END AS error_family,
        count(*) AS rows,
-       count(*) FILTER (WHERE d.dead_lettered_at >= :'redrive_started_at'::timestamptz) AS since_redrive_start
-FROM s6_dead_letter d WHERE d.message->>'shop' = :'shop'
-GROUP BY 2,3,4 ORDER BY 2,3,4;
+       count(*) FILTER (WHERE dead_lettered_at >= :'redrive_started_at'::timestamptz) AS since_redrive_start
+FROM dlq
+GROUP BY 2,3,4,5,6,7 ORDER BY 2,3,4,5,6,7;
 
-\echo '== S20-5 DLQ pass criteria'
+\echo '== S20-5 DLQ pass criteria (no_buyer_account = legacy_nba_* text + code no_buyer_account)'
+WITH dlq AS (
+  SELECT d.message->>'topic' AS topic,
+    CASE WHEN d.error IS NULL THEN NULL
+         WHEN m.m IS NOT NULL THEN m.m[2]
+         WHEN d.error LIKE 'No handler registered for topic after %' THEN 'no_handler'
+         WHEN d.error LIKE 'Order has payment terms but no matching BuyerAccount found%' THEN 'legacy_nba_payment_terms'
+         WHEN d.error LIKE 'Customer matches tag rule % but no BuyerAccount found%' THEN 'legacy_nba_tag_rule'
+         WHEN d.error LIKE 'CompanyLocation exists but no BuyerAccount synced yet%' THEN 'legacy_nba_company_location'
+         ELSE 'legacy_unclassified' END AS error_code,
+    (m.m IS NOT NULL AND m.m[1] IS NOT NULL) AS coded_disposition
+  FROM s6_dead_letter d
+  CROSS JOIN LATERAL (SELECT regexp_match(d.error, '^(?:(non_retryable|permanent):)?([A-Za-z][A-Za-z0-9_]{0,63}|graphql_error:[A-Za-z0-9_,]{1,200})$') AS m) m
+  WHERE d.message->>'shop' = :'shop'
+), c AS (
+  SELECT
+    -- a no_buyer_account row is retryable by construction; a non_retryable:/permanent: prefix is not one
+    (error_code IN ('legacy_nba_payment_terms','legacy_nba_tag_rule','legacy_nba_company_location')
+      OR (error_code = 'no_buyer_account' AND NOT coded_disposition)) AS is_nba,
+    *
+  FROM dlq
+)
 SELECT 'S20-5' AS check_id,
-  count(*) FILTER (WHERE d.message->>'topic' LIKE 'ORDERS_%')                                         AS orders_rows_total,
-  count(*) FILTER (WHERE d.message->>'topic' LIKE 'ORDERS_%'
-                     AND d.error NOT LIKE 'Order has payment terms but no matching BuyerAccount found%'
-                     AND d.error NOT LIKE 'Customer matches tag rule % but no BuyerAccount found%'
-                     AND d.error NOT LIKE 'CompanyLocation exists but no BuyerAccount synced yet%')    AS orders_rows_not_no_buyer_account,
-  count(*) FILTER (WHERE d.message->>'topic' LIKE 'ORDERS_%'
-                     AND d.error LIKE 'Customer matches tag rule % but no BuyerAccount found%')         AS orders_rows_tag_rule_nba,   -- PLACEHOLDER <TAGGED_NBA_EXPECTED>
-  count(*) FILTER (WHERE d.message->>'topic' LIKE 'ORDERS_%'
-                     AND (d.error LIKE 'Order has payment terms but no matching BuyerAccount found%'
-                       OR d.error LIKE 'CompanyLocation exists but no BuyerAccount synced yet%'))      AS orders_rows_company_nba,     -- expect 0 after reconcile companies
-  count(*) FILTER (WHERE d.message->>'topic' LIKE 'RECONCILE_%')                                       AS reconcile_rows,
-  count(*) FILTER (WHERE d.message->>'topic' LIKE 'CUSTOMERS_%')                                       AS customers_rows_held,     -- PLACEHOLDER baseline <DLQ_CUSTOMERS_BASELINE>
-  count(*) FILTER (WHERE d.message->>'topic' LIKE 'DRAFT_ORDERS_%')                                    AS draft_orders_rows_held,  -- PLACEHOLDER baseline <DLQ_DRAFT_ORDERS_BASELINE>
-  count(*) FILTER (WHERE d.message->>'topic' NOT LIKE 'ORDERS_%' AND d.message->>'topic' NOT LIKE 'CUSTOMERS_%'
-                     AND d.message->>'topic' NOT LIKE 'DRAFT_ORDERS_%' AND d.message->>'topic' NOT LIKE 'RECONCILE_%') AS other_topic_rows,
-  (count(*) FILTER (WHERE d.message->>'topic' LIKE 'ORDERS_%'
-                     AND d.error NOT LIKE 'Order has payment terms but no matching BuyerAccount found%'
-                     AND d.error NOT LIKE 'Customer matches tag rule % but no BuyerAccount found%'
-                     AND d.error NOT LIKE 'CompanyLocation exists but no BuyerAccount synced yet%') = 0
-   AND count(*) FILTER (WHERE d.message->>'topic' LIKE 'ORDERS_%'
-                     AND (d.error LIKE 'Order has payment terms but no matching BuyerAccount found%'
-                       OR d.error LIKE 'CompanyLocation exists but no BuyerAccount synced yet%')) = 0
-   AND count(*) FILTER (WHERE d.message->>'topic' LIKE 'RECONCILE_%') = 0)                             AS pass_code_derived
-FROM s6_dead_letter d WHERE d.message->>'shop' = :'shop';
+  count(*) FILTER (WHERE topic LIKE 'ORDERS_%')                                             AS orders_rows_total,
+  count(*) FILTER (WHERE topic LIKE 'ORDERS_%' AND NOT COALESCE(is_nba, false))              AS orders_rows_not_no_buyer_account,
+  count(*) FILTER (WHERE topic LIKE 'ORDERS_%' AND error_code = 'legacy_nba_tag_rule')       AS orders_rows_tag_rule_nba,   -- PLACEHOLDER <TAGGED_NBA_EXPECTED> (legacy text rows)
+  count(*) FILTER (WHERE topic LIKE 'ORDERS_%'
+                     AND error_code IN ('legacy_nba_payment_terms','legacy_nba_company_location')) AS orders_rows_company_nba,     -- expect 0 after reconcile companies (legacy text rows)
+  count(*) FILTER (WHERE topic LIKE 'ORDERS_%' AND is_nba AND error_code = 'no_buyer_account') AS orders_rows_nba_code_unsplit, -- coded rows: tag rule or company path, compare by hand
+  count(*) FILTER (WHERE topic LIKE 'ORDERS_%' AND is_nba)                                   AS orders_rows_nba_all,
+  count(*) FILTER (WHERE error_code = 'no_handler')                                          AS no_handler_rows,            -- legacy text + code no_handler
+  count(*) FILTER (WHERE error_code = 'queue_error')                                         AS queue_error_rows,
+  count(*) FILTER (WHERE error_code = 'legacy_unclassified')                                 AS legacy_unclassified_rows,
+  count(*) FILTER (WHERE topic LIKE 'RECONCILE_%')                                           AS reconcile_rows,
+  count(*) FILTER (WHERE topic LIKE 'CUSTOMERS_%')                                           AS customers_rows_held,     -- PLACEHOLDER baseline <DLQ_CUSTOMERS_BASELINE>
+  count(*) FILTER (WHERE topic LIKE 'DRAFT_ORDERS_%')                                        AS draft_orders_rows_held,  -- PLACEHOLDER baseline <DLQ_DRAFT_ORDERS_BASELINE>
+  count(*) FILTER (WHERE topic NOT LIKE 'ORDERS_%' AND topic NOT LIKE 'CUSTOMERS_%'
+                     AND topic NOT LIKE 'DRAFT_ORDERS_%' AND topic NOT LIKE 'RECONCILE_%')  AS other_topic_rows,
+  (count(*) FILTER (WHERE topic LIKE 'ORDERS_%' AND NOT COALESCE(is_nba, false)) = 0
+   AND count(*) FILTER (WHERE topic LIKE 'ORDERS_%'
+                     AND error_code IN ('legacy_nba_payment_terms','legacy_nba_company_location')) = 0
+   AND count(*) FILTER (WHERE topic LIKE 'RECONCILE_%') = 0)                                 AS pass_code_derived,
+  (count(*) FILTER (WHERE topic LIKE 'ORDERS_%' AND is_nba AND error_code = 'no_buyer_account') > 0) AS nba_split_needs_manual_check
+FROM c;
 
 \echo '== S20-6 redriven-and-re-dead-lettered ORDERS_* (same webhookId DLQed again after redrive start)'
 SELECT 'S20-6' AS check_id,
