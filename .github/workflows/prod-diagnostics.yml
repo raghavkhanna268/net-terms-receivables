@@ -71,15 +71,6 @@ on:
         required: false
         default: "100"
         type: string
-      s20_replay:
-        description: "NOT read-only: send a signed orders/updated webhook TWICE to test idempotency (S20 replay)"
-        required: false
-        default: false
-        type: boolean
-      s20_replay_order_gid:
-        description: "Order GID for S20 replay (e.g., gid://shopify/Order/123456789)"
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -123,6 +114,7 @@ jobs:
           echo ""
 
           psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT
             shop,
             "isOnline",
@@ -131,6 +123,7 @@ jobs:
             expires
           FROM "Session"
           WHERE shop = :'shop';
+          ROLLBACK;
           EOSQL
 
           echo ""
@@ -138,12 +131,14 @@ jobs:
 
           # Fetch offline session expiry and refresh token presence
           OFFLINE_DATA=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A -F '|' "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT
             expires AT TIME ZONE 'UTC',
             CASE WHEN "refreshToken" IS NOT NULL AND "refreshToken" != '' THEN 'true' ELSE 'false' END
           FROM "Session"
           WHERE shop = :'shop' AND "isOnline" = false
           LIMIT 1;
+          ROLLBACK;
           EOSQL
           )
 
@@ -207,39 +202,42 @@ jobs:
 
           # Check if needsReauth column exists (from PR #76)
           NEEDS_REAUTH_EXISTS=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT EXISTS(
             SELECT 1 FROM information_schema.columns
             WHERE table_name = 'Session' AND column_name = 'needsReauth'
           );
+          ROLLBACK;
           EOSQL
           )
 
           if [ "$NEEDS_REAUTH_EXISTS" = "t" ]; then
             echo "Session metadata (with needsReauth column):"
+            # Note: Session table has no updatedAt column - only print existing columns
             psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT
             shop,
             expires,
-            CASE WHEN "refreshToken" IS NOT NULL AND "refreshToken" != '' THEN true ELSE false END AS has_refresh_token,
             "refreshTokenExpires",
-            "updatedAt",
             "needsReauth"
           FROM "Session"
           WHERE "isOnline" = false
           ORDER BY shop;
+          ROLLBACK;
           EOSQL
           else
             echo "Session metadata (needsReauth column not present):"
             psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT
             shop,
             expires,
-            CASE WHEN "refreshToken" IS NOT NULL AND "refreshToken" != '' THEN true ELSE false END AS has_refresh_token,
-            "refreshTokenExpires",
-            "updatedAt"
+            "refreshTokenExpires"
           FROM "Session"
           WHERE "isOnline" = false
           ORDER BY shop;
+          ROLLBACK;
           EOSQL
           fi
 
@@ -247,28 +245,28 @@ jobs:
           echo "Session metadata summary (JSON):"
           if [ "$NEEDS_REAUTH_EXISTS" = "t" ]; then
             psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT json_agg(json_build_object(
             'shop', shop,
             'expires', expires,
-            'has_refresh_token', ("refreshToken" IS NOT NULL AND "refreshToken" != ''),
             'refreshTokenExpires', "refreshTokenExpires",
-            'updatedAt', "updatedAt",
             'needsReauth', "needsReauth"
           ))
           FROM "Session"
           WHERE "isOnline" = false;
+          ROLLBACK;
           EOSQL
           else
             psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT json_agg(json_build_object(
             'shop', shop,
             'expires', expires,
-            'has_refresh_token', ("refreshToken" IS NOT NULL AND "refreshToken" != ''),
-            'refreshTokenExpires', "refreshTokenExpires",
-            'updatedAt', "updatedAt"
+            'refreshTokenExpires', "refreshTokenExpires"
           ))
           FROM "Session"
           WHERE "isOnline" = false;
+          ROLLBACK;
           EOSQL
           fi
 
@@ -288,6 +286,7 @@ jobs:
           echo ""
 
           psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT
             migration_name,
             finished_at,
@@ -296,11 +295,13 @@ jobs:
           FROM _prisma_migrations
           WHERE migration_name LIKE '20261025%'
           ORDER BY migration_name;
+          ROLLBACK;
           EOSQL
 
           echo ""
           echo "Migration summary (JSON):"
           psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT json_agg(json_build_object(
             'migration_name', migration_name,
             'finished_at', finished_at,
@@ -309,6 +310,7 @@ jobs:
           ))
           FROM _prisma_migrations
           WHERE migration_name LIKE '20261025%';
+          ROLLBACK;
           EOSQL
 
       - name: Invoice aging buckets
@@ -323,27 +325,30 @@ jobs:
             exit 1
           fi
 
-          echo "=== Invoice Aging Buckets (Asia/Kolkata) ==="
+          echo "=== Invoice Aging Buckets (per-shop timezone) ==="
           echo ""
           echo "Bucket definitions: current (not due), 1-30, 31-60, 61-90, 90+ days past due"
+          echo "Days computed as: (now AT TIME ZONE tz)::date - (dueAt AT TIME ZONE tz)::date"
           echo ""
 
-          # Calculate aging buckets using Asia/Kolkata timezone
-          # Days past due = (now_kolkata_date - due_kolkata_date), negative if not yet due
+          # Calculate aging buckets using shop's IANA timezone (from S7 #80)
+          # Days past due = (now_tz_date - due_tz_date), negative if not yet due
+          # Use COALESCE to fallback to 'Asia/Kolkata' if timezone is not set
           psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           WITH aging AS (
             SELECT
               s.domain AS shop,
-              i.currency,
-              i."outstandingPaise",
+              s.currency,
+              i.outstanding,
+              COALESCE(s.timezone, 'Asia/Kolkata') AS tz,
               CASE
-                WHEN i."dueAt" IS NULL THEN 'current'
-                WHEN (CURRENT_DATE AT TIME ZONE 'Asia/Kolkata') <= (i."dueAt" AT TIME ZONE 'Asia/Kolkata')::date THEN 'current'
-                WHEN (CURRENT_DATE AT TIME ZONE 'Asia/Kolkata') - (i."dueAt" AT TIME ZONE 'Asia/Kolkata')::date <= 30 THEN '1-30'
-                WHEN (CURRENT_DATE AT TIME ZONE 'Asia/Kolkata') - (i."dueAt" AT TIME ZONE 'Asia/Kolkata')::date <= 60 THEN '31-60'
-                WHEN (CURRENT_DATE AT TIME ZONE 'Asia/Kolkata') - (i."dueAt" AT TIME ZONE 'Asia/Kolkata')::date <= 90 THEN '61-90'
-                ELSE '90+'
-              END AS bucket
+                WHEN i."dueAt" IS NULL THEN 0
+                ELSE (
+                  (now() AT TIME ZONE COALESCE(s.timezone, 'Asia/Kolkata'))::date -
+                  (i."dueAt" AT TIME ZONE COALESCE(s.timezone, 'Asia/Kolkata'))::date
+                )
+              END AS days_past_due
             FROM "Invoice" i
             JOIN "Shop" s ON i."shopId" = s.id
             WHERE i.status = 'open'
@@ -351,56 +356,85 @@ jobs:
           SELECT
             shop,
             currency,
-            bucket,
+            CASE
+              WHEN days_past_due <= 0 THEN 'current'
+              WHEN days_past_due <= 30 THEN '1-30'
+              WHEN days_past_due <= 60 THEN '31-60'
+              WHEN days_past_due <= 90 THEN '61-90'
+              ELSE '90+'
+            END AS bucket,
             COUNT(*) AS count,
-            SUM("outstandingPaise") AS total_paise
+            SUM(outstanding) AS total
           FROM aging
-          GROUP BY shop, currency, bucket
+          GROUP BY shop, currency,
+            CASE
+              WHEN days_past_due <= 0 THEN 'current'
+              WHEN days_past_due <= 30 THEN '1-30'
+              WHEN days_past_due <= 60 THEN '31-60'
+              WHEN days_past_due <= 90 THEN '61-90'
+              ELSE '90+'
+            END
           ORDER BY shop, currency,
-            CASE bucket
-              WHEN 'current' THEN 1
-              WHEN '1-30' THEN 2
-              WHEN '31-60' THEN 3
-              WHEN '61-90' THEN 4
-              WHEN '90+' THEN 5
+            CASE
+              WHEN days_past_due <= 0 THEN 1
+              WHEN days_past_due <= 30 THEN 2
+              WHEN days_past_due <= 60 THEN 3
+              WHEN days_past_due <= 90 THEN 4
+              ELSE 5
             END;
+          ROLLBACK;
           EOSQL
 
           echo ""
           echo "Aging summary (JSON):"
           psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           WITH aging AS (
             SELECT
               s.domain AS shop,
-              i.currency,
-              i."outstandingPaise",
+              s.currency,
+              i.outstanding,
               CASE
-                WHEN i."dueAt" IS NULL THEN 'current'
-                WHEN (CURRENT_DATE AT TIME ZONE 'Asia/Kolkata') <= (i."dueAt" AT TIME ZONE 'Asia/Kolkata')::date THEN 'current'
-                WHEN (CURRENT_DATE AT TIME ZONE 'Asia/Kolkata') - (i."dueAt" AT TIME ZONE 'Asia/Kolkata')::date <= 30 THEN '1-30'
-                WHEN (CURRENT_DATE AT TIME ZONE 'Asia/Kolkata') - (i."dueAt" AT TIME ZONE 'Asia/Kolkata')::date <= 60 THEN '31-60'
-                WHEN (CURRENT_DATE AT TIME ZONE 'Asia/Kolkata') - (i."dueAt" AT TIME ZONE 'Asia/Kolkata')::date <= 90 THEN '61-90'
-                ELSE '90+'
-              END AS bucket
+                WHEN i."dueAt" IS NULL THEN 0
+                ELSE (
+                  (now() AT TIME ZONE COALESCE(s.timezone, 'Asia/Kolkata'))::date -
+                  (i."dueAt" AT TIME ZONE COALESCE(s.timezone, 'Asia/Kolkata'))::date
+                )
+              END AS days_past_due
             FROM "Invoice" i
             JOIN "Shop" s ON i."shopId" = s.id
             WHERE i.status = 'open'
+          ),
+          bucketed AS (
+            SELECT
+              shop,
+              currency,
+              CASE
+                WHEN days_past_due <= 0 THEN 'current'
+                WHEN days_past_due <= 30 THEN '1-30'
+                WHEN days_past_due <= 60 THEN '31-60'
+                WHEN days_past_due <= 90 THEN '61-90'
+                ELSE '90+'
+              END AS bucket,
+              outstanding
+            FROM aging
           )
           SELECT json_agg(json_build_object(
             'shop', shop,
             'currency', currency,
             'bucket', bucket,
             'count', count,
-            'total_paise', total_paise
+            'total', total
           ))
           FROM (
-            SELECT shop, currency, bucket, COUNT(*) AS count, SUM("outstandingPaise") AS total_paise
-            FROM aging
+            SELECT shop, currency, bucket, COUNT(*) AS count, SUM(outstanding) AS total
+            FROM bucketed
             GROUP BY shop, currency, bucket
           ) sub;
+          ROLLBACK;
           EOSQL
 
-      - name: Webhook receipts duplicate check
+      - name: BuyerAccount and bulk operations counts
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
           PGOPTIONS: "-c default_transaction_read_only=on"
@@ -412,39 +446,96 @@ jobs:
             exit 1
           fi
 
-          echo "=== Webhook Receipts Duplicate Check ==="
+          echo "=== BuyerAccount Counts ==="
           echo ""
 
-          # Check if webhook_receipts table exists
-          RECEIPTS_EXISTS=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
-          SELECT to_regclass('public.webhook_receipts') IS NOT NULL;
+          psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
+          SELECT json_build_object(
+            'distinct_buyer_accounts', (SELECT COUNT(DISTINCT id) FROM "BuyerAccount"),
+            'buyer_accounts_with_deleted_company_location', (
+              SELECT COUNT(DISTINCT ba.id)
+              FROM "BuyerAccount" ba
+              WHERE ba."companyLocationId" IS NOT NULL
+                AND EXISTS (
+                  SELECT 1 FROM s6_processed_webhooks pw
+                  WHERE pw.topic = 'COMPANY_LOCATIONS_DELETE'
+                    AND pw.resource_gid = ba."companyLocationId"
+                )
+            )
+          );
+          ROLLBACK;
+          EOSQL
+
+          echo ""
+          echo "=== Bulk Operations by Type and Status ==="
+          echo ""
+
+          # Check if s6_bulk_operations table exists
+          BULK_OPS_EXISTS=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
+          SELECT to_regclass('public.s6_bulk_operations') IS NOT NULL;
+          ROLLBACK;
           EOSQL
           )
 
-          if [ "$RECEIPTS_EXISTS" = "t" ]; then
-            echo "Checking for (shop, webhook_id) duplicates..."
+          if [ "$BULK_OPS_EXISTS" = "t" ]; then
+            psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
+          SELECT
+            bulk_type,
+            CASE
+              WHEN completed_at IS NOT NULL THEN 'finished'
+              WHEN failure_count > 0 THEN 'failed'
+              ELSE 'pending'
+            END AS status,
+            COUNT(*) AS count
+          FROM s6_bulk_operations
+          GROUP BY bulk_type,
+            CASE
+              WHEN completed_at IS NOT NULL THEN 'finished'
+              WHEN failure_count > 0 THEN 'failed'
+              ELSE 'pending'
+            END
+          ORDER BY bulk_type, status;
+          ROLLBACK;
+          EOSQL
+
+            echo ""
+            echo "Bulk operations summary (JSON):"
             psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT json_build_object(
-            'duplicate_groups', (
-              SELECT COUNT(*) FROM (
-                SELECT shop, webhook_id
-                FROM webhook_receipts
-                GROUP BY shop, webhook_id
-                HAVING COUNT(*) > 1
-              ) dups
-            ),
-            'max_group_size', (
-              SELECT COALESCE(MAX(cnt), 0) FROM (
-                SELECT COUNT(*) AS cnt
-                FROM webhook_receipts
-                GROUP BY shop, webhook_id
-              ) grp
+            'by_type_and_status', (
+              SELECT json_agg(json_build_object(
+                'bulk_type', bulk_type,
+                'status', status,
+                'count', count
+              ))
+              FROM (
+                SELECT
+                  bulk_type,
+                  CASE
+                    WHEN completed_at IS NOT NULL THEN 'finished'
+                    WHEN failure_count > 0 THEN 'failed'
+                    ELSE 'pending'
+                  END AS status,
+                  COUNT(*) AS count
+                FROM s6_bulk_operations
+                GROUP BY bulk_type,
+                  CASE
+                    WHEN completed_at IS NOT NULL THEN 'finished'
+                    WHEN failure_count > 0 THEN 'failed'
+                    ELSE 'pending'
+                  END
+              ) sub
             )
           );
+          ROLLBACK;
           EOSQL
           else
-            echo "::notice::webhook_receipts table not found"
-            echo '{"webhook_receipts_exists": false}' | jq .
+            echo "::notice::s6_bulk_operations table not found"
+            echo '{"s6_bulk_operations_exists": false}' | jq .
           fi
 
       - name: Checkout
@@ -707,6 +798,7 @@ jobs:
 
           # Check extensions: pgmq, pg_cron, pg_net, supabase_vault
           psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT
             e.extname AS extension,
             true AS installed,
@@ -714,18 +806,21 @@ jobs:
           FROM pg_extension e
           WHERE e.extname IN ('pgmq', 'pg_cron', 'pg_net', 'supabase_vault')
           ORDER BY e.extname;
+          ROLLBACK;
           EOSQL
 
           # Check which extensions are missing
           echo ""
           echo "Extensions status (boolean check):"
           psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          BEGIN READ ONLY;
           SELECT json_build_object(
             'pgmq_installed', EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pgmq'),
             'pg_cron_installed', EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pg_cron'),
             'pg_net_installed', EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pg_net'),
             'supabase_vault_installed', EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'supabase_vault')
           );
+          ROLLBACK;
           EOSQL
 
           echo ""
@@ -1209,8 +1304,9 @@ jobs:
           REPO_INPUT_QUERY_HAS_CREDIT_STATUS=false
           if [ -f "$INPUT_QUERY_FILE" ]; then
             # shellcheck disable=SC2016
-            # Check for: metafield(namespace: "$app", key: "credit_status")
-            if grep -qE 'metafield\s*\(\s*namespace:\s*"\$app"\s*,\s*key:\s*"credit_status"' "$INPUT_QUERY_FILE"; then
+            # Check for metafield with namespace: "$app" and key: "credit_status" in either order
+            # Pattern matches: metafield(namespace: "$app", key: "credit_status") OR metafield(key: "credit_status", namespace: "$app")
+            if grep -qE 'metafield\s*\(\s*(namespace:\s*"\$app"\s*,\s*key:\s*"credit_status"|key:\s*"credit_status"\s*,\s*namespace:\s*"\$app")' "$INPUT_QUERY_FILE"; then
               REPO_INPUT_QUERY_HAS_CREDIT_STATUS=true
             fi
           fi
@@ -1342,10 +1438,12 @@ jobs:
             # shellcheck disable=SC2016
             MATCH_RESULT=$(node -e '
               const query = process.argv[1];
-              // Match: metafield(namespace: "$app", key: "credit_status")
-              // Account for whitespace/newlines between tokens
-              const pattern = /metafield\s*\(\s*namespace\s*:\s*"\$app"\s*,\s*key\s*:\s*"credit_status"\s*\)/s;
-              const match = query.match(pattern);
+              // Match: metafield with namespace: "$app" and key: "credit_status" in either order
+              // Pattern 1: metafield(namespace: "$app", key: "credit_status")
+              // Pattern 2: metafield(key: "credit_status", namespace: "$app")
+              const pattern1 = /metafield\s*\(\s*namespace\s*:\s*"\$app"\s*,\s*key\s*:\s*"credit_status"\s*\)/s;
+              const pattern2 = /metafield\s*\(\s*key\s*:\s*"credit_status"\s*,\s*namespace\s*:\s*"\$app"\s*\)/s;
+              const match = query.match(pattern1) || query.match(pattern2);
               if (match) {
                 console.log(JSON.stringify({ found: true, snippet: match[0].replace(/\s+/g, " ").trim() }));
               } else {
