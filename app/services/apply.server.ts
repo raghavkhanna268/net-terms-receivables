@@ -1968,12 +1968,12 @@ export const unmatchPushedMatch = unmatchMatch;
 
 /**
  * Fixed merchant-facing error messages for reconcile failures (M7).
- * Maps error codes to user-friendly messages. No raw Shopify text is exposed.
+ * Keys must be values that toErrorCode(new Error(msg)) can return for userError messages.
+ * No raw Shopify text is exposed.
  */
 const RECONCILE_ERROR_MESSAGES: Record<string, string> = {
-  shopify_error: "Couldn't update the order in Shopify. Please retry.",
-  shopify_user_error: "Couldn't update the order in Shopify. Please retry.",
   error: "Couldn't update the order in Shopify. Please retry.",
+  unknown: "Couldn't update the order in Shopify. Please retry.",
   access_denied: "Couldn't update the order in Shopify. Please check permissions.",
   throttled: "Shopify is busy. Please try again in a moment.",
   rate_limited: "Shopify is busy. Please try again in a moment.",
@@ -2038,11 +2038,12 @@ async function callOrderMarkAsPaid(
     }
 
     // Not already paid - map errors to codes and return fixed merchant-facing message (M7)
-    const errorCodes = data.userErrors.map((e) => toErrorCode(e));
-    const primaryCode = errorCodes[0] ?? "shopify_user_error";
+    // Wrap message in Error so toErrorCode's message heuristics (access_denied, throttled, etc.) work
+    const errorCodes = data.userErrors.map((e) => toErrorCode(new Error(e.message)));
+    const primaryCode = errorCodes[0] ?? "error";
     return {
       success: false,
-      error: RECONCILE_ERROR_MESSAGES[primaryCode] ?? RECONCILE_ERROR_MESSAGES.shopify_error,
+      error: RECONCILE_ERROR_MESSAGES[primaryCode] ?? RECONCILE_ERROR_MESSAGES.error,
       errorCode: primaryCode,
       retryable: false,
     };

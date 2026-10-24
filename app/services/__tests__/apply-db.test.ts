@@ -2314,8 +2314,9 @@ describeWithDb("S17 apply service DB integration", () => {
       const SENTINEL_SHOPIFY = "SENTINEL_SHOPIFY_RAW_7f3a";
       const SENTINEL_EMAIL = "sentinel7f3a@pii-leak.test";
 
+      // First userError contains "access denied" so toErrorCode returns "access_denied"
       mockUserErrors = [
-        { field: ["id"], message: `Order validation failed: ${SENTINEL_SHOPIFY}` },
+        { field: ["id"], message: `Access denied: ${SENTINEL_SHOPIFY}` },
         { field: ["amount"], message: `Invalid for ${SENTINEL_EMAIL}` },
       ];
 
@@ -2325,10 +2326,10 @@ describeWithDb("S17 apply service DB integration", () => {
 
       const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
 
-      // Result should have fixed message, not raw Shopify text
+      // Result should have fixed message mapped from "access_denied" code
       expect(result.success).toBe(false);
-      expect(result.error).toBe("Couldn't update the order in Shopify. Please retry.");
-      expect(result.errorCode).toBeDefined();
+      expect(result.error).toBe("Couldn't update the order in Shopify. Please check permissions.");
+      expect(result.errorCode).toBe("access_denied");
 
       // Sentinel must NOT appear in the result
       const resultStr = JSON.stringify(result);
