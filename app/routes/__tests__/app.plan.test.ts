@@ -165,6 +165,46 @@ describe("Plan Page Loader", () => {
     expect(result.plan).toBeNull();
   });
 
+  it("P7: error logging uses safeLog JSON with toErrorCode (per #174)", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { resolvePlan } = await import("~/services/plan.server");
+    const { getUsageStats, getGatedAccountCount, isGatingEnforced } = await import(
+      "~/services/gating.server"
+    );
+    const { getRequestSql } = await import("~/lib/request-context.server");
+
+    mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+    (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+    (isGatingEnforced as ReturnType<typeof vi.fn>).mockReturnValue(false);
+
+    (resolvePlan as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("Database connection timed out")
+    );
+    (getUsageStats as ReturnType<typeof vi.fn>).mockResolvedValue({
+      companies: { current: 0, limit: 3 },
+      importsThisMonth: { current: 0, limit: 1 },
+    });
+    (getGatedAccountCount as ReturnType<typeof vi.fn>).mockResolvedValue(0);
+
+    const { loader } = await import("../app.plan");
+    await loader({
+      request: mockRequest,
+      context: mockContext as never,
+      params: {},
+      url: mockUrl,
+      pattern: mockPattern,
+    });
+
+    const allLogs = consoleSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+    // safeLog outputs JSON with "event" field
+    expect(allLogs).toContain('"event":"app.plan.load_plan_data_failed"');
+    expect(allLogs).toContain('"err":');
+    expect(allLogs).not.toContain("Database connection timed out");
+    expect(allLogs).not.toContain(".myshopify.com");
+
+    consoleSpy.mockRestore();
+  });
+
   it("returns gatingEnforced false when flag is off", async () => {
     const { resolvePlan } = await import("~/services/plan.server");
     const { getUsageStats, getGatedAccountCount, isGatingEnforced } = await import(

@@ -718,7 +718,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
     });
   });
 
-  describe("(h) PII never logged", () => {
+  describe("(h) PII never logged (M6 - no domain in logs)", () => {
     let consoleLogs: string[] = [];
     let consoleErrors: string[] = [];
     let logSpy: ReturnType<typeof vi.spyOn>;
@@ -748,6 +748,31 @@ describeWithDb("Bank Import Action Integration Tests", () => {
       "payer@example.com",
       "9876543210",
     ];
+
+    it("M6: logs use safeLog JSON with shopId, not domain (per #174)", async () => {
+      const payload = {
+        bank: "HDFC",
+        fileName: "m6-test.csv",
+        credits: [
+          {
+            date: yesterday(),
+            amountPaise: 1000000,
+            rail: "NEFT",
+            utr: "HDFCN26296500010",
+            narration: "NEFT CR-M6 LOG TEST",
+          },
+        ],
+      };
+
+      const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      expect(response.status).toBe(200);
+
+      // Check that logs use safeLog JSON format with "shopId" but NOT .myshopify.com
+      const allLogs = [...consoleLogs, ...consoleErrors].join("\n");
+      expect(allLogs).toContain('"shopId":');
+      expect(allLogs).toContain('"event":"import.');
+      expect(allLogs).not.toContain(".myshopify.com");
+    });
 
     it("successful import logs contain no PII", async () => {
       const payload = {
