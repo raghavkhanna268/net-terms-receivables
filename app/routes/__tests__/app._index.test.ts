@@ -33,7 +33,6 @@ vi.mock("~/services/gating.server", () => ({
     importsThisMonth: { current: 0, limit: 1 },
   }),
   isGatingEnforced: vi.fn().mockReturnValue(false),
-  parseGatedFilter: vi.fn().mockReturnValue("all"),
 }));
 
 vi.mock("~/lib/aging-queries.server", () => ({
@@ -216,7 +215,6 @@ describe("app._index loader", () => {
           offset: 0,
           sortBy: "outstanding",
           sortOrder: "desc",
-          filterMode: "all",
         }
       );
     });
@@ -389,7 +387,7 @@ describe("app._index loader", () => {
         TEST_SHOP_ID,
         "buyer-1",
         expect.any(Date),
-        { limit: 50, offset: 0, filterMode: "all" }
+        { limit: 50, offset: 0 }
       );
       expect(result.selectedBuyerInvoices?.rows).toHaveLength(1);
       expect(result.selectedBuyerInvoices?.buyerName).toBe("Acme Corp");
@@ -446,55 +444,27 @@ describe("app._index loader", () => {
     });
   });
 
-  describe("gated account filter", () => {
-    it("defaults gatedFilter to 'all' when no query param", async () => {
+  describe("over-limit account filter", () => {
+    it("defaults onlyOverLimit to false when no query param", async () => {
       const { loader } = await import("../app._index");
       const result = await loader(createLoaderArgs());
 
-      expect(result.gatedFilter).toBe("all");
+      expect(result.onlyOverLimit).toBe(false);
     });
 
-    it("passes filterMode to getBuyerLedger based on gated param", async () => {
-      const { parseGatedFilter } = await import("~/services/gating.server");
-      const mockParseGatedFilter = vi.mocked(parseGatedFilter);
-
-      mockParseGatedFilter.mockReturnValueOnce("active");
+    it("sets onlyOverLimit to true when overlimit=true query param", async () => {
       const { loader } = await import("../app._index");
-      await loader(createLoaderArgs({ gated: "hide" }));
+      const result = await loader(createLoaderArgs({ overlimit: "true" }));
 
-      expect(mockGetBuyerLedger).toHaveBeenCalledWith(
-        expect.anything(),
-        TEST_SHOP_ID,
-        expect.any(Date),
-        expect.objectContaining({ filterMode: "active" })
-      );
+      expect(result.onlyOverLimit).toBe(true);
     });
 
-    it("passes filterMode to getShopAgingTotals", async () => {
-      const { parseGatedFilter } = await import("~/services/gating.server");
-      const mockParseGatedFilter = vi.mocked(parseGatedFilter);
-
-      mockParseGatedFilter.mockReturnValueOnce("gated");
-      const { loader } = await import("../app._index");
-      await loader(createLoaderArgs({ gated: "show" }));
-
-      expect(mockGetShopAgingTotals).toHaveBeenCalledWith(
-        expect.anything(),
-        TEST_SHOP_ID,
-        expect.any(Date),
-        "gated"
-      );
-    });
-
-    it("passes filterMode to getBuyerInvoices when buyer selected", async () => {
-      const { parseGatedFilter } = await import("~/services/gating.server");
-      const mockParseGatedFilter = vi.mocked(parseGatedFilter);
-
+    it("counts over-limit accounts correctly", async () => {
       mockGetBuyerLedger.mockResolvedValue({
         rows: [
           {
             buyer_account_id: "buyer-1",
-            buyer_name: "Test Buyer",
+            buyer_name: "Active Buyer",
             credit_limit_paise: null,
             hold_state: "OK",
             currency: "INR",
@@ -503,32 +473,112 @@ describe("app._index loader", () => {
             oldest_overdue_days: null,
             is_gated: false,
           },
+          {
+            buyer_account_id: "buyer-2",
+            buyer_name: "Gated Buyer 1",
+            credit_limit_paise: null,
+            hold_state: "OK",
+            currency: "INR",
+            outstanding_paise: "200000",
+            overdue_paise: "0",
+            oldest_overdue_days: null,
+            is_gated: true,
+          },
+          {
+            buyer_account_id: "buyer-3",
+            buyer_name: "Gated Buyer 2",
+            credit_limit_paise: null,
+            hold_state: "OK",
+            currency: "INR",
+            outstanding_paise: "300000",
+            overdue_paise: "0",
+            oldest_overdue_days: null,
+            is_gated: true,
+          },
         ],
-        totalCount: 1,
+        totalCount: 3,
       });
 
-      mockParseGatedFilter.mockReturnValueOnce("active");
       const { loader } = await import("../app._index");
-      await loader(createLoaderArgs({ buyer: "buyer-1", gated: "hide" }));
+      const result = await loader(createLoaderArgs());
 
-      expect(mockGetBuyerInvoices).toHaveBeenCalledWith(
-        expect.anything(),
-        TEST_SHOP_ID,
-        "buyer-1",
-        expect.any(Date),
-        expect.objectContaining({ filterMode: "active" })
-      );
+      expect(result.overLimitCount).toBe(2);
+      expect(result.buyerLedger?.rows).toHaveLength(3);
     });
 
-    it("returns gatedFilter in response for UI state", async () => {
-      const { parseGatedFilter } = await import("~/services/gating.server");
-      const mockParseGatedFilter = vi.mocked(parseGatedFilter);
+    it("filters to only over-limit accounts when overlimit=true", async () => {
+      mockGetBuyerLedger.mockResolvedValue({
+        rows: [
+          {
+            buyer_account_id: "buyer-1",
+            buyer_name: "Active Buyer",
+            credit_limit_paise: null,
+            hold_state: "OK",
+            currency: "INR",
+            outstanding_paise: "100000",
+            overdue_paise: "0",
+            oldest_overdue_days: null,
+            is_gated: false,
+          },
+          {
+            buyer_account_id: "buyer-2",
+            buyer_name: "Gated Buyer",
+            credit_limit_paise: null,
+            hold_state: "OK",
+            currency: "INR",
+            outstanding_paise: "200000",
+            overdue_paise: "0",
+            oldest_overdue_days: null,
+            is_gated: true,
+          },
+        ],
+        totalCount: 2,
+      });
 
-      mockParseGatedFilter.mockReturnValueOnce("gated");
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs({ gated: "show" }));
+      const result = await loader(createLoaderArgs({ overlimit: "true" }));
 
-      expect(result.gatedFilter).toBe("gated");
+      expect(result.onlyOverLimit).toBe(true);
+      expect(result.buyerLedger?.rows).toHaveLength(1);
+      expect(result.buyerLedger?.rows[0].buyer_name).toBe("Gated Buyer");
+      expect(result.buyerLedger?.totalCount).toBe(1);
+      expect(result.overLimitCount).toBe(1);
+    });
+
+    it("returns all accounts by default (no filtering)", async () => {
+      mockGetBuyerLedger.mockResolvedValue({
+        rows: [
+          {
+            buyer_account_id: "buyer-1",
+            buyer_name: "Active Buyer",
+            credit_limit_paise: null,
+            hold_state: "OK",
+            currency: "INR",
+            outstanding_paise: "100000",
+            overdue_paise: "0",
+            oldest_overdue_days: null,
+            is_gated: false,
+          },
+          {
+            buyer_account_id: "buyer-2",
+            buyer_name: "Gated Buyer",
+            credit_limit_paise: null,
+            hold_state: "OK",
+            currency: "INR",
+            outstanding_paise: "200000",
+            overdue_paise: "0",
+            oldest_overdue_days: null,
+            is_gated: true,
+          },
+        ],
+        totalCount: 2,
+      });
+
+      const { loader } = await import("../app._index");
+      const result = await loader(createLoaderArgs());
+
+      expect(result.onlyOverLimit).toBe(false);
+      expect(result.buyerLedger?.rows).toHaveLength(2);
     });
   });
 });

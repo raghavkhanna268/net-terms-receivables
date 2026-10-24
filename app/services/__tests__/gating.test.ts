@@ -607,7 +607,7 @@ describe("Gating Service", () => {
   });
 
   describe("activeAccountFragment helper", () => {
-    it("returns TRUE fragment when gating is OFF and no filterMode", async () => {
+    it("returns TRUE fragment when gating is OFF", async () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
       vi.resetModules();
       const { activeAccountFragment } = await import("../gating.server");
@@ -616,67 +616,13 @@ describe("Gating Service", () => {
       expect(fragment).toBeDefined();
     });
 
-    it("returns gated_at IS NULL fragment when gating is ON and no filterMode", async () => {
+    it("returns gated_at IS NULL fragment when gating is ON", async () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
       vi.resetModules();
       const { activeAccountFragment } = await import("../gating.server");
       
       const fragment = activeAccountFragment(mockSql as unknown as Sql);
       expect(fragment).toBeDefined();
-    });
-
-    it("respects filterMode='active' regardless of gating flag", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
-      vi.resetModules();
-      const { activeAccountFragment } = await import("../gating.server");
-      
-      const fragment = activeAccountFragment(mockSql as unknown as Sql, "active");
-      expect(fragment).toBeDefined();
-    });
-
-    it("respects filterMode='gated' to show only gated accounts", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
-      vi.resetModules();
-      const { activeAccountFragment } = await import("../gating.server");
-      
-      const fragment = activeAccountFragment(mockSql as unknown as Sql, "gated");
-      expect(fragment).toBeDefined();
-    });
-
-    it("respects filterMode='all' to show all accounts", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
-      vi.resetModules();
-      const { activeAccountFragment } = await import("../gating.server");
-      
-      const fragment = activeAccountFragment(mockSql as unknown as Sql, "all");
-      expect(fragment).toBeDefined();
-    });
-  });
-
-  describe("parseGatedFilter", () => {
-    it("returns 'gated' for 'show' param", async () => {
-      const { parseGatedFilter } = await import("../gating.server");
-      expect(parseGatedFilter("show")).toBe("gated");
-    });
-
-    it("returns 'active' for 'hide' param", async () => {
-      const { parseGatedFilter } = await import("../gating.server");
-      expect(parseGatedFilter("hide")).toBe("active");
-    });
-
-    it("returns 'all' for null param", async () => {
-      const { parseGatedFilter } = await import("../gating.server");
-      expect(parseGatedFilter(null)).toBe("all");
-    });
-
-    it("returns 'all' for empty string", async () => {
-      const { parseGatedFilter } = await import("../gating.server");
-      expect(parseGatedFilter("")).toBe("all");
-    });
-
-    it("returns 'all' for unknown param value", async () => {
-      const { parseGatedFilter } = await import("../gating.server");
-      expect(parseGatedFilter("invalid")).toBe("all");
     });
   });
 
@@ -844,44 +790,23 @@ describeWithDb("activeAccountFragment DB integration", () => {
     expect(gatedAccounts.length).toBe(2);
   });
 
-  it("filterMode='active' returns only non-gated accounts", async () => {
+  it("isAccountActive correctly identifies gated accounts", async () => {
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
     vi.resetModules();
-    const { activeAccountFragment } = await import("../gating.server");
+    const { isAccountActive } = await import("../gating.server");
 
-    const accounts = await sql<{ id: string; name: string }[]>`
-      SELECT id, name FROM "BuyerAccount" ba
+    // Fetch accounts with gated_at and verify isAccountActive
+    const accounts = await sql<{ id: string; name: string; gated_at: Date | null }[]>`
+      SELECT id, name, gated_at FROM "BuyerAccount"
       WHERE "shopId" = ${TEST_SHOP_ID}
-        AND ${activeAccountFragment(sql, "active")}
     `;
 
-    expect(accounts.length).toBe(2);
-    expect(accounts.every(a => a.name.includes("Active"))).toBe(true);
-  });
+    // Active accounts (gated_at IS NULL) should return true
+    const activeOnes = accounts.filter(a => a.gated_at === null);
+    expect(activeOnes.every(a => isAccountActive(a.gated_at))).toBe(true);
 
-  it("filterMode='gated' returns only gated accounts", async () => {
-    vi.resetModules();
-    const { activeAccountFragment } = await import("../gating.server");
-
-    const accounts = await sql<{ id: string; name: string }[]>`
-      SELECT id, name FROM "BuyerAccount" ba
-      WHERE "shopId" = ${TEST_SHOP_ID}
-        AND ${activeAccountFragment(sql, "gated")}
-    `;
-
-    expect(accounts.length).toBe(2);
-    expect(accounts.every(a => a.name.includes("Gated"))).toBe(true);
-  });
-
-  it("filterMode='all' returns all accounts", async () => {
-    vi.resetModules();
-    const { activeAccountFragment } = await import("../gating.server");
-
-    const accounts = await sql<{ id: string }[]>`
-      SELECT id FROM "BuyerAccount" ba
-      WHERE "shopId" = ${TEST_SHOP_ID}
-        AND ${activeAccountFragment(sql, "all")}
-    `;
-
-    expect(accounts.length).toBe(4);
+    // Gated accounts (gated_at IS NOT NULL) should return false
+    const gatedOnes = accounts.filter(a => a.gated_at !== null);
+    expect(gatedOnes.every(a => !isAccountActive(a.gated_at))).toBe(true);
   });
 });

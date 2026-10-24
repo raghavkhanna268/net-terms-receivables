@@ -3,12 +3,7 @@ import { useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { resolvePlan, type ResolvedPlan } from "~/services/plan.server";
-import {
-  getUsageStats,
-  isGatingEnforced,
-  parseGatedFilter,
-  type GatedFilterMode,
-} from "~/services/gating.server";
+import { getUsageStats, isGatingEnforced } from "~/services/gating.server";
 import type { PlanKey } from "~/lib/entitlements";
 import { PlanBanner } from "~/components/UpgradePrompt";
 import {
@@ -98,7 +93,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const sortOrder = parseSortOrder(url.searchParams.get("sortOrder"));
   const selectedBuyerId = url.searchParams.get("buyer") ?? null;
   const skipOnboarding = url.searchParams.get("skipOnboarding") === "true";
-  const gatedFilter = parseGatedFilter(url.searchParams.get("gated"));
+  const onlyOverLimit = url.searchParams.get("overlimit") === "true";
 
   const [shop] = await sql<{ id: string; currency: string; timezone: string }[]>`
     SELECT id, currency, timezone FROM "Shop" WHERE domain = ${shopDomain}
@@ -132,13 +127,12 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       [planData, usage, agingTotals, buyerLedger] = await Promise.all([
         resolvePlan(sql, shopDomain),
         getUsageStats(sql, shop.id),
-        getShopAgingTotals(sql, shop.id, asOf, gatedFilter),
+        getShopAgingTotals(sql, shop.id, asOf),
         getBuyerLedger(sql, shop.id, asOf, {
           limit: PAGE_SIZE,
           offset: (page - 1) * PAGE_SIZE,
           sortBy,
           sortOrder,
-          filterMode: gatedFilter,
         }),
       ]);
 
@@ -148,7 +142,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
           shop.id,
           selectedBuyerId,
           asOf,
-          { limit: 50, offset: 0, filterMode: gatedFilter }
+          { limit: 50, offset: 0 }
         );
 
         const buyerRow = buyerLedger?.rows.find(
@@ -178,6 +172,16 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const storeHandle = shopDomain.replace(".myshopify.com", "");
   const gatingEnforced = isGatingEnforced();
 
+  // Count over-limit accounts for banner (before any filtering)
+  const overLimitCount = buyerLedger?.rows.filter((r) => r.is_gated).length ?? 0;
+
+  // Filter to only over-limit accounts if requested (client-side filter)
+  let filteredLedger = buyerLedger;
+  if (onlyOverLimit && buyerLedger) {
+    const filteredRows = buyerLedger.rows.filter((r) => r.is_gated);
+    filteredLedger = { rows: filteredRows, totalCount: filteredRows.length };
+  }
+
   return {
     shopName: storeHandle,
     shopDomain,
@@ -197,17 +201,18 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     appHandle: process.env.APP_HANDLE ?? "net-terms-receivables",
     gatingEnforced,
     agingTotals,
-    buyerLedger,
+    buyerLedger: filteredLedger,
     selectedBuyerInvoices,
     selectedBuyerId,
     pagination: {
       page,
       pageSize: PAGE_SIZE,
-      totalCount: buyerLedger?.totalCount ?? 0,
+      totalCount: filteredLedger?.totalCount ?? 0,
     },
     sortBy,
     sortOrder,
-    gatedFilter,
+    onlyOverLimit,
+    overLimitCount,
     error,
   };
 };
@@ -294,7 +299,7 @@ function BuyerLedgerTable({
   page,
   totalCount,
   pageSize,
-  gatedFilter,
+  onlyOverLimit,
   onNextPage,
   onPreviousPage,
 }: {
@@ -304,13 +309,13 @@ function BuyerLedgerTable({
   page: number;
   totalCount: number;
   pageSize: number;
-  gatedFilter: GatedFilterMode;
+  onlyOverLimit: boolean;
   onNextPage: string;
   onPreviousPage: string;
 }) {
   const totalPages = Math.ceil(totalCount / pageSize);
-  const gp = gatedFilter !== "all" ? `&gated=${gatedFilter === "gated" ? "show" : "hide"}` : "";
-  const buildSortUrl = (col: string) => `?sortBy=${col}&sortOrder=${sortBy === col && sortOrder === "desc" ? "asc" : "desc"}${gp}`;
+  const fp = onlyOverLimit ? "&overlimit=true" : "";
+  const buildSortUrl = (col: string) => `?sortBy=${col}&sortOrder=${sortBy === col && sortOrder === "desc" ? "asc" : "desc"}${fp}`;
 
   const getSortIndicator = (column: string) => {
     if (sortBy !== column) return "";
@@ -359,10 +364,10 @@ function BuyerLedgerTable({
             return (
               <s-table-row key={`${row.buyer_account_id}-${row.currency}`}>
                 <s-table-cell>
-                  <s-link href={`?buyer=${row.buyer_account_id}&sortBy=${sortBy}&sortOrder=${sortOrder}&page=${page}${gp}`}>
+                  <s-link href={`?buyer=${row.buyer_account_id}&sortBy=${sortBy}&sortOrder=${sortOrder}&page=${page}${fp}`}>
                     {row.buyer_name}
                   </s-link>
-                  {row.is_gated && <s-badge tone="warning">gated</s-badge>}
+                  {row.is_gated && <s-badge tone="warning">over plan limit</s-badge>}
                 </s-table-cell>
                 <s-table-cell>
                   {creditLimit !== null
@@ -505,7 +510,8 @@ export default function Index() {
     pagination,
     sortBy,
     sortOrder,
-    gatedFilter,
+    onlyOverLimit,
+    overLimitCount,
     error,
   } = useLoaderData<typeof loader>();
 
@@ -595,13 +601,29 @@ export default function Index() {
           {!selectedBuyerInvoices && (
             <s-section heading="Buyer Ledger">
               <s-stack>
+                {/* Over plan limit banner */}
+                {overLimitCount > 0 && (
+                  <s-banner tone="warning" heading={`${overLimitCount} account${overLimitCount > 1 ? "s" : ""} over your plan limit`}>
+                    <s-text>
+                      These accounts are included in totals but some features may be limited.{" "}
+                      {!onlyOverLimit && (
+                        <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}&overlimit=true`}>
+                          Show only over-limit accounts
+                        </s-link>
+                      )}
+                    </s-text>
+                  </s-banner>
+                )}
+                {/* Filter UI */}
                 <s-paragraph>
                   <s-text type="strong">Show: </s-text>
-                  {gatedFilter === "all" ? "All" : <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}`}>All</s-link>}
-                  {" | "}
-                  {gatedFilter === "active" ? "Active" : <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}&gated=hide`}>Active</s-link>}
-                  {" | "}
-                  {gatedFilter === "gated" ? "Gated" : <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}&gated=show`}>Gated</s-link>}
+                  {!onlyOverLimit ? "All" : <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}`}>All</s-link>}
+                  {overLimitCount > 0 && (
+                    <>
+                      {" | "}
+                      {onlyOverLimit ? "Over limit only" : <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}&overlimit=true`}>Over limit only</s-link>}
+                    </>
+                  )}
                 </s-paragraph>
                 {buyerLedger ? (
                   <BuyerLedgerTable
@@ -611,14 +633,16 @@ export default function Index() {
                     page={pagination.page}
                     totalCount={pagination.totalCount}
                     pageSize={pagination.pageSize}
-                    gatedFilter={gatedFilter}
-                    onNextPage={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page + 1}${gatedFilter !== "all" ? `&gated=${gatedFilter === "gated" ? "show" : "hide"}` : ""}`}
-                    onPreviousPage={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page - 1}${gatedFilter !== "all" ? `&gated=${gatedFilter === "gated" ? "show" : "hide"}` : ""}`}
+                    onlyOverLimit={onlyOverLimit}
+                    onNextPage={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page + 1}${onlyOverLimit ? "&overlimit=true" : ""}`}
+                    onPreviousPage={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page - 1}${onlyOverLimit ? "&overlimit=true" : ""}`}
                   />
                 ) : (
                   <s-empty-state heading="No buyer accounts">
                     <s-text slot="subheading">
-                      No {gatedFilter === "gated" ? "gated" : gatedFilter === "active" ? "active" : ""} accounts with outstanding invoices.
+                      {onlyOverLimit
+                        ? "No accounts over your plan limit."
+                        : "You don\u0027t have any buyer accounts with outstanding invoices."}
                     </s-text>
                   </s-empty-state>
                 )}
@@ -628,12 +652,44 @@ export default function Index() {
         </>
       )}
 
-      <s-section slot="aside" heading="Features">
-        <s-paragraph>Track invoices, manage credit limits, send reminders, match payments.</s-paragraph>
+      <s-section slot="aside" heading="Getting Started">
+        <s-paragraph>Features included in this app:</s-paragraph>
+        <s-unordered-list>
+          <s-list-item>Track unpaid invoices per wholesale buyer</s-list-item>
+          <s-list-item>
+            Manage credit limits and automatic credit holds
+          </s-list-item>
+          <s-list-item>Send payment reminders</s-list-item>
+          <s-list-item>
+            Match Indian bank transfer payments (NEFT/RTGS/IMPS/UPI) to orders
+          </s-list-item>
+        </s-unordered-list>
       </s-section>
 
-      <s-section slot="aside" heading="Aging Buckets">
-        <s-paragraph>Days past due: Current (not due), 1-30, 31-60, 61-90, 90+. Timezone: Asia/Kolkata.</s-paragraph>
+      <s-section slot="aside" heading="About Aging Buckets">
+        <s-paragraph>
+          Invoices are categorized by how many days past due they are:
+        </s-paragraph>
+        <s-unordered-list>
+          <s-list-item>
+            <s-text type="strong">Current</s-text>: Not yet due
+          </s-list-item>
+          <s-list-item>
+            <s-text type="strong">1-30 days</s-text>: 1 to 30 days past due
+          </s-list-item>
+          <s-list-item>
+            <s-text type="strong">31-60 days</s-text>: 31 to 60 days past due
+          </s-list-item>
+          <s-list-item>
+            <s-text type="strong">61-90 days</s-text>: 61 to 90 days past due
+          </s-list-item>
+          <s-list-item>
+            <s-text type="strong">90+ days</s-text>: Over 90 days past due
+          </s-list-item>
+        </s-unordered-list>
+        <s-paragraph>
+          All calculations use the Asia/Kolkata timezone.
+        </s-paragraph>
       </s-section>
     </s-page>
   );

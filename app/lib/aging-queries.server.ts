@@ -22,7 +22,7 @@
  */
 
 import type { Sql } from "~/lib/db-light.server";
-import { activeAccountFragment, type GatedFilterMode } from "~/services/gating.server";
+import { activeAccountFragment } from "~/services/gating.server";
 import type {
   AgingBucketKey,
   SerializableAgingTotals,
@@ -51,14 +51,12 @@ interface ShopTotalRow {
  * @param sql - postgres.js SQL client
  * @param shopId - Shop ID to query
  * @param asOf - "As of" date for aging calculation
- * @param filterMode - Optional filter for gated account status
  * @returns Serializable aging totals structure
  */
 export async function getShopAgingTotals(
   sql: Sql,
   shopId: string,
-  asOf: Date,
-  filterMode?: GatedFilterMode
+  asOf: Date
 ): Promise<SerializableAgingTotals> {
   // Query aggregates invoices by currency and bucket
   // Uses DATE_TRUNC with shop timezone for day boundaries to match TS implementation
@@ -80,7 +78,7 @@ export async function getShopAgingTotals(
       WHERE i."shopId" = ${shopId}
         AND i.status = 'open'
         AND i.outstanding > 0
-        AND ${activeAccountFragment(sql, filterMode)}
+        AND ${activeAccountFragment(sql)}
     )
     SELECT
       currency,
@@ -165,7 +163,7 @@ export async function getShopAgingTotals(
     WHERE i."shopId" = ${shopId}
       AND i.status = 'open'
       AND i.outstanding > 0
-      AND ${activeAccountFragment(sql, filterMode)}
+      AND ${activeAccountFragment(sql)}
   `;
 
   result.oldestOverdueDays = oldestRow?.oldest_days ?? null;
@@ -186,7 +184,7 @@ export async function getShopAgingTotals(
  * @param sql - postgres.js SQL client
  * @param shopId - Shop ID to query
  * @param asOf - "As of" date for aging calculation
- * @param options - Pagination, sorting, and filter options
+ * @param options - Pagination and sorting options
  * @returns Array of buyer ledger rows
  */
 export async function getBuyerLedger(
@@ -198,10 +196,9 @@ export async function getBuyerLedger(
     offset: number;
     sortBy: "outstanding" | "overdue" | "name";
     sortOrder: "asc" | "desc";
-    filterMode?: GatedFilterMode;
   }
 ): Promise<{ rows: BuyerLedgerRow[]; totalCount: number }> {
-  const { limit, offset, sortBy, sortOrder, filterMode } = options;
+  const { limit, offset, sortBy, sortOrder } = options;
 
   // Build the query with dynamic sort
   // Note: We use separate queries for each sort option to avoid sql.unsafe for column names
@@ -226,7 +223,7 @@ export async function getBuyerLedger(
       WHERE i."shopId" = ${shopId}
         AND i.status = 'open'
         AND i.outstanding > 0
-        AND ${activeAccountFragment(sql, filterMode)}
+        AND ${activeAccountFragment(sql)}
     ),
     buyer_totals AS (
       SELECT
@@ -282,7 +279,7 @@ export async function getBuyerLedger(
     WHERE i."shopId" = ${shopId}
       AND i.status = 'open'
       AND i.outstanding > 0
-      AND ${activeAccountFragment(sql, filterMode)}
+      AND ${activeAccountFragment(sql)}
   `;
 
   return {
@@ -301,7 +298,7 @@ export async function getBuyerLedger(
  * @param shopId - Shop ID to query
  * @param buyerAccountId - Buyer account ID
  * @param asOf - "As of" date for days past due calculation
- * @param options - Pagination and filter options
+ * @param options - Pagination options
  * @returns Array of invoice rows
  */
 export async function getBuyerInvoices(
@@ -312,10 +309,9 @@ export async function getBuyerInvoices(
   options: {
     limit: number;
     offset: number;
-    filterMode?: GatedFilterMode;
   }
 ): Promise<{ rows: BuyerInvoiceRow[]; totalCount: number }> {
-  const { limit, offset, filterMode } = options;
+  const { limit, offset } = options;
 
   const rows = await sql<BuyerInvoiceRow[]>`
     SELECT
@@ -339,7 +335,7 @@ export async function getBuyerInvoices(
       AND i."buyerAccountId" = ${buyerAccountId}
       AND i.status = 'open'
       AND i.outstanding > 0
-      AND ${activeAccountFragment(sql, filterMode)}
+      AND ${activeAccountFragment(sql)}
     ORDER BY i."dueAt" ASC NULLS LAST, i.name ASC
     LIMIT ${limit}
     OFFSET ${offset}
@@ -353,7 +349,7 @@ export async function getBuyerInvoices(
       AND i."buyerAccountId" = ${buyerAccountId}
       AND i.status = 'open'
       AND i.outstanding > 0
-      AND ${activeAccountFragment(sql, filterMode)}
+      AND ${activeAccountFragment(sql)}
   `;
 
   return {

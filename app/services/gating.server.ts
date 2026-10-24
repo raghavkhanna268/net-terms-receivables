@@ -49,64 +49,29 @@ export function isGatingEnforced(): boolean {
 export type SqlFragment = ReturnType<Sql>;
 
 /**
- * Gated filter mode for user-controlled display.
- * - "active": Show only non-gated accounts (gated_at IS NULL)
- * - "gated": Show only gated accounts (gated_at IS NOT NULL)
- * - "all": Show all accounts regardless of gated status
- */
-export type GatedFilterMode = "active" | "gated" | "all";
-
-/**
- * Parse gated filter from URL query param.
- * Valid values: "show" (gated only), "hide" (active only), or anything else (all).
- */
-export function parseGatedFilter(value: string | null): GatedFilterMode {
-  if (value === "show") return "gated";
-  if (value === "hide") return "active";
-  return "all";
-}
-
-/**
- * Get a SQL fragment for filtering buyer accounts by gated status.
- * Use this in WHERE clauses to filter based on user preference.
+ * Get a SQL fragment for filtering active (non-gated) buyer accounts.
+ * Use this in WHERE clauses to consistently exclude gated accounts.
  *
- * Filter modes:
- * - "active": Only non-gated accounts (gated_at IS NULL)
- * - "gated": Only gated accounts (gated_at IS NOT NULL)
- * - "all": All accounts (TRUE)
- *
- * When no filterMode is provided, defaults to enforcement behavior:
- * - PLAN_GATING_ENFORCED=true → "active" (exclude gated)
- * - PLAN_GATING_ENFORCED=false → "all" (include all)
+ * When PLAN_GATING_ENFORCED is OFF, returns a tautology (TRUE) so all accounts are included.
+ * When PLAN_GATING_ENFORCED is ON, returns "gated_at IS NULL" to exclude gated accounts.
  *
  * Usage:
  * ```typescript
  * const accounts = await sql`
  *   SELECT * FROM "BuyerAccount"
  *   WHERE "shopId" = ${shopId}
- *   AND ${activeAccountFragment(sql, filterMode)}
+ *   AND ${activeAccountFragment(sql)}
  * `;
  * ```
  *
  * @param sql - The postgres.js SQL client (needed to create the fragment)
- * @param filterMode - Optional filter mode to override default enforcement
  * @returns A SQL fragment that can be composed into queries
  */
-export function activeAccountFragment(
-  sql: Sql,
-  filterMode?: GatedFilterMode
-): SqlFragment {
-  const mode = filterMode ?? (isGatingEnforced() ? "active" : "all");
-  
-  switch (mode) {
-    case "active":
-      return sql`ba.gated_at IS NULL`;
-    case "gated":
-      return sql`ba.gated_at IS NOT NULL`;
-    case "all":
-    default:
-      return sql`TRUE`;
+export function activeAccountFragment(sql: Sql): SqlFragment {
+  if (!isGatingEnforced()) {
+    return sql`TRUE`;
   }
+  return sql`gated_at IS NULL`;
 }
 
 /**
