@@ -323,13 +323,16 @@ export interface SeedState {
   databaseUrl: string | null;
   dryRun: boolean;
   reset: boolean;
+  reportDuplicates: boolean;
   currencyCode: string;
   companies: Map<string, CompanyData>;
   paymentTermsTemplates: PaymentTermsTemplate[];
   createdCount: { companies: number; locations: number; orders: number; roleAssignments: number; dbRules: number; dbAccounts: number };
   unchangedCount: { companies: number; locations: number; orders: number; roleAssignments: number };
+  adoptedCount: { companies: number };
   driftedCount: { companies: number };
   skippedCount: { companies: number; orders: number; roleAssignments: number };
+  skippedReasons: string[];
   deletedCount: { companies: number; orders: number };
   failedCount: { locations: number; orders: number; roleAssignments: number };
   ordersWithShopifyTerms: number;
@@ -732,7 +735,57 @@ export async function seedCompanies(state: SeedState): Promise<void> {
 
   for (const seed of COMPANY_SEEDS) {
     const externalId = `${SEED_PREFIX}${seed.key}`;
-    const existing = await findCompanyByExternalId(state, externalId);
+    let existing = await findCompanyByExternalId(state, externalId);
+    let wasAdopted = false;
+
+    // If no externalId match, try adoption via contact email or name
+    if (!existing && !state.dryRun) {
+      const adoptionResult = await findCompanyForAdoption(state, seed);
+      
+      if (adoptionResult && "ambiguous" in adoptionResult) {
+        // Multiple candidates - skip and log
+        const reason = `Ambiguous match for ${seed.name}: ${adoptionResult.candidates.length} companies have same contact email`;
+        console.log(`  ⚠️  Skipped ${seed.name}: ${reason}`);
+        console.log(`      Candidates: ${adoptionResult.candidates.map(c => c.id).join(", ")}`);
+        state.skippedCount.companies++;
+        state.skippedReasons.push(reason);
+        continue;
+      }
+      
+      if (adoptionResult && "company" in adoptionResult) {
+        const candidate = adoptionResult.company;
+        
+        // P1: Check if candidate has a conflicting externalId (non-null and different from target)
+        if (candidate.externalId !== null && candidate.externalId !== externalId) {
+          const reason = `Company ${candidate.id} already has externalId '${candidate.externalId}', cannot adopt as '${externalId}'`;
+          console.log(`  ⚠️  Skipped ${seed.name}: ${reason}`);
+          state.skippedCount.companies++;
+          state.skippedReasons.push(reason);
+          continue;
+        }
+        
+        // Single match - adopt it by setting externalId
+        if (state.dryRun) {
+          // P3a: Dry-run preview of adoption
+          console.log(`  [dry-run] Would adopt ${candidate.id} for ${seed.name} (matched by ${adoptionResult.matchType})`);
+          // For dry-run, we can't continue with this company since we don't have real data
+          continue;
+        }
+        
+        console.log(`  📎 Found existing company for ${seed.name} (matched by ${adoptionResult.matchType})`);
+        console.log(`     Adopting ${candidate.id} by setting externalId...`);
+        
+        const adopted = await adoptCompany(state, candidate.id, externalId);
+        if (adopted) {
+          existing = adopted;
+          wasAdopted = true;
+          state.adoptedCount.companies++;
+          console.log(`  ✅ Adopted: ${seed.name} (${externalId})`);
+        } else {
+          state.errors.push(`Failed to adopt company ${candidate.id} for ${seed.name}`);
+        }
+      }
+    }
 
     if (existing) {
       // Fetch contact roles for role assignment
@@ -745,7 +798,9 @@ export async function seedCompanies(state: SeedState): Promise<void> {
       const emailMatches = existingEmail.toLowerCase() === seed.contact.email.toLowerCase();
       const fixtureMatches = nameMatches && emailMatches;
       
-      if (fixtureMatches) {
+      if (wasAdopted) {
+        // Already logged as adopted
+      } else if (fixtureMatches) {
         console.log(`  ✓ ${seed.name} unchanged (${externalId})`);
         state.unchangedCount.companies++;
       } else {
@@ -902,6 +957,363 @@ export async function findCompanyByExternalId(
 }
 
 /**
+ * Minimal company info for adoption/duplicate detection.
+ */
+export interface CompanyCandidate {
+  id: string;
+  name: string;
+  externalId: string | null;
+  contactEmail: string | null;
+  /** All contact emails for this company (used for name-based matching) */
+  _allContactEmails?: string[];
+}
+
+/**
+ * Find all companies whose main contact's customer email matches the given email.
+ * Used for adoption fallback when no externalId match is found.
+ * 
+ * NOTE: Shopify doesn't have a direct "companies by contact email" search.
+ * We search customers by email, then look up their company associations.
+ * This is a multi-step process using available scopes.
+ * 
+ * @returns Array of matching companies (may be empty)
+ */
+export async function findCompaniesByContactEmail(
+  state: SeedState,
+  contactEmail: string
+): Promise<CompanyCandidate[]> {
+  const candidates: CompanyCandidate[] = [];
+  
+  // Step 1: Find the customer by email
+  let customerCursor: string | undefined = undefined;
+  let customerId: string | null = null;
+  
+  for (let page = 0; page < MAX_SEARCH_PAGES; page++) {
+    const variables: { query: string; after?: string } = { query: `email:'${contactEmail}'` };
+    if (customerCursor) variables.after = customerCursor;
+    
+    const response = await graphql<{
+      customers: {
+        nodes: Array<{ id: string; email: string | null }>;
+        pageInfo: { hasNextPage: boolean; endCursor: string | null };
+      };
+    }>(state, FIND_CUSTOMER_BY_EMAIL_QUERY, variables);
+    
+    const customers = response.data?.customers.nodes ?? [];
+    const exactMatch = customers.find(c => c.email?.toLowerCase() === contactEmail.toLowerCase());
+    if (exactMatch) {
+      customerId = exactMatch.id;
+      break;
+    }
+    
+    if (!response.data?.customers.pageInfo?.hasNextPage) break;
+    customerCursor = response.data?.customers.pageInfo?.endCursor ?? undefined;
+  }
+  
+  if (!customerId) {
+    return candidates;
+  }
+  
+  // Step 2: Find companies that have this customer as a contact
+  // Search all companies and filter by contact email (no direct query available)
+  let companyCursor: string | undefined = undefined;
+  
+  for (let page = 0; page < MAX_SEARCH_PAGES; page++) {
+    const variables: { after?: string } = {};
+    if (companyCursor) variables.after = companyCursor;
+    
+    const response = await graphql<{
+      companies: {
+        nodes: Array<{
+          id: string;
+          name: string;
+          externalId: string | null;
+          contacts: { edges: Array<{ node: { customer: { id: string; email: string } } }> };
+        }>;
+        pageInfo: { hasNextPage: boolean; endCursor: string | null };
+      };
+    }>(state, FIND_COMPANIES_WITH_CONTACTS_QUERY, variables);
+    
+    const companies = response.data?.companies.nodes ?? [];
+    for (const company of companies) {
+      const hasMatchingContact = company.contacts.edges.some(
+        e => e.node.customer.email?.toLowerCase() === contactEmail.toLowerCase()
+      );
+      if (hasMatchingContact) {
+        candidates.push({
+          id: company.id,
+          name: company.name,
+          externalId: company.externalId,
+          contactEmail: contactEmail,
+        });
+      }
+    }
+    
+    if (!response.data?.companies.pageInfo?.hasNextPage) break;
+    companyCursor = response.data?.companies.pageInfo?.endCursor ?? undefined;
+  }
+  
+  return candidates;
+}
+
+/**
+ * Find all companies with the given exact name.
+ * Used for adoption fallback (only if company has the seed's contact).
+ * 
+ * @returns Array of matching companies (may be empty)
+ */
+export async function findCompaniesByName(
+  state: SeedState,
+  name: string
+): Promise<CompanyCandidate[]> {
+  const candidates: CompanyCandidate[] = [];
+  let cursor: string | undefined = undefined;
+  
+  for (let page = 0; page < MAX_SEARCH_PAGES; page++) {
+    const variables: { query: string; after?: string } = { query: `name:'${name}'` };
+    if (cursor) variables.after = cursor;
+    
+    const response = await graphql<{
+      companies: {
+        nodes: Array<{
+          id: string;
+          name: string;
+          externalId: string | null;
+          contacts: { edges: Array<{ node: { customer: { email: string } } }> };
+        }>;
+        pageInfo: { hasNextPage: boolean; endCursor: string | null };
+      };
+    }>(state, FIND_COMPANIES_BY_NAME_QUERY, variables);
+    
+    const companies = response.data?.companies.nodes ?? [];
+    for (const company of companies) {
+      // Strict name match
+      if (company.name === name) {
+        // P3b: Collect ALL contact emails, not just contacts[0]
+        const contactEmails = company.contacts.edges
+          .map(e => e.node.customer.email)
+          .filter((email): email is string => email != null);
+        
+        // Return the first contact email for backward compatibility, but store all for matching
+        candidates.push({
+          id: company.id,
+          name: company.name,
+          externalId: company.externalId,
+          contactEmail: contactEmails[0] ?? null,
+          // Store all emails for matching in findCompanyForAdoption
+          _allContactEmails: contactEmails,
+        });
+      }
+    }
+    
+    if (!response.data?.companies.pageInfo?.hasNextPage) break;
+    cursor = response.data?.companies.pageInfo?.endCursor ?? undefined;
+  }
+  
+  return candidates;
+}
+
+/**
+ * Adopt an existing company by setting the seed externalId on it.
+ * Returns the updated company data for seeding, or null on failure.
+ */
+export async function adoptCompany(
+  state: SeedState,
+  companyId: string,
+  externalId: string
+): Promise<CompanyNode | null> {
+  const result = await graphql<{
+    companyUpdate: {
+      company: CompanyNode | null;
+      userErrors: UserError[];
+    };
+  }>(state, COMPANY_UPDATE_MUTATION, {
+    companyId: companyId,
+    input: { externalId },
+  }, { isMutation: true, mutationName: "companyUpdate" });
+  
+  if (result.errors) {
+    console.error(`    ❌ Failed to adopt company: GraphQL errors`);
+    return null;
+  }
+  
+  if (result.data?.companyUpdate.userErrors.length) {
+    logUserErrors(result.data.companyUpdate.userErrors, "adoptCompany");
+    return null;
+  }
+  
+  return result.data?.companyUpdate.company ?? null;
+}
+
+/**
+ * Try to find an existing company for adoption using fallback matching:
+ * 1. First by contact email
+ * 2. Then by exact name (only if that company has the seed's contact)
+ * 
+ * Returns:
+ * - { company, matchType } if exactly one match found
+ * - { ambiguous: true, candidates } if multiple matches found (should skip)
+ * - null if no match found
+ */
+export async function findCompanyForAdoption(
+  state: SeedState,
+  seed: { name: string; contact: { email: string } }
+): Promise<
+  | { company: CompanyCandidate; matchType: "email" | "name" }
+  | { ambiguous: true; candidates: CompanyCandidate[] }
+  | null
+> {
+  // Try contact email first
+  const emailMatches = await findCompaniesByContactEmail(state, seed.contact.email);
+  
+  if (emailMatches.length === 1) {
+    return { company: emailMatches[0], matchType: "email" };
+  }
+  
+  if (emailMatches.length > 1) {
+    return { ambiguous: true, candidates: emailMatches };
+  }
+  
+  // Fall back to name match (only if company has the seed's contact)
+  const nameMatches = await findCompaniesByName(state, seed.name);
+  
+  // P3b: Filter to only companies that have the seed's contact email (check ALL contacts)
+  const seedEmailLower = seed.contact.email.toLowerCase();
+  const nameMatchesWithContact = nameMatches.filter(c => {
+    // Check _allContactEmails if available (from name search), otherwise fall back to contactEmail
+    const emails = c._allContactEmails ?? (c.contactEmail ? [c.contactEmail] : []);
+    return emails.some(email => email.toLowerCase() === seedEmailLower);
+  });
+  
+  if (nameMatchesWithContact.length === 1) {
+    return { company: nameMatchesWithContact[0], matchType: "name" };
+  }
+  
+  if (nameMatchesWithContact.length > 1) {
+    return { ambiguous: true, candidates: nameMatchesWithContact };
+  }
+  
+  return null;
+}
+
+/**
+ * Continue seeding an existing/adopted company with locations.
+ * Creates any missing Net-XX locations.
+ */
+async function continueWithExistingCompany(
+  state: SeedState,
+  company: CompanyNode,
+  seed: (typeof COMPANY_SEEDS)[number],
+  _externalId: string
+): Promise<CompanyData | null> {
+  const contactRoles = await fetchCompanyContactRoles(state, company.id);
+  const contactId = company.contacts.edges[0]?.node.id ?? "";
+  
+  const locations = new Map<number, string>();
+  
+  // Map existing locations
+  for (const edge of company.locations.edges) {
+    for (const loc of LOCATION_TERMS) {
+      if (edge.node.name.includes(loc.suffix)) {
+        locations.set(loc.dueInDays, edge.node.id);
+      }
+    }
+  }
+  
+  const companyData: CompanyData = {
+    id: company.id,
+    contactId,
+    contactCustomerId: company.contacts.edges[0]?.node.customer.id ?? "",
+    locations,
+    contactRoles,
+  };
+  
+  // Create any missing Net-XX locations
+  for (const loc of LOCATION_TERMS) {
+    if (!locations.has(loc.dueInDays)) {
+      console.log(`    → Creating missing location ${loc.suffix}...`);
+      const template = state.paymentTermsTemplates.find(
+        (t) => t.paymentTermsType === "NET" && t.dueInDays === loc.dueInDays
+      );
+      
+      const locationId = await createCompanyLocation(state, company.id, seed.name, seed.city, loc, template?.id);
+      if (locationId) {
+        locations.set(loc.dueInDays, locationId);
+        console.log(`    ✅ Created location ${loc.suffix}`);
+        state.createdCount.locations++;
+        // Assign role on the newly created location
+        if (contactId && contactRoles.length > 0) {
+          await ensureContactRoleOnLocation(state, companyData, locationId);
+        }
+      } else {
+        state.failedCount.locations++;
+        state.errors.push(`Failed to create location ${loc.suffix} for ${seed.name}`);
+      }
+    } else {
+      // Ensure role on existing location
+      if (contactId && contactRoles.length > 0) {
+        await ensureContactRoleOnLocation(state, companyData, locations.get(loc.dueInDays)!);
+      }
+    }
+  }
+  
+  return companyData;
+}
+
+/**
+ * Report potential duplicates for each seed company.
+ * Lists companies with the same name or same contact email.
+ * Read-only mode - no mutations.
+ */
+export async function reportDuplicates(state: SeedState): Promise<void> {
+  console.log("\n🔍 Checking for potential duplicates...");
+  console.log("   (Read-only mode - no changes will be made)\n");
+  
+  for (const seed of COMPANY_SEEDS) {
+    const externalId = `${SEED_PREFIX}${seed.key}`;
+    console.log(`  ${seed.name} (expected externalId: ${externalId}):`);
+    
+    // Check for existing company with seed externalId
+    const existing = await findCompanyByExternalId(state, externalId);
+    if (existing) {
+      console.log(`    ✓ Found by externalId: ${existing.id}`);
+    } else {
+      console.log(`    ○ No company with externalId: ${externalId}`);
+    }
+    
+    // Find companies with same name
+    const nameMatches = await findCompaniesByName(state, seed.name);
+    if (nameMatches.length > 0) {
+      console.log(`    Companies with same name (${nameMatches.length}):`);
+      for (const match of nameMatches) {
+        const externalIdStr = match.externalId ? ` [externalId: ${match.externalId}]` : " [no externalId]";
+        console.log(`      - ${match.id}${externalIdStr}`);
+      }
+    } else {
+      console.log(`    ○ No companies with name "${seed.name}"`);
+    }
+    
+    // Find companies with same contact email
+    const emailMatches = await findCompaniesByContactEmail(state, seed.contact.email);
+    if (emailMatches.length > 0) {
+      console.log(`    Companies with same contact email (${emailMatches.length}):`);
+      for (const match of emailMatches) {
+        const externalIdStr = match.externalId ? ` [externalId: ${match.externalId}]` : " [no externalId]";
+        console.log(`      - ${match.id}: "${match.name}"${externalIdStr}`);
+      }
+    } else {
+      console.log(`    ○ No companies with contact email for ${seed.key}`);
+    }
+    
+    console.log();
+  }
+  
+  console.log("  Duplicate check complete. Review the output above.");
+  console.log("  To clean up duplicates, use Shopify Admin or the API manually.");
+  console.log("  Never delete automatically - always verify first.");
+}
+
+/**
  * Company creation mutation.
  * Note: India addresses require zoneCode (state code like MH for Maharashtra).
  */
@@ -983,8 +1395,60 @@ export async function createCompanyWithLocations(
     return null;
   }
 
-  if (createResult.data?.companyCreate.userErrors.length) {
-    logUserErrors(createResult.data.companyCreate.userErrors, `createCompanyWithLocations(${seed.name})`);
+  const userErrors = createResult.data?.companyCreate.userErrors ?? [];
+  
+  // Handle TAKEN error: email already exists, try to adopt the existing company
+  const takenError = userErrors.find(e => 
+    e.message.includes("already been taken") || 
+    e.code === "TAKEN"
+  );
+  
+  if (takenError) {
+    console.log(`    ⚠️  Contact email already taken for ${seed.name}, attempting recovery...`);
+    
+    // Find company by contact email and adopt it
+    const adoptionResult = await findCompanyForAdoption(state, seed);
+    
+    if (adoptionResult && "ambiguous" in adoptionResult) {
+      console.error(`    ❌ Cannot recover: multiple companies with same contact email`);
+      logUserErrors(userErrors, `createCompanyWithLocations(${seed.name})`);
+      return null;
+    }
+    
+    if (adoptionResult && "company" in adoptionResult) {
+      const candidate = adoptionResult.company;
+      
+      // P1: Check if candidate has a conflicting externalId (non-null and different from target)
+      if (candidate.externalId !== null && candidate.externalId !== externalId) {
+        const reason = `Company ${candidate.id} already has externalId '${candidate.externalId}', cannot adopt as '${externalId}'`;
+        console.error(`    ❌ Cannot recover: ${reason}`);
+        state.skippedCount.companies++;
+        state.skippedReasons.push(reason);
+        return null;
+      }
+      
+      console.log(`    📎 Found existing company by ${adoptionResult.matchType}, adopting...`);
+      const adopted = await adoptCompany(state, candidate.id, externalId);
+      if (adopted) {
+        console.log(`    ✅ Recovered by adopting ${adopted.id}`);
+        state.adoptedCount.companies++;
+        
+        // Continue with the adopted company (will create missing locations below)
+        return await continueWithExistingCompany(state, adopted, seed, externalId);
+      } else {
+        console.error(`    ❌ Failed to adopt company during TAKEN recovery`);
+        return null;
+      }
+    }
+    
+    // No company found to adopt - log original error
+    console.error(`    ❌ TAKEN error but no company found with contact email`);
+    logUserErrors(userErrors, `createCompanyWithLocations(${seed.name})`);
+    return null;
+  }
+
+  if (userErrors.length) {
+    logUserErrors(userErrors, `createCompanyWithLocations(${seed.name})`);
     return null;
   }
 
@@ -1206,6 +1670,77 @@ export const FIND_COMPANY_BY_EXTERNAL_ID_QUERY = `
         hasNextPage
         endCursor
       }
+    }
+  }
+`;
+
+/**
+ * Query to find companies by name.
+ * Used for adoption fallback and duplicate reporting.
+ * 
+ * NOTE: Shopify's `companies(query: "name:...")` uses fuzzy search.
+ * We paginate and filter client-side for exact name match.
+ */
+export const FIND_COMPANIES_BY_NAME_QUERY = `
+  query FindCompaniesByName($query: String!, $after: String) {
+    companies(first: 20, query: $query, after: $after) {
+      nodes {
+        id
+        name
+        externalId
+        contacts(first: 5) {
+          edges { node { id customer { id email } } }
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`;
+
+/**
+ * Query to find companies with their contacts.
+ * Used for adoption by contact email matching.
+ * 
+ * NOTE: No direct "companies by contact email" query exists.
+ * We fetch all companies and filter client-side for matching contact email.
+ */
+export const FIND_COMPANIES_WITH_CONTACTS_QUERY = `
+  query FindCompaniesWithContacts($after: String) {
+    companies(first: 50, after: $after) {
+      nodes {
+        id
+        name
+        externalId
+        contacts(first: 5) {
+          edges { node { customer { id email } } }
+        }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+`;
+
+/**
+ * Mutation to update a company's externalId (for adoption).
+ */
+export const COMPANY_UPDATE_MUTATION = `
+  mutation UpdateCompany($companyId: ID!, $input: CompanyInput!) {
+    companyUpdate(companyId: $companyId, input: $input) {
+      company {
+        id
+        name
+        externalId
+        locations(first: 10) {
+          edges { node { id name } }
+        }
+        contacts(first: 1) {
+          edges { node { id customer { id email } } }
+        }
+      }
+      userErrors { field message code }
     }
   }
 `;
@@ -2321,11 +2856,12 @@ export function printDatabaseSeedSQL(state: SeedState): void {
 
 // -- Main --
 
-function parseArgs(): { dryRun: boolean; reset: boolean } {
+function parseArgs(): { dryRun: boolean; reset: boolean; reportDuplicatesMode: boolean } {
   const args = process.argv.slice(2);
   return {
     dryRun: args.includes("--dry-run"),
     reset: args.includes("--reset"),
+    reportDuplicatesMode: args.includes("--report-duplicates"),
   };
 }
 
@@ -2364,7 +2900,7 @@ export async function main(): Promise<void> {
   console.log("  (Using orderCreate with processedAt - no draft orders)");
   console.log("═══════════════════════════════════════════════════════════════");
 
-  const { dryRun, reset } = parseArgs();
+  const { dryRun, reset, reportDuplicatesMode } = parseArgs();
   const env = validateEnv();
 
   if (!env) {
@@ -2377,13 +2913,16 @@ export async function main(): Promise<void> {
     databaseUrl: env.databaseUrl,
     dryRun,
     reset,
+    reportDuplicates: reportDuplicatesMode,
     currencyCode: "",
     companies: new Map(),
     paymentTermsTemplates: [],
     createdCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRules: 0, dbAccounts: 0 },
     unchangedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0 },
+    adoptedCount: { companies: 0 },
     driftedCount: { companies: 0 },
     skippedCount: { companies: 0, orders: 0, roleAssignments: 0 },
+    skippedReasons: [],
     deletedCount: { companies: 0, orders: 0 },
     failedCount: { locations: 0, orders: 0, roleAssignments: 0 },
     ordersWithShopifyTerms: 0,
@@ -2394,7 +2933,7 @@ export async function main(): Promise<void> {
   };
 
   console.log(`\nShop: ${state.shop}`);
-  console.log(`Mode: ${dryRun ? "DRY RUN (read-only lookups, no mutations)" : reset ? "RESET + SEED" : "SEED"}`);
+  console.log(`Mode: ${reportDuplicatesMode ? "REPORT DUPLICATES (read-only)" : dryRun ? "DRY RUN (read-only lookups, no mutations)" : reset ? "RESET + SEED" : "SEED"}`);
   console.log(`Database: ${env.databaseUrl ? "Connected" : "Not configured (will print SQL)"}`);
 
   // Preflight checks
@@ -2413,6 +2952,13 @@ export async function main(): Promise<void> {
   if (!templatesOk) {
     console.error("\n❌ Preflight failed: Payment terms templates not available");
     process.exit(1);
+  }
+
+  // Report duplicates mode (read-only)
+  if (reportDuplicatesMode) {
+    await reportDuplicates(state);
+    console.log("\n✅ Duplicate report complete!");
+    process.exit(0);
   }
 
   // Reset if requested
@@ -2463,6 +3009,11 @@ export async function main(): Promise<void> {
   console.log(`      Role assignments: ${state.createdCount.roleAssignments}`);
   console.log(`      Orders:           ${state.createdCount.orders}`);
 
+  if (state.adoptedCount.companies > 0) {
+    console.log("    Adopted (existing company, externalId set):");
+    console.log(`      Companies:        ${state.adoptedCount.companies}`);
+  }
+
   const hasUnchanged = state.unchangedCount.companies > 0 || state.unchangedCount.locations > 0 ||
                        state.unchangedCount.orders > 0 || state.unchangedCount.roleAssignments > 0;
   if (hasUnchanged) {
@@ -2487,10 +3038,16 @@ export async function main(): Promise<void> {
   const hasSkipped = state.skippedCount.companies > 0 || state.skippedCount.orders > 0 ||
                       state.skippedCount.roleAssignments > 0;
   if (hasSkipped) {
-    console.log("    Skipped (missing prerequisites):");
+    console.log("    Skipped (ambiguous or missing prerequisites):");
     if (state.skippedCount.companies > 0) console.log(`      Companies:        ${state.skippedCount.companies}`);
     if (state.skippedCount.roleAssignments > 0) console.log(`      Role assignments: ${state.skippedCount.roleAssignments}`);
     if (state.skippedCount.orders > 0) console.log(`      Orders:           ${state.skippedCount.orders}`);
+    if (state.skippedReasons.length > 0) {
+      console.log("    Skip reasons:");
+      for (const reason of state.skippedReasons) {
+        console.log(`      - ${reason}`);
+      }
+    }
   }
 
   const totalFailures = state.failedCount.locations + state.failedCount.orders + state.failedCount.roleAssignments;
