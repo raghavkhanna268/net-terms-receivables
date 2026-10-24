@@ -1,0 +1,119 @@
+# Prod backstop backfill DRY-RUN
+#
+# Runs scripts/backstop-backfill.ts (S13, #105) in its default dry-run mode ONLY.
+#
+# SAFETY:
+#   - Manual trigger only (workflow_dispatch), main branch only
+#   - Dry-run is hardcoded: there is no apply input and no free-form args input;
+#     the only inputs are --since/--until, each validated as an ISO-8601 UTC timestamp
+#   - Preflight imports the script's own parseArgs with the exact argv and fails
+#     unless it resolves to dryRun=true
+#   - DB session is forced read-only (default_transaction_read_only=on as a
+#     connection parameter) and verified with SHOW before the script runs
+#   - SHOPIFY_API_KEY / SHOPIFY_API_SECRET are NOT provided (apply mode needs them)
+#   - Output goes through an allowlist filter (scripts/ci/backfill-dry-run-filter.py):
+#     only shop ids, order/account ids, reason codes and counts are printed;
+#     error text is reduced to a redacted class; the job fails on any apply-mode line
+
+name: Prod Backfill Dry Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "Required. Orders with issuedAt >= since. ISO-8601 UTC, e.g. 2026-10-01T00:00:00Z"
+        required: true
+        type: string
+      until:
+        description: "Required. Orders with issuedAt < until. ISO-8601 UTC, e.g. 2026-10-24T08:29:23Z"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prod-backfill-dry-run
+  cancel-in-progress: false
+
+jobs:
+  dry-run:
+    name: Backstop backfill (dry-run only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Validate inputs
+        env:
+          SINCE: ${{ inputs.since }}
+          UNTIL: ${{ inputs.until }}
+        run: |
+          set -euo pipefail
+          ISO='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+          if [[ ! "$SINCE" =~ $ISO ]]; then
+            echo "::error::since must be ISO-8601 UTC like 2026-10-01T00:00:00Z"
+            exit 1
+          fi
+          if [[ ! "$UNTIL" =~ $ISO ]]; then
+            echo "::error::until must be ISO-8601 UTC like 2026-10-24T08:29:23Z"
+            exit 1
+          fi
+          S=$(date -u -d "$SINCE" +%s) || { echo "::error::since is not a valid date"; exit 1; }
+          U=$(date -u -d "$UNTIL" +%s) || { echo "::error::until is not a valid date"; exit 1; }
+          if [ "$S" -ge "$U" ]; then
+            echo "::error::since must be before until"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Preflight (dry-run argv + read-only session)
+        env:
+          DATABASE_URL_RAW: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          SINCE: ${{ inputs.since }}
+          UNTIL: ${{ inputs.until }}
+        run: |
+          set -euo pipefail
+          if [ -z "$DATABASE_URL_RAW" ]; then
+            echo "::error::DATABASE_URL_MIGRATIONS secret not set"
+            exit 1
+          fi
+          if [[ "$DATABASE_URL_RAW" == *\?* ]]; then SEP='&'; else SEP='?'; fi
+          export DATABASE_URL="${DATABASE_URL_RAW}${SEP}default_transaction_read_only=on"
+          npx tsx scripts/ci/backfill-dry-run-preflight.ts
+
+      - name: Run backfill (dry-run, filtered output)
+        env:
+          DATABASE_URL_RAW: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          SINCE: ${{ inputs.since }}
+          UNTIL: ${{ inputs.until }}
+        run: |
+          set -euo pipefail
+          unset SHOPIFY_API_KEY SHOPIFY_API_SECRET
+          if [[ "$DATABASE_URL_RAW" == *\?* ]]; then SEP='&'; else SEP='?'; fi
+          export DATABASE_URL="${DATABASE_URL_RAW}${SEP}default_transaction_read_only=on"
+          # Hardcoded dry-run invocation: only --since/--until, never --apply.
+          ARGS=(--since "$SINCE" --until "$UNTIL")
+          for a in "${ARGS[@]}"; do
+            if [ "$a" = "--apply" ]; then echo "::error::--apply is forbidden"; exit 1; fi
+          done
+          set +e
+          npx tsx scripts/backstop-backfill.ts "${ARGS[@]}" > "$RUNNER_TEMP/backfill.out" 2>&1
+          SCRIPT_RC=$?
+          set -e
+          python3 scripts/ci/backfill-dry-run-filter.py < "$RUNNER_TEMP/backfill.out"
+          rm -f "$RUNNER_TEMP/backfill.out"
+          echo "script_exit_code=$SCRIPT_RC"
+          exit "$SCRIPT_RC"
