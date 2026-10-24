@@ -287,28 +287,28 @@ function parseArgs(args: string[]): {
   since: Date | null;
   until: Date | null;
   shopFilter: string | undefined;
-  error?: string;
+  argError?: string;
 } {
   const dryRun = !args.includes("--apply");
   
   const sinceIndex = args.indexOf("--since");
   const sinceStr = sinceIndex !== -1 ? args[sinceIndex + 1] : undefined;
   if (sinceStr?.startsWith("--")) {
-    return { dryRun, since: null, until: null, shopFilter: undefined, error: `--since requires a value, got flag '${sinceStr}'` };
+    return { dryRun, since: null, until: null, shopFilter: undefined, argError: `--since requires a value, got flag '${sinceStr}'` };
   }
   const since = sinceStr ? new Date(sinceStr) : null;
   
   const untilIndex = args.indexOf("--until");
   const untilStr = untilIndex !== -1 ? args[untilIndex + 1] : undefined;
   if (untilStr?.startsWith("--")) {
-    return { dryRun, since: null, until: null, shopFilter: undefined, error: `--until requires a value, got flag '${untilStr}'` };
+    return { dryRun, since: null, until: null, shopFilter: undefined, argError: `--until requires a value, got flag '${untilStr}'` };
   }
   const until = untilStr ? new Date(untilStr) : null;
   
   const shopIndex = args.indexOf("--shop");
   const shopFilter = shopIndex !== -1 ? args[shopIndex + 1] : undefined;
   if (shopFilter?.startsWith("--")) {
-    return { dryRun, since: null, until: null, shopFilter: undefined, error: `--shop requires a value, got flag '${shopFilter}'` };
+    return { dryRun, since: null, until: null, shopFilter: undefined, argError: `--shop requires a value, got flag '${shopFilter}'` };
   }
 
   return { dryRun, since, until, shopFilter };
@@ -316,14 +316,14 @@ function parseArgs(args: string[]): {
 
 async function main() {
   const args = process.argv.slice(2);
-  const { dryRun, since, until, shopFilter, error } = parseArgs(args);
+  const { dryRun, since, until, shopFilter, argError: parseMsg } = parseArgs(args);
 
   console.log("=".repeat(60));
   console.log("Backstop Backfill Script (S13)");
   console.log("=".repeat(60));
 
-  if (error) {
-    console.error(`ERROR: ${error}`);
+  if (parseMsg) {
+    console.error(`ERROR: ${parseMsg}`);
     process.exit(1);
   }
   if (!since || isNaN(since.getTime())) {

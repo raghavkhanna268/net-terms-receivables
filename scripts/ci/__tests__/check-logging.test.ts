@@ -681,4 +681,329 @@ describe("check-logging.ts (AST-based)", () => {
       expect(exitCode).toBe(0);
     });
   });
+
+  // =========================================================================
+  // Gap 1: Sentry context vars - resolve const identifiers
+  // =========================================================================
+  describe("Gap 1: Sentry context vars with identifiers", () => {
+    it("fails for setContext with unresolved identifier", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `import * as Sentry from "@sentry/cloudflare";
+export function test(data: { shop: string }) {
+  Sentry.setContext("payment", data);
+}`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("sentry-context-unresolved");
+    });
+
+    it("fails for setExtras with unresolved identifier", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `import * as Sentry from "@sentry/cloudflare";
+export function test(extras: { email: string }) {
+  Sentry.setExtras(extras);
+}`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("sentry-context-unresolved");
+    });
+
+    it("passes for setContext with resolved const object literal", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `import * as Sentry from "@sentry/cloudflare";
+export function test() {
+  const ctx = { shopId: "uuid-123", status: "active" };
+  Sentry.setContext("payment", ctx);
+}`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("fails for setContext with resolved const containing sensitive key", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `import * as Sentry from "@sentry/cloudflare";
+export function test() {
+  const ctx = { shop: "example.myshopify.com" };
+  Sentry.setContext("payment", ctx);
+}`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("sensitive-key");
+    });
+  });
+
+  // =========================================================================
+  // Gap 2: Unwrap wrappers
+  // =========================================================================
+  describe("Gap 2: Wrapper unwrapping", () => {
+    it("fails for JSON.stringify wrapping error", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(err: Error) { console.log("Error:", JSON.stringify(err)); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("error");
+    });
+
+    it("fails for String() wrapping error", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(err: Error) { console.log("Error:", String(err)); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("error-stringify");
+    });
+
+    it("fails for ternary with sensitive value", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(shopDomain: string | null, fallback: string) {
+  console.log("Shop:", shopDomain ? shopDomain : fallback);
+}`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("sensitive-value");
+    });
+
+    it("fails for nullish coalescing with error", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(err: Error | undefined, defaultErr: Error) {
+  console.log("Error:", err ?? defaultErr);
+}`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("raw-error-arg");
+    });
+
+    it("fails for logical OR with sensitive value", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(shop: string | undefined, defaultShop: string) {
+  console.log("Shop:", shop || defaultShop);
+}`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("sensitive-value");
+    });
+
+    it("fails for parentheses wrapping sensitive value", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(email: string) { console.log("Contact:", (email)); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("sensitive-value");
+    });
+
+    it("fails for as cast wrapping sensitive value", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(domain: unknown) { console.log("Domain:", domain as string); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("sensitive-value");
+    });
+
+    it("passes for safe wrapped values", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(shopId: string | null, defaultId: string) {
+  console.log("Shop ID:", shopId ?? defaultId);
+}`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+  });
+
+  // =========================================================================
+  // Gap 3: Bare ${err} in template literals
+  // =========================================================================
+  describe("Gap 3: Bare error in template literals", () => {
+    it("fails for bare ${err} in console.log", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        "export function test(err: Error) { console.log(`Failed: ${err}`); }"
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("raw-error-arg");
+      expect(output).toContain("Bare error identifier");
+    });
+
+    it("fails for bare ${error} in console.error", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        "export function test(error: Error) { console.error(`Operation failed: ${error}`); }"
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("raw-error-arg");
+    });
+
+    it("fails for bare ${e} in console.warn", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        "export function test(e: Error) { console.warn(`Warning: ${e}`); }"
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("raw-error-arg");
+    });
+
+    it("fails for bare ${syncError} in console.log (ends with error)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        "export function test(syncError: Error) { console.log(`Sync failed: ${syncError}`); }"
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("raw-error-arg");
+    });
+
+    it("passes for ${toErrorCode(err)}", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `const toErrorCode = (e: Error) => e.name;
+export function test(err: Error) { console.log(\`Failed with code: \${toErrorCode(err)}\`); }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("passes for ${errorCount} (not an error-like identifier)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        "export function test(errorCount: number) { console.log(`Errors: ${errorCount}`); }"
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("passes for ${isError} (boolean flag prefix)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        "export function test(isError: boolean) { console.log(`Is error: ${isError}`); }"
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+  });
+
+  // =========================================================================
+  // Gap 4: Test file scanning for token-prefix and domain-literal only
+  // =========================================================================
+  describe("Gap 4: Test file scanning", () => {
+    it("fails for token prefix in test file", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const token = "shpat_1234567890";
+export function test() { return token; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("token-prefix");
+    });
+
+    it("does NOT fail for console.log with sensitive data in test file (logging rules skipped)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `export function test(shopDomain: string) { console.log("Shop:", shopDomain); }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("allows test mock domains like test-shop.myshopify.com", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const TEST_SHOP = "test-shop.myshopify.com";
+const EXAMPLE_SHOP = "example.myshopify.com";
+export function test() { return TEST_SHOP; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+  });
+
+  // =========================================================================
+  // Gap 5: No-mock-logger rule
+  // =========================================================================
+  describe("Gap 5: No-mock-logger rule", () => {
+    it("fails for vi.mock with log.server path", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "mock.test.ts"),
+        `import { vi } from "vitest";
+vi.mock("~/lib/log.server", () => ({
+  safeLog: vi.fn(),
+}));`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("logger mock violation");
+      expect(output).toContain("log.server");
+    });
+
+    it("fails for vi.mock with relative log.server path", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "mock.test.ts"),
+        `import { vi } from "vitest";
+vi.mock("../../lib/log.server", () => ({
+  safeLog: vi.fn(),
+}));`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("logger mock violation");
+      expect(output).toContain("log.server");
+    });
+
+    it("fails for vi.mock factory replacing safeLog", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "mock.test.ts"),
+        `import { vi } from "vitest";
+vi.mock("./utils", () => ({
+  safeLog: vi.fn(),
+  toErrorCode: vi.fn(),
+}));`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("logger mock violation");
+      expect(output).toContain("safeLog");
+    });
+
+    it("passes when test file uses console.log spy (not mocking logger)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "spy.test.ts"),
+        `import { vi } from "vitest";
+const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+  });
 });
