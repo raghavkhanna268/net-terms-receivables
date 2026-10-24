@@ -383,6 +383,7 @@ export async function generateCustomerDataExport(
   // Fetch payment matches for the customer's invoices (S16)
   // NOTE: We intentionally exclude Payment.payerText and Payment.narration
   // as they may contain PII from bank statements. Only match metadata is exported.
+  // Shop scoping via m."shopId" AND i."shopId" ensures cross-tenant isolation.
   const paymentMatches = buyerAccount
     ? await sql<{
         id: string;
@@ -401,7 +402,9 @@ export async function generateCustomerDataExport(
           m."createdAt"
         FROM "Match" m
         JOIN "Invoice" i ON m."invoiceId" = i.id
-        WHERE i."buyerAccountId" = ${buyerAccount.id}
+        WHERE m."shopId" = ${shopId}
+          AND i."shopId" = ${shopId}
+          AND i."buyerAccountId" = ${buyerAccount.id}
         ORDER BY m."createdAt" DESC
       `
     : [];

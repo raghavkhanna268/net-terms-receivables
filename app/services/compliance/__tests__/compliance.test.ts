@@ -286,25 +286,28 @@ describe("compliance.server", () => {
       expect(result.data.paymentMatches).toHaveLength(0);
     });
 
-    it("excludes phone and address from export (PCD Level 1 compliance)", async () => {
-      // This test verifies that the export structure does NOT contain
-      // phone or address fields, even if they were hypothetically stored.
-      // Per Shopify Protected Customer Data docs, we only store Level 1 data
-      // (email, name) - phone and address are never stored or exported.
+    it("drops phone and address from DB row even if present (PCD Level 1 compliance)", async () => {
+      // Feed mock data that DOES include phone and address fields.
+      // The export mapping must drop them because they're not in the interface.
+      // Per Shopify Protected Customer Data docs, we only export Level 1 data.
       //
       // See: https://shopify.dev/docs/apps/launch/protected-customer-data
 
-      // 1. SELECT s8_tagged_customers - only email/display_name, NO phone/address
+      // 1. SELECT s8_tagged_customers - include phone/address in mock row
       mockSql.mockResolvedValueOnce([{
         tags: ["wholesale"],
         tag_active: true,
         email: "customer@example.com",
         display_name: "Wholesale Customer",
         created_at: new Date("2026-01-01"),
+        // These fields are NOT in the schema but we simulate them being returned
+        // to prove the export mapping drops them
+        phone: "+1-555-123-4567",
+        address: "123 Main St, City, ST 12345",
       }]);
       // 2. SELECT s8_draft_orders
       mockSql.mockResolvedValueOnce([]);
-      // 3. SELECT BuyerAccount
+      // 3. SELECT BuyerAccount - include address fields in mock
       mockSql.mockResolvedValueOnce([{
         id: "ba-1",
         name: "Wholesale Customer",
@@ -312,6 +315,9 @@ describe("compliance.server", () => {
         creditLimit: null,
         defaultTermsDays: 30,
         holdState: "OK",
+        // Simulate extra fields that might leak through
+        billingAddress: "456 Billing Ave",
+        shippingAddress: "789 Shipping Rd",
       }]);
       // 4. SELECT Invoice
       mockSql.mockResolvedValueOnce([]);
@@ -325,26 +331,39 @@ describe("compliance.server", () => {
         "req-pii-check"
       );
 
-      // Verify the export structure
+      // Verify the export structure excludes phone/address
       const exportJson = JSON.stringify(result);
-
-      // Phone and address must NOT be present in the export
       expect(exportJson).not.toContain("phone");
       expect(exportJson).not.toContain("Phone");
+      expect(exportJson).not.toContain("+1-555");
       expect(exportJson).not.toContain("address");
       expect(exportJson).not.toContain("Address");
-      expect(exportJson).not.toContain("street");
-      expect(exportJson).not.toContain("city");
-      expect(exportJson).not.toContain("zip");
-      expect(exportJson).not.toContain("postal");
+      expect(exportJson).not.toContain("123 Main St");
+      expect(exportJson).not.toContain("billingAddress");
+      expect(exportJson).not.toContain("shippingAddress");
 
-      // Email and displayName ARE present (Level 1 PCD)
-      expect(result.data.taggedCustomer?.email).toBe("customer@example.com");
-      expect(result.data.taggedCustomer?.displayName).toBe("Wholesale Customer");
+      // Verify the export mapping explicitly picks only allowed fields
+      expect(result.data.taggedCustomer).toEqual({
+        tags: ["wholesale"],
+        tagActive: true,
+        email: "customer@example.com",
+        displayName: "Wholesale Customer",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      expect(result.data.buyerAccount).toEqual({
+        id: "ba-1",
+        name: "Wholesale Customer",
+        kind: "TAGGED_CUSTOMER",
+        creditLimit: null,
+        defaultTermsDays: 30,
+        holdState: "OK",
+      });
     });
 
-    it("excludes payment PII (payerText, narration) from export", async () => {
-      // Payment matches export only match metadata, not bank statement PII
+    it("drops payerText and narration from Match rows even if present", async () => {
+      // Feed mock data that DOES include payerText/narration in Match rows.
+      // The export mapping must drop them because they contain bank statement PII.
+
       // 1. SELECT s8_tagged_customers
       mockSql.mockResolvedValueOnce([{
         tags: ["net-terms"],
@@ -374,7 +393,7 @@ describe("compliance.server", () => {
         issuedAt: new Date("2026-01-10"),
         dueAt: new Date("2026-02-10"),
       }]);
-      // 5. SELECT Match - note: payerText and narration are NOT selected
+      // 5. SELECT Match - include payerText/narration in mock to prove they're dropped
       mockSql.mockResolvedValueOnce([{
         id: "match-1",
         invoiceId: "inv-1",
@@ -382,6 +401,9 @@ describe("compliance.server", () => {
         state: "confirmed",
         confirmedAt: new Date("2026-01-15"),
         createdAt: new Date("2026-01-14"),
+        // Simulate these fields being returned even though the SELECT doesn't request them
+        payerText: "ACME CORP PAYMENT",
+        narration: "NEFT-UTR123456789-ACME CORP-INV1001 PAYMENT",
       }]);
 
       const result = await generateCustomerDataExport(
@@ -393,14 +415,74 @@ describe("compliance.server", () => {
 
       const exportJson = JSON.stringify(result);
 
-      // Payment PII fields must NOT be present
+      // Payment PII fields must NOT be present in export
       expect(exportJson).not.toContain("payerText");
       expect(exportJson).not.toContain("narration");
+      expect(exportJson).not.toContain("ACME CORP");
+      expect(exportJson).not.toContain("UTR123456789");
 
-      // Match metadata IS present
+      // Verify the export mapping explicitly picks only allowed fields
       expect(result.data.paymentMatches).toHaveLength(1);
-      expect(result.data.paymentMatches[0].amount).toBe("1000.00");
-      expect(result.data.paymentMatches[0].state).toBe("confirmed");
+      expect(result.data.paymentMatches[0]).toEqual({
+        id: "match-1",
+        invoiceId: "inv-1",
+        amount: "1000.00",
+        state: "confirmed",
+        confirmedAt: "2026-01-15T00:00:00.000Z",
+        createdAt: "2026-01-14T00:00:00.000Z",
+      });
+    });
+
+    it("Match query SQL does not select payerText or narration", async () => {
+      // Verify the SQL query itself doesn't request PII columns.
+      // This is a belt-and-suspenders check on top of the mapping test.
+
+      // Setup: provide minimal mocks to get to the Match query
+      mockSql.mockResolvedValueOnce([{
+        tags: [],
+        tag_active: true,
+        email: null,
+        display_name: null,
+        created_at: new Date(),
+      }]);
+      mockSql.mockResolvedValueOnce([]);
+      mockSql.mockResolvedValueOnce([{
+        id: "ba-1",
+        name: "Test",
+        kind: "TAGGED_CUSTOMER",
+        creditLimit: null,
+        defaultTermsDays: 30,
+        holdState: "OK",
+      }]);
+      mockSql.mockResolvedValueOnce([]);
+      mockSql.mockResolvedValueOnce([]);
+
+      await generateCustomerDataExport(
+        mockSql,
+        "shop-123",
+        "gid://shopify/Customer/456",
+        "req-sql-check"
+      );
+
+      // The 5th call is the Match query
+      expect(mockSql).toHaveBeenCalledTimes(5);
+      const matchQueryCall = mockSql.mock.calls[4];
+      
+      // The template literal is passed as an array of strings
+      // Convert to string to check what columns are selected
+      const queryTemplateStrings = matchQueryCall[0] as string[];
+      const queryText = queryTemplateStrings.join(" ");
+
+      // Verify payerText and narration are NOT in the SELECT clause
+      expect(queryText).not.toContain("payerText");
+      expect(queryText).not.toContain("narration");
+      expect(queryText).not.toContain('"Payment"');
+
+      // Verify the query DOES select expected fields
+      expect(queryText).toContain("m.id");
+      expect(queryText).toContain('m."invoiceId"');
+      expect(queryText).toContain("m.amount");
+      expect(queryText).toContain("m.state");
     });
   });
 
