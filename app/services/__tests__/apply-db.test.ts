@@ -2084,6 +2084,11 @@ describeWithDb("S17 apply service DB integration", () => {
       return new Proxy(originalSql, handler) as SqlType;
     }
 
+    // M1: When Shopify API fails (mockShopifySuccess=false), handleStalePushingMatch
+    // returns { success: false, error: "...", retryable: true } with NO reasonCode.
+    // The safeLog conditionally includes reasonCode only when defined, so the
+    // emitted JSON has exactly [err, event, matchId]. If recovery failed for a
+    // different reason (e.g., INVOICE_NOT_OPEN), reasonCode would be present.
     it("M1: stale sibling recovery failure logs event with exact keys, no sentinels", async () => {
       mockShopifySuccess = false;
       mockAlreadyPaid = false;
