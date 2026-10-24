@@ -102,10 +102,11 @@
 
 ### Billing (if paid app)
 
-- [ ] **TBD** Implement Shopify Billing API for paid plans
-- [ ] **TBD** Define pricing tiers
-- [ ] **TBD** Test billing flow in dev store
-- **Reference:** [Shopify Billing API](https://shopify.dev/docs/apps/billing)
+- [x] **Billing mechanism is correct:** Uses Shopify Managed App Pricing (reads `currentAppInstallation.activeSubscriptions`, links to Shopify's hosted pricing page for upgrades). No custom charge flow or hardcoded prices in code.
+- [ ] **TBD: Awaiting Raghav's decision** on final prices and tier limits (see `docs/plans-and-gating.md`)
+- [ ] **⚠️ Create plans in Partner Dashboard** with names matching `docs/plans-and-gating.md:22-29` (free, starter, growth, scale)
+- [ ] **TBD** Test billing flow in dev store after plans are created
+- **Reference:** [Shopify App Pricing](https://shopify.dev/docs/apps/launch/billing)
 
 ---
 

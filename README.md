@@ -169,15 +169,20 @@ All amounts are in INR with varied values across the seed data.
 
 ### Prerequisites
 
-The seed script requires an Admin API access token with the following scopes:
+The seed script requires an Admin API access token with the **same 11 production scopes** as the main app (see `docs/scopes.md` for complete justifications):
 
 | Scope | Purpose |
 |-------|---------|
-| `read_companies`, `write_companies` | Create B2B companies |
-| `read_customers`, `write_customers` | Create net-terms customers |
-| `read_draft_orders`, `write_draft_orders` | Create and complete draft orders |
-| `read_products` | Fetch product variants for line items |
-| `read_payment_terms`, `write_payment_terms` | Apply payment terms to orders |
+| `read_companies`, `write_companies` | Create B2B companies and locations, set payment terms templates |
+| `read_customers`, `write_customers` | Create net-terms customers, set credit metafields |
+| `read_draft_orders` | Pre-granted for S8 draft order payment terms |
+| `read_orders`, `write_orders` | Create orders with custom line items and backdate with `processedAt` |
+| `read_payment_terms` | Read payment terms on orders and company locations |
+| `write_validations` | Pre-granted for S12 checkout validation function |
+| `write_payment_customizations` | Pre-granted for S13 payment method customization |
+| `write_merchant_managed_fulfillment_orders` | Pre-granted for S13 fulfillment holds |
+
+> **Note:** No `write_draft_orders`, `write_payment_terms`, or `read_products` needed. The seed uses `orderCreate` with custom line items (no product lookup) and configures payment terms via `companyLocationUpdate` (requires `write_companies`). See `docs/scopes.md` for details.
 
 **Important:** As of 2026, admin-created custom apps (via "Develop apps" in the store admin) can no longer be created for new apps. Use the **Dev Dashboard** instead.
 
