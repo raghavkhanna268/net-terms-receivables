@@ -64,18 +64,56 @@ describeWithDb("scripts/ci/backfill-dry-run-preflight", () => {
       expect(setting.transaction_read_only).toBe("off");
     });
 
-    it("returns ok:false for a non-read-only transaction (plain sql.begin)", async () => {
-      const result = await sql.begin(async (tx) => {
-        const [setting] = await tx<{ transaction_read_only: string }[]>`
-          SELECT current_setting('transaction_read_only') AS transaction_read_only
-        `;
-        if (setting?.transaction_read_only !== "on") {
-          return { ok: false, error: "transaction_read_only is not 'on'" };
-        }
-        return { ok: true };
+    it("returns ok:false when begin ignores mode and opens read-write tx", async () => {
+      // Proxy over sql whose begin ignores the mode and calls real sql.begin(fn)
+      // This simulates a broken pooler or misconfigured connection that doesn't honor
+      // the "read only" mode.
+      const proxySql = new Proxy(sql, {
+        get(target, prop) {
+          if (prop === "begin") {
+            return (_mode: string, fn: (tx: ReturnType<typeof postgres>) => Promise<unknown>) => {
+              // Ignore the mode, call real begin without "read only"
+              return target.begin(fn);
+            };
+          }
+          return Reflect.get(target, prop);
+        },
       });
+
+      const result = await verifyReadOnlyTransaction(proxySql);
+      expect(result).toEqual({ ok: false, error: "transaction_read_only is not 'on'" });
+    });
+
+    it("returns ok:false when begin rejects with 25006 before callback runs", async () => {
+      // Wrapper whose begin rejects with error code '25006' before the callback runs.
+      // The outer catch must not pass without an inner success.
+      const wrapperSql = {
+        begin: (_mode: string, _fn: (tx: unknown) => Promise<unknown>): Promise<unknown> => {
+          const error = new Error("cannot execute in a read-only transaction") as Error & { code: string };
+          error.code = "25006";
+          return Promise.reject(error);
+        },
+      } as unknown as ReturnType<typeof postgres>;
+
+      const result = await verifyReadOnlyTransaction(wrapperSql);
       expect(result.ok).toBe(false);
-      expect(result.error).toBe("transaction_read_only is not 'on'");
+      // The error should indicate transaction failure, not pass through as success
+      expect(result.error).toContain("transaction failed");
+    });
+
+    it("returns ok:false when begin rejects with other error", async () => {
+      // Wrapper whose begin rejects with some other error (not 25006).
+      const wrapperSql = {
+        begin: (_mode: string, _fn: (tx: unknown) => Promise<unknown>): Promise<unknown> => {
+          const error = new Error("connection refused") as Error & { code: string };
+          error.code = "08001";
+          return Promise.reject(error);
+        },
+      } as unknown as ReturnType<typeof postgres>;
+
+      const result = await verifyReadOnlyTransaction(wrapperSql);
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("transaction failed");
     });
   });
 });
