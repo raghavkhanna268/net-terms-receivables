@@ -63,6 +63,16 @@ const HOLD_HANDLE = "ntr-credit-hold";
 export const USE_PRE_ORDER_HOLD_STATE = true;
 
 /**
+ * Timeout for stale pending claims in seconds.
+ * A pending claim older than this is considered stale (worker likely died)
+ * and can be reclaimed by another worker.
+ *
+ * Set to 5 minutes - long enough for normal processing including retries,
+ * but short enough to recover from crashed workers reasonably quickly.
+ */
+export const STALE_CLAIM_TIMEOUT_SECONDS = 300;
+
+/**
  * Error thrown when backstop should be retried (e.g., 0 FOs, partial failure).
  */
 export class RetryableBackstopError extends Error {
@@ -211,13 +221,20 @@ const TAGS_ADD_MUTATION = `#graphql
 /**
  * Claim processing for this order atomically.
  * Uses INSERT...ON CONFLICT DO NOTHING RETURNING to atomically claim.
- * Returns true if we claimed it, false if already claimed/completed.
+ *
+ * Stale claim recovery: If a pending claim is older than STALE_CLAIM_TIMEOUT_SECONDS,
+ * it's considered stale (worker likely died) and can be atomically reclaimed.
+ *
+ * Returns:
+ * - { claimed: true } if we claimed it (new row or reclaimed stale)
+ * - { claimed: false, existingAction: 'held'|'skipped' } if already completed
+ * - { claimed: false, existingAction: 'pending', staleClaim: false } if fresh pending (should retry)
  */
 async function claimBackstopProcessing(
   sql: Sql,
   shopId: string,
   orderGid: string,
-): Promise<{ claimed: boolean; existingAction?: string }> {
+): Promise<{ claimed: boolean; existingAction?: string; staleClaim?: boolean }> {
   // Try to insert with status='pending'. RETURNING gives us the row if inserted.
   const [inserted] = await sql<{ action: string }[]>`
     INSERT INTO backstop_processed_orders (shop_id, order_gid, action, reason, processed_at)
@@ -231,13 +248,42 @@ async function claimBackstopProcessing(
     return { claimed: true };
   }
 
-  // Row already exists - check what state it's in
-  const [existing] = await sql<{ action: string }[]>`
-    SELECT action FROM backstop_processed_orders
+  // Row already exists - try to reclaim if it's a stale pending claim
+  // Using make_interval for parameterized seconds since INTERVAL literals don't support parameters
+  const [reclaimed] = await sql<{ action: string }[]>`
+    UPDATE backstop_processed_orders
+    SET processed_at = NOW()
+    WHERE shop_id = ${shopId}
+      AND order_gid = ${orderGid}
+      AND action = 'pending'
+      AND processed_at < NOW() - make_interval(secs => ${STALE_CLAIM_TIMEOUT_SECONDS})
+    RETURNING action
+  `;
+
+  if (reclaimed) {
+    // Successfully reclaimed a stale pending row
+    return { claimed: true };
+  }
+
+  // Check what state the existing row is in
+  const [existing] = await sql<{ action: string; processed_at: Date }[]>`
+    SELECT action, processed_at FROM backstop_processed_orders
     WHERE shop_id = ${shopId} AND order_gid = ${orderGid}
   `;
 
-  return { claimed: false, existingAction: existing?.action };
+  if (!existing) {
+    // Rare race condition: row was deleted between our insert and select
+    // Caller should retry
+    return { claimed: false, existingAction: undefined };
+  }
+
+  if (existing.action === "pending") {
+    // Fresh pending claim from another worker - caller should return retryable
+    return { claimed: false, existingAction: "pending", staleClaim: false };
+  }
+
+  // Already completed (held or skipped)
+  return { claimed: false, existingAction: existing.action };
 }
 
 /**
@@ -670,20 +716,26 @@ async function tagOrder(
 /**
  * Resolve invoice and buyer account for an order, independently of webhook result.
  * This allows backstop to run on retries even when webhook is already processed.
+ *
+ * @param sql Database connection
+ * @param shopDomain Shop domain (e.g., "store.myshopify.com")
+ * @param orderGid Shopify order GID (e.g., "gid://shopify/Order/123")
+ * @returns Invoice info or null if not found
  */
 export async function resolveInvoiceForOrder(
   sql: Sql,
-  shopId: string,
+  shopDomain: string,
   orderGid: string,
-): Promise<{ invoiceId: string; buyerAccountId: string | null } | null> {
-  const [invoice] = await sql<{ id: string; buyerAccountId: string | null }[]>`
-    SELECT id, "buyerAccountId"
-    FROM "Invoice"
-    WHERE "shopId" = ${shopId} AND "orderGid" = ${orderGid}
+): Promise<{ shopId: string; invoiceId: string; buyerAccountId: string | null } | null> {
+  const [invoice] = await sql<{ id: string; shopId: string; buyerAccountId: string | null }[]>`
+    SELECT i.id, i."shopId", i."buyerAccountId"
+    FROM "Invoice" i
+    JOIN "Shop" s ON s.id = i."shopId"
+    WHERE s.domain = ${shopDomain} AND i."orderId" = ${orderGid}
     LIMIT 1
   `;
   if (!invoice) return null;
-  return { invoiceId: invoice.id, buyerAccountId: invoice.buyerAccountId };
+  return { shopId: invoice.shopId, invoiceId: invoice.id, buyerAccountId: invoice.buyerAccountId };
 }
 
 /**
@@ -716,7 +768,7 @@ export async function applyBackstop(
   }
 
   // Claim processing atomically
-  const { claimed, existingAction } = await claimBackstopProcessing(sql, shopId, orderGid);
+  const { claimed, existingAction, staleClaim } = await claimBackstopProcessing(sql, shopId, orderGid);
 
   if (!claimed) {
     // Already claimed or completed
@@ -727,13 +779,20 @@ export async function applyBackstop(
         skipReason: `Already processed (${existingAction})`,
       };
     }
-    // existingAction === 'pending' means another process has it
-    // This shouldn't happen with proper message visibility, but handle it
-    return {
-      applied: false,
-      skipped: true,
-      skipReason: "Processing in progress by another worker",
-    };
+
+    if (existingAction === "pending" && staleClaim === false) {
+      // Fresh pending claim from another worker - should retry later
+      throw new RetryableBackstopError(
+        "Another worker is processing this order",
+        "pending_claim",
+      );
+    }
+
+    // Unknown state or race condition - retry
+    throw new RetryableBackstopError(
+      "Could not claim order for processing",
+      "claim_race",
+    );
   }
 
   try {

@@ -28,10 +28,14 @@ impl Configuration {
                 .get("deferredPaymentPatterns")
                 .and_then(|v| match v {
                     JsonValue::Array(arr) => {
+                        // Trim whitespace and filter out empty strings
                         let strings: Vec<String> = arr
                             .iter()
                             .filter_map(|item| match item {
-                                JsonValue::String(s) => Some(s.clone()),
+                                JsonValue::String(s) => {
+                                    let trimmed = s.trim().to_string();
+                                    if trimmed.is_empty() { None } else { Some(trimmed) }
+                                }
                                 _ => None,
                             })
                             .collect();
@@ -719,5 +723,44 @@ mod tests {
         // Empty patterns should use defaults (this is the current behavior)
         // If we wanted empty patterns to hide nothing, we'd need to change get_deferred_patterns
         assert!(!result.operations.is_empty(), "Empty patterns fall back to defaults");
+    }
+
+    #[test]
+    fn test_b2b_whitespace_only_patterns_fall_back_to_defaults() {
+        // Patterns with only whitespace or empty strings should be filtered out
+        // and fall back to defaults
+        let config = r#"{"deferredPaymentPatterns": ["", "   ", "\t", "\n", "  \t  "]}"#;
+        let input = make_b2b_input_with_config(Some(held_metafield()), &default_payment_methods(), Some(config));
+        let result = run_test(&input).unwrap();
+        
+        // All patterns are empty/whitespace-only, so falls back to defaults which hide deferred
+        assert!(!result.operations.is_empty(), "Whitespace-only patterns should fall back to defaults");
+    }
+
+    #[test]
+    fn test_b2b_mixed_empty_and_valid_patterns() {
+        // Mix of empty, whitespace, and valid patterns - valid ones should work
+        let config = r#"{"deferredPaymentPatterns": ["", "custom-term", "   ", "30 days"]}"#;
+        let payment_methods = vec![
+            ("gid://shopify/PaymentCustomizationPaymentMethod/1", "Pay now"),
+            ("gid://shopify/PaymentCustomizationPaymentMethod/2", "Custom-Term Payment"),
+            ("gid://shopify/PaymentCustomizationPaymentMethod/3", "30 Days Net"),
+        ];
+        let input = make_b2b_input_with_config(Some(held_metafield()), &payment_methods, Some(config));
+        let result = run_test(&input).unwrap();
+        
+        // Should hide "Custom-Term Payment" (matches "custom-term") and "30 Days Net" (matches "30 days")
+        assert_eq!(result.operations.len(), 2, "Should hide 2 payment methods matching valid patterns");
+    }
+
+    #[test]
+    fn test_b2b_patterns_trimmed() {
+        // Patterns with leading/trailing whitespace should be trimmed
+        let config = r#"{"deferredPaymentPatterns": ["  deferred  ", "\tnet terms\n"]}"#;
+        let input = make_b2b_input_with_config(Some(held_metafield()), &default_payment_methods(), Some(config));
+        let result = run_test(&input).unwrap();
+        
+        // Should hide methods matching trimmed patterns
+        assert!(!result.operations.is_empty(), "Trimmed patterns should still match");
     }
 }

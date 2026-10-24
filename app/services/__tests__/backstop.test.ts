@@ -83,9 +83,15 @@ describe("backstop.server", () => {
     });
 
     it("skips when already processed (idempotent)", async () => {
-      // Mock: backstop already completed - INSERT returns [] (conflict), SELECT returns existing row
-      mockSql._setResult("INSERT INTO backstop_processed_orders", []); // Conflict - already exists
-      mockSql._setResult("SELECT action FROM backstop_processed_orders", [{ action: "held" }]);
+      // Mock: backstop already completed
+      // INSERT returns [] (conflict - already exists)
+      mockSql._setResult("INSERT INTO backstop_processed_orders", []);
+      // UPDATE for stale reclaim returns [] (not stale or not pending)
+      mockSql._setResult("UPDATE backstop_processed_orders", []);
+      // SELECT returns existing completed row
+      mockSql._setResult("SELECT action, processed_at FROM backstop_processed_orders", [
+        { action: "held", processed_at: new Date() },
+      ]);
 
       const result = await applyBackstop(mockSql as never, baseInput);
 

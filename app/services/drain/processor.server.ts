@@ -352,23 +352,36 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
   );
 
   // S13: Apply backstop for ORDERS_CREATE on held accounts
-  if (message.topic === "ORDERS_CREATE" && orderResult.success && orderResult.entityId) {
+  // Always try to apply backstop on ORDERS_CREATE, even on redelivery when orderResult
+  // indicates the webhook was already processed (no entityId). The webhook marks the
+  // order processed at order.server.ts:156, but backstop must still run on retries.
+  if (message.topic === "ORDERS_CREATE") {
     const {
       applyBackstop,
       RetryableBackstopError,
       recordBackstopFailure,
+      resolveInvoiceForOrder,
     } = await import("~/services/backstop.server");
 
-    // Get shop ID and buyer account ID from the invoice
-    const [invoiceInfo] = await sql<{
-      shopId: string;
-      buyerAccountId: string | null;
-      invoiceId: string;
-    }[]>`
-      SELECT "shopId", "buyerAccountId", id AS "invoiceId"
-      FROM "Invoice"
-      WHERE id = ${orderResult.entityId}
-    `;
+    // Resolve invoice info - either from webhook result or by looking up by order GID
+    let invoiceInfo: { shopId: string; buyerAccountId: string | null; invoiceId: string } | null = null;
+
+    if (orderResult.success && orderResult.entityId) {
+      // First attempt: use the invoice ID from webhook processing
+      const [info] = await sql<{
+        shopId: string;
+        buyerAccountId: string | null;
+        invoiceId: string;
+      }[]>`
+        SELECT "shopId", "buyerAccountId", id AS "invoiceId"
+        FROM "Invoice"
+        WHERE id = ${orderResult.entityId}
+      `;
+      invoiceInfo = info ?? null;
+    } else {
+      // Redelivery or webhook skipped: resolve invoice by shop domain + order GID
+      invoiceInfo = await resolveInvoiceForOrder(sql, message.shop, message.resourceGid);
+    }
 
     if (invoiceInfo) {
       try {
@@ -387,16 +400,11 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
         }
       } catch (e) {
         if (e instanceof RetryableBackstopError) {
-          // Check if this is the last retry - if so, record failure and let order through
-          // The webhook's read_ct is incremented on each read, so we use a threshold
-          // matching the drain config (DEFAULT_DRAIN_CONFIG.maxRetries = 5)
-          // Note: We don't have access to read_ct here, so we rely on the processor
-          // catching this error and applying its normal retry/DLQ logic
+          // Retryable error: return failure to trigger pgmq retry
           console.warn(
             `[backstop] Retryable error for ${message.resourceGid}: ${e.message} (reason: ${e.reason})`
           );
 
-          // Return a failure result to trigger pgmq retry
           return {
             success: false,
             action: "skipped" as const,
@@ -812,6 +820,28 @@ async function processSyncQueue(
             syncResult.retryable === false
               ? `Non-retryable error: ${syncResult.error || "Unknown"}`
               : syncResult.error || "Max retries exceeded";
+
+          // S13: Record backstop.failed for ORDERS_CREATE when DLQ'ing
+          if (msg.message.topic === "ORDERS_CREATE") {
+            const { recordBackstopFailure, resolveInvoiceForOrder } = await import(
+              "~/services/backstop.server"
+            );
+            const invoiceInfo = await resolveInvoiceForOrder(
+              sql,
+              msg.message.shop,
+              msg.message.resourceGid
+            );
+            if (invoiceInfo) {
+              await recordBackstopFailure(
+                sql,
+                invoiceInfo.shopId,
+                msg.message.resourceGid,
+                invoiceInfo.buyerAccountId,
+                dlqReason
+              );
+            }
+          }
+
           await moveToDeadLetter(
             sql,
             S6_QUEUES.SYNC,
@@ -835,6 +865,27 @@ async function processSyncQueue(
       // Only DLQ after max retries to avoid losing messages on transient issues
       const errorMsg = err instanceof Error ? err.message : "Unknown error";
       if (msg.read_ct >= config.maxRetries) {
+        // S13: Record backstop.failed for ORDERS_CREATE when DLQ'ing
+        if (msg.message.topic === "ORDERS_CREATE") {
+          const { recordBackstopFailure, resolveInvoiceForOrder } = await import(
+            "~/services/backstop.server"
+          );
+          const invoiceInfo = await resolveInvoiceForOrder(
+            sql,
+            msg.message.shop,
+            msg.message.resourceGid
+          );
+          if (invoiceInfo) {
+            await recordBackstopFailure(
+              sql,
+              invoiceInfo.shopId,
+              msg.message.resourceGid,
+              invoiceInfo.buyerAccountId,
+              errorMsg
+            );
+          }
+        }
+
         await moveToDeadLetter(sql, S6_QUEUES.SYNC, msg.msg_id, msg.message, errorMsg);
         result.deadLettered++;
       } else {
