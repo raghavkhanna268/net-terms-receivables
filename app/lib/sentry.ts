@@ -162,9 +162,12 @@ export function wrapWithSentry<E extends SentryEnv>(
       return {
         dsn,
         tracesSampleRate: parseFloat(env.SENTRY_TRACES_SAMPLE_RATE ?? "0"),
-        // A1: PII protection is enforced by beforeSend/beforeSendTransaction hooks
-        // which scrub all sensitive data including request headers, cookies, exception
-        // messages, tags, extra, and contexts - allowing only safe identifiers.
+        // A1: sendDefaultPii defaults to false in Sentry SDK. We cannot set it
+        // explicitly because @sentry/cloudflare types it as `never` (the option
+        // isn't exposed in CloudflareOptions). PII protection is enforced by
+        // beforeSend/beforeSendTransaction hooks which scrub all sensitive data
+        // including request headers, cookies, exception messages, tags, extra,
+        // and contexts - allowing only safe identifiers.
         beforeSend,
         beforeSendTransaction,
       };

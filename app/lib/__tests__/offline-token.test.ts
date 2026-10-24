@@ -319,7 +319,8 @@ describeWithDb("refreshOfflineTokenIfNeeded with real database", () => {
     expect(result.success).toBe(false);
     expect(result.errorCode).toBe("invalid_grant");
     expect(result.error).toContain("invalid_grant");
-    expect(result.error).toContain(TEST_SHOP);
+    // Error must NOT contain shop domain (PII redaction rule)
+    expect(result.error).not.toContain("myshopify");
 
     // Verify needsReauth was set to true
     const rows = await sql<Array<{ accessToken: string; needsReauth: boolean }>>`
@@ -357,7 +358,9 @@ describeWithDb("refreshOfflineTokenIfNeeded with real database", () => {
 
     expect(result.success).toBe(false);
     expect(result.errorCode).toBe("invalid_grant");
-    expect(result.error).toContain("needing re-authentication");
+    expect(result.error).toContain("re-authentication");
+    // Error must NOT contain shop domain (PII redaction rule)
+    expect(result.error).not.toContain("myshopify");
   });
 
   it("returns no_refresh_token error and sets needsReauth when refresh token is missing", async () => {
@@ -387,7 +390,8 @@ describeWithDb("refreshOfflineTokenIfNeeded with real database", () => {
     expect(result.success).toBe(false);
     expect(result.errorCode).toBe("no_refresh_token");
     expect(result.error).toContain("No refresh token available");
-    expect(result.error).toContain(TEST_SHOP);
+    // Error must NOT contain shop domain (PII redaction rule)
+    expect(result.error).not.toContain("myshopify");
 
     // Verify needsReauth was set
     const rows = await sql<Array<{ needsReauth: boolean }>>`
@@ -428,7 +432,8 @@ describeWithDb("refreshOfflineTokenIfNeeded with real database", () => {
     expect(result.success).toBe(false);
     expect(result.errorCode).toBe("network_error");
     expect(result.error).toContain("network error");
-    expect(result.error).toContain(TEST_SHOP);
+    // Error must NOT contain shop domain (PII redaction rule)
+    expect(result.error).not.toContain("myshopify");
   });
 
   /**
@@ -468,7 +473,8 @@ describeWithDb("refreshOfflineTokenIfNeeded with real database", () => {
     expect(result.success).toBe(false);
     expect(result.errorCode).toBe("network_error");
     expect(result.error).toContain("timed out");
-    expect(result.error).toContain(TEST_SHOP);
+    // Error must NOT contain shop domain (PII redaction rule)
+    expect(result.error).not.toContain("myshopify");
 
     // Verify needsReauth is NOT set (timeout is retryable)
     const rows = await sql<Array<{ needsReauth: boolean }>>`

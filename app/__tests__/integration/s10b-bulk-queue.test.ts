@@ -215,6 +215,7 @@ describeWithDb("S10b processBulkQueue Integration", () => {
         success: false,
         action: "skipped",
         error: "HTTP 404: Not Found",
+        errorCode: "http_404",
         status: "error",
         errorType: "permanent",
       }));
@@ -232,7 +233,8 @@ describeWithDb("S10b processBulkQueue Integration", () => {
         AND original_queue = ${S6_QUEUES.BULK}
       `;
       expect(dlqResult).toBeDefined();
-      expect(dlqResult.error).toContain("404");
+      // DLQ error format: "permanent:<errorCode>"
+      expect(dlqResult.error).toBe("permanent:http_404");
 
       // Message should not be in active queue
       const [inQueue] = await sql<{ count: string }[]>`

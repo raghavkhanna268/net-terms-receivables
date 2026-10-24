@@ -41,6 +41,26 @@ describe("sentry.ts", () => {
       expect(typeof config.beforeSendTransaction).toBe("function");
     });
 
+    it("does not set sendDefaultPii (A1: SDK defaults to false, type is never)", async () => {
+      const { withSentry } = await import("@sentry/cloudflare");
+      const { wrapWithSentry } = await import("../sentry");
+
+      const mockHandler = { fetch: vi.fn() };
+      wrapWithSentry(mockHandler);
+
+      const configFn = (withSentry as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const config = configFn({ SENTRY_DSN: "https://test@sentry.io/123" });
+
+      // @sentry/cloudflare types sendDefaultPii as `never` so we can't set it.
+      // The SDK defaults sendDefaultPii to false. PII protection is enforced
+      // by beforeSend/beforeSendTransaction hooks which are verified by other tests.
+      // Here we just confirm the option is not present in config (would be type error).
+      expect(config).not.toHaveProperty("sendDefaultPii");
+      // And verify the hooks that provide PII protection are present
+      expect(config.beforeSend).toBeDefined();
+      expect(config.beforeSendTransaction).toBeDefined();
+    });
+
     it("returns undefined when DSN is not set", async () => {
       const { withSentry } = await import("@sentry/cloudflare");
       const { wrapWithSentry } = await import("../sentry");
