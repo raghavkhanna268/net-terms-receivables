@@ -385,10 +385,12 @@ describeWithDb("credit-status-recompute DB integration", () => {
     });
 
     it("gated account gets metafield written (gating applies only to value-add actions)", async () => {
-      // Set account to gated and HELD
+      // Set account to gated and HELD with syncPending=true to trigger metafield write
+      // (syncPending=true simulates a state change that needs sync)
       await sql`
         UPDATE "BuyerAccount"
-        SET gated_at = NOW(), "holdState" = 'HELD', "holdReasonCode" = 'MANUAL_HOLD', "manualHold" = true
+        SET gated_at = NOW(), "holdState" = 'HELD', "holdReasonCode" = 'MANUAL_HOLD', 
+            "manualHold" = true, "syncPending" = true
         WHERE id = ${TEST_ACCOUNT_ID}
       `;
 

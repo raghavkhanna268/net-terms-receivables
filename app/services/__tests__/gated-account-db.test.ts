@@ -478,8 +478,8 @@ describeWithDb("gated account behavior (PLAN_GATING_ENFORCED=true)", () => {
 
       // Create bank import and payment
       await sql`
-        INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "createdAt")
-        VALUES (${importId}, ${TEST_SHOP_ID}, 'hdfc', 'test.xlsx', NOW())
+        INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
+        VALUES (${importId}, ${TEST_SHOP_ID}, 'hdfc', 'test.xlsx', 1, NOW())
       `;
 
       await sql`
@@ -535,8 +535,8 @@ describeWithDb("gated account behavior (PLAN_GATING_ENFORCED=true)", () => {
 
       // Create bank import, payment, and match
       await sql`
-        INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "createdAt")
-        VALUES (${importId}, ${TEST_SHOP_ID}, 'hdfc', 'test-confirm.xlsx', NOW())
+        INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
+        VALUES (${importId}, ${TEST_SHOP_ID}, 'hdfc', 'test-confirm.xlsx', 1, NOW())
       `;
 
       await sql`

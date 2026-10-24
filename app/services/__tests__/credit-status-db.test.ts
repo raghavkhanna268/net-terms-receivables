@@ -598,6 +598,17 @@ describeWithDb("syncCreditStatusMetafield gated account", () => {
     `;
     expect(before.syncPending).toBe(true);
 
+    // Mock Shopify GraphQL response
+    mockShopifyGraphQLRequest.mockResolvedValue({
+      success: true,
+      data: {
+        metafieldsSet: {
+          metafields: [{ id: "gid://shopify/Metafield/123" }],
+          userErrors: [],
+        },
+      },
+    });
+
     // Call the real syncCreditStatusMetafield
     const result = await syncCreditStatusMetafield(sql, TEST_GATED_ACCOUNT_ID);
 

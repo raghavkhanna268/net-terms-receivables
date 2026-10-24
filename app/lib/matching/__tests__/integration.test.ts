@@ -386,7 +386,7 @@ describeWithDb("Gated account exclusion", () => {
     }
   });
 
-  it("excludes gated buyer invoices when PLAN_GATING_ENFORCED=true", async () => {
+  it("includes gated buyer invoices when PLAN_GATING_ENFORCED=true", async () => {
     const originalEnv = process.env.PLAN_GATING_ENFORCED;
     (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "true";
 
@@ -397,8 +397,9 @@ describeWithDb("Gated account exclusion", () => {
         gatedBuyerId
       );
 
-      // Gated buyer's invoices should be excluded
-      expect(invoices.length).toBe(0);
+      // Gated buyer's invoices should be INCLUDED
+      // (gating applies only to value-add actions, not to matching/aging/totals)
+      expect(invoices.length).toBeGreaterThanOrEqual(1);
     } finally {
       (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = originalEnv;
     }
@@ -422,16 +423,21 @@ describeWithDb("Gated account exclusion", () => {
     }
   });
 
-  it("excludes gated buyers from getBuyersWithAliases when gating enforced", async () => {
+  it("includes gated buyers in getBuyersWithAliases when gating enforced", async () => {
     const originalEnv = process.env.PLAN_GATING_ENFORCED;
     (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "true";
 
     try {
       const buyers = await getBuyersWithAliases(sql, testShopId);
 
-      // Should only include the active buyer
-      expect(buyers.length).toBe(1);
-      expect(buyers[0].id).toBe(activeBuyerId);
+      // Should include both buyers (gated accounts are included in matching)
+      // (gating applies only to value-add actions, not to matching)
+      expect(buyers.length).toBe(2);
+      
+      // Verify both buyers are present
+      const buyerIds = buyers.map(b => b.id);
+      expect(buyerIds).toContain(activeBuyerId);
+      expect(buyerIds).toContain(gatedBuyerId);
     } finally {
       (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = originalEnv;
     }
