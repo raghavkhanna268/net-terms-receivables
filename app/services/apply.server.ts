@@ -227,7 +227,7 @@ export async function applyMatch(
     if (!recoveryResult.success && recoveryResult.reasonCode !== "PUSH_IN_PROGRESS") {
       safeLog("warn", "apply_stale_sibling_recovery_failed", {
         matchId: sibling.id,
-        reasonCode: recoveryResult.reasonCode,
+        ...(recoveryResult.reasonCode ? { reasonCode: recoveryResult.reasonCode } : {}),
         err: toErrorCode(recoveryResult.error),
       });
     }
@@ -266,7 +266,7 @@ export async function applyMatch(
   }
 
   // Full payment path: call Shopify outside transaction, then finalize
-  let shopifySuccess = false;
+  let pushSucceeded = false;
   let reasonCode: string | undefined;
 
   if (invoiceRow.orderId) {
@@ -276,10 +276,10 @@ export async function applyMatch(
     );
 
     if (shopifyResult.success) {
-      shopifySuccess = true;
+      pushSucceeded = true;
     } else if (shopifyResult.alreadyPaid) {
       // Order was already paid - treat as success
-      shopifySuccess = true;
+      pushSucceeded = true;
       reasonCode = "ALREADY_PAID_IN_SHOPIFY";
     } else {
       // Shopify call failed - release the claim
@@ -294,7 +294,7 @@ export async function applyMatch(
     }
   } else {
     // No Shopify order to mark - local-only invoice
-    shopifySuccess = true;
+    pushSucceeded = true;
   }
 
   // TX2: Finalize - mark invoice as paid, write audit events
@@ -306,7 +306,7 @@ export async function applyMatch(
     matchRow,
     invoiceRow,
     actor,
-    shopifySuccess,
+    pushSucceeded,
     reasonCode,
     tx1Result.appliedAmountPaise ?? matchRow.amountPaise,
     tx1Result.previousOutstandingPaise ?? "0"
@@ -316,7 +316,7 @@ export async function applyMatch(
     return {
       success: false,
       invoicePaid: false,
-      shopifyPushSucceeded: shopifySuccess,
+      shopifyPushSucceeded: pushSucceeded,
       error: tx2Result.error,
     };
   }
@@ -327,7 +327,7 @@ export async function applyMatch(
   return {
     success: true,
     invoicePaid: true,
-    shopifyPushSucceeded: shopifySuccess,
+    shopifyPushSucceeded: pushSucceeded,
     reasonCode,
   };
 }
@@ -862,7 +862,7 @@ async function handleStalePushingMatch(
     }
 
     // FULL payment path: call Shopify outside transaction
-    let shopifySuccess = false;
+    let pushSucceeded = false;
     let reasonCode: string | undefined;
 
     if (invoiceRow.orderId) {
@@ -872,9 +872,9 @@ async function handleStalePushingMatch(
       );
 
       if (shopifyResult.success) {
-        shopifySuccess = true;
+        pushSucceeded = true;
       } else if (shopifyResult.alreadyPaid) {
-        shopifySuccess = true;
+        pushSucceeded = true;
         reasonCode = "STALE_RECLAIM_ALREADY_PAID_IN_SHOPIFY";
       } else {
         // Shopify call failed - leave in 'pushing' for another retry
@@ -887,7 +887,7 @@ async function handleStalePushingMatch(
         };
       }
     } else {
-      shopifySuccess = true;
+      pushSucceeded = true;
     }
 
     // Finalize: lock invoice again, re-check status, then mark paid
@@ -1029,7 +1029,7 @@ async function handleStalePushingMatch(
           invoiceId: invoiceRow.id,
           matchId,
           orderGid: invoiceRow.orderId,
-          shopifyPushSucceeded: shopifySuccess,
+          shopifyPushSucceeded: pushSucceeded,
           reasonCode,
           staleReclaim: true,
         });
@@ -1054,7 +1054,7 @@ async function handleStalePushingMatch(
     return {
       success: true,
       invoicePaid: true,
-      shopifyPushSucceeded: shopifySuccess,
+      shopifyPushSucceeded: pushSucceeded,
       reasonCode: reasonCode ?? "STALE_RECLAIM_FULL",
     };
   } catch (error) {
@@ -1275,7 +1275,7 @@ async function finalizeFullApply(
   matchRow: { id: string; shopId: string; paymentId: string; invoiceId: string; amountPaise: string },
   invoiceRow: { id: string; orderId: string | null },
   actor: string,
-  shopifySuccess: boolean,
+  pushSucceeded: boolean,
   reasonCode: string | undefined,
   appliedAmountPaise: string,
   expectedOutstandingPaise: string
@@ -1306,10 +1306,10 @@ async function finalizeFullApply(
           matchId,
           invoiceId: invoiceRow.id,
           status: lockedInvoice.status,
-          success: shopifySuccess,
+          success: pushSucceeded,
         });
 
-        if (shopifySuccess) {
+        if (pushSucceeded) {
           // Shopify already paid - finalize locally to match Shopify state
           // Don't revert the match, instead force-finalize to stay consistent with Shopify
           // Use conditional UPDATE to detect if THIS transaction actually flips open→paid
@@ -1359,7 +1359,7 @@ async function finalizeFullApply(
               invoiceId: invoiceRow.id,
               matchId,
               orderGid: invoiceRow.orderId,
-              shopifyPushSucceeded: shopifySuccess,
+              shopifyPushSucceeded: pushSucceeded,
               reasonCode,
               backstopTriggered: true,
             });
@@ -1419,7 +1419,7 @@ async function finalizeFullApply(
           invoiceId: invoiceRow.id,
           matchId,
           orderGid: invoiceRow.orderId,
-          shopifyPushSucceeded: shopifySuccess,
+          shopifyPushSucceeded: pushSucceeded,
           reasonCode,
         });
       }
