@@ -17,11 +17,17 @@ describe("Bulk Operations GraphQL", () => {
       expect(BULK_ORDERS_QUERY).toContain("financial_status:partially_paid");
     });
 
-    it("does not include paid, refunded, or voided statuses", () => {
-      // Terminal statuses should not be in the backfill query
-      expect(BULK_ORDERS_QUERY).not.toMatch(/financial_status:paid[^_]/);
-      expect(BULK_ORDERS_QUERY).not.toContain("financial_status:refunded");
-      expect(BULK_ORDERS_QUERY).not.toContain("financial_status:voided");
+    it("includes terminal statuses for updating existing invoices", () => {
+      // Terminal statuses (paid, refunded, voided) are included so reconcile
+      // can UPDATE existing invoices when their status changes.
+      // Eligibility rules still gate CREATION of new invoices.
+      expect(BULK_ORDERS_QUERY).toContain("financial_status:paid");
+      expect(BULK_ORDERS_QUERY).toContain("financial_status:refunded");
+      expect(BULK_ORDERS_QUERY).toContain("financial_status:voided");
+    });
+
+    it("includes authorized status for orders that can become net-terms", () => {
+      expect(BULK_ORDERS_QUERY).toContain("financial_status:authorized");
     });
 
     it("requests paymentTerms for filtering", () => {

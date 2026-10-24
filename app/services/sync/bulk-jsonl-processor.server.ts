@@ -45,6 +45,7 @@ import { getRequestEnv } from "~/lib/request-context.server";
 import {
   checkOrderEligibility,
   getEligibilityContext,
+  isTerminalFinancialStatus,
   type EligibilityContext,
 } from "~/lib/invoice-eligibility";
 import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
@@ -85,6 +86,21 @@ export const MAX_FAILURE_COUNT = 5;
  * - permanent: 4xx (not 429), bad data - go straight to DLQ
  */
 export type ErrorType = "retryable" | "permanent";
+
+/**
+ * Check if a raw JSONL line has __parentId (is a child line).
+ * Used for batch boundary detection to avoid splitting parent/child groups.
+ * Exported for testing.
+ */
+export function lineHasParentId(line: string): boolean {
+  try {
+    const parsed = JSON.parse(line);
+    return "__parentId" in parsed && parsed.__parentId !== undefined;
+  } catch {
+    // If we can't parse it, treat it as a parent (safer)
+    return false;
+  }
+}
 
 /**
  * Result of a bulk operation processing.
@@ -408,70 +424,216 @@ async function processCompanyLines(
  *
  * Eligibility gates CREATION only. If an Invoice already exists for an order,
  * it is ALWAYS updated (to heal status changes like PAID, REFUNDED, etc.).
+ *
+ * Orphan schedules (PaymentSchedule lines whose parent Order is not in this batch)
+ * are handled by updating the dueAt on existing Invoices for those parent orders.
+ *
+ * Exported for testing.
  */
-async function processOrderLines(
+export async function processOrderLines(
   sql: Sql,
   shopId: string,
   lines: string[],
   context?: EligibilityContext
 ): Promise<number> {
   const jsonl = lines.join("\n");
-  const { orders, errors } = parseOrderBulkJsonl(jsonl);
+  const { orders, orphanSchedules, attachedChildCount, orphanChildCount, errors } = parseOrderBulkJsonl(jsonl);
 
   if (errors.length > 0) {
     console.warn(`[bulk-jsonl] ${errors.length} parse errors in orders batch`);
   }
 
+  if (attachedChildCount > 0 || orphanChildCount > 0) {
+    console.log(`[bulk-jsonl] PaymentSchedule children: ${attachedChildCount} attached, ${orphanChildCount} orphaned`);
+  }
+
+  // Handle orphan schedules by updating existing invoices (P1 safety net)
+  // Skip paid/cancelled/closed invoices. Batch updates using SQL arrays.
+  let orphansUpdated = 0;
+  if (orphanSchedules.length > 0) {
+    const orphanParentIds = orphanSchedules.map((s) => s.__parentId);
+    // Batch lookup existing open invoices for orphan parents (skip paid/cancelled/closed)
+    const existingOrphanInvoices = await sql<{ id: string; orderId: string }[]>`
+      SELECT id, "orderId" FROM "Invoice"
+      WHERE "shopId" = ${shopId}
+        AND "orderId" = ANY(${orphanParentIds})
+        AND status = 'open'
+    `;
+    const invoiceByOrderId = new Map(existingOrphanInvoices.map((i) => [i.orderId, i.id]));
+
+    // Build arrays for batched UPDATE
+    const updateIds: string[] = [];
+    const updateDueAts: string[] = [];
+    const updateReasons: string[] = [];
+
+    for (const schedule of orphanSchedules) {
+      const invoiceId = invoiceByOrderId.get(schedule.__parentId);
+      if (invoiceId && schedule.dueAt) {
+        updateIds.push(invoiceId);
+        updateDueAts.push(schedule.dueAt);
+        updateReasons.push("Payment schedule from Shopify (orphan reconcile)");
+      }
+    }
+
+    // Batch UPDATE using unnest
+    if (updateIds.length > 0) {
+      const result = await sql`
+        UPDATE "Invoice" AS i
+        SET
+          "dueAt" = v."dueAt"::timestamptz,
+          "dueSource" = 'schedule',
+          "dueBasis" = NULL,
+          "dueReason" = v."dueReason"
+        FROM unnest(
+          ${updateIds}::text[],
+          ${updateDueAts}::timestamptz[],
+          ${updateReasons}::text[]
+        ) AS v(id, "dueAt", "dueReason")
+        WHERE i.id = v.id
+          AND (i."dueAt" IS DISTINCT FROM v."dueAt"::timestamptz)
+      `;
+      orphansUpdated = result.count;
+    }
+
+    if (orphansUpdated > 0) {
+      console.log(`[bulk-jsonl] ${orphansUpdated} orphan schedules updated existing invoices`);
+    }
+  }
+
   if (orders.length === 0) {
-    return 0;
+    return orphansUpdated;
   }
 
-  // Get eligibility context if not provided
-  const eligibilityContext = context ?? await getEligibilityContext(sql, shopId);
-  if (!eligibilityContext) {
-    console.warn(`[bulk-jsonl] No eligibility context for shop ${shopId}`);
-    return 0;
-  }
-
-  // Batch lookup: find existing invoices for these orders
+  // Batch lookup: find existing invoices with their buyer account IDs and merchant overrides
   const orderIds = orders.map((o) => o.id);
-  const existingInvoices = await sql<{ orderId: string; buyerAccountId: string }[]>`
-    SELECT "orderId", "buyerAccountId" FROM "Invoice"
+  const existingInvoices = await sql<{
+    orderId: string;
+    buyerAccountId: string;
+    dueOverrideAt: Date | null;
+    dueSource: string;
+    dueAt: Date | null;
+  }[]>`
+    SELECT "orderId", "buyerAccountId", "dueOverrideAt", "dueSource", "dueAt"
+    FROM "Invoice"
     WHERE "shopId" = ${shopId} AND "orderId" = ANY(${orderIds})
   `;
-  const existingByOrderId = new Map(existingInvoices.map((i) => [i.orderId, i.buyerAccountId]));
+  const existingByOrderId = new Map(existingInvoices.map((i) => [i.orderId, i]));
+
+  // Separate orders into existing and new for different processing paths
+  const ordersWithExisting: typeof orders = [];
+  const ordersWithoutExisting: typeof orders = [];
+  for (const order of orders) {
+    if (existingByOrderId.has(order.id)) {
+      ordersWithExisting.push(order);
+    } else {
+      ordersWithoutExisting.push(order);
+    }
+  }
+
+  // Get eligibility context if needed (for new orders or context resolution)
+  let eligibilityContext: EligibilityContext | null = context ?? null;
+  const needsContext = ordersWithoutExisting.some(
+    (o) => !isTerminalFinancialStatus(o.displayFinancialStatus)
+  ) || ordersWithExisting.length > 0;
+  
+  if (needsContext && !eligibilityContext) {
+    eligibilityContext = await getEligibilityContext(sql, shopId);
+    if (!eligibilityContext) {
+      console.warn(`[bulk-jsonl] No eligibility context for shop ${shopId}`);
+    }
+  }
 
   const invoices: InvoiceData[] = [];
   let skippedCount = 0;
 
-  for (const order of orders) {
+  // Process existing invoices: mirror webhook path (order.server.ts:111-118)
+  // Call checkOrderEligibility with full context for due-date precedence
+  for (const order of ordersWithExisting) {
     const shopifyOrder = bulkOrderToShopifyOrder(order);
-    const existingBuyerAccountId = existingByOrderId.get(shopifyOrder.id);
+    const existing = existingByOrderId.get(shopifyOrder.id)!;
 
-    // Check eligibility
-    const eligibility = await checkOrderEligibility(sql, shopifyOrder, eligibilityContext);
-
-    if (existingBuyerAccountId) {
-      // Invoice exists - ALWAYS update it (eligibility only gates creation)
+    // Mirror webhook path: call checkOrderEligibility for proper due-date precedence
+    // This ensures account defaults, tag rules, and merchant overrides are respected
+    if (eligibilityContext) {
+      const eligibility = await checkOrderEligibility(sql, shopifyOrder, eligibilityContext);
+      
+      // Check if invoice has a merchant override that should be preserved
+      // A schedule dueAt beats merchant override, but merchant override beats inferred
+      const hasScheduleDueAt = hasOrderScheduleDueAt(shopifyOrder);
+      const hasMerchantOverride = existing.dueOverrideAt !== null;
+      
+      let finalDueDate = eligibility.dueDate;
+      
+      // If no schedule dueAt and merchant override exists, use the existing dueAt
+      // (merchant override was already applied to existing.dueAt)
+      if (!hasScheduleDueAt && hasMerchantOverride) {
+        finalDueDate = {
+          dueAt: existing.dueAt,
+          dueSource: "override" as const,
+          basis: null,
+          reason: "Merchant override preserved during reconcile",
+        };
+      }
+      
       invoices.push(
         mapOrderToInvoiceWithEligibility(
           shopId,
-          eligibility.buyerAccountId ?? existingBuyerAccountId,
+          eligibility.buyerAccountId ?? existing.buyerAccountId,
           shopifyOrder,
-          eligibility
-        )
-      );
-    } else if (eligibility.eligible) {
-      // No existing Invoice and eligible - create it
-      invoices.push(
-        mapOrderToInvoiceWithEligibility(
-          shopId,
-          eligibility.buyerAccountId!,
-          shopifyOrder,
-          eligibility
+          {
+            ...eligibility,
+            eligible: true,
+            buyerAccountId: eligibility.buyerAccountId ?? existing.buyerAccountId,
+            dueDate: finalDueDate,
+          }
         )
       );
     } else {
+      // No eligibility context - preserve existing dueAt (don't overwrite with shop default)
+      invoices.push(
+        mapOrderToInvoiceWithEligibility(
+          shopId,
+          existing.buyerAccountId,
+          shopifyOrder,
+          {
+            eligible: true,
+            reason: "shopify_payment_terms",
+            explanation: "Updating existing invoice (no context, preserving dueAt)",
+            buyerAccountId: existing.buyerAccountId,
+            dueDate: existing.dueAt
+              ? {
+                  dueAt: existing.dueAt,
+                  dueSource: existing.dueSource as "schedule" | "override" | "inferred" | "none",
+                  basis: null,
+                  reason: "Preserved during reconcile (no context)",
+                }
+              : undefined,
+          }
+        )
+      );
+    }
+  }
+
+  // Process new orders: check eligibility for creation
+  for (const order of ordersWithoutExisting) {
+    const shopifyOrder = bulkOrderToShopifyOrder(order);
+    
+    if (eligibilityContext) {
+      const eligibility = await checkOrderEligibility(sql, shopifyOrder, eligibilityContext);
+      if (eligibility.eligible) {
+        invoices.push(
+          mapOrderToInvoiceWithEligibility(
+            shopId,
+            eligibility.buyerAccountId!,
+            shopifyOrder,
+            eligibility
+          )
+        );
+      } else {
+        skippedCount++;
+      }
+    } else {
+      // No eligibility context and no existing invoice - skip
       skippedCount++;
     }
   }
@@ -480,8 +642,18 @@ async function processOrderLines(
     console.log(`[bulk-jsonl] ${skippedCount} orders skipped (not eligible, no existing invoice)`);
   }
 
-  return await bulkUpsertInvoices(sql, invoices);
+  const upserted = await bulkUpsertInvoices(sql, invoices);
+  return upserted + orphansUpdated;
 }
+
+/**
+ * Check if an order has a PaymentSchedule with dueAt set.
+ */
+function hasOrderScheduleDueAt(order: import("./types").ShopifyOrder): boolean {
+  const schedules = order.paymentTerms?.paymentSchedules?.edges ?? [];
+  return schedules.some((e) => e.node.dueAt != null);
+}
+
 
 /**
  * Process a batch of JSONL lines for customers.
@@ -834,8 +1006,30 @@ export async function processBulkOperation(
     }
   }
 
-  // Limit lines processed per invocation
-  const linesToProcess = allLines.slice(0, maxLines);
+  // Limit lines processed per invocation, but for orders:
+  // Never end a non-EOF batch on a top-level (parent) line.
+  // This prevents splitting parent Orders from their PaymentSchedule children.
+  let linesToProcess = allLines.slice(0, maxLines);
+  
+  // P1 approach (a): On non-EOF order batches with >1 line, if the final line is
+  // top-level (no __parentId), drop just that final line. Children immediately
+  // follow their parent, so if the final line is a child, its parent is in the batch.
+  // A 1-line batch always processes (to avoid stall).
+  //
+  // NOTE: Ending on a child line assumes it is the last sibling for that parent.
+  // This is valid because BULK_ORDERS_QUERY requests paymentSchedules(first: 1),
+  // so each Order has at most one PaymentSchedule child line in the bulk export.
+  const isNonEofBatch = !chunkResult.isEof || linesToProcess.length < allLines.length;
+  if (bulkType === "orders" && isNonEofBatch && linesToProcess.length > 1) {
+    const finalLine = linesToProcess[linesToProcess.length - 1];
+    if (!lineHasParentId(finalLine)) {
+      // Final line is top-level (a parent Order) - its children may be in the next batch
+      // Drop just this final line and move offset back to its start
+      console.log(`[bulk-jsonl] Dropping final top-level line to keep parent/child together (${linesToProcess.length} -> ${linesToProcess.length - 1})`);
+      linesToProcess = linesToProcess.slice(0, -1);
+    }
+    // If final line is a child (__parentId), its parent is already in this batch - keep all
+  }
 
   // Process lines
   let totalUpserted = 0;
