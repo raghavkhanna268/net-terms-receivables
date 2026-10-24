@@ -66,6 +66,42 @@ describe("shopify-client.server", () => {
     process.env = originalEnv;
   });
 
+  describe("Missing credentials", () => {
+    it("returns non-retryable error when SHOPIFY_API_KEY is missing", async () => {
+      process.env = { ...originalEnv };
+      delete process.env.SHOPIFY_API_KEY;
+      delete process.env.SHOPIFY_API_SECRET;
+
+      const result = await shopifyGraphQL(
+        "test.myshopify.com",
+        "query { shop { name } }"
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.retryable).toBe(false);
+      expect(result.error).toContain("credentials not configured");
+      expect(result.error).toContain("SHOPIFY_API_KEY");
+      expect(result.retriesAttempted).toBe(0);
+      // graphql should never be called
+      expect(mockAdmin.graphql).not.toHaveBeenCalled();
+    });
+
+    it("returns non-retryable error when only SHOPIFY_API_SECRET is missing", async () => {
+      process.env = { ...originalEnv, SHOPIFY_API_KEY: "test-key" };
+      delete process.env.SHOPIFY_API_SECRET;
+
+      const result = await shopifyGraphQL(
+        "test.myshopify.com",
+        "query { shop { name } }"
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.retryable).toBe(false);
+      expect(result.error).toContain("credentials not configured");
+      expect(result.retriesAttempted).toBe(0);
+    });
+  });
+
   describe("Successful requests", () => {
     it("returns data on success", async () => {
       mockAdmin.graphql.mockResolvedValueOnce({

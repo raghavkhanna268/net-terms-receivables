@@ -15,7 +15,7 @@ export default tseslint.config(
       ".wrangler/**",
       ".react-router/**",
       "extensions/*/dist/**",
-      "*.d.ts",
+      "**/*.d.ts",
     ],
   },
   js.configs.recommended,

@@ -676,6 +676,195 @@ describeWithDb("Customer Sync", () => {
     });
   });
 
+  describe("PII mode handling", () => {
+    it("'fetched' mode writes values as-is including null (clears email)", async () => {
+      const customerId = `gid://shopify/Customer/cust-${TEST_SUFFIX}-fetched`;
+
+      // Create existing record with email
+      await sql`
+        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, email, display_name)
+        VALUES (${TEST_SHOP_ID}, ${customerId}, '["net-terms"]'::jsonb, true, 'existing@example.com', 'Existing Name')
+      `;
+
+      // Process with null email (simulating cleared email)
+      const customer: ShopifyCustomer = {
+        id: customerId,
+        tags: ["net-terms"],
+        email: null, // Customer cleared their email
+        displayName: "Updated Name",
+      };
+
+      const result = await processCustomerWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "CUSTOMERS_UPDATE",
+        customer,
+        `wh-cust-${TEST_SUFFIX}-fetched`,
+        "fetched"
+      );
+
+      expect(result.success).toBe(true);
+
+      // Verify email was cleared (null overwrites)
+      const [record] = await sql<{ email: string | null; display_name: string | null }[]>`
+        SELECT email, display_name FROM s8_tagged_customers WHERE customer_id = ${customerId}
+      `;
+      expect(record.email).toBeNull(); // Was cleared
+      expect(record.display_name).toBe("Updated Name");
+    });
+
+    it("'fallback' mode preserves existing values with COALESCE", async () => {
+      const customerId = `gid://shopify/Customer/cust-${TEST_SUFFIX}-fallback`;
+
+      // Create existing record with email
+      await sql`
+        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, email, display_name)
+        VALUES (${TEST_SHOP_ID}, ${customerId}, '["net-terms"]'::jsonb, true, 'preserve@example.com', 'Preserve Name')
+      `;
+
+      // Process with null PII (ACCESS_DENIED fallback case)
+      const customer: ShopifyCustomer = {
+        id: customerId,
+        tags: ["net-terms", "updated"],
+        email: null, // Fallback didn't fetch email
+        displayName: null, // Fallback didn't fetch displayName
+      };
+
+      const result = await processCustomerWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "CUSTOMERS_UPDATE",
+        customer,
+        `wh-cust-${TEST_SUFFIX}-fallback`,
+        "fallback"
+      );
+
+      expect(result.success).toBe(true);
+
+      // Verify existing values were preserved
+      const [record] = await sql<{ email: string | null; display_name: string | null; tags: string[] }[]>`
+        SELECT email, display_name, tags FROM s8_tagged_customers WHERE customer_id = ${customerId}
+      `;
+      expect(record.email).toBe("preserve@example.com"); // Preserved
+      expect(record.display_name).toBe("Preserve Name"); // Preserved
+      expect(record.tags).toContain("updated"); // Tags still updated
+    });
+
+    it("'disabled' mode always writes NULL (DPDP minimisation)", async () => {
+      const customerId = `gid://shopify/Customer/cust-${TEST_SUFFIX}-disabled`;
+
+      // Create existing record with email
+      await sql`
+        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, email, display_name)
+        VALUES (${TEST_SHOP_ID}, ${customerId}, '["net-terms"]'::jsonb, true, 'existing@example.com', 'Existing Name')
+      `;
+
+      // Process with PII disabled (even if we somehow have PII values)
+      const customer: ShopifyCustomer = {
+        id: customerId,
+        tags: ["net-terms"],
+        email: "new@example.com", // This should be ignored
+        displayName: "New Name", // This should be ignored
+      };
+
+      const result = await processCustomerWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "CUSTOMERS_UPDATE",
+        customer,
+        `wh-cust-${TEST_SUFFIX}-disabled`,
+        "disabled"
+      );
+
+      expect(result.success).toBe(true);
+
+      // Verify PII was cleared (disabled mode always writes NULL)
+      const [record] = await sql<{ email: string | null; display_name: string | null }[]>`
+        SELECT email, display_name FROM s8_tagged_customers WHERE customer_id = ${customerId}
+      `;
+      expect(record.email).toBeNull();
+      expect(record.display_name).toBeNull();
+    });
+
+    it("'fetched' mode on INSERT writes values as-is", async () => {
+      const customer: ShopifyCustomer = {
+        id: `gid://shopify/Customer/cust-${TEST_SUFFIX}-fetch-new`,
+        tags: ["net-terms"],
+        email: "new@example.com",
+        displayName: "New Customer",
+      };
+
+      const result = await processCustomerWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "CUSTOMERS_CREATE",
+        customer,
+        `wh-cust-${TEST_SUFFIX}-fetch-new`,
+        "fetched"
+      );
+
+      expect(result.success).toBe(true);
+
+      const [record] = await sql<{ email: string | null; display_name: string | null }[]>`
+        SELECT email, display_name FROM s8_tagged_customers WHERE customer_id = ${customer.id}
+      `;
+      expect(record.email).toBe("new@example.com");
+      expect(record.display_name).toBe("New Customer");
+    });
+
+    it("'fallback' mode on INSERT writes null PII", async () => {
+      const customer: ShopifyCustomer = {
+        id: `gid://shopify/Customer/cust-${TEST_SUFFIX}-fall-new`,
+        tags: ["net-terms"],
+        email: null,
+        displayName: null,
+      };
+
+      const result = await processCustomerWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "CUSTOMERS_CREATE",
+        customer,
+        `wh-cust-${TEST_SUFFIX}-fall-new`,
+        "fallback"
+      );
+
+      expect(result.success).toBe(true);
+
+      const [record] = await sql<{ email: string | null; display_name: string | null }[]>`
+        SELECT email, display_name FROM s8_tagged_customers WHERE customer_id = ${customer.id}
+      `;
+      expect(record.email).toBeNull();
+      expect(record.display_name).toBeNull();
+    });
+
+    it("'disabled' mode on INSERT writes null even with PII provided", async () => {
+      const customer: ShopifyCustomer = {
+        id: `gid://shopify/Customer/cust-${TEST_SUFFIX}-dis-new`,
+        tags: ["net-terms"],
+        email: "ignored@example.com",
+        displayName: "Ignored Name",
+      };
+
+      const result = await processCustomerWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "CUSTOMERS_CREATE",
+        customer,
+        `wh-cust-${TEST_SUFFIX}-dis-new`,
+        "disabled"
+      );
+
+      expect(result.success).toBe(true);
+
+      const [record] = await sql<{ email: string | null; display_name: string | null }[]>`
+        SELECT email, display_name FROM s8_tagged_customers WHERE customer_id = ${customer.id}
+      `;
+      expect(record.email).toBeNull();
+      expect(record.display_name).toBeNull();
+    });
+  });
+
   describe("Compliance redaction (customers/redact and shop/redact)", () => {
     it("redactCustomerData deletes s8_tagged_customers including email/displayName", async () => {
       const customerId = `gid://shopify/Customer/cust-${TEST_SUFFIX}-redact`;

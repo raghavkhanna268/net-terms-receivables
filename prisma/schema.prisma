@@ -781,6 +781,22 @@ model S10bOrderRefetchNull {
   @@map("s10b_order_refetch_null")
 }
 
+/// Customer PII ACCESS_DENIED fallback aggregate (S10b)
+/// Counts customer fetches that fell back to non-PII query due to ACCESS_DENIED
+/// per shop per day. Tracks when CUSTOMER_PII_FIELDS=1 but PCD approval is pending.
+/// No PII - just (shop, day, count) for monitoring.
+/// 90-day retention via pg_cron purge job.
+///
+/// Note: This table is created by the S10b migration.
+model S10bCustomerPiiFallback {
+  shop  String
+  day   DateTime @db.Date
+  count Int      @default(1)
+
+  @@id([shop, day])
+  @@map("s10b_customer_pii_fallback")
+}
+
 // =============================================================================
 // S22 DATA REQUESTS
 // =============================================================================

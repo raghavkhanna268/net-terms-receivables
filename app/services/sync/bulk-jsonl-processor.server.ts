@@ -40,7 +40,8 @@ import {
   bulkUpsertInvoices,
   type InvoiceData,
 } from "./order.server";
-import { processBulkCustomer } from "./customer.server";
+import { processBulkCustomer, type CustomerPiiMode } from "./customer.server";
+import { getRequestEnv } from "~/lib/request-context.server";
 import {
   checkOrderEligibility,
   getEligibilityContext,
@@ -671,10 +672,14 @@ async function processCustomerLines(
     );
   }
 
+  // Determine piiMode based on CUSTOMER_PII_FIELDS env
+  const env = getRequestEnv() ?? {};
+  const piiMode: CustomerPiiMode = env.CUSTOMER_PII_FIELDS === "1" ? "fetched" : "disabled";
+
   let processed = 0;
   for (const customer of customers) {
     const shopifyCustomer = bulkCustomerToShopifyCustomer(customer);
-    const result = await processBulkCustomer(sql, shop, shopifyCustomer);
+    const result = await processBulkCustomer(sql, shop, shopifyCustomer, piiMode);
     if (result.success && result.action !== "skipped") {
       processed++;
     }
