@@ -7,24 +7,23 @@
 # Stale entries fail CI (ratchet mode).
 
 # =============================================================================
+# App - root error boundary
+# =============================================================================
+app/root.tsx:raw-error-arg:1
+
+# =============================================================================
 # App routes - shop interpolation
 # =============================================================================
 # app.imports.tsx: 1 console.log with ${shopDomain} interpolation
-# (reduced from 2 after Batch B #182 fixes)
 app/routes/app.imports.tsx:shop-interpolation:1
-
-# app.reconcile.tsx: 3 raw error args
-app/routes/app.reconcile.tsx:raw-error-arg:3
-
-# app.settings.reminders.tsx: 2 raw error args
-app/routes/app.settings.reminders.tsx:raw-error-arg:2
 
 # =============================================================================
 # App services - shop interpolation and raw errors
 # =============================================================================
-# plan.server.ts: 8 console.* calls with ${shop} or ${shopDomain} interpolation
-app/services/plan.server.ts:shop-interpolation:8
-# plan.server.ts: 2 raw captureException calls + 2 raw error args
+# plan.server.ts: 10 violations (${shop}, ${shopDomain}, ${activeSubscription.name})
+# - ${shop} interpolations: 8
+# - ${activeSubscription.name}: 2 (Shopify plan names, not person names, but ending with .name)
+app/services/plan.server.ts:shop-interpolation:10
 app/services/plan.server.ts:raw-capture:2
 app/services/plan.server.ts:raw-error-arg:2
 
@@ -43,26 +42,30 @@ app/services/sync/order.server.ts:raw-capture:4
 # refresh-offline-token.ts: 1 help text with myshopify.com example
 scripts/lib/refresh-offline-token.ts:domain-literal:1
 
-# seed.ts: 2 violations:
-# - ${shopDomain} placeholder in printDatabaseSeedSQL (line 3640)
-# - ${accountName} seed data in SQL output (line 3662)
-# Note: seed.ts runs in seed-dev-store.yml workflow but uses placeholder values
-scripts/seed.ts:shop-interpolation:2
-# seed.ts: help text with myshopify.com example
+# credit-status-metafield-backfill.ts:
+# - 2 ${grandTotal} interpolations (count metrics, but ends with 'total')
+scripts/credit-status-metafield-backfill.ts:shop-interpolation:2
+# - 1 raw error arg
+scripts/credit-status-metafield-backfill.ts:raw-error-arg:1
+
+# seed.ts:
+# - ${shopDomain} placeholder in printDatabaseSeedSQL
+# - ${accountName} seed data in SQL output
+# - ${t.name}, ${preferredRole.name}, ${existingOrder.name} (code-controlled names ending with .name)
+# - ${summary.totalBuyerAccounts}, ${summary.totalAccountSources} (counts, but 'name' in totalAccountSources triggers)
+scripts/seed.ts:shop-interpolation:10
 scripts/seed.ts:domain-literal:1
 
 # backstop-backfill.ts: raw error arg
 scripts/backstop-backfill.ts:raw-error-arg:1
 
-# credit-status-metafield-backfill.ts: raw error arg
-scripts/credit-status-metafield-backfill.ts:raw-error-arg:1
-
-# validate-graphql-schema.ts: 2 ${errName} interpolations (error name string)
-scripts/validate-graphql-schema.ts:shop-interpolation:2
+# validate-graphql-schema.ts:
+# - 2 ${errName} interpolations (error name strings)
+# - 17 ${...message} interpolations (code-controlled validation error messages)
+scripts/validate-graphql-schema.ts:shop-interpolation:19
 
 # =============================================================================
 # Benchmark scripts - intentionally fake domains for testing
 # =============================================================================
-# These use 'nonexistent.myshopify.com' which is intentionally fake
 scripts/benchmark-cpu-breakdown.mjs:script-domain:1
 scripts/benchmark-db-cpu.mjs:script-domain:1

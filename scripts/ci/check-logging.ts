@@ -102,8 +102,10 @@ const SAFE_KEY_ALLOWLIST: Record<string, string> = {
   // Internal database IDs (UUIDs, not domains or names)
   shopId: "Internal UUID primary key, not the domain string",
   shop_id: "Internal UUID primary key (snake_case), not the domain string",
-  shopFilter: "Numeric shop index for filtering, not the domain",
-  shop_filter: "Numeric shop index for filtering (snake_case), not the domain",
+  shopFilter: "Numeric shop index for filtering (credit-status-metafield-backfill.ts)",
+  shop_filter: "Numeric shop index for filtering (snake_case)",
+  shopIndex: "Numeric shop index, not the domain",
+  shop_index: "Numeric shop index (snake_case)",
 
   // Count/total metrics (aggregate numbers, not individual money amounts)
   totalCount: "Aggregate count of items, not a money amount",
@@ -114,7 +116,8 @@ const SAFE_KEY_ALLOWLIST: Record<string, string> = {
   totalProcessed: "Count of processed items, not money",
   totalSkipped: "Count of skipped items, not money",
   totalFailures: "Count of failures, not money",
-  grandTotal: "Grand count of items, not money",
+  totalAccountSources: "Count of account sources, not money",
+  total: "Generic count field in stat objects",
   orderCount: "Count of orders, not a money amount",
   invoiceCount: "Count of invoices, not a money amount",
   outstandingCount: "Count of outstanding items, not a money amount",
@@ -132,6 +135,8 @@ const SAFE_KEY_ALLOWLIST: Record<string, string> = {
   domain_event: "Domain-driven design event type (snake_case)",
   mutationName: "GraphQL mutation name (code-controlled)",
   roleName: "Contact role enum (code-controlled, not person name)",
+  namespace: "Metafield namespace (code-controlled, e.g. $app)",
+  subscriptionName: "Shopify plan name (e.g. Growth, Basic), not person name",
 };
 
 /**
@@ -430,7 +435,7 @@ function checkArgument(
   sourceFile: ts.SourceFile,
   relPath: string,
   violations: Violation[],
-  argIndex: number
+  _argIndex: number
 ): void {
   // Check template literals for shop interpolation
   if (ts.isTemplateExpression(arg) || ts.isTaggedTemplateExpression(arg)) {
@@ -478,8 +483,9 @@ function checkArgument(
     checkArrayLiteral(arg, sourceFile, relPath, violations);
   }
 
-  // Check raw identifier arguments (P2.4) - e.g., console.error(x, err)
-  if (ts.isIdentifier(arg) && argIndex > 0) {
+  // Check identifier arguments (P2.4) - e.g., console.error(err), console.log(shopDomain)
+  // No argIndex > 0 condition - check ALL arguments
+  if (ts.isIdentifier(arg)) {
     const name = arg.text;
     // Check for error-like identifiers
     if (isErrorLikeIdentifier(name)) {
@@ -504,6 +510,54 @@ function checkArgument(
         message: `Sensitive identifier passed as argument: ${name}`,
         snippet: truncate(arg.getText(), 100),
       });
+    }
+  }
+
+  // Check property access arguments (P2.4) - e.g., console.error("x", err.message), console.log("x", session.shop)
+  if (ts.isPropertyAccessExpression(arg)) {
+    const propName = arg.name.text;
+    // Check for .message/.stack
+    if (propName === "message" || propName === "stack") {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "error-message",
+        message: `Error .${propName} passed as argument`,
+        snippet: truncate(arg.getText(), 100),
+      });
+    }
+    // Check for sensitive last property name
+    if (isSensitiveIdentifier(propName) && !SAFE_KEY_ALLOWLIST[propName]) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "sensitive-value",
+        message: `Property access to sensitive field as argument: .${propName}`,
+        snippet: truncate(arg.getText(), 100),
+      });
+    }
+  }
+
+  // Check call expression arguments (P2.4) - e.g., console.error("x", String(err))
+  if (ts.isCallExpression(arg)) {
+    const callName = getCallName(arg);
+    if (callName === "String" || callName === "JSON.stringify") {
+      const firstArg = arg.arguments[0];
+      if (firstArg && ts.isIdentifier(firstArg) && isErrorLikeIdentifier(firstArg.text)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          column: character + 1,
+          rule: "error-stringify",
+          message: `Error stringified in argument: ${callName}(${firstArg.text})`,
+          snippet: truncate(arg.getText(), 100),
+        });
+      }
     }
   }
 }
@@ -964,6 +1018,33 @@ function checkTemplateLiteral(
         snippet: truncate(span.getText(sourceFile), 80),
       });
       return;
+    }
+
+    // Check property access for .message/.stack and sensitive last property name
+    if (ts.isPropertyAccessExpression(expr)) {
+      const propName = expr.name.text;
+      // ${err.message}, ${err.stack} should fail
+      if (propName === "message" || propName === "stack") {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(expr.getStart());
+        violations.push({
+          line: line + 1,
+          column: character + 1,
+          expr: exprText.trim(),
+          snippet: truncate(span.getText(sourceFile), 80),
+        });
+        return;
+      }
+      // ${buyer.email}, ${company.name} should fail (sensitive last property)
+      if (isSensitiveIdentifier(propName) && !SAFE_KEY_ALLOWLIST[propName]) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(expr.getStart());
+        violations.push({
+          line: line + 1,
+          column: character + 1,
+          expr: exprText.trim(),
+          snippet: truncate(span.getText(sourceFile), 80),
+        });
+        return;
+      }
     }
 
     // Also check plain identifiers

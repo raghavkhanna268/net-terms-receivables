@@ -288,6 +288,92 @@ describe("check-logging.ts (AST-based)", () => {
       expect(exitCode).not.toBe(0);
       expect(output).toContain("raw-error-arg");
     });
+
+    // Extended P2.4: Direct arguments (no argIndex > 0 condition)
+    it("fails for console.error(\"x\", err.message) - property access argument", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(err: Error) { console.error("Failed:", err.message); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("error-message");
+    });
+
+    it("fails for console.error(\"x\", String(err)) - stringified error argument", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(err: Error) { console.error("Error:", String(err)); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("error-stringify");
+    });
+
+    it("fails for console.log(\"x\", session.shop) - sensitive property access", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(session: { shop: string }) { console.log("Shop:", session.shop); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("sensitive-value");
+    });
+
+    it("fails for console.error(err) - error as first argument", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(err: Error) { console.error(err); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("raw-error-arg");
+    });
+
+    it("fails for console.log(shopDomain) - sensitive identifier as first argument", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(shopDomain: string) { console.log(shopDomain); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("sensitive-value");
+    });
+  });
+
+  // =========================================================================
+  // P2 Extended: Template spans with .message/.stack and sensitive property
+  // =========================================================================
+  describe("P2 Extended: Template property access", () => {
+    it("fails for ${err.message} in template", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(err: Error) { console.log(\`Error: \${err.message}\`); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("err.message");
+    });
+
+    it("fails for ${buyer.email} in template", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(buyer: { email: string }) { console.log(\`Buyer: \${buyer.email}\`); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("buyer.email");
+    });
+
+    it("fails for ${company.name} in template", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(company: { name: string }) { console.log(\`Company: \${company.name}\`); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("company.name");
+    });
   });
 
   // =========================================================================
