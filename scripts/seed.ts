@@ -323,6 +323,7 @@ export interface SeedState {
   databaseUrl: string | null;
   dryRun: boolean;
   reset: boolean;
+  resetApply: boolean;
   reportDuplicates: boolean;
   currencyCode: string;
   companies: Map<string, CompanyData>;
@@ -656,12 +657,26 @@ export const FIND_SEEDED_ORDERS_QUERY = `
 `;
 
 /**
- * Query to find seeded companies by externalId prefix.
+ * Query to find seeded companies by externalId prefix with locations.
  */
 export const FIND_SEEDED_COMPANIES_BY_EXTERNAL_ID_QUERY = `
   query FindSeededCompaniesByExternalId($query: String!) {
     companies(first: 50, query: $query) {
-      nodes { id name externalId }
+      nodes {
+        id
+        externalId
+        locations(first: 10) {
+          edges {
+            node {
+              id
+              name
+              buyerExperienceConfiguration {
+                paymentTermsTemplate { dueInDays }
+              }
+            }
+          }
+        }
+      }
     }
   }
 `;
@@ -672,7 +687,32 @@ export const FIND_SEEDED_COMPANIES_BY_EXTERNAL_ID_QUERY = `
 export const FIND_COMPANIES_BY_NAME_FOR_RESET_QUERY = `
   query FindCompaniesByNameForReset($query: String!) {
     companies(first: 10, query: $query) {
-      nodes { id name externalId }
+      nodes {
+        id
+        externalId
+        locations(first: 10) {
+          edges {
+            node {
+              id
+              name
+              buyerExperienceConfiguration {
+                paymentTermsTemplate { dueInDays }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+/**
+ * Query to find seeded customers by tag.
+ */
+export const FIND_SEEDED_CUSTOMERS_QUERY = `
+  query FindSeededCustomers($query: String!) {
+    customers(first: 50, query: $query) {
+      nodes { id tags }
     }
   }
 `;
@@ -689,138 +729,306 @@ export const COMPANY_DELETE_MUTATION = `
   }
 `;
 
+/**
+ * Result of reset discovery phase.
+ */
+interface ResetDiscovery {
+  // Seed-marked records (safe to delete)
+  markedCompanies: Array<{ id: string; externalId: string | null }>;
+  markedLocations: Array<{ id: string; companyId: string; dueInDays: number | null }>;
+  markedOrders: Array<{ id: string }>;
+  markedCustomers: Array<{ id: string }>;
+  markedDbAccounts: Array<{ id: string; companyLocationId: string | null; termsDays: number | null }>;
+  
+  // Suspect records (match by name/email but no marker - NOT deleted)
+  suspectCompanies: Array<{ id: string }>;
+  
+  // Counts by terms bucket
+  locationsByTerms: { net15: number; net30: number; net60: number; other: number };
+  dbAccountsByTerms: { net15: number; net30: number; net60: number; other: number };
+}
+
 interface ResetStats {
   companiesDeleted: number;
   companiesSkipped: number;
   companiesStillPresent: number;
   ordersSkipped: number;
+  customersSkipped: number;
+  dbAccountsDeleted: number;
   skipReasons: string[];
 }
 
+/**
+ * Reset seed data. By default (dry-run), discovers and lists leftover records.
+ * With --apply flag, actually deletes seed-marked records and verifies.
+ * 
+ * Only deletes records with seed markers (externalId prefix or seed tag).
+ * Records matching by name/email without markers are listed as 'suspect'.
+ */
 export async function resetSeedData(state: SeedState): Promise<void> {
-  console.log("\n🗑️  Resetting seed data...");
-
-  if (state.dryRun) {
-    console.log("  [dry-run] Would delete all data tagged with:", SEED_TAG);
+  console.log("\n🗑️  Reset: Discovering seed data...");
+  
+  const discovery = await discoverSeedRecords(state);
+  
+  // Print discovery results (IDs only, no PII)
+  printDiscoveryResults(discovery);
+  
+  // If not applying, stop here
+  if (!state.resetApply) {
+    console.log("\n  [dry-run] No mutations performed. Use --reset --apply to delete.");
     return;
   }
-
+  
+  console.log("\n  Applying deletions...");
+  
   const stats: ResetStats = {
     companiesDeleted: 0,
     companiesSkipped: 0,
     companiesStillPresent: 0,
-    ordersSkipped: 0,
+    ordersSkipped: discovery.markedOrders.length, // Orders can't be deleted via API
+    customersSkipped: discovery.markedCustomers.length, // Customers not deleted (just tagged)
+    dbAccountsDeleted: 0,
     skipReasons: [],
   };
-
-  await deleteSeededOrders(state, stats);
-  await deleteSeededCompanies(state, stats);
-
+  
+  // Delete seed-marked companies only
+  await deleteMarkedCompanies(state, discovery.markedCompanies, stats);
+  
+  // Delete seed-marked DB BuyerAccount rows
+  if (state.databaseUrl) {
+    await deleteMarkedDbAccounts(state, discovery.markedDbAccounts, stats);
+  }
+  
   // Update state counts
   state.deletedCount.companies = stats.companiesDeleted;
   state.deletedCount.orders = stats.ordersSkipped;
   state.skippedCount.companies += stats.companiesSkipped;
   state.skippedReasons.push(...stats.skipReasons);
-
+  
+  // Verify no seed-marked records remain
+  console.log("\n  Verifying no seed-marked records remain...");
+  const postVerify = await discoverSeedRecords(state);
+  const remainingMarked = postVerify.markedCompanies.length + postVerify.markedOrders.length + 
+                          postVerify.markedCustomers.length + postVerify.markedDbAccounts.length;
+  
   console.log("\n  Reset summary:");
   console.log(`    Companies deleted:       ${stats.companiesDeleted}`);
   console.log(`    Companies skipped:       ${stats.companiesSkipped}`);
-  console.log(`    Companies still present: ${stats.companiesStillPresent}`);
   console.log(`    Orders skipped:          ${stats.ordersSkipped} (cannot delete via API)`);
-
+  console.log(`    Customers skipped:       ${stats.customersSkipped} (just tagged, not deleted)`);
+  console.log(`    DB accounts deleted:     ${stats.dbAccountsDeleted}`);
+  console.log(`    Suspect (not deleted):   ${discovery.suspectCompanies.length}`);
+  
   if (stats.skipReasons.length > 0) {
     console.log("\n  Skip reasons:");
     for (const reason of stats.skipReasons) {
       console.log(`    - ${reason}`);
     }
   }
-
-  if (stats.companiesStillPresent > 0) {
-    console.log(`\n  ⚠️  ${stats.companiesStillPresent} seed companies still present after deletion attempt.`);
-    console.log("     Companies with orders cannot be deleted via API.");
-    console.log("     To fully reset, cancel/archive orders in Shopify Admin first.");
+  
+  if (remainingMarked > 0) {
+    console.log(`\n  ❌ Verification failed: ${remainingMarked} seed-marked records still present`);
+    state.failedCount.companies += postVerify.markedCompanies.length;
+    process.exit(1);
+  } else {
+    console.log("\n  ✅ Verification passed: No seed-marked records remain");
   }
 }
 
-async function deleteSeededOrders(state: SeedState, stats: ResetStats): Promise<void> {
-  console.log("  Searching for seeded orders...");
-
-  const result = await graphql<{ orders: { nodes: OrderNode[] } }>(
+/**
+ * Discover all seed records in Shopify and DB.
+ */
+async function discoverSeedRecords(state: SeedState): Promise<ResetDiscovery> {
+  const discovery: ResetDiscovery = {
+    markedCompanies: [],
+    markedLocations: [],
+    markedOrders: [],
+    markedCustomers: [],
+    markedDbAccounts: [],
+    suspectCompanies: [],
+    locationsByTerms: { net15: 0, net30: 0, net60: 0, other: 0 },
+    dbAccountsByTerms: { net15: 0, net30: 0, net60: 0, other: 0 },
+  };
+  
+  // 1. Find seed-marked companies by externalId prefix
+  const byExternalId = await graphql<{
+    companies: {
+      nodes: Array<{
+        id: string;
+        externalId: string | null;
+        locations: { edges: Array<{ node: { id: string; name: string; buyerExperienceConfiguration?: { paymentTermsTemplate?: { dueInDays: number | null } } } }> };
+      }>;
+    };
+  }>(state, FIND_SEEDED_COMPANIES_BY_EXTERNAL_ID_QUERY, { query: `external_id:${SEED_PREFIX}*` });
+  
+  for (const company of byExternalId.data?.companies.nodes ?? []) {
+    if (company.externalId?.startsWith(SEED_PREFIX)) {
+      discovery.markedCompanies.push({ id: company.id, externalId: company.externalId });
+      
+      // Count locations by terms
+      for (const edge of company.locations.edges) {
+        const loc = edge.node;
+        const dueInDays = loc.buyerExperienceConfiguration?.paymentTermsTemplate?.dueInDays ?? null;
+        discovery.markedLocations.push({ id: loc.id, companyId: company.id, dueInDays });
+        
+        if (dueInDays === 15) discovery.locationsByTerms.net15++;
+        else if (dueInDays === 30) discovery.locationsByTerms.net30++;
+        else if (dueInDays === 60) discovery.locationsByTerms.net60++;
+        else discovery.locationsByTerms.other++;
+      }
+    }
+  }
+  
+  // 2. Find suspect companies (match by name but no externalId marker)
+  const markedIds = new Set(discovery.markedCompanies.map(c => c.id));
+  for (const seed of COMPANY_SEEDS) {
+    const byName = await graphql<{
+      companies: {
+        nodes: Array<{
+          id: string;
+          externalId: string | null;
+          locations: { edges: Array<{ node: { id: string; name: string; buyerExperienceConfiguration?: { paymentTermsTemplate?: { dueInDays: number | null } } } }> };
+        }>;
+      };
+    }>(state, FIND_COMPANIES_BY_NAME_FOR_RESET_QUERY, { query: `name:'${seed.name}'` });
+    
+    for (const company of byName.data?.companies.nodes ?? []) {
+      if (!markedIds.has(company.id)) {
+        // No externalId marker - this is a suspect
+        if (!company.externalId?.startsWith(SEED_PREFIX)) {
+          discovery.suspectCompanies.push({ id: company.id });
+        }
+      }
+    }
+  }
+  
+  // 3. Find seed-marked orders by tag
+  const orderResult = await graphql<{ orders: { nodes: Array<{ id: string; tags: string[] }> } }>(
     state,
     FIND_SEEDED_ORDERS_QUERY,
     { query: `tag:'${SEED_TAG}'` }
   );
+  for (const order of orderResult.data?.orders.nodes ?? []) {
+    if (order.tags.includes(SEED_TAG)) {
+      discovery.markedOrders.push({ id: order.id });
+    }
+  }
+  
+  // 4. Find seed-marked customers by tag
+  const customerResult = await graphql<{ customers: { nodes: Array<{ id: string; tags: string[] }> } }>(
+    state,
+    FIND_SEEDED_CUSTOMERS_QUERY,
+    { query: `tag:'${SEED_TAG}'` }
+  );
+  for (const customer of customerResult.data?.customers.nodes ?? []) {
+    if (customer.tags.includes(SEED_TAG)) {
+      discovery.markedCustomers.push({ id: customer.id });
+    }
+  }
+  
+  // 5. Find seed-marked DB BuyerAccount rows (by companyLocationId matching seed locations)
+  if (state.databaseUrl) {
+    const sql = (await import("postgres")).default;
+    const db = sql(state.databaseUrl);
+    try {
+      // Get all BuyerAccounts for seed company locations
+      const locationIds = discovery.markedLocations.map(l => l.id);
+      if (locationIds.length > 0) {
+        const accounts = await db<Array<{ id: string; companyLocationId: string | null; defaultTermsDays: number | null }>>`
+          SELECT id, "companyLocationId", "defaultTermsDays"
+          FROM "BuyerAccount"
+          WHERE "companyLocationId" = ANY(${locationIds})
+        `;
+        for (const account of accounts) {
+          discovery.markedDbAccounts.push({
+            id: account.id,
+            companyLocationId: account.companyLocationId,
+            termsDays: account.defaultTermsDays,
+          });
+          
+          if (account.defaultTermsDays === 15) discovery.dbAccountsByTerms.net15++;
+          else if (account.defaultTermsDays === 30) discovery.dbAccountsByTerms.net30++;
+          else if (account.defaultTermsDays === 60) discovery.dbAccountsByTerms.net60++;
+          else discovery.dbAccountsByTerms.other++;
+        }
+      }
+    } finally {
+      await db.end();
+    }
+  }
+  
+  return discovery;
+}
 
-  const allOrders = result.data?.orders.nodes ?? [];
-  const seededOrders = allOrders.filter(o => o.tags.includes(SEED_TAG));
-  console.log(`  Found ${seededOrders.length} seeded orders (strict match)`);
-
-  // Orders cannot be deleted via Admin API - count as skipped
-  stats.ordersSkipped = seededOrders.length;
-
-  if (seededOrders.length > 0) {
-    console.log("  ⚠️  Orders cannot be deleted via API. Counted as skipped.");
+/**
+ * Print discovery results (IDs only, no PII).
+ */
+function printDiscoveryResults(discovery: ResetDiscovery): void {
+  const expectedPerBucket = COMPANY_SEEDS.length; // 5
+  
+  console.log("\n  Seed-marked records found:");
+  console.log(`    Companies:  ${discovery.markedCompanies.length}`);
+  for (const c of discovery.markedCompanies) {
+    console.log(`      - ${c.id} [${c.externalId}]`);
+  }
+  
+  console.log(`\n    Locations by terms (expected ${expectedPerBucket}/${expectedPerBucket}/${expectedPerBucket}):`);
+  console.log(`      Net-15: ${discovery.locationsByTerms.net15}`);
+  console.log(`      Net-30: ${discovery.locationsByTerms.net30}`);
+  console.log(`      Net-60: ${discovery.locationsByTerms.net60}`);
+  if (discovery.locationsByTerms.other > 0) {
+    console.log(`      Other:  ${discovery.locationsByTerms.other}`);
+  }
+  
+  console.log(`\n    Orders (tagged): ${discovery.markedOrders.length}`);
+  for (const o of discovery.markedOrders) {
+    console.log(`      - ${o.id}`);
+  }
+  
+  console.log(`\n    Customers (tagged): ${discovery.markedCustomers.length}`);
+  for (const c of discovery.markedCustomers) {
+    console.log(`      - ${c.id}`);
+  }
+  
+  if (discovery.markedDbAccounts.length > 0) {
+    console.log(`\n    DB BuyerAccounts by terms (expected ${expectedPerBucket}/${expectedPerBucket}/${expectedPerBucket}):`);
+    console.log(`      Net-15: ${discovery.dbAccountsByTerms.net15}`);
+    console.log(`      Net-30: ${discovery.dbAccountsByTerms.net30}`);
+    console.log(`      Net-60: ${discovery.dbAccountsByTerms.net60}`);
+    if (discovery.dbAccountsByTerms.other > 0) {
+      console.log(`      Other:  ${discovery.dbAccountsByTerms.other}`);
+    }
+    for (const a of discovery.markedDbAccounts) {
+      console.log(`      - ${a.id} [loc: ${a.companyLocationId}, terms: ${a.termsDays}]`);
+    }
+  }
+  
+  if (discovery.suspectCompanies.length > 0) {
+    console.log(`\n  ⚠️  Suspect companies (name match, no marker - NOT deleted): ${discovery.suspectCompanies.length}`);
+    for (const c of discovery.suspectCompanies) {
+      console.log(`      - ${c.id}`);
+    }
   }
 }
 
-async function deleteSeededCompanies(state: SeedState, stats: ResetStats): Promise<void> {
-  console.log("  Searching for seeded companies by externalId, name, and contact email...");
-
-  // Collect all seed companies to delete using multiple search strategies
-  const companiesById = new Map<string, { id: string; name: string; externalId: string | null }>();
-
-  // Strategy 1: Search by externalId prefix
-  const byExternalId = await graphql<{ companies: { nodes: Array<{ id: string; name: string; externalId: string | null }> } }>(
-    state,
-    FIND_SEEDED_COMPANIES_BY_EXTERNAL_ID_QUERY,
-    { query: `external_id:${SEED_PREFIX}*` }
-  );
-  for (const company of byExternalId.data?.companies.nodes ?? []) {
-    if (company.externalId?.startsWith(SEED_PREFIX)) {
-      companiesById.set(company.id, company);
-    }
-  }
-  console.log(`    By externalId: ${companiesById.size} found`);
-
-  // Strategy 2: Search by seed company names (finds companies without externalId)
-  for (const seed of COMPANY_SEEDS) {
-    const byName = await graphql<{ companies: { nodes: Array<{ id: string; name: string; externalId: string | null }> } }>(
-      state,
-      FIND_COMPANIES_BY_NAME_FOR_RESET_QUERY,
-      { query: `name:'${seed.name}'` }
-    );
-    for (const company of byName.data?.companies.nodes ?? []) {
-      if (company.name === seed.name && !companiesById.has(company.id)) {
-        companiesById.set(company.id, company);
-        console.log(`    By name "${seed.name}": found ${company.id}`);
-      }
-    }
-  }
-
-  // Strategy 3: Search by seed contact emails (via findCompaniesByContactEmail)
-  for (const seed of COMPANY_SEEDS) {
-    const byEmail = await findCompaniesByContactEmail(state, seed.contact.email);
-    for (const candidate of byEmail) {
-      if (!companiesById.has(candidate.id)) {
-        companiesById.set(candidate.id, { id: candidate.id, name: candidate.name, externalId: candidate.externalId });
-        console.log(`    By contact email for "${seed.name}": found ${candidate.id}`);
-      }
-    }
-  }
-
-  const allSeedCompanies = Array.from(companiesById.values());
-  console.log(`  Total unique seed companies found: ${allSeedCompanies.length}`);
-
-  // Delete each company
-  const deletedIds = new Set<string>();
-  for (const company of allSeedCompanies) {
+/**
+ * Delete seed-marked companies only.
+ */
+async function deleteMarkedCompanies(
+  state: SeedState,
+  companies: Array<{ id: string; externalId: string | null }>,
+  stats: ResetStats
+): Promise<void> {
+  console.log(`  Deleting ${companies.length} seed-marked companies...`);
+  
+  for (const company of companies) {
     const deleteResult = await graphql<{
       companyDelete: { deletedCompanyId: string | null; userErrors: UserError[] };
     }>(state, COMPANY_DELETE_MUTATION, { id: company.id }, { isMutation: true });
-
+    
     const userErrors = deleteResult.data?.companyDelete.userErrors ?? [];
     const deletedId = deleteResult.data?.companyDelete.deletedCompanyId;
-
+    
     if (userErrors.length > 0) {
       const error = userErrors[0];
       const code = error.code ?? "UNKNOWN";
@@ -830,7 +1038,6 @@ async function deleteSeededCompanies(state: SeedState, stats: ResetStats): Promi
       stats.companiesSkipped++;
       console.log(`    ⚠️  Skipped ${company.id}: [${code}] ${message}`);
     } else if (deletedId) {
-      deletedIds.add(deletedId);
       stats.companiesDeleted++;
       console.log(`    ✓ Deleted ${company.id}`);
     } else {
@@ -840,41 +1047,36 @@ async function deleteSeededCompanies(state: SeedState, stats: ResetStats): Promi
       console.log(`    ⚠️  Skipped ${company.id}: No deletedCompanyId returned`);
     }
   }
+}
 
-  // Verify deletion by re-querying
-  console.log("  Verifying deletions...");
-  const verifyResult = await graphql<{ companies: { nodes: Array<{ id: string; name: string; externalId: string | null }> } }>(
-    state,
-    FIND_SEEDED_COMPANIES_BY_EXTERNAL_ID_QUERY,
-    { query: `external_id:${SEED_PREFIX}*` }
-  );
-  const stillPresentByExternalId = (verifyResult.data?.companies.nodes ?? [])
-    .filter(c => c.externalId?.startsWith(SEED_PREFIX));
-
-  // Also check by name for companies without externalId
-  const stillPresentByName = new Set<string>();
-  for (const seed of COMPANY_SEEDS) {
-    const byName = await graphql<{ companies: { nodes: Array<{ id: string; name: string; externalId: string | null }> } }>(
-      state,
-      FIND_COMPANIES_BY_NAME_FOR_RESET_QUERY,
-      { query: `name:'${seed.name}'` }
-    );
-    for (const company of byName.data?.companies.nodes ?? []) {
-      if (company.name === seed.name && !deletedIds.has(company.id)) {
-        stillPresentByName.add(company.id);
-      }
-    }
-  }
-
-  stats.companiesStillPresent = stillPresentByExternalId.length + stillPresentByName.size;
-
-  if (stats.companiesStillPresent > 0) {
-    console.log(`  Verification: ${stats.companiesStillPresent} seed companies still present`);
-    for (const company of stillPresentByExternalId) {
-      console.log(`    - ${company.id} (${company.name})`);
-    }
-  } else {
-    console.log("  Verification: All seed companies successfully deleted");
+/**
+ * Delete seed-marked DB BuyerAccount rows.
+ */
+async function deleteMarkedDbAccounts(
+  state: SeedState,
+  accounts: Array<{ id: string; companyLocationId: string | null; termsDays: number | null }>,
+  stats: ResetStats
+): Promise<void> {
+  if (!state.databaseUrl || accounts.length === 0) return;
+  
+  console.log(`  Deleting ${accounts.length} DB BuyerAccount rows...`);
+  
+  const sql = (await import("postgres")).default;
+  const db = sql(state.databaseUrl);
+  try {
+    const accountIds = accounts.map(a => a.id);
+    const result = await db`
+      DELETE FROM "BuyerAccount"
+      WHERE id = ANY(${accountIds})
+    `;
+    stats.dbAccountsDeleted = result.count;
+    console.log(`    ✓ Deleted ${result.count} BuyerAccount rows`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    stats.skipReasons.push(`DB delete failed: ${msg}`);
+    console.log(`    ⚠️  Failed to delete DB rows: ${msg}`);
+  } finally {
+    await db.end();
   }
 }
 
@@ -3347,11 +3549,12 @@ export function printDatabaseSeedSQL(state: SeedState): void {
 
 // -- Main --
 
-function parseArgs(): { dryRun: boolean; reset: boolean; reportDuplicatesMode: boolean } {
+function parseArgs(): { dryRun: boolean; reset: boolean; resetApply: boolean; reportDuplicatesMode: boolean } {
   const args = process.argv.slice(2);
   return {
     dryRun: args.includes("--dry-run"),
     reset: args.includes("--reset"),
+    resetApply: args.includes("--apply"),
     reportDuplicatesMode: args.includes("--report-duplicates"),
   };
 }
@@ -3391,7 +3594,7 @@ export async function main(): Promise<void> {
   console.log("  (Using orderCreate with processedAt - no draft orders)");
   console.log("═══════════════════════════════════════════════════════════════");
 
-  const { dryRun, reset, reportDuplicatesMode } = parseArgs();
+  const { dryRun, reset, resetApply, reportDuplicatesMode } = parseArgs();
   const env = validateEnv();
 
   if (!env) {
@@ -3404,6 +3607,7 @@ export async function main(): Promise<void> {
     databaseUrl: env.databaseUrl,
     dryRun,
     reset,
+    resetApply,
     reportDuplicates: reportDuplicatesMode,
     currencyCode: "",
     companies: new Map(),
@@ -3424,7 +3628,11 @@ export async function main(): Promise<void> {
   };
 
   console.log(`\nShop: ${state.shop}`);
-  console.log(`Mode: ${reportDuplicatesMode ? "REPORT DUPLICATES (read-only)" : dryRun ? "DRY RUN (read-only lookups, no mutations)" : reset ? "RESET + SEED" : "SEED"}`);
+  const modeStr = reportDuplicatesMode ? "REPORT DUPLICATES (read-only)" 
+    : dryRun ? "DRY RUN (read-only lookups, no mutations)" 
+    : reset ? (resetApply ? "RESET + APPLY (will delete)" : "RESET (dry-run, use --apply to delete)") 
+    : "SEED";
+  console.log(`Mode: ${modeStr}`);
   console.log(`Database: ${env.databaseUrl ? "Connected" : "Not configured (will print SQL)"}`);
 
   // Preflight checks
