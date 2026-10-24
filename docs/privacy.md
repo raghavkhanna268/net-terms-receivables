@@ -263,6 +263,22 @@ For privacy inquiries:
 
 ## Appendix A: Shopify OAuth Scopes
 
-**Current scopes:** `read_companies`, `read_orders`, `read_payment_terms`, `read_customers`, `read_draft_orders`
+<!-- PRIVACY_SCOPES_BEGIN -->
+| Scope | Reason |
+|-------|--------|
+| `read_companies` | Sync B2B company and location data for buyer account management |
+| `read_customers` | Sync tagged customers for non-B2B wholesale buyer accounts |
+| `read_draft_orders` | Track draft orders with payment terms for pending credit exposure |
+| `read_orders` | Sync orders with payment terms for invoice tracking and webhooks |
+| `read_payment_terms` | Read payment terms on orders and company locations for due date calculation |
+| `write_companies` | Write credit_status metafields on Company and CompanyLocation |
+| `write_customers` | Write credit_status metafields on Customer |
+| `write_merchant_managed_fulfillment_orders` | Hold and release fulfillment for orders from accounts on credit hold |
+| `write_orders` | Mark orders as paid after bank transfer matching; add/remove order tags |
+| `write_payment_customizations` | Register Shopify Function to hide net-terms payment method at checkout |
+| `write_validations` | Register Shopify Function to block checkout for accounts on hold or over limit |
+<!-- PRIVACY_SCOPES_END -->
+
+**Customer data limitation:** Customer data collected is limited to name and email only. The app does not read or store customer phone numbers or addresses.
 
 **Protected Customer Data:** The `read_customers` scope requires Shopify's Protected Customer Data (PCD) approval. Level 1 access plus Name and Email fields have been requested in the Partner Dashboard. Until approval is granted and the PCD feature is enabled, the email and display name fields in tagged customers remain empty.
