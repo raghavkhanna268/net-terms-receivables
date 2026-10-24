@@ -1362,7 +1362,7 @@ jobs:
                 printf '%s\n' "$FIXTURES" | jq -c --argjson mf "$MF_MAP" '
                   . as $a | ($a.company_location_id // $a.customer_id) as $owner
                   | {buyer_account_id, kind, company_id, company_location_id, customer_id,
-                     hold_state, manual_hold, bypass, hold_reason_code, overdue,
+                     hold_state, manual_hold, bypass, manual_hold_reason_code, overdue,
                      owner_found: ($owner != null and ($mf | has($owner))),
                      credit_status: (if $owner == null then null else $mf[$owner] end)}'
                 printf '%s\n' "$FIXTURES" | jq -s -c --argjson mf "$MF_MAP" '
