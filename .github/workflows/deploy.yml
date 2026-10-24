@@ -1,7 +1,7 @@
 # Deploys the Cloudflare Worker when code merges to main.
 #
 # Triggers:
-#   - workflow_run: When CI or Database Migrations completes (push to main only)
+#   - workflow_run: When CI or Database Migrations completes successfully (push to main only)
 #   - workflow_dispatch: Manual deployment (main branch only)
 #
 # Design:
@@ -44,10 +44,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
-    # Only deploy from main branch pushes, never from PR runs or other branches
+    # Only deploy from main branch pushes, never from PR runs or other branches.
+    # The upstream run must have succeeded: a failed/cancelled CI or migration
+    # run skips this job entirely (skipped jobs use no Actions minutes) instead
+    # of spinning up a runner just for the readiness gate to fail.
     if: >-
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_branch == 'main')
 
