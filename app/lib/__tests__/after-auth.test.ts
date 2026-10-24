@@ -18,6 +18,14 @@ vi.mock("../payment-customization-registration.server", () => ({
   ensurePaymentCustomization: vi.fn(),
 }));
 
+const mockSqlQuery = Object.assign(
+  vi.fn().mockResolvedValue({ count: 1 }),
+  { json: (v: unknown) => JSON.stringify(v) }
+);
+vi.mock("../request-context.server", () => ({
+  getRequestSql: vi.fn(() => mockSqlQuery),
+}));
+
 import { ensureMetafieldDefinitions } from "../metafield-definitions.server";
 import { ensureValidation } from "../validation-registration.server";
 import { ensurePaymentCustomization } from "../payment-customization-registration.server";

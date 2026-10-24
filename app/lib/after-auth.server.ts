@@ -16,6 +16,7 @@ import { ensureValidation } from "./validation-registration.server";
 import { ensurePaymentCustomization } from "./payment-customization-registration.server";
 import { getRequestSql } from "./request-context.server";
 import { validateTimezone } from "./aging-dates.server";
+import type { Sql } from "./db-light.server";
 
 /**
  * Minimal type for the admin GraphQL client.
@@ -93,13 +94,22 @@ const SHOP_TIMEZONE_QUERY = `
 `;
 
 /**
- * Fetch the shop's timezone from Admin API and update the database.
+ * Fetch the shop's timezone from Admin API and upsert the Shop row.
  * Uses validateTimezone to ensure the value is a valid IANA timezone.
+ *
+ * This function ensures the Shop row exists on every install or re-auth.
+ * It uses INSERT ... ON CONFLICT to be idempotent:
+ * - Fresh install: Creates new Shop row with timezone
+ * - Reinstall: Clears uninstalledAt and updates timezone
+ * - Re-auth: Updates timezone only
  */
 async function syncShopTimezone(
   shop: string,
   admin: AdminGraphqlClient,
 ): Promise<void> {
+  const sql = getRequestSql();
+  let timezone = "Asia/Kolkata";
+
   try {
     const response = await admin.graphql(SHOP_TIMEZONE_QUERY);
     const result = await response.json() as {
@@ -112,44 +122,30 @@ async function syncShopTimezone(
         `[afterAuth] GraphQL errors fetching timezone for ${shop}:`,
         result.errors.map((e) => e.message).join(", ")
       );
-      return;
-    }
-
-    const ianaTimezone = result.data?.shop?.ianaTimezone;
-    if (!ianaTimezone) {
-      console.warn(`[afterAuth] No timezone returned for ${shop}`);
-      return;
-    }
-
-    // Validate the timezone before storing - this ensures the DB only has valid zones
-    const validatedTimezone = validateTimezone(ianaTimezone);
-    if (validatedTimezone !== ianaTimezone) {
-      console.warn(
-        `[afterAuth] Invalid timezone from Shopify for ${shop}: "${ianaTimezone}", ` +
-        `using fallback: "${validatedTimezone}"`
-      );
-    }
-
-    // Get SQL client from request context
-    const sql = getRequestSql();
-
-    // Update the shop's timezone in the database
-    // Note: Shop row may not exist yet if this is the first auth - that's OK, row count will be 0
-    const updateResult = await sql`
-      UPDATE "Shop"
-      SET timezone = ${validatedTimezone}
-      WHERE domain = ${shop}
-    `;
-
-    const rowCount = updateResult.count ?? 0;
-    if (rowCount === 0) {
-      console.log(`[afterAuth] No Shop row found for ${shop}, skipping timezone update`);
     } else {
-      console.log(`[afterAuth] Updated timezone for ${shop}: ${validatedTimezone} (${rowCount} row)`);
+      const ianaTimezone = result.data?.shop?.ianaTimezone;
+      if (ianaTimezone) {
+        const validatedTimezone = validateTimezone(ianaTimezone);
+        if (validatedTimezone !== ianaTimezone) {
+          console.warn(
+            `[afterAuth] Invalid timezone from Shopify for ${shop}: "${ianaTimezone}", ` +
+            `using fallback: "${validatedTimezone}"`
+          );
+        }
+        timezone = validatedTimezone;
+      } else {
+        console.warn(`[afterAuth] No timezone returned for ${shop}, using default`);
+      }
     }
   } catch (error) {
-    // Non-fatal: timezone sync failure shouldn't break app access
-    console.error(`[afterAuth] Failed to sync timezone for ${shop}:`, error);
+    console.warn(`[afterAuth] Failed to fetch timezone for ${shop}, using default:`, error);
+  }
+
+  try {
+    await upsertShopOnAuth(sql, shop, timezone);
+  } catch (error) {
+    console.error(`[afterAuth] Failed to upsert Shop row for ${shop}:`, error);
+    throw error;
   }
 }
 
@@ -225,4 +221,35 @@ export function _isShopSetupComplete(shop: string): boolean {
  */
 export function _isShopSetupInFlight(shop: string): boolean {
   return inFlightSetups.has(shop);
+}
+
+/**
+ * Upsert Shop row on authentication.
+ *
+ * Called on every install or re-auth to ensure the Shop row exists.
+ * This is idempotent: INSERT ... ON CONFLICT updates existing rows.
+ *
+ * On fresh install: Creates a new Shop row with the given timezone.
+ * On reinstall: Clears uninstalledAt and updates timezone.
+ * On re-auth: Updates timezone only (no-op if timezone unchanged).
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopDomain - Shop domain (e.g., "example.myshopify.com")
+ * @param timezone - IANA timezone from Shopify (e.g., "America/New_York")
+ */
+export async function upsertShopOnAuth(
+  sql: Sql,
+  shopDomain: string,
+  timezone: string,
+): Promise<void> {
+  await sql`
+    INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
+    VALUES (${shopDomain}, ${timezone}, 'INR', 'free', NOW(), NOW())
+    ON CONFLICT (domain)
+    DO UPDATE SET
+      timezone = EXCLUDED.timezone,
+      "uninstalledAt" = NULL,
+      "updatedAt" = NOW()
+  `;
+  console.log(`[afterAuth] Upserted Shop row for ${shopDomain} (timezone: ${timezone})`);
 }
