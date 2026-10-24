@@ -20,6 +20,7 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 describeWithDb("S6 pgmq Queue Operations", () => {
   let sql: ReturnType<typeof postgres>;
   const TEST_SUFFIX = Date.now().toString(36);
+  const testMsgIds: string[] = [];
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
@@ -75,14 +76,17 @@ describeWithDb("S6 pgmq Queue Operations", () => {
       `;
       expect(sendResult.send).toBeDefined();
       const msgId = sendResult.send;
+      testMsgIds.push(msgId);
 
-      // Read message (visibility timeout 0 = immediate)
+      // Read our specific message by msg_id from the queue table
+      // (pgmq.read returns oldest message, not necessarily ours)
       const [readResult] = await sql<{
         msg_id: string;
         message: typeof testMessage;
       }[]>`
-        SELECT msg_id, message FROM pgmq.read('s6_sync', 0, 1)
+        SELECT msg_id, message FROM pgmq.q_s6_sync WHERE msg_id = ${msgId}::bigint
       `;
+      expect(readResult).toBeDefined();
       expect(readResult.msg_id).toBe(msgId);
       expect(readResult.message.topic).toBe("COMPANIES_CREATE");
       expect(readResult.message.shop).toBe(testMessage.shop);
@@ -113,9 +117,11 @@ describeWithDb("S6 pgmq Queue Operations", () => {
         SELECT pgmq.send('s6_sync', ${sql.json(complexMessage)}) as send
       `;
       const msgId = sendResult.send;
+      testMsgIds.push(msgId);
 
+      // Read our specific message by msg_id from the queue table
       const [readResult] = await sql<{ message: typeof complexMessage }[]>`
-        SELECT message FROM pgmq.read('s6_sync', 0, 1)
+        SELECT message FROM pgmq.q_s6_sync WHERE msg_id = ${msgId}::bigint
       `;
 
       expect(readResult.message.metadata.nested.value).toBe(123);
@@ -150,8 +156,13 @@ describeWithDb("S6 pgmq Queue Operations", () => {
       `;
       const msgId = sendResult.send;
 
-      const [readResult] = await sql<{ message: typeof bulkMessage }[]>`
-        SELECT message FROM pgmq.read('s6_bulk', 0, 1)
+      // Read our specific message by msg_id from the queue table
+      // (pgmq.read returns oldest message, not necessarily ours)
+      const [readResult] = await sql<{
+        msg_id: string;
+        message: typeof bulkMessage;
+      }[]>`
+        SELECT msg_id, message FROM pgmq.q_s6_bulk WHERE msg_id = ${msgId}::bigint
       `;
 
       expect(readResult.message.bulkType).toBe("companies");

@@ -20,6 +20,10 @@ import {
   type HoldReasonCode,
 } from "~/lib/metafields-contract";
 import { shopifyGraphQLRequest, type ShopifyClientResult } from "./shopify-client.server";
+import { hasOverdueInvoices } from "./overdue.server";
+
+// Re-export HoldReasonCode for use by credit-status-recompute.server.ts
+export type { HoldReasonCode };
 
 /**
  * Valid hold reason codes - used for validation.
@@ -299,26 +303,6 @@ async function computeExposure(
     draftExposurePaise: draftPaise,
     currency,
   };
-}
-
-/**
- * Check for overdue invoices.
- */
-async function hasOverdueInvoices(
-  sql: Sql,
-  buyerAccountId: string
-): Promise<boolean> {
-  const [result] = await sql<{ has_overdue: boolean }[]>`
-    SELECT EXISTS (
-      SELECT 1 FROM "Invoice"
-      WHERE "buyerAccountId" = ${buyerAccountId}
-        AND status = 'open'
-        AND outstanding > 0
-        AND "dueAt" IS NOT NULL
-        AND "dueAt" < NOW() - INTERVAL '1 day'
-    ) AS has_overdue
-  `;
-  return result?.has_overdue ?? false;
 }
 
 /**
