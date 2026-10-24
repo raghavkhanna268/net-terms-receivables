@@ -145,7 +145,7 @@ describe("Reconcile Route (M5)", () => {
       expect(logOutput).toContain('"err":"TypeError"');
     });
 
-    it("logs shopId, view, and errorCode for loader data error", async () => {
+    it("logs shopId, stage, and errorCode for loader data error", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       const { resolvePlan } = await import("~/services/plan.server");
       const { getSuggestedMatches } = await import(
@@ -181,15 +181,60 @@ describe("Reconcile Route (M5)", () => {
       });
 
       const logOutput = consoleErrorSpy.mock.calls[0][0];
-      expect(logOutput).toContain('"event":"reconcile_loader_error"');
-      expect(logOutput).toContain('"shopId":"shop-789"');
-      expect(logOutput).toContain('"stage":"suggested"');
-      expect(logOutput).toContain('"err":');
+      const parsed = JSON.parse(logOutput);
+
+      expect(parsed.event).toBe("reconcile_loader_error");
+      expect(parsed.shopId).toBe("shop-789");
+      expect(parsed.stage).toBe("suggested");
+      expect(parsed.err).toBeDefined();
 
       expect(logOutput).not.toContain("myshopify.com");
       expect(logOutput).not.toContain("@shop");
 
       expect(result.error).toBe("Failed to load reconciliation data");
+    });
+
+    it("maps unknown view values to 'other' in stage field", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      const { resolvePlan } = await import("~/services/plan.server");
+      const { getSuggestedMatches } = await import(
+        "~/lib/matching/queries.server"
+      );
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-unknown", currency: "INR" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+      (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+        plan: { key: "starter" },
+      });
+
+      mockSql
+        .mockResolvedValueOnce([{ count: "0" }])
+        .mockResolvedValueOnce([{ count: "0" }])
+        .mockResolvedValueOnce([{ count: "0" }])
+        .mockResolvedValueOnce([{ count: "0" }]);
+
+      const queryError = new Error("Query failed");
+      (getSuggestedMatches as ReturnType<typeof vi.fn>).mockRejectedValue(
+        queryError
+      );
+
+      const maliciousUrl = new URL("https://example.com/app/reconcile?view=<script>alert(1)</script>");
+      const maliciousRequest = new Request(maliciousUrl);
+
+      const { loader } = await import("../app.reconcile");
+      await loader({
+        request: maliciousRequest,
+        context: mockContext as never,
+        params: {},
+        url: maliciousUrl,
+        pattern: mockPattern,
+      });
+
+      const logOutput = consoleErrorSpy.mock.calls[0][0];
+      const parsed = JSON.parse(logOutput);
+
+      expect(parsed.stage).toBe("other");
+      expect(logOutput).not.toContain("<script>");
     });
   });
 

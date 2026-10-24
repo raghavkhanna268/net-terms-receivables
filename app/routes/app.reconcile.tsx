@@ -43,6 +43,13 @@ import { safeLog, toErrorCode } from "~/lib/log.server";
 
 const PAGE_SIZE = 20;
 
+const VALID_VIEWS = ["suggested", "unmatched", "confirmed", "pushing"] as const;
+type ReconcileView = (typeof VALID_VIEWS)[number];
+
+function toSafeView(raw: string): ReconcileView | "other" {
+  return VALID_VIEWS.includes(raw as ReconcileView) ? (raw as ReconcileView) : "other";
+}
+
 interface PaymentSummary {
   id: string;
   amountPaise: string;
@@ -268,7 +275,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   } catch (err) {
     safeLog("error", "reconcile_loader_error", {
       shopId: shop.id,
-      stage: view,
+      stage: toSafeView(view),
       err: toErrorCode(err),
     });
     return {
