@@ -16,9 +16,9 @@ name: Shopify App Release (dev store)
 #   - exclusive-flags guard: preview and allow-updates flags never share the base args
 #     (mutually exclusive in CLI 4.9.4; passing both exits 2 before any API call)
 # Default is a PREVIEW: `--no-release` creates an app version without releasing it.
-# Output: version/status lines plus the CLI error box, redacted (URLs, emails, shop
-# domains, token-like strings) and capped; a one-line error class goes to the job
-# summary. The token is never echoed and is explicitly masked.
+# Output: NO CLI text (public-logs ruling). Only token_present, release, a fixed-enum
+# deploy_error_class, the exit code and, on success, our own version label
+# (ci-<run_id>-<attempt>), to the log and the job summary. Token explicitly masked.
 # Does NOT touch PLAN_GATING_ENFORCED, Worker vars, DB, or the cron.
 on:
   workflow_dispatch:
@@ -189,19 +189,28 @@ jobs:
           VERSION_MESSAGE: ${{ inputs.version_message }}
           HAS_MESSAGE: ${{ steps.msg.outputs.has_message }}
           SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+          # Our own version label (ids only), so the log never needs CLI text to name it.
+          VERSION_TAG: ci-${{ github.run_id }}-${{ github.run_attempt }}
           SHOPIFY_CLI_NO_ANALYTICS: "1"
           CI: "1"
         run: |
           set -o pipefail
+          # Public-logs ruling: NO CLI text is printed (its boxes carry org/app names and
+          # free-text errors). Only token_present, release, deploy_error_class (fixed enum),
+          # deploy_exit_code and, on success, the allowlisted version label.
           if [ -z "$SHOPIFY_APP_AUTOMATION_TOKEN" ]; then
             echo "token_present=false (set environment secret SHOPIFY_APP_AUTOMATION_TOKEN on shopify-release)"
+            echo "- token_present: false" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           # Belt and braces: secrets are masked already, mask the value explicitly too.
           echo "::add-mask::$SHOPIFY_APP_AUTOMATION_TOKEN"
           echo "token_present=true"
+          if ! printf '%s' "$VERSION_TAG" | grep -Eq '^ci-[0-9]{1,20}-[0-9]{1,4}$'; then
+            echo "version_tag_valid=false"; exit 1
+          fi
           args=(app deploy --config shopify.app.toml --no-color
-                --source-control-url "$SOURCE_URL")
+                --source-control-url "$SOURCE_URL" --version "$VERSION_TAG")
           if [ "$HAS_MESSAGE" = "true" ]; then args+=(--message "$VERSION_MESSAGE"); fi
           # In CLI 4.9.4 the preview flag and the allow-updates flag are mutually
           # exclusive (oclif FailedFlagValidationError, exit 2). The preview path needs
@@ -211,44 +220,42 @@ jobs:
           else
             args+=(--no-release)
           fi
-          echo "release=$([ "$RELEASE" = "true" ] && echo true || echo false)"
+          rel="$([ "$RELEASE" = "true" ] && echo true || echo false)"
+          echo "release=$rel"
           LOG="$RUNNER_TEMP/deploy.log"
           rc=0
           ./node_modules/.bin/shopify "${args[@]}" > "$LOG" 2>&1 || rc=$?
-          # Redact URLs, emails, shop domains and token-like strings, strip ANSI codes.
-          redact() {
-            sed -E -e 's/\x1b\[[0-9;]*[A-Za-z]//g' \
-                   -e 's#https?://[^ )]+#<url>#g' \
-                   -e 's#[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+#<email>#g' \
-                   -e 's#[A-Za-z0-9-]+\.myshopify\.com#<shop>#g' \
-                   -e 's#(atkn|shp[a-z]{1,4})_[A-Za-z0-9_-]+#<token>#g' \
-                   -e 's#[A-Za-z0-9_-]{32,}#<token>#g' "$LOG"
-          }
-          # Print version/status lines plus the full CLI error/warning box (capped).
-          redact | awk '
-            /^[[:space:]]*╭/ { inbox = 1 }
-            inbox || tolower($0) ~ /version|released|error|fail/ { print }
-            /^[[:space:]]*╰/ { inbox = 0 }
-          ' | head -n 60 || true
-          # One-line error class (no raw text) for the job summary.
-          body="$(redact | tr '[:upper:]' '[:lower:]')"
+          # Classify from the RAW log (never printed). Fixed enum; matched text is never echoed.
+          has() { grep -Eiq -e "$1" "$LOG"; }
           if [ "$rc" = "0" ]; then cls="none"
-          elif printf '%s' "$body" | grep -Eq 'cannot also be provided|nonexistent flag|unexpected argument|missing required flag|expected .* to be one of|following errors? occurred'; then cls="cli_flag_validation"
-          elif printf '%s' "$body" | grep -Eq 'token|unauthori[sz]ed|forbidden|401|403|log in|login|authenticat|permission'; then cls="auth"
-          elif printf '%s' "$body" | grep -Eq 'configuration|toml|client_id|schema|invalid'; then cls="app_config"
-          elif printf '%s' "$body" | grep -Eq 'econn|etimedout|enotfound|fetch failed|network|socket|5[0-9][0-9]'; then cls="network_or_server"
-          else cls="unclassified"
+          elif has 'cannot also be provided when using --|nonexistent flags?:|unexpected arguments?:|missing required flags?|expected --[a-z-]+=.* to be one of|the following errors? occurred:'; then cls="flag_or_args"
+          elif has '(status( code)?|http)[^0-9a-z]{0,3}40[13]([^0-9]|$)|unauthori[sz]ed|invalid (app automation |access |automation )?token|token (is |has )?(expired|revoked|invalid)|not logged in|authentication (failed|required|error)|access denied|permission denied'; then cls="auth"
+          elif has '(status( code)?|http)[^0-9a-z]{0,3}5[0-9]{2}([^0-9]|$)|internal server error|bad gateway|service unavailable|gateway time-?out'; then cls="api_5xx"
+          elif has '(^|[^a-z])(econnreset|econnrefused|etimedout|enotfound|eai_again)([^a-z]|$)|fetch failed|socket hang up|network error'; then cls="network"
+          elif has 'could not find a shopify app configuration file|validation errors? in|invalid (toml|app configuration)|is not a valid app configuration'; then cls="config"
+          else cls="unknown"
           fi
           echo "deploy_error_class=$cls"
-          echo "- deploy_error_class: \`$cls\` (exit $rc)" >> "$GITHUB_STEP_SUMMARY"
           # Backstop: any extension removal/deletion mentioned by the CLI is a hard fail.
           if grep -Eiq '(extension|module).*(remov|delet)|(remov|delet).*(extension|module)' "$LOG"; then
-            echo "extension_removal_detected=true"
+            removal=true
             [ "$rc" = "0" ] && rc=3
           else
-            echo "extension_removal_detected=false"
+            removal=false
           fi
+          echo "extension_removal_detected=$removal"
           echo "deploy_exit_code=$rc"
+          {
+            echo "- token_present: true"
+            echo "- release: $rel"
+            echo "- deploy_error_class: \`$cls\`"
+            echo "- deploy_exit_code: $rc"
+            echo "- extension_removal_detected: $removal"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" = "0" ]; then
+            echo "version_label=$VERSION_TAG"
+            echo "- version_label: \`$VERSION_TAG\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
           rm -f "$LOG"
           exit "$rc"
 

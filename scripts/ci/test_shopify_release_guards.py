@@ -3,6 +3,7 @@
 import importlib.util
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -98,9 +99,13 @@ if scratch(lambda d: edit(os.path.join(d, ".github/workflows/shopify-app-release
 if scratch(lambda d: edit(os.path.join(d, "package.json"), '"@shopify/cli": "4.9.4"', '"@shopify/cli": "^4.9.4"')) == 0:
     fails.append("unpinned CLI devDependency not failed")
 
+# 13. Deploy step prints no CLI text and classifies errors (stub CLI, fake values only).
+if subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "ci", "test_shopify_deploy_step.py")]).returncode != 0:
+    fails.append("deploy step stub-CLI self-test failed")
+
 if fails:
     print("shopify release guards self-test: FAIL")
     for f in fails:
         print(" -", f)
     sys.exit(1)
-print("shopify release guards self-test: OK (17/17)")
+print("shopify release guards self-test: OK (18/18)")
