@@ -1,54 +1,54 @@
-import { useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { Form, useActionData, useLoaderData } from "react-router";
+import { redirect } from "react-router";
 
-import { loginErrorMessage } from "./error.server";
+/**
+ * App Store compliance: Per Shopify requirement 2.3.1, App Store apps must not
+ * request manual entry of a myshopify.com URL or shop domain during installation
+ * or configuration. Install/login must start from the Shopify App Store or admin.
+ *
+ * This route handles OAuth redirects when shopify.login() receives a shop
+ * parameter (from Shopify's managed installation flow). If a merchant lands
+ * here without a shop parameter (e.g., direct URL access), we redirect to /app
+ * which will trigger the appropriate authentication flow.
+ *
+ * @see https://shopify.dev/docs/apps/launch/shopify-app-store/app-store-requirements
+ */
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
-  // Session storage is injected per-request via loadContext in workers/app.ts
   const { shopify } = context;
 
-  const errors = loginErrorMessage(await shopify.login(request));
+  // shopify.login() returns a redirect if shop is present (OAuth flow),
+  // or returns an error object if shop is missing/invalid.
+  // Since we don't show a form, a missing shop means the user should go to /app.
+  const result = await shopify.login(request);
 
-  return { errors };
+  // If login didn't throw a redirect (i.e., no valid shop), redirect to /app
+  // which will handle embedded auth or prompt via Shopify's flow.
+  if (result) {
+    throw redirect("/app");
+  }
+
+  // This line is reached only if shopify.login() returned null/undefined
+  // without redirecting, which shouldn't happen in normal flow.
+  throw redirect("/app");
 };
 
 export const action = async ({ request, context }: ActionFunctionArgs) => {
-  // Session storage is injected per-request via loadContext in workers/app.ts
   const { shopify } = context;
 
-  const errors = loginErrorMessage(await shopify.login(request));
+  // Handle POST from Shopify's OAuth callback or internal redirects
+  const result = await shopify.login(request);
 
-  return {
-    errors,
-  };
+  // If login didn't throw a redirect, send to /app
+  if (result) {
+    throw redirect("/app");
+  }
+
+  throw redirect("/app");
 };
 
 export default function Auth() {
-  const loaderData = useLoaderData<typeof loader>();
-  const actionData = useActionData<typeof action>();
-  const [shop, setShop] = useState("");
-  const { errors } = actionData || loaderData;
-
-  return (
-    <>
-      <script src="https://cdn.shopify.com/shopifycloud/polaris.js" />
-      <s-page>
-        <Form method="post">
-          <s-section heading="Log in to Net Terms Receivables">
-            <s-text-field
-              name="shop"
-              label="Shop domain"
-              details="example.myshopify.com"
-              value={shop}
-              onChange={(e) => setShop(e.currentTarget.value)}
-              autocomplete="on"
-              error={errors.shop}
-            ></s-text-field>
-            <s-button type="submit">Log in</s-button>
-          </s-section>
-        </Form>
-      </s-page>
-    </>
-  );
+  // No UI rendered - this route only handles redirects.
+  // App Store apps use managed installation; merchants don't enter shop domains.
+  return null;
 }
