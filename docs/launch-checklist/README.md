@@ -9,12 +9,17 @@ Step-by-step checklists for launch prerequisites. Complete these before Shopify 
 | [Sentry Setup](./sentry-setup.md) | Raghav | Pending |
 | [Workers Paid Upgrade](./workers-paid-upgrade.md) | Raghav | Pending |
 | [Request `read_all_orders` Scope](./read-all-orders-request.md) | Raghav | Pending |
+| `PLAN_GATING_ENFORCED` stays `"false"` in every environment until the lead Developer's gating fix (eligibility and aging) merges and Team Lead gives the go. Enabling it earlier silently stops holds for gated accounts. | Team Lead | Holding |
+| `RESEND_API_KEY` + `RESEND_FROM` set as Worker secrets and Resend DPA accepted, before any shop enables reminders | Raghav | Pending |
 
 ## Order of Operations
 
 1. **Sentry Setup** — Create account, project, and submit DSN via secure channel. DevOps stores secrets.
 2. **Workers Paid Upgrade** — Raghav upgrades the Cloudflare account ($5/month). DevOps redeploys after.
 3. **`read_all_orders` Request** — Submit in Partner Dashboard. After approval, a separate PR adds the scope.
+4. **Resend (S18 reminders)** — Raghav accepts the Resend DPA and supplies `RESEND_API_KEY` / `RESEND_FROM` via secure channel; DevOps sets them as Worker secrets. Only then may any shop enable reminders.
+
+**Standing gate:** `PLAN_GATING_ENFORCED` remains `"false"` everywhere until the lead Developer's gating fix (eligibility and aging) merges and Team Lead gives the go. Enabling it earlier silently stops holds for gated accounts.
 
 ## Related Documentation
 
