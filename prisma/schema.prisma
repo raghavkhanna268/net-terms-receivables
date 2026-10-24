@@ -182,6 +182,8 @@ model Shop {
   dataRequests    S22DataRequest[]
   // S13: Backstop processed orders
   backstopProcessedOrders BackstopProcessedOrder[]
+  // S18: Payment reminder settings
+  reminderSettings S18ShopReminderSettings?
 
   // S21: Index for finding shops by plan (analytics, batch operations)
   @@index([planKey])
@@ -916,4 +918,36 @@ model BackstopProcessedOrder {
   @@index([processedAt], map: "idx_backstop_processed_orders_processed_at")
   @@index([shopId], map: "idx_backstop_processed_orders_shop")
   @@map("backstop_processed_orders")
+}
+
+// =============================================================================
+// S18 PAYMENT REMINDERS
+// =============================================================================
+
+/// Daily send count tracking (S18).
+/// Tracks reminder emails sent per shop per day for Resend free tier cap (100/day).
+/// 7-day retention via pg_cron purge job.
+/// FK to Shop with ON DELETE CASCADE.
+model S18DailySends {
+  shopId   String   @map("shop_id")
+  sendDate DateTime @map("send_date") @db.Date
+  count    Int      @default(0)
+
+  @@id([shopId, sendDate])
+  @@index([sendDate], map: "idx_s18_daily_sends_date")
+  @@map("s18_daily_sends")
+}
+
+/// Per-shop reminder settings (S18).
+/// Stores the enabled toggle for payment reminders.
+/// FK to Shop with ON DELETE CASCADE.
+model S18ShopReminderSettings {
+  shopId    String   @id @map("shop_id")
+  enabled   Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz
+
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade, map: "s18_shop_reminder_settings_shop_id_fkey")
+
+  @@map("s18_shop_reminder_settings")
 }

@@ -766,6 +766,34 @@ registerSyncHandler("RECONCILE_COMPANIES", handleReconcileCompanies);
 registerSyncHandler("RECONCILE_ORDERS", handleReconcileOrders);
 
 // =============================================================================
+// S18 REMINDER HANDLERS
+// =============================================================================
+
+/**
+ * Handler for REMINDER_SEND topic.
+ * Sends payment reminder emails via Resend.
+ */
+async function handleReminderSend(sql: Sql, message: SyncMessage): Promise<SyncResult> {
+  const { handleReminderSend: processReminder, isReminderSendMessage } = await import(
+    "~/jobs/reminders"
+  );
+
+  if (!isReminderSendMessage(message)) {
+    return {
+      success: false,
+      action: "skipped",
+      error: "Invalid REMINDER_SEND message format",
+      retryable: false,
+    };
+  }
+
+  return processReminder(sql, message);
+}
+
+// Register REMINDER_SEND handler
+registerSyncHandler("REMINDER_SEND", handleReminderSend);
+
+// =============================================================================
 // DRAIN RESULT & QUEUE OPERATIONS
 // =============================================================================
 
