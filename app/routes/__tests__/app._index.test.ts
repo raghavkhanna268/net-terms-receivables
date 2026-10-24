@@ -428,6 +428,23 @@ describe("app._index loader", () => {
       expect(result.agingTotals).toBeNull();
     });
 
+    it("P7: error logging uses safeLog JSON with toErrorCode (per #174)", async () => {
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      mockGetShopAgingTotals.mockRejectedValue(new Error("Database connection failed"));
+
+      const { loader } = await import("../app._index");
+      await loader(createLoaderArgs());
+
+      const allLogs = consoleSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      // safeLog outputs JSON with "event" field
+      expect(allLogs).toContain('"event":"app._index.load_aging_data_failed"');
+      expect(allLogs).toContain('"err":');
+      expect(allLogs).not.toContain("Database connection failed");
+      expect(allLogs).not.toContain(".myshopify.com");
+
+      consoleSpy.mockRestore();
+    });
+
     it("handles missing shop gracefully", async () => {
       mockSql.mockImplementation(() => Promise.resolve([]));
 

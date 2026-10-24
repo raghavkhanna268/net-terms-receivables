@@ -21,6 +21,7 @@ import {
   type BuyerInvoiceRow,
 } from "~/lib/aging";
 import type { Sql } from "~/lib/db-light.server";
+import { safeLog, toErrorCode } from "~/lib/log.server";
 
 const PAGE_SIZE = 20;
 
@@ -307,7 +308,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         }
       }
     } catch (err) {
-      console.error("[app._index] Error loading aging data:", err);
+      safeLog("error", "app._index.load_aging_data_failed", { err: toErrorCode(err) });
       error = "Failed to load aging data. Please try again.";
     }
   }
