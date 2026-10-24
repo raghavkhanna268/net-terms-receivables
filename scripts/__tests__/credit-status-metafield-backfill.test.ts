@@ -192,12 +192,13 @@ describeWithDb("credit-status-metafield-backfill DB integration", () => {
   const TEST_ACCOUNT_2_ID = `acc-bf-2-${TEST_SUFFIX}`;
   const TEST_ACCOUNT_3_ID = `acc-bf-3-${TEST_SUFFIX}`;
 
-  // Additional test accounts for --id-prefix tests
+  // Additional test accounts for --id-prefix tests (all use TEST_SUFFIX)
   const PREFIX_TEST_SHOP_ID = `shop-prefix-${TEST_SUFFIX}`;
   const PREFIX_TEST_SHOP_DOMAIN = `prefix-test-${TEST_SUFFIX}.myshopify.com`;
-  const SEED_ACCOUNT_A_ID = `seed-account-a`;
-  const SEED_ACCOUNT_B_ID = `seed-account-b`;
-  const OTHER_X_ID = `other-x`;
+  const ID_PREFIX = `seed-account-${TEST_SUFFIX}-`;
+  const SEED_ACCOUNT_A_ID = `${ID_PREFIX}a`;
+  const SEED_ACCOUNT_B_ID = `${ID_PREFIX}b`;
+  const OTHER_X_ID = `other-${TEST_SUFFIX}-x`;
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
@@ -467,59 +468,73 @@ describeWithDb("credit-status-metafield-backfill DB integration", () => {
   });
 
   describe("--id-prefix filtering", () => {
-    it("filters getBackfillStats by id prefix", async () => {
+    it("filters getBackfillStats by id prefix for test shop", async () => {
       const stats = await sql.begin("read only", async (tx) => {
-        return getBackfillStats(tx, "seed-account-");
+        return getBackfillStats(tx, ID_PREFIX);
       });
 
-      // Should only find the seed-account-* accounts (2 total)
-      const prefixShopStats = stats.find(s => s.total === 2);
-      expect(prefixShopStats).toBeDefined();
-      expect(prefixShopStats!.total).toBe(2);
+      // Should only find the seed-account-* accounts in the prefix test shop
+      // Find the stats entry for our prefix test shop by checking shopId match
+      const [prefixShopStats] = await sql<{ total: string }[]>`
+        SELECT COUNT(*)::text AS total
+        FROM "BuyerAccount"
+        WHERE "shopId" = ${PREFIX_TEST_SHOP_ID}
+          AND "metafieldSyncedAt" IS NULL
+          AND starts_with("id", ${ID_PREFIX})
+      `;
+      const expectedPrefixCount = parseInt(prefixShopStats.total, 10);
+      expect(expectedPrefixCount).toBe(2);
+
+      // Stats should contain an entry with exactly 2 accounts
+      const matchingStats = stats.find(s => s.total === 2);
+      expect(matchingStats).toBeDefined();
     });
 
-    it("getCandidates with prefix returns only matching accounts", async () => {
-      const candidates = await getCandidates(sql, undefined, "seed-account-");
+    it("getCandidates with prefix returns only matching accounts from test shop", async () => {
+      const candidates = await getCandidates(sql, undefined, ID_PREFIX);
 
-      expect(candidates.length).toBe(2);
-      const ids = candidates.map(c => c.id).sort();
+      // Filter to our test shop to ensure isolation
+      const ourCandidates = candidates.filter(c => c.shopId === PREFIX_TEST_SHOP_ID);
+      expect(ourCandidates.length).toBe(2);
+      const ids = ourCandidates.map(c => c.id).sort();
       expect(ids).toEqual([SEED_ACCOUNT_A_ID, SEED_ACCOUNT_B_ID].sort());
     });
 
-    it("getCandidates without prefix returns all accounts with NULL metafieldSyncedAt", async () => {
+    it("getCandidates without prefix returns all 3 accounts from test shop", async () => {
       const candidates = await getCandidates(sql);
 
-      // Should include seed-account-a, seed-account-b, other-x from prefix test shop
-      // plus the original test accounts
+      // Filter to prefix test shop only
       const prefixShopCandidates = candidates.filter(c => c.shopId === PREFIX_TEST_SHOP_ID);
       expect(prefixShopCandidates.length).toBe(3);
     });
 
-    it("runDryRun with prefix filters correctly", async () => {
+    it("runDryRun with prefix filters correctly for test shop", async () => {
       const { runDryRun } = await import("../credit-status-metafield-backfill");
 
-      const result = await runDryRun(sql, "seed-account-");
+      const result = await runDryRun(sql, ID_PREFIX);
 
       expect(result.success).toBe(true);
+      // grandTotal should be 2 (only the prefix-matching accounts)
       expect(result.grandTotal).toBe(2);
     });
   });
 
   describe("--expect validation in runApply", () => {
     it("runApply with matching expect proceeds and enqueues", async () => {
-      // First get the actual count
-      const candidates = await getCandidates(sql, undefined, "seed-account-");
-      expect(candidates.length).toBe(2);
+      // First get the actual count for our test shop with prefix
+      const candidates = await getCandidates(sql, undefined, ID_PREFIX);
+      const ourCandidates = candidates.filter(c => c.shopId === PREFIX_TEST_SHOP_ID);
+      expect(ourCandidates.length).toBe(2);
 
-      // Run with correct expect
-      const result = await runApply(sql, undefined, "seed-account-", 2);
+      // Run with correct expect (2 candidates with prefix)
+      const result = await runApply(sql, undefined, ID_PREFIX, 2);
 
       expect(result.success).toBe(true);
       expect(result.expectMismatch).toBeUndefined();
       expect(result.enqueued).toBe(2);
       expect(result.failed).toBe(0);
 
-      // Verify messages in queue
+      // Verify messages in queue for our test shop
       const messages = await sql<{ message: { topic: string } }[]>`
         SELECT message FROM pgmq.q_s6_sync
         WHERE message->>'shop' = ${PREFIX_TEST_SHOP_DOMAIN}
@@ -528,15 +543,15 @@ describeWithDb("credit-status-metafield-backfill DB integration", () => {
     });
 
     it("runApply with mismatched expect makes zero pgmq.send calls", async () => {
-      // Get initial queue count
+      // Get initial queue count for our test shop
       const [before] = await sql<{ count: string }[]>`
         SELECT COUNT(*)::text AS count FROM pgmq.q_s6_sync
         WHERE message->>'shop' = ${PREFIX_TEST_SHOP_DOMAIN}
       `;
       const initialCount = parseInt(before.count, 10);
 
-      // Run with wrong expect (there are 2 candidates, we expect 5)
-      const result = await runApply(sql, undefined, "seed-account-", 5);
+      // Run with wrong expect (there are 2 candidates with prefix, we expect 5)
+      const result = await runApply(sql, undefined, ID_PREFIX, 5);
 
       expect(result.success).toBe(false);
       expect(result.expectMismatch).toBeDefined();
@@ -555,8 +570,8 @@ describeWithDb("credit-status-metafield-backfill DB integration", () => {
     });
 
     it("runApply with expect=0 on non-empty candidates fails before enqueue", async () => {
-      // Run with expect=0 but there are 2 candidates
-      const result = await runApply(sql, undefined, "seed-account-", 0);
+      // Run with expect=0 but there are 2 candidates with prefix
+      const result = await runApply(sql, undefined, ID_PREFIX, 0);
 
       expect(result.success).toBe(false);
       expect(result.expectMismatch).toBeDefined();
@@ -566,7 +581,7 @@ describeWithDb("credit-status-metafield-backfill DB integration", () => {
     });
 
     it("runApply without expect proceeds normally", async () => {
-      const result = await runApply(sql, undefined, "seed-account-");
+      const result = await runApply(sql, undefined, ID_PREFIX);
 
       expect(result.success).toBe(true);
       expect(result.expectMismatch).toBeUndefined();
@@ -579,7 +594,7 @@ describeWithDb("credit-status-metafield-backfill DB integration", () => {
       const { runDryRun } = await import("../credit-status-metafield-backfill");
 
       // Capture what the dry-run would produce
-      const result = await runDryRun(sql, "seed-account-");
+      const result = await runDryRun(sql, ID_PREFIX);
 
       // The result should have stats but stats themselves don't contain IDs
       expect(result.success).toBe(true);
@@ -587,7 +602,7 @@ describeWithDb("credit-status-metafield-backfill DB integration", () => {
 
       // Verify stats don't contain any ID-like strings
       const statsJson = JSON.stringify(result.stats);
-      expect(statsJson).not.toContain("seed-account-");
+      expect(statsJson).not.toContain(ID_PREFIX);
       expect(statsJson).not.toContain(SEED_ACCOUNT_A_ID);
       expect(statsJson).not.toContain(SEED_ACCOUNT_B_ID);
     });

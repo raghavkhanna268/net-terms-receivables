@@ -25,12 +25,14 @@ import { getRequestSql } from "~/lib/request-context.server";
 import { runMatcher, MAX_PAYMENTS_PER_REQUEST } from "~/services/matcher.server";
 import { generateDedupeKey, isValidUtrForRail } from "~/lib/banks/dedupe";
 import type { PaymentRail } from "~/lib/banks/types";
+import { checkImportLimit, enforceImportLimit, UpgradeRequiredError } from "~/services/gating.server";
 
 /**
  * Maximum rows per import request.
  * Keeps request size reasonable and processing within Workers CPU budget.
+ * Exported for tests and client-side validation to reference the same constant.
  */
-const MAX_IMPORT_ROWS = 1000;
+export const MAX_IMPORT_ROWS = 1000;
 
 /**
  * Maximum validation errors to return (avoid huge response).
@@ -201,7 +203,10 @@ export function validateImportRequest(body: unknown): { valid: ImportRequest | n
   }
 
   if (b.credits.length > MAX_IMPORT_ROWS) {
-    errors.push({ path: "credits", message: `Maximum ${MAX_IMPORT_ROWS} rows per import` });
+    errors.push({ 
+      path: "credits", 
+      message: `This import contains ${b.credits.length.toLocaleString()} rows, which exceeds the per-import limit of ${MAX_IMPORT_ROWS.toLocaleString()} rows. Please split your statement into smaller files.`
+    });
   }
 
   // Validate ALL credit rows, but cap errors returned
@@ -241,13 +246,31 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
-  const [shop] = await sql<{ currency: string }[]>`
-    SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ id: string; currency: string }[]>`
+    SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
+
+  if (!shop) {
+    return {
+      shopDomain,
+      shopCurrency: "INR",
+      maxImportRows: MAX_IMPORT_ROWS,
+      importsThisMonth: { current: 0, limit: -1, allowed: true },
+    };
+  }
+
+  // Get import usage for the current month (IST calendar month)
+  const importCheck = await checkImportLimit(sql, shop.id);
 
   return {
     shopDomain,
-    shopCurrency: shop?.currency ?? "INR",
+    shopCurrency: shop.currency ?? "INR",
+    maxImportRows: MAX_IMPORT_ROWS,
+    importsThisMonth: {
+      current: importCheck.currentUsage,
+      limit: importCheck.limit,
+      allowed: importCheck.allowed,
+    },
   };
 };
 
@@ -326,6 +349,23 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   }
 
   const shopId = shop.id;
+
+  // Enforce monthly import allowance before creating any records
+  try {
+    await enforceImportLimit(sql, shopId);
+  } catch (err) {
+    if (err instanceof UpgradeRequiredError) {
+      return Response.json(
+        {
+          success: false,
+          error: `Monthly import limit reached. You have used ${err.currentUsage} of ${err.limit} imports this month. Upgrade your plan for unlimited imports.`,
+          limitReached: true,
+        },
+        { status: 403 }
+      );
+    }
+    throw err;
+  }
 
   try {
     // Compute dedupe keys server-side for all credits
@@ -558,6 +598,7 @@ interface ImportResult {
   importId?: string;
   error?: string;
   details?: string[];
+  limitReached?: boolean;
   counts?: {
     inserted: number;
     duplicates: number;
@@ -590,7 +631,7 @@ function RailBadge({ rail }: { rail: string }) {
 }
 
 export default function ImportsPage() {
-  const { shopCurrency } = useLoaderData<typeof loader>();
+  const { shopCurrency, maxImportRows, importsThisMonth } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<ImportResult>();
 
   const [status, setStatus] = useState<ParseStatus>("idle");
@@ -598,6 +639,7 @@ export default function ImportsPage() {
   const [result, setResult] = useState<ParseResultSummary | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
+  const [overLimitError, setOverLimitError] = useState<{ rowCount: number; limit: number } | null>(null);
   // Track a reset key to properly clear importResult when user resets
   const [resetKey, setResetKey] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -624,6 +666,7 @@ export default function ImportsPage() {
       setErrorMessage(null);
       setResult(null);
       setImportResult(null);
+      setOverLimitError(null);
       setResetKey((k) => k + 1);
 
       try {
@@ -650,6 +693,11 @@ export default function ImportsPage() {
 
         const debits = parseResult.transactions.filter((t) => t.direction === "DR");
 
+        // Check if credit count exceeds the per-import row limit
+        if (credits.length > maxImportRows) {
+          setOverLimitError({ rowCount: credits.length, limit: maxImportRows });
+        }
+
         setResult({
           bank: parseResult.detection.bank,
           confidence: parseResult.detection.confidence,
@@ -669,7 +717,7 @@ export default function ImportsPage() {
         setStatus("error");
       }
     },
-    []
+    [maxImportRows]
   );
 
   const handleImport = useCallback(() => {
@@ -707,6 +755,7 @@ export default function ImportsPage() {
     setResult(null);
     setErrorMessage(null);
     setImportResult(null);
+    setOverLimitError(null);
     setResetKey((k) => k + 1);
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
@@ -724,12 +773,37 @@ export default function ImportsPage() {
             servers.
           </s-paragraph>
 
+          {/* Monthly import usage */}
+          {importsThisMonth.limit !== -1 && (
+            <s-banner 
+              tone={importsThisMonth.allowed ? "info" : "warning"} 
+              heading="Monthly import allowance"
+            >
+              {importsThisMonth.allowed ? (
+                <>
+                  You have used <s-text type="strong">{importsThisMonth.current}</s-text> of{" "}
+                  <s-text type="strong">{importsThisMonth.limit}</s-text> imports this month.
+                </>
+              ) : (
+                <>
+                  You have reached your monthly import limit ({importsThisMonth.current}/{importsThisMonth.limit}).{" "}
+                  <s-link href="/app/plan">Upgrade your plan</s-link> for unlimited imports.
+                </>
+              )}
+            </s-banner>
+          )}
+
+          <s-banner tone="info" heading="Per-import limit">
+            Each import can include up to <s-text type="strong">{maxImportRows.toLocaleString()}</s-text> credit rows.
+            For larger statements, split them into multiple files.
+          </s-banner>
+
           <input
             ref={fileInputRef}
             type="file"
             accept=".csv,.xls,.xlsx"
             onChange={handleFileSelect}
-            disabled={status === "loading"}
+            disabled={status === "loading" || !importsThisMonth.allowed}
             style={{ marginBottom: "1rem" }}
           />
 
@@ -740,7 +814,7 @@ export default function ImportsPage() {
           )}
 
           {status === "error" && (
-            <s-banner tone="critical" heading="Parse Error">
+            <s-banner tone="critical" heading="Parse error">
               {errorMessage}
             </s-banner>
           )}
@@ -753,7 +827,7 @@ export default function ImportsPage() {
           <s-section heading="Parse Results">
             <s-stack>
               {result.bank === "UNKNOWN" ? (
-                <s-banner tone="warning" heading="Unknown Bank Format">
+                <s-banner tone="warning" heading="Unknown bank format">
                   Could not detect HDFC or ICICI format. Please ensure you are
                   uploading a standard bank statement export.
                 </s-banner>
@@ -781,16 +855,25 @@ export default function ImportsPage() {
               )}
 
               {result.errors.length > 0 && (
-                <s-banner tone="warning" heading="Parse Warnings">
+                <s-banner tone="warning" heading="Parse warnings">
                   {result.errors.length} row(s) could not be parsed. First
                   error: Row {result.errors[0].row}: {result.errors[0].message}
+                </s-banner>
+              )}
+
+              {/* Over-limit error banner - blocks submit */}
+              {overLimitError && (
+                <s-banner tone="critical" heading="Too many rows">
+                  This file contains <s-text type="strong">{overLimitError.rowCount.toLocaleString()}</s-text> credit rows,
+                  which exceeds the per-import limit of <s-text type="strong">{overLimitError.limit.toLocaleString()}</s-text> rows.
+                  Please split your statement into smaller files before importing.
                 </s-banner>
               )}
 
               {/* Import result banner */}
               {importResult && (
                 importResult.success ? (
-                  <s-banner tone="success" heading="Import Complete">
+                  <s-banner tone="success" heading="Import complete">
                     <s-paragraph>
                       <s-text type="strong">{importResult.counts?.inserted}</s-text> credits imported,{" "}
                       <s-text type="strong">{importResult.counts?.duplicates}</s-text> duplicates skipped
@@ -814,7 +897,7 @@ export default function ImportsPage() {
                     </s-paragraph>
                   </s-banner>
                 ) : (
-                  <s-banner tone="critical" heading="Import Failed">
+                  <s-banner tone="critical" heading={importResult.limitReached ? "Monthly import limit reached" : "Import failed"}>
                     {importResult.error}
                     {importResult.details && importResult.details.length > 0 && (
                       <s-unordered-list>
@@ -834,7 +917,7 @@ export default function ImportsPage() {
                 <s-button variant="secondary" onClick={handleReset}>
                   Upload Another File
                 </s-button>
-                {result.bank !== "UNKNOWN" && result.creditCount > 0 && !importResult?.success && (
+                {result.bank !== "UNKNOWN" && result.creditCount > 0 && !importResult?.success && !overLimitError && importsThisMonth.allowed && (
                   <s-button 
                     variant="primary" 
                     onClick={handleImport}
@@ -943,7 +1026,7 @@ export default function ImportsPage() {
       </s-section>
 
       <s-section slot="aside" heading="Privacy">
-        <s-banner tone="info" heading="Privacy-First Import">
+        <s-banner tone="info" heading="Privacy-first import">
           Your bank statement file is parsed entirely in your browser. The raw
           file (CSV/XLS/XLSX) <s-text type="strong">never</s-text> leaves your device.
         </s-banner>

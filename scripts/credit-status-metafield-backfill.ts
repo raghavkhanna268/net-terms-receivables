@@ -22,7 +22,8 @@
  *
  * OPTIONAL FLAGS:
  *   --shop N         Scope to a specific shop by index (1-based, from dry-run output).
- *                    Only valid with --apply.
+ *                    Only valid with --apply. When combined with --id-prefix, N must
+ *                    come from a dry-run run with the same --id-prefix.
  *   --id-prefix P    Filter candidates to BuyerAccount ids starting with prefix P.
  *                    Valid in both dry-run and --apply modes.
  *   --expect N       Assert that exactly N candidates match before applying.
@@ -36,10 +37,8 @@
  * - Sends CREDIT_STATUS_RECOMPUTE messages to pgmq with 'manual' source.
  * - Dedupe key: 'credit_backfill:<id>:<date>' is used by the drain to prevent duplicate processing.
  * - Exit non-zero on any enqueue failure.
- * - The only allowed CI path for --apply is the manual, dispatch-only
- *   .github/workflows/prod-credit-status-backfill-apply.yml (added in PR #145),
- *   gated by a protected environment that requires Raghav's approval on every run.
- *   Any other CI or automated invocation is forbidden, and the dry-run is the default.
+ * - Once PR #145 (prod-credit-status-backfill-apply.yml) merges, it will be the only allowed
+ *   CI path; until then, no CI path may run --apply.
  *
  * ENVIRONMENT:
  *   DATABASE_URL - Postgres connection string (required)

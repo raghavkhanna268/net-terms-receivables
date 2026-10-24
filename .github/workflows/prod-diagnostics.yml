@@ -109,18 +109,34 @@ jobs:
     if: github.ref == 'refs/heads/main'
 
     steps:
-      - name: Validate inputs
-        env:
-          SHOP_DOMAIN: ${{ inputs.shop }}
-          REDRIVE_STARTED_AT: ${{ inputs.redrive_started_at }}
+      # Must stay the FIRST step. The shop domain must never appear in the
+      # public log: not in a step `env:` header (Actions prints those) and
+      # not via an inputs.shop expression inside `run:` (the "Run" header
+      # shows the expanded script). So it is read from the event payload file,
+      # masked, and only then exported via GITHUB_ENV. Later steps see
+      # SHOP_DOMAIN in their env header as ***.
+      - name: Mask shop input
         run: |
           set -euo pipefail
-
-          # Validate shop domain format
-          if [[ ! "$SHOP_DOMAIN" =~ ^[a-z0-9-]+\.myshopify\.com$ ]]; then
+          SHOP=$(jq -r '.inputs.shop // empty' "$GITHUB_EVENT_PATH")
+          if [ -z "$SHOP" ]; then
+            echo "::error::shop input missing from event payload"
+            exit 1
+          fi
+          # Validate before masking (never printed) so a multi-line value
+          # cannot slip partly past ::add-mask::.
+          if [[ ! "$SHOP" =~ ^[a-z0-9-]+\.myshopify\.com$ ]]; then
             echo "::error::Invalid shop domain format. Expected: example.myshopify.com"
             exit 1
           fi
+          echo "::add-mask::$SHOP"
+          echo "SHOP_DOMAIN=$SHOP" >> "$GITHUB_ENV"
+
+      - name: Validate inputs
+        env:
+          REDRIVE_STARTED_AT: ${{ inputs.redrive_started_at }}
+        run: |
+          set -euo pipefail
 
           # Validate redrive_started_at if provided: strict ISO-8601 UTC format
           # Accepts: YYYY-MM-DDTHH:MMZ or YYYY-MM-DDTHH:MM:SSZ (seconds optional)
@@ -135,7 +151,6 @@ jobs:
         id: session
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
-          SHOP_DOMAIN: ${{ inputs.shop }}
           PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
           set -euo pipefail
@@ -224,7 +239,6 @@ jobs:
         if: ${{ inputs.post_redrive_verify }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
-          SHOP_DOMAIN: ${{ inputs.shop }}
           REDRIVE_STARTED_AT: ${{ inputs.redrive_started_at }}
           PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
@@ -284,7 +298,6 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL_SESSION }}
           SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
           SHOPIFY_API_SECRET: ${{ secrets.SHOPIFY_API_SECRET }}
-          SHOP_DOMAIN: ${{ inputs.shop }}
         run: |
           set -euo pipefail
 
@@ -349,7 +362,6 @@ jobs:
       - name: Protected customer data probe
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
-          SHOP_DOMAIN: ${{ inputs.shop }}
           TOKEN_EXPIRED: ${{ steps.session.outputs.token_expired }}
           OFFLINE_SESSION_EXISTS: ${{ steps.session.outputs.offline_session_exists }}
           FAIL_ON_EXPIRED: ${{ inputs.fail_on_expired }}
@@ -642,7 +654,6 @@ jobs:
       - name: Queue and webhook counts
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
-          SHOP_DOMAIN: ${{ inputs.shop }}
           PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
           set -euo pipefail
@@ -1004,7 +1015,6 @@ jobs:
       - name: Invoices
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
-          SHOP_DOMAIN: ${{ inputs.shop }}
           PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
           set -euo pipefail
@@ -1069,7 +1079,6 @@ jobs:
           DATABASE_URL_SESSION: ${{ secrets.DATABASE_URL_SESSION }}
           SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
           SHOPIFY_API_SECRET: ${{ secrets.SHOPIFY_API_SECRET }}
-          SHOP_DOMAIN: ${{ inputs.shop }}
           ENSURE_VALIDATION: ${{ inputs.ensure_validation }}
           CHECKOUT_FIXTURES: ${{ inputs.checkout_fixtures }}
           PGOPTIONS: "-c default_transaction_read_only=on"
