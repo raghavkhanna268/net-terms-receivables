@@ -995,3 +995,132 @@ describeWithDb("enqueue_credit_status_recomputes SQL function", () => {
     expect(job.schedule).toBe("0 19 * * *"); // 19:00 UTC
   });
 });
+
+describeWithDb("CREDIT_STATUS_RECOMPUTE message producers set source", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-src";
+  const TEST_SHOP_ID = `shop-src-${TEST_SUFFIX}`;
+  const TEST_SHOP_DOMAIN = `src-test-${TEST_SUFFIX}.myshopify.com`;
+  const TEST_ACCOUNT_ID = `acc-src-${TEST_SUFFIX}`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+    `;
+
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name,
+        "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${TEST_ACCOUNT_ID}, ${TEST_SHOP_ID}, 'COMPANY',
+        ${"co-" + TEST_SUFFIX}, ${"gid://shopify/CompanyLocation/" + TEST_SUFFIX},
+        'Source Test Account', 100000.00, 'OK', NOW(), NOW()
+      )
+    `;
+  });
+
+  beforeEach(async () => {
+    // Clean up queue messages before each test
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'buyerAccountId' = ${TEST_ACCOUNT_ID}`;
+    await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'buyerAccountId' = ${TEST_ACCOUNT_ID}`;
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'buyerAccountId' = ${TEST_ACCOUNT_ID}`;
+    await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'buyerAccountId' = ${TEST_ACCOUNT_ID}`;
+    await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+    await sql.end();
+  });
+
+  it("enqueueCreditStatusRecompute sets source='invoice_change' at top level", async () => {
+    const { enqueueCreditStatusRecompute } = await import("../credit-status-recompute.server");
+
+    await enqueueCreditStatusRecompute(sql, TEST_SHOP_DOMAIN, TEST_ACCOUNT_ID, "invoice_change");
+
+    const [msg] = await sql<{ message: { topic: string; source: string; buyerAccountId: string } }[]>`
+      SELECT message FROM pgmq.q_s6_sync
+      WHERE message->>'buyerAccountId' = ${TEST_ACCOUNT_ID}
+      LIMIT 1
+    `;
+
+    expect(msg).toBeDefined();
+    expect(msg.message.topic).toBe("CREDIT_STATUS_RECOMPUTE");
+    expect(msg.message.source).toBe("invoice_change");
+    expect(msg.message.buyerAccountId).toBe(TEST_ACCOUNT_ID);
+  });
+
+  it("enqueueCreditStatusRecompute sets source='daily_sweep' at top level", async () => {
+    const { enqueueCreditStatusRecompute } = await import("../credit-status-recompute.server");
+
+    await enqueueCreditStatusRecompute(sql, TEST_SHOP_DOMAIN, TEST_ACCOUNT_ID, "daily_sweep");
+
+    const [msg] = await sql<{ message: { topic: string; source: string } }[]>`
+      SELECT message FROM pgmq.q_s6_sync
+      WHERE message->>'buyerAccountId' = ${TEST_ACCOUNT_ID}
+      LIMIT 1
+    `;
+
+    expect(msg).toBeDefined();
+    expect(msg.message.topic).toBe("CREDIT_STATUS_RECOMPUTE");
+    expect(msg.message.source).toBe("daily_sweep");
+  });
+
+  it("enqueueCreditStatusRecompute sets source='manual' at top level", async () => {
+    const { enqueueCreditStatusRecompute } = await import("../credit-status-recompute.server");
+
+    await enqueueCreditStatusRecompute(sql, TEST_SHOP_DOMAIN, TEST_ACCOUNT_ID, "manual");
+
+    const [msg] = await sql<{ message: { topic: string; source: string } }[]>`
+      SELECT message FROM pgmq.q_s6_sync
+      WHERE message->>'buyerAccountId' = ${TEST_ACCOUNT_ID}
+      LIMIT 1
+    `;
+
+    expect(msg).toBeDefined();
+    expect(msg.message.topic).toBe("CREDIT_STATUS_RECOMPUTE");
+    expect(msg.message.source).toBe("manual");
+  });
+
+  it("enqueueRecomputeForInvoice sets source='invoice_change' at top level", async () => {
+    const invoiceId = `inv-src-${TEST_SUFFIX}`;
+    const orderId = `gid://shopify/Order/src-${TEST_SUFFIX}`;
+
+    // Create an invoice for the account
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+        status, "issuedAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+        '#SRC-1', 1000.00, 1000.00, 'open', NOW(), NOW(), NOW()
+      )
+    `;
+
+    try {
+      const { enqueueRecomputeForInvoice } = await import("../credit-status-recompute.server");
+
+      await enqueueRecomputeForInvoice(sql, invoiceId);
+
+      const [msg] = await sql<{ message: { topic: string; source: string; buyerAccountId: string } }[]>`
+        SELECT message FROM pgmq.q_s6_sync
+        WHERE message->>'buyerAccountId' = ${TEST_ACCOUNT_ID}
+        LIMIT 1
+      `;
+
+      expect(msg).toBeDefined();
+      expect(msg.message.topic).toBe("CREDIT_STATUS_RECOMPUTE");
+      expect(msg.message.source).toBe("invoice_change");
+      expect(msg.message.buyerAccountId).toBe(TEST_ACCOUNT_ID);
+    } finally {
+      await sql`DELETE FROM "Invoice" WHERE id = ${invoiceId}`;
+    }
+  });
+});
