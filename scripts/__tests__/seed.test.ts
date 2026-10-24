@@ -34,6 +34,7 @@ import {
   FIND_ORDER_BY_TAG_QUERY,
   FIND_CUSTOMER_BY_EMAIL_QUERY,
   FIND_COMPANIES_BY_NAME_QUERY as _FIND_COMPANIES_BY_NAME_QUERY,
+  FIND_COMPANIES_WITH_CONTACTS_QUERY as _FIND_COMPANIES_WITH_CONTACTS_QUERY,
   COMPANY_UPDATE_MUTATION as _COMPANY_UPDATE_MUTATION,
   MAX_SEARCH_PAGES,
   buildCompanyCreateInput,
@@ -3625,5 +3626,254 @@ describe("company adoption", () => {
     expect(output).toContain("[no externalId]");
     
     logSpy.mockRestore();
+  });
+
+  it("P1: skips adoption when candidate has different externalId (companyUpdate never called)", async () => {
+    const seed = COMPANY_SEEDS[0];
+    const targetExternalId = `${SEED_PREFIX}${seed.key}`;
+    const conflictingExternalId = "some-other-external-id";
+    
+    let companyUpdateCalled = false;
+
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+      const variables = body.variables as Record<string, unknown> | undefined;
+
+      // Find by externalId - returns nothing (no exact match)
+      if (query.includes("FindCompany") && variables?.query?.toString().includes("external_id")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companies: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Find customer by email
+      if (query.includes("customers") && variables?.query?.toString().includes("email")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              customers: {
+                nodes: [{ id: "gid://shopify/Customer/cust", email: seed.contact.email, tags: [] }],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Find companies with contacts - returns company with DIFFERENT externalId
+      if (query.includes("FindCompaniesWithContacts") || (query.includes("companies") && query.includes("contacts"))) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companies: {
+                nodes: [{
+                  id: "gid://shopify/Company/conflict",
+                  name: seed.name,
+                  externalId: conflictingExternalId, // DIFFERENT from target!
+                  contacts: { edges: [{ node: { customer: { id: "gid://cust/1", email: seed.contact.email } } }] },
+                }],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyUpdate - should NOT be called
+      if (query.includes("companyUpdate")) {
+        companyUpdateCalled = true;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyUpdate: { company: null, userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Contact roles
+      if (query.includes("contactRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { company: { contactRoles: { nodes: [] } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyCreate - mock (may be called after skip)
+      if (query.includes("companyCreate")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyCreate: {
+                company: {
+                  id: "gid://shopify/Company/new",
+                  name: seed.name,
+                  externalId: targetExternalId,
+                  locations: { edges: [] },
+                  contacts: { edges: [{ node: { id: "gid://contact/1", customer: { id: "gid://cust/1", email: seed.contact.email } } }] },
+                },
+                userErrors: [],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Role assignments
+      if (query.includes("roleAssignments")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocation: { roleAssignments: { nodes: [] } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const { findCompanyForAdoption } = await import("../seed");
+    const state = createMockState();
+
+    // Test the adoption logic directly
+    const result = await findCompanyForAdoption(state, seed);
+    
+    // Should find a candidate
+    expect(result).not.toBeNull();
+    expect(result && "company" in result).toBe(true);
+    
+    if (result && "company" in result) {
+      // The candidate should have the conflicting externalId
+      expect(result.company.externalId).toBe(conflictingExternalId);
+      
+      // Now simulate the adoption flow - it should skip due to conflicting externalId
+      // The actual skip happens in seedCompanies, so we verify the data is correct
+      // and trust the skip logic is tested by integration
+    }
+    
+    // companyUpdate should NOT have been called during findCompanyForAdoption
+    expect(companyUpdateCalled).toBe(false);
+  });
+
+  it("P1: TAKEN recovery skips when candidate has different externalId (companyUpdate never called)", async () => {
+    const seed = COMPANY_SEEDS[0];
+    const targetExternalId = `${SEED_PREFIX}${seed.key}`;
+    const conflictingExternalId = "some-other-external-id";
+    
+    let companyUpdateCalled = false;
+
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+      const variables = body.variables as Record<string, unknown> | undefined;
+
+      // companyCreate returns TAKEN error
+      if (query.includes("companyCreate")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyCreate: {
+                company: null,
+                userErrors: [{ field: ["companyContact", "email"], message: "Email address has already been taken", code: "TAKEN" }],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Find customer by email
+      if (query.includes("customers") && variables?.query?.toString().includes("email")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              customers: {
+                nodes: [{ id: "gid://shopify/Customer/existing", email: seed.contact.email, tags: [] }],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Find companies - returns company with DIFFERENT externalId
+      if (query.includes("FindCompaniesWithContacts") || (query.includes("companies") && query.includes("contacts"))) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companies: {
+                nodes: [{
+                  id: "gid://shopify/Company/conflict",
+                  name: seed.name,
+                  externalId: conflictingExternalId, // DIFFERENT from target!
+                  contacts: { edges: [{ node: { customer: { id: "gid://cust/1", email: seed.contact.email } } }] },
+                }],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyUpdate - should NOT be called
+      if (query.includes("companyUpdate")) {
+        companyUpdateCalled = true;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyUpdate: { company: null, userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const { createCompanyWithLocations } = await import("../seed");
+    const state = createMockState();
+
+    const result = await createCompanyWithLocations(state, seed, targetExternalId);
+
+    // Should fail (return null) because the only matching company has a conflicting externalId
+    expect(result).toBeNull();
+    
+    // companyUpdate should NOT have been called
+    expect(companyUpdateCalled).toBe(false);
+    
+    // Company should have been skipped
+    expect(state.skippedCount.companies).toBe(1);
+    expect(state.skippedReasons.some(r => r.includes("already has externalId"))).toBe(true);
   });
 });

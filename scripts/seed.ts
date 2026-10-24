@@ -753,18 +753,36 @@ export async function seedCompanies(state: SeedState): Promise<void> {
       }
       
       if (adoptionResult && "company" in adoptionResult) {
-        // Single match - adopt it by setting externalId
-        console.log(`  📎 Found existing company for ${seed.name} (matched by ${adoptionResult.matchType})`);
-        console.log(`     Adopting ${adoptionResult.company.id} by setting externalId...`);
+        const candidate = adoptionResult.company;
         
-        const adopted = await adoptCompany(state, adoptionResult.company.id, externalId);
+        // P1: Check if candidate has a conflicting externalId (non-null and different from target)
+        if (candidate.externalId !== null && candidate.externalId !== externalId) {
+          const reason = `Company ${candidate.id} already has externalId '${candidate.externalId}', cannot adopt as '${externalId}'`;
+          console.log(`  ⚠️  Skipped ${seed.name}: ${reason}`);
+          state.skippedCount.companies++;
+          state.skippedReasons.push(reason);
+          continue;
+        }
+        
+        // Single match - adopt it by setting externalId
+        if (state.dryRun) {
+          // P3a: Dry-run preview of adoption
+          console.log(`  [dry-run] Would adopt ${candidate.id} for ${seed.name} (matched by ${adoptionResult.matchType})`);
+          // For dry-run, we can't continue with this company since we don't have real data
+          continue;
+        }
+        
+        console.log(`  📎 Found existing company for ${seed.name} (matched by ${adoptionResult.matchType})`);
+        console.log(`     Adopting ${candidate.id} by setting externalId...`);
+        
+        const adopted = await adoptCompany(state, candidate.id, externalId);
         if (adopted) {
           existing = adopted;
           wasAdopted = true;
           state.adoptedCount.companies++;
           console.log(`  ✅ Adopted: ${seed.name} (${externalId})`);
         } else {
-          state.errors.push(`Failed to adopt company ${adoptionResult.company.id} for ${seed.name}`);
+          state.errors.push(`Failed to adopt company ${candidate.id} for ${seed.name}`);
         }
       }
     }
@@ -946,6 +964,8 @@ export interface CompanyCandidate {
   name: string;
   externalId: string | null;
   contactEmail: string | null;
+  /** All contact emails for this company (used for name-based matching) */
+  _allContactEmails?: string[];
 }
 
 /**
@@ -1012,21 +1032,7 @@ export async function findCompaniesByContactEmail(
         }>;
         pageInfo: { hasNextPage: boolean; endCursor: string | null };
       };
-    }>(state, `
-      query FindCompaniesWithContacts($after: String) {
-        companies(first: 50, after: $after) {
-          nodes {
-            id
-            name
-            externalId
-            contacts(first: 5) {
-              edges { node { customer { id email } } }
-            }
-          }
-          pageInfo { hasNextPage endCursor }
-        }
-      }
-    `, variables);
+    }>(state, FIND_COMPANIES_WITH_CONTACTS_QUERY, variables);
     
     const companies = response.data?.companies.nodes ?? [];
     for (const company of companies) {
@@ -1083,12 +1089,19 @@ export async function findCompaniesByName(
     for (const company of companies) {
       // Strict name match
       if (company.name === name) {
-        const contactEmail = company.contacts.edges[0]?.node.customer.email ?? null;
+        // P3b: Collect ALL contact emails, not just contacts[0]
+        const contactEmails = company.contacts.edges
+          .map(e => e.node.customer.email)
+          .filter((email): email is string => email != null);
+        
+        // Return the first contact email for backward compatibility, but store all for matching
         candidates.push({
           id: company.id,
           name: company.name,
           externalId: company.externalId,
-          contactEmail,
+          contactEmail: contactEmails[0] ?? null,
+          // Store all emails for matching in findCompanyForAdoption
+          _allContactEmails: contactEmails,
         });
       }
     }
@@ -1164,10 +1177,13 @@ export async function findCompanyForAdoption(
   // Fall back to name match (only if company has the seed's contact)
   const nameMatches = await findCompaniesByName(state, seed.name);
   
-  // Filter to only companies that have the seed's contact email
-  const nameMatchesWithContact = nameMatches.filter(
-    c => c.contactEmail?.toLowerCase() === seed.contact.email.toLowerCase()
-  );
+  // P3b: Filter to only companies that have the seed's contact email (check ALL contacts)
+  const seedEmailLower = seed.contact.email.toLowerCase();
+  const nameMatchesWithContact = nameMatches.filter(c => {
+    // Check _allContactEmails if available (from name search), otherwise fall back to contactEmail
+    const emails = c._allContactEmails ?? (c.contactEmail ? [c.contactEmail] : []);
+    return emails.some(email => email.toLowerCase() === seedEmailLower);
+  });
   
   if (nameMatchesWithContact.length === 1) {
     return { company: nameMatchesWithContact[0], matchType: "name" };
@@ -1400,8 +1416,19 @@ export async function createCompanyWithLocations(
     }
     
     if (adoptionResult && "company" in adoptionResult) {
+      const candidate = adoptionResult.company;
+      
+      // P1: Check if candidate has a conflicting externalId (non-null and different from target)
+      if (candidate.externalId !== null && candidate.externalId !== externalId) {
+        const reason = `Company ${candidate.id} already has externalId '${candidate.externalId}', cannot adopt as '${externalId}'`;
+        console.error(`    ❌ Cannot recover: ${reason}`);
+        state.skippedCount.companies++;
+        state.skippedReasons.push(reason);
+        return null;
+      }
+      
       console.log(`    📎 Found existing company by ${adoptionResult.matchType}, adopting...`);
-      const adopted = await adoptCompany(state, adoptionResult.company.id, externalId);
+      const adopted = await adoptCompany(state, candidate.id, externalId);
       if (adopted) {
         console.log(`    ✅ Recovered by adopting ${adopted.id}`);
         state.adoptedCount.companies++;
@@ -1669,6 +1696,29 @@ export const FIND_COMPANIES_BY_NAME_QUERY = `
         hasNextPage
         endCursor
       }
+    }
+  }
+`;
+
+/**
+ * Query to find companies with their contacts.
+ * Used for adoption by contact email matching.
+ * 
+ * NOTE: No direct "companies by contact email" query exists.
+ * We fetch all companies and filter client-side for matching contact email.
+ */
+export const FIND_COMPANIES_WITH_CONTACTS_QUERY = `
+  query FindCompaniesWithContacts($after: String) {
+    companies(first: 50, after: $after) {
+      nodes {
+        id
+        name
+        externalId
+        contacts(first: 5) {
+          edges { node { customer { id email } } }
+        }
+      }
+      pageInfo { hasNextPage endCursor }
     }
   }
 `;
