@@ -73,6 +73,10 @@ ALTER TABLE s18_shop_reminder_settings ENABLE ROW LEVEL SECURITY;
 -- Function to enqueue reminder work for eligible invoices
 -- Uses EACH shop's timezone for day math (from Shop.timezone, S7)
 -- Only enqueues during the shop's local 09:00-19:00 window
+--
+-- SECURITY: Uses SECURITY DEFINER with search_path='' to prevent
+-- search_path injection. All table, function, and type names are
+-- schema-qualified (public.*, pgmq.*) per s10_call_drain convention.
 CREATE OR REPLACE FUNCTION public.s18_enqueue_reminders()
 RETURNS void
 LANGUAGE plpgsql
@@ -106,17 +110,17 @@ BEGIN
             i."dueAt" AS due_at,
             s.domain AS shop_domain,
             s.timezone AS shop_timezone
-        FROM "ReminderRule" r
-        INNER JOIN s18_shop_reminder_settings srs 
+        FROM public."ReminderRule" r
+        INNER JOIN public.s18_shop_reminder_settings srs 
             ON srs.shop_id = r."shopId" AND srs.enabled = true
-        INNER JOIN "Shop" s 
+        INNER JOIN public."Shop" s 
             ON s.id = r."shopId" AND s."uninstalledAt" IS NULL
-        INNER JOIN "Invoice" i 
+        INNER JOIN public."Invoice" i 
             ON i."shopId" = r."shopId"
             AND i.status = 'open'
             AND i."dueAt" IS NOT NULL
         WHERE r.enabled = true
-          AND r.channel = 'email'
+          AND r.channel = 'email'::public."ReminderChannel"
           -- Check send window: shop's local hour must be 09-18 (19:00 = last send at 18:xx)
           AND EXTRACT(HOUR FROM (NOW() AT TIME ZONE COALESCE(s.timezone, 'Asia/Kolkata'))) BETWEEN 9 AND 18
           -- Due date + offset = today in shop's timezone
@@ -124,15 +128,15 @@ BEGIN
               = (NOW() AT TIME ZONE COALESCE(s.timezone, 'Asia/Kolkata'))::DATE
           -- Exclude already-sent reminders (unique index ensures idempotency)
           AND NOT EXISTS (
-              SELECT 1 FROM "ReminderLog" rl
+              SELECT 1 FROM public."ReminderLog" rl
               WHERE rl."ruleId" = r.id AND rl."invoiceId" = i.id
           )
     LOOP
         -- Enqueue a REMINDER_SEND message to the s6_sync queue
         -- The drain handler will check caps and send the email
         PERFORM pgmq.send(
-            's6_sync',
-            jsonb_build_object(
+            's6_sync'::TEXT,
+            pg_catalog.jsonb_build_object(
                 'topic', 'REMINDER_SEND',
                 'shop', reminder_row.shop_domain,
                 'shopId', reminder_row.shop_id,
@@ -211,7 +215,7 @@ BEGIN
     PERFORM cron.schedule(
         's18_global_sends_cleanup',
         '0 5 * * *',
-        $cmd$DELETE FROM s18_global_sends WHERE send_date < NOW() - INTERVAL '35 days'$cmd$
+        $cmd$DELETE FROM public.s18_global_sends WHERE send_date < NOW() - INTERVAL '35 days'$cmd$
     );
     RAISE NOTICE 'Scheduled s18_global_sends_cleanup cron job';
 
@@ -225,20 +229,20 @@ $do$;
 -- Insert default reminder rules for shops that don't have any yet
 -- Default offsets: -3 (3 days before), 0 (on due date), 7 (7 days overdue)
 -- Rules are enabled by default, but shop-level reminders start DISABLED
-INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+INSERT INTO public."ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
 SELECT 
-    gen_random_uuid()::TEXT,
+    pg_catalog.gen_random_uuid()::TEXT,
     s.id,
     offset_days.val,
-    'email'::"ReminderChannel",
+    'email'::public."ReminderChannel",
     true,
     NOW(),
     NOW()
-FROM "Shop" s
+FROM public."Shop" s
 CROSS JOIN (VALUES (-3), (0), (7)) AS offset_days(val)
 WHERE s."uninstalledAt" IS NULL
   AND NOT EXISTS (
-      SELECT 1 FROM "ReminderRule" r WHERE r."shopId" = s.id
+      SELECT 1 FROM public."ReminderRule" r WHERE r."shopId" = s.id
   )
 ON CONFLICT DO NOTHING;
 
