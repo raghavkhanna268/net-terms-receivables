@@ -22,7 +22,6 @@
 
 import type { Sql } from "~/lib/db-light.server";
 import type { ShopifyOrder } from "~/services/sync/types";
-import { activeAccountFragment } from "~/services/gating.server";
 import {
   inferDueDate,
   type InferDueDateInput,
@@ -245,7 +244,6 @@ async function findCompanyAccountWithTerms(
     FROM "BuyerAccount"
     WHERE "shopId" = ${shopId}
       AND "companyLocationId" = ${companyLocationId}
-      AND ${activeAccountFragment(sql)}
   `;
 
   if (!account) {
@@ -286,7 +284,7 @@ async function findCompanyAccountByCompanyWithTerms(
   defaultTermsDays: number;
   defaultTermsSource: "explicit" | "tag" | null;
 } | null> {
-  // Query for ALL active accounts with explicit terms for this company
+  // Query for ALL accounts with explicit terms for this company
   const accounts = await sql<{
     id: string;
     defaultTermsDays: number | null;
@@ -298,7 +296,6 @@ async function findCompanyAccountByCompanyWithTerms(
       AND "companyId" = ${companyId}
       AND "defaultTermsDays" IS NOT NULL
       AND "defaultTermsSource" = 'explicit'
-      AND ${activeAccountFragment(sql)}
     ORDER BY id
   `;
 
@@ -338,7 +335,6 @@ async function findCustomerAccount(
     FROM "BuyerAccount"
     WHERE "shopId" = ${shopId}
       AND "customerId" = ${customerId}
-      AND ${activeAccountFragment(sql)}
   `;
 
   if (!account) return null;
@@ -663,7 +659,6 @@ async function resolveBuyerAccount(
       SELECT id FROM "BuyerAccount"
       WHERE "shopId" = ${shopId}
         AND "companyLocationId" = ${purchasingEntity.location.id}
-        AND ${activeAccountFragment(sql)}
     `;
     if (account) return account.id;
   }
@@ -674,7 +669,6 @@ async function resolveBuyerAccount(
       SELECT id FROM "BuyerAccount"
       WHERE "shopId" = ${shopId}
         AND "companyId" = ${purchasingEntity.company.id}
-        AND ${activeAccountFragment(sql)}
       LIMIT 1
     `;
     if (account) return account.id;
@@ -686,7 +680,6 @@ async function resolveBuyerAccount(
       SELECT id FROM "BuyerAccount"
       WHERE "shopId" = ${shopId}
         AND "customerId" = ${order.customer.id}
-        AND ${activeAccountFragment(sql)}
     `;
     if (account) return account.id;
   }

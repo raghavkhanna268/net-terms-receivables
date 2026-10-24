@@ -97,17 +97,6 @@ export async function recomputeCreditStatus(
     };
   }
 
-  // Skip gated accounts - report real stored values
-  if (account.gatedAt !== null) {
-    const previousHold = account.holdState === "HELD" && !account.bypass;
-    return {
-      success: true,
-      metafieldWritten: false,
-      previousHold,
-      newHold: previousHold,
-    };
-  }
-
   // Capture previous hold value
   const previousHold = account.holdState === "HELD" && !account.bypass;
 
