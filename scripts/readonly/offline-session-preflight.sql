@@ -7,6 +7,10 @@
 -- (NOW() AT TIME ZONE 'UTC') and the result does not depend on the DB session TimeZone.
 -- Counts and booleans only. No token values, no shop domain (shops are indexed).
 -- Vars: none.
+-- Output column kinds for passthrough columns (scripts/ci/check-readonly-columns.ts,
+-- see scripts/readonly/README.md). Derived counts/booleans/CASE enums need no entry.
+-- @col transaction_read_only: boolean
+-- @col db_session_timezone: enum
 \set ON_ERROR_STOP 1
 BEGIN TRANSACTION READ ONLY;
 

@@ -4,6 +4,14 @@
 -- name, holdNote, emails, domains, money amounts, payloads or free-text JSON fields.
 -- Note: AuditEvent's timestamp column is "at" (no createdAt).
 -- Var: since (ISO-8601 UTC, e.g. 2026-10-24T09:30:00Z)
+-- Output column kinds for passthrough columns (scripts/ci/check-readonly-columns.ts,
+-- see scripts/readonly/README.md). Derived counts/booleans/CASE enums need no entry.
+-- @col holdState, type, status, proname: enum
+-- @col manualHold, bypass, syncPending: boolean
+-- @col syncVersion: count
+-- @col gated_at_pos: id
+-- company_location_id is the numeric tail of the CompanyLocation gid (replace() strips the prefix).
+-- @col company_location_id: id
 \set ON_ERROR_STOP 1
 BEGIN TRANSACTION READ ONLY;
 
@@ -38,8 +46,8 @@ GROUP BY 1 ORDER BY 1;
 WITH ev AS (
   SELECT e.id AS audit_event_id, e.type, e.at, e.actor,
          e.data->>'buyerAccountId' AS buyer_account_id,
-         COALESCE(e.data->>'reasonCode', e.data->>'holdReasonCode', e.data->>'reason_code') AS reason_code_raw,
-         e.data->>'source' AS source_raw
+         COALESCE(e.data->>'reasonCode', e.data->>'holdReasonCode', e.data->>'reason_code') AS reason_code_unchecked,
+         e.data->>'source' AS source_unchecked
   FROM "AuditEvent" e
   WHERE e.at > (:'since')::timestamptz
     AND e.type ILIKE '%hold%'
@@ -48,8 +56,8 @@ WITH ev AS (
 SELECT ev.audit_event_id, ev.type, ev.at,
        CASE WHEN ev.actor IN ('system','webhook') THEN ev.actor ELSE '<user>' END AS actor_kind,
        ev.buyer_account_id,
-       CASE WHEN ev.reason_code_raw ~ '^[A-Za-z0-9_.:-]{1,40}$' THEN ev.reason_code_raw END AS reason_code,
-       CASE WHEN ev.source_raw ~ '^[A-Za-z0-9_.:-]{1,40}$' THEN ev.source_raw END AS source,
+       CASE WHEN ev.reason_code_unchecked ~ '^[A-Za-z0-9_:-]{1,40}$' THEN ev.reason_code_unchecked END AS reason_code,
+       CASE WHEN ev.source_unchecked ~ '^[A-Za-z0-9_:-]{1,40}$' THEN ev.source_unchecked END AS source,
        i.id AS invoice_id, i.status, (i.outstanding > 0) AS outstanding_gt_0, (i."dueAt" IS NULL) AS due_at_is_null,
        -- Invoice has no paidAt column; status='paid' + updatedAt is the closest signal
        CASE WHEN i.status = 'paid' THEN i."updatedAt" END AS paid_status_updated_at
