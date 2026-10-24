@@ -45,8 +45,8 @@ jobs:
     timeout-minutes: 20
 
     env:
-      # Fixed shop domain - hardcoded guard in seed.ts enforces this
-      SHOP: net-terms-receivables.myshopify.com
+      # SHOP is NOT set here: step env headers are printed in public logs.
+      # It is resolved from seed.ts ALLOWED_DEV_STORE after checkout and masked.
       # Pass inputs via env, not interpolated into run blocks
       INPUT_DRY_RUN: ${{ inputs.dry_run }}
       INPUT_RESET: ${{ inputs.reset }}
@@ -57,6 +57,20 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+
+      - name: Resolve and mask dev-store domain
+        run: |
+          set -euo pipefail
+          # Single source of truth: the hardcoded guard constant in seed.ts.
+          # Read from the checked-out file so the value never appears in this
+          # step's script or in any step env header; mask before exporting.
+          SHOP=$(sed -nE 's/^const ALLOWED_DEV_STORE = "([^"]+)";$/\1/p' scripts/seed.ts)
+          if [ "$(printf '%s\n' "$SHOP" | grep -c .)" -ne 1 ] || [[ ! "$SHOP" =~ ^[a-z0-9-]+\.myshopify\.com$ ]]; then
+            echo "::error::Could not resolve a single valid dev-store domain from scripts/seed.ts"
+            exit 1
+          fi
+          echo "::add-mask::$SHOP"
+          echo "SHOP=$SHOP" >> "$GITHUB_ENV"
 
       - name: Setup Node
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
