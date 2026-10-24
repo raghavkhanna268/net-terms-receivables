@@ -270,6 +270,70 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
  */
 
 /**
+ * Shared backstop execution helper.
+ *
+ * Runs applyBackstop with proper error handling. ALL errors are retryable
+ * so they reach DLQ (which writes backstop.failed) instead of being silently archived.
+ *
+ * @param isRedelivery - True if this is a redelivery (affects logging only)
+ * @returns SyncResult with backstop outcome, or null if no invoiceInfo
+ */
+async function executeBackstop(
+  sql: Sql,
+  shopDomain: string,
+  orderGid: string,
+  invoiceInfo: { shopId: string; buyerAccountId: string | null; invoiceId: string },
+  isRedelivery: boolean
+): Promise<SyncResult | null> {
+  const { applyBackstop, RetryableBackstopError } = await import("~/services/backstop.server");
+  const context = isRedelivery ? "Redelivery" : "First-attempt";
+
+  try {
+    const backstopResult = await applyBackstop(sql, {
+      shopDomain,
+      shopId: invoiceInfo.shopId,
+      orderGid,
+      buyerAccountId: invoiceInfo.buyerAccountId,
+      invoiceId: invoiceInfo.invoiceId,
+    });
+
+    if (backstopResult.applied) {
+      console.log(
+        `[backstop] Applied (${context.toLowerCase()}) to ${orderGid}: ${backstopResult.fulfillmentOrdersHeld} FOs held`
+      );
+    }
+
+    // Only return a result for redelivery path; first-attempt returns orderResult
+    if (isRedelivery) {
+      return {
+        success: true,
+        action: "skipped",
+        skipReason: backstopResult.skipped
+          ? `Webhook processed, backstop skipped: ${backstopResult.skipReason}`
+          : "Webhook processed, backstop applied on redelivery",
+      };
+    }
+
+    return null; // First-attempt: caller returns orderResult
+  } catch (e) {
+    // ALL backstop errors are retryable so they reach DLQ (which writes backstop.failed)
+    const errorMsg = e instanceof Error ? e.message : String(e);
+    const isRetryableError = e instanceof RetryableBackstopError;
+
+    console.warn(
+      `[backstop] ${context} ${isRetryableError ? "retryable" : "unexpected"} error for ${orderGid}: ${errorMsg}`
+    );
+
+    return {
+      success: false,
+      action: "skipped" as const,
+      error: `Backstop error: ${errorMsg}`,
+      retryable: true,
+    };
+  }
+}
+
+/**
  * Run backstop only for ORDERS_CREATE redelivery.
  *
  * When a webhook was already processed but backstop failed (returned retryable),
@@ -277,12 +341,7 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
  * Backstop is idempotent via backstop_processed_orders table.
  */
 async function runBackstopOnly(sql: Sql, message: SyncMessage): Promise<SyncResult> {
-  const {
-    applyBackstop,
-    RetryableBackstopError,
-    recordBackstopFailure,
-    resolveInvoiceForOrder,
-  } = await import("~/services/backstop.server");
+  const { resolveInvoiceForOrder } = await import("~/services/backstop.server");
 
   // Resolve invoice by shop domain + order GID
   const invoiceInfo = await resolveInvoiceForOrder(sql, message.shop, message.resourceGid);
@@ -300,58 +359,8 @@ async function runBackstopOnly(sql: Sql, message: SyncMessage): Promise<SyncResu
     };
   }
 
-  try {
-    const backstopResult = await applyBackstop(sql, {
-      shopDomain: message.shop,
-      shopId: invoiceInfo.shopId,
-      orderGid: message.resourceGid,
-      buyerAccountId: invoiceInfo.buyerAccountId,
-      invoiceId: invoiceInfo.invoiceId,
-    });
-
-    if (backstopResult.applied) {
-      console.log(
-        `[backstop] Applied on redelivery to ${message.resourceGid}: ${backstopResult.fulfillmentOrdersHeld} FOs held`
-      );
-    }
-
-    // Backstop succeeded or skipped - return success
-    return {
-      success: true,
-      action: "skipped",
-      skipReason: backstopResult.skipped
-        ? `Webhook processed, backstop skipped: ${backstopResult.skipReason}`
-        : "Webhook processed, backstop applied on redelivery",
-    };
-  } catch (e) {
-    if (e instanceof RetryableBackstopError) {
-      console.warn(
-        `[backstop] Redelivery retryable error for ${message.resourceGid}: ${e.message}`
-      );
-      return {
-        success: false,
-        action: "skipped" as const,
-        error: `Backstop retryable error: ${e.message}`,
-        retryable: true,
-      };
-    }
-
-    // Non-retryable error: log, record failure, but allow message to complete
-    console.error(`[backstop] Redelivery unexpected error for ${message.resourceGid}:`, e);
-    await recordBackstopFailure(
-      sql,
-      invoiceInfo.shopId,
-      message.resourceGid,
-      invoiceInfo.buyerAccountId,
-      e instanceof Error ? e.message : String(e),
-    );
-
-    return {
-      success: true,
-      action: "skipped",
-      skipReason: "Webhook processed, backstop failed (recorded)",
-    };
-  }
+  const result = await executeBackstop(sql, message.shop, message.resourceGid, invoiceInfo, true);
+  return result!; // Always returns a result for redelivery
 }
 
 async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> {
@@ -451,16 +460,8 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
   );
 
   // S13: Apply backstop for ORDERS_CREATE on held accounts
-  // Always try to apply backstop on ORDERS_CREATE, even on redelivery when orderResult
-  // indicates the webhook was already processed (no entityId). The webhook marks the
-  // order processed at order.server.ts:156, but backstop must still run on retries.
   if (message.topic === "ORDERS_CREATE") {
-    const {
-      applyBackstop,
-      RetryableBackstopError,
-      recordBackstopFailure,
-      resolveInvoiceForOrder,
-    } = await import("~/services/backstop.server");
+    const { resolveInvoiceForOrder } = await import("~/services/backstop.server");
 
     // Resolve invoice info - either from webhook result or by looking up by order GID
     let invoiceInfo: { shopId: string; buyerAccountId: string | null; invoiceId: string } | null = null;
@@ -478,50 +479,24 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
       `;
       invoiceInfo = info ?? null;
     } else {
-      // Redelivery or webhook skipped: resolve invoice by shop domain + order GID
+      // Webhook skipped: resolve invoice by shop domain + order GID
       invoiceInfo = await resolveInvoiceForOrder(sql, message.shop, message.resourceGid);
     }
 
     if (invoiceInfo) {
-      try {
-        const backstopResult = await applyBackstop(sql, {
-          shopDomain: message.shop,
-          shopId: invoiceInfo.shopId,
-          orderGid: message.resourceGid,
-          buyerAccountId: invoiceInfo.buyerAccountId,
-          invoiceId: invoiceInfo.invoiceId,
-        });
+      const backstopResult = await executeBackstop(
+        sql,
+        message.shop,
+        message.resourceGid,
+        invoiceInfo,
+        false // first-attempt
+      );
 
-        if (backstopResult.applied) {
-          console.log(
-            `[backstop] Applied to order ${message.resourceGid}: ${backstopResult.fulfillmentOrdersHeld} fulfillment orders held`
-          );
-        }
-      } catch (e) {
-        if (e instanceof RetryableBackstopError) {
-          // Retryable error: return failure to trigger pgmq retry
-          console.warn(
-            `[backstop] Retryable error for ${message.resourceGid}: ${e.message} (reason: ${e.reason})`
-          );
-
-          return {
-            success: false,
-            action: "skipped" as const,
-            error: `Backstop retryable error: ${e.message}`,
-            retryable: true,
-          };
-        }
-
-        // Non-RetryableBackstopError: log and record failure, but don't block order processing
-        console.error(`[backstop] Unexpected error for ${message.resourceGid}:`, e);
-        await recordBackstopFailure(
-          sql,
-          invoiceInfo.shopId,
-          message.resourceGid,
-          invoiceInfo.buyerAccountId,
-          e instanceof Error ? e.message : String(e),
-        );
+      // If backstop returned an error result, propagate it
+      if (backstopResult) {
+        return backstopResult;
       }
+      // Otherwise backstop succeeded, continue to return orderResult
     }
   }
 

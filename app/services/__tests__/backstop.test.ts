@@ -171,7 +171,7 @@ describe("backstop.server", () => {
                   node: {
                     id: "gid://shopify/FulfillmentOrder/1",
                     status: "OPEN",
-                    
+
                     supportedActions: [{ action: "HOLD" }],
                   },
                 },
@@ -179,7 +179,7 @@ describe("backstop.server", () => {
                   node: {
                     id: "gid://shopify/FulfillmentOrder/2",
                     status: "OPEN",
-                    
+
                     supportedActions: [{ action: "HOLD" }],
                   },
                 },
@@ -288,7 +288,7 @@ describe("backstop.server", () => {
                   node: {
                     id: "gid://shopify/FulfillmentOrder/1",
                     status: "OPEN",
-                    
+
                     supportedActions: [{ action: "HOLD" }],
                   },
                 },
@@ -296,7 +296,7 @@ describe("backstop.server", () => {
                   node: {
                     id: "gid://shopify/FulfillmentOrder/2",
                     status: "OPEN",
-                    
+
                     supportedActions: [{ action: "HOLD" }],
                   },
                 },
@@ -349,7 +349,7 @@ describe("backstop.server", () => {
                   node: {
                     id: "gid://shopify/FulfillmentOrder/1",
                     status: "OPEN",
-                    
+
                     supportedActions: [{ action: "HOLD" }],
                   },
                 },
@@ -415,7 +415,7 @@ describe("backstop.server", () => {
                   node: {
                     id: "gid://shopify/FulfillmentOrder/1",
                     status: "OPEN",
-                    
+
                     supportedActions: [{ action: "HOLD" }], // Holdable
                   },
                 },
@@ -423,7 +423,7 @@ describe("backstop.server", () => {
                   node: {
                     id: "gid://shopify/FulfillmentOrder/2",
                     status: "OPEN",
-                    
+
                     supportedActions: [], // Non-holdable (third-party)
                   },
                 },
@@ -521,7 +521,7 @@ describe("backstop.server", () => {
                     node: {
                       id: "gid://shopify/FulfillmentOrder/1",
                       status: "OPEN",
-                      
+
                       supportedActions: [{ action: "HOLD" }],
                     },
                   },
@@ -576,7 +576,7 @@ describe("backstop.server", () => {
                     node: {
                       id: "gid://shopify/FulfillmentOrder/1",
                       status: "OPEN",
-                      
+
                       supportedActions: [{ action: "HOLD" }],
                     },
                   },
