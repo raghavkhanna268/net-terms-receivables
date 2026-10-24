@@ -361,6 +361,94 @@ describe("app._index redirect", () => {
     vi.clearAllMocks();
   });
 
+  it("does not redirect when skipOnboarding=true is set (prevents redirect loop)", async () => {
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id, currency, timezone FROM")) {
+        return Promise.resolve([
+          { id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" },
+        ]);
+      }
+      if (query.includes("onboarding_dismissed_at")) {
+        return Promise.resolve([{ onboarding_dismissed_at: null }]);
+      }
+      if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const { loader } = await import("../app._index");
+
+    const result = await loader({
+      request: new Request("https://example.com/app?skipOnboarding=true"),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+              redirect: vi.fn((url: string) => {
+                throw new Response(null, { status: 302, headers: { Location: url } });
+              }),
+            }),
+          },
+        },
+      },
+      params: {},
+    } as unknown as LoaderFunctionArgs);
+
+    expect(result.shopDomain).toBe(TEST_SHOP);
+  });
+
+  it("redirects to onboarding when skipOnboarding is NOT set and conditions match", async () => {
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id, currency, timezone FROM")) {
+        return Promise.resolve([
+          { id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" },
+        ]);
+      }
+      if (query.includes("onboarding_dismissed_at")) {
+        return Promise.resolve([{ onboarding_dismissed_at: null }]);
+      }
+      if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const { loader } = await import("../app._index");
+
+    const mockRedirect = vi.fn((url: string) => {
+      throw new Response(null, { status: 302, headers: { Location: url } });
+    });
+
+    await expect(
+      loader({
+        request: new Request("https://example.com/app"),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+                redirect: mockRedirect,
+              }),
+            },
+          },
+        },
+        params: {},
+      } as unknown as LoaderFunctionArgs)
+    ).rejects.toThrow();
+
+    expect(mockRedirect).toHaveBeenCalledWith("/app/onboarding");
+  });
+
   it("does not redirect when onboarding is dismissed", async () => {
     mockSql.mockImplementation((strings: TemplateStringsArray) => {
       const query = strings.join("?");

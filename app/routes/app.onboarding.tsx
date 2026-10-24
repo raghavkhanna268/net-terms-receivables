@@ -343,7 +343,7 @@ export default function OnboardingPage() {
                 </s-button>
               </Form>
             )}
-            <s-button href="/app">Go to Dashboard</s-button>
+            <s-button href="/app?skipOnboarding=true">Go to Dashboard</s-button>
           </s-stack>
         </s-stack>
       </s-section>
