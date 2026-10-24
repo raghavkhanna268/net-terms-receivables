@@ -186,6 +186,21 @@ interface MetafieldDefinitionsQueryResult {
   errors?: Array<{ message: string }>;
 }
 
+const METAFIELD_DEFINITIONS_QUERY = `#graphql
+  query GetMetafieldDefinitions($ownerType: MetafieldOwnerType!, $namespace: String!) {
+    metafieldDefinitions(first: 50, ownerType: $ownerType, namespace: $namespace) {
+      edges {
+        node {
+          id
+          namespace
+          key
+          ownerType
+        }
+      }
+    }
+  }
+`;
+
 /**
  * Check metafield definitions status by querying existing definitions.
  * Returns "ok" if all expected definitions exist, "missing" if any are missing.
@@ -200,20 +215,9 @@ async function checkMetafieldDefinitionsStatus(
     const foundTypes = new Set<string>();
 
     for (const ownerType of expectedOwnerTypes) {
-      const response = await admin.graphql(`#graphql
-        query GetMetafieldDefinitions($ownerType: MetafieldOwnerType!) {
-          metafieldDefinitions(first: 50, ownerType: $ownerType, namespace: "${METAFIELD.namespace}") {
-            edges {
-              node {
-                id
-                namespace
-                key
-                ownerType
-              }
-            }
-          }
-        }
-      `, { variables: { ownerType } });
+      const response = await admin.graphql(METAFIELD_DEFINITIONS_QUERY, {
+        variables: { ownerType, namespace: METAFIELD.namespace },
+      });
 
       const data = (await response.json()) as MetafieldDefinitionsQueryResult;
 
