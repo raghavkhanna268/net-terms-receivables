@@ -66,6 +66,7 @@ export type EligibilityReason =
   | "ineligible_status"          // Financial status not in eligible list
   | "terminal_status"            // Financial status indicates paid/refunded
   | "no_buyer_account"           // No matching buyer account found
+  | "no_customer_tags"           // Customer present but tags field missing from payload
   | "retail_order";              // None of (a), (b), (c) matched
 
 /**
@@ -350,29 +351,6 @@ async function findCustomerAccount(
 }
 
 /**
- * Get customer tags from s8_tagged_customers table.
- *
- * @param sql - postgres.js SQL client
- * @param shopId - Internal shop ID
- * @param customerId - Shopify Customer GID
- */
-async function getCustomerTags(
-  sql: Sql,
-  shopId: string,
-  customerId: string
-): Promise<string[]> {
-  const [row] = await sql<{ tags: string[] }[]>`
-    SELECT tags
-    FROM s8_tagged_customers
-    WHERE shop_id = ${shopId}
-      AND customer_id = ${customerId}
-      AND tag_active = true
-  `;
-
-  return row?.tags ?? [];
-}
-
-/**
  * Check if a tag rule matches any customer tags.
  */
 function findMatchingTagRule(
@@ -492,9 +470,8 @@ export async function checkOrderEligibility(
       WHERE id = ${buyerAccountId}
     `;
 
-    const customerTags = order.customer?.id
-      ? await getCustomerTags(sql, shopId, order.customer.id)
-      : [];
+    // Use customer tags from the order payload (not from s8_tagged_customers)
+    const customerTags = order.customer?.tags ?? [];
 
     const dueDate = computeDueDate(
       order,
@@ -586,8 +563,23 @@ export async function checkOrderEligibility(
   }
 
   // Condition (c): Customer matches a configured tag rule
-  if (order.customer?.id) {
-    const customerTags = await getCustomerTags(sql, shopId, order.customer.id);
+  // Evaluate tag rules against the ORDER's own customer.tags (not s8_tagged_customers)
+  if (tagRules.length > 0 && order.customer?.id) {
+    // Check if tags field is present in the order payload
+    const customerTags = order.customer.tags;
+
+    if (customerTags === undefined) {
+      // Customer present but tags field missing from payload (shouldn't happen)
+      // Return retryable - exhausted retries are dead-lettered (visible and redrivable)
+      return {
+        eligible: false,
+        reason: "no_customer_tags",
+        explanation: "Customer present but tags field missing from order payload",
+        retryable: true,
+      };
+    }
+
+    // Evaluate tag rules directly against order's customer tags
     const matchedRule = findMatchingTagRule(customerTags, tagRules);
 
     if (matchedRule) {
@@ -632,6 +624,7 @@ export async function checkOrderEligibility(
         customerTags,
       };
     }
+    // Customer tags don't match any rule - will fall through to retail_order
   }
 
   // None of the conditions matched

@@ -233,10 +233,20 @@ model BuyerAccount {
   /// Source of the default terms: explicit (set by merchant) or tag (copied from tag rule)
   /// A tag-copied default counts as tag-derived for S9 inference precedence
   defaultTermsSource  DefaultTermsSource?
-  /// Credit hold state
+  /// Credit hold state (computed from manualHold and auto-hold conditions)
   holdState           HoldState          @default(OK)
-  /// Manual bypass for credit hold (overrides holdState)
+  /// Manual bypass for credit hold (overrides holdState, exempts at checkout)
   bypass              Boolean            @default(false)
+  /// S11: Explicit manual hold flag set by merchant
+  manualHold          Boolean            @default(false)
+  /// S11: Whether metafield sync to Shopify is pending
+  syncPending         Boolean            @default(false)
+  /// S11: Monotonic version incremented on state change; prevents stale metafield clears
+  syncVersion         Int                @default(0)
+  /// S11: Machine-readable reason code for hold (e.g., MANUAL_HOLD, PAYMENT_OVERDUE)
+  holdReasonCode      String?
+  /// S11: Optional internal note about the hold
+  holdNote            String?
   /// When the account was created
   createdAt           DateTime           @default(now()) @db.Timestamptz(3)
   /// When the account was last updated (set by trigger)
@@ -782,6 +792,22 @@ model OrderOutstandingMissing {
 
   @@id([shop, day])
   @@map("order_outstanding_missing")
+}
+
+/// Customer PII ACCESS_DENIED fallback aggregate (S10b)
+/// Counts customer fetches that fell back to non-PII query due to ACCESS_DENIED
+/// per shop per day. Tracks when CUSTOMER_PII_FIELDS=1 but PCD approval is pending.
+/// No PII - just (shop, day, count) for monitoring.
+/// 90-day retention via pg_cron purge job.
+///
+/// Note: This table is created by the S10b migration.
+model S10bCustomerPiiFallback {
+  shop  String
+  day   DateTime @db.Date
+  count Int      @default(1)
+
+  @@id([shop, day])
+  @@map("s10b_customer_pii_fallback")
 }
 
 // =============================================================================

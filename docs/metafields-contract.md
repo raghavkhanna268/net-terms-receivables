@@ -231,10 +231,22 @@ The operation is idempotent - if the definition already exists, the mutation ret
 - [x] Mark shop done only after success
 
 ### S11 (Credit Status Writer)
-- [ ] Use `metafieldsSet` mutation with owner GID
-- [ ] Serialize using `serializeCreditStatus()` from `app/lib/metafields-contract.ts`
-- [ ] Always include all required fields
-- [ ] Use `$app:credit_status` as namespace:key
+- [x] Use `metafieldsSet` mutation with owner GID
+- [x] Serialize using `serializeCreditStatusFromDb()` from `app/lib/metafields-contract.ts`
+- [x] Always include all required fields
+- [x] Use `$app:credit_status` as namespace:key
+- [x] Write to `CompanyLocation` for B2B accounts
+- [x] Write to `Customer` for tagged customer accounts
+- [x] Handle userErrors and set sync-pending flag on failure
+- [x] Compute derived hold state (over-limit, overdue) before writing
+
+### S11 (Account Page)
+- [x] Route at `app.accounts.$id.tsx`
+- [x] Display credit limit, outstanding, available credit
+- [x] Display hold status with reason
+- [x] Show recent invoices
+- [x] Respect plan gating (read-only for gated accounts)
+- [x] Credit-limit editor with validation
 
 ### S12 (Cart/Checkout Validation)
 - [ ] Read `purchasingCompany.location.metafield` and `customer.metafield`
@@ -256,3 +268,87 @@ The operation is idempotent - if the definition already exists, the mutation ret
 ## Testing
 
 A shared JSON fixture at `tests/fixtures/credit-status.json` contains valid and invalid examples that both Rust and TypeScript tests load. This ensures the implementations cannot drift.
+
+### Shared Fixture Validation
+
+Both TypeScript and Rust tests verify the shared fixtures:
+
+- **TypeScript tests** (`app/lib/__tests__/metafields-contract.test.ts`):
+  - `serializeCreditStatusFromDb` produces JSON matching fixture format
+  - `parseCreditStatus` can parse all valid fixtures
+  - `checkCreditStatus` produces expected block/allow results
+
+- **Rust tests** (`extensions/credit-check-validation/src/cart_validations_generate_run.rs`):
+  - All valid fixtures deserialize correctly via `CreditStatus::from_json_value`
+  - `evaluate_credit_status` produces expected validation operations
+  - S11-specific tests verify JS writer output format is compatible
+
+## Dev-Store Verification Checklist
+
+Use this checklist to verify S12 enforcement end-to-end on a development store. Complete all steps before closing issue #50.
+
+### Prerequisites
+- [ ] Development store with B2B enabled
+- [ ] At least one B2B company with a location
+- [ ] At least one tagged customer with net-terms
+- [ ] The credit-check-validation function is deployed and enabled
+
+### S11 Writer Verification
+1. [ ] Open the account page for a B2B company location
+2. [ ] Set a credit limit (e.g., ₹100,000)
+3. [ ] Verify the limit appears in the account page UI
+4. [ ] Query the CompanyLocation metafield via Admin API:
+   ```graphql
+   query {
+     companyLocation(id: "gid://shopify/CompanyLocation/YOUR_ID") {
+       metafield(namespace: "$app", key: "credit_status") {
+         value
+       }
+     }
+   }
+   ```
+5. [ ] Verify the JSON contains all required fields:
+   - `schemaVersion: 1`
+   - `currencyCode` matches shop currency
+   - `hold` is boolean
+   - `holdReasonCode` is valid enum or null
+   - `limitPaise` is numeric string
+   - `exposurePaise` is numeric string
+   - `updatedAt` is ISO 8601 timestamp
+
+### S12 Enforcement Verification
+
+#### Test 1: Under Limit (Should Pass)
+1. [ ] Set credit limit to ₹100,000
+2. [ ] Ensure exposure is under ₹100,000
+3. [ ] Place an order as the B2B buyer
+4. [ ] Checkout should complete without error
+
+#### Test 2: Over Limit (Should Block)
+1. [ ] Set credit limit to ₹10,000
+2. [ ] Create invoices or orders totaling > ₹10,000
+3. [ ] Attempt to place another order
+4. [ ] Checkout should show "credit limit exceeded" error
+
+#### Test 3: Manual Hold (Should Block)
+1. [ ] Set manual hold on the account via the account page
+2. [ ] Attempt to place an order
+3. [ ] Checkout should show "account on hold" error
+
+#### Test 4: Currency Mismatch (Should Pass - Fail Open)
+1. [ ] Set credit status with INR currency
+2. [ ] Attempt checkout with a USD cart
+3. [ ] Checkout should pass (currency mismatch = fail open)
+
+#### Test 5: Tagged Customer
+1. [ ] Repeat tests 1-3 for a tagged customer account
+2. [ ] Verify metafield is written to Customer, not CompanyLocation
+
+### Cleanup
+- [ ] Remove test holds
+- [ ] Reset credit limits to production values
+- [ ] Document any issues in #50
+
+### Sign-off
+- [ ] DevOps has verified all tests pass
+- [ ] Issue #50 can be closed

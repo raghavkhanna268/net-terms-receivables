@@ -16,6 +16,12 @@ on:
 permissions:
   contents: read
 
+# Never run two migrations at once; queue instead of cancelling a migration
+# that is already applying.
+concurrency:
+  group: db-migrations
+  cancel-in-progress: false
+
 jobs:
   migrate:
     name: Run Prisma Migrations

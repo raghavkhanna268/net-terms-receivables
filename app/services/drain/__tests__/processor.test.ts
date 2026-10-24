@@ -1330,7 +1330,8 @@ describe("S8 Customer handler path tests", () => {
       "test.myshopify.com",
       "CUSTOMERS_CREATE",
       expect.objectContaining({ id: "gid://shopify/Customer/123" }),
-      "wh-cust-1"
+      "wh-cust-1",
+      expect.any(String) // piiMode: 'fetched' | 'fallback' | 'disabled'
     );
     expect(result.success).toBe(true);
     expect(result.action).toBe("created");
@@ -1368,7 +1369,8 @@ describe("S8 Customer handler path tests", () => {
       "test.myshopify.com",
       "CUSTOMERS_DELETE",
       expect.objectContaining({ id: "gid://shopify/Customer/456", tags: [] }),
-      "wh-cust-del-1"
+      "wh-cust-del-1",
+      expect.any(String) // piiMode
     );
     expect(result.success).toBe(true);
   });
@@ -1470,7 +1472,8 @@ describe("S8 Customer handler path tests", () => {
       "test.myshopify.com",
       "CUSTOMERS_DELETE",
       expect.objectContaining({ id: "gid://shopify/Customer/222", tags: [] }),
-      "wh-cust-null"
+      "wh-cust-null",
+      expect.any(String) // piiMode
     );
     expect(result.success).toBe(true);
   });

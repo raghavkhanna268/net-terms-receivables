@@ -41,6 +41,14 @@ import { minimiseCustomerPiiIfInactive } from "~/services/compliance";
 import { checkCompanyLimit, isGatingEnforced } from "../gating.server";
 
 /**
+ * PII write mode for customer sync.
+ * - 'fetched': PII query succeeded - write values as returned (including null clears email)
+ * - 'fallback': ACCESS_DENIED retry used - preserve existing values (COALESCE)
+ * - 'disabled': CUSTOMER_PII_FIELDS !== '1' - write NULL (DPDP minimisation)
+ */
+export type CustomerPiiMode = "fetched" | "fallback" | "disabled";
+
+/**
  * Process a Customer webhook event.
  *
  * CREATE/UPDATE: Check if customer has a matching tag (from AccountSource)
@@ -53,6 +61,7 @@ import { checkCompanyLimit, isGatingEnforced } from "../gating.server";
  * @param topic - Webhook topic
  * @param customer - Customer data (id, tags, and optional email/displayName when CUSTOMER_PII_FIELDS=1)
  * @param webhookId - Webhook ID for idempotency
+ * @param piiMode - How to handle PII fields: 'fetched' writes as-is, 'fallback' preserves existing, 'disabled' clears
  * @returns Sync result
  */
 export async function processCustomerWebhook(
@@ -60,7 +69,8 @@ export async function processCustomerWebhook(
   shopDomain: string,
   topic: string,
   customer: ShopifyCustomer,
-  webhookId: string
+  webhookId: string,
+  piiMode: CustomerPiiMode = "fetched"
 ): Promise<SyncResult> {
   // Idempotency check
   if (await isWebhookProcessed(sql, webhookId)) {
@@ -129,7 +139,8 @@ export async function processCustomerWebhook(
       customerTags,
       true,
       customer.email ?? null,
-      customer.displayName ?? null
+      customer.displayName ?? null,
+      piiMode
     );
   } else {
     // Only update existing records (don't create new ones for non-matching customers)
@@ -140,7 +151,8 @@ export async function processCustomerWebhook(
       customerTags,
       false,
       customer.email ?? null,
-      customer.displayName ?? null
+      customer.displayName ?? null,
+      piiMode
     );
   }
 
@@ -203,6 +215,11 @@ async function handleCustomerDelete(
  * Stores email and displayName when CUSTOMER_PII_FIELDS=1 is set and they are
  * included in the webhook/query response. These fields are purged by
  * customers/redact (deletes the entire row).
+ *
+ * PII handling modes:
+ * - 'fetched': Write values as returned, including null (allows clearing removed email)
+ * - 'fallback': ACCESS_DENIED retry - preserve existing values with COALESCE
+ * - 'disabled': DPDP minimisation - always write NULL to clear PII
  */
 async function upsertTaggedCustomer(
   sql: Sql,
@@ -211,30 +228,61 @@ async function upsertTaggedCustomer(
   tags: string[],
   tagActive: boolean,
   email: string | null,
-  displayName: string | null
+  displayName: string | null,
+  piiMode: CustomerPiiMode
 ): Promise<void> {
   const tagsJson = sql.json(tags);
   const deactivatedAt = tagActive ? null : new Date();
-  await sql`
-    INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name)
-    VALUES (${shopId}, ${customerId}, ${tagsJson}, ${tagActive}, ${deactivatedAt}, ${email}, ${displayName})
-    ON CONFLICT (shop_id, customer_id)
-    DO UPDATE SET
-      tags = EXCLUDED.tags,
-      tag_active = EXCLUDED.tag_active,
-      tag_deactivated_at = CASE
-        WHEN EXCLUDED.tag_active = true THEN NULL
-        WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
-        ELSE s8_tagged_customers.tag_deactivated_at
-      END,
-      email = EXCLUDED.email,
-      display_name = EXCLUDED.display_name
-  `;
+
+  // Compute effective PII values based on mode
+  const effectiveEmail = piiMode === "disabled" ? null : email;
+  const effectiveDisplayName = piiMode === "disabled" ? null : displayName;
+
+  if (piiMode === "fallback") {
+    // Preserve existing PII when fallback (ACCESS_DENIED retry) is used
+    await sql`
+      INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name)
+      VALUES (${shopId}, ${customerId}, ${tagsJson}, ${tagActive}, ${deactivatedAt}, ${effectiveEmail}, ${effectiveDisplayName})
+      ON CONFLICT (shop_id, customer_id)
+      DO UPDATE SET
+        tags = EXCLUDED.tags,
+        tag_active = EXCLUDED.tag_active,
+        tag_deactivated_at = CASE
+          WHEN EXCLUDED.tag_active = true THEN NULL
+          WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
+          ELSE s8_tagged_customers.tag_deactivated_at
+        END,
+        email = COALESCE(EXCLUDED.email, s8_tagged_customers.email),
+        display_name = COALESCE(EXCLUDED.display_name, s8_tagged_customers.display_name)
+    `;
+  } else {
+    // 'fetched' or 'disabled': write values as-is (null overwrites)
+    await sql`
+      INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name)
+      VALUES (${shopId}, ${customerId}, ${tagsJson}, ${tagActive}, ${deactivatedAt}, ${effectiveEmail}, ${effectiveDisplayName})
+      ON CONFLICT (shop_id, customer_id)
+      DO UPDATE SET
+        tags = EXCLUDED.tags,
+        tag_active = EXCLUDED.tag_active,
+        tag_deactivated_at = CASE
+          WHEN EXCLUDED.tag_active = true THEN NULL
+          WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
+          ELSE s8_tagged_customers.tag_deactivated_at
+        END,
+        email = EXCLUDED.email,
+        display_name = EXCLUDED.display_name
+    `;
+  }
 }
 
 /**
  * Update tagged customer if exists (for non-matching customers).
  * Should-fix #5: Don't create records for customers with no matching tag.
+ *
+ * PII handling modes:
+ * - 'fetched': Write values as returned, including null (allows clearing removed email)
+ * - 'fallback': ACCESS_DENIED retry - preserve existing values with COALESCE
+ * - 'disabled': DPDP minimisation - always write NULL to clear PII
  */
 async function updateTaggedCustomerIfExists(
   sql: Sql,
@@ -243,23 +291,48 @@ async function updateTaggedCustomerIfExists(
   tags: string[],
   tagActive: boolean,
   email: string | null,
-  displayName: string | null
+  displayName: string | null,
+  piiMode: CustomerPiiMode
 ): Promise<void> {
   const tagsJson = sql.json(tags);
-  await sql`
-    UPDATE s8_tagged_customers
-    SET 
-      tags = ${tagsJson},
-      tag_active = ${tagActive},
-      tag_deactivated_at = CASE
-        WHEN ${tagActive} = true THEN NULL
-        WHEN tag_active = true AND ${tagActive} = false THEN NOW()
-        ELSE tag_deactivated_at
-      END,
-      email = ${email},
-      display_name = ${displayName}
-    WHERE shop_id = ${shopId} AND customer_id = ${customerId}
-  `;
+
+  // Compute effective PII values based on mode
+  const effectiveEmail = piiMode === "disabled" ? null : email;
+  const effectiveDisplayName = piiMode === "disabled" ? null : displayName;
+
+  if (piiMode === "fallback") {
+    // Preserve existing PII when fallback (ACCESS_DENIED retry) is used
+    await sql`
+      UPDATE s8_tagged_customers
+      SET 
+        tags = ${tagsJson},
+        tag_active = ${tagActive},
+        tag_deactivated_at = CASE
+          WHEN ${tagActive} = true THEN NULL
+          WHEN tag_active = true AND ${tagActive} = false THEN NOW()
+          ELSE tag_deactivated_at
+        END,
+        email = COALESCE(${effectiveEmail}, email),
+        display_name = COALESCE(${effectiveDisplayName}, display_name)
+      WHERE shop_id = ${shopId} AND customer_id = ${customerId}
+    `;
+  } else {
+    // 'fetched' or 'disabled': write values as-is (null overwrites)
+    await sql`
+      UPDATE s8_tagged_customers
+      SET 
+        tags = ${tagsJson},
+        tag_active = ${tagActive},
+        tag_deactivated_at = CASE
+          WHEN ${tagActive} = true THEN NULL
+          WHEN tag_active = true AND ${tagActive} = false THEN NOW()
+          ELSE tag_deactivated_at
+        END,
+        email = ${effectiveEmail},
+        display_name = ${effectiveDisplayName}
+      WHERE shop_id = ${shopId} AND customer_id = ${customerId}
+    `;
+  }
 }
 
 /**
@@ -506,12 +579,14 @@ export function findMatchingTagRule(
  * @param sql - postgres.js SQL client
  * @param shop - Shop domain
  * @param customer - Customer data (id, tags, and optional email/displayName)
+ * @param piiMode - How to handle PII fields (default: 'fetched' for bulk with PII enabled)
  * @returns Sync result
  */
 export async function processBulkCustomer(
   sql: Sql,
   shop: string,
-  customer: ShopifyCustomer
+  customer: ShopifyCustomer,
+  piiMode: CustomerPiiMode = "fetched"
 ): Promise<SyncResult> {
   // Get shop with its tag rules
   const [shopRow] = await sql<{ id: string }[]>`
@@ -561,7 +636,8 @@ export async function processBulkCustomer(
     customerTags,
     true,
     customer.email ?? null,
-    customer.displayName ?? null
+    customer.displayName ?? null,
+    piiMode
   );
 
   // Check if a company account already exists (precedence check)

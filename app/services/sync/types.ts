@@ -167,6 +167,8 @@ export interface ShopifyOrder {
   } | null;
   customer?: {
     id: string;
+    /** Customer tags for tag-rule eligibility (not PII) */
+    tags?: string[];
   } | null;
 }
 
