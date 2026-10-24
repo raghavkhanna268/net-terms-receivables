@@ -1,5 +1,6 @@
 import { createRequestHandler } from "react-router";
 import { wrapWithSentry } from "~/lib/sentry";
+import { toErrorCode } from "~/lib/log.server";
 import type { Sql } from "../app/lib/db-light.server";
 import { createSql } from "../app/lib/db-light.server";
 import { requestContext } from "../app/lib/request-context.server";
@@ -93,7 +94,8 @@ export default wrapWithSentry({
           `timedOut=${result.timedOut} elapsed=${result.elapsedMs}ms`
       );
     } catch (error) {
-      console.error("[scheduled] drain error:", error);
+      // Use toErrorCode for validated error codes (J1)
+      console.error(`[scheduled] drain error: err=${toErrorCode(error)}`);
     } finally {
       if (sql !== null) {
         // Use type assertion because TypeScript's flow analysis doesn't track

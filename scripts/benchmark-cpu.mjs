@@ -193,7 +193,8 @@ function measureBundleSize() {
   try {
     walkDir(distPath);
   } catch (error) {
-    console.log(`  ⚠ Error reading dist/: ${error.message}\n`);
+    // Log error name only, not message (X8)
+    console.log(`  ⚠ Error reading dist/: ${error.name ?? "unknown"}\n`);
     return null;
   }
 
@@ -246,7 +247,8 @@ async function main() {
   try {
     await runBenchmark();
   } catch (error) {
-    console.error(`Benchmark failed: ${error.message}`);
+    // Log error class only (X8)
+    console.error(`Benchmark failed: ${error.name ?? "unknown"}`);
   }
 
   measureBundleSize();
@@ -261,4 +263,7 @@ async function main() {
   console.log("  Use the Cloudflare dashboard for authoritative CPU metrics.\n");
 }
 
-main().catch(console.error);
+// Safe error output - name only, no raw message (X8)
+main().catch((err) => {
+  console.error(`Fatal: ${err?.name ?? "unknown"}`);
+});

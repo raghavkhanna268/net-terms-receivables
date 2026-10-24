@@ -1262,7 +1262,9 @@ async function validateDynamicQueryBuilders(schema: GraphQLSchema): Promise<{ re
     getCustomerQuery = module.getCustomerQuery;
     getCustomerByNodeQuery = module.getCustomerByNodeQuery;
   } catch (err) {
-    console.error("❌ FATAL: Failed to import customer-fields.server.ts:", err);
+    // Log error class only (X7)
+    const errName = err instanceof Error ? err.name : "unknown";
+    console.error(`❌ FATAL: Failed to import customer-fields.server.ts: ${errName}`);
     process.exit(1);
   }
 
@@ -1526,7 +1528,9 @@ async function main(): Promise<void> {
 // Uses resolved paths to handle symlinks and relative paths correctly
 if (fileURLToPath(import.meta.url) === path.resolve(process.argv[1] ?? "")) {
   main().catch((err) => {
-    console.error("Fatal error:", err);
+    // Log error class only (X7)
+    const errName = err instanceof Error ? err.name : "unknown";
+    console.error(`Fatal error: ${errName}`);
     process.exit(1);
   });
 }
