@@ -15,7 +15,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
-import { parseArgs, getBackfillStats, getCandidates, enqueueBackfill, runApply } from "../credit-status-metafield-backfill";
+import { parseArgs, getBackfillStats, getCandidates, enqueueBackfill, runApply, formatFatal } from "../credit-status-metafield-backfill";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -605,6 +605,74 @@ describeWithDb("credit-status-metafield-backfill DB integration", () => {
       expect(statsJson).not.toContain(ID_PREFIX);
       expect(statsJson).not.toContain(SEED_ACCOUNT_A_ID);
       expect(statsJson).not.toContain(SEED_ACCOUNT_B_ID);
+    });
+  });
+
+  describe("logging safety (X2, X3)", () => {
+    it("formatFatal returns error type, not message", () => {
+      const sentinelMessage = "SENTINEL_DOMAIN.myshopify.com error with secret@email.com amount=50000";
+      
+      const errorResult = formatFatal(new Error(sentinelMessage));
+      expect(errorResult).toBe("Error");
+      expect(errorResult).not.toContain(sentinelMessage);
+      expect(errorResult).not.toContain("myshopify");
+      expect(errorResult).not.toContain("@");
+      expect(errorResult).not.toContain("amount");
+      
+      class CustomCreditStatusError extends Error {}
+      const customResult = formatFatal(new CustomCreditStatusError(sentinelMessage));
+      expect(customResult).toBe("CustomCreditStatusError");
+      expect(customResult).not.toContain(sentinelMessage);
+      
+      expect(formatFatal("string error")).toBe("string");
+      expect(formatFatal(42)).toBe("number");
+      expect(formatFatal(null)).toBe("object");
+      expect(formatFatal(undefined)).toBe("undefined");
+    });
+
+    it("error logs use toErrorCode, not raw messages (X3)", async () => {
+      const { toErrorCode } = await import("~/lib/log.server");
+
+      const sensitiveError = new Error(
+        "Network error for shop sentinel.myshopify.com: secret@example.com amount=999999"
+      );
+      
+      const code = toErrorCode(sensitiveError);
+      
+      expect(code).not.toContain("myshopify");
+      expect(code).not.toContain("@");
+      expect(code).not.toContain("amount");
+      expect(code).not.toContain("999999");
+      expect(code).not.toContain("sentinel");
+    });
+
+    it("dry-run error output contains no domain, email, or amount", async () => {
+      const { runDryRun } = await import("../credit-status-metafield-backfill");
+      
+      const logs: string[] = [];
+      const originalError = console.error;
+      console.error = (...args) => { logs.push(args.join(" ")); };
+      
+      try {
+        const mockSql = {
+          begin: async () => {
+            throw new Error("Connection failed for shop sentinel.myshopify.com: secret@email.com amount=50000");
+          },
+        };
+        
+        await runDryRun(mockSql as unknown as typeof sql).catch(() => {});
+        
+        const allOutput = logs.join("\n");
+        
+        if (allOutput.length > 0) {
+          expect(allOutput).not.toContain("myshopify.com");
+          expect(allOutput).not.toContain("secret@email.com");
+          expect(allOutput).not.toContain("amount=50000");
+          expect(allOutput).not.toContain("sentinel");
+        }
+      } finally {
+        console.error = originalError;
+      }
     });
   });
 });

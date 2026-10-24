@@ -21,7 +21,7 @@ import { sqlOptions } from "~/lib/db-light.server";
 import { requestContext } from "~/lib/request-context.server";
 import { _resetShopifyAppForTesting } from "~/shopify.server";
 import { setAbstractFetchFunc } from "@shopify/shopify-api/runtime";
-import { findCandidates, hasOfflineSession, processBackfill, parseArgs, assertReadOnlyTransaction } from "../backstop-backfill";
+import { findCandidates, hasOfflineSession, processBackfill, parseArgs, assertReadOnlyTransaction, formatFatal } from "../backstop-backfill";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -1058,6 +1058,185 @@ describeWithDb("scripts/backstop-backfill", () => {
         await sql`DELETE FROM "Invoice" WHERE id = ${INVOICE_ID}`;
         await sql`DELETE FROM "BuyerAccount" WHERE id = ${HELD_ACCOUNT_ID}`;
         await sql`DELETE FROM "Session" WHERE id = ${"offline_readonly_" + TEST_SHOP_DOMAIN}`;
+      }
+    });
+  });
+
+  describe("logging safety (X1, X2, X4)", () => {
+    it("formatFatal returns error type, not message", () => {
+      const sentinelMessage = "SENTINEL_DOMAIN.myshopify.com error with secret@email.com";
+      
+      const errorResult = formatFatal(new Error(sentinelMessage));
+      expect(errorResult).toBe("Error");
+      expect(errorResult).not.toContain(sentinelMessage);
+      expect(errorResult).not.toContain("myshopify");
+      expect(errorResult).not.toContain("@");
+      
+      class CustomBackstopError extends Error {}
+      const customResult = formatFatal(new CustomBackstopError(sentinelMessage));
+      expect(customResult).toBe("CustomBackstopError");
+      expect(customResult).not.toContain(sentinelMessage);
+      
+      expect(formatFatal("string error")).toBe("string");
+      expect(formatFatal(42)).toBe("number");
+      expect(formatFatal(null)).toBe("object");
+      expect(formatFatal(undefined)).toBe("undefined");
+    });
+
+    it("error logs use toErrorCode, not raw messages (dry-run path)", async () => {
+      const ORDER_GID_ERROR = `gid://shopify/Order/error-logging-${TEST_SUFFIX}`;
+      const INVOICE_ID_ERROR = `inv-error-logging-${TEST_SUFFIX}`;
+      const HELD_ACCOUNT_ERROR = `acc-error-logging-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "companyId", "companyLocationId", name,
+          "creditLimit", "holdState", bypass, "manualHold", "holdReasonCode",
+          "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${HELD_ACCOUNT_ERROR}, ${TEST_SHOP_ID}, 'COMPANY',
+          ${"co-error-" + TEST_SUFFIX}, ${"loc-error-" + TEST_SUFFIX},
+          'Error Logging Test', 100000.00, 'HELD', false, true, 'MANUAL_HOLD',
+          NOW(), NOW()
+        )
+      `;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${INVOICE_ID_ERROR}, ${TEST_SHOP_ID}, ${HELD_ACCOUNT_ERROR}, ${ORDER_GID_ERROR},
+          '#ERROR-LOGGING', 50000.00, 50000.00, 'open', NOW(), NOW(), NOW()
+        )
+      `;
+
+      await sql`
+        INSERT INTO "Session" (id, shop, state, "isOnline", scope, "accessToken", expires)
+        VALUES (${"offline_errorlog_" + TEST_SHOP_DOMAIN}, ${TEST_SHOP_DOMAIN}, 'state', false, 'read_products', 'shpat_test', ${new Date(Date.now() + 3600000).toISOString()})
+        ON CONFLICT (id) DO NOTHING
+      `;
+
+      try {
+        const logs: string[] = [];
+        const originalLog = console.log;
+        console.log = (...args) => { logs.push(args.join(" ")); };
+
+        try {
+          const candidates = [{
+            invoiceId: INVOICE_ID_ERROR,
+            orderId: ORDER_GID_ERROR,
+            shopId: TEST_SHOP_ID,
+            shopDomain: TEST_SHOP_DOMAIN,
+            buyerAccountId: HELD_ACCOUNT_ERROR,
+          }];
+
+          await requestContext.run({ getSql: () => sql }, async () => {
+            await processBackfill(sql, candidates, true);
+          });
+
+          const allOutput = logs.join("\n");
+          expect(allOutput).not.toContain(".myshopify.com");
+          expect(allOutput).not.toMatch(/@[^\s]+\.[^\s]+/);
+          expect(allOutput).not.toMatch(/\d{5,}/);
+        } finally {
+          console.log = originalLog;
+        }
+      } finally {
+        await sql`DELETE FROM "Invoice" WHERE id = ${INVOICE_ID_ERROR}`;
+        await sql`DELETE FROM "BuyerAccount" WHERE id = ${HELD_ACCOUNT_ERROR}`;
+        await sql`DELETE FROM "Session" WHERE id = ${"offline_errorlog_" + TEST_SHOP_DOMAIN}`;
+      }
+    });
+
+    it("error output contains err= prefix with error codes, not raw messages", async () => {
+      const ORDER_GID_ERRCODE = `gid://shopify/Order/errcode-${TEST_SUFFIX}`;
+      const INVOICE_ID_ERRCODE = `inv-errcode-${TEST_SUFFIX}`;
+      const HELD_ACCOUNT_ERRCODE = `acc-errcode-${TEST_SUFFIX}`;
+      const DOMAIN_SENTINEL = `sentinel-${TEST_SUFFIX}.myshopify.com`;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "companyId", "companyLocationId", name,
+          "creditLimit", "holdState", bypass, "manualHold", "holdReasonCode",
+          "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${HELD_ACCOUNT_ERRCODE}, ${TEST_SHOP_ID}, 'COMPANY',
+          ${"co-errcode-" + TEST_SUFFIX}, ${"loc-errcode-" + TEST_SUFFIX},
+          'Error Code Test', 100000.00, 'HELD', false, true, 'MANUAL_HOLD',
+          NOW(), NOW()
+        )
+      `;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${INVOICE_ID_ERRCODE}, ${TEST_SHOP_ID}, ${HELD_ACCOUNT_ERRCODE}, ${ORDER_GID_ERRCODE},
+          '#ERRCODE', 50000.00, 50000.00, 'open', NOW(), NOW(), NOW()
+        )
+      `;
+
+      await sql`
+        INSERT INTO "Session" (id, shop, state, "isOnline", scope, "accessToken", expires)
+        VALUES (${"offline_errcode_" + TEST_SHOP_DOMAIN}, ${TEST_SHOP_DOMAIN}, 'state', false, 'read_products', 'shpat_test', ${new Date(Date.now() + 3600000).toISOString()})
+        ON CONFLICT (id) DO NOTHING
+      `;
+
+      try {
+        const logs: string[] = [];
+        const originalLog = console.log;
+        console.log = (...args) => { logs.push(args.join(" ")); };
+
+        const mockEvaluateBackstop = vi.fn().mockRejectedValue(
+          new Error(`Network error for shop ${DOMAIN_SENTINEL}: ECONNREFUSED secret@email.com amount=50000`)
+        );
+
+        vi.doMock("~/services/backstop.server", async () => {
+          const actual = await vi.importActual("~/services/backstop.server");
+          return {
+            ...actual,
+            evaluateBackstop: mockEvaluateBackstop,
+          };
+        });
+
+        try {
+          const candidates = [{
+            invoiceId: INVOICE_ID_ERRCODE,
+            orderId: ORDER_GID_ERRCODE,
+            shopId: TEST_SHOP_ID,
+            shopDomain: TEST_SHOP_DOMAIN,
+            buyerAccountId: HELD_ACCOUNT_ERRCODE,
+          }];
+
+          await requestContext.run({ getSql: () => sql }, async () => {
+            await processBackfill(sql, candidates, true);
+          });
+
+          const allOutput = logs.join("\n");
+          expect(allOutput).not.toContain(DOMAIN_SENTINEL);
+          expect(allOutput).not.toContain("myshopify.com");
+          expect(allOutput).not.toContain("secret@email.com");
+          expect(allOutput).not.toContain("amount=50000");
+          expect(allOutput).not.toContain("ECONNREFUSED");
+
+          const errorLogs = logs.filter(l => l.includes("✗ error"));
+          for (const log of errorLogs) {
+            expect(log).toMatch(/err=[A-Za-z][A-Za-z0-9_]*/);
+          }
+        } finally {
+          console.log = originalLog;
+          vi.doUnmock("~/services/backstop.server");
+        }
+      } finally {
+        await sql`DELETE FROM "Invoice" WHERE id = ${INVOICE_ID_ERRCODE}`;
+        await sql`DELETE FROM "BuyerAccount" WHERE id = ${HELD_ACCOUNT_ERRCODE}`;
+        await sql`DELETE FROM "Session" WHERE id = ${"offline_errcode_" + TEST_SHOP_DOMAIN}`;
       }
     });
   });
