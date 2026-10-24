@@ -1729,8 +1729,8 @@ describeWithDb("S17 apply service DB integration", () => {
       `;
       expect(match.state).toBe("pushed");
 
-      // Exactly ONE match.applied audit
-      const matchAppliedAudits = await sql<{ id: string; data: { reasonCode?: string } }[]>`
+      // Exactly ONE match.applied audit with correct amounts
+      const matchAppliedAudits = await sql<{ id: string; data: { reasonCode?: string; amountPaise?: string; previousOutstandingPaise?: string; newOutstandingPaise?: string } }[]>`
         SELECT id, data FROM "AuditEvent"
         WHERE "shopId" = ${TEST_SHOP_ID}
           AND type = 'match.applied'
@@ -1738,6 +1738,10 @@ describeWithDb("S17 apply service DB integration", () => {
       `;
       expect(matchAppliedAudits.length).toBe(1);
       expect(matchAppliedAudits[0].data.reasonCode).toBe("STALE_FINALIZED_EXTERNALLY_PAID");
+      // Amounts come from push_claimed.outstandingAtClaimPaise, not locked outstanding (which is 0)
+      expect(matchAppliedAudits[0].data.amountPaise).toBe("1000000");
+      expect(matchAppliedAudits[0].data.previousOutstandingPaise).toBe("1000000");
+      expect(matchAppliedAudits[0].data.newOutstandingPaise).toBe("0");
 
       // NO match.unmatched audit
       const [unmatchedAudit] = await sql<{ id: string }[]>`

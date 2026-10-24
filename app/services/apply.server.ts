@@ -940,6 +940,12 @@ async function handleStalePushingMatch(
 
           // No sibling paid it - our push reached Shopify and webhook marked it paid.
           // Finalize with match.applied to stay consistent with Shopify state.
+          // Use push_claimed amounts (not current locked outstanding which is 0).
+          const outstandingAtClaim = pushClaimed?.outstandingAtClaimPaise ?? matchRow.amountPaise;
+          const matchAmount = BigInt(matchRow.amountPaise);
+          const claimAmount = BigInt(outstandingAtClaim);
+          const appliedAmount = matchAmount > claimAmount ? claimAmount : matchAmount;
+
           await tx`
             UPDATE "Invoice"
             SET outstanding = 0, "updatedAt" = NOW()
@@ -954,8 +960,8 @@ async function handleStalePushingMatch(
             matchId,
             invoiceId: invoiceRow.id,
             paymentId: matchRow.paymentId,
-            amountPaise: finalizeOutstandingPaise,
-            previousOutstandingPaise: finalizeOutstandingPaise,
+            amountPaise: appliedAmount.toString(),
+            previousOutstandingPaise: outstandingAtClaim,
             newOutstandingPaise: "0",
             reasonCode: "STALE_FINALIZED_EXTERNALLY_PAID",
             staleReclaim: true,
