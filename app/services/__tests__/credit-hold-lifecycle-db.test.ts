@@ -23,15 +23,8 @@ import type { CreditStatus } from "~/lib/metafields-contract";
 let metafieldWriteCount = 0;
 let lastMetafieldVariables: { metafields: Array<{ ownerId: string; namespace: string; key: string; type: string; value: string }> } | null = null;
 let lastMetafieldJson: CreditStatus | null = null;
-let mockShouldFail = false;
 
 const mockShopifyGraphQLRequest = vi.fn().mockImplementation(async (_shop: string, query: string, variables: unknown) => {
-  if (mockShouldFail) {
-    return {
-      success: false,
-      error: "Simulated metafield write failure",
-    };
-  }
   if (query.includes("metafieldsSet")) {
     metafieldWriteCount++;
     lastMetafieldVariables = variables as typeof lastMetafieldVariables;
@@ -60,7 +53,7 @@ vi.mock("../shopify-client.server", async (importOriginal) => {
 });
 
 import { recomputeCreditStatus } from "../credit-status-recompute.server";
-import { updateCreditStatus, syncCreditStatusMetafield } from "../credit-status.server";
+import { updateCreditStatus } from "../credit-status.server";
 import { applyMatch } from "../apply.server";
 import { confirmMatch } from "../matcher.server";
 
@@ -126,12 +119,12 @@ describeWithDb("S17 credit-hold lifecycle (overdue)", () => {
     metafieldWriteCount = 0;
     lastMetafieldVariables = null;
     lastMetafieldJson = null;
-    mockShouldFail = false;
     mockShopifyGraphQLRequest.mockClear();
 
     await sql`
       UPDATE "BuyerAccount"
       SET "holdState" = 'OK', "holdReasonCode" = NULL, "manualHold" = false,
+          "creditLimit" = 100000.00,
           "syncPending" = false, "syncVersion" = 1, gated_at = NULL, "metafieldSyncedAt" = NULL
       WHERE id = ${TEST_ACCOUNT_ID}
     `;
@@ -370,6 +363,8 @@ describeWithDb("S17 credit-hold lifecycle (overdue)", () => {
       )
     `;
 
+    // The sweep enqueues for ALL shops with overdue invoices. We archive any messages
+    // it creates for other shops' accounts to avoid leaking into later DB tests.
     const [sweepResult] = await sql<{ accounts_enqueued: number }[]>`
       SELECT * FROM enqueue_credit_status_recomputes()
     `;
@@ -387,6 +382,17 @@ describeWithDb("S17 credit-hold lifecycle (overdue)", () => {
     expect(queueMsg.message.topic).toBe("CREDIT_STATUS_RECOMPUTE");
     expect(queueMsg.message.buyerAccountId).toBe(TEST_ACCOUNT_ID);
     expect(queueMsg.message.source).toBe("daily_sweep");
+
+    // Clean up messages for other shops that the global sweep may have enqueued
+    await sql`
+      WITH archived AS (
+        SELECT pgmq.archive('s6_sync', msg_id)
+        FROM pgmq.q_s6_sync
+        WHERE message->>'shop' != ${TEST_SHOP_DOMAIN}
+          AND message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+      )
+      SELECT 1
+    `;
   });
 });
 
@@ -449,7 +455,6 @@ describeWithDb("S17 credit-hold lifecycle (over credit limit)", () => {
     metafieldWriteCount = 0;
     lastMetafieldVariables = null;
     lastMetafieldJson = null;
-    mockShouldFail = false;
     mockShopifyGraphQLRequest.mockClear();
     mockShopifyGraphQLRequest.mockImplementation(async (_shop: string, query: string, variables: unknown) => {
       if (query.includes("metafieldsSet")) {
@@ -577,7 +582,7 @@ describeWithDb("S17 credit-hold lifecycle (over credit limit)", () => {
     expect(lastMetafieldJson!.exposurePaise).toBe("3000000");
   });
 
-  it("exactly at credit limit is not HELD (hold only when over limit)", async () => {
+  it("exactly at credit limit is NEAR_LIMIT not HELD (hold only when over limit)", async () => {
     const [{ db_now: dbNow }] = await sql<{ db_now: Date }[]>`SELECT NOW() AS db_now`;
     
     const invoiceId = `inv-at-limit-${TEST_SUFFIX}`;
@@ -605,19 +610,17 @@ describeWithDb("S17 credit-hold lifecycle (over credit limit)", () => {
     const [account] = await sql<{ holdState: string }[]>`
       SELECT "holdState" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
     `;
-    expect(account.holdState).not.toBe("HELD");
+    expect(account.holdState).toBe("NEAR_LIMIT");
   });
 });
 
-describeWithDb("S17 credit-hold lifecycle (plan gating)", () => {
+describeWithDb("S17 credit-hold lifecycle (gated accounts)", () => {
   let sql: ReturnType<typeof postgres>;
-  const TEST_SUFFIX = Date.now().toString(36) + "-gating";
-  const TEST_SHOP_ID = `shop-gating-${TEST_SUFFIX}`;
-  const TEST_SHOP_DOMAIN = `gating-test-${TEST_SUFFIX}.myshopify.com`;
+  const TEST_SUFFIX = Date.now().toString(36) + "-gated";
+  const TEST_SHOP_ID = `shop-gated-${TEST_SUFFIX}`;
+  const TEST_SHOP_DOMAIN = `gated-test-${TEST_SUFFIX}.myshopify.com`;
   const TEST_GATED_ACCOUNT_ID = `acc-gated-${TEST_SUFFIX}`;
   const TEST_GATED_COMPANY_LOCATION_ID = `gid://shopify/CompanyLocation/gated-${TEST_SUFFIX}`;
-
-  const originalPlanGating = process.env.PLAN_GATING_ENFORCED;
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
@@ -646,11 +649,6 @@ describeWithDb("S17 credit-hold lifecycle (plan gating)", () => {
   });
 
   afterAll(async () => {
-    if (originalPlanGating === undefined) {
-      delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
-    } else {
-      process.env.PLAN_GATING_ENFORCED = originalPlanGating;
-    }
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
@@ -666,7 +664,6 @@ describeWithDb("S17 credit-hold lifecycle (plan gating)", () => {
     metafieldWriteCount = 0;
     lastMetafieldVariables = null;
     lastMetafieldJson = null;
-    mockShouldFail = false;
     mockShopifyGraphQLRequest.mockClear();
     mockShopifyGraphQLRequest.mockImplementation(async (_shop: string, query: string, variables: unknown) => {
       if (query.includes("metafieldsSet")) {
@@ -688,26 +685,31 @@ describeWithDb("S17 credit-hold lifecycle (plan gating)", () => {
       return { success: true, data: {} };
     });
 
+    // Gated account simulates exceeding Free plan's 3-account limit per docs/plans-and-gating.md.
+    // Credit holds apply on ALL plans regardless of gating state.
     await sql`
       UPDATE "BuyerAccount"
       SET "holdState" = 'OK', "holdReasonCode" = NULL, "manualHold" = false,
+          "creditLimit" = 100000.00,
           "syncPending" = false, "syncVersion" = 1, gated_at = NOW(), "metafieldSyncedAt" = NULL
       WHERE id = ${TEST_GATED_ACCOUNT_ID}
     `;
 
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'%' + TEST_SUFFIX + '%'}`;
   });
 
-  it("PLAN_GATING_ENFORCED=false: gated account with overdue invoice still becomes HELD with metafield written", async () => {
-    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
-    
+  // recomputeCreditStatus does NOT read PLAN_GATING_ENFORCED - credit holds apply identically
+  // to gated accounts regardless of whether gating enforcement is on or off. These tests
+  // prove that gated accounts are subject to holds just like non-gated accounts.
+  it("gated account with overdue invoice becomes HELD with metafield written", async () => {
     const [{ db_now: dbNow }] = await sql<{ db_now: Date }[]>`SELECT NOW() AS db_now`;
     
-    const invoiceId = `inv-gating-off-${TEST_SUFFIX}`;
-    const orderId = `gid://shopify/Order/gating-off-${TEST_SUFFIX}`;
+    const invoiceId = `inv-gated-overdue-${TEST_SUFFIX}`;
+    const orderId = `gid://shopify/Order/gated-overdue-${TEST_SUFFIX}`;
 
     await sql`
       INSERT INTO "Invoice" (
@@ -716,7 +718,7 @@ describeWithDb("S17 credit-hold lifecycle (plan gating)", () => {
       )
       VALUES (
         ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_GATED_ACCOUNT_ID}, ${orderId},
-        '#GATING-OFF-1', 40000.00, 40000.00, 'open',
+        '#GATED-OVERDUE-1', 40000.00, 40000.00, 'open',
         ${dbNow}::timestamptz - INTERVAL '40 days',
         ${dbNow}::timestamptz - INTERVAL '10 days',
         ${dbNow}, ${dbNow}
@@ -739,47 +741,7 @@ describeWithDb("S17 credit-hold lifecycle (plan gating)", () => {
     expect(lastMetafieldJson!.holdReasonCode).toBe("PAYMENT_OVERDUE");
   });
 
-  it("PLAN_GATING_ENFORCED=true: gated account with overdue invoice still becomes HELD with metafield written", async () => {
-    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
-    
-    const [{ db_now: dbNow }] = await sql<{ db_now: Date }[]>`SELECT NOW() AS db_now`;
-    
-    const invoiceId = `inv-gating-on-${TEST_SUFFIX}`;
-    const orderId = `gid://shopify/Order/gating-on-${TEST_SUFFIX}`;
-
-    await sql`
-      INSERT INTO "Invoice" (
-        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
-        status, "issuedAt", "dueAt", "createdAt", "updatedAt"
-      )
-      VALUES (
-        ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_GATED_ACCOUNT_ID}, ${orderId},
-        '#GATING-ON-1', 35000.00, 35000.00, 'open',
-        ${dbNow}::timestamptz - INTERVAL '45 days',
-        ${dbNow}::timestamptz - INTERVAL '15 days',
-        ${dbNow}, ${dbNow}
-      )
-    `;
-
-    const result = await recomputeCreditStatus(sql, TEST_GATED_ACCOUNT_ID);
-
-    expect(result.success).toBe(true);
-    expect(result.newHold).toBe(true);
-    expect(result.metafieldWritten).toBe(true);
-    expect(metafieldWriteCount).toBe(1);
-
-    const [account] = await sql<{ holdState: string }[]>`
-      SELECT "holdState" FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}
-    `;
-    expect(account.holdState).toBe("HELD");
-
-    expect(lastMetafieldJson!.hold).toBe(true);
-    expect(lastMetafieldJson!.holdReasonCode).toBe("PAYMENT_OVERDUE");
-  });
-
-  it("PLAN_GATING_ENFORCED=false: gated account over credit limit still becomes HELD with metafield written", async () => {
-    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
-    
+  it("gated account over credit limit becomes HELD with metafield written", async () => {
     await sql`
       UPDATE "BuyerAccount"
       SET "creditLimit" = 50000.00
@@ -788,8 +750,8 @@ describeWithDb("S17 credit-hold lifecycle (plan gating)", () => {
     
     const [{ db_now: dbNow }] = await sql<{ db_now: Date }[]>`SELECT NOW() AS db_now`;
     
-    const invoiceId = `inv-gating-off-limit-${TEST_SUFFIX}`;
-    const orderId = `gid://shopify/Order/gating-off-limit-${TEST_SUFFIX}`;
+    const invoiceId = `inv-gated-overlimit-${TEST_SUFFIX}`;
+    const orderId = `gid://shopify/Order/gated-overlimit-${TEST_SUFFIX}`;
 
     await sql`
       INSERT INTO "Invoice" (
@@ -798,7 +760,7 @@ describeWithDb("S17 credit-hold lifecycle (plan gating)", () => {
       )
       VALUES (
         ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_GATED_ACCOUNT_ID}, ${orderId},
-        '#GATING-OFF-LIMIT-1', 60000.00, 60000.00, 'open',
+        '#GATED-OVERLIMIT-1', 60000.00, 60000.00, 'open',
         ${dbNow}::timestamptz - INTERVAL '5 days',
         ${dbNow}::timestamptz + INTERVAL '25 days',
         ${dbNow}, ${dbNow}
@@ -815,19 +777,11 @@ describeWithDb("S17 credit-hold lifecycle (plan gating)", () => {
     expect(lastMetafieldJson!.holdReasonCode).toBe("CREDIT_REVIEW");
   });
 
-  it("PLAN_GATING_ENFORCED=true: gated account over credit limit still becomes HELD with metafield written", async () => {
-    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
-    
-    await sql`
-      UPDATE "BuyerAccount"
-      SET "creditLimit" = 50000.00
-      WHERE id = ${TEST_GATED_ACCOUNT_ID}
-    `;
-    
+  it("daily sweep includes gated accounts with overdue invoices", async () => {
     const [{ db_now: dbNow }] = await sql<{ db_now: Date }[]>`SELECT NOW() AS db_now`;
     
-    const invoiceId = `inv-gating-on-limit-${TEST_SUFFIX}`;
-    const orderId = `gid://shopify/Order/gating-on-limit-${TEST_SUFFIX}`;
+    const invoiceId = `inv-gated-sweep-${TEST_SUFFIX}`;
+    const orderId = `gid://shopify/Order/gated-sweep-${TEST_SUFFIX}`;
 
     await sql`
       INSERT INTO "Invoice" (
@@ -836,45 +790,15 @@ describeWithDb("S17 credit-hold lifecycle (plan gating)", () => {
       )
       VALUES (
         ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_GATED_ACCOUNT_ID}, ${orderId},
-        '#GATING-ON-LIMIT-1', 55000.00, 55000.00, 'open',
-        ${dbNow}::timestamptz - INTERVAL '5 days',
-        ${dbNow}::timestamptz + INTERVAL '25 days',
-        ${dbNow}, ${dbNow}
-      )
-    `;
-
-    const result = await recomputeCreditStatus(sql, TEST_GATED_ACCOUNT_ID);
-
-    expect(result.success).toBe(true);
-    expect(result.newHold).toBe(true);
-    expect(result.metafieldWritten).toBe(true);
-
-    expect(lastMetafieldJson!.hold).toBe(true);
-    expect(lastMetafieldJson!.holdReasonCode).toBe("CREDIT_REVIEW");
-  });
-
-  it("gating never skips credit hold: daily sweep includes gated accounts", async () => {
-    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
-    
-    const [{ db_now: dbNow }] = await sql<{ db_now: Date }[]>`SELECT NOW() AS db_now`;
-    
-    const invoiceId = `inv-gating-sweep-${TEST_SUFFIX}`;
-    const orderId = `gid://shopify/Order/gating-sweep-${TEST_SUFFIX}`;
-
-    await sql`
-      INSERT INTO "Invoice" (
-        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
-        status, "issuedAt", "dueAt", "createdAt", "updatedAt"
-      )
-      VALUES (
-        ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_GATED_ACCOUNT_ID}, ${orderId},
-        '#GATING-SWEEP-1', 20000.00, 20000.00, 'open',
+        '#GATED-SWEEP-1', 20000.00, 20000.00, 'open',
         ${dbNow}::timestamptz - INTERVAL '35 days',
         ${dbNow}::timestamptz - INTERVAL '5 days',
         ${dbNow}, ${dbNow}
       )
     `;
 
+    // The sweep enqueues for ALL shops with overdue invoices. We archive any messages
+    // it creates for other shops' accounts to avoid leaking into later DB tests.
     const [sweepResult] = await sql<{ accounts_enqueued: number }[]>`
       SELECT * FROM enqueue_credit_status_recomputes()
     `;
@@ -890,6 +814,17 @@ describeWithDb("S17 credit-hold lifecycle (plan gating)", () => {
 
     expect(queueMsg).toBeDefined();
     expect(queueMsg.message.buyerAccountId).toBe(TEST_GATED_ACCOUNT_ID);
+
+    // Clean up messages for other shops that the global sweep may have enqueued
+    await sql`
+      WITH archived AS (
+        SELECT pgmq.archive('s6_sync', msg_id)
+        FROM pgmq.q_s6_sync
+        WHERE message->>'shop' != ${TEST_SHOP_DOMAIN}
+          AND message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+      )
+      SELECT 1
+    `;
   });
 });
 
@@ -929,6 +864,7 @@ describeWithDb("S17 metafield contract compliance", () => {
 
   afterAll(async () => {
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
@@ -963,31 +899,36 @@ describeWithDb("S17 metafield contract compliance", () => {
     await sql`
       UPDATE "BuyerAccount"
       SET "holdState" = 'OK', "holdReasonCode" = NULL, "manualHold" = false,
+          "creditLimit" = 100000.00,
           "syncPending" = true, "syncVersion" = 1, "metafieldSyncedAt" = NULL
       WHERE id = ${TEST_ACCOUNT_ID}
     `;
+    await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
   });
 
-  it("metafield uses METAFIELDS_SET_MUTATION with correct structure", async () => {
-    const result = await syncCreditStatusMetafield(sql, TEST_ACCOUNT_ID);
+  it("recompute writes metafield with all docs/metafields-contract.md fields", async () => {
+    const [{ db_now: dbNow }] = await sql<{ db_now: Date }[]>`SELECT NOW() AS db_now`;
     
-    expect(result.success).toBe(true);
-    expect(mockShopifyGraphQLRequest).toHaveBeenCalled();
-    
-    const call = mockShopifyGraphQLRequest.mock.calls.find(
-      (c: unknown[]) => typeof c[1] === "string" && c[1].includes("metafieldsSet")
-    );
-    expect(call).toBeDefined();
-    
-    const query = call![1] as string;
-    expect(query).toContain("mutation MetafieldsSet");
-    expect(query).toContain("metafieldsSet(metafields: $metafields)");
-  });
+    const invoiceId = `inv-contract-full-${TEST_SUFFIX}`;
+    const orderId = `gid://shopify/Order/contract-full-${TEST_SUFFIX}`;
 
-  it("metafield variables match docs/metafields-contract.md spec", async () => {
-    await syncCreditStatusMetafield(sql, TEST_ACCOUNT_ID);
-    
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+        status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+        '#CONTRACT-FULL-1', 25000.00, 25000.00, 'open',
+        ${dbNow}::timestamptz - INTERVAL '35 days',
+        ${dbNow}::timestamptz - INTERVAL '5 days',
+        ${dbNow}, ${dbNow}
+      )
+    `;
+
+    await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
+
     expect(lastMetafieldVariables).not.toBeNull();
     expect(lastMetafieldVariables!.metafields).toHaveLength(1);
     
@@ -1000,8 +941,8 @@ describeWithDb("S17 metafield contract compliance", () => {
     
     expect(lastMetafieldJson!.schemaVersion).toBe(1);
     expect(lastMetafieldJson!.currencyCode).toBe("INR");
-    expect(typeof lastMetafieldJson!.hold).toBe("boolean");
-    expect(lastMetafieldJson!.holdReasonCode === null || typeof lastMetafieldJson!.holdReasonCode === "string").toBe(true);
+    expect(lastMetafieldJson!.hold).toBe(true);
+    expect(lastMetafieldJson!.holdReasonCode).toBe("PAYMENT_OVERDUE");
     expect(lastMetafieldJson!.limitPaise).toMatch(/^\d+$/);
     expect(lastMetafieldJson!.exposurePaise).toMatch(/^\d+$/);
     expect(lastMetafieldJson!.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
@@ -1076,8 +1017,39 @@ describeWithDb("S17 metafield contract compliance", () => {
     expect(lastMetafieldJson!.holdReasonCode).toBe("MANUAL_HOLD");
   });
 
-  it("hold=false has holdReasonCode=null", async () => {
-    await syncCreditStatusMetafield(sql, TEST_ACCOUNT_ID);
+  it("recompute to OK after paying invoice writes hold=false with holdReasonCode=null", async () => {
+    const [{ db_now: dbNow }] = await sql<{ db_now: Date }[]>`SELECT NOW() AS db_now`;
+    
+    const invoiceId = `inv-contract-release-${TEST_SUFFIX}`;
+    const orderId = `gid://shopify/Order/contract-release-${TEST_SUFFIX}`;
+
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+        status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+        '#CONTRACT-RELEASE-1', 15000.00, 15000.00, 'open',
+        ${dbNow}::timestamptz - INTERVAL '40 days',
+        ${dbNow}::timestamptz - INTERVAL '10 days',
+        ${dbNow}, ${dbNow}
+      )
+    `;
+
+    await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
+    expect(lastMetafieldJson!.hold).toBe(true);
+
+    await sql`
+      UPDATE "Invoice"
+      SET outstanding = 0.00, status = 'paid'
+      WHERE id = ${invoiceId}
+    `;
+
+    metafieldWriteCount = 0;
+    lastMetafieldJson = null;
+
+    await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
 
     expect(lastMetafieldJson!.hold).toBe(false);
     expect(lastMetafieldJson!.holdReasonCode).toBeNull();
