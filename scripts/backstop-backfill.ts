@@ -11,8 +11,11 @@
  *   npx tsx scripts/backstop-backfill.ts --since 2026-10-01 --until 2026-10-15 --shop example.myshopify.com
  *
  * REQUIRED FLAGS:
- *   --since  ISO timestamp - only orders created on or after this time
- *   --until  ISO timestamp - only orders created before this time
+ *   --since  ISO timestamp - only orders with issuedAt on or after this time
+ *   --until  ISO timestamp - only orders with issuedAt before this time
+ *
+ * NOTE: issuedAt is the order date (order.processedAt ?? order.createdAt),
+ *       not the DB row creation time. See order.server.ts:259.
  *
  * OPTIONAL FLAGS:
  *   --apply  Actually write holds (default: dry-run)
@@ -61,8 +64,8 @@ interface BackfillResult {
 }
 
 /**
- * Check if an offline session exists for a shop.
- * Returns true if an offline session exists, false otherwise.
+ * Check if a valid (non-expired) offline session exists for a shop.
+ * Returns true if a non-expired offline session exists, false otherwise.
  */
 async function hasOfflineSession(
   sql: ReturnType<typeof postgres>,
@@ -75,6 +78,7 @@ async function hasOfflineSession(
       WHERE shop = ${shopDomain}
         AND "isOnline" = false
         AND "accessToken" IS NOT NULL
+        AND (expires IS NULL OR expires > NOW())
     ) AS exists
   `;
   return session?.exists ?? false;
@@ -87,6 +91,8 @@ async function hasOfflineSession(
  * Missing = no backstop_processed_orders row OR action='pending'
  *
  * Only includes orders within the --since/--until window.
+ * Uses issuedAt (order date) not createdAt (DB row creation).
+ * Per order.server.ts:259, issuedAt = order.processedAt ?? order.createdAt
  */
 async function findCandidates(
   sql: ReturnType<typeof postgres>,
@@ -128,8 +134,8 @@ async function findCandidates(
     WHERE i.status = 'open'
       AND i.outstanding > 0
       AND i."orderId" IS NOT NULL
-      AND i."createdAt" >= ${since}
-      AND i."createdAt" < ${until}
+      AND i."issuedAt" >= ${since}
+      AND i."issuedAt" < ${until}
       AND (bpo.action IS NULL OR bpo.action = 'pending')
       ${shopCondition}
     ORDER BY i."shopId", i."orderId"
@@ -197,8 +203,11 @@ async function processBackfill(
 
       if (!invoiceInfo) {
         console.log(`    → skip (invoice_not_found)`);
-        result.skipped++;
-        if (dryRun) result.wouldSkip++;
+        if (dryRun) {
+          result.wouldSkip++;
+        } else {
+          result.skipped++;
+        }
         continue;
       }
 

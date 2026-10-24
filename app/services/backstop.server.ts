@@ -751,6 +751,54 @@ export async function resolveInvoiceForOrder(
 }
 
 /**
+ * Internal helper: Evaluate the held/bypass/not_held decision.
+ * Called by both evaluateBackstop and applyBackstop to share the decision logic.
+ *
+ * @param sql - Database connection
+ * @param buyerAccountId - Buyer account ID
+ * @param invoiceId - Invoice ID for pre-order hold state calculation
+ * @returns Decision result with held, bypass, and reason
+ */
+async function evaluateHoldDecision(
+  sql: Sql,
+  buyerAccountId: string,
+  invoiceId: string | null | undefined,
+): Promise<{
+  shouldHold: boolean;
+  skipReason: string | null;
+  reasonCode: EvaluateBackstopResult["reasonCode"];
+}> {
+  const { held, bypass, reason } = await isBuyerHeldBeforeOrder(
+    sql,
+    buyerAccountId,
+    invoiceId,
+  );
+
+  // Check bypass BEFORE held - isBuyerHeldBeforeOrder returns held:false when bypass:true
+  if (bypass) {
+    return {
+      shouldHold: false,
+      skipReason: "Bypass active",
+      reasonCode: "bypass",
+    };
+  }
+
+  if (!held) {
+    return {
+      shouldHold: false,
+      skipReason: reason,
+      reasonCode: "not_held",
+    };
+  }
+
+  return {
+    shouldHold: true,
+    skipReason: null,
+    reasonCode: "would_hold",
+  };
+}
+
+/**
  * Evaluate whether backstop should be applied to an order (read-only).
  *
  * This is a pure read-only function that checks:
@@ -818,28 +866,15 @@ export async function evaluateBackstop(
     // Stale pending - would be reclaimed, continue evaluation
   }
 
-  // Check if buyer was held BEFORE this order
-  const { held, bypass, reason } = await isBuyerHeldBeforeOrder(
-    sql,
-    buyerAccountId,
-    invoiceId,
-  );
+  // Use shared decision logic
+  const decision = await evaluateHoldDecision(sql, buyerAccountId, invoiceId);
 
-  if (!held) {
+  if (!decision.shouldHold) {
     return {
       wouldApply: false,
       wouldSkip: true,
-      skipReason: reason,
-      reasonCode: "not_held",
-    };
-  }
-
-  if (bypass) {
-    return {
-      wouldApply: false,
-      wouldSkip: true,
-      skipReason: "Bypass active",
-      reasonCode: "bypass",
+      skipReason: decision.skipReason!,
+      reasonCode: decision.reasonCode,
     };
   }
 
@@ -909,40 +944,27 @@ export async function applyBackstop(
   }
 
   try {
-    // Check if buyer was held BEFORE this order
-    const { held, bypass, holdState: _holdState, reason } = await isBuyerHeldBeforeOrder(
-      sql,
-      buyerAccountId,
-      invoiceId,
-    );
+    // Use shared decision logic (same as evaluateBackstop)
+    const decision = await evaluateHoldDecision(sql, buyerAccountId, invoiceId);
 
-    if (!held) {
+    if (!decision.shouldHold) {
       await markBackstopCompleted(
         sql,
         shopId,
         orderGid,
         "skipped",
-        reason,
+        decision.skipReason,
       );
       return {
         applied: false,
         skipped: true,
-        skipReason: reason,
-      };
-    }
-
-    if (bypass) {
-      await markBackstopCompleted(sql, shopId, orderGid, "skipped", "Bypass active");
-      return {
-        applied: false,
-        skipped: true,
-        skipReason: "Bypass active",
+        skipReason: decision.skipReason!,
       };
     }
 
     // Account was held before this order - apply backstop
     console.warn(
-      `[backstop] Applying holds for order ${orderGid} from held account ${buyerAccountId} (${reason})`,
+      `[backstop] Applying holds for order ${orderGid} from held account ${buyerAccountId}`,
     );
 
     // Hold fulfillment orders (throws on retryable failure)
