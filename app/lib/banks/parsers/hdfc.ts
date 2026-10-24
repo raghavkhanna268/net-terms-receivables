@@ -141,15 +141,21 @@ export async function parseHdfcStatement(
     // Parse this row
     const rawRow = extractHdfcRow(row, columns, i + 1);
     if (!rawRow) {
-      const narrationContent = String(row[columns.narrationCol] ?? "").trim();
-      if (narrationContent && !narrationContent.match(/^[\d.,\s]+$/)) {
+      const debitCell = String(row[columns.withdrawalCol] ?? "").trim();
+      const creditCell = String(row[columns.depositCol] ?? "").trim();
+      const hasAmount = (debitCell && !debitCell.match(/^[\d.,\s]*$/)) ||
+                        (creditCell && !creditCell.match(/^[\d.,\s]*$/)) ||
+                        (debitCell && parseFloat(debitCell.replace(/[,\s]/g, "")) > 0) ||
+                        (creditCell && parseFloat(creditCell.replace(/[,\s]/g, "")) > 0);
+      if (hasAmount) {
         errors.push({
           row: i + 1,
           code: "ROW_PARSE_FAILED",
           message: "Failed to parse row",
         });
+      } else {
+        skippedRows++;
       }
-      skippedRows++;
       continue;
     }
 

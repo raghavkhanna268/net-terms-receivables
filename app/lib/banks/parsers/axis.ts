@@ -147,15 +147,21 @@ export async function parseAxisStatement(
     // Parse this row
     const rawRow = extractAxisRow(row, columns, i + 1);
     if (!rawRow) {
-      const particularsContent = String(row[columns.particularsCol] ?? "").trim();
-      if (particularsContent && !particularsContent.match(/^[\d.,\s]+$/)) {
+      const debitCell = String(row[columns.debitCol] ?? "").trim();
+      const creditCell = String(row[columns.creditCol] ?? "").trim();
+      const hasAmount = (debitCell && !debitCell.match(/^[\d.,\s]*$/)) ||
+                        (creditCell && !creditCell.match(/^[\d.,\s]*$/)) ||
+                        (debitCell && parseFloat(debitCell.replace(/[,\s]/g, "")) > 0) ||
+                        (creditCell && parseFloat(creditCell.replace(/[,\s]/g, "")) > 0);
+      if (hasAmount) {
         errors.push({
           row: i + 1,
           code: "ROW_PARSE_FAILED",
           message: "Failed to parse row",
         });
+      } else {
+        skippedRows++;
       }
-      skippedRows++;
       continue;
     }
 

@@ -146,15 +146,21 @@ export async function parseSbiStatement(
     // Parse this row
     const rawRow = extractSbiRow(row, columns, i + 1);
     if (!rawRow) {
-      const descContent = String(row[columns.descriptionCol] ?? "").trim();
-      if (descContent && !descContent.match(/^[\d.,\s]+$/)) {
+      const debitCell = String(row[columns.debitCol] ?? "").trim();
+      const creditCell = String(row[columns.creditCol] ?? "").trim();
+      const hasAmount = (debitCell && !debitCell.match(/^[\d.,\s]*$/)) ||
+                        (creditCell && !creditCell.match(/^[\d.,\s]*$/)) ||
+                        (debitCell && parseFloat(debitCell.replace(/[,\s]/g, "")) > 0) ||
+                        (creditCell && parseFloat(creditCell.replace(/[,\s]/g, "")) > 0);
+      if (hasAmount) {
         errors.push({
           row: i + 1,
           code: "ROW_PARSE_FAILED",
           message: "Failed to parse row",
         });
+      } else {
+        skippedRows++;
       }
-      skippedRows++;
       continue;
     }
 
