@@ -5,6 +5,10 @@
  * 1. Gated accounts are NOT enqueued when invoices are due
  * 2. Non-gated accounts ARE enqueued when invoices are due
  * 3. When gating is OFF (gated_at is NULL for all), behavior is unchanged
+ *
+ * Clock source: These tests use the database's NOW() as the single time source.
+ * The shop timezone is computed from DB's UTC hour so the business-hour check
+ * in s18_enqueue_reminders() (which uses NOW()) sees a local hour of ~12.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import postgres from "postgres";
@@ -14,11 +18,16 @@ const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
 /**
- * Compute a fixed-offset Etc/GMT±N timezone where current local hour is ~12.
+ * Compute a fixed-offset Etc/GMT±N timezone where the DB's current local hour is ~12.
+ * Uses DB's NOW() as the single clock source so the timezone choice aligns with the
+ * business-hour check in s18_enqueue_reminders() which also uses NOW().
  * PostgreSQL uses POSIX convention where Etc/GMT+5 means UTC-5 (opposite of ISO).
  */
-function getTestTimezone(): string {
-  const utcHour = new Date().getUTCHours();
+async function getTestTimezone(sql: ReturnType<typeof postgres>): Promise<string> {
+  const [row] = await sql<{ utc_hour: number }[]>`
+    SELECT EXTRACT(HOUR FROM NOW() AT TIME ZONE 'UTC')::int AS utc_hour
+  `;
+  const utcHour = row.utc_hour;
   const offsetToMakeNoon = utcHour - 12;
   if (offsetToMakeNoon === 0) {
     return "Etc/GMT";
@@ -43,7 +52,7 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
-    testTimezone = getTestTimezone();
+    testTimezone = await getTestTimezone(sql);
 
     await sql`
       INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
