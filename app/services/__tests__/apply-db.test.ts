@@ -22,6 +22,9 @@ let mockShopifySuccess = true;
 let mockAlreadyPaid = false;
 let shopifyCallCount = 0;
 
+// Callback that runs DURING the Shopify orderMarkAsPaid call (for race condition testing)
+let onOrderMarkAsPaidCallback: (() => Promise<void>) | null = null;
+
 vi.mock("../shopify-client.server", async (importOriginal) => {
   const actual = await importOriginal() as Record<string, unknown>;
   return {
@@ -44,6 +47,11 @@ vi.mock("../shopify-client.server", async (importOriginal) => {
       }
 
       // Handle OrderMarkAsPaid mutation
+      // Execute callback DURING the Shopify call (for race condition testing)
+      if (onOrderMarkAsPaidCallback) {
+        await onOrderMarkAsPaidCallback();
+      }
+
       if (mockAlreadyPaid) {
         return {
           success: true,
@@ -132,6 +140,7 @@ describeWithDb("S17 apply service DB integration", () => {
     mockShopifySuccess = true;
     mockAlreadyPaid = false;
     shopifyCallCount = 0;
+    onOrderMarkAsPaidCallback = null;
 
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${TEST_SHOP_ID}`;
@@ -903,56 +912,62 @@ describeWithDb("S17 apply service DB integration", () => {
   });
 
   /**
-   * Race condition test: A partial apply lands during a slow Shopify call.
-   * TX2 must detect the change and release the claim instead of zeroing outstanding.
+   * Race condition test: A partial apply is attempted during a slow Shopify call.
+   * TX1's PUSH_IN_PROGRESS guard should REFUSE the partial apply while match1 is in 'pushed' state.
+   * This test uses the REAL path: stubs shopifyGraphQLRequest to trigger a concurrent
+   * partial applyMatch during the orderMarkAsPaid call.
    */
   describe("Race condition: partial during slow Shopify call", () => {
-    it("TX2 detects outstanding change and releases claim", async () => {
+    it("TX1 refuses partial while full payment push is in flight", async () => {
       const paymentId1 = await createPayment(1000000n); // Full payment
-      const paymentId2 = await createPayment(300000n);  // Partial that lands during push
+      const paymentId2 = await createPayment(300000n);  // Partial that tries during push
       const invoiceId = await createInvoice(1000000n);
       const matchId1 = await createConfirmedMatch(paymentId1, invoiceId, 1000000n);
       const matchId2 = await createConfirmedMatch(paymentId2, invoiceId, 300000n);
 
-      // Simulate slow Shopify: apply partial BEFORE full's TX2 completes
-      // First, manually transition match1 to 'pushed' (TX1 complete)
-      await sql`
-        UPDATE "Match"
-        SET state = 'pushed', "updatedAt" = NOW()
-        WHERE id = ${matchId1}
-      `;
+      // Track the partial apply result
+      let partialResult: { success: boolean; reasonCode?: string } | null = null;
 
-      // Apply the partial match (this would happen during full's Shopify call)
-      const partialResult = await applyMatch(sql, TEST_SHOP_ID, matchId2, "test-user");
-      expect(partialResult.success).toBe(true);
-      expect(partialResult.invoicePaid).toBe(false);
+      // Set up callback to attempt partial apply DURING the Shopify orderMarkAsPaid call
+      // This simulates a concurrent partial landing while the full payment push is in flight
+      onOrderMarkAsPaidCallback = async () => {
+        // At this point, match1 is in 'pushed' state (TX1 complete, Shopify call in progress)
+        // Attempting to apply match2 should be REFUSED with PUSH_IN_PROGRESS
+        partialResult = await applyMatch(sql, TEST_SHOP_ID, matchId2, "test-user");
+      };
 
-      // Now outstanding is 7000 (10000 - 3000), not 10000 anymore
-      // When full payment's TX2 runs, it should detect this and fail gracefully
+      // Apply the full payment (this will trigger the callback during Shopify call)
+      shopifyCallCount = 0;
+      const fullResult = await applyMatch(sql, TEST_SHOP_ID, matchId1, "test-user");
 
-      // Simulate what TX2 would see:
-      // It expects outstanding = 10000, but finds 7000
-      // The full apply service should have detected this and released the claim
+      // Full payment should succeed
+      expect(fullResult.success).toBe(true);
+      expect(fullResult.invoicePaid).toBe(true);
 
-      // Reset match1 back to confirmed (simulating what would happen after race detection)
-      await sql`
-        UPDATE "Match"
-        SET state = 'confirmed', "updatedAt" = NOW()
-        WHERE id = ${matchId1}
-      `;
+      // Partial should have been REFUSED with PUSH_IN_PROGRESS
+      expect(partialResult).not.toBeNull();
+      expect(partialResult!.success).toBe(false);
+      expect(partialResult!.reasonCode).toBe("PUSH_IN_PROGRESS");
 
-      // Verify invoice is still open (not paid) with correct outstanding
+      // Only ONE orderMarkAsPaid call (for the full payment)
+      expect(shopifyCallCount).toBe(1);
+
+      // Invoice should be paid with outstanding 0
       const [invoice] = await sql<{ status: string; outstanding: string }[]>`
         SELECT status, outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
       `;
-      expect(invoice.status).toBe("open");
-      expect(parseFloat(invoice.outstanding)).toBe(7000);
+      expect(invoice.status).toBe("paid");
+      expect(parseFloat(invoice.outstanding)).toBe(0);
 
-      // Match1 should still be confirmable for retry
+      // Match1 should be 'pushed', Match2 should still be 'confirmed' (not applied)
       const [match1] = await sql<{ state: string }[]>`
         SELECT state FROM "Match" WHERE id = ${matchId1}
       `;
-      expect(match1.state).toBe("confirmed");
+      const [match2] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId2}
+      `;
+      expect(match1.state).toBe("pushed");
+      expect(match2.state).toBe("confirmed");
     });
   });
 

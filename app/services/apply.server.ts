@@ -536,6 +536,25 @@ async function claimMatchAndDecide(
         return { success: false, error: `Invoice status is '${lockedInvoice.status}', expected 'open'` };
       }
 
+      // RACE CHECK: Refuse apply while another match on this invoice has an in-flight push
+      // (state='pushed' means TX1 claimed it but TX2 hasn't finalized yet)
+      const [inFlightPush] = await tx<{ id: string }[]>`
+        SELECT id FROM "Match"
+        WHERE "invoiceId" = ${invoiceRow.id}
+          AND "shopId" = ${shopId}
+          AND id != ${matchId}
+          AND state = 'pushed'
+        LIMIT 1
+      `;
+
+      if (inFlightPush) {
+        return {
+          success: false,
+          error: "Another payment is being applied to this invoice",
+          reasonCode: "PUSH_IN_PROGRESS",
+        };
+      }
+
       // Claim the match with conditional UPDATE - IDOR protection: filter by shopId
       const [transitioned] = await tx<{ id: string }[]>`
         UPDATE "Match"
@@ -672,21 +691,53 @@ async function finalizeFullApply(
         throw new Error("Invoice not found");
       }
 
-      // RACE CONDITION CHECK: Verify invoice state hasn't changed during Shopify call
-      if (lockedInvoice.status !== "open") {
-        // Invoice was paid by another process - release claim and fail gracefully
-        await tx`
-          UPDATE "Match"
-          SET state = 'confirmed', "updatedAt" = NOW()
-          WHERE id = ${matchId}
-            AND "shopId" = ${shopId}
-            AND state = 'pushed'
-        `;
-        return { raceDetected: true, error: `Invoice status changed to '${lockedInvoice.status}' during push` };
-      }
+      // BACKSTOP CHECK: Verify invoice state hasn't changed during Shopify call
+      // With TX1's PUSH_IN_PROGRESS guard, this should never trip. If it does after
+      // Shopify succeeded, finalize locally to match Shopify state rather than reverting.
+      if (lockedInvoice.status !== "open" || lockedInvoice.outstandingPaise !== expectedOutstandingPaise) {
+        // Log this unexpected condition - indicates the TX1 guard was somehow bypassed
+        console.error(
+          `[applyMatch] BACKSTOP TRIGGERED: matchId=${matchId}, ` +
+          `expectedStatus=open, actualStatus=${lockedInvoice.status}, ` +
+          `expectedOutstanding=${expectedOutstandingPaise}, actualOutstanding=${lockedInvoice.outstandingPaise}, ` +
+          `shopifySuccess=${shopifySuccess}`
+        );
 
-      if (lockedInvoice.outstandingPaise !== expectedOutstandingPaise) {
-        // Outstanding changed (partial apply landed during Shopify call) - release claim
+        if (shopifySuccess) {
+          // Shopify already paid - finalize locally to match Shopify state
+          // Don't revert the match, instead force-finalize to stay consistent with Shopify
+          await tx`
+            UPDATE "Invoice"
+            SET outstanding = 0, status = 'paid', "updatedAt" = NOW()
+            WHERE id = ${invoiceRow.id}
+              AND "shopId" = ${shopId}
+          `;
+
+          // Write audit events with backstop flag
+          await writeAuditEvent(tx, shopId, actor, "match.applied", {
+            matchId,
+            invoiceId: invoiceRow.id,
+            paymentId: matchRow.paymentId,
+            amountPaise: appliedAmountPaise,
+            previousOutstandingPaise: lockedInvoice.outstandingPaise,
+            newOutstandingPaise: "0",
+            reasonCode,
+            backstopTriggered: true,
+          });
+
+          await writeAuditEvent(tx, shopId, actor, "invoice.paid", {
+            invoiceId: invoiceRow.id,
+            matchId,
+            orderGid: invoiceRow.orderId,
+            shopifyPushSucceeded: shopifySuccess,
+            reasonCode,
+            backstopTriggered: true,
+          });
+
+          return { success: true, backstopTriggered: true };
+        }
+
+        // Shopify didn't succeed - safe to release claim
         await tx`
           UPDATE "Match"
           SET state = 'confirmed', "updatedAt" = NOW()
@@ -696,7 +747,7 @@ async function finalizeFullApply(
         `;
         return {
           raceDetected: true,
-          error: `Outstanding changed from ${expectedOutstandingPaise} to ${lockedInvoice.outstandingPaise} during push`,
+          error: `Invoice state changed during push (status=${lockedInvoice.status}, outstanding=${lockedInvoice.outstandingPaise})`,
         };
       }
 
@@ -1099,6 +1150,7 @@ type AuditData = {
   shopifyPushSucceeded?: boolean;
   reasonCode?: string;
   recoveredFromCrash?: boolean;
+  backstopTriggered?: boolean;
   previousState?: string;
 };
 

@@ -420,9 +420,9 @@ export async function confirmMatch(
       if (!matchRow) {
         return { success: false, error: "Match not found" };
       }
-      // P3: Return specific error for already-confirmed match
+      // Idempotent: already confirmed/pushed matches return success with no side effects
       if (matchRow.state === "confirmed" || matchRow.state === "pushed") {
-        return { success: false, error: "This match is already confirmed" };
+        return { success: true };
       }
       if (matchRow.state !== "suggested") {
         return { success: false, error: "Match not found or already processed" };
