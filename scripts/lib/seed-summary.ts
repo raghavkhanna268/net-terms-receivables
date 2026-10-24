@@ -10,7 +10,45 @@
 import type { Sql } from "~/lib/db-light.server";
 
 /**
- * Counts of seed-created DB rows, scoped to a specific shop.
+ * Result of a DB upsert operation with create/update detection.
+ * Uses xmax to determine if row was created (xmax=0) or updated (xmax>0).
+ */
+export interface UpsertResult {
+  id: string;
+  wasCreated: boolean;
+}
+
+/**
+ * Tracks what was actually written to the DB during seeding.
+ * Populated during seedDatabase() to enable accurate count verification.
+ */
+export interface SeedDbWriteTracker {
+  shopId: string | null;
+  tags: Set<string>;
+  companyLocationIds: Set<string>;
+  createdAccountSources: number;
+  updatedAccountSources: number;
+  createdBuyerAccounts: number;
+  updatedBuyerAccounts: number;
+}
+
+/**
+ * Create a new write tracker for a seed run.
+ */
+export function createSeedDbWriteTracker(): SeedDbWriteTracker {
+  return {
+    shopId: null,
+    tags: new Set(),
+    companyLocationIds: new Set(),
+    createdAccountSources: 0,
+    updatedAccountSources: 0,
+    createdBuyerAccounts: 0,
+    updatedBuyerAccounts: 0,
+  };
+}
+
+/**
+ * Counts of seed-created DB rows, scoped to specific shop and keys.
  */
 export interface SeedDbCounts {
   shopExists: boolean;
@@ -19,27 +57,29 @@ export interface SeedDbCounts {
 }
 
 /**
- * Query actual DB row counts for seed-created records.
+ * Query actual DB row counts for records written by this seed run.
  * 
- * Counts are scoped to the seed's shop ID pattern (seed-shop-*).
- * Only counts rows with seed-prefixed IDs to avoid counting
- * non-seed data.
+ * Uses the actual shopId and specific tags/companyLocationIds that were
+ * written during seeding, rather than prefix matching. This handles cases
+ * where existing rows have non-seed IDs but match on conflict keys.
  * 
  * @param sql - postgres.js connection
- * @param shopDomain - The shop domain used for seeding
- * @returns Actual DB counts for seed-created rows
+ * @param tracker - The write tracker populated during seeding
+ * @returns Actual DB counts for seed-written rows
  */
 export async function getSeedDbCounts(
   sql: Sql,
-  shopDomain: string
+  tracker: SeedDbWriteTracker
 ): Promise<SeedDbCounts> {
-  const shopId = `seed-shop-${shopDomain}`;
+  if (!tracker.shopId) {
+    return { shopExists: false, accountSourceCount: 0, buyerAccountCount: 0 };
+  }
   
   // Check if shop exists
   const shopResult = await sql`
     SELECT COUNT(*)::int as count
     FROM "Shop"
-    WHERE id = ${shopId}
+    WHERE id = ${tracker.shopId}
   `;
   const shopExists = (shopResult[0]?.count ?? 0) > 0;
   
@@ -47,23 +87,31 @@ export async function getSeedDbCounts(
     return { shopExists: false, accountSourceCount: 0, buyerAccountCount: 0 };
   }
   
-  // Count AccountSource rows with seed prefix
-  const accountSourceResult = await sql`
-    SELECT COUNT(*)::int as count
-    FROM "AccountSource"
-    WHERE "shopId" = ${shopId}
-      AND id LIKE 'seed-source-%'
-  `;
-  const accountSourceCount = accountSourceResult[0]?.count ?? 0;
+  // Count AccountSource rows by exact (shopId, tag) keys we wrote
+  const tags = Array.from(tracker.tags);
+  let accountSourceCount = 0;
+  if (tags.length > 0) {
+    const accountSourceResult = await sql`
+      SELECT COUNT(*)::int as count
+      FROM "AccountSource"
+      WHERE "shopId" = ${tracker.shopId}
+        AND tag = ANY(${tags})
+    `;
+    accountSourceCount = accountSourceResult[0]?.count ?? 0;
+  }
   
-  // Count BuyerAccount rows with seed prefix
-  const buyerAccountResult = await sql`
-    SELECT COUNT(*)::int as count
-    FROM "BuyerAccount"
-    WHERE "shopId" = ${shopId}
-      AND id LIKE 'seed-account-%'
-  `;
-  const buyerAccountCount = buyerAccountResult[0]?.count ?? 0;
+  // Count BuyerAccount rows by exact (shopId, companyLocationId) keys we wrote
+  const locationIds = Array.from(tracker.companyLocationIds);
+  let buyerAccountCount = 0;
+  if (locationIds.length > 0) {
+    const buyerAccountResult = await sql`
+      SELECT COUNT(*)::int as count
+      FROM "BuyerAccount"
+      WHERE "shopId" = ${tracker.shopId}
+        AND "companyLocationId" = ANY(${locationIds})
+    `;
+    buyerAccountCount = buyerAccountResult[0]?.count ?? 0;
+  }
   
   return {
     shopExists,
@@ -73,42 +121,28 @@ export async function getSeedDbCounts(
 }
 
 /**
- * Verify that reported counts match actual DB state.
- * 
- * Returns a verification result with any discrepancies.
- * 
- * @param reportedRules - Count of rules reported by seed
- * @param reportedAccounts - Count of accounts reported by seed
- * @param actualCounts - Actual DB counts from getSeedDbCounts
- * @returns Verification result with discrepancies if any
+ * Summary of what seedDatabase actually did, derived from RETURNING xmax.
  */
-export function verifySeedCounts(
-  reportedRules: number,
-  reportedAccounts: number,
-  actualCounts: SeedDbCounts
-): { valid: boolean; discrepancies: string[] } {
-  const discrepancies: string[] = [];
-  
-  if (!actualCounts.shopExists) {
-    discrepancies.push("Shop record not found in database");
-    return { valid: false, discrepancies };
-  }
-  
-  if (reportedRules !== actualCounts.accountSourceCount) {
-    discrepancies.push(
-      `AccountSource mismatch: reported ${reportedRules}, actual ${actualCounts.accountSourceCount}`
-    );
-  }
-  
-  if (reportedAccounts !== actualCounts.buyerAccountCount) {
-    discrepancies.push(
-      `BuyerAccount mismatch: reported ${reportedAccounts}, actual ${actualCounts.buyerAccountCount}`
-    );
-  }
-  
+export interface SeedDbSummary {
+  accountSourcesCreated: number;
+  accountSourcesUpdated: number;
+  buyerAccountsCreated: number;
+  buyerAccountsUpdated: number;
+  totalAccountSources: number;
+  totalBuyerAccounts: number;
+}
+
+/**
+ * Get summary from write tracker.
+ */
+export function getSeedDbSummary(tracker: SeedDbWriteTracker): SeedDbSummary {
   return {
-    valid: discrepancies.length === 0,
-    discrepancies,
+    accountSourcesCreated: tracker.createdAccountSources,
+    accountSourcesUpdated: tracker.updatedAccountSources,
+    buyerAccountsCreated: tracker.createdBuyerAccounts,
+    buyerAccountsUpdated: tracker.updatedBuyerAccounts,
+    totalAccountSources: tracker.createdAccountSources + tracker.updatedAccountSources,
+    totalBuyerAccounts: tracker.createdBuyerAccounts + tracker.updatedBuyerAccounts,
   };
 }
 

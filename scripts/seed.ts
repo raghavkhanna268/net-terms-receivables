@@ -66,7 +66,12 @@
 
 import { pathToFileURL } from "node:url";
 import postgres from "postgres";
-import { getSeedDbCounts, verifySeedCounts } from "./lib/seed-summary";
+import {
+  getSeedDbCounts,
+  getSeedDbSummary,
+  createSeedDbWriteTracker,
+  type SeedDbWriteTracker,
+} from "./lib/seed-summary";
 
 // -- Types --
 
@@ -3480,9 +3485,11 @@ export async function seedDatabase(state: SeedState): Promise<void> {
   }
 
   const sql = postgres(state.databaseUrl, { max: 1 });
+  const tracker = createSeedDbWriteTracker();
 
   try {
-    // Upsert Shop record
+    // Upsert Shop record - RETURNING id and xmax to detect create vs update
+    // xmax = 0 means row was inserted, xmax > 0 means row was updated
     const shopResult = await sql`
       INSERT INTO "Shop" (id, domain, currency, plan, "defaultTermsDays", timezone, "createdAt", "updatedAt")
       VALUES (
@@ -3498,15 +3505,19 @@ export async function seedDatabase(state: SeedState): Promise<void> {
       ON CONFLICT (domain) DO UPDATE SET
         currency = EXCLUDED.currency,
         "updatedAt" = NOW()
-      RETURNING id
+      RETURNING id, xmax::text
     `;
     const shopId = shopResult[0]?.id;
-    console.log(`  ✅ Shop record upserted`);
+    const shopWasCreated = shopResult[0]?.xmax === "0";
+    tracker.shopId = shopId;
+    console.log(`  ✅ Shop record ${shopWasCreated ? "created" : "updated"}`);
 
     // Upsert AccountSource tag rules for Net 15/30/60
     for (const loc of LOCATION_TERMS) {
       const tag = `${SEED_TAG}-net${loc.dueInDays}`;
-      await sql`
+      tracker.tags.add(tag);
+      
+      const result = await sql`
         INSERT INTO "AccountSource" (id, "shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")
         VALUES (
           ${`seed-source-${tag}`},
@@ -3519,16 +3530,24 @@ export async function seedDatabase(state: SeedState): Promise<void> {
         ON CONFLICT ("shopId", tag) DO UPDATE SET
           "defaultTermsDays" = EXCLUDED."defaultTermsDays",
           "updatedAt" = NOW()
+        RETURNING xmax::text
       `;
-      state.createdCount.dbRules++;
-      console.log(`  ✅ Tag rule: ${tag} → Net ${loc.dueInDays}`);
+      const wasCreated = result[0]?.xmax === "0";
+      if (wasCreated) {
+        tracker.createdAccountSources++;
+      } else {
+        tracker.updatedAccountSources++;
+      }
+      console.log(`  ✅ Tag rule: ${tag} → Net ${loc.dueInDays} (${wasCreated ? "created" : "updated"})`);
     }
 
     // Upsert BuyerAccount records for each company location
     for (const [companyKey, company] of state.companies) {
       for (const [dueInDays, locationId] of company.locations) {
+        tracker.companyLocationIds.add(locationId);
         const accountName = `${COMPANY_SEEDS.find(c => c.key === companyKey)?.name ?? companyKey} - Net ${dueInDays}`;
-        await sql`
+        
+        const result = await sql`
           INSERT INTO "BuyerAccount" (
             id, "shopId", kind, "companyId", "companyLocationId", name,
             "defaultTermsDays", "defaultTermsSource", "holdState", "createdAt", "updatedAt"
@@ -3550,25 +3569,48 @@ export async function seedDatabase(state: SeedState): Promise<void> {
             "defaultTermsDays" = EXCLUDED."defaultTermsDays",
             "defaultTermsSource" = EXCLUDED."defaultTermsSource",
             "updatedAt" = NOW()
+          RETURNING xmax::text
         `;
-        state.createdCount.dbAccounts++;
+        const wasCreated = result[0]?.xmax === "0";
+        if (wasCreated) {
+          tracker.createdBuyerAccounts++;
+        } else {
+          tracker.updatedBuyerAccounts++;
+        }
       }
     }
-    console.log(`  ✅ BuyerAccounts: ${state.createdCount.dbAccounts} with explicit default terms`);
 
-    // Verify counts against actual DB state
-    const actualCounts = await getSeedDbCounts(sql, state.shop);
-    const verification = verifySeedCounts(
-      state.createdCount.dbRules,
-      state.createdCount.dbAccounts,
-      actualCounts
-    );
+    // Get summary from tracker
+    const summary = getSeedDbSummary(tracker);
+    state.createdCount.dbRules = summary.totalAccountSources;
+    state.createdCount.dbAccounts = summary.totalBuyerAccounts;
     
-    if (!verification.valid) {
-      // Update state to reflect actual DB counts (handles upsert idempotency)
+    const rulesMsg = summary.accountSourcesCreated > 0 && summary.accountSourcesUpdated > 0
+      ? `${summary.accountSourcesCreated} created, ${summary.accountSourcesUpdated} updated`
+      : summary.accountSourcesCreated > 0
+        ? `${summary.accountSourcesCreated} created`
+        : `${summary.accountSourcesUpdated} updated`;
+    
+    const accountsMsg = summary.buyerAccountsCreated > 0 && summary.buyerAccountsUpdated > 0
+      ? `${summary.buyerAccountsCreated} created, ${summary.buyerAccountsUpdated} updated`
+      : summary.buyerAccountsCreated > 0
+        ? `${summary.buyerAccountsCreated} created`
+        : `${summary.buyerAccountsUpdated} updated`;
+    
+    console.log(`  ✅ AccountSources: ${summary.totalAccountSources} (${rulesMsg})`);
+    console.log(`  ✅ BuyerAccounts: ${summary.totalBuyerAccounts} (${accountsMsg})`);
+
+    // Verify counts against actual DB state using exact keys we wrote
+    const actualCounts = await getSeedDbCounts(sql, tracker);
+    
+    if (actualCounts.accountSourceCount !== summary.totalAccountSources) {
+      console.log(`  ⚠️  AccountSource count mismatch: tracker=${summary.totalAccountSources}, DB=${actualCounts.accountSourceCount}`);
       state.createdCount.dbRules = actualCounts.accountSourceCount;
+    }
+    
+    if (actualCounts.buyerAccountCount !== summary.totalBuyerAccounts) {
+      console.log(`  ⚠️  BuyerAccount count mismatch: tracker=${summary.totalBuyerAccounts}, DB=${actualCounts.buyerAccountCount}`);
       state.createdCount.dbAccounts = actualCounts.buyerAccountCount;
-      console.log(`  ℹ️  Counts adjusted to actual DB state (idempotent upsert)`);
     }
 
   } finally {
