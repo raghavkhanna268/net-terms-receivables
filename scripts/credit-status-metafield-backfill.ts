@@ -37,7 +37,6 @@
 import postgres from "postgres";
 import { pathToFileURL } from "node:url";
 import { sqlOptions } from "~/lib/db-light.server";
-import { verifyReadOnlyTransaction } from "./ci/backfill-dry-run-preflight";
 
 interface BackfillStats {
   shopIndex: number;
