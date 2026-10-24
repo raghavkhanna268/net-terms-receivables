@@ -235,6 +235,44 @@ describe("S8 Webhook Handlers", () => {
     });
   });
 
+  describe("valid HMAC + missing header returns 400", () => {
+    it("webhooks.customers returns 400 when valid HMAC but topic missing", async () => {
+      const { action } = await import("../webhooks.customers");
+      const request = createRequestWithMissingHeaders(
+        "https://example.com/webhooks/customers",
+        { admin_graphql_api_id: TEST_CUSTOMER_GID },
+        { omitTopic: true }
+      );
+
+      try {
+        await action(createActionArgs(request));
+        expect.fail("Expected action to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(400);
+        expect((error as Response).statusText).toBe("Bad Request");
+      }
+    });
+
+    it("webhooks.draft_orders returns 400 when valid HMAC but shop missing", async () => {
+      const { action } = await import("../webhooks.draft_orders");
+      const request = createRequestWithMissingHeaders(
+        "https://example.com/webhooks/draft_orders",
+        { admin_graphql_api_id: TEST_DRAFT_ORDER_GID },
+        { omitShop: true }
+      );
+
+      try {
+        await action(createActionArgs(request));
+        expect.fail("Expected action to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(400);
+        expect((error as Response).statusText).toBe("Bad Request");
+      }
+    });
+  });
+
   describe("webhooks.customers", () => {
     it("returns 401 when HMAC validation fails", async () => {
       const { action } = await import("../webhooks.customers");

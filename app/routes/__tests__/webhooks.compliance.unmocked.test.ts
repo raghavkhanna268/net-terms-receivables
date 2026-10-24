@@ -404,7 +404,7 @@ describe("webhooks.compliance unmocked HMAC tests (#39)", () => {
   });
 
   describe("shop/redact rejects header shop mismatch from signed shop_domain", () => {
-    it("returns 401 when header shop differs from payload shop_domain", async () => {
+    it("returns 400 when header shop differs from payload shop_domain", async () => {
       const payload = {
         shop_id: 123,
         shop_domain: "other-shop.myshopify.com",
@@ -415,7 +415,7 @@ describe("webhooks.compliance unmocked HMAC tests (#39)", () => {
       });
 
       await expect(action(createMockActionArgs(request))).rejects.toMatchObject({
-        status: 401,
+        status: 400,
       });
 
       expect(mockDeleteShop).not.toHaveBeenCalled();
@@ -437,7 +437,7 @@ describe("webhooks.compliance unmocked HMAC tests (#39)", () => {
   });
 
   describe("customers/redact shop mismatch rejection", () => {
-    it("returns 401 when header shop differs from payload shop_domain", async () => {
+    it("returns 400 when header shop differs from payload shop_domain", async () => {
       const payload = {
         shop_id: 123,
         shop_domain: "other-shop.myshopify.com",
@@ -449,7 +449,7 @@ describe("webhooks.compliance unmocked HMAC tests (#39)", () => {
       });
 
       await expect(action(createMockActionArgs(request))).rejects.toMatchObject({
-        status: 401,
+        status: 400,
       });
 
       expect(mockRedactCustomer).not.toHaveBeenCalled();

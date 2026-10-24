@@ -279,7 +279,8 @@ export async function verifyWebhook(
 /**
  * Verify that the payload's shop_domain matches the header shop.
  * For shop/redact, the shop to purge should come from the signed payload.
- * @throws Response with 400 if they don't match
+ * Uses generic error messages to avoid leaking validation details.
+ * @throws Response with 400 if shop_domain missing or doesn't match
  */
 export function verifyPayloadShopMatch(
   headerShop: string,
@@ -291,14 +292,14 @@ export function verifyPayloadShopMatch(
   if (!payloadShop) {
     throw new Response(null, {
       status: 400,
-      statusText: "Missing shop_domain in payload",
+      statusText: "Bad Request",
     });
   }
 
   if (payloadShop !== headerShop) {
     throw new Response(null, {
-      status: 401,
-      statusText: "Payload shop_domain does not match header shop",
+      status: 400,
+      statusText: "Bad Request",
     });
   }
 
