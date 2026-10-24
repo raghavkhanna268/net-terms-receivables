@@ -108,7 +108,7 @@ describe("webhooks.compliance", () => {
       customerGid: "gid://shopify/Customer/456",
       requestId: "req-123",
       requestedAt: new Date().toISOString(),
-      data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [] },
+      data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [], paymentMatches: [] },
     });
     mockPersistDataRequest.mockResolvedValue({ id: "dr-1", alreadyExists: false });
     mockPurgeExpiredDataRequests.mockResolvedValue(0);
