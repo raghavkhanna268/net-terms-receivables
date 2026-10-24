@@ -784,6 +784,12 @@ describeWithDb("S17 apply service DB integration", () => {
       expect(auditEvent).toBeDefined();
       expect(auditEvent?.data.reason).toBe("PUSHED_WITHOUT_AUDIT");
       expect(auditEvent?.data.previousState).toBe("pushed");
+
+      // Payment status should be recomputed (freed up)
+      const [payment] = await sql<{ status: string }[]>`
+        SELECT status FROM "Payment" WHERE id = ${paymentId}
+      `;
+      expect(payment.status).toBe("unmatched");
     });
 
     it("idempotent retry for pushed match with paid invoice", async () => {
@@ -1432,11 +1438,7 @@ describeWithDb("S17 apply service DB integration", () => {
       // Now retry match A - should finalize with match.applied (STALE_FINALIZED_EXTERNALLY_PAID)
       const resultA = await applyMatch(sql, TEST_SHOP_ID, matchIdA, "test-user");
 
-      // A should succeed (finalized with match.applied)
-      // Note: success depends on the implementation - if it returns success=true for externally paid
-      // or success=false with reasonCode. Let me check the actual behavior.
-      // Based on handleStaleInvoiceNotOpen, when invoice is 'paid' and no sibling paid,
-      // it finalizes with match.applied, which should be success.
+      expect(resultA.success).toBe(true);
       expect(resultA.invoicePaid).toBe(true);
 
       // Zero orderMarkAsPaid calls (invoice already paid)
@@ -1528,6 +1530,120 @@ describeWithDb("S17 apply service DB integration", () => {
       expect(unmatchedAudit).toBeDefined();
       expect(unmatchedAudit?.data.reason).toBe("INVOICE_NOT_OPEN");
       expect(unmatchedAudit?.data.invoiceStatus).toBe("cancelled");
+    });
+
+    it("STALE_FINALIZED_EXTERNALLY_PAID match can be unmatched even when invoice is paid", async () => {
+      // Scenario: Match A is finalized via STALE_FINALIZED_EXTERNALLY_PAID, then unmatched
+      const paymentId = await createPayment(1000000n); // 10000 INR
+      const invoiceId = await createInvoice(1000000n); // 10000 INR
+
+      // Create match A in 'pushed' state (simulating after STALE_FINALIZED_EXTERNALLY_PAID)
+      const matchIdA = `match-stale-external-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${matchIdA}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 10000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushed', NOW(), NOW())
+      `;
+
+      // Write match.applied audit with STALE_FINALIZED_EXTERNALLY_PAID reasonCode
+      await sql`
+        INSERT INTO "AuditEvent" (id, "shopId", actor, type, data, at)
+        VALUES (
+          gen_random_uuid(),
+          ${TEST_SHOP_ID},
+          'test-user',
+          'match.applied',
+          ${sql.json({ matchId: matchIdA, invoiceId, paymentId, amountPaise: '1000000', reasonCode: 'STALE_FINALIZED_EXTERNALLY_PAID' })}::jsonb,
+          NOW()
+        )
+      `;
+
+      // Mark invoice as paid (webhook scenario)
+      await sql`
+        UPDATE "Invoice"
+        SET status = 'paid', outstanding = 0, "updatedAt" = NOW()
+        WHERE id = ${invoiceId}
+      `;
+
+      // Unmatch - should succeed for STALE_FINALIZED_EXTERNALLY_PAID matches
+      const result = await unmatchMatch(sql, TEST_SHOP_ID, matchIdA, "test-user");
+
+      expect(result.success).toBe(true);
+
+      // Match should be 'unmatched'
+      const [matchA] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchIdA}
+      `;
+      expect(matchA.state).toBe("unmatched");
+
+      // Invoice should remain paid with outstanding 0 (unchanged)
+      const [invoice] = await sql<{ status: string; outstanding: string }[]>`
+        SELECT status, outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+      expect(invoice.status).toBe("paid");
+      expect(parseFloat(invoice.outstanding)).toBe(0);
+
+      // Audit should have STALE_EXTERNAL_PAID_RELEASED reason
+      const [unmatchedAudit] = await sql<{ data: { reason?: string; restoredPaise?: string } }[]>`
+        SELECT data FROM "AuditEvent"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+          AND type = 'match.unmatched'
+          AND data->>'matchId' = ${matchIdA}
+      `;
+      expect(unmatchedAudit).toBeDefined();
+      expect(unmatchedAudit?.data.reason).toBe("STALE_EXTERNAL_PAID_RELEASED");
+      expect(unmatchedAudit?.data.restoredPaise).toBe("0");
+
+      // Payment should be free (not allocated)
+      const [payment] = await sql<{ status: string }[]>`
+        SELECT status FROM "Payment" WHERE id = ${paymentId}
+      `;
+      expect(payment.status).toBe("unmatched");
+    });
+
+    it("normal pushed match on paid invoice still refuses unmatch", async () => {
+      // Scenario: Normal match applied and paid, then unmatch attempted
+      const paymentId = await createPayment(1000000n); // 10000 INR
+      const invoiceId = await createInvoice(1000000n); // 10000 INR
+
+      // Create match in 'pushed' state
+      const matchId = `match-normal-paid-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 10000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushed', NOW(), NOW())
+      `;
+
+      // Write normal match.applied audit (NO STALE_FINALIZED_EXTERNALLY_PAID reasonCode)
+      await sql`
+        INSERT INTO "AuditEvent" (id, "shopId", actor, type, data, at)
+        VALUES (
+          gen_random_uuid(),
+          ${TEST_SHOP_ID},
+          'test-user',
+          'match.applied',
+          ${sql.json({ matchId, invoiceId, paymentId, amountPaise: '1000000' })}::jsonb,
+          NOW()
+        )
+      `;
+
+      // Mark invoice as paid
+      await sql`
+        UPDATE "Invoice"
+        SET status = 'paid', outstanding = 0, "updatedAt" = NOW()
+        WHERE id = ${invoiceId}
+      `;
+
+      // Unmatch - should FAIL for normal pushed matches on paid invoices
+      const result = await unmatchMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      expect(result.success).toBe(false);
+      expect(result.alreadyPushed).toBe(true);
+      expect(result.error).toContain("paid in Shopify");
+
+      // Match should still be 'pushed'
+      const [match] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId}
+      `;
+      expect(match.state).toBe("pushed");
     });
   });
 

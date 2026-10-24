@@ -360,6 +360,9 @@ async function handlePushedMatch(
         reason: "PUSHED_WITHOUT_AUDIT",
         invoiceStatus: invoiceRow.status,
       });
+
+      // Free up the payment
+      await updatePaymentStatusAfterUnmatch(tx, shopId, matchRow.paymentId);
     });
 
     return {
@@ -452,10 +455,50 @@ async function handleStalePushingMatch(
   }
 
   // If invoice is already paid or not open locally, handle appropriately
+  // Must lock invoice FOR UPDATE and re-check status under the lock
   if (invoiceRow.status !== "open") {
     const result = await sql.begin(async (tx) => {
-      return handleStaleInvoiceNotOpen(tx, shopId, matchId, matchRow, invoiceRow.status, actor);
+      // Lock invoice and re-check status
+      const [lockedInvoice] = await tx<{ status: string }[]>`
+        SELECT status
+        FROM "Invoice"
+        WHERE id = ${matchRow.invoiceId}
+          AND "shopId" = ${shopId}
+        FOR UPDATE
+      `;
+
+      if (!lockedInvoice) {
+        return { action: "error" as const, invoicePaid: false, error: "Invoice not found" };
+      }
+
+      // Re-check status after locking - it might have changed to 'open'
+      if (lockedInvoice.status === "open") {
+        return { action: "retry" as const, invoicePaid: false };
+      }
+
+      return handleStaleInvoiceNotOpen(tx, shopId, matchId, matchRow, lockedInvoice.status, actor);
     });
+
+    if (result.action === "error") {
+      return {
+        success: false,
+        invoicePaid: false,
+        shopifyPushSucceeded: false,
+        error: result.error ?? "Invoice not found",
+      };
+    }
+
+    if (result.action === "retry") {
+      // Invoice is now open - fall through to normal processing
+      // This is a rare race condition; for simplicity, ask for retry
+      return {
+        success: false,
+        invoicePaid: false,
+        shopifyPushSucceeded: false,
+        error: "Invoice status changed, please retry",
+        retryable: true,
+      };
+    }
 
     if (result.action === "unmatched") {
       // Recompute credit status for the invoice
@@ -1295,8 +1338,41 @@ export async function unmatchMatch(
           return { success: false, error: "Invoice not found" };
         }
 
-        // Block unmatch if invoice is already paid in Shopify
+        // Block unmatch if invoice is already paid in Shopify,
+        // UNLESS the match was finalized via STALE_FINALIZED_EXTERNALLY_PAID
+        // (our push may have paid it, but we didn't actually apply any amount locally)
         if (invoiceRow.status === "paid") {
+          const isStaleExternal = await isStaleExternallyPaidMatch(tx, shopId, matchId);
+
+          if (isStaleExternal) {
+            // Allow unmatch - this match was finalized externally and didn't apply locally
+            const [transitioned] = await tx<{ id: string }[]>`
+              UPDATE "Match"
+              SET state = 'unmatched', "updatedAt" = NOW()
+              WHERE id = ${matchId}
+                AND "shopId" = ${shopId}
+                AND state = 'pushed'
+              RETURNING id
+            `;
+
+            if (transitioned) {
+              // Don't restore outstanding - nothing was applied locally
+              await writeAuditEvent(tx, shopId, actor, "match.unmatched", {
+                matchId: matchRow.id,
+                invoiceId: matchRow.invoiceId,
+                paymentId: matchRow.paymentId,
+                reason: "STALE_EXTERNAL_PAID_RELEASED",
+                restoredPaise: "0",
+                previousState: "pushed",
+              });
+
+              // Free up the payment
+              await updatePaymentStatusAfterUnmatch(tx, shopId, matchRow.paymentId);
+            }
+
+            return { success: true, invoiceId: matchRow.invoiceId };
+          }
+
           return {
             success: false,
             error: "Cannot unmatch: order already marked as paid in Shopify",
@@ -1431,6 +1507,28 @@ async function getAppliedAmountFromAudit(
   }
 
   return null;
+}
+
+/**
+ * Check if the latest match.applied audit has reasonCode STALE_FINALIZED_EXTERNALLY_PAID.
+ * Such matches can be unmatched even if the invoice is paid.
+ */
+async function isStaleExternallyPaidMatch(
+  sql: Sql,
+  shopId: string,
+  matchId: string
+): Promise<boolean> {
+  const [auditRow] = await sql<{ data: { reasonCode?: string } }[]>`
+    SELECT data
+    FROM "AuditEvent"
+    WHERE "shopId" = ${shopId}
+      AND type = 'match.applied'
+      AND data->>'matchId' = ${matchId}
+    ORDER BY at DESC
+    LIMIT 1
+  `;
+
+  return auditRow?.data?.reasonCode === "STALE_FINALIZED_EXTERNALLY_PAID";
 }
 
 /**
@@ -1759,6 +1857,7 @@ type AuditData = {
   previousOutstandingPaise?: string;
   newOutstandingPaise?: string;
   restoredAmountPaise?: string;
+  restoredPaise?: string;
   orderGid?: string | null;
   shopifyPushSucceeded?: boolean;
   reasonCode?: string;
