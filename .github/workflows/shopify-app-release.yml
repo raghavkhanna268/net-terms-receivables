@@ -1,0 +1,200 @@
+name: Shopify App Release (dev store)
+
+# Sanctioned path to release the Shopify app config + Functions (S12/S13) with
+# `shopify app deploy`. Manual only (workflow_dispatch), main only, and gated by
+# the `shopify-release` GitHub environment (required reviewer, main-only branch
+# policy). The CLI token is an ENVIRONMENT secret of `shopify-release` only.
+#
+# Guards run before any token is exposed:
+#   - scope guard: shopify.app.toml scopes == wrangler.jsonc SCOPES == approved 11
+#   - config guard: client_id pinned; no other shopify.app.*.toml (dev store config only)
+#   - PII guard: no extension input query requests customer email/phone/name/address
+# Output: only the released version name/id. The token is never echoed.
+# Does NOT touch PLAN_GATING_ENFORCED, Worker vars, DB, or the cron.
+on:
+  workflow_dispatch:
+    inputs:
+      version_message:
+        description: "Optional version message (letters, digits, space . , _ : # / ( ) -; max 120)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shopify-app-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release app config + functions (dev store)
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: shopify-release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Release guards (scopes, config, input-query PII)
+        run: |
+          python3 scripts/ci/test_shopify_release_guards.py > /dev/null
+          python3 scripts/ci/shopify_release_guards.py .
+
+      - name: Validate version message
+        id: msg
+        env:
+          VERSION_MESSAGE: ${{ inputs.version_message }}
+        run: |
+          if [ "${#VERSION_MESSAGE}" -gt 120 ]; then
+            echo "version_message too long (max 120)"; exit 1
+          fi
+          if [ -n "$VERSION_MESSAGE" ] && ! printf '%s' "$VERSION_MESSAGE" | grep -Eq '^[A-Za-z0-9 .,_:#/()-]+$'; then
+            echo "version_message has disallowed characters"; exit 1
+          fi
+          echo "has_message=$([ -n "$VERSION_MESSAGE" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable (2026-10-16)
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo (registry, git deps, target)
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: |
+            extensions/credit-check-validation -> target
+            extensions/hide-terms-payment -> target
+          save-if: false
+
+      - name: Run Rust tests (credit-check-validation)
+        working-directory: extensions/credit-check-validation
+        run: |
+          cargo test --verbose 2>&1 | tee test-output.txt
+          echo ""
+          echo "=== Test Summary ==="
+          grep -E "^test result:|^running [0-9]+ test" test-output.txt || true
+
+      - name: Run Rust tests (hide-terms-payment)
+        working-directory: extensions/hide-terms-payment
+        run: |
+          cargo test --verbose 2>&1 | tee test-output.txt
+          echo ""
+          echo "=== Test Summary ==="
+          grep -E "^test result:|^running [0-9]+ test" test-output.txt || true
+
+      - name: Build WASM (credit-check-validation)
+        working-directory: extensions/credit-check-validation
+        run: |
+          cargo build --release --target wasm32-unknown-unknown
+          
+          # Report WASM size and enforce limits
+          # Shopify Functions have a 256KB limit
+          # @see https://shopify.dev/docs/apps/build/functions/programming-languages/rust-for-functions
+          WASM_FILE="target/wasm32-unknown-unknown/release/credit_check_validation.wasm"
+          if [ -f "$WASM_FILE" ]; then
+            SIZE=$(stat -c%s "$WASM_FILE")
+            SIZE_KB=$((SIZE / 1024))
+            echo "WASM size: ${SIZE_KB} KB ($SIZE bytes)"
+            
+            # Fail if over 256KB (Shopify Functions hard limit)
+            if [ $SIZE_KB -gt 256 ]; then
+              echo "✗ WASM size exceeds 256 KB limit (${SIZE_KB} KB)"
+              echo "See: https://shopify.dev/docs/apps/build/functions/programming-languages/rust-for-functions#binary-size-tips"
+              exit 1
+            fi
+            
+            # Warn if over 200KB
+            if [ $SIZE_KB -gt 200 ]; then
+              echo "⚠ Warning: WASM size is ${SIZE_KB} KB, approaching 256 KB limit"
+            else
+              echo "✓ WASM size is within limits"
+            fi
+          else
+            echo "✗ WASM file not found"
+            exit 1
+          fi
+
+      - name: Build WASM (hide-terms-payment)
+        working-directory: extensions/hide-terms-payment
+        run: |
+          cargo build --release --target wasm32-unknown-unknown
+          
+          # Report WASM size and enforce limits
+          WASM_FILE="target/wasm32-unknown-unknown/release/hide_terms_payment.wasm"
+          if [ -f "$WASM_FILE" ]; then
+            SIZE=$(stat -c%s "$WASM_FILE")
+            SIZE_KB=$((SIZE / 1024))
+            echo "WASM size: ${SIZE_KB} KB ($SIZE bytes)"
+            
+            if [ $SIZE_KB -gt 256 ]; then
+              echo "✗ WASM size exceeds 256 KB limit (${SIZE_KB} KB)"
+              echo "See: https://shopify.dev/docs/apps/build/functions/programming-languages/rust-for-functions#binary-size-tips"
+              exit 1
+            fi
+            
+            if [ $SIZE_KB -gt 200 ]; then
+              echo "⚠ Warning: WASM size is ${SIZE_KB} KB, approaching 256 KB limit"
+            else
+              echo "✓ WASM size is within limits"
+            fi
+          else
+            echo "✗ WASM file not found"
+            exit 1
+          fi
+
+      - name: Deploy app version (shopify app deploy)
+        env:
+          # Environment secret of `shopify-release` (deliberately a different name
+          # from any repo-level secret so it can never fall back to one).
+          SHOPIFY_APP_AUTOMATION_TOKEN: ${{ secrets.SHOPIFY_RELEASE_AUTOMATION_TOKEN }}
+          VERSION_MESSAGE: ${{ inputs.version_message }}
+          HAS_MESSAGE: ${{ steps.msg.outputs.has_message }}
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+          SHOPIFY_CLI_NO_ANALYTICS: "1"
+          CI: "1"
+        run: |
+          set -o pipefail
+          if [ -z "$SHOPIFY_APP_AUTOMATION_TOKEN" ]; then
+            echo "token_present=false (set environment secret SHOPIFY_RELEASE_AUTOMATION_TOKEN on shopify-release)"
+            exit 1
+          fi
+          echo "token_present=true"
+          args=(app deploy --config shopify.app.toml --allow-updates --no-color
+                --source-control-url "$SOURCE_URL")
+          if [ "$HAS_MESSAGE" = "true" ]; then args+=(--message "$VERSION_MESSAGE"); fi
+          LOG="$RUNNER_TEMP/deploy.log"
+          rc=0
+          npx -y @shopify/cli@4.9.4 "${args[@]}" > "$LOG" 2>&1 || rc=$?
+          # Print only version/status/error lines with URLs, emails and hosts redacted.
+          sed -E -e 's#https?://[^ )]+#<url>#g' \
+                 -e 's#[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+#<email>#g' \
+                 -e 's#[A-Za-z0-9-]+\.myshopify\.com#<shop>#g' "$LOG" \
+            | grep -Ei 'version|released|error|fail' | head -n 40 || true
+          echo "deploy_exit_code=$rc"
+          rm -f "$LOG"
+          exit "$rc"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Shopify app release"
+            echo "- commit: \`${GITHUB_SHA}\`"
+            echo "- config: shopify.app.toml (client_id pinned by guard)"
+          } >> "$GITHUB_STEP_SUMMARY"
