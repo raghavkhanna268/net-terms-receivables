@@ -33,9 +33,9 @@ on:
   workflow_dispatch:
     inputs:
       shop:
-        description: "Shopify shop domain (e.g., example.myshopify.com)"
-        required: true
-        default: "net-terms-receivables.myshopify.com"
+        description: "Shopify shop domain (e.g., example.myshopify.com). Leave empty to use the single installed shop from the DB (never printed)"
+        required: false
+        default: ""
         type: string
       fail_on_expired:
         description: "Fail if offline token has expired (strict mode)"
@@ -115,13 +115,35 @@ jobs:
       # shows the expanded script). So it is read from the event payload file,
       # masked, and only then exported via GITHUB_ENV. Later steps see
       # SHOP_DOMAIN in their env header as ***.
+      #
+      # If the shop input is empty, the shop is resolved from the DB as the
+      # single installed shop ("Shop"."uninstalledAt" IS NULL), read-only. It
+      # fails if 0 or more than 1 shops are installed. Only the count is printed.
       - name: Mask shop input
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
           set -euo pipefail
           SHOP=$(jq -r '.inputs.shop // empty' "$GITHUB_EVENT_PATH")
           if [ -z "$SHOP" ]; then
-            echo "::error::shop input missing from event payload"
-            exit 1
+            echo "shop input empty: resolving the single installed shop from the DB (domain not printed)"
+            if [ -z "$DATABASE_URL" ]; then
+              echo "::error::DATABASE_URL_MIGRATIONS secret not set (needed to resolve shop)"
+              exit 1
+            fi
+            INSTALLED=$(psql -X -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" \
+              -c 'SELECT COUNT(*) FROM "Shop" WHERE "uninstalledAt" IS NULL;')
+            echo "installed_shop_count=$INSTALLED"
+            if [ "$INSTALLED" != "1" ]; then
+              echo "::error::Expected exactly 1 installed shop to resolve an empty shop input, found $INSTALLED. Pass the shop input explicitly."
+              exit 1
+            fi
+            SHOP=$(psql -X -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" \
+              -c 'SELECT domain FROM "Shop" WHERE "uninstalledAt" IS NULL;')
+            echo "shop_source=db_single_installed"
+          else
+            echo "shop_source=input"
           fi
           # Validate before masking (never printed) so a multi-line value
           # cannot slip partly past ::add-mask::.
