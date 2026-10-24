@@ -508,13 +508,20 @@ export function mapCustomerToTaggedCustomer(
  *
  * Should-fix #5: Only call this for customers that match a tag rule.
  *
+ * PII handling modes:
+ * - 'fetched': Write values as returned, including null (allows clearing removed email)
+ * - 'fallback': ACCESS_DENIED retry - preserve existing values with COALESCE
+ * - 'disabled': DPDP minimisation - always write NULL to clear PII
+ *
  * @param sql - postgres.js SQL client
  * @param customers - Array of mapped tagged customer data (only matching customers)
+ * @param piiMode - How to handle PII fields (default: 'fetched')
  * @returns Number of customers upserted
  */
 export async function bulkUpsertTaggedCustomers(
   sql: Sql,
-  customers: ReturnType<typeof mapCustomerToTaggedCustomer>[]
+  customers: ReturnType<typeof mapCustomerToTaggedCustomer>[],
+  piiMode: CustomerPiiMode = "fetched"
 ): Promise<number> {
   if (customers.length === 0) return 0;
 
@@ -522,22 +529,45 @@ export async function bulkUpsertTaggedCustomers(
   for (const c of customers) {
     const tagsJson = sql.json(c.tags);
     const deactivatedAt = c.tagActive ? null : new Date();
-    const result = await sql`
-      INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name)
-      VALUES (${c.shopId}, ${c.customerId}, ${tagsJson}, ${c.tagActive}, ${deactivatedAt}, ${c.email}, ${c.displayName})
-      ON CONFLICT (shop_id, customer_id)
-      DO UPDATE SET
-        tags = EXCLUDED.tags,
-        tag_active = EXCLUDED.tag_active,
-        tag_deactivated_at = CASE
-          WHEN EXCLUDED.tag_active = true THEN NULL
-          WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
-          ELSE s8_tagged_customers.tag_deactivated_at
-        END,
-        email = EXCLUDED.email,
-        display_name = EXCLUDED.display_name
-    `;
-    count += result.count;
+
+    const effectiveEmail = piiMode === "disabled" ? null : c.email;
+    const effectiveDisplayName = piiMode === "disabled" ? null : c.displayName;
+
+    if (piiMode === "fallback") {
+      const result = await sql`
+        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name)
+        VALUES (${c.shopId}, ${c.customerId}, ${tagsJson}, ${c.tagActive}, ${deactivatedAt}, ${effectiveEmail}, ${effectiveDisplayName})
+        ON CONFLICT (shop_id, customer_id)
+        DO UPDATE SET
+          tags = EXCLUDED.tags,
+          tag_active = EXCLUDED.tag_active,
+          tag_deactivated_at = CASE
+            WHEN EXCLUDED.tag_active = true THEN NULL
+            WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
+            ELSE s8_tagged_customers.tag_deactivated_at
+          END,
+          email = COALESCE(EXCLUDED.email, s8_tagged_customers.email),
+          display_name = COALESCE(EXCLUDED.display_name, s8_tagged_customers.display_name)
+      `;
+      count += result.count;
+    } else {
+      const result = await sql`
+        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name)
+        VALUES (${c.shopId}, ${c.customerId}, ${tagsJson}, ${c.tagActive}, ${deactivatedAt}, ${effectiveEmail}, ${effectiveDisplayName})
+        ON CONFLICT (shop_id, customer_id)
+        DO UPDATE SET
+          tags = EXCLUDED.tags,
+          tag_active = EXCLUDED.tag_active,
+          tag_deactivated_at = CASE
+            WHEN EXCLUDED.tag_active = true THEN NULL
+            WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
+            ELSE s8_tagged_customers.tag_deactivated_at
+          END,
+          email = EXCLUDED.email,
+          display_name = EXCLUDED.display_name
+      `;
+      count += result.count;
+    }
   }
 
   return count;
