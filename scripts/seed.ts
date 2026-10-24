@@ -3641,23 +3641,25 @@ export function printDatabaseSeedSQL(state: SeedState): void {
   console.log(`ON CONFLICT (domain) DO UPDATE SET currency = EXCLUDED.currency, "updatedAt" = NOW();`);
   console.log();
 
-  console.log(`-- Upsert AccountSource tag rules`);
+  console.log(`-- Upsert AccountSource tag rules (IDs are shop-scoped to avoid cross-shop conflicts)`);
   for (const loc of LOCATION_TERMS) {
     const tag = `${SEED_TAG}-net${loc.dueInDays}`;
+    const sourceId = `seed-source-${shopId}-${tag}`;
     console.log(`INSERT INTO "AccountSource" (id, "shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")`);
-    console.log(`VALUES ('seed-source-${tag}', '${shopId}', '${tag}', ${loc.dueInDays}, NOW(), NOW())`);
+    console.log(`VALUES ('${sourceId}', '${shopId}', '${tag}', ${loc.dueInDays}, NOW(), NOW())`);
     console.log(`ON CONFLICT ("shopId", tag) DO UPDATE SET "defaultTermsDays" = EXCLUDED."defaultTermsDays", "updatedAt" = NOW();`);
   }
   console.log();
 
-  console.log(`-- Upsert BuyerAccount records for each company location`);
+  console.log(`-- Upsert BuyerAccount records for each company location (IDs are shop-scoped)`);
   for (const [companyKey, company] of state.companies) {
     for (const [dueInDays, locationId] of company.locations) {
       // Use externalId for account name (PII-free)
       const externalId = `${SEED_PREFIX}${companyKey}`;
       const accountName = `${externalId} - Net ${dueInDays}`;
+      const accountId = `seed-account-${shopId}-${locationId}`;
       console.log(`INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "defaultTermsDays", "defaultTermsSource", "holdState", "createdAt", "updatedAt")`);
-      console.log(`VALUES ('seed-account-${locationId}', '${shopId}', 'COMPANY', '${company.id}', '${locationId}', '${accountName}', ${dueInDays}, 'explicit', 'OK', NOW(), NOW())`);
+      console.log(`VALUES ('${accountId}', '${shopId}', 'COMPANY', '${company.id}', '${locationId}', '${accountName}', ${dueInDays}, 'explicit', 'OK', NOW(), NOW())`);
       console.log(`ON CONFLICT ("shopId", "companyLocationId") DO UPDATE SET "defaultTermsDays" = EXCLUDED."defaultTermsDays", "defaultTermsSource" = EXCLUDED."defaultTermsSource", "updatedAt" = NOW();`);
     }
   }

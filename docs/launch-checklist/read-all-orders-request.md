@@ -104,7 +104,7 @@ Reference these existing implementations when filling out the justification:
 | Shop redact | `app/routes/webhooks.compliance.tsx` | Cascading delete on uninstall |
 | Forbidden PII fields | `app/services/sync/customer-fields.server.ts` | Blocks phone/address fields |
 
-See `docs/privacy.md` for complete data handling documentation.
+See `docs/privacy.md` for the public privacy policy and `docs/privacy-implementation.md` for internal implementation details.
 
 ## Checklist Summary
 
