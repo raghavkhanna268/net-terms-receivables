@@ -431,6 +431,134 @@ describeWithDb("processor backstop integration (DB-backed)", () => {
     });
   });
 
+  describe("no_handler DLQ behavior (real DB)", () => {
+    it("sync queue: unregistered topic at read_ct >= noHandlerMaxReads goes to DLQ with no_handler code", async () => {
+      const { runDrain, DEFAULT_DRAIN_CONFIG } = await import("../processor.server");
+
+      const unregisteredTopic = `UNREGISTERED_TOPIC_${Date.now()}`;
+      const testMsgId = Date.now();
+
+      const message = {
+        shop: TEST_SHOP_DOMAIN,
+        topic: unregisteredTopic,
+        resourceGid: `gid://test/Unregistered/${testMsgId}`,
+        webhookId: `wh-unreg-sync-${testMsgId}`,
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      await sql`
+        INSERT INTO pgmq.q_s6_sync (vt, read_ct, enqueued_at, message)
+        VALUES (
+          NOW() - interval '1 second',
+          ${DEFAULT_DRAIN_CONFIG.noHandlerMaxReads},
+          NOW(),
+          ${sql.json(message)}::jsonb
+        )
+      `;
+
+      const [beforeDrain] = await sql<{ msg_id: bigint }[]>`
+        SELECT msg_id FROM pgmq.q_s6_sync
+        WHERE message->>'webhookId' = ${message.webhookId}
+      `;
+      expect(beforeDrain).toBeDefined();
+      const msgId = beforeDrain.msg_id;
+
+      let totalDeadLettered = 0;
+      for (let i = 0; i < 10; i++) {
+        const result = await runDrain(sql, { batchSize: 50, timeBudgetMs: 10000 });
+        totalDeadLettered += result.deadLettered;
+
+        const [dlqEntry] = await sql<{ message: Record<string, unknown>; error: string }[]>`
+          SELECT message, error FROM s6_dead_letter
+          WHERE original_queue = 's6_sync'
+            AND message->>'webhookId' = ${message.webhookId}
+        `;
+        if (dlqEntry) {
+          expect(dlqEntry.error).toBe("no_handler");
+          expect(dlqEntry.message).toMatchObject({ topic: unregisteredTopic });
+          break;
+        }
+      }
+
+      const [dlqEntry] = await sql<{ message: Record<string, unknown>; error: string }[]>`
+        SELECT message, error FROM s6_dead_letter
+        WHERE original_queue = 's6_sync'
+          AND message->>'webhookId' = ${message.webhookId}
+      `;
+      expect(dlqEntry).toBeDefined();
+
+      await sql`DELETE FROM s6_dead_letter WHERE message->>'webhookId' = ${message.webhookId}`;
+      await sql`DELETE FROM pgmq.a_s6_sync WHERE msg_id = ${msgId}`;
+    });
+
+    it("bulk queue: unregistered topic at read_ct >= noHandlerMaxReads goes to DLQ with no_handler code", async () => {
+      const { runDrain, DEFAULT_DRAIN_CONFIG } = await import("../processor.server");
+
+      const unregisteredTopic = `BULK_UNREGISTERED_${Date.now()}`;
+      const testMsgId = Date.now();
+
+      const message = {
+        shop: TEST_SHOP_DOMAIN,
+        topic: unregisteredTopic,
+        bulkOperationId: `gid://shopify/BulkOperation/unreg-${testMsgId}`,
+        bulkType: "unknown",
+        webhookId: `wh-unreg-bulk-${testMsgId}`,
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      await sql`
+        INSERT INTO pgmq.q_s6_bulk (vt, read_ct, enqueued_at, message)
+        VALUES (
+          NOW() - interval '1 second',
+          ${DEFAULT_DRAIN_CONFIG.noHandlerMaxReads},
+          NOW(),
+          ${sql.json(message)}::jsonb
+        )
+      `;
+
+      const [beforeDrain] = await sql<{ msg_id: bigint }[]>`
+        SELECT msg_id FROM pgmq.q_s6_bulk
+        WHERE message->>'webhookId' = ${message.webhookId}
+      `;
+      expect(beforeDrain).toBeDefined();
+      const msgId = beforeDrain.msg_id;
+
+      for (let i = 0; i < 10; i++) {
+        await runDrain(sql, { batchSize: 50, timeBudgetMs: 10000 });
+
+        const [dlqEntry] = await sql<{ message: Record<string, unknown>; error: string }[]>`
+          SELECT message, error FROM s6_dead_letter
+          WHERE original_queue = 's6_bulk'
+            AND message->>'webhookId' = ${message.webhookId}
+        `;
+        if (dlqEntry) {
+          expect(dlqEntry.error).toBe("no_handler");
+          expect(dlqEntry.message).toMatchObject({ topic: unregisteredTopic });
+          break;
+        }
+      }
+
+      const [dlqEntry] = await sql<{ message: Record<string, unknown>; error: string }[]>`
+        SELECT message, error FROM s6_dead_letter
+        WHERE original_queue = 's6_bulk'
+          AND message->>'webhookId' = ${message.webhookId}
+      `;
+      expect(dlqEntry).toBeDefined();
+
+      await sql`DELETE FROM s6_dead_letter WHERE message->>'webhookId' = ${message.webhookId}`;
+      await sql`DELETE FROM pgmq.a_s6_bulk WHERE msg_id = ${msgId}`;
+    });
+
+    it("no_handler code contains no raw message text or PII", async () => {
+      const dlqCode = "no_handler";
+      expect(dlqCode).not.toContain("@");
+      expect(dlqCode).not.toContain("myshopify.com");
+      expect(dlqCode).not.toMatch(/topic/i);
+      expect(dlqCode).not.toMatch(/No handler/i);
+      expect(dlqCode).toMatch(/^[a-z][a-z0-9_]*$/);
+    });
+  });
+
   describe("ORDERS_UPDATED still early-returns when processed", () => {
     it("ORDERS_UPDATED with isWebhookProcessed=true returns early without backstop", async () => {
       const { getSyncHandler } = await import("../processor.server");

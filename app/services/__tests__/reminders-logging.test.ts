@@ -136,6 +136,15 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
     }
   }
 
+  function assertNoSensitiveDataInRawCalls(spy: ReturnType<typeof vi.spyOn>) {
+    for (const call of spy.mock.calls) {
+      const raw = String(call[0]);
+      expect(raw).not.toContain("myshopify.com");
+      expect(raw).not.toContain(SENSITIVE_EMAIL);
+      expect(raw).not.toContain(SENSITIVE_AMOUNT);
+    }
+  }
+
   it("reminders disabled log contains only shopId", async () => {
     const { sendPaymentReminder } = await import("../reminders.server");
     const mockSql = createMockSql();
@@ -154,11 +163,14 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
     
     const logs = parseLogCalls(consoleLogSpy);
     assertNoSensitiveDataInLogs(logs);
+    assertNoSensitiveDataInRawCalls(consoleLogSpy);
 
-    const disabledLog = logs.find(l => l.event === "reminders_disabled");
-    expect(disabledLog).toBeDefined();
-    expect(disabledLog?.shopId).toBe("shop-123");
-    expect(Object.keys(disabledLog!).sort()).toEqual(["event", "shopId"]);
+    const disabledLogs = logs.filter(l => l.event === "reminders_disabled");
+    expect(disabledLogs.length).toBe(1);
+
+    const log = disabledLogs[0];
+    expect(Object.keys(log).sort()).toEqual(["event", "shopId"]);
+    expect(log.shopId).toBe("shop-123");
   });
 
   it("auth error log contains only shopId and httpStatus", async () => {
@@ -203,11 +215,14 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
 
     const errorLogs = parseLogCalls(consoleErrorSpy);
     assertNoSensitiveDataInLogs(errorLogs);
+    assertNoSensitiveDataInRawCalls(consoleErrorSpy);
 
-    const authErrorLog = errorLogs.find(l => l.event === "reminders_auth_error");
-    expect(authErrorLog).toBeDefined();
-    expect(authErrorLog?.shopId).toBe("shop-123");
-    expect(authErrorLog?.httpStatus).toBe(401);
-    expect(Object.keys(authErrorLog!).sort()).toEqual(["event", "httpStatus", "shopId"]);
+    const authErrorLogs = errorLogs.filter(l => l.event === "reminders_auth_error");
+    expect(authErrorLogs.length).toBe(1);
+
+    const log = authErrorLogs[0];
+    expect(Object.keys(log).sort()).toEqual(["event", "httpStatus", "shopId"]);
+    expect(log.shopId).toBe("shop-123");
+    expect(log.httpStatus).toBe(401);
   });
 });

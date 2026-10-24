@@ -412,7 +412,7 @@ async function handlePushedMatch(
   safeLog("warn", "apply_pushed_without_audit", {
     matchId,
     invoiceId: invoiceRow.id,
-    invoiceStatus: invoiceRow.status,
+    status: invoiceRow.status,
   });
 
   try {

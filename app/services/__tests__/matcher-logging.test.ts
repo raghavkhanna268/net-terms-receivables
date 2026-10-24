@@ -54,6 +54,16 @@ describe("Matcher Logging: No PII in log output (M4)", () => {
     }
   }
 
+  function assertNoSensitiveDataInRawCalls(spy: ReturnType<typeof vi.spyOn>) {
+    for (const call of spy.mock.calls) {
+      const raw = String(call[0]);
+      expect(raw).not.toContain("myshopify.com");
+      expect(raw).not.toContain(SENSITIVE_EMAIL);
+      expect(raw).not.toContain(SENSITIVE_UTR);
+      expect(raw).not.toContain(SENSITIVE_AMOUNT);
+    }
+  }
+
   it("runMatcher error in payment processing logs no domain, email, UTR, or amount", async () => {
     vi.doMock("~/lib/db-light.server", () => ({ sqlOptions: {} }));
 
@@ -108,11 +118,15 @@ describe("Matcher Logging: No PII in log output (M4)", () => {
     
     const logs = parseErrorLogs();
     assertNoSensitiveDataInLogs(logs);
+    assertNoSensitiveDataInRawCalls(consoleErrorSpy);
 
-    const matcherLog = logs.find(l => l.event === "matcher_payment_processing_failed");
-    expect(matcherLog).toBeDefined();
-    expect(matcherLog?.paymentId).toBe("pmt-test-err");
-    expect(matcherLog?.err).toBeDefined();
+    const matcherLogs = logs.filter(l => l.event === "matcher_payment_processing_failed");
+    expect(matcherLogs.length).toBe(1);
+
+    const log = matcherLogs[0];
+    expect(Object.keys(log).sort()).toEqual(["err", "event", "paymentId"]);
+    expect(log.paymentId).toBe("pmt-test-err");
+    expect(typeof log.err).toBe("string");
   });
 
   it("confirmMatch error logs no domain, email, UTR, or amount", async () => {
@@ -138,11 +152,15 @@ describe("Matcher Logging: No PII in log output (M4)", () => {
     
     const logs = parseErrorLogs();
     assertNoSensitiveDataInLogs(logs);
+    assertNoSensitiveDataInRawCalls(consoleErrorSpy);
 
-    const confirmLog = logs.find(l => l.event === "matcher_confirm_failed");
-    expect(confirmLog).toBeDefined();
-    expect(confirmLog?.matchId).toBe("match-123");
-    expect(confirmLog?.err).toBeDefined();
+    const confirmLogs = logs.filter(l => l.event === "matcher_confirm_failed");
+    expect(confirmLogs.length).toBe(1);
+
+    const log = confirmLogs[0];
+    expect(Object.keys(log).sort()).toEqual(["err", "event", "matchId"]);
+    expect(log.matchId).toBe("match-123");
+    expect(typeof log.err).toBe("string");
   });
 
   it("rejectMatch error logs no domain, email, UTR, or amount", async () => {
@@ -168,11 +186,15 @@ describe("Matcher Logging: No PII in log output (M4)", () => {
     
     const logs = parseErrorLogs();
     assertNoSensitiveDataInLogs(logs);
+    assertNoSensitiveDataInRawCalls(consoleErrorSpy);
 
-    const rejectLog = logs.find(l => l.event === "matcher_reject_failed");
-    expect(rejectLog).toBeDefined();
-    expect(rejectLog?.matchId).toBe("match-123");
-    expect(rejectLog?.err).toBeDefined();
+    const rejectLogs = logs.filter(l => l.event === "matcher_reject_failed");
+    expect(rejectLogs.length).toBe(1);
+
+    const log = rejectLogs[0];
+    expect(Object.keys(log).sort()).toEqual(["err", "event", "matchId"]);
+    expect(log.matchId).toBe("match-123");
+    expect(typeof log.err).toBe("string");
   });
 
   it("updateMatchAllocation error logs no domain, email, UTR, or amount", async () => {
@@ -198,10 +220,14 @@ describe("Matcher Logging: No PII in log output (M4)", () => {
     
     const logs = parseErrorLogs();
     assertNoSensitiveDataInLogs(logs);
+    assertNoSensitiveDataInRawCalls(consoleErrorSpy);
 
-    const updateLog = logs.find(l => l.event === "matcher_update_allocation_failed");
-    expect(updateLog).toBeDefined();
-    expect(updateLog?.matchId).toBe("match-123");
-    expect(updateLog?.err).toBeDefined();
+    const updateLogs = logs.filter(l => l.event === "matcher_update_allocation_failed");
+    expect(updateLogs.length).toBe(1);
+
+    const log = updateLogs[0];
+    expect(Object.keys(log).sort()).toEqual(["err", "event", "matchId"]);
+    expect(log.matchId).toBe("match-123");
+    expect(typeof log.err).toBe("string");
   });
 });
