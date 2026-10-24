@@ -1,0 +1,280 @@
+import type { LoaderFunctionArgs, HeadersFunction } from "react-router";
+
+import privacyMarkdown from "../../docs/privacy.md?raw";
+
+/**
+ * Public /privacy route - renders docs/privacy.md as HTML.
+ *
+ * NO AUTHENTICATION REQUIRED. This route:
+ * - Does not call authenticate.admin
+ * - Does not read any session
+ * - Does not use any shop data
+ *
+ * The markdown is imported at build time via Vite's `?raw` suffix and
+ * converted to HTML server-side with a simple, Worker-safe converter.
+ */
+
+/**
+ * Cache-Control for the privacy page.
+ * - public: no user-specific content (no auth)
+ * - max-age=3600: browser caches for 1 hour
+ */
+export const headers: HeadersFunction = () => ({
+  "Cache-Control": "public, max-age=3600",
+});
+
+/**
+ * Simple markdown-to-HTML converter for Workers.
+ *
+ * Handles: headings, bold, italic, links, code, horizontal rules,
+ * tables, lists (ordered and unordered), paragraphs.
+ *
+ * This is intentionally minimal to keep the Worker bundle small.
+ * It does NOT add any dependencies.
+ */
+function markdownToHtml(md: string): string {
+  const lines = md.split("\n");
+  const htmlLines: string[] = [];
+  let inTable = false;
+  let inList: "ul" | "ol" | null = null;
+  let inCodeBlock = false;
+
+  const escapeHtml = (text: string): string =>
+    text
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+
+  const processInline = (text: string): string => {
+    let result = escapeHtml(text);
+    // Bold: **text** or __text__
+    result = result.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    result = result.replace(/__(.+?)__/g, "<strong>$1</strong>");
+    // Italic: *text* or _text_ (not already bold)
+    result = result.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, "<em>$1</em>");
+    result = result.replace(/(?<!_)_(?!_)(.+?)(?<!_)_(?!_)/g, "<em>$1</em>");
+    // Inline code: `code`
+    result = result.replace(/`([^`]+)`/g, "<code>$1</code>");
+    // Links: [text](url)
+    result = result.replace(
+      /\[([^\]]+)\]\(([^)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>'
+    );
+    return result;
+  };
+
+  const closeList = () => {
+    if (inList) {
+      htmlLines.push(inList === "ul" ? "</ul>" : "</ol>");
+      inList = null;
+    }
+  };
+
+  const closeTable = () => {
+    if (inTable) {
+      htmlLines.push("</tbody></table>");
+      inTable = false;
+    }
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    // Code block
+    if (trimmed.startsWith("```")) {
+      closeList();
+      closeTable();
+      if (inCodeBlock) {
+        htmlLines.push("</code></pre>");
+        inCodeBlock = false;
+      } else {
+        inCodeBlock = true;
+        htmlLines.push("<pre><code>");
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      htmlLines.push(escapeHtml(line));
+      continue;
+    }
+
+    // Empty line
+    if (trimmed === "") {
+      closeList();
+      closeTable();
+      continue;
+    }
+
+    // Horizontal rule
+    if (/^-{3,}$/.test(trimmed) || /^\*{3,}$/.test(trimmed)) {
+      closeList();
+      closeTable();
+      htmlLines.push("<hr>");
+      continue;
+    }
+
+    // Headings
+    const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      closeList();
+      closeTable();
+      const level = headingMatch[1].length;
+      const text = processInline(headingMatch[2]);
+      htmlLines.push(`<h${level}>${text}</h${level}>`);
+      continue;
+    }
+
+    // Table row
+    if (trimmed.startsWith("|") && trimmed.endsWith("|")) {
+      closeList();
+      const cells = trimmed
+        .slice(1, -1)
+        .split("|")
+        .map((c) => c.trim());
+
+      // Check if this is a separator row (|---|---|)
+      if (cells.every((c) => /^[-:]+$/.test(c))) {
+        continue;
+      }
+
+      if (!inTable) {
+        inTable = true;
+        htmlLines.push('<table class="privacy-table"><thead><tr>');
+        for (const cell of cells) {
+          htmlLines.push(`<th>${processInline(cell)}</th>`);
+        }
+        htmlLines.push("</tr></thead><tbody>");
+      } else {
+        htmlLines.push("<tr>");
+        for (const cell of cells) {
+          htmlLines.push(`<td>${processInline(cell)}</td>`);
+        }
+        htmlLines.push("</tr>");
+      }
+      continue;
+    }
+
+    // Unordered list item
+    const ulMatch = trimmed.match(/^[-*]\s+(.+)$/);
+    if (ulMatch) {
+      closeTable();
+      if (inList !== "ul") {
+        closeList();
+        htmlLines.push("<ul>");
+        inList = "ul";
+      }
+      htmlLines.push(`<li>${processInline(ulMatch[1])}</li>`);
+      continue;
+    }
+
+    // Ordered list item
+    const olMatch = trimmed.match(/^\d+\.\s+(.+)$/);
+    if (olMatch) {
+      closeTable();
+      if (inList !== "ol") {
+        closeList();
+        htmlLines.push("<ol>");
+        inList = "ol";
+      }
+      htmlLines.push(`<li>${processInline(olMatch[1])}</li>`);
+      continue;
+    }
+
+    // Paragraph
+    closeList();
+    closeTable();
+    htmlLines.push(`<p>${processInline(trimmed)}</p>`);
+  }
+
+  closeList();
+  closeTable();
+
+  return htmlLines.join("\n");
+}
+
+const CSS = `
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+    line-height: 1.6;
+    color: #1a1a1a;
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 2rem 1rem;
+    background: #fff;
+  }
+  h1, h2, h3, h4 { margin-top: 2rem; margin-bottom: 1rem; color: #111; }
+  h1 { font-size: 2rem; border-bottom: 2px solid #eee; padding-bottom: 0.5rem; }
+  h2 { font-size: 1.5rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1.25rem; }
+  p { margin: 1rem 0; }
+  a { color: #0066cc; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code {
+    background: #f4f4f4;
+    padding: 0.2rem 0.4rem;
+    border-radius: 3px;
+    font-family: 'SF Mono', Consolas, monospace;
+    font-size: 0.9em;
+  }
+  pre {
+    background: #f4f4f4;
+    padding: 1rem;
+    border-radius: 5px;
+    overflow-x: auto;
+  }
+  pre code { padding: 0; background: none; }
+  ul, ol { margin: 1rem 0; padding-left: 2rem; }
+  li { margin: 0.5rem 0; }
+  hr { border: none; border-top: 1px solid #ddd; margin: 2rem 0; }
+  .privacy-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.95em;
+  }
+  .privacy-table th, .privacy-table td {
+    border: 1px solid #ddd;
+    padding: 0.75rem;
+    text-align: left;
+  }
+  .privacy-table th { background: #f8f8f8; font-weight: 600; }
+  .privacy-table tr:nth-child(even) { background: #fafafa; }
+  strong { font-weight: 600; }
+  @media (max-width: 600px) {
+    body { padding: 1rem 0.5rem; }
+    .privacy-table { font-size: 0.85em; }
+    .privacy-table th, .privacy-table td { padding: 0.5rem; }
+  }
+`;
+
+export const loader = async (_args: LoaderFunctionArgs) => {
+  const htmlContent = markdownToHtml(privacyMarkdown);
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy Policy — Net Terms Receivables</title>
+  <style>${CSS}</style>
+</head>
+<body>
+${htmlContent}
+</body>
+</html>`;
+
+  return new Response(html, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+    },
+  });
+};
+
+export default function Privacy() {
+  return null;
+}

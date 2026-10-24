@@ -9,6 +9,7 @@ Step-by-step checklists for launch prerequisites. Complete these before Shopify 
 | [Sentry Setup](./sentry-setup.md) | Raghav | Pending |
 | [Workers Paid Upgrade](./workers-paid-upgrade.md) | Raghav | Pending |
 | [Request `read_all_orders` Scope](./read-all-orders-request.md) | Raghav | Pending |
+| [Privacy Policy](/privacy) — Fill in `[TBD: ...]` placeholders in [docs/privacy.md](../privacy.md) and verify route is accessible | Raghav | Pending |
 | `PLAN_GATING_ENFORCED` stays `"false"` in every environment until the lead Developer's gating fix (eligibility and aging) merges and Team Lead gives the go. Enabling it earlier silently stops holds for gated accounts. | Team Lead | Holding |
 | `RESEND_API_KEY` + `RESEND_FROM` set as Worker secrets and Resend DPA accepted, before any shop enables reminders | Raghav | Pending |
 

@@ -259,6 +259,7 @@ Orders are created with payment terms using `draftOrderCreate` with `paymentTerm
 │   │   ├── auth.$.tsx           # Auth catch-all
 │   │   ├── auth.login/          # Login page
 │   │   ├── _index/              # Landing page
+│   │   ├── privacy.tsx          # Public privacy policy (/privacy)
 │   │   └── webhooks.*.tsx       # Webhook handlers
 │   ├── entry.server.tsx         # Server entry (injects KV)
 │   ├── root.tsx                 # App root
@@ -270,6 +271,15 @@ Orders are created with payment terms using `draftOrderCreate` with `paymentTerm
 ├── shopify.app.toml             # Shopify app config
 └── vite.config.ts               # Vite config
 ```
+
+## Public Routes
+
+The following routes are publicly accessible without authentication:
+
+| Route | Purpose |
+|-------|---------|
+| `/` | Landing page (redirects to `/app` with shop param) |
+| `/privacy` | Privacy Policy — renders `docs/privacy.md` as HTML |
 
 ## CPU Time Analysis (Workers Free Tier)
 
