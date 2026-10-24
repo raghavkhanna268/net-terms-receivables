@@ -36,8 +36,11 @@ import {
   FIND_COMPANIES_BY_NAME_QUERY as _FIND_COMPANIES_BY_NAME_QUERY,
   FIND_COMPANIES_WITH_CONTACTS_QUERY as _FIND_COMPANIES_WITH_CONTACTS_QUERY,
   COMPANY_UPDATE_MUTATION as _COMPANY_UPDATE_MUTATION,
+  COMPANY_ASSIGN_CUSTOMER_AS_CONTACT_MUTATION as _COMPANY_ASSIGN_CUSTOMER_AS_CONTACT_MUTATION,
+  COMPANY_ASSIGN_MAIN_CONTACT_MUTATION as _COMPANY_ASSIGN_MAIN_CONTACT_MUTATION,
   MAX_SEARCH_PAGES,
   buildCompanyCreateInput,
+  buildCompanyCreateInputWithoutContact,
   buildCompanyLocationCreateInput,
   buildCompanyLocationAssignRolesInput,
   buildTaggedCustomerOrderInput,
@@ -48,6 +51,7 @@ import {
   findCompaniesByContactEmail as _findCompaniesByContactEmail,
   findCompaniesByName as _findCompaniesByName,
   findCompanyForAdoption as _findCompanyForAdoption,
+  findCustomersByEmail as _findCustomersByEmail,
   adoptCompany as _adoptCompany,
   reportDuplicates as _reportDuplicates,
   createCompanyWithLocations as _createCompanyWithLocations,
@@ -62,6 +66,7 @@ import {
   type UserError,
   type CompanyData,
   type CompanyCandidate as _CompanyCandidate,
+  type CustomerLookupResult as _CustomerLookupResult,
 } from "../seed";
 import { inferDueDate } from "~/lib/due-date";
 import { readFileSync } from "fs";
@@ -3875,5 +3880,433 @@ describe("company adoption", () => {
     // Company should have been skipped
     expect(state.skippedCount.companies).toBe(1);
     expect(state.skippedReasons.some(r => r.includes("already has externalId"))).toBe(true);
+  });
+
+  it("reuses existing customer when creating company (no new customer created)", async () => {
+    const seed = COMPANY_SEEDS[0];
+    const targetExternalId = `${SEED_PREFIX}${seed.key}`;
+    const existingCustomerId = "gid://shopify/Customer/existing123";
+    
+    let customerCreateCalled = false;
+    let companyAssignCustomerAsContactCalled = false;
+    let companyAssignMainContactCalled = false;
+    let companyCreateInput: Record<string, unknown> | null = null;
+
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+      const variables = body.variables as Record<string, unknown> | undefined;
+
+      // Find customer by email - returns existing customer
+      if (query.includes("FindCustomer") && variables?.query?.toString().includes("email")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              customers: {
+                nodes: [{ id: existingCustomerId, email: seed.contact.email, tags: [] }],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyCreate - capture input to verify no companyContact
+      if (query.includes("companyCreate")) {
+        companyCreateInput = variables?.input as Record<string, unknown>;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyCreate: {
+                company: {
+                  id: "gid://shopify/Company/new",
+                  name: seed.name,
+                  externalId: targetExternalId,
+                  locations: { edges: [{ node: { id: "gid://loc/1", name: `${seed.name} - Net-15` } }] },
+                  contacts: { edges: [] }, // No contact initially (created without companyContact)
+                },
+                userErrors: [],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyAssignCustomerAsContact
+      if (query.includes("companyAssignCustomerAsContact")) {
+        companyAssignCustomerAsContactCalled = true;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyAssignCustomerAsContact: {
+                companyContact: {
+                  id: "gid://shopify/CompanyContact/new",
+                  customer: { id: existingCustomerId, email: seed.contact.email },
+                },
+                userErrors: [],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyAssignMainContact
+      if (query.includes("companyAssignMainContact")) {
+        companyAssignMainContactCalled = true;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyAssignMainContact: { company: { id: "gid://shopify/Company/new" }, userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // customerCreate - should NOT be called
+      if (query.includes("customerCreate")) {
+        customerCreateCalled = true;
+        return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+      }
+
+      // Contact roles
+      if (query.includes("contactRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { company: { contactRoles: { nodes: [{ id: "gid://role/1", name: "Ordering only" }] } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Role assignments
+      if (query.includes("roleAssignments")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocation: { roleAssignments: { nodes: [] } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyLocationAssignRoles
+      if (query.includes("companyLocationAssignRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocationAssignRoles: { roleAssignments: [], userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyLocationCreate - additional locations
+      if (query.includes("companyLocationCreate")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyLocationCreate: {
+                companyLocation: { id: "gid://loc/additional", name: "Additional Location" },
+                userErrors: [],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const { createCompanyWithLocations } = await import("../seed");
+    const state = createMockState();
+
+    const result = await createCompanyWithLocations(state, seed, targetExternalId);
+
+    // Should succeed
+    expect(result).not.toBeNull();
+    expect(result?.id).toBe("gid://shopify/Company/new");
+    
+    // Verify companyCreate was called WITHOUT companyContact
+    expect(companyCreateInput).not.toBeNull();
+    expect(companyCreateInput).not.toHaveProperty("companyContact");
+    
+    // Verify customer was attached via companyAssignCustomerAsContact
+    expect(companyAssignCustomerAsContactCalled).toBe(true);
+    expect(companyAssignMainContactCalled).toBe(true);
+    
+    // Verify no new customer was created
+    expect(customerCreateCalled).toBe(false);
+  });
+
+  it("skips company creation when multiple customers match email (ambiguous)", async () => {
+    const seed = COMPANY_SEEDS[0];
+    const targetExternalId = `${SEED_PREFIX}${seed.key}`;
+    
+    let companyCreateCalled = false;
+
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+      const variables = body.variables as Record<string, unknown> | undefined;
+
+      // Find customer by email - returns MULTIPLE customers
+      if (query.includes("FindCustomer") && variables?.query?.toString().includes("email")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              customers: {
+                nodes: [
+                  { id: "gid://shopify/Customer/cust1", email: seed.contact.email, tags: [] },
+                  { id: "gid://shopify/Customer/cust2", email: seed.contact.email, tags: [] },
+                ],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyCreate - should NOT be called
+      if (query.includes("companyCreate")) {
+        companyCreateCalled = true;
+        return { ok: true, status: 200, json: async () => ({ data: { companyCreate: { company: null, userErrors: [] } } }) } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const { createCompanyWithLocations } = await import("../seed");
+    const state = createMockState();
+
+    const result = await createCompanyWithLocations(state, seed, targetExternalId);
+
+    // Should be skipped
+    expect(result).toBeNull();
+    expect(companyCreateCalled).toBe(false);
+    
+    // Should record skip reason with customer GIDs
+    expect(state.skippedCount.companies).toBe(1);
+    expect(state.skippedReasons.some(r => 
+      r.includes("gid://shopify/Customer/cust1") && 
+      r.includes("gid://shopify/Customer/cust2")
+    )).toBe(true);
+  });
+
+  it("TAKEN recovery falls back to customer path when no company found", async () => {
+    const seed = COMPANY_SEEDS[0];
+    const targetExternalId = `${SEED_PREFIX}${seed.key}`;
+    const existingCustomerId = "gid://shopify/Customer/taken123";
+    
+    let companyCreateCallCount = 0;
+    let companyAssignCustomerCalled = false;
+    let secondCompanyCreateInput: Record<string, unknown> | null = null;
+
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+      const variables = body.variables as Record<string, unknown> | undefined;
+
+      // companyCreate - first call returns TAKEN, second succeeds
+      if (query.includes("companyCreate")) {
+        companyCreateCallCount++;
+        if (companyCreateCallCount === 1) {
+          // First call fails with TAKEN
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              data: {
+                companyCreate: {
+                  company: null,
+                  userErrors: [{ field: ["companyContact", "email"], message: "Email address has already been taken", code: "TAKEN" }],
+                },
+              },
+              extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+            }),
+          } as Response;
+        } else {
+          // Second call (without contact) succeeds
+          secondCompanyCreateInput = variables?.input as Record<string, unknown>;
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              data: {
+                companyCreate: {
+                  company: {
+                    id: "gid://shopify/Company/recovered",
+                    name: seed.name,
+                    externalId: targetExternalId,
+                    locations: { edges: [{ node: { id: "gid://loc/1", name: `${seed.name} - Net-15` } }] },
+                    contacts: { edges: [] },
+                  },
+                  userErrors: [],
+                },
+              },
+              extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+            }),
+          } as Response;
+        }
+      }
+
+      // Find companies with contacts - returns NO companies
+      if (query.includes("companies") && query.includes("contacts")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companies: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Find customer by email - returns existing customer
+      if (query.includes("FindCustomer") && variables?.query?.toString().includes("email")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              customers: {
+                nodes: [{ id: existingCustomerId, email: seed.contact.email, tags: [] }],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyAssignCustomerAsContact
+      if (query.includes("companyAssignCustomerAsContact")) {
+        companyAssignCustomerCalled = true;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyAssignCustomerAsContact: {
+                companyContact: {
+                  id: "gid://shopify/CompanyContact/recovered",
+                  customer: { id: existingCustomerId, email: seed.contact.email },
+                },
+                userErrors: [],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyAssignMainContact
+      if (query.includes("companyAssignMainContact")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyAssignMainContact: { company: { id: "gid://shopify/Company/recovered" }, userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Contact roles
+      if (query.includes("contactRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { company: { contactRoles: { nodes: [{ id: "gid://role/1", name: "Ordering only" }] } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // Role assignments
+      if (query.includes("roleAssignments")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocation: { roleAssignments: { nodes: [] } } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyLocationAssignRoles
+      if (query.includes("companyLocationAssignRoles")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { companyLocationAssignRoles: { roleAssignments: [], userErrors: [] } },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      // companyLocationCreate - additional locations
+      if (query.includes("companyLocationCreate")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              companyLocationCreate: {
+                companyLocation: { id: "gid://loc/additional", name: "Additional Location" },
+                userErrors: [],
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+
+      return { ok: true, status: 200, json: async () => ({ data: {} }) } as Response;
+    });
+
+    const { createCompanyWithLocations } = await import("../seed");
+    const state = createMockState();
+
+    const result = await createCompanyWithLocations(state, seed, targetExternalId);
+
+    // Should succeed via TAKEN recovery
+    expect(result).not.toBeNull();
+    expect(result?.id).toBe("gid://shopify/Company/recovered");
+    
+    // companyCreate should have been called twice (first TAKEN, second without contact)
+    expect(companyCreateCallCount).toBe(2);
+    
+    // Second companyCreate should NOT have companyContact
+    expect(secondCompanyCreateInput).not.toBeNull();
+    expect(secondCompanyCreateInput).not.toHaveProperty("companyContact");
+    
+    // Customer should have been attached
+    expect(companyAssignCustomerCalled).toBe(true);
+    
+    // Should record as created (via recovery)
+    expect(state.createdCount.companies).toBe(1);
   });
 });
