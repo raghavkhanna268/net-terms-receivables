@@ -1,5 +1,5 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useLoaderData } from "react-router";
+import { useLoaderData, redirect } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { resolvePlan, type ResolvedPlan } from "~/services/plan.server";
@@ -48,6 +48,37 @@ function parseSortOrder(value: string | null): SortOrder {
   return "desc";
 }
 
+async function checkOnboardingRedirect(
+  sql: ReturnType<typeof getRequestSql>,
+  shopId: string
+): Promise<boolean> {
+  try {
+    const buyerCountResult = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+    `;
+    const buyerCount = parseInt(buyerCountResult[0]?.count ?? "0", 10);
+    if (buyerCount > 0) return false;
+
+    const tagRuleCountResult = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "AccountSource" WHERE "shopId" = ${shopId}
+    `;
+    const tagRuleCount = parseInt(tagRuleCountResult[0]?.count ?? "0", 10);
+    if (tagRuleCount > 0) return false;
+
+    const onboardingResult = await sql<{ dismissed_at: Date | null }[]>`
+      SELECT dismissed_at FROM shop_onboarding WHERE shop_id = ${shopId}
+    `;
+
+    if (onboardingResult.length === 0) {
+      return true;
+    }
+
+    return onboardingResult[0].dismissed_at === null;
+  } catch {
+    return false;
+  }
+}
+
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { shopify } = context;
   const { session } = await shopify.authenticate.admin(request);
@@ -59,10 +90,18 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const sortBy = parseSortBy(url.searchParams.get("sortBy"));
   const sortOrder = parseSortOrder(url.searchParams.get("sortOrder"));
   const selectedBuyerId = url.searchParams.get("buyer") ?? null;
+  const skipOnboarding = url.searchParams.get("skipOnboarding") === "true";
 
   const [shop] = await sql<{ id: string; currency: string; timezone: string }[]>`
     SELECT id, currency, timezone FROM "Shop" WHERE domain = ${shopDomain}
   `;
+
+  if (shop && !skipOnboarding) {
+    const shouldRedirect = await checkOnboardingRedirect(sql, shop.id);
+    if (shouldRedirect) {
+      throw redirect("/app/onboarding");
+    }
+  }
 
   let planData: ResolvedPlan | null = null;
   let usage: {

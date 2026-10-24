@@ -69,6 +69,16 @@ describe("app._index loader", () => {
       if (query.includes("SELECT name FROM")) {
         return Promise.resolve([{ name: "Test Buyer" }]);
       }
+      // S23: Mock onboarding queries to prevent redirect during tests
+      if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
+        return Promise.resolve([{ count: "1" }]);
+      }
+      if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      if (query.includes("shop_onboarding")) {
+        return Promise.resolve([{ dismissed_at: new Date() }]);
+      }
       return Promise.resolve([]);
     });
 

@@ -182,6 +182,8 @@ model Shop {
   dataRequests    S22DataRequest[]
   // S13: Backstop processed orders
   backstopProcessedOrders BackstopProcessedOrder[]
+  // S23: Shop onboarding state
+  onboarding ShopOnboarding?
 
   // S21: Index for finding shops by plan (analytics, batch operations)
   @@index([planKey])
@@ -916,4 +918,31 @@ model BackstopProcessedOrder {
   @@index([processedAt], map: "idx_backstop_processed_orders_processed_at")
   @@index([shopId], map: "idx_backstop_processed_orders_shop")
   @@map("backstop_processed_orders")
+}
+
+// =============================================================================
+// S23 SHOP ONBOARDING STATE
+// =============================================================================
+
+/// Shop onboarding state tracking (S23).
+/// Stores dismissed and completed flags only.
+/// Minimal table required because Shop has no settings field and
+/// we don't have write_metafields scope for shop-level metafields.
+///
+/// FK to Shop with ON DELETE CASCADE (S22 compliance).
+model ShopOnboarding {
+  /// Shop ID (references Shop.id)
+  shopId      String    @id @map("shop_id")
+  /// When the merchant dismissed the onboarding checklist
+  dismissedAt DateTime? @map("dismissed_at") @db.Timestamptz
+  /// When the merchant completed all onboarding steps
+  completedAt DateTime? @map("completed_at") @db.Timestamptz
+  /// When the record was created
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  // FK to Shop with CASCADE delete
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@index([dismissedAt], map: "idx_shop_onboarding_dismissed")
+  @@map("shop_onboarding")
 }
