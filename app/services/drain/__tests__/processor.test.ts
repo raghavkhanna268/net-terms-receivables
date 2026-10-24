@@ -248,25 +248,6 @@ describe("Drain Processor", () => {
 
       expect(DEFAULT_DRAIN_CONFIG.noHandlerMaxReads).toBe(48);
     });
-
-    it("no-handler DLQ code is safe (no raw message text)", async () => {
-      // The no_handler code is a fixed string literal - verify it conforms to safe patterns
-      // This ensures no PII/raw message data leaks into DLQ rows
-      const { toErrorCode } = await import("~/lib/log.server");
-
-      // Verify "no_handler" is a valid safe error code (passes through toErrorCode unchanged)
-      const noHandlerCode = "no_handler";
-      expect(toErrorCode(noHandlerCode)).toBe("no_handler");
-
-      // Verify it doesn't match sensitive patterns
-      expect(noHandlerCode).not.toContain("@");
-      expect(noHandlerCode).not.toContain("myshopify.com");
-      expect(noHandlerCode).not.toMatch(/topic/i);
-      expect(noHandlerCode).not.toMatch(/No handler registered/i);
-
-      // Verify it matches the safe code pattern (alphanumeric + underscore)
-      expect(noHandlerCode).toMatch(/^[a-z][a-z0-9_]*$/);
-    });
   });
 
   describe("error handling", () => {

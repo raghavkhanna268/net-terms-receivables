@@ -80,6 +80,7 @@ export interface ApplyMatchResult {
   invoicePaid: boolean;
   shopifyPushSucceeded: boolean;
   error?: string;
+  errorCode?: string;
   retryable?: boolean;
   reasonCode?: string;
 }
@@ -289,6 +290,7 @@ export async function applyMatch(
         invoicePaid: false,
         shopifyPushSucceeded: false,
         error: shopifyResult.error ?? "Shopify orderMarkAsPaid failed",
+        errorCode: shopifyResult.errorCode,
         retryable: shopifyResult.retryable,
       };
     }
@@ -1965,6 +1967,19 @@ async function updatePaymentStatusAfterUnmatch(
 export const unmatchPushedMatch = unmatchMatch;
 
 /**
+ * Fixed merchant-facing error messages for reconcile failures (M7).
+ * Keys must be values that toErrorCode(new Error(msg)) can return for userError messages.
+ * No raw Shopify text is exposed.
+ */
+const RECONCILE_ERROR_MESSAGES: Record<string, string> = {
+  error: "Couldn't update the order in Shopify. Please retry.",
+  unknown: "Couldn't update the order in Shopify. Please retry.",
+  access_denied: "Couldn't update the order in Shopify. Please check permissions.",
+  throttled: "Shopify is busy. Please try again in a moment.",
+  rate_limited: "Shopify is busy. Please try again in a moment.",
+};
+
+/**
  * Call Shopify orderMarkAsPaid mutation.
  *
  * Issue #5: Better already-paid detection - we verify by querying the order's
@@ -1977,6 +1992,7 @@ async function callOrderMarkAsPaid(
   success: boolean;
   alreadyPaid?: boolean;
   error?: string;
+  errorCode?: string;
   retryable?: boolean;
 }> {
   interface OrderMarkAsPaidResponse {
@@ -2021,11 +2037,14 @@ async function callOrderMarkAsPaid(
       return { success: false, alreadyPaid: true };
     }
 
-    // Not already paid - return the actual error
-    const errorMessage = data.userErrors.map((e) => e.message).join("; ");
+    // Not already paid - map errors to codes and return fixed merchant-facing message (M7)
+    // Wrap message in Error so toErrorCode's message heuristics (access_denied, throttled, etc.) work
+    const errorCodes = data.userErrors.map((e) => toErrorCode(new Error(e.message)));
+    const primaryCode = errorCodes[0] ?? "error";
     return {
       success: false,
-      error: errorMessage,
+      error: RECONCILE_ERROR_MESSAGES[primaryCode] ?? RECONCILE_ERROR_MESSAGES.error,
+      errorCode: primaryCode,
       retryable: false,
     };
   }
