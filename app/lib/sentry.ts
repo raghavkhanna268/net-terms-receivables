@@ -188,6 +188,9 @@ export function wrapWithSentry<E extends SentryEnv>(
         // urlQueryParams, cookies, httpHeaders, httpBodies, and all other collection.
         // beforeSend/beforeSendTransaction hooks provide defense-in-depth scrubbing.
         dataCollection: RESTRICTIVE_DATA_COLLECTION,
+        // Disable fetch error hostname enrichment (e.g. "Failed to fetch (example.com)").
+        // The hostname could be a shop domain, which is PII per #174.
+        enhanceFetchErrorMessages: false,
         beforeSend,
         beforeSendTransaction,
       };

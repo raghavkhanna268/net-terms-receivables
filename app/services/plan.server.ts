@@ -234,7 +234,7 @@ async function fetchPlanFromShopify(
 
   if (!result.success) {
     const code = toErrorCode(result.error);
-    safeLog("error", "plan_fetch_failed", { shopHash: shopHash(shop), err: code });
+    safeLog("error", "plan_fetch_failed", { shopHash: await shopHash(shop), err: code });
     captureMessage("plan_fetch_failed", "error");
     return null;
   }
@@ -262,7 +262,7 @@ async function fetchPlanFromShopify(
 
   if (!planKey) {
     safeLog("warn", "unknown_subscription_name", {
-      shopHash: shopHash(shop),
+      shopHash: await shopHash(shop),
       subscriptionId: activeSubscription.id,
       isTest: activeSubscription.test,
     });
@@ -479,7 +479,7 @@ export async function refreshPlanCache(
   shopDomain: string
 ): Promise<void> {
   await resolvePlan(sql, shopDomain, true);
-  safeLog("info", "plan_cache_refreshed", { shopHash: shopHash(shopDomain) });
+  safeLog("info", "plan_cache_refreshed", { shopHash: await shopHash(shopDomain) });
 }
 
 /**
