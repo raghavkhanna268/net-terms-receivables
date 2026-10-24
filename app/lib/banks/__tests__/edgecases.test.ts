@@ -525,76 +525,80 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
   });
 
   describe("error handling without crashes", () => {
-    it("HDFC: malformed rows return errors, not exceptions", async () => {
+    it("HDFC: malformed rows produce coded errors with row index", async () => {
       const content = readFileSync(join(FIXTURES_DIR, "hdfc-edgecases-synthetic.csv"));
       const file = new File([content], "hdfc-edgecases-synthetic.csv", { type: "text/csv" });
 
       let result: ParseResult | null = null;
-      let error: Error | null = null;
+      let thrownError: Error | null = null;
 
       try {
         result = await parseBankStatement(file);
       } catch (e) {
-        error = e as Error;
+        thrownError = e as Error;
       }
 
-      expect(error).toBeNull();
+      expect(thrownError).toBeNull();
       expect(result).not.toBeNull();
       expect(result!.transactions.length).toBeGreaterThan(0);
+      expect(result!.skippedRows).toBeGreaterThan(0);
     });
 
-    it("ICICI: malformed rows return errors, not exceptions", async () => {
+    it("ICICI: malformed rows produce coded errors with row index", async () => {
       const content = readFileSync(join(FIXTURES_DIR, "icici-edgecases-synthetic.csv"));
       const file = new File([content], "icici-edgecases-synthetic.csv", { type: "text/csv" });
 
       let result: ParseResult | null = null;
-      let error: Error | null = null;
+      let thrownError: Error | null = null;
 
       try {
         result = await parseBankStatement(file);
       } catch (e) {
-        error = e as Error;
+        thrownError = e as Error;
       }
 
-      expect(error).toBeNull();
+      expect(thrownError).toBeNull();
       expect(result).not.toBeNull();
       expect(result!.transactions.length).toBeGreaterThan(0);
+      expect(result!.skippedRows).toBeGreaterThan(0);
     });
 
-    it("SBI: malformed rows return errors, not exceptions", async () => {
+    it("SBI: malformed rows produce coded errors with row index", async () => {
       const content = readFileSync(join(FIXTURES_DIR, "sbi-edgecases-synthetic.csv"));
       const file = new File([content], "sbi-edgecases-synthetic.csv", { type: "text/csv" });
 
       let result: ParseResult | null = null;
-      let error: Error | null = null;
+      let thrownError: Error | null = null;
 
       try {
         result = await parseBankStatement(file);
       } catch (e) {
-        error = e as Error;
+        thrownError = e as Error;
       }
 
-      expect(error).toBeNull();
+      expect(thrownError).toBeNull();
       expect(result).not.toBeNull();
       expect(result!.transactions.length).toBeGreaterThan(0);
+      expect(result!.skippedRows).toBeGreaterThan(0);
     });
 
-    it("Axis: malformed rows return errors, not exceptions", async () => {
+    it("Axis: malformed rows produce coded errors with row index", async () => {
       const content = readFileSync(join(FIXTURES_DIR, "axis-edgecases-synthetic.csv"));
       const file = new File([content], "axis-edgecases-synthetic.csv", { type: "text/csv" });
 
       let result: ParseResult | null = null;
-      let error: Error | null = null;
+      let thrownError: Error | null = null;
 
       try {
         result = await parseBankStatement(file);
       } catch (e) {
-        error = e as Error;
+        thrownError = e as Error;
       }
 
-      expect(error).toBeNull();
+      expect(thrownError).toBeNull();
       expect(result).not.toBeNull();
       expect(result!.transactions.length).toBeGreaterThan(0);
+      expect(result!.skippedRows).toBeGreaterThan(0);
     });
   });
 
@@ -618,9 +622,8 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       const upiMissingRef = result.transactions.find(
         (t) => t.narration.includes("UPI-SYNTHETIC STORE") && !t.refNo
       );
-      if (upiMissingRef) {
-        expect(upiMissingRef.parsed.utr).toBeUndefined();
-      }
+      expect(upiMissingRef).toBeDefined();
+      expect(upiMissingRef!.parsed.utr).toBeUndefined();
     });
 
     it("ICICI: extracts UTR for RTGS transactions", async () => {
