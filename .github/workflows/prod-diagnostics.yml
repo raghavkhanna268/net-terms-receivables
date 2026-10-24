@@ -145,12 +145,11 @@ jobs:
             exit 1
           fi
 
-          echo "Querying Session table for shop: $SHOP_DOMAIN"
+          echo "Querying Session table for the input shop (domain not printed)"
           echo ""
 
           psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" "$DATABASE_URL" <<'EOSQL'
           SELECT
-            shop,
             "isOnline",
             scope,
             CASE WHEN "accessToken" IS NOT NULL AND "accessToken" != '' THEN true ELSE false END AS "hasAccessToken",
@@ -245,7 +244,7 @@ jobs:
 
           echo "=== Post-Redrive Verification ==="
           echo ""
-          echo "Shop: $SHOP_DOMAIN"
+          echo "Shop: (input shop; domain not printed)"
           echo "Read-only mode: enforced via PGOPTIONS and BEGIN TRANSACTION READ ONLY"
           echo ""
 
@@ -305,7 +304,7 @@ jobs:
             exit 0
           fi
 
-          echo "Attempting to refresh expired token for shop: $SHOP_DOMAIN"
+          echo "Attempting to refresh expired token for the input shop"
           echo ""
 
           # Run the refresh script (never outputs tokens - probe re-reads from DB)
@@ -376,7 +375,7 @@ jobs:
 
           # Check if offline session exists
           if [ "$OFFLINE_SESSION_EXISTS" != "true" ]; then
-            echo "::error::No offline session found for shop $SHOP_DOMAIN"
+            echo "::error::No offline session found for the input shop"
             exit 1
           fi
 
@@ -422,7 +421,7 @@ jobs:
           )
 
           if [ -z "$ACCESS_TOKEN" ]; then
-            echo "::error::No offline session found for shop $SHOP_DOMAIN"
+            echo "::error::No offline session found for the input shop"
             exit 1
           fi
 
@@ -785,18 +784,23 @@ jobs:
           )
 
           if [ "$DLQ_EXISTS" = "t" ]; then
-            echo "DLQ messages by topic/handler (no payloads; error class truncated, hosts/emails/ids redacted):"
+            echo "DLQ messages by topic/handler (no payloads; error class enum, error text never printed):"
             psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
           SELECT
             original_queue,
             message->>'topic' AS topic,
-            LEFT(
-              REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(error, ':.*$', ''), '[^[:space:]@]+@[^[:space:]]+', '<email>', 'g'), '[A-Za-z0-9_.-]+\.(local|com|net|org|io|co|dev|in|app)\M', '<host>', 'g'), '\m[0-9a-fA-F]{12,}\M', '<hex>', 'g'), '[0-9]{4,}', '<n>', 'g'),
-              80
-            ) AS error_class_truncated,
+            CASE
+              WHEN error LIKE 'Order has payment terms but no matching BuyerAccount found%' THEN 'nba_payment_terms'
+              WHEN error LIKE 'Customer matches tag rule % but no BuyerAccount found%'      THEN 'nba_tag_rule'
+              WHEN error LIKE 'CompanyLocation exists but no BuyerAccount synced yet%'      THEN 'nba_company_location'
+              WHEN error LIKE 'No handler registered for topic after %'                     THEN 'no_handler'
+              WHEN error LIKE 'Non-retryable error:%'                                       THEN 'non_retryable'
+              WHEN error IS NULL                                                            THEN NULL
+              ELSE 'other'
+            END AS error_class,
             COUNT(*) AS count
           FROM s6_dead_letter
-          GROUP BY original_queue, message->>'topic', error_class_truncated
+          GROUP BY original_queue, message->>'topic', error_class
           ORDER BY count DESC
           LIMIT 50;
           EOSQL
@@ -834,24 +838,30 @@ jobs:
 
           psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
           SELECT
-            s.domain AS shop,
+            ROW_NUMBER() OVER (ORDER BY s.id) AS shop_idx,
             (SELECT COUNT(*) FROM "Invoice" i WHERE i."shopId" = s.id) AS invoice_count,
             (SELECT COUNT(*) FROM "BuyerAccount" ba WHERE ba."shopId" = s.id) AS buyer_account_count
           FROM "Shop" s
           WHERE s."uninstalledAt" IS NULL
-          ORDER BY s.domain;
+          ORDER BY s.id;
           EOSQL
 
           echo ""
           echo "Entity counts summary (JSON):"
           psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
           SELECT json_agg(json_build_object(
-            'shop', s.domain,
-            'invoices', (SELECT COUNT(*) FROM "Invoice" i WHERE i."shopId" = s.id),
-            'buyer_accounts', (SELECT COUNT(*) FROM "BuyerAccount" ba WHERE ba."shopId" = s.id)
-          ))
-          FROM "Shop" s
-          WHERE s."uninstalledAt" IS NULL;
+            'shop_idx', x.shop_idx,
+            'invoices', x.invoices,
+            'buyer_accounts', x.buyer_accounts
+          ) ORDER BY x.shop_idx)
+          FROM (
+            SELECT
+              ROW_NUMBER() OVER (ORDER BY s.id) AS shop_idx,
+              (SELECT COUNT(*) FROM "Invoice" i WHERE i."shopId" = s.id) AS invoices,
+              (SELECT COUNT(*) FROM "BuyerAccount" ba WHERE ba."shopId" = s.id) AS buyer_accounts
+            FROM "Shop" s
+            WHERE s."uninstalledAt" IS NULL
+          ) x;
           EOSQL
 
       - name: Drain cron control
@@ -1283,7 +1293,14 @@ jobs:
                 fi
                 MF_MAP=$(jq -c '[.data.nodes[] | select(. != null and .id != null)
                   | {key: .id, value: (if .metafield == null then null else (.metafield.jsonValue
-                      | {schemaVersion, hold, holdReasonCode, currencyCode, limitPaise, exposurePaise, updatedAt}) end)}]
+                      | {schemaVersion, hold, currencyCode,
+                         holdReasonCode: (if .holdReasonCode == null then null
+                                          elif ((.holdReasonCode | type) == "string" and (.holdReasonCode | test("^[A-Z0-9_]{1,40}$"))) then .holdReasonCode
+                                          else "<other>" end),
+                         has_limit: (.limitPaise != null),
+                         over_limit: (if .limitPaise == null or .exposurePaise == null then null
+                                      else ((.exposurePaise | tonumber) > (.limitPaise | tonumber)) end),
+                         updatedAt}) end)}]
                   | from_entries' "$HTTP_RESPONSE")
                 echo "fixtures (one per line):"
                 printf '%s\n' "$FIXTURES" | jq -c --argjson mf "$MF_MAP" '
