@@ -90,7 +90,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (result.status === "error") {
     console.error(`[webhooks.orders] Enqueue failed wh=${webhookId}`);
-    throw result.error;
+    throw new Error(result.code);
   }
 
   console.log(`[webhooks.orders] Enqueued ${normalizedTopic} wh=${webhookId}: ${resourceGid}`);

@@ -5,11 +5,5 @@
 
 # Burn-down list from initial audit
 app/services/sync/draft-order.server.ts:shop-interpolation:1
-app/services/sync/order.server.ts:shop-interpolation:1
-app/services/plan.server.ts:raw-capture:2
-app/services/plan.server.ts:shop-interpolation:6
 app/services/sync/customer.server.ts:shop-interpolation:2
-app/services/sync/bulk-jsonl-processor.server.ts:shop-interpolation:2
-app/services/drain/reconcile-handlers.server.ts:shop-interpolation:1
-app/services/sync/order.server.ts:raw-capture:4
 app/services/sync/company-location.server.ts:shop-interpolation:1

@@ -609,7 +609,7 @@ describe("credit-status.server", () => {
 
       expect(result.success).toBe(true);
       expect(result.metafieldSyncPending).toBe(true);
-      expect(result.error).toContain("sync failed");
+      expect(result.error).toBe("metafield_sync_failed");
     });
 
     it("clears syncPending on successful metafield write", async () => {

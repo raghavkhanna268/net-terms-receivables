@@ -270,7 +270,7 @@ describeWithDb("processor backstop integration (DB-backed)", () => {
         // Attempt 1 should return retryable (not archived)
         expect(result1.success).toBe(false);
         expect(result1.retryable).toBe(true);
-        expect(result1.error).toContain("Backstop error");
+        expect(result1.error).toBe("RetryableBackstopError");
 
         // Verify: No backstop_processed_orders row (error before claim completion)
         const [afterAttempt1] = await sql<{ action: string }[]>`
@@ -421,7 +421,7 @@ describeWithDb("processor backstop integration (DB-backed)", () => {
         // KEY ASSERTION: Error should return retryable, NOT success
         expect(result.success).toBe(false);
         expect(result.retryable).toBe(true);
-        expect(result.error).toContain("Backstop error");
+        expect(result.error).toBe("RetryableBackstopError");
 
       } finally {
         await sql`DELETE FROM backstop_processed_orders WHERE order_gid = ${orderGid}`;
@@ -472,7 +472,7 @@ describeWithDb("processor backstop integration (DB-backed)", () => {
             AND message->>'webhookId' = ${message.webhookId}
         `;
         if (dlqEntry) {
-          expect(dlqEntry.error).toBe("no_handler");
+          expect(dlqEntry.error).toBe("permanent:no_handler");
           expect(dlqEntry.message).toMatchObject({ topic: unregisteredTopic });
           break;
         }
@@ -530,7 +530,7 @@ describeWithDb("processor backstop integration (DB-backed)", () => {
             AND message->>'webhookId' = ${message.webhookId}
         `;
         if (dlqEntry) {
-          expect(dlqEntry.error).toBe("no_handler");
+          expect(dlqEntry.error).toBe("permanent:no_handler");
           expect(dlqEntry.message).toMatchObject({ topic: unregisteredTopic });
           break;
         }
@@ -548,12 +548,12 @@ describeWithDb("processor backstop integration (DB-backed)", () => {
     });
 
     it("no_handler code contains no raw message text or PII", async () => {
-      const dlqCode = "no_handler";
+      const dlqCode = "permanent:no_handler";
       expect(dlqCode).not.toContain("@");
       expect(dlqCode).not.toContain("myshopify.com");
       expect(dlqCode).not.toMatch(/topic/i);
-      expect(dlqCode).not.toMatch(/No handler/i);
-      expect(dlqCode).toMatch(/^[a-z][a-z0-9_]*$/);
+      expect(dlqCode).not.toMatch(/No handler registered/i);
+      expect(dlqCode).toMatch(/^[a-z:_]+$/);
     });
   });
 

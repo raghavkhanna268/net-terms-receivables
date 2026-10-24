@@ -47,6 +47,7 @@
 import postgres from "postgres";
 import { pathToFileURL } from "node:url";
 import { sqlOptions } from "~/lib/db-light.server";
+import { toErrorCode } from "~/lib/log.server";
 import { verifyReadOnlyTransaction } from "./ci/backfill-dry-run-preflight";
 
 interface BackfillStats {
@@ -126,7 +127,7 @@ function parseArgs(args: string[]): ParseArgsResult {
         shopFilter: undefined,
         idPrefix: undefined,
         expect: undefined,
-        error: `--shop must be a positive integer, got '${shopValue}'`,
+        error: "--shop must be a positive integer (shop index from dry-run output)",
       };
     }
     if (dryRun) {
@@ -264,6 +265,15 @@ interface DryRunResult {
   success: true;
   stats: BackfillStats[];
   grandTotal: number;
+}
+
+/**
+ * Format a dry-run error for logging (X3 fix).
+ * Uses toErrorCode to avoid leaking raw error messages.
+ * Exported for testing.
+ */
+export function formatDryRunError(err: unknown): string {
+  return `ERROR: err=${toErrorCode(err)}`;
 }
 
 /**
@@ -532,7 +542,7 @@ async function main() {
         stats = result.stats;
         grandTotal = result.grandTotal;
       } catch (err) {
-        console.error(`ERROR: ${err instanceof Error ? err.message : String(err)}`);
+        console.error(formatDryRunError(err));
         process.exit(1);
       }
 
@@ -627,9 +637,17 @@ async function main() {
   }
 }
 
+/**
+ * Format a fatal error for logging without exposing message/stack.
+ * Only returns the error type (constructor name or typeof).
+ */
+export function formatFatal(err: unknown): string {
+  return err instanceof Error ? err.constructor.name : typeof err;
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
-    console.error("Fatal error:", err);
+    console.error(`\n❌ Fatal error: [${formatFatal(err)}]`);
     process.exit(1);
   });
 }

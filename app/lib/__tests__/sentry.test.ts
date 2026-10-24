@@ -51,7 +51,7 @@ describe("sentry.ts", () => {
       const configFn = (withSentry as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const config = configFn({ SENTRY_DSN: "https://test@sentry.io/123" });
 
-      // @sentry/core 11.9.0 replaced sendDefaultPii with dataCollection.
+      // @sentry/core 11.8.0 replaced sendDefaultPii with dataCollection.
       // Defaults are permissive, so we set all fields to their restrictive values.
       expect(config.dataCollection).toEqual(RESTRICTIVE_DATA_COLLECTION);
       expect(config.dataCollection).toEqual({
@@ -70,6 +70,21 @@ describe("sentry.ts", () => {
       // beforeSend/beforeSendTransaction provide defense-in-depth
       expect(config.beforeSend).toBeDefined();
       expect(config.beforeSendTransaction).toBeDefined();
+    });
+
+    it("disables fetch error hostname enrichment to prevent shop domain leakage", async () => {
+      const { withSentry } = await import("@sentry/cloudflare");
+      const { wrapWithSentry } = await import("../sentry");
+
+      const mockHandler = { fetch: vi.fn() };
+      wrapWithSentry(mockHandler);
+
+      const configFn = (withSentry as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const config = configFn({ SENTRY_DSN: "https://test@sentry.io/123" });
+
+      // Fetch error hostname enrichment (e.g., "Failed to fetch (shop.myshopify.com)")
+      // would leak shop domains, which is PII per #174. Disable it entirely.
+      expect(config.enhanceFetchErrorMessages).toBe(false);
     });
 
     it("returns undefined when DSN is not set", async () => {
