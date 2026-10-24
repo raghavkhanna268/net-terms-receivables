@@ -7,9 +7,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
  * - Loader: default disabled, not-configured state, caps and usage present, shop not found
  * - Action: toggle_enabled, update_rule, create_rule, delete_rule, offset validation, invalid intent
  * - ensureDefaultReminderRules: seeds 3 on first settings creation, no-op when settings exist
+ * - R2 (#174): safeLog/toErrorCode logging with no PII leaks (uses REAL log.server)
  *
  * Uses partial mocking: DB functions are mocked, pure helpers (isValidOffset,
- * isReminderSendingEnabled) use real implementations.
+ * isReminderSendingEnabled) use real implementations. log.server is NOT mocked.
  */
 
 vi.mock("~/services/reminders.server", async (importOriginal) => {
@@ -1073,5 +1074,279 @@ describe("ensureDefaultReminderRules (via loader)", () => {
     const { DEFAULT_RULE_OFFSETS } = await import("~/services/reminders.server");
 
     expect(DEFAULT_RULE_OFFSETS).toEqual([-3, 0, 7]);
+  });
+});
+
+describe("Reminder Settings Route error logging (R2)", () => {
+  const mockSession = { shop: "sensitive-store.myshopify.com" };
+  const mockContext = {
+    shopify: {
+      authenticate: {
+        admin: vi.fn().mockResolvedValue({ session: mockSession }),
+      },
+    },
+    cloudflare: {
+      env: {},
+    },
+  };
+  const mockRequest = new Request("https://example.com/app/settings/reminders");
+  const mockUrl = new URL(mockRequest.url);
+  const mockPattern = "/app/settings/reminders";
+
+  let mockSql: ReturnType<typeof vi.fn>;
+  let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    mockSql = vi.fn();
+    mockContext.shopify.authenticate.admin.mockResolvedValue({
+      session: mockSession,
+    });
+    mockContext.cloudflare.env = {};
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleErrorSpy.mockRestore();
+    vi.clearAllMocks();
+  });
+
+  describe("loader error logging (R2)", () => {
+    it("logs error code via real safeLog, not raw error with domain or email", async () => {
+      const {
+        getShopReminderSettings,
+        getShopReminderRules,
+        getGlobalSendCounts,
+        ensureDefaultReminderRules,
+      } = await import("~/services/reminders.server");
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+      (getShopReminderSettings as ReturnType<typeof vi.fn>).mockResolvedValue({
+        enabled: false,
+      });
+      (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (ensureDefaultReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue({
+        seeded: false,
+        count: 0,
+      });
+
+      const sensitiveError = new Error(
+        "Database error for admin@sensitive-store.myshopify.com: balance 99500"
+      );
+      (getGlobalSendCounts as ReturnType<typeof vi.fn>).mockRejectedValue(
+        sensitiveError
+      );
+
+      const { loader } = await import("../app.settings.reminders");
+      const result = await loader({
+        request: mockRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(consoleErrorSpy).toHaveBeenCalled();
+      const logOutput = consoleErrorSpy.mock.calls[0][0];
+
+      expect(logOutput).toContain('"event":"reminders_send_counts_error"');
+      expect(logOutput).toContain('"shopId":"shop-123"');
+      expect(logOutput).toContain('"err":');
+
+      expect(logOutput).not.toContain("myshopify.com");
+      expect(logOutput).not.toContain("@sensitive-store");
+      expect(logOutput).not.toContain("99500");
+      expect(logOutput).not.toContain("balance");
+
+      expect(result.usageError).toBe(true);
+    });
+
+    it("logs shopId and errorCode for send counts error", async () => {
+      const {
+        getShopReminderSettings,
+        getShopReminderRules,
+        getGlobalSendCounts,
+        ensureDefaultReminderRules,
+      } = await import("~/services/reminders.server");
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-456" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+      (getShopReminderSettings as ReturnType<typeof vi.fn>).mockResolvedValue({
+        enabled: false,
+      });
+      (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (ensureDefaultReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue({
+        seeded: false,
+        count: 0,
+      });
+
+      const dbError = new TypeError("Connection failed");
+      (getGlobalSendCounts as ReturnType<typeof vi.fn>).mockRejectedValue(
+        dbError
+      );
+
+      const { loader } = await import("../app.settings.reminders");
+      await loader({
+        request: mockRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const logOutput = consoleErrorSpy.mock.calls[0][0];
+      expect(logOutput).toContain('"event":"reminders_send_counts_error"');
+      expect(logOutput).toContain('"shopId":"shop-456"');
+      expect(logOutput).toContain('"err":"TypeError"');
+    });
+  });
+
+  describe("action error logging (R2)", () => {
+    it("logs shopId, action, and errorCode for action error", async () => {
+      const { updateShopReminderSettings } = await import(
+        "~/services/reminders.server"
+      );
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-action-test" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      mockContext.cloudflare.env = {
+        RESEND_API_KEY: "re_test_123",
+        RESEND_FROM: "noreply@example.com",
+      };
+
+      const actionError = new Error(
+        "Update failed for merchant@shop.myshopify.com with amount 50000"
+      );
+      (
+        updateShopReminderSettings as ReturnType<typeof vi.fn>
+      ).mockRejectedValue(actionError);
+
+      const formData = new FormData();
+      formData.append("intent", "toggle_enabled");
+      formData.append("enabled", "true");
+
+      const postRequest = new Request(
+        "https://example.com/app/settings/reminders",
+        {
+          method: "POST",
+          body: formData,
+        }
+      );
+
+      const { action } = await import("../app.settings.reminders");
+      const result = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const logOutput = consoleErrorSpy.mock.calls[0][0];
+      expect(logOutput).toContain('"event":"reminders_action_error"');
+      expect(logOutput).toContain('"shopId":"shop-action-test"');
+      expect(logOutput).toContain('"action":"toggle_enabled"');
+      expect(logOutput).toContain('"err":');
+
+      expect(logOutput).not.toContain("myshopify.com");
+      expect(logOutput).not.toContain("@shop");
+      expect(logOutput).not.toContain("50000");
+      expect(logOutput).not.toContain("merchant");
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("Action failed");
+    });
+
+    it("does not log raw error message with customer email", async () => {
+      const { updateReminderRule } = await import("~/services/reminders.server");
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-email-test" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      mockContext.cloudflare.env = {
+        RESEND_API_KEY: "re_test_123",
+        RESEND_FROM: "noreply@example.com",
+      };
+
+      const errorWithEmail = new Error(
+        "Reminder failed for customer@business.com invoice INV-2024-001"
+      );
+      (updateReminderRule as ReturnType<typeof vi.fn>).mockRejectedValue(
+        errorWithEmail
+      );
+
+      const formData = new FormData();
+      formData.append("intent", "update_rule");
+      formData.append("ruleId", "rule-123");
+      formData.append("offsetDays", "7");
+      formData.append("enabled", "true");
+
+      const postRequest = new Request(
+        "https://example.com/app/settings/reminders",
+        {
+          method: "POST",
+          body: formData,
+        }
+      );
+
+      const { action } = await import("../app.settings.reminders");
+      await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const logOutput = consoleErrorSpy.mock.calls[0][0];
+      expect(logOutput).not.toContain("customer@business.com");
+      expect(logOutput).not.toContain("INV-2024-001");
+      expect(logOutput).not.toContain("Reminder failed");
+    });
+  });
+
+  describe("loader success paths (no errors)", () => {
+    it("does not call console.error when no errors occur", async () => {
+      const {
+        getShopReminderSettings,
+        getShopReminderRules,
+        getGlobalSendCounts,
+        ensureDefaultReminderRules,
+      } = await import("~/services/reminders.server");
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-ok" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+      (getShopReminderSettings as ReturnType<typeof vi.fn>).mockResolvedValue({
+        enabled: false,
+      });
+      (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (getGlobalSendCounts as ReturnType<typeof vi.fn>).mockResolvedValue({
+        daily: 0,
+        monthly: 0,
+      });
+      (ensureDefaultReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue({
+        seeded: false,
+        count: 0,
+      });
+
+      const { loader } = await import("../app.settings.reminders");
+      await loader({
+        request: mockRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    });
   });
 });
