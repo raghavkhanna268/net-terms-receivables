@@ -23,6 +23,7 @@ on:
           - canary-orders-backstop
           - post-drain-aggregates
           - redriven-webhook-receipts
+          - s22-retention-purge-preview
       msg_ids:
         description: "Comma-separated pgmq msg_ids (e.g. 162,163); used by canary-orders-backstop and redriven-webhook-receipts"
         required: false
