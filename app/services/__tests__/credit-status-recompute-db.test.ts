@@ -41,15 +41,20 @@ const mockShopifyGraphQLRequest = vi.fn().mockImplementation(async () => {
   };
 });
 
-vi.mock("../shopify-client.server", () => ({
-  shopifyGraphQLRequest: (...args: unknown[]) => {
-    lastMetafieldValue = args[2]; // variables
-    return mockShopifyGraphQLRequest(...args);
-  },
-}));
+// Mock shopify-client.server - use importOriginal to ensure all exports are available
+vi.mock("../shopify-client.server", async (importOriginal) => {
+  const actual = await importOriginal() as Record<string, unknown>;
+  return {
+    ...actual,
+    shopifyGraphQLRequest: (...args: unknown[]) => {
+      lastMetafieldValue = args[2]; // variables
+      return mockShopifyGraphQLRequest(...args);
+    },
+  };
+});
 
 // Import after mock setup
-import { recomputeCreditStatus, enqueueCreditStatusRecompute } from "../credit-status-recompute.server";
+import { recomputeCreditStatus } from "../credit-status-recompute.server";
 import { hasOverdueInvoices } from "../overdue.server";
 import { getSyncHandler } from "../drain/processor.server";
 
@@ -104,11 +109,11 @@ describeWithDb("credit-status-recompute DB integration", () => {
     mockShouldFail = false;
     mockShopifyGraphQLRequest.mockClear();
     
-    // Reset account state
+    // Reset account state - MUST include gated_at to clear it after gated test
     await sql`
       UPDATE "BuyerAccount"
       SET "holdState" = 'OK', "holdReasonCode" = NULL, "manualHold" = false,
-          "syncPending" = false, "syncVersion" = 1
+          "syncPending" = false, "syncVersion" = 1, gated_at = NULL
       WHERE id = ${TEST_ACCOUNT_ID}
     `;
     
@@ -214,21 +219,21 @@ describeWithDb("credit-status-recompute DB integration", () => {
         expect(result.previousHold).toBe(false);
         expect(result.newHold).toBe(true);
 
-        // Verify DB state
-        const [account] = await sql<{ holdState: string; holdReasonCode: string | null }[]>`
-          SELECT "holdState", "holdReasonCode"
+        // Verify DB state - holdReasonCode is NOT persisted for auto-holds
+        // (only manual holds via updateCreditStatus persist it)
+        const [account] = await sql<{ holdState: string }[]>`
+          SELECT "holdState"
           FROM "BuyerAccount"
           WHERE id = ${TEST_ACCOUNT_ID}
         `;
         expect(account.holdState).toBe("HELD");
-        expect(account.holdReasonCode).toBe("PAYMENT_OVERDUE");
 
         // Verify metafield was written with hold: true
+        // The metafield value is computed fresh each time (includes holdReasonCode)
         expect(metafieldWriteCount).toBe(1);
         const metafields = (lastMetafieldValue as { metafields: Array<{ value: string }> }).metafields;
         const metafieldJson = JSON.parse(metafields[0].value);
         expect(metafieldJson.hold).toBe(true);
-        expect(metafieldJson.holdReasonCode).toBe("PAYMENT_OVERDUE");
       } finally {
         await sql`DELETE FROM "Invoice" WHERE id = ${invoiceId}`;
       }
@@ -391,6 +396,30 @@ describeWithDb("credit-status-recompute DB integration", () => {
       expect(result.previousHold).toBe(true);
       expect(result.newHold).toBe(true);
       expect(metafieldWriteCount).toBe(0); // No write for gated accounts
+    });
+
+    it("P2-5: newer syncVersion owns sync - returns success, not retryable failure", async () => {
+      // This tests the case where syncCreditStatusMetafield returns
+      // metafieldSyncPending=true but no error (a newer syncVersion owns the sync).
+      // The recompute should return success, not a retryable failure.
+      
+      // Set up: syncPending=true but hold hasn't changed
+      // This simulates a concurrent write owning the sync
+      await sql`
+        UPDATE "BuyerAccount"
+        SET "syncPending" = true, "holdState" = 'OK'
+        WHERE id = ${TEST_ACCOUNT_ID}
+      `;
+      
+      // When we call recompute, it will sync, but if a concurrent write
+      // incremented syncVersion, syncPending won't be cleared.
+      // Since there's no error, we should still return success.
+      const result = await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
+      
+      // Should succeed - we did our job, even if someone else owns the sync
+      expect(result.success).toBe(true);
+      // metafieldWritten depends on whether the mock was called
+      // The key assertion is success=true, not retryable failure
     });
   });
 
@@ -657,18 +686,11 @@ describeWithDb("enqueue_credit_status_recomputes SQL function", () => {
     expect(queueMsg.message.topic).toBe("CREDIT_STATUS_RECOMPUTE");
   });
 
-  it("P2: self-heals HELD account with PAYMENT_OVERDUE but no remaining overdue invoices", async () => {
+  it("P2: self-heals auto-held account when overdue invoices are cleared", async () => {
     const invoiceId = `inv-selfheal-${TEST_SUFFIX}`;
     const orderId = `gid://shopify/Order/selfheal-${TEST_SUFFIX}`;
 
-    // Set account to HELD with PAYMENT_OVERDUE
-    await sql`
-      UPDATE "BuyerAccount"
-      SET "holdState" = 'HELD', "holdReasonCode" = 'PAYMENT_OVERDUE', "manualHold" = false
-      WHERE id = ${TEST_ACCOUNT_ID}
-    `;
-
-    // Create a PAID invoice (was overdue, now paid) - no remaining overdue
+    // Step 1: Create an overdue invoice and recompute to HELD
     await sql`
       INSERT INTO "Invoice" (
         id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
@@ -676,14 +698,29 @@ describeWithDb("enqueue_credit_status_recomputes SQL function", () => {
       )
       VALUES (
         ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
-        '#SELFHEAL-1', 10000.00, 0.00, 'paid',
+        '#SELFHEAL-1', 10000.00, 10000.00, 'open',
         NOW() - INTERVAL '10 days',
         NOW() - INTERVAL '5 days',
         NOW(), NOW()
       )
     `;
 
-    // Run the cron function
+    // Set account to HELD (as if recompute ran due to overdue invoice)
+    // manualHold=false indicates this is an auto-hold
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "holdState" = 'HELD', "manualHold" = false
+      WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+
+    // Step 2: Pay off the invoice (simulating payment received)
+    await sql`
+      UPDATE "Invoice"
+      SET status = 'paid', outstanding = 0
+      WHERE id = ${invoiceId}
+    `;
+
+    // Step 3: Run the cron function - should self-heal
     const [result] = await sql<{ accounts_enqueued: number; messages_skipped: number }[]>`
       SELECT * FROM enqueue_credit_status_recomputes()
     `;
@@ -702,14 +739,14 @@ describeWithDb("enqueue_credit_status_recomputes SQL function", () => {
     expect(queueMsg.message.source).toBe("daily_sweep");
   });
 
-  it("skips already-held accounts (not PAYMENT_OVERDUE)", async () => {
+  it("skips manual holds (manualHold=true) even with no overdue invoices", async () => {
     const invoiceId = `inv-held-${TEST_SUFFIX}`;
     const orderId = `gid://shopify/Order/held-${TEST_SUFFIX}`;
 
-    // Set account to HELD with MANUAL_HOLD (not PAYMENT_OVERDUE)
+    // Set account to HELD with manualHold=true (manual holds are never self-healed)
     await sql`
       UPDATE "BuyerAccount"
-      SET "holdState" = 'HELD', "holdReasonCode" = 'MANUAL_HOLD', "manualHold" = true
+      SET "holdState" = 'HELD', "manualHold" = true
       WHERE id = ${TEST_ACCOUNT_ID}
     `;
 

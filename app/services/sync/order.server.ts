@@ -36,6 +36,7 @@ import {
 } from "~/lib/invoice-eligibility";
 import { incrementOrderOutstandingMissing } from "../drain/reconcile-handlers.server";
 import { enqueueRecomputeForInvoice } from "../credit-status-recompute.server";
+import { captureException } from "~/lib/sentry";
 
 /**
  * Process an Order webhook event.
@@ -143,7 +144,7 @@ export async function processOrderWebhook(
       try {
         await enqueueRecomputeForInvoice(sql, result.entityId);
       } catch (err) {
-        console.warn(`[order.server] Failed to enqueue credit recompute: ${err instanceof Error ? err.message : String(err)}`);
+        captureException(err);
       }
     }
 
@@ -200,7 +201,7 @@ export async function processOrderWebhook(
     try {
       await enqueueRecomputeForInvoice(sql, result.entityId);
     } catch (err) {
-      console.warn(`[order.server] Failed to enqueue credit recompute: ${err instanceof Error ? err.message : String(err)}`);
+      captureException(err);
     }
   }
 
@@ -579,7 +580,7 @@ async function cancelInvoice(
   try {
     await enqueueRecomputeForInvoice(sql, result.id);
   } catch (err) {
-    console.warn(`[order.server] Failed to enqueue credit recompute: ${err instanceof Error ? err.message : String(err)}`);
+    captureException(err);
   }
 
   return {
@@ -619,7 +620,7 @@ async function markInvoicePaid(
   try {
     await enqueueRecomputeForInvoice(sql, result.id);
   } catch (err) {
-    console.warn(`[order.server] Failed to enqueue credit recompute: ${err instanceof Error ? err.message : String(err)}`);
+    captureException(err);
   }
 
   return {

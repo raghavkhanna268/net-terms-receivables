@@ -157,19 +157,22 @@ export async function recomputeCreditStatus(
   }
 
   // metafieldSyncPending tells us if the metafield write succeeded
-  // If syncPending is still true, the metafield write failed - return failure for retry
-  if (syncResult.metafieldSyncPending) {
+  // Two cases when metafieldSyncPending is true:
+  // 1. Metafield write failed (has error) - return failure for retry
+  // 2. A newer syncVersion owns the sync (no error) - return success, not our problem
+  if (syncResult.metafieldSyncPending && syncResult.error) {
     return {
       success: false,
       metafieldWritten: false,
       previousHold,
       newHold,
-      error: syncResult.error ?? "Metafield write failed, pending retry",
+      error: syncResult.error,
       retryable: true,
     };
   }
 
-  const metafieldWritten = true;
+  // Either metafield write succeeded, or a newer sync owns it (both are success)
+  const metafieldWritten = !syncResult.metafieldSyncPending;
 
   // Re-read the account to get the actual post-sync hold state
   const [postSyncAccount] = await sql<{ holdState: string; bypass: boolean }[]>`

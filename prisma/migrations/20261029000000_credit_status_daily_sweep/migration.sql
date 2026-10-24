@@ -5,8 +5,9 @@
 --
 -- 1. Accounts with newly-overdue invoices (dueAt crossed NOW() - 1 day threshold)
 --    - Any non-HELD state (OK, NEAR_LIMIT) needs recompute
--- 2. Self-heal: HELD accounts whose overdue invoices are all cleared
---    - holdReasonCode = 'PAYMENT_OVERDUE' but no remaining overdue invoices
+-- 2. Self-heal: Auto-held accounts whose overdue invoices are all cleared
+--    - holdState=HELD, manualHold=false, no remaining overdue invoices
+--    - Let recompute decide if hold should be released
 --
 -- Design:
 -- - pg_cron CANNOT call Shopify (no pg_net/http calls)
@@ -80,8 +81,10 @@ BEGIN
     v_accounts_enqueued := v_accounts_enqueued + 1;
   END LOOP;
   
-  -- Part 2: Self-heal - HELD accounts with PAYMENT_OVERDUE that no longer have overdue invoices
-  -- If a payment event was missed, this allows the account to be released
+  -- Part 2: Self-heal - Auto-held accounts that may no longer need to be held
+  -- Conditions: HELD state, NOT manual hold, and no remaining overdue invoices.
+  -- We don't check holdReasonCode because it's only persisted for manual holds.
+  -- Let recomputeCreditStatus decide if the hold should be released.
   FOR v_account IN
     SELECT DISTINCT
       ba.id AS buyer_account_id,
@@ -89,10 +92,9 @@ BEGIN
     FROM "BuyerAccount" ba
     JOIN "Shop" s ON s.id = ba."shopId"
     WHERE ba."holdState" = 'HELD'
-      AND ba."holdReasonCode" = 'PAYMENT_OVERDUE'
+      AND ba."manualHold" = false
       AND ba.bypass = false
       AND ba.gated_at IS NULL
-      AND ba."manualHold" = false
       -- No overdue invoices remaining
       AND NOT EXISTS (
         SELECT 1 FROM "Invoice" i
@@ -135,9 +137,9 @@ $$ LANGUAGE plpgsql;
 -- Add helpful comment
 COMMENT ON FUNCTION enqueue_credit_status_recomputes() IS 
   'Daily sweep: enqueues CREDIT_STATUS_RECOMPUTE messages for (1) accounts with overdue invoices '
-  '(holdState OK or NEAR_LIMIT), and (2) HELD accounts with PAYMENT_OVERDUE but no remaining overdue '
-  'invoices (self-heal). Called by pg_cron at 19:00 UTC (00:30 IST). Does NOT make any HTTP calls - '
-  'the drain handler does the actual Shopify metafield sync.';
+  '(holdState OK or NEAR_LIMIT), and (2) auto-held accounts (manualHold=false) with no remaining '
+  'overdue invoices (self-heal). Called by pg_cron at 19:00 UTC (00:30 IST). Does NOT make any '
+  'HTTP calls - the drain handler does the actual Shopify metafield sync.';
 
 -- Schedule the cron job (follows s13 pattern: IF EXISTS guard for unschedule)
 DO $do$
@@ -161,6 +163,7 @@ BEGIN
   END IF;
 
   -- Schedule new job: 19:00 UTC = 00:30 IST
+  -- Failures are NOT swallowed - let them propagate
   PERFORM cron.schedule(
     'credit_status_daily_sweep',
     '0 19 * * *',
@@ -168,10 +171,5 @@ BEGIN
   );
 
   RAISE NOTICE 'Scheduled credit_status_daily_sweep cron job at 19:00 UTC';
-
-EXCEPTION
-  WHEN OTHERS THEN
-    -- Only log if pg_cron is installed but scheduling failed for another reason
-    RAISE NOTICE 'Failed to schedule pg_cron job: %. Manual invocation via enqueue_credit_status_recomputes() is still available.', SQLERRM;
 END;
 $do$;
