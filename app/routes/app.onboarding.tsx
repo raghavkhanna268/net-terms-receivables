@@ -42,41 +42,24 @@ interface PaymentCustomizationNode {
   enabled: boolean;
 }
 
-const VALIDATIONS_QUERY = `#graphql
-  query GetValidations {
-    validations(first: 50) {
-      edges {
-        node {
-          id
-          shopifyFunction { handle }
-          title
-          enabled
-        }
-      }
-    }
-  }
-`;
-
-const PAYMENT_CUSTOMIZATIONS_QUERY = `#graphql
-  query GetPaymentCustomizations {
-    paymentCustomizations(first: 50) {
-      edges {
-        node {
-          id
-          shopifyFunction { handle }
-          title
-          enabled
-        }
-      }
-    }
-  }
-`;
-
 async function fetchValidationInfo(
   admin: { graphql: (q: string) => Promise<{ json: () => Promise<unknown> }> }
 ): Promise<ValidationInfo | null> {
   try {
-    const response = await admin.graphql(VALIDATIONS_QUERY);
+    const response = await admin.graphql(`#graphql
+      query GetValidations {
+        validations(first: 50) {
+          edges {
+            node {
+              id
+              shopifyFunction { handle }
+              title
+              enabled
+            }
+          }
+        }
+      }
+    `);
     const data = (await response.json()) as {
       data?: {
         validations?: { edges: Array<{ node: ValidationNode }> };
@@ -105,7 +88,20 @@ async function fetchPaymentCustomizationInfo(
   admin: { graphql: (q: string) => Promise<{ json: () => Promise<unknown> }> }
 ): Promise<PaymentCustomizationInfo | null> {
   try {
-    const response = await admin.graphql(PAYMENT_CUSTOMIZATIONS_QUERY);
+    const response = await admin.graphql(`#graphql
+      query GetPaymentCustomizations {
+        paymentCustomizations(first: 50) {
+          edges {
+            node {
+              id
+              shopifyFunction { handle }
+              title
+              enabled
+            }
+          }
+        }
+      }
+    `);
     const data = (await response.json()) as {
       data?: {
         paymentCustomizations?: {
