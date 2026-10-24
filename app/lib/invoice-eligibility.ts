@@ -65,6 +65,7 @@ export type EligibilityReason =
   | "ineligible_status"          // Financial status not in eligible list
   | "terminal_status"            // Financial status indicates paid/refunded
   | "no_buyer_account"           // No matching buyer account found
+  | "no_customer"                // Customer not synced yet (no row in s8_tagged_customers)
   | "retail_order";              // None of (a), (b), (c) matched
 
 /**
@@ -349,7 +350,43 @@ async function findCustomerAccount(
 }
 
 /**
+ * Result of looking up customer tags.
+ */
+type CustomerTagsResult =
+  | { found: true; tags: string[] }
+  | { found: false };
+
+/**
  * Get customer tags from s8_tagged_customers table.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopId - Internal shop ID
+ * @param customerId - Shopify Customer GID
+ * @returns Object with found=true and tags if customer row exists, found=false if not
+ */
+async function getCustomerTagsWithStatus(
+  sql: Sql,
+  shopId: string,
+  customerId: string
+): Promise<CustomerTagsResult> {
+  const [row] = await sql<{ tags: string[] }[]>`
+    SELECT tags
+    FROM s8_tagged_customers
+    WHERE shop_id = ${shopId}
+      AND customer_id = ${customerId}
+      AND tag_active = true
+  `;
+
+  if (!row) {
+    return { found: false };
+  }
+
+  return { found: true, tags: row.tags ?? [] };
+}
+
+/**
+ * Get customer tags from s8_tagged_customers table (legacy signature).
+ * Returns empty array if customer not found.
  *
  * @param sql - postgres.js SQL client
  * @param shopId - Internal shop ID
@@ -360,15 +397,8 @@ async function getCustomerTags(
   shopId: string,
   customerId: string
 ): Promise<string[]> {
-  const [row] = await sql<{ tags: string[] }[]>`
-    SELECT tags
-    FROM s8_tagged_customers
-    WHERE shop_id = ${shopId}
-      AND customer_id = ${customerId}
-      AND tag_active = true
-  `;
-
-  return row?.tags ?? [];
+  const result = await getCustomerTagsWithStatus(sql, shopId, customerId);
+  return result.found ? result.tags : [];
 }
 
 /**
@@ -577,8 +607,21 @@ export async function checkOrderEligibility(
   }
 
   // Condition (c): Customer matches a configured tag rule
-  if (order.customer?.id) {
-    const customerTags = await getCustomerTags(sql, shopId, order.customer.id);
+  if (order.customer?.id && tagRules.length > 0) {
+    const customerTagsResult = await getCustomerTagsWithStatus(sql, shopId, order.customer.id);
+
+    if (!customerTagsResult.found) {
+      // Customer has no row in s8_tagged_customers - not synced yet
+      // Return retryable so order can be processed once customer webhook is received
+      return {
+        eligible: false,
+        reason: "no_customer",
+        explanation: "Customer not synced yet - no row in s8_tagged_customers",
+        retryable: true,
+      };
+    }
+
+    const customerTags = customerTagsResult.tags;
     const matchedRule = findMatchingTagRule(customerTags, tagRules);
 
     if (matchedRule) {

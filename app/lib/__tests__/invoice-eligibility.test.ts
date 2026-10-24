@@ -331,6 +331,111 @@ describe("Invoice Eligibility", () => {
       });
     });
 
+    describe("Missing customer row (no_customer)", () => {
+      it("returns retryable no_customer when customer has no row in s8_tagged_customers", async () => {
+        const sql = createMockSql(new Map([
+          ["buyerAccountByLocation", []],
+          ["buyerAccountByCompany", []],
+          ["buyerAccountByCustomer", []],
+          ["customerTags", []], // Empty array = no row found
+        ]));
+
+        const order = createOrder({
+          customer: { id: "gid://shopify/Customer/111" },
+        });
+
+        const context: EligibilityContext = {
+          ...defaultContext,
+          tagRules: [{ tag: "net-terms", defaultTermsDays: 30 }],
+        };
+
+        const result = await checkOrderEligibility(sql as never, order, context);
+
+        expect(result.eligible).toBe(false);
+        expect(result.reason).toBe("no_customer");
+        expect(result.retryable).toBe(true);
+        expect(result.explanation).toContain("Customer not synced yet");
+      });
+
+      it("customer with row and matching tag is eligible", async () => {
+        const sql = createMockSql(new Map([
+          ["buyerAccountByLocation", []],
+          ["buyerAccountByCompany", []],
+          ["buyerAccountByCustomer", [{
+            id: "ba-tagged",
+            defaultTermsDays: 30,
+            defaultTermsSource: "tag",
+          }]],
+          ["customerTags", [{ tags: ["net-terms", "wholesale"] }]], // Row exists with matching tag
+        ]));
+
+        const order = createOrder({
+          customer: { id: "gid://shopify/Customer/222" },
+        });
+
+        const context: EligibilityContext = {
+          ...defaultContext,
+          tagRules: [{ tag: "net-terms", defaultTermsDays: 30 }],
+        };
+
+        const result = await checkOrderEligibility(sql as never, order, context);
+
+        expect(result.eligible).toBe(true);
+        expect(result.reason).toBe("tagged_customer");
+        expect(result.buyerAccountId).toBe("ba-tagged");
+      });
+
+      it("customer with row but no matching tag is retail (not retryable)", async () => {
+        const sql = createMockSql(new Map([
+          ["buyerAccountByLocation", []],
+          ["buyerAccountByCompany", []],
+          ["buyerAccountByCustomer", []],
+          ["customerTags", [{ tags: ["other-tag"] }]], // Row exists but no matching tag
+        ]));
+
+        const order = createOrder({
+          customer: { id: "gid://shopify/Customer/333" },
+        });
+
+        const context: EligibilityContext = {
+          ...defaultContext,
+          tagRules: [{ tag: "net-terms", defaultTermsDays: 30 }],
+        };
+
+        const result = await checkOrderEligibility(sql as never, order, context);
+
+        expect(result.eligible).toBe(false);
+        expect(result.reason).toBe("retail_order");
+        expect(result.retryable).toBeUndefined(); // Permanent skip - customer synced but no match
+      });
+
+      it("no_customer only triggers when shop has tag rules configured", async () => {
+        const sql = createMockSql(new Map([
+          ["buyerAccountByLocation", []],
+          ["buyerAccountByCompany", []],
+          ["buyerAccountByCustomer", []],
+          ["customerTags", []], // No customer row
+        ]));
+
+        const order = createOrder({
+          customer: { id: "gid://shopify/Customer/444" },
+        });
+
+        // No tag rules configured
+        const context: EligibilityContext = {
+          ...defaultContext,
+          tagRules: [], // Empty!
+        };
+
+        const result = await checkOrderEligibility(sql as never, order, context);
+
+        // Should be retail, not no_customer (no tag rules to check anyway)
+        expect(result.eligible).toBe(false);
+        expect(result.reason).toBe("retail_order");
+        expect(result.retryable).toBeUndefined();
+      });
+    });
+
     describe("Retail orders (no B2B, no tag)", () => {
       it("is NOT eligible when no paymentTerms, no company, no tag match", async () => {
         const sql = createMockSql(new Map([

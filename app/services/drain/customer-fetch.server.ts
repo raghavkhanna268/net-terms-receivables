@@ -11,10 +11,7 @@
 
 import type { Sql } from "~/lib/db-light.server";
 import { adminGraphQL, type AdminClientResult } from "./admin-client.server";
-import {
-  getCustomerByNodeQuery,
-  CUSTOMER_BASE_FIELDS,
-} from "~/services/sync/customer-fields.server";
+import { getCustomerByNodeQuery } from "~/services/sync/customer-fields.server";
 import { getRequestEnv } from "~/lib/request-context.server";
 import type { ShopifyCustomer } from "~/services/sync/types";
 
@@ -31,33 +28,25 @@ export interface CustomerFetchResult {
 }
 
 /**
- * Build a base-only (non-PII) customer query.
- * Always returns id and tags, never email/displayName.
- */
-function getBaseCustomerQuery(): string {
-  const fields = CUSTOMER_BASE_FIELDS.join("\n");
-  return `
-    query CustomerById($id: ID!) {
-      node(id: $id) {
-        ... on Customer {
-          ${fields}
-        }
-      }
-    }
-  `;
-}
-
-/**
  * Check if a GraphQL response contains ACCESS_DENIED error.
- * This includes both top-level and field-level errors.
+ *
+ * Detection priority:
+ * 1. Check for "ACCESS_DENIED" in error message (from extensions.code in shopify-client)
+ * 2. Fall back to case-insensitive "access denied" match
+ *
+ * Note: shopify-client.server.ts checks extensions.code === "ACCESS_DENIED" and
+ * formats the error as "Access denied: <message>". We check for both patterns
+ * to handle any formatting variations.
  */
 function hasAccessDeniedError(result: AdminClientResult<unknown>): boolean {
   if (result.success) return false;
   
   const error = result.error ?? "";
+  // Check for ACCESS_DENIED code (from shopify-client formatting)
+  // or case-insensitive "access denied" in message
   return (
     error.includes("ACCESS_DENIED") ||
-    error.includes("Access denied")
+    error.toLowerCase().includes("access denied")
   );
 }
 
@@ -107,7 +96,8 @@ export async function fetchCustomerWithFallback(
   }
 
   // ACCESS_DENIED on PII - retry with base fields only
-  const baseQuery = getBaseCustomerQuery();
+  // Use getCustomerByNodeQuery with CUSTOMER_PII_FIELDS='0' to get base-only query
+  const baseQuery = getCustomerByNodeQuery({ CUSTOMER_PII_FIELDS: "0" });
   const baseResult = await adminGraphQL<{ node: ShopifyCustomer | null }>(
     shop,
     baseQuery,

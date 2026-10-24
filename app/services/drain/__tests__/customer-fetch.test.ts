@@ -312,36 +312,259 @@ describe("Customer PII ACCESS_DENIED fallback", () => {
   });
 });
 
-describe("Processor integration: handleCustomer with fallback", () => {
-  beforeEach(() => {
+describe("Real handleCustomer tests with fallback", () => {
+  let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
+  let mockProcessCustomerWebhook: ReturnType<typeof vi.fn>;
+  let mockIsWebhookProcessed: ReturnType<typeof vi.fn>;
+  let mockMarkWebhookProcessed: ReturnType<typeof vi.fn>;
+  let mockIncrementCounter: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
     vi.clearAllMocks();
+    vi.resetModules();
+
+    consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // Re-mock dependencies for handleCustomer
+    vi.doMock("../admin-client.server", () => ({
+      adminGraphQL: mockAdminGraphQL,
+    }));
+
+    vi.doMock("~/lib/request-context.server", () => ({
+      getRequestEnv: vi.fn(() => ({ CUSTOMER_PII_FIELDS: "1" })),
+    }));
+
+    mockProcessCustomerWebhook = vi.fn().mockResolvedValue({
+      success: true,
+      action: "created",
+      entityId: "contact-123",
+    });
+
+    mockIsWebhookProcessed = vi.fn().mockResolvedValue(false);
+    mockMarkWebhookProcessed = vi.fn().mockResolvedValue(undefined);
+
+    vi.doMock("~/services/sync/customer.server", () => ({
+      processCustomerWebhook: mockProcessCustomerWebhook,
+      CustomerPiiMode: {} as never,
+    }));
+
+    vi.doMock("~/services/sync/company.server", () => ({
+      isWebhookProcessed: mockIsWebhookProcessed,
+      markWebhookProcessed: mockMarkWebhookProcessed,
+    }));
+
+    mockIncrementCounter = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("../customer-fetch.server", async () => {
+      const actual = await vi.importActual<typeof import("../customer-fetch.server")>("../customer-fetch.server");
+      return {
+        ...actual,
+        incrementCustomerPiiAccessDeniedFallback: mockIncrementCounter,
+      };
+    });
   });
 
-  it("logs warning and increments counter on fallback success", async () => {
-    // This is tested implicitly via the processor tests
-    // The processor calls fetchCustomerWithFallback and checks usedFallback
-    // Here we just verify the warning message format
-    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  afterEach(() => {
+    consoleWarnSpy.mockRestore();
+    vi.resetModules();
+  });
 
-    const warningMsg = `[customer_pii_access_denied_fallback] shop=test.myshopify.com ` +
-      `customer=gid://shopify/Customer/123 topic=CUSTOMERS_UPDATE ` +
-      `fields=email,displayName`;
+  it("fallback succeeds: logs warning, increments counter, passes 'fallback' piiMode", async () => {
+    // First call: ACCESS_DENIED
+    mockAdminGraphQL.mockResolvedValueOnce({
+      success: false,
+      error: "Access denied: Required scope read_customers Level 1 + Email",
+      retryable: false,
+    });
+    // Fallback call: success
+    mockAdminGraphQL.mockResolvedValueOnce({
+      success: true,
+      data: { node: { id: "gid://shopify/Customer/123", tags: ["net-terms"] } },
+      retryable: false,
+    });
 
-    console.warn(warningMsg);
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("CUSTOMERS_UPDATE");
 
+    const mockSql = Object.assign(vi.fn().mockResolvedValue([]), {
+      json: vi.fn((v: unknown) => v),
+    });
+
+    const message = {
+      topic: "CUSTOMERS_UPDATE",
+      shop: "test.myshopify.com",
+      webhookId: "wh-fallback-1",
+      resourceGid: "gid://shopify/Customer/123",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(result.success).toBe(true);
+
+    // Verify warning was logged
     expect(consoleWarnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("customer_pii_access_denied_fallback")
+      expect.stringContaining("[customer_pii_access_denied_fallback]")
     );
     expect(consoleWarnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("shop=")
-    );
-    expect(consoleWarnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("customer=")
+      expect.stringContaining("shop=test.myshopify.com")
     );
     expect(consoleWarnSpy).toHaveBeenCalledWith(
       expect.stringContaining("fields=email,displayName")
     );
 
-    consoleWarnSpy.mockRestore();
+    // Verify counter was incremented
+    expect(mockIncrementCounter).toHaveBeenCalledWith(mockSql, "test.myshopify.com");
+
+    // Verify processCustomerWebhook was called with 'fallback' mode
+    expect(mockProcessCustomerWebhook).toHaveBeenCalledWith(
+      mockSql,
+      "test.myshopify.com",
+      "CUSTOMERS_UPDATE",
+      expect.objectContaining({ id: "gid://shopify/Customer/123" }),
+      "wh-fallback-1",
+      "fallback"
+    );
+  });
+
+  it("both calls denied: returns failure, no counter increment", async () => {
+    // First call: ACCESS_DENIED
+    mockAdminGraphQL.mockResolvedValueOnce({
+      success: false,
+      error: "Access denied",
+      retryable: false,
+    });
+    // Fallback call: also ACCESS_DENIED
+    mockAdminGraphQL.mockResolvedValueOnce({
+      success: false,
+      error: "Access denied - scope not granted",
+      retryable: false,
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("CUSTOMERS_CREATE");
+
+    const mockSql = Object.assign(vi.fn().mockResolvedValue([]), {
+      json: vi.fn((v: unknown) => v),
+    });
+
+    const message = {
+      topic: "CUSTOMERS_CREATE",
+      shop: "test.myshopify.com",
+      webhookId: "wh-both-denied-1",
+      resourceGid: "gid://shopify/Customer/456",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Access denied");
+
+    // Counter should NOT be called (processing failed)
+    expect(mockIncrementCounter).not.toHaveBeenCalled();
+    // processCustomerWebhook should NOT be called (fetch failed)
+    expect(mockProcessCustomerWebhook).not.toHaveBeenCalled();
+  });
+
+  it("first call succeeds: no warning, no counter, 'fetched' piiMode", async () => {
+    // First call: success with PII
+    mockAdminGraphQL.mockResolvedValueOnce({
+      success: true,
+      data: {
+        node: {
+          id: "gid://shopify/Customer/789",
+          tags: ["premium"],
+          email: "customer@example.com",
+          displayName: "John Doe",
+        },
+      },
+      retryable: false,
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("CUSTOMERS_UPDATE");
+
+    const mockSql = Object.assign(vi.fn().mockResolvedValue([]), {
+      json: vi.fn((v: unknown) => v),
+    });
+
+    const message = {
+      topic: "CUSTOMERS_UPDATE",
+      shop: "test.myshopify.com",
+      webhookId: "wh-success-1",
+      resourceGid: "gid://shopify/Customer/789",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(result.success).toBe(true);
+
+    // No warning should be logged
+    expect(consoleWarnSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining("[customer_pii_access_denied_fallback]")
+    );
+
+    // Counter should NOT be called
+    expect(mockIncrementCounter).not.toHaveBeenCalled();
+
+    // processCustomerWebhook should be called with 'fetched' mode
+    expect(mockProcessCustomerWebhook).toHaveBeenCalledWith(
+      mockSql,
+      "test.myshopify.com",
+      "CUSTOMERS_UPDATE",
+      expect.objectContaining({
+        id: "gid://shopify/Customer/789",
+        email: "customer@example.com",
+      }),
+      "wh-success-1",
+      "fetched"
+    );
+  });
+
+  it("counter insert throws: message still succeeds (best-effort)", async () => {
+    // First call: ACCESS_DENIED
+    mockAdminGraphQL.mockResolvedValueOnce({
+      success: false,
+      error: "Access denied",
+      retryable: false,
+    });
+    // Fallback call: success
+    mockAdminGraphQL.mockResolvedValueOnce({
+      success: true,
+      data: { node: { id: "gid://shopify/Customer/999", tags: [] } },
+      retryable: false,
+    });
+
+    // Counter throws (e.g., table doesn't exist, migration not applied)
+    mockIncrementCounter.mockRejectedValueOnce(new Error("relation s10b_customer_pii_fallback does not exist"));
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("CUSTOMERS_UPDATE");
+
+    const mockSql = Object.assign(vi.fn().mockResolvedValue([]), {
+      json: vi.fn((v: unknown) => v),
+    });
+
+    const message = {
+      topic: "CUSTOMERS_UPDATE",
+      shop: "test.myshopify.com",
+      webhookId: "wh-counter-fail-1",
+      resourceGid: "gid://shopify/Customer/999",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    // Message should still succeed despite counter failure
+    expect(result.success).toBe(true);
+
+    // Warning should include counter failure
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("counter increment failed")
+    );
+
+    // processCustomerWebhook should still have been called
+    expect(mockProcessCustomerWebhook).toHaveBeenCalled();
   });
 });
