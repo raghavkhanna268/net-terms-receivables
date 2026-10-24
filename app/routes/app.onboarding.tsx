@@ -4,6 +4,8 @@
  * Polaris checklist shown to new merchants until setup is complete.
  * Each step reads REAL state from DB and Shopify Admin API.
  * Can be dismissed and re-opened from the help menu.
+ *
+ * S23-02: Added app registration status step with retry functionality.
  */
 
 import type {
@@ -24,10 +26,24 @@ import {
   type PaymentCustomizationInfo,
   type OnboardingStep,
 } from "~/lib/onboarding-steps.server";
-import { safeLog, toErrorCode } from "~/lib/log.server";
+import { safeLog, toErrorCode, shopHash } from "~/lib/log.server";
+import { ensureValidation } from "~/lib/validation-registration.server";
+import { ensurePaymentCustomization } from "~/lib/payment-customization-registration.server";
+import { ensureMetafieldDefinitions, getMetafieldDefinitionSpecs } from "~/lib/metafield-definitions.server";
+import { METAFIELD } from "~/lib/metafields-contract";
 
 const VALIDATION_FUNCTION_HANDLE = "credit-check-validation";
 const PAYMENT_CUSTOMIZATION_HANDLE = "hide-terms-payment";
+
+/**
+ * Admin GraphQL client interface with variables support.
+ */
+interface AdminGraphqlClient {
+  graphql: (
+    query: string,
+    options?: { variables?: Record<string, unknown> },
+  ) => Promise<{ json: () => Promise<unknown> }>;
+}
 
 interface ValidationNode {
   id: string;
@@ -43,9 +59,41 @@ interface PaymentCustomizationNode {
   enabled: boolean;
 }
 
+/**
+ * Registration item status for the onboarding step (S23-02).
+ */
+export type RegistrationItemStatus = "ok" | "missing" | "error";
+
+/**
+ * Individual registration item with status.
+ */
+export interface RegistrationItem {
+  name: string;
+  status: RegistrationItemStatus;
+  errorCode?: string;
+}
+
+/**
+ * Overall registration status for the shop.
+ */
+export interface RegistrationStatus {
+  validation: RegistrationItem;
+  paymentCustomization: RegistrationItem;
+  metafieldDefinitions: RegistrationItem;
+}
+
+const retryInFlightShops = new Set<string>();
+
+interface ValidationQueryResult {
+  data?: {
+    validations?: { edges: Array<{ node: ValidationNode }> };
+  };
+  errors?: Array<{ message: string }>;
+}
+
 async function fetchValidationInfo(
-  admin: { graphql: (q: string) => Promise<{ json: () => Promise<unknown> }> }
-): Promise<ValidationInfo | null> {
+  admin: AdminGraphqlClient
+): Promise<{ info: ValidationInfo | null; error: string | null }> {
   try {
     const response = await admin.graphql(`#graphql
       query GetValidations {
@@ -61,33 +109,48 @@ async function fetchValidationInfo(
         }
       }
     `);
-    const data = (await response.json()) as {
-      data?: {
-        validations?: { edges: Array<{ node: ValidationNode }> };
-      };
-    };
+    const data = (await response.json()) as ValidationQueryResult;
+
+    if (data.errors?.length) {
+      const errCode = toErrorCode({ message: data.errors[0].message });
+      safeLog("error", "onboarding.fetch_validations_failed", { err: errCode });
+      return { info: null, error: errCode };
+    }
 
     const validation = data.data?.validations?.edges.find(
       (e) => e.node.shopifyFunction.handle === VALIDATION_FUNCTION_HANDLE
     );
 
-    if (!validation) return null;
+    if (!validation) return { info: null, error: null };
 
     return {
-      id: validation.node.id,
-      handle: validation.node.shopifyFunction.handle,
-      enabled: validation.node.enabled,
-      title: validation.node.title,
+      info: {
+        id: validation.node.id,
+        handle: validation.node.shopifyFunction.handle,
+        enabled: validation.node.enabled,
+        title: validation.node.title,
+      },
+      error: null,
     };
   } catch (error) {
-    safeLog("error", "onboarding.fetch_validations_failed", { err: toErrorCode(error) });
-    return null;
+    const errCode = toErrorCode(error);
+    safeLog("error", "onboarding.fetch_validations_failed", { err: errCode });
+    return { info: null, error: errCode };
   }
 }
 
+interface PaymentCustomizationQueryResult {
+  data?: {
+    paymentCustomizations?: {
+      edges: Array<{ node: PaymentCustomizationNode }>;
+    };
+  };
+  errors?: Array<{ message: string }>;
+}
+
 async function fetchPaymentCustomizationInfo(
-  admin: { graphql: (q: string) => Promise<{ json: () => Promise<unknown> }> }
-): Promise<PaymentCustomizationInfo | null> {
+  admin: AdminGraphqlClient
+): Promise<{ info: PaymentCustomizationInfo | null; error: string | null }> {
   try {
     const response = await admin.graphql(`#graphql
       query GetPaymentCustomizations {
@@ -103,30 +166,160 @@ async function fetchPaymentCustomizationInfo(
         }
       }
     `);
-    const data = (await response.json()) as {
-      data?: {
-        paymentCustomizations?: {
-          edges: Array<{ node: PaymentCustomizationNode }>;
-        };
-      };
-    };
+    const data = (await response.json()) as PaymentCustomizationQueryResult;
+
+    if (data.errors?.length) {
+      const errCode = toErrorCode({ message: data.errors[0].message });
+      safeLog("error", "onboarding.fetch_payment_customizations_failed", { err: errCode });
+      return { info: null, error: errCode };
+    }
 
     const customization = data.data?.paymentCustomizations?.edges.find(
       (e) => e.node.shopifyFunction.handle === PAYMENT_CUSTOMIZATION_HANDLE
     );
 
-    if (!customization) return null;
+    if (!customization) return { info: null, error: null };
 
     return {
-      id: customization.node.id,
-      handle: customization.node.shopifyFunction.handle,
-      enabled: customization.node.enabled,
-      title: customization.node.title,
+      info: {
+        id: customization.node.id,
+        handle: customization.node.shopifyFunction.handle,
+        enabled: customization.node.enabled,
+        title: customization.node.title,
+      },
+      error: null,
     };
   } catch (error) {
-    safeLog("error", "onboarding.fetch_payment_customizations_failed", { err: toErrorCode(error) });
-    return null;
+    const errCode = toErrorCode(error);
+    safeLog("error", "onboarding.fetch_payment_customizations_failed", { err: errCode });
+    return { info: null, error: errCode };
   }
+}
+
+interface MetafieldDefinitionNode {
+  id: string;
+  namespace: string;
+  key: string;
+  ownerType: string;
+}
+
+interface MetafieldDefinitionsQueryResult {
+  data?: {
+    metafieldDefinitions?: {
+      edges: Array<{ node: MetafieldDefinitionNode }>;
+    };
+  };
+  errors?: Array<{ message: string }>;
+}
+
+const METAFIELD_DEFINITIONS_QUERY = `#graphql
+  query GetMetafieldDefinitions($ownerType: MetafieldOwnerType!, $namespace: String!) {
+    metafieldDefinitions(first: 50, ownerType: $ownerType, namespace: $namespace) {
+      edges {
+        node {
+          id
+          namespace
+          key
+          ownerType
+        }
+      }
+    }
+  }
+`;
+
+/**
+ * Check metafield definitions status by querying existing definitions.
+ * Returns "ok" if all expected definitions exist, "missing" if any are missing.
+ */
+async function checkMetafieldDefinitionsStatus(
+  admin: AdminGraphqlClient
+): Promise<{ status: RegistrationItemStatus; errorCode?: string }> {
+  try {
+    const specs = getMetafieldDefinitionSpecs();
+    const expectedOwnerTypes = specs[0]?.ownerTypes ?? ["COMPANY_LOCATION", "CUSTOMER"];
+
+    const foundTypes = new Set<string>();
+
+    for (const ownerType of expectedOwnerTypes) {
+      const response = await admin.graphql(METAFIELD_DEFINITIONS_QUERY, {
+        variables: { ownerType, namespace: METAFIELD.namespace },
+      });
+
+      const data = (await response.json()) as MetafieldDefinitionsQueryResult;
+
+      if (data.errors?.length) {
+        return { status: "error", errorCode: toErrorCode({ message: data.errors[0].message }) };
+      }
+
+      const hasCreditStatus = data.data?.metafieldDefinitions?.edges.some(
+        (e) => e.node.key === METAFIELD.key
+      );
+
+      if (hasCreditStatus) {
+        foundTypes.add(ownerType);
+      }
+    }
+
+    if (foundTypes.size === expectedOwnerTypes.length) {
+      return { status: "ok" };
+    }
+
+    return { status: "missing" };
+  } catch (error) {
+    safeLog("error", "onboarding.check_metafield_definitions_failed", { err: toErrorCode(error) });
+    return { status: "error", errorCode: toErrorCode(error) };
+  }
+}
+
+/**
+ * Compute registration status from fetched data.
+ */
+function computeRegistrationStatus(
+  validation: ValidationInfo | null,
+  validationError: string | null,
+  paymentCustomization: PaymentCustomizationInfo | null,
+  paymentCustomizationError: string | null,
+  metafieldStatus: { status: RegistrationItemStatus; errorCode?: string }
+): RegistrationStatus {
+  return {
+    validation: {
+      name: "Validation Function",
+      status: validationError ? "error" : validation ? "ok" : "missing",
+      errorCode: validationError ?? undefined,
+    },
+    paymentCustomization: {
+      name: "Payment Customization",
+      status: paymentCustomizationError ? "error" : paymentCustomization ? "ok" : "missing",
+      errorCode: paymentCustomizationError ?? undefined,
+    },
+    metafieldDefinitions: {
+      name: "Metafield Definitions",
+      status: metafieldStatus.status,
+      errorCode: metafieldStatus.errorCode,
+    },
+  };
+}
+
+/**
+ * Check if any registration item needs retry.
+ */
+export function needsRetry(status: RegistrationStatus): boolean {
+  return (
+    status.validation.status !== "ok" ||
+    status.paymentCustomization.status !== "ok" ||
+    status.metafieldDefinitions.status !== "ok"
+  );
+}
+
+/**
+ * Check if all registrations are complete.
+ */
+export function isRegistrationComplete(status: RegistrationStatus): boolean {
+  return (
+    status.validation.status === "ok" &&
+    status.paymentCustomization.status === "ok" &&
+    status.metafieldDefinitions.status === "ok"
+  );
 }
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
@@ -141,13 +334,20 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     return {
       error: "Shop not found",
       state: null,
+      registrationStatus: null,
     };
   }
 
-  const [validation, paymentCustomization] = await Promise.all([
+  const [validationResult, paymentCustomizationResult, metafieldStatus] = await Promise.all([
     fetchValidationInfo(admin),
     fetchPaymentCustomizationInfo(admin),
+    checkMetafieldDefinitionsStatus(admin),
   ]);
+
+  const validation = validationResult.info;
+  const validationError = validationResult.error;
+  const paymentCustomization = paymentCustomizationResult.info;
+  const paymentCustomizationError = paymentCustomizationResult.error;
 
   const resendApiKeyConfigured = Boolean(process.env.RESEND_API_KEY);
 
@@ -164,6 +364,14 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   const state = computeOnboardingState(inputs);
 
+  const registrationStatus = computeRegistrationStatus(
+    validation,
+    validationError,
+    paymentCustomization,
+    paymentCustomizationError,
+    metafieldStatus
+  );
+
   return {
     error: null,
     state: {
@@ -174,12 +382,13 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       dismissedAt: state.dismissedAt?.toISOString() ?? null,
     },
     shopId: dbData.shopId,
+    registrationStatus,
   };
 };
 
 export const action = async ({ request, context }: ActionFunctionArgs) => {
   const { shopify } = context;
-  const { session } = await shopify.authenticate.admin(request);
+  const { session, admin } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
@@ -204,6 +413,103 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     return { success: true, action: "reopened" };
   }
 
+  if (actionType === "retry_registration") {
+    if (retryInFlightShops.has(shop.id)) {
+      return { success: false, error: "Retry already in progress", action: "retry_registration" };
+    }
+
+    retryInFlightShops.add(shop.id);
+    const hash = await shopHash(shopDomain);
+
+    try {
+      const [validationResult, paymentCustomizationResult, metafieldStatus] = await Promise.all([
+        fetchValidationInfo(admin),
+        fetchPaymentCustomizationInfo(admin),
+        checkMetafieldDefinitionsStatus(admin),
+      ]);
+
+      const currentStatus = computeRegistrationStatus(
+        validationResult.info,
+        validationResult.error,
+        paymentCustomizationResult.info,
+        paymentCustomizationResult.error,
+        metafieldStatus
+      );
+
+      const results: {
+        validation: RegistrationItem;
+        paymentCustomization: RegistrationItem;
+        metafieldDefinitions: RegistrationItem;
+      } = {
+        validation: { name: "Validation Function", status: currentStatus.validation.status },
+        paymentCustomization: { name: "Payment Customization", status: currentStatus.paymentCustomization.status },
+        metafieldDefinitions: { name: "Metafield Definitions", status: currentStatus.metafieldDefinitions.status },
+      };
+
+      if (currentStatus.validation.status !== "ok") {
+        try {
+          await ensureValidation(admin);
+          results.validation = { name: "Validation Function", status: "ok" };
+          safeLog("info", "onboarding.retry_validation_success", { shopHash: hash });
+        } catch (e) {
+          results.validation = {
+            name: "Validation Function",
+            status: "error",
+            errorCode: toErrorCode(e),
+          };
+          safeLog("error", "onboarding.retry_validation_failed", { shopHash: hash, err: toErrorCode(e) });
+        }
+      }
+
+      if (currentStatus.paymentCustomization.status !== "ok") {
+        try {
+          await ensurePaymentCustomization(admin);
+          results.paymentCustomization = { name: "Payment Customization", status: "ok" };
+          safeLog("info", "onboarding.retry_payment_customization_success", { shopHash: hash });
+        } catch (e) {
+          results.paymentCustomization = {
+            name: "Payment Customization",
+            status: "error",
+            errorCode: toErrorCode(e),
+          };
+          safeLog("error", "onboarding.retry_payment_customization_failed", { shopHash: hash, err: toErrorCode(e) });
+        }
+      }
+
+      if (currentStatus.metafieldDefinitions.status !== "ok") {
+        try {
+          await ensureMetafieldDefinitions(admin);
+          results.metafieldDefinitions = { name: "Metafield Definitions", status: "ok" };
+          safeLog("info", "onboarding.retry_metafield_definitions_success", { shopHash: hash });
+        } catch (e) {
+          results.metafieldDefinitions = {
+            name: "Metafield Definitions",
+            status: "error",
+            errorCode: toErrorCode(e),
+          };
+          safeLog("error", "onboarding.retry_metafield_definitions_failed", { shopHash: hash, err: toErrorCode(e) });
+        }
+      }
+
+      const allOk = results.validation.status === "ok" &&
+        results.paymentCustomization.status === "ok" &&
+        results.metafieldDefinitions.status === "ok";
+
+      safeLog("info", "onboarding.retry_registration_complete", {
+        shopHash: hash,
+        success: allOk,
+      });
+
+      return {
+        success: allOk,
+        action: "retry_registration",
+        registrationStatus: results,
+      };
+    } finally {
+      retryInFlightShops.delete(shop.id);
+    }
+  }
+
   return { success: false, error: "Unknown action" };
 };
 
@@ -218,6 +524,73 @@ function StepStatusBadge({ status }: { status: OnboardingStep["status"] }) {
     default:
       return <s-badge>To do</s-badge>;
   }
+}
+
+function RegistrationItemBadge({ status }: { status: RegistrationItemStatus }) {
+  switch (status) {
+    case "ok":
+      return <s-badge tone="success">OK</s-badge>;
+    case "missing":
+      return <s-badge tone="warning">Missing</s-badge>;
+    case "error":
+      return <s-badge tone="critical">Error</s-badge>;
+  }
+}
+
+function RegistrationStatusSection({
+  status,
+  isRetrying,
+}: {
+  status: RegistrationStatus;
+  isRetrying: boolean;
+}) {
+  const allOk = isRegistrationComplete(status);
+  const items = [status.validation, status.paymentCustomization, status.metafieldDefinitions];
+
+  return (
+    <s-stack gap="base">
+      <s-stack direction="inline" gap="base">
+        <s-text type="strong">Status</s-text>
+        {allOk ? (
+          <s-badge tone="success">Complete</s-badge>
+        ) : (
+          <s-badge tone="warning">Incomplete</s-badge>
+        )}
+      </s-stack>
+
+      <s-paragraph>
+        Status of app registrations required for checkout protection and credit tracking.
+      </s-paragraph>
+
+      <s-table>
+        <s-table-header-row>
+          <s-table-header>Item</s-table-header>
+          <s-table-header>Status</s-table-header>
+        </s-table-header-row>
+        <s-table-body>
+          {items.map((item) => (
+            <s-table-row key={item.name}>
+              <s-table-cell>
+                <s-text>{item.name}</s-text>
+              </s-table-cell>
+              <s-table-cell>
+                <RegistrationItemBadge status={item.status} />
+              </s-table-cell>
+            </s-table-row>
+          ))}
+        </s-table-body>
+      </s-table>
+
+      {!allOk && (
+        <Form method="post">
+          <input type="hidden" name="_action" value="retry_registration" />
+          <s-button type="submit" disabled={isRetrying}>
+            {isRetrying ? "Retrying..." : "Retry"}
+          </s-button>
+        </Form>
+      )}
+    </s-stack>
+  );
 }
 
 function OnboardingChecklist({
@@ -270,10 +643,17 @@ function OnboardingChecklist({
 }
 
 export default function OnboardingPage() {
-  const { error, state } = useLoaderData<typeof loader>();
+  const { error, state, registrationStatus } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
+
+  const isRetrying = isSubmitting && navigation.formData?.get("_action") === "retry_registration";
+
+  const currentRegistrationStatus: RegistrationStatus | null =
+    actionData?.action === "retry_registration" && actionData.registrationStatus
+      ? (actionData.registrationStatus as RegistrationStatus)
+      : registrationStatus;
 
   if (error || !state) {
     return (
@@ -291,7 +671,23 @@ export default function OnboardingPage() {
 
   return (
     <s-page heading="Setup Guide">
-      {actionData?.success && (
+      {actionData?.success && actionData.action === "retry_registration" && (
+        <s-section>
+          <s-banner tone="success" heading="Retry Complete">
+            Registration retry completed.
+          </s-banner>
+        </s-section>
+      )}
+
+      {actionData?.success === false && actionData.action === "retry_registration" && (
+        <s-section>
+          <s-banner tone="warning" heading="Retry Incomplete">
+            Some registrations could not be completed. Check the status below.
+          </s-banner>
+        </s-section>
+      )}
+
+      {actionData?.success && actionData.action !== "retry_registration" && (
         <s-section>
           <s-banner tone="info" heading="Done">
             {actionData.action === "dismissed"
@@ -344,6 +740,15 @@ export default function OnboardingPage() {
           </s-stack>
         </s-stack>
       </s-section>
+
+      {currentRegistrationStatus && (
+        <s-section heading="App Registration &amp; Metafield Definitions">
+          <RegistrationStatusSection
+            status={currentRegistrationStatus}
+            isRetrying={isRetrying}
+          />
+        </s-section>
+      )}
 
       <s-section slot="aside" heading="Why complete setup?">
         <s-paragraph>
