@@ -70,7 +70,6 @@ import {
   getSeedDbCounts,
   getSeedDbSummary,
   createSeedDbWriteTracker,
-  type SeedDbWriteTracker,
 } from "./lib/seed-summary";
 
 // -- Types --

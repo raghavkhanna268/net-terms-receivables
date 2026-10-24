@@ -3,7 +3,6 @@ import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import {
   getSeedDbCounts,
-  getSeedDbSummary,
   createSeedDbWriteTracker,
   checkOutputForPii,
   PII_PATTERNS,
