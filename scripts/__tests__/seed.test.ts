@@ -497,9 +497,10 @@ describe("(3) At least one seeded order is overdue under S9 inference", () => {
   it("inferDueDate produces overdue dueAt for Net 30 order processed 35 days ago", () => {
     // Simulate: order processed 35 days ago with Net 30 terms from BuyerAccount default
     // S6 sync maps processedAt → order.createdAt → issuedAt (order.server.ts:187)
-    const now = new Date();
+    // Use a fixed UTC date to avoid DST issues
+    const now = new Date("2026-10-15T12:00:00Z");
     const processedAt = new Date(now);
-    processedAt.setDate(processedAt.getDate() - 35);
+    processedAt.setUTCDate(processedAt.getUTCDate() - 35);
 
     // No Shopify paymentTerms (null) - S9 inference uses BuyerAccount default
     const result = inferDueDate({
@@ -526,9 +527,10 @@ describe("(3) At least one seeded order is overdue under S9 inference", () => {
 
   it("inferDueDate produces future dueAt for Net 60 order processed 45 days ago", () => {
     // Order processed 45 days ago with Net 60 terms - should NOT be overdue yet
-    const now = new Date();
+    // Use a fixed UTC date to avoid DST issues
+    const now = new Date("2026-10-15T12:00:00Z");
     const processedAt = new Date(now);
-    processedAt.setDate(processedAt.getDate() - 45);
+    processedAt.setUTCDate(processedAt.getUTCDate() - 45);
 
     const result = inferDueDate({
       paymentTerms: null,

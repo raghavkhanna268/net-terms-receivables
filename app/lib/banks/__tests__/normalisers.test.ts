@@ -85,7 +85,8 @@ describe("normalisers", () => {
 
     describe("Date objects", () => {
       it("converts Date object to ISO string", () => {
-        const date = new Date(2026, 9, 1); // October 1, 2026
+        // Use Date.UTC to create a UTC midnight date (matches Excel parsing behavior)
+        const date = new Date(Date.UTC(2026, 9, 1)); // October 1, 2026 UTC
         expect(parseIndianDate(date)).toBe("2026-10-01");
       });
 
