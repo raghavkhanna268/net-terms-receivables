@@ -1099,7 +1099,11 @@ async function claimMatchAndDecide(
       }
 
       if (lockedInvoice.status !== "open") {
-        return { success: false, error: `Invoice status is '${lockedInvoice.status}', expected 'open'` };
+        return {
+          success: false,
+          error: `Invoice status is '${lockedInvoice.status}', expected 'open'`,
+          reasonCode: "INVOICE_NOT_OPEN",
+        };
       }
 
       // RACE CHECK: Refuse apply while another match on this invoice has a FRESH in-flight push
