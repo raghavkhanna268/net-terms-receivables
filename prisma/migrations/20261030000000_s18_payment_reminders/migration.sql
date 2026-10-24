@@ -67,6 +67,27 @@ CREATE TRIGGER s18_shop_reminder_settings_updated_at
 ALTER TABLE s18_shop_reminder_settings ENABLE ROW LEVEL SECURITY;
 
 -- =============================================================================
+-- SAFE TIMEZONE HELPER FUNCTION
+-- =============================================================================
+
+-- Returns a valid IANA timezone or the fallback 'Asia/Kolkata'.
+-- Prevents invalid Shop.timezone from aborting the entire enqueue run.
+CREATE OR REPLACE FUNCTION public.s18_safe_timezone(tz TEXT)
+RETURNS TEXT
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+  SELECT CASE 
+    WHEN tz IS NULL THEN 'Asia/Kolkata'
+    WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_timezone_names WHERE name = tz) THEN tz
+    ELSE 'Asia/Kolkata'
+  END;
+$$;
+
+COMMENT ON FUNCTION public.s18_safe_timezone(TEXT) IS 'S18: Returns valid timezone or fallback. Used by s18_enqueue_reminders to skip bad timezones safely.';
+
+-- =============================================================================
 -- ENQUEUE REMINDERS FUNCTION
 -- =============================================================================
 
@@ -77,6 +98,9 @@ ALTER TABLE s18_shop_reminder_settings ENABLE ROW LEVEL SECURITY;
 -- SECURITY: Uses SECURITY DEFINER with search_path='' to prevent
 -- search_path injection. All table, function, and type names are
 -- schema-qualified (public.*, pgmq.*) per s10_call_drain convention.
+--
+-- ROBUSTNESS: Invalid Shop.timezone values are handled gracefully via
+-- s18_safe_timezone() - bad shops get skipped with fallback to Asia/Kolkata.
 CREATE OR REPLACE FUNCTION public.s18_enqueue_reminders()
 RETURNS void
 LANGUAGE plpgsql
@@ -122,10 +146,11 @@ BEGIN
         WHERE r.enabled = true
           AND r.channel = 'email'::public."ReminderChannel"
           -- Check send window: shop's local hour must be 09-18 (19:00 = last send at 18:xx)
-          AND EXTRACT(HOUR FROM (NOW() AT TIME ZONE COALESCE(s.timezone, 'Asia/Kolkata'))) BETWEEN 9 AND 18
+          -- Uses s18_safe_timezone to gracefully handle invalid Shop.timezone values
+          AND EXTRACT(HOUR FROM (NOW() AT TIME ZONE public.s18_safe_timezone(s.timezone))) BETWEEN 9 AND 18
           -- Due date + offset = today in shop's timezone
-          AND (i."dueAt" AT TIME ZONE COALESCE(s.timezone, 'Asia/Kolkata'))::DATE + r."offsetDays" 
-              = (NOW() AT TIME ZONE COALESCE(s.timezone, 'Asia/Kolkata'))::DATE
+          AND (i."dueAt" AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE + r."offsetDays" 
+              = (NOW() AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE
           -- Exclude already-sent reminders (unique index ensures idempotency)
           AND NOT EXISTS (
               SELECT 1 FROM public."ReminderLog" rl
@@ -143,9 +168,9 @@ BEGIN
                 'invoiceId', reminder_row.invoice_id,
                 'ruleId', reminder_row.rule_id,
                 'offsetDays', reminder_row.offset_days,
-                'timezone', COALESCE(reminder_row.shop_timezone, 'Asia/Kolkata'),
+                'timezone', public.s18_safe_timezone(reminder_row.shop_timezone),
                 'webhookId', 's18_' || reminder_row.invoice_id || '_' || reminder_row.rule_id || '_' || 
-                    ((NOW() AT TIME ZONE COALESCE(reminder_row.shop_timezone, 'Asia/Kolkata'))::DATE)::TEXT,
+                    ((NOW() AT TIME ZONE public.s18_safe_timezone(reminder_row.shop_timezone))::DATE)::TEXT,
                 'enqueuedAt', NOW()::TEXT
             )
         );
