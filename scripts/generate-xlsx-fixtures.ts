@@ -87,6 +87,10 @@ const fixtures = [
   { csv: "icici-retail-synthetic.csv", xlsx: "icici-retail-synthetic.xlsx", sheet: "Statement" },
   { csv: "hdfc-malformed-synthetic.csv", xlsx: "hdfc-malformed-synthetic.xlsx", sheet: "Statement" },
   { csv: "icici-malformed-synthetic.csv", xlsx: "icici-malformed-synthetic.xlsx", sheet: "Statement" },
+  { csv: "sbi-retail-synthetic.csv", xlsx: "sbi-retail-synthetic.xlsx", sheet: "Statement" },
+  { csv: "sbi-malformed-synthetic.csv", xlsx: "sbi-malformed-synthetic.xlsx", sheet: "Statement" },
+  { csv: "axis-retail-synthetic.csv", xlsx: "axis-retail-synthetic.xlsx", sheet: "Statement" },
+  { csv: "axis-malformed-synthetic.csv", xlsx: "axis-malformed-synthetic.xlsx", sheet: "Statement" },
 ];
 
 for (const fixture of fixtures) {

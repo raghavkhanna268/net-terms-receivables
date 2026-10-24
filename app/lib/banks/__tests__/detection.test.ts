@@ -119,6 +119,236 @@ describe("detection", () => {
       expect(result.bank).toBe("UNKNOWN");
       expect(result.confidence).toBe(0);
     });
+
+    it("detects SBI from header row (UNVERIFIED)", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["STATE BANK OF INDIA"],
+          ["Account Statement"],
+          [],
+          ["Txn Date", "Value Date", "Description", "Ref No./Cheque No.", "Debit", "Credit", "Balance"],
+          ["01/10/2026", "01/10/2026", "NEFT CR-TEST", "REF001", "", "50,000.00", "1,50,000.00"],
+        ],
+      };
+
+      const result = detectBank(sheet);
+      expect(result.bank).toBe("SBI");
+      expect(result.confidence).toBeGreaterThanOrEqual(0.5);
+    });
+
+    it("detects SBI from filename (UNVERIFIED)", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["Txn Date", "Value Date", "Description", "Ref No./Cheque No.", "Debit", "Credit", "Balance"],
+        ],
+      };
+
+      const result = detectBank(sheet, "SBI_Statement_Oct2026.xls");
+      expect(result.bank).toBe("SBI");
+    });
+
+    it("detects SBI from preamble text (UNVERIFIED)", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["STATE BANK OF INDIA"],
+          ["www.onlinesbi.com"],
+          [],
+          ["Txn Date", "Value Date", "Description", "Ref No./Cheque No.", "Debit", "Credit", "Balance"],
+        ],
+      };
+
+      const result = detectBank(sheet);
+      expect(result.bank).toBe("SBI");
+      expect(result.confidence).toBeGreaterThanOrEqual(0.7);
+    });
+
+    it("detects Axis Bank from header row (UNVERIFIED)", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["AXIS BANK"],
+          ["Statement of Account"],
+          [],
+          ["Tran Date", "Chq No", "Particulars", "DR", "CR", "Balance"],
+          ["01-10-2026", "", "NEFT CR-TEST", "", "50,000.00", "1,50,000.00"],
+        ],
+      };
+
+      const result = detectBank(sheet);
+      expect(result.bank).toBe("AXIS");
+      expect(result.confidence).toBeGreaterThanOrEqual(0.5);
+    });
+
+    it("detects Axis Bank from filename (UNVERIFIED)", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["Tran Date", "Chq No", "Particulars", "DR", "CR", "Balance"],
+        ],
+      };
+
+      const result = detectBank(sheet, "AXIS_Statement_2026.csv");
+      expect(result.bank).toBe("AXIS");
+    });
+
+    it("detects Axis Bank from preamble text (UNVERIFIED)", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["AXIS BANK LIMITED"],
+          ["www.axisbank.com"],
+          [],
+          ["Tran Date", "Chq No", "Particulars", "DR", "CR", "Balance"],
+        ],
+      };
+
+      const result = detectBank(sheet);
+      expect(result.bank).toBe("AXIS");
+      expect(result.confidence).toBeGreaterThanOrEqual(0.7);
+    });
+
+    it("does not confuse SBI with HDFC", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["STATE BANK OF INDIA"],
+          ["Account Statement"],
+          [],
+          ["Txn Date", "Value Date", "Description", "Ref No./Cheque No.", "Debit", "Credit", "Balance"],
+        ],
+      };
+
+      const result = detectBank(sheet);
+      expect(result.bank).toBe("SBI");
+      expect(result.bank).not.toBe("HDFC");
+    });
+
+    it("does not confuse Axis with ICICI", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["AXIS BANK LIMITED"],
+          ["Statement of Account"],
+          [],
+          ["Tran Date", "Chq No", "Particulars", "DR", "CR", "Balance"],
+        ],
+      };
+
+      const result = detectBank(sheet);
+      expect(result.bank).toBe("AXIS");
+      expect(result.bank).not.toBe("ICICI");
+    });
+
+    it("Axis detection returns non-empty reason string", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["AXIS BANK LIMITED"],
+          [],
+          ["Tran Date", "Chq No", "Particulars", "DR", "CR", "Balance"],
+        ],
+      };
+
+      const result = detectBank(sheet);
+      expect(result.bank).toBe("AXIS");
+      expect(result.reason).toBeTruthy();
+      expect(result.reason.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("header detection regression tests", () => {
+    it("ICICI detailed headers detect as ICICI not AXIS (regression for DR/CR matching)", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["ICICI BANK"],
+          [],
+          ["Date", "Particulars", "Chq. No.", "Withdrawals", "Deposits", "Balance"],
+          ["01.10.2026", "NEFT", "", "1000", "", "99000"],
+        ],
+      };
+
+      const result = detectBank(sheet);
+      expect(result.bank).toBe("ICICI");
+      expect(result.bank).not.toBe("AXIS");
+    });
+
+    it("all HDFC header variants detect as HDFC", () => {
+      const hdfcVariants = [
+        ["Date", "Narration", "Chq./Ref.No.", "Value Dt", "Withdrawal Amt.", "Deposit Amt.", "Closing Balance"],
+        ["Date", "Narration", "Chq./Ref. No.", "Value Dt"],
+        ["Date", "Transaction Description", "Chq/Ref. No", "Value Date", "Debit Amount", "Credit Amount", "Closing Balance"],
+      ];
+
+      for (const headers of hdfcVariants) {
+        const sheet: SheetData = {
+          name: "Sheet1",
+          rows: [headers],
+        };
+        const result = detectHeaderRow(sheet);
+        expect(result?.bank).toBe("HDFC");
+      }
+    });
+
+    it("all ICICI header variants detect as ICICI", () => {
+      const iciciVariants = [
+        ["S No.", "Transaction Date", "Cheque Number", "Remarks", "Withdrawal", "Deposit", "Balance"],
+        ["S No.", "Transaction Date", "Cheque/Reference No.", "Remarks"],
+        ["Tran ID", "Value Date", "Transaction Date", "Cheque/RefNo", "Withdrawal (Dr)", "Deposit (Cr)"],
+        ["Date", "Particulars", "Chq. No.", "Withdrawals", "Deposits", "Balance"],
+      ];
+
+      for (const headers of iciciVariants) {
+        const sheet: SheetData = {
+          name: "Sheet1",
+          rows: [headers],
+        };
+        const result = detectHeaderRow(sheet);
+        expect(result?.bank).toBe("ICICI");
+      }
+    });
+
+    it("SBI primary header variant detects as SBI (UNVERIFIED)", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [["Txn Date", "Value Date", "Description", "Ref No./Cheque No.", "Debit", "Credit", "Balance"]],
+      };
+      const result = detectHeaderRow(sheet);
+      expect(result?.bank).toBe("SBI");
+    });
+
+    it("all Axis header variants detect as AXIS (UNVERIFIED)", () => {
+      const axisVariants = [
+        ["Tran Date", "Chq No", "Particulars", "DR", "CR", "Balance"],
+        ["Transaction Date", "Value Date", "Particulars", "Chq./Ref.No.", "Debit", "Credit", "Balance"],
+        ["Tran Date", "Value Date", "Particulars", "Chq No", "Debit", "Credit", "Balance"],
+      ];
+
+      for (const headers of axisVariants) {
+        const sheet: SheetData = {
+          name: "Sheet1",
+          rows: [headers],
+        };
+        const result = detectHeaderRow(sheet);
+        expect(result?.bank).toBe("AXIS");
+      }
+    });
+
+    it("DR/CR only match as whole words not substrings", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["Date", "Particulars", "Chq. No.", "Withdrawals", "Deposits", "Balance"],
+        ],
+      };
+      
+      const result = detectHeaderRow(sheet);
+      expect(result?.bank).toBe("ICICI");
+      expect(result?.bank).not.toBe("AXIS");
+    });
   });
 
   describe("detectHeaderRow", () => {
@@ -167,6 +397,40 @@ describe("detection", () => {
 
       const result = detectHeaderRow(sheet);
       expect(result).toBeNull();
+    });
+
+    it("finds SBI header row (UNVERIFIED)", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["STATE BANK OF INDIA"],
+          [],
+          ["Txn Date", "Value Date", "Description", "Ref No./Cheque No.", "Debit", "Credit", "Balance"],
+          ["01/10/2026", "01/10/2026", "TEST", "REF", "", "100.00", "100.00"],
+        ],
+      };
+
+      const result = detectHeaderRow(sheet);
+      expect(result).not.toBeNull();
+      expect(result?.bank).toBe("SBI");
+      expect(result?.row).toBe(2);
+    });
+
+    it("finds Axis Bank header row (UNVERIFIED)", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["AXIS BANK"],
+          [],
+          ["Tran Date", "Chq No", "Particulars", "DR", "CR", "Balance"],
+          ["01-10-2026", "", "TEST", "100.00", "", "100.00"],
+        ],
+      };
+
+      const result = detectHeaderRow(sheet);
+      expect(result).not.toBeNull();
+      expect(result?.bank).toBe("AXIS");
+      expect(result?.row).toBe(2);
     });
   });
 
