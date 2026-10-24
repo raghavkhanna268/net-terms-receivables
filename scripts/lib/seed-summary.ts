@@ -95,7 +95,7 @@ export async function getSeedDbCounts(
       SELECT COUNT(*)::int as count
       FROM "AccountSource"
       WHERE "shopId" = ${tracker.shopId}
-        AND tag = ANY(${tags})
+        AND tag IN ${sql(tags)}
     `;
     accountSourceCount = accountSourceResult[0]?.count ?? 0;
   }
@@ -108,7 +108,7 @@ export async function getSeedDbCounts(
       SELECT COUNT(*)::int as count
       FROM "BuyerAccount"
       WHERE "shopId" = ${tracker.shopId}
-        AND "companyLocationId" = ANY(${locationIds})
+        AND "companyLocationId" IN ${sql(locationIds)}
     `;
     buyerAccountCount = buyerAccountResult[0]?.count ?? 0;
   }
