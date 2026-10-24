@@ -74,6 +74,24 @@ function extractActionData(result: unknown): TestActionData {
   return result as TestActionData;
 }
 
+/**
+ * Helper to extract HTTP status from result.
+ * Returns undefined for plain objects (200 OK).
+ */
+function extractStatus(result: unknown): number | undefined {
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    "type" in result &&
+    (result as { type: string }).type === "DataWithResponseInit" &&
+    "init" in result
+  ) {
+    const init = (result as { init: { status?: number } | null }).init;
+    return init?.status;
+  }
+  return undefined;
+}
+
 describe("Tag Rules Route", () => {
   const mockSession = { shop: "test-store.myshopify.com" };
   const mockContext = {
@@ -201,6 +219,8 @@ describe("Tag Rules Route", () => {
       });
 
       const result = extractLoaderData(rawResult);
+      const status = extractStatus(rawResult);
+      expect(status).toBe(404);
       expect(result.error).toBe("Shop not found");
       expect(result.shopId).toBeNull();
     });
@@ -236,6 +256,8 @@ describe("Tag Rules Route", () => {
       });
 
       const result = extractActionData(rawResult);
+      const status = extractStatus(rawResult);
+      expect(status).toBe(400);
       expect(result.success).toBe(false);
       expect(result.fieldErrors?.tag).toBe("Tag is required");
     });
@@ -270,6 +292,8 @@ describe("Tag Rules Route", () => {
       });
 
       const result = extractActionData(rawResult);
+      const status = extractStatus(rawResult);
+      expect(status).toBe(400);
       expect(result.success).toBe(false);
       expect(result.fieldErrors?.tag).toContain("at most 255 characters");
     });
@@ -303,6 +327,8 @@ describe("Tag Rules Route", () => {
       });
 
       const result = extractActionData(rawResult);
+      const status = extractStatus(rawResult);
+      expect(status).toBe(400);
       expect(result.success).toBe(false);
       expect(result.fieldErrors?.tag).toContain("commas");
     });
@@ -336,6 +362,8 @@ describe("Tag Rules Route", () => {
       });
 
       const result = extractActionData(rawResult);
+      const status = extractStatus(rawResult);
+      expect(status).toBe(400);
       expect(result.success).toBe(false);
       expect(result.fieldErrors?.tag).toContain("control characters");
     });
@@ -371,6 +399,8 @@ describe("Tag Rules Route", () => {
       });
 
       const result = extractActionData(rawResult);
+      const status = extractStatus(rawResult);
+      expect(status).toBe(400);
       expect(result.success).toBe(false);
       expect(result.fieldErrors?.tag).toContain("already exists");
       expect(result.fieldErrors?.tag).toContain("case-insensitive");
@@ -402,6 +432,8 @@ describe("Tag Rules Route", () => {
       });
 
       const result = extractActionData(rawResult);
+      const status = extractStatus(rawResult);
+      expect(status).toBe(400);
       expect(result.success).toBe(false);
       // Should get error (either invalid body or unknown action)
       expect(result.error).toBeDefined();
@@ -435,6 +467,8 @@ describe("Tag Rules Route", () => {
       });
 
       const result = extractActionData(rawResult);
+      const status = extractStatus(rawResult);
+      expect(status).toBe(400);
       expect(result.success).toBe(false);
       expect(result.fieldErrors?.tag).toBe("Tag is required");
       expect(result.fieldErrors?.defaultTermsDays).toBe("Default terms days is required");
@@ -469,6 +503,8 @@ describe("Tag Rules Route", () => {
       });
 
       const result = extractActionData(rawResult);
+      const status = extractStatus(rawResult);
+      expect(status).toBe(400);
       expect(result.success).toBe(false);
       expect(result.fieldErrors?.defaultTermsDays).toContain("whole number");
     });
@@ -502,6 +538,8 @@ describe("Tag Rules Route", () => {
       });
 
       const result = extractActionData(rawResult);
+      const status = extractStatus(rawResult);
+      expect(status).toBe(400);
       expect(result.success).toBe(false);
       expect(result.fieldErrors?.defaultTermsDays).toContain("at least 1");
     });
@@ -535,6 +573,8 @@ describe("Tag Rules Route", () => {
       });
 
       const result = extractActionData(rawResult);
+      const status = extractStatus(rawResult);
+      expect(status).toBe(400);
       expect(result.success).toBe(false);
       expect(result.fieldErrors?.defaultTermsDays).toContain("at most 365");
     });
@@ -572,14 +612,19 @@ describe("Tag Rules Route", () => {
       });
 
       const result = extractActionData(rawResult);
+      const status = extractStatus(rawResult);
+      expect(status).toBeUndefined(); // 200 OK returns plain object
       expect(result.success).toBe(true);
       expect(result.createdRuleId).toBe("new-rule-id");
 
-      // Verify the INSERT was called with correct shopId
+      // Verify the INSERT was called with correct shopId and tag
       const insertCall = mockSql.mock.calls.find((call) =>
         call[0]?.some?.((s: string) => s?.includes?.("INSERT INTO"))
       );
       expect(insertCall).toBeDefined();
+      // Assert the bound values: shopId="shop-123", tag="net30"
+      expect(insertCall?.[1]).toBe("shop-123");
+      expect(insertCall?.[2]).toBe("net30");
     });
 
     it("creates tag rule with trimmed tag", async () => {
@@ -645,6 +690,8 @@ describe("Tag Rules Route", () => {
       });
 
       const result = extractActionData(rawResult);
+      const status = extractStatus(rawResult);
+      expect(status).toBe(404);
       expect(result.success).toBe(false);
       expect(result.error).toBe("Shop not found");
     });
@@ -678,6 +725,8 @@ describe("Tag Rules Route", () => {
       });
 
       const result = extractActionData(rawResult);
+      const status = extractStatus(rawResult);
+      expect(status).toBe(400);
       expect(result.success).toBe(false);
       expect(result.error).toBe("Unknown action");
     });
@@ -713,6 +762,8 @@ describe("Tag Rules Route", () => {
       });
 
       const result = extractActionData(rawResult);
+      const status = extractStatus(rawResult);
+      expect(status).toBe(400);
       expect(result.success).toBe(false);
       expect(result.error).toContain("B2B stores");
 
@@ -758,6 +809,8 @@ describe("Tag Rules Route", () => {
       });
 
       const result = extractActionData(rawResult);
+      const status = extractStatus(rawResult);
+      expect(status).toBe(400);
       expect(result.success).toBe(false);
       expect(result.fieldErrors?.tag).toContain("already exists");
     });
@@ -793,6 +846,8 @@ describe("Tag Rules Route", () => {
       });
 
       const result = extractActionData(rawResult);
+      const status = extractStatus(rawResult);
+      expect(status).toBe(400);
       expect(result.success).toBe(false);
       expect(result.fieldErrors?.tag).toContain("already exists");
     });
@@ -812,6 +867,18 @@ describe("Tag rule validation helpers", () => {
     expect(validateTag("tag<script>")).toBeNull();
     expect(validateTag("tag@email")).toBeNull();
     expect(validateTag("special!#$%^&*()")).toBeNull();
+    // Valid Shopify tag characters: : / . &
+    expect(validateTag("category:wholesale")).toBeNull();
+    expect(validateTag("tier/gold")).toBeNull();
+    expect(validateTag("v2.0")).toBeNull();
+    expect(validateTag("B&B")).toBeNull();
+    expect(validateTag("path/to:tag.v1&more")).toBeNull();
+    // Non-Latin tags (Unicode)
+    expect(validateTag("卸売")).toBeNull(); // Japanese "wholesale"
+    expect(validateTag("도매")).toBeNull(); // Korean "wholesale"
+    expect(validateTag("оптовая")).toBeNull(); // Russian "wholesale"
+    expect(validateTag("großhandel")).toBeNull(); // German "wholesale"
+    expect(validateTag("批发商")).toBeNull(); // Chinese "wholesaler"
   });
 
   it("validateTag rejects empty tags", async () => {

@@ -459,9 +459,8 @@ export default function TagRulesPage() {
 
       {actionData?.success && (
         <s-section>
-          <s-banner tone="info" heading="Tag rule created">
-            The tag rule has been saved. Customers with this tag are picked up
-            on the next sync.
+          <s-banner tone="success" heading="Tag rule saved">
+            The new tag rule is now active.
           </s-banner>
         </s-section>
       )}
