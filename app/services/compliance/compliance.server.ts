@@ -152,91 +152,106 @@ export async function redactCustomer(
   buyerAccountAnonymized: boolean;
   paymentsRedacted: number;
 }> {
-  // Delete tagged customer tracking record
-  const taggedResult = await sql`
-    DELETE FROM s8_tagged_customers
-    WHERE shop_id = ${shopId} AND customer_id = ${customerGid}
-  `;
-
-  // Delete draft orders linked to customer's buyer account
-  const draftResult = await sql`
-    DELETE FROM s8_draft_orders
-    WHERE shop_id = ${shopId}
-      AND buyer_account_id IN (
-        SELECT id FROM "BuyerAccount"
-        WHERE "shopId" = ${shopId} AND "customerId" = ${customerGid}
-      )
-  `;
-
-  // Delete data request exports for this customer (contains PII)
-  const dataRequestResult = await sql`
-    DELETE FROM s22_data_requests
-    WHERE shop_id = ${shopId} AND customer_gid = ${customerGid}
-  `;
-
-  // Find buyer account for this customer
-  const [buyerAccount] = await sql<{ id: string }[]>`
-    SELECT id FROM "BuyerAccount"
-    WHERE "shopId" = ${shopId} AND "customerId" = ${customerGid}
-  `;
-
-  let buyerAccountAnonymized = false;
-  let paymentsRedacted = 0;
-  let payerAliasesDeleted = 0;
-
-  if (buyerAccount) {
-    // Delete PayerAlias rows for this buyer account (learned payer keys)
-    // Must be deleted before anonymizing the account since aliases contain
-    // payer identification data derived from payment matching.
-    const aliasResult = await sql`
-      DELETE FROM "PayerAlias"
-      WHERE "buyerAccountId" = ${buyerAccount.id}
+  // Wrap all operations in a single transaction for atomicity.
+  // If any statement fails, the entire operation rolls back, so Shopify's
+  // retry can safely re-execute from scratch.
+  return sql.begin(async (tx) => {
+    // Delete tagged customer tracking record
+    const taggedResult = await tx`
+      DELETE FROM s8_tagged_customers
+      WHERE shop_id = ${shopId} AND customer_id = ${customerGid}
     `;
-    payerAliasesDeleted = aliasResult.count;
 
-    // Anonymize buyer account (keep for financial history)
-    await sql`
-      UPDATE "BuyerAccount"
-      SET 
-        name = 'Redacted Customer',
-        "customerId" = ${customerGid + '_redacted_' + Date.now()},
-        "updatedAt" = NOW()
-      WHERE id = ${buyerAccount.id}
+    // Delete draft orders linked to customer's buyer account
+    const draftResult = await tx`
+      DELETE FROM s8_draft_orders
+      WHERE shop_id = ${shopId}
+        AND buyer_account_id IN (
+          SELECT id FROM "BuyerAccount"
+          WHERE "shopId" = ${shopId} AND "customerId" = ${customerGid}
+        )
     `;
-    buyerAccountAnonymized = true;
 
-    // Redact payments linked to this buyer via Match→Invoice→BuyerAccount.
-    // This is the correct way to find customer's payments, not ILIKE on narration.
-    //
-    // NOTE: A payment matched to multiple buyers (split payment scenario) is FULLY
-    // redacted when ANY linked buyer is redacted. This is the conservative/safe
-    // approach for GDPR compliance: we cannot selectively redact portions of
-    // payerText/narration, and retaining any part risks exposing the redacted
-    // customer's identity through the shared payment context.
-    const paymentResult = await sql`
-      UPDATE "Payment" p
-      SET
-        "payerText" = '[REDACTED]',
-        narration = '[REDACTED]',
-        "updatedAt" = NOW()
-      WHERE p.id IN (
-        SELECT DISTINCT m."paymentId"
-        FROM "Match" m
-        JOIN "Invoice" i ON m."invoiceId" = i.id
-        WHERE i."buyerAccountId" = ${buyerAccount.id}
-      )
+    // Delete data request exports for this customer (contains PII)
+    const dataRequestResult = await tx`
+      DELETE FROM s22_data_requests
+      WHERE shop_id = ${shopId} AND customer_gid = ${customerGid}
     `;
-    paymentsRedacted = paymentResult.count;
-  }
 
-  return {
-    taggedCustomersDeleted: taggedResult.count,
-    draftOrdersDeleted: draftResult.count,
-    dataRequestsDeleted: dataRequestResult.count,
-    payerAliasesDeleted,
-    buyerAccountAnonymized,
-    paymentsRedacted,
-  };
+    // Find buyer account for this customer
+    const [buyerAccount] = await tx<{ id: string }[]>`
+      SELECT id FROM "BuyerAccount"
+      WHERE "shopId" = ${shopId} AND "customerId" = ${customerGid}
+    `;
+
+    let buyerAccountAnonymized = false;
+    let paymentsRedacted = 0;
+    let payerAliasesDeleted = 0;
+
+    if (buyerAccount) {
+      // Redact payments linked to this buyer via Match→Invoice→BuyerAccount FIRST.
+      // This must happen before BuyerAccount anonymization rewrites customerId,
+      // so a failed retry can still find the account.
+      //
+      // Shop scoping on Payment, Match, and Invoice ensures isolation.
+      //
+      // NOTE: A payment matched to multiple buyers (split payment scenario) is FULLY
+      // redacted when ANY linked buyer is redacted. This is the conservative/safe
+      // approach for GDPR compliance: we cannot selectively redact portions of
+      // payerText/narration, and retaining any part risks exposing the redacted
+      // customer's identity through the shared payment context.
+      const paymentResult = await tx`
+        UPDATE "Payment" p
+        SET
+          "payerText" = NULL,
+          narration = '[REDACTED]',
+          "updatedAt" = NOW()
+        WHERE p.id IN (
+          SELECT DISTINCT m."paymentId"
+          FROM "Match" m
+          JOIN "Invoice" i ON m."invoiceId" = i.id
+          WHERE i."buyerAccountId" = ${buyerAccount.id}
+            AND i."shopId" = ${shopId}
+            AND m."shopId" = ${shopId}
+        )
+        AND p."shopId" = ${shopId}
+      `;
+      paymentsRedacted = paymentResult.count;
+
+      // Delete PayerAlias rows for this buyer account (learned payer keys).
+      // PayerAlias has no shopId column, so we scope via BuyerAccount join.
+      const aliasResult = await tx`
+        DELETE FROM "PayerAlias"
+        WHERE "buyerAccountId" = ${buyerAccount.id}
+          AND "buyerAccountId" IN (
+            SELECT id FROM "BuyerAccount"
+            WHERE "shopId" = ${shopId}
+          )
+      `;
+      payerAliasesDeleted = aliasResult.count;
+
+      // Anonymize buyer account (keep for financial history)
+      await tx`
+        UPDATE "BuyerAccount"
+        SET 
+          name = 'Redacted Customer',
+          "customerId" = ${customerGid + '_redacted_' + Date.now()},
+          "updatedAt" = NOW()
+        WHERE id = ${buyerAccount.id}
+          AND "shopId" = ${shopId}
+      `;
+      buyerAccountAnonymized = true;
+    }
+
+    return {
+      taggedCustomersDeleted: taggedResult.count,
+      draftOrdersDeleted: draftResult.count,
+      dataRequestsDeleted: dataRequestResult.count,
+      payerAliasesDeleted,
+      buyerAccountAnonymized,
+      paymentsRedacted,
+    };
+  });
 }
 
 // ============================================================================

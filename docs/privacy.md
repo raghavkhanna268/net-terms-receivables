@@ -57,7 +57,7 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | PayerAlias | Normalized payer key, buyer account link | Payment matching | Until customers/redact or shop/redact |
 
 **Note:** `Payment.narration` and `Payment.payerText` may contain personal data from bank statements. These fields are:
-- Redacted to `[REDACTED]` during customers/redact if the payment is matched to the customer's buyer account
+- Redacted during customers/redact if the payment is matched to the customer's buyer account: `payerText` becomes `NULL` and `narration` becomes `[REDACTED]`. This happens in a single transaction scoped to the signed shop, ensuring atomicity (if any step fails, the entire redaction rolls back so Shopify's retry can re-execute safely).
 - Purged to `[RETENTION_PURGED]` after **180 days** for **unmatched** payments via nightly pg_cron job
 
 **Retention purge details:**
@@ -205,15 +205,20 @@ When a customer requests their data:
 
 When a customer must be deleted (GDPR/CCPA erasure request):
 1. **Verify** payload `shop_domain` matches header shop (returns 401 on mismatch)
-2. **Delete** `s8_tagged_customers` row for the customer
-3. **Delete** `s8_draft_orders` linked to customer's buyer account
-4. **Delete** `s22_data_requests` for the customer (contains PII in export)
-5. **Delete** `PayerAlias` rows for the customer's buyer account (learned payer keys)
-6. **Anonymize** `BuyerAccount`:
+2. **All operations run in a single database transaction** for atomicity. If any step fails, the entire redaction rolls back, allowing Shopify's retry mechanism to safely re-execute.
+3. **Delete** `s8_tagged_customers` row for the customer
+4. **Delete** `s8_draft_orders` linked to customer's buyer account
+5. **Delete** `s22_data_requests` for the customer (contains PII in export)
+6. **Redact** `Payment` fields for payments linked via Match→Invoice→BuyerAccount:
+   - `payerText` → `NULL`
+   - `narration` → `[REDACTED]`
+   - Preserved: `amount`, `utr`, `rail`, `valueDate`, and all Match/RejectedMatch rows and AuditEvent history
+   - Shop-scoped: queries include `p."shopId"`, `m."shopId"`, and `i."shopId"` predicates
+7. **Delete** `PayerAlias` rows for the customer's buyer account (learned payer keys)
+8. **Anonymize** `BuyerAccount`:
    - Set `name` to "Redacted Customer"
    - Append timestamp to `customerId` to prevent FK conflicts
-7. **Redact** `Payment` fields (`payerText`, `narration`) for payments linked via Match→Invoice→BuyerAccount relationship (not pattern matching on customer ID)
-8. **Preserve** `Invoice` records for legal/tax compliance (Invoice has no customer-identifying fields; buyer relationship is through BuyerAccount which is anonymized)
+9. **Preserve** `Invoice` records for legal/tax compliance (Invoice has no customer-identifying fields; buyer relationship is through BuyerAccount which is anonymized)
 
 **Legal retention reasoning:** Invoices must be retained for tax compliance (typically 7+ years in India). The invoice itself is a business record; the buyer link is anonymized.
 

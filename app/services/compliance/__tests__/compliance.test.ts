@@ -2,10 +2,20 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { Sql } from "~/lib/db-light.server";
 
 const mockSqlResult = Object.assign([], { count: 0 });
+
+// Create a mockTx that will be used inside sql.begin()
+const mockTx = vi.fn().mockResolvedValue(mockSqlResult);
+
 const mockSql = Object.assign(
   vi.fn().mockResolvedValue(mockSqlResult),
-  { json: vi.fn((v) => JSON.stringify(v)) }
-) as unknown as Sql & ReturnType<typeof vi.fn>;
+  {
+    json: vi.fn((v) => JSON.stringify(v)),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    begin: vi.fn(async (callback: (tx: any) => Promise<unknown>) => {
+      return callback(mockTx);
+    }),
+  }
+) as unknown as Sql & ReturnType<typeof vi.fn> & { begin: ReturnType<typeof vi.fn> };
 
 vi.mock("~/lib/db-light.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
@@ -35,6 +45,7 @@ describe("compliance.server", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSql.mockResolvedValue(mockSqlResult);
+    mockTx.mockResolvedValue(mockSqlResult);
     globalThis.fetch = mockFetch;
     process.env = { ...originalEnv };
   });
@@ -88,20 +99,21 @@ describe("compliance.server", () => {
 
   describe("redactCustomer", () => {
     it("deletes s8_tagged_customers, s8_draft_orders, s22_data_requests, and PayerAlias", async () => {
+      // Transaction operations use mockTx
       // 1. DELETE s8_tagged_customers
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
       // 2. DELETE s8_draft_orders
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 2 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
       // 3. DELETE s22_data_requests
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
       // 4. SELECT buyerAccount
-      mockSql.mockResolvedValueOnce([{ id: "ba-1" }]);
-      // 5. DELETE PayerAlias
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-      // 6. UPDATE BuyerAccount
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-      // 7. UPDATE Payment (via Match→Invoice→BuyerAccount)
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 3 }));
+      mockTx.mockResolvedValueOnce([{ id: "ba-1" }]);
+      // 5. UPDATE Payment (via Match→Invoice→BuyerAccount) - now before alias delete
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
+      // 6. DELETE PayerAlias
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
+      // 7. UPDATE BuyerAccount
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
 
       const result = await redactCustomer(
         mockSql,
@@ -118,20 +130,21 @@ describe("compliance.server", () => {
     });
 
     it("redacts payments and deletes PayerAlias via Match→Invoice→BuyerAccount", async () => {
+      // Transaction operations use mockTx
       // 1. DELETE s8_tagged_customers
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
       // 2. DELETE s8_draft_orders
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
       // 3. DELETE s22_data_requests
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
       // 4. SELECT buyerAccount
-      mockSql.mockResolvedValueOnce([{ id: "ba-1" }]);
-      // 5. DELETE PayerAlias
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-      // 6. UPDATE BuyerAccount
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-      // 7. UPDATE Payment (via Match→Invoice→BuyerAccount)
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 2 }));
+      mockTx.mockResolvedValueOnce([{ id: "ba-1" }]);
+      // 5. UPDATE Payment (via Match→Invoice→BuyerAccount) - now before alias delete
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
+      // 6. DELETE PayerAlias
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
+      // 7. UPDATE BuyerAccount
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
 
       const result = await redactCustomer(
         mockSql,
@@ -145,14 +158,15 @@ describe("compliance.server", () => {
     });
 
     it("handles customer with no data gracefully", async () => {
+      // Transaction operations use mockTx
       // 1. DELETE s8_tagged_customers
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
       // 2. DELETE s8_draft_orders
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
       // 3. DELETE s22_data_requests
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
       // 4. SELECT buyerAccount (not found)
-      mockSql.mockResolvedValueOnce([]);
+      mockTx.mockResolvedValueOnce([]);
 
       const result = await redactCustomer(
         mockSql,
@@ -169,14 +183,15 @@ describe("compliance.server", () => {
     });
 
     it("deletes data requests for the customer", async () => {
+      // Transaction operations use mockTx
       // 1. DELETE s8_tagged_customers
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
       // 2. DELETE s8_draft_orders
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
       // 3. DELETE s22_data_requests - 3 requests exist
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 3 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
       // 4. SELECT buyerAccount (not found)
-      mockSql.mockResolvedValueOnce([]);
+      mockTx.mockResolvedValueOnce([]);
 
       const result = await redactCustomer(
         mockSql,
@@ -186,6 +201,22 @@ describe("compliance.server", () => {
 
       expect(result.dataRequestsDeleted).toBe(3);
       expect(result.payerAliasesDeleted).toBe(0);
+    });
+
+    it("runs all operations in a single transaction", async () => {
+      // Setup: customer has data to redact
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 })); // tagged_customers
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 })); // draft_orders
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 })); // data_requests
+      mockTx.mockResolvedValueOnce([{ id: "ba-1" }]); // buyerAccount
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 })); // payments
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 })); // aliases
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 })); // buyerAccount update
+
+      await redactCustomer(mockSql, "shop-123", "gid://shopify/Customer/456");
+
+      // Verify sql.begin was called (ensures transaction wrapper)
+      expect(mockSql.begin).toHaveBeenCalledTimes(1);
     });
   });
 
