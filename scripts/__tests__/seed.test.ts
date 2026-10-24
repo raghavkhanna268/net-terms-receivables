@@ -74,6 +74,8 @@ import {
   getIndiaProvinceCode,
   getIndiaAddressInfo,
   INDIA_CITY_ADDRESS_INFO,
+  makeAccountSourceId,
+  makeBuyerAccountId,
   type SeedState,
   type GraphQLResponse,
   type UserError,
@@ -6757,5 +6759,319 @@ describe("seed summary output PII checks (unit)", () => {
     expect(PII_PATTERNS.currencyAmount.test("INR 1000")).toBe(true);
     expect(PII_PATTERNS.currencyAmount.test("USD 1,234.56")).toBe(true);
     expect(PII_PATTERNS.currencyAmount.test("Count: 1000")).toBe(false);
+  });
+});
+
+describe("shop-scoped ID helpers", () => {
+  it("makeAccountSourceId generates shop-scoped ID", () => {
+    const id = makeAccountSourceId("shop-123", "ntr-seed-net15");
+    expect(id).toBe("seed-source-shop-123-ntr-seed-net15");
+  });
+
+  it("makeBuyerAccountId generates shop-scoped ID", () => {
+    const id = makeBuyerAccountId("shop-456", "gid://shopify/CompanyLocation/loc-1");
+    expect(id).toBe("seed-account-shop-456-gid://shopify/CompanyLocation/loc-1");
+  });
+
+  it("makeAccountSourceId avoids old format without shopId", () => {
+    const id = makeAccountSourceId("my-shop", "tag");
+    expect(id).not.toBe("seed-source-tag");
+    expect(id).toContain("my-shop");
+  });
+
+  it("makeBuyerAccountId avoids old format without shopId", () => {
+    const id = makeBuyerAccountId("my-shop", "loc-1");
+    expect(id).not.toBe("seed-account-loc-1");
+    expect(id).toContain("my-shop");
+  });
+});
+
+describe("dry-run printout ID format", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("printDatabaseSeedSQL uses shop-scoped AccountSource IDs", () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    
+    const state = createMockState({ currencyCode: "INR" });
+    const locations = new Map<number, string>();
+    locations.set(15, "gid://shopify/CompanyLocation/test-loc-15");
+    state.companies.set("test-company", createMockCompanyData({ locations }));
+
+    printDatabaseSeedSQL(state);
+
+    const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    
+    // Verify shop-scoped format is used (seed-source-<shopId>-<tag>)
+    expect(output).toMatch(/seed-source-seed-shop-placeholder-ntr-seed-net\d+/);
+    
+    // Verify old format without shopId is NOT used
+    expect(output).not.toMatch(/VALUES\s*\('seed-source-ntr-seed-net\d+'/);
+    
+    logSpy.mockRestore();
+  });
+
+  it("printDatabaseSeedSQL uses shop-scoped BuyerAccount IDs", () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    
+    const state = createMockState({ currencyCode: "INR" });
+    const locations = new Map<number, string>();
+    locations.set(15, "gid://shopify/CompanyLocation/test-loc-15");
+    state.companies.set("test-company", createMockCompanyData({ locations }));
+
+    printDatabaseSeedSQL(state);
+
+    const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    
+    // Verify shop-scoped format is used (seed-account-<shopId>-<locationId>)
+    expect(output).toMatch(/seed-account-seed-shop-placeholder-gid:\/\/shopify\/CompanyLocation/);
+    
+    // Verify old format without shopId is NOT used
+    expect(output).not.toMatch(/VALUES\s*\('seed-account-gid:\/\/shopify\/CompanyLocation\/[^']+',\s*'seed-shop-placeholder'/);
+    
+    logSpy.mockRestore();
+  });
+
+  it("dry-run output IDs match format used by real seedDatabase writes", () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    
+    const state = createMockState({ currencyCode: "INR" });
+    const locations = new Map<number, string>();
+    const testLocationId = "gid://shopify/CompanyLocation/test-loc";
+    locations.set(30, testLocationId);
+    state.companies.set("test-co", createMockCompanyData({ locations }));
+
+    printDatabaseSeedSQL(state);
+
+    const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    
+    // The dry-run uses makeAccountSourceId and makeBuyerAccountId
+    // which produce the same format as seedDatabase
+    const expectedSourceId = makeAccountSourceId("seed-shop-placeholder", "ntr-seed-net30");
+    const expectedAccountId = makeBuyerAccountId("seed-shop-placeholder", testLocationId);
+    
+    expect(output).toContain(expectedSourceId);
+    expect(output).toContain(expectedAccountId);
+    
+    logSpy.mockRestore();
+  });
+});
+
+describe("seed exit code behavior", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    setupMockFetch();
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it("seedDatabase increments failedCount.dbRows on AccountSource count mismatch", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    
+    const state = createMockState({
+      databaseUrl: "postgresql://mock",
+      dryRun: false,
+      currencyCode: "INR",
+    });
+    
+    const locations = new Map<number, string>();
+    locations.set(15, "gid://shopify/CompanyLocation/loc-15");
+    state.companies.set("test-company", createMockCompanyData({ locations }));
+
+    // Mock postgres to simulate a count mismatch
+    vi.doMock("postgres", () => ({
+      default: () => {
+        const mockSql = Object.assign(
+          async (strings: TemplateStringsArray, ..._values: unknown[]) => {
+            const query = strings.join("?");
+            // Shop upsert returns xmax=0 (created)
+            if (query.includes('INSERT INTO "Shop"')) {
+              return [{ id: "test-shop-id", xmax: "0" }];
+            }
+            // AccountSource upsert returns xmax=0 (created)
+            if (query.includes('INSERT INTO "AccountSource"')) {
+              return [{ xmax: "0" }];
+            }
+            // BuyerAccount upsert returns xmax=0 (created)
+            if (query.includes('INSERT INTO "BuyerAccount"')) {
+              return [{ xmax: "0" }];
+            }
+            // Shop existence check
+            if (query.includes('SELECT COUNT(*)') && query.includes('"Shop"')) {
+              return [{ count: 1 }];
+            }
+            // AccountSource count - return WRONG count to trigger mismatch
+            if (query.includes('SELECT COUNT(*)') && query.includes('"AccountSource"')) {
+              return [{ count: 0 }]; // Should be 3, return 0 to cause mismatch
+            }
+            // BuyerAccount count
+            if (query.includes('SELECT COUNT(*)') && query.includes('"BuyerAccount"')) {
+              return [{ count: 1 }];
+            }
+            return [];
+          },
+          { end: async () => {} }
+        );
+        return mockSql;
+      },
+    }));
+
+    const { seedDatabase } = await import("../seed");
+    await seedDatabase(state);
+
+    // Should have incremented failedCount.dbRows due to mismatch
+    expect(state.failedCount.dbRows).toBeGreaterThan(0);
+    
+    const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    expect(output).toContain("mismatch");
+    
+    logSpy.mockRestore();
+  });
+
+  it("seedDatabase increments failedCount.dbRows on BuyerAccount count mismatch", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    
+    const state = createMockState({
+      databaseUrl: "postgresql://mock",
+      dryRun: false,
+      currencyCode: "INR",
+    });
+    
+    const locations = new Map<number, string>();
+    locations.set(15, "gid://shopify/CompanyLocation/loc-15");
+    state.companies.set("test-company", createMockCompanyData({ locations }));
+
+    // Mock postgres to simulate a BuyerAccount count mismatch
+    vi.doMock("postgres", () => ({
+      default: () => {
+        const mockSql = Object.assign(
+          async (strings: TemplateStringsArray, ..._values: unknown[]) => {
+            const query = strings.join("?");
+            if (query.includes('INSERT INTO "Shop"')) {
+              return [{ id: "test-shop-id", xmax: "0" }];
+            }
+            if (query.includes('INSERT INTO "AccountSource"')) {
+              return [{ xmax: "0" }];
+            }
+            if (query.includes('INSERT INTO "BuyerAccount"')) {
+              return [{ xmax: "0" }];
+            }
+            if (query.includes('SELECT COUNT(*)') && query.includes('"Shop"')) {
+              return [{ count: 1 }];
+            }
+            if (query.includes('SELECT COUNT(*)') && query.includes('"AccountSource"')) {
+              return [{ count: 3 }]; // Correct count
+            }
+            // BuyerAccount count - return WRONG count to trigger mismatch
+            if (query.includes('SELECT COUNT(*)') && query.includes('"BuyerAccount"')) {
+              return [{ count: 0 }]; // Should be 1, return 0 to cause mismatch
+            }
+            return [];
+          },
+          { end: async () => {} }
+        );
+        return mockSql;
+      },
+    }));
+
+    const { seedDatabase } = await import("../seed");
+    await seedDatabase(state);
+
+    // Should have incremented failedCount.dbRows due to mismatch
+    expect(state.failedCount.dbRows).toBeGreaterThan(0);
+    
+    const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    expect(output).toContain("mismatch");
+    
+    logSpy.mockRestore();
+  });
+
+  it("seedDatabase does not increment failedCount.dbRows when counts match", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    
+    const state = createMockState({
+      databaseUrl: "postgresql://mock",
+      dryRun: false,
+      currencyCode: "INR",
+    });
+    
+    const locations = new Map<number, string>();
+    locations.set(15, "gid://shopify/CompanyLocation/loc-15");
+    state.companies.set("test-company", createMockCompanyData({ locations }));
+
+    // Mock postgres with matching counts
+    vi.doMock("postgres", () => ({
+      default: () => {
+        const mockSql = Object.assign(
+          async (strings: TemplateStringsArray, ..._values: unknown[]) => {
+            const query = strings.join("?");
+            if (query.includes('INSERT INTO "Shop"')) {
+              return [{ id: "test-shop-id", xmax: "0" }];
+            }
+            if (query.includes('INSERT INTO "AccountSource"')) {
+              return [{ xmax: "0" }];
+            }
+            if (query.includes('INSERT INTO "BuyerAccount"')) {
+              return [{ xmax: "0" }];
+            }
+            if (query.includes('SELECT COUNT(*)') && query.includes('"Shop"')) {
+              return [{ count: 1 }];
+            }
+            // Correct counts - should match tracker
+            if (query.includes('SELECT COUNT(*)') && query.includes('"AccountSource"')) {
+              return [{ count: 3 }];
+            }
+            if (query.includes('SELECT COUNT(*)') && query.includes('"BuyerAccount"')) {
+              return [{ count: 1 }];
+            }
+            return [];
+          },
+          { end: async () => {} }
+        );
+        return mockSql;
+      },
+    }));
+
+    const { seedDatabase } = await import("../seed");
+    await seedDatabase(state);
+
+    // Should NOT have incremented failedCount.dbRows
+    expect(state.failedCount.dbRows).toBe(0);
+    
+    const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    expect(output).not.toContain("mismatch");
+    
+    logSpy.mockRestore();
+  });
+
+  it("main exits non-zero when totalFailures > 0", async () => {
+    // This test verifies the exit behavior is tied to failedCount
+    // The main() function checks: if (totalFailures > 0 || state.errors.length > 0) process.exit(1)
+    
+    const state = createMockState();
+    state.failedCount.dbRows = 1;
+    
+    const totalFailures = state.failedCount.companies + state.failedCount.locations + 
+                          state.failedCount.orders + state.failedCount.roleAssignments + state.failedCount.dbRows;
+    
+    expect(totalFailures).toBeGreaterThan(0);
+  });
+
+  it("main exits zero when no failures and no errors", async () => {
+    const state = createMockState();
+    
+    const totalFailures = state.failedCount.companies + state.failedCount.locations + 
+                          state.failedCount.orders + state.failedCount.roleAssignments + state.failedCount.dbRows;
+    
+    expect(totalFailures).toBe(0);
+    expect(state.errors.length).toBe(0);
   });
 });

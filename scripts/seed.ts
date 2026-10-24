@@ -200,6 +200,22 @@ export const LOCATION_TERMS: { suffix: string; dueInDays: number }[] = [
 ];
 
 /**
+ * Generate shop-scoped AccountSource ID.
+ * Used by both seedDatabase and printDatabaseSeedSQL to ensure consistent ID format.
+ */
+export function makeAccountSourceId(shopId: string, tag: string): string {
+  return `seed-source-${shopId}-${tag}`;
+}
+
+/**
+ * Generate shop-scoped BuyerAccount ID.
+ * Used by both seedDatabase and printDatabaseSeedSQL to ensure consistent ID format.
+ */
+export function makeBuyerAccountId(shopId: string, locationId: string): string {
+  return `seed-account-${shopId}-${locationId}`;
+}
+
+/**
  * Indian city address data: ISO 3166-2:IN zone/province code and PIN code prefix.
  * @see https://en.wikipedia.org/wiki/ISO_3166-2:IN
  * @see https://en.wikipedia.org/wiki/Postal_Index_Number
@@ -3518,8 +3534,7 @@ export async function seedDatabase(state: SeedState): Promise<void> {
       const tag = `${SEED_TAG}-net${loc.dueInDays}`;
       tracker.tags.add(tag);
       
-      // Use a shop-scoped id to avoid conflicts across different shops
-      const sourceId = `seed-source-${shopId}-${tag}`;
+      const sourceId = makeAccountSourceId(shopId, tag);
       
       const result = await sql`
         INSERT INTO "AccountSource" (id, "shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")
@@ -3546,12 +3561,11 @@ export async function seedDatabase(state: SeedState): Promise<void> {
     }
 
     // Upsert BuyerAccount records for each company location
-    // Use shop-scoped id to avoid conflicts across different shops
     for (const [companyKey, company] of state.companies) {
       for (const [dueInDays, locationId] of company.locations) {
         tracker.companyLocationIds.add(locationId);
         const accountName = `${COMPANY_SEEDS.find(c => c.key === companyKey)?.name ?? companyKey} - Net ${dueInDays}`;
-        const accountId = `seed-account-${shopId}-${locationId}`;
+        const accountId = makeBuyerAccountId(shopId, locationId);
         
         const result = await sql`
           INSERT INTO "BuyerAccount" (
@@ -3608,15 +3622,22 @@ export async function seedDatabase(state: SeedState): Promise<void> {
 
     // Verify counts against actual DB state using exact keys we wrote
     const actualCounts = await getSeedDbCounts(sql, tracker);
+    let hasMismatch = false;
     
     if (actualCounts.accountSourceCount !== summary.totalAccountSources) {
       console.log(`  ⚠️  AccountSource count mismatch: tracker=${summary.totalAccountSources}, DB=${actualCounts.accountSourceCount}`);
       state.createdCount.dbRules = actualCounts.accountSourceCount;
+      hasMismatch = true;
     }
     
     if (actualCounts.buyerAccountCount !== summary.totalBuyerAccounts) {
       console.log(`  ⚠️  BuyerAccount count mismatch: tracker=${summary.totalBuyerAccounts}, DB=${actualCounts.buyerAccountCount}`);
       state.createdCount.dbAccounts = actualCounts.buyerAccountCount;
+      hasMismatch = true;
+    }
+
+    if (hasMismatch) {
+      state.failedCount.dbRows++;
     }
 
   } finally {
@@ -3637,8 +3658,9 @@ export function printDatabaseSeedSQL(state: SeedState): void {
   console.log(`-- Upsert AccountSource tag rules`);
   for (const loc of LOCATION_TERMS) {
     const tag = `${SEED_TAG}-net${loc.dueInDays}`;
+    const sourceId = makeAccountSourceId(shopId, tag);
     console.log(`INSERT INTO "AccountSource" (id, "shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")`);
-    console.log(`VALUES ('seed-source-${tag}', '${shopId}', '${tag}', ${loc.dueInDays}, NOW(), NOW())`);
+    console.log(`VALUES ('${sourceId}', '${shopId}', '${tag}', ${loc.dueInDays}, NOW(), NOW())`);
     console.log(`ON CONFLICT ("shopId", tag) DO UPDATE SET "defaultTermsDays" = EXCLUDED."defaultTermsDays", "updatedAt" = NOW();`);
   }
   console.log();
@@ -3649,8 +3671,9 @@ export function printDatabaseSeedSQL(state: SeedState): void {
       // Use externalId for account name (PII-free)
       const externalId = `${SEED_PREFIX}${companyKey}`;
       const accountName = `${externalId} - Net ${dueInDays}`;
+      const accountId = makeBuyerAccountId(shopId, locationId);
       console.log(`INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "defaultTermsDays", "defaultTermsSource", "holdState", "createdAt", "updatedAt")`);
-      console.log(`VALUES ('seed-account-${locationId}', '${shopId}', 'COMPANY', '${company.id}', '${locationId}', '${accountName}', ${dueInDays}, 'explicit', 'OK', NOW(), NOW())`);
+      console.log(`VALUES ('${accountId}', '${shopId}', 'COMPANY', '${company.id}', '${locationId}', '${accountName}', ${dueInDays}, 'explicit', 'OK', NOW(), NOW())`);
       console.log(`ON CONFLICT ("shopId", "companyLocationId") DO UPDATE SET "defaultTermsDays" = EXCLUDED."defaultTermsDays", "defaultTermsSource" = EXCLUDED."defaultTermsSource", "updatedAt" = NOW();`);
     }
   }

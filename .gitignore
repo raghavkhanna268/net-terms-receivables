@@ -34,8 +34,8 @@ app/generated/prisma-node/
 # Shopify CLI files
 .shopify/*
 .shopify.lock
-# Local app config overrides (e.g. shopify.app.dev.toml created by `shopify app config link`)
-shopify.app.*.toml
+# Local app config created by `shopify app config link`
+shopify.app.dev.toml
 
 # React Router auto-generated types
 .react-router/
