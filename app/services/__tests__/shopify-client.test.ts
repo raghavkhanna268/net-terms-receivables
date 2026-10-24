@@ -382,7 +382,7 @@ describe("shopify-client.server", () => {
       );
 
       const result = await shopifyGraphQL(
-        "revoked-shop.myshopify.com",
+        "test-revoked-shop.myshopify.com",
         "query { shop { name } }"
       );
 
@@ -402,7 +402,7 @@ describe("shopify-client.server", () => {
       );
 
       const result = await shopifyGraphQL(
-        "missing-session.myshopify.com",
+        "test-missing-session.myshopify.com",
         "query { shop { name } }"
       );
 
@@ -422,7 +422,7 @@ describe("shopify-client.server", () => {
       );
 
       const result = await shopifyGraphQL(
-        "expired-session.myshopify.com",
+        "test-expired-session.myshopify.com",
         "query { shop { name } }"
       );
 

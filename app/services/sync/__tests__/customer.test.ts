@@ -1074,7 +1074,7 @@ describeWithDb("Customer Sync", () => {
       const redactShopId = `shop-redact-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
-        VALUES (${redactShopId}, 'redact-test.myshopify.com', NOW(), NOW())
+        VALUES (${redactShopId}, 'test-redact.myshopify.com', NOW(), NOW())
       `;
 
       // Create multiple tagged customer records

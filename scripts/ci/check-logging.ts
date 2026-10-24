@@ -51,9 +51,10 @@ const TOKEN_KEY_PATTERNS = [
 ];
 
 /**
- * Token prefix patterns for text-based scanning of scripts.
+ * Token prefix patterns for text-based scanning of scripts and test files.
+ * P2: Must include shpca_/shppa_ (customer/partner access tokens).
  */
-const TOKEN_PREFIX_PATTERN = /shpat_|shpua_|shpss_/;
+const TOKEN_PREFIX_PATTERN = /shpat_|shpua_|shpss_|shpca_|shppa_/;
 
 /**
  * Normalize a key for matching: convert snake_case to camelCase equivalent
@@ -1509,28 +1510,14 @@ function hasRealLookingToken(line: string): boolean {
 }
 
 /**
- * Explicit set of fake domain prefixes that are safe in test files.
- * Only domains starting with these (case-insensitive) are considered fake.
- * Any other domain is flagged as potentially real.
+ * Explicit set of fake subdomains that are safe in test files.
+ * P1: Only exact matches from this set or prefixes with proper boundaries are allowed.
+ * No heuristic substring matching - strict fail-closed approach.
  */
-const FAKE_DOMAIN_PREFIXES = new Set([
-  "example",
-  "test",
-  "my-store",
-  "dev-store",
-  "fake",
-  "placeholder",
-  "mock",
-  "demo",
-  "sample",
-  "qa",
-  "staging",
-  "sentinel",
-  "shop1",
-  "shop2",
-  "shopa",
-  "shopb",
-  "shopc",
+const FAKE_SUBDOMAINS = new Set([
+  "example", "test", "fake", "placeholder", "mock", "demo", "sample",
+  "sentinel", "invalid", "nonexistent", "my-store", "dev-store",
+  "shop", "store", "shop1", "shop2", "shop-a", "shop-b", "shopa", "shopb", "shopc",
 ]);
 
 /**
@@ -1539,103 +1526,76 @@ const FAKE_DOMAIN_PREFIXES = new Set([
 const FAKE_TLDS = [".test", ".invalid", ".example", ".localhost"];
 
 /**
- * Check if a domain is explicitly fake (safe for test files).
- * A domain is fake if:
- * 1. Its subdomain contains known test indicators (test, mock, fake, etc.), OR
- * 2. Its subdomain starts with a known fake prefix, OR
- * 3. Its subdomain is a generic placeholder (shop-a, shop-1, etc.), OR
- * 4. It uses a fake TLD (.test, .invalid), OR
- * 5. It's a template interpolation (${...}.myshopify.com), OR
- * 6. It's an SQL pattern or template literal interpolation
+ * Check if a subdomain matches a fake prefix with proper boundary.
+ * Proper boundary means: prefix followed by hyphen (-), digit, or end of string.
+ * P1: No heuristic substring matching - only explicit prefixes with boundaries.
  */
-function isFakeDomain(line: string): boolean {
-  // Template interpolation: ${...}.myshopify.com
-  if (/\$\{[^}]+\}\.myshopify\.com/i.test(line)) return true;
-
-  // SQL/template string patterns (e.g., LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'})
-  if (/['"`]\s*[-+%]\s*.*\.myshopify\.com/i.test(line)) return true;
-  if (/\+\s*['"`]\.myshopify\.com/i.test(line)) return true;
-
-  // Email embedded in domain string (e.g., "owner@shop.myshopify.com")
-  if (/@[^@\s]*\.myshopify\.com/i.test(line)) return true;
-
-  // Extract the subdomain from myshopify.com
-  const match = line.match(/([a-z0-9][-_a-z0-9]*)\.myshopify\.com/i);
-  if (match) {
-    const subdomain = match[1].toLowerCase();
-
-    // Check if subdomain starts with a fake prefix
-    for (const prefix of FAKE_DOMAIN_PREFIXES) {
-      if (subdomain === prefix || subdomain.startsWith(prefix + "-") || subdomain.startsWith(prefix + ".")) {
-        return true;
-      }
-    }
-
-    // Check if subdomain CONTAINS test indicators anywhere
-    if (/test|mock|fake|demo|sample|example|placeholder|sentinel|nonexistent|invalid|dummy|acme|evil/i.test(subdomain)) {
-      return true;
-    }
-
-    // Check for generic single-letter or single-digit suffixes: shop-a, shop-1, shop1
-    if (/^shop[-_]?[a-z0-9]$/i.test(subdomain)) {
-      return true;
-    }
-
-    // Check for test suite prefixes like s20-, s13-, s1- etc.
-    if (/^s\d+-/i.test(subdomain)) {
-      return true;
-    }
-
-    // Check for descriptive test patterns at START of subdomain
-    if (/^(dev|qa|staging|other|deleted|revoked|expired|missing|empty|failing|sensitive|reinstall|fresh|idempotent|retry|error|context|scopes|uninstall|direct|traditional|reconcile|redact|unknown|no-sessions|no-context|events|customer|handle|bound|ssr|log|compliance|my-?shop|net-terms|unbound|concurrent|pii|cached|clear)/i.test(subdomain)) {
-      return true;
-    }
-
-    // Check for subdomains ending with -shop (common test naming pattern)
-    if (/-shop$/i.test(subdomain)) {
-      return true;
-    }
-
-    // Check for shop with underscore (shop_name) or camelCase (MyShop)
-    if (/^shop[_A-Z]/i.test(subdomain)) {
-      return true;
-    }
-
-    // Check for numbered shop patterns (my-shop123, shop123, etc.)
-    if (/^(my-?)?shop\d+$/i.test(subdomain)) {
-      return true;
-    }
-
-    // All-uppercase indicates test constant (e.g., SENTINEL_DOMAIN)
-    if (/^[A-Z_]+$/.test(match[1])) {
-      return true;
-    }
+function matchesFakePrefix(subdomain: string): boolean {
+  const lower = subdomain.toLowerCase();
+  const prefixes = ["test", "fake", "mock", "example", "sentinel"];
+  for (const prefix of prefixes) {
+    if (lower === prefix) return true;
+    if (lower.startsWith(prefix + "-")) return true;
+    if (lower.startsWith(prefix) && /^\d/.test(lower.slice(prefix.length))) return true;
   }
-
-  // Check for fake TLDs
-  for (const tld of FAKE_TLDS) {
-    if (line.toLowerCase().includes(tld)) return true;
-  }
-
+  if (/^s\d+(-|$)/.test(lower)) return true;
   return false;
 }
 
 /**
- * Assertion and test description patterns.
- * These are meta-level references to domains, not actual domain usage.
+ * Check if ALL domains on a line are explicitly fake (safe for test files).
+ * P1: Strict fail-closed - a domain is fake only if:
+ * 1. Its subdomain EXACTLY equals a value in FAKE_SUBDOMAINS, OR
+ * 2. Its subdomain starts with test-/fake-/mock-/example-/sentinel- with proper boundary, OR
+ * 3. Its subdomain starts with s##- (test suite prefix), OR
+ * 4. The line is a template interpolation (${...}.myshopify.com), OR
+ * 5. The line is an SQL/string concatenation pattern, OR
+ * 6. The subdomain is ALL_CAPS (test constant), OR
+ * 7. The domain uses a fake TLD (.test, .invalid, .example, .localhost)
+ *
+ * Returns true only if ALL domains on the line are fake. Returns false if ANY domain is real.
+ * P1: Must check EVERY domain on the line using global regex.
  */
-const ASSERTION_PATTERNS = [
-  // Assertions checking domains are NOT present
+function allDomainsAreFake(line: string): boolean {
+  if (/\$\{[^}]+\}\.myshopify\.com/i.test(line)) return true;
+
+  if (/['"`]\s*[-+%]\s*.*\.myshopify\.com/i.test(line)) return true;
+  if (/\+\s*['"`]\.myshopify\.com/i.test(line)) return true;
+
+  for (const tld of FAKE_TLDS) {
+    if (line.toLowerCase().includes(tld)) return true;
+  }
+
+  const domainRegex = /([a-z0-9][-_a-z0-9]*)\.myshopify\.com/gi;
+  let match;
+  let foundAnyDomain = false;
+  while ((match = domainRegex.exec(line)) !== null) {
+    foundAnyDomain = true;
+    const subdomain = match[1].toLowerCase();
+    const originalCase = match[1];
+
+    if (/^[A-Z_]+$/.test(originalCase)) continue;
+
+    if (FAKE_SUBDOMAINS.has(subdomain)) continue;
+
+    if (matchesFakePrefix(subdomain)) continue;
+
+    return false;
+  }
+
+  return foundAnyDomain;
+}
+
+/**
+ * Domain skip patterns for test file scanning.
+ * P1: Must be strict - only these specific patterns are allowed:
+ * - .not.toContain( / .not.toMatch( - assertions checking absence
+ * - Test description strings (it/describe/test) mentioning myshopify
+ */
+const DOMAIN_SKIP_PATTERNS = [
   /\.not\.toContain\(/,
   /\.not\.toMatch\(/,
-  /expect\(.*\)\.not\./,
-  /\.toBe\(false\)/,
-  /toContain\(".*myshopify\.com"\)/i,
-  
-  // Test descriptions mentioning domains (it("...", describe("...")
-  /it\s*\(\s*["'`].*myshopify/i,
-  /describe\s*\(\s*["'`].*myshopify/i,
-  /test\s*\(\s*["'`].*myshopify/i,
+  /^[^'"]*(?:it|describe|test)\s*\(\s*["'`][^"'`]*myshopify/i,
 ];
 
 function analyzeTestFile(testFile: TestFile): Violation[] {
@@ -1651,14 +1611,13 @@ function analyzeTestFile(testFile: TestFile): Violation[] {
     if (line.trim().startsWith("//") || line.trim().startsWith("*")) continue;
 
     // Check for token prefixes (shpat_, shpua_, shpss_, shpca_, shppa_)
-    // P1 fix: Decide fake vs real based on the token VALUE, not context words
+    // P2: Decide fake vs real based on the token VALUE only
+    // P2: Don't apply assertion patterns to tokens - if VALUE looks real, flag it
     if (TOKEN_PREFIX_PATTERN.test(line)) {
       // Skip regex patterns (used for validation/redaction)
-      if (/\/.*shp[atu]{2}_/.test(line) || /RegExp|\.test\(|\.replace\(/.test(line)) continue;
+      if (/\/.*shp(?:at|ua|ss|ca|pa)_/.test(line) || /RegExp|\.test\(|\.replace\(/.test(line)) continue;
       // Skip if it's in a file that handles token redaction
       if (/\/log\.server|lib\/log/i.test(testFile.relPath) || testFile.relPath.includes("sentry")) continue;
-      // Skip assertions about tokens
-      if (ASSERTION_PATTERNS.some((p) => p.test(line))) continue;
 
       // P1: Check if the token VALUE looks real (32+ hex chars, not synthetic)
       if (hasRealLookingToken(line)) {
@@ -1674,17 +1633,17 @@ function analyzeTestFile(testFile: TestFile): Violation[] {
     }
 
     // Check for myshopify.com domain literal
-    // P1 fix: Only allow explicitly fake domains, flag anything else
+    // P1 fix: Strict fail-closed - only allow explicitly fake domains
     if (DOMAIN_LITERAL_PATTERN.test(line)) {
       // Skip comments
       if (line.trim().startsWith("//") || line.trim().startsWith("*")) continue;
       // Skip validation patterns
       if (VALIDATION_PATTERNS.some((p) => p.test(line))) continue;
-      // Skip assertion patterns (tests checking domains are NOT logged)
-      if (ASSERTION_PATTERNS.some((p) => p.test(line))) continue;
+      // Skip specific assertion patterns (P1: strict list only)
+      if (DOMAIN_SKIP_PATTERNS.some((p) => p.test(line))) continue;
 
-      // P1: Only allow explicitly fake domains
-      if (!isFakeDomain(line)) {
+      // P1: Only allow explicitly fake domains - check EVERY domain on the line
+      if (!allDomainsAreFake(line)) {
         violations.push({
           file: testFile.relPath,
           line: lineNum,
@@ -1720,6 +1679,9 @@ function analyzeTestFileForLoggerMocks(testFile: TestFile): Violation[] {
     true,
     testFile.fullPath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS
   );
+
+  // P3: Clear spy tracking at the start of each file to avoid cross-file false positives
+  spyOnAssignments.clear();
 
   function visit(node: ts.Node): void {
     if (ts.isCallExpression(node)) {

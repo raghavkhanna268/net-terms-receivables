@@ -11,7 +11,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-const SENSITIVE_DOMAIN = "pii-test-reminder.myshopify.com";
+const SENSITIVE_DOMAIN = "test-pii-reminder.myshopify.com";
 const SENSITIVE_EMAIL = "buyer@pii-reminder-test.com";
 const SENSITIVE_AMOUNT = "75000";
 
@@ -243,7 +243,7 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
     const mockInvoiceData = {
       invoiceId: "inv-r1",
       shopId: "shop-r1",
-      shopDomain: "r1-test.myshopify.com",
+      shopDomain: "test-r1.myshopify.com",
       shopTimezone: "Asia/Kolkata",
       invoiceName: "#R1-001",
       total: "50000",
@@ -313,7 +313,7 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
     const mockInvoiceData = {
       invoiceId: "inv-r1-http",
       shopId: "shop-r1-http",
-      shopDomain: "r1-http.myshopify.com",
+      shopDomain: "test-r1-http.myshopify.com",
       shopTimezone: "Asia/Kolkata",
       invoiceName: "#R1-HTTP",
       total: "50000",

@@ -366,7 +366,7 @@ describe("jobs.drain route", () => {
     it("logs drain error with error code, no raw message or PII", async () => {
       // Error containing fictional domain, email, and free text
       const piiError = new TypeError(
-        "Connection failed for shop pii-shop.myshopify.com, contact alice@example.com: sensitive details here"
+        "Connection failed for shop test-pii-shop.myshopify.com, contact alice@example.com: sensitive details here"
       );
       mockRunDrain.mockRejectedValueOnce(piiError);
 
@@ -399,7 +399,7 @@ describe("jobs.drain route", () => {
     it("drain error log redacts domain, email, and free text from error message", async () => {
       // Error with multiple PII types in message
       const piiError = new Error(
-        "Database error for merchant@shop.com at customer-store.myshopify.com: credit limit exceeded for John Doe"
+        "Database error for merchant@shop.com at test-customer-store.myshopify.com: credit limit exceeded for John Doe"
       );
       mockRunDrain.mockRejectedValueOnce(piiError);
 
@@ -415,7 +415,7 @@ describe("jobs.drain route", () => {
 
       // Verify PII is NOT in any error output
       expect(allOutput).not.toContain("merchant@shop.com");
-      expect(allOutput).not.toContain("customer-store.myshopify.com");
+      expect(allOutput).not.toContain("test-customer-store.myshopify.com");
       expect(allOutput).not.toContain("John Doe");
       expect(allOutput).not.toContain("credit limit exceeded");
 
@@ -427,7 +427,7 @@ describe("jobs.drain route", () => {
     it("reconcile error uses error code, no raw message or PII", async () => {
       // Error containing fictional domain, email, and free text
       const piiError = new Error(
-        "Reconcile failed for admin@company.com at reconcile-shop.myshopify.com: internal auth token expired"
+        "Reconcile failed for admin@company.com at test-reconcile-shop.myshopify.com: internal auth token expired"
       );
 
       // Mock the enqueueReconcileForAllShops to throw

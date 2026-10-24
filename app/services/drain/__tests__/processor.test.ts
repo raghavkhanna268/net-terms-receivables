@@ -531,7 +531,7 @@ describe("Deleted shop handling", () => {
     // adminGraphQL returns a non-retryable error for missing sessions.
     mockAdminGraphQL.mockResolvedValue({
       success: false,
-      error: "No offline session found for deleted-shop.myshopify.com. Shop may need to reinstall the app.",
+      error: "No offline session found for test-deleted-shop.myshopify.com. Shop may need to reinstall the app.",
       retryable: false,
     });
 
@@ -545,7 +545,7 @@ describe("Deleted shop handling", () => {
 
     const message = {
       topic: "COMPANIES_CREATE",
-      shop: "deleted-shop.myshopify.com",
+      shop: "test-deleted-shop.myshopify.com",
       webhookId: "wh-deleted-1",
       resourceGid: "gid://shopify/Company/123",
       enqueuedAt: new Date().toISOString(),
@@ -562,7 +562,7 @@ describe("Deleted shop handling", () => {
     // 401 is RETRYABLE because #76 session refresh can recover the token
     mockAdminGraphQL.mockResolvedValue({
       success: false,
-      error: "Authentication failed for revoked-shop.myshopify.com (401). Token may need refresh.",
+      error: "Authentication failed for test-revoked-shop.myshopify.com (401). Token may need refresh.",
       retryable: true, // Retryable: session refresh can recover
     });
 
@@ -576,7 +576,7 @@ describe("Deleted shop handling", () => {
 
     const message = {
       topic: "ORDERS_CREATE",
-      shop: "revoked-shop.myshopify.com",
+      shop: "test-revoked-shop.myshopify.com",
       webhookId: "wh-revoked-1",
       resourceGid: "gid://shopify/Order/456",
       enqueuedAt: new Date().toISOString(),
@@ -595,7 +595,7 @@ describe("Deleted shop handling", () => {
     // 403 is NON-RETRYABLE because it means scope not granted, needs reinstall
     mockAdminGraphQL.mockResolvedValue({
       success: false,
-      error: "Forbidden for revoked-shop.myshopify.com (403). Scope may not be granted.",
+      error: "Forbidden for test-revoked-shop.myshopify.com (403). Scope may not be granted.",
       retryable: false, // Non-retryable: needs app reinstall
     });
 
@@ -609,7 +609,7 @@ describe("Deleted shop handling", () => {
 
     const message = {
       topic: "ORDERS_CREATE",
-      shop: "revoked-shop.myshopify.com",
+      shop: "test-revoked-shop.myshopify.com",
       webhookId: "wh-revoked-2",
       resourceGid: "gid://shopify/Order/789",
       enqueuedAt: new Date().toISOString(),

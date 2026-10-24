@@ -128,7 +128,7 @@ describeWithDb("Light Session Storage Integration", () => {
 
   it("returns empty array for shop with no sessions", async () => {
     const sessions = await sessionStorage.findSessionsByShop(
-      "nonexistent-shop.myshopify.com"
+      "test-nonexistent-shop.myshopify.com"
     );
     expect(sessions).toEqual([]);
   });

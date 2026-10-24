@@ -71,7 +71,7 @@ describe("entry.server.tsx", () => {
 
       // Error containing fictional domain, email, and free text
       const piiError = new TypeError(
-        "Render failed for handle-shop.myshopify.com, contact render@example.com: component state corrupted"
+        "Render failed for test-handle-shop.myshopify.com, contact render@example.com: component state corrupted"
       );
 
       const request = new Request("https://example.com/app");
@@ -94,7 +94,7 @@ describe("entry.server.tsx", () => {
 
       // Error containing fictional domain, email, and free text
       const piiError = new Error(
-        "SSR crash for ssr-shop.myshopify.com, user ssr@example.com: hydration mismatch in UserProfile"
+        "SSR crash for test-ssr-shop.myshopify.com, user ssr@example.com: hydration mismatch in UserProfile"
       );
 
       const code = toErrorCode(piiError);
@@ -112,7 +112,7 @@ describe("entry.server.tsx", () => {
 
       // Error containing fictional domain, email, and free text
       const piiError = new TypeError(
-        "Component error for log-shop.myshopify.com, contact log@example.com: state update on unmounted"
+        "Component error for test-log-shop.myshopify.com, contact log@example.com: state update on unmounted"
       );
 
       // Call safeLog the same way onError does

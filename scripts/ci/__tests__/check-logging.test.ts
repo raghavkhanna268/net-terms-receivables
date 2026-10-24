@@ -977,6 +977,134 @@ export function test() { return domain; }`
       expect(output).toContain("domain-literal");
       expect(output).toContain("Real-looking domain");
     });
+
+    // P1 FAIL tests for specific real-looking domains (QA examples)
+    it("fails for acmewholesale.myshopify.com", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const domain = "acme" + "wholesale" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "${domain}"; export function test() { return domain; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for clearwater-wholesale.myshopify.com (prefix without boundary)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const domain = "clearwater" + "-wholesale" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "${domain}"; export function test() { return domain; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for brightfurniture-shop.myshopify.com (removed -shop$ rule)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const domain = "bright" + "furniture-shop" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "${domain}"; export function test() { return domain; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for customer-goods.myshopify.com (prefix needs boundary)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const domain = "customer" + "-goods" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "${domain}"; export function test() { return domain; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for log-cabin.myshopify.com (prefix needs boundary)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const domain = "log" + "-cabin" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "${domain}"; export function test() { return domain; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for urban-shop.myshopify.com (removed -shop$ rule)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      const domain = "urban" + "-shop" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "${domain}"; export function test() { return domain; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    it("fails for second real domain on line after fake domain", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      // Line has fake domain first, then real domain - both should be checked
+      const realDomain = "merchant" + "store" + ".myshopify.com";
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domains = ["test-shop.myshopify.com", "${realDomain}"];
+export function test() { return domains; }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("domain-literal");
+    });
+
+    // PASS tests for fake domains
+    it("allows exact fake subdomain: test", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "test.myshopify.com"; export function test() { return domain; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("allows test- prefix with boundary", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "test-customer-goods.myshopify.com"; export function test() { return domain; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("allows test1 (prefix + digit boundary)", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "test1.myshopify.com"; export function test() { return domain; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("allows s20- test suite prefix", () => {
+      fs.mkdirSync(path.join(appDir, "__tests__"), { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, "__tests__", "example.test.ts"),
+        `const domain = "s20-integration.myshopify.com"; export function test() { return domain; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
   });
 
   // =========================================================================
