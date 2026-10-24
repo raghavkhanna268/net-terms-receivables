@@ -194,7 +194,7 @@ async function processBackfill(
     }
 
     for (const candidate of shopCandidates) {
-      console.log(`  Order: ${candidate.orderId}`);
+      console.log(`  Order: ${candidate.orderId} account: ${candidate.buyerAccountId}`);
 
       const invoiceInfo = await resolveInvoiceForOrder(
         sql,
