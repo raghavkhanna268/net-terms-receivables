@@ -270,6 +270,8 @@ describeWithDb("Bank Import Action Integration Tests", () => {
     });
 
     it("(b) re-import yields all duplicates", async () => {
+      // Use valid NEFT UTR format: 4 letters + N + 11-17 digits
+      const validNeftUtr = "HDFCN26296123456";
       const payload = {
         bank: "HDFC",
         fileName: "test.csv",
@@ -278,7 +280,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
             date: yesterday(),
             amountPaise: 1000000,
             rail: "NEFT",
-            utr: "HDFCN26296REIMPORT",
+            utr: validNeftUtr,
             narration: "NEFT CR-REIMPORT TEST",
           },
         ],
@@ -298,10 +300,10 @@ describeWithDb("Bank Import Action Integration Tests", () => {
       expect(data2.counts?.inserted).toBe(0);
       expect(data2.counts?.duplicates).toBe(1);
 
-      // Verify only 1 payment in DB
+      // Verify only 1 payment in DB with the exact UTR (valid UTRs keep their value)
       const [count] = await sql<{ c: string }[]>`
         SELECT COUNT(*)::text AS c FROM "Payment" 
-        WHERE "shopId" = ${testShopId} AND utr = 'HDFCN26296REIMPORT'
+        WHERE "shopId" = ${testShopId} AND utr = ${validNeftUtr}
       `;
       expect(parseInt(count.c, 10)).toBe(1);
     });
@@ -392,7 +394,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
             date: yesterday(),
             amountPaise: 1000000,
             rail: "NEFT",
-            utr: "HDFCN26296SHOPA1",
+            utr: "HDFCN26296100001",
             narration: "NEFT CR-SHOP A",
           },
         ],
@@ -412,7 +414,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
             date: yesterday(),
             amountPaise: 1000000,
             rail: "NEFT",
-            utr: "HDFCN26296SHOPA1", // Same UTR!
+            utr: "HDFCN26296100001", // Same UTR!
             narration: "NEFT CR-SHOP B",
           },
         ],
@@ -500,31 +502,37 @@ describeWithDb("Bank Import Action Integration Tests", () => {
       // This test verifies the tx.json() serialization works correctly.
       // Previously JSON.stringify(rows) caused postgres.js to double-encode,
       // sending a JSON string scalar instead of array, causing PostgresError 22023.
+      
+      // Use valid UTR formats: 4 letters + N/R + 11-17 digits (no letters after prefix)
+      const neftUtr = "HDFCN26296900001";  // Valid NEFT UTR
+      const rtgsUtr = "HDFCR26296900002";  // Valid RTGS UTR
+      const impsUtr = "999988887777";       // Valid 12-digit IMPS RRN
+      
       const payload = {
         bank: "HDFC",
         fileName: "json-serial.csv",
         credits: [
           {
             date: yesterday(),
-            amountPaise: 100000,
+            amountPaise: 100000,  // 1000.00
             rail: "NEFT",
-            utr: "HDFCN26296JSON001",
+            utr: neftUtr,
             payerName: "Test Corp",
             narration: "NEFT CR-JSON SERIALIZATION TEST",
           },
           {
             date: today(),
-            amountPaise: 200000,
+            amountPaise: 200000,  // 2000.00
             rail: "RTGS",
-            utr: "HDFCR26296JSON002",
+            utr: rtgsUtr,
             narration: "RTGS CR-JSON TEST 2",
           },
           {
             date: yesterday(),
-            amountPaise: 50000,
+            amountPaise: 50000,   // 500.00
             balancePaise: 1500000,
             rail: "IMPS",
-            utr: "123456789012",
+            utr: impsUtr,
             payerName: "Payer With Special Chars: \"quotes\" & <brackets>",
             narration: "IMPS with special chars: éàü",
           },
@@ -541,16 +549,22 @@ describeWithDb("Bank Import Action Integration Tests", () => {
       expect(data.counts?.inserted).toBe(3);
       expect(data.counts?.total).toBe(3);
 
-      // Verify all rows were inserted with correct data
+      // Query specifically for this test's UTRs to ensure isolation
+      const testUtrs = [neftUtr, rtgsUtr, impsUtr];
       const payments = await sql<{ utr: string; amount: string; rail: string }[]>`
         SELECT utr, amount::text, rail FROM "Payment" 
-        WHERE "shopId" = ${testShopId}
-        ORDER BY amount
+        WHERE "shopId" = ${testShopId} AND utr = ANY(${testUtrs})
+        ORDER BY amount::numeric
       `;
       expect(payments).toHaveLength(3);
+      
+      // Verify amounts sorted numerically: 500.00, 1000.00, 2000.00
       expect(payments[0].amount).toBe("500.00");
+      expect(payments[0].utr).toBe(impsUtr);
       expect(payments[1].amount).toBe("1000.00");
+      expect(payments[1].utr).toBe(neftUtr);
       expect(payments[2].amount).toBe("2000.00");
+      expect(payments[2].utr).toBe(rtgsUtr);
     });
   });
 
@@ -564,7 +578,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
             date: justInsideWindow(),
             amountPaise: 1000000,
             rail: "NEFT",
-            utr: "HDFCN26296OLDVALID",
+            utr: "HDFCN26296200001",
             narration: "NEFT CR-OLD BUT VALID",
           },
         ],
@@ -587,7 +601,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
             date: justOutsideWindow(),
             amountPaise: 1000000,
             rail: "NEFT",
-            utr: "HDFCN26296TOOOLD",
+            utr: "HDFCN26296200002",
             narration: "NEFT CR-TOO OLD",
           },
         ],
@@ -620,7 +634,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
               date: insideDate,
               amountPaise: 1000000,
               rail: "NEFT",
-              utr: "HDFCN26296LEAPIN",
+              utr: "HDFCN26296300001",
               narration: "NEFT CR-LEAP INSIDE",
             },
           ],
@@ -640,7 +654,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
               date: outsideDate,
               amountPaise: 1000000,
               rail: "NEFT",
-              utr: "HDFCN26296LEAPOUT",
+              utr: "HDFCN26296300002",
               narration: "NEFT CR-LEAP OUTSIDE",
             },
           ],
@@ -671,7 +685,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
             date: yesterday(),
             amountPaise: 1000000,
             rail: "NEFT",
-            utr: "HDFCN26296MATCHER1",
+            utr: "HDFCN26296400001",
             narration: "NEFT CR-MATCHER TEST",
           },
         ],
@@ -729,7 +743,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
             date: yesterday(),
             amountPaise: 1000000,
             rail: "NEFT",
-            utr: "HDFCN26296PIITEST",
+            utr: "HDFCN26296500001",
             payerName: "ACME Corp",
             narration: "NEFT CR-ACME CORP-INV001",
           },
@@ -737,7 +751,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
             date: today(),
             amountPaise: 2000000,
             rail: "RTGS",
-            utr: "HDFCR26296PIITEST",
+            utr: "HDFCR26296500002",
             payerName: "Secret Buyer",
             narration: "Payment for invoice 12345",
           },
@@ -768,7 +782,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
             date: yesterday(),
             amountPaise: 1000000,
             rail: "NEFT",
-            utr: "HDFCN26296PIIDUPE",
+            utr: "HDFCN26296500003",
             payerName: "ACME Corp",
             narration: "NEFT CR-ACME CORP-INV001",
           },

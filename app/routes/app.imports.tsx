@@ -406,9 +406,10 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       // Prepare all rows for batch insert
       const rows = creditsWithKeys.map((credit) => {
         const dbUtr = normalizeForDb(credit.dedupeKey);
+        // Convert to ISO string for JSON serialization (tx.json() needs string, not Date)
         const valueDate = credit.valueDate 
-          ? new Date(credit.valueDate + "T00:00:00Z")
-          : new Date(credit.date + "T00:00:00Z");
+          ? new Date(credit.valueDate + "T00:00:00Z").toISOString()
+          : new Date(credit.date + "T00:00:00Z").toISOString();
         // Use exact decimal string to avoid float precision issues
         const amountString = (credit.amountPaise / 100).toFixed(2);
         
