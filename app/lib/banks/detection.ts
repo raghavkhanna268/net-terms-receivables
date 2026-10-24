@@ -497,9 +497,10 @@ export function isNarrationContinuation(row: (string | number | Date | boolean |
 
   // Continuation rows typically have:
   // - Empty first cell (checked above)
+  // - At least one non-empty cell (the narration text) - fully blank rows are skips
   // - Very few non-empty cells (just narration text)
   // - No amount-like values
-  return nonEmptyCount <= 2 && !hasAmountLike;
+  return nonEmptyCount >= 1 && nonEmptyCount <= 2 && !hasAmountLike;
 }
 
 /**
@@ -538,7 +539,8 @@ export function isNarrationContinuationWithDateCol(
 
   // Continuation rows typically have:
   // - Empty date cell (checked above)
+  // - At least one non-empty cell (the narration text) - fully blank rows are skips
   // - Very few non-empty cells (just narration text)
   // - No amount-like values
-  return nonEmptyCount <= 2 && !hasAmountLike;
+  return nonEmptyCount >= 1 && nonEmptyCount <= 2 && !hasAmountLike;
 }

@@ -548,6 +548,21 @@ describe("detection", () => {
       const row: (string | null)[] = [];
       expect(isNarrationContinuation(row)).toBe(false);
     });
+
+    it("returns false for fully blank row (all empty strings)", () => {
+      const row = ["", "", "", "", "", "", ""];
+      expect(isNarrationContinuation(row)).toBe(false);
+    });
+
+    it("returns false for fully blank row (all nulls)", () => {
+      const row = [null, null, null, null, null, null, null];
+      expect(isNarrationContinuation(row)).toBe(false);
+    });
+
+    it("returns false for fully blank row (whitespace only)", () => {
+      const row = ["  ", "", "   ", null, "", "", ""];
+      expect(isNarrationContinuation(row)).toBe(false);
+    });
   });
 
   describe("isNarrationContinuationWithDateCol", () => {
@@ -573,6 +588,21 @@ describe("detection", () => {
       // Row with empty S No. (col 0) and empty date (col 1), just narration
       const row = [null, null, null, "Continuation text", null, null, null];
       expect(isNarrationContinuationWithDateCol(row, 1)).toBe(true);
+    });
+
+    it("returns false for fully blank row (all empty strings)", () => {
+      const row = ["", "", "", "", "", "", ""];
+      expect(isNarrationContinuationWithDateCol(row, 1)).toBe(false);
+    });
+
+    it("returns false for fully blank row (all nulls)", () => {
+      const row = [null, null, null, null, null, null, null];
+      expect(isNarrationContinuationWithDateCol(row, 1)).toBe(false);
+    });
+
+    it("returns false for empty row array", () => {
+      const row: (string | null)[] = [];
+      expect(isNarrationContinuationWithDateCol(row, 1)).toBe(false);
     });
   });
 });
