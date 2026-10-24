@@ -16,7 +16,7 @@ SENTRY_TRACES_SAMPLE_RATE=0
 # Never commit the real key - these are wrangler secrets in production
 RESEND_API_KEY=
 # Sender address - must be a verified domain in Resend (e.g. noreply@yourdomain.com)
-RESEND_FROM_EMAIL=
+RESEND_FROM=
 
 # Database connection for local development
 # Option 1: Local Postgres (recommended for offline dev)

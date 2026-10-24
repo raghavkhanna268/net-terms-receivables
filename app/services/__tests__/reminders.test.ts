@@ -19,7 +19,7 @@ import type { Sql } from "~/lib/db-light.server";
  * - Monthly cap enforcement (3,000/month GLOBAL)
  * - Send window (09:00-19:00 shop local time)
  * - PCD compliance (only email/displayName via CUSTOMER_PII_FIELDS)
- * - RESEND_FROM_EMAIL gate (both keys required)
+ * - RESEND_FROM gate (both keys required)
  * - Reserve-then-release cap on non-retryable errors
  * - offsetDays validation (-30 to 90)
  * - formatAmount uses Decimal(14,2) rupees (not paise)
@@ -146,34 +146,34 @@ describe("Payment Reminders (S18)", () => {
 
     it("returns false when RESEND_API_KEY is empty string (S18-02)", async () => {
       const { isReminderSendingEnabled } = await import("../reminders.server");
-      expect(isReminderSendingEnabled({ RESEND_API_KEY: "", RESEND_FROM_EMAIL: "test@example.com" })).toBe(false);
+      expect(isReminderSendingEnabled({ RESEND_API_KEY: "", RESEND_FROM: "test@example.com" })).toBe(false);
     });
 
     it("returns false when RESEND_API_KEY is whitespace (S18-02)", async () => {
       const { isReminderSendingEnabled } = await import("../reminders.server");
-      expect(isReminderSendingEnabled({ RESEND_API_KEY: "   ", RESEND_FROM_EMAIL: "test@example.com" })).toBe(false);
+      expect(isReminderSendingEnabled({ RESEND_API_KEY: "   ", RESEND_FROM: "test@example.com" })).toBe(false);
     });
 
-    it("returns false when RESEND_FROM_EMAIL is missing", async () => {
+    it("returns false when RESEND_FROM is missing", async () => {
       const { isReminderSendingEnabled } = await import("../reminders.server");
       expect(isReminderSendingEnabled({ RESEND_API_KEY: "re_test_1234" })).toBe(false);
     });
 
-    it("returns false when RESEND_FROM_EMAIL is empty", async () => {
+    it("returns false when RESEND_FROM is empty", async () => {
       const { isReminderSendingEnabled } = await import("../reminders.server");
-      expect(isReminderSendingEnabled({ RESEND_API_KEY: "re_test_1234", RESEND_FROM_EMAIL: "" })).toBe(false);
+      expect(isReminderSendingEnabled({ RESEND_API_KEY: "re_test_1234", RESEND_FROM: "" })).toBe(false);
     });
 
-    it("returns false when RESEND_FROM_EMAIL is whitespace", async () => {
+    it("returns false when RESEND_FROM is whitespace", async () => {
       const { isReminderSendingEnabled } = await import("../reminders.server");
-      expect(isReminderSendingEnabled({ RESEND_API_KEY: "re_test_1234", RESEND_FROM_EMAIL: "   " })).toBe(false);
+      expect(isReminderSendingEnabled({ RESEND_API_KEY: "re_test_1234", RESEND_FROM: "   " })).toBe(false);
     });
 
-    it("returns true when both RESEND_API_KEY and RESEND_FROM_EMAIL are set", async () => {
+    it("returns true when both RESEND_API_KEY and RESEND_FROM are set", async () => {
       const { isReminderSendingEnabled } = await import("../reminders.server");
       expect(isReminderSendingEnabled({ 
         RESEND_API_KEY: "re_test_1234", 
-        RESEND_FROM_EMAIL: "noreply@example.com" 
+        RESEND_FROM: "noreply@example.com" 
       })).toBe(true);
     });
   });
@@ -282,7 +282,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM_EMAIL: "noreply@example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
       );
 
       expect(result.success).toBe(true);
@@ -324,7 +324,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM_EMAIL: "noreply@example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
       );
 
       expect(result.success).toBe(true);
@@ -364,7 +364,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM_EMAIL: "noreply@example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
       );
 
       expect(result.success).toBe(true);
@@ -386,7 +386,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM_EMAIL: "noreply@example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
       );
 
       expect(result.success).toBe(true);
@@ -426,7 +426,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM_EMAIL: "noreply@example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
       );
 
       expect(result.success).toBe(true);
@@ -471,7 +471,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM_EMAIL: "noreply@example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
       );
 
       expect(result.success).toBe(true);
@@ -496,7 +496,7 @@ describe("Payment Reminders (S18)", () => {
       customerId: "gid://shopify/Customer/456",
     };
 
-    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM_EMAIL: "noreply@example.com" };
+    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" };
 
     it("handles Resend 429 rate limit as retryable (S18-14)", async () => {
       const { sendPaymentReminder } = await import("../reminders.server");
@@ -625,7 +625,7 @@ describe("Payment Reminders (S18)", () => {
       expect(options.headers["Idempotency-Key"]).toBe("s18_inv-123_rule-123");
     });
 
-    it("uses RESEND_FROM_EMAIL for sender address", async () => {
+    it("uses RESEND_FROM for sender address", async () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
       mockSql.setMockResult("invoice", [mockInvoiceData]);
@@ -645,7 +645,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM_EMAIL: "reminders@myapp.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "reminders@myapp.com" }
       );
 
       expect(mockFetch).toHaveBeenCalledTimes(1);

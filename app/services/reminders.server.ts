@@ -58,13 +58,13 @@ const SEND_WINDOW_END = 19;
 
 /**
  * Check if reminder sending is enabled.
- * Requires BOTH RESEND_API_KEY AND RESEND_FROM_EMAIL to be set.
+ * Requires BOTH RESEND_API_KEY AND RESEND_FROM to be set.
  */
 export function isReminderSendingEnabled(
-  env: { RESEND_API_KEY?: string; RESEND_FROM_EMAIL?: string } = {}
+  env: { RESEND_API_KEY?: string; RESEND_FROM?: string } = {}
 ): boolean {
   const key = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
-  const from = env.RESEND_FROM_EMAIL ?? process.env.RESEND_FROM_EMAIL;
+  const from = env.RESEND_FROM ?? process.env.RESEND_FROM;
   const hasKey = typeof key === "string" && key.trim().length > 0;
   const hasFrom = typeof from === "string" && from.trim().length > 0;
   return hasKey && hasFrom;
@@ -74,10 +74,10 @@ export function isReminderSendingEnabled(
  * Get the sender email address from environment.
  * Returns null if not configured.
  */
-export function getResendFromEmail(
-  env: { RESEND_FROM_EMAIL?: string } = {}
+export function getResendFrom(
+  env: { RESEND_FROM?: string } = {}
 ): string | null {
-  const from = env.RESEND_FROM_EMAIL ?? process.env.RESEND_FROM_EMAIL;
+  const from = env.RESEND_FROM ?? process.env.RESEND_FROM;
   return typeof from === "string" && from.trim().length > 0 ? from.trim() : null;
 }
 
@@ -432,7 +432,7 @@ export function getReminderLabel(offsetDays: number): string {
  * Send a payment reminder email via Resend.
  *
  * This function:
- * 1. Checks provider gate (RESEND_API_KEY + RESEND_FROM_EMAIL) - if missing, acks WITHOUT consuming slot/cap
+ * 1. Checks provider gate (RESEND_API_KEY + RESEND_FROM) - if missing, acks WITHOUT consuming slot/cap
  * 2. Checks send window (09:00-19:00 in shop's timezone)
  * 3. Re-checks if reminder day matches today in shop's timezone
  * 4. Verifies invoice is still open
@@ -448,7 +448,7 @@ export function getReminderLabel(offsetDays: number): string {
  * @param ruleId - Reminder rule ID
  * @param offsetDays - Days offset from due date
  * @param timezone - Shop's IANA timezone
- * @param env - Environment variables (RESEND_API_KEY, RESEND_FROM_EMAIL)
+ * @param env - Environment variables (RESEND_API_KEY, RESEND_FROM)
  */
 export async function sendPaymentReminder(
   sql: Sql,
@@ -457,10 +457,10 @@ export async function sendPaymentReminder(
   ruleId: string,
   offsetDays: number,
   timezone: string,
-  env: { RESEND_API_KEY?: string; RESEND_FROM_EMAIL?: string } = {}
+  env: { RESEND_API_KEY?: string; RESEND_FROM?: string } = {}
 ): Promise<ReminderSendResult> {
   const resendKey = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
-  const fromEmail = getResendFromEmail(env);
+  const fromEmail = getResendFrom(env);
   const validTz = validateTimezone(timezone);
 
   // Gate 1: Check provider config - if missing, ack WITHOUT consuming slot

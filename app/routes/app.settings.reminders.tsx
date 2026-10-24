@@ -63,7 +63,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     getShopReminderRules(sql, shop.id),
   ]);
 
-  const env = (context as { cloudflare?: { env?: { RESEND_API_KEY?: string; RESEND_FROM_EMAIL?: string } } })
+  const env = (context as { cloudflare?: { env?: { RESEND_API_KEY?: string; RESEND_FROM?: string } } })
     .cloudflare?.env;
   const providerConfigured = isReminderSendingEnabled(env);
 
@@ -93,7 +93,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const formData = await request.formData();
   const intent = formData.get("intent") as string;
 
-  const env = (context as { cloudflare?: { env?: { RESEND_API_KEY?: string; RESEND_FROM_EMAIL?: string } } })
+  const env = (context as { cloudflare?: { env?: { RESEND_API_KEY?: string; RESEND_FROM?: string } } })
     .cloudflare?.env;
   const providerConfigured = isReminderSendingEnabled(env);
 
