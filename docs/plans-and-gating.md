@@ -14,8 +14,10 @@ The app uses Shopify App Pricing (managed pricing) where plans are configured in
 |------|-----------|---------------|----------|
 | **Free** | 3 | 1 | Aging dashboard |
 | **Starter** | 25 | Unlimited | + Matching, Reminders |
-| **Growth** | 100 | Unlimited | + Credit holds, PDF statements, Payer memory |
+| **Growth** | 100 | Unlimited | + PDF statements, Payer memory |
 | **Scale** | Unlimited | Unlimited | + Audit export |
+
+**Note on credit holds**: The `credit_holds` feature key exists in `entitlements.ts`, but nothing in the codebase calls `checkFeature()` or `hasFeature()` to enforce it. Credit holds, hold recomputation, the daily sweep, and the checkout Validation Function run on **all plans**. The tier table above reflects features that are (or will be) actually gated.
 
 ## Partner Dashboard Configuration
 
@@ -23,7 +25,7 @@ Plans must be configured in the Shopify Partner Dashboard with these exact names
 
 - **Free** - The default plan for shops without an active subscription
 - **Starter** - Entry-level paid plan
-- **Growth** - Mid-tier plan with credit holds
+- **Growth** - Mid-tier plan with PDF statements
 - **Scale** - Enterprise plan with unlimited accounts
 
 The app matches subscription names case-insensitively, so "Growth", "growth", "GROWTH" all map to the growth plan.
@@ -69,7 +71,7 @@ This is wired in `workers/app.ts`:
 
 ```typescript
 // In the fetch handler:
-return requestContext.run({ getSql, waitUntil: (p) => ctx.waitUntil(p) }, async () => {
+return requestContext.run({ getSql, waitUntil: (p) => ctx.waitUntil(p), env }, async () => {
   return requestHandler(request, { ... });
 });
 ```
@@ -82,7 +84,7 @@ import { getRequestWaitUntil } from "~/lib/request-context.server";
 
 const waitUntil = getRequestWaitUntil();
 if (waitUntil) {
-  waitUntil(refreshCacheInBackground());
+  triggerBackgroundRefresh(sql, shopId, shopDomain);
 }
 ```
 
@@ -117,11 +119,23 @@ When `PLAN_GATING_ENFORCED` is ON and a new BuyerAccount would exceed the limit:
 
 1. The account is created with `gated_at = NOW()` (persisted, not lost)
 2. Gated accounts are excluded from:
-   - Company limit count
-   - Ledger/UI display
-   - Credit holds and reminders enforcement
+   - Company limit count (for enforcement purposes only)
 
-3. On plan upgrade, gated accounts are reactivated:
+3. **Product rule: Gated accounts stay VISIBLE everywhere.** They are:
+   - Included in ledger/UI display (with `is_gated` flag)
+   - Included in aging totals and per-account rows
+   - Subject to credit holds and hold recomputation
+   - Eligible for invoice creation (orders still sync)
+   - Included in payment matching
+
+4. **Gated accounts are blocked from value-add actions only:**
+   - Payment reminders (skipped at send time; skipped at enqueue time via `s18_enqueue_reminders`)
+   - Credit-limit edits (returns "Cannot edit gated accounts")
+   - Account detail edits (UI shows read-only state)
+   - Bulk statement import (shop-level monthly limit via `enforceImportLimit`, not a per-account restriction)
+   - Hold-only updates remain allowed (holds work on all plans)
+
+5. On plan upgrade, gated accounts are reactivated:
    - Up to the new limit
    - Oldest accounts first (by `createdAt`)
 
@@ -160,22 +174,15 @@ The import limit enforcement is fully implemented in `gating.server.ts`:
 - `checkImportLimit(sql, shopId)` - Returns whether an import is allowed
 - `enforceImportLimit(sql, shopId)` - Throws `UpgradeRequiredError` if limit exceeded
 
-**Wiring for S15**: When implementing the S15 bank statement import feature, call
-`enforceImportLimit()` before creating a new `BankImport` record:
+**Already wired**: The import route (`app/routes/app.imports.tsx`) calls `enforceImportLimit()`
+before creating a new `BankImport` record:
 
 ```typescript
-// In the import handler (S15)
+// In app/routes/app.imports.tsx action():
 import { enforceImportLimit, UpgradeRequiredError } from "~/services/gating.server";
 
-try {
-  await enforceImportLimit(sql, shopId);
-  // Proceed with creating BankImport...
-} catch (error) {
-  if (error instanceof UpgradeRequiredError) {
-    return { success: false, error: error.message };
-  }
-  throw error;
-}
+await enforceImportLimit(sql, shopId);
+// Creates BankImport and Payments...
 ```
 
 When `PLAN_GATING_ENFORCED` is OFF, `enforceImportLimit()` is a no-op and always allows.
@@ -183,29 +190,29 @@ When `PLAN_GATING_ENFORCED` is OFF, `enforceImportLimit()` is a no-op and always
 **Note**: Unlike company limits which gate accounts (persist but mark as inactive),
 import limits simply block the operation since there's no persistent state to preserve.
 
+**Important**: Import limits are a PLAN FEATURE, not a gated-account restriction. Even
+shops with gated accounts can still import (up to their plan limit). Imports help with
+payment matching which still works for gated accounts.
+
 ### Feature Checks
 
-For features not yet implemented, export the feature key for later use:
+For features not yet implemented, the feature key can be checked at runtime:
 
 ```typescript
-// Check if shop has a feature
-const canUseCreditHolds = await checkFeature(sql, shopId, "credit_holds");
+// Check if shop has a feature (example: audit_export)
+const canUseAuditExport = await checkFeature(sql, shopId, "audit_export");
 ```
 
-## Credit Holds on Downgrade
+## Credit Holds
 
-**TODO (S13)**: The `hasFeature('credit_holds')` check is exported but the Validation Function fail-open/fail-closed behavior on downgrade needs to be decided in S13.
-
-This PR does NOT:
-- Disable the Validation Function when credit_holds is unavailable
-- Change any fail-open/fail-closed rules
+**Credit holds work on all plans.** The `credit_holds` feature key exists in `entitlements.ts`, but no production code calls `checkFeature()` or `hasFeature()` to enforce it. Hold recomputation, the daily sweep (`enqueue_credit_status_recomputes`), and the checkout Validation Function run unconditionally regardless of plan.
 
 ## Bulk Ingestion
 
 S10b reconcile/bulk ingestion applies the same gating as the webhook sync path:
 
 - `bulkUpsertBuyerAccounts()` in `company-location.server.ts` checks `checkCompanyLimit()`
-  for each new account and sets `gated_at` if over limit
+  once per batch (not per account) and sets `gated_at` on accounts that exceed the limit
 - Customer bulk processing goes through `processBulkCustomer()` → `syncTaggedCustomerBuyerAccount()`
   which already applies gating
 
@@ -231,24 +238,88 @@ https://admin.shopify.com/store/{store_handle}/charges/{app_handle}/pricing_plan
 
 The `app_handle` comes from `APP_HANDLE` env var.
 
+## Status of #57 Items (Pre-Enable Checklist)
+
+Items 1-5 from issue #57 are done on main; item 6 is deferred (acceptable). Status summary:
+
+| Item | Description | Status | Evidence |
+|------|-------------|--------|----------|
+| 1 | Background plan refresh wiring | Done on main | `workers/app.ts:44` passes `waitUntil` via ALS `requestContext.run()`; `plan.server.ts:319` uses `getRequestWaitUntil()`. PRs #67, #149. Tests: `plan.test.ts`, `als-request-isolation.test.ts`. |
+| 2 | Gated accounts exclusion from queries | Revised on main | Product decision (#127): gated accounts stay VISIBLE in ledger/UI, holds, aging. Only gated ACTIONS blocked. Tests: `gated-account-db.test.ts`, `plan-gating-actions-db.test.ts`. |
+| 3 | S10b bulk/reconcile gating | Done on main | `bulk-jsonl-processor.server.ts:420` calls `bulkUpsertBuyerAccounts()`; that function at `company-location.server.ts:229` calls `checkCompanyLimit()` per-batch. PR #67. Tests: `company-location.test.ts`. |
+| 4 | Import limit wiring | Done on main | `app/routes/app.imports.tsx:355` calls `enforceImportLimit()`. PR #69. Tests: `gating.test.ts` ("enforceImportLimit" tests), `plan-gating-actions-db.test.ts` ("checkImportLimit" tests). |
+| 5 | Migration hygiene (index drift) | Done on main | Migration `20261025000001_s21_fix_gated_at_index` creates regular index; `schema.prisma:286` uses `@@index([gatedAt], map: "BuyerAccount_gated_at_idx")`. No drift (`prisma migrate diff` shows "No difference detected"). PR #67. |
+| 6 | Count-then-insert concurrency | Deferred (acceptable) | See "Concurrent webhook note" in Company Limit section above. Reason: Slight overshoot is acceptable; gated accounts don't consume functional capacity; proper locking would add latency to every webhook. |
+
+**Scheduled reminders path**: The `s18_enqueue_reminders()` PL/pgSQL function includes
+`ba.gated_at IS NULL` in its WHERE clause (migration `20261106000000_s18_enqueue_skip_gated`),
+so gated accounts are skipped at enqueue time, not just at send time.
+Tests: `s18-enqueue-skip-gated-db.test.ts`.
+
+## Test Coverage for Gated Account Behavior
+
+Tests proving over-limit (gated) accounts stay visible and only gated actions are blocked:
+
+### Gated Accounts Stay VISIBLE (with `PLAN_GATING_ENFORCED=true`)
+
+| Area | Test File | Test Name |
+|------|-----------|-----------|
+| Aging totals | `gated-account-db.test.ts` | "getShopAgingTotals includes gated account's invoices" |
+| Aging buckets | `gated-account-db.test.ts` | "aging totals include overdue gated account invoices in correct bucket" |
+| Aging totals | `aging-reconcile.test.ts` | "shop totals include gated account rows with PLAN_GATING_ENFORCED=true" |
+| Buyer ledger | `gated-account-db.test.ts` | "getBuyerLedger includes gated account with is_gated flag" |
+| Invoice list | `gated-account-db.test.ts` | "getBuyerInvoices returns invoices for gated account" |
+| Invoice eligibility | `gated-account-db.test.ts` | "gated account's order becomes an Invoice through eligibility check" |
+| Credit holds | `gated-account-db.test.ts` | "gated account is auto-held when overdue via recompute" |
+| Credit holds | `gated-account-db.test.ts` | "gated account hold clears after invoice is paid and recomputed" |
+| Credit sweep | `gated-account-db.test.ts` | "gated account is included in sweep function when overdue" |
+| Payment matching | `gated-account-db.test.ts` | "matcher suggests match for gated account's invoice" |
+| Payment matching | `gated-account-db.test.ts` | "confirmMatch succeeds for gated account" |
+
+### Gated ACTIONS Are Blocked (with `PLAN_GATING_ENFORCED=true`)
+
+| Action | Test File | Test Name |
+|--------|-----------|-----------|
+| Reminders (send) | `plan-gating-actions-db.test.ts` | "skips gated account with gating ON - NO ReminderLog, NO cap consumed" |
+| Reminders (enqueue) | `s18-enqueue-skip-gated-db.test.ts` | "does NOT enqueue reminder for gated account's due invoice" |
+| Credit-limit edit | `plan-gating-actions-db.test.ts` | "rejects credit-limit edit on gated account when gating ON" |
+| Hold-only allowed | `plan-gating-actions-db.test.ts` | "allows hold-only update on gated account when gating ON (holds work on all plans)" |
+
+### Gating OFF Behavior (with `PLAN_GATING_ENFORCED=false`)
+
+| Area | Test File | Test Name |
+|------|-----------|-----------|
+| Reminders | `plan-gating-actions-db.test.ts` | "sends reminder for gated account with gating OFF (passes Gate 3)" |
+| Credit-limit edit | `plan-gating-actions-db.test.ts` | "allows credit-limit edit on gated account when gating OFF" |
+| Company limit | `gating.test.ts` | "checkCompanyLimit with gating OFF" (allows all) |
+| Import limit | `gating.test.ts` | "checkImportLimit with gating OFF" (allows all) |
+| Active fragment | `gating.test.ts` | "returns TRUE fragment when gating is OFF" |
+| isAccountActive | `gating.test.ts` | "returns true for all accounts when gating is OFF" |
+| Bulk gating | `company-location.test.ts` | "does not gate new accounts when PLAN_GATING_ENFORCED=false" |
+
 ## Testing
 
 Run tests with:
 ```bash
-npm test -- --filter plan
-npm test -- --filter gating
-npm test -- --filter subscriptions_update
+npm test -- app/services/__tests__/plan.test.ts
+npm test -- app/services/__tests__/gating.test.ts
+npm test -- -t "subscriptions_update"
 ```
 
 Test coverage includes:
 - Plan resolution (no sub, active sub, unknown name, API error)
 - Fail-to-cached behavior (use cached plan on error)
-- Stale cache triggers background refresh
+- Stale cache triggers background refresh via ALS `waitUntil`
 - Cache TTL and webhook refresh
 - Limit enforcement at boundaries (3rd vs 4th company on free)
 - Gated account creation and reactivation on upgrade
 - PLAN_GATING_ENFORCED on/off modes
 - Feature checks per plan tier
+- **Gated account visibility** (aging, ledger, invoices - `gated-account-db.test.ts`)
+- **Gated action blocking** (reminders, credit edits - `plan-gating-actions-db.test.ts`)
+- **Scheduled reminder filtering** (enqueue skips gated - `s18-enqueue-skip-gated-db.test.ts`)
+- **Import limit enforcement** (`gating.test.ts`, `plan-gating-actions-db.test.ts`)
+- **Bulk ingestion gating** (`company-location.test.ts`)
 
 ## Database Schema
 
@@ -273,17 +344,3 @@ Migration: `prisma/migrations/20261025000000_s21_plan_cache/migration.sql`
 ## Scopes
 
 App Pricing requires no additional OAuth scopes. The 11 production scopes remain unchanged.
-
-## Files Changed
-
-- `app/lib/entitlements.ts` - Plan configuration
-- `app/services/plan.server.ts` - Plan resolution service with fail-to-cached
-- `app/services/gating.server.ts` - Limit enforcement with gating
-- `app/routes/webhooks.app.subscriptions_update.tsx` - Webhook handler with reactivation
-- `app/routes/app._index.tsx` - Plan banner UI
-- `app/services/sync/company-location.server.ts` - Company gating on create
-- `app/services/sync/customer.server.ts` - Customer gating on create
-- `shopify.app.toml` - Webhook registration
-- `prisma/schema.prisma` - Plan cache and gated_at columns
-- `prisma/migrations/20261025000000_s21_plan_cache/migration.sql`
-- `wrangler.jsonc` - PLAN_GATING_ENFORCED and APP_HANDLE env vars

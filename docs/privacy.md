@@ -1,8 +1,8 @@
 # Privacy Policy — Net Terms Receivables
 
-**Effective Date:** **TBD**
+**Effective Date:** [TBD: effective date]
 
-**Last Updated:** **TBD**
+**Last Updated:** [TBD: effective date]
 
 ---
 
@@ -11,9 +11,9 @@
 Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wholesale merchants manage net-terms invoices, track credit limits, and match bank transfer payments. This Privacy Policy describes what data we collect, why we collect it, how we use it, and your rights.
 
 **Legal Entity and Contact:**
-- **TBD** — Company name, address, and registration details
-- **Contact Email:** **TBD**
-- **Data Protection Officer:** **TBD** (if applicable)
+- [TBD: legal entity] — Company name, address, and registration details
+- **Contact Email:** [TBD: contact email]
+- **Data Protection Officer:** [TBD: legal entity] (if applicable)
 
 ---
 
@@ -126,8 +126,8 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 
 | Subprocessor | Purpose | Location | DPA |
 |--------------|---------|----------|-----|
-| Cloudflare, Inc. | Application hosting (Workers), connection pooling (Hyperdrive) | Global (Worker placed ap-south-1) | **TBD** |
-| Supabase, Inc. | Database hosting (Postgres) | AWS ap-south-1 (Mumbai) | **TBD** |
+| Cloudflare, Inc. | Application hosting (Workers), connection pooling (Hyperdrive) | Global (Worker placed ap-south-1) | [TBD: DPA] |
+| Supabase, Inc. | Database hosting (Postgres) | AWS ap-south-1 (Mumbai) | [TBD: DPA] |
 | Resend, Inc. | Email delivery (data request notifications, payment reminders) | US | [Resend DPA](https://resend.com/legal/dpa) |
 
 **Resend data handling:**
@@ -293,8 +293,8 @@ We may update this Privacy Policy from time to time. Material changes will be co
 ## 11. Contact
 
 For privacy inquiries:
-- **Email:** **TBD**
-- **Address:** **TBD**
+- **Email:** [TBD: contact email]
+- **Address:** [TBD: legal entity]
 
 ---
 
@@ -311,7 +311,7 @@ For privacy inquiries:
 ### Pre-Launch
 
 - [ ] Complete Shopify Protected Customer Data (PCD) approval form
-- [ ] Fill in **TBD** sections with actual company details
+- [ ] Fill in `[TBD: ...]` sections with actual company details
 - [ ] Set up DPAs with Cloudflare and Supabase
 - [ ] Accept [Resend DPA](https://resend.com/legal/dpa) before enabling email notifications
 - [ ] Configure data retention policies for audit events
@@ -325,6 +325,7 @@ For privacy inquiries:
 - [ ] Test all compliance webhooks with Shopify's compliance test tool
 - [ ] Verify no PII appears in application logs
 - [ ] Confirm pgmq message handling for deleted shops
+- [ ] Verify `/privacy` route is accessible without authentication
 
 ### Post-Launch Monitoring
 
@@ -335,4 +336,4 @@ For privacy inquiries:
 
 ---
 
-*This privacy policy reflects the implemented S22 compliance code. All **TBD** items require product/legal decisions before publication.*
+*This privacy policy reflects the implemented S22 compliance code. All `[TBD: ...]` items require product/legal decisions before publication.*
