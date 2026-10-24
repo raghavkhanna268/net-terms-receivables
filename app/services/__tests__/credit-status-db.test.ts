@@ -632,3 +632,251 @@ describeWithDb("syncCreditStatusMetafield gated account", () => {
 // - COMPANY accounts must have companyLocationId AND companyId
 // - TAGGED_CUSTOMER accounts must have customerId
 // This ensures all valid accounts have an owner GID, making the skip branch unreachable.
+
+describeWithDb("hold-transition audit events", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-holdaudit";
+  const TEST_SHOP_ID = `shop-holdaudit-${TEST_SUFFIX}`;
+  const TEST_SHOP_DOMAIN = `holdaudit-test-${TEST_SUFFIX}.myshopify.com`;
+  const TEST_ACCOUNT_ID = `acc-holdaudit-${TEST_SUFFIX}`;
+
+  const ALLOWED_AUDIT_DATA_KEYS = [
+    "buyerAccountId",
+    "holdReasonCode",
+    "source",
+    "previousHoldState",
+    "newHoldState",
+  ];
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+    `;
+
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name,
+        "creditLimit", "holdState", bypass, "manualHold", "syncPending", "syncVersion",
+        "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${TEST_ACCOUNT_ID}, ${TEST_SHOP_ID}, 'COMPANY',
+        ${"co-" + TEST_SUFFIX}, ${"gid://shopify/CompanyLocation/" + TEST_SUFFIX},
+        'Hold Audit Test Account', 100000.00, 'OK', false, false, false, 0,
+        NOW(), NOW()
+      )
+    `;
+  });
+
+  beforeEach(async () => {
+    // Reset fixture state before each test
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "holdState" = 'OK', "manualHold" = false, "holdReasonCode" = NULL,
+          "syncPending" = false, "syncVersion" = 0, bypass = false
+      WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+    await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    mockShopifyGraphQLRequest.mockReset();
+    mockShopifyGraphQLRequest.mockResolvedValue({
+      success: true,
+      data: { metafieldsSet: { metafields: [{ id: "mf-audit-test" }], userErrors: [] } },
+    });
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+    await sql.end();
+  });
+
+  it("OK -> HELD writes exactly one hold_applied event", async () => {
+    const result = await updateCreditStatus(sql, TEST_ACCOUNT_ID, {
+      creditLimitAmount: 100000,
+      manualHold: true,
+      holdReasonCode: "MANUAL_HOLD",
+    });
+
+    expect(result.success).toBe(true);
+
+    const events = await sql<{ type: string; data: unknown }[]>`
+      SELECT type, data FROM "AuditEvent"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+        AND type LIKE 'credit_status.%'
+      ORDER BY at
+    `;
+
+    expect(events.length).toBe(1);
+    expect(events[0].type).toBe("credit_status.hold_applied");
+  });
+
+  it("HELD -> OK writes exactly one hold_released event", async () => {
+    // First set to HELD
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "holdState" = 'HELD', "manualHold" = true, "holdReasonCode" = 'MANUAL_HOLD'
+      WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+
+    const result = await updateCreditStatus(sql, TEST_ACCOUNT_ID, {
+      creditLimitAmount: 100000,
+      manualHold: false,
+    });
+
+    expect(result.success).toBe(true);
+
+    const events = await sql<{ type: string; data: unknown }[]>`
+      SELECT type, data FROM "AuditEvent"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+        AND type LIKE 'credit_status.%'
+      ORDER BY at
+    `;
+
+    expect(events.length).toBe(1);
+    expect(events[0].type).toBe("credit_status.hold_released");
+  });
+
+  it("no-op recompute writes no audit events", async () => {
+    // Account is OK, update without changing hold state
+    const result = await updateCreditStatus(sql, TEST_ACCOUNT_ID, {
+      creditLimitAmount: 90000,
+      manualHold: false,
+    });
+
+    expect(result.success).toBe(true);
+
+    const events = await sql<{ type: string }[]>`
+      SELECT type FROM "AuditEvent"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+        AND type LIKE 'credit_status.%'
+    `;
+
+    expect(events.length).toBe(0);
+  });
+
+  it("audit event data has exactly the allowed keys", async () => {
+    const result = await updateCreditStatus(sql, TEST_ACCOUNT_ID, {
+      creditLimitAmount: 100000,
+      manualHold: true,
+      holdReasonCode: "MANUAL_HOLD",
+    });
+
+    expect(result.success).toBe(true);
+
+    const events = await sql<{ data: Record<string, unknown> }[]>`
+      SELECT data FROM "AuditEvent"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+        AND type LIKE 'credit_status.%'
+    `;
+
+    expect(events.length).toBe(1);
+    const dataKeys = Object.keys(events[0].data).sort();
+    expect(dataKeys).toEqual(ALLOWED_AUDIT_DATA_KEYS.sort());
+
+    // Verify the actual content
+    expect(events[0].data.buyerAccountId).toBe(TEST_ACCOUNT_ID);
+    expect(events[0].data.holdReasonCode).toBe("MANUAL_HOLD");
+    expect(events[0].data.source).toBe("manual");
+    expect(events[0].data.previousHoldState).toBe("OK");
+    expect(events[0].data.newHoldState).toBe("HELD");
+  });
+
+  it("failed metafield write still records the transition (audit in tx)", async () => {
+    // Make metafield write fail
+    mockShopifyGraphQLRequest.mockResolvedValue({
+      success: false,
+      error: "Network error",
+    });
+
+    const result = await updateCreditStatus(sql, TEST_ACCOUNT_ID, {
+      creditLimitAmount: 100000,
+      manualHold: true,
+      holdReasonCode: "MANUAL_HOLD",
+    });
+
+    // DB update succeeded but metafield failed
+    expect(result.success).toBe(true);
+    expect(result.metafieldSyncPending).toBe(true);
+
+    // Audit event should still be recorded (it was in the same tx as holdState UPDATE)
+    const events = await sql<{ type: string; data: Record<string, unknown> }[]>`
+      SELECT type, data FROM "AuditEvent"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+        AND type LIKE 'credit_status.%'
+    `;
+
+    expect(events.length).toBe(1);
+    expect(events[0].type).toBe("credit_status.hold_applied");
+    expect(events[0].data.buyerAccountId).toBe(TEST_ACCOUNT_ID);
+  });
+
+  it("syncCreditStatusMetafield records audit event with source", async () => {
+    // Set up: account is OK with an overdue invoice (will trigger auto-hold)
+    const invoiceId = `inv-audit-${TEST_SUFFIX}`;
+    const orderId = `gid://shopify/Order/audit-${TEST_SUFFIX}`;
+
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+        status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+        '#AUDIT-1', 1000.00, 1000.00, 'open',
+        NOW() - INTERVAL '30 days',
+        NOW() - INTERVAL '10 days',
+        NOW(), NOW()
+      )
+    `;
+
+    try {
+      // Call syncCreditStatusMetafield with a specific source
+      const result = await syncCreditStatusMetafield(sql, TEST_ACCOUNT_ID, "invoice_change");
+
+      expect(result.success).toBe(true);
+
+      // Check audit event was recorded with correct source
+      const events = await sql<{ type: string; data: Record<string, unknown> }[]>`
+        SELECT type, data FROM "AuditEvent"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+          AND type LIKE 'credit_status.%'
+      `;
+
+      expect(events.length).toBe(1);
+      expect(events[0].type).toBe("credit_status.hold_applied");
+      expect(events[0].data.source).toBe("invoice_change");
+    } finally {
+      await sql`DELETE FROM "Invoice" WHERE id = ${invoiceId}`;
+    }
+  });
+
+  it("bypass account does not trigger hold_applied even when manualHold is set", async () => {
+    // Set bypass=true
+    await sql`
+      UPDATE "BuyerAccount"
+      SET bypass = true
+      WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+
+    const result = await updateCreditStatus(sql, TEST_ACCOUNT_ID, {
+      creditLimitAmount: 100000,
+      manualHold: true,
+      holdReasonCode: "MANUAL_HOLD",
+    });
+
+    expect(result.success).toBe(true);
+
+    // No audit event because effective hold didn't change (bypass prevents hold)
+    const events = await sql<{ type: string }[]>`
+      SELECT type FROM "AuditEvent"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+        AND type LIKE 'credit_status.%'
+    `;
+
+    expect(events.length).toBe(0);
+  });
+});

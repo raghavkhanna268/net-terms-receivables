@@ -150,7 +150,7 @@ vi.mock("~/services/matcher.server", () => ({
 
 // Now import after mock is set up
 import { requestContext } from "~/lib/request-context.server";
-import { action, validateImportRequest } from "../app.imports";
+import { action, validateImportRequest, MAX_IMPORT_ROWS } from "../app.imports";
 
 /**
  * Call the real action inside request context.
@@ -909,7 +909,7 @@ describe("Import validation (unit tests)", () => {
     expect(result.valid).toBeNull();
   });
 
-  it("rejects oversized payload (>1000 rows)", () => {
+  it("rejects oversized payload (>1000 rows) with user-readable error", () => {
     const credits = Array.from({ length: 1001 }, (_, i) => ({
       date: yesterday(),
       amountPaise: 1000,
@@ -925,7 +925,11 @@ describe("Import validation (unit tests)", () => {
 
     const result = validateImportRequest(payload);
     expect(result.valid).toBeNull();
-    expect(result.errors.some(e => e.message.includes("1000"))).toBe(true);
+    // Check for user-readable error message with row count and limit
+    const overLimitError = result.errors.find(e => e.path === "credits" && e.message.includes("1,001"));
+    expect(overLimitError).toBeDefined();
+    expect(overLimitError?.message).toContain("1,000 rows");
+    expect(overLimitError?.message).toContain("Please split your statement");
   });
 
   it("rejects negative amountPaise", () => {
@@ -1091,5 +1095,276 @@ describe("Import validation (unit tests)", () => {
 
     const result = validateImportRequest(payload);
     expect(result.valid).not.toBeNull();
+  });
+});
+
+describe("MAX_IMPORT_ROWS constant", () => {
+  it("is exported and equals 1000", () => {
+    expect(MAX_IMPORT_ROWS).toBe(1000);
+  });
+
+  it("is used consistently in validation", () => {
+    // Test that validation accepts exactly MAX_IMPORT_ROWS
+    const exactLimitPayload = {
+      bank: "HDFC",
+      fileName: "statement.csv",
+      credits: Array.from({ length: MAX_IMPORT_ROWS }, (_, i) => ({
+        date: yesterday(),
+        amountPaise: 1000,
+        rail: "NEFT",
+        narration: `Payment ${i}`,
+      })),
+    };
+
+    const exactResult = validateImportRequest(exactLimitPayload);
+    expect(exactResult.valid).not.toBeNull();
+    expect(exactResult.errors).toHaveLength(0);
+
+    // Test that validation rejects MAX_IMPORT_ROWS + 1
+    const overLimitPayload = {
+      bank: "HDFC",
+      fileName: "statement.csv",
+      credits: Array.from({ length: MAX_IMPORT_ROWS + 1 }, (_, i) => ({
+        date: yesterday(),
+        amountPaise: 1000,
+        rail: "NEFT",
+        narration: `Payment ${i}`,
+      })),
+    };
+
+    const overResult = validateImportRequest(overLimitPayload);
+    expect(overResult.valid).toBeNull();
+  });
+});
+
+describeWithDb("Monthly import limit enforcement", () => {
+  let sql: ReturnType<typeof postgres>;
+  let testShopId: string;
+  let TEST_SHOP_DOMAIN: string;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    const suffix = Date.now().toString(36) + "lim";
+    TEST_SHOP_DOMAIN = `import-limit-test-${suffix}.myshopify.com`;
+
+    // Create test shop with free plan (1 import/month limit)
+    const [shop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, plan_key, plan_cached_at, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'free', NOW(), NOW(), NOW())
+      RETURNING id
+    `;
+    testShopId = shop.id;
+  });
+
+  afterAll(async () => {
+    if (sql) {
+      await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+      await sql.end();
+    }
+  });
+
+  beforeEach(async () => {
+    await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+    await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+    matcherCalls.length = 0;
+    
+    // Ensure free plan (1 import/month) and PLAN_GATING_ENFORCED is ON for this test
+    await sql`UPDATE "Shop" SET plan_key = 'free', plan_cached_at = NOW() WHERE id = ${testShopId}`;
+  });
+
+  it("first import succeeds when under monthly limit", async () => {
+    // Enable gating for this test
+    vi.stubEnv("PLAN_GATING_ENFORCED", "true");
+
+    try {
+      const payload = {
+        bank: "HDFC",
+        fileName: "first-import.csv",
+        credits: [
+          {
+            date: yesterday(),
+            amountPaise: 1000000,
+            rail: "NEFT",
+            utr: "HDFCN26296600001",
+            narration: "NEFT CR-FIRST IMPORT TEST",
+          },
+        ],
+      };
+
+      const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      expect(response.status).toBe(200);
+
+      const data = await parseResponse(response);
+      expect(data.success).toBe(true);
+      expect(data.counts?.inserted).toBe(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("second import in same month is rejected when on free plan (1/month)", async () => {
+    // Enable gating for this test
+    vi.stubEnv("PLAN_GATING_ENFORCED", "true");
+
+    try {
+      // Create a BankImport record to simulate a previous import this month
+      await sql`
+        INSERT INTO "BankImport" ("shopId", bank, "fileName", "rowCount", "createdAt")
+        VALUES (${testShopId}, 'hdfc', 'previous.csv', 10, NOW())
+      `;
+
+      const payload = {
+        bank: "HDFC",
+        fileName: "second-import.csv",
+        credits: [
+          {
+            date: yesterday(),
+            amountPaise: 2000000,
+            rail: "NEFT",
+            utr: "HDFCN26296600002",
+            narration: "NEFT CR-SECOND IMPORT TEST",
+          },
+        ],
+      };
+
+      const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      expect(response.status).toBe(403);
+
+      const data = await parseResponse(response);
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("Monthly import limit reached");
+      expect((data as { limitReached?: boolean }).limitReached).toBe(true);
+
+      // Verify no BankImport was created for the rejected request
+      const [count] = await sql<{ c: string }[]>`
+        SELECT COUNT(*)::text AS c FROM "BankImport" WHERE "shopId" = ${testShopId}
+      `;
+      expect(parseInt(count.c, 10)).toBe(1); // Only the original import
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("import succeeds when on unlimited plan (starter/growth/scale)", async () => {
+    // Enable gating for this test
+    vi.stubEnv("PLAN_GATING_ENFORCED", "true");
+
+    try {
+      // Upgrade to starter plan (unlimited imports)
+      await sql`UPDATE "Shop" SET plan_key = 'starter', plan_cached_at = NOW() WHERE id = ${testShopId}`;
+
+      // Create multiple BankImport records
+      await sql`
+        INSERT INTO "BankImport" ("shopId", bank, "fileName", "rowCount", "createdAt")
+        VALUES 
+          (${testShopId}, 'hdfc', 'import1.csv', 10, NOW()),
+          (${testShopId}, 'hdfc', 'import2.csv', 10, NOW()),
+          (${testShopId}, 'hdfc', 'import3.csv', 10, NOW())
+      `;
+
+      const payload = {
+        bank: "HDFC",
+        fileName: "unlimited-import.csv",
+        credits: [
+          {
+            date: yesterday(),
+            amountPaise: 3000000,
+            rail: "NEFT",
+            utr: "HDFCN26296600003",
+            narration: "NEFT CR-UNLIMITED PLAN TEST",
+          },
+        ],
+      };
+
+      const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      expect(response.status).toBe(200);
+
+      const data = await parseResponse(response);
+      expect(data.success).toBe(true);
+      expect(data.counts?.inserted).toBe(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("gating off allows unlimited imports on free plan", async () => {
+    // Ensure gating is OFF
+    vi.stubEnv("PLAN_GATING_ENFORCED", "false");
+
+    try {
+      // Ensure free plan
+      await sql`UPDATE "Shop" SET plan_key = 'free', plan_cached_at = NOW() WHERE id = ${testShopId}`;
+
+      // Create many BankImport records
+      await sql`
+        INSERT INTO "BankImport" ("shopId", bank, "fileName", "rowCount", "createdAt")
+        VALUES 
+          (${testShopId}, 'hdfc', 'import1.csv', 10, NOW()),
+          (${testShopId}, 'hdfc', 'import2.csv', 10, NOW())
+      `;
+
+      const payload = {
+        bank: "HDFC",
+        fileName: "gating-off-import.csv",
+        credits: [
+          {
+            date: yesterday(),
+            amountPaise: 4000000,
+            rail: "NEFT",
+            utr: "HDFCN26296600004",
+            narration: "NEFT CR-GATING OFF TEST",
+          },
+        ],
+      };
+
+      const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      expect(response.status).toBe(200);
+
+      const data = await parseResponse(response);
+      expect(data.success).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("monthly limit error message includes usage info", async () => {
+    // Enable gating
+    vi.stubEnv("PLAN_GATING_ENFORCED", "true");
+
+    try {
+      // Ensure free plan
+      await sql`UPDATE "Shop" SET plan_key = 'free', plan_cached_at = NOW() WHERE id = ${testShopId}`;
+
+      // Create a BankImport to hit the limit
+      await sql`
+        INSERT INTO "BankImport" ("shopId", bank, "fileName", "rowCount", "createdAt")
+        VALUES (${testShopId}, 'hdfc', 'existing.csv', 10, NOW())
+      `;
+
+      const payload = {
+        bank: "HDFC",
+        fileName: "over-limit.csv",
+        credits: [
+          {
+            date: yesterday(),
+            amountPaise: 5000000,
+            rail: "NEFT",
+            narration: "NEFT CR-LIMIT MESSAGE TEST",
+          },
+        ],
+      };
+
+      const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      const data = await parseResponse(response);
+
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("1 of 1"); // "used 1 of 1 imports"
+      expect(data.error).toContain("Upgrade");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
