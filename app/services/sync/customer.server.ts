@@ -203,6 +203,10 @@ async function handleCustomerDelete(
  * Stores email and displayName when CUSTOMER_PII_FIELDS=1 is set and they are
  * included in the webhook/query response. These fields are purged by
  * customers/redact (deletes the entire row).
+ *
+ * PII preservation: When email/displayName are null (e.g., ACCESS_DENIED fallback),
+ * existing stored values are preserved using COALESCE. This ensures fallback
+ * processing doesn't overwrite previously-fetched PII.
  */
 async function upsertTaggedCustomer(
   sql: Sql,
@@ -227,14 +231,18 @@ async function upsertTaggedCustomer(
         WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
         ELSE s8_tagged_customers.tag_deactivated_at
       END,
-      email = EXCLUDED.email,
-      display_name = EXCLUDED.display_name
+      -- Preserve existing PII when new value is null (ACCESS_DENIED fallback)
+      email = COALESCE(EXCLUDED.email, s8_tagged_customers.email),
+      display_name = COALESCE(EXCLUDED.display_name, s8_tagged_customers.display_name)
   `;
 }
 
 /**
  * Update tagged customer if exists (for non-matching customers).
  * Should-fix #5: Don't create records for customers with no matching tag.
+ *
+ * PII preservation: When email/displayName are null (e.g., ACCESS_DENIED fallback),
+ * existing stored values are preserved using COALESCE.
  */
 async function updateTaggedCustomerIfExists(
   sql: Sql,
@@ -256,8 +264,9 @@ async function updateTaggedCustomerIfExists(
         WHEN tag_active = true AND ${tagActive} = false THEN NOW()
         ELSE tag_deactivated_at
       END,
-      email = ${email},
-      display_name = ${displayName}
+      -- Preserve existing PII when new value is null (ACCESS_DENIED fallback)
+      email = COALESCE(${email}, email),
+      display_name = COALESCE(${displayName}, display_name)
     WHERE shop_id = ${shopId} AND customer_id = ${customerId}
   `;
 }

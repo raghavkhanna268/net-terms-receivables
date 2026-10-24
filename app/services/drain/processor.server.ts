@@ -39,9 +39,12 @@ import {
   COMPANY_QUERY,
   COMPANY_LOCATION_QUERY,
   ORDER_QUERY,
-  getCustomerQueryForDrain,
   DRAFT_ORDER_QUERY,
 } from "./admin-client.server";
+import {
+  fetchCustomerWithFallback,
+  incrementCustomerPiiAccessDeniedFallback,
+} from "./customer-fetch.server";
 import {
   processBulkOperation,
   type BulkProcessResult,
@@ -364,6 +367,11 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
  * - Always fetches: id, tags
  * - Optional PII (CUSTOMER_PII_FIELDS=1): email, displayName
  * - NEVER fetches: phone, addresses
+ *
+ * ACCESS_DENIED fallback:
+ * If PCD approval is pending and Shopify returns ACCESS_DENIED for PII fields,
+ * we retry with base fields only (id, tags) and process without PII.
+ * This avoids dead-lettering every customer message while awaiting approval.
  */
 async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResult> {
   // Idempotency check (S20: use shop for new table)
@@ -384,10 +392,8 @@ async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResul
     return processCustomerWebhook(sql, message.shop, message.topic, customer, message.webhookId);
   }
 
-  // Fetch customer data via GraphQL
-  const result = await adminGraphQL<{
-    node: ShopifyCustomer | null;
-  }>(message.shop, getCustomerQueryForDrain(), { id: message.resourceGid });
+  // Fetch customer data via GraphQL with ACCESS_DENIED fallback
+  const result = await fetchCustomerWithFallback(message.shop, message.resourceGid);
 
   if (!result.success) {
     return {
@@ -399,7 +405,7 @@ async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResul
   }
 
   // If node is null, the resource was deleted
-  if (!result.data?.node) {
+  if (!result.data) {
     const customer: ShopifyCustomer = {
       id: message.resourceGid,
       tags: [],
@@ -407,11 +413,21 @@ async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResul
     return processCustomerWebhook(sql, message.shop, "CUSTOMERS_DELETE", customer, message.webhookId);
   }
 
+  // Log warning and increment counter if fallback was used
+  if (result.usedFallback) {
+    console.warn(
+      `[customer_pii_access_denied_fallback] shop=${message.shop} ` +
+        `customer=${message.resourceGid} topic=${message.topic} ` +
+        `fields=email,displayName`
+    );
+    await incrementCustomerPiiAccessDeniedFallback(sql, message.shop);
+  }
+
   return processCustomerWebhook(
     sql,
     message.shop,
     message.topic,
-    result.data.node,
+    result.data,
     message.webhookId
   );
 }
