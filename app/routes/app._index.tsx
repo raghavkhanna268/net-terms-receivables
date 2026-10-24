@@ -120,6 +120,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   } | null = null;
   let error: string | null = null;
 
+  let overLimitCount = 0;
+
   if (shop) {
     const asOf = new Date();
 
@@ -135,6 +137,57 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
           sortOrder,
         }),
       ]);
+
+      // Get overLimitCount via SQL (total across all accounts, not just current page)
+      const [overLimitResult] = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text as count
+        FROM "BuyerAccount"
+        WHERE "shopId" = ${shop.id}
+          AND gated_at IS NOT NULL
+      `;
+      overLimitCount = parseInt(overLimitResult?.count ?? "0", 10);
+
+      // When filtering to only over-limit accounts, query directly with pagination
+      if (onlyOverLimit) {
+        const sortColumn = sortBy === "name" ? "ba.name" : sortBy === "overdue" ? "overdue_paise" : "outstanding_paise";
+        const sortDir = sortOrder === "asc" ? sql`ASC` : sql`DESC`;
+
+        const filteredRows = await sql<BuyerLedgerRow[]>`
+          WITH invoice_totals AS (
+            SELECT
+              ba.id as buyer_account_id,
+              ba.name as buyer_name,
+              ba."creditLimitPaise"::text as credit_limit_paise,
+              ba."holdState" as hold_state,
+              i.currency,
+              COALESCE(SUM(i.outstanding), 0)::text as outstanding_paise,
+              COALESCE(SUM(CASE WHEN i.due_at < ${asOf} THEN i.outstanding ELSE 0 END), 0)::text as overdue_paise,
+              MAX(CASE WHEN i.due_at < ${asOf} THEN EXTRACT(DAY FROM ${asOf}::timestamp - i.due_at::timestamp)::integer ELSE NULL END) as oldest_overdue_days,
+              ba.gated_at IS NOT NULL as is_gated
+            FROM "BuyerAccount" ba
+            LEFT JOIN "Invoice" i ON i."buyerAccountId" = ba.id AND i.status = 'open' AND i.outstanding > 0
+            WHERE ba."shopId" = ${shop.id}
+              AND ba.gated_at IS NOT NULL
+            GROUP BY ba.id, ba.name, ba."creditLimitPaise", ba."holdState", i.currency, ba.gated_at
+            HAVING COALESCE(SUM(i.outstanding), 0) > 0
+          )
+          SELECT * FROM invoice_totals
+          ORDER BY ${sql.unsafe(sortColumn)} ${sortDir}
+          LIMIT ${PAGE_SIZE}
+          OFFSET ${(page - 1) * PAGE_SIZE}
+        `;
+
+        const [filteredCountResult] = await sql<{ count: string }[]>`
+          SELECT COUNT(DISTINCT ba.id)::text as count
+          FROM "BuyerAccount" ba
+          JOIN "Invoice" i ON i."buyerAccountId" = ba.id AND i.status = 'open' AND i.outstanding > 0
+          WHERE ba."shopId" = ${shop.id}
+            AND ba.gated_at IS NOT NULL
+        `;
+        const filteredTotalCount = parseInt(filteredCountResult?.count ?? "0", 10);
+
+        buyerLedger = { rows: filteredRows, totalCount: filteredTotalCount };
+      }
 
       if (selectedBuyerId) {
         const buyerInvoices = await getBuyerInvoices(
@@ -172,16 +225,6 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const storeHandle = shopDomain.replace(".myshopify.com", "");
   const gatingEnforced = isGatingEnforced();
 
-  // Count over-limit accounts for banner (before any filtering)
-  const overLimitCount = buyerLedger?.rows.filter((r) => r.is_gated).length ?? 0;
-
-  // Filter to only over-limit accounts if requested (client-side filter)
-  let filteredLedger = buyerLedger;
-  if (onlyOverLimit && buyerLedger) {
-    const filteredRows = buyerLedger.rows.filter((r) => r.is_gated);
-    filteredLedger = { rows: filteredRows, totalCount: filteredRows.length };
-  }
-
   return {
     shopName: storeHandle,
     shopDomain,
@@ -201,13 +244,13 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     appHandle: process.env.APP_HANDLE ?? "net-terms-receivables",
     gatingEnforced,
     agingTotals,
-    buyerLedger: filteredLedger,
+    buyerLedger,
     selectedBuyerInvoices,
     selectedBuyerId,
     pagination: {
       page,
       pageSize: PAGE_SIZE,
-      totalCount: filteredLedger?.totalCount ?? 0,
+      totalCount: buyerLedger?.totalCount ?? 0,
     },
     sortBy,
     sortOrder,

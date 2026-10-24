@@ -1,5 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from "vitest";
 import type { LoaderFunctionArgs } from "react-router";
+import postgres from "postgres";
+import { sqlOptions } from "~/lib/db-light.server";
 
 /**
  * Tests for app._index loader (S7 Aging Dashboard).
@@ -72,6 +74,10 @@ describe("app._index loader", () => {
       // S23: Mock onboarding queries to prevent redirect during tests
       if (query.includes("onboarding_dismissed_at")) {
         return Promise.resolve([{ onboarding_dismissed_at: new Date() }]);
+      }
+      // Mock overLimitCount query (gated accounts count)
+      if (query.includes("COUNT(*)") && query.includes("gated_at IS NOT NULL")) {
+        return Promise.resolve([{ count: "0" }]);
       }
       if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
         return Promise.resolve([{ count: "1" }]);
@@ -453,75 +459,27 @@ describe("app._index loader", () => {
     });
 
     it("sets onlyOverLimit to true when overlimit=true query param", async () => {
-      const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs({ overlimit: "true" }));
-
-      expect(result.onlyOverLimit).toBe(true);
-    });
-
-    it("counts over-limit accounts correctly", async () => {
-      mockGetBuyerLedger.mockResolvedValue({
-        rows: [
-          {
-            buyer_account_id: "buyer-1",
-            buyer_name: "Active Buyer",
-            credit_limit_paise: null,
-            hold_state: "OK",
-            currency: "INR",
-            outstanding_paise: "100000",
-            overdue_paise: "0",
-            oldest_overdue_days: null,
-            is_gated: false,
-          },
-          {
-            buyer_account_id: "buyer-2",
-            buyer_name: "Gated Buyer 1",
-            credit_limit_paise: null,
-            hold_state: "OK",
-            currency: "INR",
-            outstanding_paise: "200000",
-            overdue_paise: "0",
-            oldest_overdue_days: null,
-            is_gated: true,
-          },
-          {
-            buyer_account_id: "buyer-3",
-            buyer_name: "Gated Buyer 2",
-            credit_limit_paise: null,
-            hold_state: "OK",
-            currency: "INR",
-            outstanding_paise: "300000",
-            overdue_paise: "0",
-            oldest_overdue_days: null,
-            is_gated: true,
-          },
-        ],
-        totalCount: 3,
-      });
-
-      const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
-
-      expect(result.overLimitCount).toBe(2);
-      expect(result.buyerLedger?.rows).toHaveLength(3);
-    });
-
-    it("filters to only over-limit accounts when overlimit=true", async () => {
-      mockGetBuyerLedger.mockResolvedValue({
-        rows: [
-          {
-            buyer_account_id: "buyer-1",
-            buyer_name: "Active Buyer",
-            credit_limit_paise: null,
-            hold_state: "OK",
-            currency: "INR",
-            outstanding_paise: "100000",
-            overdue_paise: "0",
-            oldest_overdue_days: null,
-            is_gated: false,
-          },
-          {
-            buyer_account_id: "buyer-2",
+      // Mock the filtered query and count queries for overlimit=true
+      mockSql.mockImplementation((strings: TemplateStringsArray, ..._values: unknown[]) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id, currency, timezone FROM")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" }]);
+        }
+        if (query.includes("onboarding_dismissed_at")) {
+          return Promise.resolve([{ onboarding_dismissed_at: new Date() }]);
+        }
+        // overLimitCount query
+        if (query.includes("COUNT(*)") && query.includes("gated_at IS NOT NULL")) {
+          return Promise.resolve([{ count: "1" }]);
+        }
+        // Filtered count query for overlimit=true
+        if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL")) {
+          return Promise.resolve([{ count: "1" }]);
+        }
+        // Filtered rows query for overlimit=true (WITH invoice_totals)
+        if (query.includes("WITH invoice_totals") && query.includes("gated_at IS NOT NULL")) {
+          return Promise.resolve([{
+            buyer_account_id: "buyer-gated",
             buyer_name: "Gated Buyer",
             credit_limit_paise: null,
             hold_state: "OK",
@@ -530,19 +488,134 @@ describe("app._index loader", () => {
             overdue_paise: "0",
             oldest_overdue_days: null,
             is_gated: true,
-          },
-        ],
-        totalCount: 2,
+          }]);
+        }
+        if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
+          return Promise.resolve([{ count: "1" }]);
+        }
+        if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
       });
 
       const { loader } = await import("../app._index");
       const result = await loader(createLoaderArgs({ overlimit: "true" }));
 
       expect(result.onlyOverLimit).toBe(true);
+    });
+
+    it("counts over-limit accounts via SQL across all pages", async () => {
+      // Mock SQL to return overLimitCount of 2 (from SQL, not client-side filter)
+      mockSql.mockImplementation((strings: TemplateStringsArray, ..._values: unknown[]) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id, currency, timezone FROM")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" }]);
+        }
+        if (query.includes("onboarding_dismissed_at")) {
+          return Promise.resolve([{ onboarding_dismissed_at: new Date() }]);
+        }
+        // overLimitCount query - returns 2 gated accounts total
+        if (query.includes("COUNT(*)") && query.includes("gated_at IS NOT NULL")) {
+          return Promise.resolve([{ count: "2" }]);
+        }
+        if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
+          return Promise.resolve([{ count: "3" }]);
+        }
+        if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      mockGetBuyerLedger.mockResolvedValue({
+        rows: [
+          {
+            buyer_account_id: "buyer-1",
+            buyer_name: "Active Buyer",
+            credit_limit_paise: null,
+            hold_state: "OK",
+            currency: "INR",
+            outstanding_paise: "100000",
+            overdue_paise: "0",
+            oldest_overdue_days: null,
+            is_gated: false,
+          },
+        ],
+        totalCount: 1,
+      });
+
+      const { loader } = await import("../app._index");
+      const result = await loader(createLoaderArgs());
+
+      // overLimitCount is from SQL (2), not from current page (which has 0 gated)
+      expect(result.overLimitCount).toBe(2);
       expect(result.buyerLedger?.rows).toHaveLength(1);
-      expect(result.buyerLedger?.rows[0].buyer_name).toBe("Gated Buyer");
-      expect(result.buyerLedger?.totalCount).toBe(1);
-      expect(result.overLimitCount).toBe(1);
+    });
+
+    it("filters to only over-limit accounts via SQL when overlimit=true", async () => {
+      // Mock SQL queries for overlimit=true - uses direct SQL instead of getBuyerLedger
+      mockSql.mockImplementation((strings: TemplateStringsArray, ..._values: unknown[]) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id, currency, timezone FROM")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" }]);
+        }
+        if (query.includes("onboarding_dismissed_at")) {
+          return Promise.resolve([{ onboarding_dismissed_at: new Date() }]);
+        }
+        // overLimitCount query
+        if (query.includes("COUNT(*)") && query.includes("gated_at IS NOT NULL") && !query.includes("DISTINCT")) {
+          return Promise.resolve([{ count: "2" }]);
+        }
+        // Filtered count query
+        if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL")) {
+          return Promise.resolve([{ count: "2" }]);
+        }
+        // Filtered rows query (WITH invoice_totals)
+        if (query.includes("WITH invoice_totals") && query.includes("gated_at IS NOT NULL")) {
+          return Promise.resolve([
+            {
+              buyer_account_id: "buyer-2",
+              buyer_name: "Gated Buyer 1",
+              credit_limit_paise: null,
+              hold_state: "OK",
+              currency: "INR",
+              outstanding_paise: "200000",
+              overdue_paise: "0",
+              oldest_overdue_days: null,
+              is_gated: true,
+            },
+            {
+              buyer_account_id: "buyer-3",
+              buyer_name: "Gated Buyer 2",
+              credit_limit_paise: null,
+              hold_state: "OK",
+              currency: "INR",
+              outstanding_paise: "300000",
+              overdue_paise: "0",
+              oldest_overdue_days: null,
+              is_gated: true,
+            },
+          ]);
+        }
+        if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
+          return Promise.resolve([{ count: "3" }]);
+        }
+        if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { loader } = await import("../app._index");
+      const result = await loader(createLoaderArgs({ overlimit: "true" }));
+
+      expect(result.onlyOverLimit).toBe(true);
+      expect(result.buyerLedger?.rows).toHaveLength(2);
+      expect(result.buyerLedger?.rows[0].buyer_name).toBe("Gated Buyer 1");
+      expect(result.buyerLedger?.rows[1].buyer_name).toBe("Gated Buyer 2");
+      expect(result.buyerLedger?.totalCount).toBe(2);
+      expect(result.overLimitCount).toBe(2);
     });
 
     it("returns all accounts by default (no filtering)", async () => {
@@ -580,5 +653,156 @@ describe("app._index loader", () => {
       expect(result.onlyOverLimit).toBe(false);
       expect(result.buyerLedger?.rows).toHaveLength(2);
     });
+  });
+});
+
+/**
+ * DB-backed tests for app._index loader over-limit account queries.
+ * These tests verify that the SQL queries for overLimitCount and
+ * the filtered list work correctly with PLAN_GATING_ENFORCED=true.
+ */
+const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
+const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
+
+describeWithDb("app._index loader over-limit queries (DB integration)", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-idx";
+  const TEST_SHOP_ID = `shop-idx-${TEST_SUFFIX}`;
+  const TEST_SHOP_DOMAIN = `idx-test-${TEST_SUFFIX}.myshopify.com`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    // Create test shop
+    await sql`
+      INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt", onboarding_dismissed_at)
+      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, NOW(), NOW(), NOW())
+    `;
+
+    // Create test accounts: 2 active, 2 gated
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, gated_at, "createdAt", "updatedAt")
+      VALUES
+        (${"acc-active-1-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, 'COMPANY', ${"co-1-" + TEST_SUFFIX}, ${"loc-1-" + TEST_SUFFIX}, 'Active Account 1', NULL, NOW(), NOW()),
+        (${"acc-active-2-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, 'COMPANY', ${"co-2-" + TEST_SUFFIX}, ${"loc-2-" + TEST_SUFFIX}, 'Active Account 2', NULL, NOW(), NOW()),
+        (${"acc-gated-1-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, 'COMPANY', ${"co-3-" + TEST_SUFFIX}, ${"loc-3-" + TEST_SUFFIX}, 'Gated Account 1', NOW(), NOW(), NOW()),
+        (${"acc-gated-2-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, 'COMPANY', ${"co-4-" + TEST_SUFFIX}, ${"loc-4-" + TEST_SUFFIX}, 'Gated Account 2', NOW(), NOW(), NOW())
+    `;
+
+    // Create invoices for the accounts (so they show in the ledger)
+    await sql`
+      INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", name, currency, outstanding, status, "createdAt", "updatedAt")
+      VALUES
+        (${"inv-active-1-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, ${"acc-active-1-" + TEST_SUFFIX}, 'INV-001', 'INR', 100000, 'open', NOW(), NOW()),
+        (${"inv-active-2-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, ${"acc-active-2-" + TEST_SUFFIX}, 'INV-002', 'INR', 200000, 'open', NOW(), NOW()),
+        (${"inv-gated-1-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, ${"acc-gated-1-" + TEST_SUFFIX}, 'INV-003', 'INR', 300000, 'open', NOW(), NOW()),
+        (${"inv-gated-2-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, ${"acc-gated-2-" + TEST_SUFFIX}, 'INV-004', 'INR', 400000, 'open', NOW(), NOW())
+    `;
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+    await sql.end();
+  });
+
+  it("overLimitCount query returns correct count of gated accounts with PLAN_GATING_ENFORCED=true", async () => {
+    const originalEnv = process.env.PLAN_GATING_ENFORCED;
+    process.env.PLAN_GATING_ENFORCED = "true";
+
+    try {
+      // This is the exact query used in the loader for overLimitCount
+      const [result] = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text as count
+        FROM "BuyerAccount"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+          AND gated_at IS NOT NULL
+      `;
+
+      expect(parseInt(result.count, 10)).toBe(2);
+    } finally {
+      process.env.PLAN_GATING_ENFORCED = originalEnv;
+    }
+  });
+
+  it("filtered ledger query returns only gated accounts with outstanding invoices", async () => {
+    const originalEnv = process.env.PLAN_GATING_ENFORCED;
+    process.env.PLAN_GATING_ENFORCED = "true";
+
+    try {
+      const asOf = new Date();
+
+      // This is the filtered query used when overlimit=true
+      const filteredRows = await sql<{ buyer_account_id: string; buyer_name: string; is_gated: boolean }[]>`
+        WITH invoice_totals AS (
+          SELECT
+            ba.id as buyer_account_id,
+            ba.name as buyer_name,
+            ba."creditLimitPaise"::text as credit_limit_paise,
+            ba."holdState" as hold_state,
+            i.currency,
+            COALESCE(SUM(i.outstanding), 0)::text as outstanding_paise,
+            COALESCE(SUM(CASE WHEN i.due_at < ${asOf} THEN i.outstanding ELSE 0 END), 0)::text as overdue_paise,
+            MAX(CASE WHEN i.due_at < ${asOf} THEN EXTRACT(DAY FROM ${asOf}::timestamp - i.due_at::timestamp)::integer ELSE NULL END) as oldest_overdue_days,
+            ba.gated_at IS NOT NULL as is_gated
+          FROM "BuyerAccount" ba
+          LEFT JOIN "Invoice" i ON i."buyerAccountId" = ba.id AND i.status = 'open' AND i.outstanding > 0
+          WHERE ba."shopId" = ${TEST_SHOP_ID}
+            AND ba.gated_at IS NOT NULL
+          GROUP BY ba.id, ba.name, ba."creditLimitPaise", ba."holdState", i.currency, ba.gated_at
+          HAVING COALESCE(SUM(i.outstanding), 0) > 0
+        )
+        SELECT * FROM invoice_totals
+        ORDER BY outstanding_paise DESC
+        LIMIT 20
+        OFFSET 0
+      `;
+
+      // Should return exactly 2 gated accounts
+      expect(filteredRows.length).toBe(2);
+      expect(filteredRows.every(r => r.is_gated)).toBe(true);
+      expect(filteredRows.every(r => r.buyer_name.includes("Gated"))).toBe(true);
+
+      // Verify filtered count query
+      const [countResult] = await sql<{ count: string }[]>`
+        SELECT COUNT(DISTINCT ba.id)::text as count
+        FROM "BuyerAccount" ba
+        JOIN "Invoice" i ON i."buyerAccountId" = ba.id AND i.status = 'open' AND i.outstanding > 0
+        WHERE ba."shopId" = ${TEST_SHOP_ID}
+          AND ba.gated_at IS NOT NULL
+      `;
+      expect(parseInt(countResult.count, 10)).toBe(2);
+    } finally {
+      process.env.PLAN_GATING_ENFORCED = originalEnv;
+    }
+  });
+
+  it("gated accounts appear in query results even when PLAN_GATING_ENFORCED=true", async () => {
+    const originalEnv = process.env.PLAN_GATING_ENFORCED;
+    process.env.PLAN_GATING_ENFORCED = "true";
+
+    try {
+      // Verify gated accounts exist and have the correct gated_at status
+      const accounts = await sql<{ id: string; name: string; gated_at: Date | null }[]>`
+        SELECT id, name, gated_at
+        FROM "BuyerAccount"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+      `;
+
+      expect(accounts.length).toBe(4);
+
+      const gatedAccounts = accounts.filter(a => a.gated_at !== null);
+      const activeAccounts = accounts.filter(a => a.gated_at === null);
+
+      expect(gatedAccounts.length).toBe(2);
+      expect(activeAccounts.length).toBe(2);
+
+      // Gated accounts should have names containing "Gated"
+      expect(gatedAccounts.every(a => a.name.includes("Gated"))).toBe(true);
+      expect(activeAccounts.every(a => a.name.includes("Active"))).toBe(true);
+    } finally {
+      process.env.PLAN_GATING_ENFORCED = originalEnv;
+    }
   });
 });
