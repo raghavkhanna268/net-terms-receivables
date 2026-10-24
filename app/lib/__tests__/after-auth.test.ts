@@ -190,7 +190,9 @@ describe("after-auth", () => {
         expect(_isShopSetupComplete("reinstall-shop.myshopify.com")).toBe(true);
       });
 
+      expect(mockEnsureMetafieldDefinitions).toHaveBeenCalledTimes(1);
       expect(mockEnsureValidation).toHaveBeenCalledTimes(1);
+      expect(mockEnsurePaymentCustomization).toHaveBeenCalledTimes(1);
 
       waitUntilPromises.length = 0;
       mockSqlQuery.mockResolvedValueOnce([{ id: "shop-123" }]);
@@ -204,7 +206,9 @@ describe("after-auth", () => {
       await Promise.allSettled(waitUntilPromises);
 
       await vi.waitFor(() => {
+        expect(mockEnsureMetafieldDefinitions).toHaveBeenCalledTimes(2);
         expect(mockEnsureValidation).toHaveBeenCalledTimes(2);
+        expect(mockEnsurePaymentCustomization).toHaveBeenCalledTimes(2);
         expect(_isShopSetupComplete("reinstall-shop.myshopify.com")).toBe(true);
       });
     });
@@ -642,4 +646,5 @@ describe("after-auth", () => {
       consoleSpy.mockRestore();
     });
   });
+
 });
