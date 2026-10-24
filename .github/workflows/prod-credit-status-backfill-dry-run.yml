@@ -75,7 +75,10 @@ jobs:
           if [[ "$DATABASE_URL_RAW" == *\?* ]]; then SEP='&'; else SEP='?'; fi
           export DATABASE_URL="${DATABASE_URL_RAW}${SEP}default_transaction_read_only=on"
           ARGS=(--dry-run)
-          [ "${#ARGS[@]}" -eq 1 ] && [ "${ARGS[0]}" = "--dry-run" ] || { echo "::error::argv must be exactly --dry-run"; exit 1; }
+          if [ "${#ARGS[@]}" -ne 1 ] || [ "${ARGS[0]}" != "--dry-run" ]; then
+            echo "::error::argv must be exactly --dry-run"
+            exit 1
+          fi
           set +e
           npx tsx scripts/credit-status-metafield-backfill.ts "${ARGS[@]}" > "$RUNNER_TEMP/bf.out" 2>&1
           RC=$?
