@@ -124,7 +124,7 @@ describe("app.data-requests.$id.download", () => {
         customerGid: "gid://shopify/Customer/456",
         requestId: "req-123",
         requestedAt: "2026-01-01T00:00:00.000Z",
-        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [] },
+        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [], paymentMatches: [] },
       };
 
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
