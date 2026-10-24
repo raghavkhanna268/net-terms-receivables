@@ -276,3 +276,75 @@ describe("Plan Page Component Logic", () => {
     expect(bannerTone).toBe("info");
   });
 });
+
+/**
+ * Tests for FeatureComparisonTable logic (S21).
+ *
+ * The FeatureComparisonTable component in app.plan.tsx iterates over
+ * ALL_PLAN_KEYS and ALL_FEATURE_KEYS, calling planHasFeature() to
+ * determine whether to show ✓ or — for each cell.
+ *
+ * These tests verify the pure logic that the table uses, especially
+ * that credit_holds shows as included (✓) for ALL four plan tiers.
+ */
+describe("FeatureComparisonTable logic", () => {
+  it("credit_holds shows as included for all four tiers", async () => {
+    const { ALL_PLAN_KEYS, getPlanConfig, planHasFeature } = await import(
+      "~/lib/entitlements"
+    );
+
+    const creditHoldsRow = ALL_PLAN_KEYS.map((planKey) => {
+      const plan = getPlanConfig(planKey);
+      return { planKey, hasFeature: planHasFeature(plan, "credit_holds") };
+    });
+
+    expect(creditHoldsRow).toEqual([
+      { planKey: "free", hasFeature: true },
+      { planKey: "starter", hasFeature: true },
+      { planKey: "growth", hasFeature: true },
+      { planKey: "scale", hasFeature: true },
+    ]);
+  });
+
+  it("aging_dashboard shows as included for all four tiers", async () => {
+    const { ALL_PLAN_KEYS, getPlanConfig, planHasFeature } = await import(
+      "~/lib/entitlements"
+    );
+
+    for (const planKey of ALL_PLAN_KEYS) {
+      const plan = getPlanConfig(planKey);
+      expect(planHasFeature(plan, "aging_dashboard")).toBe(true);
+    }
+  });
+
+  it("pdf_statements shows as NOT included for free and starter", async () => {
+    const { getPlanConfig, planHasFeature } = await import("~/lib/entitlements");
+
+    expect(planHasFeature(getPlanConfig("free"), "pdf_statements")).toBe(false);
+    expect(planHasFeature(getPlanConfig("starter"), "pdf_statements")).toBe(false);
+    expect(planHasFeature(getPlanConfig("growth"), "pdf_statements")).toBe(true);
+    expect(planHasFeature(getPlanConfig("scale"), "pdf_statements")).toBe(true);
+  });
+
+  it("generates correct table data for all features", async () => {
+    const { ALL_PLAN_KEYS, ALL_FEATURE_KEYS, getPlanConfig, planHasFeature } =
+      await import("~/lib/entitlements");
+
+    const tableRows = ALL_FEATURE_KEYS.map((feature) => {
+      const cells = ALL_PLAN_KEYS.map((planKey) => {
+        const plan = getPlanConfig(planKey);
+        return planHasFeature(plan, feature);
+      });
+      return { feature, cells };
+    });
+
+    const creditHoldsRowData = tableRows.find((row) => row.feature === "credit_holds");
+    expect(creditHoldsRowData?.cells).toEqual([true, true, true, true]);
+
+    const agingRowData = tableRows.find((row) => row.feature === "aging_dashboard");
+    expect(agingRowData?.cells).toEqual([true, true, true, true]);
+
+    const auditExportRowData = tableRows.find((row) => row.feature === "audit_export");
+    expect(auditExportRowData?.cells).toEqual([false, false, false, true]);
+  });
+});
