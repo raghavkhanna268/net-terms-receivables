@@ -188,9 +188,12 @@ export const SEED_ORDER_DELAY_MS = parseInt(process.env.SEED_ORDER_DELAY_MS ?? S
 export const ORDER_CREATE_MAX_ATTEMPTS = 5;
 export const ORDER_CREATE_BACKOFF_DELAYS_MS = [15000, 30000, 60000, 120000]; // After first failure: 15s, 30s, 60s, 120s
 
-// Security: hardcoded allowed dev store domain. Seed refuses to run on any other shop.
-// This prevents accidental mutation of production data if someone misconfigures SHOP.
-const ALLOWED_DEV_STORE = "net-terms-receivables.myshopify.com";
+// Security: the allowed dev-store domain comes from the ALLOWED_DEV_STORE env var
+// (a GitHub Actions secret in CI; never committed, #190 F1). Seed refuses to run
+// on any other shop, and refuses to run at all if ALLOWED_DEV_STORE is unset or
+// malformed (fail closed). This prevents accidental mutation of production data
+// if someone misconfigures SHOP.
+const DEV_STORE_DOMAIN_RE = /^[a-z0-9-]+\.myshopify\.com$/;
 
 // Location suffixes for different payment terms (Net 15, Net 30, Net 60)
 export const LOCATION_TERMS: { suffix: string; dueInDays: number }[] = [
@@ -3688,8 +3691,18 @@ function validateEnv(): { shop: string; token: string; databaseUrl: string | nul
     return null;
   }
 
-  // Security: enforce hardcoded dev store domain
-  if (shop !== ALLOWED_DEV_STORE) {
+  // Security: enforce the configured dev store domain (fail closed if unset)
+  const allowedDevStore = process.env.ALLOWED_DEV_STORE?.trim();
+  if (!allowedDevStore) {
+    console.error("❌ Missing ALLOWED_DEV_STORE environment variable");
+    console.error("   Set it to the dev-store domain the seed may run against. Seed refuses to run without it.");
+    return null;
+  }
+  if (!DEV_STORE_DOMAIN_RE.test(allowedDevStore)) {
+    console.error("❌ Security: ALLOWED_DEV_STORE is not a valid *.myshopify.com domain");
+    return null;
+  }
+  if (shop !== allowedDevStore) {
     console.error("❌ Security: SHOP is not a valid dev-store domain");
     console.error("   This guard prevents accidental mutation of production data.");
     return null;
