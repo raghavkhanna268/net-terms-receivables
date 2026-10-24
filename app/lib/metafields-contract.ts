@@ -193,3 +193,54 @@ export const METAFIELD = {
   key: "credit_status",
   type: "json",
 } as const;
+
+/**
+ * Input for serializing credit status from database values.
+ * Amounts are already in paise (bigint).
+ */
+export interface CreditStatusDbInput {
+  currencyCode: string;
+  hold: boolean;
+  holdReasonCode: HoldReasonCode;
+  /** Credit limit in paise. Null = no limit (serialize as a very large value). */
+  limitPaise: bigint | null;
+  /** Current exposure in paise. */
+  exposurePaise: bigint;
+}
+
+/**
+ * Serialize a CreditStatus from database values where amounts are already in paise.
+ *
+ * This is used by the credit-status writer service to create the metafield value
+ * that the Rust validation function will read.
+ *
+ * @param input - The credit status parameters with amounts in paise
+ * @returns JSON string suitable for metafield value
+ */
+export function serializeCreditStatusFromDb(input: CreditStatusDbInput): string {
+  const status: CreditStatus = {
+    schemaVersion: 1,
+    currencyCode: input.currencyCode,
+    hold: input.hold,
+    holdReasonCode: input.holdReasonCode,
+    limitPaise: input.limitPaise?.toString() ?? "999999999999999",
+    exposurePaise: input.exposurePaise.toString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  return JSON.stringify(status);
+}
+
+/**
+ * Parse paise string to bigint, with validation.
+ * Returns null for invalid values.
+ */
+export function parsePaiseString(value: string | null | undefined): bigint | null {
+  if (!value) return null;
+  if (!/^\d+$/.test(value)) return null;
+  try {
+    return BigInt(value);
+  } catch {
+    return null;
+  }
+}
