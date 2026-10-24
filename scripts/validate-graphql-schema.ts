@@ -94,6 +94,42 @@ export const CONNECTION_FIELDS = [
 ];
 
 /**
+ * CUSTOMER PII DENYLIST: Customer fields that are NEVER allowed.
+ *
+ * Protected Customer Data (Level 1 + Name + Email) approval allows only:
+ * - email, displayName (CUSTOMER_OPTIONAL_PII_FIELDS in customer-fields.server.ts)
+ *
+ * Phone and address fields are NEVER fetched, regardless of approval level.
+ * These fields are not needed for net-terms functionality.
+ *
+ * Uses for allowed PII fields:
+ * - S8: Labels in buyer account UI
+ * - S16: Payment matching against bank statement payer names
+ * - S18: Payment reminder emails
+ *
+ * Format: { parentType: Set<fieldName> }
+ *
+ * @see app/services/sync/customer-fields.server.ts for the authoritative list
+ */
+export const CUSTOMER_PII_DENYLIST: Record<string, Set<string>> = {
+  Customer: new Set([
+    "phone",
+    "addresses",
+    "firstName",
+    "lastName",
+    "defaultAddress",
+  ]),
+};
+
+/**
+ * CUSTOMER PII ALLOWLIST: The ONLY optional PII fields that may be fetched.
+ * When CUSTOMER_PII_FIELDS=1, only these fields are allowed in addition to base fields.
+ *
+ * @see app/services/sync/customer-fields.server.ts CUSTOMER_OPTIONAL_PII_FIELDS
+ */
+export const CUSTOMER_PII_ALLOWLIST: Set<string> = new Set(["email", "displayName"]);
+
+/**
  * SCOPE DENYLIST: Fields that require scopes we don't have.
  *
  * Our production scopes (shopify.app.toml): 11 scopes total.
@@ -228,6 +264,39 @@ const NEGATIVE_FIXTURES = {
       }
     }`,
     expectedError: "requires scope 'read_locations'",
+  },
+  customerPiiPhone: {
+    name: "NEGATIVE_TEST_CUSTOMER_PII_PHONE",
+    source: `query CustomerWithPhone($id: ID!) {
+      customer(id: $id) {
+        id
+        tags
+        phone
+      }
+    }`,
+    expectedError: "forbidden PII field",
+  },
+  customerPiiAddress: {
+    name: "NEGATIVE_TEST_CUSTOMER_PII_ADDRESS",
+    source: `query CustomerWithAddress($id: ID!) {
+      customer(id: $id) {
+        id
+        addresses {
+          address1
+        }
+      }
+    }`,
+    expectedError: "forbidden PII field",
+  },
+  customerPiiFirstName: {
+    name: "NEGATIVE_TEST_CUSTOMER_PII_FIRSTNAME",
+    source: `query CustomerWithFirstName($id: ID!) {
+      customer(id: $id) {
+        id
+        firstName
+      }
+    }`,
+    expectedError: "forbidden PII field",
   },
 };
 
@@ -588,13 +657,24 @@ export function checkScopeDenylist(
         const fieldName = node.name.value;
         const parentType = typeStack[typeStack.length - 1];
 
-        // Check if this field is in the denylist for the current parent type
+        // Check if this field is in the scope denylist for the current parent type
         const denylistEntry = SCOPE_DENYLIST[parentType];
         if (denylistEntry && denylistEntry[fieldName]) {
           const requiredScope = denylistEntry[fieldName];
           errors.push(
             new GraphQLError(
               `${docName}: Field '${fieldName}' on type '${parentType}' requires scope '${requiredScope}' which is not in our production scopes. Remove this field.`
+            )
+          );
+        }
+
+        // Check if this field is in the customer PII denylist
+        const piiDenylist = CUSTOMER_PII_DENYLIST[parentType];
+        if (piiDenylist && piiDenylist.has(fieldName)) {
+          errors.push(
+            new GraphQLError(
+              `${docName}: Field '${fieldName}' on type '${parentType}' is a forbidden PII field. ` +
+              `Phone and address fields are NEVER allowed. Only email and displayName are permitted for customers.`
             )
           );
         }
@@ -848,6 +928,81 @@ function runSelfTests(schema: GraphQLSchema): boolean {
       console.log(`  ❌ SELF-TEST FAILED: scopeDenylistFragmentDefinition - wrong error type`);
       console.log(`     Expected: ${NEGATIVE_FIXTURES.scopeDenylistFragmentDefinition.expectedError}`);
       console.log(`     Got: ${scopeFragmentErrors[0].message}`);
+      allPassed = false;
+    }
+  }
+
+  // Test customer PII denylist: phone field
+  const piiPhoneDoc: GraphQLDocument = {
+    name: NEGATIVE_FIXTURES.customerPiiPhone.name,
+    source: NEGATIVE_FIXTURES.customerPiiPhone.source,
+    filePath: "<self-test>",
+  };
+
+  const piiPhoneErrors = validateDocument(schema, piiPhoneDoc);
+  if (piiPhoneErrors.length === 0) {
+    console.log(`  ❌ SELF-TEST FAILED: customerPiiPhone - expected error but got none`);
+    allPassed = false;
+  } else {
+    const hasExpectedError = piiPhoneErrors.some((e) =>
+      e.message.includes(NEGATIVE_FIXTURES.customerPiiPhone.expectedError)
+    );
+    if (hasExpectedError) {
+      console.log(`  ✓ customerPiiPhone: correctly detected error`);
+    } else {
+      console.log(`  ❌ SELF-TEST FAILED: customerPiiPhone - wrong error type`);
+      console.log(`     Expected: ${NEGATIVE_FIXTURES.customerPiiPhone.expectedError}`);
+      console.log(`     Got: ${piiPhoneErrors[0].message}`);
+      allPassed = false;
+    }
+  }
+
+  // Test customer PII denylist: address field
+  const piiAddressDoc: GraphQLDocument = {
+    name: NEGATIVE_FIXTURES.customerPiiAddress.name,
+    source: NEGATIVE_FIXTURES.customerPiiAddress.source,
+    filePath: "<self-test>",
+  };
+
+  const piiAddressErrors = validateDocument(schema, piiAddressDoc);
+  if (piiAddressErrors.length === 0) {
+    console.log(`  ❌ SELF-TEST FAILED: customerPiiAddress - expected error but got none`);
+    allPassed = false;
+  } else {
+    const hasExpectedError = piiAddressErrors.some((e) =>
+      e.message.includes(NEGATIVE_FIXTURES.customerPiiAddress.expectedError)
+    );
+    if (hasExpectedError) {
+      console.log(`  ✓ customerPiiAddress: correctly detected error`);
+    } else {
+      console.log(`  ❌ SELF-TEST FAILED: customerPiiAddress - wrong error type`);
+      console.log(`     Expected: ${NEGATIVE_FIXTURES.customerPiiAddress.expectedError}`);
+      console.log(`     Got: ${piiAddressErrors[0].message}`);
+      allPassed = false;
+    }
+  }
+
+  // Test customer PII denylist: firstName field
+  const piiFirstNameDoc: GraphQLDocument = {
+    name: NEGATIVE_FIXTURES.customerPiiFirstName.name,
+    source: NEGATIVE_FIXTURES.customerPiiFirstName.source,
+    filePath: "<self-test>",
+  };
+
+  const piiFirstNameErrors = validateDocument(schema, piiFirstNameDoc);
+  if (piiFirstNameErrors.length === 0) {
+    console.log(`  ❌ SELF-TEST FAILED: customerPiiFirstName - expected error but got none`);
+    allPassed = false;
+  } else {
+    const hasExpectedError = piiFirstNameErrors.some((e) =>
+      e.message.includes(NEGATIVE_FIXTURES.customerPiiFirstName.expectedError)
+    );
+    if (hasExpectedError) {
+      console.log(`  ✓ customerPiiFirstName: correctly detected error`);
+    } else {
+      console.log(`  ❌ SELF-TEST FAILED: customerPiiFirstName - wrong error type`);
+      console.log(`     Expected: ${NEGATIVE_FIXTURES.customerPiiFirstName.expectedError}`);
+      console.log(`     Got: ${piiFirstNameErrors[0].message}`);
       allPassed = false;
     }
   }

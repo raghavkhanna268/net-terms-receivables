@@ -7,7 +7,12 @@ import {
   validate,
   type GraphQLSchema,
 } from "graphql";
-import { validateBulkQueryRulesAST } from "../validate-graphql-schema";
+import {
+  validateBulkQueryRulesAST,
+  checkScopeDenylist,
+  CUSTOMER_PII_DENYLIST,
+  CUSTOMER_PII_ALLOWLIST,
+} from "../validate-graphql-schema";
 
 const SCHEMA_PATH = path.join(__dirname, "../../test/fixtures/admin-2026-10.schema.json");
 
@@ -195,6 +200,183 @@ describe("validate-graphql-schema AST validation", () => {
 
       expect(schemaErrors.length).toBeGreaterThan(0);
       expect(schemaErrors[0].message).toContain("Cannot query field");
+    });
+  });
+
+  describe("CUSTOMER_PII_DENYLIST", () => {
+    it("contains all forbidden customer fields", () => {
+      expect(CUSTOMER_PII_DENYLIST.Customer).toBeDefined();
+      expect(CUSTOMER_PII_DENYLIST.Customer.has("phone")).toBe(true);
+      expect(CUSTOMER_PII_DENYLIST.Customer.has("addresses")).toBe(true);
+      expect(CUSTOMER_PII_DENYLIST.Customer.has("firstName")).toBe(true);
+      expect(CUSTOMER_PII_DENYLIST.Customer.has("lastName")).toBe(true);
+      expect(CUSTOMER_PII_DENYLIST.Customer.has("defaultAddress")).toBe(true);
+    });
+
+    it("does NOT contain allowed PII fields", () => {
+      expect(CUSTOMER_PII_DENYLIST.Customer.has("email")).toBe(false);
+      expect(CUSTOMER_PII_DENYLIST.Customer.has("displayName")).toBe(false);
+    });
+  });
+
+  describe("CUSTOMER_PII_ALLOWLIST", () => {
+    it("contains exactly email and displayName", () => {
+      expect(CUSTOMER_PII_ALLOWLIST.has("email")).toBe(true);
+      expect(CUSTOMER_PII_ALLOWLIST.has("displayName")).toBe(true);
+      expect(CUSTOMER_PII_ALLOWLIST.size).toBe(2);
+    });
+
+    it("does NOT contain forbidden fields", () => {
+      expect(CUSTOMER_PII_ALLOWLIST.has("phone")).toBe(false);
+      expect(CUSTOMER_PII_ALLOWLIST.has("addresses")).toBe(false);
+      expect(CUSTOMER_PII_ALLOWLIST.has("firstName")).toBe(false);
+      expect(CUSTOMER_PII_ALLOWLIST.has("lastName")).toBe(false);
+      expect(CUSTOMER_PII_ALLOWLIST.has("defaultAddress")).toBe(false);
+    });
+  });
+
+  describe("checkScopeDenylist - customer PII fields", () => {
+    it("rejects query with Customer.phone field", () => {
+      const query = `
+        query CustomerWithPhone($id: ID!) {
+          customer(id: $id) {
+            id
+            phone
+          }
+        }
+      `;
+      const parsed = parse(query);
+      const errors = checkScopeDenylist(schema, parsed, "TEST_QUERY");
+
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors[0].message).toContain("forbidden PII field");
+      expect(errors[0].message).toContain("phone");
+    });
+
+    it("rejects query with Customer.addresses field", () => {
+      const query = `
+        query CustomerWithAddresses($id: ID!) {
+          customer(id: $id) {
+            id
+            addresses {
+              id
+            }
+          }
+        }
+      `;
+      const parsed = parse(query);
+      const errors = checkScopeDenylist(schema, parsed, "TEST_QUERY");
+
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors[0].message).toContain("forbidden PII field");
+      expect(errors[0].message).toContain("addresses");
+    });
+
+    it("rejects query with Customer.firstName field", () => {
+      const query = `
+        query CustomerWithFirstName($id: ID!) {
+          customer(id: $id) {
+            id
+            firstName
+          }
+        }
+      `;
+      const parsed = parse(query);
+      const errors = checkScopeDenylist(schema, parsed, "TEST_QUERY");
+
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors[0].message).toContain("forbidden PII field");
+      expect(errors[0].message).toContain("firstName");
+    });
+
+    it("rejects query with Customer.lastName field", () => {
+      const query = `
+        query CustomerWithLastName($id: ID!) {
+          customer(id: $id) {
+            id
+            lastName
+          }
+        }
+      `;
+      const parsed = parse(query);
+      const errors = checkScopeDenylist(schema, parsed, "TEST_QUERY");
+
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors[0].message).toContain("forbidden PII field");
+      expect(errors[0].message).toContain("lastName");
+    });
+
+    it("rejects query with Customer.defaultAddress field", () => {
+      const query = `
+        query CustomerWithDefaultAddress($id: ID!) {
+          customer(id: $id) {
+            id
+            defaultAddress {
+              id
+            }
+          }
+        }
+      `;
+      const parsed = parse(query);
+      const errors = checkScopeDenylist(schema, parsed, "TEST_QUERY");
+
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors[0].message).toContain("forbidden PII field");
+      expect(errors[0].message).toContain("defaultAddress");
+    });
+
+    it("ALLOWS query with Customer.email field", () => {
+      const query = `
+        query CustomerWithEmail($id: ID!) {
+          customer(id: $id) {
+            id
+            email
+          }
+        }
+      `;
+      const parsed = parse(query);
+      const errors = checkScopeDenylist(schema, parsed, "TEST_QUERY");
+
+      // No PII denylist errors for email
+      const piiErrors = errors.filter(e => e.message.includes("forbidden PII field"));
+      expect(piiErrors).toHaveLength(0);
+    });
+
+    it("ALLOWS query with Customer.displayName field", () => {
+      const query = `
+        query CustomerWithDisplayName($id: ID!) {
+          customer(id: $id) {
+            id
+            displayName
+          }
+        }
+      `;
+      const parsed = parse(query);
+      const errors = checkScopeDenylist(schema, parsed, "TEST_QUERY");
+
+      // No PII denylist errors for displayName
+      const piiErrors = errors.filter(e => e.message.includes("forbidden PII field"));
+      expect(piiErrors).toHaveLength(0);
+    });
+
+    it("rejects customer PII in bulk query inner", () => {
+      const query = `
+        query BulkInner {
+          customers {
+            edges {
+              node {
+                id
+                phone
+              }
+            }
+          }
+        }
+      `;
+      const parsed = parse(query);
+      const errors = checkScopeDenylist(schema, parsed, "BULK_QUERY");
+
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors[0].message).toContain("forbidden PII field");
     });
   });
 });
