@@ -3916,12 +3916,25 @@ export async function main(): Promise<void> {
   }
 
   // Exit non-zero if any failures occurred
-  if (totalFailures > 0 || state.errors.length > 0) {
+  const exitCode = computeExitCode(state);
+  if (exitCode !== 0) {
     console.log(`\n❌ Seed completed with ${totalFailures} failure(s) and ${state.errors.length} error(s)`);
-    process.exit(1);
+    process.exit(exitCode);
   }
 
   console.log("\n✅ Seed complete!");
+}
+
+/**
+ * Compute the exit code for the seed script based on failure counts.
+ * Returns 1 if any failures or errors occurred, 0 otherwise.
+ * 
+ * This is the single source of truth for the exit decision - main() calls this.
+ */
+export function computeExitCode(state: SeedState): number {
+  const totalFailures = state.failedCount.companies + state.failedCount.locations + 
+                        state.failedCount.orders + state.failedCount.roleAssignments + state.failedCount.dbRows;
+  return (totalFailures > 0 || state.errors.length > 0) ? 1 : 0;
 }
 
 /**

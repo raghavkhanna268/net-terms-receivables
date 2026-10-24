@@ -74,6 +74,7 @@ import {
   getIndiaProvinceCode,
   getIndiaAddressInfo,
   INDIA_CITY_ADDRESS_INFO,
+  computeExitCode,
   type SeedState,
   type GraphQLResponse,
   type UserError,
@@ -6950,26 +6951,37 @@ describe("seed exit code behavior", () => {
     logSpy.mockRestore();
   });
 
-  it("main exits non-zero when totalFailures > 0", async () => {
-    // This test verifies the exit behavior is tied to failedCount
-    // The main() function checks: if (totalFailures > 0 || state.errors.length > 0) process.exit(1)
-    
+  it("computeExitCode returns 1 when failedCount.dbRows > 0 (count mismatch)", () => {
     const state = createMockState();
     state.failedCount.dbRows = 1;
     
-    const totalFailures = state.failedCount.companies + state.failedCount.locations + 
-                          state.failedCount.orders + state.failedCount.roleAssignments + state.failedCount.dbRows;
-    
-    expect(totalFailures).toBeGreaterThan(0);
+    expect(computeExitCode(state)).toBe(1);
   });
 
-  it("main exits zero when no failures and no errors", async () => {
+  it("computeExitCode returns 1 when failedCount.companies > 0 (step failure)", () => {
+    const state = createMockState();
+    state.failedCount.companies = 1;
+    
+    expect(computeExitCode(state)).toBe(1);
+  });
+
+  it("computeExitCode returns 1 when failedCount.orders > 0 (step failure)", () => {
+    const state = createMockState();
+    state.failedCount.orders = 1;
+    
+    expect(computeExitCode(state)).toBe(1);
+  });
+
+  it("computeExitCode returns 1 when state.errors has entries", () => {
+    const state = createMockState();
+    state.errors.push("some error");
+    
+    expect(computeExitCode(state)).toBe(1);
+  });
+
+  it("computeExitCode returns 0 when no failures and no errors (success)", () => {
     const state = createMockState();
     
-    const totalFailures = state.failedCount.companies + state.failedCount.locations + 
-                          state.failedCount.orders + state.failedCount.roleAssignments + state.failedCount.dbRows;
-    
-    expect(totalFailures).toBe(0);
-    expect(state.errors.length).toBe(0);
+    expect(computeExitCode(state)).toBe(0);
   });
 });
