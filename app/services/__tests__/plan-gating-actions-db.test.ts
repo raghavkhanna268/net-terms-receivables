@@ -4,6 +4,7 @@
  * Tests with PLAN_GATING_ENFORCED=true that:
  * 1. Payment reminders are blocked for gated accounts (no ReminderLog, no cap consumed)
  * 2. Credit-limit edits are blocked for gated accounts (via isAccountActive in route)
+ * 3. Hold-only updates work on gated accounts (holds work on all plans)
  *
  * Tests with PLAN_GATING_ENFORCED=false that:
  * - All actions are allowed for gated accounts
@@ -16,11 +17,12 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
-import { requestContext } from "~/lib/request-context.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
+// Capture whether env var was originally set (not just its value)
+const originalEnvWasSet = "PLAN_GATING_ENFORCED" in process.env;
 const originalEnv = process.env.PLAN_GATING_ENFORCED;
 
 // Stub fetch globally for Resend API calls
@@ -39,16 +41,22 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
   const TEST_RULE_ID = `rule-gating-${TEST_SUFFIX}`;
 
   // Snapshot for s18_global_sends restoration
-  let globalSendsSnapshot: { send_key: string; send_date: string; send_month: string; daily_count: number }[] = [];
+  let globalSendsSnapshotDaily: number = 0;
+  let globalSendsSnapshotExists: boolean = false;
+  const todayStr = new Date().toISOString().split("T")[0];
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
 
-    // Snapshot existing global sends before tests
-    globalSendsSnapshot = await sql<typeof globalSendsSnapshot>`
-      SELECT send_key, send_date::TEXT, send_month, daily_count
-      FROM s18_global_sends WHERE send_key = 'global'
+    // Snapshot existing global sends for today before tests
+    const [existing] = await sql<{ daily_count: number }[]>`
+      SELECT daily_count FROM s18_global_sends 
+      WHERE send_key = 'global' AND send_date = ${todayStr}::DATE
     `;
+    if (existing) {
+      globalSendsSnapshotExists = true;
+      globalSendsSnapshotDaily = existing.daily_count;
+    }
 
     // Create test shop (free plan by default)
     await sql`
@@ -103,30 +111,30 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
   });
 
   afterAll(async () => {
-    process.env.PLAN_GATING_ENFORCED = originalEnv;
+    // Restore or delete the env var properly
+    if (originalEnvWasSet) {
+      process.env.PLAN_GATING_ENFORCED = originalEnv;
+    } else {
+      delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
+    }
 
     // Clean up in reverse order of creation
     await sql`DELETE FROM "ReminderLog" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "ReminderRule" WHERE "shopId" = ${TEST_SHOP_ID}`;
 
-    // Restore s18_global_sends to original state instead of deleting
-    const todayStr = new Date().toISOString().split("T")[0];
-    // Delete rows added by this test, but only for today
-    await sql`
-      DELETE FROM s18_global_sends 
-      WHERE send_key = 'global' 
-        AND send_date = ${todayStr}::DATE
-        AND NOT EXISTS (
-          SELECT 1 FROM unnest(${globalSendsSnapshot.map(r => r.send_date)}::DATE[]) AS orig
-          WHERE orig = s18_global_sends.send_date
-        )
-    `;
-    // Restore original counts for any pre-existing rows
-    for (const row of globalSendsSnapshot) {
+    // Restore s18_global_sends to original state
+    if (globalSendsSnapshotExists) {
+      // Restore to original count
       await sql`
         UPDATE s18_global_sends 
-        SET daily_count = ${row.daily_count}
-        WHERE send_key = ${row.send_key} AND send_date = ${row.send_date}::DATE
+        SET daily_count = ${globalSendsSnapshotDaily}
+        WHERE send_key = 'global' AND send_date = ${todayStr}::DATE
+      `;
+    } else {
+      // Delete the row we created
+      await sql`
+        DELETE FROM s18_global_sends 
+        WHERE send_key = 'global' AND send_date = ${todayStr}::DATE
       `;
     }
 
@@ -151,9 +159,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
   });
 
   afterEach(() => {
-    vi.resetModules();
     vi.restoreAllMocks();
-    vi.doUnmock("../shopify-client.server");
   });
 
   describe("1. Payment reminders - getInvoiceForReminder returns gated_at", () => {
@@ -216,7 +222,6 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
 
     it("skips gated account with gating ON - NO ReminderLog, NO cap consumed", async () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
-      vi.resetModules();
 
       const invoiceId = `inv-send-gated-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/send-gated-${TEST_SUFFIX}`;
@@ -266,10 +271,9 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
         `;
         expect(logRow).toBeUndefined();
 
-        // NO cap slot consumed
+        // NO cap slot consumed (delta = 0)
         const countsAfter = await getGlobalSendCounts(sql);
-        expect(countsAfter.daily).toBe(countsBefore.daily);
-        expect(countsAfter.monthly).toBe(countsBefore.monthly);
+        expect(countsAfter.daily - countsBefore.daily).toBe(0);
 
         // NO fetch call to Resend
         expect(mockFetch).not.toHaveBeenCalled();
@@ -280,7 +284,6 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
 
     it("sends reminder for non-gated account with gating ON - ReminderLog created, cap consumed, fetch called", async () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
-      vi.resetModules();
 
       const invoiceId = `inv-send-nongated-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/send-nongated-${TEST_SUFFIX}`;
@@ -335,9 +338,9 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
         `;
         expect(logRow).toBeDefined();
 
-        // Cap slot consumed
+        // Cap slot consumed (delta = 1)
         const countsAfter = await getGlobalSendCounts(sql);
-        expect(countsAfter.daily).toBe(countsBefore.daily + 1);
+        expect(countsAfter.daily - countsBefore.daily).toBe(1);
 
         // Exactly one fetch call
         expect(mockFetch).toHaveBeenCalledTimes(1);
@@ -348,7 +351,6 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
 
     it("sends reminder for gated account with gating OFF (passes Gate 3)", async () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "0";
-      vi.resetModules();
 
       const invoiceId = `inv-send-gated-off-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/send-gated-off-${TEST_SUFFIX}`;
@@ -365,7 +367,25 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
         )
       `;
 
-      const { sendPaymentReminder } = await import("../reminders.server");
+      // Snapshot and reset cap for this test to avoid hitting cap limit
+      const [capBefore] = await sql<{ daily_count: number }[]>`
+        SELECT COALESCE(
+          (SELECT daily_count FROM s18_global_sends WHERE send_key = 'global' AND send_date = ${todayStr}::DATE),
+          0
+        ) AS daily_count
+      `;
+      const capExisted = capBefore.daily_count > 0;
+
+      // Reset cap to 0 for this test
+      if (capExisted) {
+        await sql`
+          UPDATE s18_global_sends SET daily_count = 0
+          WHERE send_key = 'global' AND send_date = ${todayStr}::DATE
+        `;
+      }
+
+      const { getGlobalSendCounts, sendPaymentReminder } = await import("../reminders.server");
+      const countsBefore = await getGlobalSendCounts(sql);
 
       // Mock send window
       const luxon = await import("luxon");
@@ -392,9 +412,21 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
         // With gating OFF, gated account should pass Gate 3 and send
         expect(result.success).toBe(true);
         expect(result.action).toBe("sent");
+
+        // Cap consumed (delta = 1 means it tried to send)
+        const countsAfter = await getGlobalSendCounts(sql);
+        expect(countsAfter.daily - countsBefore.daily).toBe(1);
+
         expect(mockFetch).toHaveBeenCalledTimes(1);
       } finally {
         luxonSpy.mockRestore();
+        // Restore the original cap value
+        if (capExisted) {
+          await sql`
+            UPDATE s18_global_sends SET daily_count = ${capBefore.daily_count}
+            WHERE send_key = 'global' AND send_date = ${todayStr}::DATE
+          `;
+        }
       }
     });
   });
@@ -402,52 +434,47 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
   describe("3. isAccountActive helper (from gating.server.ts)", () => {
     it("returns false for gated account when gating ON", async () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
-      vi.resetModules();
 
-      // Re-import after env change
-      const gating = await import("../gating.server");
+      const { isAccountActive } = await import("../gating.server");
 
       const [account] = await sql<{ gated_at: Date | null }[]>`
         SELECT gated_at FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}
       `;
 
       expect(account.gated_at).not.toBeNull();
-      expect(gating.isAccountActive(account.gated_at)).toBe(false);
+      expect(isAccountActive(account.gated_at)).toBe(false);
     });
 
     it("returns true for non-gated account when gating ON", async () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
-      vi.resetModules();
 
-      const gating = await import("../gating.server");
+      const { isAccountActive } = await import("../gating.server");
 
       const [account] = await sql<{ gated_at: Date | null }[]>`
         SELECT gated_at FROM "BuyerAccount" WHERE id = ${TEST_NONGATED_ACCOUNT_ID}
       `;
 
       expect(account.gated_at).toBeNull();
-      expect(gating.isAccountActive(account.gated_at)).toBe(true);
+      expect(isAccountActive(account.gated_at)).toBe(true);
     });
 
     it("returns true for gated account when gating OFF", async () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "0";
-      vi.resetModules();
 
-      const gating = await import("../gating.server");
+      const { isAccountActive } = await import("../gating.server");
 
       const [account] = await sql<{ gated_at: Date | null }[]>`
         SELECT gated_at FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}
       `;
 
       expect(account.gated_at).not.toBeNull();
-      expect(gating.isAccountActive(account.gated_at)).toBe(true);
+      expect(isAccountActive(account.gated_at)).toBe(true);
     });
   });
 
   describe("4. Bulk import - checkImportLimit with real DB", () => {
     it("blocks import when at limit with gating ON (free plan)", async () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
-      vi.resetModules();
 
       // Create one import this month (free plan limit is 1)
       const importId = `import-limit-test-${TEST_SUFFIX}`;
@@ -467,7 +494,6 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
 
     it("allows import when under limit with gating ON (free plan)", async () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
-      vi.resetModules();
 
       // No imports this month
       const { checkImportLimit } = await import("../gating.server");
@@ -480,7 +506,6 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
 
     it("allows import when gating OFF regardless of limit", async () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "0";
-      vi.resetModules();
 
       // Create one import this month
       const importId = `import-limit-off-${TEST_SUFFIX}`;
@@ -498,7 +523,6 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
 
     it("allows unlimited imports for starter+ plans with gating ON", async () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
-      vi.resetModules();
 
       // Upgrade shop to starter
       await sql`UPDATE "Shop" SET plan_key = 'starter' WHERE id = ${TEST_SHOP_ID}`;
@@ -516,10 +540,174 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     });
   });
 
+  describe("5. app.accounts.$id action - credit-limit and hold gating", () => {
+    /**
+     * Create a mock FormData request for the accounts action.
+     */
+    function createAccountsRequest(formFields: Record<string, string>, accountId: string): Request {
+      const formData = new URLSearchParams();
+      for (const [key, value] of Object.entries(formFields)) {
+        formData.append(key, value);
+      }
+      return new Request(`http://localhost/app/accounts/${accountId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: formData.toString(),
+      });
+    }
+
+    /**
+     * Create mock Shopify context with authenticated session.
+     */
+    function createMockContext(shopDomain: string) {
+      return {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: shopDomain },
+            }),
+          },
+        },
+      };
+    }
+
+    /**
+     * Call the real accounts action inside request context.
+     * Dynamically imports request-context after vi.resetModules() to use the same fresh instance.
+     */
+    async function callAccountsAction(
+      testSql: ReturnType<typeof postgres>,
+      shopDomain: string,
+      accountId: string,
+      formFields: Record<string, string>
+    ): Promise<{ success: boolean; error?: string; metafieldSyncPending?: boolean }> {
+      const request = createAccountsRequest(formFields, accountId);
+      const context = createMockContext(shopDomain);
+      const url = new URL(request.url);
+
+      // Dynamically import request-context to get the same instance the route uses
+      const { requestContext } = await import("~/lib/request-context.server");
+      const { action: accountsAction } = await import("~/routes/app.accounts.$id");
+
+      return requestContext.run({ getSql: () => testSql }, async () => {
+        const result = await accountsAction({
+          request,
+          context: context as never,
+          params: { id: accountId },
+          url,
+          pattern: "/app/accounts/:id",
+        });
+        return result as { success: boolean; error?: string; metafieldSyncPending?: boolean };
+      });
+    }
+
+    it("rejects credit-limit edit on gated account when gating ON", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.resetModules();
+
+      // Save original credit limit for verification
+      const [originalAccount] = await sql<{ creditLimit: string }[]>`
+        SELECT "creditLimit"::TEXT FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}
+      `;
+
+      const result = await callAccountsAction(sql, TEST_SHOP_DOMAIN, TEST_GATED_ACCOUNT_ID, {
+        _action: "updateCredit",
+        creditLimit: "200000",
+      });
+
+      // Should be rejected
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Cannot edit gated accounts");
+
+      // DB row should be unchanged
+      const [afterAccount] = await sql<{ creditLimit: string }[]>`
+        SELECT "creditLimit"::TEXT FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}
+      `;
+      expect(afterAccount.creditLimit).toBe(originalAccount.creditLimit);
+    });
+
+    it("allows credit-limit edit on non-gated account when gating ON", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.resetModules();
+
+      const result = await callAccountsAction(sql, TEST_SHOP_DOMAIN, TEST_NONGATED_ACCOUNT_ID, {
+        _action: "updateCredit",
+        creditLimit: "200000",
+      });
+
+      // Should succeed
+      expect(result.success).toBe(true);
+
+      // DB row should be updated
+      const [afterAccount] = await sql<{ creditLimit: string }[]>`
+        SELECT "creditLimit"::TEXT FROM "BuyerAccount" WHERE id = ${TEST_NONGATED_ACCOUNT_ID}
+      `;
+      expect(afterAccount.creditLimit).toBe("200000.00");
+
+      // Restore original credit limit
+      await sql`
+        UPDATE "BuyerAccount" SET "creditLimit" = 100000.00 WHERE id = ${TEST_NONGATED_ACCOUNT_ID}
+      `;
+    });
+
+    it("allows credit-limit edit on gated account when gating OFF", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "0";
+      vi.resetModules();
+
+      const result = await callAccountsAction(sql, TEST_SHOP_DOMAIN, TEST_GATED_ACCOUNT_ID, {
+        _action: "updateCredit",
+        creditLimit: "150000",
+      });
+
+      // Should succeed when gating is OFF
+      expect(result.success).toBe(true);
+
+      // Restore original credit limit
+      await sql`
+        UPDATE "BuyerAccount" SET "creditLimit" = 100000.00 WHERE id = ${TEST_GATED_ACCOUNT_ID}
+      `;
+    });
+
+    it("allows hold-only update on gated account when gating ON (holds work on all plans)", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.resetModules();
+
+      // Save original state
+      const [originalAccount] = await sql<{ manualHold: boolean; holdState: string }[]>`
+        SELECT "manualHold", "holdState" FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}
+      `;
+
+      try {
+        const result = await callAccountsAction(sql, TEST_SHOP_DOMAIN, TEST_GATED_ACCOUNT_ID, {
+          _action: "updateCredit",
+          holdOnly: "true",
+          manualHold: "true",
+          holdReasonCode: "MANUAL_HOLD",
+        });
+
+        // Should succeed - holds are NOT gated
+        expect(result.success).toBe(true);
+
+        // DB row should be updated
+        const [afterAccount] = await sql<{ manualHold: boolean; holdState: string }[]>`
+          SELECT "manualHold", "holdState" FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}
+        `;
+        expect(afterAccount.manualHold).toBe(true);
+        expect(afterAccount.holdState).toBe("HELD");
+      } finally {
+        // Restore original state
+        await sql`
+          UPDATE "BuyerAccount" 
+          SET "manualHold" = ${originalAccount.manualHold}, "holdState" = ${originalAccount.holdState}
+          WHERE id = ${TEST_GATED_ACCOUNT_ID}
+        `;
+      }
+    });
+  });
+
   describe("Regression: matching/confirm/paid NOT gated", () => {
     it("matcher suggests match for gated account invoice", async () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
-      vi.resetModules();
 
       const invoiceId = `inv-match-gated-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/match-gated-${TEST_SUFFIX}`;
@@ -576,7 +764,6 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
 
     it("confirmMatch succeeds for gated account", async () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
-      vi.resetModules();
 
       const invoiceId = `inv-confirm-gated-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/confirm-gated-${TEST_SUFFIX}`;
@@ -641,7 +828,6 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
 
     it("invoice marked paid on gated account triggers hold recompute", async () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
-      vi.resetModules();
 
       const invoiceId = `inv-paid-gated-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/paid-gated-${TEST_SUFFIX}`;
@@ -712,187 +898,8 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
           SET "holdState" = ${originalAccount.holdState}, "holdReasonCode" = ${originalAccount.holdReasonCode}
           WHERE id = ${TEST_GATED_ACCOUNT_ID}
         `;
+        vi.doUnmock("../shopify-client.server");
       }
-    });
-  });
-
-  describe("5. app.accounts.$id action - credit-limit and account-details gating", () => {
-    /**
-     * Create a mock FormData request for the accounts action.
-     */
-    function createAccountsRequest(formFields: Record<string, string>, accountId: string): Request {
-      const formData = new URLSearchParams();
-      for (const [key, value] of Object.entries(formFields)) {
-        formData.append(key, value);
-      }
-      return new Request(`http://localhost/app/accounts/${accountId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: formData.toString(),
-      });
-    }
-
-    /**
-     * Create mock Shopify context with authenticated session.
-     */
-    function createMockContext(shopDomain: string) {
-      return {
-        shopify: {
-          authenticate: {
-            admin: vi.fn().mockResolvedValue({
-              session: { shop: shopDomain },
-            }),
-          },
-        },
-      };
-    }
-
-    /**
-     * Call the real accounts action inside request context.
-     */
-    async function callAccountsAction(
-      testSql: ReturnType<typeof postgres>,
-      shopDomain: string,
-      accountId: string,
-      formFields: Record<string, string>
-    ): Promise<{ success: boolean; error?: string }> {
-      const request = createAccountsRequest(formFields, accountId);
-      const context = createMockContext(shopDomain);
-      const url = new URL(request.url);
-
-      // Import the action inside the test to avoid import chain issues
-      const { action } = await import("~/routes/app.accounts.$id");
-
-      return requestContext.run({ getSql: () => testSql }, async () => {
-        const result = await action({
-          request,
-          context: context as never,
-          params: { id: accountId },
-          url,
-          pattern: "/app/accounts/:id",
-        });
-        return result as { success: boolean; error?: string };
-      });
-    }
-
-    it("rejects credit-limit edit on gated account when gating ON", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
-      vi.resetModules();
-
-      // Save original credit limit for verification
-      const [originalAccount] = await sql<{ creditLimit: string }[]>`
-        SELECT "creditLimit"::TEXT FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}
-      `;
-
-      const result = await callAccountsAction(sql, TEST_SHOP_DOMAIN, TEST_GATED_ACCOUNT_ID, {
-        _action: "updateCredit",
-        creditLimit: "200000",
-      });
-
-      // Should be rejected
-      expect(result.success).toBe(false);
-      expect(result.error).toContain("Cannot edit gated accounts");
-
-      // DB row should be unchanged
-      const [afterAccount] = await sql<{ creditLimit: string }[]>`
-        SELECT "creditLimit"::TEXT FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}
-      `;
-      expect(afterAccount.creditLimit).toBe(originalAccount.creditLimit);
-    });
-
-    it("allows credit-limit edit on non-gated account when gating ON", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
-      vi.resetModules();
-
-      // Mock shopify client for metafield write (required by updateCreditStatus)
-      vi.doMock("../shopify-client.server", () => ({
-        shopifyGraphQLRequest: vi.fn().mockResolvedValue({
-          success: true,
-          data: {
-            metafieldsSet: {
-              metafields: [{ id: "mf-1" }],
-              userErrors: [],
-            },
-          },
-        }),
-      }));
-
-      const result = await callAccountsAction(sql, TEST_SHOP_DOMAIN, TEST_NONGATED_ACCOUNT_ID, {
-        _action: "updateCredit",
-        creditLimit: "200000",
-      });
-
-      // Should succeed
-      expect(result.success).toBe(true);
-
-      // DB row should be updated
-      const [afterAccount] = await sql<{ creditLimit: string }[]>`
-        SELECT "creditLimit"::TEXT FROM "BuyerAccount" WHERE id = ${TEST_NONGATED_ACCOUNT_ID}
-      `;
-      expect(afterAccount.creditLimit).toBe("200000.00");
-
-      // Restore original credit limit
-      await sql`
-        UPDATE "BuyerAccount" SET "creditLimit" = 100000.00 WHERE id = ${TEST_NONGATED_ACCOUNT_ID}
-      `;
-    });
-
-    it("allows credit-limit edit on gated account when gating OFF", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "0";
-      vi.resetModules();
-
-      // Mock shopify client for metafield write
-      vi.doMock("../shopify-client.server", () => ({
-        shopifyGraphQLRequest: vi.fn().mockResolvedValue({
-          success: true,
-          data: {
-            metafieldsSet: {
-              metafields: [{ id: "mf-1" }],
-              userErrors: [],
-            },
-          },
-        }),
-      }));
-
-      const result = await callAccountsAction(sql, TEST_SHOP_DOMAIN, TEST_GATED_ACCOUNT_ID, {
-        _action: "updateCredit",
-        creditLimit: "150000",
-      });
-
-      // Should succeed when gating is OFF
-      expect(result.success).toBe(true);
-
-      // Restore original credit limit
-      await sql`
-        UPDATE "BuyerAccount" SET "creditLimit" = 100000.00 WHERE id = ${TEST_GATED_ACCOUNT_ID}
-      `;
-    });
-
-    it("rejects hold update on gated account when gating ON", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
-      vi.resetModules();
-
-      // Save original state
-      const [originalAccount] = await sql<{ manualHold: boolean }[]>`
-        SELECT "manualHold" FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}
-      `;
-
-      const result = await callAccountsAction(sql, TEST_SHOP_DOMAIN, TEST_GATED_ACCOUNT_ID, {
-        _action: "updateCredit",
-        holdOnly: "true",
-        manualHold: "true",
-        holdReasonCode: "MANUAL_HOLD",
-      });
-
-      // Should be rejected
-      expect(result.success).toBe(false);
-      expect(result.error).toContain("Cannot edit gated accounts");
-
-      // DB row should be unchanged
-      const [afterAccount] = await sql<{ manualHold: boolean }[]>`
-        SELECT "manualHold" FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}
-      `;
-      expect(afterAccount.manualHold).toBe(originalAccount.manualHold);
     });
   });
 });

@@ -278,10 +278,6 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
     return { success: false, error: "Account not found" } satisfies ActionData;
   }
 
-  if (!isAccountActive(accountRow.gatedAt)) {
-    return { success: false, error: "Cannot edit gated accounts" } satisfies ActionData;
-  }
-
   const formData = await request.formData();
   const action = formData.get("_action");
 
@@ -290,6 +286,12 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
     const noLimit = formData.get("noLimit") === "true";
     const holdOnly = formData.get("holdOnly") === "true";
     const manualHold = formData.get("manualHold") === "true";
+
+    // Hold-only updates work on all plans including gated accounts.
+    // Only gate credit-limit and account-details edits.
+    if (!holdOnly && !isAccountActive(accountRow.gatedAt)) {
+      return { success: false, error: "Cannot edit gated accounts" } satisfies ActionData;
+    }
     const holdReasonCodeRaw = formData.get("holdReasonCode") as string | null;
     const holdReasonCode = (holdReasonCodeRaw && holdReasonCodeRaw.trim() !== "") 
       ? holdReasonCodeRaw as HoldReasonCode 
