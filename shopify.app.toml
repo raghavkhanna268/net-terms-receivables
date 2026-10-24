@@ -23,7 +23,9 @@ embedded = true
 # - write_payment_customizations: paymentCustomizationCreate (S13 pre-grant)
 # - write_validations: validationCreate (S12 pre-grant)
 #
-# NOT in production: write_draft_orders (seed-only, in shopify.app.dev.toml)
+# NOT in production: write_draft_orders. To add it for local development, run
+# `shopify app config link` to create a local shopify.app.dev.toml (gitignored).
+# See https://shopify.dev/docs/apps/build/cli-for-apps/manage-app-config-files
 scopes = "read_companies,read_customers,read_draft_orders,read_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations"
 
 [webhooks]

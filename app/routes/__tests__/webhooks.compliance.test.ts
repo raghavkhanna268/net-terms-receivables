@@ -218,7 +218,7 @@ describe("webhooks.compliance", () => {
     it("returns 400 for invalid JSON payload (could hide redact)", async () => {
       const badRequestResponse = new Response(undefined, {
         status: 400,
-        statusText: "Invalid JSON payload",
+        statusText: "Bad Request",
       });
       mockVerifyWebhook.mockRejectedValue(badRequestResponse);
 

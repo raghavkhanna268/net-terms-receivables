@@ -176,6 +176,7 @@ function getHmacHeader(request: Request, webhookType: "events" | "webhooks"): st
 
 /**
  * Extract required header or throw 400 Bad Request.
+ * Uses a generic error message to avoid leaking which header was missing.
  */
 function getRequiredHeader(
   request: Request,
@@ -183,11 +184,10 @@ function getRequiredHeader(
   headerKey: keyof typeof WEBHOOK_HEADERS
 ): string {
   const value = getHeader(request, webhookType, headerKey);
-  const headerName = webhookType === "events" ? EVENTS_HEADERS[headerKey] : WEBHOOK_HEADERS[headerKey];
   if (!value) {
     throw new Response(null, {
       status: 400,
-      statusText: `Missing required header: ${headerName}`,
+      statusText: "Bad Request",
     });
   }
   return value;
@@ -196,12 +196,13 @@ function getRequiredHeader(
 /**
  * Validate shop domain format.
  * Must match: ^[a-z0-9][a-z0-9-]*\.myshopify\.com$
+ * Uses a generic error message to avoid leaking validation details.
  */
 function validateShopDomain(shop: string): void {
   if (!SHOP_DOMAIN_REGEX.test(shop)) {
     throw new Response(null, {
       status: 400,
-      statusText: "Invalid shop domain format",
+      statusText: "Bad Request",
     });
   }
 }
@@ -209,11 +210,15 @@ function validateShopDomain(shop: string): void {
 /**
  * Verify a Shopify webhook request using HMAC-SHA256.
  *
+ * Security: HMAC verification happens FIRST, before validating other headers.
+ * This prevents information leakage about which headers are missing to
+ * unauthenticated requests. Only after HMAC passes are other headers checked.
+ *
  * @param request - The incoming webhook request
  * @param apiSecret - The Shopify API secret for HMAC verification
  * @param options - Optional settings (requireValidJson for compliance topics)
  * @returns Verified webhook data including shop, topic, webhookId, and parsed payload
- * @throws Response with 401 if HMAC is invalid or missing, 400 if other headers missing, invalid shop format, or invalid JSON (when required), 405 if not POST
+ * @throws Response with 401 if HMAC is invalid or missing, 400 if other headers missing/invalid or invalid JSON (when required) after HMAC passes, 405 if not POST
  */
 export async function verifyWebhook(
   request: Request,
@@ -229,12 +234,6 @@ export async function verifyWebhook(
 
   const webhookType = detectWebhookType(request);
   const providedHmac = getHmacHeader(request, webhookType);
-  const topic = getRequiredHeader(request, webhookType, "topic");
-  const shop = getRequiredHeader(request, webhookType, "domain");
-  const webhookId = getRequiredHeader(request, webhookType, "webhookId");
-  const apiVersion = getRequiredHeader(request, webhookType, "apiVersion");
-
-  validateShopDomain(shop);
 
   const rawBody = await request.arrayBuffer();
   const expectedHmac = await computeHmac(apiSecret, rawBody);
@@ -246,6 +245,13 @@ export async function verifyWebhook(
     });
   }
 
+  const topic = getRequiredHeader(request, webhookType, "topic");
+  const shop = getRequiredHeader(request, webhookType, "domain");
+  const webhookId = getRequiredHeader(request, webhookType, "webhookId");
+  const apiVersion = getRequiredHeader(request, webhookType, "apiVersion");
+
+  validateShopDomain(shop);
+
   const bodyText = decoder.decode(new Uint8Array(rawBody));
   let payload: unknown;
   try {
@@ -254,7 +260,7 @@ export async function verifyWebhook(
     if (options.requireValidJson) {
       throw new Response(null, {
         status: 400,
-        statusText: "Invalid JSON payload",
+        statusText: "Bad Request",
       });
     }
     payload = {};
