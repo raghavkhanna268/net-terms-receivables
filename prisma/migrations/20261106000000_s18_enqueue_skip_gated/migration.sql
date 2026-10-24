@@ -57,6 +57,7 @@ BEGIN
             AND i."dueAt" IS NOT NULL
         INNER JOIN public."BuyerAccount" ba
             ON ba.id = i."buyerAccountId"
+            AND ba."shopId" = i."shopId"
             AND ba.gated_at IS NULL
         WHERE r.enabled = true
           AND r.channel = 'email'::public."ReminderChannel"

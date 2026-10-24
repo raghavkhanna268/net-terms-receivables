@@ -1,10 +1,6 @@
 /**
  * DB-backed integration tests for s18_enqueue_reminders gated account filtering.
  *
- * Product rule: When plan gating is enforced, gated accounts should not receive
- * payment reminders. The s18_enqueue_reminders function filters them out at
- * enqueue time to match the app-side isAccountActive() check.
- *
  * Tests verify:
  * 1. Gated accounts are NOT enqueued when invoices are due
  * 2. Non-gated accounts ARE enqueued when invoices are due
@@ -17,6 +13,22 @@ import { sqlOptions } from "~/lib/db-light.server";
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
+/**
+ * Compute a fixed-offset Etc/GMT±N timezone where current local hour is ~12.
+ * PostgreSQL uses POSIX convention where Etc/GMT+5 means UTC-5 (opposite of ISO).
+ */
+function getTestTimezone(): string {
+  const utcHour = new Date().getUTCHours();
+  const offsetToMakeNoon = utcHour - 12;
+  if (offsetToMakeNoon === 0) {
+    return "Etc/GMT";
+  } else if (offsetToMakeNoon > 0) {
+    return `Etc/GMT+${offsetToMakeNoon}`;
+  } else {
+    return `Etc/GMT${offsetToMakeNoon}`;
+  }
+}
+
 describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
   let sql: ReturnType<typeof postgres>;
   const TEST_SUFFIX = Date.now().toString(36) + "-enqueue-gated";
@@ -27,23 +39,22 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
   const TEST_GATED_INVOICE_ID = `inv-gated-enqueue-${TEST_SUFFIX}`;
   const TEST_ACTIVE_INVOICE_ID = `inv-active-enqueue-${TEST_SUFFIX}`;
   const TEST_RULE_ID = `rule-enqueue-${TEST_SUFFIX}`;
+  let testTimezone: string;
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+    testTimezone = getTestTimezone();
 
-    // Create test shop with reminders enabled
     await sql`
       INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
-      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'free', NOW(), NOW())
+      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', ${testTimezone}, 'free', NOW(), NOW())
     `;
 
-    // Enable reminders for the shop
     await sql`
       INSERT INTO s18_shop_reminder_settings (shop_id, enabled, created_at, updated_at)
       VALUES (${TEST_SHOP_ID}, true, NOW(), NOW())
     `;
 
-    // Create gated buyer account (gated_at IS NOT NULL)
     await sql`
       INSERT INTO "BuyerAccount" (
         id, "shopId", kind, "companyId", "companyLocationId", "customerId", name,
@@ -58,7 +69,6 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
       )
     `;
 
-    // Create active (non-gated) buyer account (gated_at IS NULL)
     await sql`
       INSERT INTO "BuyerAccount" (
         id, "shopId", kind, "companyId", "companyLocationId", "customerId", name,
@@ -73,7 +83,6 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
       )
     `;
 
-    // Create a reminder rule for offset=0 (due today)
     await sql`
       INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
       VALUES (${TEST_RULE_ID}, ${TEST_SHOP_ID}, 0, 'email'::"ReminderChannel", true, NOW(), NOW())
@@ -81,7 +90,6 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
   });
 
   afterAll(async () => {
-    // Clean up in reverse order of creation
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM "ReminderLog" WHERE "shopId" = ${TEST_SHOP_ID}`;
@@ -94,16 +102,11 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
   });
 
   beforeEach(async () => {
-    // Clean up invoices and queue messages between tests
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM "ReminderLog" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
   });
 
-  /**
-   * Helper to create an invoice due today for a given account.
-   * Uses a deterministic ID based on the account to allow re-running.
-   */
   async function createInvoiceDueToday(
     accountId: string,
     invoiceId: string,
@@ -119,29 +122,15 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
         ${invoiceId}, ${TEST_SHOP_ID}, ${accountId}, ${orderId},
         ${invoiceName}, 10000.00, 10000.00, 'open',
         NOW() - INTERVAL '5 days',
-        (NOW() AT TIME ZONE 'Asia/Kolkata')::DATE,
+        (NOW() AT TIME ZONE ${testTimezone})::DATE,
         NOW(), NOW()
       )
     `;
   }
 
-  /**
-   * Helper to call s18_enqueue_reminders and return enqueued invoice IDs.
-   * Temporarily adjusts the clock to be within the send window (12:00 IST).
-   */
   async function callEnqueueAndGetInvoiceIds(): Promise<string[]> {
-    // Call the function - it uses NOW() internally, so we need to ensure we're
-    // in the send window. Since we can't mock NOW() in PL/pgSQL, we rely on
-    // the test running during valid hours OR accept that it may enqueue 0
-    // if run outside 09:00-19:00 IST. For CI, we mock the hour check.
-    //
-    // Actually, we can work around this by using a dynamic SQL approach,
-    // but for simplicity, let's just call the function and check results.
-    // If the hour check fails, the test should still pass because BOTH
-    // accounts would be skipped (testing relative behavior, not absolute).
     await sql`SELECT public.s18_enqueue_reminders()`;
 
-    // Get enqueued invoice IDs for this shop
     const rows = await sql<{ invoiceId: string }[]>`
       SELECT message->>'invoiceId' AS "invoiceId"
       FROM pgmq.q_s6_sync
@@ -154,7 +143,6 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
 
   describe("gated account filtering", () => {
     it("does NOT enqueue reminder for gated account's due invoice", async () => {
-      // Create invoice due today for GATED account only
       await createInvoiceDueToday(
         TEST_GATED_ACCOUNT_ID,
         TEST_GATED_INVOICE_ID,
@@ -163,12 +151,10 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
 
       const enqueuedIds = await callEnqueueAndGetInvoiceIds();
 
-      // The gated account's invoice should NOT be enqueued
       expect(enqueuedIds).not.toContain(TEST_GATED_INVOICE_ID);
     });
 
     it("DOES enqueue reminder for active (non-gated) account's due invoice", async () => {
-      // Create invoice due today for ACTIVE account only
       await createInvoiceDueToday(
         TEST_ACTIVE_ACCOUNT_ID,
         TEST_ACTIVE_INVOICE_ID,
@@ -177,23 +163,10 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
 
       const enqueuedIds = await callEnqueueAndGetInvoiceIds();
 
-      // Check if we're in the send window by checking if anything was enqueued
-      // If nothing was enqueued, the test is inconclusive (outside send window)
-      // This is acceptable for a DB test that can't mock NOW()
-      if (enqueuedIds.length === 0) {
-        // Outside send window - skip this assertion but log it
-        console.log(
-          "Test ran outside 09:00-19:00 IST send window - skipping positive assertion"
-        );
-        return;
-      }
-
-      // The active account's invoice SHOULD be enqueued
       expect(enqueuedIds).toContain(TEST_ACTIVE_INVOICE_ID);
     });
 
     it("only enqueues active account when both have due invoices", async () => {
-      // Create invoices due today for BOTH accounts
       await createInvoiceDueToday(
         TEST_GATED_ACCOUNT_ID,
         TEST_GATED_INVOICE_ID,
@@ -207,21 +180,14 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
 
       const enqueuedIds = await callEnqueueAndGetInvoiceIds();
 
-      // Regardless of send window, the gated invoice should NEVER be present
       expect(enqueuedIds).not.toContain(TEST_GATED_INVOICE_ID);
-
-      // If we're in the send window, the active invoice should be present
-      if (enqueuedIds.length > 0) {
-        expect(enqueuedIds).toContain(TEST_ACTIVE_INVOICE_ID);
-        // Exactly one invoice should be enqueued
-        expect(enqueuedIds).toHaveLength(1);
-      }
+      expect(enqueuedIds).toContain(TEST_ACTIVE_INVOICE_ID);
+      expect(enqueuedIds).toHaveLength(1);
     });
   });
 
   describe("non-gated accounts unchanged", () => {
     it("enqueues reminder for account that was never gated", async () => {
-      // The active account has gated_at = NULL (never gated)
       await createInvoiceDueToday(
         TEST_ACTIVE_ACCOUNT_ID,
         TEST_ACTIVE_INVOICE_ID,
@@ -230,14 +196,10 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
 
       const enqueuedIds = await callEnqueueAndGetInvoiceIds();
 
-      // If in send window, should be enqueued
-      if (enqueuedIds.length > 0) {
-        expect(enqueuedIds).toContain(TEST_ACTIVE_INVOICE_ID);
-      }
+      expect(enqueuedIds).toContain(TEST_ACTIVE_INVOICE_ID);
     });
 
     it("cleared gated_at allows account to receive reminders again", async () => {
-      // Temporarily clear gated_at on the gated account
       await sql`
         UPDATE "BuyerAccount"
         SET gated_at = NULL
@@ -253,13 +215,8 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
 
         const enqueuedIds = await callEnqueueAndGetInvoiceIds();
 
-        // Now that gated_at is NULL, it should be eligible
-        // (if we're in the send window)
-        if (enqueuedIds.length > 0) {
-          expect(enqueuedIds).toContain(TEST_GATED_INVOICE_ID);
-        }
+        expect(enqueuedIds).toContain(TEST_GATED_INVOICE_ID);
       } finally {
-        // Restore gated_at
         await sql`
           UPDATE "BuyerAccount"
           SET gated_at = NOW()
@@ -277,7 +234,6 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
         "#LOGGED-1"
       );
 
-      // Pre-create a ReminderLog entry (simulating already sent)
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", "sentAt")
         VALUES (
@@ -291,7 +247,6 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
 
       const enqueuedIds = await callEnqueueAndGetInvoiceIds();
 
-      // Should NOT be enqueued because it's already logged
       expect(enqueuedIds).not.toContain(TEST_ACTIVE_INVOICE_ID);
     });
 
@@ -299,7 +254,6 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
       const paidInvoiceId = `inv-paid-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/${paidInvoiceId}`;
 
-      // Create a PAID invoice (not open)
       await sql`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
@@ -309,25 +263,23 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
           ${paidInvoiceId}, ${TEST_SHOP_ID}, ${TEST_ACTIVE_ACCOUNT_ID}, ${orderId},
           '#PAID-1', 10000.00, 0.00, 'paid',
           NOW() - INTERVAL '10 days',
-          (NOW() AT TIME ZONE 'Asia/Kolkata')::DATE,
+          (NOW() AT TIME ZONE ${testTimezone})::DATE,
           NOW(), NOW()
         )
       `;
 
       const enqueuedIds = await callEnqueueAndGetInvoiceIds();
 
-      // Paid invoice should not be enqueued
       expect(enqueuedIds).not.toContain(paidInvoiceId);
     });
 
     it("handles shop with no accounts gracefully", async () => {
-      // Create a new shop with reminders enabled but no accounts
       const emptyShopId = `shop-empty-${TEST_SUFFIX}`;
       const emptyShopDomain = `empty-${TEST_SUFFIX}.myshopify.com`;
 
       await sql`
         INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
-        VALUES (${emptyShopId}, ${emptyShopDomain}, 'INR', 'Asia/Kolkata', 'free', NOW(), NOW())
+        VALUES (${emptyShopId}, ${emptyShopDomain}, 'INR', ${testTimezone}, 'free', NOW(), NOW())
       `;
       await sql`
         INSERT INTO s18_shop_reminder_settings (shop_id, enabled, created_at, updated_at)
@@ -339,10 +291,8 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
       `;
 
       try {
-        // Should not throw
         await sql`SELECT public.s18_enqueue_reminders()`;
 
-        // No messages for empty shop
         const [result] = await sql<{ count: number }[]>`
           SELECT COUNT(*)::INT AS count
           FROM pgmq.q_s6_sync
