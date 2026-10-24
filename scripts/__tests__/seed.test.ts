@@ -6020,7 +6020,7 @@ describe("reset functionality", () => {
     global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const body = init?.body ? JSON.parse(init.body as string) : {};
       const query = body.query as string;
-      const variables = body.variables as Record<string, unknown> | undefined;
+      const _variables = body.variables as Record<string, unknown> | undefined;
 
       if (query.includes("FindSeededOrders")) {
         return {
