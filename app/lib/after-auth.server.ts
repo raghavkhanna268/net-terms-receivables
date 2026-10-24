@@ -99,16 +99,16 @@ const SHOP_TIMEZONE_QUERY = `
  *
  * This function ensures the Shop row exists on every install or re-auth.
  * It uses INSERT ... ON CONFLICT to be idempotent:
- * - Fresh install: Creates new Shop row with timezone
- * - Reinstall: Clears uninstalledAt and updates timezone
- * - Re-auth: Updates timezone only
+ * - Fresh install: Creates new Shop row with timezone (or default if query fails)
+ * - Reinstall: Clears uninstalledAt and updates timezone (preserves existing if query fails)
+ * - Re-auth: Updates timezone only (preserves existing if query fails)
  */
 async function syncShopTimezone(
   shop: string,
   admin: AdminGraphqlClient,
 ): Promise<void> {
   const sql = getRequestSql();
-  let timezone = "Asia/Kolkata";
+  let timezone: string | null = null;
 
   try {
     const response = await admin.graphql(SHOP_TIMEZONE_QUERY);
@@ -134,11 +134,11 @@ async function syncShopTimezone(
         }
         timezone = validatedTimezone;
       } else {
-        console.warn(`[afterAuth] No timezone returned for ${shop}, using default`);
+        console.warn(`[afterAuth] No timezone returned for ${shop}`);
       }
     }
   } catch (error) {
-    console.warn(`[afterAuth] Failed to fetch timezone for ${shop}, using default:`, error);
+    console.warn(`[afterAuth] Failed to fetch timezone for ${shop}:`, error);
   }
 
   try {
@@ -229,27 +229,38 @@ export function _isShopSetupInFlight(shop: string): boolean {
  * Called on every install or re-auth to ensure the Shop row exists.
  * This is idempotent: INSERT ... ON CONFLICT updates existing rows.
  *
- * On fresh install: Creates a new Shop row with the given timezone.
- * On reinstall: Clears uninstalledAt and updates timezone.
- * On re-auth: Updates timezone only (no-op if timezone unchanged).
+ * On fresh install: Creates a new Shop row with the given timezone (or default if null).
+ * On reinstall: Clears uninstalledAt and updates timezone (preserves existing if null).
+ * On re-auth: Updates timezone only (preserves existing if null).
  *
  * @param sql - postgres.js SQL client
  * @param shopDomain - Shop domain (e.g., "example.myshopify.com")
- * @param timezone - IANA timezone from Shopify (e.g., "America/New_York")
+ * @param timezone - IANA timezone from Shopify, or null if query failed
  */
 export async function upsertShopOnAuth(
   sql: Sql,
   shopDomain: string,
-  timezone: string,
+  timezone: string | null,
 ): Promise<void> {
   await sql`
     INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
-    VALUES (${shopDomain}, ${timezone}, 'INR', 'free', NOW(), NOW())
+    VALUES (${shopDomain}, COALESCE(${timezone}, 'Asia/Kolkata'), 'INR', 'free', NOW(), NOW())
     ON CONFLICT (domain)
     DO UPDATE SET
-      timezone = EXCLUDED.timezone,
+      timezone = COALESCE(${timezone}, "Shop".timezone),
       "uninstalledAt" = NULL,
       "updatedAt" = NOW()
   `;
-  console.log(`[afterAuth] Upserted Shop row for ${shopDomain} (timezone: ${timezone})`);
+  console.log(`[afterAuth] Upserted Shop row for ${shopDomain} (timezone: ${timezone ?? 'preserved'})`);
+}
+
+/**
+ * Evict a shop from the setup completed cache.
+ * Called after a successful uninstall to ensure a quick reinstall
+ * on a warm isolate still runs the upsert.
+ *
+ * @param shop - The shop domain to evict
+ */
+export function evictShopFromSetupCache(shop: string): void {
+  setupCompletedShops.delete(shop);
 }

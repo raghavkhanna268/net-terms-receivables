@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   runAfterAuth,
+  evictShopFromSetupCache,
   _resetSetupCacheForTesting,
   _isShopSetupComplete,
   _isShopSetupInFlight,
@@ -399,6 +400,44 @@ describe("after-auth", () => {
 
       expect(mockEnsureValidation).toHaveBeenCalledTimes(2);
       consoleSpy.mockRestore();
+    });
+
+    it("uninstall then afterAuth on same isolate runs upsert again", async () => {
+      mockEnsureValidation.mockResolvedValue({
+        id: "gid://shopify/Validation/123",
+        created: true,
+      });
+
+      const mockAdmin = { graphql: vi.fn() };
+      const mockWaitUntil = vi.fn();
+
+      runAfterAuth(
+        "reinstall-test.myshopify.com",
+        mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
+      );
+
+      await vi.waitFor(() => {
+        expect(_isShopSetupComplete("reinstall-test.myshopify.com")).toBe(true);
+      });
+
+      expect(mockEnsureValidation).toHaveBeenCalledTimes(1);
+
+      evictShopFromSetupCache("reinstall-test.myshopify.com");
+      expect(_isShopSetupComplete("reinstall-test.myshopify.com")).toBe(false);
+
+      runAfterAuth(
+        "reinstall-test.myshopify.com",
+        mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
+      );
+
+      await vi.waitFor(() => {
+        expect(_isShopSetupComplete("reinstall-test.myshopify.com")).toBe(true);
+      });
+
+      expect(mockEnsureValidation).toHaveBeenCalledTimes(2);
+      expect(mockWaitUntil).toHaveBeenCalledTimes(2);
     });
   });
 });

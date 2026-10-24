@@ -21,6 +21,11 @@ vi.mock("~/services/compliance", () => ({
   markShopUninstalled: (...args: unknown[]) => mockMarkShopUninstalled(...args),
 }));
 
+const mockEvictShopFromSetupCache = vi.fn();
+vi.mock("~/lib/after-auth.server", () => ({
+  evictShopFromSetupCache: (...args: unknown[]) => mockEvictShopFromSetupCache(...args),
+}));
+
 const mockSql = vi.fn();
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
@@ -76,6 +81,7 @@ describe("webhooks.app.uninstalled", () => {
     mockRecordWebhookReceipt.mockResolvedValue(true);
     mockParseTriggeredAt.mockReturnValue(null);
     mockDeleteWebhookReceiptsForShop.mockResolvedValue(0);
+    mockEvictShopFromSetupCache.mockReturnValue(undefined);
   });
 
   afterEach(() => {
@@ -97,6 +103,24 @@ describe("webhooks.app.uninstalled", () => {
     await action(createActionArgs());
 
     expect(mockMarkShopUninstalled).toHaveBeenCalledWith(expect.anything(), TEST_SHOP);
+  });
+
+  it("evicts shop from setup cache after successful uninstall", async () => {
+    mockSessionStorage.deleteAllForShop.mockResolvedValue(1);
+    mockMarkShopUninstalled.mockResolvedValue(true);
+
+    await action(createActionArgs());
+
+    expect(mockEvictShopFromSetupCache).toHaveBeenCalledWith(TEST_SHOP);
+  });
+
+  it("evicts shop from setup cache even if shop not found in DB", async () => {
+    mockSessionStorage.deleteAllForShop.mockResolvedValue(0);
+    mockMarkShopUninstalled.mockResolvedValue(false);
+
+    await action(createActionArgs());
+
+    expect(mockEvictShopFromSetupCache).toHaveBeenCalledWith(TEST_SHOP);
   });
 
   it("handles shops with no sessions gracefully", async () => {

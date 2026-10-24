@@ -105,6 +105,40 @@ describeWithDb("after-auth Shop row upsert (DB)", () => {
       expect(shop.timezone).toBe("Asia/Kolkata");
     });
   });
+
+  describe("timezone preservation on failed query", () => {
+    const TEST_SHOP_DOMAIN_TZ = `tz-preserve-${TEST_SUFFIX}.myshopify.com`;
+
+    it("re-auth with failed tz query preserves existing timezone", async () => {
+      const { upsertShopOnAuth } = await import("../after-auth.server");
+      
+      await upsertShopOnAuth(sql, TEST_SHOP_DOMAIN_TZ, "America/New_York");
+
+      const [before] = await sql<{ timezone: string }[]>`
+        SELECT timezone FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN_TZ}
+      `;
+      expect(before.timezone).toBe("America/New_York");
+
+      await upsertShopOnAuth(sql, TEST_SHOP_DOMAIN_TZ, null);
+
+      const [after] = await sql<{ timezone: string }[]>`
+        SELECT timezone FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN_TZ}
+      `;
+      expect(after.timezone).toBe("America/New_York");
+    });
+
+    it("fresh install with failed tz query gets default timezone", async () => {
+      const { upsertShopOnAuth } = await import("../after-auth.server");
+      const FRESH_SHOP = `fresh-tz-fail-${TEST_SUFFIX}.myshopify.com`;
+      
+      await upsertShopOnAuth(sql, FRESH_SHOP, null);
+
+      const [shop] = await sql<{ timezone: string }[]>`
+        SELECT timezone FROM "Shop" WHERE domain = ${FRESH_SHOP}
+      `;
+      expect(shop.timezone).toBe("Asia/Kolkata");
+    });
+  });
 });
 
 describeWithDb("Shop-dependent services after fresh install (DB)", () => {
@@ -216,8 +250,8 @@ describeWithDb("Shop-dependent services after fresh install (DB)", () => {
     });
   });
 
-  describe("reminders skip uninstalled shops", () => {
-    it("s18_enqueue_reminders excludes uninstalled shops", async () => {
+  describe("reconcile excludes uninstalled shops", () => {
+    it("enqueueReconcileForAllShops excludes uninstalled shops", async () => {
       await sql`
         UPDATE "Shop"
         SET "uninstalledAt" = NOW()

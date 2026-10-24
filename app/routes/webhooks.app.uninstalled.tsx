@@ -6,6 +6,7 @@ import {
 import { getRequestSql } from "~/lib/request-context.server";
 import { markShopUninstalled } from "~/services/compliance";
 import { deleteWebhookReceiptsForShop } from "~/lib/webhook-receipts.server";
+import { evictShopFromSetupCache } from "~/lib/after-auth.server";
 
 /**
  * App uninstalled webhook handler.
@@ -75,6 +76,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         `[uninstalled] Shop ${shop} not found in database (may not have completed install)`
       );
     }
+    evictShopFromSetupCache(shop);
   } catch (error) {
     console.error(`Error marking shop ${shop} as uninstalled:`, error);
     return new Response(null, { status: 500 });
