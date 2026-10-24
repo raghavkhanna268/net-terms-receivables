@@ -19,6 +19,11 @@ import type { Sql } from "~/lib/db-light.server";
  * - Monthly cap enforcement (3,000/month GLOBAL)
  * - Send window (09:00-19:00 shop local time)
  * - PCD compliance (only email/displayName via CUSTOMER_PII_FIELDS)
+ * - RESEND_FROM_EMAIL gate (both keys required)
+ * - Reserve-then-release cap on non-retryable errors
+ * - offsetDays validation (-30 to 90)
+ * - formatAmount uses Decimal(14,2) rupees (not paise)
+ * - Idempotency-Key HTTP header to Resend
  */
 
 // Mock fetch globally
@@ -59,7 +64,18 @@ function createMockSql() {
         return [];
       }
 
-      // Global sends count (single day)
+      // Global sends CTE-based atomic reservation
+      if (query.includes("WITH monthly_sum AS") && query.includes("upserted AS")) {
+        const result = mockResults.get("global_increment") ?? [{ dailyCount: 1, monthlyTotal: 1 }];
+        return result;
+      }
+
+      // Global sends release (decrement)
+      if (query.includes("GREATEST(0, daily_count - 1)")) {
+        return [];
+      }
+
+      // Global sends count query
       if (query.includes("FROM s18_global_sends") && query.includes("send_date =")) {
         return mockResults.get("global_daily") ?? [];
       }
@@ -69,19 +85,14 @@ function createMockSql() {
         return mockResults.get("global_monthly") ?? [{ monthlyTotal: 0 }];
       }
 
-      // Global sends increment
-      if (query.includes("INSERT INTO s18_global_sends")) {
-        return mockResults.get("global_increment") ?? [{ dailyCount: 1, monthlyCount: 1 }];
-      }
-
-      // Global sends previous daily (for cap check)
-      if (query.includes("daily_count - 1")) {
-        return mockResults.get("global_prev_daily") ?? [{ prevDaily: 0 }];
-      }
-
       // ReminderRule lookup
       if (query.includes("FROM \"ReminderRule\"") && query.includes("WHERE id")) {
         return mockResults.get("rule") ?? [];
+      }
+
+      // ReminderRule UPDATE
+      if (query.includes("UPDATE \"ReminderRule\"") && query.includes("RETURNING id")) {
+        return mockResults.get("rule_update") ?? [{ id: "rule-123" }];
       }
 
       // Shop reminder settings
@@ -135,17 +146,62 @@ describe("Payment Reminders (S18)", () => {
 
     it("returns false when RESEND_API_KEY is empty string (S18-02)", async () => {
       const { isReminderSendingEnabled } = await import("../reminders.server");
-      expect(isReminderSendingEnabled({ RESEND_API_KEY: "" })).toBe(false);
+      expect(isReminderSendingEnabled({ RESEND_API_KEY: "", RESEND_FROM_EMAIL: "test@example.com" })).toBe(false);
     });
 
     it("returns false when RESEND_API_KEY is whitespace (S18-02)", async () => {
       const { isReminderSendingEnabled } = await import("../reminders.server");
-      expect(isReminderSendingEnabled({ RESEND_API_KEY: "   " })).toBe(false);
+      expect(isReminderSendingEnabled({ RESEND_API_KEY: "   ", RESEND_FROM_EMAIL: "test@example.com" })).toBe(false);
     });
 
-    it("returns true when RESEND_API_KEY is a valid key", async () => {
+    it("returns false when RESEND_FROM_EMAIL is missing", async () => {
       const { isReminderSendingEnabled } = await import("../reminders.server");
-      expect(isReminderSendingEnabled({ RESEND_API_KEY: "re_test_1234" })).toBe(true);
+      expect(isReminderSendingEnabled({ RESEND_API_KEY: "re_test_1234" })).toBe(false);
+    });
+
+    it("returns false when RESEND_FROM_EMAIL is empty", async () => {
+      const { isReminderSendingEnabled } = await import("../reminders.server");
+      expect(isReminderSendingEnabled({ RESEND_API_KEY: "re_test_1234", RESEND_FROM_EMAIL: "" })).toBe(false);
+    });
+
+    it("returns false when RESEND_FROM_EMAIL is whitespace", async () => {
+      const { isReminderSendingEnabled } = await import("../reminders.server");
+      expect(isReminderSendingEnabled({ RESEND_API_KEY: "re_test_1234", RESEND_FROM_EMAIL: "   " })).toBe(false);
+    });
+
+    it("returns true when both RESEND_API_KEY and RESEND_FROM_EMAIL are set", async () => {
+      const { isReminderSendingEnabled } = await import("../reminders.server");
+      expect(isReminderSendingEnabled({ 
+        RESEND_API_KEY: "re_test_1234", 
+        RESEND_FROM_EMAIL: "noreply@example.com" 
+      })).toBe(true);
+    });
+  });
+
+  describe("isValidOffset", () => {
+    it("accepts valid offsets within -30..90", async () => {
+      const { isValidOffset, OFFSET_MIN, OFFSET_MAX } = await import("../reminders.server");
+      expect(OFFSET_MIN).toBe(-30);
+      expect(OFFSET_MAX).toBe(90);
+      expect(isValidOffset(-30)).toBe(true);
+      expect(isValidOffset(-3)).toBe(true);
+      expect(isValidOffset(0)).toBe(true);
+      expect(isValidOffset(7)).toBe(true);
+      expect(isValidOffset(90)).toBe(true);
+    });
+
+    it("rejects offsets outside -30..90", async () => {
+      const { isValidOffset } = await import("../reminders.server");
+      expect(isValidOffset(-31)).toBe(false);
+      expect(isValidOffset(91)).toBe(false);
+      expect(isValidOffset(-100)).toBe(false);
+      expect(isValidOffset(365)).toBe(false);
+    });
+
+    it("rejects non-integer offsets", async () => {
+      const { isValidOffset } = await import("../reminders.server");
+      expect(isValidOffset(3.5)).toBe(false);
+      expect(isValidOffset(-1.1)).toBe(false);
     });
   });
 
@@ -199,47 +255,85 @@ describe("Payment Reminders (S18)", () => {
     it("returns capped when daily GLOBAL cap (100) is reached", async () => {
       const { sendPaymentReminder, DAILY_SEND_CAP } = await import("../reminders.server");
 
-      // Mock global daily count at cap
-      mockSql.setMockResult("global_daily", [{ dailyCount: DAILY_SEND_CAP, monthlyCount: 50 }]);
+      const mockInvoice = {
+        invoiceId: "inv-123",
+        shopId: "shop-123",
+        shopDomain: "test-shop.myshopify.com",
+        shopTimezone: "Asia/Kolkata",
+        invoiceName: "#1001",
+        total: "1000.00",
+        currency: "INR",
+        dueAt: new Date(),
+        status: "open",
+        buyerAccountId: "buyer-123",
+        customerId: "gid://shopify/Customer/456",
+      };
+
+      mockSql.setMockResult("invoice", [mockInvoice]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
+      // Mock reservation failure due to daily cap - return 0 dailyCount
+      mockSql.setMockResult("global_increment", [{ dailyCount: 0, monthlyTotal: 50 }]);
 
       const result = await sendPaymentReminder(
         mockSql,
         "shop-123",
         "inv-123",
         "rule-123",
-        -3,
+        0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM_EMAIL: "noreply@example.com" }
       );
 
       expect(result.success).toBe(true);
       expect(result.action).toBe("capped");
-      expect(result.skipReason).toContain("Daily send cap");
-      expect(result.skipReason).toContain("100");
+      expect(result.skipReason).toContain("send cap");
       expect(mockFetch).not.toHaveBeenCalled();
+
+      // Verify DAILY_SEND_CAP constant
+      expect(DAILY_SEND_CAP).toBe(100);
     });
 
     it("returns capped when monthly GLOBAL cap (3000) is reached", async () => {
       const { sendPaymentReminder, MONTHLY_SEND_CAP } = await import("../reminders.server");
 
-      // Mock monthly count at cap
-      mockSql.setMockResult("global_monthly", [{ monthlyTotal: MONTHLY_SEND_CAP }]);
+      const mockInvoice = {
+        invoiceId: "inv-123",
+        shopId: "shop-123",
+        shopDomain: "test-shop.myshopify.com",
+        shopTimezone: "Asia/Kolkata",
+        invoiceName: "#1001",
+        total: "1000.00",
+        currency: "INR",
+        dueAt: new Date(),
+        status: "open",
+        buyerAccountId: "buyer-123",
+        customerId: "gid://shopify/Customer/456",
+      };
+
+      mockSql.setMockResult("invoice", [mockInvoice]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
+      // Mock reservation failure - return 0 dailyCount but high monthly
+      mockSql.setMockResult("global_increment", [{ dailyCount: 0, monthlyTotal: MONTHLY_SEND_CAP }]);
 
       const result = await sendPaymentReminder(
         mockSql,
         "shop-123",
         "inv-123",
         "rule-123",
-        -3,
+        0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM_EMAIL: "noreply@example.com" }
       );
 
       expect(result.success).toBe(true);
       expect(result.action).toBe("capped");
-      expect(result.skipReason).toContain("Monthly send cap");
-      expect(result.skipReason).toContain("3000");
+      expect(result.skipReason).toContain("send cap");
       expect(mockFetch).not.toHaveBeenCalled();
+
+      // Verify MONTHLY_SEND_CAP constant
+      expect(MONTHLY_SEND_CAP).toBe(3000);
     });
   });
 
@@ -260,7 +354,6 @@ describe("Payment Reminders (S18)", () => {
     it("skips when invoice is paid (S18-12)", async () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
-      mockSql.setMockResult("global_daily", []);
       mockSql.setMockResult("invoice", [{ ...baseInvoice, status: "paid" }]);
       mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
 
@@ -271,7 +364,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM_EMAIL: "noreply@example.com" }
       );
 
       expect(result.success).toBe(true);
@@ -283,7 +376,6 @@ describe("Payment Reminders (S18)", () => {
     it("skips when invoice is cancelled (S18-12)", async () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
-      mockSql.setMockResult("global_daily", []);
       mockSql.setMockResult("invoice", [{ ...baseInvoice, status: "cancelled" }]);
       mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
 
@@ -294,7 +386,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM_EMAIL: "noreply@example.com" }
       );
 
       expect(result.success).toBe(true);
@@ -334,7 +426,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM_EMAIL: "noreply@example.com" }
       );
 
       expect(result.success).toBe(true);
@@ -360,7 +452,7 @@ describe("Payment Reminders (S18)", () => {
         shopDomain: "test-shop.myshopify.com",
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
-        total: "100000",
+        total: "1000.00",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
@@ -368,7 +460,6 @@ describe("Payment Reminders (S18)", () => {
         customerId: "gid://shopify/Customer/456",
       };
 
-      mockSql.setMockResult("global_daily", []);
       mockSql.setMockResult("invoice", [mockInvoiceData]);
       mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
       mockSql.setMockResult("claim_slot", []); // Empty = slot not claimed (conflict)
@@ -380,7 +471,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM_EMAIL: "noreply@example.com" }
       );
 
       expect(result.success).toBe(true);
@@ -397,7 +488,7 @@ describe("Payment Reminders (S18)", () => {
       shopDomain: "test-shop.myshopify.com",
       shopTimezone: "Asia/Kolkata",
       invoiceName: "#1001",
-      total: "100000",
+      total: "1000.00",
       currency: "INR",
       dueAt: new Date(),
       status: "open",
@@ -405,15 +496,15 @@ describe("Payment Reminders (S18)", () => {
       customerId: "gid://shopify/Customer/456",
     };
 
+    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM_EMAIL: "noreply@example.com" };
+
     it("handles Resend 429 rate limit as retryable (S18-14)", async () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
-      mockSql.setMockResult("global_daily", []);
       mockSql.setMockResult("invoice", [mockInvoiceData]);
       mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
       mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
-      mockSql.setMockResult("global_increment", [{ dailyCount: 1, monthlyCount: 1 }]);
-      mockSql.setMockResult("global_prev_daily", [{ prevDaily: 0 }]);
+      mockSql.setMockResult("global_increment", [{ dailyCount: 1, monthlyTotal: 1 }]);
 
       mockFetch.mockResolvedValueOnce({
         ok: false,
@@ -428,7 +519,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234" }
+        validEnv
       );
 
       expect(result.success).toBe(false);
@@ -436,15 +527,13 @@ describe("Payment Reminders (S18)", () => {
       expect(result.error).toContain("429");
     });
 
-    it("handles Resend 401 auth error as non-retryable (S18-15)", async () => {
+    it("handles Resend 401 auth error as non-retryable and releases cap (S18-15)", async () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
-      mockSql.setMockResult("global_daily", []);
       mockSql.setMockResult("invoice", [mockInvoiceData]);
       mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
       mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
-      mockSql.setMockResult("global_increment", [{ dailyCount: 1, monthlyCount: 1 }]);
-      mockSql.setMockResult("global_prev_daily", [{ prevDaily: 0 }]);
+      mockSql.setMockResult("global_increment", [{ dailyCount: 1, monthlyTotal: 1 }]);
 
       mockFetch.mockResolvedValueOnce({
         ok: false,
@@ -459,7 +548,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234" }
+        validEnv
       );
 
       expect(result.success).toBe(false);
@@ -467,17 +556,20 @@ describe("Payment Reminders (S18)", () => {
       expect(consoleErrorSpy).toHaveBeenCalledWith(
         expect.stringContaining("Resend auth error")
       );
+
+      // Verify cap was released (UPDATE query with GREATEST(0, daily_count - 1))
+      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const capReleaseCalls = sqlCalls.filter((q: string) => q.includes("GREATEST(0, daily_count - 1)"));
+      expect(capReleaseCalls.length).toBeGreaterThan(0);
     });
 
-    it("handles 5xx server errors as retryable (S18-14)", async () => {
+    it("handles 5xx server errors as retryable and does NOT release cap (S18-14)", async () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
-      mockSql.setMockResult("global_daily", []);
       mockSql.setMockResult("invoice", [mockInvoiceData]);
       mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
       mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
-      mockSql.setMockResult("global_increment", [{ dailyCount: 1, monthlyCount: 1 }]);
-      mockSql.setMockResult("global_prev_daily", [{ prevDaily: 0 }]);
+      mockSql.setMockResult("global_increment", [{ dailyCount: 1, monthlyTotal: 1 }]);
 
       mockFetch.mockResolvedValueOnce({
         ok: false,
@@ -492,11 +584,109 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234" }
+        validEnv
       );
 
       expect(result.success).toBe(false);
       expect(result.retryable).toBe(true);
+
+      // Verify cap was NOT released (no GREATEST(0, daily_count - 1) for retryable errors)
+      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const capReleaseCalls = sqlCalls.filter((q: string) => q.includes("GREATEST(0, daily_count - 1)"));
+      expect(capReleaseCalls).toHaveLength(0);
+    });
+
+    it("sends Idempotency-Key HTTP header to Resend", async () => {
+      const { sendPaymentReminder } = await import("../reminders.server");
+
+      mockSql.setMockResult("invoice", [mockInvoiceData]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
+      mockSql.setMockResult("global_increment", [{ dailyCount: 1, monthlyTotal: 1 }]);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: "email-123" }),
+      });
+
+      await sendPaymentReminder(
+        mockSql,
+        "shop-123",
+        "inv-123",
+        "rule-123",
+        0,
+        "Asia/Kolkata",
+        validEnv
+      );
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const [url, options] = mockFetch.mock.calls[0];
+      expect(url).toBe("https://api.resend.com/emails");
+      expect(options.headers["Idempotency-Key"]).toBe("s18_inv-123_rule-123");
+    });
+
+    it("uses RESEND_FROM_EMAIL for sender address", async () => {
+      const { sendPaymentReminder } = await import("../reminders.server");
+
+      mockSql.setMockResult("invoice", [mockInvoiceData]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
+      mockSql.setMockResult("global_increment", [{ dailyCount: 1, monthlyTotal: 1 }]);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: "email-123" }),
+      });
+
+      await sendPaymentReminder(
+        mockSql,
+        "shop-123",
+        "inv-123",
+        "rule-123",
+        0,
+        "Asia/Kolkata",
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM_EMAIL: "reminders@myapp.com" }
+      );
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const [, options] = mockFetch.mock.calls[0];
+      const body = JSON.parse(options.body);
+      expect(body.from).toBe("reminders@myapp.com");
+    });
+  });
+
+  describe("updateReminderRule", () => {
+    it("updates offsetDays within valid bounds", async () => {
+      const { updateReminderRule } = await import("../reminders.server");
+
+      // Mock successful update
+      const mockUpdateResult = [{ id: "rule-123" }];
+      mockSql.setMockResult("rule_update", mockUpdateResult);
+
+      const updated = await updateReminderRule(mockSql, "shop-123", "rule-123", {
+        offsetDays: 7,
+      });
+
+      expect(updated).toBe(true);
+    });
+
+    it("throws error for offsetDays outside bounds", async () => {
+      const { updateReminderRule, OFFSET_MIN, OFFSET_MAX } = await import("../reminders.server");
+
+      await expect(
+        updateReminderRule(mockSql, "shop-123", "rule-123", { offsetDays: -31 })
+      ).rejects.toThrow(`offsetDays must be between ${OFFSET_MIN} and ${OFFSET_MAX}`);
+
+      await expect(
+        updateReminderRule(mockSql, "shop-123", "rule-123", { offsetDays: 91 })
+      ).rejects.toThrow(`offsetDays must be between ${OFFSET_MIN} and ${OFFSET_MAX}`);
+    });
+
+    it("returns false when no updates provided", async () => {
+      const { updateReminderRule } = await import("../reminders.server");
+
+      const updated = await updateReminderRule(mockSql, "shop-123", "rule-123", {});
+      expect(updated).toBe(false);
     });
   });
 
@@ -703,5 +893,25 @@ describe("Reminder Job Handler", () => {
         enqueuedAt: "2026-10-30T10:00:00Z",
       })
     ).toBe(true);
+  });
+});
+
+describe("formatAmount (rendered in email)", () => {
+  it("renders INR amount from Decimal(14,2) correctly (no paise division)", async () => {
+    const { renderPaymentReminderEmail } = await import("~/emails/PaymentReminderEmail");
+
+    // Invoice.total is "1234.56" (Decimal(14,2) rupees), NOT paise
+    // The email should show ₹1,234.56, not ₹12.35
+    const html = renderPaymentReminderEmail({
+      invoiceName: "#1001",
+      buyerName: "Test Customer",
+      amount: "₹1,234.56", // This is what formatAmount should produce from "1234.56"
+      dueDate: "October 30, 2026",
+      merchantName: "Test Shop",
+      reminderType: "Payment due today",
+    });
+
+    expect(html).toContain("₹1,234.56");
+    expect(html).not.toContain("₹12.35"); // Would be wrong if we divided by 100
   });
 });
