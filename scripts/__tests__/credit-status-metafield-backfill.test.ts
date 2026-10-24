@@ -271,4 +271,53 @@ describeWithDb("credit-status-metafield-backfill DB integration", () => {
       }
     });
   });
+
+  describe("dry-run transaction_read_only enforcement", () => {
+    it("runDryRun succeeds and counts run with transaction_read_only='on'", async () => {
+      // Import the exported runDryRun function
+      const { runDryRun } = await import("../credit-status-metafield-backfill");
+
+      // Call the actual exported function against the test DB
+      const result = await runDryRun(sql);
+
+      // Assert it succeeded
+      expect(result.success).toBe(true);
+      // Assert stats is an array (the counts query ran)
+      expect(Array.isArray(result.stats)).toBe(true);
+    });
+
+    it("negative: runDryRun rejects when read-only check fails", async () => {
+      // This test verifies the negative case: if the preflight or in-place check fails,
+      // runDryRun throws an error. We can't easily make the in-place check fail with
+      // a real DB (sql.begin("read only") always sets transaction_read_only='on'),
+      // but we can verify the error path by checking that runDryRun throws when
+      // called with a mock that simulates failure.
+      
+      // Create a mock sql that makes verifyReadOnlyTransaction fail
+      const mockSql = {
+        begin: async (mode: string, fn: (tx: unknown) => Promise<unknown>) => {
+          if (mode === "read only") {
+            const mockTx = async (strings: TemplateStringsArray) => {
+              const query = strings.join("");
+              if (query.includes("transaction_read_only")) {
+                return [{ transaction_read_only: "off" }];
+              }
+              return [];
+            };
+            mockTx.json = (v: unknown) => v;
+            return fn(mockTx);
+          }
+          // verifyReadOnlyTransaction opens its own read only tx
+          return fn(mockSql);
+        },
+      };
+
+      const { runDryRun } = await import("../credit-status-metafield-backfill");
+
+      // When transaction_read_only is 'off', the in-place check should throw
+      await expect(runDryRun(mockSql as unknown as typeof sql)).rejects.toThrow(
+        "transaction_read_only is not 'on'"
+      );
+    });
+  });
 });
