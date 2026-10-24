@@ -1520,10 +1520,6 @@ const FAKE_SUBDOMAINS = new Set([
   "shop", "store", "shop1", "shop2", "shop-a", "shop-b", "shopa", "shopb", "shopc",
 ]);
 
-/**
- * TLDs that indicate test/fake domains.
- */
-const FAKE_TLDS = [".test", ".invalid", ".example", ".localhost"];
 
 /**
  * Check if a subdomain matches a fake prefix with proper boundary.
