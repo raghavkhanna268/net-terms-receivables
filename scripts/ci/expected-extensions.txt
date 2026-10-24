@@ -1,0 +1,6 @@
+# Extensions currently deployed on the Net Terms Receivables app (one handle per line).
+# `shopify app deploy` REMOVES any deployed extension missing from the repo, so the
+# release workflow hard-fails unless the repo's extensions/ match this list exactly.
+# Changing this file (adding or removing an extension) requires QA review.
+credit-check-validation
+hide-terms-payment
