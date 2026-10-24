@@ -3512,14 +3512,19 @@ export async function seedDatabase(state: SeedState): Promise<void> {
     console.log(`  ✅ Shop record ${shopWasCreated ? "created" : "updated"}`);
 
     // Upsert AccountSource tag rules for Net 15/30/60
+    // Note: We don't specify id in INSERT - let ON CONFLICT use existing id or generate new one
+    // This handles both fresh installs (new rows) and existing installs (updates existing rows)
     for (const loc of LOCATION_TERMS) {
       const tag = `${SEED_TAG}-net${loc.dueInDays}`;
       tracker.tags.add(tag);
       
+      // Use a shop-scoped id to avoid conflicts across different shops
+      const sourceId = `seed-source-${shopId}-${tag}`;
+      
       const result = await sql`
         INSERT INTO "AccountSource" (id, "shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")
         VALUES (
-          ${`seed-source-${tag}`},
+          ${sourceId},
           ${shopId},
           ${tag},
           ${loc.dueInDays},
@@ -3541,10 +3546,12 @@ export async function seedDatabase(state: SeedState): Promise<void> {
     }
 
     // Upsert BuyerAccount records for each company location
+    // Use shop-scoped id to avoid conflicts across different shops
     for (const [companyKey, company] of state.companies) {
       for (const [dueInDays, locationId] of company.locations) {
         tracker.companyLocationIds.add(locationId);
         const accountName = `${COMPANY_SEEDS.find(c => c.key === companyKey)?.name ?? companyKey} - Net ${dueInDays}`;
+        const accountId = `seed-account-${shopId}-${locationId}`;
         
         const result = await sql`
           INSERT INTO "BuyerAccount" (
@@ -3552,7 +3559,7 @@ export async function seedDatabase(state: SeedState): Promise<void> {
             "defaultTermsDays", "defaultTermsSource", "holdState", "createdAt", "updatedAt"
           )
           VALUES (
-            ${`seed-account-${locationId}`},
+            ${accountId},
             ${shopId},
             'COMPANY',
             ${company.id},
