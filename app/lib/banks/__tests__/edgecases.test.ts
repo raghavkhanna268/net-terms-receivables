@@ -640,6 +640,7 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       );
       expect(upiMissingRef).toBeDefined();
       expect(upiMissingRef!.refNo).toBeFalsy();
+      expect(upiMissingRef!.parsed.utr).toBe("876543210987");
     });
 
     it("ICICI: extracts UTR for RTGS transactions", async () => {
