@@ -132,6 +132,9 @@ jobs:
       - name: Logging guard (PII/domain redaction)
         run: ./scripts/ci/check-logging.sh
 
+      - name: Readonly SQL column guard (public-logs kinds)
+        run: npx tsx scripts/ci/check-readonly-columns.ts
+
       - name: Lint
         run: npm run lint
 

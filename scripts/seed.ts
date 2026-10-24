@@ -3699,7 +3699,7 @@ function validateEnv(): { shop: string; token: string; databaseUrl: string | nul
     return null;
   }
   if (!DEV_STORE_DOMAIN_RE.test(allowedDevStore)) {
-    console.error("❌ Security: ALLOWED_DEV_STORE is not a valid *.myshopify.com domain");
+    console.error("❌ Security: ALLOWED_DEV_STORE is not a valid Shopify store domain");
     return null;
   }
   if (shop !== allowedDevStore) {
