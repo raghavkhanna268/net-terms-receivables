@@ -84,9 +84,23 @@ text/message/payload/body/raw, error/reason (unless `*_code`, `*_kind`,
 `*_format`, ...), money (amount, price, balance, outstanding, limit), token or
 secret. Annotations cannot override that. `SELECT *`, `SUM/AVG` and other
 unclassifiable expressions fail too, as does any statement other than
-`SELECT`/`WITH`/`SHOW`/`BEGIN`/`COMMIT`/`ROLLBACK`. A `UNION`/`INTERSECT`/
-`EXCEPT` branch must be a plain `SELECT` (`VALUES`, `TABLE`, a parenthesised
-branch, or `WITH ... TABLE x` are `unparseable`).
+`SELECT`/`WITH`/`SHOW`/`BEGIN`/`COMMIT`/`ROLLBACK` (`SET`, `DELETE`, `COPY`
+... are `unsupported_statement`). `SHOW x` prints one column named `x` and
+needs an `@col x: <kind>` annotation (unannotated it is `unclassified`). A
+`UNION`/`INTERSECT`/`EXCEPT` branch must be a plain `SELECT` (`VALUES`,
+`TABLE`, a parenthesised branch, or `WITH ... TABLE x` are `unparseable`).
+
+**CTEs and subqueries.** An outer column that refers to a CTE or FROM-list
+subquery column (`c.x_id`, or an unqualified `x_id` that a CTE / subquery
+defines) is replaced by the inner expression it names, recursively (chained
+CTEs, `FROM c alias`, `c(col, ...)` column lists, nested subqueries,
+comma joins), and that expression is classified, including its sources for
+the sensitive check. So `WITH c AS (SELECT email AS buyer_id FROM s) SELECT
+buyer_id FROM c` fails like `SELECT email AS buyer_id`. A UNION body or an
+ambiguous unqualified name is checked for every inner expression it could be.
+Columns passed through `q.*` keep their base name and are checked as that
+column. A ref into a CTE / subquery whose body cannot be parsed (`VALUES`,
+`TABLE`, ...) is `unparseable`.
 
 **psql meta commands.** Only `\set ON_ERROR_STOP 1` and `\echo` with
 single-quoted literals (psql does not expand `:var` inside single quotes) are

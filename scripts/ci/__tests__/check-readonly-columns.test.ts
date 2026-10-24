@@ -453,6 +453,114 @@ describe("check-readonly-columns: QA review at 61c306b (fail-closed probes)", ()
   });
 });
 
+describe("check-readonly-columns: QA review at b4f349e (CTE / subquery resolution)", () => {
+  it("P1 probe: CTE alias on email, unqualified outer ref, fails", () => {
+    expect(
+      issues(
+        `WITH c AS (SELECT email AS buyer_id FROM s) SELECT buyer_id FROM c;`,
+      ),
+    ).toEqual(["buyer_id:sensitive"]);
+  });
+
+  it("P1 probe: CTE alias on note, qualified outer ref, fails", () => {
+    expect(
+      issues(`WITH c AS (SELECT note AS x_id FROM s) SELECT c.x_id FROM c;`),
+    ).toEqual(["x_id:sensitive"]);
+  });
+
+  it("P1 probe: FROM-subquery alias on email fails", () => {
+    expect(
+      issues(`SELECT q.a_id FROM (SELECT email AS a_id FROM s) q;`),
+    ).toEqual(["a_id:sensitive"]);
+  });
+
+  it("resolves CTE aliases, chained CTEs, column lists, UNION bodies and comma joins", () => {
+    // alias of a CTE reference
+    expect(
+      issues(
+        `WITH c AS (SELECT email AS buyer_id FROM s) SELECT x.buyer_id FROM c x;`,
+      ),
+    ).toEqual(["buyer_id:sensitive"]);
+    // chained CTEs
+    expect(
+      issues(
+        `WITH a AS (SELECT phone AS p_id FROM s), b AS (SELECT p_id AS q_id FROM a) SELECT q_id FROM b;`,
+      ),
+    ).toEqual(["q_id:sensitive"]);
+    // CTE column list
+    expect(
+      issues(`WITH c(k_id) AS (SELECT email FROM s) SELECT k_id FROM c;`),
+    ).toEqual(["k_id:sensitive"]);
+    // any UNION branch of the body
+    expect(
+      issues(
+        `WITH c AS (SELECT id AS k_id FROM s UNION ALL SELECT email FROM s) SELECT k_id FROM c;`,
+      ),
+    ).toEqual(["k_id:sensitive"]);
+    // comma-joined subquery, guarded CASE over a CTE column, MAX over a CTE column
+    expect(
+      issues(`SELECT q.a_id FROM t, (SELECT note AS a_id FROM s) q;`),
+    ).toEqual(["a_id:sensitive"]);
+    expect(
+      issues(
+        `WITH c AS (SELECT "shopDomain" AS v FROM s) SELECT CASE WHEN c.v ~ '^[a-z]{1,20}$' THEN c.v END AS v_kind FROM c;`,
+      ),
+    ).toEqual(["v_kind:sensitive"]);
+    expect(
+      issues(
+        `WITH c AS (SELECT zip AS last_at FROM s) SELECT MAX(last_at) AS last_at FROM c;`,
+      ),
+    ).toEqual(["last_at:unclassified"]);
+    // nested subquery inside a CTE
+    expect(
+      issues(
+        `WITH c AS (SELECT q.a_id FROM (SELECT email AS a_id FROM s) q) SELECT a_id FROM c;`,
+      ),
+    ).toEqual(["a_id:sensitive"]);
+  });
+
+  it("refs into an unparseable CTE body fail closed", () => {
+    expect(issues(`WITH c(a_id) AS (VALUES (1)) SELECT a_id FROM c;`)).toEqual([
+      "a_id:unparseable",
+    ]);
+  });
+
+  it("real shapes still pass: data->>'buyerAccountId' via CTE, NOW() age via inv.*, counts over a CTE", () => {
+    expect(
+      issues(`WITH ev AS (
+  SELECT e.id AS audit_event_id, e.data->>'buyerAccountId' AS buyer_account_id FROM "AuditEvent" e
+)
+SELECT ev.audit_event_id, ev.buyer_account_id FROM ev;`),
+    ).toEqual([]);
+    expect(
+      issues(`-- @col issued_at_days_ago: timestamp
+-- @col status: enum
+SELECT i.id, i.status, i.issued_at_days_ago, i.outstanding > 0 AS has_outstanding
+FROM (
+  SELECT inv.*, EXTRACT(DAY FROM NOW() - inv."issuedAt")::int AS issued_at_days_ago
+  FROM "Invoice" inv
+) i;`),
+    ).toEqual([]);
+    expect(
+      issues(`WITH _m AS (SELECT msg_id, message FROM q)
+SELECT (SELECT COUNT(*) FROM _m) AS messages, COUNT(DISTINCT m.msg_id) AS ids FROM _m m;`),
+    ).toEqual([]);
+    // a star passthrough keeps the base column name: still checked as itself
+    expect(
+      issues(`SELECT q.email FROM (SELECT d.*, 1 AS one FROM d) q;`),
+    ).toEqual(["email:sensitive"]);
+  });
+
+  it("P3: SET is unsupported_statement", () => {
+    expect(issues(`SET search_path = x;`)).toEqual([
+      "(statement):unsupported_statement",
+    ]);
+    expect(issues(`SET LOCAL statement_timeout = '5s';`)).toEqual([
+      "(statement):unsupported_statement",
+    ]);
+  });
+});
+
 describe("check-readonly-columns: CLI", () => {
   const script = path.join(__dirname, "..", "check-readonly-columns.ts");
   const runCli = (files: Record<string, string>, allow: AllowlistEntry[]) => {

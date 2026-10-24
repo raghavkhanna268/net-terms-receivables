@@ -27,6 +27,10 @@
  *      output columns. An unaliased json_build_object(...) is expanded into
  *      one column per key. Column names follow Postgres rules (alias, else
  *      the column/function name; unquoted identifiers fold to lower case).
+ *      A ref to a CTE / FROM-subquery column is replaced by the inner
+ *      expression it names (recursively; see resolveExpr), so an inner alias
+ *      cannot launder a column. A UNION body or ambiguous name yields several
+ *      variants and every variant must pass.
  *   3. Classify each column, in order:
  *      a. Derived from the expression shape (no annotation needed):
  *         COUNT(...)                      -> count
@@ -66,7 +70,7 @@
  *      enum/boolean/count in SQL instead.
  *      Also rejected: SELECT * (`star`), SUM/AVG and other unclassifiable
  *      expressions (`unclassified`), statements that are not SELECT/WITH/
- *      SHOW/BEGIN/COMMIT/ROLLBACK (`unsupported_statement`), unparseable
+ *      SHOW/BEGIN/COMMIT/ROLLBACK, e.g. SET (`unsupported_statement`), unparseable
  *      select lists (`unparseable`), annotations naming a column that is not
  *      in the output (`stale_annotation`), an invalid kind
  *      (`bad_annotation`) or config_int on a column / source that is not in
@@ -815,6 +819,8 @@ function plainRef(exprIn: Tok[]): Tok[] | null {
 interface Ctx {
   /** columns / JSON keys passed through to the output (for the sensitive check) */
   sources: string[];
+  /** unqualified refs (not after `.`), for the whole-row check */
+  bare?: string[];
 }
 
 /** Kind of an expression from its shape, or null when not derivable. */
@@ -1034,6 +1040,7 @@ function collectSources(e: Tok[], ctx: Ctx) {
         return;
       if (isP(e[k - 1], "::")) return; // type name
       ctx.sources.push(tk.v);
+      if (!isP(e[k - 1], ".")) ctx.bare?.push(tk.v);
     }
     if (tk.t === "string" && isP(e[k - 1], "->>")) ctx.sources.push(tk.v);
     if (tk.t === "string" && isP(e[k - 1], "->")) ctx.sources.push(tk.v);
@@ -1085,7 +1092,7 @@ function caseKind(e: Tok[], ctx: Ctx): Kind | null {
       kinds.push("enum");
       continue;
     }
-    const sub: Ctx = { sources: [] };
+    const sub: Ctx = { sources: [], bare: [] };
     const k = deriveKind(r, sub);
     if (k) {
       kinds.push(k);
@@ -1093,6 +1100,7 @@ function caseKind(e: Tok[], ctx: Ctx): Kind | null {
     }
     // passthrough result: classify by its own name convention, keep sources
     ctx.sources.push(...sub.sources);
+    ctx.bare?.push(...(sub.bare ?? []));
     const ref = plainRef(r);
     const conv = ref ? nameConvention(ref[ref.length - 1].v) : null;
     if (!conv) return null;
@@ -1219,7 +1227,6 @@ export function checkSql(
     const relations = relationNames(stmt);
     const head = stmt[0];
     if (isKw(head, "begin", "commit", "rollback", "end", "start")) continue;
-    if (isKw(head, "set") && !stmt.some((t) => isKw(t, "select"))) continue;
     if (isKw(head, "show")) {
       const nm = stmt[1]?.v ?? "?";
       const k = ann.get(nm) ?? null;
@@ -1264,6 +1271,7 @@ export function checkSql(
       continue;
     }
     const names = branches[0].map((c) => c.name);
+    const derived = derivedRelations(stmt);
     branches.forEach((cols, bi) => {
       if (cols.length !== names.length) {
         violations.push({
@@ -1290,75 +1298,49 @@ export function checkSql(
           });
           return;
         }
-        const ctx: Ctx = { sources: [] };
-        let kind = deriveKind(col.expr, ctx);
-        let via: ColumnReport["via"] = kind ? "derived" : null;
-        const annK = ann.get(nm);
-        if (annK) used.add(nm);
-        if (!kind && annK) {
-          kind = annK;
-          via = "annotation";
-        }
-        // whole-row reference (`SELECT s ...`, row_to_json(s)): always fails
-        const wholeRow = ctx.sources.find((src) => relations.has(src));
-        const ref = plainRef(col.expr);
-        if (wholeRow || (ref && ref.length === 1 && relations.has(ref[0].v))) {
+        // Resolve refs to CTE / derived-table columns to the inner expression
+        // they name (recursively), so an inner alias cannot launder a column.
+        // A UNION body or an ambiguous unqualified name gives several
+        // variants; every variant must pass.
+        let variants: Tok[][];
+        try {
+          variants = resolveExpr(col.expr, derived, new Set(), 0);
+        } catch (err) {
           violations.push({
             file,
             column: nm,
-            issue: "whole_row",
-            detail: `prints a whole row of ${wholeRow ?? ref![0].v}`,
+            issue: "unparseable",
+            detail: `cannot resolve through CTE/subquery: ${(err as Error).message}`,
           });
           return;
         }
-        // naming convention: only for a plain column ref whose SOURCE name
-        // has the same convention (an alias alone proves nothing)
-        if (!kind && ref) {
-          const conv = nameConvention(nm);
-          if (conv && nameConvention(ref[ref.length - 1].v) === conv) {
-            kind = conv;
-            via = "convention";
+        let firstKind: Kind | null | undefined;
+        let firstVia: ColumnReport["via"] = null;
+        for (const expr of variants) {
+          const r = classifyColumn(nm, expr, ann, relations);
+          if (r.used) used.add(nm);
+          if (r.violation) {
+            if (bi === 0 && firstKind === undefined)
+              columns.push({ column: nm, kind: r.kind, via: r.via });
+            violations.push({ file, column: nm, ...r.violation });
+            return;
           }
-        }
-        if (bi === 0) columns.push({ column: nm, kind, via });
-        // sensitive check: skip only for derived count/boolean (they cannot carry the value)
-        const derivedSafe =
-          via === "derived" && (kind === "count" || kind === "boolean");
-        if (!derivedSafe) {
-          const hits = [nm, ...ctx.sources]
-            .map((s) => [s, sensitiveWord(s)] as const)
-            .filter(([, w]) => w);
-          if (hits.length) {
+          if (firstKind === undefined) {
+            firstKind = r.kind;
+            firstVia = r.via;
+          } else if (r.kind !== firstKind) {
+            if (bi === 0) columns.push({ column: nm, kind: null, via: null });
             violations.push({
               file,
               column: nm,
-              issue: "sensitive",
-              detail: `looks like '${hits[0][1]}' (from ${hits[0][0] === nm ? "output name" : "source " + hits[0][0]})`,
+              issue: "unclassified",
+              detail: "UNION / ambiguous source resolves to different kinds",
             });
             return;
           }
         }
-        if (kind === "config_int") {
-          const offList = [nm, ...ctx.sources].filter(
-            (s) => !CONFIG_INT_COLUMNS.includes(s),
-          );
-          if (offList.length) {
-            violations.push({
-              file,
-              column: nm,
-              issue: "config_int_not_listed",
-              detail: `config_int is only for named settings (${CONFIG_INT_COLUMNS.join(", ")}); not listed: ${offList[0]}`,
-            });
-            return;
-          }
-        }
-        if (!kind)
-          violations.push({
-            file,
-            column: nm,
-            issue: "unclassified",
-            detail: `no derived kind, @col annotation or naming convention for: ${text(col.expr).slice(0, 80)}`,
-          });
+        if (bi === 0)
+          columns.push({ column: nm, kind: firstKind ?? null, via: firstVia });
       });
     });
   }
@@ -1372,6 +1354,100 @@ export function checkSql(
       });
   }
   return { violations, columns };
+}
+
+interface ColResult {
+  kind: Kind | null;
+  via: ColumnReport["via"];
+  used: boolean;
+  violation?: { issue: Violation["issue"]; detail: string };
+}
+
+/** Classify one (resolved) output column expression. */
+function classifyColumn(
+  nm: string,
+  expr: Tok[],
+  ann: Map<string, Kind>,
+  relations: Set<string>,
+): ColResult {
+  const ctx: Ctx = { sources: [], bare: [] };
+  let kind = deriveKind(expr, ctx);
+  let via: ColumnReport["via"] = kind ? "derived" : null;
+  const annK = ann.get(nm);
+  const used = !!annK;
+  if (!kind && annK) {
+    kind = annK;
+    via = "annotation";
+  }
+  // whole-row reference (`SELECT s ...`, row_to_json(s)): always fails
+  const wholeRow = (ctx.bare ?? []).find((src) => relations.has(src));
+  const ref = plainRef(expr);
+  if (wholeRow || (ref && ref.length === 1 && relations.has(ref[0].v))) {
+    return {
+      kind,
+      via,
+      used,
+      violation: {
+        issue: "whole_row",
+        detail: `prints a whole row of ${wholeRow ?? ref![0].v}`,
+      },
+    };
+  }
+  // naming convention: only for a plain column ref whose SOURCE name
+  // has the same convention (an alias alone proves nothing)
+  if (!kind && ref) {
+    const conv = nameConvention(nm);
+    if (conv && nameConvention(ref[ref.length - 1].v) === conv) {
+      kind = conv;
+      via = "convention";
+    }
+  }
+  // sensitive check: skip only for derived count/boolean (they cannot carry the value)
+  const derivedSafe =
+    via === "derived" && (kind === "count" || kind === "boolean");
+  if (!derivedSafe) {
+    const hits = [nm, ...ctx.sources]
+      .map((s) => [s, sensitiveWord(s)] as const)
+      .filter(([, w]) => w);
+    if (hits.length) {
+      return {
+        kind,
+        via,
+        used,
+        violation: {
+          issue: "sensitive",
+          detail: `looks like '${hits[0][1]}' (from ${hits[0][0] === nm ? "output name" : "source " + hits[0][0]})`,
+        },
+      };
+    }
+  }
+  if (kind === "config_int") {
+    const offList = [nm, ...ctx.sources].filter(
+      (s) => !CONFIG_INT_COLUMNS.includes(s),
+    );
+    if (offList.length) {
+      return {
+        kind,
+        via,
+        used,
+        violation: {
+          issue: "config_int_not_listed",
+          detail: `config_int is only for named settings (${CONFIG_INT_COLUMNS.join(", ")}); not listed: ${offList[0]}`,
+        },
+      };
+    }
+  }
+  if (!kind)
+    return {
+      kind,
+      via,
+      used,
+      violation: {
+        issue: "unclassified",
+        detail: `no derived kind, @col annotation or naming convention for: ${text(expr).slice(0, 80)}`,
+      },
+    };
+  return { kind, via, used };
 }
 
 /** Table names and aliases introduced by FROM / JOIN anywhere in a statement. */
@@ -1426,6 +1502,378 @@ function relationNames(stmt: Tok[]): Set<string> {
     const a = stmt[j];
     if (a && (a.t === "qident" || (a.t === "ident" && !notAlias.has(a.v))))
       out.add(a.v);
+  }
+  return out;
+}
+
+// ============================================================================
+// CTE / derived-table resolution
+// ============================================================================
+
+interface Derived {
+  /** output column name -> inner expression(s), one per UNION branch */
+  cols: Map<string, Tok[][]>;
+  /** qualifiers of `q.*` items ("" for a bare `*`) */
+  stars: string[];
+  /** body could not be parsed: any ref into it fails closed */
+  opaque: boolean;
+}
+
+const MAX_RESOLVE_DEPTH = 16;
+const MAX_VARIANTS = 32;
+
+const REL_STOP = new Set([
+  "select",
+  "from",
+  "where",
+  "join",
+  "on",
+  "using",
+  "group",
+  "order",
+  "having",
+  "limit",
+  "offset",
+  "window",
+  "with",
+  "union",
+  "intersect",
+  "except",
+  "returning",
+  "values",
+]);
+
+const NOT_ALIAS = new Set([
+  "on",
+  "using",
+  "where",
+  "group",
+  "order",
+  "limit",
+  "join",
+  "left",
+  "right",
+  "inner",
+  "outer",
+  "full",
+  "cross",
+  "natural",
+  "lateral",
+  "union",
+  "intersect",
+  "except",
+  "having",
+  "window",
+  "offset",
+  "fetch",
+  "for",
+  "as",
+  "with",
+  "select",
+]);
+
+function matchParen(toks: Tok[], open: number): number {
+  let depth = 0;
+  for (let k = open; k < toks.length; k++) {
+    if (isP(toks[k], "(")) depth++;
+    if (isP(toks[k], ")") && --depth === 0) return k;
+  }
+  return -1;
+}
+
+const isName = (tk: Tok | undefined) =>
+  !!tk && (tk.t === "qident" || (tk.t === "ident" && !NOT_ALIAS.has(tk.v)));
+
+/** `(` / ident at k sits in a FROM list (after FROM / JOIN / LATERAL / `,` of a FROM). */
+function inFromList(toks: Tok[], d: number[], k: number): boolean {
+  const prev = toks[k - 1];
+  if (isKw(prev, "from", "join", "lateral", "only")) return true;
+  if (!isP(prev, ",")) return false;
+  for (let j = k - 2; j >= 0; j--) {
+    if (d[j] < d[k]) return false;
+    if (d[j] === d[k] && toks[j].t === "ident" && REL_STOP.has(toks[j].v))
+      return toks[j].v === "from";
+  }
+  return false;
+}
+
+function parseBody(body: Tok[], colList: string[] | null): Derived {
+  const rel: Derived = { cols: new Map(), stars: [], opaque: false };
+  const branches = outputColumns(body);
+  if (!branches || branches.length === 0) {
+    rel.opaque = true;
+    return rel;
+  }
+  const isStar = (e: Tok[]) =>
+    (e.length === 1 && isP(e[0], "*")) ||
+    (e.length >= 3 && isP(e[e.length - 1], "*") && isP(e[e.length - 2], "."));
+  // branch-0 names of the non-star columns (later UNION branches take them positionally)
+  const names0 = branches[0].filter((c) => !isStar(c.expr)).map((c) => c.name);
+  for (const branch of branches) {
+    let pos = 0;
+    for (const col of branch) {
+      const e = col.expr;
+      if (e.length === 1 && isP(e[0], "*")) {
+        rel.stars.push("");
+        continue;
+      }
+      if (
+        e.length >= 3 &&
+        isP(e[e.length - 1], "*") &&
+        isP(e[e.length - 2], ".")
+      ) {
+        rel.stars.push(e[e.length - 3].v);
+        continue;
+      }
+      const name = colList ? colList[pos] : (names0[pos] ?? col.name);
+      pos++;
+      if (name === undefined) continue;
+      const list = rel.cols.get(name) ?? [];
+      list.push(e);
+      rel.cols.set(name, list);
+    }
+  }
+  if (colList && rel.stars.length) rel.opaque = true;
+  return rel;
+}
+
+function columnList(
+  toks: Tok[],
+  open: number,
+): { names: string[]; end: number } | null {
+  if (!isP(toks[open], "(")) return null;
+  const close = matchParen(toks, open);
+  if (close < 0) return null;
+  const inner = toks.slice(open + 1, close);
+  if (!inner.every((tk, k) => (k % 2 === 0 ? isName(tk) : isP(tk, ","))))
+    return null;
+  return {
+    names: inner.filter((_, k) => k % 2 === 0).map((tk) => tk.v),
+    end: close,
+  };
+}
+
+/**
+ * CTEs (`name [(cols)] AS [NOT] [MATERIALIZED] (body)`) and FROM-list
+ * subqueries (`(body) [AS] alias [(cols)]`) anywhere in a statement, plus
+ * aliases of CTE references (`FROM c x`). An unaliased subquery is registered
+ * under a synthetic name so unqualified refs still resolve.
+ */
+export function derivedRelations(stmt: Tok[]): Map<string, Derived> {
+  const d = depths(stmt);
+  const rels = new Map<string, Derived>();
+  for (let k = 0; k < stmt.length; k++) {
+    const tk = stmt[k];
+    // CTE
+    if (
+      isName(tk) &&
+      (isKw(stmt[k - 1], "with", "recursive") || isP(stmt[k - 1], ","))
+    ) {
+      let j = k + 1;
+      let cols: string[] | null = null;
+      const cl = columnList(stmt, j);
+      if (cl) {
+        cols = cl.names;
+        j = cl.end + 1;
+      }
+      if (!isKw(stmt[j], "as")) continue;
+      j++;
+      if (isKw(stmt[j], "not")) j++;
+      if (isKw(stmt[j], "materialized")) j++;
+      if (!isP(stmt[j], "(")) continue;
+      const close = matchParen(stmt, j);
+      if (close < 0) continue;
+      const body = stmt.slice(j + 1, close);
+      rels.set(
+        tk.v,
+        isKw(body[0], "select", "with")
+          ? parseBody(body, cols)
+          : { cols: new Map(), stars: [], opaque: true },
+      );
+      continue;
+    }
+    // FROM-list subquery
+    if (
+      isP(tk, "(") &&
+      isKw(stmt[k + 1], "select", "with", "values", "table") &&
+      inFromList(stmt, d, k)
+    ) {
+      const close = matchParen(stmt, k);
+      if (close < 0) continue;
+      const body = stmt.slice(k + 1, close);
+      let j = close + 1;
+      if (isKw(stmt[j], "as")) j++;
+      let name = `(subquery@${k})`;
+      let cols: string[] | null = null;
+      if (isName(stmt[j])) {
+        name = stmt[j].v;
+        const cl = columnList(stmt, j + 1);
+        if (cl) cols = cl.names;
+      }
+      rels.set(
+        name,
+        isKw(body[0], "select", "with")
+          ? parseBody(body, cols)
+          : { cols: new Map(), stars: [], opaque: true },
+      );
+    }
+  }
+  // aliases of CTE references: FROM c x / JOIN c AS x
+  for (let k = 0; k < stmt.length; k++) {
+    const tk = stmt[k];
+    if (!isName(tk) || !rels.has(tk.v) || !inFromList(stmt, d, k)) continue;
+    if (isP(stmt[k + 1], "(") || isP(stmt[k + 1], ".")) continue;
+    let j = k + 1;
+    if (isKw(stmt[j], "as")) j++;
+    if (isName(stmt[j]) && !rels.has(stmt[j].v))
+      rels.set(stmt[j].v, rels.get(tk.v)!);
+  }
+  return rels;
+}
+
+const NOT_REF = new Set([
+  "null",
+  "true",
+  "false",
+  "now",
+  "interval",
+  "case",
+  "when",
+  "then",
+  "else",
+  "end",
+  "and",
+  "or",
+  "not",
+  "is",
+  "in",
+  "like",
+  "ilike",
+  "between",
+  "distinct",
+  "from",
+  "as",
+  "at",
+  "time",
+  "zone",
+  "day",
+  "filter",
+  "where",
+  "over",
+  "partition",
+  "by",
+  "order",
+  "asc",
+  "desc",
+  "nulls",
+  "first",
+  "last",
+  "current_timestamp",
+  "current_date",
+  "exists",
+  "select",
+]);
+
+/**
+ * Replace refs to CTE / derived-table columns with `( inner expr )`,
+ * recursively. Returns every variant (UNION branches, ambiguous unqualified
+ * names). A relation already on the expansion chain is not resolved again
+ * (its inner refs are to its own FROM). Throws when a ref hits an opaque
+ * relation or the expansion is too deep / too wide.
+ */
+export function resolveExpr(
+  e: Tok[],
+  rels: Map<string, Derived>,
+  chain: Set<Derived>,
+  depth: number,
+): Tok[][] {
+  if (rels.size === 0) return [e];
+  if (depth > MAX_RESOLVE_DEPTH) throw new Error("nesting too deep");
+  let out: Tok[][] = [[]];
+  const append = (alts: Tok[][]) => {
+    const next: Tok[][] = [];
+    for (const pre of out) for (const a of alts) next.push([...pre, ...a]);
+    if (next.length > MAX_VARIANTS) throw new Error("too many variants");
+    out = next;
+  };
+  // a plain ref replaces a ref as-is (keeps `ref ->> 'key'` a plain JSON key);
+  // anything else is parenthesised
+  const wrap = (alts: Tok[][]): Tok[][] =>
+    alts.map((a) =>
+      isRef(a)
+        ? a
+        : [
+            { t: "punct", v: "(", raw: "(" } as Tok,
+            ...a,
+            { t: "punct", v: ")", raw: ")" } as Tok,
+          ],
+    );
+  const lookup = (rel: Derived, col: string, orig: Tok[]): Tok[][] => {
+    if (rel.opaque) throw new Error(`unparseable CTE/subquery for ${col}`);
+    const next = new Set(chain).add(rel);
+    const exprs = rel.cols.get(col);
+    if (exprs) {
+      const alts: Tok[][] = [];
+      for (const x of exprs)
+        alts.push(...resolveExpr(x, rels, next, depth + 1));
+      return wrap(alts);
+    }
+    if (rel.stars.length === 0) return [orig]; // not a column of it (Postgres would error)
+    const q = rel.stars.length === 1 ? rel.stars[0] : "";
+    const ref: Tok[] = q
+      ? [
+          { t: "qident", v: q, raw: `"${q}"` },
+          { t: "punct", v: ".", raw: "." },
+          { t: "qident", v: col, raw: `"${col}"` },
+        ]
+      : [{ t: "qident", v: col, raw: `"${col}"` }];
+    return wrap(resolveExpr(ref, rels, next, depth + 1));
+  };
+  for (let k = 0; k < e.length; k++) {
+    const tk = e[k];
+    const startsRef =
+      (tk.t === "ident" || tk.t === "qident") &&
+      !isP(e[k - 1], ".") &&
+      !isP(e[k - 1], "::") &&
+      !isP(e[k + 1], "(") &&
+      !(tk.t === "ident" && NOT_REF.has(tk.v));
+    if (!startsRef) {
+      append([[tk]]);
+      continue;
+    }
+    let end = k;
+    while (
+      isP(e[end + 1], ".") &&
+      e[end + 2] &&
+      (e[end + 2].t === "ident" || e[end + 2].t === "qident")
+    )
+      end += 2;
+    const parts = e.slice(k, end + 1).filter((_, i) => i % 2 === 0);
+    const orig = e.slice(k, end + 1);
+    k = end;
+    if (parts.length === 2) {
+      const rel = rels.get(parts[0].v);
+      append(rel && !chain.has(rel) ? lookup(rel, parts[1].v, orig) : [orig]);
+      continue;
+    }
+    if (parts.length === 1) {
+      const cands = [...new Set(rels.values())].filter(
+        (r) => !chain.has(r) && (r.opaque || r.cols.has(parts[0].v)),
+      );
+      const named = cands.filter((r) => !r.opaque);
+      if (named.length === 0) {
+        // unqualified ref with an opaque relation in scope: cannot prove it is not from it
+        if (cands.length)
+          throw new Error(`unparseable CTE/subquery may define ${parts[0].v}`);
+        append([orig]);
+        continue;
+      }
+      const alts: Tok[][] = [];
+      for (const r of named) alts.push(...lookup(r, parts[0].v, orig));
+      append(alts);
+      continue;
+    }
+    append([orig]);
   }
   return out;
 }
