@@ -1,0 +1,101 @@
+# Prod credit-status metafield backfill: DRY-RUN ONLY
+#
+# Runs scripts/credit-status-metafield-backfill.ts (npm run credit-status:backfill)
+# with a hardcoded --dry-run. Reports accounts with metafieldSyncedAt IS NULL,
+# counted per shop index and holdState. Mutates nothing.
+#
+# SAFETY:
+#   - Manual trigger only (workflow_dispatch), main branch only, no inputs at all
+#   - No apply path: argv is hardcoded to --dry-run and is checked before the run;
+#   - Preflight: the script's own parseArgs must return dryRun=true for that argv, and an
+#     explicit READ ONLY transaction must report transaction_read_only=on and reject writes
+#   - Session also opened with default_transaction_read_only=on (defence in depth)
+#   - No Shopify credentials are provided
+#   - Output is allowlisted line by line: only the script's fixed headings and
+#     "<label>: <integer>" count lines pass; anything else prints as <redacted line>
+
+name: Prod Credit-status Backfill (dry-run only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prod-credit-status-backfill-dry-run
+  cancel-in-progress: false
+
+jobs:
+  dry-run:
+    name: Credit-status metafield backfill (dry-run only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.repository == 'raghavkhanna268/net-terms-receivables'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Preflight (dry-run argv + read-only transaction)
+        env:
+          DATABASE_URL_RAW: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+        run: |
+          set -euo pipefail
+          if [ -z "$DATABASE_URL_RAW" ]; then
+            echo "::error::DATABASE_URL_MIGRATIONS secret not set"
+            exit 1
+          fi
+          if [[ "$DATABASE_URL_RAW" == *\?* ]]; then SEP='&'; else SEP='?'; fi
+          export DATABASE_URL="${DATABASE_URL_RAW}${SEP}default_transaction_read_only=on"
+          set +e
+          npx tsx scripts/ci/credit-status-backfill-dry-run-preflight.ts > "$RUNNER_TEMP/pre.out" 2>&1
+          RC=$?
+          set -e
+          grep -E '^preflight: [A-Za-z =_]+$' "$RUNNER_TEMP/pre.out" || true
+          rm -f "$RUNNER_TEMP/pre.out"
+          exit "$RC"
+
+      - name: Run backfill (dry-run, allowlisted output)
+        env:
+          DATABASE_URL_RAW: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+        run: |
+          set -euo pipefail
+          unset SHOPIFY_API_KEY SHOPIFY_API_SECRET SHOPIFY_APP_AUTOMATION_TOKEN
+          if [[ "$DATABASE_URL_RAW" == *\?* ]]; then SEP='&'; else SEP='?'; fi
+          export DATABASE_URL="${DATABASE_URL_RAW}${SEP}default_transaction_read_only=on"
+          ARGS=(--dry-run)
+          if [ "${#ARGS[@]}" -ne 1 ] || [ "${ARGS[0]}" != "--dry-run" ]; then
+            echo "::error::argv must be exactly --dry-run"
+            exit 1
+          fi
+          set +e
+          npx tsx scripts/credit-status-metafield-backfill.ts "${ARGS[@]}" > "$RUNNER_TEMP/bf.out" 2>&1
+          RC=$?
+          set -e
+          # Allowlist: separators, fixed headings, and "<label>: <int>" lines only.
+          while IFS= read -r line; do
+            if [[ "$line" =~ ^[=-]*$ ]] \
+              || [[ "$line" =~ ^(Credit\ Status\ Metafield\ Backfill\ Script|Mode:\ DRY-RUN\ \(counts\ only,\ no\ mutations\)|Accounts\ with\ metafieldSyncedAt\ IS\ NULL:|GRAND\ TOTAL:|No\ accounts\ with\ metafieldSyncedAt\ IS\ NULL\ found\.|All\ accounts\ have\ had\ their\ metafield\ synced\ at\ least\ once\.)$ ]] \
+              || [[ "$line" =~ ^Shop\ [0-9]+:$ ]] \
+              || [[ "$line" =~ ^\ *(Total|Total\ accounts|OK|NEAR_LIMIT|HELD|BYPASS):\ [0-9]+$ ]]; then
+              echo "$line"
+            elif [[ "$line" =~ ^To\ (enqueue|target) ]]; then
+              :
+            else
+              echo "<redacted line>"
+            fi
+          done < "$RUNNER_TEMP/bf.out"
+          rm -f "$RUNNER_TEMP/bf.out"
+          echo "script_exit_code=$RC"
+          exit "$RC"
