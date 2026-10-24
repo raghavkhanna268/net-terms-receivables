@@ -9,6 +9,11 @@ name: Shopify App Release (dev store)
 #   - scope guard: shopify.app.toml scopes == wrangler.jsonc SCOPES == approved 11
 #   - config guard: client_id pinned; no other shopify.app.*.toml (dev store config only)
 #   - PII guard: no extension input query requests customer email/phone/name/address
+#   - extension guard: repo extensions == scripts/ci/expected-extensions.txt (deploy would
+#     DELETE a deployed extension missing from the repo); --allow-deletes is never passed,
+#     so the CLI also refuses any deletion non-interactively
+#   - deploy-flags guard: this file must never contain the delete/force flags
+# Default is a PREVIEW: `--no-release` creates an app version without releasing it.
 # Output: only the released version name/id. The token is never echoed.
 # Does NOT touch PLAN_GATING_ENFORCED, Worker vars, DB, or the cron.
 on:
@@ -19,6 +24,11 @@ on:
         required: false
         default: ""
         type: string
+      release:
+        description: "Release the new version to users (default false = --no-release preview version only)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -30,7 +40,8 @@ concurrency:
 jobs:
   release:
     name: Release app config + functions (dev store)
-    if: github.ref == 'refs/heads/main'
+    # Manual dispatch on main of this repo only (never forks / PRs).
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.repository == 'raghavkhanna268/net-terms-receivables'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: shopify-release
@@ -41,7 +52,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Release guards (scopes, config, input-query PII)
+      - name: Release guards (scopes, config, input-query PII, extensions, flags)
         run: |
           python3 scripts/ci/test_shopify_release_guards.py > /dev/null
           python3 scripts/ci/shopify_release_guards.py .
@@ -160,9 +171,9 @@ jobs:
 
       - name: Deploy app version (shopify app deploy)
         env:
-          # Environment secret of `shopify-release` (deliberately a different name
-          # from any repo-level secret so it can never fall back to one).
-          SHOPIFY_APP_AUTOMATION_TOKEN: ${{ secrets.SHOPIFY_RELEASE_AUTOMATION_TOKEN }}
+          # App Automation Token (Dev Dashboard), ENVIRONMENT secret of `shopify-release`.
+          SHOPIFY_APP_AUTOMATION_TOKEN: ${{ secrets.SHOPIFY_APP_AUTOMATION_TOKEN }}
+          RELEASE: ${{ inputs.release }}
           VERSION_MESSAGE: ${{ inputs.version_message }}
           HAS_MESSAGE: ${{ steps.msg.outputs.has_message }}
           SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
@@ -171,13 +182,15 @@ jobs:
         run: |
           set -o pipefail
           if [ -z "$SHOPIFY_APP_AUTOMATION_TOKEN" ]; then
-            echo "token_present=false (set environment secret SHOPIFY_RELEASE_AUTOMATION_TOKEN on shopify-release)"
+            echo "token_present=false (set environment secret SHOPIFY_APP_AUTOMATION_TOKEN on shopify-release)"
             exit 1
           fi
           echo "token_present=true"
           args=(app deploy --config shopify.app.toml --allow-updates --no-color
                 --source-control-url "$SOURCE_URL")
           if [ "$HAS_MESSAGE" = "true" ]; then args+=(--message "$VERSION_MESSAGE"); fi
+          if [ "$RELEASE" != "true" ]; then args+=(--no-release); fi
+          echo "release=$([ "$RELEASE" = "true" ] && echo true || echo false)"
           LOG="$RUNNER_TEMP/deploy.log"
           rc=0
           npx -y @shopify/cli@4.9.4 "${args[@]}" > "$LOG" 2>&1 || rc=$?
@@ -186,6 +199,13 @@ jobs:
                  -e 's#[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+#<email>#g' \
                  -e 's#[A-Za-z0-9-]+\.myshopify\.com#<shop>#g' "$LOG" \
             | grep -Ei 'version|released|error|fail' | head -n 40 || true
+          # Backstop: any extension removal/deletion mentioned by the CLI is a hard fail.
+          if grep -Eiq '(extension|module).*(remov|delet)|(remov|delet).*(extension|module)' "$LOG"; then
+            echo "extension_removal_detected=true"
+            [ "$rc" = "0" ] && rc=3
+          else
+            echo "extension_removal_detected=false"
+          fi
           echo "deploy_exit_code=$rc"
           rm -f "$LOG"
           exit "$rc"
@@ -197,4 +217,5 @@ jobs:
             echo "### Shopify app release"
             echo "- commit: \`${GITHUB_SHA}\`"
             echo "- config: shopify.app.toml (client_id pinned by guard)"
+            echo "- release: ${{ inputs.release }} (false = --no-release preview)"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -38,6 +38,10 @@ def scratch(mutate):
     shutil.copy(os.path.join(ROOT, "wrangler.jsonc"), d)
     shutil.copytree(os.path.join(ROOT, "extensions"), os.path.join(d, "extensions"),
                     ignore=shutil.ignore_patterns("target", "node_modules"))
+    os.makedirs(os.path.join(d, "scripts", "ci"))
+    shutil.copy(os.path.join(ROOT, "scripts", "ci", "expected-extensions.txt"), os.path.join(d, "scripts", "ci"))
+    os.makedirs(os.path.join(d, ".github", "workflows"))
+    shutil.copy(os.path.join(ROOT, ".github", "workflows", "shopify-app-release.yml"), os.path.join(d, ".github", "workflows"))
     mutate(d)
     rc = g.main(d)
     shutil.rmtree(d)
@@ -64,9 +68,23 @@ if scratch(lambda d: edit(os.path.join(d, "extensions/credit-check-validation/sr
                           "customer {", "customer {\n        email")) == 0:
     fails.append("PII in input query not failed")
 
+# 7. Deployed extension missing from repo fails (would be deleted by deploy).
+if scratch(lambda d: shutil.rmtree(os.path.join(d, "extensions", "hide-terms-payment"))) == 0:
+    fails.append("missing deployed extension not failed")
+# 8. New extension not in expected list fails.
+def add_ext(d):
+    os.makedirs(os.path.join(d, "extensions", "new-ext"))
+    open(os.path.join(d, "extensions", "new-ext", "shopify.extension.toml"), "w").write('handle = "new-ext"\n')
+if scratch(add_ext) == 0:
+    fails.append("unexpected extension not failed")
+# 9. --allow-deletes in release workflow fails.
+if scratch(lambda d: edit(os.path.join(d, ".github/workflows/shopify-app-release.yml"),
+                          "--allow-updates", "--allow-updates --allow-deletes")) == 0:
+    fails.append("--allow-deletes not failed")
+
 if fails:
     print("shopify release guards self-test: FAIL")
     for f in fails:
         print(" -", f)
     sys.exit(1)
-print("shopify release guards self-test: OK (10/10)")
+print("shopify release guards self-test: OK (13/13)")

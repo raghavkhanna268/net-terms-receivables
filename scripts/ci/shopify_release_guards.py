@@ -8,6 +8,11 @@ Checks (any failure exits non-zero):
      shopify.app.*.toml config exists (dev store / current config only).
   3. input queries: no extension input query requests customer PII fields
      (email, phone, name, address) or any address-like field anywhere.
+  4. extensions: handles in extensions/*/shopify.extension.toml == the committed
+     scripts/ci/expected-extensions.txt (deployed set). A deployed extension
+     missing from the repo would be DELETED by `app deploy`, so this hard-fails.
+  5. release workflow flags: shopify-app-release.yml must never use
+     --allow-deletes / SHOPIFY_FLAG_ALLOW_DELETES / --force.
 
 Prints only booleans, counts and scope names (scope names are public config).
 Usage: shopify_release_guards.py [repo_root]
@@ -97,6 +102,23 @@ def input_query_files(root):
     return sorted(files)
 
 
+def repo_extension_handles(root):
+    handles = []
+    for toml in sorted(glob.glob(os.path.join(root, "extensions", "*", "shopify.extension.toml"))):
+        handles += re.findall(r'^\s*handle\s*=\s*"([^"]+)"', open(toml).read(), re.M)
+    return handles
+
+
+def expected_extension_handles(root):
+    path = os.path.join(root, "scripts", "ci", "expected-extensions.txt")
+    if not os.path.exists(path):
+        return None
+    return [l.strip() for l in open(path) if l.strip() and not l.strip().startswith("#")]
+
+
+FORBIDDEN_DEPLOY_FLAGS = ("--allow-deletes", "SHOPIFY_FLAG_ALLOW_DELETES", "--force", "SHOPIFY_FLAG_FORCE")
+
+
 def main(root):
     ok = True
     app_toml = open(os.path.join(root, "shopify.app.toml")).read()
@@ -147,6 +169,32 @@ def main(root):
         ok = False
     else:
         print("pii_guard: PASS")
+    repo_h, exp_h = repo_extension_handles(root), expected_extension_handles(root)
+    if exp_h is None:
+        print("extension_guard: FAIL (scripts/ci/expected-extensions.txt missing)")
+        ok = False
+    else:
+        missing, unexpected = sorted(set(exp_h) - set(repo_h)), sorted(set(repo_h) - set(exp_h))
+        dup = len(repo_h) != len(set(repo_h))
+        print(f"extension_guard: repo_count={len(repo_h)} expected_count={len(exp_h)} "
+              f"missing_from_repo={','.join(missing) or 'none'} not_in_expected={','.join(unexpected) or 'none'} "
+              f"duplicate_handles={str(dup).lower()}")
+        if missing or unexpected or dup:
+            print("extension_guard: FAIL")
+            ok = False
+        else:
+            print("extension_guard: PASS")
+
+    wf = os.path.join(root, ".github", "workflows", "shopify-app-release.yml")
+    if os.path.exists(wf):
+        body = "\n".join(l for l in open(wf).read().splitlines() if not l.lstrip().startswith("#"))
+        bad = [f for f in FORBIDDEN_DEPLOY_FLAGS if f in body]
+        print(f"deploy_flags_guard: forbidden_flags={','.join(bad) or 'none'}")
+        if bad:
+            print("deploy_flags_guard: FAIL")
+            ok = False
+        else:
+            print("deploy_flags_guard: PASS")
     return 0 if ok else 1
 
 
