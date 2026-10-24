@@ -187,6 +187,8 @@ describeWithDb("Order Sync", () => {
       expect(result.retryable).toBe(true);
       // The error message explains why it failed (BuyerAccount not found)
       expect(result.error).toContain("BuyerAccount");
+      // errorCode must be set from eligibility.reason (no raw text for DLQ)
+      expect(result.errorCode).toBe("no_buyer_account");
     });
 
     it("always updates existing invoice even when eligibility would fail", async () => {

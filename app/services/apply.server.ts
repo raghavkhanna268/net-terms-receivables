@@ -41,6 +41,7 @@
 import type { Sql } from "~/lib/db-light.server";
 import { shopifyGraphQLRequest, type ShopifyClientResult } from "./shopify-client.server";
 import { enqueueRecomputeForInvoice } from "./credit-status-recompute.server";
+import { safeLog, toErrorCode } from "~/lib/log.server";
 
 /**
  * GraphQL mutation to mark a Shopify order as paid.
@@ -224,9 +225,11 @@ export async function applyMatch(
     // If recovery failed with an error (not just "not stale"), warn but continue
     // The TX1 guard will catch any remaining issues
     if (!recoveryResult.success && recoveryResult.reasonCode !== "PUSH_IN_PROGRESS") {
-      console.warn(
-        `[applyMatch] Failed to recover stale sibling matchId=${sibling.id}: ${recoveryResult.error}`
-      );
+      safeLog("warn", "apply_stale_sibling_recovery_failed", {
+        matchId: sibling.id,
+        ...(recoveryResult.reasonCode ? { reasonCode: recoveryResult.reasonCode } : {}),
+        err: toErrorCode(recoveryResult.error),
+      });
     }
   }
 
@@ -263,7 +266,7 @@ export async function applyMatch(
   }
 
   // Full payment path: call Shopify outside transaction, then finalize
-  let shopifySuccess = false;
+  let pushSucceeded = false;
   let reasonCode: string | undefined;
 
   if (invoiceRow.orderId) {
@@ -273,10 +276,10 @@ export async function applyMatch(
     );
 
     if (shopifyResult.success) {
-      shopifySuccess = true;
+      pushSucceeded = true;
     } else if (shopifyResult.alreadyPaid) {
       // Order was already paid - treat as success
-      shopifySuccess = true;
+      pushSucceeded = true;
       reasonCode = "ALREADY_PAID_IN_SHOPIFY";
     } else {
       // Shopify call failed - release the claim
@@ -291,7 +294,7 @@ export async function applyMatch(
     }
   } else {
     // No Shopify order to mark - local-only invoice
-    shopifySuccess = true;
+    pushSucceeded = true;
   }
 
   // TX2: Finalize - mark invoice as paid, write audit events
@@ -303,7 +306,7 @@ export async function applyMatch(
     matchRow,
     invoiceRow,
     actor,
-    shopifySuccess,
+    pushSucceeded,
     reasonCode,
     tx1Result.appliedAmountPaise ?? matchRow.amountPaise,
     tx1Result.previousOutstandingPaise ?? "0"
@@ -313,7 +316,7 @@ export async function applyMatch(
     return {
       success: false,
       invoicePaid: false,
-      shopifyPushSucceeded: shopifySuccess,
+      shopifyPushSucceeded: pushSucceeded,
       error: tx2Result.error,
     };
   }
@@ -324,7 +327,7 @@ export async function applyMatch(
   return {
     success: true,
     invoicePaid: true,
-    shopifyPushSucceeded: shopifySuccess,
+    shopifyPushSucceeded: pushSucceeded,
     reasonCode,
   };
 }
@@ -406,10 +409,11 @@ async function handlePushedMatch(
   // P1: No 'pushed' without match.applied audit. Invoice is no longer open OR
   // there was a crash before the audit was written. Transition to 'unmatched'
   // with an audit event explaining the situation.
-  console.warn(
-    `[applyMatch] Inconsistent state: matchId=${matchId} is 'pushed' but no audit event found. ` +
-    `Transitioning to 'unmatched' with PUSHED_WITHOUT_AUDIT audit.`
-  );
+  safeLog("warn", "apply_pushed_without_audit", {
+    matchId,
+    invoiceId: invoiceRow.id,
+    status: invoiceRow.status,
+  });
 
   try {
     await sql.begin(async (tx) => {
@@ -858,7 +862,7 @@ async function handleStalePushingMatch(
     }
 
     // FULL payment path: call Shopify outside transaction
-    let shopifySuccess = false;
+    let pushSucceeded = false;
     let reasonCode: string | undefined;
 
     if (invoiceRow.orderId) {
@@ -868,9 +872,9 @@ async function handleStalePushingMatch(
       );
 
       if (shopifyResult.success) {
-        shopifySuccess = true;
+        pushSucceeded = true;
       } else if (shopifyResult.alreadyPaid) {
-        shopifySuccess = true;
+        pushSucceeded = true;
         reasonCode = "STALE_RECLAIM_ALREADY_PAID_IN_SHOPIFY";
       } else {
         // Shopify call failed - leave in 'pushing' for another retry
@@ -883,7 +887,7 @@ async function handleStalePushingMatch(
         };
       }
     } else {
-      shopifySuccess = true;
+      pushSucceeded = true;
     }
 
     // Finalize: lock invoice again, re-check status, then mark paid
@@ -1025,7 +1029,7 @@ async function handleStalePushingMatch(
           invoiceId: invoiceRow.id,
           matchId,
           orderGid: invoiceRow.orderId,
-          shopifyPushSucceeded: shopifySuccess,
+          shopifyPushSucceeded: pushSucceeded,
           reasonCode,
           staleReclaim: true,
         });
@@ -1050,7 +1054,7 @@ async function handleStalePushingMatch(
     return {
       success: true,
       invoicePaid: true,
-      shopifyPushSucceeded: shopifySuccess,
+      shopifyPushSucceeded: pushSucceeded,
       reasonCode: reasonCode ?? "STALE_RECLAIM_FULL",
     };
   } catch (error) {
@@ -1249,10 +1253,10 @@ async function releaseMatchClaim(sql: Sql, shopId: string, matchId: string): Pro
         AND state = 'pushing'
     `;
   } catch (error) {
-    console.error(
-      `[applyMatch] Failed to release claim for matchId=${matchId}:`,
-      error instanceof Error ? error.message : String(error)
-    );
+    safeLog("error", "apply_release_claim_failed", {
+      matchId,
+      err: toErrorCode(error),
+    });
   }
 }
 
@@ -1271,7 +1275,7 @@ async function finalizeFullApply(
   matchRow: { id: string; shopId: string; paymentId: string; invoiceId: string; amountPaise: string },
   invoiceRow: { id: string; orderId: string | null },
   actor: string,
-  shopifySuccess: boolean,
+  pushSucceeded: boolean,
   reasonCode: string | undefined,
   appliedAmountPaise: string,
   expectedOutstandingPaise: string
@@ -1298,14 +1302,14 @@ async function finalizeFullApply(
       // Shopify succeeded, finalize locally to match Shopify state rather than reverting.
       if (lockedInvoice.status !== "open" || lockedInvoice.outstandingPaise !== expectedOutstandingPaise) {
         // Log this unexpected condition - indicates the TX1 guard was somehow bypassed
-        console.error(
-          `[applyMatch] BACKSTOP TRIGGERED: matchId=${matchId}, ` +
-          `expectedStatus=open, actualStatus=${lockedInvoice.status}, ` +
-          `expectedOutstanding=${expectedOutstandingPaise}, actualOutstanding=${lockedInvoice.outstandingPaise}, ` +
-          `shopifySuccess=${shopifySuccess}`
-        );
+        safeLog("error", "apply_backstop_triggered", {
+          matchId,
+          invoiceId: invoiceRow.id,
+          status: lockedInvoice.status,
+          success: pushSucceeded,
+        });
 
-        if (shopifySuccess) {
+        if (pushSucceeded) {
           // Shopify already paid - finalize locally to match Shopify state
           // Don't revert the match, instead force-finalize to stay consistent with Shopify
           // Use conditional UPDATE to detect if THIS transaction actually flips open→paid
@@ -1355,7 +1359,7 @@ async function finalizeFullApply(
               invoiceId: invoiceRow.id,
               matchId,
               orderGid: invoiceRow.orderId,
-              shopifyPushSucceeded: shopifySuccess,
+              shopifyPushSucceeded: pushSucceeded,
               reasonCode,
               backstopTriggered: true,
             });
@@ -1415,7 +1419,7 @@ async function finalizeFullApply(
           invoiceId: invoiceRow.id,
           matchId,
           orderGid: invoiceRow.orderId,
-          shopifyPushSucceeded: shopifySuccess,
+          shopifyPushSucceeded: pushSucceeded,
           reasonCode,
         });
       }
@@ -1429,13 +1433,14 @@ async function finalizeFullApply(
 
     return { success: true };
   } catch (error) {
-    console.error(
-      `[applyMatch] TX2 failed for matchId=${matchId}:`,
-      error instanceof Error ? error.message : String(error)
-    );
+    safeLog("error", "apply_tx2_failed", {
+      matchId,
+      invoiceId: invoiceRow.id,
+      err: toErrorCode(error),
+    });
     return {
       success: false,
-      error: `Database error: ${error instanceof Error ? error.message : String(error)}`,
+      error: `Database error: ${toErrorCode(error)}`,
     };
   }
 }
@@ -2109,14 +2114,9 @@ async function safeEnqueueRecompute(sql: Sql, invoiceId: string): Promise<void> 
   try {
     await enqueueRecomputeForInvoice(sql, invoiceId);
   } catch (error) {
-    // Log the error without PII (Issue #4)
-    console.error(
-      "[applyMatch] Failed to enqueue credit status recompute:",
-      `invoiceId=${invoiceId}`,
-      error instanceof Error ? error.message : String(error)
-    );
-
-    // TODO: Report to Sentry if helper exists
-    // For now, we log and continue - the apply was still successful
+    safeLog("error", "apply_enqueue_recompute_failed", {
+      invoiceId,
+      err: toErrorCode(error),
+    });
   }
 }

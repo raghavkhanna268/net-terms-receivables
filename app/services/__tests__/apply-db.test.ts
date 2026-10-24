@@ -14,7 +14,7 @@
  * - Audit append-only: confirm, unmatch, re-confirm yields 2 match.confirmed events
  * - Concurrency: two concurrent partial applies on same invoice get correct final outstanding
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 
@@ -26,6 +26,9 @@ let orderMarkAsPaidCallCount = 0;
 
 // Callback that runs DURING the Shopify orderMarkAsPaid call (for race condition testing)
 let onOrderMarkAsPaidCallback: (() => Promise<void>) | null = null;
+
+// Flag to make enqueueRecomputeForInvoice throw
+let mockEnqueueShouldThrow = false;
 
 vi.mock("../shopify-client.server", async (importOriginal) => {
   const actual = await importOriginal() as Record<string, unknown>;
@@ -81,6 +84,19 @@ vi.mock("../shopify-client.server", async (importOriginal) => {
           },
         },
       };
+    }),
+  };
+});
+
+vi.mock("../credit-status-recompute.server", async (importOriginal) => {
+  const actual = await importOriginal() as Record<string, unknown>;
+  return {
+    ...actual,
+    enqueueRecomputeForInvoice: vi.fn().mockImplementation(async (sql, invoiceId) => {
+      if (mockEnqueueShouldThrow) {
+        throw new Error("Forced enqueue error for testing");
+      }
+      return (actual.enqueueRecomputeForInvoice as (sql: unknown, invoiceId: string) => Promise<void>)(sql, invoiceId);
     }),
   };
 });
@@ -143,6 +159,7 @@ describeWithDb("S17 apply service DB integration", () => {
   beforeEach(async () => {
     mockShopifySuccess = true;
     mockAlreadyPaid = false;
+    mockEnqueueShouldThrow = false;
     shopifyCallCount = 0;
     verifyOrderIsPaidCallCount = 0;
     orderMarkAsPaidCallCount = 0;
@@ -1975,6 +1992,299 @@ describeWithDb("S17 apply service DB integration", () => {
       const result = await confirmMatch(sql, TEST_SHOP_ID, matchId, "test-user");
       expect(result.success).toBe(false);
       expect(result.error).toBe("Match not found or already processed");
+    });
+  });
+
+  /**
+   * M1, M2, M3, M7, M9: Verify safeLog output contains no PII.
+   * Tests that shop domains, emails, UTRs, and amounts never appear in logs.
+   * 
+   * Per QA: Uses REAL safeLog, spies on console methods, parses emitted JSON,
+   * and asserts no sensitive data leaks while verifying expected safe keys.
+   * 
+   * IMPORTANT: Each test FORCES the failure path (mock failing dependency, inject DB error)
+   * and asserts the event appears EXACTLY once with exact key set (toEqual).
+   * Raw mock.calls are checked for sentinel patterns (domain, email, UTR, amount).
+   */
+  describe("Logging: No PII in log output", () => {
+    let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
+    let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      consoleWarnSpy?.mockRestore();
+      consoleErrorSpy?.mockRestore();
+    });
+
+    function parseLogCalls(spy: ReturnType<typeof vi.spyOn>): Array<{ event: string; [key: string]: unknown }> {
+      const parsed: Array<{ event: string; [key: string]: unknown }> = [];
+      for (const call of spy.mock.calls) {
+        const arg = call[0];
+        if (typeof arg === "string" && arg.startsWith("{")) {
+          try {
+            parsed.push(JSON.parse(arg));
+          } catch {
+            // Not JSON, skip
+          }
+        }
+      }
+      return parsed;
+    }
+
+    function assertNoSensitiveDataInRawCalls(spy: ReturnType<typeof vi.spyOn>) {
+      for (const call of spy.mock.calls) {
+        const raw = String(call[0]);
+        expect(raw).not.toContain("myshopify.com");
+        expect(raw).not.toContain("@");
+        expect(raw).not.toMatch(/UTIB\d+/i);
+        expect(raw).not.toContain("1000000");
+        expect(raw).not.toContain("500000");
+        expect(raw).not.toContain("10000.00");
+        expect(raw).not.toContain("5000.00");
+      }
+    }
+
+    type SqlType = ReturnType<typeof postgres>;
+
+    function createThrowingSql(
+      originalSql: SqlType,
+      shouldThrow: () => boolean,
+      pattern: RegExp
+    ): SqlType {
+      const handler: ProxyHandler<SqlType> = {
+        apply(target, _thisArg, args) {
+          if (Array.isArray(args[0]) && 'raw' in args[0]) {
+            const query = (args[0] as TemplateStringsArray).join('?');
+            if (shouldThrow() && pattern.test(query)) {
+              throw new Error('Forced SQL error for test');
+            }
+          }
+          return Reflect.apply(target, target, args);
+        },
+        get(target, prop, receiver) {
+          const value = Reflect.get(target, prop, receiver);
+          if (prop === 'begin' && typeof value === 'function') {
+            return (callback: (tx: SqlType) => Promise<unknown>) => {
+              return (value as (cb: (tx: SqlType) => Promise<unknown>) => Promise<unknown>).call(
+                target,
+                async (tx: SqlType) => {
+                  const throwingTx = createThrowingSql(tx, shouldThrow, pattern);
+                  return callback(throwingTx);
+                }
+              );
+            };
+          }
+          return value;
+        }
+      };
+      return new Proxy(originalSql, handler) as SqlType;
+    }
+
+    // M1: When Shopify API fails (mockShopifySuccess=false), handleStalePushingMatch
+    // returns { success: false, error: "...", retryable: true } with NO reasonCode.
+    // The safeLog conditionally includes reasonCode only when defined, so the
+    // emitted JSON has exactly [err, event, matchId]. If recovery failed for a
+    // different reason (e.g., INVOICE_NOT_OPEN), reasonCode would be present.
+    it("M1: stale sibling recovery failure logs event with exact keys, no sentinels", async () => {
+      mockShopifySuccess = false;
+      mockAlreadyPaid = false;
+
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+
+      const siblingId = `match-sibling-m1-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${siblingId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 10000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushing', NOW() - interval '10 minutes', NOW() - interval '10 minutes')
+      `;
+
+      await sql`
+        INSERT INTO "AuditEvent" (id, "shopId", actor, type, data, at)
+        VALUES (
+          gen_random_uuid(),
+          ${TEST_SHOP_ID},
+          'test-user',
+          'match.push_claimed',
+          ${sql.json({ matchId: siblingId, invoiceId, paymentId, outstandingAtClaimPaise: '1000000' })}::jsonb,
+          NOW() - interval '10 minutes'
+        )
+      `;
+
+      const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
+
+      await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      const warnLogs = parseLogCalls(consoleWarnSpy);
+      const recoveryLogs = warnLogs.filter(l => l.event === "apply_stale_sibling_recovery_failed");
+      expect(recoveryLogs.length).toBe(1);
+
+      const log = recoveryLogs[0];
+      expect(Object.keys(log).sort()).toEqual(["err", "event", "matchId"]);
+      expect(log.matchId).toBe(siblingId);
+      expect(typeof log.err).toBe("string");
+
+      assertNoSensitiveDataInRawCalls(consoleWarnSpy);
+      assertNoSensitiveDataInRawCalls(consoleErrorSpy);
+    });
+
+    it("M2: pushed-without-audit logs event with exact keys, no sentinels", async () => {
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+
+      const matchId = `match-no-audit-m2-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 10000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushed', NOW(), NOW())
+      `;
+
+      await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      const warnLogs = parseLogCalls(consoleWarnSpy);
+      const pushedWithoutAuditLogs = warnLogs.filter(l => l.event === "apply_pushed_without_audit");
+      expect(pushedWithoutAuditLogs.length).toBe(1);
+
+      const log = pushedWithoutAuditLogs[0];
+      expect(Object.keys(log).sort()).toEqual(["event", "invoiceId", "matchId", "status"]);
+      expect(log.matchId).toBe(matchId);
+      expect(log.invoiceId).toBe(invoiceId);
+      expect(typeof log.status).toBe("string");
+
+      assertNoSensitiveDataInRawCalls(consoleWarnSpy);
+    });
+
+    it("M3: release-claim failure logs event with exact keys, no sentinels", async () => {
+      mockShopifySuccess = false;
+      mockAlreadyPaid = false;
+
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+      const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
+
+      let throwOnReleaseClaim = false;
+      const throwingSql = createThrowingSql(
+        sql,
+        () => throwOnReleaseClaim,
+        /SET state = 'confirmed'/
+      );
+
+      onOrderMarkAsPaidCallback = async () => {
+        throwOnReleaseClaim = true;
+      };
+
+      await applyMatch(throwingSql, TEST_SHOP_ID, matchId, "test-user");
+      onOrderMarkAsPaidCallback = null;
+
+      const errorLogs = parseLogCalls(consoleErrorSpy);
+      const releaseClaimLogs = errorLogs.filter(l => l.event === "apply_release_claim_failed");
+      expect(releaseClaimLogs.length).toBe(1);
+
+      const log = releaseClaimLogs[0];
+      expect(Object.keys(log).sort()).toEqual(["err", "event", "matchId"]);
+      expect(log.matchId).toBe(matchId);
+      expect(typeof log.err).toBe("string");
+
+      assertNoSensitiveDataInRawCalls(consoleErrorSpy);
+    });
+
+    it("M7: backstop triggered logs event with exact keys, no sentinels", async () => {
+      mockShopifySuccess = true;
+      mockAlreadyPaid = false;
+
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+      const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
+
+      onOrderMarkAsPaidCallback = async () => {
+        await sql`
+          UPDATE "Invoice"
+          SET outstanding = 500.00, "updatedAt" = NOW()
+          WHERE id = ${invoiceId}
+        `;
+      };
+
+      await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+      onOrderMarkAsPaidCallback = null;
+
+      const errorLogs = parseLogCalls(consoleErrorSpy);
+      const backstopLogs = errorLogs.filter(l => l.event === "apply_backstop_triggered");
+      expect(backstopLogs.length).toBe(1);
+
+      const log = backstopLogs[0];
+      expect(Object.keys(log).sort()).toEqual(["event", "invoiceId", "matchId", "status", "success"]);
+      expect(log.matchId).toBe(matchId);
+      expect(log.invoiceId).toBe(invoiceId);
+      expect(typeof log.status).toBe("string");
+      expect(typeof log.success).toBe("boolean");
+
+      assertNoSensitiveDataInRawCalls(consoleErrorSpy);
+    });
+
+    it("M9: TX2 failure logs event with exact keys, no sentinels", async () => {
+      mockShopifySuccess = true;
+      mockAlreadyPaid = false;
+
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+      const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
+
+      let throwOnTx2 = false;
+      const throwingSql = createThrowingSql(
+        sql,
+        () => throwOnTx2,
+        /outstanding = 0, status = 'paid'/
+      );
+
+      onOrderMarkAsPaidCallback = async () => {
+        throwOnTx2 = true;
+      };
+
+      await applyMatch(throwingSql, TEST_SHOP_ID, matchId, "test-user");
+      onOrderMarkAsPaidCallback = null;
+
+      const errorLogs = parseLogCalls(consoleErrorSpy);
+      const tx2FailLogs = errorLogs.filter(l => l.event === "apply_tx2_failed");
+      expect(tx2FailLogs.length).toBe(1);
+
+      const log = tx2FailLogs[0];
+      expect(Object.keys(log).sort()).toEqual(["err", "event", "invoiceId", "matchId"]);
+      expect(log.matchId).toBe(matchId);
+      expect(log.invoiceId).toBe(invoiceId);
+      expect(typeof log.err).toBe("string");
+
+      assertNoSensitiveDataInRawCalls(consoleErrorSpy);
+      assertNoSensitiveDataInRawCalls(consoleWarnSpy);
+    });
+
+    it("enqueue recompute failure logs event with exact keys, no sentinels", async () => {
+      mockShopifySuccess = true;
+      mockAlreadyPaid = false;
+      mockEnqueueShouldThrow = true;
+
+      const paymentId = await createPayment(500000n);
+      const invoiceId = await createInvoice(1000000n);
+      const matchId = await createConfirmedMatch(paymentId, invoiceId, 500000n);
+
+      try {
+        await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+      } finally {
+        mockEnqueueShouldThrow = false;
+      }
+
+      const errorLogs = parseLogCalls(consoleErrorSpy);
+      const enqueueLogs = errorLogs.filter(l => l.event === "apply_enqueue_recompute_failed");
+      expect(enqueueLogs.length).toBe(1);
+
+      const log = enqueueLogs[0];
+      expect(Object.keys(log).sort()).toEqual(["err", "event", "invoiceId"]);
+      expect(log.invoiceId).toBe(invoiceId);
+      expect(typeof log.err).toBe("string");
+
+      assertNoSensitiveDataInRawCalls(consoleWarnSpy);
+      assertNoSensitiveDataInRawCalls(consoleErrorSpy);
     });
   });
 });
