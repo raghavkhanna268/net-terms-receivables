@@ -50,19 +50,14 @@ export type SqlFragment = ReturnType<Sql>;
 
 /**
  * Get a SQL fragment for filtering active (non-gated) buyer accounts.
- * Use this in WHERE clauses to consistently exclude gated accounts.
+ *
+ * IMPORTANT: This helper must NOT be used for sync, hold, recompute, metafield,
+ * sweep, matching, aging, or totals queries. Gated accounts participate fully
+ * in those paths - gating applies only to value-add actions (reminders,
+ * credit-limit edits, account editing, bulk statement import).
  *
  * When PLAN_GATING_ENFORCED is OFF, returns a tautology (TRUE) so all accounts are included.
  * When PLAN_GATING_ENFORCED is ON, returns "gated_at IS NULL" to exclude gated accounts.
- *
- * Usage:
- * ```typescript
- * const accounts = await sql`
- *   SELECT * FROM "BuyerAccount"
- *   WHERE "shopId" = ${shopId}
- *   AND ${activeAccountFragment(sql)}
- * `;
- * ```
  *
  * @param sql - The postgres.js SQL client (needed to create the fragment)
  * @returns A SQL fragment that can be composed into queries

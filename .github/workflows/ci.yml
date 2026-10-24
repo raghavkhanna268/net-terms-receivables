@@ -148,6 +148,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Test build output (xlsx exclusion, bundle size)
+        run: npm run test:build
+
       - name: Wrangler dry-run and size check
         run: |
           OUTPUT=$(npx wrangler deploy --dry-run --outdir /tmp/wrangler-out 2>&1)

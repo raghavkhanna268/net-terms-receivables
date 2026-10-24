@@ -1016,3 +1016,382 @@ describe("formatAmount (rendered in email)", () => {
     expect(html).not.toContain("₹12.35"); // Would be wrong if we divided by 100
   });
 });
+
+describe("ensureDefaultReminderRules", () => {
+  it("DEFAULT_RULE_OFFSETS contains -3, 0, 7", async () => {
+    const { DEFAULT_RULE_OFFSETS } = await import("../reminders.server");
+
+    expect(DEFAULT_RULE_OFFSETS).toEqual([-3, 0, 7]);
+  });
+
+  it("seeds 3 rules on FIRST settings creation", async () => {
+    const { ensureDefaultReminderRules } = await import("../reminders.server");
+
+    const insertedRules: { offset: number }[] = [];
+    const mockTx = Object.assign(
+      vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        const query = strings.join("?");
+
+        // Advisory lock
+        if (query.includes("pg_advisory_xact_lock")) {
+          return [];
+        }
+
+        // Re-check ReminderLog inside transaction
+        if (query.includes("EXISTS") && query.includes("ReminderLog")) {
+          return [{ hasHistory: false }];
+        }
+
+        // Insert settings row - return shop_id to indicate it was created
+        if (query.includes("INSERT INTO s18_shop_reminder_settings")) {
+          return [{ shop_id: "shop-new" }];
+        }
+
+        // Insert rule
+        if (query.includes("INSERT INTO \"ReminderRule\"")) {
+          const offsetDays = values[1] as number;
+          insertedRules.push({ offset: offsetDays });
+          return [];
+        }
+
+        return [];
+      }),
+      {}
+    );
+
+    // Pre-tx EXISTS check returns no settings, no history
+    const mockSql = Object.assign(
+      vi.fn(async (strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("hasSettings") && query.includes("hasHistory")) {
+          return [{ hasSettings: false, hasHistory: false }];
+        }
+        return [];
+      }),
+      {
+        begin: vi.fn(async (callback: (tx: typeof mockTx) => Promise<unknown>) => {
+          return callback(mockTx);
+        }),
+      }
+    );
+
+    const result = await ensureDefaultReminderRules(
+      mockSql as unknown as Parameters<typeof ensureDefaultReminderRules>[0],
+      "shop-new"
+    );
+
+    expect(result.seeded).toBe(true);
+    expect(result.count).toBe(3);
+    expect(insertedRules.map((r) => r.offset)).toEqual([-3, 0, 7]);
+  });
+
+  it("is no-op when settings row already exists (via cheap EXISTS check)", async () => {
+    const { ensureDefaultReminderRules } = await import("../reminders.server");
+
+    let beginCalled = false;
+
+    // Pre-tx EXISTS check returns settings exist - should skip entirely
+    const mockSql = Object.assign(
+      vi.fn(async (strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("hasSettings") && query.includes("hasHistory")) {
+          return [{ hasSettings: true, hasHistory: false }];
+        }
+        return [];
+      }),
+      {
+        begin: vi.fn(async () => {
+          beginCalled = true;
+          return { seeded: false, count: 0 };
+        }),
+      }
+    );
+
+    const result = await ensureDefaultReminderRules(
+      mockSql as unknown as Parameters<typeof ensureDefaultReminderRules>[0],
+      "shop-with-settings"
+    );
+
+    expect(result.seeded).toBe(false);
+    expect(result.count).toBe(0);
+    expect(beginCalled).toBe(false);
+  });
+
+  it("does NOT re-seed after merchant deletes all rules (settings row already exists)", async () => {
+    const { ensureDefaultReminderRules } = await import("../reminders.server");
+
+    let beginCalled = false;
+
+    // Pre-tx EXISTS check returns settings exist (merchant deleted rules but settings remain)
+    const mockSql = Object.assign(
+      vi.fn(async (strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("hasSettings") && query.includes("hasHistory")) {
+          return [{ hasSettings: true, hasHistory: false }];
+        }
+        return [];
+      }),
+      {
+        begin: vi.fn(async () => {
+          beginCalled = true;
+          return { seeded: false, count: 0 };
+        }),
+      }
+    );
+
+    const result = await ensureDefaultReminderRules(
+      mockSql as unknown as Parameters<typeof ensureDefaultReminderRules>[0],
+      "shop-deleted-all-rules"
+    );
+
+    // No re-seeding because settings row already exists
+    expect(result.seeded).toBe(false);
+    expect(result.count).toBe(0);
+    expect(beginCalled).toBe(false);
+  });
+
+  it("uses advisory lock for concurrency safety", async () => {
+    const { ensureDefaultReminderRules } = await import("../reminders.server");
+
+    let lockAcquired = false;
+    let lockShopId: string | null = null;
+    const mockTx = Object.assign(
+      vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        const query = strings.join("?");
+
+        // Advisory lock
+        if (query.includes("pg_advisory_xact_lock")) {
+          lockAcquired = true;
+          lockShopId = values[0] as string;
+          return [];
+        }
+
+        // Re-check ReminderLog inside transaction
+        if (query.includes("EXISTS") && query.includes("ReminderLog")) {
+          return [{ hasHistory: false }];
+        }
+
+        // Insert settings row - conflict (already exists)
+        if (query.includes("INSERT INTO s18_shop_reminder_settings")) {
+          return [];
+        }
+
+        return [];
+      }),
+      {}
+    );
+
+    // Pre-tx EXISTS check returns no settings, no history
+    const mockSql = Object.assign(
+      vi.fn(async (strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("hasSettings") && query.includes("hasHistory")) {
+          return [{ hasSettings: false, hasHistory: false }];
+        }
+        return [];
+      }),
+      {
+        begin: vi.fn(async (callback: (tx: typeof mockTx) => Promise<unknown>) => {
+          return callback(mockTx);
+        }),
+      }
+    );
+
+    await ensureDefaultReminderRules(
+      mockSql as unknown as Parameters<typeof ensureDefaultReminderRules>[0],
+      "shop-concurrent"
+    );
+
+    expect(lockAcquired).toBe(true);
+    expect(lockShopId).toBe("shop-concurrent");
+  });
+
+  it("inserts settings with enabled=false (query structure check)", async () => {
+    const { ensureDefaultReminderRules } = await import("../reminders.server");
+
+    let settingsInsertQuery = "";
+    const mockTx = Object.assign(
+      vi.fn(async (strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+
+        // Advisory lock
+        if (query.includes("pg_advisory_xact_lock")) {
+          return [];
+        }
+
+        // Re-check ReminderLog inside transaction
+        if (query.includes("EXISTS") && query.includes("ReminderLog")) {
+          return [{ hasHistory: false }];
+        }
+
+        // Insert settings row - capture query structure
+        if (query.includes("INSERT INTO s18_shop_reminder_settings")) {
+          settingsInsertQuery = query;
+          return [{ shop_id: "shop-new" }];
+        }
+
+        // Insert rule
+        if (query.includes("INSERT INTO \"ReminderRule\"")) {
+          return [];
+        }
+
+        return [];
+      }),
+      {}
+    );
+
+    // Pre-tx EXISTS check returns no settings, no history
+    const mockSql = Object.assign(
+      vi.fn(async (strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("hasSettings") && query.includes("hasHistory")) {
+          return [{ hasSettings: false, hasHistory: false }];
+        }
+        return [];
+      }),
+      {
+        begin: vi.fn(async (callback: (tx: typeof mockTx) => Promise<unknown>) => {
+          return callback(mockTx);
+        }),
+      }
+    );
+
+    await ensureDefaultReminderRules(
+      mockSql as unknown as Parameters<typeof ensureDefaultReminderRules>[0],
+      "shop-new"
+    );
+
+    // Query inserts with enabled = false (second placeholder after shop_id)
+    expect(settingsInsertQuery).toContain("INSERT INTO s18_shop_reminder_settings");
+    expect(settingsInsertQuery).toContain("shop_id");
+    expect(settingsInsertQuery).toContain("enabled");
+    // enabled=false is passed as second value placeholder
+  });
+
+  it("skips seeding when shop has ReminderLog history (cheap EXISTS check)", async () => {
+    const { ensureDefaultReminderRules } = await import("../reminders.server");
+
+    let beginCalled = false;
+
+    // Pre-tx EXISTS check returns history exists
+    const mockSql = Object.assign(
+      vi.fn(async (strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("hasSettings") && query.includes("hasHistory")) {
+          return [{ hasSettings: false, hasHistory: true }];
+        }
+        return [];
+      }),
+      {
+        begin: vi.fn(async () => {
+          beginCalled = true;
+          return { seeded: false, count: 0 };
+        }),
+      }
+    );
+
+    const result = await ensureDefaultReminderRules(
+      mockSql as unknown as Parameters<typeof ensureDefaultReminderRules>[0],
+      "shop-with-history"
+    );
+
+    // Should skip without even starting transaction
+    expect(result.seeded).toBe(false);
+    expect(result.count).toBe(0);
+    expect(beginCalled).toBe(false);
+  });
+
+  it("skips seeding when shop has existing settings (cheap EXISTS check)", async () => {
+    const { ensureDefaultReminderRules } = await import("../reminders.server");
+
+    let beginCalled = false;
+
+    // Pre-tx EXISTS check returns settings exist
+    const mockSql = Object.assign(
+      vi.fn(async (strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("hasSettings") && query.includes("hasHistory")) {
+          return [{ hasSettings: true, hasHistory: false }];
+        }
+        return [];
+      }),
+      {
+        begin: vi.fn(async () => {
+          beginCalled = true;
+          return { seeded: false, count: 0 };
+        }),
+      }
+    );
+
+    const result = await ensureDefaultReminderRules(
+      mockSql as unknown as Parameters<typeof ensureDefaultReminderRules>[0],
+      "shop-with-settings"
+    );
+
+    // Should skip without even starting transaction
+    expect(result.seeded).toBe(false);
+    expect(result.count).toBe(0);
+    expect(beginCalled).toBe(false);
+  });
+
+  it("re-checks ReminderLog inside transaction (race condition protection)", async () => {
+    const { ensureDefaultReminderRules } = await import("../reminders.server");
+
+    let ruleInsertCalled = false;
+    const mockTx = Object.assign(
+      vi.fn(async (strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+
+        // Advisory lock
+        if (query.includes("pg_advisory_xact_lock")) {
+          return [];
+        }
+
+        // Re-check ReminderLog inside transaction - NOW returns true (race condition)
+        if (query.includes("EXISTS") && query.includes("ReminderLog")) {
+          return [{ hasHistory: true }];
+        }
+
+        // Insert settings row (should not be called due to history check)
+        if (query.includes("INSERT INTO s18_shop_reminder_settings")) {
+          return [{ shop_id: "shop-race" }];
+        }
+
+        // Insert rule (should not be called)
+        if (query.includes("INSERT INTO \"ReminderRule\"")) {
+          ruleInsertCalled = true;
+          return [];
+        }
+
+        return [];
+      }),
+      {}
+    );
+
+    // Pre-tx EXISTS check returns NO history (but it appears inside tx)
+    const mockSql = Object.assign(
+      vi.fn(async (strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("hasSettings") && query.includes("hasHistory")) {
+          return [{ hasSettings: false, hasHistory: false }];
+        }
+        return [];
+      }),
+      {
+        begin: vi.fn(async (callback: (tx: typeof mockTx) => Promise<unknown>) => {
+          return callback(mockTx);
+        }),
+      }
+    );
+
+    const result = await ensureDefaultReminderRules(
+      mockSql as unknown as Parameters<typeof ensureDefaultReminderRules>[0],
+      "shop-race"
+    );
+
+    // Should not seed due to in-tx history check
+    expect(result.seeded).toBe(false);
+    expect(result.count).toBe(0);
+    expect(ruleInsertCalled).toBe(false);
+  });
+});

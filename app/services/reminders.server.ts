@@ -798,3 +798,88 @@ export async function deleteReminderRule(
   `;
   return result.length > 0;
 }
+
+/**
+ * Default reminder rule offsets.
+ * - 3 days before due date (-3)
+ * - On due date (0)
+ * - 7 days overdue (+7)
+ */
+export const DEFAULT_RULE_OFFSETS = [-3, 0, 7] as const;
+
+/**
+ * Ensure default reminder rules exist for a shop on FIRST settings creation.
+ *
+ * Seeds the 3 default rules (offsets -3, 0, +7) ONLY when creating the
+ * s18_shop_reminder_settings row for the first time. Uses INSERT ... ON CONFLICT
+ * DO NOTHING with RETURNING to detect first-time creation atomically.
+ *
+ * After initial setup, a shop with zero rules stays at zero - no re-seeding.
+ * If a merchant deletes all rules, they stay deleted on subsequent page loads.
+ *
+ * Skips seeding entirely if:
+ * - Shop already has a settings row (not first visit)
+ * - Shop has any ReminderLog history (has used reminders before)
+ *
+ * Concurrency-safe: Uses pg_advisory_xact_lock plus INSERT ... ON CONFLICT
+ * to prevent duplicate inserts from concurrent requests.
+ *
+ * Does NOT enable reminders - they stay disabled (enabled=false) by default.
+ * Does NOT send any emails.
+ */
+export async function ensureDefaultReminderRules(
+  sql: Sql,
+  shopId: string
+): Promise<{ seeded: boolean; count: number }> {
+  // Cheap EXISTS check before acquiring lock - skip early if already set up
+  const [existsCheck] = await sql<{ hasSettings: boolean; hasHistory: boolean }[]>`
+    SELECT
+      EXISTS(SELECT 1 FROM s18_shop_reminder_settings WHERE shop_id = ${shopId}) AS "hasSettings",
+      EXISTS(SELECT 1 FROM "ReminderLog" WHERE "shopId" = ${shopId}) AS "hasHistory"
+  `;
+
+  if (existsCheck?.hasSettings || existsCheck?.hasHistory) {
+    return { seeded: false, count: 0 };
+  }
+
+  const result = await sql.begin(async (tx) => {
+    // Acquire advisory lock keyed on shop ID (released at end of transaction)
+    await tx`SELECT pg_advisory_xact_lock(hashtext('s18_rules_' || ${shopId}))`;
+
+    // Re-check ReminderLog inside transaction (may have changed since EXISTS check)
+    const [historyCheck] = await tx<{ hasHistory: boolean }[]>`
+      SELECT EXISTS(SELECT 1 FROM "ReminderLog" WHERE "shopId" = ${shopId}) AS "hasHistory"
+    `;
+    if (historyCheck?.hasHistory) {
+      return { seeded: false, count: 0 };
+    }
+
+    // Try to insert settings row (enabled=false). ON CONFLICT DO NOTHING
+    // returns empty if row already exists, returns the row if newly created.
+    const inserted = await tx<{ shop_id: string }[]>`
+      INSERT INTO s18_shop_reminder_settings (shop_id, enabled, created_at, updated_at)
+      VALUES (${shopId}, false, NOW(), NOW())
+      ON CONFLICT (shop_id) DO NOTHING
+      RETURNING shop_id
+    `;
+
+    // Only seed rules if we just created the settings row for the first time
+    if (inserted.length === 0) {
+      return { seeded: false, count: 0 };
+    }
+
+    // Seed default rules (all enabled by default, but reminders setting stays disabled)
+    let count = 0;
+    for (const offset of DEFAULT_RULE_OFFSETS) {
+      await tx`
+        INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+        VALUES (gen_random_uuid()::TEXT, ${shopId}, ${offset}, 'email'::"ReminderChannel", true, NOW(), NOW())
+      `;
+      count++;
+    }
+
+    return { seeded: true, count };
+  });
+
+  return result;
+}

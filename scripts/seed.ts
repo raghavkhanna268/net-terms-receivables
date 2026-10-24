@@ -1197,6 +1197,138 @@ export async function findCompanyForAdoption(
 }
 
 /**
+ * Result of customer email lookup.
+ */
+export type CustomerLookupResult = 
+  | { customer: { id: string; email: string }; ambiguous?: false }
+  | { ambiguous: true; customerIds: string[] }
+  | null;
+
+/**
+ * Find all customers with the given exact email.
+ * Used to detect if we can reuse an existing customer for company creation.
+ * 
+ * @returns CustomerLookupResult:
+ *   - { customer } if exactly one match
+ *   - { ambiguous: true, customerIds } if multiple matches
+ *   - null if no match
+ */
+export async function findCustomersByEmail(
+  state: SeedState,
+  email: string
+): Promise<CustomerLookupResult> {
+  const matches: Array<{ id: string; email: string }> = [];
+  let cursor: string | undefined = undefined;
+  
+  for (let page = 0; page < MAX_SEARCH_PAGES; page++) {
+    const variables: { query: string; after?: string } = { query: `email:'${email}'` };
+    if (cursor) variables.after = cursor;
+    
+    const response = await graphql<{
+      customers: {
+        nodes: Array<{ id: string; email: string | null }>;
+        pageInfo: { hasNextPage: boolean; endCursor: string | null };
+      };
+    }>(state, FIND_CUSTOMER_BY_EMAIL_QUERY, variables);
+    
+    const customers = response.data?.customers.nodes ?? [];
+    for (const customer of customers) {
+      if (customer.email?.toLowerCase() === email.toLowerCase()) {
+        matches.push({ id: customer.id, email: customer.email });
+      }
+    }
+    
+    if (!response.data?.customers.pageInfo?.hasNextPage) break;
+    cursor = response.data?.customers.pageInfo?.endCursor ?? undefined;
+  }
+  
+  if (matches.length === 0) {
+    return null;
+  }
+  
+  if (matches.length === 1) {
+    return { customer: matches[0] };
+  }
+  
+  return { ambiguous: true, customerIds: matches.map(m => m.id) };
+}
+
+/**
+ * Assign an existing customer as a contact on a company.
+ * Returns the created CompanyContact ID, or null on failure.
+ */
+async function assignCustomerAsContact(
+  state: SeedState,
+  companyId: string,
+  customerId: string
+): Promise<{ contactId: string; customerId: string; email: string } | null> {
+  const result = await graphql<{
+    companyAssignCustomerAsContact: {
+      companyContact: { id: string; customer: { id: string; email: string } } | null;
+      userErrors: UserError[];
+    };
+  }>(state, COMPANY_ASSIGN_CUSTOMER_AS_CONTACT_MUTATION, {
+    companyId,
+    customerId,
+  }, { isMutation: true, mutationName: "companyAssignCustomerAsContact" });
+  
+  if (result.errors) {
+    console.error(`    ❌ Failed to assign customer as contact: GraphQL errors`);
+    return null;
+  }
+  
+  const userErrors = result.data?.companyAssignCustomerAsContact.userErrors ?? [];
+  if (userErrors.length) {
+    logUserErrors(userErrors, "assignCustomerAsContact");
+    return null;
+  }
+  
+  const contact = result.data?.companyAssignCustomerAsContact.companyContact;
+  if (!contact) {
+    console.error(`    ❌ No contact returned from companyAssignCustomerAsContact`);
+    return null;
+  }
+  
+  return {
+    contactId: contact.id,
+    customerId: contact.customer.id,
+    email: contact.customer.email,
+  };
+}
+
+/**
+ * Set a contact as the main contact on a company.
+ */
+async function setMainContact(
+  state: SeedState,
+  companyId: string,
+  contactId: string
+): Promise<boolean> {
+  const result = await graphql<{
+    companyAssignMainContact: {
+      company: { id: string } | null;
+      userErrors: UserError[];
+    };
+  }>(state, COMPANY_ASSIGN_MAIN_CONTACT_MUTATION, {
+    companyId,
+    companyContactId: contactId,
+  }, { isMutation: true, mutationName: "companyAssignMainContact" });
+  
+  if (result.errors) {
+    console.error(`    ❌ Failed to set main contact: GraphQL errors`);
+    return false;
+  }
+  
+  const userErrors = result.data?.companyAssignMainContact.userErrors ?? [];
+  if (userErrors.length) {
+    logUserErrors(userErrors, "setMainContact");
+    return false;
+  }
+  
+  return result.data?.companyAssignMainContact.company != null;
+}
+
+/**
  * Continue seeding an existing/adopted company with locations.
  * Creates any missing Net-XX locations.
  */
@@ -1305,6 +1437,22 @@ export async function reportDuplicates(state: SeedState): Promise<void> {
       console.log(`    ○ No companies with contact email for ${seed.key}`);
     }
     
+    // Find customers with same email (may cause TAKEN error even if no company exists)
+    const customerLookup = await findCustomersByEmail(state, seed.contact.email);
+    if (customerLookup) {
+      if (customerLookup.ambiguous === true) {
+        console.log(`    ⚠️  Multiple customers with email ${seed.contact.email} (${customerLookup.customerIds.length}):`);
+        for (const customerId of customerLookup.customerIds) {
+          console.log(`      - ${customerId}`);
+        }
+      } else {
+        console.log(`    Customers with same email (1):`);
+        console.log(`      - ${customerLookup.customer.id}`);
+      }
+    } else {
+      console.log(`    ○ No customers with email ${seed.contact.email}`);
+    }
+    
     console.log();
   }
   
@@ -1374,6 +1522,42 @@ export function buildCompanyCreateInput(
   };
 }
 
+/**
+ * Build CompanyCreateInput WITHOUT companyContact.
+ * Used when an existing customer will be attached via companyAssignCustomerAsContact.
+ * Exported for schema validation testing.
+ */
+export function buildCompanyCreateInputWithoutContact(
+  seed: { name: string; city: string },
+  externalId: string,
+  locationSuffix: string,
+  paymentTermsTemplateId?: string
+): { input: Record<string, unknown> } {
+  const addressInfo = getIndiaAddressInfo(seed.city);
+  return {
+    input: {
+      company: { name: seed.name, externalId },
+      companyLocation: {
+        name: `${seed.name} - ${locationSuffix}`,
+        shippingAddress: {
+          firstName: "Branch",
+          lastName: locationSuffix,
+          address1: "123 Business Street",
+          city: seed.city,
+          zoneCode: addressInfo.provinceCode,
+          countryCode: "IN",
+          zip: addressInfo.zip,
+        },
+        billingSameAsShipping: true,
+        buyerExperienceConfiguration: paymentTermsTemplateId ? {
+          paymentTermsTemplateId,
+        } : undefined,
+      },
+      // No companyContact - existing customer will be attached separately
+    },
+  };
+}
+
 export async function createCompanyWithLocations(
   state: SeedState,
   seed: (typeof COMPANY_SEEDS)[number],
@@ -1384,7 +1568,28 @@ export async function createCompanyWithLocations(
     (t) => t.paymentTermsType === "NET" && t.dueInDays === firstLoc.dueInDays
   );
 
-  const variables = buildCompanyCreateInput(seed, externalId, firstLoc.suffix, firstTemplate?.id);
+  // Check if a customer with this email already exists (from a prior seed run)
+  const customerLookup = await findCustomersByEmail(state, seed.contact.email);
+  
+  if (customerLookup?.ambiguous === true) {
+    // Multiple customers with same email - skip
+    const reason = `Multiple customers with email ${seed.contact.email}: ${customerLookup.customerIds.join(", ")}`;
+    console.log(`  ⚠️  Skipped ${seed.name}: ${reason}`);
+    state.skippedCount.companies++;
+    state.skippedReasons.push(reason);
+    return null;
+  }
+  
+  const existingCustomer = customerLookup && !customerLookup.ambiguous ? customerLookup.customer : null;
+  
+  // Choose mutation input based on whether customer exists
+  const variables = existingCustomer
+    ? buildCompanyCreateInputWithoutContact(seed, externalId, firstLoc.suffix, firstTemplate?.id)
+    : buildCompanyCreateInput(seed, externalId, firstLoc.suffix, firstTemplate?.id);
+  
+  if (existingCustomer) {
+    console.log(`    📎 Found existing customer ${existingCustomer.id}, will attach after company creation`);
+  }
 
   const createResult = await graphql<{
     companyCreate: { company: CompanyNode | null; userErrors: UserError[] };
@@ -1441,8 +1646,99 @@ export async function createCompanyWithLocations(
       }
     }
     
-    // No company found to adopt - log original error
-    console.error(`    ❌ TAKEN error but no company found with contact email`);
+    // No company found - try customer path: create company without contact, attach customer
+    const takenCustomerLookup = await findCustomersByEmail(state, seed.contact.email);
+    
+    if (takenCustomerLookup?.ambiguous === true) {
+      const reason = `Multiple customers with email ${seed.contact.email}: ${takenCustomerLookup.customerIds.join(", ")}`;
+      console.error(`    ❌ Cannot recover: ${reason}`);
+      state.skippedCount.companies++;
+      state.skippedReasons.push(reason);
+      return null;
+    }
+    
+    const takenCustomer = takenCustomerLookup && !takenCustomerLookup.ambiguous ? takenCustomerLookup.customer : null;
+    if (takenCustomer) {
+      console.log(`    📎 Found existing customer ${takenCustomer.id}, creating company without contact...`);
+      
+      const recoveryVars = buildCompanyCreateInputWithoutContact(seed, externalId, firstLoc.suffix, firstTemplate?.id);
+      const recoveryResult = await graphql<{
+        companyCreate: { company: CompanyNode | null; userErrors: UserError[] };
+      }>(state, COMPANY_CREATE_MUTATION, recoveryVars, { isMutation: true, mutationName: "companyCreate" });
+      
+      if (recoveryResult.errors || recoveryResult.data?.companyCreate.userErrors.length) {
+        console.error(`    ❌ Recovery companyCreate failed`);
+        if (recoveryResult.data?.companyCreate.userErrors.length) {
+          logUserErrors(recoveryResult.data.companyCreate.userErrors, "TAKEN recovery companyCreate");
+        }
+        return null;
+      }
+      
+      const recoveredCompany = recoveryResult.data?.companyCreate.company;
+      if (!recoveredCompany) {
+        console.error(`    ❌ Recovery companyCreate returned null`);
+        return null;
+      }
+      
+      // Attach the existing customer
+      const attachedContact = await assignCustomerAsContact(state, recoveredCompany.id, takenCustomer.id);
+      if (!attachedContact) {
+        console.error(`    ❌ Failed to attach customer to recovered company`);
+        return null;
+      }
+      
+      // Set as main contact
+      await setMainContact(state, recoveredCompany.id, attachedContact.contactId);
+      console.log(`    ✅ Recovered: created company and attached existing customer`);
+      state.createdCount.companies++;
+      
+      // Build company data and continue with locations
+      const contactRoles = await fetchCompanyContactRoles(state, recoveredCompany.id);
+      const locations = new Map<number, string>();
+      const firstLocationId = recoveredCompany.locations.edges[0]?.node.id;
+      
+      const companyData: CompanyData = {
+        id: recoveredCompany.id,
+        contactId: attachedContact.contactId,
+        contactCustomerId: attachedContact.customerId,
+        locations,
+        contactRoles,
+      };
+      
+      if (firstLocationId) {
+        locations.set(firstLoc.dueInDays, firstLocationId);
+        console.log(`    → Location ${firstLoc.suffix}: created`);
+        state.createdCount.locations++;
+        if (attachedContact.contactId && contactRoles.length > 0) {
+          await ensureContactRoleOnLocation(state, companyData, firstLocationId);
+        }
+      }
+      
+      // Create remaining locations
+      for (let i = 1; i < LOCATION_TERMS.length; i++) {
+        const loc = LOCATION_TERMS[i];
+        const template = state.paymentTermsTemplates.find(
+          (t) => t.paymentTermsType === "NET" && t.dueInDays === loc.dueInDays
+        );
+        const locationId = await createCompanyLocation(state, recoveredCompany.id, seed.name, seed.city, loc, template?.id);
+        if (locationId) {
+          locations.set(loc.dueInDays, locationId);
+          console.log(`    → Location ${loc.suffix}: created`);
+          state.createdCount.locations++;
+          if (attachedContact.contactId && contactRoles.length > 0) {
+            await ensureContactRoleOnLocation(state, companyData, locationId);
+          }
+        } else {
+          state.failedCount.locations++;
+          state.errors.push(`Failed to create location ${loc.suffix} for ${seed.name}`);
+        }
+      }
+      
+      return companyData;
+    }
+    
+    // No company AND no customer found - log original error
+    console.error(`    ❌ TAKEN error but no company or customer found with contact email`);
     logUserErrors(userErrors, `createCompanyWithLocations(${seed.name})`);
     return null;
   }
@@ -1458,9 +1754,25 @@ export async function createCompanyWithLocations(
     return null;
   }
 
+  // If we created company without contact (because customer existed), attach the customer now
+  let contactId = company.contacts.edges[0]?.node.id ?? "";
+  let contactCustomerId = company.contacts.edges[0]?.node.customer.id ?? "";
+  
+  if (existingCustomer && !contactId) {
+    console.log(`    → Attaching existing customer ${existingCustomer.id}...`);
+    const attachedContact = await assignCustomerAsContact(state, company.id, existingCustomer.id);
+    if (attachedContact) {
+      contactId = attachedContact.contactId;
+      contactCustomerId = attachedContact.customerId;
+      await setMainContact(state, company.id, contactId);
+      console.log(`    ✅ Attached customer as main contact`);
+    } else {
+      console.error(`    ⚠️  Failed to attach existing customer, company created without contact`);
+    }
+  }
+
   // Fetch contact roles for role assignment
   const contactRoles = await fetchCompanyContactRoles(state, company.id);
-  const contactId = company.contacts.edges[0]?.node.id ?? "";
 
   const locations = new Map<number, string>();
   const firstLocationId = company.locations.edges[0]?.node.id;
@@ -1469,7 +1781,7 @@ export async function createCompanyWithLocations(
   const companyData: CompanyData = {
     id: company.id,
     contactId,
-    contactCustomerId: company.contacts.edges[0]?.node.customer.id ?? "",
+    contactCustomerId,
     locations,
     contactRoles,
   };
@@ -1777,6 +2089,35 @@ export const FIND_CUSTOMER_BY_EMAIL_QUERY = `
         hasNextPage
         endCursor
       }
+    }
+  }
+`;
+
+/**
+ * Mutation to assign an existing customer as a contact on a company.
+ * Used when a customer already exists (from a previous seed run) and we want
+ * to attach them to a new company instead of getting a TAKEN error.
+ */
+export const COMPANY_ASSIGN_CUSTOMER_AS_CONTACT_MUTATION = `
+  mutation CompanyAssignCustomerAsContact($companyId: ID!, $customerId: ID!) {
+    companyAssignCustomerAsContact(companyId: $companyId, customerId: $customerId) {
+      companyContact {
+        id
+        customer { id email }
+      }
+      userErrors { field message code }
+    }
+  }
+`;
+
+/**
+ * Mutation to set a company contact as the main contact.
+ */
+export const COMPANY_ASSIGN_MAIN_CONTACT_MUTATION = `
+  mutation CompanyAssignMainContact($companyId: ID!, $companyContactId: ID!) {
+    companyAssignMainContact(companyId: $companyId, companyContactId: $companyContactId) {
+      company { id }
+      userErrors { field message code }
     }
   }
 `;

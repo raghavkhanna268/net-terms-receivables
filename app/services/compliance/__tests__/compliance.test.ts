@@ -87,7 +87,7 @@ describe("compliance.server", () => {
   });
 
   describe("redactCustomer", () => {
-    it("deletes s8_tagged_customers, s8_draft_orders, and s22_data_requests", async () => {
+    it("deletes s8_tagged_customers, s8_draft_orders, s22_data_requests, and PayerAlias", async () => {
       // 1. DELETE s8_tagged_customers
       mockSql.mockResolvedValueOnce(Object.assign([], { count: 1 }));
       // 2. DELETE s8_draft_orders
@@ -96,9 +96,11 @@ describe("compliance.server", () => {
       mockSql.mockResolvedValueOnce(Object.assign([], { count: 1 }));
       // 4. SELECT buyerAccount
       mockSql.mockResolvedValueOnce([{ id: "ba-1" }]);
-      // 5. UPDATE BuyerAccount
+      // 5. DELETE PayerAlias
+      mockSql.mockResolvedValueOnce(Object.assign([], { count: 2 }));
+      // 6. UPDATE BuyerAccount
       mockSql.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-      // 6. UPDATE Payment (via Match→Invoice→BuyerAccount)
+      // 7. UPDATE Payment (via Match→Invoice→BuyerAccount)
       mockSql.mockResolvedValueOnce(Object.assign([], { count: 3 }));
 
       const result = await redactCustomer(
@@ -110,11 +112,12 @@ describe("compliance.server", () => {
       expect(result.taggedCustomersDeleted).toBe(1);
       expect(result.draftOrdersDeleted).toBe(2);
       expect(result.dataRequestsDeleted).toBe(1);
+      expect(result.payerAliasesDeleted).toBe(2);
       expect(result.buyerAccountAnonymized).toBe(true);
       expect(result.paymentsRedacted).toBe(3);
     });
 
-    it("redacts payments linked via Match→Invoice→BuyerAccount", async () => {
+    it("redacts payments and deletes PayerAlias via Match→Invoice→BuyerAccount", async () => {
       // 1. DELETE s8_tagged_customers
       mockSql.mockResolvedValueOnce(Object.assign([], { count: 1 }));
       // 2. DELETE s8_draft_orders
@@ -123,9 +126,11 @@ describe("compliance.server", () => {
       mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
       // 4. SELECT buyerAccount
       mockSql.mockResolvedValueOnce([{ id: "ba-1" }]);
-      // 5. UPDATE BuyerAccount
+      // 5. DELETE PayerAlias
+      mockSql.mockResolvedValueOnce(Object.assign([], { count: 3 }));
+      // 6. UPDATE BuyerAccount
       mockSql.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-      // 6. UPDATE Payment (via Match→Invoice→BuyerAccount)
+      // 7. UPDATE Payment (via Match→Invoice→BuyerAccount)
       mockSql.mockResolvedValueOnce(Object.assign([], { count: 2 }));
 
       const result = await redactCustomer(
@@ -134,6 +139,7 @@ describe("compliance.server", () => {
         "gid://shopify/Customer/789"
       );
 
+      expect(result.payerAliasesDeleted).toBe(3);
       expect(result.buyerAccountAnonymized).toBe(true);
       expect(result.paymentsRedacted).toBe(2);
     });
@@ -157,6 +163,7 @@ describe("compliance.server", () => {
       expect(result.taggedCustomersDeleted).toBe(0);
       expect(result.draftOrdersDeleted).toBe(0);
       expect(result.dataRequestsDeleted).toBe(0);
+      expect(result.payerAliasesDeleted).toBe(0);
       expect(result.buyerAccountAnonymized).toBe(false);
       expect(result.paymentsRedacted).toBe(0);
     });
@@ -178,6 +185,7 @@ describe("compliance.server", () => {
       );
 
       expect(result.dataRequestsDeleted).toBe(3);
+      expect(result.payerAliasesDeleted).toBe(0);
     });
   });
 
