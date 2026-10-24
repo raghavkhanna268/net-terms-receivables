@@ -107,7 +107,7 @@ This document lists all OAuth scopes requested by the Net Terms Receivables app,
 
 ## Dev Seed Script
 
-The seed script (`scripts/seed.ts`) runs with **the same 11 production scopes** — no separate dev app needed. It uses **only the dev-store token** (`SHOPIFY_ADMIN_TOKEN` env var) and refuses to run on any shop other than `net-terms-receivables.myshopify.com`.
+The seed script (`scripts/seed.ts`) runs with **the same 11 production scopes** — no separate dev app needed. It uses **only the dev-store token** (`SHOPIFY_ADMIN_TOKEN` env var) and refuses to run on any shop other than the one in the `ALLOWED_DEV_STORE` env var (a GitHub Actions secret in CI), and refuses to run at all if it is unset.
 
 ### How the Seed Uses Production Scopes
 

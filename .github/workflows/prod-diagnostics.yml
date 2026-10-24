@@ -109,7 +109,16 @@ jobs:
     if: github.ref == 'refs/heads/main'
 
     steps:
-      # Must stay the FIRST step. The shop domain must never appear in the
+      # Checkout runs first so every psql step can source
+      # scripts/ci/psql-redacted.sh (DB host redaction, #190 F2). It never sees
+      # the shop domain, and `inputs.shop` is not referenced by it.
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      # Must stay the FIRST step that touches the shop (only Checkout may run
+      # before it). The shop domain must never appear in the
       # public log: not in a step `env:` header (Actions prints those) and
       # not via an inputs.shop expression inside `run:` (the "Run" header
       # shows the expanded script). So it is read from the event payload file,
@@ -125,6 +134,7 @@ jobs:
           PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
           set -euo pipefail
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
           SHOP=$(jq -r '.inputs.shop // empty' "$GITHUB_EVENT_PATH")
           if [ -z "$SHOP" ]; then
             echo "shop input empty: resolving the single installed shop from the DB (domain not printed)"
@@ -176,6 +186,7 @@ jobs:
           PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
           set -euo pipefail
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
 
           if [ -z "$DATABASE_URL" ]; then
             echo "::error::DATABASE_URL_MIGRATIONS secret not set"
@@ -252,11 +263,6 @@ jobs:
             fi
           fi
 
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-
       - name: Post-redrive verification (read-only)
         if: ${{ inputs.post_redrive_verify }}
         env:
@@ -277,6 +283,7 @@ jobs:
             sudo apt-get update -qq
             sudo apt-get install -y -qq postgresql-client
           fi
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
 
           echo "=== Post-Redrive Verification ==="
           echo ""
@@ -395,6 +402,7 @@ jobs:
           PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
           set -euo pipefail
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
 
           # Temp files for cleanup
           CURL_CONFIG=""
@@ -553,6 +561,7 @@ jobs:
           PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
           set -euo pipefail
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
 
           if [ -z "$DATABASE_URL" ]; then
             echo "::error::DATABASE_URL_MIGRATIONS secret not set"
@@ -681,6 +690,7 @@ jobs:
           PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
           set -euo pipefail
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
 
           if [ -z "$DATABASE_URL" ]; then
             echo "::error::DATABASE_URL_MIGRATIONS secret not set"
@@ -944,6 +954,7 @@ jobs:
           DRAIN_CRON: ${{ inputs.drain_cron }}
         run: |
           set -euo pipefail
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
 
           if [ -z "$DATABASE_URL" ]; then
             echo "::error::DATABASE_URL_MIGRATIONS secret not set (required for drain_cron)"
@@ -996,6 +1007,7 @@ jobs:
           REDRIVE_LIMIT: ${{ inputs.redrive_limit }}
         run: |
           set -euo pipefail
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
 
           if [ -z "$DATABASE_URL" ]; then
             echo "::error::DATABASE_URL_SESSION secret not set (required for DLQ redrive - needs write access)"
@@ -1079,6 +1091,7 @@ jobs:
           PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
           set -euo pipefail
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
 
           if [ -z "$DATABASE_URL" ]; then
             echo "::error::DATABASE_URL_MIGRATIONS secret not set"
@@ -1146,6 +1159,7 @@ jobs:
           PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
           set -euo pipefail
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
 
           echo "=== S12 Validation ==="
           echo ""
@@ -1443,6 +1457,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
         run: |
           set -euo pipefail
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
 
           if [ -z "$DATABASE_URL" ]; then
             echo "::error::DATABASE_URL_MIGRATIONS secret not set"
