@@ -248,6 +248,62 @@ describe("S6 Webhook Handlers", () => {
     });
   });
 
+  describe("valid HMAC + missing header returns 400", () => {
+    it("webhooks.companies returns 400 when valid HMAC but topic missing", async () => {
+      const { action } = await import("../webhooks.companies");
+      const request = createRequestWithMissingHeaders(
+        "https://example.com/webhooks/companies",
+        { admin_graphql_api_id: TEST_GID },
+        { omitTopic: true }
+      );
+
+      try {
+        await action(createActionArgs(request));
+        expect.fail("Expected action to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(400);
+        expect((error as Response).statusText).toBe("Bad Request");
+      }
+    });
+
+    it("webhooks.company_locations returns 400 when valid HMAC but shop missing", async () => {
+      const { action } = await import("../webhooks.company_locations");
+      const request = createRequestWithMissingHeaders(
+        "https://example.com/webhooks/company_locations",
+        { admin_graphql_api_id: TEST_GID },
+        { omitShop: true }
+      );
+
+      try {
+        await action(createActionArgs(request));
+        expect.fail("Expected action to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(400);
+        expect((error as Response).statusText).toBe("Bad Request");
+      }
+    });
+
+    it("webhooks.orders returns 400 when valid HMAC but topic missing", async () => {
+      const { action } = await import("../webhooks.orders");
+      const request = createRequestWithMissingHeaders(
+        "https://example.com/webhooks/orders",
+        { admin_graphql_api_id: TEST_GID },
+        { omitTopic: true }
+      );
+
+      try {
+        await action(createActionArgs(request));
+        expect.fail("Expected action to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(400);
+        expect((error as Response).statusText).toBe("Bad Request");
+      }
+    });
+  });
+
   describe("webhooks.companies", () => {
     it("returns 401 when HMAC validation fails", async () => {
       const { action } = await import("../webhooks.companies");

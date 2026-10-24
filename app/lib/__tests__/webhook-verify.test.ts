@@ -629,7 +629,7 @@ describe("verifyPayloadShopMatch", () => {
     expect(result).toBe("test-shop.myshopify.com");
   });
 
-  it("throws 400 when payload shop_domain is missing", () => {
+  it("throws 400 with generic message when payload shop_domain is missing", () => {
     const payload = { shop_id: 123 };
     try {
       verifyPayloadShopMatch("test-shop.myshopify.com", payload);
@@ -637,19 +637,19 @@ describe("verifyPayloadShopMatch", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(Response);
       expect((error as Response).status).toBe(400);
-      expect((error as Response).statusText).toBe("Missing shop_domain in payload");
+      expect((error as Response).statusText).toBe("Bad Request");
     }
   });
 
-  it("throws 401 when payload shop_domain does not match header", () => {
+  it("throws 400 with generic message when payload shop_domain does not match header", () => {
     const payload = { shop_domain: "other-shop.myshopify.com", shop_id: 123 };
     try {
       verifyPayloadShopMatch("test-shop.myshopify.com", payload);
       expect.fail("Expected verifyPayloadShopMatch to throw");
     } catch (error) {
       expect(error).toBeInstanceOf(Response);
-      expect((error as Response).status).toBe(401);
-      expect((error as Response).statusText).toBe("Payload shop_domain does not match header shop");
+      expect((error as Response).status).toBe(400);
+      expect((error as Response).statusText).toBe("Bad Request");
     }
   });
 
@@ -660,6 +660,7 @@ describe("verifyPayloadShopMatch", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(Response);
       expect((error as Response).status).toBe(400);
+      expect((error as Response).statusText).toBe("Bad Request");
     }
   });
 });
