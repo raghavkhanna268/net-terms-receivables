@@ -12,6 +12,8 @@ import type { ActionFunctionArgs } from "react-router";
  * 5. Reconcile mode enqueues messages
  * 6. Drain runs and returns result
  * 7. 500 response is generic (no raw error)
+ * 8. Error logging uses safeLog with error codes (no raw messages)
+ * 9. Response errors array uses 'code' not 'error'
  */
 
 // Mock SQL client
@@ -49,22 +51,38 @@ vi.mock("~/services/drain/processor.server", () => ({
   },
 }));
 
+// Mock log.server for error logging tests
+vi.mock("~/lib/log.server", () => ({
+  safeLog: vi.fn(),
+  toErrorCode: vi.fn((err) => {
+    if (err && typeof err === "object" && "code" in err) {
+      return (err as { code: string }).code;
+    }
+    if (err instanceof Error) {
+      return err.name !== "Error" ? err.name : "error";
+    }
+    return "unknown";
+  }),
+}));
+
 // NOTE: reconcile.server is not mocked because reconcile is disabled (returns 501)
 
 describe("jobs.drain route", () => {
   const VALID_SECRET = "test-drain-secret-12345";
   let originalConsole: typeof console.log;
+  let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     vi.resetModules();
     originalConsole = console.log;
     console.log = vi.fn();
-    console.error = vi.fn();
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
   afterEach(() => {
     console.log = originalConsole;
+    consoleErrorSpy.mockRestore();
   });
 
   function createRequest(
@@ -292,8 +310,6 @@ describe("jobs.drain route", () => {
       const result = (await response.json()) as { error: string };
       // Should be generic, not the raw error message
       expect(result.error).toBe("Internal server error");
-      // Error should be logged
-      expect(console.error).toHaveBeenCalled();
     });
   });
 
@@ -349,6 +365,104 @@ describe("jobs.drain route", () => {
       expect(response.status).toBe(500);
       const result = (await response.json()) as { error: string };
       expect(result.error).toBe("Internal server error");
+    });
+  });
+
+  describe("error logging (PII safety)", () => {
+    it("logs drain error with safeLog, not raw error", async () => {
+      const { safeLog } = await import("~/lib/log.server");
+      mockRunDrain.mockRejectedValueOnce(new TypeError("Connection failed"));
+
+      const { action } = await import("../jobs.drain");
+      const request = createRequest();
+
+      await action(createActionArgs(request));
+
+      expect(safeLog).toHaveBeenCalledWith("error", "drain_error", {
+        err: "TypeError",
+      });
+
+      // Verify raw error was not logged to console
+      expect(consoleErrorSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining("Connection failed")
+      );
+    });
+
+    it("error log does not contain shop domain", async () => {
+      const { safeLog } = await import("~/lib/log.server");
+
+      // Error with shop domain in message
+      mockRunDrain.mockRejectedValueOnce(new Error("Failed for test.myshopify.com"));
+
+      const { action } = await import("../jobs.drain");
+      const request = createRequest();
+
+      await action(createActionArgs(request));
+
+      // Check safeLog was called
+      expect(safeLog).toHaveBeenCalled();
+
+      // Get all safeLog calls and verify none contain myshopify.com
+      const calls = (safeLog as ReturnType<typeof vi.fn>).mock.calls;
+      for (const call of calls) {
+        const callStr = JSON.stringify(call);
+        expect(callStr).not.toContain("myshopify.com");
+      }
+    });
+
+    it("reconcile error uses safeLog with error code", async () => {
+      const { safeLog } = await import("~/lib/log.server");
+
+      // Mock the enqueueReconcileForAllShops to throw
+      vi.doMock("~/services/drain/reconcile.server", () => ({
+        enqueueReconcileForAllShops: vi.fn().mockRejectedValue(new Error("Module error")),
+      }));
+
+      vi.resetModules();
+      const { action } = await import("../jobs.drain");
+      const request = createRequest({ queryParams: { reconcile: "true" } });
+
+      await action(createActionArgs(request));
+
+      // Should have called safeLog for the error
+      expect(safeLog).toHaveBeenCalledWith(
+        "error",
+        "drain_reconcile_error",
+        expect.objectContaining({ err: expect.any(String) })
+      );
+    });
+  });
+
+  describe("response format (PII safety)", () => {
+    it("returns error codes only, not raw messages", async () => {
+      // Mock successful drain with errors
+      mockRunDrain.mockResolvedValueOnce({
+        processed: 5,
+        failed: 1,
+        deadLettered: 1,
+        skipped: 2,
+        noHandler: 0,
+        timedOut: false,
+        elapsedMs: 1500,
+        errors: [
+          { msgId: "123", topic: "ORDERS_CREATE", code: "network_error" },
+        ],
+      });
+
+      const { action } = await import("../jobs.drain");
+      const request = createRequest();
+
+      const response = await action(createActionArgs(request));
+      const body = (await response.json()) as { errors: Array<{ code?: string; error?: string }> };
+
+      // Verify errors array has 'code' not 'error'
+      expect(body.errors).toHaveLength(1);
+      expect(body.errors[0]).toHaveProperty("code", "network_error");
+      expect(body.errors[0]).not.toHaveProperty("error");
+
+      // Verify no shop domains in response
+      const responseStr = JSON.stringify(body);
+      expect(responseStr).not.toContain("myshopify.com");
     });
   });
 });

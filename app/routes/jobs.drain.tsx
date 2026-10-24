@@ -17,6 +17,7 @@
 import type { ActionFunctionArgs } from "react-router";
 import { getRequestSql } from "~/lib/request-context.server";
 import { runDrain, type DrainConfig } from "~/services/drain/processor.server";
+import { safeLog, toErrorCode } from "~/lib/log.server";
 
 /**
  * Constant-time comparison using byte lengths (Web Crypto style).
@@ -140,7 +141,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
         }
       );
     } catch (error) {
-      console.error("[drain] reconcile error:", error);
+      safeLog("error", "drain_reconcile_error", { err: toErrorCode(error) });
       return new Response(
         JSON.stringify({
           error: "Internal server error",
@@ -174,10 +175,8 @@ export async function action({ request, context }: ActionFunctionArgs) {
       headers: { "Content-Type": "application/json" },
     });
   } catch (error) {
-    // Log the full error details server-side
-    console.error("[drain] error:", error);
+    safeLog("error", "drain_error", { err: toErrorCode(error) });
 
-    // Return generic error response (no raw error.message to client)
     return new Response(
       JSON.stringify({
         error: "Internal server error",

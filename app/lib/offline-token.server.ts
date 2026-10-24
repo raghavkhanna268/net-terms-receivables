@@ -25,6 +25,7 @@
  */
 
 import type { Sql } from "./db-light.server";
+import { safeLog, shopHash } from "./log.server";
 
 /**
  * 5 minutes in milliseconds - matches the library's WITHIN_MILLISECONDS_OF_EXPIRY.
@@ -53,6 +54,7 @@ export type RefreshErrorCode =
   | "invalid_response"
   | "refresh_persist_failed"
   | "network_error"
+  | "http_error"
   | "unknown";
 
 /**
@@ -187,7 +189,7 @@ export async function refreshOfflineTokenIfNeeded(
     return {
       success: false,
       errorCode: "no_session",
-      error: `No offline session found for shop ${shop}`,
+      error: "No offline session found",
     };
   }
 
@@ -196,7 +198,7 @@ export async function refreshOfflineTokenIfNeeded(
     return {
       success: false,
       errorCode: "invalid_grant",
-      error: `Session for shop ${shop} is marked as needing re-authentication.`,
+      error: "Session needs re-authentication",
     };
   }
 
@@ -222,7 +224,7 @@ export async function refreshOfflineTokenIfNeeded(
       return {
         success: false,
         errorCode: "no_session",
-        error: `No offline session found for shop ${shop}`,
+        error: "No offline session found",
       };
     }
 
@@ -241,7 +243,7 @@ export async function refreshOfflineTokenIfNeeded(
       return {
         success: false,
         errorCode: "invalid_grant",
-        error: `Session for shop ${shop} is marked as needing re-authentication.`,
+        error: "Session needs re-authentication",
       };
     }
 
@@ -252,11 +254,14 @@ export async function refreshOfflineTokenIfNeeded(
     if (!usedRefreshToken) {
       // Mark session as needing re-auth with guarded update
       await markSessionNeedsReauthGuarded(tx, sessionId, null);
-      console.error(`[offline-token] no_refresh_token shop=${shop}`);
+      safeLog("error", "offline_token_no_refresh_token", {
+        shopHash: await shopHash(shop),
+        code: "no_refresh_token",
+      });
       return {
         success: false,
         errorCode: "no_refresh_token",
-        error: `No refresh token available for shop ${shop}. Re-authentication required.`,
+        error: "No refresh token available",
       };
     }
 
@@ -267,11 +272,14 @@ export async function refreshOfflineTokenIfNeeded(
     ) {
       // Mark session as needing re-auth with guarded update
       await markSessionNeedsReauthGuarded(tx, sessionId, usedRefreshToken);
-      console.error(`[offline-token] refresh_token_expired shop=${shop}`);
+      safeLog("error", "offline_token_refresh_token_expired", {
+        shopHash: await shopHash(shop),
+        code: "invalid_grant",
+      });
       return {
         success: false,
         errorCode: "invalid_grant",
-        error: `Refresh token expired for shop ${shop}. Re-authentication required.`,
+        error: "Refresh token expired",
       };
     }
 
@@ -310,7 +318,10 @@ export async function refreshOfflineTokenIfNeeded(
         // No concurrent winner - mark session as needing re-auth
         // Use guarded update to only mark if our refresh token is still current
         await markSessionNeedsReauthGuarded(tx, sessionId, usedRefreshToken);
-        console.error(`[offline-token] invalid_grant shop=${shop}`);
+        safeLog("error", "offline_token_invalid_grant", {
+          shopHash: await shopHash(shop),
+          code: "invalid_grant",
+        });
       }
 
       return {
@@ -326,7 +337,7 @@ export async function refreshOfflineTokenIfNeeded(
       return {
         success: false,
         errorCode: "invalid_response",
-        error: `Token refresh returned empty access_token for shop ${shop}`,
+        error: "Token refresh returned empty access_token",
       };
     }
 
@@ -336,7 +347,7 @@ export async function refreshOfflineTokenIfNeeded(
       return {
         success: false,
         errorCode: "invalid_response",
-        error: `Invalid expires_in from Shopify for shop ${shop}`,
+        error: "Invalid expires_in from Shopify",
       };
     }
 
@@ -385,14 +396,13 @@ export async function refreshOfflineTokenIfNeeded(
 
     // Guard failed - another process updated the refresh token
     // This shouldn't happen with advisory lock, but handle defensively
-    console.debug(`[offline-token] write guard failed for shop=${shop}, re-reading`);
     const finalSession = await readSessionInTx(tx, sessionId);
 
     if (!finalSession) {
       return {
         success: false,
         errorCode: "no_session",
-        error: `Session disappeared for shop ${shop}`,
+        error: "Session disappeared during refresh",
       };
     }
 
@@ -400,7 +410,7 @@ export async function refreshOfflineTokenIfNeeded(
       return {
         success: false,
         errorCode: "invalid_grant",
-        error: `Session for shop ${shop} is marked as needing re-authentication.`,
+        error: "Session needs re-authentication",
       };
     }
 
@@ -517,14 +527,14 @@ async function performTokenRefresh(
         return {
           success: false,
           errorCode: "invalid_grant",
-          error: `Token refresh failed for shop ${shop}: invalid_grant. Re-authentication required.`,
+          error: "Token refresh failed: invalid_grant",
         };
       }
 
       return {
         success: false,
-        errorCode: "unknown",
-        error: `Token refresh failed for shop ${shop}: HTTP ${response.status}`,
+        errorCode: "http_error",
+        error: `Token refresh failed: HTTP ${response.status}`,
       };
     }
 
@@ -535,7 +545,7 @@ async function performTokenRefresh(
       return {
         success: false,
         errorCode: "invalid_response",
-        error: `Token refresh returned invalid access_token for shop ${shop}`,
+        error: "Token refresh returned invalid access_token",
       };
     }
 
@@ -543,7 +553,7 @@ async function performTokenRefresh(
       return {
         success: false,
         errorCode: "invalid_response",
-        error: `Token refresh returned invalid expires_in for shop ${shop}`,
+        error: "Token refresh returned invalid expires_in",
       };
     }
 
@@ -564,15 +574,29 @@ async function performTokenRefresh(
       return {
         success: false,
         errorCode: "network_error",
-        error: `Token refresh timed out for shop ${shop} (>${timeoutMs}ms). Retryable.`,
+        error: "Token refresh timed out",
       };
     }
 
     return {
       success: false,
       errorCode: "network_error",
-      error: `Token refresh network error for shop ${shop}: ${err instanceof Error ? err.message : "Unknown"}`,
+      error: "Token refresh network error",
     };
+  }
+}
+
+/**
+ * Error thrown when offline token operations fail.
+ * Carries only the error code, never the shop domain or raw messages.
+ */
+export class OfflineTokenError extends Error {
+  constructor(
+    public readonly code: RefreshErrorCode,
+    message?: string
+  ) {
+    super(message ?? `Offline token error: ${code}`);
+    this.name = "OfflineTokenError";
   }
 }
 
@@ -587,7 +611,7 @@ async function performTokenRefresh(
  * @param clientId - Shopify app's API key
  * @param clientSecret - Shopify app's API secret
  * @returns Valid access token
- * @throws Error if token cannot be obtained or refreshed
+ * @throws OfflineTokenError if token cannot be obtained or refreshed
  */
 export async function getValidOfflineToken(
   sql: Sql,
@@ -598,7 +622,7 @@ export async function getValidOfflineToken(
   const result = await refreshOfflineTokenIfNeeded(sql, shop, clientId, clientSecret);
 
   if (!result.success || !result.accessToken) {
-    throw new Error(result.error ?? "Failed to get valid offline token");
+    throw new OfflineTokenError(result.errorCode ?? "unknown");
   }
 
   return result.accessToken;

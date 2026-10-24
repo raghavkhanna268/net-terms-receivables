@@ -55,6 +55,7 @@ import {
   incrementOrderRefetchNull,
   enqueueReconcileOrders,
 } from "./reconcile-handlers.server";
+import { toErrorCode, safeLog, shopHash } from "~/lib/log.server";
 
 /**
  * Configuration for drain processing.
@@ -402,10 +403,11 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
   // If node is null, order may be >60 days old (without read_all_orders)
   // NEVER assume deleted - this would break Net 60/90 invoices
   if (!result.data?.node) {
-    // Log distinct warning (shop and order GID only, no PII)
-    console.warn(
-      `[order_refetch_null] shop=${message.shop} order=${message.resourceGid} topic=${message.topic}`
-    );
+    safeLog("warn", "order_refetch_null", {
+      shopHash: await shopHash(message.shop),
+      orderGid: message.resourceGid,
+      topic: message.topic,
+    });
 
     // Increment metric counter (S10b aggregate table)
     await incrementOrderRefetchNull(sql, message.shop);
@@ -587,11 +589,12 @@ async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResul
 
   // Log warning if fallback was used
   if (result.usedFallback) {
-    console.warn(
-      `[customer_pii_access_denied_fallback] shop=${message.shop} ` +
-        `customer=${message.resourceGid} topic=${message.topic} ` +
-        `fields=email,displayName`
-    );
+    safeLog("warn", "customer_pii_access_denied_fallback", {
+      shopHash: await shopHash(message.shop),
+      customerId: message.resourceGid,
+      topic: message.topic,
+      fields: "email,displayName",
+    });
   }
 
   // Process the customer
@@ -889,8 +892,8 @@ export interface DrainResult {
   timedOut: boolean;
   /** Total wall time in milliseconds */
   elapsedMs: number;
-  /** Errors encountered (for logging) */
-  errors: Array<{ msgId: string; topic: string; error: string }>;
+  /** Errors encountered (for logging) - code only, no raw messages */
+  errors: Array<{ msgId: string; topic: string; code: string }>;
 }
 
 /**
@@ -1044,10 +1047,10 @@ async function processSyncQueue(
           syncResult.retryable === false || msg.read_ct >= config.maxRetries;
 
         if (shouldDlq) {
-          const dlqReason =
-            syncResult.retryable === false
-              ? `Non-retryable error: ${syncResult.error || "Unknown"}`
-              : syncResult.error || "Max retries exceeded";
+          const errorCode = syncResult.errorCode ?? toErrorCode(syncResult.error);
+          const dlqReason = syncResult.retryable === false
+            ? `non_retryable:${errorCode}`
+            : errorCode;
 
           // S13: Record backstop.failed for ORDERS_CREATE when DLQ'ing
           if (msg.message.topic === "ORDERS_CREATE") {
@@ -1065,7 +1068,7 @@ async function processSyncQueue(
                 invoiceInfo.shopId,
                 msg.message.resourceGid,
                 invoiceInfo.buyerAccountId,
-                dlqReason
+                errorCode
               );
             }
           }
@@ -1085,13 +1088,13 @@ async function processSyncQueue(
         result.errors.push({
           msgId: msg.msg_id,
           topic: msg.message.topic,
-          error: syncResult.error || "Unknown error",
+          code: syncResult.errorCode ?? toErrorCode(syncResult.error),
         });
       }
     } catch (err) {
       // Uncaught exceptions are treated as retryable (transient failures)
       // Only DLQ after max retries to avoid losing messages on transient issues
-      const errorMsg = err instanceof Error ? err.message : "Unknown error";
+      const errorCode = toErrorCode(err);
       if (msg.read_ct >= config.maxRetries) {
         // S13: Record backstop.failed for ORDERS_CREATE when DLQ'ing
         if (msg.message.topic === "ORDERS_CREATE") {
@@ -1109,12 +1112,12 @@ async function processSyncQueue(
               invoiceInfo.shopId,
               msg.message.resourceGid,
               invoiceInfo.buyerAccountId,
-              errorMsg
+              errorCode
             );
           }
         }
 
-        await moveToDeadLetter(sql, S6_QUEUES.SYNC, msg.msg_id, msg.message, errorMsg);
+        await moveToDeadLetter(sql, S6_QUEUES.SYNC, msg.msg_id, msg.message, errorCode);
         result.deadLettered++;
       } else {
         result.failed++;
@@ -1122,7 +1125,7 @@ async function processSyncQueue(
       result.errors.push({
         msgId: msg.msg_id,
         topic: msg.message.topic,
-        error: errorMsg,
+        code: errorCode,
       });
     }
   }
@@ -1208,6 +1211,7 @@ async function processBulkQueue(
       } else {
         // Error handling based on errorType classification
         const errorType = bulkResult.errorType;
+        const errorCode = bulkResult.errorCode ?? toErrorCode(bulkResult.error);
 
         if (errorType === "permanent") {
           // Permanent error (4xx, bad data, exhausted retries) - go to DLQ
@@ -1216,7 +1220,7 @@ async function processBulkQueue(
             S6_QUEUES.BULK,
             msg.msg_id,
             msg.message,
-            bulkResult.error || "Permanent error"
+            `permanent:${errorCode}`
           );
           result.deadLettered++;
         } else if (errorType === "retryable") {
@@ -1232,7 +1236,7 @@ async function processBulkQueue(
               S6_QUEUES.BULK,
               msg.msg_id,
               msg.message,
-              bulkResult.error || "Max retries exceeded"
+              errorCode
             );
             result.deadLettered++;
           } else {
@@ -1242,13 +1246,13 @@ async function processBulkQueue(
         result.errors.push({
           msgId: msg.msg_id,
           topic: msg.message.topic,
-          error: bulkResult.error || "Unknown error",
+          code: errorCode,
         });
       }
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : "Unknown error";
+      const errorCode = toErrorCode(err);
       if (msg.read_ct >= config.maxRetries) {
-        await moveToDeadLetter(sql, S6_QUEUES.BULK, msg.msg_id, msg.message, errorMsg);
+        await moveToDeadLetter(sql, S6_QUEUES.BULK, msg.msg_id, msg.message, errorCode);
         result.deadLettered++;
       } else {
         result.failed++;
@@ -1256,7 +1260,7 @@ async function processBulkQueue(
       result.errors.push({
         msgId: msg.msg_id,
         topic: msg.message.topic,
-        error: errorMsg,
+        code: errorCode,
       });
     }
   }

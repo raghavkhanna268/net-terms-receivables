@@ -2,7 +2,8 @@ import type { EntryContext, AppLoadContext } from "react-router";
 import { ServerRouter } from "react-router";
 import { renderToReadableStream } from "react-dom/server";
 import { isbot } from "isbot";
-import { captureException } from "./lib/sentry";
+import { captureExceptionWithTags } from "./lib/sentry";
+import { safeLog, toErrorCode } from "./lib/log.server";
 
 export const streamTimeout = 5000;
 
@@ -17,7 +18,8 @@ export function handleError(
   if (request.signal.aborted) {
     return;
   }
-  captureException(error);
+  const code = toErrorCode(error);
+  captureExceptionWithTags(error, { code });
 }
 
 export default async function handleRequest(
@@ -41,7 +43,7 @@ export default async function handleRequest(
     {
       signal: AbortSignal.timeout(streamTimeout),
       onError(error: unknown) {
-        console.error(error);
+        safeLog("error", "ssr_render_error", { err: toErrorCode(error) });
         responseStatusCode = 500;
       },
     }

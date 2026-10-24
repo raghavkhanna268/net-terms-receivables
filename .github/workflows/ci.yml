@@ -126,6 +126,9 @@ jobs:
       - name: Apply database migrations
         run: npx prisma migrate deploy
 
+      - name: Logging guard (PII/domain redaction)
+        run: ./scripts/ci/check-logging.sh
+
       - name: Lint
         run: npm run lint
 
