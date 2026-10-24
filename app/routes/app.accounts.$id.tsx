@@ -492,8 +492,8 @@ export default function AccountPage() {
 
       {account.isGated && (
         <s-section>
-          <s-banner tone="warning" heading="Credit limit is read-only on your current plan">
-            Holds still work. Upgrade to edit credit limits.
+          <s-banner tone="warning" heading="Credit limit and account details are read-only on your current plan">
+            Holds still work. Upgrade to edit credit settings.
           </s-banner>
         </s-section>
       )}
@@ -708,8 +708,8 @@ export default function AccountPage() {
                   : "No limit"}
               </s-text>
             </s-paragraph>
-            <s-banner tone="info" heading="Upgrade to edit credit limits">
-              Credit limit editing is only available on paid plans.
+            <s-banner tone="info" heading="Upgrade to edit credit settings">
+              Credit limit and account detail editing is only available on paid plans.
               Holds still work on all plans.
             </s-banner>
             <Form method="post">
