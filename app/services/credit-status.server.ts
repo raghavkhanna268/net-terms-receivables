@@ -21,7 +21,7 @@ import {
 } from "~/lib/metafields-contract";
 import { shopifyGraphQLRequest, type ShopifyClientResult } from "./shopify-client.server";
 import { hasOverdueInvoices } from "./overdue.server";
-import { safeLog, toErrorCode, isSafeCode } from "~/lib/log.server";
+import { safeLog, toErrorCode } from "~/lib/log.server";
 
 // Re-export HoldReasonCode for use by credit-status-recompute.server.ts
 export type { HoldReasonCode };
@@ -70,6 +70,57 @@ export function toPermanentSyncErrorCode(errorCode: string | undefined): Permane
   // These are NOT permanent: they might resolve on retry, so leave marker NULL
   // and let the nightly resync retry them (at most once per UTC day)
   return null;
+}
+
+/**
+ * Pattern for simple error codes: lowercase letter followed by lowercase alphanumerics/underscores.
+ * Examples: no_session, access_denied, http_404
+ */
+const SIMPLE_CODE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+
+/**
+ * Pattern for GraphQL compound error codes: graphql_error: followed by 1-5 uppercase extension codes.
+ * Examples: graphql_error:ACCESS_DENIED, graphql_error:ACCESS_DENIED,THROTTLED
+ */
+const GRAPHQL_CODE_PATTERN = /^graphql_error:[A-Z][A-Z0-9_]{0,40}(,[A-Z][A-Z0-9_]{0,40}){0,4}$/;
+
+/**
+ * Validates an error code for safe use in DLQ, audit, and result.
+ * Returns the code unchanged if it matches allowed patterns, otherwise falls back to a safe value.
+ * 
+ * This is a LOCAL validator for credit-status sync errors only.
+ * It does NOT modify the global safeLog behavior.
+ * 
+ * Allowed patterns:
+ * - Simple codes: /^[a-z][a-z0-9_]{0,63}$/ (e.g., no_session, http_404)
+ * - GraphQL codes: /^graphql_error:[A-Z][A-Z0-9_]{0,40}(,[A-Z]...){0,4}$/ with total length <= 128
+ * 
+ * Fallback:
+ * - If starts with 'graphql_error:' but doesn't match pattern: returns 'graphql_error'
+ * - Otherwise: returns toErrorCode(new Error(code))
+ * 
+ * @param code - Raw error code from Shopify client
+ * @returns Safe error code for DLQ/audit/result
+ */
+export function toSafeSyncErrorCode(code: string | undefined): string {
+  if (!code) return "unknown";
+  
+  // Simple codes: lowercase with underscores
+  if (SIMPLE_CODE_PATTERN.test(code)) {
+    return code;
+  }
+  
+  // GraphQL compound codes: must match pattern AND be <= 128 chars
+  if (code.startsWith("graphql_error:")) {
+    if (GRAPHQL_CODE_PATTERN.test(code) && code.length <= 128) {
+      return code;
+    }
+    // Invalid graphql_error format - return generic
+    return "graphql_error";
+  }
+  
+  // Unknown format - use toErrorCode fallback
+  return toErrorCode(new Error(code));
 }
 
 /**
@@ -892,9 +943,9 @@ export async function syncCreditStatusMetafield(
     const rawErrorCode = metafieldResult.errorCode ?? toErrorCode(metafieldResult.error);
     const retryable = metafieldResult.retryable;
     
-    // For return/log/audit/DLQ: use original client code if safe, otherwise toErrorCode fallback.
-    // This keeps the specific error code (e.g., graphql_error:ACCESS_DENIED) in DLQ and logs.
-    const errorCode = isSafeCode(rawErrorCode) ? rawErrorCode : toErrorCode(metafieldResult.error);
+    // For return/audit/DLQ: validate code with local toSafeSyncErrorCode.
+    // This keeps specific codes (e.g., graphql_error:ACCESS_DENIED) in DLQ while filtering unsafe values.
+    const errorCode = toSafeSyncErrorCode(rawErrorCode);
     
     // For marker column only: map to known permanent codes, or null if unknown.
     // Unknown non-retryable codes (graphql_error:*, http_400, http_404, unknown) leave marker NULL
@@ -902,6 +953,7 @@ export async function syncCreditStatusMetafield(
     // This prevents a single transient error from permanently excluding a paid buyer.
     const markerCode = retryable === false ? toPermanentSyncErrorCode(rawErrorCode) : null;
 
+    // Log with errorCode under 'err' key. If safeLog strips compound codes, that's fine.
     safeLog("error", "credit_status_metafield_sync_failed", {
       buyerAccountId,
       err: errorCode,

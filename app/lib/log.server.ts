@@ -135,10 +135,9 @@ const WEB_VITALS_VALUE_BOUNDS = { min: 0, maxMs: 60000, maxCls: 10 };
 
 /**
  * Pattern for valid error codes.
- * Must start with a letter, contain only alphanumerics, underscores, colons, and commas.
- * Max 128 chars. Colons and commas allow compound codes like graphql_error:ACCESS_DENIED,USER_ERROR.
+ * Must start with a letter, contain only alphanumerics/underscores, max 64 chars.
  */
-const SAFE_CODE_PATTERN = /^[A-Za-z][A-Za-z0-9_:,]{0,127}$/;
+const SAFE_CODE_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 
 /**
  * Check if a field key is allowlisted.
@@ -157,9 +156,8 @@ function isSensitiveValue(value: string): boolean {
 /**
  * Check if a string is a safe error code.
  * Must match safe pattern and not contain sensitive patterns.
- * Exported for use in credit-status error handling.
  */
-export function isSafeCode(code: string): boolean {
+function isSafeCode(code: string): boolean {
   return SAFE_CODE_PATTERN.test(code) && !isSensitiveValue(code);
 }
 

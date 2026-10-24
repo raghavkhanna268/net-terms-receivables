@@ -1818,6 +1818,82 @@ describeWithDb("permanent sync error handling (#204)", () => {
     });
   });
 
+  describe("toSafeSyncErrorCode (local validator)", () => {
+    it("passes valid simple codes unchanged", async () => {
+      const { toSafeSyncErrorCode } = await import("../credit-status.server");
+      
+      expect(toSafeSyncErrorCode("no_session")).toBe("no_session");
+      expect(toSafeSyncErrorCode("access_denied")).toBe("access_denied");
+      expect(toSafeSyncErrorCode("http_404")).toBe("http_404");
+      expect(toSafeSyncErrorCode("user_error")).toBe("user_error");
+      expect(toSafeSyncErrorCode("graphql_query_error")).toBe("graphql_query_error");
+    });
+
+    it("passes valid graphql_error compound codes unchanged", async () => {
+      const { toSafeSyncErrorCode } = await import("../credit-status.server");
+      
+      expect(toSafeSyncErrorCode("graphql_error:ACCESS_DENIED")).toBe("graphql_error:ACCESS_DENIED");
+      expect(toSafeSyncErrorCode("graphql_error:THROTTLED")).toBe("graphql_error:THROTTLED");
+      expect(toSafeSyncErrorCode("graphql_error:ACCESS_DENIED,THROTTLED")).toBe("graphql_error:ACCESS_DENIED,THROTTLED");
+      expect(toSafeSyncErrorCode("graphql_error:A,B,C,D,E")).toBe("graphql_error:A,B,C,D,E");
+    });
+
+    it("falls back for sentinel lowercase raw message", async () => {
+      const { toSafeSyncErrorCode } = await import("../credit-status.server");
+      
+      // Raw error message doesn't match simple code pattern (has spaces)
+      const result = toSafeSyncErrorCode("raw error message with spaces");
+      expect(result).not.toBe("raw error message with spaces");
+      expect(result).toBe("error"); // toErrorCode fallback
+    });
+
+    it("falls back for code with spaces", async () => {
+      const { toSafeSyncErrorCode } = await import("../credit-status.server");
+      
+      const result = toSafeSyncErrorCode("invalid code with spaces");
+      expect(result).not.toContain("invalid code with spaces");
+    });
+
+    it("falls back for code over length limit", async () => {
+      const { toSafeSyncErrorCode } = await import("../credit-status.server");
+      
+      // Create a graphql_error code over 128 chars
+      const longCode = "graphql_error:" + "A".repeat(200);
+      const result = toSafeSyncErrorCode(longCode);
+      expect(result).toBe("graphql_error"); // Falls back to generic
+    });
+
+    it("falls back for email-like string", async () => {
+      const { toSafeSyncErrorCode } = await import("../credit-status.server");
+      
+      const result = toSafeSyncErrorCode("user@example.com");
+      expect(result).not.toBe("user@example.com");
+      expect(result).toBe("error"); // toErrorCode fallback
+    });
+
+    it("falls back for graphql_error with lowercase extensions", async () => {
+      const { toSafeSyncErrorCode } = await import("../credit-status.server");
+      
+      // Extension codes must be uppercase
+      const result = toSafeSyncErrorCode("graphql_error:access_denied");
+      expect(result).toBe("graphql_error"); // Falls back to generic
+    });
+
+    it("falls back for graphql_error with too many extensions", async () => {
+      const { toSafeSyncErrorCode } = await import("../credit-status.server");
+      
+      // Max 5 extension codes
+      const result = toSafeSyncErrorCode("graphql_error:A,B,C,D,E,F");
+      expect(result).toBe("graphql_error"); // Falls back to generic
+    });
+
+    it("returns 'unknown' for undefined/null", async () => {
+      const { toSafeSyncErrorCode } = await import("../credit-status.server");
+      
+      expect(toSafeSyncErrorCode(undefined)).toBe("unknown");
+    });
+  });
+
   describe("sync_failed audit event", () => {
     it("writes credit_status.sync_failed audit event on failure", async () => {
       // Set up account that needs sync
@@ -1892,8 +1968,9 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
   const TEST_SHOP_DOMAIN = `drain-test-${TEST_SUFFIX}.myshopify.com`;
   const TEST_ACCOUNT_ID = `acc-drain-${TEST_SUFFIX}`;
   const TEST_COMPANY_LOCATION_ID = `gid://shopify/CompanyLocation/${TEST_SUFFIX}`;
-  // SENTINEL contains an email pattern to ensure it fails isSafeCode and gets redacted
-  const SENTINEL_RAW_GQL_TEXT = "user@sentinel-leak-test.example.com";
+  // SENTINEL contains lowercase raw text that fails toSafeSyncErrorCode pattern
+  // (not a valid simple code or graphql_error:UPPERCASE format)
+  const SENTINEL_RAW_GQL_TEXT = "raw error message with spaces";
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
@@ -2417,8 +2494,8 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
       expect(auditData.buyerAccountId).toBe(TEST_ACCOUNT_ID);
       // syncVersion is incremented by recomputeCreditStatus (50 -> 51)
       expect(auditData.syncVersion).toBe(51);
-      // errorCode should be 'string_error' (the SENTINEL email fails isSafeCode)
-      expect(auditData.errorCode).toBe("string_error");
+      // errorCode should be 'graphql_error' (the SENTINEL fails toSafeSyncErrorCode pattern)
+      expect(auditData.errorCode).toBe("graphql_error");
       
       // Verify the sentinel is absent from the audit data
       const dataStr = JSON.stringify(auditData);
