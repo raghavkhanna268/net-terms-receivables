@@ -327,6 +327,8 @@ export interface SeedState {
   companies: Map<string, CompanyData>;
   paymentTermsTemplates: PaymentTermsTemplate[];
   createdCount: { companies: number; locations: number; orders: number; roleAssignments: number; dbRules: number; dbAccounts: number };
+  unchangedCount: { companies: number; locations: number; orders: number; roleAssignments: number };
+  driftedCount: { companies: number };
   skippedCount: { companies: number; orders: number; roleAssignments: number };
   deletedCount: { companies: number; orders: number };
   failedCount: { locations: number; orders: number; roleAssignments: number };
@@ -670,14 +672,16 @@ async function deleteSeededOrders(state: SeedState): Promise<void> {
         nodes { id name tags }
       }
     }
-  `, { query: `tag:${SEED_TAG}` });
+  `, { query: `tag:'${SEED_TAG}'` });
 
-  const orders = result.data?.orders.nodes ?? [];
-  console.log(`  Found ${orders.length} seeded orders`);
+  // Strict match: only count orders that actually have the exact SEED_TAG
+  const allOrders = result.data?.orders.nodes ?? [];
+  const seededOrders = allOrders.filter(o => o.tags.includes(SEED_TAG));
+  console.log(`  Found ${seededOrders.length} seeded orders (strict match)`);
   // Note: orders cannot be deleted via Admin API
-  state.deletedCount.orders = orders.length;
+  state.deletedCount.orders = seededOrders.length;
 
-  if (orders.length > 0) {
+  if (seededOrders.length > 0) {
     console.log("  ⚠️  Orders cannot be deleted via API. They remain tagged for identification.");
   }
 }
@@ -685,6 +689,7 @@ async function deleteSeededOrders(state: SeedState): Promise<void> {
 async function deleteSeededCompanies(state: SeedState): Promise<void> {
   console.log("  Searching for seeded companies...");
 
+  // Use unquoted wildcard - quoting makes Shopify treat '*' as a literal
   const result = await graphql<{ companies: { nodes: CompanyNode[] } }>(state, `
     query FindSeededCompanies($query: String!) {
       companies(first: 50, query: $query) {
@@ -693,10 +698,12 @@ async function deleteSeededCompanies(state: SeedState): Promise<void> {
     }
   `, { query: `external_id:${SEED_PREFIX}*` });
 
-  const companies = result.data?.companies.nodes ?? [];
-  console.log(`  Found ${companies.length} seeded companies`);
+  // Safety filter: only delete companies whose externalId actually starts with SEED_PREFIX
+  const allCompanies = result.data?.companies.nodes ?? [];
+  const seededCompanies = allCompanies.filter(c => c.externalId?.startsWith(SEED_PREFIX));
+  console.log(`  Found ${seededCompanies.length} seeded companies (strict match)`);
 
-  for (const company of companies) {
+  for (const company of seededCompanies) {
     // Mutations must not retry on network errors (may have executed)
     const deleteResult = await graphql<{ companyDelete: { deletedCompanyId: string; userErrors: UserError[] } }>(
       state,
@@ -728,21 +735,40 @@ export async function seedCompanies(state: SeedState): Promise<void> {
     const existing = await findCompanyByExternalId(state, externalId);
 
     if (existing) {
-      console.log(`  ⏭️  ${seed.name} already exists (${externalId})`);
-      
       // Fetch contact roles for role assignment
       const contactRoles = await fetchCompanyContactRoles(state, existing.id);
       const contactId = existing.contacts.edges[0]?.node.id ?? "";
+      const existingEmail = existing.contacts.edges[0]?.node.customer.email ?? "";
+      
+      // Compare fixture fields with existing values
+      const nameMatches = existing.name === seed.name;
+      const emailMatches = existingEmail.toLowerCase() === seed.contact.email.toLowerCase();
+      const fixtureMatches = nameMatches && emailMatches;
+      
+      if (fixtureMatches) {
+        console.log(`  ✓ ${seed.name} unchanged (${externalId})`);
+        state.unchangedCount.companies++;
+      } else {
+        console.log(`  ⚠️  ${seed.name} drifted from fixture (${externalId})`);
+        if (!nameMatches) console.log(`      Name: "${existing.name}" vs fixture "${seed.name}"`);
+        if (!emailMatches) console.log(`      Email: "${existingEmail}" vs fixture "${seed.contact.email}"`);
+        state.driftedCount.companies++;
+      }
       
       // Build locations map from existing data
       const locations = new Map<number, string>();
+      let existingLocationCount = 0;
       for (const edge of existing.locations.edges) {
         for (const loc of LOCATION_TERMS) {
           if (edge.node.name.includes(loc.suffix)) {
             locations.set(loc.dueInDays, edge.node.id);
+            existingLocationCount++;
           }
         }
       }
+      
+      // Count existing locations as unchanged
+      state.unchangedCount.locations += existingLocationCount;
       
       // Store company data early for role assignment
       const companyData: CompanyData = {
@@ -792,7 +818,6 @@ export async function seedCompanies(state: SeedState): Promise<void> {
       }
       
       state.companies.set(seed.key, companyData);
-      state.skippedCount.companies++;
       continue;
     }
 
@@ -825,33 +850,55 @@ export async function seedCompanies(state: SeedState): Promise<void> {
   }
 }
 
+/**
+ * Find a company by exact externalId match.
+ * 
+ * IMPORTANT: Shopify's `companies(query: "external_id:...")` uses fuzzy, tokenised search.
+ * A search for "ntr-seed-company-1" can return "ntr-seed-company-10" or other partial matches.
+ * We paginate up to MAX_SEARCH_PAGES and filter client-side for exact match.
+ * 
+ * @returns The company with exact externalId match, or null if not found
+ */
+interface CompaniesSearchResult {
+  companies: {
+    nodes: CompanyNode[];
+    pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  };
+}
+
 export async function findCompanyByExternalId(
   state: SeedState,
   externalId: string
 ): Promise<CompanyNode | null> {
-  const query = `
-    query FindCompany($query: String!) {
-      companies(first: 1, query: $query) {
-        nodes {
-          id
-          name
-          externalId
-          locations(first: 10) {
-            edges { node { id name } }
-          }
-          contacts(first: 1) {
-            edges { node { id customer { id email } } }
-          }
-        }
-      }
+  let cursor: string | undefined = undefined;
+  
+  for (let page = 0; page < MAX_SEARCH_PAGES; page++) {
+    const variables: { query: string; after?: string } = { query: `external_id:'${externalId}'` };
+    if (cursor) variables.after = cursor;
+    
+    const response: GraphQLResponse<CompaniesSearchResult> = await graphql<CompaniesSearchResult>(
+      state,
+      FIND_COMPANY_BY_EXTERNAL_ID_QUERY,
+      variables
+    );
+
+    const companies = response.data?.companies.nodes ?? [];
+    
+    // Strict match: return if externalId matches exactly
+    const exactMatch = companies.find((c: CompanyNode) => c.externalId === externalId);
+    if (exactMatch) {
+      return exactMatch;
     }
-  `;
-
-  const result = await graphql<{ companies: { nodes: CompanyNode[] } }>(state, query, {
-    query: `external_id:${externalId}`,
-  });
-
-  return result.data?.companies.nodes[0] ?? null;
+    
+    const hasNextPage = response.data?.companies.pageInfo?.hasNextPage ?? false;
+    if (!hasNextPage) {
+      return null;
+    }
+    cursor = response.data?.companies.pageInfo?.endCursor ?? undefined;
+  }
+  
+  console.log(`  ⚠️  Search for company with externalId "${externalId}" exceeded ${MAX_SEARCH_PAGES} pages`);
+  return null;
 }
 
 /**
@@ -1135,6 +1182,74 @@ export const COMPANY_LOCATION_ASSIGN_ROLES_MUTATION = `
 `;
 
 /**
+ * Query to find a company by externalId.
+ * 
+ * NOTE: Shopify's `companies(query: "external_id:...")` uses fuzzy, tokenised search.
+ * A search for "ntr-seed-company-1" can return "ntr-seed-company-10".
+ * We paginate up to MAX_SEARCH_PAGES and filter client-side for exact match.
+ */
+export const FIND_COMPANY_BY_EXTERNAL_ID_QUERY = `
+  query FindCompany($query: String!, $after: String) {
+    companies(first: 10, query: $query, after: $after) {
+      nodes {
+        id
+        name
+        externalId
+        locations(first: 10) {
+          edges { node { id name } }
+        }
+        contacts(first: 1) {
+          edges { node { id customer { id email } } }
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`;
+
+/**
+ * Query to find an order by tag.
+ * 
+ * NOTE: Shopify's `orders(query: "tag:...")` uses fuzzy, tokenised search.
+ * We paginate up to MAX_SEARCH_PAGES and filter client-side for exact tag match.
+ */
+export const FIND_ORDER_BY_TAG_QUERY = `
+  query FindOrder($query: String!, $after: String) {
+    orders(first: 10, query: $query, after: $after) {
+      nodes { id name tags }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`;
+
+/**
+ * Query to find a customer by email.
+ * 
+ * NOTE: Shopify's `customers(query: "email:...")` uses fuzzy search.
+ * We paginate up to MAX_SEARCH_PAGES and filter for exact email match.
+ */
+export const FIND_CUSTOMER_BY_EMAIL_QUERY = `
+  query FindCustomer($query: String!, $after: String) {
+    customers(first: 10, query: $query, after: $after) {
+      nodes { id email tags }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`;
+
+/** Maximum pages to fetch when searching for exact matches (prevents runaway pagination) */
+export const MAX_SEARCH_PAGES = 10;
+
+/**
  * Build variables for companyLocationAssignRoles mutation.
  * Exported for schema validation testing.
  */
@@ -1238,7 +1353,7 @@ export async function ensureContactRoleOnLocation(
   // Check if contact already has a role on this location
   const alreadyAssigned = await hasContactRoleOnLocation(state, locationId, companyData.contactId);
   if (alreadyAssigned) {
-    state.skippedCount.roleAssignments++;
+    state.unchangedCount.roleAssignments++;
     return true;
   }
 
@@ -1295,8 +1410,8 @@ export async function seedOrders(state: SeedState): Promise<void> {
     // Check if order already exists (idempotency)
     const existingOrder = await findOrderByTag(state, orderKey);
     if (existingOrder) {
-      console.log(`  ⏭️  [${orderIndex}/${totalOrders}] Order already exists (${existingOrder.name})`);
-      state.skippedCount.orders++;
+      console.log(`  ✓ [${orderIndex}/${totalOrders}] Order unchanged (${existingOrder.name})`);
+      state.unchangedCount.orders++;
       continue;
     }
 
@@ -1383,20 +1498,50 @@ export async function seedOrders(state: SeedState): Promise<void> {
   }
 }
 
-/**
- * Query to find an order by tag (used for idempotency check).
- */
-export const FIND_ORDER_BY_TAG_QUERY = `
-  query FindOrder($query: String!) {
-    orders(first: 1, query: $query) {
-      nodes { id name tags }
-    }
-  }
-`;
+interface OrdersSearchResult {
+  orders: {
+    nodes: OrderNode[];
+    pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  };
+}
 
+/**
+ * Find an order by exact tag match.
+ * 
+ * IMPORTANT: Shopify's `orders(query: "tag:...")` uses fuzzy, tokenised search.
+ * We paginate up to MAX_SEARCH_PAGES and filter client-side for exact tag match.
+ * 
+ * @returns The order with exact tag match, or null if not found
+ */
 export async function findOrderByTag(state: SeedState, tag: string): Promise<OrderNode | null> {
-  const result = await graphql<{ orders: { nodes: OrderNode[] } }>(state, FIND_ORDER_BY_TAG_QUERY, { query: `tag:'${tag}'` });
-  return result.data?.orders.nodes[0] ?? null;
+  let cursor: string | undefined = undefined;
+  
+  for (let page = 0; page < MAX_SEARCH_PAGES; page++) {
+    const variables: { query: string; after?: string } = { query: `tag:'${tag}'` };
+    if (cursor) variables.after = cursor;
+    
+    const response: GraphQLResponse<OrdersSearchResult> = await graphql<OrdersSearchResult>(
+      state,
+      FIND_ORDER_BY_TAG_QUERY,
+      variables
+    );
+    const orders = response.data?.orders.nodes ?? [];
+    
+    // Strict match: return if tags array includes the exact tag
+    const exactMatch = orders.find((o: OrderNode) => o.tags.includes(tag));
+    if (exactMatch) {
+      return exactMatch;
+    }
+    
+    const hasNextPage = response.data?.orders.pageInfo?.hasNextPage ?? false;
+    if (!hasNextPage) {
+      return null;
+    }
+    cursor = response.data?.orders.pageInfo?.endCursor ?? undefined;
+  }
+  
+  console.log(`  ⚠️  Search for order with tag "${tag}" exceeded ${MAX_SEARCH_PAGES} pages`);
+  return null;
 }
 
 // Tagged customer seeds - one per term (Net 15, 30, 60)
@@ -1420,9 +1565,25 @@ export const TAGGED_ORDER_DISTRIBUTION = [
   { customerTermsDays: 60, daysAgo: 45 },  // Not yet due
 ] as const;
 
+interface CustomerSearchNode {
+  id: string;
+  email: string | null;
+  tags: string[];
+}
+
+interface CustomersSearchResult {
+  customers: {
+    nodes: CustomerSearchNode[];
+    pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  };
+}
+
 /**
  * Find or create a tagged customer, then tag with tagsAdd (idempotent).
  * Does NOT tag B2B contacts - their terms come from location/DB defaults.
+ * 
+ * IMPORTANT: Shopify's `customers(query: "email:...")` uses fuzzy search.
+ * We paginate up to MAX_SEARCH_PAGES and filter for exact email match.
  *
  * @returns Customer ID or null on failure
  */
@@ -1433,23 +1594,43 @@ async function ensureTaggedCustomer(
 ): Promise<string | null> {
   const tag = `${SEED_TAG}-net${termsDays}`;
 
-  // First, try to find existing customer by email
-  const findResult = await graphql<{
-    customers: { nodes: Array<{ id: string; tags: string[] }> };
-  }>(state, `
-    query FindCustomer($query: String!) {
-      customers(first: 1, query: $query) {
-        nodes { id tags }
-      }
+  // Try to find existing customer by email with pagination (strict match)
+  let cursor: string | undefined = undefined;
+  let customerId: string | undefined;
+  
+  for (let page = 0; page < MAX_SEARCH_PAGES; page++) {
+    const variables: { query: string; after?: string } = { query: `email:'${email}'` };
+    if (cursor) variables.after = cursor;
+    
+    const response: GraphQLResponse<CustomersSearchResult> = await graphql<CustomersSearchResult>(
+      state,
+      FIND_CUSTOMER_BY_EMAIL_QUERY,
+      variables
+    );
+
+    if (response.errors) {
+      console.log(`    ⚠️  GraphQL error finding customer: ${response.errors.map((e: { message: string }) => e.message).join(", ")}`);
+      return null;
     }
-  `, { query: `email:${email}` });
 
-  if (findResult.errors) {
-    console.log(`    ⚠️  GraphQL error finding customer: ${findResult.errors.map(e => e.message).join(", ")}`);
-    return null;
+    // Strict match: find customer with exact email
+    const customers = response.data?.customers.nodes ?? [];
+    const exactMatch = customers.find((c: CustomerSearchNode) => c.email?.toLowerCase() === email.toLowerCase());
+    if (exactMatch) {
+      customerId = exactMatch.id;
+      break;
+    }
+    
+    const hasNextPage = response.data?.customers.pageInfo?.hasNextPage ?? false;
+    if (!hasNextPage) {
+      break;
+    }
+    cursor = response.data?.customers.pageInfo?.endCursor ?? undefined;
+    
+    if (page === MAX_SEARCH_PAGES - 1) {
+      console.log(`    ⚠️  Search for customer with email "${email}" exceeded ${MAX_SEARCH_PAGES} pages`);
+    }
   }
-
-  let customerId = findResult.data?.customers.nodes[0]?.id;
 
   // If not found, create new customer
   if (!customerId) {
@@ -1556,8 +1737,8 @@ export async function seedTaggedCustomerOrders(state: SeedState): Promise<void> 
 
     const existingOrder = await findOrderByTag(state, orderKey);
     if (existingOrder) {
-      console.log(`  ⏭️  [${orderIndex}/${totalTaggedOrders}] Tagged order already exists (${existingOrder.name})`);
-      state.skippedCount.orders++;
+      console.log(`  ✓ [${orderIndex}/${totalTaggedOrders}] Tagged order unchanged (${existingOrder.name})`);
+      state.unchangedCount.orders++;
       continue;
     }
 
@@ -2200,6 +2381,8 @@ export async function main(): Promise<void> {
     companies: new Map(),
     paymentTermsTemplates: [],
     createdCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRules: 0, dbAccounts: 0 },
+    unchangedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0 },
+    driftedCount: { companies: 0 },
     skippedCount: { companies: 0, orders: 0, roleAssignments: 0 },
     deletedCount: { companies: 0, orders: 0 },
     failedCount: { locations: 0, orders: 0, roleAssignments: 0 },
@@ -2273,23 +2456,49 @@ export async function main(): Promise<void> {
   }
   console.log(`  Total companies with all 3 locations: ${companiesWithAllLocations}/${state.companies.size}`);
 
-  console.log("\n  Shopify Created:");
-  console.log(`    Companies:        ${state.createdCount.companies}`);
-  console.log(`    Locations:        ${state.createdCount.locations}`);
-  console.log(`    Role assignments: ${state.createdCount.roleAssignments}`);
-  console.log(`    Orders (total):   ${state.createdCount.orders}`);
+  console.log("\n  Shopify Results:");
+  console.log("    Created:");
+  console.log(`      Companies:        ${state.createdCount.companies}`);
+  console.log(`      Locations:        ${state.createdCount.locations}`);
+  console.log(`      Role assignments: ${state.createdCount.roleAssignments}`);
+  console.log(`      Orders:           ${state.createdCount.orders}`);
 
-  console.log("\n  Skipped (already exist):");
-  console.log(`    Companies:        ${state.skippedCount.companies}`);
-  console.log(`    Role assignments: ${state.skippedCount.roleAssignments}`);
-  console.log(`    Orders:           ${state.skippedCount.orders}`);
+  const hasUnchanged = state.unchangedCount.companies > 0 || state.unchangedCount.locations > 0 ||
+                       state.unchangedCount.orders > 0 || state.unchangedCount.roleAssignments > 0;
+  if (hasUnchanged) {
+    console.log("    Unchanged:");
+    console.log(`      Companies:        ${state.unchangedCount.companies}`);
+    console.log(`      Locations:        ${state.unchangedCount.locations}`);
+    console.log(`      Role assignments: ${state.unchangedCount.roleAssignments}`);
+    console.log(`      Orders:           ${state.unchangedCount.orders}`);
+  }
+
+  if (state.driftedCount.companies > 0) {
+    console.log("    Drifted (not modified, run --reset to recreate):");
+    console.log(`      Companies:        ${state.driftedCount.companies}`);
+  }
+
+  if (state.deletedCount.companies > 0 || state.deletedCount.orders > 0) {
+    console.log("    Deleted:");
+    console.log(`      Companies:        ${state.deletedCount.companies}`);
+    console.log(`      Orders:           ${state.deletedCount.orders}`);
+  }
+
+  const hasSkipped = state.skippedCount.companies > 0 || state.skippedCount.orders > 0 ||
+                      state.skippedCount.roleAssignments > 0;
+  if (hasSkipped) {
+    console.log("    Skipped (missing prerequisites):");
+    if (state.skippedCount.companies > 0) console.log(`      Companies:        ${state.skippedCount.companies}`);
+    if (state.skippedCount.roleAssignments > 0) console.log(`      Role assignments: ${state.skippedCount.roleAssignments}`);
+    if (state.skippedCount.orders > 0) console.log(`      Orders:           ${state.skippedCount.orders}`);
+  }
 
   const totalFailures = state.failedCount.locations + state.failedCount.orders + state.failedCount.roleAssignments;
   if (totalFailures > 0) {
-    console.log("\n  ❌ Failed:");
-    console.log(`    Locations:        ${state.failedCount.locations}`);
-    console.log(`    Role assignments: ${state.failedCount.roleAssignments}`);
-    console.log(`    Orders:           ${state.failedCount.orders}`);
+    console.log("    ❌ Failed:");
+    console.log(`      Locations:        ${state.failedCount.locations}`);
+    console.log(`      Role assignments: ${state.failedCount.roleAssignments}`);
+    console.log(`      Orders:           ${state.failedCount.orders}`);
   }
 
   // Order breakdown

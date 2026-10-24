@@ -380,14 +380,15 @@ describe("Invoice Eligibility", () => {
         expect(result.reason).toBe("terminal_status");
       });
 
-      it("rejects orders with ineligible status (null)", async () => {
+      it("rejects orders with null status as status_missing", async () => {
         const sql = createMockSql(new Map());
         const order = createOrder({ displayFinancialStatus: null });
 
         const result = await checkOrderEligibility(sql as never, order, defaultContext);
 
         expect(result.eligible).toBe(false);
-        expect(result.reason).toBe("ineligible_status");
+        expect(result.reason).toBe("status_missing");
+        expect(result.explanation).toContain("null displayFinancialStatus");
       });
     });
 

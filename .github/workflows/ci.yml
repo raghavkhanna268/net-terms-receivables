@@ -1,51 +1,23 @@
 name: CI
 
+# Minutes budget: CI runs only on PRs and on pushes to main, and superseded
+# runs on the same ref are cancelled. No paths filters: "Lint, typecheck,
+# test, build" is a REQUIRED status check, and a required workflow skipped by
+# a paths filter would leave docs-only PRs stuck on a pending check.
 on:
   push:
     branches: [main]
   pull_request:
     # Run on PRs to any branch (supports stacked PRs)
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  actionlint:
-    name: Lint GitHub Actions workflows
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Install actionlint
-        env:
-          # Pin to specific version for reproducibility
-          ACTIONLINT_VERSION: "1.7.4"
-          # SHA256 of actionlint_1.7.4_linux_amd64.tar.gz
-          ACTIONLINT_SHA256: "fc0a6886bbb9a23a39eeec4b176193cadb54ddbe77cdbb19b637933919545395"
-        run: |
-          set -euo pipefail
-          TARBALL="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          curl -fsSL -o "$TARBALL" \
-            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${TARBALL}"
-          echo "${ACTIONLINT_SHA256}  ${TARBALL}" | sha256sum -c -
-          tar xzf "$TARBALL" actionlint
-          rm "$TARBALL"
-          ./actionlint --version
-
-      - name: Run actionlint
-        run: |
-          # actionlint checks workflow syntax and runs shellcheck on run blocks
-          ./actionlint -color
-
   check:
     name: Lint, typecheck, test, build
     runs-on: ubuntu-latest
@@ -86,13 +58,40 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      # actionlint used to be its own job. Each job is billed rounded up to a
+      # whole minute, so a ~10s lint job cost a full minute per CI run. It now
+      # runs as the first steps of this job and still fails CI (gates PRs).
+      - name: Install actionlint
+        env:
+          # Pin to specific version for reproducibility
+          ACTIONLINT_VERSION: "1.7.4"
+          # SHA256 of actionlint_1.7.4_linux_amd64.tar.gz
+          ACTIONLINT_SHA256: "fc0a6886bbb9a23a39eeec4b176193cadb54ddbe77cdbb19b637933919545395"
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/actionlint"
+          cd "$RUNNER_TEMP/actionlint"
+          TARBALL="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$TARBALL" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${TARBALL}"
+          echo "${ACTIONLINT_SHA256}  ${TARBALL}" | sha256sum -c -
+          tar xzf "$TARBALL" actionlint
+          rm "$TARBALL"
+          ./actionlint --version
+
+      - name: Lint GitHub Actions workflows (actionlint)
+        run: |
+          # actionlint checks workflow syntax and runs shellcheck on run blocks
+          "$RUNNER_TEMP/actionlint/actionlint" -color
 
       - name: Setup Node
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: package-lock.json
 
       - name: Install dependencies
         run: npm ci
