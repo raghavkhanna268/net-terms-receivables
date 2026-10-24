@@ -5,7 +5,8 @@
 # - Access token is read from the DB and masked with ::add-mask:: immediately
 # - Refresh token is NEVER logged or echoed
 # - Secrets are passed via env:, never inline in run: blocks
-# - Hardcoded dev-store guard in seed.ts refuses any shop other than the allowed domain
+# - Dev-store guard in seed.ts refuses any shop other than ALLOWED_DEV_STORE
+#   (GitHub Actions secret; fails closed if unset)
 # - Only booleans are printed: has_token, refreshed, expired
 #
 # Token source:
@@ -46,7 +47,7 @@ jobs:
 
     env:
       # SHOP is NOT set here: step env headers are printed in public logs.
-      # It is resolved from seed.ts ALLOWED_DEV_STORE after checkout and masked.
+      # It is resolved from the ALLOWED_DEV_STORE secret and masked.
       # Pass inputs via env, not interpolated into run blocks
       INPUT_DRY_RUN: ${{ inputs.dry_run }}
       INPUT_RESET: ${{ inputs.reset }}
@@ -59,18 +60,26 @@ jobs:
           persist-credentials: false
 
       - name: Resolve and mask dev-store domain
+        env:
+          # Secret, so the env header prints *** (#190 F1: never committed).
+          ALLOWED_DEV_STORE: ${{ secrets.ALLOWED_DEV_STORE }}
         run: |
           set -euo pipefail
-          # Single source of truth: the hardcoded guard constant in seed.ts.
-          # Read from the checked-out file so the value never appears in this
-          # step's script or in any step env header; mask before exporting.
-          SHOP=$(sed -nE 's/^const ALLOWED_DEV_STORE = "([^"]+)";$/\1/p' scripts/seed.ts)
-          if [ "$(printf '%s\n' "$SHOP" | grep -c .)" -ne 1 ] || [[ ! "$SHOP" =~ ^[a-z0-9-]+\.myshopify\.com$ ]]; then
-            echo "::error::Could not resolve a single valid dev-store domain from scripts/seed.ts"
+          # Fail closed: no secret, no seed.
+          if [ -z "${ALLOWED_DEV_STORE:-}" ]; then
+            echo "::error::ALLOWED_DEV_STORE secret is not set (dev-store domain for the seed guard)"
             exit 1
           fi
-          echo "::add-mask::$SHOP"
-          echo "SHOP=$SHOP" >> "$GITHUB_ENV"
+          echo "::add-mask::$ALLOWED_DEV_STORE"
+          if [[ ! "$ALLOWED_DEV_STORE" =~ ^[a-z0-9-]+\.myshopify\.com$ ]]; then
+            echo "::error::ALLOWED_DEV_STORE secret is not a valid *.myshopify.com domain"
+            exit 1
+          fi
+          # SHOP drives token lookup; ALLOWED_DEV_STORE is seed.ts's guard.
+          {
+            echo "SHOP=$ALLOWED_DEV_STORE"
+            echo "ALLOWED_DEV_STORE=$ALLOWED_DEV_STORE"
+          } >> "$GITHUB_ENV"
 
       - name: Setup Node
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
@@ -91,6 +100,7 @@ jobs:
           PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
           set -euo pipefail
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
 
           # Mask API credentials immediately
           if [ -n "$SHOPIFY_API_KEY" ]; then
