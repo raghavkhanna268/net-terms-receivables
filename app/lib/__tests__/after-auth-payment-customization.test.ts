@@ -78,7 +78,7 @@ describe("after-auth with payment customization", () => {
 
     // Error was logged
     expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Failed to ensure payment customization"),
+      expect.stringContaining("[afterAuth] payment_customization_failed"),
       expect.any(Error),
     );
 
