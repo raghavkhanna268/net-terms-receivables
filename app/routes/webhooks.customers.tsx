@@ -46,13 +46,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return new Response(null, { status: 500 });
   }
 
-  const triggeredAt = parseTriggeredAt(request);
   const { shop, topic, webhookId, payload } = await verifyWebhook(request, apiSecret);
+  const triggeredAt = parseTriggeredAt(request);
   const normalizedTopic = normalizeWebhookTopic(topic);
 
   if (!ALLOWED_TOPICS.has(normalizedTopic)) {
     console.warn(
-      `[webhooks.customers] Unexpected topic ${normalizedTopic} for ${shop}, ignoring`
+      `[webhooks.customers] Unexpected topic ${normalizedTopic} wh=${webhookId}, ignoring`
     );
     return new Response(null, { status: 200 });
   }
@@ -62,7 +62,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (!resourceGid) {
     console.warn(
-      `[webhooks.customers] Missing admin_graphql_api_id in ${normalizedTopic} for ${shop}`
+      `[webhooks.customers] Missing admin_graphql_api_id in ${normalizedTopic} wh=${webhookId}`
     );
     return new Response(null, { status: 200 });
   }
@@ -79,17 +79,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   });
 
   if (result.status === "duplicate") {
-    console.log(`[webhooks.customers] Duplicate ${normalizedTopic} for ${shop}, skipping`);
+    console.log(`[webhooks.customers] Duplicate ${normalizedTopic} wh=${webhookId}, skipping`);
     return new Response(null, { status: 200 });
   }
 
   if (result.status === "error") {
-    console.error(`[webhooks.customers] Enqueue failed for ${shop}:`, result.error);
+    console.error(`[webhooks.customers] Enqueue failed wh=${webhookId}`);
     throw result.error;
   }
 
   console.log(
-    `[webhooks.customers] Enqueued ${normalizedTopic} for ${shop}: ${resourceGid}`
+    `[webhooks.customers] Enqueued ${normalizedTopic} wh=${webhookId}: ${resourceGid}`
   );
 
   return new Response(null, { status: 200 });

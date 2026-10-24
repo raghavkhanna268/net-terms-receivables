@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
 import type { ActionFunctionArgs } from "react-router";
 import crypto from "node:crypto";
 
@@ -9,7 +9,25 @@ import crypto from "node:crypto";
  * 1. Valid HMAC triggers plan cache refresh
  * 2. Bad HMAC returns 401
  * 3. Uses waitUntil for background refresh
+ * 4. No shop domains appear in log output (public-log safety)
  */
+
+/**
+ * Helper to assert that no shop domains appear in console output.
+ * Per public-log allowlist: only counts, ids, enums, booleans, timestamps.
+ */
+function expectNoShopDomainInLogs(
+  spies: { log: MockInstance; warn: MockInstance; error: MockInstance },
+  shopDomain: string
+): void {
+  for (const spy of [spies.log, spies.warn, spies.error]) {
+    for (const call of spy.mock.calls) {
+      const msg = String(call[0] ?? "");
+      expect(msg).not.toContain(shopDomain);
+      expect(msg).not.toContain(".myshopify.com");
+    }
+  }
+}
 
 // Mock SQL client
 const mockSql = Object.assign(
@@ -24,9 +42,18 @@ vi.mock("~/lib/request-context.server", () => ({
 
 // Mock the plan server module
 const mockRefreshPlanCache = vi.fn().mockResolvedValue(undefined);
+const mockResolvePlan = vi.fn().mockResolvedValue({ plan: { key: "free" } });
 
 vi.mock("~/services/plan.server", () => ({
   refreshPlanCache: mockRefreshPlanCache,
+  resolvePlan: (...args: unknown[]) => mockResolvePlan(...args),
+}));
+
+// Mock the gating server module
+const mockReactivateGatedAccounts = vi.fn().mockResolvedValue(0);
+
+vi.mock("~/services/gating.server", () => ({
+  reactivateGatedAccounts: (...args: unknown[]) => mockReactivateGatedAccounts(...args),
 }));
 
 // Mock webhook receipts for S20 idempotency
@@ -241,6 +268,108 @@ describe("webhooks.app.subscriptions_update", () => {
         expect(error).toBeInstanceOf(Response);
         expect((error as Response).status).toBe(401);
       }
+    });
+  });
+
+  describe("domain-free log assertions (public-log safety)", () => {
+    let consoleSpy: { log: MockInstance; warn: MockInstance; error: MockInstance };
+
+    beforeEach(() => {
+      consoleSpy = {
+        log: vi.spyOn(console, "log").mockImplementation(() => {}),
+        warn: vi.spyOn(console, "warn").mockImplementation(() => {}),
+        error: vi.spyOn(console, "error").mockImplementation(() => {}),
+      };
+    });
+
+    afterEach(() => {
+      consoleSpy.log.mockRestore();
+      consoleSpy.warn.mockRestore();
+      consoleSpy.error.mockRestore();
+    });
+
+    it("success path (plan refresh) logs no shop domain", async () => {
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockReactivateGatedAccounts.mockResolvedValueOnce(0);
+
+      const { action } = await import("../webhooks.app.subscriptions_update");
+      const request = createMockRequest(
+        { app_subscription: { id: "gid://shopify/AppSubscription/123" } },
+        "app_subscriptions/update"
+      );
+
+      const args = createActionArgs(request) as ActionFunctionArgs & { _waitUntil: ReturnType<typeof vi.fn> };
+      const response = await action(args);
+      expect(response.status).toBe(200);
+
+      // Wait for the background task
+      await args._waitUntil.mock.calls[0][0];
+
+      expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
+    });
+
+    it("reactivated accounts path logs shop_id not shop domain", async () => {
+      mockSql.mockResolvedValueOnce([{ id: "shop-456" }]);
+      mockReactivateGatedAccounts.mockResolvedValueOnce(5);
+
+      const { action } = await import("../webhooks.app.subscriptions_update");
+      const request = createMockRequest(
+        { app_subscription: { id: "gid://shopify/AppSubscription/123" } },
+        "app_subscriptions/update"
+      );
+
+      const args = createActionArgs(request) as ActionFunctionArgs & { _waitUntil: ReturnType<typeof vi.fn> };
+      const response = await action(args);
+      expect(response.status).toBe(200);
+
+      // Wait for the background task
+      await args._waitUntil.mock.calls[0][0];
+
+      expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
+      expect(consoleSpy.log).toHaveBeenCalledWith(
+        expect.stringContaining("shop_id=shop-456")
+      );
+    });
+
+    it("unexpected topic path logs no shop domain", async () => {
+      const { action } = await import("../webhooks.app.subscriptions_update");
+      const request = createMockRequest(
+        { app_subscription: { id: "gid://shopify/AppSubscription/123" } },
+        "orders/create" // Wrong topic
+      );
+
+      const response = await action(createActionArgs(request));
+      expect(response.status).toBe(200);
+
+      expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
+    });
+
+    it("error path logs error code not raw error", async () => {
+      mockRefreshPlanCache.mockRejectedValueOnce(new Error("DB connection failed"));
+
+      const { action } = await import("../webhooks.app.subscriptions_update");
+      const request = createMockRequest(
+        { app_subscription: { id: "gid://shopify/AppSubscription/123" } },
+        "app_subscriptions/update"
+      );
+
+      const args = createActionArgs(request) as ActionFunctionArgs & { _waitUntil: ReturnType<typeof vi.fn> };
+      const response = await action(args);
+      expect(response.status).toBe(200);
+
+      // Wait for the background task to complete (it catches the error)
+      await args._waitUntil.mock.calls[0][0];
+
+      expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
+
+      // Verify error code is logged, not the full error message
+      expect(consoleSpy.error).toHaveBeenCalledWith(
+        expect.stringContaining("err=Error")
+      );
+      expect(consoleSpy.error).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.any(Error)
+      );
     });
   });
 });
