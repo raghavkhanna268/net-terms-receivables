@@ -890,7 +890,7 @@ function PushingMatchesView({
   return (
     <s-stack>
       <s-banner tone="warning" heading="Matches In Progress">
-        These matches started applying but haven't completed. Click Retry to
+        These matches started applying but have not completed. Click Retry to
         attempt completion, or wait for automatic recovery (stale matches are
         retried after 5 minutes).
       </s-banner>

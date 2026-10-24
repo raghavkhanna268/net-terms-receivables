@@ -279,7 +279,7 @@ async function handlePushedMatch(
   shopId: string,
   matchId: string,
   matchRow: { id: string; shopId: string; paymentId: string; invoiceId: string; amountPaise: string },
-  actor: string
+  _actor: string
 ): Promise<ApplyMatchResult> {
   // Check invoice status to determine if this is idempotent or crash recovery
   // IDOR protection: filter by shopId
