@@ -327,8 +327,8 @@ export interface SeedState {
   companies: Map<string, CompanyData>;
   paymentTermsTemplates: PaymentTermsTemplate[];
   createdCount: { companies: number; locations: number; orders: number; roleAssignments: number; dbRules: number; dbAccounts: number };
-  updatedCount: { companies: number; locations: number; orders: number; roleAssignments: number };
   unchangedCount: { companies: number; locations: number; orders: number; roleAssignments: number };
+  driftedCount: { companies: number };
   skippedCount: { companies: number; orders: number; roleAssignments: number };
   deletedCount: { companies: number; orders: number };
   failedCount: { locations: number; orders: number; roleAssignments: number };
@@ -749,10 +749,10 @@ export async function seedCompanies(state: SeedState): Promise<void> {
         console.log(`  ✓ ${seed.name} unchanged (${externalId})`);
         state.unchangedCount.companies++;
       } else {
-        console.log(`  ⚠️  ${seed.name} exists but differs from fixture (${externalId})`);
+        console.log(`  ⚠️  ${seed.name} drifted from fixture (${externalId})`);
         if (!nameMatches) console.log(`      Name: "${existing.name}" vs fixture "${seed.name}"`);
         if (!emailMatches) console.log(`      Email: "${existingEmail}" vs fixture "${seed.contact.email}"`);
-        state.unchangedCount.companies++;
+        state.driftedCount.companies++;
       }
       
       // Build locations map from existing data
@@ -2381,8 +2381,8 @@ export async function main(): Promise<void> {
     companies: new Map(),
     paymentTermsTemplates: [],
     createdCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRules: 0, dbAccounts: 0 },
-    updatedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0 },
     unchangedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0 },
+    driftedCount: { companies: 0 },
     skippedCount: { companies: 0, orders: 0, roleAssignments: 0 },
     deletedCount: { companies: 0, orders: 0 },
     failedCount: { locations: 0, orders: 0, roleAssignments: 0 },
@@ -2463,16 +2463,6 @@ export async function main(): Promise<void> {
   console.log(`      Role assignments: ${state.createdCount.roleAssignments}`);
   console.log(`      Orders:           ${state.createdCount.orders}`);
 
-  const hasUpdates = state.updatedCount.companies > 0 || state.updatedCount.locations > 0 || 
-                     state.updatedCount.orders > 0 || state.updatedCount.roleAssignments > 0;
-  if (hasUpdates) {
-    console.log("    Updated:");
-    console.log(`      Companies:        ${state.updatedCount.companies}`);
-    console.log(`      Locations:        ${state.updatedCount.locations}`);
-    console.log(`      Role assignments: ${state.updatedCount.roleAssignments}`);
-    console.log(`      Orders:           ${state.updatedCount.orders}`);
-  }
-
   const hasUnchanged = state.unchangedCount.companies > 0 || state.unchangedCount.locations > 0 ||
                        state.unchangedCount.orders > 0 || state.unchangedCount.roleAssignments > 0;
   if (hasUnchanged) {
@@ -2481,6 +2471,11 @@ export async function main(): Promise<void> {
     console.log(`      Locations:        ${state.unchangedCount.locations}`);
     console.log(`      Role assignments: ${state.unchangedCount.roleAssignments}`);
     console.log(`      Orders:           ${state.unchangedCount.orders}`);
+  }
+
+  if (state.driftedCount.companies > 0) {
+    console.log("    Drifted (not modified, run --reset to recreate):");
+    console.log(`      Companies:        ${state.driftedCount.companies}`);
   }
 
   if (state.deletedCount.companies > 0 || state.deletedCount.orders > 0) {
