@@ -11,6 +11,11 @@ SCOPES=
 SENTRY_DSN=
 SENTRY_TRACES_SAMPLE_RATE=0
 
+# S18: Resend email provider (optional, leave empty to disable reminders)
+# Get this from Resend Dashboard > API Keys
+# Never commit the real key - this is a wrangler secret in production
+RESEND_API_KEY=
+
 # Database connection for local development
 # Option 1: Local Postgres (recommended for offline dev)
 # CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE=postgresql://postgres:password@localhost:5432/net_terms

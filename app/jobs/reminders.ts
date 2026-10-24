@@ -11,15 +11,22 @@
  *   shopId: "<shopId>",
  *   invoiceId: "<invoiceId>",
  *   ruleId: "<ruleId>",
- *   webhookId: "s18_enqueue_<invoiceId>_<ruleId>_<date>",
+ *   offsetDays: <number>,
+ *   timezone: "<IANA timezone>",
+ *   webhookId: "s18_<invoiceId>_<ruleId>_<date>",
  *   enqueuedAt: "<ISO timestamp>"
  * }
  *
- * The handler:
- * 1. Validates the message
- * 2. Looks up the rule to get offsetDays
- * 3. Calls sendPaymentReminder()
- * 4. Returns appropriate SyncResult
+ * Gate behavior:
+ * - When RESEND_API_KEY is missing: ack as no-op (no retry, no ReminderLog)
+ *   This allows the reminder to fire again once a key is configured.
+ * - When caps are reached: ack as no-op
+ * - When invoice is paid/cancelled: ack as no-op
+ * - When buyer has no email (CUSTOMER_PII_FIELDS off): ack as no-op
+ *
+ * Idempotency:
+ * - ReminderLog unique index on (ruleId, invoiceId) prevents duplicate sends
+ * - Slot is claimed before sending, released on failure to allow retry
  */
 
 import type { Sql } from "~/lib/db-light.server";
@@ -29,6 +36,7 @@ import {
   getReminderRule,
 } from "~/services/reminders.server";
 import { getRequestEnv } from "~/lib/request-context.server";
+import { validateTimezone, DEFAULT_TIMEZONE } from "~/lib/aging-dates.server";
 
 /**
  * Message payload for REMINDER_SEND topic.
@@ -39,6 +47,8 @@ export interface ReminderSendMessage {
   shopId: string;
   invoiceId: string;
   ruleId: string;
+  offsetDays?: number;
+  timezone?: string;
   webhookId: string;
   enqueuedAt: string;
 }
@@ -72,6 +82,7 @@ export async function handleReminderSend(
 ): Promise<SyncResult> {
   const { shopId, invoiceId, ruleId } = message;
 
+  // Get rule to determine offsetDays (may not be in message for backwards compat)
   const rule = await getReminderRule(sql, shopId, ruleId);
   if (!rule) {
     return {
@@ -89,13 +100,22 @@ export async function handleReminderSend(
     };
   }
 
+  // Use offsetDays from message if present, otherwise from rule
+  const offsetDays = message.offsetDays ?? rule.offsetDays;
+
+  // Use timezone from message if present, otherwise default
+  const timezone = message.timezone 
+    ? validateTimezone(message.timezone) 
+    : DEFAULT_TIMEZONE;
+
   const env = getRequestEnv() ?? {};
   const result = await sendPaymentReminder(
     sql,
     shopId,
     invoiceId,
     ruleId,
-    rule.offsetDays,
+    offsetDays,
+    timezone,
     env as { RESEND_API_KEY?: string }
   );
 
@@ -109,6 +129,7 @@ export async function handleReminderSend(
     };
   }
 
+  // Non-retryable errors should not silently archive
   return {
     success: false,
     action: "skipped",
@@ -116,3 +137,6 @@ export async function handleReminderSend(
     retryable: result.retryable ?? false,
   };
 }
+
+// Re-export DEFAULT_TIMEZONE for convenience
+export { DEFAULT_TIMEZONE };

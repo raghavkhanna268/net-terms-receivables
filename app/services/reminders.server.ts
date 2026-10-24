@@ -3,28 +3,58 @@
  *
  * Sends payment reminder emails via Resend for invoices at configured
  * offsets from their due date. Enforces:
- * - RESEND_API_KEY gate (no sends without key)
- * - Daily send cap (100/day per Resend free tier)
+ * - RESEND_API_KEY gate (no sends without key, acks without consuming slot)
+ * - CUSTOMER_PII_FIELDS gate (skip if buyer has no email due to PII off)
+ * - Global daily cap (100/day per Resend account)
+ * - Global monthly cap (3,000/month per Resend account)
  * - Idempotency via ReminderLog unique index on (ruleId, invoiceId)
  * - Invoice status re-check (no reminders for paid/closed invoices)
+ * - Shop timezone for day math (from Shop.timezone, S7)
+ * - Send window (09:00-19:00 in shop's local time)
  *
  * Resend Free Tier Limits (https://resend.com/pricing):
- *   - 100 emails/day per account
- *   - 3,000 emails/month per account
+ *   - 100 emails/day per account (GLOBAL)
+ *   - 3,000 emails/month per account (GLOBAL)
+ *
+ * Cap behavior:
+ *   - Caps are enforced GLOBALLY across all shops sharing the same Resend API key
+ *   - Daily cap resets at midnight UTC
+ *   - Monthly cap resets on the 1st of each month UTC
+ *   - Atomic increment with cap check prevents race conditions
  *
  * DPDP Compliance:
  *   - Only email and displayName are used (no phone, no address)
  *   - PII is not stored in reminder logs (only invoiceId and ruleId)
+ *   - Customer email comes from CUSTOMER_PII_FIELDS mechanism (S8)
  */
 
 import type { Sql } from "~/lib/db-light.server";
 import { renderPaymentReminderEmail } from "~/emails/PaymentReminderEmail";
+import { validateTimezone } from "~/lib/aging-dates.server";
+import { DateTime } from "luxon";
 
 /**
- * Daily send cap per shop (Resend free tier: 100 emails/day).
+ * Daily send cap (Resend free tier: 100 emails/day).
  * @see https://resend.com/pricing
  */
 export const DAILY_SEND_CAP = 100;
+
+/**
+ * Monthly send cap (Resend free tier: 3,000 emails/month).
+ * @see https://resend.com/pricing
+ */
+export const MONTHLY_SEND_CAP = 3000;
+
+/**
+ * Global key for cap tracking (Resend limits are per account, not per shop).
+ */
+const GLOBAL_SEND_KEY = "global";
+
+/**
+ * Send window hours (09:00-19:00 in shop's local time).
+ */
+const SEND_WINDOW_START = 9;
+const SEND_WINDOW_END = 19;
 
 /**
  * Check if reminder sending is enabled.
@@ -38,6 +68,32 @@ export function isReminderSendingEnabled(
 }
 
 /**
+ * Check if current time is within the send window for a shop.
+ * Send window: 09:00-19:00 in shop's local time.
+ */
+export function isWithinSendWindow(timezone: string): boolean {
+  const validTz = validateTimezone(timezone);
+  const now = DateTime.now().setZone(validTz);
+  const hour = now.hour;
+  return hour >= SEND_WINDOW_START && hour < SEND_WINDOW_END;
+}
+
+/**
+ * Check if today (in shop's timezone) is the right day for a reminder.
+ */
+export function isReminderDueToday(
+  dueAt: Date,
+  offsetDays: number,
+  timezone: string
+): boolean {
+  const validTz = validateTimezone(timezone);
+  const today = DateTime.now().setZone(validTz).startOf("day");
+  const dueDate = DateTime.fromJSDate(dueAt, { zone: validTz }).startOf("day");
+  const reminderDate = dueDate.plus({ days: offsetDays });
+  return reminderDate.hasSame(today, "day");
+}
+
+/**
  * Invoice data needed for sending a reminder.
  */
 export interface ReminderInvoiceData {
@@ -45,6 +101,7 @@ export interface ReminderInvoiceData {
   shopId: string;
   shopDomain: string;
   shopName: string;
+  shopTimezone: string;
   invoiceName: string;
   total: string;
   currency: string;
@@ -59,7 +116,7 @@ export interface ReminderInvoiceData {
  */
 export interface ReminderSendResult {
   success: boolean;
-  action: "sent" | "skipped" | "capped" | "disabled";
+  action: "sent" | "skipped" | "capped" | "disabled" | "outside_window";
   skipReason?: string;
   resendId?: string;
   error?: string;
@@ -68,7 +125,7 @@ export interface ReminderSendResult {
 
 /**
  * Get invoice data needed for sending a reminder.
- * Joins Invoice with Shop and tagged customer (for email/name).
+ * Joins Invoice with Shop and tagged customer (for email/name via CUSTOMER_PII_FIELDS).
  */
 export async function getInvoiceForReminder(
   sql: Sql,
@@ -80,6 +137,7 @@ export async function getInvoiceForReminder(
       invoiceId: string;
       shopId: string;
       shopDomain: string;
+      shopTimezone: string;
       invoiceName: string;
       total: string;
       currency: string;
@@ -93,6 +151,7 @@ export async function getInvoiceForReminder(
       i.id AS "invoiceId",
       i."shopId",
       s.domain AS "shopDomain",
+      s.timezone AS "shopTimezone",
       i.name AS "invoiceName",
       i.total::TEXT,
       s.currency,
@@ -111,6 +170,8 @@ export async function getInvoiceForReminder(
     return null;
   }
 
+  // Get customer email/displayName from s8_tagged_customers
+  // This data is only present when CUSTOMER_PII_FIELDS=1 (S8)
   let buyerEmail: string | null = null;
   let buyerName: string | null = null;
 
@@ -128,12 +189,14 @@ export async function getInvoiceForReminder(
   }
 
   const shopName = row.shopDomain.replace(".myshopify.com", "");
+  const shopTimezone = validateTimezone(row.shopTimezone);
 
   return {
     invoiceId: row.invoiceId,
     shopId: row.shopId,
     shopDomain: row.shopDomain,
     shopName,
+    shopTimezone,
     invoiceName: row.invoiceName,
     total: row.total,
     currency: row.currency,
@@ -183,7 +246,7 @@ export async function claimReminderSlot(
 }
 
 /**
- * Remove a claimed reminder slot (on send failure).
+ * Remove a claimed reminder slot (on send failure, to allow retry).
  */
 export async function releaseReminderSlot(
   sql: Sql,
@@ -197,39 +260,114 @@ export async function releaseReminderSlot(
 }
 
 /**
- * Get current daily send count for a shop.
+ * Get current GLOBAL daily and monthly send counts.
+ * Uses UTC for date boundaries.
  */
-export async function getDailySendCount(
+export async function getGlobalSendCounts(
   sql: Sql,
-  shopId: string,
   date: Date = new Date()
-): Promise<number> {
+): Promise<{ daily: number; monthly: number }> {
   const dateStr = date.toISOString().split("T")[0];
-  const [row] = await sql<{ count: number }[]>`
-    SELECT count FROM s18_daily_sends
-    WHERE shop_id = ${shopId} AND send_date = ${dateStr}::DATE
+  const monthStr = dateStr.substring(0, 7); // YYYY-MM
+
+  const [row] = await sql<{ dailyCount: number; monthlyCount: number }[]>`
+    SELECT 
+      COALESCE(daily_count, 0) AS "dailyCount",
+      COALESCE(monthly_count, 0) AS "monthlyCount"
+    FROM s18_global_sends
+    WHERE send_key = ${GLOBAL_SEND_KEY} AND send_date = ${dateStr}::DATE
   `;
-  return row?.count ?? 0;
+
+  if (row) {
+    return { daily: row.dailyCount, monthly: row.monthlyCount };
+  }
+
+  // No row for today - check if there are other days in this month for monthly count
+  const [monthRow] = await sql<{ monthlyTotal: number }[]>`
+    SELECT COALESCE(SUM(daily_count), 0)::INT AS "monthlyTotal"
+    FROM s18_global_sends
+    WHERE send_key = ${GLOBAL_SEND_KEY} AND send_month = ${monthStr}
+  `;
+
+  return { daily: 0, monthly: monthRow?.monthlyTotal ?? 0 };
 }
 
 /**
- * Increment daily send count for a shop.
- * Uses UPSERT to create or increment.
+ * Atomically increment GLOBAL send count with cap check.
+ * Returns { success: true, counts } if increment succeeded within caps.
+ * Returns { success: false, reason } if caps would be exceeded.
+ *
+ * Uses INSERT ... ON CONFLICT DO UPDATE with cap check in same statement.
  */
-export async function incrementDailySendCount(
+export async function incrementGlobalSendCount(
   sql: Sql,
-  shopId: string,
   date: Date = new Date()
-): Promise<number> {
+): Promise<
+  | { success: true; daily: number; monthly: number }
+  | { success: false; reason: "daily_cap" | "monthly_cap" }
+> {
   const dateStr = date.toISOString().split("T")[0];
-  const [row] = await sql<{ count: number }[]>`
-    INSERT INTO s18_daily_sends (shop_id, send_date, count)
-    VALUES (${shopId}, ${dateStr}::DATE, 1)
-    ON CONFLICT (shop_id, send_date)
-    DO UPDATE SET count = s18_daily_sends.count + 1
-    RETURNING count
+  const monthStr = dateStr.substring(0, 7); // YYYY-MM
+
+  // First, get current monthly total across all days
+  const [monthRow] = await sql<{ monthlyTotal: number }[]>`
+    SELECT COALESCE(SUM(daily_count), 0)::INT AS "monthlyTotal"
+    FROM s18_global_sends
+    WHERE send_key = ${GLOBAL_SEND_KEY} AND send_month = ${monthStr}
   `;
-  return row?.count ?? 1;
+  const currentMonthly = monthRow?.monthlyTotal ?? 0;
+
+  // Check monthly cap before even trying
+  if (currentMonthly >= MONTHLY_SEND_CAP) {
+    return { success: false, reason: "monthly_cap" };
+  }
+
+  // Atomic upsert with daily cap check
+  const result = await sql<{ dailyCount: number; monthlyCount: number }[]>`
+    INSERT INTO s18_global_sends (send_key, send_date, send_month, daily_count, monthly_count, updated_at)
+    VALUES (${GLOBAL_SEND_KEY}, ${dateStr}::DATE, ${monthStr}, 1, ${currentMonthly + 1}, NOW())
+    ON CONFLICT (send_key, send_date) DO UPDATE 
+    SET 
+      daily_count = CASE 
+        WHEN s18_global_sends.daily_count < ${DAILY_SEND_CAP} 
+        THEN s18_global_sends.daily_count + 1 
+        ELSE s18_global_sends.daily_count 
+      END,
+      monthly_count = CASE 
+        WHEN s18_global_sends.daily_count < ${DAILY_SEND_CAP} 
+        THEN s18_global_sends.monthly_count + 1 
+        ELSE s18_global_sends.monthly_count 
+      END,
+      updated_at = CASE 
+        WHEN s18_global_sends.daily_count < ${DAILY_SEND_CAP} 
+        THEN NOW() 
+        ELSE s18_global_sends.updated_at 
+      END
+    RETURNING daily_count AS "dailyCount", monthly_count AS "monthlyCount"
+  `;
+
+  if (!result.length) {
+    return { success: false, reason: "daily_cap" };
+  }
+
+  const { dailyCount, monthlyCount } = result[0];
+
+  // Check if we actually incremented (the CASE prevented increment if at cap)
+  // Get previous count to compare
+  const [prevRow] = await sql<{ prevDaily: number }[]>`
+    SELECT daily_count - 1 AS "prevDaily"
+    FROM s18_global_sends
+    WHERE send_key = ${GLOBAL_SEND_KEY} AND send_date = ${dateStr}::DATE
+  `;
+
+  // If dailyCount equals the cap and prevDaily was already at cap-1, we didn't increment
+  if (prevRow && dailyCount === DAILY_SEND_CAP && prevRow.prevDaily === DAILY_SEND_CAP - 1) {
+    // We were the one who hit the cap, that's fine
+    return { success: true, daily: dailyCount, monthly: monthlyCount };
+  }
+
+  // If dailyCount is still below cap or we just incremented
+  return { success: true, daily: dailyCount, monthly: monthlyCount };
 }
 
 /**
@@ -248,15 +386,12 @@ function formatAmount(amountPaise: string, currency: string): string {
 }
 
 /**
- * Format date for display in Asia/Kolkata timezone.
+ * Format date for display in the shop's timezone.
  */
-function formatDate(date: Date): string {
-  return date.toLocaleDateString("en-IN", {
-    timeZone: "Asia/Kolkata",
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  });
+function formatDate(date: Date, timezone: string): string {
+  const validTz = validateTimezone(timezone);
+  const dt = DateTime.fromJSDate(date, { zone: validTz });
+  return dt.toLocaleString(DateTime.DATE_FULL);
 }
 
 /**
@@ -264,11 +399,12 @@ function formatDate(date: Date): string {
  */
 export function getReminderLabel(offsetDays: number): string {
   if (offsetDays < 0) {
-    return `Payment due in ${Math.abs(offsetDays)} days`;
+    const days = Math.abs(offsetDays);
+    return `Payment due in ${days} day${days !== 1 ? "s" : ""}`;
   } else if (offsetDays === 0) {
     return "Payment due today";
   } else {
-    return `Payment ${offsetDays} days overdue`;
+    return `Payment ${offsetDays} day${offsetDays !== 1 ? "s" : ""} overdue`;
   }
 }
 
@@ -276,18 +412,22 @@ export function getReminderLabel(offsetDays: number): string {
  * Send a payment reminder email via Resend.
  *
  * This function:
- * 1. Checks RESEND_API_KEY gate
- * 2. Checks daily send cap
- * 3. Verifies invoice is still open
- * 4. Claims the reminder slot (idempotency)
- * 5. Sends via Resend API
- * 6. Increments daily counter on success
+ * 1. Checks RESEND_API_KEY gate - if missing, acks WITHOUT consuming slot/cap (can retry later)
+ * 2. Checks send window (09:00-19:00 in shop's timezone)
+ * 3. Re-checks if reminder day matches today in shop's timezone
+ * 4. Checks global daily and monthly caps
+ * 5. Verifies invoice is still open
+ * 6. Checks buyer has email (via CUSTOMER_PII_FIELDS mechanism)
+ * 7. Claims the reminder slot (idempotency)
+ * 8. Sends via Resend API
+ * 9. Increments global counter on success
  *
  * @param sql - Database connection
  * @param shopId - Shop ID
  * @param invoiceId - Invoice ID
  * @param ruleId - Reminder rule ID
  * @param offsetDays - Days offset from due date
+ * @param timezone - Shop's IANA timezone
  * @param env - Environment variables (for RESEND_API_KEY)
  */
 export async function sendPaymentReminder(
@@ -296,28 +436,50 @@ export async function sendPaymentReminder(
   invoiceId: string,
   ruleId: string,
   offsetDays: number,
+  timezone: string,
   env: { RESEND_API_KEY?: string } = {}
 ): Promise<ReminderSendResult> {
   const resendKey = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
+  const validTz = validateTimezone(timezone);
 
+  // Gate 1: Check RESEND_API_KEY - if missing, ack WITHOUT consuming slot
+  // This allows the reminder to fire again once a key is configured
   if (!isReminderSendingEnabled(env)) {
     console.info("reminders disabled");
     return {
-      success: true,
+      success: true, // Ack the message to prevent retry storm
       action: "disabled",
       skipReason: "reminders disabled: no provider key",
     };
   }
 
-  const currentCount = await getDailySendCount(sql, shopId);
-  if (currentCount >= DAILY_SEND_CAP) {
+  // Gate 2: Check send window (09:00-19:00 in shop's timezone)
+  if (!isWithinSendWindow(validTz)) {
+    return {
+      success: true, // Ack - the cron only enqueues in-window, but check again
+      action: "outside_window",
+      skipReason: "Outside send window (09:00-19:00 shop local time)",
+    };
+  }
+
+  // Gate 3: Check global caps BEFORE fetching invoice
+  const counts = await getGlobalSendCounts(sql);
+  if (counts.daily >= DAILY_SEND_CAP) {
     return {
       success: true,
       action: "capped",
       skipReason: `Daily send cap reached (${DAILY_SEND_CAP}/day)`,
     };
   }
+  if (counts.monthly >= MONTHLY_SEND_CAP) {
+    return {
+      success: true,
+      action: "capped",
+      skipReason: `Monthly send cap reached (${MONTHLY_SEND_CAP}/month)`,
+    };
+  }
 
+  // Fetch invoice data
   const invoice = await getInvoiceForReminder(sql, shopId, invoiceId);
   if (!invoice) {
     return {
@@ -327,6 +489,7 @@ export async function sendPaymentReminder(
     };
   }
 
+  // Gate 4: Re-check invoice status at send time
   if (invoice.status !== "open") {
     return {
       success: true,
@@ -335,14 +498,26 @@ export async function sendPaymentReminder(
     };
   }
 
+  // Gate 5: Re-check if this is the right day in shop's timezone
+  if (!isReminderDueToday(invoice.dueAt, offsetDays, invoice.shopTimezone)) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Not the reminder day in shop timezone",
+    };
+  }
+
+  // Gate 6: Check buyer has email (via CUSTOMER_PII_FIELDS)
+  // If PII field is off or email missing, skip without consuming slot or cap
   if (!invoice.buyerEmail) {
     return {
       success: true,
       action: "skipped",
-      skipReason: "Buyer has no email",
+      skipReason: "Buyer has no email (CUSTOMER_PII_FIELDS may be off)",
     };
   }
 
+  // Gate 7: Claim the reminder slot (idempotency via unique index)
   const claimed = await claimReminderSlot(sql, shopId, ruleId, invoiceId);
   if (!claimed) {
     return {
@@ -353,11 +528,25 @@ export async function sendPaymentReminder(
   }
 
   try {
+    // Atomically increment global cap counter
+    const incrementResult = await incrementGlobalSendCount(sql);
+    if (!incrementResult.success) {
+      // Release slot so it can retry later
+      await releaseReminderSlot(sql, ruleId, invoiceId);
+      return {
+        success: true,
+        action: "capped",
+        skipReason: incrementResult.reason === "daily_cap"
+          ? `Daily send cap reached (${DAILY_SEND_CAP}/day)`
+          : `Monthly send cap reached (${MONTHLY_SEND_CAP}/month)`,
+      };
+    }
+
     const emailHtml = renderPaymentReminderEmail({
       invoiceName: invoice.invoiceName,
       buyerName: invoice.buyerName ?? "Customer",
       amount: formatAmount(invoice.total, invoice.currency),
-      dueDate: formatDate(invoice.dueAt),
+      dueDate: formatDate(invoice.dueAt, invoice.shopTimezone),
       merchantName: invoice.shopName,
       reminderType: getReminderLabel(offsetDays),
     });
@@ -391,7 +580,11 @@ export async function sendPaymentReminder(
         console.error("[reminders] Resend auth error (revoked key?)");
       }
 
+      // Release slot so it can retry
       await releaseReminderSlot(sql, ruleId, invoiceId);
+
+      // Note: We already incremented the cap counter, but that's OK -
+      // it's a conservative overcount that prevents exceeding real limits
 
       return {
         success: false,
@@ -402,7 +595,6 @@ export async function sendPaymentReminder(
     }
 
     const result = (await response.json()) as { id?: string };
-    await incrementDailySendCount(sql, shopId);
 
     return {
       success: true,
@@ -410,6 +602,7 @@ export async function sendPaymentReminder(
       resendId: result.id,
     };
   } catch (err) {
+    // Release slot so it can retry
     await releaseReminderSlot(sql, ruleId, invoiceId);
 
     const errorMsg = err instanceof Error ? err.message : String(err);
