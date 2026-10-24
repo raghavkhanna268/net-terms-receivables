@@ -1,5 +1,5 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useLoaderData, redirect } from "react-router";
+import { useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { resolvePlan, type ResolvedPlan } from "~/services/plan.server";
@@ -53,6 +53,14 @@ async function checkOnboardingRedirect(
   shopId: string
 ): Promise<boolean> {
   try {
+    const [shop] = await sql<{ onboarding_dismissed_at: Date | null }[]>`
+      SELECT onboarding_dismissed_at FROM "Shop" WHERE id = ${shopId}
+    `;
+
+    if (shop?.onboarding_dismissed_at !== null) {
+      return false;
+    }
+
     const buyerCountResult = await sql<{ count: string }[]>`
       SELECT COUNT(*)::text as count FROM "BuyerAccount" WHERE "shopId" = ${shopId}
     `;
@@ -65,15 +73,7 @@ async function checkOnboardingRedirect(
     const tagRuleCount = parseInt(tagRuleCountResult[0]?.count ?? "0", 10);
     if (tagRuleCount > 0) return false;
 
-    const onboardingResult = await sql<{ dismissed_at: Date | null }[]>`
-      SELECT dismissed_at FROM shop_onboarding WHERE shop_id = ${shopId}
-    `;
-
-    if (onboardingResult.length === 0) {
-      return true;
-    }
-
-    return onboardingResult[0].dismissed_at === null;
+    return true;
   } catch {
     return false;
   }
@@ -81,7 +81,7 @@ async function checkOnboardingRedirect(
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { shopify } = context;
-  const { session } = await shopify.authenticate.admin(request);
+  const { session, redirect: shopifyRedirect } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
@@ -99,7 +99,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   if (shop && !skipOnboarding) {
     const shouldRedirect = await checkOnboardingRedirect(sql, shop.id);
     if (shouldRedirect) {
-      throw redirect("/app/onboarding");
+      throw shopifyRedirect("/app/onboarding");
     }
   }
 

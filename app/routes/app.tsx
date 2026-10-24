@@ -24,10 +24,7 @@ export default function App() {
       <s-app-nav>
         <s-link href="/app">Dashboard</s-link>
         <s-link href="/app/reconcile">Reconcile</s-link>
-        {/* Future navigation items for B2B features */}
-        {/* <s-link href="/app/buyers">Buyers</s-link> */}
-        {/* <s-link href="/app/invoices">Invoices</s-link> */}
-        {/* <s-link href="/app/settings">Settings</s-link> */}
+        <s-link href="/app/onboarding">Setup Guide</s-link>
       </s-app-nav>
       <Outlet />
     </AppProvider>

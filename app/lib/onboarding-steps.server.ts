@@ -20,8 +20,8 @@ import type { Sql } from "~/lib/db-light.server";
 export type StepStatus =
   | "complete"
   | "pending"
-  | "attention" // Needs attention (e.g., registration failed)
-  | "coming_soon"; // Feature not yet available
+  | "attention"
+  | "coming_soon";
 
 /**
  * Individual step state with metadata for display.
@@ -87,6 +87,7 @@ const PAYMENT_CUSTOMIZATION_HANDLE = "hide-terms-payment";
 
 /**
  * Compute step 1: Default net terms configured.
+ * No action link - settings route doesn't exist yet.
  */
 export function computeDefaultTermsStep(
   defaultTermsDays: number | null
@@ -98,8 +99,6 @@ export function computeDefaultTermsStep(
     title: "Set default payment terms",
     description: "Configure the default net terms days for new buyer accounts",
     status: isComplete ? "complete" : "pending",
-    actionUrl: "/app/settings",
-    actionLabel: isComplete ? "Edit settings" : "Configure terms",
     helpText: isComplete
       ? `Default: Net ${defaultTermsDays} days`
       : "Set a default payment term (e.g., Net 30) for orders without specific terms",
@@ -108,6 +107,7 @@ export function computeDefaultTermsStep(
 
 /**
  * Compute step 2: First buyer account or tag rule created.
+ * No action link - buyers route doesn't exist yet.
  */
 export function computeBuyerSetupStep(
   buyerAccountCount: number,
@@ -135,14 +135,13 @@ export function computeBuyerSetupStep(
     description:
       "Set up B2B company sync or create customer tag rules for net-terms eligibility",
     status: isComplete ? "complete" : "pending",
-    actionUrl: "/app/buyers",
-    actionLabel: isComplete ? "Manage buyers" : "Add buyers",
     helpText,
   };
 }
 
 /**
  * Compute step 3: Checkout validation active (S12).
+ * Links to Shopify admin checkout settings.
  */
 export function computeValidationStep(
   validation: ValidationInfo | null
@@ -153,26 +152,27 @@ export function computeValidationStep(
 
   let status: StepStatus;
   let helpText: string;
-  let actionLabel: string;
+  let actionLabel: string | undefined;
+  let actionUrl: string | undefined;
 
   if (exists && isEnabled && hasCorrectHandle) {
     status = "complete";
     helpText = "Checkout validation is active and protecting your store";
     actionLabel = "View in Shopify";
+    actionUrl = "shopify://admin/settings/checkout";
   } else if (exists && !isEnabled) {
     status = "attention";
     helpText =
       "Validation function exists but is disabled. Enable it in checkout settings.";
     actionLabel = "Enable validation";
+    actionUrl = "shopify://admin/settings/checkout";
   } else if (!exists) {
     status = "attention";
     helpText =
       "Checkout validation not registered. This may indicate a setup issue.";
-    actionLabel = "Retry setup";
   } else {
     status = "pending";
     helpText = "Checkout protection is being configured";
-    actionLabel = "Check status";
   }
 
   return {
@@ -181,7 +181,7 @@ export function computeValidationStep(
     description:
       "Block checkout for buyers on credit hold or over their limit",
     status,
-    actionUrl: "shopify://admin/settings/checkout",
+    actionUrl,
     actionLabel,
     helpText,
   };
@@ -189,6 +189,7 @@ export function computeValidationStep(
 
 /**
  * Compute step 4: Payment customization registered (S13).
+ * Links to Shopify admin payment settings.
  */
 export function computePaymentCustomizationStep(
   customization: PaymentCustomizationInfo | null
@@ -199,26 +200,27 @@ export function computePaymentCustomizationStep(
 
   let status: StepStatus;
   let helpText: string;
-  let actionLabel: string;
+  let actionLabel: string | undefined;
+  let actionUrl: string | undefined;
 
   if (exists && isEnabled && hasCorrectHandle) {
     status = "complete";
     helpText = "Payment customization is active";
     actionLabel = "View in Shopify";
+    actionUrl = "shopify://admin/settings/payments";
   } else if (exists && !isEnabled) {
     status = "attention";
     helpText =
       "Payment customization exists but is disabled. Enable it in payment settings.";
     actionLabel = "Enable customization";
+    actionUrl = "shopify://admin/settings/payments";
   } else if (!exists) {
     status = "attention";
     helpText =
       "Payment customization not registered. This may indicate a setup issue.";
-    actionLabel = "Retry setup";
   } else {
     status = "pending";
     helpText = "Payment customization is being configured";
-    actionLabel = "Check status";
   }
 
   return {
@@ -227,7 +229,7 @@ export function computePaymentCustomizationStep(
     description:
       "Hide or show payment methods based on buyer account status",
     status,
-    actionUrl: "shopify://admin/settings/payments",
+    actionUrl,
     actionLabel,
     helpText,
   };
@@ -255,8 +257,6 @@ export function computeReminderStep(
     title: "Configure payment reminders",
     description: "Set up automated reminder emails for upcoming and overdue invoices",
     status: "complete",
-    actionUrl: "/app/settings/reminders",
-    actionLabel: "Configure reminders",
     helpText: "Email sender is configured and ready",
   };
 }
@@ -321,9 +321,10 @@ export async function fetchShopOnboardingData(
     {
       id: string;
       defaultTermsDays: number | null;
+      onboardingDismissedAt: Date | null;
     }[]
   >`
-    SELECT id, "defaultTermsDays"
+    SELECT id, "defaultTermsDays", onboarding_dismissed_at AS "onboardingDismissedAt"
     FROM "Shop"
     WHERE domain = ${shopDomain}
   `;
@@ -342,18 +343,12 @@ export async function fetchShopOnboardingData(
     WHERE "shopId" = ${shop.id}
   `;
 
-  const [onboarding] = await sql<{ dismissed_at: Date | null }[]>`
-    SELECT dismissed_at
-    FROM shop_onboarding
-    WHERE shop_id = ${shop.id}
-  `.catch(() => [{ dismissed_at: null }]);
-
   return {
     shopId: shop.id,
     defaultTermsDays: shop.defaultTermsDays,
     buyerAccountCount: parseInt(accountCount?.count ?? "0", 10),
     tagRuleCount: parseInt(tagRuleCount?.count ?? "0", 10),
-    dismissedAt: onboarding?.dismissed_at ?? null,
+    dismissedAt: shop.onboardingDismissedAt,
   };
 }
 
@@ -365,10 +360,9 @@ export async function dismissOnboarding(
   shopId: string
 ): Promise<void> {
   await sql`
-    INSERT INTO shop_onboarding (shop_id, dismissed_at)
-    VALUES (${shopId}, NOW())
-    ON CONFLICT (shop_id)
-    DO UPDATE SET dismissed_at = NOW()
+    UPDATE "Shop"
+    SET onboarding_dismissed_at = NOW()
+    WHERE id = ${shopId}
   `;
 }
 
@@ -380,23 +374,8 @@ export async function reopenOnboarding(
   shopId: string
 ): Promise<void> {
   await sql`
-    UPDATE shop_onboarding
-    SET dismissed_at = NULL
-    WHERE shop_id = ${shopId}
-  `;
-}
-
-/**
- * Mark onboarding as complete for a shop.
- */
-export async function markOnboardingComplete(
-  sql: Sql,
-  shopId: string
-): Promise<void> {
-  await sql`
-    INSERT INTO shop_onboarding (shop_id, completed_at)
-    VALUES (${shopId}, NOW())
-    ON CONFLICT (shop_id)
-    DO UPDATE SET completed_at = NOW()
+    UPDATE "Shop"
+    SET onboarding_dismissed_at = NULL
+    WHERE id = ${shopId}
   `;
 }

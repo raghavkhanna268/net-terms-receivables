@@ -367,12 +367,9 @@ export default function OnboardingPage() {
 
       <s-section slot="aside" heading="Need help?">
         <s-paragraph>
-          Check our documentation or contact support if you have questions
-          about any step.
+          Check the documentation in this repository for detailed setup
+          instructions and troubleshooting.
         </s-paragraph>
-        <s-link href="https://docs.example.com/net-terms">
-          View documentation
-        </s-link>
       </s-section>
     </s-page>
   );
