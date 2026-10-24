@@ -111,6 +111,28 @@ export interface BackstopResult {
   alertRecorded?: boolean;
 }
 
+/**
+ * Result of evaluating whether backstop should be applied (read-only).
+ * Used by both applyBackstop and dry-run mode.
+ */
+export interface EvaluateBackstopResult {
+  /** Whether backstop would be applied */
+  wouldApply: boolean;
+  /** Whether the order would be skipped */
+  wouldSkip: boolean;
+  /** Reason for skipping (if wouldSkip=true) */
+  skipReason?: string;
+  /** Reason code for categorization */
+  reasonCode:
+    | "no_buyer_account"
+    | "already_held"
+    | "already_skipped"
+    | "pending_claim"
+    | "not_held"
+    | "bypass"
+    | "would_hold";
+}
+
 interface FulfillmentOrdersQueryResult {
   order: {
     fulfillmentOrders: {
@@ -726,6 +748,107 @@ export async function resolveInvoiceForOrder(
   `;
   if (!invoice) return null;
   return { shopId: invoice.shopId, invoiceId: invoice.id, buyerAccountId: invoice.buyerAccountId };
+}
+
+/**
+ * Evaluate whether backstop should be applied to an order (read-only).
+ *
+ * This is a pure read-only function that checks:
+ * 1. Buyer account exists
+ * 2. Existing claims (held, skipped, pending)
+ * 3. isBuyerHeldBeforeOrder (hold status, bypass, grace period)
+ *
+ * Used by both applyBackstop (before writing) and dry-run mode.
+ * Does NOT claim or write anything to the database.
+ *
+ * @param sql - Database connection
+ * @param input - Order and buyer information
+ * @returns Evaluation result indicating what would happen
+ */
+export async function evaluateBackstop(
+  sql: Sql,
+  input: BackstopInput,
+): Promise<EvaluateBackstopResult> {
+  const { shopId, orderGid, buyerAccountId, invoiceId } = input;
+
+  // No buyer account - not a net-terms order
+  if (!buyerAccountId) {
+    return {
+      wouldApply: false,
+      wouldSkip: true,
+      skipReason: "No buyer account (not a net-terms order)",
+      reasonCode: "no_buyer_account",
+    };
+  }
+
+  // Check existing backstop_processed_orders row (read-only)
+  const [existing] = await sql<{ action: string; processed_at: Date }[]>`
+    SELECT action, processed_at FROM backstop_processed_orders
+    WHERE shop_id = ${shopId} AND order_gid = ${orderGid}
+  `;
+
+  if (existing) {
+    if (existing.action === "held") {
+      return {
+        wouldApply: false,
+        wouldSkip: true,
+        skipReason: "Already processed (held)",
+        reasonCode: "already_held",
+      };
+    }
+    if (existing.action === "skipped") {
+      return {
+        wouldApply: false,
+        wouldSkip: true,
+        skipReason: "Already processed (skipped)",
+        reasonCode: "already_skipped",
+      };
+    }
+    // pending claim - check if stale
+    const processedAt = new Date(existing.processed_at).getTime();
+    const staleThreshold = Date.now() - STALE_CLAIM_TIMEOUT_SECONDS * 1000;
+    if (processedAt >= staleThreshold) {
+      return {
+        wouldApply: false,
+        wouldSkip: true,
+        skipReason: "Fresh pending claim from another worker",
+        reasonCode: "pending_claim",
+      };
+    }
+    // Stale pending - would be reclaimed, continue evaluation
+  }
+
+  // Check if buyer was held BEFORE this order
+  const { held, bypass, reason } = await isBuyerHeldBeforeOrder(
+    sql,
+    buyerAccountId,
+    invoiceId,
+  );
+
+  if (!held) {
+    return {
+      wouldApply: false,
+      wouldSkip: true,
+      skipReason: reason,
+      reasonCode: "not_held",
+    };
+  }
+
+  if (bypass) {
+    return {
+      wouldApply: false,
+      wouldSkip: true,
+      skipReason: "Bypass active",
+      reasonCode: "bypass",
+    };
+  }
+
+  // Would apply backstop
+  return {
+    wouldApply: true,
+    wouldSkip: false,
+    reasonCode: "would_hold",
+  };
 }
 
 /**

@@ -6,31 +6,42 @@
  * fulfillment holds retroactively using the real applyBackstop service.
  *
  * USAGE:
- *   npx tsx scripts/backstop-backfill.ts              # Dry-run (default)
- *   npx tsx scripts/backstop-backfill.ts --apply      # Actually write holds
- *   npx tsx scripts/backstop-backfill.ts --shop example.myshopify.com  # Scope to shop
+ *   npx tsx scripts/backstop-backfill.ts --since 2026-10-01 --until 2026-10-15
+ *   npx tsx scripts/backstop-backfill.ts --since 2026-10-01 --until 2026-10-15 --apply
+ *   npx tsx scripts/backstop-backfill.ts --since 2026-10-01 --until 2026-10-15 --shop example.myshopify.com
+ *
+ * REQUIRED FLAGS:
+ *   --since  ISO timestamp - only orders created on or after this time
+ *   --until  ISO timestamp - only orders created before this time
+ *
+ * OPTIONAL FLAGS:
+ *   --apply  Actually write holds (default: dry-run)
+ *   --shop   Scope to a specific shop domain
  *
  * HOW IT WORKS:
- * 1. Queries all open invoices for held accounts (manualHold=true OR overdue)
- * 2. For each candidate, calls resolveInvoiceForOrder to verify invoice exists
- * 3. For each candidate (dry-run: logs only, --apply: calls applyBackstop)
- * 4. applyBackstop handles all hold rules: isBuyerHeldBeforeOrder, bypass,
- *    holdState/grace, claims, tags, and AuditEvent
+ * 1. Queries all open invoices for held accounts (manualHold=true, overdue, or holdState=HELD)
+ *    within the --since/--until window
+ * 2. For each candidate, calls evaluateBackstop (read-only) to determine action
+ * 3. Dry-run: prints would-hold, would-skip (with reason), or error per order
+ * 4. --apply: calls applyBackstop which handles all rules, claims, tags, AuditEvent
  *
  * SAFETY:
  * - Dry-run by default (no changes without --apply)
- * - Uses per-shop OFFLINE session token (isOnline=false)
+ * - Uses per-shop OFFLINE session from database
  * - Never overwrites pending claims (handled by applyBackstop)
- * - Output contains GIDs and counts only, no PII, no hardcoded domains
+ * - Output contains GIDs and shop IDs only, no PII, no domains in output
  *
  * ENVIRONMENT:
  *   DATABASE_URL - Postgres connection string (required)
+ *   SHOPIFY_API_KEY - Shopify app API key (required for --apply)
+ *   SHOPIFY_API_SECRET - Shopify app API secret (required for --apply)
  *
  * @see app/services/backstop.server.ts
  */
 
 import postgres from "postgres";
 import { pathToFileURL } from "node:url";
+import { requestContext } from "~/lib/request-context.server";
 
 interface BackfillCandidate {
   invoiceId: string;
@@ -42,39 +53,45 @@ interface BackfillCandidate {
 
 interface BackfillResult {
   candidates: number;
+  wouldHold: number;
+  wouldSkip: number;
   applied: number;
   skipped: number;
   errors: number;
 }
 
 /**
- * Get offline session access token for a shop.
- * Returns null if no offline session exists.
+ * Check if an offline session exists for a shop.
+ * Returns true if an offline session exists, false otherwise.
  */
-async function getOfflineAccessToken(
+async function hasOfflineSession(
   sql: ReturnType<typeof postgres>,
   shopDomain: string
-): Promise<string | null> {
-  const [session] = await sql<{ accessToken: string }[]>`
-    SELECT "accessToken"
-    FROM "Session"
-    WHERE shop = ${shopDomain}
-      AND "isOnline" = false
-      AND "accessToken" IS NOT NULL
-    ORDER BY id DESC
-    LIMIT 1
+): Promise<boolean> {
+  const [session] = await sql<{ exists: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1
+      FROM "Session"
+      WHERE shop = ${shopDomain}
+        AND "isOnline" = false
+        AND "accessToken" IS NOT NULL
+    ) AS exists
   `;
-  return session?.accessToken ?? null;
+  return session?.exists ?? false;
 }
 
 /**
  * Find orders from held accounts missing backstop holds.
  *
- * Held = manualHold=true OR has overdue invoices (dueAt < NOW() - 1 day)
+ * Held = manualHold=true OR overdue invoices OR holdState='HELD'
  * Missing = no backstop_processed_orders row OR action='pending'
+ *
+ * Only includes orders within the --since/--until window.
  */
 async function findCandidates(
   sql: ReturnType<typeof postgres>,
+  since: Date,
+  until: Date,
   shopFilter?: string
 ): Promise<BackfillCandidate[]> {
   const shopCondition = shopFilter
@@ -94,6 +111,7 @@ async function findCandidates(
       SELECT id, "shopId"
       FROM "BuyerAccount"
       WHERE "manualHold" = true
+         OR "holdState" = 'HELD'
          OR id IN (SELECT "buyerAccountId" FROM overdue_accounts)
     )
     SELECT
@@ -110,9 +128,11 @@ async function findCandidates(
     WHERE i.status = 'open'
       AND i.outstanding > 0
       AND i."orderId" IS NOT NULL
+      AND i."createdAt" >= ${since}
+      AND i."createdAt" < ${until}
       AND (bpo.action IS NULL OR bpo.action = 'pending')
       ${shopCondition}
-    ORDER BY s.domain, i."orderId"
+    ORDER BY i."shopId", i."orderId"
   `;
 
   return rows;
@@ -120,6 +140,7 @@ async function findCandidates(
 
 /**
  * Process candidates in dry-run or apply mode.
+ * Must be called inside requestContext.run() for --apply mode.
  */
 async function processBackfill(
   sql: ReturnType<typeof postgres>,
@@ -128,6 +149,8 @@ async function processBackfill(
 ): Promise<BackfillResult> {
   const result: BackfillResult = {
     candidates: candidates.length,
+    wouldHold: 0,
+    wouldSkip: 0,
     applied: 0,
     skipped: 0,
     errors: 0,
@@ -137,37 +160,35 @@ async function processBackfill(
     return result;
   }
 
-  // Import backstop service
-  const { resolveInvoiceForOrder, applyBackstop, RetryableBackstopError } =
-    await import("~/services/backstop.server");
+  const {
+    resolveInvoiceForOrder,
+    evaluateBackstop,
+    applyBackstop,
+    RetryableBackstopError,
+  } = await import("~/services/backstop.server");
 
-  // Group by shop for token efficiency
   const byShop = new Map<string, BackfillCandidate[]>();
   for (const candidate of candidates) {
-    const existing = byShop.get(candidate.shopDomain) ?? [];
+    const existing = byShop.get(candidate.shopId) ?? [];
     existing.push(candidate);
-    byShop.set(candidate.shopDomain, existing);
+    byShop.set(candidate.shopId, existing);
   }
 
-  for (const [shopDomain, shopCandidates] of byShop) {
-    console.log(`\nShop: ${shopDomain}`);
+  for (const [shopId, shopCandidates] of byShop) {
+    const shopDomain = shopCandidates[0].shopDomain;
+    console.log(`\nShop: ${shopId}`);
     console.log("-".repeat(40));
 
-    // Get offline access token for this shop
-    const accessToken = await getOfflineAccessToken(sql, shopDomain);
-    if (!accessToken) {
+    const hasSession = await hasOfflineSession(sql, shopDomain);
+    if (!hasSession) {
       console.log(`  ⚠ No offline session, skipping ${shopCandidates.length} orders`);
       result.errors += shopCandidates.length;
       continue;
     }
 
-    // Set up shopify client context for this shop
-    // The shopifyGraphQLRequest function used by applyBackstop
-    // will use the session from the database
     for (const candidate of shopCandidates) {
       console.log(`  Order: ${candidate.orderId}`);
 
-      // Verify invoice still exists
       const invoiceInfo = await resolveInvoiceForOrder(
         sql,
         shopDomain,
@@ -175,40 +196,54 @@ async function processBackfill(
       );
 
       if (!invoiceInfo) {
-        console.log(`    → Invoice not found, skipping`);
+        console.log(`    → skip (invoice_not_found)`);
         result.skipped++;
+        if (dryRun) result.wouldSkip++;
         continue;
       }
+
+      const evalInput = {
+        shopDomain,
+        shopId: invoiceInfo.shopId,
+        orderGid: candidate.orderId,
+        buyerAccountId: invoiceInfo.buyerAccountId,
+        invoiceId: invoiceInfo.invoiceId,
+      };
 
       if (dryRun) {
-        console.log(`    → [DRY-RUN] Would apply backstop`);
-        result.applied++;
+        try {
+          const evalResult = await evaluateBackstop(sql, evalInput);
+          if (evalResult.wouldApply) {
+            console.log(`    → would-hold (${evalResult.reasonCode})`);
+            result.wouldHold++;
+          } else {
+            console.log(`    → would-skip (${evalResult.reasonCode})`);
+            result.wouldSkip++;
+          }
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.log(`    ✗ error: ${msg}`);
+          result.errors++;
+        }
         continue;
       }
 
-      // Apply backstop (handles all rules, claims, tags, audit)
       try {
-        const backstopResult = await applyBackstop(sql, {
-          shopDomain,
-          shopId: invoiceInfo.shopId,
-          orderGid: candidate.orderId,
-          buyerAccountId: invoiceInfo.buyerAccountId,
-          invoiceId: invoiceInfo.invoiceId,
-        });
+        const backstopResult = await applyBackstop(sql, evalInput);
 
         if (backstopResult.applied) {
           console.log(
-            `    ✓ Applied: ${backstopResult.fulfillmentOrdersHeld} FOs held`
+            `    ✓ held: ${backstopResult.fulfillmentOrdersHeld} FOs`
           );
           result.applied++;
         } else {
-          console.log(`    → Skipped: ${backstopResult.skipReason}`);
+          console.log(`    → skip (${backstopResult.skipReason})`);
           result.skipped++;
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         const isRetryable = e instanceof RetryableBackstopError;
-        console.log(`    ✗ Error (${isRetryable ? "retryable" : "fatal"}): ${msg}`);
+        console.log(`    ✗ error (${isRetryable ? "retryable" : "fatal"}): ${msg}`);
         result.errors++;
       }
     }
@@ -217,18 +252,53 @@ async function processBackfill(
   return result;
 }
 
-async function main() {
-  const args = process.argv.slice(2);
+function parseArgs(args: string[]): {
+  dryRun: boolean;
+  since: Date | null;
+  until: Date | null;
+  shopFilter: string | undefined;
+} {
   const dryRun = !args.includes("--apply");
+  
+  const sinceIndex = args.indexOf("--since");
+  const sinceStr = sinceIndex !== -1 ? args[sinceIndex + 1] : undefined;
+  const since = sinceStr ? new Date(sinceStr) : null;
+  
+  const untilIndex = args.indexOf("--until");
+  const untilStr = untilIndex !== -1 ? args[untilIndex + 1] : undefined;
+  const until = untilStr ? new Date(untilStr) : null;
+  
   const shopIndex = args.indexOf("--shop");
   const shopFilter = shopIndex !== -1 ? args[shopIndex + 1] : undefined;
+
+  return { dryRun, since, until, shopFilter };
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  const { dryRun, since, until, shopFilter } = parseArgs(args);
 
   console.log("=".repeat(60));
   console.log("Backstop Backfill Script (S13)");
   console.log("=".repeat(60));
+
+  if (!since || isNaN(since.getTime())) {
+    console.error("ERROR: --since is required (ISO timestamp, e.g. 2026-10-01)");
+    process.exit(1);
+  }
+  if (!until || isNaN(until.getTime())) {
+    console.error("ERROR: --until is required (ISO timestamp, e.g. 2026-10-15)");
+    process.exit(1);
+  }
+  if (since >= until) {
+    console.error("ERROR: --since must be before --until");
+    process.exit(1);
+  }
+
   console.log(`Mode: ${dryRun ? "DRY-RUN (use --apply to write)" : "APPLY (writing holds)"}`);
+  console.log(`Window: ${since.toISOString()} to ${until.toISOString()}`);
   if (shopFilter) {
-    console.log(`Shop filter: ${shopFilter}`);
+    console.log(`Shop filter: (provided)`);
   }
   console.log("");
 
@@ -238,11 +308,18 @@ async function main() {
     process.exit(1);
   }
 
+  if (!dryRun) {
+    if (!process.env.SHOPIFY_API_KEY || !process.env.SHOPIFY_API_SECRET) {
+      console.error("ERROR: SHOPIFY_API_KEY and SHOPIFY_API_SECRET are required for --apply mode");
+      process.exit(1);
+    }
+  }
+
   const sql = postgres(databaseUrl, { max: 1 });
 
   try {
     console.log("Finding candidates (held accounts with missing backstop)...\n");
-    const candidates = await findCandidates(sql, shopFilter);
+    const candidates = await findCandidates(sql, since, until, shopFilter);
 
     if (candidates.length === 0) {
       console.log("✅ No candidates found. All orders from held accounts have been processed.\n");
@@ -251,17 +328,24 @@ async function main() {
 
     console.log(`Found ${candidates.length} candidate(s):`);
 
-    const result = await processBackfill(sql, candidates, dryRun);
+    const result = await requestContext.run({ getSql: () => sql }, async () => {
+      return processBackfill(sql, candidates, dryRun);
+    });
 
     console.log("\n" + "=".repeat(60));
     console.log("SUMMARY");
     console.log("=".repeat(60));
     console.log(`Candidates: ${result.candidates}`);
-    console.log(`${dryRun ? "Would apply" : "Applied"}: ${result.applied}`);
-    console.log(`Skipped: ${result.skipped}`);
+    if (dryRun) {
+      console.log(`Would hold: ${result.wouldHold}`);
+      console.log(`Would skip: ${result.wouldSkip}`);
+    } else {
+      console.log(`Applied: ${result.applied}`);
+      console.log(`Skipped: ${result.skipped}`);
+    }
     console.log(`Errors: ${result.errors}`);
 
-    if (dryRun && result.applied > 0) {
+    if (dryRun && result.wouldHold > 0) {
       console.log("\n⚠ This was a dry-run. Run with --apply to actually apply holds.");
     }
   } finally {
@@ -269,7 +353,6 @@ async function main() {
   }
 }
 
-// Run if executed directly
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
     console.error("Fatal error:", err);
@@ -277,4 +360,4 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   });
 }
 
-export { findCandidates, getOfflineAccessToken, processBackfill };
+export { findCandidates, hasOfflineSession, processBackfill, parseArgs };
