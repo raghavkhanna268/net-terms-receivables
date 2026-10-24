@@ -231,8 +231,8 @@ describe("metafield-definitions", () => {
       }
 
       const errorCall = consoleSpy.mock.calls[0];
-      expect(errorCall[0]).toContain("[metafieldDefinitions]");
-      expect(errorCall[0]).toContain("NAMESPACE_INVALID");
+      expect(errorCall[0]).toContain("metafield_definition_create_failed");
+      // safeLog redacts non-allowlisted values - just verify no PII leaked
       expect(errorCall[0]).not.toContain("shop");
       expect(errorCall[0]).not.toContain("myshopify");
 
@@ -260,7 +260,7 @@ describe("metafield-definitions", () => {
       ).rejects.toThrow("Failed to create metafield definitions");
 
       expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("GraphQL errors: Access denied"),
+        expect.stringContaining("metafield_definition_create_failed"),
       );
 
       consoleSpy.mockRestore();
@@ -282,7 +282,7 @@ describe("metafield-definitions", () => {
       ).rejects.toThrow("Failed to create metafield definitions");
 
       expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("Exception: Network error"),
+        expect.stringContaining("metafield_definition_create_failed"),
       );
 
       consoleSpy.mockRestore();

@@ -80,7 +80,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (result.status === "error") {
     console.error(`[webhooks.company_locations] Enqueue failed wh=${webhookId}`);
-    throw result.error;
+    throw new Error(result.code);
   }
 
   console.log(

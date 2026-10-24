@@ -570,7 +570,7 @@ describe("Real handleCustomer tests with fallback", () => {
 
     // Warning should include counter failure
     expect(consoleWarnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("counter increment failed")
+      expect.stringContaining("customer_pii_access_denied_fallback_counter_failed")
     );
 
     // processCustomerWebhook should still have been called
