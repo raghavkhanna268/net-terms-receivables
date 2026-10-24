@@ -34,21 +34,21 @@ import { validateTimezone } from "~/lib/aging-dates.server";
 import { DateTime } from "luxon";
 
 /**
- * Check if plan gating enforcement is enabled (inlined to avoid import chain issues).
- * Mirrors gating.server.ts:isGatingEnforced().
+ * Check if plan gating enforcement is enabled.
+ * Inlined from gating.server.ts to avoid import chain that breaks test mocking
+ * in app.settings.reminders.test.ts (chain: gating → plan → shopify modules).
  */
-function isGatingEnforcedForReminders(): boolean {
+function isGatingEnforced(): boolean {
   const env = process.env.PLAN_GATING_ENFORCED as string | undefined;
   return env === "1" || env === "true";
 }
 
 /**
  * Check if a buyer account is active (not gated) for reminder purposes.
- * Mirrors gating.server.ts:isAccountActive() - inlined to avoid import chain
- * that breaks test mocking in app.settings.reminders.test.ts.
+ * Inlined from gating.server.ts to avoid import chain.
  */
-function isBuyerAccountActiveForReminders(gatedAt: Date | null): boolean {
-  if (!isGatingEnforcedForReminders()) {
+function isAccountActive(gatedAt: Date | null): boolean {
+  if (!isGatingEnforced()) {
     return true;
   }
   return gatedAt === null;
@@ -521,7 +521,7 @@ export async function sendPaymentReminder(
 
   // Gate 3: Check if buyer account is gated (over plan limit)
   // When PLAN_GATING_ENFORCED is on, no reminders to gated accounts
-  if (!isBuyerAccountActiveForReminders(invoice.buyerAccountGatedAt)) {
+  if (!isAccountActive(invoice.buyerAccountGatedAt)) {
     return {
       success: true,
       action: "skipped",

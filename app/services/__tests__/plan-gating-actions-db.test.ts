@@ -357,24 +357,9 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
         )
       `;
 
-      // Snapshot and reset cap for this test to avoid hitting cap limit
-      const [capBefore] = await sql<{ daily_count: number }[]>`
-        SELECT COALESCE(
-          (SELECT daily_count FROM s18_global_sends WHERE send_key = 'global' AND send_date = ${todayStr}::DATE),
-          0
-        ) AS daily_count
-      `;
-      const capExisted = capBefore.daily_count > 0;
-
-      // Reset cap to 0 for this test
-      if (capExisted) {
-        await sql`
-          UPDATE s18_global_sends SET daily_count = 0
-          WHERE send_key = 'global' AND send_date = ${todayStr}::DATE
-        `;
-      }
-
       const { getGlobalSendCounts, sendPaymentReminder } = await import("../reminders.server");
+      
+      // Capture counts before - use delta assertion (don't modify the shared row)
       const countsBefore = await getGlobalSendCounts(sql);
 
       // Mock send window
@@ -403,20 +388,13 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
         expect(result.success).toBe(true);
         expect(result.action).toBe("sent");
 
-        // Cap consumed (delta = 1 means it tried to send)
+        // Delta assertion: cap increased by 1 (don't check absolute values)
         const countsAfter = await getGlobalSendCounts(sql);
         expect(countsAfter.daily - countsBefore.daily).toBe(1);
 
         expect(mockFetch).toHaveBeenCalledTimes(1);
       } finally {
         luxonSpy.mockRestore();
-        // Restore the original cap value
-        if (capExisted) {
-          await sql`
-            UPDATE s18_global_sends SET daily_count = ${capBefore.daily_count}
-            WHERE send_key = 'global' AND send_date = ${todayStr}::DATE
-          `;
-        }
       }
     });
   });
