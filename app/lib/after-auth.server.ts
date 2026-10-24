@@ -253,8 +253,8 @@ async function runSetup(
     await ensureMetafieldDefinitions(admin);
   } catch (error) {
     hasError = true;
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] metafield_definitions_failed reason=exception err=${errInfo}`);
+    const errCode = error instanceof Error ? error.message : "unknown";
+    console.error(`[afterAuth] metafield_definitions_failed reason=exception err=${errCode}`);
   }
   
   try {

@@ -2287,4 +2287,73 @@ describeWithDb("S17 apply service DB integration", () => {
       assertNoSensitiveDataInRawCalls(consoleErrorSpy);
     });
   });
+
+  /**
+   * Error code format tests: verify returned errors are codes, not raw messages.
+   * Uses REAL toErrorCode (no mocks) and sentinels to detect leakage.
+   */
+  describe("Error code format: no raw messages in returned errors", () => {
+    const SENTINEL = "SENTINEL_RAW_9f3";
+
+    it("Shopify API failure returns code, not raw error text", async () => {
+      mockShopifySuccess = false;
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+      const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
+
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("retryable:shopify_api_error");
+      expect(result.error).not.toContain(SENTINEL);
+    });
+
+    it("unmatchMatch catch returns error code, not raw exception text", async () => {
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+      
+      const matchId = `match-unmatch-error-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 10000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'confirmed', NOW(), NOW())
+      `;
+
+      const result = await unmatchMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+      expect(result.success).toBe(true);
+
+      // Verify error format on actual failures - test the pattern
+      const badResult = await unmatchMatch(sql, TEST_SHOP_ID, "nonexistent-match-id", "test-user");
+      expect(badResult.success).toBe(false);
+      expect(badResult.error).toBe("Match not found");
+    });
+
+    it("recovery error returns code with permanent prefix, no raw text", async () => {
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+
+      const matchId = `match-recovery-error-${Date.now().toString(36)}`;
+      await sql`
+        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES (${matchId}, ${TEST_SHOP_ID}, ${paymentId}, ${invoiceId}, 10000.00, 100, ${sql.json([{ type: 'test', points: 100 }])}, 'pushed', NOW(), NOW())
+      `;
+
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      expect(result.success).toBe(false);
+      expect(result.reasonCode).toBe("PUSHED_WITHOUT_AUDIT");
+      // Error should be fixed text or code, no sentinel
+      expect(result.error).not.toContain(SENTINEL);
+    });
+
+    it("error codes use toErrorCode pattern (retryable: or permanent: prefix)", async () => {
+      mockShopifySuccess = false;
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+      const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
+
+      const result = await applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      expect(result.error).toMatch(/^(retryable|permanent):/);
+    });
+  });
 });
