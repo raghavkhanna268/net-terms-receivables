@@ -37,7 +37,22 @@ WITH _msgs AS (
   ) m
   WHERE m.msg_id = ANY (string_to_array(:'msg_ids', ',')::bigint[])
 )
-SELECT m.msg_id, b.order_gid, b.action, b.reason, b.processed_at
+SELECT m.msg_id, b.order_gid, b.action,
+       CASE b.reason
+         WHEN 'Order placed from held account - backstop applied'                   THEN 'hold_applied'
+         WHEN 'Backstop failed after all retries - manual intervention required'     THEN 'failed_after_retries'
+         WHEN 'Skipped non-merchant-managed fulfillment orders (outside our scope)'  THEN 'non_merchant_managed_skipped'
+         WHEN 'Account not found'                                                   THEN 'account_not_found'
+         WHEN 'Bypass active'                                                       THEN 'bypass_active'
+         WHEN 'Manual hold'                                                         THEN 'manual_hold'
+         WHEN 'Payment overdue'                                                     THEN 'payment_overdue'
+         WHEN 'Over credit limit'                                                   THEN 'over_credit_limit'
+         WHEN 'Not held'                                                            THEN 'not_held'
+         WHEN 'No credit limit'                                                     THEN 'no_credit_limit'
+         WHEN 'Already over limit before this order'                                THEN 'already_over_limit'
+         WHEN 'This order pushed account over limit (not held)'                     THEN 'order_pushed_over_limit'
+         ELSE CASE WHEN b.reason IS NULL THEN NULL ELSE '<other>' END
+       END AS reason_code, b.processed_at
 FROM _msgs m
 JOIN backstop_processed_orders b ON b.order_gid = m.order_gid
 ORDER BY m.msg_id, b.processed_at;
@@ -77,7 +92,7 @@ SELECT m.msg_id,
        ba."holdState"::text            AS hold_state,
        ba."manualHold"                 AS manual_hold,
        ba.bypass                       AS bypass,
-       ba."holdReasonCode"             AS hold_reason_code
+       CASE WHEN ba."holdReasonCode" ~ '^[A-Z0-9_]{1,40}$' THEN ba."holdReasonCode" WHEN ba."holdReasonCode" IS NULL THEN NULL ELSE '<other>' END AS hold_reason_code
 FROM _msgs m
 LEFT JOIN "Invoice" i ON i."orderId" = m.order_gid
 LEFT JOIN "BuyerAccount" ba ON ba.id = i."buyerAccountId"

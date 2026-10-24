@@ -80,6 +80,11 @@ on:
         description: "UTC timestamp when redrive started (for post_redrive_verify, e.g. 2026-10-24T10:00:00Z)"
         required: false
         type: string
+      checkout_fixtures:
+        description: "Read-only: S12 checkout fixtures (seed BuyerAccount ids/enums/booleans + $app:credit_status values + active validation function ids)"
+        required: false
+        default: false
+        type: boolean
       drain_cron:
         description: "NOT read-only unless none: pause/resume ONLY the s10_drain_every_minute pg_cron job (cron.alter_job active=false/true)"
         required: false
@@ -140,12 +145,11 @@ jobs:
             exit 1
           fi
 
-          echo "Querying Session table for shop: $SHOP_DOMAIN"
+          echo "Querying Session table for the input shop (domain not printed)"
           echo ""
 
           psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" "$DATABASE_URL" <<'EOSQL'
           SELECT
-            shop,
             "isOnline",
             scope,
             CASE WHEN "accessToken" IS NOT NULL AND "accessToken" != '' THEN true ELSE false END AS "hasAccessToken",
@@ -240,7 +244,7 @@ jobs:
 
           echo "=== Post-Redrive Verification ==="
           echo ""
-          echo "Shop: $SHOP_DOMAIN"
+          echo "Shop: (input shop; domain not printed)"
           echo "Read-only mode: enforced via PGOPTIONS and BEGIN TRANSACTION READ ONLY"
           echo ""
 
@@ -300,7 +304,7 @@ jobs:
             exit 0
           fi
 
-          echo "Attempting to refresh expired token for shop: $SHOP_DOMAIN"
+          echo "Attempting to refresh expired token for the input shop"
           echo ""
 
           # Run the refresh script (never outputs tokens - probe re-reads from DB)
@@ -371,7 +375,7 @@ jobs:
 
           # Check if offline session exists
           if [ "$OFFLINE_SESSION_EXISTS" != "true" ]; then
-            echo "::error::No offline session found for shop $SHOP_DOMAIN"
+            echo "::error::No offline session found for the input shop"
             exit 1
           fi
 
@@ -417,7 +421,7 @@ jobs:
           )
 
           if [ -z "$ACCESS_TOKEN" ]; then
-            echo "::error::No offline session found for shop $SHOP_DOMAIN"
+            echo "::error::No offline session found for the input shop"
             exit 1
           fi
 
@@ -780,18 +784,23 @@ jobs:
           )
 
           if [ "$DLQ_EXISTS" = "t" ]; then
-            echo "DLQ messages by topic/handler (no payloads; error class truncated, hosts/emails/ids redacted):"
+            echo "DLQ messages by topic/handler (no payloads; error class enum, error text never printed):"
             psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
           SELECT
             original_queue,
             message->>'topic' AS topic,
-            LEFT(
-              REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(error, ':.*$', ''), '[^[:space:]@]+@[^[:space:]]+', '<email>', 'g'), '[A-Za-z0-9_.-]+\.(local|com|net|org|io|co|dev|in|app)\M', '<host>', 'g'), '\m[0-9a-fA-F]{12,}\M', '<hex>', 'g'), '[0-9]{4,}', '<n>', 'g'),
-              80
-            ) AS error_class_truncated,
+            CASE
+              WHEN error LIKE 'Order has payment terms but no matching BuyerAccount found%' THEN 'nba_payment_terms'
+              WHEN error LIKE 'Customer matches tag rule % but no BuyerAccount found%'      THEN 'nba_tag_rule'
+              WHEN error LIKE 'CompanyLocation exists but no BuyerAccount synced yet%'      THEN 'nba_company_location'
+              WHEN error LIKE 'No handler registered for topic after %'                     THEN 'no_handler'
+              WHEN error LIKE 'Non-retryable error:%'                                       THEN 'non_retryable'
+              WHEN error IS NULL                                                            THEN NULL
+              ELSE 'other'
+            END AS error_class,
             COUNT(*) AS count
           FROM s6_dead_letter
-          GROUP BY original_queue, message->>'topic', error_class_truncated
+          GROUP BY original_queue, message->>'topic', error_class
           ORDER BY count DESC
           LIMIT 50;
           EOSQL
@@ -829,24 +838,30 @@ jobs:
 
           psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
           SELECT
-            s.domain AS shop,
+            ROW_NUMBER() OVER (ORDER BY s.id) AS shop_idx,
             (SELECT COUNT(*) FROM "Invoice" i WHERE i."shopId" = s.id) AS invoice_count,
             (SELECT COUNT(*) FROM "BuyerAccount" ba WHERE ba."shopId" = s.id) AS buyer_account_count
           FROM "Shop" s
           WHERE s."uninstalledAt" IS NULL
-          ORDER BY s.domain;
+          ORDER BY s.id;
           EOSQL
 
           echo ""
           echo "Entity counts summary (JSON):"
           psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
           SELECT json_agg(json_build_object(
-            'shop', s.domain,
-            'invoices', (SELECT COUNT(*) FROM "Invoice" i WHERE i."shopId" = s.id),
-            'buyer_accounts', (SELECT COUNT(*) FROM "BuyerAccount" ba WHERE ba."shopId" = s.id)
-          ))
-          FROM "Shop" s
-          WHERE s."uninstalledAt" IS NULL;
+            'shop_idx', x.shop_idx,
+            'invoices', x.invoices,
+            'buyer_accounts', x.buyer_accounts
+          ) ORDER BY x.shop_idx)
+          FROM (
+            SELECT
+              ROW_NUMBER() OVER (ORDER BY s.id) AS shop_idx,
+              (SELECT COUNT(*) FROM "Invoice" i WHERE i."shopId" = s.id) AS invoices,
+              (SELECT COUNT(*) FROM "BuyerAccount" ba WHERE ba."shopId" = s.id) AS buyer_accounts
+            FROM "Shop" s
+            WHERE s."uninstalledAt" IS NULL
+          ) x;
           EOSQL
 
       - name: Drain cron control
@@ -1056,6 +1071,7 @@ jobs:
           SHOPIFY_API_SECRET: ${{ secrets.SHOPIFY_API_SECRET }}
           SHOP_DOMAIN: ${{ inputs.shop }}
           ENSURE_VALIDATION: ${{ inputs.ensure_validation }}
+          CHECKOUT_FIXTURES: ${{ inputs.checkout_fixtures }}
           PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
           set -euo pipefail
@@ -1219,6 +1235,90 @@ jobs:
             --argjson repo_input_query_has_credit_status "$REPO_INPUT_QUERY_HAS_CREDIT_STATUS" \
             --argjson deployed_input_query_has_credit_status "$DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS" \
             '{exists: $exists, enabled: $enabled, blockOnFailure: $block_on_failure, repo_input_query_has_credit_status: $repo_input_query_has_credit_status, deployed_input_query_has_credit_status: $deployed_input_query_has_credit_status}'
+
+          # S12 checkout fixtures (read-only). Prints ids, enums, booleans and the
+          # whitelisted credit_status fields only. Never names, emails, phones or addresses.
+          if [ "$CHECKOUT_FIXTURES" = "true" ]; then
+            echo ""
+            echo "=== S12 checkout fixtures (read-only) ==="
+            FX_QUERY='{"query":"{ validations(first:50) { nodes { id enabled blockOnFailure shopifyFunction { id handle apiType apiVersion app { id handle } } } } }"}'
+            HTTP_STATUS=$(curl -s -w "%{http_code}" -o "$HTTP_RESPONSE" \
+              -X POST \
+              --config "$CURL_CONFIG" \
+              --data-binary "$FX_QUERY" \
+              "https://${SHOP_DOMAIN}/admin/api/2026-10/graphql.json")
+            if [ "$HTTP_STATUS" != "200" ]; then
+              echo "::error::Fixtures validations query failed with HTTP $HTTP_STATUS"
+              exit 1
+            fi
+            if jq -e '.errors | length > 0' "$HTTP_RESPONSE" >/dev/null 2>&1; then
+              echo "::error::GraphQL errors: $(jq -r '[.errors[] | .extensions.code // "UNKNOWN"] | join(", ")' "$HTTP_RESPONSE")"
+              exit 1
+            fi
+            echo "active_validation (credit-check-validation):"
+            jq -c '.data.validations.nodes[] | select(.shopifyFunction.handle == "credit-check-validation")
+              | {validation_id: .id, enabled, blockOnFailure,
+                 function_id: .shopifyFunction.id, function_handle: .shopifyFunction.handle,
+                 function_api_type: .shopifyFunction.apiType, function_api_version: .shopifyFunction.apiVersion,
+                 app_id: .shopifyFunction.app.id, app_handle: .shopifyFunction.app.handle}' "$HTTP_RESPONSE"
+            echo "app_version: not exposed by the Admin API (see the release workflow output / Dev Dashboard)"
+
+            FX_SHOP_ID=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT id FROM "Shop" WHERE domain = :'shop';
+          EOSQL
+            )
+            if [ -z "$FX_SHOP_ID" ]; then
+              echo '{"fixtures_shop_found": false}'
+            else
+              FIXTURES=$(psql -v ON_ERROR_STOP=1 -v shop_id="$FX_SHOP_ID" -t -A "$DATABASE_URL" \
+                -f scripts/readonly/s12-checkout-fixtures.sql | grep '^{' || true)
+              FX_COUNT=$(printf '%s\n' "$FIXTURES" | grep -c '^{' || true)
+              echo "seed_fixture_accounts: $FX_COUNT"
+              if [ "$FX_COUNT" != "0" ]; then
+                OWNER_IDS=$(printf '%s\n' "$FIXTURES" | jq -s -c '[.[] | (.company_location_id // .customer_id) | select(. != null)] | unique')
+                # shellcheck disable=SC2016
+                NODES_Q=$(jq -n --argjson ids "$OWNER_IDS" '{query: "query($ids: [ID!]!) { nodes(ids: $ids) { ... on CompanyLocation { id metafield(namespace: \"$app\", key: \"credit_status\") { jsonValue } } ... on Customer { id metafield(namespace: \"$app\", key: \"credit_status\") { jsonValue } } } }", variables: {ids: $ids}}')
+                HTTP_STATUS=$(curl -s -w "%{http_code}" -o "$HTTP_RESPONSE" \
+                  -X POST \
+                  --config "$CURL_CONFIG" \
+                  --data-binary "$NODES_Q" \
+                  "https://${SHOP_DOMAIN}/admin/api/2026-10/graphql.json")
+                if [ "$HTTP_STATUS" != "200" ]; then
+                  echo "::error::Fixtures metafield query failed with HTTP $HTTP_STATUS"
+                  exit 1
+                fi
+                if jq -e '.errors | length > 0' "$HTTP_RESPONSE" >/dev/null 2>&1; then
+                  echo "::error::GraphQL errors: $(jq -r '[.errors[] | .extensions.code // "UNKNOWN"] | join(", ")' "$HTTP_RESPONSE")"
+                  exit 1
+                fi
+                MF_MAP=$(jq -c '[.data.nodes[] | select(. != null and .id != null)
+                  | {key: .id, value: (if .metafield == null then null else (.metafield.jsonValue
+                      | {schemaVersion, hold, currencyCode,
+                         holdReasonCode: (if .holdReasonCode == null then null
+                                          elif ((.holdReasonCode | type) == "string" and (.holdReasonCode | test("^[A-Z0-9_]{1,40}$"))) then .holdReasonCode
+                                          else "<other>" end),
+                         has_limit: (.limitPaise != null),
+                         over_limit: (if .limitPaise == null or .exposurePaise == null then null
+                                      else ((.exposurePaise | tonumber) > (.limitPaise | tonumber)) end),
+                         updatedAt}) end)}]
+                  | from_entries' "$HTTP_RESPONSE")
+                echo "fixtures (one per line):"
+                printf '%s\n' "$FIXTURES" | jq -c --argjson mf "$MF_MAP" '
+                  . as $a | ($a.company_location_id // $a.customer_id) as $owner
+                  | {buyer_account_id, kind, company_id, company_location_id, customer_id,
+                     hold_state, manual_hold, bypass, hold_reason_code, overdue,
+                     owner_found: ($owner != null and ($mf | has($owner))),
+                     credit_status: (if $owner == null then null else $mf[$owner] end)}'
+                printf '%s\n' "$FIXTURES" | jq -s -c --argjson mf "$MF_MAP" '
+                  {fixtures_total: length,
+                   db_held: (map(select(.hold_state == "HELD" or .manual_hold)) | length),
+                   db_overdue: (map(select(.overdue)) | length),
+                   metafield_present: (map((.company_location_id // .customer_id) as $o | select($o != null and $mf[$o] != null)) | length),
+                   metafield_hold_true: (map((.company_location_id // .customer_id) as $o | select($o != null and ($mf[$o].hold // false))) | length)}' \
+                  | sed 's/^/fixtures_summary: /'
+              fi
+            fi
+          fi
 
           # Handle ensure_validation flag
           if [ "$ENSURE_VALIDATION" = "true" ]; then

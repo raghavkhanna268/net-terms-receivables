@@ -48,6 +48,7 @@ import { checkOrderEligibility, getEligibilityContext } from "~/lib/invoice-elig
 import { getShopAgingTotals, getBuyerLedger, getBuyerInvoices } from "~/lib/aging-queries.server";
 import { runMatcher, confirmMatch } from "../matcher.server";
 import { getSyncHandler } from "../drain/processor.server";
+import { processOrderWebhook } from "../sync/order.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -107,7 +108,11 @@ describeWithDb("gated account behavior (PLAN_GATING_ENFORCED=true)", () => {
   });
 
   afterAll(async () => {
-    process.env.PLAN_GATING_ENFORCED = originalEnv;
+    if (originalEnv === undefined) {
+      delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
+    } else {
+      process.env.PLAN_GATING_ENFORCED = originalEnv;
+    }
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
@@ -305,6 +310,98 @@ describeWithDb("gated account behavior (PLAN_GATING_ENFORCED=true)", () => {
         SELECT "holdState" FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}
       `;
       expect(account.holdState).toBe("OK");
+    });
+
+    it("e2e: markInvoicePaid enqueues recompute, handler clears hold on gated account", async () => {
+      const invoiceId = `inv-gated-e2e-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/gated-e2e-${TEST_SUFFIX}`;
+      const webhookId = `webhook-gated-e2e-${TEST_SUFFIX}`;
+
+      // 1. Create overdue invoice for gated account
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_GATED_ACCOUNT_ID}, ${orderId},
+          '#GATED-E2E-1', 15000.00, 15000.00, 'open',
+          NOW() - INTERVAL '10 days',
+          NOW() - INTERVAL '5 days',
+          NOW(), NOW()
+        )
+      `;
+
+      // 2. Set account to HELD (overdue)
+      await sql`
+        UPDATE "BuyerAccount"
+        SET "holdState" = 'HELD', "holdReasonCode" = 'PAYMENT_OVERDUE', "manualHold" = false
+        WHERE id = ${TEST_GATED_ACCOUNT_ID}
+      `;
+
+      // Verify account is held before we pay
+      const [beforePay] = await sql<{ holdState: string }[]>`
+        SELECT "holdState" FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}
+      `;
+      expect(beforePay.holdState).toBe("HELD");
+
+      // 3. Drive the real markInvoicePaid path via processOrderWebhook with ORDERS_PAID topic
+      const paidResult = await processOrderWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "ORDERS_PAID",
+        {
+          id: orderId,
+          name: "#GATED-E2E-1",
+          createdAt: new Date().toISOString(),
+          displayFinancialStatus: "PAID",
+        },
+        webhookId
+      );
+
+      expect(paidResult.success).toBe(true);
+      expect(paidResult.action).toBe("updated");
+
+      // 4. Verify invoice is now paid
+      const [paidInvoice] = await sql<{ status: string; outstanding: string }[]>`
+        SELECT status, outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+      expect(paidInvoice.status).toBe("paid");
+      expect(paidInvoice.outstanding).toBe("0.00");
+
+      // 5. Assert that a CREDIT_STATUS_RECOMPUTE message for this buyerAccountId lands on s6_sync
+      // Find by payload, not queue length
+      const [recomputeMsg] = await sql<{ msg_id: string; message: { topic: string; buyerAccountId: string } }[]>`
+        SELECT msg_id, message FROM pgmq.q_s6_sync
+        WHERE message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+          AND message->>'buyerAccountId' = ${TEST_GATED_ACCOUNT_ID}
+        ORDER BY msg_id DESC
+        LIMIT 1
+      `;
+
+      expect(recomputeMsg).toBeDefined();
+      expect(recomputeMsg.message.topic).toBe("CREDIT_STATUS_RECOMPUTE");
+      expect(recomputeMsg.message.buyerAccountId).toBe(TEST_GATED_ACCOUNT_ID);
+
+      // 6. Process it through the real handler
+      const recomputeHandler = getSyncHandler("CREDIT_STATUS_RECOMPUTE");
+      expect(recomputeHandler).toBeDefined();
+
+      const handlerResult = await recomputeHandler!(sql, {
+        ...recomputeMsg.message,
+        shop: TEST_SHOP_DOMAIN,
+        webhookId: `credit_recompute:${TEST_GATED_ACCOUNT_ID}:e2e-test`,
+        resourceGid: TEST_GATED_ACCOUNT_ID,
+        enqueuedAt: new Date().toISOString(),
+      });
+
+      expect(handlerResult.success).toBe(true);
+
+      // 7. Assert the hold clears
+      const [afterRecompute] = await sql<{ holdState: string }[]>`
+        SELECT "holdState" FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}
+      `;
+      expect(afterRecompute.holdState).toBe("OK");
     });
   });
 

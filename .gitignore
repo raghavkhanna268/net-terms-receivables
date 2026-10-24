@@ -58,3 +58,5 @@ app/types/admin-*.schema.json
 .vscode
 *.swp
 *.swo
+
+__pycache__/
