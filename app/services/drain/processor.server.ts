@@ -342,7 +342,7 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
     };
   }
 
-  return processOrderWebhook(
+  const orderResult = await processOrderWebhook(
     sql,
     message.shop,
     message.topic,
@@ -350,6 +350,41 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
     message.webhookId,
     triggeredAt
   );
+
+  // S13: Apply backstop for ORDERS_CREATE on held accounts
+  if (message.topic === "ORDERS_CREATE" && orderResult.success && orderResult.entityId) {
+    try {
+      const { applyBackstop } = await import("~/services/backstop.server");
+      
+      // Get shop ID and buyer account ID from the invoice
+      const [invoiceInfo] = await sql<{ shopId: string; buyerAccountId: string }[]>`
+        SELECT "shopId", "buyerAccountId"
+        FROM "Invoice"
+        WHERE id = ${orderResult.entityId}
+      `;
+
+      if (invoiceInfo) {
+        const backstopResult = await applyBackstop(sql, {
+          shopDomain: message.shop,
+          shopId: invoiceInfo.shopId,
+          orderId: orderResult.entityId,
+          orderGid: message.resourceGid,
+          buyerAccountId: invoiceInfo.buyerAccountId,
+        });
+
+        if (backstopResult.applied) {
+          console.log(
+            `[backstop] Applied to order ${message.resourceGid}: ${backstopResult.fulfillmentOrdersHeld} fulfillment orders held`
+          );
+        }
+      }
+    } catch (e) {
+      // Log but don't fail the webhook - backstop is best-effort
+      console.error(`[backstop] Error applying backstop for ${message.resourceGid}:`, e);
+    }
+  }
+
+  return orderResult;
 }
 
 // =============================================================================
