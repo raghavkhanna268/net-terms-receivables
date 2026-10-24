@@ -233,10 +233,18 @@ model BuyerAccount {
   /// Source of the default terms: explicit (set by merchant) or tag (copied from tag rule)
   /// A tag-copied default counts as tag-derived for S9 inference precedence
   defaultTermsSource  DefaultTermsSource?
-  /// Credit hold state
+  /// Credit hold state (computed from manualHold and auto-hold conditions)
   holdState           HoldState          @default(OK)
-  /// Manual bypass for credit hold (overrides holdState)
+  /// Manual bypass for credit hold (overrides holdState, exempts at checkout)
   bypass              Boolean            @default(false)
+  /// S11: Explicit manual hold flag set by merchant
+  manualHold          Boolean            @default(false)
+  /// S11: Whether metafield sync to Shopify is pending
+  syncPending         Boolean            @default(false)
+  /// S11: Machine-readable reason code for hold (e.g., MANUAL_HOLD, PAYMENT_OVERDUE)
+  holdReasonCode      String?
+  /// S11: Optional internal note about the hold
+  holdNote            String?
   /// When the account was created
   createdAt           DateTime           @default(now()) @db.Timestamptz(3)
   /// When the account was last updated (set by trigger)

@@ -61,14 +61,19 @@ interface LoaderData {
     creditLimitAmount: number | null;
     creditLimitPaise: string | null;
     exposurePaise: string;
+    draftExposurePaise: string;
     availableCreditPaise: string | null;
     currency: string;
     holdState: "OK" | "NEAR_LIMIT" | "HELD" | "BYPASS";
+    manualHold: boolean;
+    holdReasonCode: string | null;
+    holdNote: string | null;
     isOnHold: boolean;
     holdReasonDisplay: string | null;
     isOverLimit: boolean;
     isOverdue: boolean;
     utilizationPercent: number | null;
+    syncPending: boolean;
   } | null;
   companyTotals: {
     locationCount: number;
@@ -182,14 +187,19 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
         creditLimitAmount: creditStatusDisplay.creditLimitAmount,
         creditLimitPaise: creditStatusDisplay.creditLimitPaise?.toString() ?? null,
         exposurePaise: creditStatusDisplay.exposurePaise.toString(),
+        draftExposurePaise: creditStatusDisplay.draftExposurePaise.toString(),
         availableCreditPaise: creditStatusDisplay.availableCreditPaise?.toString() ?? null,
         currency: creditStatusDisplay.currency,
         holdState: creditStatusDisplay.holdState,
+        manualHold: creditStatusDisplay.manualHold,
+        holdReasonCode: creditStatusDisplay.holdReasonCode,
+        holdNote: creditStatusDisplay.holdNote,
         isOnHold: creditStatusDisplay.isOnHold,
         holdReasonDisplay: creditStatusDisplay.holdReasonDisplay,
         isOverLimit: creditStatusDisplay.isOverLimit,
         isOverdue: creditStatusDisplay.isOverdue,
         utilizationPercent: creditStatusDisplay.utilizationPercent,
+        syncPending: creditStatusDisplay.syncPending,
       }
     : null;
 
@@ -277,13 +287,18 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
   if (action === "updateCredit") {
     const creditLimitStr = formData.get("creditLimit") as string | null;
     const noLimit = formData.get("noLimit") === "true";
+    const holdOnly = formData.get("holdOnly") === "true";
     const manualHold = formData.get("manualHold") === "true";
     const holdReasonCode = formData.get("holdReasonCode") as HoldReasonCode | null;
     const holdNote = formData.get("holdNote") as string | null;
 
-    let creditLimitAmount: number | null = null;
+    let creditLimitAmount: number | null | undefined;
 
-    if (!noLimit && creditLimitStr) {
+    if (holdOnly) {
+      creditLimitAmount = undefined;
+    } else if (noLimit) {
+      creditLimitAmount = null;
+    } else if (creditLimitStr && creditLimitStr.trim() !== "") {
       const parsed = parseFloat(creditLimitStr);
       if (isNaN(parsed) || parsed < 0) {
         return {
@@ -292,12 +307,18 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
         } satisfies ActionData;
       }
       creditLimitAmount = parsed;
+    } else {
+      return {
+        success: false,
+        error: "Credit limit cannot be empty. Check 'No credit limit' to allow unlimited credit.",
+      } satisfies ActionData;
     }
 
     const update: CreditStatusUpdate = {
       creditLimitAmount,
+      noLimit,
       manualHold,
-      holdReasonCode: manualHold ? (holdReasonCode ?? "MANUAL_HOLD") : null,
+      holdReasonCode: manualHold ? (holdReasonCode ?? "MANUAL_HOLD") : "MANUAL_HOLD",
       holdNote: holdNote || null,
     };
 
@@ -464,6 +485,11 @@ export default function AccountPage() {
 
       {creditStatus && (
         <s-section heading="Credit Status">
+          {creditStatus.syncPending && (
+            <s-banner tone="warning" heading="Sync Pending">
+              Shopify metafield sync is pending. Changes will be retried automatically.
+            </s-banner>
+          )}
           <s-stack>
             <s-paragraph>
               <s-text type="strong">Credit Limit: </s-text>
@@ -478,6 +504,11 @@ export default function AccountPage() {
               <s-text>
                 {formatPaiseAmount(BigInt(creditStatus.exposurePaise), currency)}
               </s-text>
+              {BigInt(creditStatus.draftExposurePaise) > 0n && (
+                <s-text>
+                  {" "}(includes {formatPaiseAmount(BigInt(creditStatus.draftExposurePaise), currency)} pending)
+                </s-text>
+              )}
             </s-paragraph>
             {creditStatus.availableCreditPaise !== null && (
               <s-paragraph>
@@ -579,6 +610,8 @@ export default function AccountPage() {
                   name="creditLimit"
                   min={0}
                   placeholder="e.g., 100000"
+                  value={creditStatus?.creditLimitAmount?.toString() ?? ""}
+                  disabled={creditStatus?.creditLimitAmount === null}
                 ></s-money-field>
                 <s-text>{currency}</s-text>
               </s-grid>
@@ -587,17 +620,22 @@ export default function AccountPage() {
                 label="No credit limit"
                 name="noLimit"
                 value="true"
-                checked={creditStatus?.creditLimitPaise === null}
+                checked={creditStatus?.creditLimitAmount === null}
               ></s-checkbox>
 
               <s-checkbox
                 label="Place manual hold on this account"
                 name="manualHold"
                 value="true"
-                checked={creditStatus?.holdState === "HELD"}
+                checked={creditStatus?.manualHold ?? false}
               ></s-checkbox>
 
-              <s-select label="Hold Reason (if held)" name="holdReasonCode" placeholder="Select reason...">
+              <s-select 
+                label="Hold Reason (if held)" 
+                name="holdReasonCode" 
+                placeholder="Select reason..."
+                value={creditStatus?.holdReasonCode ?? ""}
+              >
                 {HOLD_REASON_OPTIONS.map((opt) => (
                   <s-option key={opt.value ?? "null"} value={opt.value ?? ""}>
                     {opt.label}
@@ -609,6 +647,7 @@ export default function AccountPage() {
                 label="Hold Note (optional)"
                 name="holdNote"
                 placeholder="Internal note about the hold"
+                value={creditStatus?.holdNote ?? ""}
               ></s-text-field>
 
               <s-button type="submit" variant="primary" disabled={isSubmitting}>

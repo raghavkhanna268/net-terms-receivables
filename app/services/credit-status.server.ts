@@ -8,8 +8,8 @@
  * validation function (S12) deserializes. See docs/metafields-contract.md.
  *
  * Design:
- * - DB writes happen first in a transaction
- * - If metafield write fails, a sync_pending flag is set
+ * - DB writes happen in a transaction with FOR UPDATE locking
+ * - If metafield write fails, syncPending flag is set in DB
  * - On next edit or via a reconciliation job, the metafield is retried
  */
 
@@ -22,6 +22,24 @@ import {
 import { shopifyGraphQLRequest, type ShopifyClientResult } from "./shopify-client.server";
 
 /**
+ * Valid hold reason codes - used for validation.
+ */
+export const VALID_HOLD_REASON_CODES: readonly HoldReasonCode[] = [
+  "MANUAL_HOLD",
+  "PAYMENT_OVERDUE",
+  "CREDIT_REVIEW",
+  "NEW_ACCOUNT",
+  "FRAUD_SUSPECTED",
+] as const;
+
+/**
+ * Maximum credit limit in paise that fits safely in BigInt.
+ * 999,999,999,999,999 paise = 9,999,999,999,999.99 currency units (~10 trillion)
+ */
+export const MAX_CREDIT_LIMIT_PAISE = 999_999_999_999_999n;
+export const MAX_CREDIT_LIMIT_AMOUNT = 9_999_999_999_999.99;
+
+/**
  * Owner type for metafield writes.
  */
 export type MetafieldOwner = "CompanyLocation" | "Customer";
@@ -30,12 +48,19 @@ export type MetafieldOwner = "CompanyLocation" | "Customer";
  * Input for updating a buyer account's credit status.
  */
 export interface CreditStatusUpdate {
-  /** Credit limit in the main currency unit (e.g., rupees). Null = no limit. */
-  creditLimitAmount: number | null;
+  /** 
+   * Credit limit in the main currency unit (e.g., rupees). 
+   * - undefined = leave unchanged (hold-only save)
+   * - null = explicit no limit (requires noLimit flag)
+   * - number = set specific limit
+   */
+  creditLimitAmount?: number | null;
+  /** Whether to set no credit limit (explicit flag required for null). */
+  noLimit?: boolean;
   /** Whether the account is on manual hold. */
   manualHold: boolean;
-  /** Reason code for the hold (required if manualHold is true). */
-  holdReasonCode: HoldReasonCode;
+  /** Reason code for the hold (required if manualHold is true, ignored if false). */
+  holdReasonCode?: HoldReasonCode | null;
   /** Optional note for the hold. */
   holdNote?: string | null;
 }
@@ -64,6 +89,10 @@ interface BuyerAccountData {
   creditLimit: string | null;
   holdState: "OK" | "NEAR_LIMIT" | "HELD" | "BYPASS";
   bypass: boolean;
+  manualHold: boolean;
+  holdReasonCode: string | null;
+  holdNote: string | null;
+  syncPending: boolean;
   gatedAt: Date | null;
 }
 
@@ -92,7 +121,11 @@ interface MetafieldsSetResponse {
   };
 }
 
-const METAFIELDS_SET_MUTATION = `
+/**
+ * Static GraphQL mutation for metafieldsSet.
+ * Validated against Admin 2026-10 schema.
+ */
+export const METAFIELDS_SET_MUTATION = `
   mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
     metafieldsSet(metafields: $metafields) {
       metafields {
@@ -107,6 +140,91 @@ const METAFIELDS_SET_MUTATION = `
     }
   }
 `;
+
+/**
+ * Input for computing hold state.
+ */
+export interface ComputeHoldStateInput {
+  bypass: boolean;
+  manualHold: boolean;
+  isOverLimit: boolean;
+  isOverdue: boolean;
+}
+
+/**
+ * Output of hold state computation.
+ */
+export interface ComputeHoldStateResult {
+  holdState: "OK" | "NEAR_LIMIT" | "HELD" | "BYPASS";
+  metafieldHold: boolean;
+  holdReasonCode: HoldReasonCode;
+}
+
+/**
+ * Pure function to compute hold state.
+ * 
+ * Rules:
+ * - bypass = true → BYPASS state, hold: false in metafield (exempt at checkout)
+ * - manualHold = true → HELD state, hold: true
+ * - isOverLimit or isOverdue → auto-hold, HELD state, hold: true
+ * - Otherwise → OK state, hold: false
+ * 
+ * NEAR_LIMIT is set by a separate process (e.g., when utilization > 80%)
+ * and is preserved unless overridden by HELD or BYPASS.
+ */
+export function computeHoldState(
+  input: ComputeHoldStateInput,
+  existingHoldState?: "OK" | "NEAR_LIMIT" | "HELD" | "BYPASS",
+  manualHoldReasonCode?: HoldReasonCode | null
+): ComputeHoldStateResult {
+  const { bypass, manualHold, isOverLimit, isOverdue } = input;
+
+  if (bypass) {
+    return {
+      holdState: "BYPASS",
+      metafieldHold: false,
+      holdReasonCode: null,
+    };
+  }
+
+  if (manualHold) {
+    return {
+      holdState: "HELD",
+      metafieldHold: true,
+      holdReasonCode: manualHoldReasonCode ?? "MANUAL_HOLD",
+    };
+  }
+
+  if (isOverLimit) {
+    return {
+      holdState: "HELD",
+      metafieldHold: true,
+      holdReasonCode: "CREDIT_REVIEW",
+    };
+  }
+
+  if (isOverdue) {
+    return {
+      holdState: "HELD",
+      metafieldHold: true,
+      holdReasonCode: "PAYMENT_OVERDUE",
+    };
+  }
+
+  if (existingHoldState === "NEAR_LIMIT") {
+    return {
+      holdState: "NEAR_LIMIT",
+      metafieldHold: false,
+      holdReasonCode: null,
+    };
+  }
+
+  return {
+    holdState: "OK",
+    metafieldHold: false,
+    holdReasonCode: null,
+  };
+}
 
 /**
  * Get the Shopify GID for the metafield owner.
@@ -129,13 +247,13 @@ function getOwnerGid(account: BuyerAccountData): { gid: string; type: MetafieldO
 
 /**
  * Compute outstanding exposure for a buyer account.
- * Includes open invoices and draft orders with payment terms.
+ * Includes open invoices and draft orders with payment terms (status 'open' or 'invoice_sent').
  */
 async function computeExposure(
   sql: Sql,
   buyerAccountId: string,
   shopId: string
-): Promise<{ exposurePaise: bigint; currency: string }> {
+): Promise<{ exposurePaise: bigint; draftExposurePaise: bigint; currency: string }> {
   const [shopResult] = await sql<{ currency: string }[]>`
     SELECT currency FROM "Shop" WHERE id = ${shopId}
   `;
@@ -154,7 +272,7 @@ async function computeExposure(
     FROM "s8_draft_orders"
     WHERE buyer_account_id = ${buyerAccountId}
       AND has_payment_terms = true
-      AND status = 'open'
+      AND status IN ('open', 'invoice_sent')
   `;
 
   const invoicePaise = BigInt(invoiceResult?.total_paise ?? "0");
@@ -162,22 +280,19 @@ async function computeExposure(
 
   return {
     exposurePaise: invoicePaise + draftPaise,
+    draftExposurePaise: draftPaise,
     currency,
   };
 }
 
 /**
- * Determine if an account should be on hold based on exposure and overdue invoices.
+ * Check for overdue invoices.
  */
-async function computeDerivedHoldState(
+async function hasOverdueInvoices(
   sql: Sql,
-  buyerAccountId: string,
-  creditLimitPaise: bigint | null,
-  exposurePaise: bigint
-): Promise<{ shouldHold: boolean; derivedReasonCode: HoldReasonCode; isOverLimit: boolean; isOverdue: boolean }> {
-  const isOverLimit = creditLimitPaise !== null && exposurePaise > creditLimitPaise;
-
-  const [overdueResult] = await sql<{ has_overdue: boolean }[]>`
+  buyerAccountId: string
+): Promise<boolean> {
+  const [result] = await sql<{ has_overdue: boolean }[]>`
     SELECT EXISTS (
       SELECT 1 FROM "Invoice"
       WHERE "buyerAccountId" = ${buyerAccountId}
@@ -187,21 +302,7 @@ async function computeDerivedHoldState(
         AND "dueAt" < NOW() - INTERVAL '1 day'
     ) AS has_overdue
   `;
-  const isOverdue = overdueResult?.has_overdue ?? false;
-
-  let derivedReasonCode: HoldReasonCode = null;
-  if (isOverLimit) {
-    derivedReasonCode = "CREDIT_REVIEW";
-  } else if (isOverdue) {
-    derivedReasonCode = "PAYMENT_OVERDUE";
-  }
-
-  return {
-    shouldHold: isOverLimit || isOverdue,
-    derivedReasonCode,
-    isOverLimit,
-    isOverdue,
-  };
+  return result?.has_overdue ?? false;
 }
 
 /**
@@ -230,16 +331,88 @@ async function writeMetafield(
 }
 
 /**
+ * Validate credit limit amount.
+ */
+function validateCreditLimit(amount: number | null | undefined, noLimit: boolean): 
+  { valid: true; value: number | null } | { valid: false; error: string } {
+  
+  if (noLimit) {
+    return { valid: true, value: null };
+  }
+
+  if (amount === undefined) {
+    return { valid: true, value: undefined as unknown as number | null };
+  }
+
+  if (amount === null) {
+    return { 
+      valid: false, 
+      error: "Credit limit cannot be empty. Check 'No credit limit' to allow unlimited credit." 
+    };
+  }
+
+  if (!Number.isFinite(amount)) {
+    return { 
+      valid: false, 
+      error: "Credit limit must be a valid number (not Infinity or NaN)" 
+    };
+  }
+
+  if (amount < 0) {
+    return { 
+      valid: false, 
+      error: "Credit limit must be >= 0" 
+    };
+  }
+
+  if (amount > MAX_CREDIT_LIMIT_AMOUNT) {
+    return { 
+      valid: false, 
+      error: `Credit limit cannot exceed ${MAX_CREDIT_LIMIT_AMOUNT.toLocaleString()}` 
+    };
+  }
+
+  return { valid: true, value: amount };
+}
+
+/**
+ * Validate hold reason code.
+ */
+function validateHoldReasonCode(code: HoldReasonCode | null | undefined, manualHold: boolean): 
+  { valid: true } | { valid: false; error: string } {
+  
+  if (!manualHold) {
+    return { valid: true };
+  }
+
+  if (!code) {
+    return { 
+      valid: false, 
+      error: "holdReasonCode is required when manualHold is true" 
+    };
+  }
+
+  if (!VALID_HOLD_REASON_CODES.includes(code)) {
+    return { 
+      valid: false, 
+      error: `Invalid holdReasonCode: ${code}. Valid codes: ${VALID_HOLD_REASON_CODES.join(", ")}` 
+    };
+  }
+
+  return { valid: true };
+}
+
+/**
  * Update a buyer account's credit status.
  *
  * This function:
  * 1. Validates the input
- * 2. Updates the database in a transaction
- * 3. Computes the full credit status
- * 4. Writes the metafield to Shopify
+ * 2. Locks the BuyerAccount row with FOR UPDATE
+ * 3. Updates the database in a transaction
+ * 4. Computes the full credit status using computeHoldState
+ * 5. Writes the metafield to Shopify
  *
- * If the metafield write fails, the DB change is preserved but a
- * sync_pending flag is set for later reconciliation.
+ * If the metafield write fails, syncPending is set to true in the DB.
  *
  * @param sql - Database connection
  * @param buyerAccountId - The buyer account to update
@@ -251,149 +424,148 @@ export async function updateCreditStatus(
   buyerAccountId: string,
   update: CreditStatusUpdate
 ): Promise<CreditStatusUpdateResult> {
-  if (update.manualHold && !update.holdReasonCode) {
-    return {
-      success: false,
-      error: "holdReasonCode is required when manualHold is true",
-    };
+  const limitValidation = validateCreditLimit(update.creditLimitAmount, update.noLimit ?? false);
+  if (!limitValidation.valid) {
+    return { success: false, error: limitValidation.error };
   }
 
-  if (update.creditLimitAmount !== null && update.creditLimitAmount < 0) {
-    return {
-      success: false,
-      error: "creditLimitAmount must be >= 0 or null (no limit)",
-    };
+  const reasonValidation = validateHoldReasonCode(update.holdReasonCode, update.manualHold);
+  if (!reasonValidation.valid) {
+    return { success: false, error: reasonValidation.error };
   }
 
-  const [account] = await sql<BuyerAccountData[]>`
-    SELECT
-      id,
-      "shopId" AS "shopId",
-      kind,
-      "companyLocationId",
-      "customerId",
-      "creditLimit"::text AS "creditLimit",
-      "holdState",
-      bypass,
-      gated_at AS "gatedAt"
-    FROM "BuyerAccount"
-    WHERE id = ${buyerAccountId}
-  `;
+  return sql.begin(async (tx) => {
+    const [account] = await tx<BuyerAccountData[]>`
+      SELECT
+        id,
+        "shopId" AS "shopId",
+        kind,
+        "companyLocationId",
+        "customerId",
+        "creditLimit"::text AS "creditLimit",
+        "holdState",
+        bypass,
+        "manualHold",
+        "holdReasonCode",
+        "holdNote",
+        "syncPending",
+        gated_at AS "gatedAt"
+      FROM "BuyerAccount"
+      WHERE id = ${buyerAccountId}
+      FOR UPDATE
+    `;
 
-  if (!account) {
-    return {
-      success: false,
-      error: "Buyer account not found",
-    };
-  }
+    if (!account) {
+      return { success: false, error: "Buyer account not found" };
+    }
 
-  if (account.gatedAt !== null) {
-    return {
-      success: false,
-      error: "Cannot update credit status for gated accounts",
-    };
-  }
+    if (account.gatedAt !== null) {
+      return { success: false, error: "Cannot update credit status for gated accounts" };
+    }
 
-  const [shop] = await sql<ShopData[]>`
-    SELECT domain, currency FROM "Shop" WHERE id = ${account.shopId}
-  `;
+    const [shop] = await tx<ShopData[]>`
+      SELECT domain, currency FROM "Shop" WHERE id = ${account.shopId}
+    `;
 
-  if (!shop) {
-    return {
-      success: false,
-      error: "Shop not found",
-    };
-  }
+    if (!shop) {
+      return { success: false, error: "Shop not found" };
+    }
 
-  const owner = getOwnerGid(account);
-  if (!owner) {
-    return {
-      success: false,
-      error: `Cannot determine metafield owner for account kind ${account.kind}`,
-    };
-  }
+    const owner = getOwnerGid(account);
+    if (!owner) {
+      return { 
+        success: false, 
+        error: `Cannot determine metafield owner for account kind ${account.kind}` 
+      };
+    }
 
-  const creditLimitValue = update.creditLimitAmount !== null
-    ? update.creditLimitAmount.toFixed(2)
-    : null;
+    const newCreditLimit = limitValidation.value !== undefined 
+      ? limitValidation.value 
+      : (account.creditLimit ? parseFloat(account.creditLimit) : null);
 
-  const newHoldState = update.manualHold ? "HELD" : "OK";
+    const creditLimitPaise = newCreditLimit !== null
+      ? BigInt(Math.round(newCreditLimit * 100))
+      : null;
 
-  await sql`
-    UPDATE "BuyerAccount"
-    SET
-      "creditLimit" = ${creditLimitValue}::numeric,
-      "holdState" = ${newHoldState}::"HoldState",
-      "updatedAt" = NOW()
-    WHERE id = ${buyerAccountId}
-  `;
+    const { exposurePaise, currency } = await computeExposure(tx, buyerAccountId, account.shopId);
+    const isOverdue = await hasOverdueInvoices(tx, buyerAccountId);
+    const isOverLimit = creditLimitPaise !== null && exposurePaise > creditLimitPaise;
 
-  const { exposurePaise, currency } = await computeExposure(
-    sql,
-    buyerAccountId,
-    account.shopId
-  );
+    const holdStateResult = computeHoldState(
+      {
+        bypass: account.bypass,
+        manualHold: update.manualHold,
+        isOverLimit,
+        isOverdue,
+      },
+      account.holdState,
+      update.holdReasonCode
+    );
 
-  const creditLimitPaise = update.creditLimitAmount !== null
-    ? BigInt(Math.round(update.creditLimitAmount * 100))
-    : null;
+    const creditLimitValue = newCreditLimit !== null
+      ? newCreditLimit.toFixed(2)
+      : null;
 
-  const { shouldHold: derivedShouldHold, derivedReasonCode: _derivedReasonCode, isOverLimit, isOverdue } =
-    await computeDerivedHoldState(sql, buyerAccountId, creditLimitPaise, exposurePaise);
+    const holdReasonCodeValue = update.manualHold ? (update.holdReasonCode ?? null) : null;
+    const holdNoteValue = update.manualHold ? (update.holdNote ?? null) : null;
 
-  const effectiveHold = update.manualHold || derivedShouldHold;
-  let effectiveReasonCode: HoldReasonCode = null;
+    await tx`
+      UPDATE "BuyerAccount"
+      SET
+        "creditLimit" = ${creditLimitValue}::numeric,
+        "holdState" = ${holdStateResult.holdState}::"HoldState",
+        "manualHold" = ${update.manualHold},
+        "holdReasonCode" = ${holdReasonCodeValue},
+        "holdNote" = ${holdNoteValue},
+        "syncPending" = true,
+        "updatedAt" = NOW()
+      WHERE id = ${buyerAccountId}
+    `;
 
-  if (update.manualHold) {
-    effectiveReasonCode = update.holdReasonCode;
-  } else if (isOverLimit) {
-    effectiveReasonCode = "CREDIT_REVIEW";
-  } else if (isOverdue) {
-    effectiveReasonCode = "PAYMENT_OVERDUE";
-  }
+    const metafieldValue = serializeCreditStatusFromDb({
+      currencyCode: currency,
+      hold: holdStateResult.metafieldHold,
+      holdReasonCode: holdStateResult.holdReasonCode,
+      limitPaise: creditLimitPaise,
+      exposurePaise,
+    });
 
-  const metafieldValue = serializeCreditStatusFromDb({
-    currencyCode: currency,
-    hold: effectiveHold,
-    holdReasonCode: effectiveReasonCode,
-    limitPaise: creditLimitPaise,
-    exposurePaise,
+    const metafieldResult = await writeMetafield(shop.domain, owner.gid, metafieldValue);
+
+    if (!metafieldResult.success) {
+      console.error(
+        `[credit-status] Metafield write failed for ${buyerAccountId}:`,
+        metafieldResult.error
+      );
+      return {
+        success: true,
+        metafieldSyncPending: true,
+        error: `Database updated but metafield sync failed: ${metafieldResult.error}`,
+      };
+    }
+
+    const userErrors = metafieldResult.data?.metafieldsSet?.userErrors ?? [];
+    if (userErrors.length > 0) {
+      console.error(
+        `[credit-status] Metafield userErrors for ${buyerAccountId}:`,
+        JSON.stringify(userErrors)
+      );
+      return {
+        success: true,
+        metafieldSyncPending: true,
+        userErrors,
+        error: `Database updated but metafield had userErrors: ${userErrors.map(e => e.message).join("; ")}`,
+      };
+    }
+
+    await tx`
+      UPDATE "BuyerAccount"
+      SET "syncPending" = false
+      WHERE id = ${buyerAccountId}
+    `;
+
+    return { success: true, metafieldSyncPending: false };
   });
-
-  const metafieldResult = await writeMetafield(shop.domain, owner.gid, metafieldValue);
-
-  if (!metafieldResult.success) {
-    console.error(
-      `[credit-status] Metafield write failed for ${buyerAccountId}:`,
-      metafieldResult.error
-    );
-
-    return {
-      success: true,
-      metafieldSyncPending: true,
-      error: `Database updated but metafield sync failed: ${metafieldResult.error}`,
-    };
-  }
-
-  const userErrors = metafieldResult.data?.metafieldsSet?.userErrors ?? [];
-  if (userErrors.length > 0) {
-    console.error(
-      `[credit-status] Metafield userErrors for ${buyerAccountId}:`,
-      JSON.stringify(userErrors)
-    );
-
-    return {
-      success: true,
-      metafieldSyncPending: true,
-      userErrors,
-      error: `Database updated but metafield had userErrors: ${userErrors.map(e => e.message).join("; ")}`,
-    };
-  }
-
-  return {
-    success: true,
-    metafieldSyncPending: false,
-  };
 }
 
 /**
@@ -401,6 +573,7 @@ export async function updateCreditStatus(
  *
  * Called during reconciliation or when a sync is pending.
  * Computes the current state from DB and writes the metafield.
+ * Reads bypass flag and uses computeHoldState for consistency.
  *
  * @param sql - Database connection
  * @param buyerAccountId - The buyer account to sync
@@ -410,110 +583,107 @@ export async function syncCreditStatusMetafield(
   sql: Sql,
   buyerAccountId: string
 ): Promise<CreditStatusUpdateResult> {
-  const [account] = await sql<BuyerAccountData[]>`
-    SELECT
-      id,
-      "shopId" AS "shopId",
-      kind,
-      "companyLocationId",
-      "customerId",
-      "creditLimit"::text AS "creditLimit",
-      "holdState",
-      bypass,
-      gated_at AS "gatedAt"
-    FROM "BuyerAccount"
-    WHERE id = ${buyerAccountId}
-  `;
+  return sql.begin(async (tx) => {
+    const [account] = await tx<BuyerAccountData[]>`
+      SELECT
+        id,
+        "shopId" AS "shopId",
+        kind,
+        "companyLocationId",
+        "customerId",
+        "creditLimit"::text AS "creditLimit",
+        "holdState",
+        bypass,
+        "manualHold",
+        "holdReasonCode",
+        "holdNote",
+        "syncPending",
+        gated_at AS "gatedAt"
+      FROM "BuyerAccount"
+      WHERE id = ${buyerAccountId}
+      FOR UPDATE
+    `;
 
-  if (!account) {
-    return {
-      success: false,
-      error: "Buyer account not found",
-    };
-  }
+    if (!account) {
+      return { success: false, error: "Buyer account not found" };
+    }
 
-  if (account.gatedAt !== null) {
-    return {
-      success: true,
-    };
-  }
+    if (account.gatedAt !== null) {
+      await tx`UPDATE "BuyerAccount" SET "syncPending" = false WHERE id = ${buyerAccountId}`;
+      return { success: true };
+    }
 
-  const [shop] = await sql<ShopData[]>`
-    SELECT domain, currency FROM "Shop" WHERE id = ${account.shopId}
-  `;
+    const [shop] = await tx<ShopData[]>`
+      SELECT domain, currency FROM "Shop" WHERE id = ${account.shopId}
+    `;
 
-  if (!shop) {
-    return {
-      success: false,
-      error: "Shop not found",
-    };
-  }
+    if (!shop) {
+      return { success: false, error: "Shop not found" };
+    }
 
-  const owner = getOwnerGid(account);
-  if (!owner) {
-    return {
-      success: true,
-    };
-  }
+    const owner = getOwnerGid(account);
+    if (!owner) {
+      await tx`UPDATE "BuyerAccount" SET "syncPending" = false WHERE id = ${buyerAccountId}`;
+      return { success: true };
+    }
 
-  const { exposurePaise, currency } = await computeExposure(
-    sql,
-    buyerAccountId,
-    account.shopId
-  );
+    const { exposurePaise, currency } = await computeExposure(tx, buyerAccountId, account.shopId);
+    const creditLimitPaise = account.creditLimit
+      ? BigInt(Math.round(parseFloat(account.creditLimit) * 100))
+      : null;
 
-  const creditLimitPaise = account.creditLimit
-    ? BigInt(Math.round(parseFloat(account.creditLimit) * 100))
-    : null;
+    const isOverdue = await hasOverdueInvoices(tx, buyerAccountId);
+    const isOverLimit = creditLimitPaise !== null && exposurePaise > creditLimitPaise;
 
-  const manualHold = account.holdState === "HELD" || account.holdState === "BYPASS";
+    const holdStateResult = computeHoldState(
+      {
+        bypass: account.bypass,
+        manualHold: account.manualHold,
+        isOverLimit,
+        isOverdue,
+      },
+      account.holdState,
+      account.holdReasonCode as HoldReasonCode
+    );
 
-  const { shouldHold: derivedShouldHold, isOverLimit, isOverdue } =
-    await computeDerivedHoldState(sql, buyerAccountId, creditLimitPaise, exposurePaise);
+    const metafieldValue = serializeCreditStatusFromDb({
+      currencyCode: currency,
+      hold: holdStateResult.metafieldHold,
+      holdReasonCode: holdStateResult.holdReasonCode,
+      limitPaise: creditLimitPaise,
+      exposurePaise,
+    });
 
-  const effectiveHold = manualHold || derivedShouldHold;
-  let effectiveReasonCode: HoldReasonCode = null;
+    const metafieldResult = await writeMetafield(shop.domain, owner.gid, metafieldValue);
 
-  if (account.holdState === "HELD") {
-    effectiveReasonCode = "MANUAL_HOLD";
-  } else if (isOverLimit) {
-    effectiveReasonCode = "CREDIT_REVIEW";
-  } else if (isOverdue) {
-    effectiveReasonCode = "PAYMENT_OVERDUE";
-  }
+    if (!metafieldResult.success) {
+      return {
+        success: false,
+        metafieldSyncPending: true,
+        error: `Metafield sync failed: ${metafieldResult.error}`,
+      };
+    }
 
-  const metafieldValue = serializeCreditStatusFromDb({
-    currencyCode: currency,
-    hold: effectiveHold,
-    holdReasonCode: effectiveReasonCode,
-    limitPaise: creditLimitPaise,
-    exposurePaise,
+    const userErrors = metafieldResult.data?.metafieldsSet?.userErrors ?? [];
+    if (userErrors.length > 0) {
+      return {
+        success: false,
+        metafieldSyncPending: true,
+        userErrors,
+        error: `Metafield userErrors: ${userErrors.map(e => e.message).join("; ")}`,
+      };
+    }
+
+    await tx`
+      UPDATE "BuyerAccount"
+      SET 
+        "holdState" = ${holdStateResult.holdState}::"HoldState",
+        "syncPending" = false
+      WHERE id = ${buyerAccountId}
+    `;
+
+    return { success: true, metafieldSyncPending: false };
   });
-
-  const metafieldResult = await writeMetafield(shop.domain, owner.gid, metafieldValue);
-
-  if (!metafieldResult.success) {
-    return {
-      success: false,
-      metafieldSyncPending: true,
-      error: `Metafield sync failed: ${metafieldResult.error}`,
-    };
-  }
-
-  const userErrors = metafieldResult.data?.metafieldsSet?.userErrors ?? [];
-  if (userErrors.length > 0) {
-    return {
-      success: false,
-      metafieldSyncPending: true,
-      userErrors,
-      error: `Metafield userErrors: ${userErrors.map(e => e.message).join("; ")}`,
-    };
-  }
-
-  return {
-    success: true,
-    metafieldSyncPending: false,
-  };
 }
 
 /**
@@ -525,6 +695,7 @@ export interface CompanyTotals {
   locationsOnHold: number;
   totalLimitPaise: bigint | null;
   totalExposurePaise: bigint;
+  totalDraftExposurePaise: bigint;
   totalAvailablePaise: bigint | null;
   currency: string;
   hasMixedCurrencies: boolean;
@@ -535,8 +706,7 @@ export interface CompanyTotals {
  * Get company-level totals by rolling up all locations' BuyerAccounts.
  * Returns null for TAGGED_CUSTOMER accounts.
  *
- * If locations have mixed currencies, returns totals for the majority currency
- * and sets hasMixedCurrencies=true with excludedLocationCount.
+ * Includes draft exposure (status 'open' or 'invoice_sent') in totals.
  */
 export async function getCompanyTotals(
   sql: Sql,
@@ -571,37 +741,54 @@ export async function getCompanyTotals(
   `;
   const shopCurrency = shopResult?.currency ?? "INR";
 
-  const exposureResults = await sql<{
+  const locationIds = locations.map(l => l.id);
+
+  const invoiceExposure = await sql<{
     buyerAccountId: string;
-    currency: string;
     totalPaise: string;
   }[]>`
     SELECT
       "buyerAccountId",
-      COALESCE(
-        (SELECT currency FROM "Shop" WHERE id = ${shopId}),
-        'INR'
-      ) AS currency,
       COALESCE(SUM((ROUND(outstanding * 100))::bigint), 0)::text AS "totalPaise"
     FROM "Invoice"
-    WHERE "buyerAccountId" = ANY(${sql.array(locations.map(l => l.id))})
+    WHERE "buyerAccountId" = ANY(${sql.array(locationIds)})
       AND status = 'open'
       AND outstanding > 0
     GROUP BY "buyerAccountId"
   `;
 
-  const exposureByAccount = new Map(
-    exposureResults.map(r => [r.buyerAccountId, BigInt(r.totalPaise)])
+  const draftExposure = await sql<{
+    buyerAccountId: string;
+    totalPaise: string;
+  }[]>`
+    SELECT
+      buyer_account_id AS "buyerAccountId",
+      COALESCE(SUM((ROUND(total * 100))::bigint), 0)::text AS "totalPaise"
+    FROM "s8_draft_orders"
+    WHERE buyer_account_id = ANY(${sql.array(locationIds)})
+      AND has_payment_terms = true
+      AND status IN ('open', 'invoice_sent')
+    GROUP BY buyer_account_id
+  `;
+
+  const invoiceByAccount = new Map(
+    invoiceExposure.map(r => [r.buyerAccountId, BigInt(r.totalPaise)])
+  );
+  const draftByAccount = new Map(
+    draftExposure.map(r => [r.buyerAccountId, BigInt(r.totalPaise)])
   );
 
   let totalLimitPaise: bigint | null = 0n;
   let totalExposurePaise = 0n;
+  let totalDraftExposurePaise = 0n;
   let locationsOnHold = 0;
   let hasAnyNoLimit = false;
 
   for (const loc of locations) {
-    const exposure = exposureByAccount.get(loc.id) ?? 0n;
-    totalExposurePaise += exposure;
+    const invoiceExp = invoiceByAccount.get(loc.id) ?? 0n;
+    const draftExp = draftByAccount.get(loc.id) ?? 0n;
+    totalExposurePaise += invoiceExp + draftExp;
+    totalDraftExposurePaise += draftExp;
 
     if (loc.creditLimit === null) {
       hasAnyNoLimit = true;
@@ -627,6 +814,7 @@ export async function getCompanyTotals(
     locationsOnHold,
     totalLimitPaise,
     totalExposurePaise,
+    totalDraftExposurePaise,
     totalAvailablePaise,
     currency: shopCurrency,
     hasMixedCurrencies: false,
@@ -641,14 +829,19 @@ export interface CreditStatusDisplay {
   creditLimitAmount: number | null;
   creditLimitPaise: bigint | null;
   exposurePaise: bigint;
+  draftExposurePaise: bigint;
   availableCreditPaise: bigint | null;
   currency: string;
   holdState: "OK" | "NEAR_LIMIT" | "HELD" | "BYPASS";
+  manualHold: boolean;
+  holdReasonCode: string | null;
+  holdNote: string | null;
   isOnHold: boolean;
   holdReasonDisplay: string | null;
   isOverLimit: boolean;
   isOverdue: boolean;
   utilizationPercent: number | null;
+  syncPending: boolean;
 }
 
 /**
@@ -668,6 +861,10 @@ export async function getCreditStatusDisplay(
       "creditLimit"::text AS "creditLimit",
       "holdState",
       bypass,
+      "manualHold",
+      "holdReasonCode",
+      "holdNote",
+      "syncPending",
       gated_at AS "gatedAt"
     FROM "BuyerAccount"
     WHERE id = ${buyerAccountId}
@@ -677,7 +874,7 @@ export async function getCreditStatusDisplay(
     return null;
   }
 
-  const { exposurePaise, currency } = await computeExposure(
+  const { exposurePaise, draftExposurePaise, currency } = await computeExposure(
     sql,
     buyerAccountId,
     account.shopId
@@ -695,21 +892,25 @@ export async function getCreditStatusDisplay(
     ? creditLimitPaise - exposurePaise
     : null;
 
-  const { isOverLimit, isOverdue } = await computeDerivedHoldState(
-    sql,
-    buyerAccountId,
-    creditLimitPaise,
-    exposurePaise
+  const isOverdue = await hasOverdueInvoices(sql, buyerAccountId);
+  const isOverLimit = creditLimitPaise !== null && exposurePaise > creditLimitPaise;
+
+  const holdStateResult = computeHoldState(
+    {
+      bypass: account.bypass,
+      manualHold: account.manualHold,
+      isOverLimit,
+      isOverdue,
+    },
+    account.holdState,
+    account.holdReasonCode as HoldReasonCode
   );
 
-  const isOnHold = account.holdState === "HELD" ||
-    (account.holdState !== "BYPASS" && (isOverLimit || isOverdue));
-
   let holdReasonDisplay: string | null = null;
-  if (account.holdState === "HELD") {
-    holdReasonDisplay = "Manual hold";
-  } else if (account.holdState === "BYPASS") {
+  if (account.bypass) {
     holdReasonDisplay = "Bypass active";
+  } else if (account.manualHold) {
+    holdReasonDisplay = "Manual hold";
   } else if (isOverLimit) {
     holdReasonDisplay = "Over credit limit";
   } else if (isOverdue) {
@@ -724,13 +925,18 @@ export async function getCreditStatusDisplay(
     creditLimitAmount,
     creditLimitPaise,
     exposurePaise,
+    draftExposurePaise,
     availableCreditPaise,
     currency,
-    holdState: account.holdState,
-    isOnHold,
+    holdState: holdStateResult.holdState,
+    manualHold: account.manualHold,
+    holdReasonCode: account.holdReasonCode,
+    holdNote: account.holdNote,
+    isOnHold: holdStateResult.metafieldHold,
     holdReasonDisplay,
     isOverLimit,
     isOverdue,
     utilizationPercent,
+    syncPending: account.syncPending,
   };
 }
