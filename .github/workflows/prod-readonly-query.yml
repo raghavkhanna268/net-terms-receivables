@@ -22,6 +22,7 @@ on:
         options:
           - canary-orders-backstop
           - hold-audit-s12
+          - offline-session-preflight
           - post-drain-aggregates
           - redriven-webhook-receipts
           - s22-retention-purge-preview
