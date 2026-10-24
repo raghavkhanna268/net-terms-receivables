@@ -2,15 +2,16 @@
  * Tests that the prod-diagnostics workflow is read-only by default.
  *
  * Verifies:
- * - Only the explicit "Refresh expired token" step can call refresh-offline-token.ts
- * - All database connections in default mode use PGOPTIONS with default_transaction_read_only=on
- * - Token refresh only runs when refresh_if_expired input is true
- * - The run summary records refresh_token_used when refresh is triggered
+ * - Only the explicit "Refresh expired token" step (id: refresh) can call refresh code
+ * - All database steps use PGOPTIONS with default_transaction_read_only=on unless in write allowlist
+ * - Token refresh only runs when refresh_if_expired input is true (exact if expression)
+ * - Workflow triggers are exactly [workflow_dispatch]
+ * - Write steps are gated on their own dedicated inputs
  *
  * @see https://github.com/raghavkhanna268/net-terms-receivables/issues/159
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -32,137 +33,263 @@ interface WorkflowJob {
   steps?: WorkflowStep[];
 }
 
-interface Workflow {
-  jobs?: Record<string, WorkflowJob>;
-  on?: {
-    workflow_dispatch?: {
-      inputs?: Record<string, { default?: unknown }>;
-    };
-  };
+interface WorkflowInput {
+  default?: unknown;
+  type?: string;
+  description?: string;
+  required?: boolean;
 }
 
-describe("prod-diagnostics workflow read-only mode", () => {
-  const workflowContent = readFileSync(WORKFLOW_PATH, "utf-8");
-  const workflow = parseYaml(workflowContent) as Workflow;
+type WorkflowTrigger =
+  | { inputs?: Record<string, WorkflowInput> }
+  | Record<string, unknown>
+  | null;
 
-  it("has refresh_if_expired input defaulting to false", () => {
-    const inputs = workflow.on?.workflow_dispatch?.inputs;
-    expect(inputs).toBeDefined();
-    expect(inputs?.refresh_if_expired).toBeDefined();
-    expect(inputs?.refresh_if_expired.default).toBe(false);
+interface Workflow {
+  jobs?: Record<string, WorkflowJob>;
+  on?: Record<string, WorkflowTrigger> | string | string[];
+}
+
+const WRITE_STEP_IDS = new Set(["refresh"]);
+
+const WRITE_STEP_NAMES_TO_INPUT_GATES: Record<string, string> = {
+  "Refresh expired token": "inputs.refresh_if_expired",
+  "DLQ Redrive": "inputs.redrive_dlq",
+  "Drain cron control": "inputs.drain_cron",
+  "Reconcile probe": "inputs.invoke_reconcile",
+};
+
+const REFRESH_CODE_PATTERN =
+  /refresh-offline-token|offline-token\.server|refreshOfflineToken/;
+
+const EXPECTED_REFRESH_IF =
+  "${{ inputs.refresh_if_expired && steps.session.outputs.token_expired == 'true' && steps.session.outputs.has_refresh_token == 'true' }}";
+
+describe("prod-diagnostics workflow read-only mode", () => {
+  let workflow: Workflow;
+  let allSteps: WorkflowStep[];
+  let refreshStep: WorkflowStep | undefined;
+  let s12Step: WorkflowStep | undefined;
+
+  beforeAll(() => {
+    const workflowContent = readFileSync(WORKFLOW_PATH, "utf-8");
+    workflow = parseYaml(workflowContent) as Workflow;
+
+    allSteps = [];
+    for (const job of Object.values(workflow.jobs ?? {})) {
+      for (const step of job.steps ?? []) {
+        allSteps.push(step);
+      }
+    }
+
+    refreshStep = allSteps.find((s) => s.id === "refresh");
+    s12Step = allSteps.find((s) => s.id === "s12_validation");
   });
 
-  it("only calls refresh-offline-token.ts in the 'Refresh expired token' step", () => {
-    const jobs = workflow.jobs ?? {};
-    const refreshScriptPattern = /refresh-offline-token\.ts/;
+  describe("step lookup by id", () => {
+    it("finds refresh step by id", () => {
+      expect(refreshStep).toBeDefined();
+      expect(refreshStep?.name).toBe("Refresh expired token");
+    });
 
-    for (const [_jobName, job] of Object.entries(jobs)) {
-      for (const step of job.steps ?? []) {
+    it("finds S12 Validation step by id", () => {
+      expect(s12Step).toBeDefined();
+      expect(s12Step?.name).toBe("S12 Validation");
+    });
+  });
+
+  describe("workflow triggers", () => {
+    it("triggers are exactly [workflow_dispatch]", () => {
+      expect(workflow.on).toBeDefined();
+
+      const triggers = workflow.on;
+      if (typeof triggers === "string") {
+        expect(triggers).toBe("workflow_dispatch");
+      } else if (Array.isArray(triggers)) {
+        expect(triggers).toEqual(["workflow_dispatch"]);
+      } else {
+        const triggerKeys = Object.keys(triggers ?? {});
+        expect(triggerKeys).toEqual(["workflow_dispatch"]);
+      }
+    });
+  });
+
+  describe("refresh_if_expired input", () => {
+    it("defaults to false", () => {
+      const triggers = workflow.on;
+      expect(triggers).toBeDefined();
+      expect(typeof triggers).toBe("object");
+      expect(triggers).not.toBeNull();
+
+      const workflowDispatch = (triggers as Record<string, WorkflowTrigger>)
+        .workflow_dispatch;
+      expect(workflowDispatch).toBeDefined();
+
+      const inputs = (workflowDispatch as { inputs?: Record<string, WorkflowInput> })
+        ?.inputs;
+      expect(inputs).toBeDefined();
+      expect(inputs?.refresh_if_expired).toBeDefined();
+      expect(inputs?.refresh_if_expired.default).toBe(false);
+    });
+  });
+
+  describe("refresh step if expression", () => {
+    it("has exact expected if expression (string equality)", () => {
+      expect(refreshStep).toBeDefined();
+      expect(refreshStep?.if).toBe(EXPECTED_REFRESH_IF);
+    });
+
+    it("contains no || (OR) in if expression", () => {
+      expect(refreshStep).toBeDefined();
+      expect(refreshStep?.if).not.toContain("||");
+    });
+
+    it("contains no negation (!) in if expression", () => {
+      expect(refreshStep).toBeDefined();
+      expect(refreshStep?.if).not.toMatch(/[^=]!/);
+      expect(refreshStep?.if).not.toMatch(/^!/);
+    });
+
+    it("records refresh_token_used in summary when triggered", () => {
+      expect(refreshStep).toBeDefined();
+      expect(refreshStep?.run).toContain("GITHUB_STEP_SUMMARY");
+      expect(refreshStep?.run).toContain("refresh_token_used=true");
+    });
+  });
+
+  describe("refresh code isolation", () => {
+    it("only step with id:refresh may reference refresh code", () => {
+      for (const step of allSteps) {
         if (!step.run) continue;
 
-        const callsRefreshScript = refreshScriptPattern.test(step.run);
-        if (callsRefreshScript) {
-          expect(step.name).toBe("Refresh expired token");
-          expect(step.if).toContain("inputs.refresh_if_expired");
+        const matchesRefreshCode = REFRESH_CODE_PATTERN.test(step.run);
+        if (matchesRefreshCode) {
+          expect(step.id).toBe("refresh");
         }
       }
-    }
+    });
+
+    it("refresh step is the only step that references refresh code", () => {
+      const stepsWithRefreshCode = allSteps.filter(
+        (s) => s.run && REFRESH_CODE_PATTERN.test(s.run)
+      );
+
+      expect(stepsWithRefreshCode.length).toBeGreaterThan(0);
+      expect(stepsWithRefreshCode.every((s) => s.id === "refresh")).toBe(true);
+    });
+
+    it("S12 Validation step does NOT reference refresh code", () => {
+      expect(s12Step).toBeDefined();
+      expect(s12Step?.run).toBeDefined();
+      expect(REFRESH_CODE_PATTERN.test(s12Step!.run!)).toBe(false);
+    });
   });
 
-  it("'Refresh expired token' step requires refresh_if_expired input", () => {
-    const jobs = workflow.jobs ?? {};
+  describe("read-only PGOPTIONS enforcement", () => {
+    it("every step with DATABASE_URL in env has read-only PGOPTIONS (unless in write allowlist)", () => {
+      for (const step of allSteps) {
+        const env = step.env ?? {};
+        const hasDbUrl =
+          env.DATABASE_URL !== undefined ||
+          env.DATABASE_URL_MIGRATIONS !== undefined ||
+          env.DATABASE_URL_SESSION !== undefined;
 
-    for (const job of Object.values(jobs)) {
-      for (const step of job.steps ?? []) {
-        if (step.name === "Refresh expired token") {
-          expect(step.if).toBeDefined();
-          expect(step.if).toContain("inputs.refresh_if_expired");
-          expect(step.run).toContain("GITHUB_STEP_SUMMARY");
-          expect(step.run).toContain("refresh_token_used=true");
-        }
+        if (!hasDbUrl) continue;
+        if (WRITE_STEP_IDS.has(step.id ?? "")) continue;
+        if (Object.keys(WRITE_STEP_NAMES_TO_INPUT_GATES).includes(step.name ?? "")) continue;
+
+        expect(
+          env.PGOPTIONS,
+          `Step "${step.name ?? step.id}" has DATABASE_URL but missing PGOPTIONS`
+        ).toBeDefined();
+        expect(
+          env.PGOPTIONS,
+          `Step "${step.name ?? step.id}" PGOPTIONS is not read-only`
+        ).toContain("default_transaction_read_only=on");
       }
-    }
-  });
+    });
 
-  it("S12 Validation step does NOT call refresh-offline-token.ts", () => {
-    const jobs = workflow.jobs ?? {};
-    const refreshScriptPattern = /refresh-offline-token\.ts/;
+    it("every step with DATABASE_URL reference in run script has PGOPTIONS (unless in write allowlist)", () => {
+      const dbUrlPattern = /\$DATABASE_URL|\${DATABASE_URL}|\$\{?DATABASE_URL_/;
 
-    for (const job of Object.values(jobs)) {
-      for (const step of job.steps ?? []) {
-        if (step.name === "S12 Validation") {
-          expect(step.run).toBeDefined();
-          expect(refreshScriptPattern.test(step.run!)).toBe(false);
-        }
+      for (const step of allSteps) {
+        if (!step.run) continue;
+        if (!dbUrlPattern.test(step.run)) continue;
+        if (WRITE_STEP_IDS.has(step.id ?? "")) continue;
+        if (Object.keys(WRITE_STEP_NAMES_TO_INPUT_GATES).includes(step.name ?? "")) continue;
+
+        const env = step.env ?? {};
+        expect(
+          env.PGOPTIONS,
+          `Step "${step.name ?? step.id}" references DATABASE_URL in run but has no PGOPTIONS`
+        ).toBeDefined();
+        expect(
+          env.PGOPTIONS,
+          `Step "${step.name ?? step.id}" PGOPTIONS is not read-only`
+        ).toContain("default_transaction_read_only=on");
       }
-    }
+    });
   });
 
-  it("S12 Validation step uses read-only PGOPTIONS", () => {
-    const jobs = workflow.jobs ?? {};
+  describe("write steps are gated on dedicated inputs", () => {
+    it("each write step has if expression gated on its dedicated input", () => {
+      for (const [stepName, requiredInputGate] of Object.entries(
+        WRITE_STEP_NAMES_TO_INPUT_GATES
+      )) {
+        const step = allSteps.find((s) => s.name === stepName);
+        if (!step) continue;
 
-    for (const job of Object.values(jobs)) {
-      for (const step of job.steps ?? []) {
-        if (step.name === "S12 Validation") {
-          expect(step.env?.PGOPTIONS).toBe("-c default_transaction_read_only=on");
-        }
+        expect(
+          step.if,
+          `Write step "${stepName}" must have an if expression`
+        ).toBeDefined();
+        expect(
+          step.if,
+          `Write step "${stepName}" if expression must contain ${requiredInputGate}`
+        ).toContain(requiredInputGate);
       }
-    }
+    });
   });
 
-  it("S12 Validation step skips when token is expired in default mode", () => {
-    const jobs = workflow.jobs ?? {};
+  describe("S12 Validation step properties", () => {
+    it("uses read-only PGOPTIONS", () => {
+      expect(s12Step).toBeDefined();
+      expect(s12Step?.env?.PGOPTIONS).toBe("-c default_transaction_read_only=on");
+    });
 
-    for (const job of Object.values(jobs)) {
-      for (const step of job.steps ?? []) {
-        if (step.name === "S12 Validation") {
-          expect(step.run).toContain('TOKEN_EXPIRED');
-          expect(step.run).toContain('REFRESH_SUCCESS');
-          expect(step.run).toContain('skipping S12 Validation');
-          expect(step.run).toContain('status: "skipped"');
-          expect(step.run).toContain('reason: "token_expired"');
-        }
-      }
-    }
-  });
+    it("does not have DATABASE_URL_SESSION in env", () => {
+      expect(s12Step).toBeDefined();
+      expect(s12Step?.env?.DATABASE_URL_SESSION).toBeUndefined();
+    });
 
-  it("all steps with DATABASE_URL use read-only PGOPTIONS by default", () => {
-    const jobs = workflow.jobs ?? {};
-    const writeSteps = new Set([
-      "Refresh expired token",
-      "DLQ Redrive",
-      "Drain cron control",
-      "Reconcile probe",
-    ]);
+    it("does not have SHOPIFY_API_KEY in env", () => {
+      expect(s12Step).toBeDefined();
+      expect(s12Step?.env?.SHOPIFY_API_KEY).toBeUndefined();
+    });
 
-    for (const job of Object.values(jobs)) {
-      for (const step of job.steps ?? []) {
-        if (!step.env?.DATABASE_URL) continue;
-        if (writeSteps.has(step.name ?? "")) continue;
+    it("does not have SHOPIFY_API_SECRET in env", () => {
+      expect(s12Step).toBeDefined();
+      expect(s12Step?.env?.SHOPIFY_API_SECRET).toBeUndefined();
+    });
 
-        if (step.env.PGOPTIONS) {
-          expect(step.env.PGOPTIONS).toContain("default_transaction_read_only=on");
-        }
-      }
-    }
-  });
+    it("checks TOKEN_EXPIRED and REFRESH_SUCCESS before proceeding", () => {
+      expect(s12Step).toBeDefined();
+      expect(s12Step?.run).toContain("TOKEN_EXPIRED");
+      expect(s12Step?.run).toContain("REFRESH_SUCCESS");
+    });
 
-  it("workflow only triggers on workflow_dispatch (no push/schedule in default)", () => {
-    expect(workflow.on).toBeDefined();
-    expect(workflow.on?.workflow_dispatch).toBeDefined();
-  });
+    it("skips with token_expired reason when token is expired", () => {
+      expect(s12Step).toBeDefined();
+      expect(s12Step?.run).toContain("skipping S12 Validation");
+      expect(s12Step?.run).toContain('status: "skipped"');
+      expect(s12Step?.run).toContain('reason: "token_expired"');
+    });
 
-  it("does not have DATABASE_URL_SESSION in S12 Validation env", () => {
-    const jobs = workflow.jobs ?? {};
-
-    for (const job of Object.values(jobs)) {
-      for (const step of job.steps ?? []) {
-        if (step.name === "S12 Validation") {
-          expect(step.env?.DATABASE_URL_SESSION).toBeUndefined();
-          expect(step.env?.SHOPIFY_API_KEY).toBeUndefined();
-          expect(step.env?.SHOPIFY_API_SECRET).toBeUndefined();
-        }
-      }
-    }
+    it("warns and records ensure_validation_skipped when ensure_validation=true but token expired", () => {
+      expect(s12Step).toBeDefined();
+      expect(s12Step?.run).toContain("ensure_validation=true but token is expired");
+      expect(s12Step?.run).toContain("ensure_validation_skipped=true");
+      expect(s12Step?.run).toContain("GITHUB_STEP_SUMMARY");
+    });
   });
 });
