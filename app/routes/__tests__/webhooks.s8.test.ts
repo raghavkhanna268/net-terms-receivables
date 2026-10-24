@@ -125,6 +125,116 @@ describe("S8 Webhook Handlers", () => {
     } as ActionFunctionArgs;
   }
 
+  /**
+   * Create a request with configurable missing headers (E9 security tests).
+   * Used to verify HMAC is checked before other header validation.
+   */
+  function createRequestWithMissingHeaders(
+    url: string,
+    body: object,
+    options: {
+      omitHmac?: boolean;
+      omitTopic?: boolean;
+      omitShop?: boolean;
+      wrongHmac?: boolean;
+    } = {}
+  ): Request {
+    const bodyStr = JSON.stringify(body);
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "X-Shopify-Webhook-Id": TEST_WEBHOOK_ID,
+      "X-Shopify-API-Version": "2026-10",
+    };
+
+    if (!options.omitHmac) {
+      headers["X-Shopify-Hmac-Sha256"] = options.wrongHmac
+        ? "invalid-hmac-signature"
+        : computeHmac(API_SECRET, bodyStr);
+    }
+    if (!options.omitTopic) {
+      headers["X-Shopify-Topic"] = "customers/create";
+    }
+    if (!options.omitShop) {
+      headers["X-Shopify-Shop-Domain"] = TEST_SHOP;
+    }
+
+    return new Request(url, {
+      method: "POST",
+      headers,
+      body: bodyStr,
+    });
+  }
+
+  describe("E9 HMAC-first verification (security)", () => {
+    it("webhooks.customers returns 401 when HMAC missing, even if topic missing", async () => {
+      const { action } = await import("../webhooks.customers");
+      const request = createRequestWithMissingHeaders(
+        "https://example.com/webhooks/customers",
+        { admin_graphql_api_id: TEST_CUSTOMER_GID },
+        { omitHmac: true, omitTopic: true }
+      );
+
+      try {
+        await action(createActionArgs(request));
+        expect.fail("Expected action to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(401);
+      }
+    });
+
+    it("webhooks.customers returns 401 when HMAC wrong, even if shop missing", async () => {
+      const { action } = await import("../webhooks.customers");
+      const request = createRequestWithMissingHeaders(
+        "https://example.com/webhooks/customers",
+        { admin_graphql_api_id: TEST_CUSTOMER_GID },
+        { wrongHmac: true, omitShop: true }
+      );
+
+      try {
+        await action(createActionArgs(request));
+        expect.fail("Expected action to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(401);
+      }
+    });
+
+    it("webhooks.draft_orders returns 401 when HMAC missing with all headers missing", async () => {
+      const { action } = await import("../webhooks.draft_orders");
+      const request = createRequestWithMissingHeaders(
+        "https://example.com/webhooks/draft_orders",
+        { admin_graphql_api_id: TEST_DRAFT_ORDER_GID },
+        { omitHmac: true, omitTopic: true, omitShop: true }
+      );
+
+      try {
+        await action(createActionArgs(request));
+        expect.fail("Expected action to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(401);
+      }
+    });
+
+    it("webhooks.draft_orders returns 401 when HMAC wrong, even with valid headers", async () => {
+      const { action } = await import("../webhooks.draft_orders");
+      const request = createRequestWithMissingHeaders(
+        "https://example.com/webhooks/draft_orders",
+        { admin_graphql_api_id: TEST_DRAFT_ORDER_GID },
+        { wrongHmac: true }
+      );
+
+      try {
+        await action(createActionArgs(request));
+        expect.fail("Expected action to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Response);
+        expect((error as Response).status).toBe(401);
+      }
+    });
+  });
+
   describe("webhooks.customers", () => {
     it("returns 401 when HMAC validation fails", async () => {
       const { action } = await import("../webhooks.customers");
