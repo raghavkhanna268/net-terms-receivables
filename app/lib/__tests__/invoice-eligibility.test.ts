@@ -286,11 +286,11 @@ describe("Invoice Eligibility", () => {
             defaultTermsDays: 30, 
             defaultTermsSource: "tag" 
           }]],
-          ["customerTags", [{ tags: ["wholesale", "net-terms"] }]],
         ]));
 
+        // Tags are now on the order's customer, not fetched from DB
         const order = createOrder({
-          customer: { id: "gid://shopify/Customer/111" },
+          customer: { id: "gid://shopify/Customer/111", tags: ["wholesale", "net-terms"] },
         });
 
         const context: EligibilityContext = {
@@ -311,11 +311,11 @@ describe("Invoice Eligibility", () => {
           ["buyerAccountByLocation", []],
           ["buyerAccountByCompany", []],
           ["buyerAccountByCustomer", []],
-          ["customerTags", [{ tags: ["net-terms"] }]],
         ]));
 
+        // Tags are now on the order's customer, not fetched from DB
         const order = createOrder({
-          customer: { id: "gid://shopify/Customer/111" },
+          customer: { id: "gid://shopify/Customer/111", tags: ["net-terms"] },
         });
 
         const context: EligibilityContext = {
@@ -331,14 +331,146 @@ describe("Invoice Eligibility", () => {
       });
     });
 
-    describe("Retail orders (no B2B, no tag)", () => {
-      it("is NOT eligible when no paymentTerms, no company, no tag match", async () => {
+    describe("Tag-rule eligibility (uses order's customer.tags)", () => {
+      it("guest order (no customer) is retail_order", async () => {
+        const sql = createMockSql(new Map());
+
+        const order = createOrder({
+          // No customer field - guest checkout
+        });
+
+        const context: EligibilityContext = {
+          ...defaultContext,
+          tagRules: [{ tag: "net-terms", defaultTermsDays: 30 }],
+        };
+
+        const result = await checkOrderEligibility(sql as never, order, context);
+
+        expect(result.eligible).toBe(false);
+        expect(result.reason).toBe("retail_order");
+        expect(result.retryable).toBeUndefined();
+      });
+
+      it("customer with tags that don't match any rule is retail_order", async () => {
         const sql = createMockSql(new Map([
-          ["customerTags", [{ tags: ["regular-customer"] }]],
+          ["buyerAccountByCustomer", []],
         ]));
 
         const order = createOrder({
-          customer: { id: "gid://shopify/Customer/111" },
+          customer: { id: "gid://shopify/Customer/111", tags: ["other-tag", "regular"] },
+        });
+
+        const context: EligibilityContext = {
+          ...defaultContext,
+          tagRules: [{ tag: "net-terms", defaultTermsDays: 30 }],
+        };
+
+        const result = await checkOrderEligibility(sql as never, order, context);
+
+        expect(result.eligible).toBe(false);
+        expect(result.reason).toBe("retail_order");
+        expect(result.retryable).toBeUndefined(); // Permanent - tags checked, no match
+      });
+
+      it("de-tagged customer (tags no longer match) is retail_order", async () => {
+        const sql = createMockSql(new Map([
+          ["buyerAccountByCustomer", []],
+        ]));
+
+        // Customer used to have "net-terms" but was de-tagged
+        const order = createOrder({
+          customer: { id: "gid://shopify/Customer/222", tags: [] }, // Empty tags now
+        });
+
+        const context: EligibilityContext = {
+          ...defaultContext,
+          tagRules: [{ tag: "net-terms", defaultTermsDays: 30 }],
+        };
+
+        const result = await checkOrderEligibility(sql as never, order, context);
+
+        expect(result.eligible).toBe(false);
+        expect(result.reason).toBe("retail_order");
+        expect(result.retryable).toBeUndefined();
+      });
+
+      it("customer with matching tag and buyer account is eligible", async () => {
+        const sql = createMockSql(new Map([
+          ["buyerAccountByCustomer", [{
+            id: "ba-tagged",
+            defaultTermsDays: 30,
+            defaultTermsSource: "tag",
+          }]],
+        ]));
+
+        const order = createOrder({
+          customer: { id: "gid://shopify/Customer/333", tags: ["net-terms", "wholesale"] },
+        });
+
+        const context: EligibilityContext = {
+          ...defaultContext,
+          tagRules: [{ tag: "net-terms", defaultTermsDays: 30 }],
+        };
+
+        const result = await checkOrderEligibility(sql as never, order, context);
+
+        expect(result.eligible).toBe(true);
+        expect(result.reason).toBe("tagged_customer");
+        expect(result.buyerAccountId).toBe("ba-tagged");
+      });
+
+      it("customer present but tags field missing is retryable no_customer_tags", async () => {
+        const sql = createMockSql(new Map([
+          ["buyerAccountByCustomer", []],
+        ]));
+
+        // Customer has id but tags field is missing (undefined)
+        const order = createOrder({
+          customer: { id: "gid://shopify/Customer/444" }, // No tags field
+        });
+
+        const context: EligibilityContext = {
+          ...defaultContext,
+          tagRules: [{ tag: "net-terms", defaultTermsDays: 30 }],
+        };
+
+        const result = await checkOrderEligibility(sql as never, order, context);
+
+        expect(result.eligible).toBe(false);
+        expect(result.reason).toBe("no_customer_tags");
+        expect(result.retryable).toBe(true);
+        expect(result.explanation).toContain("tags field missing");
+      });
+
+      it("no tag rules configured - customer order is retail_order", async () => {
+        const sql = createMockSql(new Map());
+
+        const order = createOrder({
+          customer: { id: "gid://shopify/Customer/555", tags: ["net-terms"] },
+        });
+
+        // No tag rules configured
+        const context: EligibilityContext = {
+          ...defaultContext,
+          tagRules: [], // Empty!
+        };
+
+        const result = await checkOrderEligibility(sql as never, order, context);
+
+        // No tag rules to check, so retail
+        expect(result.eligible).toBe(false);
+        expect(result.reason).toBe("retail_order");
+        expect(result.retryable).toBeUndefined();
+      });
+    });
+
+    describe("Retail orders (no B2B, no tag)", () => {
+      it("is NOT eligible when no paymentTerms, no company, no tag match", async () => {
+        const sql = createMockSql(new Map());
+
+        // Customer has tags but they don't match any tag rule (defaultContext has no tag rules)
+        const order = createOrder({
+          customer: { id: "gid://shopify/Customer/111", tags: ["regular-customer"] },
         });
 
         const result = await checkOrderEligibility(sql as never, order, defaultContext);

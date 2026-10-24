@@ -306,6 +306,10 @@ export function parseCustomerBulkJsonl(jsonl: string): {
 /**
  * Convert bulk Customer line to ShopifyCustomer format.
  *
+ * Maps all available fields from the bulk line, including optional PII fields
+ * (email, displayName) when present. The bulk query only includes these fields
+ * when CUSTOMER_PII_FIELDS=1 is set.
+ *
  * @param customer - Bulk line data
  * @returns ShopifyCustomer for sync processing
  */
@@ -313,5 +317,7 @@ export function bulkCustomerToShopifyCustomer(customer: BulkCustomerLine): Shopi
   return {
     id: customer.id,
     tags: customer.tags ?? [],
+    email: customer.email,
+    displayName: customer.displayName,
   };
 }

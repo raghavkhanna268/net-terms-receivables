@@ -108,8 +108,8 @@ export const BULK_COMPANIES_QUERY = `
  * (Shopify default). Once read_all_orders is approved, all historical orders
  * matching the filter will be included.
  *
- * DPDP note: Only customer.id is fetched (for BuyerAccount lookup).
- * No PII fields (email, names, tags) are requested.
+ * DPDP note: Customer tags are fetched for tag-rule eligibility (not PII).
+ * No email, name, phone, or address fields are requested.
  */
 export const BULK_ORDERS_QUERY = `
   mutation BulkOrdersExport {
@@ -169,6 +169,7 @@ export const BULK_ORDERS_QUERY = `
               }
               customer {
                 id
+                tags
               }
             }
           }

@@ -22,7 +22,8 @@ import {
   isWebhookProcessed,
   markWebhookProcessed,
 } from "~/services/sync/company.server";
-import { processCustomerWebhook } from "~/services/sync/customer.server";
+import { processCustomerWebhook, type CustomerPiiMode } from "~/services/sync/customer.server";
+import { getRequestEnv } from "~/lib/request-context.server";
 import { processDraftOrderWebhook } from "~/services/sync/draft-order.server";
 import { processCompanyLocationWebhook } from "~/services/sync/company-location.server";
 import { processOrderWebhook } from "~/services/sync/order.server";
@@ -39,9 +40,12 @@ import {
   COMPANY_QUERY,
   COMPANY_LOCATION_QUERY,
   ORDER_QUERY,
-  getCustomerQueryForDrain,
   DRAFT_ORDER_QUERY,
 } from "./admin-client.server";
+import {
+  fetchCustomerWithFallback,
+  incrementCustomerPiiAccessDeniedFallback,
+} from "./customer-fetch.server";
 import {
   processBulkOperation,
   type BulkProcessResult,
@@ -364,6 +368,11 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
  * - Always fetches: id, tags
  * - Optional PII (CUSTOMER_PII_FIELDS=1): email, displayName
  * - NEVER fetches: phone, addresses
+ *
+ * ACCESS_DENIED fallback:
+ * If PCD approval is pending and Shopify returns ACCESS_DENIED for PII fields,
+ * we retry with base fields only (id, tags) and process without PII.
+ * This avoids dead-lettering every customer message while awaiting approval.
  */
 async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResult> {
   // Idempotency check (S20: use shop for new table)
@@ -375,19 +384,25 @@ async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResul
     };
   }
 
+  // Determine PII mode based on env config
+  const env = getRequestEnv() ?? {};
+  const piiEnabled = env.CUSTOMER_PII_FIELDS === "1";
+
   // For DELETE, we don't need to fetch - just process
+  // Use 'disabled' mode since we're not fetching PII anyway
   if (message.topic === "CUSTOMERS_DELETE") {
     const customer: ShopifyCustomer = {
       id: message.resourceGid,
       tags: [],
     };
-    return processCustomerWebhook(sql, message.shop, message.topic, customer, message.webhookId);
+    return processCustomerWebhook(
+      sql, message.shop, message.topic, customer, message.webhookId,
+      piiEnabled ? "fetched" : "disabled"
+    );
   }
 
-  // Fetch customer data via GraphQL
-  const result = await adminGraphQL<{
-    node: ShopifyCustomer | null;
-  }>(message.shop, getCustomerQueryForDrain(), { id: message.resourceGid });
+  // Fetch customer data via GraphQL with ACCESS_DENIED fallback
+  const result = await fetchCustomerWithFallback(message.shop, message.resourceGid);
 
   if (!result.success) {
     return {
@@ -399,21 +414,62 @@ async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResul
   }
 
   // If node is null, the resource was deleted
-  if (!result.data?.node) {
+  if (!result.data) {
     const customer: ShopifyCustomer = {
       id: message.resourceGid,
       tags: [],
     };
-    return processCustomerWebhook(sql, message.shop, "CUSTOMERS_DELETE", customer, message.webhookId);
+    return processCustomerWebhook(
+      sql, message.shop, "CUSTOMERS_DELETE", customer, message.webhookId,
+      piiEnabled ? "fetched" : "disabled"
+    );
   }
 
-  return processCustomerWebhook(
+  // Determine piiMode:
+  // - 'fallback': ACCESS_DENIED retry was used - preserve existing values
+  // - 'fetched': PII query succeeded - write values as returned
+  // - 'disabled': CUSTOMER_PII_FIELDS !== '1' - clear PII
+  let piiMode: CustomerPiiMode;
+  if (!piiEnabled) {
+    piiMode = "disabled";
+  } else if (result.usedFallback) {
+    piiMode = "fallback";
+  } else {
+    piiMode = "fetched";
+  }
+
+  // Log warning if fallback was used
+  if (result.usedFallback) {
+    console.warn(
+      `[customer_pii_access_denied_fallback] shop=${message.shop} ` +
+        `customer=${message.resourceGid} topic=${message.topic} ` +
+        `fields=email,displayName`
+    );
+  }
+
+  // Process the customer
+  const syncResult = await processCustomerWebhook(
     sql,
     message.shop,
     message.topic,
-    result.data.node,
-    message.webhookId
+    result.data,
+    message.webhookId,
+    piiMode
   );
+
+  // Best-effort counter increment after successful processing
+  // Wrapped in try/catch so a failed insert (e.g., migration not applied) never fails the message
+  if (result.usedFallback && syncResult.success) {
+    try {
+      await incrementCustomerPiiAccessDeniedFallback(sql, message.shop);
+    } catch (err) {
+      console.warn(
+        `[customer_pii_access_denied_fallback] counter increment failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
+  return syncResult;
 }
 
 /**
