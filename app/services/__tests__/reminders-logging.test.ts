@@ -225,4 +225,139 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
     expect(log.shopId).toBe("shop-123");
     expect(log.httpStatus).toBe(401);
   });
+
+  /**
+   * R1: Send failure returns errorCode, no raw provider message.
+   * Forces a network error with sentinel string, asserts:
+   * - Result has exact keys: success, action, errorCode, retryable
+   * - No 'error' field with raw message
+   * - No sentinel appears in result or logs
+   */
+  it("R1: send failure returns errorCode, no raw message in result", async () => {
+    const { sendPaymentReminder } = await import("../reminders.server");
+    const mockSql = createMockSql();
+
+    const SENTINEL_PROVIDER = "SENTINEL_RESEND_RAW_r1x9";
+    const SENTINEL_EMAIL_R1 = "sentinel-r1@provider-leak.test";
+
+    const mockInvoiceData = {
+      invoiceId: "inv-r1",
+      shopId: "shop-r1",
+      shopDomain: "r1-test.myshopify.com",
+      shopTimezone: "Asia/Kolkata",
+      invoiceName: "#R1-001",
+      total: "50000",
+      currency: "INR",
+      dueAt: new Date(),
+      status: "open",
+      buyerAccountId: "buyer-r1",
+      customerId: "gid://shopify/Customer/r1",
+      buyerAccountGatedAt: null,
+    };
+
+    mockSql.setMockResult("invoice", [mockInvoiceData]);
+    mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
+    mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
+    mockSql.setMockResult("global_increment", [{ dailyCount: 1, monthlyTotal: 1 }]);
+
+    // Force network error with sentinel string
+    mockFetch.mockRejectedValueOnce(
+      new Error(`Network error connecting to ${SENTINEL_PROVIDER} for ${SENTINEL_EMAIL_R1}`)
+    );
+
+    const result = await sendPaymentReminder(
+      mockSql,
+      "shop-r1",
+      "inv-r1",
+      "rule-r1",
+      0,
+      "Asia/Kolkata",
+      { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
+    );
+
+    // Result should have errorCode, not error with raw message
+    expect(result.success).toBe(false);
+    expect(result.action).toBe("skipped");
+    expect(result.retryable).toBe(true);
+    expect(result.errorCode).toBeDefined();
+    expect(typeof result.errorCode).toBe("string");
+
+    // Exact keys check - no 'error' field
+    const resultKeys = Object.keys(result).sort();
+    expect(resultKeys).toEqual(["action", "errorCode", "retryable", "success"]);
+
+    // Sentinel must NOT appear in the result
+    const resultStr = JSON.stringify(result);
+    expect(resultStr).not.toContain(SENTINEL_PROVIDER);
+    expect(resultStr).not.toContain(SENTINEL_EMAIL_R1);
+    expect(resultStr).not.toContain("provider-leak");
+
+    // Sentinel must NOT appear in any console output
+    for (const spy of [consoleLogSpy, consoleErrorSpy]) {
+      for (const call of spy.mock.calls) {
+        const raw = String(call[0]);
+        expect(raw).not.toContain(SENTINEL_PROVIDER);
+        expect(raw).not.toContain(SENTINEL_EMAIL_R1);
+        expect(raw).not.toContain("provider-leak");
+      }
+    }
+  });
+
+  /**
+   * R1: HTTP error returns errorCode, not interpolated status message.
+   */
+  it("R1: HTTP error returns errorCode, not raw status in result", async () => {
+    const { sendPaymentReminder } = await import("../reminders.server");
+    const mockSql = createMockSql();
+
+    const mockInvoiceData = {
+      invoiceId: "inv-r1-http",
+      shopId: "shop-r1-http",
+      shopDomain: "r1-http.myshopify.com",
+      shopTimezone: "Asia/Kolkata",
+      invoiceName: "#R1-HTTP",
+      total: "50000",
+      currency: "INR",
+      dueAt: new Date(),
+      status: "open",
+      buyerAccountId: "buyer-r1-http",
+      customerId: "gid://shopify/Customer/r1-http",
+      buyerAccountGatedAt: null,
+    };
+
+    mockSql.setMockResult("invoice", [mockInvoiceData]);
+    mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
+    mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
+    mockSql.setMockResult("global_increment", [{ dailyCount: 1, monthlyTotal: 1 }]);
+
+    // Force 503 error
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      text: async () => "Service unavailable with PII: secret@leak.test",
+    });
+
+    const result = await sendPaymentReminder(
+      mockSql,
+      "shop-r1-http",
+      "inv-r1-http",
+      "rule-r1-http",
+      0,
+      "Asia/Kolkata",
+      { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
+    );
+
+    // Result should have errorCode, not error with interpolated status
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe("resend_server_error");
+
+    // Exact keys check - no 'error' field
+    const resultKeys = Object.keys(result).sort();
+    expect(resultKeys).toEqual(["action", "errorCode", "retryable", "success"]);
+
+    // Status code 503 must NOT appear as string in result
+    const resultStr = JSON.stringify(result);
+    expect(resultStr).not.toContain("503");
+    expect(resultStr).not.toContain("secret@leak.test");
+  });
 });

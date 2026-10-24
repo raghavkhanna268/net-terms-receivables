@@ -80,6 +80,7 @@ export interface ApplyMatchResult {
   invoicePaid: boolean;
   shopifyPushSucceeded: boolean;
   error?: string;
+  errorCode?: string;
   retryable?: boolean;
   reasonCode?: string;
 }
@@ -289,6 +290,7 @@ export async function applyMatch(
         invoicePaid: false,
         shopifyPushSucceeded: false,
         error: shopifyResult.error ?? "Shopify orderMarkAsPaid failed",
+        errorCode: shopifyResult.errorCode,
         retryable: shopifyResult.retryable,
       };
     }
@@ -450,7 +452,7 @@ async function handlePushedMatch(
       success: false,
       invoicePaid: false,
       shopifyPushSucceeded: false,
-      error: `Failed to recover inconsistent match: ${error instanceof Error ? error.message : String(error)}`,
+      error: `permanent:${toErrorCode(error)}`,
       reasonCode: "RECOVERY_FAILED",
     };
   }
@@ -737,7 +739,7 @@ async function handleStalePushingMatch(
           success: false,
           invoicePaid: false,
           shopifyPushSucceeded: false,
-          error: `Stale reclaim finalization failed: ${error instanceof Error ? error.message : String(error)}`,
+          error: `retryable:${toErrorCode(error)}`,
         };
       }
     }
@@ -882,7 +884,7 @@ async function handleStalePushingMatch(
           success: false,
           invoicePaid: false,
           shopifyPushSucceeded: false,
-          error: shopifyResult.error ?? "Shopify call failed during stale reclaim",
+          error: shopifyResult.retryable ? "retryable:shopify_api_error" : "permanent:shopify_api_error",
           retryable: shopifyResult.retryable,
         };
       }
@@ -1058,12 +1060,11 @@ async function handleStalePushingMatch(
       reasonCode: reasonCode ?? "STALE_RECLAIM_FULL",
     };
   } catch (error) {
-    // DB error - leave in 'pushing' for stale re-claim
     return {
       success: false,
       invoicePaid: false,
       shopifyPushSucceeded: false,
-      error: `Stale reclaim failed: ${error instanceof Error ? error.message : String(error)}`,
+      error: `retryable:${toErrorCode(error)}`,
     };
   }
 }
@@ -1234,7 +1235,7 @@ async function claimMatchAndDecide(
   } catch (error) {
     return {
       success: false,
-      error: error instanceof Error ? error.message : String(error),
+      error: toErrorCode(error),
     };
   }
 }
@@ -1368,7 +1369,9 @@ async function finalizeFullApply(
           return { success: true, backstopTriggered: true };
         }
 
-        // Shopify didn't succeed - safe to release claim back to 'confirmed'
+        // Defensive: Shopify didn't succeed but invoice state changed.
+        // Currently unreachable: if Shopify fails, applyMatch returns early at L287-293.
+        // Kept as safety net in case future code paths reach here with pushSucceeded=false.
         await tx`
           UPDATE "Match"
           SET state = 'confirmed', "updatedAt" = NOW()
@@ -1378,7 +1381,7 @@ async function finalizeFullApply(
         `;
         return {
           raceDetected: true,
-          error: `Invoice state changed during push (status=${lockedInvoice.status}, outstanding=${lockedInvoice.outstandingPaise})`,
+          error: "invoice_state_changed_during_push",
         };
       }
 
@@ -1664,7 +1667,7 @@ export async function unmatchMatch(
   } catch (error) {
     return {
       success: false,
-      error: error instanceof Error ? error.message : String(error),
+      error: toErrorCode(error),
     };
   }
 }
@@ -1965,6 +1968,19 @@ async function updatePaymentStatusAfterUnmatch(
 export const unmatchPushedMatch = unmatchMatch;
 
 /**
+ * Fixed merchant-facing error messages for reconcile failures (M7).
+ * Keys must be values that toErrorCode(new Error(msg)) can return for userError messages.
+ * No raw Shopify text is exposed.
+ */
+const RECONCILE_ERROR_MESSAGES: Record<string, string> = {
+  error: "Couldn't update the order in Shopify. Please retry.",
+  unknown: "Couldn't update the order in Shopify. Please retry.",
+  access_denied: "Couldn't update the order in Shopify. Please check permissions.",
+  throttled: "Shopify is busy. Please try again in a moment.",
+  rate_limited: "Shopify is busy. Please try again in a moment.",
+};
+
+/**
  * Call Shopify orderMarkAsPaid mutation.
  *
  * Issue #5: Better already-paid detection - we verify by querying the order's
@@ -1977,6 +1993,7 @@ async function callOrderMarkAsPaid(
   success: boolean;
   alreadyPaid?: boolean;
   error?: string;
+  errorCode?: string;
   retryable?: boolean;
 }> {
   interface OrderMarkAsPaidResponse {
@@ -1994,7 +2011,7 @@ async function callOrderMarkAsPaid(
   if (!result.success) {
     return {
       success: false,
-      error: result.error ?? "Shopify request failed",
+      error: result.retryable ? "retryable:shopify_api_error" : "permanent:shopify_api_error",
       retryable: result.retryable,
     };
   }
@@ -2003,7 +2020,7 @@ async function callOrderMarkAsPaid(
   if (!data) {
     return {
       success: false,
-      error: "Invalid Shopify response",
+      error: "retryable:shopify_invalid_response",
       retryable: true,
     };
   }
@@ -2021,11 +2038,14 @@ async function callOrderMarkAsPaid(
       return { success: false, alreadyPaid: true };
     }
 
-    // Not already paid - return the actual error
-    const errorMessage = data.userErrors.map((e) => e.message).join("; ");
+    // Not already paid - map errors to codes and return fixed merchant-facing message (M7)
+    // Wrap message in Error so toErrorCode's message heuristics (access_denied, throttled, etc.) work
+    const errorCodes = data.userErrors.map((e) => toErrorCode(new Error(e.message)));
+    const primaryCode = errorCodes[0] ?? "error";
     return {
       success: false,
-      error: errorMessage,
+      error: RECONCILE_ERROR_MESSAGES[primaryCode] ?? RECONCILE_ERROR_MESSAGES.error,
+      errorCode: primaryCode,
       retryable: false,
     };
   }
