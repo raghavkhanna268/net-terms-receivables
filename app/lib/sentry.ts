@@ -7,8 +7,28 @@ import {
   type ErrorEvent,
   type EventHint,
 } from "@sentry/cloudflare";
-import type { TransactionEvent } from "@sentry/core";
+import type { TransactionEvent, DataCollection } from "@sentry/core";
 import { redactString, toErrorCode } from "./log.server";
+
+/**
+ * Restrictive data collection settings per #174 PII rules.
+ * @sentry/core 11.9.0 replaced sendDefaultPii with dataCollection.
+ * Defaults are permissive, so we explicitly disable all data collection.
+ * beforeSend/beforeSendTransaction hooks provide defense-in-depth.
+ */
+export const RESTRICTIVE_DATA_COLLECTION: DataCollection = {
+  userInfo: false,
+  cookies: false,
+  httpHeaders: false,
+  httpBodies: [],
+  urlQueryParams: false,
+  graphQL: { document: false, variables: false },
+  genAI: { inputs: false, outputs: false },
+  databaseQueryData: false,
+  queues: false,
+  stackFrameVariables: false,
+  frameContextLines: 0,
+};
 
 /**
  * Allowlisted tag/extra keys that are safe to send to Sentry.
@@ -162,12 +182,12 @@ export function wrapWithSentry<E extends SentryEnv>(
       return {
         dsn,
         tracesSampleRate: parseFloat(env.SENTRY_TRACES_SAMPLE_RATE ?? "0"),
-        // A1: sendDefaultPii defaults to false in Sentry SDK. We cannot set it
-        // explicitly because @sentry/cloudflare types it as `never` (the option
-        // isn't exposed in CloudflareOptions). PII protection is enforced by
-        // beforeSend/beforeSendTransaction hooks which scrub all sensitive data
-        // including request headers, cookies, exception messages, tags, extra,
-        // and contexts - allowing only safe identifiers.
+        // A1: Disable all automatic data collection. @sentry/core 11.9.0 replaced
+        // sendDefaultPii with dataCollection, which defaults to permissive settings.
+        // Shopify request URLs carry shop/host/hmac query params, so we must disable
+        // urlQueryParams, cookies, httpHeaders, httpBodies, and all other collection.
+        // beforeSend/beforeSendTransaction hooks provide defense-in-depth scrubbing.
+        dataCollection: RESTRICTIVE_DATA_COLLECTION,
         beforeSend,
         beforeSendTransaction,
       };

@@ -41,9 +41,9 @@ describe("sentry.ts", () => {
       expect(typeof config.beforeSendTransaction).toBe("function");
     });
 
-    it("does not set sendDefaultPii (A1: SDK defaults to false, type is never)", async () => {
+    it("sets dataCollection to most restrictive values (A1)", async () => {
       const { withSentry } = await import("@sentry/cloudflare");
-      const { wrapWithSentry } = await import("../sentry");
+      const { wrapWithSentry, RESTRICTIVE_DATA_COLLECTION } = await import("../sentry");
 
       const mockHandler = { fetch: vi.fn() };
       wrapWithSentry(mockHandler);
@@ -51,12 +51,23 @@ describe("sentry.ts", () => {
       const configFn = (withSentry as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const config = configFn({ SENTRY_DSN: "https://test@sentry.io/123" });
 
-      // @sentry/cloudflare types sendDefaultPii as `never` so we can't set it.
-      // The SDK defaults sendDefaultPii to false. PII protection is enforced
-      // by beforeSend/beforeSendTransaction hooks which are verified by other tests.
-      // Here we just confirm the option is not present in config (would be type error).
-      expect(config).not.toHaveProperty("sendDefaultPii");
-      // And verify the hooks that provide PII protection are present
+      // @sentry/core 11.9.0 replaced sendDefaultPii with dataCollection.
+      // Defaults are permissive, so we set all fields to their restrictive values.
+      expect(config.dataCollection).toEqual(RESTRICTIVE_DATA_COLLECTION);
+      expect(config.dataCollection).toEqual({
+        userInfo: false,
+        cookies: false,
+        httpHeaders: false,
+        httpBodies: [],
+        urlQueryParams: false,
+        graphQL: { document: false, variables: false },
+        genAI: { inputs: false, outputs: false },
+        databaseQueryData: false,
+        queues: false,
+        stackFrameVariables: false,
+        frameContextLines: 0,
+      });
+      // beforeSend/beforeSendTransaction provide defense-in-depth
       expect(config.beforeSend).toBeDefined();
       expect(config.beforeSendTransaction).toBeDefined();
     });
