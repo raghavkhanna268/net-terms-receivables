@@ -499,7 +499,8 @@ export async function confirmMatch(
 
       const finalAmountDecimal = Number(finalAllocationPaise) / 100;
 
-      // Confirm this match with capped amount - conditional UPDATE for idempotency
+      // Confirm this match with capped amount using conditional UPDATE
+      // Only transitions if state is still 'suggested' (idempotency)
       const [confirmedRow] = await tx<{ id: string }[]>`
         UPDATE "Match"
         SET
@@ -513,6 +514,26 @@ export async function confirmMatch(
           AND state = 'suggested'
         RETURNING id
       `;
+
+      // S17: Write audit event only if the transition actually happened
+      if (confirmedRow) {
+        await tx`
+          INSERT INTO "AuditEvent" (id, "shopId", actor, type, data, at)
+          VALUES (
+            gen_random_uuid(),
+            ${shopId},
+            ${userId},
+            'match.confirmed',
+            ${tx.json({
+              matchId,
+              invoiceId: match.invoice_id,
+              paymentId: payment.id,
+              amountPaise: finalAllocationPaise.toString(),
+            })}::jsonb,
+            NOW()
+          )
+        `;
+      }
 
       // Calculate new remaining payment after this confirmation
       const newRemainingPaymentPaise = remainingPaymentPaise - finalAllocationPaise;
@@ -573,8 +594,6 @@ export async function confirmMatch(
       const isFullyAllocated = newAllocatedTotal >= paymentAmountPaise;
       const newStatus = isFullyAllocated ? "matched" : "partial";
       await updatePaymentStatus(tx, shopId, payment.id, newStatus);
-
-      if (confirmedRow) await tx`INSERT INTO "AuditEvent"(id,"shopId",actor,type,data,at) VALUES(gen_random_uuid(),${shopId},${userId},'match.confirmed',${tx.json({matchId,invoiceId:match.invoice_id,paymentId:payment.id,amtP:finalAllocationPaise.toString()})}::jsonb,NOW())`;
 
       return { success: true };
     });
