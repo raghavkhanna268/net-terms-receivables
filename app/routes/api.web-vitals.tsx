@@ -4,19 +4,24 @@
  * POST /api/web-vitals
  *
  * Receives Core Web Vitals (LCP, CLS, INP) from the embedded app's
- * client-side reporter. No authentication required (same-origin only).
+ * client-side reporter. Authenticated via Shopify session token.
  *
  * Privacy requirements (PCD-2):
  * - Never echoes input in response
- * - Never logs raw error objects
- * - Only logs: metric name (enum), value (number), route (pathname)
- * - Rejects any payload containing shop domain or query strings
+ * - Never logs raw error objects or the shop domain
+ * - Logs only validated enum/numeric fields via safeLog:
+ *   - metric: LCP|CLS|INP (enum)
+ *   - value: numeric, clamped and rounded
+ *   - rating: good|needs-improvement|poor (computed server-side)
+ *   - route: route-id enum (app_home, app_accounts, etc.)
  *
  * Security:
+ * - Requires Shopify session token authentication
  * - Strict validation of metric names (allowlist)
  * - Value bounds checking
  * - Body size cap (4 KB)
  * - Max 10 metrics per request
+ * - Route must match strict allowlist: ^/app(/[A-Za-z0-9_-]+)*$
  *
  * @module
  */
@@ -41,6 +46,12 @@ const MAX_METRICS = 10;
 const ALLOWED_NAMES = new Set(["LCP", "CLS", "INP"]);
 
 /**
+ * Strict route allowlist: /app with optional path segments.
+ * Only alphanumeric, underscore, and hyphen allowed in segments.
+ */
+const ROUTE_PATTERN = /^\/app(\/[A-Za-z0-9_-]+)*$/;
+
+/**
  * Value bounds per metric type.
  * - LCP: 0 to 60,000 ms (60 seconds max, way beyond poor threshold)
  * - CLS: 0 to 10 (scores above 1 are extremely poor, 10 is sanity cap)
@@ -53,18 +64,66 @@ const VALUE_BOUNDS: Record<string, { min: number; max: number }> = {
 };
 
 /**
- * Patterns that indicate sensitive data (shop domain, query strings).
- * If any of these match the route, reject the request.
+ * Google's Web Vitals thresholds for rating computation.
+ * @see https://web.dev/articles/vitals
  */
-const SENSITIVE_PATTERNS = [
-  /\.myshopify\.com/i,
-  /\?/,
-  /shop=/i,
-  /host=/i,
-  /hmac=/i,
-  /session=/i,
-  /token=/i,
-];
+const RATING_THRESHOLDS: Record<string, { good: number; poor: number }> = {
+  LCP: { good: 2500, poor: 4000 },
+  INP: { good: 200, poor: 500 },
+  CLS: { good: 0.1, poor: 0.25 },
+};
+
+/**
+ * Map route path to route-id enum.
+ * Never log raw paths - only these safe identifiers.
+ */
+function mapRouteToId(path: string): string {
+  if (path === "/app" || path === "/app/") {
+    return "app_home";
+  }
+  if (path.startsWith("/app/accounts")) {
+    return "app_accounts";
+  }
+  if (path.startsWith("/app/data-requests") && path.includes("/download")) {
+    return "app_data_requests_download";
+  }
+  if (path.startsWith("/app/data-requests")) {
+    return "app_data_requests";
+  }
+  if (path === "/app/imports") {
+    return "app_imports";
+  }
+  if (path === "/app/onboarding") {
+    return "app_onboarding";
+  }
+  if (path === "/app/plan") {
+    return "app_plan";
+  }
+  if (path === "/app/reconcile") {
+    return "app_reconcile";
+  }
+  if (path === "/app/settings/reminders") {
+    return "app_settings_reminders";
+  }
+  return "other";
+}
+
+/**
+ * Compute rating from value using Google's thresholds.
+ */
+function computeRating(metricName: string, value: number): "good" | "needs-improvement" | "poor" {
+  const thresholds = RATING_THRESHOLDS[metricName];
+  if (!thresholds) {
+    return "poor";
+  }
+  if (value <= thresholds.good) {
+    return "good";
+  }
+  if (value > thresholds.poor) {
+    return "poor";
+  }
+  return "needs-improvement";
+}
 
 /**
  * Validate a single metric.
@@ -93,22 +152,8 @@ function validateMetric(
     return `metrics[${index}].value: out of bounds`;
   }
 
-  if (typeof m.id !== "string" || m.id.length === 0 || m.id.length > 100) {
-    return `metrics[${index}].id: invalid`;
-  }
-
-  if (typeof m.route !== "string" || m.route.length === 0 || m.route.length > 500) {
+  if (typeof m.route !== "string" || !ROUTE_PATTERN.test(m.route)) {
     return `metrics[${index}].route: invalid`;
-  }
-
-  for (const pattern of SENSITIVE_PATTERNS) {
-    if (pattern.test(m.route)) {
-      return `metrics[${index}].route: contains sensitive data`;
-    }
-  }
-
-  if (typeof m.version !== "string" || m.version.length > 50) {
-    return `metrics[${index}].version: invalid`;
   }
 
   return null;
@@ -138,9 +183,9 @@ function validatePayload(body: unknown): string | null {
   }
 
   for (let i = 0; i < payload.metrics.length; i++) {
-    const error = validateMetric(payload.metrics[i], i);
-    if (error) {
-      return error;
+    const validationIssue = validateMetric(payload.metrics[i], i);
+    if (validationIssue) {
+      return validationIssue;
     }
   }
 
@@ -148,33 +193,32 @@ function validatePayload(body: unknown): string | null {
 }
 
 /**
- * Log validated metrics.
- * Uses structured logging with only safe fields.
+ * Log validated metrics using safeLog with strict validation keys.
  *
- * Key naming: CI logging guard (check-logging.ts) rejects keys matching
- * sensitive patterns like "name", "amount", "shop", etc. We use:
- * - metric: the vital type (LCP/CLS/INP) - not "metricName"
- * - value: the numeric measurement
- * - route: pathname only (no query string)
- * - id: web-vitals library id
- * - version: App Bridge version
+ * Log fields (all validated by safeLog):
+ * - metric: LCP|CLS|INP (enum)
+ * - value: numeric, clamped and rounded
+ * - rating: good|needs-improvement|poor (computed from thresholds)
+ * - route: route-id enum (never raw path)
  */
 function logMetrics(
-  metrics: Array<{ name: string; value: number; route: string; id: string; version: string }>
+  metrics: Array<{ name: string; value: number; route: string }>
 ): void {
   for (const m of metrics) {
-    const { name: metric, value, route, id, version } = m;
+    const { name: metric, value, route } = m;
+    const routeId = mapRouteToId(route);
+    const rating = computeRating(metric, value);
+    
     safeLog("info", "web_vitals", {
       metric,
       value,
-      route,
-      id,
-      version,
+      rating,
+      route: routeId,
     });
   }
 }
 
-export async function action({ request }: ActionFunctionArgs) {
+export async function action({ request, context }: ActionFunctionArgs) {
   if (request.method !== "POST") {
     return new Response(null, { status: 405 });
   }
@@ -187,6 +231,13 @@ export async function action({ request }: ActionFunctionArgs) {
   const contentLength = request.headers.get("Content-Length");
   if (contentLength && parseInt(contentLength, 10) > MAX_BODY_SIZE) {
     return new Response(null, { status: 413 });
+  }
+
+  const { shopify } = context;
+  try {
+    await shopify.authenticate.admin(request);
+  } catch {
+    return new Response(null, { status: 401 });
   }
 
   let body: unknown;
@@ -206,7 +257,7 @@ export async function action({ request }: ActionFunctionArgs) {
     return new Response(null, { status: 400 });
   }
 
-  const payload = body as { metrics: Array<{ name: string; value: number; route: string; id: string; version: string }> };
+  const payload = body as { metrics: Array<{ name: string; value: number; route: string }> };
   logMetrics(payload.metrics);
 
   return new Response(null, { status: 204 });

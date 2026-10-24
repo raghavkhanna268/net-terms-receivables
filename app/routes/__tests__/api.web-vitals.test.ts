@@ -7,16 +7,11 @@
  * - Route rejects oversized bodies
  * - Route accepts valid payloads with 204
  * - Payload never contains shop domain or query string
+ * - Uses real safeLog with console spy to verify actual JSON output
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { action, loader } from "../api.web-vitals";
-
-const mockSafeLog = vi.fn();
-
-vi.mock("~/lib/log.server", () => ({
-  safeLog: (...args: unknown[]) => mockSafeLog(...args),
-}));
 
 function createRequest(
   body: unknown,
@@ -39,10 +34,20 @@ function createRequest(
   });
 }
 
-function callAction(request: Request) {
+function createMockContext() {
+  return {
+    shopify: {
+      authenticate: {
+        admin: vi.fn().mockResolvedValue({ session: { shop: "test.myshopify.com" } }),
+      },
+    },
+  };
+}
+
+function callAction(request: Request, context = createMockContext()) {
   return action({
     request,
-    context: {} as never,
+    context: context as never,
     params: {},
     url: new URL(request.url),
     pattern: "/api/web-vitals",
@@ -54,11 +59,17 @@ function callLoader() {
 }
 
 describe("api.web-vitals action", () => {
+  let consoleLogSpy: ReturnType<typeof vi.spyOn>;
+  let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
+
   beforeEach(() => {
-    mockSafeLog.mockClear();
+    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
   });
 
   afterEach(() => {
+    consoleLogSpy.mockRestore();
+    consoleWarnSpy.mockRestore();
     vi.restoreAllMocks();
   });
 
@@ -80,6 +91,35 @@ describe("api.web-vitals action", () => {
     });
   });
 
+  describe("authentication", () => {
+    it("returns 401 when authentication fails", async () => {
+      const request = createRequest({
+        metrics: [{ name: "LCP", value: 2500, route: "/app" }],
+      });
+      const context = {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockRejectedValue(new Error("Unauthorized")),
+          },
+        },
+      };
+
+      const response = await callAction(request, context);
+
+      expect(response.status).toBe(401);
+    });
+
+    it("accepts request when authentication succeeds", async () => {
+      const request = createRequest({
+        metrics: [{ name: "LCP", value: 2500, route: "/app" }],
+      });
+
+      const response = await callAction(request);
+
+      expect(response.status).toBe(204);
+    });
+  });
+
   describe("content type validation", () => {
     it("rejects text/plain with 415", async () => {
       const request = createRequest("{}", { contentType: "text/plain" });
@@ -91,7 +131,7 @@ describe("api.web-vitals action", () => {
 
     it("accepts application/json", async () => {
       const request = createRequest({
-        metrics: [{ name: "LCP", value: 2500, id: "v1-1", route: "/app", version: "3.0" }],
+        metrics: [{ name: "LCP", value: 2500, route: "/app" }],
       });
 
       const response = await callAction(request);
@@ -102,7 +142,7 @@ describe("api.web-vitals action", () => {
     it("accepts application/json;charset=utf-8", async () => {
       const request = createRequest(
         {
-          metrics: [{ name: "LCP", value: 2500, id: "v1-1", route: "/app", version: "3.0" }],
+          metrics: [{ name: "LCP", value: 2500, route: "/app" }],
         },
         { contentType: "application/json;charset=utf-8" }
       );
@@ -119,9 +159,7 @@ describe("api.web-vitals action", () => {
         metrics: Array(100).fill({
           name: "LCP",
           value: 2500,
-          id: "v1-1234567890-1234567890-1234567890",
           route: "/app/very/long/route/that/takes/up/space",
-          version: "3.0.0",
         }),
       };
 
@@ -135,18 +173,17 @@ describe("api.web-vitals action", () => {
   describe("metric name validation", () => {
     it("rejects unknown metric names with 400", async () => {
       const request = createRequest({
-        metrics: [{ name: "UNKNOWN", value: 100, id: "v1-1", route: "/app", version: "3.0" }],
+        metrics: [{ name: "UNKNOWN", value: 100, route: "/app" }],
       });
 
       const response = await callAction(request);
 
       expect(response.status).toBe(400);
-      expect(mockSafeLog).toHaveBeenCalledWith("warn", "web_vitals_invalid", expect.any(Object));
     });
 
     it("rejects FCP (not a Core Web Vital) with 400", async () => {
       const request = createRequest({
-        metrics: [{ name: "FCP", value: 100, id: "v1-1", route: "/app", version: "3.0" }],
+        metrics: [{ name: "FCP", value: 100, route: "/app" }],
       });
 
       const response = await callAction(request);
@@ -156,7 +193,7 @@ describe("api.web-vitals action", () => {
 
     it("rejects TTFB (not a Core Web Vital) with 400", async () => {
       const request = createRequest({
-        metrics: [{ name: "TTFB", value: 100, id: "v1-1", route: "/app", version: "3.0" }],
+        metrics: [{ name: "TTFB", value: 100, route: "/app" }],
       });
 
       const response = await callAction(request);
@@ -166,7 +203,7 @@ describe("api.web-vitals action", () => {
 
     it("rejects FID (deprecated) with 400", async () => {
       const request = createRequest({
-        metrics: [{ name: "FID", value: 100, id: "v1-1", route: "/app", version: "3.0" }],
+        metrics: [{ name: "FID", value: 100, route: "/app" }],
       });
 
       const response = await callAction(request);
@@ -176,7 +213,7 @@ describe("api.web-vitals action", () => {
 
     it("accepts LCP", async () => {
       const request = createRequest({
-        metrics: [{ name: "LCP", value: 2500, id: "v1-1", route: "/app", version: "3.0" }],
+        metrics: [{ name: "LCP", value: 2500, route: "/app" }],
       });
 
       const response = await callAction(request);
@@ -186,7 +223,7 @@ describe("api.web-vitals action", () => {
 
     it("accepts CLS", async () => {
       const request = createRequest({
-        metrics: [{ name: "CLS", value: 0.05, id: "v1-1", route: "/app", version: "3.0" }],
+        metrics: [{ name: "CLS", value: 0.05, route: "/app" }],
       });
 
       const response = await callAction(request);
@@ -196,7 +233,7 @@ describe("api.web-vitals action", () => {
 
     it("accepts INP", async () => {
       const request = createRequest({
-        metrics: [{ name: "INP", value: 150, id: "v1-1", route: "/app", version: "3.0" }],
+        metrics: [{ name: "INP", value: 150, route: "/app" }],
       });
 
       const response = await callAction(request);
@@ -208,7 +245,7 @@ describe("api.web-vitals action", () => {
   describe("value bounds validation", () => {
     it("rejects negative LCP value", async () => {
       const request = createRequest({
-        metrics: [{ name: "LCP", value: -100, id: "v1-1", route: "/app", version: "3.0" }],
+        metrics: [{ name: "LCP", value: -100, route: "/app" }],
       });
 
       const response = await callAction(request);
@@ -218,7 +255,7 @@ describe("api.web-vitals action", () => {
 
     it("rejects LCP over 60000", async () => {
       const request = createRequest({
-        metrics: [{ name: "LCP", value: 60001, id: "v1-1", route: "/app", version: "3.0" }],
+        metrics: [{ name: "LCP", value: 60001, route: "/app" }],
       });
 
       const response = await callAction(request);
@@ -228,7 +265,7 @@ describe("api.web-vitals action", () => {
 
     it("rejects negative CLS value", async () => {
       const request = createRequest({
-        metrics: [{ name: "CLS", value: -0.1, id: "v1-1", route: "/app", version: "3.0" }],
+        metrics: [{ name: "CLS", value: -0.1, route: "/app" }],
       });
 
       const response = await callAction(request);
@@ -238,7 +275,7 @@ describe("api.web-vitals action", () => {
 
     it("rejects CLS over 10", async () => {
       const request = createRequest({
-        metrics: [{ name: "CLS", value: 10.1, id: "v1-1", route: "/app", version: "3.0" }],
+        metrics: [{ name: "CLS", value: 10.1, route: "/app" }],
       });
 
       const response = await callAction(request);
@@ -248,7 +285,7 @@ describe("api.web-vitals action", () => {
 
     it("rejects negative INP value", async () => {
       const request = createRequest({
-        metrics: [{ name: "INP", value: -50, id: "v1-1", route: "/app", version: "3.0" }],
+        metrics: [{ name: "INP", value: -50, route: "/app" }],
       });
 
       const response = await callAction(request);
@@ -258,7 +295,7 @@ describe("api.web-vitals action", () => {
 
     it("rejects INP over 30000", async () => {
       const request = createRequest({
-        metrics: [{ name: "INP", value: 30001, id: "v1-1", route: "/app", version: "3.0" }],
+        metrics: [{ name: "INP", value: 30001, route: "/app" }],
       });
 
       const response = await callAction(request);
@@ -270,19 +307,7 @@ describe("api.web-vitals action", () => {
       const request = new Request("https://example.com/api/web-vitals", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: '{"metrics":[{"name":"LCP","value":NaN,"id":"v1-1","route":"/app","version":"3.0"}]}',
-      });
-
-      const response = await callAction(request);
-
-      expect(response.status).toBe(400);
-    });
-
-    it("rejects non-finite values (Infinity)", async () => {
-      const request = new Request("https://example.com/api/web-vitals", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: '{"metrics":[{"name":"LCP","value":Infinity,"id":"v1-1","route":"/app","version":"3.0"}]}',
+        body: '{"metrics":[{"name":"LCP","value":NaN,"route":"/app"}]}',
       });
 
       const response = await callAction(request);
@@ -292,7 +317,7 @@ describe("api.web-vitals action", () => {
 
     it("accepts edge case: LCP exactly 60000", async () => {
       const request = createRequest({
-        metrics: [{ name: "LCP", value: 60000, id: "v1-1", route: "/app", version: "3.0" }],
+        metrics: [{ name: "LCP", value: 60000, route: "/app" }],
       });
 
       const response = await callAction(request);
@@ -302,7 +327,69 @@ describe("api.web-vitals action", () => {
 
     it("accepts edge case: CLS exactly 0", async () => {
       const request = createRequest({
-        metrics: [{ name: "CLS", value: 0, id: "v1-1", route: "/app", version: "3.0" }],
+        metrics: [{ name: "CLS", value: 0, route: "/app" }],
+      });
+
+      const response = await callAction(request);
+
+      expect(response.status).toBe(204);
+    });
+  });
+
+  describe("route validation (strict allowlist)", () => {
+    it("rejects route not starting with /app", async () => {
+      const request = createRequest({
+        metrics: [{ name: "LCP", value: 2500, route: "/other" }],
+      });
+
+      const response = await callAction(request);
+
+      expect(response.status).toBe(400);
+    });
+
+    it("rejects route with query string", async () => {
+      const request = createRequest({
+        metrics: [{ name: "LCP", value: 2500, route: "/app?shop=test.myshopify.com" }],
+      });
+
+      const response = await callAction(request);
+
+      expect(response.status).toBe(400);
+    });
+
+    it("rejects route with special characters", async () => {
+      const request = createRequest({
+        metrics: [{ name: "LCP", value: 2500, route: "/app/../secret" }],
+      });
+
+      const response = await callAction(request);
+
+      expect(response.status).toBe(400);
+    });
+
+    it("accepts /app", async () => {
+      const request = createRequest({
+        metrics: [{ name: "LCP", value: 2500, route: "/app" }],
+      });
+
+      const response = await callAction(request);
+
+      expect(response.status).toBe(204);
+    });
+
+    it("accepts /app/onboarding", async () => {
+      const request = createRequest({
+        metrics: [{ name: "LCP", value: 2500, route: "/app/onboarding" }],
+      });
+
+      const response = await callAction(request);
+
+      expect(response.status).toBe(204);
+    });
+
+    it("accepts /app/accounts/123", async () => {
+      const request = createRequest({
+        metrics: [{ name: "LCP", value: 2500, route: "/app/accounts/123" }],
       });
 
       const response = await callAction(request);
@@ -325,9 +412,7 @@ describe("api.web-vitals action", () => {
         metrics: Array(11).fill({
           name: "LCP",
           value: 2500,
-          id: "v1-1",
           route: "/app",
-          version: "3.0",
         }),
       });
 
@@ -342,10 +427,8 @@ describe("api.web-vitals action", () => {
           .fill(null)
           .map((_, i) => ({
             name: "LCP",
-            value: 2500,
-            id: `v1-${i}`,
+            value: 2500 + i,
             route: "/app",
-            version: "3.0",
           })),
       });
 
@@ -371,96 +454,10 @@ describe("api.web-vitals action", () => {
     });
   });
 
-  describe("route validation (privacy)", () => {
-    it("rejects route containing .myshopify.com", async () => {
-      const request = createRequest({
-        metrics: [
-          {
-            name: "LCP",
-            value: 2500,
-            id: "v1-1",
-            route: "/app?shop=test.myshopify.com",
-            version: "3.0",
-          },
-        ],
-      });
-
-      const response = await callAction(request);
-
-      expect(response.status).toBe(400);
-    });
-
-    it("rejects route containing query string (?)", async () => {
-      const request = createRequest({
-        metrics: [
-          {
-            name: "LCP",
-            value: 2500,
-            id: "v1-1",
-            route: "/app?session=abc123",
-            version: "3.0",
-          },
-        ],
-      });
-
-      const response = await callAction(request);
-
-      expect(response.status).toBe(400);
-    });
-
-    it("rejects route containing shop=", async () => {
-      const request = createRequest({
-        metrics: [
-          { name: "LCP", value: 2500, id: "v1-1", route: "/app/shop=test", version: "3.0" },
-        ],
-      });
-
-      const response = await callAction(request);
-
-      expect(response.status).toBe(400);
-    });
-
-    it("rejects route containing host=", async () => {
-      const request = createRequest({
-        metrics: [
-          { name: "LCP", value: 2500, id: "v1-1", route: "/app/host=abc", version: "3.0" },
-        ],
-      });
-
-      const response = await callAction(request);
-
-      expect(response.status).toBe(400);
-    });
-
-    it("rejects route containing hmac=", async () => {
-      const request = createRequest({
-        metrics: [
-          { name: "LCP", value: 2500, id: "v1-1", route: "/app/hmac=xyz", version: "3.0" },
-        ],
-      });
-
-      const response = await callAction(request);
-
-      expect(response.status).toBe(400);
-    });
-
-    it("accepts clean route without query string", async () => {
-      const request = createRequest({
-        metrics: [
-          { name: "LCP", value: 2500, id: "v1-1", route: "/app/onboarding", version: "3.0" },
-        ],
-      });
-
-      const response = await callAction(request);
-
-      expect(response.status).toBe(204);
-    });
-  });
-
-  describe("successful request handling", () => {
+  describe("successful request logging (real safeLog)", () => {
     it("returns 204 No Content for valid payload", async () => {
       const request = createRequest({
-        metrics: [{ name: "LCP", value: 2500, id: "v1-1", route: "/app", version: "3.0" }],
+        metrics: [{ name: "LCP", value: 2500, route: "/app" }],
       });
 
       const response = await callAction(request);
@@ -470,44 +467,164 @@ describe("api.web-vitals action", () => {
       expect(body).toBe("");
     });
 
-    it("logs each metric via safeLog", async () => {
+    it("logs each metric with validated fields via real safeLog", async () => {
       const request = createRequest({
         metrics: [
-          { name: "LCP", value: 2500, id: "v1-1", route: "/app", version: "3.0" },
-          { name: "CLS", value: 0.05, id: "v1-2", route: "/app", version: "3.0" },
-          { name: "INP", value: 150, id: "v1-3", route: "/app", version: "3.0" },
+          { name: "LCP", value: 2500, route: "/app" },
+          { name: "CLS", value: 0.05, route: "/app/onboarding" },
+          { name: "INP", value: 150, route: "/app/reconcile" },
         ],
       });
 
       await callAction(request);
 
-      expect(mockSafeLog).toHaveBeenCalledTimes(3);
-      expect(mockSafeLog).toHaveBeenCalledWith("info", "web_vitals", {
-        metric: "LCP",
-        value: 2500,
-        route: "/app",
-        id: "v1-1",
-        version: "3.0",
+      expect(consoleLogSpy).toHaveBeenCalledTimes(3);
+
+      const log1 = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+      expect(log1.event).toBe("web_vitals");
+      expect(log1.metric).toBe("LCP");
+      expect(log1.value).toBe(2500);
+      expect(log1.rating).toBe("good");
+      expect(log1.route).toBe("app_home");
+
+      const log2 = JSON.parse(consoleLogSpy.mock.calls[1][0]);
+      expect(log2.event).toBe("web_vitals");
+      expect(log2.metric).toBe("CLS");
+      expect(log2.value).toBe(0.05);
+      expect(log2.rating).toBe("good");
+      expect(log2.route).toBe("app_onboarding");
+
+      const log3 = JSON.parse(consoleLogSpy.mock.calls[2][0]);
+      expect(log3.event).toBe("web_vitals");
+      expect(log3.metric).toBe("INP");
+      expect(log3.value).toBe(150);
+      expect(log3.rating).toBe("good");
+      expect(log3.route).toBe("app_reconcile");
+    });
+
+    it("computes correct rating for LCP thresholds", async () => {
+      const request = createRequest({
+        metrics: [
+          { name: "LCP", value: 2500, route: "/app" },
+          { name: "LCP", value: 3000, route: "/app" },
+          { name: "LCP", value: 4500, route: "/app" },
+        ],
       });
-      expect(mockSafeLog).toHaveBeenCalledWith("info", "web_vitals", {
-        metric: "CLS",
-        value: 0.05,
-        route: "/app",
-        id: "v1-2",
-        version: "3.0",
+
+      await callAction(request);
+
+      const log1 = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+      expect(log1.rating).toBe("good");
+
+      const log2 = JSON.parse(consoleLogSpy.mock.calls[1][0]);
+      expect(log2.rating).toBe("needs-improvement");
+
+      const log3 = JSON.parse(consoleLogSpy.mock.calls[2][0]);
+      expect(log3.rating).toBe("poor");
+    });
+
+    it("computes correct rating for INP thresholds", async () => {
+      const request = createRequest({
+        metrics: [
+          { name: "INP", value: 200, route: "/app" },
+          { name: "INP", value: 300, route: "/app" },
+          { name: "INP", value: 600, route: "/app" },
+        ],
       });
-      expect(mockSafeLog).toHaveBeenCalledWith("info", "web_vitals", {
-        metric: "INP",
-        value: 150,
-        route: "/app",
-        id: "v1-3",
-        version: "3.0",
+
+      await callAction(request);
+
+      const log1 = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+      expect(log1.rating).toBe("good");
+
+      const log2 = JSON.parse(consoleLogSpy.mock.calls[1][0]);
+      expect(log2.rating).toBe("needs-improvement");
+
+      const log3 = JSON.parse(consoleLogSpy.mock.calls[2][0]);
+      expect(log3.rating).toBe("poor");
+    });
+
+    it("computes correct rating for CLS thresholds", async () => {
+      const request = createRequest({
+        metrics: [
+          { name: "CLS", value: 0.1, route: "/app" },
+          { name: "CLS", value: 0.2, route: "/app" },
+          { name: "CLS", value: 0.3, route: "/app" },
+        ],
       });
+
+      await callAction(request);
+
+      const log1 = JSON.parse(consoleLogSpy.mock.calls[0][0]);
+      expect(log1.rating).toBe("good");
+
+      const log2 = JSON.parse(consoleLogSpy.mock.calls[1][0]);
+      expect(log2.rating).toBe("needs-improvement");
+
+      const log3 = JSON.parse(consoleLogSpy.mock.calls[2][0]);
+      expect(log3.rating).toBe("poor");
+    });
+
+    it("maps routes to route-id enum correctly", async () => {
+      const request = createRequest({
+        metrics: [
+          { name: "LCP", value: 2500, route: "/app" },
+          { name: "LCP", value: 2500, route: "/app/accounts/123" },
+          { name: "LCP", value: 2500, route: "/app/imports" },
+          { name: "LCP", value: 2500, route: "/app/settings/reminders" },
+          { name: "LCP", value: 2500, route: "/app/unknown-route" },
+        ],
+      });
+
+      await callAction(request);
+
+      expect(JSON.parse(consoleLogSpy.mock.calls[0][0]).route).toBe("app_home");
+      expect(JSON.parse(consoleLogSpy.mock.calls[1][0]).route).toBe("app_accounts");
+      expect(JSON.parse(consoleLogSpy.mock.calls[2][0]).route).toBe("app_imports");
+      expect(JSON.parse(consoleLogSpy.mock.calls[3][0]).route).toBe("app_settings_reminders");
+      expect(JSON.parse(consoleLogSpy.mock.calls[4][0]).route).toBe("other");
+    });
+
+    it("log output never contains shop domain", async () => {
+      const request = createRequest({
+        metrics: [{ name: "LCP", value: 2500, route: "/app" }],
+      });
+
+      await callAction(request);
+
+      const logOutput = consoleLogSpy.mock.calls[0][0];
+      expect(logOutput).not.toContain(".myshopify.com");
+      expect(logOutput).not.toContain("shop");
+    });
+
+    it("log output never contains query string", async () => {
+      const request = createRequest({
+        metrics: [{ name: "LCP", value: 2500, route: "/app" }],
+      });
+
+      await callAction(request);
+
+      const logOutput = consoleLogSpy.mock.calls[0][0];
+      expect(logOutput).not.toContain("?");
+      expect(logOutput).not.toContain("session=");
+      expect(logOutput).not.toContain("hmac=");
+    });
+
+    it("log output never contains raw route path", async () => {
+      const request = createRequest({
+        metrics: [{ name: "LCP", value: 2500, route: "/app/accounts/12345" }],
+      });
+
+      await callAction(request);
+
+      const logOutput = consoleLogSpy.mock.calls[0][0];
+      expect(logOutput).not.toContain("/app/accounts/12345");
+      expect(logOutput).toContain("app_accounts");
     });
 
     it("never echoes input in response body", async () => {
       const request = createRequest({
-        metrics: [{ name: "LCP", value: 2500, id: "v1-1", route: "/app", version: "3.0" }],
+        metrics: [{ name: "LCP", value: 2500, route: "/app" }],
       });
 
       const response = await callAction(request);

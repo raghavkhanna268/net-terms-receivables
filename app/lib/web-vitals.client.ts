@@ -5,9 +5,12 @@
  * and forwards only LCP, CLS, and INP to our endpoint.
  *
  * Privacy requirements (S23-30, PCD-2):
- * - Only sends: name, value, id, route (pathname without query), version
+ * - Only sends: name, value, route (pathname without query)
  * - NEVER sends: shop domain, host param, query strings, session token,
- *   user/customer data, country, IP, user agent
+ *   user/customer data, country, IP, user agent, id, version
+ *
+ * Authentication: Uses fetch (not sendBeacon) so App Bridge's global fetch
+ * can attach the session token automatically.
  *
  * @module
  */
@@ -53,16 +56,20 @@ interface ShopifyGlobal {
 const ALLOWED_METRICS = new Set<MetricName>(["LCP", "CLS", "INP"]);
 
 /**
+ * Strict route allowlist: /app with optional path segments.
+ * Only alphanumeric, underscore, and hyphen allowed in segments.
+ */
+const ROUTE_PATTERN = /^\/app(\/[A-Za-z0-9_-]+)*$/;
+
+/**
  * Payload sent to our endpoint.
- * Minimal, privacy-safe fields only.
+ * Minimal, privacy-safe fields only. No id or version.
  */
 export interface WebVitalsPayload {
   metrics: Array<{
     name: MetricName;
     value: number;
-    id: string;
     route: string;
-    version: string;
   }>;
 }
 
@@ -81,28 +88,26 @@ function roundValue(name: MetricName, value: number): number {
 /**
  * Get clean route from current URL.
  * Returns pathname only, no query string or hash.
+ * Returns null if route doesn't match allowlist.
  */
-function getCleanRoute(): string {
+function getCleanRoute(): string | null {
   if (typeof window === "undefined") {
     return "/app";
   }
-  return window.location.pathname;
+  const pathname = window.location.pathname;
+  if (!ROUTE_PATTERN.test(pathname)) {
+    return null;
+  }
+  return pathname;
 }
 
 /**
- * Send metrics to our endpoint using sendBeacon with fetch keepalive fallback.
+ * Send metrics to our endpoint using fetch with keepalive.
+ * Uses fetch (not sendBeacon) so App Bridge's global fetch attaches session token.
  */
 function sendMetrics(payload: WebVitalsPayload): void {
   const endpoint = "/api/web-vitals";
   const body = JSON.stringify(payload);
-
-  if (typeof navigator !== "undefined" && navigator.sendBeacon) {
-    const blob = new Blob([body], { type: "application/json" });
-    const sent = navigator.sendBeacon(endpoint, blob);
-    if (sent) {
-      return;
-    }
-  }
 
   if (typeof fetch !== "undefined") {
     fetch(endpoint, {
@@ -118,7 +123,7 @@ function sendMetrics(payload: WebVitalsPayload): void {
 
 /**
  * Filter and transform metrics from App Bridge to our payload format.
- * Only includes LCP, CLS, INP. Strips all other data.
+ * Only includes LCP, CLS, INP. Strips id, version, and all other data.
  *
  * @param metrics - Raw metrics from App Bridge
  * @param route - Clean route (pathname only)
@@ -133,9 +138,7 @@ export function filterMetrics(
     .map((m) => ({
       name: m.name,
       value: roundValue(m.name, m.value),
-      id: m.id,
       route,
-      version: m.version ?? "unknown",
     }));
 
   if (filtered.length === 0) {
@@ -151,6 +154,9 @@ export function filterMetrics(
  */
 function handleReport(report: WebVitalsReport): void {
   const route = getCleanRoute();
+  if (!route) {
+    return;
+  }
   const payload = filterMetrics(report.metrics, route);
 
   if (payload) {

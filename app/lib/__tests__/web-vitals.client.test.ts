@@ -3,7 +3,7 @@
  *
  * Verifies:
  * - filterMetrics filters to LCP/CLS/INP only
- * - Payload never contains shop domain or query strings
+ * - Payload never contains shop domain, query strings, id, or version
  * - registerWebVitalsReporter is a no-op when shopify.webVitals is missing
  * - Value rounding is correct (CLS 4 decimals, others integer)
  */
@@ -73,20 +73,25 @@ describe("filterMetrics", () => {
     expect(result!.metrics[0].route).toBe("/app/onboarding");
   });
 
-  it("uses version from metric when provided", () => {
-    const metrics = [{ id: "v1-1", name: "LCP" as const, value: 2500, version: "3.1.0" }];
+  it("strips id from output (never forwarded)", () => {
+    const metrics = [
+      { id: "v4-1729795200000-1234567890123", name: "LCP" as const, value: 2500 },
+    ];
 
     const result = filterMetrics(metrics, "/app");
 
-    expect(result!.metrics[0].version).toBe("3.1.0");
+    expect(result!.metrics[0]).not.toHaveProperty("id");
+    expect(Object.keys(result!.metrics[0])).toEqual(["name", "value", "route"]);
   });
 
-  it("uses 'unknown' version when not provided", () => {
-    const metrics = [{ id: "v1-1", name: "LCP" as const, value: 2500 }];
+  it("strips version from output (never forwarded)", () => {
+    const metrics = [
+      { id: "v1-1", name: "LCP" as const, value: 2500, version: "3.1.0" },
+    ];
 
     const result = filterMetrics(metrics, "/app");
 
-    expect(result!.metrics[0].version).toBe("unknown");
+    expect(result!.metrics[0]).not.toHaveProperty("version");
   });
 
   it("strips country field from output (never forwarded)", () => {
@@ -97,13 +102,6 @@ describe("filterMetrics", () => {
     const result = filterMetrics(metrics, "/app");
 
     expect(result!.metrics[0]).not.toHaveProperty("country");
-    expect(Object.keys(result!.metrics[0])).toEqual([
-      "name",
-      "value",
-      "id",
-      "route",
-      "version",
-    ]);
   });
 });
 
@@ -143,11 +141,11 @@ describe("payload privacy", () => {
 
     for (const metric of result!.metrics) {
       const keys = Object.keys(metric);
-      expect(keys).toEqual(["name", "value", "id", "route", "version"]);
+      expect(keys).toEqual(["name", "value", "route"]);
     }
   });
 
-  it("does not include user agent or IP fields", () => {
+  it("does not include user agent, IP, or id fields", () => {
     const metrics = [{ id: "v1-1", name: "LCP" as const, value: 2500 }];
 
     const result = filterMetrics(metrics, "/app");
@@ -156,6 +154,8 @@ describe("payload privacy", () => {
     expect(metricKeys).not.toContain("userAgent");
     expect(metricKeys).not.toContain("ip");
     expect(metricKeys).not.toContain("ua");
+    expect(metricKeys).not.toContain("id");
+    expect(metricKeys).not.toContain("version");
   });
 });
 
@@ -182,7 +182,6 @@ describe("registerWebVitalsReporter", () => {
   });
 
   it("is a no-op when shopify is undefined", () => {
-    // window is defined but shopify is not
     const result = registerWebVitalsReporter();
 
     expect(result).toBeUndefined();
