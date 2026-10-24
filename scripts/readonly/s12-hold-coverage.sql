@@ -99,16 +99,17 @@ SELECT ba."holdState", ba."manualHold", ba.bypass,
 FROM pd JOIN "BuyerAccount" ba ON ba.id = pd.buyer_account_id
 GROUP BY 1, 2, 3, 4, 5 ORDER BY 1, 2, 3, 4, 5;
 
-\echo '== A3 open invoices outstanding > 0 by due bucket (context for the past-due total)'
+\echo '== A3 all open invoices by due bucket and outstanding > 0 (diagnostics past_due counts open + dueAt < NOW() without the outstanding filter)'
 SELECT CASE WHEN i."dueAt" IS NULL THEN 'no_due_at'
             WHEN i."dueAt" >= NOW() THEN 'not_yet_due'
             WHEN i."dueAt" >= NOW() - INTERVAL '1 day' THEN 'past_due_within_1_day_grace'
             ELSE 'overdue_beyond_grace' END AS due_bucket,
+       i.outstanding > 0 AS outstanding_gt_0,
        COUNT(*) AS invoices,
        COUNT(DISTINCT i."buyerAccountId") AS accounts
 FROM "Invoice" i
-WHERE i.status = 'open' AND i.outstanding > 0
-GROUP BY 1 ORDER BY 1;
+WHERE i.status = 'open'
+GROUP BY 1, 2 ORDER BY 1, 2;
 
 \echo '== A4 sweep dedupe rows (credit_recompute:*) on the since date and daily_sweep messages since :since'
 SELECT 'dedupe_rows_on_since_date' AS what, COUNT(*) AS n
