@@ -245,17 +245,58 @@ All items from issue #57 have been addressed. Status summary:
 
 | Item | Description | Status | Evidence |
 |------|-------------|--------|----------|
-| 1 | Background plan refresh wiring | Done on main | `workers/app.ts` passes `waitUntil` via ALS; `plan.server.ts` uses `getRequestWaitUntil()`. PRs #67, #149. Tests: `plan.test.ts`, `als-request-isolation.test.ts`. |
+| 1 | Background plan refresh wiring | Done on main | `workers/app.ts:44` passes `waitUntil` via ALS `requestContext.run()`; `plan.server.ts:319` uses `getRequestWaitUntil()`. PRs #67, #149. Tests: `plan.test.ts`, `als-request-isolation.test.ts`. |
 | 2 | Gated accounts exclusion from queries | Revised on main | Product decision (#127): gated accounts stay VISIBLE in ledger/UI, holds, aging. Only gated ACTIONS blocked. Tests: `gated-account-db.test.ts`, `plan-gating-actions-db.test.ts`. |
-| 3 | S10b bulk/reconcile gating | Done on main | `bulkUpsertBuyerAccounts()` checks `checkCompanyLimit()` per-batch. PR #67. Tests: `company-location.test.ts`. |
-| 4 | Import limit wiring | Done on main | `app/routes/app.imports.tsx:355` calls `enforceImportLimit()`. PR #69 tests. Tests: `gating.test.ts` (enforceImportLimit tests). |
-| 5 | Migration hygiene (index drift) | Done on main | Migration `20261025000001_s21_fix_gated_at_index` creates regular index; schema uses `@@index([gatedAt], map: "BuyerAccount_gated_at_idx")`. PR #67. |
-| 6 | Count-then-insert concurrency | Documented as acceptable | See "Concurrent webhook note" in Company Limit section above. Slight overshoot is acceptable; gated accounts don't consume functional capacity. |
+| 3 | S10b bulk/reconcile gating | Done on main | `bulk-jsonl-processor.server.ts:420` calls `bulkUpsertBuyerAccounts()`; that function at `company-location.server.ts:229` calls `checkCompanyLimit()` per-batch. PR #67. Tests: `company-location.test.ts`. |
+| 4 | Import limit wiring | Done on main | `app/routes/app.imports.tsx:355` calls `enforceImportLimit()`. PR #69. Tests: `gating.test.ts` ("enforceImportLimit" tests), `plan-gating-actions-db.test.ts` ("checkImportLimit" tests). |
+| 5 | Migration hygiene (index drift) | Done on main | Migration `20261025000001_s21_fix_gated_at_index` creates regular index; `schema.prisma:286` uses `@@index([gatedAt], map: "BuyerAccount_gated_at_idx")`. No drift (`prisma migrate diff` shows "No difference detected"). PR #67. |
+| 6 | Count-then-insert concurrency | Deferred (acceptable) | See "Concurrent webhook note" in Company Limit section above. Reason: Slight overshoot is acceptable; gated accounts don't consume functional capacity; proper locking would add latency to every webhook. |
 
 **Scheduled reminders path**: The `s18_enqueue_reminders()` PL/pgSQL function includes
 `ba.gated_at IS NULL` in its WHERE clause (migration `20261106000000_s18_enqueue_skip_gated`),
 so gated accounts are skipped at enqueue time, not just at send time.
 Tests: `s18-enqueue-skip-gated-db.test.ts`.
+
+## Test Coverage for Gated Account Behavior
+
+Tests proving over-limit (gated) accounts stay visible and only gated actions are blocked:
+
+### Gated Accounts Stay VISIBLE (with `PLAN_GATING_ENFORCED=true`)
+
+| Area | Test File | Test Name |
+|------|-----------|-----------|
+| Aging totals | `gated-account-db.test.ts` | "getShopAgingTotals includes gated account's invoices" |
+| Aging buckets | `gated-account-db.test.ts` | "aging totals include overdue gated account invoices in correct bucket" |
+| Aging totals | `aging-reconcile.test.ts` | "shop totals include gated account rows with PLAN_GATING_ENFORCED=true" |
+| Buyer ledger | `gated-account-db.test.ts` | "getBuyerLedger includes gated account with is_gated flag" |
+| Invoice list | `gated-account-db.test.ts` | "getBuyerInvoices returns invoices for gated account" |
+| Invoice eligibility | `gated-account-db.test.ts` | "gated account's order becomes an Invoice through eligibility check" |
+| Credit holds | `gated-account-db.test.ts` | "gated account is auto-held when overdue via recompute" |
+| Credit holds | `gated-account-db.test.ts` | "gated account hold clears after invoice is paid and recomputed" |
+| Credit sweep | `gated-account-db.test.ts` | "gated account is included in sweep function when overdue" |
+| Payment matching | `gated-account-db.test.ts` | "matcher suggests match for gated account's invoice" |
+| Payment matching | `gated-account-db.test.ts` | "confirmMatch succeeds for gated account" |
+
+### Gated ACTIONS Are Blocked (with `PLAN_GATING_ENFORCED=true`)
+
+| Action | Test File | Test Name |
+|--------|-----------|-----------|
+| Reminders (send) | `plan-gating-actions-db.test.ts` | "skips gated account with gating ON - NO ReminderLog, NO cap consumed" |
+| Reminders (enqueue) | `s18-enqueue-skip-gated-db.test.ts` | "does NOT enqueue reminder for gated account's due invoice" |
+| Credit-limit edit | `plan-gating-actions-db.test.ts` | "rejects credit-limit edit on gated account when gating ON" |
+| Hold-only allowed | `plan-gating-actions-db.test.ts` | "allows hold-only update on gated account when gating ON (holds work on all plans)" |
+
+### Gating OFF Behavior (with `PLAN_GATING_ENFORCED=false`)
+
+| Area | Test File | Test Name |
+|------|-----------|-----------|
+| Reminders | `plan-gating-actions-db.test.ts` | "sends reminder for gated account with gating OFF (passes Gate 3)" |
+| Credit-limit edit | `plan-gating-actions-db.test.ts` | "allows credit-limit edit on gated account when gating OFF" |
+| Company limit | `gating.test.ts` | "checkCompanyLimit with gating OFF" (allows all) |
+| Import limit | `gating.test.ts` | "checkImportLimit with gating OFF" (allows all) |
+| Active fragment | `gating.test.ts` | "returns TRUE fragment when gating is OFF" |
+| isAccountActive | `gating.test.ts` | "returns true for all accounts when gating is OFF" |
+| Bulk gating | `company-location.test.ts` | "does not gate new accounts when PLAN_GATING_ENFORCED=false" |
 
 ## Testing
 
