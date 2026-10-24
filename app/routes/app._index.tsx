@@ -245,30 +245,39 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     const asOf = new Date();
 
     try {
-      [planData, usage, agingTotals, buyerLedger] = await Promise.all([
+      const ledgerOptions = {
+        limit: PAGE_SIZE,
+        offset: (page - 1) * PAGE_SIZE,
+        sortBy,
+        sortOrder,
+      };
+
+      // Choose ledger function BEFORE Promise.all - never run both
+      const ledgerFn = onlyOverLimit
+        ? getOverLimitBuyerLedger(sql, shop.id, asOf, ledgerOptions)
+        : getBuyerLedger(sql, shop.id, asOf, ledgerOptions);
+
+      // When filtering over-limit, reuse buyerLedger.totalCount as overLimitCount
+      // Otherwise, run getOverLimitCount separately
+      const overLimitCountFn = onlyOverLimit
+        ? Promise.resolve(null) // will use buyerLedger.totalCount
+        : getOverLimitCount(sql, shop.id);
+
+      const [planResult, usageResult, agingResult, ledgerResult, countResult] = await Promise.all([
         resolvePlan(sql, shopDomain),
         getUsageStats(sql, shop.id),
         getShopAgingTotals(sql, shop.id, asOf),
-        getBuyerLedger(sql, shop.id, asOf, {
-          limit: PAGE_SIZE,
-          offset: (page - 1) * PAGE_SIZE,
-          sortBy,
-          sortOrder,
-        }),
+        ledgerFn,
+        overLimitCountFn,
       ]);
 
-      // Get overLimitCount via SQL (total across all accounts, not just current page)
-      overLimitCount = await getOverLimitCount(sql, shop.id);
+      planData = planResult;
+      usage = usageResult;
+      agingTotals = agingResult;
+      buyerLedger = ledgerResult;
 
-      // When filtering to only over-limit accounts, use the exported query function
-      if (onlyOverLimit) {
-        buyerLedger = await getOverLimitBuyerLedger(sql, shop.id, asOf, {
-          limit: PAGE_SIZE,
-          offset: (page - 1) * PAGE_SIZE,
-          sortBy,
-          sortOrder,
-        });
-      }
+      // Use totalCount from ledger when filtering over-limit, otherwise use separate count
+      overLimitCount = onlyOverLimit ? buyerLedger.totalCount : (countResult ?? 0);
 
       if (selectedBuyerId) {
         const buyerInvoices = await getBuyerInvoices(

@@ -790,7 +790,7 @@ describeWithDb("activeAccountFragment DB integration", () => {
     expect(gatedAccounts.length).toBe(2);
   });
 
-  it("isAccountActive correctly identifies gated accounts", async () => {
+  it("isAccountActive correctly identifies gated accounts with gating ON", async () => {
     (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
     vi.resetModules();
     const { isAccountActive } = await import("../gating.server");
@@ -801,12 +801,45 @@ describeWithDb("activeAccountFragment DB integration", () => {
       WHERE "shopId" = ${TEST_SHOP_ID}
     `;
 
-    // Active accounts (gated_at IS NULL) should return true
+    // Explicit length assertions: exactly 2 active and 2 gated
     const activeOnes = accounts.filter(a => a.gated_at === null);
-    expect(activeOnes.every(a => isAccountActive(a.gated_at))).toBe(true);
+    const gatedOnes = accounts.filter(a => a.gated_at !== null);
+
+    expect(activeOnes.length).toBe(2);
+    expect(gatedOnes.length).toBe(2);
+
+    // Active accounts (gated_at IS NULL) should return true
+    for (const account of activeOnes) {
+      expect(isAccountActive(account.gated_at)).toBe(true);
+    }
 
     // Gated accounts (gated_at IS NOT NULL) should return false
-    const gatedOnes = accounts.filter(a => a.gated_at !== null);
-    expect(gatedOnes.every(a => !isAccountActive(a.gated_at))).toBe(true);
+    for (const account of gatedOnes) {
+      expect(isAccountActive(account.gated_at)).toBe(false);
+    }
+  });
+
+  it("isAccountActive treats all accounts as active when gating is OFF", async () => {
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+    vi.resetModules();
+    const { isAccountActive } = await import("../gating.server");
+
+    // Fetch all accounts
+    const accounts = await sql<{ id: string; gated_at: Date | null }[]>`
+      SELECT id, gated_at FROM "BuyerAccount"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+    `;
+
+    // Explicit length assertions: 4 total (2 with gated_at NULL, 2 with gated_at set)
+    const withNullGatedAt = accounts.filter(a => a.gated_at === null);
+    const withSetGatedAt = accounts.filter(a => a.gated_at !== null);
+
+    expect(withNullGatedAt.length).toBe(2);
+    expect(withSetGatedAt.length).toBe(2);
+
+    // When gating is OFF, all accounts should be treated as active
+    for (const account of accounts) {
+      expect(isAccountActive(account.gated_at)).toBe(true);
+    }
   });
 });
