@@ -42,8 +42,17 @@ const createMockSql = () => {
       return mockResults.get("account") ?? [];
     }
 
+    if (query.includes('UPDATE "BuyerAccount"') && query.includes('syncPending') && query.includes('syncVersion') && !query.includes('syncVersion" + 1')) {
+      // This is the clear query: SET syncPending=false WHERE syncVersion=?
+      return mockResults.get("clear_sync_pending") ?? [{ id: "acc-123" }];
+    }
+
+    if (query.includes('UPDATE "BuyerAccount"') && query.includes('RETURNING')) {
+      return mockResults.get("update_account_returning") ?? [{ syncVersion: 1, id: "acc-123" }];
+    }
+
     if (query.includes('UPDATE "BuyerAccount"')) {
-      return mockResults.get("update_account") ?? { count: 1 };
+      return mockResults.get("update_account") ?? [{ count: 1 }];
     }
 
     if (query.includes('FROM "Invoice"') && query.includes("SUM")) {
@@ -114,6 +123,8 @@ describe("credit-status.server", () => {
         manualHold: false,
         isOverLimit: false,
         isOverdue: false,
+        exposurePaise: 0n,
+        limitPaise: 100000n,
       });
 
       expect(result.holdState).toBe("BYPASS");
@@ -129,6 +140,8 @@ describe("credit-status.server", () => {
         manualHold: true,
         isOverLimit: true,
         isOverdue: true,
+        exposurePaise: 100000n,
+        limitPaise: 50000n,
       });
 
       expect(result.holdState).toBe("BYPASS");
@@ -144,8 +157,9 @@ describe("credit-status.server", () => {
           manualHold: true,
           isOverLimit: false,
           isOverdue: false,
+          exposurePaise: 0n,
+          limitPaise: 100000n,
         },
-        undefined,
         "MANUAL_HOLD"
       );
 
@@ -163,8 +177,9 @@ describe("credit-status.server", () => {
           manualHold: true,
           isOverLimit: false,
           isOverdue: false,
+          exposurePaise: 0n,
+          limitPaise: 100000n,
         },
-        undefined,
         "FRAUD_SUSPECTED"
       );
 
@@ -180,6 +195,8 @@ describe("credit-status.server", () => {
         manualHold: false,
         isOverLimit: true,
         isOverdue: false,
+        exposurePaise: 110000n,
+        limitPaise: 100000n,
       });
 
       expect(result.holdState).toBe("HELD");
@@ -195,6 +212,8 @@ describe("credit-status.server", () => {
         manualHold: false,
         isOverLimit: false,
         isOverdue: true,
+        exposurePaise: 50000n,
+        limitPaise: 100000n,
       });
 
       expect(result.holdState).toBe("HELD");
@@ -202,24 +221,26 @@ describe("credit-status.server", () => {
       expect(result.holdReasonCode).toBe("PAYMENT_OVERDUE");
     });
 
-    it("preserves NEAR_LIMIT when no hold conditions are met", async () => {
-      const { computeHoldState } = await import("../credit-status.server");
+    it("returns NEAR_LIMIT at exactly 80% utilization", async () => {
+      const { computeHoldState, NEAR_LIMIT_THRESHOLD } = await import("../credit-status.server");
 
-      const result = computeHoldState(
-        {
-          bypass: false,
-          manualHold: false,
-          isOverLimit: false,
-          isOverdue: false,
-        },
-        "NEAR_LIMIT"
-      );
+      expect(NEAR_LIMIT_THRESHOLD).toBe(0.8);
+
+      const result = computeHoldState({
+        bypass: false,
+        manualHold: false,
+        isOverLimit: false,
+        isOverdue: false,
+        exposurePaise: 80000n,
+        limitPaise: 100000n,
+      });
 
       expect(result.holdState).toBe("NEAR_LIMIT");
       expect(result.metafieldHold).toBe(false);
+      expect(result.holdReasonCode).toBeNull();
     });
 
-    it("returns OK when no conditions apply and no existing state", async () => {
+    it("returns OK at 79% utilization (below threshold)", async () => {
       const { computeHoldState } = await import("../credit-status.server");
 
       const result = computeHoldState({
@@ -227,13 +248,63 @@ describe("credit-status.server", () => {
         manualHold: false,
         isOverLimit: false,
         isOverdue: false,
+        exposurePaise: 79000n,
+        limitPaise: 100000n,
       });
 
       expect(result.holdState).toBe("OK");
       expect(result.metafieldHold).toBe(false);
     });
 
-    it("manualHold overrides NEAR_LIMIT", async () => {
+    it("returns NEAR_LIMIT at 100% utilization (not over limit)", async () => {
+      const { computeHoldState } = await import("../credit-status.server");
+
+      const result = computeHoldState({
+        bypass: false,
+        manualHold: false,
+        isOverLimit: false,
+        isOverdue: false,
+        exposurePaise: 100000n,
+        limitPaise: 100000n,
+      });
+
+      expect(result.holdState).toBe("NEAR_LIMIT");
+      expect(result.metafieldHold).toBe(false);
+    });
+
+    it("no-limit account never gets NEAR_LIMIT", async () => {
+      const { computeHoldState } = await import("../credit-status.server");
+
+      const result = computeHoldState({
+        bypass: false,
+        manualHold: false,
+        isOverLimit: false,
+        isOverdue: false,
+        exposurePaise: 1000000000n,
+        limitPaise: null,
+      });
+
+      expect(result.holdState).toBe("OK");
+      expect(result.metafieldHold).toBe(false);
+    });
+
+    it("bypass overrides NEAR_LIMIT", async () => {
+      const { computeHoldState } = await import("../credit-status.server");
+
+      const result = computeHoldState({
+        bypass: true,
+        manualHold: false,
+        isOverLimit: false,
+        isOverdue: false,
+        exposurePaise: 90000n,
+        limitPaise: 100000n,
+      });
+
+      expect(result.holdState).toBe("BYPASS");
+      expect(result.metafieldHold).toBe(false);
+    });
+
+    it("HELD overrides NEAR_LIMIT", async () => {
       const { computeHoldState } = await import("../credit-status.server");
 
       const result = computeHoldState(
@@ -242,13 +313,30 @@ describe("credit-status.server", () => {
           manualHold: true,
           isOverLimit: false,
           isOverdue: false,
+          exposurePaise: 90000n,
+          limitPaise: 100000n,
         },
-        "NEAR_LIMIT",
         "MANUAL_HOLD"
       );
 
       expect(result.holdState).toBe("HELD");
       expect(result.metafieldHold).toBe(true);
+    });
+
+    it("returns OK when no conditions apply", async () => {
+      const { computeHoldState } = await import("../credit-status.server");
+
+      const result = computeHoldState({
+        bypass: false,
+        manualHold: false,
+        isOverLimit: false,
+        isOverdue: false,
+        exposurePaise: 50000n,
+        limitPaise: 100000n,
+      });
+
+      expect(result.holdState).toBe("OK");
+      expect(result.metafieldHold).toBe(false);
     });
   });
 
@@ -891,6 +979,106 @@ describe("credit-status.server", () => {
       const totals = await getCompanyTotals(mockSql, "co-123", "shop-123");
 
       expect(totals).toBeNull();
+    });
+  });
+
+  describe("syncVersion race condition handling", () => {
+    it("leaves syncPending=true when syncVersion mismatch (simulates older write finishing last)", async () => {
+      const { updateCreditStatus } = await import("../credit-status.server");
+
+      // This test verifies the key behavior: when a write tries to clear syncPending
+      // but the syncVersion doesn't match (because a newer write incremented it),
+      // syncPending should remain true.
+
+      mockSql.setMockResult("account", [{
+        id: "acc-123",
+        shopId: "shop-123",
+        kind: "COMPANY",
+        companyLocationId: "gid://shopify/CompanyLocation/456",
+        customerId: null,
+        creditLimit: "100000",
+        holdState: "OK",
+        bypass: false,
+        manualHold: false,
+        holdReasonCode: null,
+        holdNote: null,
+        syncPending: false,
+        gatedAt: null,
+      }]);
+
+      mockSql.setMockResult("shop", [{ domain: "test.myshopify.com", currency: "INR" }]);
+      mockSql.setMockResult("invoice_exposure", [{ total_paise: "0" }]);
+      mockSql.setMockResult("draft_exposure", [{ total_paise: "0" }]);
+      mockSql.setMockResult("overdue_check", [{ has_overdue: false }]);
+      // Transaction returns syncVersion=1
+      mockSql.setMockResult("update_account_returning", [{ syncVersion: 1 }]);
+      // Simulate: syncPending clear returns 0 rows (version mismatch)
+      mockSql.setMockResult("clear_sync_pending", []);
+
+      mockShopifyGraphQLRequest.mockImplementation(() => Promise.resolve({
+        success: true,
+        data: {
+          metafieldsSet: {
+            metafields: [{ id: "gid://shopify/Metafield/123" }],
+            userErrors: [],
+          },
+        },
+      }));
+
+      const result = await updateCreditStatus(mockSql, "acc-123", {
+        creditLimitAmount: 100000,
+        manualHold: false,
+        holdReasonCode: undefined,
+      });
+
+      expect(result.success).toBe(true);
+      // syncPending should stay true because the clear returned 0 rows
+      expect(result.metafieldSyncPending).toBe(true);
+    });
+
+    it("clears syncPending when syncVersion matches (happy path)", async () => {
+      const { updateCreditStatus } = await import("../credit-status.server");
+
+      mockSql.setMockResult("account", [{
+        id: "acc-123",
+        shopId: "shop-123",
+        kind: "COMPANY",
+        companyLocationId: "gid://shopify/CompanyLocation/456",
+        customerId: null,
+        creditLimit: "100000",
+        holdState: "OK",
+        bypass: false,
+        manualHold: false,
+        holdReasonCode: null,
+        holdNote: null,
+        syncPending: false,
+        gatedAt: null,
+      }]);
+
+      mockSql.setMockResult("shop", [{ domain: "test.myshopify.com", currency: "INR" }]);
+      mockSql.setMockResult("invoice_exposure", [{ total_paise: "0" }]);
+      mockSql.setMockResult("draft_exposure", [{ total_paise: "0" }]);
+      mockSql.setMockResult("overdue_check", [{ has_overdue: false }]);
+
+      mockShopifyGraphQLRequest.mockImplementation(() => Promise.resolve({
+        success: true,
+        data: {
+          metafieldsSet: {
+            metafields: [{ id: "gid://shopify/Metafield/123" }],
+            userErrors: [],
+          },
+        },
+      }));
+
+      // Single write - syncVersion should match and clear syncPending
+      const result = await updateCreditStatus(mockSql, "acc-123", {
+        creditLimitAmount: 100000,
+        manualHold: false,
+        holdReasonCode: undefined,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.metafieldSyncPending).toBe(false);
     });
   });
 });

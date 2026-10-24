@@ -33,6 +33,13 @@ export const VALID_HOLD_REASON_CODES: readonly HoldReasonCode[] = [
 ] as const;
 
 /**
+ * Threshold for NEAR_LIMIT state (80% of credit limit).
+ * When exposure/limit >= this value, holdState transitions to NEAR_LIMIT
+ * (unless already HELD or BYPASS).
+ */
+export const NEAR_LIMIT_THRESHOLD = 0.8;
+
+/**
  * Maximum credit limit in paise that fits safely in BigInt.
  * 999,999,999,999,999 paise = 9,999,999,999,999.99 currency units (~10 trillion)
  */
@@ -149,6 +156,10 @@ export interface ComputeHoldStateInput {
   manualHold: boolean;
   isOverLimit: boolean;
   isOverdue: boolean;
+  /** Exposure in paise (for NEAR_LIMIT calculation) */
+  exposurePaise: bigint;
+  /** Credit limit in paise (null = no limit, never NEAR_LIMIT) */
+  limitPaise: bigint | null;
 }
 
 /**
@@ -163,21 +174,20 @@ export interface ComputeHoldStateResult {
 /**
  * Pure function to compute hold state.
  * 
- * Rules:
- * - bypass = true → BYPASS state, hold: false in metafield (exempt at checkout)
- * - manualHold = true → HELD state, hold: true
- * - isOverLimit or isOverdue → auto-hold, HELD state, hold: true
- * - Otherwise → OK state, hold: false
+ * Precedence (first match wins):
+ * 1. bypass = true → BYPASS state, hold: false (exempt at checkout)
+ * 2. manualHold = true → HELD state, hold: true
+ * 3. isOverLimit or isOverdue → auto-hold, HELD state, hold: true
+ * 4. NEAR_LIMIT when limit > 0 AND exposure/limit >= NEAR_LIMIT_THRESHOLD (0.8)
+ * 5. Otherwise → OK state, hold: false
  * 
- * NEAR_LIMIT is set by a separate process (e.g., when utilization > 80%)
- * and is preserved unless overridden by HELD or BYPASS.
+ * A no-limit account (limitPaise === null) is never NEAR_LIMIT.
  */
 export function computeHoldState(
   input: ComputeHoldStateInput,
-  existingHoldState?: "OK" | "NEAR_LIMIT" | "HELD" | "BYPASS",
   manualHoldReasonCode?: HoldReasonCode | null
 ): ComputeHoldStateResult {
-  const { bypass, manualHold, isOverLimit, isOverdue } = input;
+  const { bypass, manualHold, isOverLimit, isOverdue, exposurePaise, limitPaise } = input;
 
   if (bypass) {
     return {
@@ -211,12 +221,18 @@ export function computeHoldState(
     };
   }
 
-  if (existingHoldState === "NEAR_LIMIT") {
-    return {
-      holdState: "NEAR_LIMIT",
-      metafieldHold: false,
-      holdReasonCode: null,
-    };
+  // NEAR_LIMIT: only for accounts with a limit, when utilization >= threshold
+  if (limitPaise !== null && limitPaise > 0n) {
+    // Use integer math to avoid floating point: exposure * 100 >= limit * 80
+    const utilizationScaled = exposurePaise * 100n;
+    const thresholdScaled = limitPaise * BigInt(Math.round(NEAR_LIMIT_THRESHOLD * 100));
+    if (utilizationScaled >= thresholdScaled) {
+      return {
+        holdState: "NEAR_LIMIT",
+        metafieldHold: false,
+        holdReasonCode: null,
+      };
+    }
   }
 
   return {
@@ -441,7 +457,7 @@ export async function updateCreditStatus(
     return { success: false, error: reasonValidation.error };
   }
 
-  type TxSuccess = { success: true; metafieldWriteData: MetafieldWriteData };
+  type TxSuccess = { success: true; metafieldWriteData: MetafieldWriteData; syncVersion: number };
   type TxError = { success: false; error: string };
   type TxResult = TxSuccess | TxError;
 
@@ -508,8 +524,9 @@ export async function updateCreditStatus(
         manualHold: update.manualHold,
         isOverLimit,
         isOverdue,
+        exposurePaise,
+        limitPaise: creditLimitPaise,
       },
-      account.holdState,
       update.holdReasonCode
     );
 
@@ -520,7 +537,7 @@ export async function updateCreditStatus(
     const holdReasonCodeValue = update.manualHold ? (update.holdReasonCode ?? null) : null;
     const holdNoteValue = update.manualHold ? (update.holdNote ?? null) : null;
 
-    await tx`
+    const [updatedRow] = await tx<{ syncVersion: number }[]>`
       UPDATE "BuyerAccount"
       SET
         "creditLimit" = ${creditLimitValue}::numeric,
@@ -529,9 +546,13 @@ export async function updateCreditStatus(
         "holdReasonCode" = ${holdReasonCodeValue},
         "holdNote" = ${holdNoteValue},
         "syncPending" = true,
+        "syncVersion" = "syncVersion" + 1,
         "updatedAt" = NOW()
       WHERE id = ${buyerAccountId}
+      RETURNING "syncVersion"
     `;
+
+    const syncVersion = updatedRow?.syncVersion ?? 0;
 
     const metafieldValue = serializeCreditStatusFromDb({
       currencyCode: currency,
@@ -547,7 +568,8 @@ export async function updateCreditStatus(
         shopDomain: shop.domain,
         ownerGid: owner.gid,
         metafieldValue,
-      }
+      },
+      syncVersion,
     } as TxSuccess;
   });
 
@@ -587,13 +609,19 @@ export async function updateCreditStatus(
     };
   }
 
-  await sql`
+  // Clear syncPending only if syncVersion matches (no newer write occurred)
+  const clearResult = await sql<{ id: string }[]>`
     UPDATE "BuyerAccount"
     SET "syncPending" = false
     WHERE id = ${buyerAccountId}
+      AND "syncVersion" = ${txResult.syncVersion}
+    RETURNING id
   `;
 
-  return { success: true, metafieldSyncPending: false };
+  // If 0 rows updated, a newer write owns syncPending; leave it true
+  const cleared = clearResult.length > 0;
+
+  return { success: true, metafieldSyncPending: !cleared };
 }
 
 /**
@@ -617,7 +645,7 @@ export async function syncCreditStatusMetafield(
   sql: Sql,
   buyerAccountId: string
 ): Promise<CreditStatusUpdateResult> {
-  type SyncTxSuccess = { success: true; metafieldWriteData: MetafieldWriteData };
+  type SyncTxSuccess = { success: true; metafieldWriteData: MetafieldWriteData; syncVersion: number };
   type SyncTxSkip = { success: true; skipMetafield: true };
   type SyncTxError = { success: false; error: string };
   type SyncTxResult = SyncTxSuccess | SyncTxSkip | SyncTxError;
@@ -680,18 +708,23 @@ export async function syncCreditStatusMetafield(
         manualHold: account.manualHold,
         isOverLimit,
         isOverdue,
+        exposurePaise,
+        limitPaise: creditLimitPaise,
       },
-      account.holdState,
       account.holdReasonCode as HoldReasonCode
     );
 
-    await tx`
+    const [updatedRow] = await tx<{ syncVersion: number }[]>`
       UPDATE "BuyerAccount"
       SET 
         "holdState" = ${holdStateResult.holdState}::"HoldState",
-        "syncPending" = true
+        "syncPending" = true,
+        "syncVersion" = "syncVersion" + 1
       WHERE id = ${buyerAccountId}
+      RETURNING "syncVersion"
     `;
+
+    const syncVersion = updatedRow?.syncVersion ?? 0;
 
     const metafieldValue = serializeCreditStatusFromDb({
       currencyCode: currency,
@@ -707,7 +740,8 @@ export async function syncCreditStatusMetafield(
         shopDomain: shop.domain,
         ownerGid: owner.gid,
         metafieldValue,
-      }
+      },
+      syncVersion,
     } as SyncTxSuccess;
   });
 
@@ -751,13 +785,19 @@ export async function syncCreditStatusMetafield(
     };
   }
 
-  await sql`
+  // Clear syncPending only if syncVersion matches (no newer write occurred)
+  const clearResult = await sql<{ id: string }[]>`
     UPDATE "BuyerAccount"
     SET "syncPending" = false
     WHERE id = ${buyerAccountId}
+      AND "syncVersion" = ${txResult.syncVersion}
+    RETURNING id
   `;
 
-  return { success: true, metafieldSyncPending: false };
+  // If 0 rows updated, a newer write owns syncPending; leave it true
+  const cleared = clearResult.length > 0;
+
+  return { success: true, metafieldSyncPending: !cleared };
 }
 
 /**
@@ -975,8 +1015,9 @@ export async function getCreditStatusDisplay(
       manualHold: account.manualHold,
       isOverLimit,
       isOverdue,
+      exposurePaise,
+      limitPaise: creditLimitPaise,
     },
-    account.holdState,
     account.holdReasonCode as HoldReasonCode
   );
 

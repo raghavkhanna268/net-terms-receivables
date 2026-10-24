@@ -241,6 +241,8 @@ model BuyerAccount {
   manualHold          Boolean            @default(false)
   /// S11: Whether metafield sync to Shopify is pending
   syncPending         Boolean            @default(false)
+  /// S11: Monotonic version incremented on state change; prevents stale metafield clears
+  syncVersion         Int                @default(0)
   /// S11: Machine-readable reason code for hold (e.g., MANUAL_HOLD, PAYMENT_OVERDUE)
   holdReasonCode      String?
   /// S11: Optional internal note about the hold

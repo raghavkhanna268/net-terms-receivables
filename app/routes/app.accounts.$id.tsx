@@ -646,7 +646,10 @@ export default function AccountPage() {
                 name="noLimit"
                 value="true"
                 checked={noLimitChecked}
-                onChange={() => setNoLimitChecked(!noLimitChecked)}
+                onChange={(e: Event) => {
+                  const target = e.currentTarget as HTMLInputElement | null;
+                  setNoLimitChecked(target?.checked ?? !noLimitChecked);
+                }}
               ></s-checkbox>
 
               <s-checkbox
