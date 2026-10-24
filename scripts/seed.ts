@@ -3608,15 +3608,22 @@ export async function seedDatabase(state: SeedState): Promise<void> {
 
     // Verify counts against actual DB state using exact keys we wrote
     const actualCounts = await getSeedDbCounts(sql, tracker);
+    let hasMismatch = false;
     
     if (actualCounts.accountSourceCount !== summary.totalAccountSources) {
       console.log(`  ⚠️  AccountSource count mismatch: tracker=${summary.totalAccountSources}, DB=${actualCounts.accountSourceCount}`);
       state.createdCount.dbRules = actualCounts.accountSourceCount;
+      hasMismatch = true;
     }
     
     if (actualCounts.buyerAccountCount !== summary.totalBuyerAccounts) {
       console.log(`  ⚠️  BuyerAccount count mismatch: tracker=${summary.totalBuyerAccounts}, DB=${actualCounts.buyerAccountCount}`);
       state.createdCount.dbAccounts = actualCounts.buyerAccountCount;
+      hasMismatch = true;
+    }
+
+    if (hasMismatch) {
+      state.failedCount.dbRows++;
     }
 
   } finally {
@@ -3634,23 +3641,25 @@ export function printDatabaseSeedSQL(state: SeedState): void {
   console.log(`ON CONFLICT (domain) DO UPDATE SET currency = EXCLUDED.currency, "updatedAt" = NOW();`);
   console.log();
 
-  console.log(`-- Upsert AccountSource tag rules`);
+  console.log(`-- Upsert AccountSource tag rules (IDs are shop-scoped to avoid cross-shop conflicts)`);
   for (const loc of LOCATION_TERMS) {
     const tag = `${SEED_TAG}-net${loc.dueInDays}`;
+    const sourceId = `seed-source-${shopId}-${tag}`;
     console.log(`INSERT INTO "AccountSource" (id, "shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")`);
-    console.log(`VALUES ('seed-source-${tag}', '${shopId}', '${tag}', ${loc.dueInDays}, NOW(), NOW())`);
+    console.log(`VALUES ('${sourceId}', '${shopId}', '${tag}', ${loc.dueInDays}, NOW(), NOW())`);
     console.log(`ON CONFLICT ("shopId", tag) DO UPDATE SET "defaultTermsDays" = EXCLUDED."defaultTermsDays", "updatedAt" = NOW();`);
   }
   console.log();
 
-  console.log(`-- Upsert BuyerAccount records for each company location`);
+  console.log(`-- Upsert BuyerAccount records for each company location (IDs are shop-scoped)`);
   for (const [companyKey, company] of state.companies) {
     for (const [dueInDays, locationId] of company.locations) {
       // Use externalId for account name (PII-free)
       const externalId = `${SEED_PREFIX}${companyKey}`;
       const accountName = `${externalId} - Net ${dueInDays}`;
+      const accountId = `seed-account-${shopId}-${locationId}`;
       console.log(`INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "defaultTermsDays", "defaultTermsSource", "holdState", "createdAt", "updatedAt")`);
-      console.log(`VALUES ('seed-account-${locationId}', '${shopId}', 'COMPANY', '${company.id}', '${locationId}', '${accountName}', ${dueInDays}, 'explicit', 'OK', NOW(), NOW())`);
+      console.log(`VALUES ('${accountId}', '${shopId}', 'COMPANY', '${company.id}', '${locationId}', '${accountName}', ${dueInDays}, 'explicit', 'OK', NOW(), NOW())`);
       console.log(`ON CONFLICT ("shopId", "companyLocationId") DO UPDATE SET "defaultTermsDays" = EXCLUDED."defaultTermsDays", "defaultTermsSource" = EXCLUDED."defaultTermsSource", "updatedAt" = NOW();`);
     }
   }
@@ -3909,12 +3918,25 @@ export async function main(): Promise<void> {
   }
 
   // Exit non-zero if any failures occurred
-  if (totalFailures > 0 || state.errors.length > 0) {
+  const exitCode = computeExitCode(state);
+  if (exitCode !== 0) {
     console.log(`\n❌ Seed completed with ${totalFailures} failure(s) and ${state.errors.length} error(s)`);
-    process.exit(1);
+    process.exit(exitCode);
   }
 
   console.log("\n✅ Seed complete!");
+}
+
+/**
+ * Compute the exit code for the seed script based on failure counts.
+ * Returns 1 if any failures or errors occurred, 0 otherwise.
+ * 
+ * This is the single source of truth for the exit decision - main() calls this.
+ */
+export function computeExitCode(state: SeedState): number {
+  const totalFailures = state.failedCount.companies + state.failedCount.locations + 
+                        state.failedCount.orders + state.failedCount.roleAssignments + state.failedCount.dbRows;
+  return (totalFailures > 0 || state.errors.length > 0) ? 1 : 0;
 }
 
 /**

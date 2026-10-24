@@ -46,7 +46,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   if (!ALLOWED_TOPICS.has(normalizedTopic)) {
     console.warn(
-      `[webhooks.app.subscriptions_update] Unexpected topic ${normalizedTopic} for ${shop}, ignoring`
+      `[webhooks.app.subscriptions_update] Unexpected topic ${normalizedTopic} wh=${webhookId}, ignoring`
     );
     return new Response(null, { status: 200 });
   }
@@ -64,7 +64,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       // Refresh the plan cache
       await refreshPlanCache(sql, shop);
       console.log(
-        `[webhooks.app.subscriptions_update] Refreshed plan for ${shop} (webhookId=${webhookId})`
+        `[webhooks.app.subscriptions_update] Refreshed plan wh=${webhookId}`
       );
 
       // Get the new plan and reactivate gated accounts if upgraded
@@ -80,14 +80,14 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         const reactivated = await reactivateGatedAccounts(sql, shopRow.id, newPlanKey);
         if (reactivated > 0) {
           console.log(
-            `[webhooks.app.subscriptions_update] Reactivated ${reactivated} gated accounts for ${shop}`
+            `[webhooks.app.subscriptions_update] Reactivated ${reactivated} gated accounts shop_id=${shopRow.id} wh=${webhookId}`
           );
         }
       }
     } catch (error) {
+      const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name ?? "unknown";
       console.error(
-        `[webhooks.app.subscriptions_update] Error processing for ${shop}:`,
-        error
+        `[webhooks.app.subscriptions_update] Error processing wh=${webhookId} err=${errInfo}`
       );
     }
   })();

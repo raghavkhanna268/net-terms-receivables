@@ -88,6 +88,8 @@ export async function getSeedDbCounts(
   }
   
   // Count AccountSource rows by exact (shopId, tag) keys we wrote
+  // Use IN ${sql(array)} instead of ANY(${array}) - postgres.js with fetch_types:false
+  // needs explicit array handling (see db-light.server.ts comments)
   const tags = Array.from(tracker.tags);
   let accountSourceCount = 0;
   if (tags.length > 0) {

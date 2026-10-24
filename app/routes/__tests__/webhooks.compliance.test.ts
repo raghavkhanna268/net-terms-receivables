@@ -1,5 +1,22 @@
-import { describe, it, expect, vi, beforeEach, afterEach, Mock } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, Mock, type MockInstance } from "vitest";
 import type { ActionFunctionArgs } from "react-router";
+
+/**
+ * Helper to assert that no shop domains appear in console output.
+ * Per public-log allowlist: only counts, ids, enums, booleans, timestamps.
+ */
+function expectNoShopDomainInLogs(
+  spies: { log: MockInstance; warn: MockInstance; error: MockInstance },
+  shopDomain: string
+): void {
+  for (const spy of [spies.log, spies.warn, spies.error]) {
+    for (const call of spy.mock.calls) {
+      const msg = String(call[0] ?? "");
+      expect(msg).not.toContain(shopDomain);
+      expect(msg).not.toContain(".myshopify.com");
+    }
+  }
+}
 
 const mockVerifyWebhook = vi.fn();
 const mockVerifyPayloadShopMatch = vi.fn();
@@ -355,10 +372,10 @@ describe("webhooks.compliance", () => {
       );
     });
 
-    it("returns 401 when shop mismatch (via verifyPayloadShopMatch)", async () => {
+    it("returns 400 when shop mismatch (via verifyPayloadShopMatch)", async () => {
       const badRequestResponse = new Response(undefined, {
-        status: 401,
-        statusText: "Payload shop_domain does not match header shop",
+        status: 400,
+        statusText: "Bad Request",
       });
       mockVerifyPayloadShopMatch.mockImplementation(() => {
         throw badRequestResponse;
@@ -389,7 +406,7 @@ describe("webhooks.compliance", () => {
         expect.fail("Expected action to throw");
       } catch (error) {
         expect(error).toBeInstanceOf(Response);
-        expect((error as Response).status).toBe(401);
+        expect((error as Response).status).toBe(400);
       }
 
       expect(mockGenerateCustomerDataExport).not.toHaveBeenCalled();
@@ -545,10 +562,10 @@ describe("webhooks.compliance", () => {
       mockVerifyPayloadShopMatch.mockImplementation((headerShop: string) => headerShop);
     });
 
-    it("returns 401 when header shop differs from payload shop_domain (no deletes)", async () => {
+    it("returns 400 when header shop differs from payload shop_domain (no deletes)", async () => {
       const badRequestResponse = new Response(undefined, {
-        status: 401,
-        statusText: "Payload shop_domain does not match header shop",
+        status: 400,
+        statusText: "Bad Request",
       });
       mockVerifyPayloadShopMatch.mockImplementation(() => {
         throw badRequestResponse;
@@ -576,7 +593,7 @@ describe("webhooks.compliance", () => {
         expect.fail("Expected action to throw");
       } catch (error) {
         expect(error).toBeInstanceOf(Response);
-        expect((error as Response).status).toBe(401);
+        expect((error as Response).status).toBe(400);
       }
 
       expect(mockRedactCustomer).not.toHaveBeenCalled();
@@ -728,10 +745,10 @@ describe("webhooks.compliance", () => {
       expect(mockDeleteShop).toHaveBeenCalled();
     });
 
-    it("returns 401 when payload shop_domain does not match header shop", async () => {
+    it("returns 400 when payload shop_domain does not match header shop", async () => {
       const badRequestResponse = new Response(undefined, {
-        status: 401,
-        statusText: "Payload shop_domain does not match header shop",
+        status: 400,
+        statusText: "Bad Request",
       });
       mockVerifyPayloadShopMatch.mockImplementation(() => {
         throw badRequestResponse;
@@ -759,7 +776,7 @@ describe("webhooks.compliance", () => {
         expect.fail("Expected action to throw");
       } catch (error) {
         expect(error).toBeInstanceOf(Response);
-        expect((error as Response).status).toBe(401);
+        expect((error as Response).status).toBe(400);
       }
 
       expect(mockDeleteAllForShop).not.toHaveBeenCalled();
@@ -769,7 +786,7 @@ describe("webhooks.compliance", () => {
     it("returns 400 when payload shop_domain is missing", async () => {
       const badRequestResponse = new Response(undefined, {
         status: 400,
-        statusText: "Missing shop_domain in payload",
+        statusText: "Bad Request",
       });
       mockVerifyPayloadShopMatch.mockImplementation(() => {
         throw badRequestResponse;
@@ -831,6 +848,387 @@ describe("webhooks.compliance", () => {
       await action(createMockActionArgs(request));
 
       expect(mockDeleteAllForShop).toHaveBeenCalled();
+    });
+  });
+
+  describe("domain-free log assertions (public-log safety)", () => {
+    const TEST_SHOP = "test-domain-check.myshopify.com";
+    let consoleSpy: { log: MockInstance; warn: MockInstance; error: MockInstance };
+
+    beforeEach(() => {
+      consoleSpy = {
+        log: vi.spyOn(console, "log").mockImplementation(() => {}),
+        warn: vi.spyOn(console, "warn").mockImplementation(() => {}),
+        error: vi.spyOn(console, "error").mockImplementation(() => {}),
+      };
+      mockVerifyPayloadShopMatch.mockImplementation((headerShop: string) => headerShop);
+    });
+
+    afterEach(() => {
+      consoleSpy.log.mockRestore();
+      consoleSpy.warn.mockRestore();
+      consoleSpy.error.mockRestore();
+    });
+
+    it("CUSTOMERS_DATA_REQUEST success path logs no shop domain", async () => {
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockPersistDataRequest.mockResolvedValue({ id: "dr-1", alreadyExists: false });
+      mockSendDataRequestNotification.mockResolvedValue({ sent: true });
+
+      const payload = {
+        shop_domain: TEST_SHOP,
+        customer: { id: 456 },
+        data_request: { id: 789 },
+      };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "customers/data_request",
+        webhookId: "wh-domain-check",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      const response = await action(createMockActionArgs(request));
+      expect(response.status).toBe(200);
+      expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
+    });
+
+    it("CUSTOMERS_DATA_REQUEST duplicate path logs no shop domain", async () => {
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockPersistDataRequest.mockResolvedValue({ id: "dr-dup", alreadyExists: true });
+      mockSendDataRequestNotification.mockResolvedValue({ sent: false, skippedReason: "no_api_key" });
+
+      const payload = {
+        shop_domain: TEST_SHOP,
+        customer: { id: 456 },
+        data_request: { id: 999 },
+      };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "customers/data_request",
+        webhookId: "wh-dup-check",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      const response = await action(createMockActionArgs(request));
+      expect(response.status).toBe(200);
+      expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
+    });
+
+    it("CUSTOMERS_DATA_REQUEST email failed path logs fixed code not raw error", async () => {
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSendDataRequestNotification.mockResolvedValue({
+        sent: false,
+        error: "resend_api_error:rate_limit_exceeded",
+      });
+
+      const payload = {
+        shop_domain: TEST_SHOP,
+        customer: { id: 456 },
+        data_request: { id: 789 },
+      };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "customers/data_request",
+        webhookId: "wh-email-fail",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      const response = await action(createMockActionArgs(request));
+      expect(response.status).toBe(200);
+      expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
+
+      // Verify fixed error code is logged, not the raw error message
+      expect(consoleSpy.log).toHaveBeenCalledWith(
+        expect.stringContaining("error=email_send_failed")
+      );
+    });
+
+    it("CUSTOMERS_DATA_REQUEST email failed with domain in error does not leak domain", async () => {
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Simulate compliance.server.ts returning raw err.message with domain (finding C5)
+      mockSendDataRequestNotification.mockResolvedValue({
+        sent: false,
+        error: "Failed to send email to owner@evil-shop.myshopify.com",
+      });
+
+      const payload = {
+        shop_domain: TEST_SHOP,
+        customer: { id: 456 },
+        data_request: { id: 789 },
+      };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "customers/data_request",
+        webhookId: "wh-email-domain-leak",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      const response = await action(createMockActionArgs(request));
+      expect(response.status).toBe(200);
+
+      // Must not leak the domain from the error message
+      expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
+      expect(consoleSpy.log).not.toHaveBeenCalledWith(
+        expect.stringContaining("evil-shop.myshopify.com")
+      );
+
+      // Should log fixed code instead
+      expect(consoleSpy.log).toHaveBeenCalledWith(
+        expect.stringContaining("error=email_send_failed")
+      );
+    });
+
+    it("CUSTOMERS_DATA_REQUEST missing customer ID path logs no shop domain", async () => {
+      const payload = { shop_domain: TEST_SHOP };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "customers/data_request",
+        webhookId: "wh-no-cust",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      const response = await action(createMockActionArgs(request));
+      expect(response.status).toBe(200);
+      expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
+    });
+
+    it("CUSTOMERS_DATA_REQUEST shop not found path logs no shop domain", async () => {
+      mockSql.mockResolvedValueOnce([]);
+
+      const payload = {
+        shop_domain: TEST_SHOP,
+        customer: { id: 456 },
+        data_request: { id: 789 },
+      };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "customers/data_request",
+        webhookId: "wh-no-shop",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      const response = await action(createMockActionArgs(request));
+      expect(response.status).toBe(200);
+      expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
+    });
+
+    it("CUSTOMERS_DATA_REQUEST email skipped (no shop email) path logs no shop domain", async () => {
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockUnauthenticatedAdmin.mockRejectedValueOnce(new Error("No session"));
+
+      const payload = {
+        shop_domain: TEST_SHOP,
+        customer: { id: 456 },
+        data_request: { id: 789 },
+      };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "customers/data_request",
+        webhookId: "wh-no-email",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      const response = await action(createMockActionArgs(request));
+      expect(response.status).toBe(200);
+      expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
+    });
+
+    it("CUSTOMERS_REDACT success path logs no shop domain", async () => {
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+
+      const payload = { shop_domain: TEST_SHOP, customer: { id: 456 } };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "customers/redact",
+        webhookId: "wh-redact-ok",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      const response = await action(createMockActionArgs(request));
+      expect(response.status).toBe(200);
+      expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
+    });
+
+    it("CUSTOMERS_REDACT missing customer ID path logs no shop domain", async () => {
+      const payload = { shop_domain: TEST_SHOP };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "customers/redact",
+        webhookId: "wh-redact-no-cust",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      const response = await action(createMockActionArgs(request));
+      expect(response.status).toBe(200);
+      expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
+    });
+
+    it("CUSTOMERS_REDACT shop not found path logs no shop domain", async () => {
+      mockSql.mockResolvedValueOnce([]);
+
+      const payload = { shop_domain: TEST_SHOP, customer: { id: 456 } };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "customers/redact",
+        webhookId: "wh-redact-no-shop",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      const response = await action(createMockActionArgs(request));
+      expect(response.status).toBe(200);
+      expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
+    });
+
+    it("SHOP_REDACT success path logs no shop domain", async () => {
+      mockDeleteAllForShop.mockResolvedValue(3);
+      mockDeleteShop.mockResolvedValue({ deleted: true, shopId: "shop-del-123" });
+
+      const payload = { shop_domain: TEST_SHOP, shop_id: 123 };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "shop/redact",
+        webhookId: "wh-shop-redact-ok",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      const response = await action(createMockActionArgs(request));
+      expect(response.status).toBe(200);
+      expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
+    });
+
+    it("SHOP_REDACT shop not found path logs no shop domain", async () => {
+      mockDeleteAllForShop.mockResolvedValue(0);
+      mockDeleteShop.mockResolvedValue({ deleted: false, shopId: null });
+
+      const payload = { shop_domain: TEST_SHOP, shop_id: 123 };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "shop/redact",
+        webhookId: "wh-shop-redact-miss",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      const response = await action(createMockActionArgs(request));
+      expect(response.status).toBe(200);
+      expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
+    });
+
+    it("unhandled topic path logs no shop domain", async () => {
+      const payload = { shop_domain: TEST_SHOP };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "unknown/topic",
+        webhookId: "wh-unknown",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      const response = await action(createMockActionArgs(request));
+      expect(response.status).toBe(200);
+      expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
     });
   });
 });

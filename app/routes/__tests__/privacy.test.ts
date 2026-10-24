@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "fs";
+import { resolve } from "path";
 
 /**
  * Tests for the /privacy public RESOURCE route.
@@ -8,6 +10,9 @@ import { describe, it, expect } from "vitest";
  *
  * As a RESOURCE ROUTE (no default export), the loader's Response
  * is returned directly to the client.
+ *
+ * Internal implementation details (table names, job names, code identifiers)
+ * are in docs/privacy-implementation.md which is NOT rendered publicly.
  */
 
 describe("/privacy route", () => {
@@ -138,58 +143,52 @@ describe("/privacy route", () => {
     expect(routeModule).not.toHaveProperty("default");
     expect(routeModule).toHaveProperty("loader");
   });
+
+  it("does NOT contain Implementation Checklist heading", async () => {
+    const { loader } = await import("../privacy");
+
+    const request = new Request("https://example.com/privacy");
+
+    const response = await loader({
+      request,
+      context: {} as never,
+      params: {},
+      url: new URL(request.url),
+      pattern: "/privacy",
+    });
+
+    const html = await response.text();
+
+    expect(html).not.toContain("Implementation Checklist");
+    expect(html).not.toContain("Appendix B");
+  });
+
+  it("does NOT contain internal table names", async () => {
+    const { loader } = await import("../privacy");
+
+    const request = new Request("https://example.com/privacy");
+
+    const response = await loader({
+      request,
+      context: {} as never,
+      params: {},
+      url: new URL(request.url),
+      pattern: "/privacy",
+    });
+
+    const html = await response.text();
+
+    expect(html).not.toContain("s8_tagged_customers");
+    expect(html).not.toContain("s8_draft_orders");
+    expect(html).not.toContain("s22_data_requests");
+    expect(html).not.toContain("s6_dead_letter");
+    expect(html).not.toContain("s6_processed_webhooks");
+    expect(html).not.toContain("s22_purge_unmatched_narration");
+    expect(html).not.toContain("CUSTOMER_PII_FIELDS");
+  });
 });
 
 describe("/privacy markdown rendering", () => {
-  it("preserves snake_case identifiers without converting to italics", async () => {
-    const { loader } = await import("../privacy");
-
-    const request = new Request("https://example.com/privacy");
-
-    const response = await loader({
-      request,
-      context: {} as never,
-      params: {},
-      url: new URL(request.url),
-      pattern: "/privacy",
-    });
-
-    const html = await response.text();
-
-    expect(html).toContain("s8_tagged_customers");
-    expect(html).toContain("s8_draft_orders");
-    expect(html).toContain("s22_data_requests");
-    expect(html).toContain("s6_dead_letter");
-    expect(html).toContain("s6_processed_webhooks");
-
-    expect(html).not.toContain("s8<em>tagged</em>customers");
-    expect(html).not.toContain("s8<em>draft</em>orders");
-    expect(html).not.toContain("s22<em>data</em>requests");
-    expect(html).not.toContain("s6<em>dead</em>letter");
-  });
-
-  it("preserves code spans with snake_case content", async () => {
-    const { loader } = await import("../privacy");
-
-    const request = new Request("https://example.com/privacy");
-
-    const response = await loader({
-      request,
-      context: {} as never,
-      params: {},
-      url: new URL(request.url),
-      pattern: "/privacy",
-    });
-
-    const html = await response.text();
-
-    expect(html).toContain("<code>s22_purge_unmatched_narration</code>");
-    expect(html).toContain("<code>CUSTOMER_PII_FIELDS=1</code>");
-
-    expect(html).not.toContain("<code>s22<em>purge</em>");
-    expect(html).not.toContain("<code>CUSTOMER<em>PII</em>");
-  });
-
   it("does not have unbalanced em/code tags", async () => {
     const { loader } = await import("../privacy");
 
@@ -215,28 +214,6 @@ describe("/privacy markdown rendering", () => {
 
     expect(html).not.toMatch(/<em>[^<]*<\/code>/);
     expect(html).not.toMatch(/<code>[^<]*<\/em>/);
-  });
-
-  it("preserves asterisk markers attached to identifiers (email*, displayName*)", async () => {
-    const { loader } = await import("../privacy");
-
-    const request = new Request("https://example.com/privacy");
-
-    const response = await loader({
-      request,
-      context: {} as never,
-      params: {},
-      url: new URL(request.url),
-      pattern: "/privacy",
-    });
-
-    const html = await response.text();
-
-    expect(html).toContain("email*");
-    expect(html).toContain("displayName*");
-
-    expect(html).not.toContain("email<em>");
-    expect(html).not.toContain("<em>displayName");
   });
 });
 
@@ -284,5 +261,46 @@ describe("markdownToHtml function", () => {
 
     expect(output).toContain("<em>emphasized</em>");
     expect(output).toContain("<em>also emphasized</em>");
+  });
+
+  it("preserves snake_case in privacy-implementation.md (verbatim coverage)", async () => {
+    const { _markdownToHtml } = await import("../privacy");
+
+    const implPath = resolve(
+      process.cwd(),
+      "docs/privacy-implementation.md"
+    );
+    const implContent = readFileSync(implPath, "utf-8");
+
+    const html = _markdownToHtml(implContent);
+
+    expect(html).toContain("s8_tagged_customers");
+    expect(html).toContain("s8_draft_orders");
+    expect(html).toContain("s22_data_requests");
+    expect(html).toContain("s6_dead_letter");
+    expect(html).toContain("s6_processed_webhooks");
+
+    expect(html).not.toContain("s8<em>tagged</em>customers");
+    expect(html).not.toContain("s8<em>draft</em>orders");
+    expect(html).not.toContain("s22<em>data</em>requests");
+    expect(html).not.toContain("s6<em>dead</em>letter");
+  });
+
+  it("preserves code spans in privacy-implementation.md", async () => {
+    const { _markdownToHtml } = await import("../privacy");
+
+    const implPath = resolve(
+      process.cwd(),
+      "docs/privacy-implementation.md"
+    );
+    const implContent = readFileSync(implPath, "utf-8");
+
+    const html = _markdownToHtml(implContent);
+
+    expect(html).toContain("<code>s22_purge_unmatched_narration</code>");
+    expect(html).toContain("<code>CUSTOMER_PII_FIELDS=1</code>");
+
+    expect(html).not.toContain("<code>s22<em>purge</em>");
+    expect(html).not.toContain("<code>CUSTOMER<em>PII</em>");
   });
 });
