@@ -882,8 +882,14 @@ export async function syncCreditStatusMetafield(
   );
 
   if (!metafieldResult.success) {
-    const errorCode = metafieldResult.errorCode ?? toErrorCode(metafieldResult.error);
+    const rawErrorCode = metafieldResult.errorCode ?? toErrorCode(metafieldResult.error);
     const retryable = metafieldResult.retryable;
+    
+    // Map error code for non-retryable errors to avoid storing raw text
+    // Retryable errors use toErrorCode which is already safe (no raw messages)
+    const errorCode = retryable === false 
+      ? toPermanentSyncErrorCode(rawErrorCode)
+      : rawErrorCode;
 
     safeLog("error", "credit_status_metafield_sync_failed", {
       buyerAccountId,
@@ -892,33 +898,39 @@ export async function syncCreditStatusMetafield(
     });
 
     // Write credit_status.sync_failed audit event (ids and codes only)
-    // Fetch shopId for audit
+    // Wrapped in try/catch so audit failure doesn't block the marker UPDATE or return value
     const [accountInfo] = await sql<{ shopId: string }[]>`
       SELECT "shopId" FROM "BuyerAccount" WHERE id = ${buyerAccountId}
     `;
     if (accountInfo) {
-      await sql`
-        INSERT INTO "AuditEvent" ("shopId", actor, type, data, at)
-        VALUES (
-          ${accountInfo.shopId},
-          'system',
-          'credit_status.sync_failed',
-          ${sql.json({
-            buyerAccountId,
-            errorCode,
-            syncVersion: txResult.syncVersion,
-          })},
-          NOW()
-        )
-      `;
+      try {
+        await sql`
+          INSERT INTO "AuditEvent" ("shopId", actor, type, data, at)
+          VALUES (
+            ${accountInfo.shopId},
+            'system',
+            'credit_status.sync_failed',
+            ${sql.json({
+              buyerAccountId,
+              errorCode,
+              syncVersion: txResult.syncVersion,
+            })},
+            NOW()
+          )
+        `;
+      } catch (auditErr) {
+        safeLog("warn", "credit_status_sync_failed_audit_error", {
+          buyerAccountId,
+          err: toErrorCode(auditErr),
+        });
+      }
     }
 
     // Set permanent error marker if not retryable (respecting syncVersion guard)
     if (retryable === false) {
-      const permanentCode = toPermanentSyncErrorCode(errorCode);
       await sql`
         UPDATE "BuyerAccount"
-        SET "metafieldSyncErrorCode" = ${permanentCode},
+        SET "metafieldSyncErrorCode" = ${errorCode},
             "metafieldSyncErrorAt" = NOW()
         WHERE id = ${buyerAccountId}
           AND "syncVersion" = ${txResult.syncVersion}
@@ -942,24 +954,32 @@ export async function syncCreditStatusMetafield(
     });
 
     // Write credit_status.sync_failed audit event for userErrors
-    const [accountInfo] = await sql<{ shopId: string }[]>`
+    // Wrapped in try/catch so audit failure doesn't block the marker UPDATE or return value
+    const [accountInfoForUserError] = await sql<{ shopId: string }[]>`
       SELECT "shopId" FROM "BuyerAccount" WHERE id = ${buyerAccountId}
     `;
-    if (accountInfo) {
-      await sql`
-        INSERT INTO "AuditEvent" ("shopId", actor, type, data, at)
-        VALUES (
-          ${accountInfo.shopId},
-          'system',
-          'credit_status.sync_failed',
-          ${sql.json({
-            buyerAccountId,
-            errorCode: "user_error",
-            syncVersion: txResult.syncVersion,
-          })},
-          NOW()
-        )
-      `;
+    if (accountInfoForUserError) {
+      try {
+        await sql`
+          INSERT INTO "AuditEvent" ("shopId", actor, type, data, at)
+          VALUES (
+            ${accountInfoForUserError.shopId},
+            'system',
+            'credit_status.sync_failed',
+            ${sql.json({
+              buyerAccountId,
+              errorCode: "user_error",
+              syncVersion: txResult.syncVersion,
+            })},
+            NOW()
+          )
+        `;
+      } catch (auditErr) {
+        safeLog("warn", "credit_status_sync_failed_audit_error", {
+          buyerAccountId,
+          err: toErrorCode(auditErr),
+        });
+      }
     }
 
     // userErrors are permanent failures - set marker
