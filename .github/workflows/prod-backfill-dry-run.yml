@@ -70,6 +70,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Log filter self-test (shop ids masked, apply/host output fails)
+        run: python3 scripts/ci/test_backfill_dry_run_filter.py
+
       - name: Setup Node
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
