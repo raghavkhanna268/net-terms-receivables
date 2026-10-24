@@ -1417,9 +1417,9 @@ describeWithDb("S17 apply service DB integration", () => {
       expect(orderMarkAsPaidCallCount).toBe(1);
     });
 
-    it("webhook marks invoice paid (no sibling), Retry A: A UNMATCHED (can't prove our push worked)", async () => {
+    it("webhook marks invoice paid (no sibling), Retry A: pushed with STALE_FINALIZED_EXTERNALLY_PAID", async () => {
       // Scenario: Match A is stale 'pushing', webhook marks invoice paid, then A is retried
-      // Decision: We can't prove our push reached Shopify, so unmatch A and let payment be used elsewhere
+      // Decision: Invoice is paid with no sibling - our push likely worked, finalize with audit
       const paymentId = await createPayment(1000000n); // 10000 INR
       const invoiceId = await createInvoice(1000000n); // 10000 INR
 
@@ -1453,38 +1453,47 @@ describeWithDb("S17 apply service DB integration", () => {
       // Reset counts
       orderMarkAsPaidCallCount = 0;
 
-      // Now retry match A - should be UNMATCHED because we can't prove our push worked
+      // Now retry match A - should be PUSHED with STALE_FINALIZED_EXTERNALLY_PAID
       const resultA = await applyMatch(sql, TEST_SHOP_ID, matchIdA, "test-user");
 
-      // A should NOT succeed - it's being unmatched
-      expect(resultA.success).toBe(false);
-      expect(resultA.reasonCode).toBe("INVOICE_NOT_OPEN");
+      // A should succeed - it's being finalized
+      expect(resultA.success).toBe(true);
+      expect(resultA.invoicePaid).toBe(true);
 
-      // Zero orderMarkAsPaid calls
+      // Zero orderMarkAsPaid calls (invoice already paid, no need to call Shopify)
       expect(orderMarkAsPaidCallCount).toBe(0);
 
-      // Match A should be 'unmatched'
+      // Match A should be 'pushed'
       const [matchA] = await sql<{ state: string }[]>`
         SELECT state FROM "Match" WHERE id = ${matchIdA}
       `;
-      expect(matchA.state).toBe("unmatched");
+      expect(matchA.state).toBe("pushed");
 
-      // Match A should have match.UNMATCHED audit (not match.applied)
-      const [unmatchedAudit] = await sql<{ data: { reason?: string; appliedPaise?: string } }[]>`
+      // Match A should have match.applied audit with STALE_FINALIZED_EXTERNALLY_PAID
+      const appliedAudits = await sql<{ data: { reasonCode?: string; amountPaise?: string } }[]>`
         SELECT data FROM "AuditEvent"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+          AND type = 'match.applied'
+          AND data->>'matchId' = ${matchIdA}
+      `;
+      expect(appliedAudits.length).toBe(1);
+      expect(appliedAudits[0].data.reasonCode).toBe("STALE_FINALIZED_EXTERNALLY_PAID");
+      expect(appliedAudits[0].data.amountPaise).toBe("1000000");
+
+      // NO match.unmatched audit
+      const [unmatchedAudit] = await sql<{ id: string }[]>`
+        SELECT id FROM "AuditEvent"
         WHERE "shopId" = ${TEST_SHOP_ID}
           AND type = 'match.unmatched'
           AND data->>'matchId' = ${matchIdA}
       `;
-      expect(unmatchedAudit).toBeDefined();
-      expect(unmatchedAudit?.data.reason).toBe("INVOICE_NOT_OPEN");
-      expect(unmatchedAudit?.data.appliedPaise).toBe("0");
+      expect(unmatchedAudit).toBeUndefined();
 
-      // Payment status should be recomputed (not allocated)
+      // Payment status should be 'matched'
       const [payment] = await sql<{ status: string }[]>`
         SELECT status FROM "Payment" WHERE id = ${paymentId}
       `;
-      expect(payment.status).toBe("unmatched");
+      expect(payment.status).toBe("matched");
     });
 
     it("cancelled invoice, Retry A: A unmatched with audit, invoice unchanged", async () => {
@@ -1752,11 +1761,11 @@ describeWithDb("S17 apply service DB integration", () => {
       `;
       expect(unmatchedAudit).toBeUndefined();
 
-      // Payment should be allocated (not unmatched)
+      // Payment should be 'matched' (not unmatched)
       const [payment] = await sql<{ status: string }[]>`
         SELECT status FROM "Payment" WHERE id = ${paymentId}
       `;
-      expect(payment.status).toBe("allocated");
+      expect(payment.status).toBe("matched");
 
       // Invoice should be paid with outstanding 0
       const [invoice] = await sql<{ status: string; outstanding: string }[]>`

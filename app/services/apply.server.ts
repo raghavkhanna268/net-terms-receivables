@@ -967,6 +967,8 @@ async function handleStalePushingMatch(
             staleReclaim: true,
             backstopTriggered: true,
           });
+          // Update Payment status to 'matched'
+          await updatePaymentStatusAfterApply(tx, shopId, matchRow.paymentId);
           return { wasUnmatched: false, invoicePaid: true };
         }
 
@@ -1335,12 +1337,13 @@ async function finalizeFullApply(
           `;
 
           // Write audit events with backstop flag
+          // Use expectedOutstandingPaise from TX1 (not lockedInvoice.outstandingPaise which may be 0)
           await writeAuditEvent(tx, shopId, actor, "match.applied", {
             matchId,
             invoiceId: invoiceRow.id,
             paymentId: matchRow.paymentId,
             amountPaise: appliedAmountPaise,
-            previousOutstandingPaise: lockedInvoice.outstandingPaise,
+            previousOutstandingPaise: expectedOutstandingPaise,
             newOutstandingPaise: "0",
             reasonCode,
             backstopTriggered: true,
@@ -1864,6 +1867,9 @@ async function handleStaleInvoiceNotOpen(
       staleReclaim: true,
     });
 
+    // Update Payment status to 'matched'
+    await updatePaymentStatusAfterApply(tx, shopId, matchRow.paymentId);
+
     return { action: "pushed", invoicePaid: true };
   }
 
@@ -1887,6 +1893,24 @@ async function handleStaleInvoiceNotOpen(
   await updatePaymentStatusAfterUnmatch(tx, shopId, matchRow.paymentId);
 
   return { action: "unmatched", invoicePaid: false };
+}
+
+/**
+ * Update Payment.status after applying (pushing) a match.
+ * Sets to 'matched' when the payment has a pushed match.
+ * IDOR protection: filter by shopId
+ */
+async function updatePaymentStatusAfterApply(
+  sql: Sql,
+  shopId: string,
+  paymentId: string
+): Promise<void> {
+  await sql`
+    UPDATE "Payment"
+    SET status = 'matched', "updatedAt" = NOW()
+    WHERE id = ${paymentId}
+      AND "shopId" = ${shopId}
+  `;
 }
 
 /**
