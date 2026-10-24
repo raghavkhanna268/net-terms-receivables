@@ -354,14 +354,14 @@ describe("app.onboarding", () => {
   });
 });
 
-describe("P6: error logging uses toErrorCode (no raw errors)", () => {
+describe("P6: error logging uses safeLog JSON (no raw errors)", () => {
   const TEST_SHOP = "test-onboard-log.myshopify.com";
 
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("fetchValidationInfo logs only error code, not raw error", async () => {
+  it("fetchValidationInfo logs safeLog JSON with error code, not raw error", async () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const mockGraphql = vi.fn().mockRejectedValue(new Error("GraphQL network error"));
@@ -395,8 +395,9 @@ describe("P6: error logging uses toErrorCode (no raw errors)", () => {
     } as never);
 
     const allLogs = consoleSpy.mock.calls.map((c) => c.join(" ")).join("\n");
-    expect(allLogs).toContain("[onboarding]");
-    expect(allLogs).toContain("err=");
+    // safeLog outputs JSON with "event" field
+    expect(allLogs).toContain('"event":"onboarding.fetch_validations_failed"');
+    expect(allLogs).toContain('"err":');
     expect(allLogs).not.toContain("GraphQL network error");
     expect(allLogs).not.toContain(".myshopify.com");
 

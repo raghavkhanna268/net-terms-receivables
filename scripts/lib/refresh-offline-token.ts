@@ -42,6 +42,7 @@ import {
   type RefreshResult,
   type RefreshErrorCode,
 } from "../../app/lib/offline-token.server";
+import { toErrorCode } from "../../app/lib/log.server";
 
 // Re-export types for consumers
 export type { RefreshResult, RefreshErrorCode };
@@ -66,7 +67,7 @@ export interface ScriptRefreshResult {
   success: boolean;
   wasRefreshed?: boolean;
   expires?: string;
-  errorCode?: RefreshErrorCode | "config_error" | string;
+  errorCode?: RefreshErrorCode | "config_error";
 }
 
 /**
@@ -224,11 +225,10 @@ async function main(): Promise<void> {
 const isMainModule = import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMainModule) {
   main().catch((err) => {
-    // Return errorCode only, not raw error message (X6)
-    const errCode = err instanceof Error && "code" in err ? (err as { code: string }).code : undefined;
+    // Use toErrorCode for validated error codes (X6)
     console.log(JSON.stringify({
       success: false,
-      errorCode: errCode ?? (err instanceof Error ? err.name : "unknown"),
+      errorCode: toErrorCode(err),
     }));
     process.exit(1);
   });

@@ -26,6 +26,7 @@ import { runMatcher, MAX_PAYMENTS_PER_REQUEST } from "~/services/matcher.server"
 import { generateDedupeKey, isValidUtrForRail } from "~/lib/banks/dedupe";
 import type { PaymentRail } from "~/lib/banks/types";
 import { checkImportLimit, enforceImportLimit, UpgradeRequiredError } from "~/services/gating.server";
+import { safeLog, toErrorCode } from "~/lib/log.server";
 
 /**
  * Maximum rows per import request.
@@ -439,9 +440,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       const importId = bankImport.id;
 
       // Log import start (counts only, no PII)
-      console.log(
-        `[import] Starting import: shopId=${shopId} importId=${importId} rows=${importData.credits.length}`
-      );
+      safeLog("info", "import.start", {
+        shopId,
+        importId,
+        count: importData.credits.length,
+      });
 
       // Prepare all rows for batch insert
       const rows = creditsWithKeys.map((credit) => {
@@ -513,9 +516,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       const duplicates = rows.length - inserted;
 
       // Log import completion (counts only, no PII)
-      console.log(
-        `[import] Completed: importId=${importId} inserted=${inserted} duplicates=${duplicates}`
-      );
+      safeLog("info", "import.complete", {
+        importId,
+        insertedCount: inserted,
+        duplicateCount: duplicates,
+      });
 
       return { importId, inserted, duplicates };
     });
@@ -525,15 +530,17 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     if (result.inserted > 0) {
       try {
         matcherResult = await runMatcher(sql, shopId, { limit: MAX_PAYMENTS_PER_REQUEST });
-        console.log(
-          `[import] Matcher run: shopId=${shopId} processed=${matcherResult.paymentsProcessed} matches=${matcherResult.matchesCreated}`
-        );
+        safeLog("info", "import.matcher_run", {
+          shopId,
+          processedCount: matcherResult.paymentsProcessed,
+          matchCount: matcherResult.matchesCreated,
+        });
       } catch (err) {
-        // Log error without message content (may contain data)
-        const errCode = err instanceof Error && "code" in err ? (err as { code: string }).code : undefined;
-        console.error(
-          `[import] Matcher failed: shopId=${shopId} errorName=${err instanceof Error ? err.name : "unknown"} code=${errCode ?? "none"}`
-        );
+        // Log error code only (M6)
+        safeLog("error", "import.matcher_failed", {
+          shopId,
+          err: toErrorCode(err),
+        });
       }
     }
 
@@ -554,11 +561,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       } : null,
     });
   } catch (err) {
-    // Log error without message content (may contain row data)
-    const errCode = err instanceof Error && "code" in err ? (err as { code: string }).code : undefined;
-    console.error(
-      `[import] Import failed: shopId=${shopId} errorName=${err instanceof Error ? err.name : "unknown"} code=${errCode ?? "none"}`
-    );
+    // Log error code only (M6)
+    safeLog("error", "import.failed", {
+      shopId,
+      err: toErrorCode(err),
+    });
     return Response.json(
       { success: false, error: "Import failed" },
       { status: 500 }

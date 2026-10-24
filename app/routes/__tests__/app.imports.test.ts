@@ -749,7 +749,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
       "9876543210",
     ];
 
-    it("M6: logs use shopId=, not shop= or domain (per #174)", async () => {
+    it("M6: logs use safeLog JSON with shopId, not domain (per #174)", async () => {
       const payload = {
         bank: "HDFC",
         fileName: "m6-test.csv",
@@ -767,11 +767,11 @@ describeWithDb("Bank Import Action Integration Tests", () => {
       const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
       expect(response.status).toBe(200);
 
-      // Check that logs contain shopId= but NOT shop= or .myshopify.com
+      // Check that logs use safeLog JSON format with "shopId" but NOT .myshopify.com
       const allLogs = [...consoleLogs, ...consoleErrors].join("\n");
-      expect(allLogs).toContain("shopId=");
+      expect(allLogs).toContain('"shopId":');
+      expect(allLogs).toContain('"event":"import.');
       expect(allLogs).not.toContain(".myshopify.com");
-      expect(allLogs).not.toMatch(/\bshop=[^I]/); // shop= not followed by I (excludes shopId=)
     });
 
     it("successful import logs contain no PII", async () => {

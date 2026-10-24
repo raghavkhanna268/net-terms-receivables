@@ -165,7 +165,7 @@ describe("Plan Page Loader", () => {
     expect(result.plan).toBeNull();
   });
 
-  it("P7: error logging uses toErrorCode, not raw error (per #174)", async () => {
+  it("P7: error logging uses safeLog JSON with toErrorCode (per #174)", async () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const { resolvePlan } = await import("~/services/plan.server");
     const { getUsageStats, getGatedAccountCount, isGatingEnforced } = await import(
@@ -196,8 +196,9 @@ describe("Plan Page Loader", () => {
     });
 
     const allLogs = consoleSpy.mock.calls.map((c) => c.join(" ")).join("\n");
-    expect(allLogs).toContain("[app.plan]");
-    expect(allLogs).toContain("err=");
+    // safeLog outputs JSON with "event" field
+    expect(allLogs).toContain('"event":"app.plan.load_plan_data_failed"');
+    expect(allLogs).toContain('"err":');
     expect(allLogs).not.toContain("Database connection timed out");
     expect(allLogs).not.toContain(".myshopify.com");
 
