@@ -66,6 +66,10 @@ const inFlightSetups = new Map<string, Promise<void>>();
  * 5. Without this check, Isolate B would skip upsertShopOnAuth
  *    and leave uninstalledAt set, breaking reconcile/reminders
  *
+ * When clearUninstalledAtIfSet returns true (a row was cleared), we also
+ * re-run the full setup because Shopify drops app-owned metafield definitions,
+ * the validation function, and payment customization on uninstall.
+ *
  * This adds one indexed conditional UPDATE on every /app load, but it's
  * a single-row WHERE domain=$1 AND uninstalledAt IS NOT NULL update
  * that is a no-op when already NULL (most requests).
@@ -79,9 +83,48 @@ export function runAfterAuth(
   admin: AdminGraphqlClient,
   waitUntil: WaitUntilFn,
 ): void {
-  const clearUninstalledPromise = clearUninstalledAtIfSet(shop);
-  waitUntil(clearUninstalledPromise);
+  let sql: Sql | null = null;
+  try {
+    sql = getRequestSql();
+  } catch (error) {
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.error(`[afterAuth] clear_uninstalled_at_failed reason=no_request_context err=${errInfo}`);
+  }
 
+  if (sql) {
+    const clearAndSetupPromise = clearAndMaybeSetup(sql, shop, admin, waitUntil);
+    waitUntil(clearAndSetupPromise);
+  } else {
+    runSetupIfNeeded(shop, admin, waitUntil);
+  }
+}
+
+/**
+ * Clear uninstalledAt and run setup if the shop was reinstalled or not cached.
+ */
+async function clearAndMaybeSetup(
+  sql: Sql,
+  shop: string,
+  admin: AdminGraphqlClient,
+  waitUntil: WaitUntilFn,
+): Promise<void> {
+  const wasReinstalled = await clearUninstalledAtIfSet(sql, shop);
+
+  if (wasReinstalled) {
+    setupCompletedShops.delete(shop);
+  }
+
+  runSetupIfNeeded(shop, admin, waitUntil);
+}
+
+/**
+ * Run setup if the shop is not in cache and not already in-flight.
+ */
+function runSetupIfNeeded(
+  shop: string,
+  admin: AdminGraphqlClient,
+  waitUntil: WaitUntilFn,
+): void {
   if (setupCompletedShops.has(shop)) {
     return;
   }
@@ -107,11 +150,12 @@ export function runAfterAuth(
  * IMPORTANT: Only sets uninstalledAt to NULL. Never touches plan, gating,
  * credit, timezone, or any other column.
  *
+ * @param sql - postgres.js SQL client
  * @param shop - The shop domain
+ * @returns true if a row was updated (shop was reinstalled), false otherwise
  */
-async function clearUninstalledAtIfSet(shop: string): Promise<void> {
+async function clearUninstalledAtIfSet(sql: Sql, shop: string): Promise<boolean> {
   try {
-    const sql = getRequestSql();
     const result = await sql<{ id: string }[]>`
       UPDATE "Shop"
       SET "uninstalledAt" = NULL
@@ -120,9 +164,13 @@ async function clearUninstalledAtIfSet(shop: string): Promise<void> {
     `;
     if (result.length > 0) {
       console.log(`[afterAuth] cleared_uninstalled_at shop_id=${result[0].id}`);
+      return true;
     }
+    return false;
   } catch (error) {
-    console.error(`[afterAuth] clear_uninstalled_at_failed reason=db_error`, error);
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.error(`[afterAuth] clear_uninstalled_at_failed reason=db_error err=${errInfo}`);
+    return false;
   }
 }
 
@@ -172,7 +220,7 @@ async function syncShopTimezone(
         const validatedTimezone = validateTimezone(ianaTimezone);
         if (validatedTimezone !== ianaTimezone) {
           console.warn(
-            `[afterAuth] timezone_invalid input=${ianaTimezone} fallback=${validatedTimezone}`
+            `[afterAuth] timezone_invalid fallback=${validatedTimezone}`
           );
         }
         timezone = validatedTimezone;
@@ -181,13 +229,15 @@ async function syncShopTimezone(
       }
     }
   } catch (error) {
-    console.warn(`[afterAuth] timezone_query_failed reason=exception`, error);
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.warn(`[afterAuth] timezone_query_failed reason=exception err=${errInfo}`);
   }
 
   try {
     await upsertShopOnAuth(sql, shop, timezone);
   } catch (error) {
-    console.error(`[afterAuth] upsert_shop_failed reason=db_error`, error);
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.error(`[afterAuth] upsert_shop_failed reason=db_error err=${errInfo}`);
     throw error;
   }
 }
@@ -199,19 +249,24 @@ async function runSetup(
   let hasError = false;
   
   try {
+    // Definitions run before validation so the Function input query can resolve them.
     await ensureMetafieldDefinitions(admin);
   } catch (error) {
     hasError = true;
-    console.error(`[afterAuth] metafield_definitions_failed reason=exception`, error);
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.error(`[afterAuth] metafield_definitions_failed reason=exception err=${errInfo}`);
   }
   
   try {
     await ensureValidation(admin);
   } catch (error) {
     hasError = true;
-    console.error(`[afterAuth] validation_registration_failed reason=exception`, error);
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.error(`[afterAuth] validation_registration_failed reason=exception err=${errInfo}`);
   }
   
+  // S13: Payment customization for hiding net-terms payment methods.
+  // Failure is logged but doesn't break auth - can be retried on next request.
   try {
     const result = await ensurePaymentCustomization(admin);
     if (result.created) {
@@ -219,16 +274,20 @@ async function runSetup(
     }
   } catch (error) {
     hasError = true;
-    console.error(`[afterAuth] payment_customization_failed reason=exception`, error);
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.error(`[afterAuth] payment_customization_failed reason=exception err=${errInfo}`);
   }
   
+  // Timezone sync runs even if earlier steps fail - it's independent.
   try {
     await syncShopTimezone(shop, admin);
   } catch (error) {
     hasError = true;
-    console.error(`[afterAuth] sync_timezone_failed reason=exception`, error);
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.error(`[afterAuth] sync_timezone_failed reason=exception err=${errInfo}`);
   }
   
+  // Only mark complete if all steps succeeded.
   if (!hasError) {
     setupCompletedShops.add(shop);
   }

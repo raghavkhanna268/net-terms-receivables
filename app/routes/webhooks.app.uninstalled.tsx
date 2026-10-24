@@ -61,7 +61,8 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     const count = await sessionStorage.deleteAllForShop(shop);
     console.log(`[uninstalled] sessions_deleted count=${count}`);
   } catch (error) {
-    console.error(`[uninstalled] sessions_delete_failed reason=db_error`, error);
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.error(`[uninstalled] sessions_delete_failed reason=db_error err=${errInfo}`);
     return new Response(null, { status: 500 });
   }
 
@@ -74,15 +75,18 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     }
     evictShopFromSetupCache(shop);
   } catch (error) {
-    console.error(`[uninstalled] mark_uninstalled_failed reason=db_error`, error);
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.error(`[uninstalled] mark_uninstalled_failed reason=db_error err=${errInfo}`);
     return new Response(null, { status: 500 });
   }
 
+  // Purge webhook receipts for the shop (S20 compliance) - non-fatal on failure.
   try {
     const receiptsDeleted = await deleteWebhookReceiptsForShop(sql, shop);
     console.log(`[uninstalled] receipts_deleted count=${receiptsDeleted}`);
   } catch (error) {
-    console.error(`[uninstalled] receipts_delete_failed reason=db_error`, error);
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.error(`[uninstalled] receipts_delete_failed reason=db_error err=${errInfo}`);
   }
 
   return new Response();
