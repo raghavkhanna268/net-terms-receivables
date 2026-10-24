@@ -16,6 +16,7 @@
  */
 
 import type { Sql } from "./db-light.server";
+import { toErrorCode } from "./log.server";
 
 /**
  * Record a webhook receipt at the edge (INSIDE a transaction).
@@ -164,7 +165,6 @@ export async function recordAndEnqueueSync(
 
     return result;
   } catch (err) {
-    const { toErrorCode } = await import("./log.server");
     return { status: "error", code: toErrorCode(err) };
   }
 }

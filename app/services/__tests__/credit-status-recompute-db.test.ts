@@ -364,7 +364,7 @@ describeWithDb("credit-status-recompute DB integration", () => {
         
         // Should fail but DB state updated
         expect(result1.success).toBe(false);
-        expect(result1.error).toContain("Metafield");
+        expect(result1.error).toBe("metafield_sync_failed");
         
         // Verify DB state is HELD but syncPending is true
         const [account1] = await sql<{ holdState: string; syncPending: boolean }[]>`
@@ -481,7 +481,7 @@ describeWithDb("credit-status-recompute DB integration", () => {
 
       const result = await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
       expect(result.success).toBe(false);
-      expect(result.error).toContain("Metafield");
+      expect(result.error).toBe("metafield_sync_failed");
 
       // Verify metafieldSyncedAt is still NULL and syncPending is true
       const [after] = await sql<{ metafieldSyncedAt: Date | null; syncPending: boolean }[]>`

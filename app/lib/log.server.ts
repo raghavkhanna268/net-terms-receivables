@@ -71,6 +71,10 @@ const ALLOWED_KEY_PATTERNS: RegExp[] = [
   /^piiMode$/,
   /^holdState$/,
   /^bypass$/,
+  /^bulkType$/,
+  /^byteOffset$/,
+  /^ownerType$/,
+  /^lineCount$/,
 ];
 
 /**
@@ -151,64 +155,6 @@ function redactValue(value: unknown, key: string): unknown {
 }
 
 /**
- * Internal toErrorCode for use within redactFields.
- * This ensures the `err` key only contains safe error codes, not free text.
- */
-function toErrorCodeInternal(err: unknown): string {
-  if (err === null || err === undefined) {
-    return "unknown";
-  }
-
-  if (typeof err === "object") {
-    const errObj = err as Record<string, unknown>;
-
-    if (typeof errObj.code === "string" && errObj.code && isSafeCode(errObj.code)) {
-      return errObj.code;
-    }
-
-    if (typeof errObj.errorCode === "string" && errObj.errorCode && isSafeCode(errObj.errorCode)) {
-      return errObj.errorCode;
-    }
-
-    if (typeof errObj.name === "string" && errObj.name && errObj.name !== "Error" && isSafeCode(errObj.name)) {
-      return errObj.name;
-    }
-
-    if (err instanceof Error) {
-      const msg = err.message.toLowerCase();
-
-      if (msg.includes("econnrefused")) return "connection_refused";
-      if (msg.includes("etimedout") || msg.includes("timeout")) return "timeout";
-      if (msg.includes("enotfound")) return "dns_error";
-      if (msg.includes("fetch failed")) return "fetch_error";
-
-      if (msg.includes("invalid_grant")) return "invalid_grant";
-      if (msg.includes("access denied") || msg.includes("access_denied")) return "access_denied";
-      if (msg.includes("throttled")) return "throttled";
-      if (msg.includes("rate limit")) return "rate_limited";
-
-      if (msg.includes("unique constraint") || msg.includes("duplicate key")) return "pg_unique_violation";
-      if (msg.includes("foreign key")) return "pg_foreign_key_violation";
-      if (msg.includes("connection") && msg.includes("postgres")) return "pg_connection_error";
-
-      if (err.name !== "Error" && isSafeCode(err.name)) {
-        return err.name;
-      }
-      return "error";
-    }
-  }
-
-  if (typeof err === "string") {
-    if (isSafeCode(err)) {
-      return err;
-    }
-    return "string_error";
-  }
-
-  return "unknown";
-}
-
-/**
  * Redact all fields in an object, keeping only allowlisted keys.
  * Non-allowlisted keys have all values redacted (including numbers, per #174 money rule).
  * Only booleans pass through for non-allowlisted keys.
@@ -219,7 +165,7 @@ function redactFields(fields: Record<string, unknown>): Record<string, unknown> 
 
   for (const [key, value] of Object.entries(fields)) {
     if (key === "err") {
-      result[key] = toErrorCodeInternal(value);
+      result[key] = toErrorCode(value);
     } else if (isAllowedKey(key)) {
       result[key] = redactValue(value, key);
     } else {
@@ -332,6 +278,7 @@ export function toErrorCode(err: unknown): string {
       if (msg.includes("unique constraint") || msg.includes("duplicate key")) return "pg_unique_violation";
       if (msg.includes("foreign key")) return "pg_foreign_key_violation";
       if (msg.includes("connection") && msg.includes("postgres")) return "pg_connection_error";
+      if (msg.includes("pgmq")) return "pgmq_send_failed";
 
       if (err.name !== "Error" && isSafeCode(err.name)) {
         return err.name;

@@ -31,7 +31,7 @@ vi.mock("~/lib/sentry", () => ({
 
 // Import after mocks are set up
 import { adminGraphQL as _adminGraphQL } from "../drain/admin-client.server";
-import { captureExceptionWithTags as _captureExceptionWithTags } from "~/lib/sentry";
+import { captureExceptionWithTags as _captureExceptionWithTags, captureMessage as _captureMessage } from "~/lib/sentry";
 import {
   resolvePlan,
   getPlanByShopId,
@@ -41,6 +41,7 @@ import {
 
 const adminGraphQL = _adminGraphQL as ReturnType<typeof vi.fn>;
 const captureExceptionWithTags = _captureExceptionWithTags as ReturnType<typeof vi.fn>;
+const captureMessage = _captureMessage as ReturnType<typeof vi.fn>;
 
 // Mock SQL client
 const createMockSql = () => {
@@ -306,7 +307,7 @@ describe("Plan Resolution Service", () => {
       expect(result.subscriptionId).toBeNull();
     });
 
-    it("returns free plan for unknown subscription name", async () => {
+    it("returns free plan for unknown subscription name and alerts via captureMessage", async () => {
       // resolvePlan imported at module scope
       
       // Shop exists, no cache
@@ -339,6 +340,8 @@ describe("Plan Resolution Service", () => {
       
       expect(result.plan.key).toBe("free");
       expect(result.subscriptionName).toBe("Unknown Plan");
+      // Must alert because unknown name silently drops shop to free
+      expect(captureMessage).toHaveBeenCalledWith("unknown_subscription_name", "warning");
     });
 
     it("returns cached plan on API error when cache exists (fail-to-cached)", async () => {
@@ -371,7 +374,7 @@ describe("Plan Resolution Service", () => {
       expect(result.fromCache).toBe(true);
     });
 
-    it("returns free plan on API error when NO cache exists", async () => {
+    it("returns free plan on API error when NO cache exists and alerts via captureMessage", async () => {
       // resolvePlan imported at module scope
       
       // Shop exists, no cache
@@ -396,6 +399,8 @@ describe("Plan Resolution Service", () => {
       // No cache exists, so free is correct
       expect(result.plan.key).toBe("free");
       expect(result.fromCache).toBe(false);
+      // Must alert because plan fetch failed
+      expect(captureMessage).toHaveBeenCalledWith("plan_fetch_failed", "error");
     });
 
     it("returns cached plan on exception when cache exists", async () => {

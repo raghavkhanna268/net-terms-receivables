@@ -20,8 +20,8 @@
 
 import type { Sql } from "~/lib/db-light.server";
 import { getRequestWaitUntil } from "~/lib/request-context.server";
-import { captureExceptionWithTags } from "~/lib/sentry";
-import { safeLog, toErrorCode } from "~/lib/log.server";
+import { captureExceptionWithTags, captureMessage } from "~/lib/sentry";
+import { safeLog, toErrorCode, shopHash } from "~/lib/log.server";
 import {
   type PlanKey,
   type PlanConfig,
@@ -233,9 +233,9 @@ async function fetchPlanFromShopify(
   );
 
   if (!result.success) {
-    safeLog("error", "plan_fetch_failed", {
-      err: result.error,
-    });
+    const code = toErrorCode(result.error);
+    safeLog("error", "plan_fetch_failed", { shopHash: shopHash(shop), err: code });
+    captureMessage("plan_fetch_failed", "error");
     return null;
   }
 
@@ -262,9 +262,11 @@ async function fetchPlanFromShopify(
 
   if (!planKey) {
     safeLog("warn", "unknown_subscription_name", {
+      shopHash: shopHash(shop),
       subscriptionId: activeSubscription.id,
       isTest: activeSubscription.test,
     });
+    captureMessage("unknown_subscription_name", "warning");
     return {
       planKey: "free",
       subscriptionId: activeSubscription.id,
@@ -476,9 +478,8 @@ export async function refreshPlanCache(
   sql: Sql,
   shopDomain: string
 ): Promise<void> {
-  const shopId = await getShopId(sql, shopDomain);
   await resolvePlan(sql, shopDomain, true);
-  safeLog("info", "plan_cache_refreshed", { shopId });
+  safeLog("info", "plan_cache_refreshed", { shopHash: shopHash(shopDomain) });
 }
 
 /**
