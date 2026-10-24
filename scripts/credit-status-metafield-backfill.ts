@@ -10,16 +10,24 @@
  *   npx tsx scripts/credit-status-metafield-backfill.ts --dry-run
  *   npx tsx scripts/credit-status-metafield-backfill.ts --apply
  *   npx tsx scripts/credit-status-metafield-backfill.ts --apply --shop 1
+ *   npx tsx scripts/credit-status-metafield-backfill.ts --id-prefix abc123
+ *   npx tsx scripts/credit-status-metafield-backfill.ts --apply --id-prefix abc123 --expect 5
  *
  * MODES:
  *   (default)   Dry-run: prints counts only per shop index, by holdState and total.
  *               No IDs, names, emails, or shop domains in output.
  *   --dry-run   Same as default. Makes no mutations.
  *   --apply     Enqueues CREDIT_STATUS_RECOMPUTE messages via pgmq.
+ *               Recommended to use with --expect for safety.
  *
  * OPTIONAL FLAGS:
- *   --shop N    Scope to a specific shop by index (1-based, from dry-run output).
- *               Only valid with --apply.
+ *   --shop N         Scope to a specific shop by index (1-based, from dry-run output).
+ *                    Only valid with --apply.
+ *   --id-prefix P    Filter candidates to BuyerAccount ids starting with prefix P.
+ *                    Valid in both dry-run and --apply modes.
+ *   --expect N       Assert that exactly N candidates match before applying.
+ *                    In dry-run mode, prints expectMatched=true/false and exits non-zero on mismatch.
+ *                    In apply mode, exits non-zero BEFORE any pgmq.send if count mismatches.
  *
  * SAFETY:
  * - Dry-run is the default and makes no mutations.
@@ -28,7 +36,10 @@
  * - Sends CREDIT_STATUS_RECOMPUTE messages to pgmq with 'manual' source.
  * - Dedupe key: 'credit_backfill:<id>:<date>' is used by the drain to prevent duplicate processing.
  * - Exit non-zero on any enqueue failure.
- * - This script must never run from CI or on its own in automated pipelines.
+ * - The only allowed CI path for --apply is the manual, dispatch-only
+ *   .github/workflows/prod-credit-status-backfill-apply.yml (added in PR #145),
+ *   gated by a protected environment that requires Raghav's approval on every run.
+ *   Any other CI or automated invocation is forbidden, and the dry-run is the default.
  *
  * ENVIRONMENT:
  *   DATABASE_URL - Postgres connection string (required)
@@ -52,15 +63,25 @@ interface BackfillCandidate {
   holdState: string;
 }
 
-/**
- * Parse command line arguments.
- */
-function parseArgs(args: string[]): {
+/** Regex for valid id-prefix: 1-64 alphanumeric, underscore, or hyphen characters */
+const ID_PREFIX_REGEX = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** Regex for valid expect value: 1-6 digit non-negative integer */
+const EXPECT_REGEX = /^\d{1,6}$/;
+
+interface ParseArgsResult {
   dryRun: boolean;
   apply: boolean;
   shopFilter: number | undefined;
+  idPrefix: string | undefined;
+  expect: number | undefined;
   error?: string;
-} {
+}
+
+/**
+ * Parse command line arguments.
+ */
+function parseArgs(args: string[]): ParseArgsResult {
   const dryRunExplicit = args.includes("--dry-run");
   const applyExplicit = args.includes("--apply");
 
@@ -70,6 +91,8 @@ function parseArgs(args: string[]): {
       dryRun: true,
       apply: false,
       shopFilter: undefined,
+      idPrefix: undefined,
+      expect: undefined,
       error: "--dry-run and --apply are mutually exclusive",
     };
   }
@@ -78,8 +101,12 @@ function parseArgs(args: string[]): {
   const dryRun = !applyExplicit;
   const apply = applyExplicit;
 
-  const shopIndex = args.indexOf("--shop");
   let shopFilter: number | undefined;
+  let idPrefix: string | undefined;
+  let expect: number | undefined;
+
+  // Parse --shop
+  const shopIndex = args.indexOf("--shop");
   if (shopIndex !== -1) {
     const shopValue = args[shopIndex + 1];
     if (!shopValue || shopValue.startsWith("--")) {
@@ -87,6 +114,8 @@ function parseArgs(args: string[]): {
         dryRun,
         apply,
         shopFilter: undefined,
+        idPrefix: undefined,
+        expect: undefined,
         error: "--shop requires a numeric value (shop index from dry-run output)",
       };
     }
@@ -96,6 +125,8 @@ function parseArgs(args: string[]): {
         dryRun,
         apply,
         shopFilter: undefined,
+        idPrefix: undefined,
+        expect: undefined,
         error: `--shop must be a positive integer, got '${shopValue}'`,
       };
     }
@@ -104,32 +135,104 @@ function parseArgs(args: string[]): {
         dryRun,
         apply,
         shopFilter: undefined,
+        idPrefix: undefined,
+        expect: undefined,
         error: "--shop filter is only valid with --apply",
       };
     }
     shopFilter = parsed;
   }
 
-  return { dryRun, apply, shopFilter };
+  // Parse --id-prefix
+  const idPrefixIndex = args.indexOf("--id-prefix");
+  if (idPrefixIndex !== -1) {
+    const prefixValue = args[idPrefixIndex + 1];
+    if (!prefixValue || prefixValue.startsWith("--")) {
+      return {
+        dryRun,
+        apply,
+        shopFilter,
+        idPrefix: undefined,
+        expect: undefined,
+        error: "--id-prefix requires a value",
+      };
+    }
+    if (!ID_PREFIX_REGEX.test(prefixValue)) {
+      return {
+        dryRun,
+        apply,
+        shopFilter,
+        idPrefix: undefined,
+        expect: undefined,
+        error: "--id-prefix must match pattern [A-Za-z0-9_-]{1,64}",
+      };
+    }
+    idPrefix = prefixValue;
+  }
+
+  // Parse --expect
+  const expectIndex = args.indexOf("--expect");
+  if (expectIndex !== -1) {
+    const expectValue = args[expectIndex + 1];
+    if (!expectValue || expectValue.startsWith("--")) {
+      return {
+        dryRun,
+        apply,
+        shopFilter,
+        idPrefix,
+        expect: undefined,
+        error: "--expect requires a non-negative integer value",
+      };
+    }
+    if (!EXPECT_REGEX.test(expectValue)) {
+      return {
+        dryRun,
+        apply,
+        shopFilter,
+        idPrefix,
+        expect: undefined,
+        error: "--expect must be a non-negative integer (0-999999)",
+      };
+    }
+    expect = parseInt(expectValue, 10);
+  }
+
+  return { dryRun, apply, shopFilter, idPrefix, expect };
 }
 
 /**
  * Get counts of accounts with metafieldSyncedAt IS NULL, grouped by shop and holdState.
  * Returns stats array with shop indices (no shop domains in output).
+ *
+ * @param sql - Postgres connection
+ * @param idPrefix - Optional id prefix filter (parameterized, not string-concatenated)
  */
 async function getBackfillStats(
   sql: ReturnType<typeof postgres>,
+  idPrefix?: string,
 ): Promise<BackfillStats[]> {
-  const rows = await sql<{ shopId: string; holdState: string; count: string }[]>`
-    SELECT
-      "shopId",
-      "holdState",
-      COUNT(*)::text AS count
-    FROM "BuyerAccount"
-    WHERE "metafieldSyncedAt" IS NULL
-    GROUP BY "shopId", "holdState"
-    ORDER BY "shopId", "holdState"
-  `;
+  const rows = idPrefix
+    ? await sql<{ shopId: string; holdState: string; count: string }[]>`
+        SELECT
+          "shopId",
+          "holdState",
+          COUNT(*)::text AS count
+        FROM "BuyerAccount"
+        WHERE "metafieldSyncedAt" IS NULL
+          AND starts_with("id", ${idPrefix})
+        GROUP BY "shopId", "holdState"
+        ORDER BY "shopId", "holdState"
+      `
+    : await sql<{ shopId: string; holdState: string; count: string }[]>`
+        SELECT
+          "shopId",
+          "holdState",
+          COUNT(*)::text AS count
+        FROM "BuyerAccount"
+        WHERE "metafieldSyncedAt" IS NULL
+        GROUP BY "shopId", "holdState"
+        ORDER BY "shopId", "holdState"
+      `;
 
   // Group by shopId and assign indices
   const shopMap = new Map<string, { total: number; byHoldState: Record<string, number> }>();
@@ -161,6 +264,7 @@ async function getBackfillStats(
 interface DryRunResult {
   success: true;
   stats: BackfillStats[];
+  grandTotal: number;
 }
 
 /**
@@ -168,11 +272,13 @@ interface DryRunResult {
  * Exported for testing.
  *
  * @param sql - Top-level postgres connection (NOT a TransactionSql)
+ * @param idPrefix - Optional id prefix filter
  * @returns Stats from the read-only query
  * @throws Error if preflight fails or transaction_read_only is not 'on'
  */
 async function runDryRun(
   sql: ReturnType<typeof postgres>,
+  idPrefix?: string,
 ): Promise<DryRunResult> {
   // Step 1: Verify READ ONLY transaction enforcement on the connection first.
   // This runs in its own transaction and verifies that writes are rejected.
@@ -193,26 +299,42 @@ async function runDryRun(
       throw new Error("READ ONLY transaction check failed: transaction_read_only is not 'on'");
     }
 
-    return getBackfillStats(tx);
+    return getBackfillStats(tx, idPrefix);
   });
 
-  return { success: true, stats };
+  const grandTotal = stats.reduce((sum, s) => sum + s.total, 0);
+
+  return { success: true, stats, grandTotal };
 }
 
 /**
- * Get all candidates for backfill, optionally filtered by shop index.
+ * Get all candidates for backfill, optionally filtered by shop index and/or id prefix.
+ *
+ * @param sql - Postgres connection
+ * @param shopFilter - Optional shop index filter (1-based)
+ * @param idPrefix - Optional id prefix filter (parameterized, not string-concatenated)
  */
 async function getCandidates(
   sql: ReturnType<typeof postgres>,
   shopFilter?: number,
+  idPrefix?: string,
 ): Promise<BackfillCandidate[]> {
   // First get the ordered shop IDs to map index to actual ID
-  const shopIds = await sql<{ shopId: string }[]>`
-    SELECT DISTINCT "shopId"
-    FROM "BuyerAccount"
-    WHERE "metafieldSyncedAt" IS NULL
-    ORDER BY "shopId"
-  `;
+  // Apply idPrefix filter here too for consistent shop index mapping
+  const shopIds = idPrefix
+    ? await sql<{ shopId: string }[]>`
+        SELECT DISTINCT "shopId"
+        FROM "BuyerAccount"
+        WHERE "metafieldSyncedAt" IS NULL
+          AND starts_with("id", ${idPrefix})
+        ORDER BY "shopId"
+      `
+    : await sql<{ shopId: string }[]>`
+        SELECT DISTINCT "shopId"
+        FROM "BuyerAccount"
+        WHERE "metafieldSyncedAt" IS NULL
+        ORDER BY "shopId"
+      `;
 
   let targetShopId: string | undefined;
   if (shopFilter !== undefined) {
@@ -222,32 +344,60 @@ async function getCandidates(
     targetShopId = shopIds[shopFilter - 1].shopId;
   }
 
-  const query = targetShopId
-    ? sql<BackfillCandidate[]>`
-        SELECT
-          ba.id,
-          ba."shopId",
-          s.domain AS "shopDomain",
-          ba."holdState"
-        FROM "BuyerAccount" ba
-        JOIN "Shop" s ON s.id = ba."shopId"
-        WHERE ba."metafieldSyncedAt" IS NULL
-          AND ba."shopId" = ${targetShopId}
-        ORDER BY ba."shopId", ba.id
-      `
-    : sql<BackfillCandidate[]>`
-        SELECT
-          ba.id,
-          ba."shopId",
-          s.domain AS "shopDomain",
-          ba."holdState"
-        FROM "BuyerAccount" ba
-        JOIN "Shop" s ON s.id = ba."shopId"
-        WHERE ba."metafieldSyncedAt" IS NULL
-        ORDER BY ba."shopId", ba.id
-      `;
-
-  return query;
+  // Build query with optional filters (all parameterized via postgres.js tagged templates)
+  if (targetShopId && idPrefix) {
+    return sql<BackfillCandidate[]>`
+      SELECT
+        ba.id,
+        ba."shopId",
+        s.domain AS "shopDomain",
+        ba."holdState"
+      FROM "BuyerAccount" ba
+      JOIN "Shop" s ON s.id = ba."shopId"
+      WHERE ba."metafieldSyncedAt" IS NULL
+        AND ba."shopId" = ${targetShopId}
+        AND starts_with(ba."id", ${idPrefix})
+      ORDER BY ba."shopId", ba.id
+    `;
+  } else if (targetShopId) {
+    return sql<BackfillCandidate[]>`
+      SELECT
+        ba.id,
+        ba."shopId",
+        s.domain AS "shopDomain",
+        ba."holdState"
+      FROM "BuyerAccount" ba
+      JOIN "Shop" s ON s.id = ba."shopId"
+      WHERE ba."metafieldSyncedAt" IS NULL
+        AND ba."shopId" = ${targetShopId}
+      ORDER BY ba."shopId", ba.id
+    `;
+  } else if (idPrefix) {
+    return sql<BackfillCandidate[]>`
+      SELECT
+        ba.id,
+        ba."shopId",
+        s.domain AS "shopDomain",
+        ba."holdState"
+      FROM "BuyerAccount" ba
+      JOIN "Shop" s ON s.id = ba."shopId"
+      WHERE ba."metafieldSyncedAt" IS NULL
+        AND starts_with(ba."id", ${idPrefix})
+      ORDER BY ba."shopId", ba.id
+    `;
+  } else {
+    return sql<BackfillCandidate[]>`
+      SELECT
+        ba.id,
+        ba."shopId",
+        s.domain AS "shopDomain",
+        ba."holdState"
+      FROM "BuyerAccount" ba
+      JOIN "Shop" s ON s.id = ba."shopId"
+      WHERE ba."metafieldSyncedAt" IS NULL
+      ORDER BY ba."shopId", ba.id
+    `;
+  }
 }
 
 /**
@@ -284,9 +434,67 @@ async function enqueueBackfill(
   return { enqueued, failed };
 }
 
+/**
+ * Result of an apply operation.
+ */
+interface ApplyResult {
+  success: boolean;
+  candidateCount: number;
+  enqueued: number;
+  failed: number;
+  expectMismatch?: { expected: number; actual: number };
+}
+
+/**
+ * Run the apply path: fetch candidates, check --expect, enqueue messages.
+ * Exported for testing.
+ *
+ * @param sql - Postgres connection
+ * @param shopFilter - Optional shop index filter
+ * @param idPrefix - Optional id prefix filter
+ * @param expect - Optional expected count (exits before enqueue if mismatched)
+ */
+async function runApply(
+  sql: ReturnType<typeof postgres>,
+  shopFilter?: number,
+  idPrefix?: string,
+  expect?: number,
+): Promise<ApplyResult> {
+  const candidates = await getCandidates(sql, shopFilter, idPrefix);
+
+  // Check --expect BEFORE any pgmq.send
+  if (expect !== undefined && candidates.length !== expect) {
+    return {
+      success: false,
+      candidateCount: candidates.length,
+      enqueued: 0,
+      failed: 0,
+      expectMismatch: { expected: expect, actual: candidates.length },
+    };
+  }
+
+  if (candidates.length === 0) {
+    return {
+      success: true,
+      candidateCount: 0,
+      enqueued: 0,
+      failed: 0,
+    };
+  }
+
+  const result = await enqueueBackfill(sql, candidates);
+
+  return {
+    success: result.failed === 0,
+    candidateCount: candidates.length,
+    enqueued: result.enqueued,
+    failed: result.failed,
+  };
+}
+
 async function main() {
   const args = process.argv.slice(2);
-  const { dryRun, apply: _apply, shopFilter, error } = parseArgs(args);
+  const { dryRun, apply: _apply, shopFilter, idPrefix, expect, error } = parseArgs(args);
 
   console.log("=".repeat(60));
   console.log("Credit Status Metafield Backfill Script");
@@ -300,6 +508,10 @@ async function main() {
   console.log(`Mode: ${dryRun ? "DRY-RUN (counts only, no mutations)" : "APPLY (enqueuing messages)"}`);
   if (shopFilter !== undefined) {
     console.log(`Shop filter: index ${shopFilter}`);
+  }
+  console.log(`idPrefixApplied: ${idPrefix !== undefined}`);
+  if (expect !== undefined) {
+    console.log(`expectCount: ${expect}`);
   }
   console.log("");
 
@@ -315,9 +527,11 @@ async function main() {
     if (dryRun) {
       // Use the exported runDryRun function for testability
       let stats: BackfillStats[];
+      let grandTotal: number;
       try {
-        const result = await runDryRun(sql);
+        const result = await runDryRun(sql, idPrefix);
         stats = result.stats;
+        grandTotal = result.grandTotal;
       } catch (err) {
         console.error(`ERROR: ${err instanceof Error ? err.message : String(err)}`);
         process.exit(1);
@@ -326,6 +540,14 @@ async function main() {
       if (stats.length === 0) {
         console.log("No accounts with metafieldSyncedAt IS NULL found.");
         console.log("All accounts have had their metafield synced at least once.");
+        if (expect !== undefined) {
+          const matched = expect === 0;
+          console.log(`expectMatched: ${matched}`);
+          if (!matched) {
+            console.error(`ERROR: expect mismatch: expected=${expect} actual=0`);
+            process.exit(1);
+          }
+        }
         return;
       }
 
@@ -333,7 +555,6 @@ async function main() {
       console.log("-".repeat(60));
       console.log("");
 
-      let grandTotal = 0;
       const grandByHoldState: Record<string, number> = {};
 
       for (const stat of stats) {
@@ -343,7 +564,6 @@ async function main() {
           console.log(`    ${holdState}: ${count}`);
           grandByHoldState[holdState] = (grandByHoldState[holdState] ?? 0) + count;
         }
-        grandTotal += stat.total;
         console.log("");
       }
 
@@ -353,26 +573,41 @@ async function main() {
       for (const [holdState, count] of Object.entries(grandByHoldState).sort()) {
         console.log(`    ${holdState}: ${count}`);
       }
+
+      // Handle --expect in dry-run mode
+      if (expect !== undefined) {
+        const matched = grandTotal === expect;
+        console.log(`expectMatched: ${matched}`);
+        if (!matched) {
+          console.error(`ERROR: expect mismatch: expected=${expect} actual=${grandTotal}`);
+          process.exit(1);
+        }
+      }
+
       console.log("");
       console.log("To enqueue recompute messages, run with --apply");
       if (stats.length > 1) {
         console.log("To target a specific shop, run with --apply --shop <index>");
       }
     } else {
-      // Apply mode
+      // Apply mode - use runApply for testability
       console.log("Fetching candidates...");
-      const candidates = await getCandidates(sql, shopFilter);
+      const result = await runApply(sql, shopFilter, idPrefix, expect);
 
-      if (candidates.length === 0) {
+      // Check for expect mismatch (no pgmq.send was called)
+      if (result.expectMismatch) {
+        console.error(`ERROR: expect mismatch: expected=${result.expectMismatch.expected} actual=${result.expectMismatch.actual}`);
+        process.exit(1);
+      }
+
+      if (result.candidateCount === 0) {
         console.log("No candidates found.");
         return;
       }
 
-      console.log(`Found ${candidates.length} candidate(s) to enqueue.`);
+      console.log(`Found ${result.candidateCount} candidate(s) to enqueue.`);
       console.log("Enqueuing CREDIT_STATUS_RECOMPUTE messages...");
       console.log("");
-
-      const result = await enqueueBackfill(sql, candidates);
 
       console.log("=".repeat(60));
       console.log("SUMMARY");
@@ -400,4 +635,4 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   });
 }
 
-export { parseArgs, getBackfillStats, getCandidates, enqueueBackfill, runDryRun };
+export { parseArgs, getBackfillStats, getCandidates, enqueueBackfill, runDryRun, runApply };

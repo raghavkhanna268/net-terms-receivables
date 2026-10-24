@@ -3,17 +3,19 @@
  * Uses the CI pgmq Postgres service.
  *
  * Tests:
- * - parseArgs validates flags correctly
+ * - parseArgs validates flags correctly (including --id-prefix and --expect)
  * - Dry-run makes zero mutations (queue length unchanged)
  * - Dry-run prints no PII (no IDs, names, emails, shop domains)
  * - --dry-run --apply is rejected as mutually exclusive
  * - --apply enqueues exactly N messages with the right message shape
  * - A rerun on the same day is deduped (dedupe key includes date)
+ * - --id-prefix filters candidates by id prefix
+ * - --expect validates candidate count before enqueuing
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
-import { parseArgs, getBackfillStats, getCandidates, enqueueBackfill } from "../credit-status-metafield-backfill";
+import { parseArgs, getBackfillStats, getCandidates, enqueueBackfill, runApply } from "../credit-status-metafield-backfill";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -72,6 +74,113 @@ describe("parseArgs", () => {
     const result2 = parseArgs(["--apply", "--shop", "-1"]);
     expect(result2.error).toContain("must be a positive integer");
   });
+
+  describe("--id-prefix", () => {
+    it("accepts valid prefix in dry-run mode", () => {
+      const result = parseArgs(["--id-prefix", "seed-account-"]);
+      expect(result.dryRun).toBe(true);
+      expect(result.idPrefix).toBe("seed-account-");
+      expect(result.error).toBeUndefined();
+    });
+
+    it("accepts valid prefix in apply mode", () => {
+      const result = parseArgs(["--apply", "--id-prefix", "abc_123-XYZ"]);
+      expect(result.apply).toBe(true);
+      expect(result.idPrefix).toBe("abc_123-XYZ");
+      expect(result.error).toBeUndefined();
+    });
+
+    it("rejects empty prefix", () => {
+      const result = parseArgs(["--id-prefix", ""]);
+      expect(result.error).toContain("--id-prefix requires a value");
+    });
+
+    it("rejects prefix with wildcard character %", () => {
+      const result = parseArgs(["--id-prefix", "a%"]);
+      expect(result.error).toContain("--id-prefix must match pattern");
+    });
+
+    it("rejects prefix with SQL injection character '", () => {
+      const result = parseArgs(["--id-prefix", "a'b"]);
+      expect(result.error).toContain("--id-prefix must match pattern");
+    });
+
+    it("rejects prefix longer than 64 characters", () => {
+      const longPrefix = "a".repeat(65);
+      const result = parseArgs(["--id-prefix", longPrefix]);
+      expect(result.error).toContain("--id-prefix must match pattern");
+    });
+
+    it("accepts prefix of exactly 64 characters", () => {
+      const maxPrefix = "a".repeat(64);
+      const result = parseArgs(["--id-prefix", maxPrefix]);
+      expect(result.idPrefix).toBe(maxPrefix);
+      expect(result.error).toBeUndefined();
+    });
+
+    it("rejects missing value after --id-prefix", () => {
+      const result = parseArgs(["--id-prefix"]);
+      expect(result.error).toContain("--id-prefix requires a value");
+    });
+  });
+
+  describe("--expect", () => {
+    it("accepts valid non-negative integer in dry-run mode", () => {
+      const result = parseArgs(["--expect", "5"]);
+      expect(result.dryRun).toBe(true);
+      expect(result.expect).toBe(5);
+      expect(result.error).toBeUndefined();
+    });
+
+    it("accepts zero as valid expect value", () => {
+      const result = parseArgs(["--expect", "0"]);
+      expect(result.expect).toBe(0);
+      expect(result.error).toBeUndefined();
+    });
+
+    it("accepts valid expect in apply mode", () => {
+      const result = parseArgs(["--apply", "--expect", "100"]);
+      expect(result.apply).toBe(true);
+      expect(result.expect).toBe(100);
+      expect(result.error).toBeUndefined();
+    });
+
+    it("rejects negative value", () => {
+      const result = parseArgs(["--expect", "-1"]);
+      expect(result.error).toContain("--expect must be a non-negative integer");
+    });
+
+    it("rejects decimal value", () => {
+      const result = parseArgs(["--expect", "1.5"]);
+      expect(result.error).toContain("--expect must be a non-negative integer");
+    });
+
+    it("rejects non-numeric value", () => {
+      const result = parseArgs(["--expect", "abc"]);
+      expect(result.error).toContain("--expect must be a non-negative integer");
+    });
+
+    it("rejects empty value", () => {
+      const result = parseArgs(["--expect", ""]);
+      expect(result.error).toContain("--expect requires a non-negative integer value");
+    });
+
+    it("rejects missing value after --expect", () => {
+      const result = parseArgs(["--expect"]);
+      expect(result.error).toContain("--expect requires a non-negative integer value");
+    });
+
+    it("accepts up to 6-digit value (max 999999)", () => {
+      const result = parseArgs(["--expect", "999999"]);
+      expect(result.expect).toBe(999999);
+      expect(result.error).toBeUndefined();
+    });
+
+    it("rejects 7-digit value", () => {
+      const result = parseArgs(["--expect", "1000000"]);
+      expect(result.error).toContain("--expect must be a non-negative integer");
+    });
+  });
 });
 
 describeWithDb("credit-status-metafield-backfill DB integration", () => {
@@ -82,6 +191,13 @@ describeWithDb("credit-status-metafield-backfill DB integration", () => {
   const TEST_ACCOUNT_1_ID = `acc-bf-1-${TEST_SUFFIX}`;
   const TEST_ACCOUNT_2_ID = `acc-bf-2-${TEST_SUFFIX}`;
   const TEST_ACCOUNT_3_ID = `acc-bf-3-${TEST_SUFFIX}`;
+
+  // Additional test accounts for --id-prefix tests
+  const PREFIX_TEST_SHOP_ID = `shop-prefix-${TEST_SUFFIX}`;
+  const PREFIX_TEST_SHOP_DOMAIN = `prefix-test-${TEST_SUFFIX}.myshopify.com`;
+  const SEED_ACCOUNT_A_ID = `seed-account-a`;
+  const SEED_ACCOUNT_B_ID = `seed-account-b`;
+  const OTHER_X_ID = `other-x`;
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
@@ -108,14 +224,41 @@ describeWithDb("credit-status-metafield-backfill DB integration", () => {
          ${"co-3-" + TEST_SUFFIX}, ${"loc-3-" + TEST_SUFFIX},
          'Account 3', 'OK', NOW(), NOW(), NOW())
     `;
+
+    // Create shop and accounts for --id-prefix tests
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+      VALUES (${PREFIX_TEST_SHOP_ID}, ${PREFIX_TEST_SHOP_DOMAIN}, 'USD', NOW(), NOW())
+    `;
+
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name,
+        "holdState", "metafieldSyncedAt", "createdAt", "updatedAt"
+      )
+      VALUES
+        (${SEED_ACCOUNT_A_ID}, ${PREFIX_TEST_SHOP_ID}, 'COMPANY',
+         ${"co-seed-a-" + TEST_SUFFIX}, ${"loc-seed-a-" + TEST_SUFFIX},
+         'Seed Account A', 'OK', NULL, NOW(), NOW()),
+        (${SEED_ACCOUNT_B_ID}, ${PREFIX_TEST_SHOP_ID}, 'COMPANY',
+         ${"co-seed-b-" + TEST_SUFFIX}, ${"loc-seed-b-" + TEST_SUFFIX},
+         'Seed Account B', 'OK', NULL, NOW(), NOW()),
+        (${OTHER_X_ID}, ${PREFIX_TEST_SHOP_ID}, 'COMPANY',
+         ${"co-other-x-" + TEST_SUFFIX}, ${"loc-other-x-" + TEST_SUFFIX},
+         'Other X', 'HELD', NULL, NOW(), NOW())
+    `;
   });
 
   afterAll(async () => {
     // Clean up queue messages
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${PREFIX_TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${PREFIX_TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${PREFIX_TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${PREFIX_TEST_SHOP_ID}`;
     await sql.end();
   });
 
@@ -123,6 +266,8 @@ describeWithDb("credit-status-metafield-backfill DB integration", () => {
     // Clean up queue messages before each test
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${PREFIX_TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${PREFIX_TEST_SHOP_DOMAIN}`;
   });
 
   describe("getBackfillStats", () => {
@@ -318,6 +463,133 @@ describeWithDb("credit-status-metafield-backfill DB integration", () => {
       await expect(runDryRun(mockSql as unknown as typeof sql)).rejects.toThrow(
         "transaction_read_only is not 'on'"
       );
+    });
+  });
+
+  describe("--id-prefix filtering", () => {
+    it("filters getBackfillStats by id prefix", async () => {
+      const stats = await sql.begin("read only", async (tx) => {
+        return getBackfillStats(tx, "seed-account-");
+      });
+
+      // Should only find the seed-account-* accounts (2 total)
+      const prefixShopStats = stats.find(s => s.total === 2);
+      expect(prefixShopStats).toBeDefined();
+      expect(prefixShopStats!.total).toBe(2);
+    });
+
+    it("getCandidates with prefix returns only matching accounts", async () => {
+      const candidates = await getCandidates(sql, undefined, "seed-account-");
+
+      expect(candidates.length).toBe(2);
+      const ids = candidates.map(c => c.id).sort();
+      expect(ids).toEqual([SEED_ACCOUNT_A_ID, SEED_ACCOUNT_B_ID].sort());
+    });
+
+    it("getCandidates without prefix returns all accounts with NULL metafieldSyncedAt", async () => {
+      const candidates = await getCandidates(sql);
+
+      // Should include seed-account-a, seed-account-b, other-x from prefix test shop
+      // plus the original test accounts
+      const prefixShopCandidates = candidates.filter(c => c.shopId === PREFIX_TEST_SHOP_ID);
+      expect(prefixShopCandidates.length).toBe(3);
+    });
+
+    it("runDryRun with prefix filters correctly", async () => {
+      const { runDryRun } = await import("../credit-status-metafield-backfill");
+
+      const result = await runDryRun(sql, "seed-account-");
+
+      expect(result.success).toBe(true);
+      expect(result.grandTotal).toBe(2);
+    });
+  });
+
+  describe("--expect validation in runApply", () => {
+    it("runApply with matching expect proceeds and enqueues", async () => {
+      // First get the actual count
+      const candidates = await getCandidates(sql, undefined, "seed-account-");
+      expect(candidates.length).toBe(2);
+
+      // Run with correct expect
+      const result = await runApply(sql, undefined, "seed-account-", 2);
+
+      expect(result.success).toBe(true);
+      expect(result.expectMismatch).toBeUndefined();
+      expect(result.enqueued).toBe(2);
+      expect(result.failed).toBe(0);
+
+      // Verify messages in queue
+      const messages = await sql<{ message: { topic: string } }[]>`
+        SELECT message FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${PREFIX_TEST_SHOP_DOMAIN}
+      `;
+      expect(messages.length).toBe(2);
+    });
+
+    it("runApply with mismatched expect makes zero pgmq.send calls", async () => {
+      // Get initial queue count
+      const [before] = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text AS count FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${PREFIX_TEST_SHOP_DOMAIN}
+      `;
+      const initialCount = parseInt(before.count, 10);
+
+      // Run with wrong expect (there are 2 candidates, we expect 5)
+      const result = await runApply(sql, undefined, "seed-account-", 5);
+
+      expect(result.success).toBe(false);
+      expect(result.expectMismatch).toBeDefined();
+      expect(result.expectMismatch!.expected).toBe(5);
+      expect(result.expectMismatch!.actual).toBe(2);
+      expect(result.enqueued).toBe(0);
+      expect(result.failed).toBe(0);
+
+      // Verify no messages were added to queue
+      const [after] = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text AS count FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${PREFIX_TEST_SHOP_DOMAIN}
+      `;
+      const finalCount = parseInt(after.count, 10);
+      expect(finalCount).toBe(initialCount);
+    });
+
+    it("runApply with expect=0 on non-empty candidates fails before enqueue", async () => {
+      // Run with expect=0 but there are 2 candidates
+      const result = await runApply(sql, undefined, "seed-account-", 0);
+
+      expect(result.success).toBe(false);
+      expect(result.expectMismatch).toBeDefined();
+      expect(result.expectMismatch!.expected).toBe(0);
+      expect(result.expectMismatch!.actual).toBe(2);
+      expect(result.enqueued).toBe(0);
+    });
+
+    it("runApply without expect proceeds normally", async () => {
+      const result = await runApply(sql, undefined, "seed-account-");
+
+      expect(result.success).toBe(true);
+      expect(result.expectMismatch).toBeUndefined();
+      expect(result.enqueued).toBe(2);
+    });
+  });
+
+  describe("output privacy (no PII in logs)", () => {
+    it("dry-run output with prefix contains no account IDs or prefix value", async () => {
+      const { runDryRun } = await import("../credit-status-metafield-backfill");
+
+      // Capture what the dry-run would produce
+      const result = await runDryRun(sql, "seed-account-");
+
+      // The result should have stats but stats themselves don't contain IDs
+      expect(result.success).toBe(true);
+      expect(result.grandTotal).toBe(2);
+
+      // Verify stats don't contain any ID-like strings
+      const statsJson = JSON.stringify(result.stats);
+      expect(statsJson).not.toContain("seed-account-");
+      expect(statsJson).not.toContain(SEED_ACCOUNT_A_ID);
+      expect(statsJson).not.toContain(SEED_ACCOUNT_B_ID);
     });
   });
 });
