@@ -29,6 +29,7 @@ vi.mock("~/services/gating.server", () => ({
     companies: { current: 0, limit: 3 },
     importsThisMonth: { current: 0, limit: 1 },
   }),
+  isGatingEnforced: vi.fn().mockReturnValue(false),
 }));
 
 vi.mock("~/lib/aging-queries.server", () => ({
