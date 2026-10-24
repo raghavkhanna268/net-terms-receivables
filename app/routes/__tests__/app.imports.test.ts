@@ -8,18 +8,81 @@
  * 4. CHEQUE/ACH non-UTR refs get SYNTH- keys
  * 5. Cross-shop isolation: shop B's session can't see or affect shop A's rows
  * 6. Oversized and invalid payloads are rejected
- * 7. runMatcher is invoked after successful import
+ * 7. runMatcher is invoked after successful import with inserts
  * 8. PII (remitter names, narrations) is NEVER logged
+ * 9. Date boundary tests: just inside window passes, just outside rejected
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi, afterEach } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
-import { requestContext } from "~/lib/request-context.server";
-import { action, validateImportRequest } from "../app.imports";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
+
+// ============================================================================
+// Date helpers - all test dates are relative to today
+// ============================================================================
+
+/**
+ * Get ISO date string for N days ago (or in the future if negative).
+ */
+function daysAgo(n: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Get ISO date string for today.
+ */
+function today(): string {
+  return daysAgo(0);
+}
+
+/**
+ * Get ISO date string for yesterday.
+ */
+function yesterday(): string {
+  return daysAgo(1);
+}
+
+/**
+ * Get a date just inside the valid window (2 years - 1 day ago).
+ */
+function justInsideWindow(): string {
+  return daysAgo(365 * 2 - 1);
+}
+
+/**
+ * Get a date just outside the valid window (2 years + 1 day ago).
+ */
+function justOutsideWindow(): string {
+  return daysAgo(365 * 2 + 1);
+}
+
+// ============================================================================
+// Test helpers
+// ============================================================================
+
+interface ImportActionResult {
+  success: boolean;
+  importId?: string;
+  error?: string;
+  details?: string[];
+  counts?: {
+    inserted: number;
+    duplicates: number;
+    rejected: number;
+    total: number;
+  };
+  matcher?: {
+    paymentsProcessed: number;
+    matchesCreated: number;
+    highConfidenceMatches: number;
+    hasMore: boolean;
+  } | null;
+}
 
 /**
  * Create a mock request with JSON body.
@@ -47,24 +110,37 @@ function createMockContext(shopDomain: string) {
   };
 }
 
-interface ImportActionResult {
-  success: boolean;
-  importId?: string;
-  error?: string;
-  details?: string[];
-  counts?: {
-    inserted: number;
-    duplicates: number;
-    rejected: number;
-    total: number;
-  };
-  matcher?: {
-    paymentsProcessed: number;
-    matchesCreated: number;
-    highConfidenceMatches: number;
-    hasMore: boolean;
-  } | null;
+/**
+ * Parse response JSON with type.
+ */
+async function parseResponse(response: Response): Promise<ImportActionResult> {
+  return response.json() as Promise<ImportActionResult>;
 }
+
+// ============================================================================
+// Mocked matcher for vi.mock hoisting
+// ============================================================================
+
+// Track matcher calls across all tests
+const matcherCalls: Array<{ shopId: string }> = [];
+
+// Use vi.mock with hoisting - this is applied before any imports
+vi.mock("~/services/matcher.server", () => ({
+  runMatcher: vi.fn(async (_sql: unknown, shopId: string) => {
+    matcherCalls.push({ shopId });
+    return {
+      paymentsProcessed: 1,
+      matchesCreated: 0,
+      highConfidenceMatches: 0,
+      hasMore: false,
+    };
+  }),
+  MAX_PAYMENTS_PER_REQUEST: 100,
+}));
+
+// Now import after mock is set up
+import { requestContext } from "~/lib/request-context.server";
+import { action, validateImportRequest } from "../app.imports";
 
 /**
  * Call the real action inside request context.
@@ -89,22 +165,12 @@ async function callAction(
   });
 }
 
-/**
- * Parse response JSON with type.
- */
-async function parseResponse(response: Response): Promise<ImportActionResult> {
-  return response.json() as Promise<ImportActionResult>;
-}
-
 describeWithDb("Bank Import Action Integration Tests", () => {
   let sql: ReturnType<typeof postgres>;
   let testShopId: string;
   let testShop2Id: string;
   let TEST_SHOP_DOMAIN: string;
   let TEST_SHOP2_DOMAIN: string;
-  
-  // Spy on matcher to verify it's called
-  let matcherSpy: ReturnType<typeof vi.fn>;
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
@@ -144,23 +210,12 @@ describeWithDb("Bank Import Action Integration Tests", () => {
     await sql`DELETE FROM "Payment" WHERE "shopId" IN (${testShopId}, ${testShop2Id})`;
     await sql`DELETE FROM "BankImport" WHERE "shopId" IN (${testShopId}, ${testShop2Id})`;
     
-    // Stub runMatcher to avoid side effects and track invocations
-    matcherSpy = vi.fn().mockResolvedValue({
-      paymentsProcessed: 1,
-      matchesCreated: 0,
-      highConfidenceMatches: 0,
-      hasMore: false,
-    });
-    
-    vi.doMock("~/services/matcher.server", () => ({
-      runMatcher: matcherSpy,
-      MAX_PAYMENTS_PER_REQUEST: 100,
-    }));
+    // Clear matcher call tracking
+    matcherCalls.length = 0;
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
-    vi.resetModules();
+    vi.clearAllMocks();
   });
 
   describe("Payment insertion via real action", () => {
@@ -170,7 +225,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
         fileName: "test.csv",
         credits: [
           {
-            date: "2025-01-15",
+            date: yesterday(),
             amountPaise: 1000000,
             rail: "NEFT",
             utr: "HDFCN26296000001",
@@ -178,7 +233,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
             narration: "NEFT CR-ACME CORP-INV001",
           },
           {
-            date: "2025-01-16",
+            date: today(),
             amountPaise: 2000000,
             rail: "RTGS",
             utr: "HDFCR26296000002",
@@ -210,7 +265,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
         fileName: "test.csv",
         credits: [
           {
-            date: "2025-01-15",
+            date: yesterday(),
             amountPaise: 1000000,
             rail: "NEFT",
             utr: "HDFCN26296REIMPORT",
@@ -242,19 +297,20 @@ describeWithDb("Bank Import Action Integration Tests", () => {
     });
 
     it("(c) two same-day credits with different balancePaise both insert", async () => {
+      const testDate = yesterday();
       const payload = {
         bank: "HDFC",
         fileName: "same-day.csv",
         credits: [
           {
-            date: "2025-01-15",
+            date: testDate,
             amountPaise: 500000,
             balancePaise: 10000000,
             rail: "CHEQUE",
             narration: "CHEQUE DEPOSIT",
           },
           {
-            date: "2025-01-15",
+            date: testDate,
             amountPaise: 500000,
             balancePaise: 10500000, // Different balance = different hash
             rail: "CHEQUE",
@@ -285,14 +341,14 @@ describeWithDb("Bank Import Action Integration Tests", () => {
         fileName: "cheques.csv",
         credits: [
           {
-            date: "2025-01-15",
+            date: yesterday(),
             amountPaise: 500000,
             rail: "CHEQUE",
             utr: "000123", // Invalid UTR for cheque
             narration: "CHEQUE 000123 FROM BUYER A",
           },
           {
-            date: "2025-01-15",
+            date: yesterday(),
             amountPaise: 600000,
             rail: "ACH",
             utr: "ACH-REF-456", // Invalid UTR for ACH
@@ -323,7 +379,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
         fileName: "shopA.csv",
         credits: [
           {
-            date: "2025-01-15",
+            date: yesterday(),
             amountPaise: 1000000,
             rail: "NEFT",
             utr: "HDFCN26296SHOPA1",
@@ -343,7 +399,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
         fileName: "shopB.csv",
         credits: [
           {
-            date: "2025-01-15",
+            date: yesterday(),
             amountPaise: 1000000,
             rail: "NEFT",
             utr: "HDFCN26296SHOPA1", // Same UTR!
@@ -371,7 +427,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
 
     it("(f.1) rejects oversized payload (>1000 rows)", async () => {
       const credits = Array.from({ length: 1001 }, (_, i) => ({
-        date: "2025-01-15",
+        date: yesterday(),
         amountPaise: 1000,
         rail: "NEFT",
         narration: `Payment ${i}`,
@@ -397,7 +453,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
         fileName: "invalid.csv",
         credits: [
           {
-            date: "2025-01-15",
+            date: yesterday(),
             amountPaise: -1000,
             rail: "NEFT",
             narration: "Negative",
@@ -418,7 +474,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
         fileName: "invalid.csv",
         credits: [
           {
-            date: "2025-01-15",
+            date: yesterday(),
             amountPaise: 1000,
             rail: "NEFT",
             narration: "Test",
@@ -431,35 +487,65 @@ describeWithDb("Bank Import Action Integration Tests", () => {
     });
   });
 
+  describe("Date boundary tests", () => {
+    it("date just inside window (2 years - 1 day ago) passes", async () => {
+      const payload = {
+        bank: "HDFC",
+        fileName: "old-valid.csv",
+        credits: [
+          {
+            date: justInsideWindow(),
+            amountPaise: 1000000,
+            rail: "NEFT",
+            utr: "HDFCN26296OLDVALID",
+            narration: "NEFT CR-OLD BUT VALID",
+          },
+        ],
+      };
+
+      const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      expect(response.status).toBe(200);
+
+      const data = await parseResponse(response);
+      expect(data.success).toBe(true);
+      expect(data.counts?.inserted).toBe(1);
+    });
+
+    it("date just outside window (2 years + 1 day ago) is rejected", async () => {
+      const payload = {
+        bank: "HDFC",
+        fileName: "too-old.csv",
+        credits: [
+          {
+            date: justOutsideWindow(),
+            amountPaise: 1000000,
+            rail: "NEFT",
+            utr: "HDFCN26296TOOOLD",
+            narration: "NEFT CR-TOO OLD",
+          },
+        ],
+      };
+
+      const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      expect(response.status).toBe(400);
+
+      const data = await parseResponse(response);
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("dates outside valid range");
+    });
+  });
+
   describe("runMatcher integration", () => {
     it("(g) runMatcher is invoked after successful import with inserts", async () => {
-      // Re-import the matcher module to get fresh mock
-      vi.resetModules();
-      
-      // Create a trackable spy
-      const runMatcherCalls: Array<{ shopId: string }> = [];
-      vi.doMock("~/services/matcher.server", () => ({
-        runMatcher: vi.fn(async (_sql: unknown, shopId: string) => {
-          runMatcherCalls.push({ shopId });
-          return {
-            paymentsProcessed: 1,
-            matchesCreated: 0,
-            highConfidenceMatches: 0,
-            hasMore: false,
-          };
-        }),
-        MAX_PAYMENTS_PER_REQUEST: 100,
-      }));
-
-      // Need to re-import action to pick up the mock
-      const { action: freshAction } = await import("../app.imports");
+      // Clear call tracking
+      matcherCalls.length = 0;
 
       const payload = {
         bank: "HDFC",
         fileName: "matcher-test.csv",
         credits: [
           {
-            date: "2025-01-15",
+            date: yesterday(),
             amountPaise: 1000000,
             rail: "NEFT",
             utr: "HDFCN26296MATCHER1",
@@ -468,26 +554,15 @@ describeWithDb("Bank Import Action Integration Tests", () => {
         ],
       };
 
-      const request = createMockRequest(payload);
-      const context = createMockContext(TEST_SHOP_DOMAIN);
-      const url = new URL(request.url);
-
-      await requestContext.run({ getSql: () => sql }, async () => {
-        const response = await freshAction({
-          request,
-          context: context as never,
-          params: {},
-          url,
-          pattern: "/app/imports",
-        });
-        expect(response.status).toBe(200);
-        const data = await parseResponse(response);
-        expect(data.counts?.inserted).toBe(1);
-      });
+      const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      expect(response.status).toBe(200);
+      
+      const data = await parseResponse(response);
+      expect(data.counts?.inserted).toBe(1);
 
       // Verify matcher was called
-      expect(runMatcherCalls.length).toBe(1);
-      expect(runMatcherCalls[0].shopId).toBe(testShopId);
+      expect(matcherCalls.length).toBe(1);
+      expect(matcherCalls[0].shopId).toBe(testShopId);
     });
   });
 
@@ -528,7 +603,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
         fileName: "pii-test.csv",
         credits: [
           {
-            date: "2025-01-15",
+            date: yesterday(),
             amountPaise: 1000000,
             rail: "NEFT",
             utr: "HDFCN26296PIITEST",
@@ -536,7 +611,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
             narration: "NEFT CR-ACME CORP-INV001",
           },
           {
-            date: "2025-01-16",
+            date: today(),
             amountPaise: 2000000,
             rail: "RTGS",
             utr: "HDFCR26296PIITEST",
@@ -567,7 +642,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
         fileName: "pii-dupe.csv",
         credits: [
           {
-            date: "2025-01-15",
+            date: yesterday(),
             amountPaise: 1000000,
             rail: "NEFT",
             utr: "HDFCN26296PIIDUPE",
@@ -600,7 +675,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
         fileName: "error-test.csv",
         credits: [
           {
-            date: "2025-01-15",
+            date: yesterday(),
             amountPaise: 1000000,
             rail: "NEFT",
             payerName: "ACME Corp",
@@ -631,7 +706,7 @@ describe("Import validation (unit tests)", () => {
       fileName: "statement.csv",
       credits: [
         {
-          date: "2025-01-15",
+          date: yesterday(),
           amountPaise: 1000050,
           rail: "NEFT",
           utr: "HDFCN26296000001",
@@ -648,7 +723,7 @@ describe("Import validation (unit tests)", () => {
 
   it("validates ALL rows (not just first 10)", () => {
     const credits = Array.from({ length: 15 }, (_, i) => ({
-      date: "2025-01-15",
+      date: yesterday(),
       amountPaise: i === 11 ? -100 : 1000,
       rail: "NEFT",
       narration: `Payment ${i}`,
@@ -697,7 +772,7 @@ describe("Import validation (unit tests)", () => {
 
   it("rejects oversized payload (>1000 rows)", () => {
     const credits = Array.from({ length: 1001 }, (_, i) => ({
-      date: "2025-01-15",
+      date: yesterday(),
       amountPaise: 1000,
       rail: "NEFT",
       narration: `Payment ${i}`,
@@ -720,7 +795,7 @@ describe("Import validation (unit tests)", () => {
       fileName: "statement.csv",
       credits: [
         {
-          date: "2025-01-15",
+          date: yesterday(),
           amountPaise: -1000,
           rail: "NEFT",
           narration: "Negative amount",
@@ -738,7 +813,7 @@ describe("Import validation (unit tests)", () => {
       fileName: "statement.csv",
       credits: [
         {
-          date: "2025-01-15",
+          date: yesterday(),
           amountPaise: 0,
           rail: "NEFT",
           narration: "Zero amount",
@@ -774,7 +849,7 @@ describe("Import validation (unit tests)", () => {
       fileName: "statement.csv",
       credits: [
         {
-          date: "2025-01-15",
+          date: yesterday(),
           amountPaise: 1000,
           rail: "SWIFT",
           narration: "Invalid rail",
@@ -792,7 +867,7 @@ describe("Import validation (unit tests)", () => {
       fileName: "statement.csv",
       credits: [
         {
-          date: "2025-01-15",
+          date: yesterday(),
           amountPaise: 1000,
           rail: "NEFT",
           narration: "Test",
@@ -810,7 +885,7 @@ describe("Import validation (unit tests)", () => {
       fileName: "statement.csv",
       credits: [
         {
-          date: "2025-01-15",
+          date: yesterday(),
           amountPaise: 1000,
         },
       ],
@@ -827,7 +902,7 @@ describe("Import validation (unit tests)", () => {
         fileName: "statement.csv",
         credits: [
           {
-            date: "2025-01-15",
+            date: yesterday(),
             amountPaise: 1000,
             rail,
             narration: `Test ${rail}`,
@@ -847,7 +922,7 @@ describe("Import validation (unit tests)", () => {
       fileName: "statement.csv",
       credits: [
         {
-          date: "2025-01-15",
+          date: yesterday(),
           amountPaise: 1000,
           balancePaise: 50000,
           rail: "NEFT",
@@ -867,7 +942,7 @@ describe("Import validation (unit tests)", () => {
       fileName: "statement.csv",
       credits: [
         {
-          date: "2025-01-15",
+          date: yesterday(),
           amountPaise: 1000,
           rail: "NEFT",
           narration: "No dedupe key",
