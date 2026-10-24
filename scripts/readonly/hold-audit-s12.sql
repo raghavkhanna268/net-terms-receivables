@@ -1,7 +1,7 @@
 -- hold-audit-s12.sql (READ-ONLY)
 -- Developer's S12 hold questions (Q1-Q6). SELECT only, inside a READ ONLY transaction.
 -- Prints only ids, enums, booleans, timestamps and counts. Never selects
--- name, holdNote, emails, domains, payloads or free-text JSON fields.
+-- name, holdNote, emails, domains, money amounts, payloads or free-text JSON fields.
 -- Note: AuditEvent's timestamp column is "at" (no createdAt).
 -- Var: since (ISO-8601 UTC, e.g. 2026-10-24T09:30:00Z)
 \set ON_ERROR_STOP 1
@@ -50,7 +50,7 @@ SELECT ev.audit_event_id, ev.type, ev.at,
        ev.buyer_account_id,
        CASE WHEN ev.reason_code_raw ~ '^[A-Za-z0-9_.:-]{1,40}$' THEN ev.reason_code_raw END AS reason_code,
        CASE WHEN ev.source_raw ~ '^[A-Za-z0-9_.:-]{1,40}$' THEN ev.source_raw END AS source,
-       i.id AS invoice_id, i.status, i.outstanding, (i."dueAt" IS NULL) AS due_at_is_null,
+       i.id AS invoice_id, i.status, (i.outstanding > 0) AS outstanding_gt_0, (i."dueAt" IS NULL) AS due_at_is_null,
        -- Invoice has no paidAt column; status='paid' + updatedAt is the closest signal
        CASE WHEN i.status = 'paid' THEN i."updatedAt" END AS paid_status_updated_at
 FROM ev
@@ -62,7 +62,7 @@ LIMIT 500;
 SELECT ba.id AS buyer_account_id, ba."holdState", ba."manualHold", ba.bypass,
        CASE WHEN ba."holdReasonCode" ~ '^[A-Z0-9_]{1,40}$' THEN ba."holdReasonCode" END AS hold_reason_code,
        ba."syncPending", ba."syncVersion", ba."updatedAt",
-       i.id AS invoice_id, i.status, i.outstanding, (i."dueAt" IS NULL) AS due_at_is_null,
+       i.id AS invoice_id, i.status, (i.outstanding > 0) AS outstanding_gt_0, (i."dueAt" IS NULL) AS due_at_is_null,
        i."dueAt", CASE WHEN i.status = 'paid' THEN i."updatedAt" END AS paid_status_updated_at
 FROM "BuyerAccount" ba
 LEFT JOIN "Invoice" i ON i."buyerAccountId" = ba.id
@@ -74,7 +74,7 @@ LIMIT 500;
 SELECT replace(ba."companyLocationId", 'gid://shopify/CompanyLocation/', '') AS company_location_id,
        ba.id AS buyer_account_id, ba."holdState", ba."manualHold", ba.bypass,
        ba."syncPending", ba."syncVersion", (ba.gated_at IS NOT NULL) AS gated,
-       i.id AS invoice_id, i.status, i.outstanding, i."dueAt",
+       i.id AS invoice_id, i.status, (i.outstanding > 0) AS outstanding_gt_0, i."dueAt",
        NOW() - i."dueAt" AS past_due_by,
        (i."dueAt" < NOW() - INTERVAL '1 day') AS more_than_1_day_past_due
 FROM "BuyerAccount" ba
