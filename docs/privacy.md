@@ -58,11 +58,16 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 
 **Note:** `Payment.narration` and `Payment.payerText` may contain personal data from bank statements. These fields are:
 - Redacted to `[REDACTED]` during customers/redact if the payment is matched to the customer's buyer account
-- Purged to `[RETENTION_PURGED]` after **180 days** (provisional) for **unmatched** payments via nightly pg_cron job
+- Purged to `[RETENTION_PURGED]` after **180 days** for **unmatched** payments via nightly pg_cron job
 
-**Retention purge:** The `s22_purge_unmatched_narration` pg_cron job runs daily at 04:00 UTC and clears narration/payerText on unmatched payments older than the retention window. This preserves amounts, UTR, rail, value date, and status for reconciliation purposes while removing potentially PII-bearing text. Matched payments retain their narration until explicitly redacted via customers/redact or shop/redact.
+**Retention purge details:**
+- **What is purged:** `narration` → `[RETENTION_PURGED]`, `payerText` → `NULL`
+- **What is kept:** `amount`, `utr`, `rail`, `valueDate`, `status`, and match history
+- **Age calculation:** From `valueDate` (bank statement date), not import date
+- **Schedule:** Daily at 04:00 UTC (09:30 IST) via `s22_purge_unmatched_narration` pg_cron job
+- **Scope:** Unmatched payments only; matched payments retain narration until explicitly redacted via customers/redact or shop/redact
 
-**PROVISIONAL:** The 180-day retention window is provisional, pending Raghav. The single source of truth is the `s22_unmatched_narration_retention_days()` SQL function in migration `20261101000000_s22_followups`. The TS constant `UNMATCHED_NARRATION_RETENTION_DAYS` in `app/services/compliance/compliance.server.ts` documents the same value for reference.
+**Configuration:** The 180-day retention window is configured in the `s22_unmatched_narration_retention_days()` SQL function in migration `20261101000000_s22_followups`. The TS constant `UNMATCHED_NARRATION_RETENTION_DAYS` in `app/services/compliance/compliance.server.ts` documents the same value for reference.
 
 ### 2.5 Data Request Records (S22)
 
@@ -142,7 +147,7 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | Tagged Customer Data | Until customers/redact or shop/redact | Compliance webhooks |
 | Invoices | Retained (no customer-identifying fields) | Buyer relationship anonymized on customers/redact |
 | Payments (matched) | Until shop/redact | Narration/payerText redacted on customers/redact if linked to customer via Match→Invoice→BuyerAccount |
-| Payments (unmatched narration) | **180 days (provisional)** | Narration/payerText cleared nightly via pg_cron `s22_purge_unmatched_narration`; amounts/UTR/status retained |
+| Payments (unmatched narration) | **180 days** | Narration/payerText cleared daily at 04:00 UTC via pg_cron `s22_purge_unmatched_narration`; amounts/UTR/rail retained |
 | PayerAlias | Until customers/redact or shop/redact | Deleted on customers/redact for the customer's buyer account; cascades on shop/redact |
 | Data Request Records | 30 days (DPDP minimisation) | Purged on next access, and nightly where pg_cron is enabled; also on customers/redact or shop/redact (CASCADE) |
 | Audit Events | Until shop/redact | Automatic cascade |

@@ -1,33 +1,32 @@
 -- S22 Follow-ups: Retention job for unmatched payment narration
 --
 -- This migration adds:
--- 1. s22_unmatched_narration_retention_days() - config function (180 days, PROVISIONAL)
+-- 1. s22_unmatched_narration_retention_days() - config function (180 days)
 -- 2. s22_purge_unmatched_narration() - purge function called by pg_cron and tests
--- 3. pg_cron job scheduling the purge daily at 04:00 UTC
+-- 3. pg_cron job scheduling the purge daily at 04:00 UTC (09:30 IST)
 -- 4. idx_payment_status_valuedate index for the purge query
 --
 -- What's retained: amount, UTR, rail, valueDate, status, importId, match history
 -- What's cleared: narration → '[RETENTION_PURGED]', payerText → NULL
 --
 -- Age measured from valueDate (bank statement date), not createdAt (import date).
--- RETENTION WINDOW: 180 days (PROVISIONAL, pending Raghav)
+-- RETENTION WINDOW: 180 days
 
 -- =============================================================================
 -- RETENTION WINDOW CONFIG FUNCTION
 -- =============================================================================
--- PROVISIONAL: 180 days, pending Raghav
--- This is the SINGLE source of truth for the retention window.
+-- 180 days - single source of truth for the retention window.
 
 CREATE OR REPLACE FUNCTION public.s22_unmatched_narration_retention_days()
 RETURNS INTEGER
 LANGUAGE sql
 IMMUTABLE
 AS $$
-  SELECT 180  -- PROVISIONAL, pending Raghav
+  SELECT 180
 $$;
 
 COMMENT ON FUNCTION public.s22_unmatched_narration_retention_days() IS
-  'S22: Retention window (days) for unmatched payment narration. PROVISIONAL: 180 days, pending Raghav. Single source of truth.';
+  'S22: Retention window (days) for unmatched payment narration. Single source of truth.';
 
 -- =============================================================================
 -- PURGE FUNCTION
