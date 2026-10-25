@@ -856,7 +856,7 @@ export default function Index() {
           </s-list-item>
           <s-list-item>Send payment reminders</s-list-item>
           <s-list-item>
-            Match Indian bank transfer payments (NEFT/RTGS/IMPS/UPI) to orders
+            Match Indian bank transfer payments (NEFT/RTGS/IMPS/UPI/CMS) to orders
           </s-list-item>
         </s-unordered-list>
       </s-section>
