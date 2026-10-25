@@ -4,7 +4,7 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { resolvePlan, type ResolvedPlan } from "~/services/plan.server";
 import { getUsageStats, isGatingEnforced } from "~/services/gating.server";
-import type { PlanKey } from "~/lib/entitlements";
+import { resolvePlanKey, type PlanKey } from "~/lib/entitlements";
 import { PlanBanner, PLAN_DISPLAY_NAMES } from "~/components/UpgradePrompt";
 import {
   getShopAgingTotals,
@@ -361,8 +361,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     shopCurrency: shop?.currency ?? "INR",
     plan: planData
       ? {
-          key: planData.plan.key,
-          name: planData.subscriptionName ?? planData.plan.key,
+          key: resolvePlanKey(planData.plan.key),
+          name: PLAN_DISPLAY_NAMES[resolvePlanKey(planData.plan.key) as PlanKey],
           isTest: planData.isTest,
         }
       : null,
@@ -478,7 +478,11 @@ function AgingBucketSummary({
   );
 }
 
-function BuyerLedgerTable({
+/**
+ * BuyerLedgerTable: Renders the buyer accounts table.
+ * Exported for render testing.
+ */
+export function BuyerLedgerTable({
   rows,
   sortBy,
   sortOrder,
@@ -488,6 +492,7 @@ function BuyerLedgerTable({
   onlyOverLimit,
   onNextPage,
   onPreviousPage,
+  gatingEnforced,
 }: {
   rows: BuyerLedgerRow[];
   sortBy: string;
@@ -498,6 +503,7 @@ function BuyerLedgerTable({
   onlyOverLimit: boolean;
   onNextPage: string;
   onPreviousPage: string;
+  gatingEnforced: boolean;
 }) {
   const totalPages = Math.ceil(totalCount / pageSize);
   const fp = onlyOverLimit ? "&overlimit=true" : "";
@@ -553,7 +559,7 @@ function BuyerLedgerTable({
                   <s-link href={`?buyer=${row.buyer_account_id}&sortBy=${sortBy}&sortOrder=${sortOrder}&page=${page}${fp}`}>
                     {row.buyer_name}
                   </s-link>
-                  {row.is_gated && <s-badge tone="warning">over plan limit</s-badge>}
+                  {gatingEnforced && row.is_gated && <s-badge tone="warning">over plan limit</s-badge>}
                 </s-table-cell>
                 <s-table-cell>
                   {creditLimit !== null
@@ -806,7 +812,7 @@ export default function Index() {
                 <s-paragraph>
                   <s-text type="strong">Show: </s-text>
                   {!onlyOverLimit ? "All" : <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}`}>All</s-link>}
-                  {overLimitCount > 0 && (
+                  {gatingEnforced && overLimitCount > 0 && (
                     <>
                       {" | "}
                       {onlyOverLimit ? "Over limit only" : <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}&overlimit=true`}>Over limit only</s-link>}
@@ -824,6 +830,7 @@ export default function Index() {
                     onlyOverLimit={onlyOverLimit}
                     onNextPage={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page + 1}${onlyOverLimit ? "&overlimit=true" : ""}`}
                     onPreviousPage={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page - 1}${onlyOverLimit ? "&overlimit=true" : ""}`}
+                    gatingEnforced={gatingEnforced}
                   />
                 ) : (
                   <s-empty-state heading="No buyer accounts">
