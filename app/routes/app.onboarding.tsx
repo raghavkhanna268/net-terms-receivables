@@ -14,7 +14,7 @@ import type {
   LoaderFunctionArgs,
   ActionFunctionArgs,
 } from "react-router";
-import { useLoaderData, useActionData, Form, useNavigation, useRevalidator } from "react-router";
+import { useLoaderData, useActionData, Form, useNavigation, useRevalidator, useRouteError, isRouteErrorResponse } from "react-router";
 import { useEffect, useRef } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
@@ -939,6 +939,44 @@ export default function OnboardingPage() {
           Check the documentation in this repository for detailed setup
           instructions and troubleshooting.
         </s-paragraph>
+      </s-section>
+    </s-page>
+  );
+}
+
+export function ErrorBoundary() {
+  const error = useRouteError();
+
+  if (isRouteErrorResponse(error) && error.status !== 404) {
+    return boundary.error(error);
+  }
+
+  let heading = "Something went wrong";
+  let message = "An unexpected error occurred while loading the setup guide.";
+
+  if (isRouteErrorResponse(error)) {
+    heading = `Error ${error.status}`;
+    if (error.status === 404) {
+      message = "The page you're looking for doesn't exist.";
+    }
+  } else if (error instanceof Error && import.meta.env.DEV) {
+    message = error.message;
+  }
+
+  return (
+    <s-page heading="Setup Guide">
+      <s-section>
+        <s-banner tone="critical" heading={heading}>
+          <s-paragraph>{message}</s-paragraph>
+          <s-stack direction="inline" gap="base">
+            <s-button onClick={() => window.location.reload()}>
+              Try again
+            </s-button>
+            <s-button href="/app" variant="tertiary">
+              Go to dashboard
+            </s-button>
+          </s-stack>
+        </s-banner>
       </s-section>
     </s-page>
   );

@@ -55,38 +55,57 @@ vi.mock("luxon", async () => {
 function createMockSql() {
   const mockResults = new Map<string, unknown>();
 
-  const sql = Object.assign(
-    vi.fn(async (strings: TemplateStringsArray) => {
-      const query = strings.join("?");
+  const createQueryHandler = () => async (strings: TemplateStringsArray) => {
+    const query = strings.join("?");
 
-      if (query.includes("FROM \"Invoice\"") && query.includes("INNER JOIN")) {
-        return mockResults.get("invoice") ?? [];
-      }
-      if (query.includes("FROM s8_tagged_customers")) {
-        return mockResults.get("customer") ?? [];
-      }
-      if (query.includes("EXISTS") && query.includes("ReminderLog")) {
-        return mockResults.get("reminder_exists") ?? [{ exists: false }];
-      }
-      if (query.includes("INSERT INTO \"ReminderLog\"")) {
-        return mockResults.get("claim_slot") ?? [{ id: "new-log-id" }];
-      }
-      if (query.includes("DELETE FROM \"ReminderLog\"")) {
-        return [];
-      }
-      if (query.includes("WITH monthly_sum AS") && query.includes("upserted AS")) {
-        return mockResults.get("global_increment") ?? [{ dailyCount: 1, monthlyTotal: 1 }];
-      }
-      if (query.includes("GREATEST(0, daily_count - 1)")) {
-        return [];
-      }
+    if (query.includes("FROM \"Invoice\"") && query.includes("INNER JOIN")) {
+      return mockResults.get("invoice") ?? [];
+    }
+    if (query.includes("FROM s8_tagged_customers")) {
+      return mockResults.get("customer") ?? [];
+    }
+    if (query.includes("EXISTS") && query.includes("ReminderLog")) {
+      return mockResults.get("reminder_exists") ?? [{ exists: false }];
+    }
+    if (query.includes("INSERT INTO \"ReminderLog\"")) {
+      return mockResults.get("claim_slot") ?? [{ id: "new-log-id" }];
+    }
+    if (query.includes("DELETE FROM \"ReminderLog\"")) {
       return [];
-    }),
+    }
+    // Advisory lock for global send cap (transaction-based approach)
+    if (query.includes("pg_advisory_xact_lock")) {
+      return [];
+    }
+    // Global sends count query (inside transaction)
+    if (query.includes("dailyCount") && query.includes("monthlyTotal") && query.includes("s18_global_sends")) {
+      const counts = mockResults.get("global_counts") ?? { dailyCount: 0, monthlyTotal: 0 };
+      return [counts];
+    }
+    // Global sends INSERT...ON CONFLICT (reservation increment)
+    if (query.includes("INSERT INTO s18_global_sends") && query.includes("ON CONFLICT")) {
+      const result = mockResults.get("global_increment") ?? [{ dailyCount: 1 }];
+      return result;
+    }
+    if (query.includes("GREATEST(0, daily_count - 1)")) {
+      return [];
+    }
+    return [];
+  };
+
+  const queryHandler = createQueryHandler();
+  const mockTx = Object.assign(vi.fn(queryHandler), {});
+
+  const sql = Object.assign(
+    vi.fn(queryHandler),
     {
       json: vi.fn((v) => v),
       unsafe: vi.fn((s: string) => s),
       setMockResult: (key: string, value: unknown) => mockResults.set(key, value),
       clearMockResults: () => mockResults.clear(),
+      begin: vi.fn(async <T>(callback: (tx: typeof mockTx) => Promise<T>): Promise<T> => {
+        return callback(mockTx);
+      }),
     }
   ) as unknown as import("~/lib/db-light.server").Sql & {
     setMockResult: (key: string, value: unknown) => void;
