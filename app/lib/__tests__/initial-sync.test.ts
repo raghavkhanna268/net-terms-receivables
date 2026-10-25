@@ -55,7 +55,7 @@ describe("initial-sync.server", () => {
         if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([
             {
-              bulk_op_id: "gid://shopify/BulkOperation/1",
+              bulk_operation_id: "gid://shopify/BulkOperation/1",
               reconcile_stage: "companies",
               completed_at: null,
               failure_count: 0,
@@ -85,7 +85,7 @@ describe("initial-sync.server", () => {
         if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([
             {
-              bulk_op_id: "gid://shopify/BulkOperation/1",
+              bulk_operation_id: "gid://shopify/BulkOperation/1",
               reconcile_stage: "companies",
               completed_at: new Date("2026-10-24T10:05:00Z"),
               failure_count: 0,
@@ -115,7 +115,7 @@ describe("initial-sync.server", () => {
         if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([
             {
-              bulk_op_id: "gid://shopify/BulkOperation/1",
+              bulk_operation_id: "gid://shopify/BulkOperation/1",
               reconcile_stage: "companies",
               completed_at: new Date("2026-10-24T10:05:00Z"),
               failure_count: 0,
@@ -126,7 +126,7 @@ describe("initial-sync.server", () => {
         if (query.includes("s6_bulk_operations") && query.includes("orders")) {
           return Promise.resolve([
             {
-              bulk_op_id: "gid://shopify/BulkOperation/2",
+              bulk_operation_id: "gid://shopify/BulkOperation/2",
               reconcile_stage: "orders",
               completed_at: new Date("2026-10-24T10:10:00Z"),
               failure_count: 0,
@@ -153,7 +153,7 @@ describe("initial-sync.server", () => {
         if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([
             {
-              bulk_op_id: "gid://shopify/BulkOperation/1",
+              bulk_operation_id: "gid://shopify/BulkOperation/1",
               reconcile_stage: "companies",
               completed_at: null,
               failure_count: 5,
@@ -176,14 +176,14 @@ describe("initial-sync.server", () => {
       expect(result.status).toBe("failed");
     });
 
-    it("returns failed when DLQ entries exist for current run's bulk_op_id", async () => {
+    it("returns failed when DLQ entries exist for current run's bulk_operation_id", async () => {
       const companiesStarted = new Date("2026-10-24T10:00:00Z");
       mockSql.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([
             {
-              bulk_op_id: "gid://shopify/BulkOperation/1",
+              bulk_operation_id: "gid://shopify/BulkOperation/1",
               reconcile_stage: "companies",
               completed_at: null,
               failure_count: 0,
@@ -213,7 +213,7 @@ describe("initial-sync.server", () => {
         if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([
             {
-              bulk_op_id: "gid://shopify/BulkOperation/2",
+              bulk_operation_id: "gid://shopify/BulkOperation/2",
               reconcile_stage: "companies",
               completed_at: null,
               failure_count: 0,
@@ -249,7 +249,7 @@ describe("initial-sync.server", () => {
         if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([
             {
-              bulk_op_id: "gid://shopify/BulkOperation/1",
+              bulk_operation_id: "gid://shopify/BulkOperation/1",
               reconcile_stage: "companies",
               completed_at: new Date("2026-10-24T10:05:00Z"),
               failure_count: 0,
@@ -260,7 +260,7 @@ describe("initial-sync.server", () => {
         if (query.includes("s6_bulk_operations") && query.includes("orders")) {
           return Promise.resolve([
             {
-              bulk_op_id: "gid://shopify/BulkOperation/2",
+              bulk_operation_id: "gid://shopify/BulkOperation/2",
               reconcile_stage: "orders",
               completed_at: null,
               failure_count: 5,
@@ -287,7 +287,7 @@ describe("initial-sync.server", () => {
         if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([
             {
-              bulk_op_id: "gid://shopify/BulkOperation/2",
+              bulk_operation_id: "gid://shopify/BulkOperation/2",
               reconcile_stage: "companies",
               completed_at: new Date("2026-10-24T10:05:00Z"),
               failure_count: 0,
@@ -298,7 +298,7 @@ describe("initial-sync.server", () => {
         if (query.includes("s6_bulk_operations") && query.includes("orders")) {
           return Promise.resolve([
             {
-              bulk_op_id: "gid://shopify/BulkOperation/3",
+              bulk_operation_id: "gid://shopify/BulkOperation/3",
               reconcile_stage: "orders",
               completed_at: new Date("2026-10-24T10:10:00Z"),
               failure_count: 0,
@@ -330,7 +330,7 @@ describe("initial-sync.server", () => {
         if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([
             {
-              bulk_op_id: "gid://shopify/BulkOperation/1",
+              bulk_operation_id: "gid://shopify/BulkOperation/1",
               reconcile_stage: "companies",
               completed_at: null,
               failure_count: 0,
@@ -383,7 +383,7 @@ describe("initial-sync.server", () => {
         if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([
             {
-              bulk_op_id: "gid://shopify/BulkOperation/1",
+              bulk_operation_id: "gid://shopify/BulkOperation/1",
               reconcile_stage: "companies",
               completed_at: null,
               failure_count: 5,
