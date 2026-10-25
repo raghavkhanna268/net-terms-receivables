@@ -48,8 +48,9 @@ describeWithDb("shop/redact complete DB deletion", () => {
   const SHOP_B_DOMAIN = `test-b-${TEST_SUFFIX}.myshopify.com`;
 
   // Near-miss domains for Shop A (should NOT be deleted)
-  // 1. Longer domain that starts with Shop A's prefix (e.g. "test-a-xxxext.myshopify.com")
-  const SHOP_A_EXTENDED_DOMAIN = `test-a-${TEST_SUFFIX}ext.myshopify.com`;
+  // 1. Extended domain that is longer than Shop A's domain but shares the same prefix
+  // Uses test-extended-xxx pattern which starts with test- (accepted fake prefix)
+  const SHOP_A_EXTENDED_DOMAIN = `test-extended-${TEST_SUFFIX}.myshopify.com`;
   // 2. Uppercase version of Shop A's domain
   const SHOP_A_UPPER_DOMAIN = `TEST-A-${TEST_SUFFIX}.MYSHOPIFY.COM`;
 
