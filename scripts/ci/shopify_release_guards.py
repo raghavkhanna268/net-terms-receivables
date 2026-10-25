@@ -148,7 +148,7 @@ def main(root):
         print("scope_guard: FAIL")
         ok = False
     else:
-        print("scope_guard: PASS (toml == wrangler SCOPES == approved 11)")
+        print(f"scope_guard: PASS (toml == wrangler SCOPES == approved {len(APPROVED_SCOPES)})")
 
     cid = parse_toml_client_id(app_toml)
     others = [os.path.basename(p) for p in glob.glob(os.path.join(root, "shopify.app.*.toml"))]

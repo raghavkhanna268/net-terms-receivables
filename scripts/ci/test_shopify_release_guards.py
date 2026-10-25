@@ -100,9 +100,22 @@ if scratch(lambda d: edit(os.path.join(d, "package.json"), '"@shopify/cli": "4.9
     fails.append("unpinned CLI devDependency not failed")
 
 # 13. S24: Adding read_locations (a 9th scope outside the approved 8) fails.
-if scratch(lambda d: edit(os.path.join(d, "shopify.app.toml"), 'scopes = "read_draft_orders,', 'scopes = "read_locations,read_draft_orders,') or
-                     edit(os.path.join(d, "wrangler.jsonc"), '"SCOPES": "read_draft_orders,', '"SCOPES": "read_locations,read_draft_orders,')) == 0:
+def add_read_locations(d):
+    """Add read_locations to both files sequentially."""
+    edit(os.path.join(d, "shopify.app.toml"), 'scopes = "read_draft_orders,', 'scopes = "read_locations,read_draft_orders,')
+    edit(os.path.join(d, "wrangler.jsonc"), '"SCOPES": "read_draft_orders,', '"SCOPES": "read_locations,read_draft_orders,')
+
+# Capture output to verify read_locations is named
+import io
+import contextlib
+_test13_output = io.StringIO()
+with contextlib.redirect_stdout(_test13_output):
+    _test13_rc = scratch(add_read_locations)
+_test13_text = _test13_output.getvalue()
+if _test13_rc == 0:
     fails.append("read_locations (9th scope) not rejected")
+elif "read_locations" not in _test13_text:
+    fails.append("read_locations not named in guard output")
 
 # 14. Deploy step prints no CLI text and classifies errors (stub CLI, fake values only).
 if subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "ci", "test_shopify_deploy_step.py")]).returncode != 0:

@@ -12,7 +12,7 @@
 This plan verifies that:
 - held or over-limit buyers do not see net terms at checkout, and everyone else is unaffected (fail-open)
 - orders from held accounts are put on fulfillment hold and released correctly
-- all of this works with the existing 11 scopes and no PII
+- all of this works with the existing 8 scopes and no PII
 
 ## 2. Preconditions and fixtures (synthetic data only)
 - Shared fixture `tests/fixtures/credit-status.json`. Function input JSON fixtures:
