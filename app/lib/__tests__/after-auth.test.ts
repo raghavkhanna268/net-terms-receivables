@@ -703,14 +703,14 @@ describe("after-auth", () => {
         const safeLogCall = consoleLogSpy.mock.calls.find(
           (call) =>
             typeof call[0] === "string" &&
-            call[0].includes("cleared_uninstalled_at_and_onboarding"),
+            call[0].includes("cleared_uninstalled_at_and_metafield_errors"),
         );
         expect(safeLogCall).toBeDefined();
 
         const logOutput = safeLogCall![0] as string;
         const parsed = JSON.parse(logOutput);
 
-        expect(parsed.event).toBe("cleared_uninstalled_at_and_onboarding");
+        expect(parsed.event).toBe("cleared_uninstalled_at_and_metafield_errors");
         expect(parsed.shopHash).toBeDefined();
         expect(typeof parsed.shopHash).toBe("string");
         expect(parsed.shopHash.length).toBeGreaterThan(0);
