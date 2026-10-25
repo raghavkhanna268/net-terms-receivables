@@ -1117,7 +1117,6 @@ const ADMIN_GRAPHQL_CONST_ALLOWLIST = [
   "payment-customization-registration.server.ts", // Uses PAYMENT_CUSTOMIZATIONS_QUERY, PAYMENT_CUSTOMIZATION_CREATE_MUTATION constants
   "shopify-client.server.ts", // Generic wrapper that takes query as parameter
   "app.onboarding.tsx", // Uses METAFIELD_DEFINITIONS_QUERY constant (S23-02)
-  "app._index.tsx", // #292: Uses mutation const for shop_config metafield write
 ];
 
 /**
