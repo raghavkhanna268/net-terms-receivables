@@ -8,11 +8,15 @@
  * 1. This function enqueues RECONCILE_COMPANIES messages
  * 2. The drain handler starts bulk operations via Admin API
  * 3. The bulk_operations/finish webhook triggers JSONL processing
- * 4. After companies complete, RECONCILE_ORDERS is enqueued
- * 5. The drain processes orders similarly
+ * 4. After companies complete, RECONCILE_CUSTOMERS is enqueued (skipped if no tag rules)
+ * 5. After customers complete, RECONCILE_ORDERS is enqueued
+ * 6. After orders complete, RECONCILE_DRAFT_ORDERS is enqueued
+ * 7. The drain processes each stage similarly
  *
- * Sequential design: Companies must complete before orders to ensure
- * BuyerAccounts exist for order-to-account mapping.
+ * Sequential design: companies → customers → orders → draft_orders
+ * - Companies must complete before customers (B2B contacts)
+ * - Customers must complete before orders (tagged customer buyer accounts)
+ * - Orders must complete before draft_orders (buyer account existence)
  *
  * Idempotency: Uses webhookId pattern "reconcile:<shop>:<YYYY-MM-DD>:<kind>"
  * so a nightly run is idempotent per day.
@@ -29,7 +33,7 @@ import { S6_QUEUES } from "~/lib/pgmq.server";
  * When set, orders stage uses the same key base instead of the date key.
  */
 export interface ReconcileMessage {
-  topic: "RECONCILE_COMPANIES" | "RECONCILE_CUSTOMERS" | "RECONCILE_ORDERS";
+  topic: "RECONCILE_COMPANIES" | "RECONCILE_CUSTOMERS" | "RECONCILE_ORDERS" | "RECONCILE_DRAFT_ORDERS";
   shop: string;
   webhookId: string;
   enqueuedAt: string;
@@ -48,7 +52,7 @@ function getTodayUTC(): string {
 /**
  * Reconcile stage type.
  */
-export type ReconcileStageKind = "companies" | "customers" | "orders";
+export type ReconcileStageKind = "companies" | "customers" | "orders" | "draft_orders";
 
 /**
  * Generate an idempotent webhookId for reconcile.
@@ -122,6 +126,7 @@ export function isReconcileMessage(
   return (
     message.topic === "RECONCILE_COMPANIES" ||
     message.topic === "RECONCILE_CUSTOMERS" ||
-    message.topic === "RECONCILE_ORDERS"
+    message.topic === "RECONCILE_ORDERS" ||
+    message.topic === "RECONCILE_DRAFT_ORDERS"
   );
 }

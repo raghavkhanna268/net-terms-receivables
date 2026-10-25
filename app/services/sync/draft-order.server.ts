@@ -339,3 +339,35 @@ export async function bulkUpsertDraftOrders(
 
   return count;
 }
+
+/**
+ * Process a draft order from bulk JSONL export.
+ *
+ * Resolves the buyer account and maps the draft order data for upsert.
+ * Only processes draft orders with payment terms.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopDomain - Shop domain
+ * @param draftOrder - Draft order data from bulk export
+ * @returns Mapped draft order data or null if should be skipped
+ */
+export async function processBulkDraftOrder(
+  sql: Sql,
+  shopDomain: string,
+  draftOrder: ShopifyDraftOrder
+): Promise<ReturnType<typeof mapDraftOrder> | null> {
+  if (!draftOrder.paymentTerms) {
+    return null;
+  }
+
+  const [shop] = await sql<{ id: string }[]>`
+    SELECT id FROM "Shop" WHERE domain = ${shopDomain}
+  `;
+
+  if (!shop) {
+    return null;
+  }
+
+  const buyerAccountId = await resolveBuyerAccount(sql, shop.id, draftOrder);
+  return mapDraftOrder(shop.id, draftOrder, buyerAccountId);
+}

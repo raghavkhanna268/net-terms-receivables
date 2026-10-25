@@ -20,10 +20,12 @@ import type {
   BulkOrderLine,
   BulkPaymentScheduleLine,
   BulkCustomerLine,
+  BulkDraftOrderLine,
   ParsedBulkResult,
   ShopifyCompanyLocation,
   ShopifyOrder,
   ShopifyCustomer,
+  ShopifyDraftOrder,
 } from "./types";
 
 /**
@@ -320,5 +322,60 @@ export function bulkCustomerToShopifyCustomer(customer: BulkCustomerLine): Shopi
     tags: customer.tags ?? [],
     email: customer.email,
     displayName: customer.displayName,
+  };
+}
+
+/**
+ * Parse draft order bulk JSONL (S8 PR-B).
+ *
+ * Returns all draft orders with payment terms for pending credit exposure.
+ * Only draft orders with status=open or status=invoice_sent are in the export.
+ *
+ * DPDP note: Only order metadata and buyer references are fetched.
+ *
+ * @param jsonl - Raw JSONL from bulk draft order query
+ * @returns Parsed draft orders
+ */
+export function parseDraftOrderBulkJsonl(jsonl: string): {
+  draftOrders: BulkDraftOrderLine[];
+  errors: ParsedBulkResult<unknown>["errors"];
+} {
+  const parsed = parseJsonl<BulkDraftOrderLine>(jsonl);
+
+  return {
+    draftOrders: parsed.items,
+    errors: parsed.errors,
+  };
+}
+
+/**
+ * Convert bulk DraftOrder line to ShopifyDraftOrder format.
+ *
+ * Adds __typename for purchasingEntity since bulk JSONL doesn't include it
+ * but the ShopifyDraftOrder type expects it.
+ *
+ * @param draftOrder - Bulk line data
+ * @returns ShopifyDraftOrder for sync processing
+ */
+export function bulkDraftOrderToShopifyDraftOrder(draftOrder: BulkDraftOrderLine): ShopifyDraftOrder {
+  let purchasingEntity: ShopifyDraftOrder["purchasingEntity"] = undefined;
+  if (draftOrder.purchasingEntity) {
+    purchasingEntity = {
+      __typename: "PurchasingCompany",
+      company: draftOrder.purchasingEntity.company,
+      location: draftOrder.purchasingEntity.location,
+    };
+  }
+
+  return {
+    id: draftOrder.id,
+    name: draftOrder.name,
+    createdAt: draftOrder.createdAt,
+    updatedAt: draftOrder.updatedAt,
+    status: draftOrder.status,
+    totalPriceSet: draftOrder.totalPriceSet,
+    paymentTerms: draftOrder.paymentTerms,
+    purchasingEntity,
+    customer: draftOrder.customer,
   };
 }

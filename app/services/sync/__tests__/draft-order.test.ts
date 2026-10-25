@@ -6,6 +6,7 @@ import {
   mapDraftOrder,
   bulkUpsertDraftOrders,
   getPendingExposure,
+  processBulkDraftOrder,
 } from "../draft-order.server";
 import type { ShopifyDraftOrder } from "../types";
 
@@ -479,6 +480,121 @@ describeWithDb("Draft Order Sync", () => {
     it("handles empty array", async () => {
       const count = await bulkUpsertDraftOrders(sql, []);
       expect(count).toBe(0);
+    });
+  });
+
+  describe("processBulkDraftOrder", () => {
+    it("returns mapped data for draft order with payment terms", async () => {
+      const draftOrder: ShopifyDraftOrder = {
+        id: `gid://shopify/DraftOrder/bulk-proc-${TEST_SUFFIX}-1`,
+        name: "#BP1",
+        createdAt: "2026-10-25T10:00:00.000Z",
+        status: "open",
+        totalPriceSet: {
+          shopMoney: { amount: "5000.00", currencyCode: "USD" },
+        },
+        paymentTerms: {
+          id: "pt1",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+          dueInDays: 30,
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      const result = await processBulkDraftOrder(sql, TEST_SHOP_DOMAIN, draftOrder);
+
+      expect(result).not.toBeNull();
+      expect(result!.draftOrderId).toBe(draftOrder.id);
+      expect(result!.shopId).toBe(TEST_SHOP_ID);
+      expect(result!.buyerAccountId).toBe(TEST_ACCOUNT_ID);
+      expect(result!.total).toBe("5000.00");
+      expect(result!.hasPaymentTerms).toBe(true);
+      expect(result!.status).toBe("open");
+    });
+
+    it("returns null for draft order without payment terms", async () => {
+      const draftOrder: ShopifyDraftOrder = {
+        id: `gid://shopify/DraftOrder/bulk-proc-${TEST_SUFFIX}-2`,
+        name: "#BP2",
+        createdAt: "2026-10-25T10:00:00.000Z",
+        status: "open",
+        totalPriceSet: {
+          shopMoney: { amount: "3000.00", currencyCode: "USD" },
+        },
+        paymentTerms: null,
+      };
+
+      const result = await processBulkDraftOrder(sql, TEST_SHOP_DOMAIN, draftOrder);
+
+      expect(result).toBeNull();
+    });
+
+    it("returns null for unknown shop domain", async () => {
+      const draftOrder: ShopifyDraftOrder = {
+        id: `gid://shopify/DraftOrder/bulk-proc-${TEST_SUFFIX}-3`,
+        name: "#BP3",
+        createdAt: "2026-10-25T10:00:00.000Z",
+        status: "open",
+        paymentTerms: {
+          id: "pt1",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+      };
+
+      const result = await processBulkDraftOrder(
+        sql,
+        "test-s8b-unknown.myshopify.com",
+        draftOrder
+      );
+
+      expect(result).toBeNull();
+    });
+
+    it("resolves buyer account from customer reference", async () => {
+      const testCustomerId = `gid://shopify/Customer/cust-bulk-${TEST_SUFFIX}`;
+      const testCustomerAccountId = `account-cust-bulk-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "customerId", name,
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${testCustomerAccountId}, ${TEST_SHOP_ID}, 'TAGGED_CUSTOMER', ${testCustomerId}, 'Tagged Customer',
+          NOW(), NOW()
+        )
+      `;
+
+      try {
+        const draftOrder: ShopifyDraftOrder = {
+          id: `gid://shopify/DraftOrder/bulk-proc-${TEST_SUFFIX}-cust`,
+          name: "#BPCUST",
+          createdAt: "2026-10-25T10:00:00.000Z",
+          status: "invoice_sent",
+          totalPriceSet: {
+            shopMoney: { amount: "7500.00", currencyCode: "USD" },
+          },
+          paymentTerms: {
+            id: "pt1",
+            paymentTermsName: "Net 45",
+            paymentTermsType: "NET",
+            dueInDays: 45,
+          },
+          customer: { id: testCustomerId },
+        };
+
+        const result = await processBulkDraftOrder(sql, TEST_SHOP_DOMAIN, draftOrder);
+
+        expect(result).not.toBeNull();
+        expect(result!.buyerAccountId).toBe(testCustomerAccountId);
+      } finally {
+        await sql`DELETE FROM "BuyerAccount" WHERE id = ${testCustomerAccountId}`;
+      }
     });
   });
 });

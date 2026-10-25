@@ -272,6 +272,34 @@ export interface BulkCustomerLine {
 }
 
 /**
+ * Bulk JSONL line for draft order export (S8 PR-B).
+ *
+ * Tracked when payment terms are present for pending credit exposure.
+ * Only draft orders with status=open or status=invoice_sent are exported.
+ *
+ * Note: Bulk JSONL does not include __typename like webhook payloads.
+ */
+export interface BulkDraftOrderLine {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt?: string;
+  status?: string;
+  totalPriceSet?: {
+    shopMoney: {
+      amount: string;
+      currencyCode: string;
+    };
+  };
+  paymentTerms?: ShopifyDraftOrder["paymentTerms"];
+  purchasingEntity?: {
+    company?: { id: string };
+    location?: { id: string };
+  } | null;
+  customer?: { id: string } | null;
+}
+
+/**
  * Parsed bulk JSONL result.
  */
 export interface ParsedBulkResult<T> {

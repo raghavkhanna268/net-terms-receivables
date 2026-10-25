@@ -1,9 +1,9 @@
 /**
  * Reconcile handlers for S10b + S8.
  *
- * Handles RECONCILE_COMPANIES, RECONCILE_CUSTOMERS, and RECONCILE_ORDERS
- * messages by starting bulk exports via the Admin API. Also provides the
- * order refetch null metric recording function.
+ * Handles RECONCILE_COMPANIES, RECONCILE_CUSTOMERS, RECONCILE_ORDERS, and
+ * RECONCILE_DRAFT_ORDERS messages by starting bulk exports via the Admin API.
+ * Also provides the order refetch null metric recording function.
  *
  * Flow:
  * 1. pg_cron calls /jobs/drain?reconcile=true at 02:00 UTC daily
@@ -15,10 +15,13 @@
  * 7. Customers reconcile runs (skipped if no tag rules)
  * 8. After customers complete, handleBulkOperationsFinish enqueues RECONCILE_ORDERS
  * 9. Orders reconcile runs similarly
+ * 10. After orders complete, handleBulkOperationsFinish enqueues RECONCILE_DRAFT_ORDERS
+ * 11. Draft orders reconcile runs for pending credit exposure tracking
  *
- * Sequential design: companies → customers → orders
+ * Sequential design: companies → customers → orders → draft_orders
  * - Companies must complete before customers (B2B contacts check)
  * - Customers must complete before orders (tagged customer buyer account existence)
+ * - Orders must complete before draft_orders (buyer account existence)
  *
  * Customers stage skip: If a shop has no tag rules, the customers stage is
  * skipped entirely (no bulk op started) and the chain continues to orders.
@@ -33,6 +36,7 @@ import { adminGraphQL } from "./admin-client.server";
 import {
   BULK_COMPANIES_QUERY,
   BULK_ORDERS_QUERY,
+  BULK_DRAFT_ORDERS_QUERY,
   parseBulkOperationResult,
   registerBulkOperation,
 } from "~/services/sync/bulk-operations.server";
@@ -58,7 +62,8 @@ export function extractManualKey(webhookId: string): string | undefined {
  * have the same bulk operation GID (unlikely but defensive).
  *
  * Looks up any reconcile stage topic (RECONCILE_COMPANIES, RECONCILE_CUSTOMERS,
- * RECONCILE_ORDERS) since the manual key is consistent across all stages.
+ * RECONCILE_ORDERS, RECONCILE_DRAFT_ORDERS) since the manual key is consistent
+ * across all stages.
  *
  * @param sql - postgres.js SQL client
  * @param bulkOperationId - The bulk operation GID
@@ -75,7 +80,7 @@ export async function getManualKeyForBulkOp(
     SELECT webhook_id
     FROM s6_processed_webhooks
     WHERE resource_gid = ${bulkOperationId}
-      AND topic IN ('RECONCILE_COMPANIES', 'RECONCILE_CUSTOMERS', 'RECONCILE_ORDERS')
+      AND topic IN ('RECONCILE_COMPANIES', 'RECONCILE_CUSTOMERS', 'RECONCILE_ORDERS', 'RECONCILE_DRAFT_ORDERS')
       AND left(webhook_id, length(${prefix})) = ${prefix}
     LIMIT 1
   `;
@@ -112,6 +117,10 @@ async function buildReconcileMutation(
 
   if (kind === "orders") {
     return BULK_ORDERS_QUERY;
+  }
+
+  if (kind === "draft_orders") {
+    return BULK_DRAFT_ORDERS_QUERY;
   }
 
   if (kind === "customers") {
@@ -241,14 +250,14 @@ export async function startReconcileBulkOperation(
  *
  * @param sql - postgres.js SQL client
  * @param shop - Shop domain
- * @param stage - Stage to enqueue (customers or orders)
+ * @param stage - Stage to enqueue (customers, orders, or draft_orders)
  * @param manualKey - Optional manual key base from previous stage
  * @returns Whether the message was enqueued (false if shop doesn't exist or uninstalled)
  */
 export async function enqueueReconcileStage(
   sql: Sql,
   shop: string,
-  stage: "customers" | "orders",
+  stage: "customers" | "orders" | "draft_orders",
   manualKey?: string
 ): Promise<boolean> {
   let webhookId: string;
