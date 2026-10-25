@@ -261,9 +261,9 @@ async function fetchPlanFromShopify(
   );
 
   if (!activeSubscription) {
-    // No active subscription = free plan
+    // No active subscription = none (no plan)
     return {
-      planKey: "free",
+      planKey: "none",
       subscriptionId: null,
       subscriptionName: null,
       isTest: false,
@@ -281,7 +281,7 @@ async function fetchPlanFromShopify(
     });
     captureMessage("unknown_subscription_name", "warning");
     return {
-      planKey: "free",
+      planKey: "none",
       subscriptionId: activeSubscription.id,
       subscriptionName: activeSubscription.name,
       isTest: activeSubscription.test,

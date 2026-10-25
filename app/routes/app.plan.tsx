@@ -38,9 +38,6 @@ const FEATURE_DESCRIPTIONS: Record<FeatureKey, string> = {
   matching: "Automatic matching of payments to invoices",
   reminders: "Send payment reminders to buyers",
   credit_holds: "Automatic credit holds for overdue accounts",
-  pdf_statements: "Generate PDF statements for buyers",
-  payer_memory: "Remember payer preferences and patterns",
-  audit_export: "Export audit logs for compliance",
 };
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {

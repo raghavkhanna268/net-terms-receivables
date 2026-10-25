@@ -114,15 +114,20 @@ describe("Plan Resolution Service", () => {
     it("maps known plan names case-insensitively", async () => {
       const { mapSubscriptionToPlanKey } = await import("~/lib/entitlements");
       
-      expect(mapSubscriptionToPlanKey("free")).toBe("free");
-      expect(mapSubscriptionToPlanKey("Free")).toBe("free");
-      expect(mapSubscriptionToPlanKey("FREE")).toBe("free");
+      // Legacy 'free' maps to 'none'
+      expect(mapSubscriptionToPlanKey("free")).toBe("none");
+      expect(mapSubscriptionToPlanKey("Free")).toBe("none");
+      expect(mapSubscriptionToPlanKey("FREE")).toBe("none");
       expect(mapSubscriptionToPlanKey("starter")).toBe("starter");
       expect(mapSubscriptionToPlanKey("Starter")).toBe("starter");
       expect(mapSubscriptionToPlanKey("growth")).toBe("growth");
       expect(mapSubscriptionToPlanKey("Growth")).toBe("growth");
-      expect(mapSubscriptionToPlanKey("scale")).toBe("scale");
-      expect(mapSubscriptionToPlanKey("Scale")).toBe("scale");
+      // Legacy 'scale' maps to 'unlimited'
+      expect(mapSubscriptionToPlanKey("scale")).toBe("unlimited");
+      expect(mapSubscriptionToPlanKey("Scale")).toBe("unlimited");
+      // New plan keys
+      expect(mapSubscriptionToPlanKey("unlimited")).toBe("unlimited");
+      expect(mapSubscriptionToPlanKey("Unlimited")).toBe("unlimited");
     });
 
     it("returns null for unknown names", async () => {
@@ -137,13 +142,14 @@ describe("Plan Resolution Service", () => {
   });
 
   describe("getPlanConfig", () => {
-    it("returns correct limits for free plan", async () => {
+    it("returns correct limits for none plan", async () => {
       const { getPlanConfig } = await import("~/lib/entitlements");
       
-      const plan = getPlanConfig("free");
-      expect(plan.key).toBe("free");
-      expect(plan.limits.companies).toBe(3);
-      expect(plan.limits.importsPerMonth).toBe(1);
+      const plan = getPlanConfig("none");
+      expect(plan.key).toBe("none");
+      expect(plan.limits.companies).toBe(0);
+      expect(plan.limits.importsPerMonth).toBe(-1); // unlimited imports on all plans
+      // All features on all plans
       expect(plan.features.has("aging_dashboard")).toBe(true);
       expect(plan.features.has("matching")).toBe(true);
     });
@@ -164,15 +170,15 @@ describe("Plan Resolution Service", () => {
       const plan = getPlanConfig("growth");
       expect(plan.limits.companies).toBe(100);
       expect(plan.features.has("credit_holds")).toBe(true);
-      expect(plan.features.has("pdf_statements")).toBe(true);
+      expect(plan.features.has("reminders")).toBe(true);
     });
 
-    it("returns unlimited for scale plan", async () => {
+    it("returns unlimited for unlimited plan", async () => {
       const { getPlanConfig } = await import("~/lib/entitlements");
       
-      const plan = getPlanConfig("scale");
+      const plan = getPlanConfig("unlimited");
       expect(plan.limits.companies).toBe(-1); // unlimited
-      expect(plan.features.has("audit_export")).toBe(true);
+      expect(plan.features.has("credit_holds")).toBe(true);
     });
   });
 
@@ -180,19 +186,19 @@ describe("Plan Resolution Service", () => {
     it("returns false for unlimited limits", async () => {
       const { getPlanConfig, isLimitExceeded } = await import("~/lib/entitlements");
       
-      const scalePlan = getPlanConfig("scale");
-      expect(isLimitExceeded(scalePlan, "companies", 0)).toBe(false);
-      expect(isLimitExceeded(scalePlan, "companies", 100)).toBe(false);
-      expect(isLimitExceeded(scalePlan, "companies", 10000)).toBe(false);
+      const unlimitedPlan = getPlanConfig("unlimited");
+      expect(isLimitExceeded(unlimitedPlan, "companies", 0)).toBe(false);
+      expect(isLimitExceeded(unlimitedPlan, "companies", 100)).toBe(false);
+      expect(isLimitExceeded(unlimitedPlan, "companies", 10000)).toBe(false);
     });
 
-    it("returns true when at or over limit", async () => {
+    it("returns true when at or over limit (starter has 25)", async () => {
       const { getPlanConfig, isLimitExceeded } = await import("~/lib/entitlements");
       
-      const freePlan = getPlanConfig("free");
-      expect(isLimitExceeded(freePlan, "companies", 2)).toBe(false);
-      expect(isLimitExceeded(freePlan, "companies", 3)).toBe(true);
-      expect(isLimitExceeded(freePlan, "companies", 4)).toBe(true);
+      const starterPlan = getPlanConfig("starter");
+      expect(isLimitExceeded(starterPlan, "companies", 24)).toBe(false);
+      expect(isLimitExceeded(starterPlan, "companies", 25)).toBe(true);
+      expect(isLimitExceeded(starterPlan, "companies", 26)).toBe(true);
     });
   });
 
@@ -205,7 +211,7 @@ describe("Plan Resolution Service", () => {
       
       const result = await resolvePlan(mockSql as unknown as Sql, TEST_SHOP);
       
-      expect(result.plan.key).toBe("free");
+      expect(result.plan.key).toBe("none");
       expect(result.fromCache).toBe(false);
     });
 
@@ -309,11 +315,11 @@ describe("Plan Resolution Service", () => {
       
       const result = await resolvePlan(mockSql as unknown as Sql, TEST_SHOP, true);
       
-      expect(result.plan.key).toBe("free");
+      expect(result.plan.key).toBe("none");
       expect(result.subscriptionId).toBeNull();
     });
 
-    it("returns free plan for unknown subscription name and alerts via captureMessage", async () => {
+    it("returns none plan for unknown subscription name and alerts via captureMessage", async () => {
       // resolvePlan imported at module scope
       
       // Shop exists, no cache
@@ -344,9 +350,9 @@ describe("Plan Resolution Service", () => {
       
       const result = await resolvePlan(mockSql as unknown as Sql, TEST_SHOP, true);
       
-      expect(result.plan.key).toBe("free");
+      expect(result.plan.key).toBe("none");
       expect(result.subscriptionName).toBe("Unknown Plan");
-      // Must alert because unknown name silently drops shop to free
+      // Must alert because unknown name silently drops shop to none
       expect(captureMessage).toHaveBeenCalledWith("unknown_subscription_name", "warning");
     });
 
@@ -402,8 +408,8 @@ describe("Plan Resolution Service", () => {
       
       const result = await resolvePlan(mockSql as unknown as Sql, TEST_SHOP, true);
       
-      // No cache exists, so free is correct
-      expect(result.plan.key).toBe("free");
+      // No cache exists, so none is correct
+      expect(result.plan.key).toBe("none");
       expect(result.fromCache).toBe(false);
       // Must alert because plan fetch failed
       expect(captureMessage).toHaveBeenCalledWith("plan_fetch_failed", "error");
@@ -505,7 +511,7 @@ describe("Plan Resolution Service", () => {
       
       const plan = await getPlanByShopId(mockSql as unknown as Sql, TEST_SHOP_ID);
       
-      expect(plan.key).toBe("free");
+      expect(plan.key).toBe("none");
     });
 
     it("triggers background refresh when stale via ALS", async () => {
@@ -1124,7 +1130,7 @@ describe("PlanSource Interface", () => {
       });
 
       expect(result.status).toBe("unknown");
-      expect(result.planKey).toBe("free");
+      expect(result.planKey).toBe("none");
     });
 
     it("resolveActivePlan passes forceRefresh to underlying resolvePlan", async () => {
@@ -1174,9 +1180,9 @@ describe("PlanSource Interface", () => {
 
       const freshCacheTime = new Date(Date.now() - 60 * 60 * 1000);
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "scale",
+        plan_key: "unlimited",
         subscription_id: "gid://shopify/AppSubscription/test-123",
-        subscription_name: "Scale",
+        subscription_name: "Unlimited",
         is_test: true,
         plan_cached_at: freshCacheTime,
       }]);
@@ -1241,7 +1247,7 @@ describe("PlanSource Interface", () => {
 
       mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "free",
+        plan_key: "none",
         subscription_id: null,
         subscription_name: null,
         is_test: false,
@@ -1324,7 +1330,7 @@ describe("PlanSource Interface", () => {
         shopDomain: "test-nonexistent.myshopify.com",
       });
 
-      expect(sourceResult.planKey).toBe("free");
+      expect(sourceResult.planKey).toBe("none");
       expect(sourceResult.fromCache).toBe(false);
     });
 

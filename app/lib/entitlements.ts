@@ -40,16 +40,16 @@ export type SupportTier = "standard" | "priority";
  *
  * credit_holds is an all-plans feature: holds, recompute, sweep, and the
  * Validation Function run on every plan. It must never be gated.
+ *
+ * HIDDEN (issue #286, App Store rule 1.1.4): pdf_statements, payer_memory,
+ * audit_export are not built and must not be listed. T5 removes them fully.
  */
 export type FeatureKey =
   | "aging_dashboard"
   | "unlimited_imports"
   | "matching"
   | "reminders"
-  | "credit_holds"
-  | "pdf_statements"
-  | "payer_memory"
-  | "audit_export";
+  | "credit_holds";
 
 /**
  * Limit keys for numeric constraints.
@@ -71,6 +71,7 @@ export interface PlanConfig {
 
 /**
  * All features - every feature is enabled on every plan.
+ * HIDDEN (issue #286): pdf_statements, payer_memory, audit_export removed.
  */
 const ALL_FEATURES = new Set<FeatureKey>([
   "aging_dashboard",
@@ -78,9 +79,6 @@ const ALL_FEATURES = new Set<FeatureKey>([
   "matching",
   "reminders",
   "credit_holds",
-  "pdf_statements",
-  "payer_memory",
-  "audit_export",
 ]);
 
 /**
@@ -274,6 +272,7 @@ export function getSupportTier(plan: PlanConfig): SupportTier {
 
 /**
  * All available feature keys (exported for later steps to call hasFeature).
+ * HIDDEN (issue #286): pdf_statements, payer_memory, audit_export removed.
  */
 export const ALL_FEATURE_KEYS: readonly FeatureKey[] = [
   "aging_dashboard",
@@ -281,9 +280,6 @@ export const ALL_FEATURE_KEYS: readonly FeatureKey[] = [
   "matching",
   "reminders",
   "credit_holds",
-  "pdf_statements",
-  "payer_memory",
-  "audit_export",
 ] as const;
 
 /**

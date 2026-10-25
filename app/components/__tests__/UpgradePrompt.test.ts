@@ -23,10 +23,11 @@ import { ALL_PLAN_KEYS, ALL_FEATURE_KEYS } from "~/lib/entitlements";
 describe("getRequiredPlanForFeature", () => {
   it("derives required plan from entitlements.ts (all features on all plans)", () => {
     // All features are now available on every plan, so they return 'none'
+    // HIDDEN (issue #286): pdf_statements, payer_memory, audit_export removed
     expect(getRequiredPlanForFeature("aging_dashboard")).toBe("none");
     expect(getRequiredPlanForFeature("matching")).toBe("none");
-    expect(getRequiredPlanForFeature("pdf_statements")).toBe("none");
-    expect(getRequiredPlanForFeature("audit_export")).toBe("none");
+    expect(getRequiredPlanForFeature("reminders")).toBe("none");
+    expect(getRequiredPlanForFeature("credit_holds")).toBe("none");
   });
 
   it("returns valid plan for all features", () => {
@@ -173,11 +174,13 @@ describe("UpgradePrompt component", () => {
   });
 
   describe("upgrade URL", () => {
-    it("includes target _top for parent frame navigation", () => {
+    it("includes target _top for parent frame navigation (limit-based)", () => {
+      // Use limit-based prompt since feature-based prompts render nothing
+      // when all features are on all plans
       const html = renderToString(
         createElement(UpgradePrompt, {
           ...baseProps,
-          feature: "reminders",
+          limitType: "companies",
           gatingEnforced: true,
         })
       );

@@ -375,14 +375,14 @@ describe("FeatureComparisonTable logic", () => {
     ]);
   });
 
-  it("pdf_statements shows as included for all four tiers (all features on all plans)", async () => {
+  it("reminders shows as included for all four tiers (all features on all plans)", async () => {
     const { getPlanConfig, planHasFeature } = await import("~/lib/entitlements");
 
     // All features are now on all plans
-    expect(planHasFeature(getPlanConfig("none"), "pdf_statements")).toBe(true);
-    expect(planHasFeature(getPlanConfig("starter"), "pdf_statements")).toBe(true);
-    expect(planHasFeature(getPlanConfig("growth"), "pdf_statements")).toBe(true);
-    expect(planHasFeature(getPlanConfig("unlimited"), "pdf_statements")).toBe(true);
+    expect(planHasFeature(getPlanConfig("none"), "reminders")).toBe(true);
+    expect(planHasFeature(getPlanConfig("starter"), "reminders")).toBe(true);
+    expect(planHasFeature(getPlanConfig("growth"), "reminders")).toBe(true);
+    expect(planHasFeature(getPlanConfig("unlimited"), "reminders")).toBe(true);
   });
 
   it("generates correct table data for all features (all true on all plans)", async () => {
@@ -397,7 +397,7 @@ describe("FeatureComparisonTable logic", () => {
       return { feature, cells };
     });
 
-    // All features are true on all plans
+    // All features are true on all plans (5 features now, not 8)
     const creditHoldsRowData = tableRows.find((row) => row.feature === "credit_holds");
     expect(creditHoldsRowData?.cells).toEqual([true, true, true, true]);
 
@@ -407,8 +407,65 @@ describe("FeatureComparisonTable logic", () => {
     const matchingRowData = tableRows.find((row) => row.feature === "matching");
     expect(matchingRowData?.cells).toEqual([true, true, true, true]);
 
-    const auditExportRowData = tableRows.find((row) => row.feature === "audit_export");
-    expect(auditExportRowData?.cells).toEqual([true, true, true, true]);
+    const remindersRowData = tableRows.find((row) => row.feature === "reminders");
+    expect(remindersRowData?.cells).toEqual([true, true, true, true]);
+  });
+});
+
+/**
+ * Issue #286: Hidden features must not appear in plan page (App Store rule 1.1.4).
+ * pdf_statements, payer_memory, audit_export are not built and must not be listed.
+ */
+describe("Issue #286: Hidden features not displayed", () => {
+  it("FEATURE_DESCRIPTIONS does not contain PDF statements", async () => {
+    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
+    const allDescriptions = Object.values(FEATURE_DISPLAY_NAMES).join(" ");
+    
+    expect(allDescriptions).not.toContain("PDF");
+    expect(allDescriptions).not.toContain("pdf");
+    expect(allDescriptions).not.toContain("Statements");
+  });
+
+  it("FEATURE_DESCRIPTIONS does not contain payer memory", async () => {
+    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
+    const allDescriptions = Object.values(FEATURE_DISPLAY_NAMES).join(" ");
+    
+    expect(allDescriptions.toLowerCase()).not.toContain("payer");
+    expect(allDescriptions.toLowerCase()).not.toContain("memory");
+  });
+
+  it("FEATURE_DESCRIPTIONS does not contain audit export", async () => {
+    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
+    const allDescriptions = Object.values(FEATURE_DISPLAY_NAMES).join(" ");
+    
+    expect(allDescriptions.toLowerCase()).not.toContain("audit");
+    expect(allDescriptions.toLowerCase()).not.toContain("export");
+  });
+
+  it("ALL_FEATURE_KEYS does not include hidden features", async () => {
+    const { ALL_FEATURE_KEYS } = await import("~/lib/entitlements");
+    
+    expect(ALL_FEATURE_KEYS).not.toContain("pdf_statements");
+    expect(ALL_FEATURE_KEYS).not.toContain("payer_memory");
+    expect(ALL_FEATURE_KEYS).not.toContain("audit_export");
+  });
+
+  it("plan page feature list excludes hidden features", async () => {
+    const { ALL_FEATURE_KEYS } = await import("~/lib/entitlements");
+    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
+    
+    // Verify that ALL_FEATURE_KEYS used for rendering only has visible features
+    expect(ALL_FEATURE_KEYS).toHaveLength(5);
+    expect(ALL_FEATURE_KEYS).toEqual([
+      "aging_dashboard",
+      "unlimited_imports",
+      "matching",
+      "reminders",
+      "credit_holds",
+    ]);
+    
+    // Verify FEATURE_DISPLAY_NAMES only has entries for visible features
+    expect(Object.keys(FEATURE_DISPLAY_NAMES)).toHaveLength(5);
   });
 });
 

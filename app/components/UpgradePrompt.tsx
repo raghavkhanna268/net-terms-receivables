@@ -26,6 +26,7 @@ export const PLAN_DISPLAY_NAMES: Record<PlanKey, string> = {
 
 /**
  * Display names for features. Single source of truth for UI.
+ * HIDDEN (issue #286): pdf_statements, payer_memory, audit_export removed.
  */
 export const FEATURE_DISPLAY_NAMES: Record<FeatureKey, string> = {
   aging_dashboard: "Aging Dashboard",
@@ -33,9 +34,6 @@ export const FEATURE_DISPLAY_NAMES: Record<FeatureKey, string> = {
   matching: "Payment Matching",
   reminders: "Payment Reminders",
   credit_holds: "Credit Holds",
-  pdf_statements: "PDF Statements",
-  payer_memory: "Payer Memory",
-  audit_export: "Audit Export",
 };
 
 /**
