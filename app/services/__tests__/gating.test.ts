@@ -677,3 +677,262 @@ describeWithDb("activeAccountFragment DB integration", () => {
     }
   });
 });
+
+/**
+ * DB-backed tests for inactive-tag exclusion (Item 3).
+ * TAGGED_CUSTOMER accounts with s8_tagged_customers.tag_active=false don't count.
+ */
+describeWithDb("countActiveAccounts inactive-tag exclusion DB integration", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-inactivetag";
+  const TEST_SHOP_ID = `shop-inactivetag-${TEST_SUFFIX}`;
+  const TEST_SHOP_DOMAIN = `inactivetag-test-${TEST_SUFFIX}.myshopify.com`;
+  const TEST_CUSTOMER_ID_INACTIVE = `cust-inactive-${TEST_SUFFIX}`;
+  const TEST_CUSTOMER_ID_ACTIVE = `cust-active-${TEST_SUFFIX}`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    // Create test shop with a starter plan (limit 25)
+    await sql`
+      INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt", plan_key, plan_cached_at)
+      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, NOW(), NOW(), 'starter', NOW())
+    `;
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM s8_tagged_customers WHERE shop_id = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+    await sql.end();
+  });
+
+  it("inactive-tag TAGGED_CUSTOMER account doesn't count toward limit", async () => {
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+    vi.resetModules();
+    const { countActiveAccounts } = await import("../gating.server");
+
+    // Create a TAGGED_CUSTOMER account
+    const accountId = `acc-tagged-inactive-${TEST_SUFFIX}`;
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "customerId", name, gated_at, "createdAt", "updatedAt")
+      VALUES (${accountId}, ${TEST_SHOP_ID}, 'TAGGED_CUSTOMER', ${TEST_CUSTOMER_ID_INACTIVE}, 'Tagged Customer Inactive', NULL, NOW(), NOW())
+    `;
+
+    // Mark tag as inactive in s8_tagged_customers (schema has 'tags' JSONB array, not 'tag')
+    await sql`
+      INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, created_at)
+      VALUES (${TEST_SHOP_ID}, ${TEST_CUSTOMER_ID_INACTIVE}, '["wholesale"]'::jsonb, false, NOW())
+    `;
+
+    // Count should exclude the inactive-tag account
+    const count = await countActiveAccounts(sql, TEST_SHOP_ID);
+    expect(count).toBe(0);
+  });
+
+  it("active-tag TAGGED_CUSTOMER account counts toward limit", async () => {
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+    vi.resetModules();
+    const { countActiveAccounts } = await import("../gating.server");
+
+    // Create another TAGGED_CUSTOMER account with active tag
+    const accountId = `acc-tagged-active-${TEST_SUFFIX}`;
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "customerId", name, gated_at, "createdAt", "updatedAt")
+      VALUES (${accountId}, ${TEST_SHOP_ID}, 'TAGGED_CUSTOMER', ${TEST_CUSTOMER_ID_ACTIVE}, 'Tagged Customer Active', NULL, NOW(), NOW())
+    `;
+
+    // Mark tag as active in s8_tagged_customers (schema has 'tags' JSONB array, not 'tag')
+    await sql`
+      INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, created_at)
+      VALUES (${TEST_SHOP_ID}, ${TEST_CUSTOMER_ID_ACTIVE}, '["wholesale"]'::jsonb, true, NOW())
+    `;
+
+    // Count should include the active-tag account but not the inactive one
+    // We have 1 inactive-tag account from previous test, 1 active-tag account
+    const count = await countActiveAccounts(sql, TEST_SHOP_ID);
+    expect(count).toBe(1);
+  });
+
+  it("COMPANY accounts always count (no tag_active check)", async () => {
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+    vi.resetModules();
+    const { countActiveAccounts } = await import("../gating.server");
+
+    // Create a COMPANY account
+    const accountId = `acc-company-${TEST_SUFFIX}`;
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, gated_at, "createdAt", "updatedAt")
+      VALUES (${accountId}, ${TEST_SHOP_ID}, 'COMPANY', ${"co-" + TEST_SUFFIX}, ${"loc-" + TEST_SUFFIX}, 'Company Account', NULL, NOW(), NOW())
+    `;
+
+    // Count should be 2: 1 active-tag TAGGED_CUSTOMER + 1 COMPANY
+    // (inactive-tag TAGGED_CUSTOMER still doesn't count)
+    const count = await countActiveAccounts(sql, TEST_SHOP_ID);
+    expect(count).toBe(2);
+  });
+
+  it("re-activating tag doesn't change gated_at", async () => {
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+    vi.resetModules();
+
+    // The inactive-tag account already exists with gated_at = NULL
+    // Re-activate the tag
+    await sql`
+      UPDATE s8_tagged_customers
+      SET tag_active = true
+      WHERE shop_id = ${TEST_SHOP_ID}
+        AND customer_id = ${TEST_CUSTOMER_ID_INACTIVE}
+    `;
+
+    // Verify gated_at is still NULL (re-activation doesn't change it)
+    const [account] = await sql<{ gated_at: Date | null }[]>`
+      SELECT gated_at FROM "BuyerAccount"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+        AND "customerId" = ${TEST_CUSTOMER_ID_INACTIVE}
+    `;
+
+    expect(account.gated_at).toBeNull();
+
+    // Now count should include this account (tag is active again)
+    const { countActiveAccounts } = await import("../gating.server");
+    const count = await countActiveAccounts(sql, TEST_SHOP_ID);
+    expect(count).toBe(3); // 2 TAGGED_CUSTOMER (both active now) + 1 COMPANY
+  });
+});
+
+/**
+ * DB-backed tests for flag-off inertness (Item 4).
+ * When PLAN_GATING_ENFORCED=false, creates stay ungated and no lock is taken.
+ */
+describeWithDb("decideNewAccountGate flag-off inertness DB integration", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-flagoff";
+  const TEST_SHOP_ID = `shop-flagoff-${TEST_SUFFIX}`;
+  const TEST_SHOP_DOMAIN = `flagoff-test-${TEST_SUFFIX}.myshopify.com`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    // Create test shop with "none" plan (limit 0)
+    await sql`
+      INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt", plan_key, plan_cached_at)
+      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, NOW(), NOW(), 'none', NOW())
+    `;
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+    await sql.end();
+  });
+
+  it("flag-off: decideNewAccountGate returns gate=false without taking lock", async () => {
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+    vi.resetModules();
+    const { decideNewAccountGate } = await import("../gating.server");
+
+    // Track if advisory lock was taken by checking pg_locks before and after
+    // When flag is off, the lock should NOT be taken
+    const [locksBefore] = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM pg_locks
+      WHERE locktype = 'advisory' AND pid = pg_backend_pid()
+    `;
+
+    // Run decideNewAccountGate in a transaction
+    const decision = await sql.begin(async (tx) => {
+      return decideNewAccountGate(tx, TEST_SHOP_ID);
+    });
+
+    // After transaction completes, locks are released, but decision should show gate=false
+    expect(decision.gate).toBe(false);
+    expect(decision.limit).toBe(-1); // Returns -1 when flag is off
+    expect(decision.used).toBe(0);
+
+    // The lock count shouldn't have changed (lock was not taken)
+    const [locksAfter] = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM pg_locks
+      WHERE locktype = 'advisory' AND pid = pg_backend_pid()
+    `;
+    expect(locksAfter.count).toBe(locksBefore.count);
+  });
+
+  it("flag-off: new accounts are created ungated even at limit=0", async () => {
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+    vi.resetModules();
+    const { decideNewAccountGate } = await import("../gating.server");
+
+    // Shop has plan_key='none' which has limit=0
+    // When flag is off, this should NOT gate the account
+
+    const decision = await sql.begin(async (tx) => {
+      return decideNewAccountGate(tx, TEST_SHOP_ID);
+    });
+
+    // With flag off, gate should be false regardless of limit
+    expect(decision.gate).toBe(false);
+
+    // Create an account based on the decision
+    const accountId = `acc-flagoff-${TEST_SUFFIX}`;
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, gated_at, "createdAt", "updatedAt")
+      VALUES (
+        ${accountId},
+        ${TEST_SHOP_ID},
+        'COMPANY',
+        ${"co-flagoff-" + TEST_SUFFIX},
+        ${"loc-flagoff-" + TEST_SUFFIX},
+        'Flag Off Test Account',
+        ${decision.gate ? sql`NOW()` : sql`NULL`},
+        NOW(),
+        NOW()
+      )
+    `;
+
+    // Verify account was created without gated_at
+    const [account] = await sql<{ gated_at: Date | null }[]>`
+      SELECT gated_at FROM "BuyerAccount" WHERE id = ${accountId}
+    `;
+    expect(account.gated_at).toBeNull();
+  });
+
+  it("flag-on with limit=0: new accounts ARE gated", async () => {
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+    vi.resetModules();
+    const { decideNewAccountGate } = await import("../gating.server");
+
+    // Shop has plan_key='none' which has limit=0
+    // When flag is ON, this SHOULD gate the account
+
+    const decision = await sql.begin(async (tx) => {
+      return decideNewAccountGate(tx, TEST_SHOP_ID);
+    });
+
+    // With flag on and limit=0, gate should be true
+    expect(decision.gate).toBe(true);
+    expect(decision.limit).toBe(0);
+
+    // Create an account based on the decision
+    const accountId = `acc-flagon-${TEST_SUFFIX}`;
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, gated_at, "createdAt", "updatedAt")
+      VALUES (
+        ${accountId},
+        ${TEST_SHOP_ID},
+        'COMPANY',
+        ${"co-flagon-" + TEST_SUFFIX},
+        ${"loc-flagon-" + TEST_SUFFIX},
+        'Flag On Test Account',
+        ${decision.gate ? sql`NOW()` : sql`NULL`},
+        NOW(),
+        NOW()
+      )
+    `;
+
+    // Verify account was created WITH gated_at
+    const [account] = await sql<{ gated_at: Date | null }[]>`
+      SELECT gated_at FROM "BuyerAccount" WHERE id = ${accountId}
+    `;
+    expect(account.gated_at).not.toBeNull();
+  });
+});

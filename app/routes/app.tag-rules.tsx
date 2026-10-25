@@ -28,6 +28,9 @@ import { useLoaderData, useActionData, Form, useNavigation, useRevalidator, data
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { safeLog, toErrorCode, shopHash } from "~/lib/log.server";
+import { getUsageStats, isGatingEnforced } from "~/services/gating.server";
+import { buildNewAccountsPausedBannerState, type NewAccountsPausedBannerState } from "~/lib/over-limit-banner";
+import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 import { enqueueReconcileStage } from "~/services/drain/reconcile-handlers.server";
 
 /**
@@ -67,6 +70,7 @@ interface LoaderData {
   shopId: string | null;
   error: string | null;
   finishingSetup: boolean;
+  newAccountsPausedBanner: NewAccountsPausedBannerState;
 }
 
 interface ActionData {
@@ -189,14 +193,28 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       shopId: null,
       error: null,
       finishingSetup: true,
+      newAccountsPausedBanner: {
+        show: false,
+        heading: "",
+        bodyText: "",
+        upgradeUrl: null,
+      },
     } satisfies LoaderData;
   }
 
   try {
-    const [storeMode, tagRules] = await Promise.all([
+    const [storeMode, tagRules, usage] = await Promise.all([
       detectStoreMode(sql, shop.id),
       getTagRules(sql, shop.id),
+      getUsageStats(sql, shop.id),
     ]);
+
+    const gatingEnforced = isGatingEnforced();
+    const upgradeUrl = (() => {
+      const handle = getAppHandle();
+      if (handle === null) return null;
+      return buildPlanSelectionUrl(shopDomain, handle);
+    })();
 
     return {
       storeMode,
@@ -204,6 +222,12 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       shopId: shop.id,
       error: null,
       finishingSetup: false,
+      newAccountsPausedBanner: buildNewAccountsPausedBannerState(
+        usage.companies.current,
+        usage.companies.limit,
+        gatingEnforced,
+        upgradeUrl
+      ),
     } satisfies LoaderData;
   } catch (err) {
     safeLog("error", "tag_rules_load_error", {
@@ -217,6 +241,12 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       shopId: shop.id,
       error: "Failed to load tag rules",
       finishingSetup: false,
+      newAccountsPausedBanner: {
+        show: false,
+        heading: "",
+        bodyText: "",
+        upgradeUrl: null,
+      },
     } satisfies LoaderData;
   }
 };
@@ -461,7 +491,7 @@ function TagRuleTable({ rules }: { rules: TagRule[] }) {
 }
 
 export default function TagRulesPage() {
-  const { storeMode, tagRules, error, finishingSetup } = useLoaderData<typeof loader>();
+  const { storeMode, tagRules, error, finishingSetup, newAccountsPausedBanner } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const revalidator = useRevalidator();
@@ -539,6 +569,23 @@ export default function TagRulesPage() {
       <s-link href="/" slot="breadcrumb-actions">
         Back to Dashboard
       </s-link>
+
+      {/* T4: New accounts paused banner */}
+      {newAccountsPausedBanner.show && (
+        <s-section>
+          <s-banner tone="warning" heading={newAccountsPausedBanner.heading}>
+            {newAccountsPausedBanner.bodyText}
+            {newAccountsPausedBanner.upgradeUrl && (
+              <>
+                {" "}
+                <a href={newAccountsPausedBanner.upgradeUrl} target="_top">
+                  Upgrade your plan
+                </a>
+              </>
+            )}
+          </s-banner>
+        </s-section>
+      )}
 
       {error && (
         <s-section>

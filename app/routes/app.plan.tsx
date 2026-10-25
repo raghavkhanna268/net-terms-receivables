@@ -18,7 +18,7 @@ import {
 } from "~/services/gating.server";
 import type { PlanKey } from "~/lib/entitlements";
 import { PLAN_DISPLAY_NAMES } from "~/components/UpgradePrompt";
-import { buildOverLimitBannerState } from "~/lib/over-limit-banner";
+import { buildOverLimitBannerState, buildNewAccountsPausedBannerState } from "~/lib/over-limit-banner";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 
@@ -80,6 +80,16 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       }
       return buildPlanSelectionUrl(shopDomain, handle);
     })(),
+    newAccountsPausedBanner: buildNewAccountsPausedBannerState(
+      usage?.companies.current ?? 0,
+      usage?.companies.limit ?? 0,
+      gatingEnforced,
+      (() => {
+        const handle = getAppHandle();
+        if (handle === null) return null;
+        return buildPlanSelectionUrl(shopDomain, handle);
+      })()
+    ),
     error,
   };
 };
@@ -130,6 +140,7 @@ export default function PlanPage() {
     gatedCount,
     gatingEnforced,
     upgradeUrl,
+    newAccountsPausedBanner,
     error,
   } = useLoaderData<typeof loader>();
 
@@ -153,6 +164,23 @@ export default function PlanPage() {
 
   return (
     <s-page heading="Plan & Usage">
+      {/* T4: New accounts paused banner */}
+      {newAccountsPausedBanner.show && (
+        <s-section>
+          <s-banner tone="warning" heading={newAccountsPausedBanner.heading}>
+            {newAccountsPausedBanner.bodyText}
+            {newAccountsPausedBanner.upgradeUrl && (
+              <>
+                {" "}
+                <a href={newAccountsPausedBanner.upgradeUrl} target="_top">
+                  Upgrade your plan
+                </a>
+              </>
+            )}
+          </s-banner>
+        </s-section>
+      )}
+
       {/* Error State */}
       {error && (
         <s-section>

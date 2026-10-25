@@ -99,11 +99,14 @@ export function isAccountActive(gatedAt: Date | null): boolean {
  * - getUsageStats() for UI display
  * - decideNewAccountGate() inside transactions
  *
- * Note: Currently counts all rows with gated_at IS NULL. The Team Lead ruling
- * says to exclude rows with deleted-location or removed-tag markers, but there's
- * no such marker on BuyerAccount for deleted company locations. Implementing this
- * would require a migration to add a deleted_at column or similar. Per the ruling,
- * we count all rows and this is noted for a backlog issue.
+ * Exclusions:
+ * - Gated accounts (gated_at IS NOT NULL) don't count
+ * - TAGGED_CUSTOMER accounts with inactive tags (s8_tagged_customers.tag_active=false)
+ *   don't count - these are customers whose tag was removed
+ *
+ * Note: COMPANY accounts from deleted company locations still count (no marker exists
+ * on BuyerAccount for deleted locations - COMPANY_LOCATIONS_DELETE keeps the row).
+ * A backlog issue tracks adding a deleted-location marker.
  *
  * @param sql - postgres.js SQL client (or transaction)
  * @param shopId - Internal shop ID
@@ -115,9 +118,18 @@ export async function countActiveAccounts(
 ): Promise<number> {
   const [result] = await sql<{ count: string }[]>`
     SELECT COUNT(*)::text as count
-    FROM "BuyerAccount"
-    WHERE "shopId" = ${shopId}
-      AND gated_at IS NULL
+    FROM "BuyerAccount" ba
+    WHERE ba."shopId" = ${shopId}
+      AND ba.gated_at IS NULL
+      AND NOT (
+        ba.kind = 'TAGGED_CUSTOMER'
+        AND EXISTS (
+          SELECT 1 FROM s8_tagged_customers tc
+          WHERE tc.shop_id = ba."shopId"
+            AND tc.customer_id = ba."customerId"
+            AND tc.tag_active = false
+        )
+      )
   `;
   return parseInt(result?.count ?? "0", 10);
 }

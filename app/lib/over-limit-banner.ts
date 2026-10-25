@@ -94,6 +94,7 @@ export interface NewAccountsPausedBannerState {
   show: boolean;
   heading: string;
   bodyText: string;
+  upgradeUrl: string | null;
 }
 
 /**
@@ -105,12 +106,14 @@ export interface NewAccountsPausedBannerState {
  * @param usedCount - Number of active (non-gated) buyer accounts
  * @param limitCount - Plan limit for buyer accounts (-1 means unlimited)
  * @param gatingEnforced - Whether plan gating is currently enforced
- * @returns Banner state with heading and body text
+ * @param upgradeUrl - URL to upgrade page (null means no link shown)
+ * @returns Banner state with heading, body text, and upgrade URL
  */
 export function buildNewAccountsPausedBannerState(
   usedCount: number,
   limitCount: number,
-  gatingEnforced: boolean
+  gatingEnforced: boolean,
+  upgradeUrl: string | null = null
 ): NewAccountsPausedBannerState {
   // Don't show when gating is not enforced or unlimited plan
   if (!gatingEnforced || limitCount === -1) {
@@ -118,6 +121,7 @@ export function buildNewAccountsPausedBannerState(
       show: false,
       heading: "",
       bodyText: "",
+      upgradeUrl: null,
     };
   }
 
@@ -127,6 +131,7 @@ export function buildNewAccountsPausedBannerState(
       show: false,
       heading: "",
       bodyText: "",
+      upgradeUrl: null,
     };
   }
 
@@ -138,5 +143,6 @@ export function buildNewAccountsPausedBannerState(
     show: true,
     heading,
     bodyText,
+    upgradeUrl,
   };
 }

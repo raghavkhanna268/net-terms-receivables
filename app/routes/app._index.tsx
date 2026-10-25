@@ -22,7 +22,7 @@ import {
 } from "~/lib/aging";
 import type { Sql } from "~/lib/db-light.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
-import { buildOverLimitBannerState } from "~/lib/over-limit-banner";
+import { buildOverLimitBannerState, buildNewAccountsPausedBannerState } from "~/lib/over-limit-banner";
 import { ServerTiming, mergeServerTimingHeaders, readColdOnce } from "~/lib/server-timing.server";
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
@@ -393,6 +393,16 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     onlyOverLimit,
     overLimitCount,
     error,
+    newAccountsPausedBanner: buildNewAccountsPausedBannerState(
+      usage?.companies.current ?? 0,
+      usage?.companies.limit ?? 0,
+      gatingEnforced,
+      (() => {
+        const handle = getAppHandle();
+        if (handle === null) return null;
+        return buildPlanSelectionUrl(shopDomain, handle);
+      })()
+    ),
   };
 
   const headers: HeadersInit = {};
@@ -704,6 +714,7 @@ export default function Index() {
     onlyOverLimit,
     overLimitCount,
     error,
+    newAccountsPausedBanner,
   } = useLoaderData<typeof loader>();
 
   const planKey = (plan?.key ?? "none") as PlanKey;
@@ -723,6 +734,23 @@ export default function Index() {
 
   return (
     <s-page heading="Net Terms Receivables">
+      {/* T4: New accounts paused banner */}
+      {newAccountsPausedBanner.show && (
+        <s-section>
+          <s-banner tone="warning" heading={newAccountsPausedBanner.heading}>
+            {newAccountsPausedBanner.bodyText}
+            {newAccountsPausedBanner.upgradeUrl && (
+              <>
+                {" "}
+                <a href={newAccountsPausedBanner.upgradeUrl} target="_top">
+                  Upgrade your plan
+                </a>
+              </>
+            )}
+          </s-banner>
+        </s-section>
+      )}
+
       {/* S21: Plan Banner */}
       <s-section heading="Your Plan">
         <PlanBanner
