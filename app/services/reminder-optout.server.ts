@@ -30,7 +30,7 @@ export async function isBuyerOptedOut(
   buyerAccountId: string
 ): Promise<boolean> {
   const [row] = await sql<{ optedOut: boolean }[]>`
-    SELECT (reminder_opt_out_at IS NOT NULL) AS "optedOut"
+    SELECT ("reminderOptOutAt" IS NOT NULL) AS "optedOut"
     FROM "BuyerAccount"
     WHERE "shopId" = ${shopId} AND id = ${buyerAccountId}
   `;
@@ -136,12 +136,12 @@ export async function setBuyerOptOut(
   const result = await sql`
     UPDATE "BuyerAccount"
     SET
-      reminder_opt_out_at = NOW(),
-      reminder_opt_out_source = ${source}::"ReminderOptOutSource",
+      "reminderOptOutAt" = NOW(),
+      "reminderOptOutSource" = ${source}::"ReminderOptOutSource",
       "updatedAt" = NOW()
     WHERE "shopId" = ${shopId}
       AND id = ${buyerAccountId}
-      AND reminder_opt_out_at IS NULL
+      AND "reminderOptOutAt" IS NULL
     RETURNING id
   `;
 
@@ -178,12 +178,12 @@ export async function clearBuyerOptOut(
   const result = await sql`
     UPDATE "BuyerAccount"
     SET
-      reminder_opt_out_at = NULL,
-      reminder_opt_out_source = NULL,
+      "reminderOptOutAt" = NULL,
+      "reminderOptOutSource" = NULL,
       "updatedAt" = NOW()
     WHERE "shopId" = ${shopId}
       AND id = ${buyerAccountId}
-      AND reminder_opt_out_at IS NOT NULL
+      AND "reminderOptOutAt" IS NOT NULL
     RETURNING id
   `;
 
@@ -222,8 +222,8 @@ export async function getBuyerOptOutStatus(
     optOutSource: "merchant" | "link" | null;
   }[]>`
     SELECT
-      reminder_opt_out_at AS "optOutAt",
-      reminder_opt_out_source AS "optOutSource"
+      "reminderOptOutAt" AS "optOutAt",
+      "reminderOptOutSource" AS "optOutSource"
     FROM "BuyerAccount"
     WHERE "shopId" = ${shopId} AND id = ${buyerAccountId}
   `;

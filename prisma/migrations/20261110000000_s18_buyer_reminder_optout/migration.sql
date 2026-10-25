@@ -9,9 +9,9 @@
 -- PURELY ADDITIVE: No drops, no destructive UPDATE/DELETE.
 -- Existing rows remain opted-in (NULL = not opted out).
 --
--- New columns:
--- - BuyerAccount.reminder_opt_out_at: when the buyer opted out (NULL = opted in)
--- - BuyerAccount.reminder_opt_out_source: who triggered opt-out (merchant|link)
+-- New columns (quoted camelCase, matching BuyerAccount convention):
+-- - BuyerAccount."reminderOptOutAt": when the buyer opted out (NULL = opted in)
+-- - BuyerAccount."reminderOptOutSource": who triggered opt-out (merchant|link)
 --
 -- New enum value:
 -- - ReminderLogStatus.skipped_opted_out: buyer was opted out at eligibility check
@@ -23,24 +23,24 @@
 -- Step 1: Create the opt-out source enum
 CREATE TYPE "ReminderOptOutSource" AS ENUM ('merchant', 'link');
 
--- Step 2: Add opt-out columns to BuyerAccount
+-- Step 2: Add opt-out columns to BuyerAccount (quoted camelCase, no @map)
 -- Both are nullable: NULL means buyer is opted in (receives reminders)
-ALTER TABLE "BuyerAccount" ADD COLUMN "reminder_opt_out_at" TIMESTAMPTZ(3);
-ALTER TABLE "BuyerAccount" ADD COLUMN "reminder_opt_out_source" "ReminderOptOutSource";
+ALTER TABLE "BuyerAccount" ADD COLUMN "reminderOptOutAt" TIMESTAMPTZ(3);
+ALTER TABLE "BuyerAccount" ADD COLUMN "reminderOptOutSource" "ReminderOptOutSource";
 
 -- Step 3: Add CHECK constraint ensuring both columns are set together
 -- Either both are NULL (opted in) or both are NOT NULL (opted out)
 ALTER TABLE "BuyerAccount" ADD CONSTRAINT "BuyerAccount_reminder_opt_out_consistency"
     CHECK (
-        ("reminder_opt_out_at" IS NULL AND "reminder_opt_out_source" IS NULL) OR
-        ("reminder_opt_out_at" IS NOT NULL AND "reminder_opt_out_source" IS NOT NULL)
+        ("reminderOptOutAt" IS NULL AND "reminderOptOutSource" IS NULL) OR
+        ("reminderOptOutAt" IS NOT NULL AND "reminderOptOutSource" IS NOT NULL)
     );
 
 -- Step 4: Add index on opt-out status for efficient eligibility checks
 -- Partial index on opted-out accounts (small subset)
 CREATE INDEX "idx_buyer_account_reminder_opt_out"
-    ON "BuyerAccount" ("shopId", "reminder_opt_out_at")
-    WHERE "reminder_opt_out_at" IS NOT NULL;
+    ON "BuyerAccount" ("shopId", "reminderOptOutAt")
+    WHERE "reminderOptOutAt" IS NOT NULL;
 
 -- Step 5: Add new enum value for skipped_opted_out status
 -- This tracks when a reminder was skipped because buyer opted out

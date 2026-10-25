@@ -96,7 +96,7 @@ describeWithDb("S18 buyer reminder opt-out helpers (DB)", () => {
     // Reset buyer account to opted-in state
     await sql`
       UPDATE "BuyerAccount"
-      SET reminder_opt_out_at = NULL, reminder_opt_out_source = NULL, "updatedAt" = NOW()
+      SET "reminderOptOutAt" = NULL, "reminderOptOutSource" = NULL, "updatedAt" = NOW()
       WHERE id = ${TEST_ACCOUNT_ID} AND "shopId" = ${TEST_SHOP_ID}
     `;
     // Clear reminder logs
@@ -113,7 +113,7 @@ describeWithDb("S18 buyer reminder opt-out helpers (DB)", () => {
       // Set opt-out
       await sql`
         UPDATE "BuyerAccount"
-        SET reminder_opt_out_at = NOW(), reminder_opt_out_source = 'link'::"ReminderOptOutSource"
+        SET "reminderOptOutAt" = NOW(), "reminderOptOutSource" = 'link'::"ReminderOptOutSource"
         WHERE id = ${TEST_ACCOUNT_ID} AND "shopId" = ${TEST_SHOP_ID}
       `;
 
@@ -130,7 +130,7 @@ describeWithDb("S18 buyer reminder opt-out helpers (DB)", () => {
       // Set opt-out on the correct shop
       await sql`
         UPDATE "BuyerAccount"
-        SET reminder_opt_out_at = NOW(), reminder_opt_out_source = 'link'::"ReminderOptOutSource"
+        SET "reminderOptOutAt" = NOW(), "reminderOptOutSource" = 'link'::"ReminderOptOutSource"
         WHERE id = ${TEST_ACCOUNT_ID} AND "shopId" = ${TEST_SHOP_ID}
       `;
 
@@ -252,7 +252,7 @@ describeWithDb("S18 buyer reminder opt-out helpers (DB)", () => {
       expect(result).toBe(true);
 
       const [account] = await sql<{ optOutAt: Date; optOutSource: string }[]>`
-        SELECT reminder_opt_out_at AS "optOutAt", reminder_opt_out_source AS "optOutSource"
+        SELECT "reminderOptOutAt" AS "optOutAt", "reminderOptOutSource" AS "optOutSource"
         FROM "BuyerAccount"
         WHERE id = ${TEST_ACCOUNT_ID} AND "shopId" = ${TEST_SHOP_ID}
       `;
@@ -266,7 +266,7 @@ describeWithDb("S18 buyer reminder opt-out helpers (DB)", () => {
       expect(result).toBe(true);
 
       const [account] = await sql<{ optOutSource: string }[]>`
-        SELECT reminder_opt_out_source AS "optOutSource"
+        SELECT "reminderOptOutSource" AS "optOutSource"
         FROM "BuyerAccount"
         WHERE id = ${TEST_ACCOUNT_ID} AND "shopId" = ${TEST_SHOP_ID}
       `;
@@ -279,7 +279,7 @@ describeWithDb("S18 buyer reminder opt-out helpers (DB)", () => {
       await setBuyerOptOut(sql, TEST_SHOP_ID, TEST_ACCOUNT_ID, "link");
 
       const [before] = await sql<{ optOutAt: Date }[]>`
-        SELECT reminder_opt_out_at AS "optOutAt"
+        SELECT "reminderOptOutAt" AS "optOutAt"
         FROM "BuyerAccount"
         WHERE id = ${TEST_ACCOUNT_ID} AND "shopId" = ${TEST_SHOP_ID}
       `;
@@ -290,7 +290,7 @@ describeWithDb("S18 buyer reminder opt-out helpers (DB)", () => {
 
       // Timestamp should be unchanged
       const [after] = await sql<{ optOutAt: Date; optOutSource: string }[]>`
-        SELECT reminder_opt_out_at AS "optOutAt", reminder_opt_out_source AS "optOutSource"
+        SELECT "reminderOptOutAt" AS "optOutAt", "reminderOptOutSource" AS "optOutSource"
         FROM "BuyerAccount"
         WHERE id = ${TEST_ACCOUNT_ID} AND "shopId" = ${TEST_SHOP_ID}
       `;
@@ -330,7 +330,7 @@ describeWithDb("S18 buyer reminder opt-out helpers (DB)", () => {
 
       // Fields should be NULL
       const [account] = await sql<{ optOutAt: Date | null; optOutSource: string | null }[]>`
-        SELECT reminder_opt_out_at AS "optOutAt", reminder_opt_out_source AS "optOutSource"
+        SELECT "reminderOptOutAt" AS "optOutAt", "reminderOptOutSource" AS "optOutSource"
         FROM "BuyerAccount"
         WHERE id = ${TEST_ACCOUNT_ID} AND "shopId" = ${TEST_SHOP_ID}
       `;
@@ -422,7 +422,7 @@ describeWithDb("S18 buyer reminder opt-out helpers (DB)", () => {
       // The account was created in beforeAll without opt-out fields
       // After migration, it should have NULL values (opted in)
       const [account] = await sql<{ optOutAt: Date | null; optOutSource: string | null }[]>`
-        SELECT reminder_opt_out_at AS "optOutAt", reminder_opt_out_source AS "optOutSource"
+        SELECT "reminderOptOutAt" AS "optOutAt", "reminderOptOutSource" AS "optOutSource"
         FROM "BuyerAccount"
         WHERE id = ${TEST_ACCOUNT_ID} AND "shopId" = ${TEST_SHOP_ID}
       `;
