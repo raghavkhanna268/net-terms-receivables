@@ -5,6 +5,8 @@
 -- shop-level config_int defaultTermsDays (H1 only; per-account terms print as booleans). Never selects name, holdNote, emails, domains, money
 -- amounts (outstanding/total/creditLimit only appear inside comparisons), payloads
 -- or free-text fields.
+-- Section A prints counts only (no Customer, CompanyLocation or BuyerAccount ids):
+-- public logs carry no per-customer ids (Team Lead ruling, 2026-10-25).
 -- "past_due"  = open invoice, outstanding > 0, dueAt < NOW().
 -- "overdue"   = the sweep / hasOverdueInvoices predicate: same, but dueAt < NOW() - 1 day.
 -- "is_seed"   = BuyerAccount.id LIKE 'seed-account-%' (same as s12-checkout-fixtures.sql).
@@ -32,54 +34,66 @@ SELECT DENSE_RANK() OVER (ORDER BY s.id) AS shop_idx,
 FROM "Shop" s
 ORDER BY 1;
 
-\echo '== A per BuyerAccount with >= 1 past-due unpaid invoice'
-WITH pd AS (
+\echo '== A past-due accounts (>= 1 past-due unpaid invoice) by kind / seed / holdState: counts only, no per-entity ids'
+WITH pdi AS (
   SELECT i."buyerAccountId" AS buyer_account_id,
-         COUNT(*) AS past_due_invoices,
-         COUNT(*) FILTER (WHERE i."dueAt" < NOW() - INTERVAL '1 day') AS overdue_invoices,
-         MIN(i."dueAt") AS oldest_due_at,
-         MAX(i."dueAt") AS newest_due_at
+         i."dueAt" AS due_at,
+         i."dueAt" < NOW() - INTERVAL '1 day' AS overdue
   FROM "Invoice" i
   WHERE i.status = 'open' AND i.outstanding > 0
     AND i."dueAt" IS NOT NULL AND i."dueAt" < NOW()
-  GROUP BY 1
+),
+acct AS (
+  SELECT ba.id AS buyer_account_id,
+         ba.kind,
+         ba.id LIKE 'seed-account-%' AS is_seed,
+         ba."holdState", ba."manualHold", ba.bypass,
+         ba.gated_at IS NOT NULL AS gated,
+         ba."defaultTermsDays" IS NOT NULL AS has_account_terms,
+         ba."defaultTermsDays" IS DISTINCT FROM s."defaultTermsDays" AS account_terms_differ_from_shop,
+         ba."creditLimit" IS NOT NULL AS has_credit_limit,
+         (ba."creditLimit" IS NOT NULL AND
+          (COALESCE((SELECT SUM(i2.outstanding) FROM "Invoice" i2
+                     WHERE i2."buyerAccountId" = ba.id AND i2.status = 'open' AND i2.outstanding > 0), 0)
+           + COALESCE((SELECT SUM(d.total) FROM s8_draft_orders d
+                       WHERE d.buyer_account_id = ba.id AND d.has_payment_terms
+                         AND d.status IN ('open', 'invoice_sent')), 0)) > ba."creditLimit") AS over_limit,
+         ba."syncPending",
+         ba."metafieldSyncedAt" IS NULL AS metafield_synced_at_is_null,
+         ba."metafieldSyncedAt" AS metafield_synced_at,
+         ba."updatedAt" AS account_updated_at,
+         s."uninstalledAt" IS NULL AS shop_installed,
+         EXISTS (SELECT 1 FROM s6_processed_webhooks w
+                 WHERE w.webhook_id = 'credit_recompute:' || ba.id || ':' || TO_CHAR((:'since')::timestamptz AT TIME ZONE 'UTC', 'YYYY-MM-DD')) AS swept_on_since_date
+  FROM "BuyerAccount" ba
+  JOIN "Shop" s ON s.id = ba."shopId"
+  WHERE ba.id IN (SELECT buyer_account_id FROM pdi)
 )
-SELECT ba.id AS buyer_account_id,
-       DENSE_RANK() OVER (ORDER BY ba."shopId") AS shop_idx,
-       ba.kind,
-       ba."companyLocationId" AS company_location_gid,
-       ba."customerId" AS customer_gid,
-       ba."holdState", ba."manualHold", ba.bypass,
-       ba.gated_at IS NOT NULL AS gated,
-       pd.past_due_invoices,
-       pd.overdue_invoices,
-       pd.oldest_due_at,
-       pd.newest_due_at,
-       ba."defaultTermsDays" IS NOT NULL AS has_account_terms,
-       ba."defaultTermsDays" IS DISTINCT FROM s."defaultTermsDays" AS account_terms_differ_from_shop,
-       ba."creditLimit" IS NOT NULL AS has_credit_limit,
-       (ba."creditLimit" IS NOT NULL AND
-        (COALESCE((SELECT SUM(i2.outstanding) FROM "Invoice" i2
-                   WHERE i2."buyerAccountId" = ba.id AND i2.status = 'open' AND i2.outstanding > 0), 0)
-         + COALESCE((SELECT SUM(d.total) FROM s8_draft_orders d
-                     WHERE d.buyer_account_id = ba.id AND d.has_payment_terms
-                       AND d.status IN ('open', 'invoice_sent')), 0)) > ba."creditLimit") AS over_limit,
-       ba."syncPending",
-       ba."metafieldSyncedAt" IS NULL AS metafield_synced_at_is_null,
-       ba."metafieldSyncedAt" AS metafield_synced_at,
-       ba."updatedAt" AS account_updated_at,
-       ba.id LIKE 'seed-account-%' AS is_seed,
-       s."uninstalledAt" IS NULL AS shop_installed,
-       (ba."holdState" IN ('OK', 'NEAR_LIMIT') AND ba.bypass = false AND pd.overdue_invoices > 0) AS sweep_part1_eligible,
-       EXISTS (SELECT 1 FROM s6_processed_webhooks w
-               WHERE w.webhook_id = 'credit_recompute:' || ba.id || ':' || TO_CHAR((:'since')::timestamptz AT TIME ZONE 'UTC', 'YYYY-MM-DD')) AS swept_on_since_date,
-       (SELECT MAX(w.processed_at) FROM s6_processed_webhooks w
-         WHERE w.webhook_id LIKE 'credit_recompute:' || ba.id || ':%') AS last_recompute_processed_at
-FROM pd
-JOIN "BuyerAccount" ba ON ba.id = pd.buyer_account_id
-JOIN "Shop" s ON s.id = ba."shopId"
-ORDER BY ba.id
-LIMIT 200;
+SELECT a.kind, a.is_seed, a."holdState",
+       COUNT(DISTINCT a.buyer_account_id) AS accounts,
+       COUNT(DISTINCT a.buyer_account_id) FILTER (WHERE a."manualHold") AS accounts_manual_hold,
+       COUNT(DISTINCT a.buyer_account_id) FILTER (WHERE a.bypass) AS accounts_bypass,
+       COUNT(DISTINCT a.buyer_account_id) FILTER (WHERE a.gated) AS accounts_gated,
+       COUNT(DISTINCT a.buyer_account_id) FILTER (WHERE p.overdue) AS accounts_with_overdue,
+       COUNT(DISTINCT a.buyer_account_id) FILTER (WHERE a.has_account_terms) AS accounts_with_account_terms,
+       COUNT(DISTINCT a.buyer_account_id) FILTER (WHERE a.account_terms_differ_from_shop) AS accounts_terms_differ_from_shop,
+       COUNT(DISTINCT a.buyer_account_id) FILTER (WHERE a.has_credit_limit) AS accounts_with_credit_limit,
+       COUNT(DISTINCT a.buyer_account_id) FILTER (WHERE a.over_limit) AS accounts_over_limit,
+       COUNT(DISTINCT a.buyer_account_id) FILTER (WHERE a."syncPending") AS accounts_sync_pending,
+       COUNT(DISTINCT a.buyer_account_id) FILTER (WHERE a.metafield_synced_at_is_null) AS accounts_metafield_never_synced,
+       COUNT(DISTINCT a.buyer_account_id) FILTER (WHERE NOT a.shop_installed) AS accounts_shop_uninstalled,
+       COUNT(DISTINCT a.buyer_account_id) FILTER (WHERE a."holdState" IN ('OK', 'NEAR_LIMIT') AND a.bypass = false AND p.overdue) AS accounts_sweep_part1_eligible,
+       COUNT(DISTINCT a.buyer_account_id) FILTER (WHERE a.swept_on_since_date) AS accounts_swept_on_since_date,
+       COUNT(*) AS past_due_invoices,
+       COUNT(*) FILTER (WHERE p.overdue) AS overdue_invoices,
+       MIN(p.due_at) AS oldest_due_at,
+       MAX(p.due_at) AS newest_due_at,
+       MAX(a.metafield_synced_at) AS latest_metafield_synced_at,
+       MAX(a.account_updated_at) AS latest_account_updated_at
+FROM acct a
+JOIN pdi p ON p.buyer_account_id = a.buyer_account_id
+GROUP BY 1, 2, 3
+ORDER BY 1, 2, 3;
 
 \echo '== A2 summary: past-due accounts by holdState / overdue (sweep predicate) / seed'
 WITH pd AS (
