@@ -616,3 +616,68 @@ describe("S12 Validation deployed inputQuery metrics (no text)", () => {
     });
   });
 });
+
+describe("Active subscriptions probe (counts/booleans only)", () => {
+  let step: WorkflowStep | undefined;
+  let run: string;
+  const START = "# Active subscriptions query and summary";
+  const END = "# End active subscriptions";
+
+  beforeAll(() => {
+    const workflow = parseYaml(readFileSync(WORKFLOW_PATH, "utf-8")) as Workflow;
+    const steps = Object.values(workflow.jobs ?? {}).flatMap((j) => j.steps ?? []);
+    step = steps.find((s) => s.id === "active_subscriptions");
+    run = step?.run ?? "";
+    expect(run).not.toBe("");
+  });
+
+  function probe(body: unknown, httpStatus = "200") {
+    return runSnippet(run, START, END, {
+      FAKE_CURL_BODY_JSON: typeof body === "string" ? body : JSON.stringify(body),
+      FAKE_CURL_STATUS: httpStatus,
+    }).stdout;
+  }
+
+  it("is read-only, never refreshes, and skips with skipped_token_expired", () => {
+    expect(step?.env?.PGOPTIONS).toContain("default_transaction_read_only=on");
+    expect(step?.if).toBeUndefined();
+    expect(run).not.toMatch(REFRESH_CODE_PATTERN);
+    expect(run).not.toMatch(/mutation/);
+    expect(run).toContain('[ "$TOKEN_EXPIRED" = "true" ] && [ "$REFRESH_SUCCESS" != "true" ]');
+    expect(run).toContain("active_subscriptions=skipped_token_expired");
+  });
+
+  it("prints only the count and the has-name boolean, never names or statuses", () => {
+    const out = probe({
+      data: {
+        currentAppInstallation: {
+          activeSubscriptions: [
+            { name: `Plan ${SENTINEL}`, status: "ACTIVE" },
+            { name: "", status: "PENDING" },
+          ],
+        },
+      },
+    });
+    expect(out).toBe("active_subscriptions_count=2\nany_subscription_has_plan_name=true\n");
+    expect(out).not.toContain(SENTINEL);
+    expect(out).not.toContain("ACTIVE");
+    expect(out).not.toContain("PENDING");
+  });
+
+  it("empty/null names and no subscriptions report false", () => {
+    expect(probe({ data: { currentAppInstallation: { activeSubscriptions: [] } } })).toBe(
+      "active_subscriptions_count=0\nany_subscription_has_plan_name=false\n"
+    );
+    expect(
+      probe({ data: { currentAppInstallation: { activeSubscriptions: [{ name: "", status: "ACTIVE" }, { name: null }] } } })
+    ).toBe("active_subscriptions_count=2\nany_subscription_has_plan_name=false\n");
+  });
+
+  it("soft-fails on HTTP, GraphQL and parse errors (codes only)", () => {
+    expect(probe({}, "403")).toContain("active_subscriptions=error http_status=403");
+    const g = probe({ errors: [{ message: `secret ${SENTINEL}`, extensions: { code: "ACCESS_DENIED" } }] });
+    expect(g).toContain("active_subscriptions=error error_codes=ACCESS_DENIED");
+    expect(g).not.toContain(SENTINEL);
+    expect(probe("not json")).toContain("active_subscriptions=error parse_failed");
+  });
+});
