@@ -867,10 +867,6 @@ export async function sendDataRequestNotification(
 
   const downloadUrl = buildDataRequestsAdminUrl(shopDomain);
 
-  if (downloadUrl === null) {
-    safeLog("warn", "plan_url_app_handle_missing", {});
-  }
-
   const downloadLinkHtml = downloadUrl
     ? `<p><a href="${downloadUrl}">Download Customer Data Export</a></p>`
     : `<p>Open the Net Terms Receivables app in your Shopify admin and go to Data Requests.</p>`;
