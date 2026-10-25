@@ -17,6 +17,14 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 
+/**
+ * Advisory lock ID for drain-using DB tests.
+ * All test files that call runDrain against the real database must acquire this lock
+ * to prevent cross-file race conditions where one file's drain reads another file's messages.
+ * Lock ID chosen to be unique and unlikely to conflict with application code.
+ */
+const DRAIN_TEST_ADVISORY_LOCK_ID = 8675309;
+
 // Track metafield write calls
 let metafieldWriteCount = 0;
 let lastMetafieldValue: unknown = null;
@@ -72,6 +80,10 @@ describeWithDb("credit-status-recompute DB integration", () => {
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
 
+    // Acquire advisory lock to prevent cross-file drain race conditions.
+    // All test files that call runDrain against the shared Postgres must hold this lock.
+    await sql`SELECT pg_advisory_lock(${DRAIN_TEST_ADVISORY_LOCK_ID})`;
+
     // Create test shop
     await sql`
       INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
@@ -104,6 +116,9 @@ describeWithDb("credit-status-recompute DB integration", () => {
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+
+    // Release advisory lock to allow other drain-using DB test files to run
+    await sql`SELECT pg_advisory_unlock(${DRAIN_TEST_ADVISORY_LOCK_ID})`;
     await sql.end();
   });
 
@@ -691,12 +706,14 @@ describeWithDb("enqueue_credit_status_recomputes SQL function", () => {
     await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_recompute:' + TEST_ACCOUNT_ID + '%'}`;
+    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_resync:' + TEST_ACCOUNT_ID + '%'}`;
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
     
-    // Reset account
+    // Reset account to clean state (including syncPending/metafieldSyncedAt to prevent Part 3 interference)
     await sql`
       UPDATE "BuyerAccount"
-      SET "holdState" = 'OK', "holdReasonCode" = NULL, bypass = false, gated_at = NULL, "manualHold" = false
+      SET "holdState" = 'OK', "holdReasonCode" = NULL, bypass = false, gated_at = NULL, "manualHold" = false,
+          "syncPending" = false, "metafieldSyncedAt" = NOW(), "metafieldSyncErrorCode" = NULL
       WHERE id = ${TEST_ACCOUNT_ID}
     `;
   });
@@ -1975,6 +1992,17 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
 
+    // Acquire advisory lock to prevent cross-file drain race conditions.
+    // All test files that call runDrain against the shared Postgres must hold this lock.
+    await sql`SELECT pg_advisory_lock(${DRAIN_TEST_ADVISORY_LOCK_ID})`;
+
+    // Clean up ALL messages from queue and archive to prevent cross-run interference.
+    // This is safe because we hold the advisory lock, so no other drain test file is running.
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE TRUE`;
+    await sql`DELETE FROM pgmq.q_s6_bulk WHERE TRUE`;
+    await sql`DELETE FROM pgmq.a_s6_sync WHERE TRUE`;
+    await sql`DELETE FROM pgmq.a_s6_bulk WHERE TRUE`;
+
     await sql`
       INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
       VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', NOW(), NOW())
@@ -2004,6 +2032,9 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+
+    // Release advisory lock to allow other drain-using DB test files to run
+    await sql`SELECT pg_advisory_unlock(${DRAIN_TEST_ADVISORY_LOCK_ID})`;
     await sql.end();
   });
 
@@ -2039,10 +2070,10 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
         WHERE id = ${TEST_ACCOUNT_ID}
       `;
 
-      // Clear ALL messages from the queue to ensure clean test
-      // This prevents messages from other suites from consuming our mock
-      await sql`DELETE FROM pgmq.q_s6_sync WHERE TRUE`;
-      await sql`DELETE FROM pgmq.q_s6_bulk WHERE TRUE`;
+      // Clear this test's messages from the queue to ensure clean test
+      // Scoped by shop domain to avoid affecting other test files running in parallel
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+      await sql`DELETE FROM pgmq.q_s6_bulk WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
 
       // Mock shopify client to return non-retryable no_session error
       // Use mockImplementation (not mockImplementationOnce) since drain may process multiple messages
@@ -2105,9 +2136,10 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
         WHERE id = ${TEST_ACCOUNT_ID}
       `;
 
-      // Clear ALL messages from the queue to ensure clean test
-      await sql`DELETE FROM pgmq.q_s6_sync WHERE TRUE`;
-      await sql`DELETE FROM pgmq.q_s6_bulk WHERE TRUE`;
+      // Clear this test's messages from the queue to ensure clean test
+      // Scoped by shop domain to avoid affecting other test files running in parallel
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+      await sql`DELETE FROM pgmq.q_s6_bulk WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
 
       mockShopifyGraphQLRequest.mockImplementation(async () => ({
         success: false,
@@ -2155,8 +2187,12 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
         WHERE id = ${TEST_ACCOUNT_ID}
       `;
 
+      // Clear this test's messages from the queue to ensure isolation
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+
       // Mock returns graphql_error with specific extension code
-      mockShopifyGraphQLRequest.mockImplementationOnce(async () => ({
+      // Use mockImplementation (not mockImplementationOnce) to handle stray messages from parallel tests
+      mockShopifyGraphQLRequest.mockImplementation(async () => ({
         success: false,
         error: "GraphQL error",
         errorCode: "graphql_error:ACCESS_DENIED",
@@ -2227,8 +2263,12 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
         WHERE id = ${TEST_ACCOUNT_ID}
       `;
 
-      // Mock returns no_session (known permanent code)
-      mockShopifyGraphQLRequest.mockImplementationOnce(async () => ({
+      // Clear this test's messages from the queue to ensure isolation
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+
+      // Mock returns no_session for any CREDIT_STATUS_RECOMPUTE request for this shop
+      // Use mockImplementation (not mockImplementationOnce) to handle stray messages from parallel tests
+      mockShopifyGraphQLRequest.mockImplementation(async () => ({
         success: false,
         error: "Session not found",
         errorCode: "no_session",
@@ -2687,6 +2727,17 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
 
+    // Acquire advisory lock to prevent cross-file drain race conditions.
+    // All test files that call runDrain against the shared Postgres must hold this lock.
+    await sql`SELECT pg_advisory_lock(${DRAIN_TEST_ADVISORY_LOCK_ID})`;
+
+    // Clean up ALL messages from queue and archive to prevent cross-run interference.
+    // This is safe because we hold the advisory lock, so no other drain test file is running.
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE TRUE`;
+    await sql`DELETE FROM pgmq.q_s6_bulk WHERE TRUE`;
+    await sql`DELETE FROM pgmq.a_s6_sync WHERE TRUE`;
+    await sql`DELETE FROM pgmq.a_s6_bulk WHERE TRUE`;
+
     await sql`
       INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
       VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', NOW(), NOW())
@@ -2716,6 +2767,9 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+
+    // Release advisory lock to allow other drain-using DB test files to run
+    await sql`SELECT pg_advisory_unlock(${DRAIN_TEST_ADVISORY_LOCK_ID})`;
     await sql.end();
   });
 
@@ -2818,7 +2872,8 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
 
       // Step 5: Run the drain with a success mock
       lastMetafieldValue = null;
-      mockShopifyGraphQLRequest.mockImplementationOnce(async () => {
+      // Use mockImplementation (not mockImplementationOnce) to handle stray messages from parallel tests
+      mockShopifyGraphQLRequest.mockImplementation(async () => {
         return {
           success: true,
           data: {
@@ -2927,7 +2982,8 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
 
       // Step 4: Run the drain with a success mock
       lastMetafieldValue = null;
-      mockShopifyGraphQLRequest.mockImplementationOnce(async () => {
+      // Use mockImplementation (not mockImplementationOnce) to handle stray messages from parallel tests
+      mockShopifyGraphQLRequest.mockImplementation(async () => {
         return {
           success: true,
           data: {
@@ -3297,6 +3353,17 @@ describeWithDb("leak checks (#204)", () => {
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
 
+    // Acquire advisory lock to prevent cross-file drain race conditions.
+    // All test files that call runDrain against the shared Postgres must hold this lock.
+    await sql`SELECT pg_advisory_lock(${DRAIN_TEST_ADVISORY_LOCK_ID})`;
+
+    // Clean up ALL messages from queue and archive to prevent cross-run interference.
+    // This is safe because we hold the advisory lock, so no other drain test file is running.
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE TRUE`;
+    await sql`DELETE FROM pgmq.q_s6_bulk WHERE TRUE`;
+    await sql`DELETE FROM pgmq.a_s6_sync WHERE TRUE`;
+    await sql`DELETE FROM pgmq.a_s6_bulk WHERE TRUE`;
+
     await sql`
       INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
       VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', NOW(), NOW())
@@ -3326,6 +3393,9 @@ describeWithDb("leak checks (#204)", () => {
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+
+    // Release advisory lock to allow other drain-using DB test files to run
+    await sql`SELECT pg_advisory_unlock(${DRAIN_TEST_ADVISORY_LOCK_ID})`;
     await sql.end();
   });
 
@@ -3379,8 +3449,12 @@ describeWithDb("leak checks (#204)", () => {
       WHERE id = ${TEST_ACCOUNT_ID}
     `;
 
+    // Clear this test's messages from the queue to ensure isolation
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+
     // Mock Shopify returning non-retryable error
-    mockShopifyGraphQLRequest.mockImplementationOnce(async () => ({
+    // Use mockImplementation (not mockImplementationOnce) to handle stray messages from parallel tests
+    mockShopifyGraphQLRequest.mockImplementation(async () => ({
       success: false,
       error: "Session not found",
       errorCode: "no_session",
