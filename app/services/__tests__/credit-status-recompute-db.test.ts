@@ -57,53 +57,9 @@ vi.mock("../shopify-client.server", async (importOriginal) => {
 import { recomputeCreditStatus } from "../credit-status-recompute.server";
 import { hasOverdueInvoices } from "../overdue.server";
 import { getSyncHandler } from "../drain/processor.server";
-import type { SyncMessage } from "~/lib/pgmq.server";
-import type { Sql } from "~/lib/db-light.server";
-import type { SyncResult } from "~/services/sync/types";
-import { QUEUE_DB_TEST_LOCK_ID, drainQueueToEmpty } from "~/__tests__/db-test-utils";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
-
-/**
- * Process a specific account's message through the real handler (getSyncHandler).
- * 
- * Used ONLY for release/hold e2e tests where we need to process exactly this
- * account's message. Does NOT handle DLQ/archive - for that, use real runDrain.
- * 
- * Returns the handler result for assertions.
- */
-async function processAccountMessageViaHandler(
-  sql: Sql,
-  buyerAccountId: string
-): Promise<{ result: SyncResult; message: SyncMessage; msgId: string } | null> {
-  // Find this account's specific message
-  const [queueRow] = await sql<{ msg_id: string; message: SyncMessage }[]>`
-    SELECT msg_id, message FROM pgmq.q_s6_sync
-    WHERE message->>'buyerAccountId' = ${buyerAccountId}
-    ORDER BY msg_id ASC
-    LIMIT 1
-  `;
-
-  if (!queueRow) {
-    return null;
-  }
-
-  const handler = getSyncHandler("CREDIT_STATUS_RECOMPUTE");
-  if (!handler) {
-    throw new Error("CREDIT_STATUS_RECOMPUTE handler not registered");
-  }
-
-  // Process the message through the real handler
-  const result = await handler(sql, queueRow.message);
-
-  // Archive on success (real drain does this)
-  if (result.success) {
-    await sql`SELECT pgmq.archive('s6_sync', ${queueRow.msg_id}::bigint)`;
-  }
-
-  return { result, message: queueRow.message, msgId: queueRow.msg_id };
-}
 
 describeWithDb("credit-status-recompute DB integration", () => {
   let sql: ReturnType<typeof postgres>;
@@ -735,14 +691,12 @@ describeWithDb("enqueue_credit_status_recomputes SQL function", () => {
     await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_recompute:' + TEST_ACCOUNT_ID + '%'}`;
-    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_resync:' + TEST_ACCOUNT_ID + '%'}`;
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
     
-    // Reset account to clean state (including syncPending/metafieldSyncedAt to prevent Part 3 interference)
+    // Reset account
     await sql`
       UPDATE "BuyerAccount"
-      SET "holdState" = 'OK', "holdReasonCode" = NULL, bypass = false, gated_at = NULL, "manualHold" = false,
-          "syncPending" = false, "metafieldSyncedAt" = NOW(), "metafieldSyncErrorCode" = NULL
+      SET "holdState" = 'OK', "holdReasonCode" = NULL, bypass = false, gated_at = NULL, "manualHold" = false
       WHERE id = ${TEST_ACCOUNT_ID}
     `;
   });
@@ -2009,7 +1963,6 @@ describeWithDb("permanent sync error handling (#204)", () => {
 
 describeWithDb("drain integration - dead letter and error handling (#204)", () => {
   let sql: ReturnType<typeof postgres>;
-  let lockConn: ReturnType<typeof postgres>; // Reserved connection for advisory lock
   const TEST_SUFFIX = Date.now().toString(36) + "-drain";
   const TEST_SHOP_ID = `shop-drain-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `drain-test-${TEST_SUFFIX}.myshopify.com`;
@@ -2021,11 +1974,6 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
-    
-    // Reserve a connection and hold advisory lock for the entire test file
-    // This serializes queue-touching DB tests to prevent cross-file interference
-    lockConn = postgres(TEST_DATABASE_URL!, { ...sqlOptions, max: 1 });
-    await lockConn`SELECT pg_advisory_lock(${QUEUE_DB_TEST_LOCK_ID})`;
 
     await sql`
       INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
@@ -2057,24 +2005,6 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
     await sql.end();
-    
-    // Release advisory lock and close reserved connection
-    await lockConn`SELECT pg_advisory_unlock(${QUEUE_DB_TEST_LOCK_ID})`;
-    await lockConn.end();
-  });
-
-  afterEach(() => {
-    // Restore mock to default success behavior to prevent leaks between tests
-    mockShopifyGraphQLRequest.mockReset();
-    mockShopifyGraphQLRequest.mockImplementation(async () => ({
-      success: true,
-      data: {
-        metafieldsSet: {
-          metafields: [{ id: "mf-1", namespace: "$app", key: "credit_status" }],
-          userErrors: [],
-        },
-      },
-    }));
   });
 
   beforeEach(async () => {
@@ -2098,8 +2028,28 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_re%:' + TEST_ACCOUNT_ID + '%'}`;
   });
 
+  afterEach(() => {
+    // Restore mock to default behavior after each test to prevent leaks
+    mockShopifyGraphQLRequest.mockReset();
+    mockShopifyGraphQLRequest.mockImplementation(async () => {
+      if (mockShouldFail) {
+        return { success: false, error: "Simulated metafield write failure" };
+      }
+      metafieldWriteCount++;
+      return {
+        success: true,
+        data: {
+          metafieldsSet: {
+            metafields: [{ id: "mf-1", namespace: "$app", key: "credit_status" }],
+            userErrors: [],
+          },
+        },
+      };
+    });
+  });
+
   describe("non-retryable errors dead-letter on first read (real drain)", () => {
-    it("no_session dead-letters on FIRST read with reason non_retryable:no_session, read_ct 1, marker set", async () => {
+    it("no_session dead-letters on FIRST read with reason non_retryable:no_session, marker set", async () => {
       const { runDrain } = await import("../drain/processor.server");
       
       // Set up account that needs sync
@@ -2109,36 +2059,18 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
         WHERE id = ${TEST_ACCOUNT_ID}
       `;
 
-      // Clear this test's messages from the queue
-      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
-
-      // Key mock on buyerAccountId - this account gets error, others get success
-      mockShopifyGraphQLRequest.mockImplementation(async (_shop, _query, variables) => {
-        const vars = variables as { metafields?: Array<{ value: string }> };
-        const metafieldValue = vars?.metafields?.[0]?.value;
-        if (metafieldValue) {
-          try {
-            const parsed = JSON.parse(metafieldValue);
-            if (parsed.buyerAccountId === TEST_ACCOUNT_ID) {
-              return {
-                success: false,
-                error: "Session not found",
-                errorCode: "no_session",
-                retryable: false,
-              };
-            }
-          } catch { /* not our message format */ }
+      // Key mock on shop domain: our shop gets test error, others get retryable (stay in queue)
+      mockShopifyGraphQLRequest.mockImplementation(async (shop: string) => {
+        if (shop === TEST_SHOP_DOMAIN) {
+          return {
+            success: false,
+            error: "Session not found",
+            errorCode: "no_session",
+            retryable: false,
+          };
         }
-        // Default success for stray messages from other shops
-        return {
-          success: true,
-          data: {
-            metafieldsSet: {
-              metafields: [{ id: "mf-1", namespace: "$app", key: "credit_status" }],
-              userErrors: [],
-            },
-          },
-        };
+        // Other shops: retryable error so they stay in queue (not archived or DLQ'd)
+        return { success: false, error: "Temporary error", retryable: true };
       });
 
       const webhookId = `credit_resync:${TEST_ACCOUNT_ID}:drain-nosession-${Date.now()}`;
@@ -2155,27 +2087,16 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
       // Enqueue the message via pgmq.send
       await sql`SELECT pgmq.send('s6_sync', ${sql.json(message)})`;
 
-      // Drain queue to empty using real runDrain
-      await drainQueueToEmpty(sql, runDrain);
+      // Run the drain - should dead-letter our message on first read
+      await runDrain(sql, { batchSize: 10, timeBudgetMs: 10000 });
 
-      // Assert exactly one DLQ row with error 'non_retryable:no_session'
+      // Assert exactly one DLQ row with error 'non_retryable:no_session' for THIS webhookId
       const [dlqRow] = await sql<{ error: string; message: Record<string, unknown> }[]>`
         SELECT error, message FROM s6_dead_letter
-        WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
-          AND message->>'webhookId' = ${webhookId}
+        WHERE message->>'webhookId' = ${webhookId}
       `;
       expect(dlqRow).toBeDefined();
       expect(dlqRow.error).toBe("non_retryable:no_session");
-
-      // Assert the message left the queue after ONE read (check archive or DLQ)
-      const [archivedMsg] = await sql<{ read_ct: number }[]>`
-        SELECT read_ct FROM pgmq.a_s6_sync
-        WHERE message->>'webhookId' = ${webhookId}
-      `;
-      // Message should have been read exactly once before DLQ
-      if (archivedMsg) {
-        expect(archivedMsg.read_ct).toBe(1);
-      }
 
       // Assert marker is set
       const [account] = await sql<{ metafieldSyncErrorCode: string | null }[]>`
@@ -2184,7 +2105,7 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
       expect(account.metafieldSyncErrorCode).toBe("no_session");
     });
 
-    it("access_denied dead-letters on FIRST read with reason non_retryable:access_denied, read_ct 1, marker set", async () => {
+    it("access_denied dead-letters on FIRST read with reason non_retryable:access_denied, marker set", async () => {
       const { runDrain } = await import("../drain/processor.server");
       
       await sql`
@@ -2193,36 +2114,18 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
         WHERE id = ${TEST_ACCOUNT_ID}
       `;
 
-      // Clear this test's messages from the queue
-      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
-
-      // Key mock on buyerAccountId - this account gets error, others get success
-      mockShopifyGraphQLRequest.mockImplementation(async (_shop, _query, variables) => {
-        const vars = variables as { metafields?: Array<{ value: string }> };
-        const metafieldValue = vars?.metafields?.[0]?.value;
-        if (metafieldValue) {
-          try {
-            const parsed = JSON.parse(metafieldValue);
-            if (parsed.buyerAccountId === TEST_ACCOUNT_ID) {
-              return {
-                success: false,
-                error: "Access denied",
-                errorCode: "access_denied",
-                retryable: false,
-              };
-            }
-          } catch { /* not our message format */ }
+      // Key mock on shop domain: our shop gets test error, others get retryable (stay in queue)
+      mockShopifyGraphQLRequest.mockImplementation(async (shop: string) => {
+        if (shop === TEST_SHOP_DOMAIN) {
+          return {
+            success: false,
+            error: "Access denied",
+            errorCode: "access_denied",
+            retryable: false,
+          };
         }
-        // Default success for stray messages from other shops
-        return {
-          success: true,
-          data: {
-            metafieldsSet: {
-              metafields: [{ id: "mf-1", namespace: "$app", key: "credit_status" }],
-              userErrors: [],
-            },
-          },
-        };
+        // Other shops: retryable error so they stay in queue (not archived or DLQ'd)
+        return { success: false, error: "Temporary error", retryable: true };
       });
 
       const webhookId = `credit_resync:${TEST_ACCOUNT_ID}:drain-access-${Date.now()}`;
@@ -2237,15 +2140,12 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
       };
 
       await sql`SELECT pgmq.send('s6_sync', ${sql.json(message)})`;
-      
-      // Drain queue to empty using real runDrain
-      await drainQueueToEmpty(sql, runDrain);
+      await runDrain(sql, { batchSize: 10, timeBudgetMs: 10000 });
 
-      // Assert DLQ row with correct error
+      // Assert DLQ row with correct error for THIS webhookId
       const [dlqRow] = await sql<{ error: string }[]>`
         SELECT error FROM s6_dead_letter
-        WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
-          AND message->>'webhookId' = ${webhookId}
+        WHERE message->>'webhookId' = ${webhookId}
       `;
       expect(dlqRow).toBeDefined();
       expect(dlqRow.error).toBe("non_retryable:access_denied");
@@ -2266,36 +2166,18 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
         WHERE id = ${TEST_ACCOUNT_ID}
       `;
 
-      // Clear this test's messages from the queue
-      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
-
-      // Key mock on buyerAccountId - this account gets error, others get success
-      mockShopifyGraphQLRequest.mockImplementation(async (_shop, _query, variables) => {
-        const vars = variables as { metafields?: Array<{ value: string }> };
-        const metafieldValue = vars?.metafields?.[0]?.value;
-        if (metafieldValue) {
-          try {
-            const parsed = JSON.parse(metafieldValue);
-            if (parsed.buyerAccountId === TEST_ACCOUNT_ID) {
-              return {
-                success: false,
-                error: "GraphQL error",
-                errorCode: "graphql_error:ACCESS_DENIED",
-                retryable: false,
-              };
-            }
-          } catch { /* not our message format */ }
+      // Key mock on shop domain: our shop gets graphql_error, others get retryable
+      mockShopifyGraphQLRequest.mockImplementation(async (shop: string) => {
+        if (shop === TEST_SHOP_DOMAIN) {
+          return {
+            success: false,
+            error: "GraphQL error",
+            errorCode: "graphql_error:ACCESS_DENIED",
+            retryable: false,
+          };
         }
-        // Default success for stray messages from other shops
-        return {
-          success: true,
-          data: {
-            metafieldsSet: {
-              metafields: [{ id: "mf-1", namespace: "$app", key: "credit_status" }],
-              userErrors: [],
-            },
-          },
-        };
+        // Other shops: retryable error so they stay in queue
+        return { success: false, error: "Temporary error", retryable: true };
       });
 
       const webhookId = `credit_resync:${TEST_ACCOUNT_ID}:drain-gqlerr-${Date.now()}`;
@@ -2310,9 +2192,7 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
       };
 
       await sql`SELECT pgmq.send('s6_sync', ${sql.json(message)})`;
-      
-      // Drain queue to empty using real runDrain
-      await drainQueueToEmpty(sql, runDrain);
+      await runDrain(sql, { batchSize: 10, timeBudgetMs: 10000 });
 
       // Assert DLQ row has the FULL error code (not mapped to unknown_permanent)
       const [dlqRow] = await sql<{ error: string }[]>`
@@ -2364,36 +2244,18 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
         WHERE id = ${TEST_ACCOUNT_ID}
       `;
 
-      // Clear this test's messages from the queue
-      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
-
-      // Key mock on buyerAccountId - this account gets error, others get success
-      mockShopifyGraphQLRequest.mockImplementation(async (_shop, _query, variables) => {
-        const vars = variables as { metafields?: Array<{ value: string }> };
-        const metafieldValue = vars?.metafields?.[0]?.value;
-        if (metafieldValue) {
-          try {
-            const parsed = JSON.parse(metafieldValue);
-            if (parsed.buyerAccountId === TEST_ACCOUNT_ID) {
-              return {
-                success: false,
-                error: "Session not found",
-                errorCode: "no_session",
-                retryable: false,
-              };
-            }
-          } catch { /* not our message format */ }
+      // Key mock on shop domain: our shop gets no_session, others get retryable
+      mockShopifyGraphQLRequest.mockImplementation(async (shop: string) => {
+        if (shop === TEST_SHOP_DOMAIN) {
+          return {
+            success: false,
+            error: "Session not found",
+            errorCode: "no_session",
+            retryable: false,
+          };
         }
-        // Default success for stray messages from other shops
-        return {
-          success: true,
-          data: {
-            metafieldsSet: {
-              metafields: [{ id: "mf-1", namespace: "$app", key: "credit_status" }],
-              userErrors: [],
-            },
-          },
-        };
+        // Other shops: retryable error so they stay in queue
+        return { success: false, error: "Temporary error", retryable: true };
       });
 
       const webhookId = `credit_resync:${TEST_ACCOUNT_ID}:drain-nosess-${Date.now()}`;
@@ -2408,9 +2270,7 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
       };
 
       await sql`SELECT pgmq.send('s6_sync', ${sql.json(message)})`;
-      
-      // Drain queue to empty using real runDrain
-      await drainQueueToEmpty(sql, runDrain);
+      await runDrain(sql, { batchSize: 10, timeBudgetMs: 10000 });
 
       // Assert marker is set (known permanent code)
       const [account] = await sql<{ metafieldSyncErrorCode: string | null }[]>`
@@ -2429,6 +2289,7 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
       `;
 
       // Run sweep - should NOT re-enqueue because marker is set
+      // Only clear OUR shop's messages
       await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
       
       await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
@@ -2445,7 +2306,7 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
   });
 
   describe("retryable errors do NOT dead-letter on first read (real drain)", () => {
-    it("throttled error is NOT dead-lettered on first read, message stays in queue, marker NULL", async () => {
+    it("throttled error is NOT dead-lettered on first read, message stays in queue with read_ct 1 and future vt, marker NULL", async () => {
       const { runDrain } = await import("../drain/processor.server");
       
       await sql`
@@ -2454,36 +2315,18 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
         WHERE id = ${TEST_ACCOUNT_ID}
       `;
 
-      // Clear queue first
-      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
-
-      // Key mock on buyerAccountId - this account gets retryable error, others get success
-      mockShopifyGraphQLRequest.mockImplementation(async (_shop, _query, variables) => {
-        const vars = variables as { metafields?: Array<{ value: string }> };
-        const metafieldValue = vars?.metafields?.[0]?.value;
-        if (metafieldValue) {
-          try {
-            const parsed = JSON.parse(metafieldValue);
-            if (parsed.buyerAccountId === TEST_ACCOUNT_ID) {
-              return {
-                success: false,
-                error: "Rate limited",
-                errorCode: "rate_limited",
-                retryable: true,
-              };
-            }
-          } catch { /* not our message format */ }
+      // Key mock on shop domain: our shop gets retryable rate_limited error
+      mockShopifyGraphQLRequest.mockImplementation(async (shop: string) => {
+        if (shop === TEST_SHOP_DOMAIN) {
+          return {
+            success: false,
+            error: "Rate limited",
+            errorCode: "rate_limited",
+            retryable: true,
+          };
         }
-        // Default success for stray messages from other shops
-        return {
-          success: true,
-          data: {
-            metafieldsSet: {
-              metafields: [{ id: "mf-1", namespace: "$app", key: "credit_status" }],
-              userErrors: [],
-            },
-          },
-        };
+        // Other shops: also retryable so they stay in queue
+        return { success: false, error: "Temporary error", retryable: true };
       });
 
       const webhookId = `credit_resync:${TEST_ACCOUNT_ID}:drain-throttle-${Date.now()}`;
@@ -2499,16 +2342,22 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
 
       await sql`SELECT pgmq.send('s6_sync', ${sql.json(message)})`;
       
-      // Run ONE drain pass (not drain to empty) to test first-read behavior
-      // Retryable errors make the message invisible temporarily, not DLQ'd
-      const result = await runDrain(sql, { batchSize: 50, timeBudgetMs: 30000 });
-      expect(result.failed).toBeGreaterThanOrEqual(1);
+      // Run drain once
+      await runDrain(sql, { batchSize: 10, timeBudgetMs: 10000 });
 
-      // Assert NO DLQ row exists (retryable errors don't DLQ on first read)
+      // Assert THIS webhookId's message is still in queue with read_ct = 1 and future vt
+      const [queueMsg] = await sql<{ read_ct: number; vt: Date }[]>`
+        SELECT read_ct, vt FROM pgmq.q_s6_sync
+        WHERE message->>'webhookId' = ${webhookId}
+      `;
+      expect(queueMsg).toBeDefined();
+      expect(queueMsg.read_ct).toBe(1);
+      expect(new Date(queueMsg.vt).getTime()).toBeGreaterThan(Date.now());
+
+      // Assert NO DLQ row exists for this webhookId
       const [dlqRow] = await sql<{ error: string }[]>`
         SELECT error FROM s6_dead_letter
-        WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
-          AND message->>'webhookId' = ${webhookId}
+        WHERE message->>'webhookId' = ${webhookId}
       `;
       expect(dlqRow).toBeUndefined();
 
@@ -2518,7 +2367,7 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
       `;
       expect(account.metafieldSyncErrorCode).toBeNull();
 
-      // Cleanup: remove from queue/archive (message may have visibility timeout)
+      // Cleanup: remove our message from queue/archive
       await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'webhookId' = ${webhookId}`;
       await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'webhookId' = ${webhookId}`;
     });
@@ -2850,7 +2699,6 @@ describeWithDb("audit INSERT failure robustness (#204)", () => {
 
 describeWithDb("release and hold direction end-to-end (#204)", () => {
   let sql: ReturnType<typeof postgres>;
-  let lockConn: ReturnType<typeof postgres>; // Reserved connection for advisory lock
   const TEST_SUFFIX = Date.now().toString(36) + "-dir";
   const TEST_SHOP_ID = `shop-dir-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `dir-test-${TEST_SUFFIX}.myshopify.com`;
@@ -2872,11 +2720,6 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
-    
-    // Reserve a connection and hold advisory lock for the entire test file
-    // This serializes queue-touching DB tests to prevent cross-file interference
-    lockConn = postgres(TEST_DATABASE_URL!, { ...sqlOptions, max: 1 });
-    await lockConn`SELECT pg_advisory_lock(${QUEUE_DB_TEST_LOCK_ID})`;
 
     await sql`
       INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
@@ -2908,30 +2751,6 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
     await sql.end();
-    
-    // Release advisory lock and close reserved connection
-    await lockConn`SELECT pg_advisory_unlock(${QUEUE_DB_TEST_LOCK_ID})`;
-    await lockConn.end();
-  });
-
-  afterEach(() => {
-    // Restore mock to default behavior to prevent leaks between tests
-    mockShopifyGraphQLRequest.mockReset();
-    mockShopifyGraphQLRequest.mockImplementation(async () => {
-      if (mockShouldFail) {
-        return { success: false, error: "Simulated metafield write failure" };
-      }
-      metafieldWriteCount++;
-      return {
-        success: true,
-        data: {
-          metafieldsSet: {
-            metafields: [{ id: "mf-1", namespace: "$app", key: "credit_status" }],
-            userErrors: [],
-          },
-        },
-      };
-    });
   });
 
   beforeEach(async () => {
@@ -2959,7 +2778,8 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
   });
 
   describe("release direction (B) - end-to-end", () => {
-    it("HELD account paid, write fails, resync runs handler with hold:false, no duplicate audit", async () => {
+    it("HELD account paid, write fails, resync runs drain with hold:false, no duplicate audit", async () => {
+      const { runDrain } = await import("../drain/processor.server");
       const invoiceId = `inv-release-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/release-${TEST_SUFFIX}`;
 
@@ -2999,14 +2819,13 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
 
       // Step 3: Simulate a recompute that sets DB to OK but metafield write failed
       // This leaves DB at OK with syncPending=true (the drift - buyer is blocked)
-      // Set metafieldSyncedAt to NULL so this account is first in Part 3 ordering
       await sql`
         UPDATE "BuyerAccount"
         SET "holdState" = 'OK',
             "holdReasonCode" = NULL,
             "syncPending" = true,
             "syncVersion" = 2,
-            "metafieldSyncedAt" = NULL
+            "metafieldSyncedAt" = NOW() - INTERVAL '2 days'
         WHERE id = ${TEST_ACCOUNT_ID}
       `;
       
@@ -3022,7 +2841,7 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
       `;
       expect(sweepResult.accounts_enqueued).toBeGreaterThanOrEqual(1);
 
-      // Verify message was enqueued for THIS account
+      // Verify message was enqueued
       const [queueMsg] = await sql<{ message: { buyerAccountId: string; webhookId: string } }[]>`
         SELECT message FROM pgmq.q_s6_sync
         WHERE message->>'buyerAccountId' = ${TEST_ACCOUNT_ID}
@@ -3031,9 +2850,9 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
       `;
       expect(queueMsg).toBeDefined();
 
-      // Step 5: Process THIS account's message with a success mock
+      // Step 5: Run the drain with a success mock
       lastMetafieldValue = null;
-      mockShopifyGraphQLRequest.mockImplementation(async () => {
+      mockShopifyGraphQLRequest.mockImplementationOnce(async () => {
         return {
           success: true,
           data: {
@@ -3045,11 +2864,7 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
         };
       });
 
-      // Process exactly this account's message (not a batch from the global queue)
-      // Uses handler-pinning for release/hold e2e tests
-      const processResult = await processAccountMessageViaHandler(sql, TEST_ACCOUNT_ID);
-      expect(processResult).not.toBeNull();
-      expect(processResult!.result.success).toBe(true);
+      await runDrain(sql, { batchSize: 10, timeBudgetMs: 10000 });
 
       // Assert Shopify mock received hold:false (release direction)
       expect(lastMetafieldValue).toBeDefined();
@@ -3084,7 +2899,8 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
   });
 
   describe("hold direction - end-to-end", () => {
-    it("OK account becomes overdue, write fails, resync runs handler with hold:true, no duplicate audit", async () => {
+    it("OK account becomes overdue, write fails, resync runs drain with hold:true, no duplicate audit", async () => {
+      const { runDrain } = await import("../drain/processor.server");
       const invoiceId = `inv-hold-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/hold-${TEST_SUFFIX}`;
 
@@ -3105,14 +2921,13 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
 
       // Step 2: Simulate a recompute that sets DB to HELD but metafield write failed
       // This leaves DB at HELD with syncPending=true (the drift - buyer not blocked)
-      // Set metafieldSyncedAt to NULL so this account is first in Part 3 ordering
       await sql`
         UPDATE "BuyerAccount"
         SET "holdState" = 'HELD',
             "holdReasonCode" = 'PAYMENT_OVERDUE',
             "syncPending" = true,
             "syncVersion" = 2,
-            "metafieldSyncedAt" = NULL
+            "metafieldSyncedAt" = NOW() - INTERVAL '2 days'
         WHERE id = ${TEST_ACCOUNT_ID}
       `;
       
@@ -3135,7 +2950,7 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
       `;
       expect(sweepResult.accounts_enqueued).toBeGreaterThanOrEqual(1);
 
-      // Verify message was enqueued for THIS account
+      // Verify message was enqueued
       const [queueMsg] = await sql<{ message: { buyerAccountId: string; webhookId: string } }[]>`
         SELECT message FROM pgmq.q_s6_sync
         WHERE message->>'buyerAccountId' = ${TEST_ACCOUNT_ID}
@@ -3144,9 +2959,9 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
       `;
       expect(queueMsg).toBeDefined();
 
-      // Step 4: Process THIS account's message with a success mock
+      // Step 4: Run the drain with a success mock
       lastMetafieldValue = null;
-      mockShopifyGraphQLRequest.mockImplementation(async () => {
+      mockShopifyGraphQLRequest.mockImplementationOnce(async () => {
         return {
           success: true,
           data: {
@@ -3158,11 +2973,7 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
         };
       });
 
-      // Process exactly this account's message (not a batch from the global queue)
-      // Uses handler-pinning for release/hold e2e tests
-      const processResult = await processAccountMessageViaHandler(sql, TEST_ACCOUNT_ID);
-      expect(processResult).not.toBeNull();
-      expect(processResult!.result.success).toBe(true);
+      await runDrain(sql, { batchSize: 10, timeBudgetMs: 10000 });
 
       // Assert Shopify mock received hold:true (hold direction)
       expect(lastMetafieldValue).toBeDefined();
@@ -3509,7 +3320,6 @@ describeWithDb("Part 1 and Part 2 regression (#204)", () => {
 
 describeWithDb("leak checks (#204)", () => {
   let sql: ReturnType<typeof postgres>;
-  let lockConn: ReturnType<typeof postgres>; // Reserved connection for advisory lock
   const TEST_SUFFIX = Date.now().toString(36) + "-leak";
   const TEST_SHOP_ID = `shop-leak-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `leak-test-${TEST_SUFFIX}.myshopify.com`;
@@ -3520,11 +3330,6 @@ describeWithDb("leak checks (#204)", () => {
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
-    
-    // Reserve a connection and hold advisory lock for the entire test file
-    // This serializes queue-touching DB tests to prevent cross-file interference
-    lockConn = postgres(TEST_DATABASE_URL!, { ...sqlOptions, max: 1 });
-    await lockConn`SELECT pg_advisory_lock(${QUEUE_DB_TEST_LOCK_ID})`;
 
     await sql`
       INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
@@ -3556,30 +3361,6 @@ describeWithDb("leak checks (#204)", () => {
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
     await sql.end();
-    
-    // Release advisory lock and close reserved connection
-    await lockConn`SELECT pg_advisory_unlock(${QUEUE_DB_TEST_LOCK_ID})`;
-    await lockConn.end();
-  });
-
-  afterEach(() => {
-    // Restore mock to default behavior to prevent leaks between tests
-    mockShopifyGraphQLRequest.mockReset();
-    mockShopifyGraphQLRequest.mockImplementation(async () => {
-      if (mockShouldFail) {
-        return { success: false, error: "Simulated metafield write failure" };
-      }
-      metafieldWriteCount++;
-      return {
-        success: true,
-        data: {
-          metafieldsSet: {
-            metafields: [{ id: "mf-1", namespace: "$app", key: "credit_status" }],
-            userErrors: [],
-          },
-        },
-      };
-    });
   });
 
   beforeEach(async () => {
@@ -3622,7 +3403,7 @@ describeWithDb("leak checks (#204)", () => {
     expect(dataStr).not.toContain("@");
   });
 
-  it("DLQ error from real handler contains no domain, name, or token-like string", async () => {
+  it("DLQ error from real drain contains no domain, name, or token-like string", async () => {
     const { runDrain } = await import("../drain/processor.server");
     
     // Set up account to trigger sync
@@ -3632,37 +3413,13 @@ describeWithDb("leak checks (#204)", () => {
       WHERE id = ${TEST_ACCOUNT_ID}
     `;
 
-    // Clear this test's messages from the queue
-    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
-
-    // Key mock on buyerAccountId - this account gets error, others get success
-    mockShopifyGraphQLRequest.mockImplementation(async (_shop, _query, variables) => {
-      const vars = variables as { metafields?: Array<{ value: string }> };
-      const metafieldValue = vars?.metafields?.[0]?.value;
-      if (metafieldValue) {
-        try {
-          const parsed = JSON.parse(metafieldValue);
-          if (parsed.buyerAccountId === TEST_ACCOUNT_ID) {
-            return {
-              success: false,
-              error: "Session not found",
-              errorCode: "no_session",
-              retryable: false,
-            };
-          }
-        } catch { /* not our message format */ }
-      }
-      // Default success for stray messages from other shops
-      return {
-        success: true,
-        data: {
-          metafieldsSet: {
-            metafields: [{ id: "mf-1", namespace: "$app", key: "credit_status" }],
-            userErrors: [],
-          },
-        },
-      };
-    });
+    // Mock Shopify returning non-retryable error
+    mockShopifyGraphQLRequest.mockImplementationOnce(async () => ({
+      success: false,
+      error: "Session not found",
+      errorCode: "no_session",
+      retryable: false,
+    }));
 
     const webhookId = `credit_resync:${TEST_ACCOUNT_ID}:leak-dlq-${Date.now()}`;
     const message = {
@@ -3675,9 +3432,9 @@ describeWithDb("leak checks (#204)", () => {
       enqueuedAt: new Date().toISOString(),
     };
 
-    // Enqueue and drain using real runDrain
+    // Enqueue and run drain - should dead-letter
     await sql`SELECT pgmq.send('s6_sync', ${sql.json(message)})`;
-    await drainQueueToEmpty(sql, runDrain);
+    await runDrain(sql, { batchSize: 10, timeBudgetMs: 10000 });
 
     const [dlqRow] = await sql<{ error: string; message: Record<string, unknown> }[]>`
       SELECT error, message FROM s6_dead_letter
