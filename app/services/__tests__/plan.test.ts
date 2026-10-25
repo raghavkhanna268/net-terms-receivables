@@ -39,7 +39,6 @@ import {
   _isRefreshInFlight,
   getPlanSource,
   AdminInstallationPlanSource,
-  PartnerApiPlanSource,
   _getAdminSourceForTesting,
   _getPartnerSourceForTesting,
   type PlanSource,
