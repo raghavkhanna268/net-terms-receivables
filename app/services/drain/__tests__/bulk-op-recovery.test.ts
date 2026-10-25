@@ -20,10 +20,7 @@ vi.mock("~/lib/pgmq.server", () => ({
   sendBulkMessage: vi.fn().mockResolvedValue({ msgId: "mock-msg-id" }),
 }));
 
-vi.mock("~/lib/log.server", () => ({
-  safeLog: vi.fn(),
-  shopHash: vi.fn().mockResolvedValue("hash-xxx"),
-}));
+const TEST_SUFFIX = Date.now().toString(36) + "-recovery-unit";
 
 describe("bulk-op-recovery", () => {
   beforeEach(() => {
@@ -443,10 +440,11 @@ describe("bulk-op-recovery", () => {
         retryable: false,
       });
 
+      const testShop = `specific-${TEST_SUFFIX}.myshopify.com`;
       const findStaleResult = [
         {
           bulk_operation_id: "gid://shopify/BulkOperation/123",
-          shop: "specific.myshopify.com",
+          shop: testShop,
           bulk_type: "companies" as const,
           started_at: new Date("2026-10-24T10:00:00Z"),
         },
@@ -462,7 +460,7 @@ describe("bulk-op-recovery", () => {
       const { recoverStaleBulkOperationsForShop } = await import("../bulk-op-recovery.server");
       const result = await recoverStaleBulkOperationsForShop(
         mockSql as unknown as Parameters<typeof recoverStaleBulkOperationsForShop>[0],
-        "specific.myshopify.com",
+        testShop,
         60
       );
 
