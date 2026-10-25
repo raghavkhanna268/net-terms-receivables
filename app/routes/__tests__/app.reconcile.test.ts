@@ -10,7 +10,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(),
-  getRequestWaitUntil: vi.fn(() => undefined),
 }));
 
 vi.mock("~/lib/matching/queries.server", () => ({
@@ -61,9 +60,6 @@ describe("Reconcile Route (M5)", () => {
     vi.resetModules();
     vi.clearAllMocks();
     mockSql = vi.fn();
-    // Add json method for access logging INSERT queries
-    (mockSql as unknown as { json: (data: unknown) => string }).json = (data: unknown) =>
-      JSON.stringify(data);
     mockContext.shopify.authenticate.admin.mockResolvedValue({
       session: mockSession,
     });
@@ -663,8 +659,7 @@ describe("Reconcile Route (M5)", () => {
         .mockResolvedValueOnce([{ count: "0" }])
         .mockResolvedValueOnce([{ count: "0" }])
         .mockResolvedValueOnce([{ count: "0" }])
-        .mockResolvedValueOnce([{ count: "0" }])
-        .mockResolvedValue([]); // Fallback for any additional queries (e.g., access logging INSERT)
+        .mockResolvedValueOnce([{ count: "0" }]);
 
       (getSuggestedMatches as ReturnType<typeof vi.fn>).mockResolvedValue({
         matches: [],
@@ -679,9 +674,6 @@ describe("Reconcile Route (M5)", () => {
         url: mockUrl,
         pattern: mockPattern,
       });
-
-      // Allow async access log insert to complete (fire-and-forget)
-      await new Promise((resolve) => setTimeout(resolve, 10));
 
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
@@ -699,8 +691,7 @@ describe("Reconcile Route (M5)", () => {
         .mockResolvedValueOnce([{ count: "0" }])
         .mockResolvedValueOnce([{ count: "0" }])
         .mockResolvedValueOnce([{ count: "0" }])
-        .mockResolvedValueOnce([{ count: "0" }])
-        .mockResolvedValue([]); // Fallback for any additional queries (e.g., access logging INSERT)
+        .mockResolvedValueOnce([{ count: "0" }]);
 
       (getSuggestedMatches as ReturnType<typeof vi.fn>).mockResolvedValue({
         matches: [],

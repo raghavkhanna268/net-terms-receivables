@@ -170,17 +170,19 @@ describe("compliance.server", () => {
       // Transaction operations use mockTx
       // 1. DELETE s8_tagged_customers
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-      // 2. DELETE s8_draft_orders
+      // 2. UPDATE BuyerAccount B2B main contact fields (where mainContactCustomerId matches)
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 3. DELETE s8_draft_orders
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-      // 3. DELETE s22_data_requests
+      // 4. DELETE s22_data_requests
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-      // 4. SELECT buyerAccount
+      // 5. SELECT buyerAccount
       mockTx.mockResolvedValueOnce([{ id: "ba-1" }]);
-      // 5. UPDATE Payment (via Match→Invoice→BuyerAccount) - now before alias delete
+      // 6. UPDATE Payment (via Match→Invoice→BuyerAccount) - now before alias delete
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-      // 6. DELETE PayerAlias
+      // 7. DELETE PayerAlias
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-      // 7. UPDATE BuyerAccount
+      // 8. UPDATE BuyerAccount
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
 
       const result = await redactCustomer(
@@ -195,23 +197,26 @@ describe("compliance.server", () => {
       expect(result.payerAliasesDeleted).toBe(2);
       expect(result.buyerAccountAnonymized).toBe(true);
       expect(result.paymentsRedacted).toBe(3);
+      expect(result.b2bMainContactsRedacted).toBe(0);
     });
 
     it("redacts payments and deletes PayerAlias via Match→Invoice→BuyerAccount", async () => {
       // Transaction operations use mockTx
       // 1. DELETE s8_tagged_customers
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-      // 2. DELETE s8_draft_orders
+      // 2. UPDATE BuyerAccount B2B main contact fields (where mainContactCustomerId matches)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 3. DELETE s22_data_requests
+      // 3. DELETE s8_draft_orders
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 4. SELECT buyerAccount
+      // 4. DELETE s22_data_requests
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 5. SELECT buyerAccount
       mockTx.mockResolvedValueOnce([{ id: "ba-1" }]);
-      // 5. UPDATE Payment (via Match→Invoice→BuyerAccount) - now before alias delete
+      // 6. UPDATE Payment (via Match→Invoice→BuyerAccount) - now before alias delete
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-      // 6. DELETE PayerAlias
+      // 7. DELETE PayerAlias
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-      // 7. UPDATE BuyerAccount
+      // 8. UPDATE BuyerAccount
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
 
       const result = await redactCustomer(
@@ -223,17 +228,20 @@ describe("compliance.server", () => {
       expect(result.payerAliasesDeleted).toBe(3);
       expect(result.buyerAccountAnonymized).toBe(true);
       expect(result.paymentsRedacted).toBe(2);
+      expect(result.b2bMainContactsRedacted).toBe(0);
     });
 
     it("handles customer with no data gracefully", async () => {
       // Transaction operations use mockTx
       // 1. DELETE s8_tagged_customers
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 2. DELETE s8_draft_orders
+      // 2. UPDATE BuyerAccount B2B main contact fields (where mainContactCustomerId matches)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 3. DELETE s22_data_requests
+      // 3. DELETE s8_draft_orders
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 4. SELECT buyerAccount (not found)
+      // 4. DELETE s22_data_requests
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 5. SELECT buyerAccount (not found)
       mockTx.mockResolvedValueOnce([]);
 
       const result = await redactCustomer(
@@ -248,17 +256,20 @@ describe("compliance.server", () => {
       expect(result.payerAliasesDeleted).toBe(0);
       expect(result.buyerAccountAnonymized).toBe(false);
       expect(result.paymentsRedacted).toBe(0);
+      expect(result.b2bMainContactsRedacted).toBe(0);
     });
 
     it("deletes data requests for the customer", async () => {
       // Transaction operations use mockTx
       // 1. DELETE s8_tagged_customers
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 2. DELETE s8_draft_orders
+      // 2. UPDATE BuyerAccount B2B main contact fields (where mainContactCustomerId matches)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 3. DELETE s22_data_requests - 3 requests exist
+      // 3. DELETE s8_draft_orders
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 4. DELETE s22_data_requests - 3 requests exist
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-      // 4. SELECT buyerAccount (not found)
+      // 5. SELECT buyerAccount (not found)
       mockTx.mockResolvedValueOnce([]);
 
       const result = await redactCustomer(
@@ -269,11 +280,13 @@ describe("compliance.server", () => {
 
       expect(result.dataRequestsDeleted).toBe(3);
       expect(result.payerAliasesDeleted).toBe(0);
+      expect(result.b2bMainContactsRedacted).toBe(0);
     });
 
     it("runs all operations in a single transaction", async () => {
       // Setup: customer has data to redact
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 })); // tagged_customers
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // b2b main contact update
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 })); // draft_orders
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 })); // data_requests
       mockTx.mockResolvedValueOnce([{ id: "ba-1" }]); // buyerAccount
@@ -285,6 +298,32 @@ describe("compliance.server", () => {
 
       // Verify sql.begin was called (ensures transaction wrapper)
       expect(mockSql.begin).toHaveBeenCalledTimes(1);
+    });
+
+    it("redacts B2B main contacts when mainContactCustomerId matches", async () => {
+      // Transaction operations use mockTx
+      // 1. DELETE s8_tagged_customers
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 2. UPDATE BuyerAccount B2B main contact fields - 2 company locations have this contact
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
+      // 3. DELETE s8_draft_orders
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 4. DELETE s22_data_requests
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 5. SELECT buyerAccount (not found - this is a contact, not a tagged customer)
+      mockTx.mockResolvedValueOnce([]);
+
+      const result = await redactCustomer(
+        mockSql,
+        "shop-123",
+        "gid://shopify/Customer/contact-789"
+      );
+
+      expect(result.taggedCustomersDeleted).toBe(0);
+      expect(result.b2bMainContactsRedacted).toBe(2);
+      expect(result.draftOrdersDeleted).toBe(0);
+      expect(result.dataRequestsDeleted).toBe(0);
+      expect(result.buyerAccountAnonymized).toBe(false);
     });
   });
 
@@ -818,7 +857,7 @@ describe("compliance.server", () => {
       );
 
       expect(result.sent).toBe(false);
-      expect(result.error).toBe("resend_api_error_500");
+      expect(result.error).toBe("resend_server_error");
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining("data_request_email_failed")
       );
@@ -831,7 +870,7 @@ describe("compliance.server", () => {
       vi.stubEnv("RESEND_TEST_RECIPIENTS", "owner@test-shop.com");
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
-      // Mock network error (generic error message maps to "error" via toErrorCode)
+      // Mock network error
       mockFetch.mockRejectedValueOnce(new Error("Network error"));
 
       const result = await sendDataRequestNotification(
@@ -841,8 +880,8 @@ describe("compliance.server", () => {
       );
 
       expect(result.sent).toBe(false);
-      // toErrorCode maps generic errors to "error", preserving main's behavior
-      expect(result.error).toBe("error");
+      // Error code is returned, not raw message (per security rule)
+      expect(result.error).toBe("fetch_error");
       consoleSpy.mockRestore();
     });
   });

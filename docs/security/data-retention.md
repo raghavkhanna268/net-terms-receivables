@@ -24,7 +24,7 @@
 | Offline tokens | `Session.accessToken` (`:123`), `Session.refreshToken` (`:132`) | Until session deletion | Part of Session table; deleted with sessions | `prisma/schema.prisma:116-140` |
 | BuyerAccount.name | `BuyerAccount.name` | Until customers/redact (anonymized to "Redacted Customer") or shop/redact (CASCADE) | `redactCustomer()` at `compliance.server.ts:405-413` | `prisma/schema.prisma` |
 | Tagged customer PII | `s8_tagged_customers.email`, `s8_tagged_customers.display_name` | Until customers/redact or shop/redact; minimised on tag removal only if no open invoices | `minimiseCustomerPiiIfInactive()` at `compliance.server.ts:971-995`, called from `customer.server.ts:388` | See Notes |
-| AuditEvent | `AuditEvent` | Until shop/redact (CASCADE) | AuditEvent rows, including access events, are kept while the app is installed and deleted by the shop/redact cascade; no time-based purge yet [retention period: Raghav to confirm]. (`compliance.server.ts:230`, `prisma/migrations/20261022000001_s5_data_model/migration.sql:284`) | `prisma/schema.prisma` |
+| AuditEvent | `AuditEvent` | Until shop/redact (CASCADE) | No separate retention purge — not implemented | `prisma/schema.prisma` |
 | Backstop processed orders | `backstop_processed_orders` | 30 days | pg_cron job `backstop-purge-30d` at 03:00 UTC daily | `prisma/migrations/20261028000000_s13_backstop_table/migration.sql:61-65` |
 | Customer PII fallback counts | `s10b_customer_pii_fallback` | 90 days | pg_cron job `s10b_purge_old_pii_fallback` at 04:15 UTC daily; also deleted on shop/redact (`compliance.server.ts:156`) | `prisma/migrations/20261027000000_s10b_customer_pii_fallback/migration.sql:47-51` |
 | Order outstanding missing counts | `order_outstanding_missing` | 90 days | pg_cron job `purge_old_order_outstanding_missing` at 04:30 UTC daily; also deleted on shop/redact (`compliance.server.ts:150`) | `prisma/migrations/20261026010000_order_outstanding_missing/migration.sql:50-54` |
@@ -66,7 +66,7 @@
 
 3. **pgmq queue tables:** Shop-scoped messages deleted by `deleteShop()` from `pgmq.q_s6_sync`, `pgmq.q_s6_bulk`, `pgmq.a_s6_sync`, `pgmq.a_s6_bulk` (lines 174-188 in `compliance.server.ts`).
 
-4. **AuditEvent:** AuditEvent rows, including access events, are kept while the app is installed and deleted by the shop/redact cascade; no time-based purge yet [retention period: Raghav to confirm]. (`compliance.server.ts:230`, `prisma/migrations/20261022000001_s5_data_model/migration.sql:284`)
+4. **AuditEvent:** Deleted via CASCADE on `shop/redact`. No separate retention purge — not implemented.
 
 5. **S8 tagged customer PII minimisation:** `minimiseCustomerPiiIfInactive()` (`compliance.server.ts:971-995`) runs only at tag removal (`customer.server.ts:388`) and requires `email IS NOT NULL`. If open invoices exist at tag removal, PII is not nulled later — no sweep job exists. `minimiseInactiveCustomerPii()` (`:938-960`) is defined but never called — not implemented.
 

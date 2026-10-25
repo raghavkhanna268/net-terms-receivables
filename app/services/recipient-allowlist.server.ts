@@ -13,7 +13,8 @@
 
 /**
  * Parsed recipient allowlist - a Set of lowercase, trimmed email addresses.
- * An empty Set means the allowlist is empty or not configured (fail closed, no sends allowed).
+ * An empty Set means the allowlist is empty (no sends allowed).
+ * null means the env var is not set (fail closed, no sends).
  */
 export type RecipientAllowlist = Set<string>;
 

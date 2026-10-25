@@ -141,7 +141,6 @@ describeWithDb("app.accounts.$id dead-letter time filter (DB)", () => {
       vi.resetModules();
       vi.doMock("~/lib/request-context.server", () => ({
         getRequestSql: () => sql,
-        getRequestWaitUntil: () => undefined,
       }));
 
       const { loader } = await import("../app.accounts.$id");
@@ -198,7 +197,6 @@ describeWithDb("app.accounts.$id dead-letter time filter (DB)", () => {
       vi.resetModules();
       vi.doMock("~/lib/request-context.server", () => ({
         getRequestSql: () => sql,
-        getRequestWaitUntil: () => undefined,
       }));
 
       const { loader } = await import("../app.accounts.$id");
@@ -255,7 +253,6 @@ describeWithDb("app.accounts.$id dead-letter time filter (DB)", () => {
       vi.resetModules();
       vi.doMock("~/lib/request-context.server", () => ({
         getRequestSql: () => sql,
-        getRequestWaitUntil: () => undefined,
       }));
 
       const { loader } = await import("../app.accounts.$id");
@@ -312,7 +309,6 @@ describeWithDb("app.accounts.$id dead-letter time filter (DB)", () => {
       vi.resetModules();
       vi.doMock("~/lib/request-context.server", () => ({
         getRequestSql: () => sql,
-        getRequestWaitUntil: () => undefined,
       }));
 
       const { loader } = await import("../app.accounts.$id");

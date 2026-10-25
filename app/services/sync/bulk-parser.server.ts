@@ -255,6 +255,7 @@ export function bulkLocationToShopifyLocation(
     },
     billingAddress: location.billingAddress,
     buyerExperienceConfiguration: location.buyerExperienceConfiguration,
+    mainContact: location.mainContact,
   };
 }
 

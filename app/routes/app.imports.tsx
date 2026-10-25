@@ -27,7 +27,6 @@ import { generateDedupeKey, isValidUtrForRail } from "~/lib/banks/dedupe";
 import type { PaymentRail } from "~/lib/banks/types";
 import { checkImportLimit, enforceImportLimit, UpgradeRequiredError } from "~/services/gating.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
-import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 
 /**
  * Maximum rows per import request.
@@ -244,7 +243,7 @@ export function validateImportRequest(body: unknown): { valid: ImportRequest | n
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { shopify } = context;
-  const { session, sessionToken } = await shopify.authenticate.admin(request);
+  const { session } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
@@ -263,13 +262,6 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   // Get import usage for the current month (IST calendar month)
   const importCheck = await checkImportLimit(sql, shop.id);
-
-  recordAccess(sql, {
-    shopId: shop.id,
-    actor: getActorFromSessionToken(sessionToken, session),
-    action: "imports",
-    recordType: "BankImport",
-  });
 
   return {
     shopDomain,

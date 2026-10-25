@@ -17,7 +17,6 @@ const mockSql = Object.assign(vi.fn(), { unsafe: vi.fn((s) => s) });
 // Mock modules
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
-  getRequestWaitUntil: vi.fn(() => undefined),
 }));
 
 vi.mock("~/services/plan.server", () => ({

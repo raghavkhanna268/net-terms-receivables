@@ -1,13 +1,8 @@
 /**
  * Shared Resend email client with pre-launch recipient allowlist guard.
  *
- * Payment and catch-up reminders MUST go through sendViaResend() to ensure
- * the allowlist is enforced.
- *
- * Note: sendDataRequestNotification in compliance.server.ts makes its own
- * direct fetch to api.resend.com on purpose, preserving main's error codes
- * (resend_api_error_{status}, toErrorCode for network errors). It enforces
- * the allowlist itself before the fetch call.
+ * All email sends MUST go through sendViaResend() to ensure the allowlist
+ * is enforced. Direct fetch() calls to api.resend.com are not allowed.
  *
  * Pre-launch behavior:
  * - RESEND_TEST_RECIPIENTS env var contains a comma-separated allowlist
@@ -36,7 +31,7 @@ export type ResendSkipReason =
  * Result of a Resend send attempt.
  */
 export type ResendSendResult =
-  | { sent: true; id: string | undefined }
+  | { sent: true; id: string }
   | { sent: false; skipped: true; reason: ResendSkipReason; skippedCount: number; allowedCount: number }
   | { sent: false; skipped: false; error: string; httpStatus?: number; retryable: boolean };
 
@@ -196,39 +191,57 @@ export async function sendViaResend(
     body.headers = filteredParams.headers;
   }
 
-  const response = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
+  try {
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
 
-  if (!response.ok) {
-    const isAuthError = response.status === 401;
-    const isRateLimited = response.status === 429;
-    const isServerError = response.status >= 500;
-    const isRetryable = isRateLimited || isServerError;
+    if (!response.ok) {
+      const isAuthError = response.status === 401;
+      const isRateLimited = response.status === 429;
+      const isServerError = response.status >= 500;
+      const isRetryable = isRateLimited || isServerError;
 
-    const errorCode = isAuthError
-      ? "resend_auth_error"
-      : isRateLimited
-        ? "resend_rate_limited"
-        : isServerError
-          ? "resend_server_error"
-          : "resend_error";
+      const errorCode = isAuthError
+        ? "resend_auth_error"
+        : isRateLimited
+          ? "resend_rate_limited"
+          : isServerError
+            ? "resend_server_error"
+            : "resend_error";
+
+      return {
+        sent: false,
+        skipped: false,
+        error: errorCode,
+        httpStatus: response.status,
+        retryable: isRetryable,
+      };
+    }
+
+    const result = (await response.json()) as { id?: string };
+
+    return {
+      sent: true,
+      id: result.id ?? "unknown",
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message.toLowerCase() : "";
+    let errorCode = "fetch_error";
+
+    if (message.includes("timeout") || message.includes("etimedout")) {
+      errorCode = "timeout";
+    } else if (message.includes("econnrefused")) {
+      errorCode = "connection_refused";
+    }
 
     return {
       sent: false,
       skipped: false,
       error: errorCode,
-      httpStatus: response.status,
-      retryable: isRetryable,
+      retryable: true,
     };
   }
-
-  const result = (await response.json()) as { id?: string };
-
-  return {
-    sent: true,
-    id: result.id,
-  };
 }

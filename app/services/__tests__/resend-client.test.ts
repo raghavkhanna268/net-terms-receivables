@@ -5,16 +5,16 @@ const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
 describe("sendViaResend", () => {
+  const originalEnv = process.env;
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockFetch.mockReset();
-    // Make tests hermetic by clearing RESEND_* env vars
-    vi.stubEnv("RESEND_API_KEY", "");
-    vi.stubEnv("RESEND_TEST_RECIPIENTS", "");
+    process.env = { ...originalEnv };
   });
 
   afterEach(() => {
-    vi.unstubAllEnvs();
+    process.env = originalEnv;
   });
 
   describe("allowlist enforcement", () => {
@@ -386,20 +386,27 @@ describe("sendViaResend", () => {
       }
     });
 
-    it("propagates network errors to callers (toErrorCode handles in outer catch)", async () => {
-      mockFetch.mockRejectedValueOnce(new Error("Network timeout ETIMEDOUT"));
+    it("handles network timeout as retryable", async () => {
+      mockFetch.mockRejectedValueOnce(new Error("Network timeout"));
 
-      await expect(
-        sendViaResend(
-          {
-            from: "sender@test-example.com",
-            to: ["buyer@test-example.com"],
-            subject: "Test",
-            html: "<p>Test</p>",
-          },
-          { RESEND_API_KEY: "re_test_1234", RESEND_TEST_RECIPIENTS: "buyer@test-example.com" }
-        )
-      ).rejects.toThrow("Network timeout ETIMEDOUT");
+      const result = await sendViaResend(
+        {
+          from: "sender@test-example.com",
+          to: ["buyer@test-example.com"],
+          subject: "Test",
+          html: "<p>Test</p>",
+        },
+        { RESEND_API_KEY: "re_test_1234", RESEND_TEST_RECIPIENTS: "buyer@test-example.com" }
+      );
+
+      expect(result.sent).toBe(false);
+      if (!result.sent) {
+        expect(result.skipped).toBe(false);
+        if (!result.skipped) {
+          expect(result.error).toBe("timeout");
+          expect(result.retryable).toBe(true);
+        }
+      }
     });
   });
 

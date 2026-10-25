@@ -74,6 +74,19 @@ describe("Bulk Operations GraphQL", () => {
       expect(BULK_COMPANIES_QUERY).toContain("paymentTermsTemplate");
       expect(BULK_COMPANIES_QUERY).toContain("dueInDays");
     });
+
+    it("requests mainContact for B2B reminder emails", () => {
+      expect(BULK_COMPANIES_QUERY).toContain("mainContact");
+      expect(BULK_COMPANIES_QUERY).toContain("customer {");
+      expect(BULK_COMPANIES_QUERY).toContain("email");
+      expect(BULK_COMPANIES_QUERY).toContain("displayName");
+    });
+
+    it("does not request forbidden customer fields in mainContact (DPDP compliance)", () => {
+      expect(BULK_COMPANIES_QUERY).not.toContain("phone");
+      expect(BULK_COMPANIES_QUERY).not.toContain("addresses");
+      expect(BULK_COMPANIES_QUERY).not.toContain("defaultAddress");
+    });
   });
 
   describe("parseBulkOperationResult", () => {

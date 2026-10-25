@@ -183,7 +183,12 @@ export interface ReminderSendResult {
 
 /**
  * Get invoice data needed for sending a reminder.
- * Joins Invoice with Shop and tagged customer (for email/name via CUSTOMER_PII_FIELDS).
+ * 
+ * Recipient resolution by account type:
+ * - COMPANY (B2B): uses mainContactEmail and mainContactName from BuyerAccount
+ * - TAGGED_CUSTOMER: uses email and displayName from s8_tagged_customers
+ * 
+ * Both require CUSTOMER_PII_FIELDS=1 for PII fields to be populated.
  */
 export async function getInvoiceForReminder(
   sql: Sql,
@@ -203,7 +208,10 @@ export async function getInvoiceForReminder(
       dueAt: Date | null;
       status: string;
       buyerAccountId: string;
+      accountKind: string;
       customerId: string | null;
+      mainContactEmail: string | null;
+      mainContactDisplayName: string | null;
       buyerAccountGatedAt: Date | null;
       shopUninstalledAt: Date | null;
     }[]
@@ -220,7 +228,10 @@ export async function getInvoiceForReminder(
       i."dueAt",
       i.status,
       i."buyerAccountId",
+      ba.kind::TEXT AS "accountKind",
       ba."customerId",
+      ba."mainContactEmail",
+      ba."mainContactName" AS "mainContactDisplayName",
       ba.gated_at AS "buyerAccountGatedAt",
       s."uninstalledAt" AS "shopUninstalledAt"
     FROM "Invoice" i
@@ -234,12 +245,17 @@ export async function getInvoiceForReminder(
     return null;
   }
 
-  // Get customer email/displayName from s8_tagged_customers
-  // This data is only present when CUSTOMER_PII_FIELDS=1 (S8)
+  // Resolve recipient email and name by account type
   let buyerEmail: string | null = null;
-  let buyerName: string | null = null;
+  let buyerDisplayName: string | null = null;
 
-  if (row.customerId) {
+  if (row.accountKind === "COMPANY") {
+    // B2B: use mainContactEmail and mainContactName from BuyerAccount
+    buyerEmail = row.mainContactEmail;
+    buyerDisplayName = row.mainContactDisplayName;
+  } else if (row.customerId) {
+    // Tagged customer: get email/displayName from s8_tagged_customers
+    // This data is only present when CUSTOMER_PII_FIELDS=1 (S8)
     const [customer] = await sql<{ email: string | null; displayName: string | null }[]>`
       SELECT email, display_name AS "displayName"
       FROM s8_tagged_customers
@@ -248,18 +264,18 @@ export async function getInvoiceForReminder(
     `;
     if (customer) {
       buyerEmail = customer.email;
-      buyerName = customer.displayName;
+      buyerDisplayName = customer.displayName;
     }
   }
 
-  const shopName = row.shopDomain.replace(".myshopify.com", "");
+  const shopLabel = row.shopDomain.replace(".myshopify.com", "");
   const shopTimezone = validateTimezone(row.shopTimezone);
 
   return {
     invoiceId: row.invoiceId,
     shopId: row.shopId,
     shopDomain: row.shopDomain,
-    shopName,
+    shopName: shopLabel,
     shopTimezone,
     invoiceName: row.invoiceName,
     total: row.total,
@@ -268,7 +284,7 @@ export async function getInvoiceForReminder(
     dueAt: row.dueAt,
     status: row.status as "open" | "paid" | "cancelled",
     buyerEmail,
-    buyerName,
+    buyerName: buyerDisplayName,
     buyerAccountGatedAt: row.buyerAccountGatedAt,
     shopUninstalledAt: row.shopUninstalledAt,
   };
