@@ -47,8 +47,11 @@
     // S21: Plan gating enforcement. Set to "1" or "true" to enable.
     // When OFF (default): Plan resolution, banner, usage work but limits are not enforced.
     // When ON: Over-limit accounts are gated (gated_at set) and blocked from operations.
-    // Expected Partner Dashboard plan names: Free, Starter, Growth, Scale (case-insensitive)
-    "PLAN_GATING_ENFORCED": "false"
+    "PLAN_GATING_ENFORCED": "false",
+    // T2: Plan resolution source. Defaults to "admin_installation" (today's behavior).
+    // Set to "partner_api" to resolve plans from the Partner API (Shopify App Pricing).
+    // Requires the Partner API secrets below to be set; otherwise falls back to admin.
+    "PLAN_SOURCE": "admin_installation"
   },
 
   "observability": {
@@ -62,4 +65,9 @@
   // wrangler secret put SHOPIFY_API_SECRET
   // wrangler secret put REMINDER_UNSUBSCRIBE_SECRET
   // wrangler secret put REMINDER_UNSUBSCRIBE_SECRET_PREVIOUS  # optional, for key rotation
+  //
+  // T2 Partner API secrets (required when PLAN_SOURCE="partner_api"):
+  // wrangler secret put SHOPIFY_PARTNER_API_TOKEN
+  // wrangler secret put SHOPIFY_PARTNER_ORG_ID
+  // wrangler secret put SHOPIFY_APP_GID  # format: gid://shopify/App/{id}
 }

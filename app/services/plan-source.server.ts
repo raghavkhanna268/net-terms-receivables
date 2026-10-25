@@ -33,6 +33,18 @@ export type PlanSourceTag = "admin_installation" | "partner_api" | "not_configur
 export type PlanStatus = "active" | "expired" | "cancelled" | "pending" | "unknown";
 
 /**
+ * Discriminated resolution state for plan resolution results.
+ *
+ * - 'active': Confirmed active subscription from the source
+ * - 'none': Confirmed no subscription (Partner API returned null, or Admin returned no ACTIVE sub)
+ * - 'unknown': Fetch error, exception, or no Shop row yet
+ *
+ * Callers should only redirect to pricing on 'none'. Never redirect on 'unknown'
+ * (that would kick paying merchants on transient errors).
+ */
+export type ResolutionState = "active" | "none" | "unknown";
+
+/**
  * Result of plan resolution from a PlanSource.
  */
 export interface SourceResolvedPlan {
@@ -52,6 +64,13 @@ export interface SourceResolvedPlan {
   sourceTag: PlanSourceTag;
   /** Status of the subscription */
   status: PlanStatus;
+  /**
+   * Discriminated resolution state.
+   * - 'active': Confirmed active subscription
+   * - 'none': Confirmed no subscription
+   * - 'unknown': Fetch error, exception, or no Shop row yet
+   */
+  resolutionState: ResolutionState;
 }
 
 /**
