@@ -340,14 +340,17 @@ function runSnippet(
         files[k] = v;
       }
     }
+    // Minimal child env on purpose (no app secrets/config). Cast because the
+    // generated worker types make some ProcessEnv keys required.
+    const childEnv: Record<string, string> = {
+      PATH: `${dir}:${process.env.PATH ?? ""}`,
+      REPO_INPUT_QUERY_HAS_CREDIT_STATUS: "true",
+      CURL_CONFIG: "/dev/null",
+      SHOP_DOMAIN: "example.invalid",
+      ...files,
+    };
     const result = spawnSync("bash", ["-euo", "pipefail", "-c", snippet], {
-      env: {
-        PATH: `${dir}:${process.env.PATH ?? ""}`,
-        REPO_INPUT_QUERY_HAS_CREDIT_STATUS: "true",
-        CURL_CONFIG: "/dev/null",
-        SHOP_DOMAIN: "example.invalid",
-        ...files,
-      },
+      env: childEnv as NodeJS.ProcessEnv,
       encoding: "utf-8",
     });
     expect(result.stderr).toBe("");
