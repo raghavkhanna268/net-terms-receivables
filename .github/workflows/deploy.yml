@@ -236,24 +236,30 @@ jobs:
           command: deploy --secrets-file ${{ steps.secrets.outputs.file }} --var SENTRY_RELEASE:${{ github.sha }}
 
       - name: Upload source maps to Sentry
-        if: steps.gate.outputs.ready == 'true' && steps.verify-head.outputs.changed != 'true' && secrets.SENTRY_AUTH_TOKEN != ''
+        if: steps.gate.outputs.ready == 'true' && steps.verify-head.outputs.changed != 'true'
         continue-on-error: true
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
         run: |
-          npx @sentry/cli releases new "${{ github.sha }}" \
+          if [ -z "${SENTRY_AUTH_TOKEN:-}" ]; then
+            echo 'SENTRY_AUTH_TOKEN not set; skipping'
+            exit 0
+          fi
+
+          npx --yes @sentry/cli@2.58.6 releases new "${{ github.sha }}" \
             --org termwise \
             --project net-terms-app \
             --url https://sentry.io
 
-          npx @sentry/cli sourcemaps upload \
+          npx --yes @sentry/cli@2.58.6 sourcemaps upload \
             --org termwise \
             --project net-terms-app \
             --release "${{ github.sha }}" \
             --url https://sentry.io \
-            ./dist
+            --url-prefix '~/' \
+            ./dist/server
 
-          npx @sentry/cli releases finalize "${{ github.sha }}" \
+          npx --yes @sentry/cli@2.58.6 releases finalize "${{ github.sha }}" \
             --org termwise \
             --project net-terms-app \
             --url https://sentry.io
