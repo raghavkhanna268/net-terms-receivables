@@ -75,6 +75,7 @@ export interface ShopifyCompany {
  *
  * DPDP note: billingAddress only includes companyName (name fallback).
  * No PII fields (names, addresses, phones) are stored.
+ * mainContact PII (email, displayName) is only fetched when CUSTOMER_PII_FIELDS=1.
  *
  * Note: CompanyAddress.company was renamed to companyName in 2026-10.
  */
@@ -93,6 +94,13 @@ export interface ShopifyCompanyLocation {
       name: string;
       dueInDays: number;
       paymentTermsType: string;
+    } | null;
+  } | null;
+  mainContact?: {
+    customer?: {
+      id: string;
+      email?: string | null;
+      displayName?: string | null;
     } | null;
   } | null;
   createdAt?: string;
