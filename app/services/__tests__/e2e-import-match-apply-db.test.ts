@@ -140,6 +140,11 @@ function getUtcDateString(daysAgo: number): string {
   return d.toISOString().slice(0, 10);
 }
 
+function makeValidNeftUtr(suffix: string): string {
+  const paddedSuffix = suffix.replace(/[^0-9]/g, "").padStart(11, "0").slice(0, 11);
+  return `HDFCN${paddedSuffix}`;
+}
+
 describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
   let sql: ReturnType<typeof postgres>;
 
@@ -234,7 +239,7 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
   });
 
   it("E2E: import -> match -> confirm -> apply full flow", async () => {
-    const syntheticUtr = `SYNTE2E${TEST_SUFFIX.toUpperCase().slice(0, 8)}`;
+    const syntheticUtr = makeValidNeftUtr("10000000001");
     const importPayload = {
       bank: "HDFC",
       fileName: "e2e-synthetic-test.csv",
@@ -267,12 +272,13 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
     expect(importData.counts?.duplicates).toBe(0);
 
     const [paymentRow] = await sql<
-      { id: string; status: string; amount: string }[]
+      { id: string; status: string; amount: string; utr: string }[]
     >`
-      SELECT id, status, amount::text FROM "Payment"
+      SELECT id, status, amount::text, utr FROM "Payment"
       WHERE "shopId" = ${testShopId} AND utr = ${syntheticUtr}
     `;
     expect(paymentRow).toBeDefined();
+    expect(paymentRow.utr).toBe(syntheticUtr);
     expect(paymentRow.status).toBe("unmatched");
     expect(parseFloat(paymentRow.amount)).toBe(85000);
 
@@ -311,12 +317,15 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
     expect(confirmedMatch.state).toBe("confirmed");
     expect(confirmedMatch.confirmed_by).toBe("e2e-test-user");
 
-    const [matchConfirmedAudit] = await sql<{ id: string; data: object }[]>`
+    const [matchConfirmedAudit] = await sql<{ id: string; data: { matchId?: string; invoiceId?: string } }[]>`
       SELECT id, data FROM "AuditEvent"
       WHERE "shopId" = ${testShopId} AND type = 'match.confirmed'
       ORDER BY at DESC LIMIT 1
     `;
     expect(matchConfirmedAudit).toBeDefined();
+    expect(matchConfirmedAudit.id).toBeTruthy();
+    expect(matchConfirmedAudit.data.matchId).toBe(topMatch.id);
+    expect(matchConfirmedAudit.data.invoiceId).toBe(testInvoiceId);
 
     const applyResult = await applyMatch(
       sql,
@@ -340,23 +349,28 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
     expect(paidInvoice.status).toBe("paid");
     expect(parseFloat(paidInvoice.outstanding)).toBe(0);
 
-    const [matchAppliedAudit] = await sql<{ id: string; data: object }[]>`
+    const [matchAppliedAudit] = await sql<{ id: string; data: { matchId?: string; invoiceId?: string } }[]>`
       SELECT id, data FROM "AuditEvent"
       WHERE "shopId" = ${testShopId} AND type = 'match.applied'
       ORDER BY at DESC LIMIT 1
     `;
     expect(matchAppliedAudit).toBeDefined();
+    expect(matchAppliedAudit.id).toBeTruthy();
+    expect(matchAppliedAudit.data.matchId).toBe(topMatch.id);
+    expect(matchAppliedAudit.data.invoiceId).toBe(testInvoiceId);
 
-    const [invoicePaidAudit] = await sql<{ id: string; data: object }[]>`
+    const [invoicePaidAudit] = await sql<{ id: string; data: { matchId?: string; invoiceId?: string } }[]>`
       SELECT id, data FROM "AuditEvent"
       WHERE "shopId" = ${testShopId} AND type = 'invoice.paid'
       ORDER BY at DESC LIMIT 1
     `;
     expect(invoicePaidAudit).toBeDefined();
+    expect(invoicePaidAudit.id).toBeTruthy();
+    expect(invoicePaidAudit.data.invoiceId).toBe(testInvoiceId);
   });
 
   it("E2E: confirm is idempotent", async () => {
-    const syntheticUtr = `SYNTIDM${TEST_SUFFIX.toUpperCase().slice(0, 8)}`;
+    const syntheticUtr = makeValidNeftUtr("20000000002");
     const importPayload = {
       bank: "HDFC",
       fileName: "e2e-idempotent-test.csv",
@@ -375,11 +389,13 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
     await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
     await runMatcher(sql, testShopId, { limit: 10 });
 
-    const [match] = await sql<{ id: string }[]>`
-      SELECT id FROM "Match"
+    const [match] = await sql<{ id: string; invoice_id: string }[]>`
+      SELECT id, "invoiceId" as invoice_id FROM "Match"
       WHERE "shopId" = ${testShopId} AND state = 'suggested'
       ORDER BY score DESC LIMIT 1
     `;
+    expect(match).toBeDefined();
+    expect(match.invoice_id).toBe(testInvoiceId);
 
     const firstConfirm = await confirmMatch(
       sql,
@@ -405,7 +421,7 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
   });
 
   it("E2E: apply is idempotent", async () => {
-    const syntheticUtr = `SYNTAPD${TEST_SUFFIX.toUpperCase().slice(0, 8)}`;
+    const syntheticUtr = makeValidNeftUtr("30000000003");
     const importPayload = {
       bank: "HDFC",
       fileName: "e2e-apply-idempotent.csv",
@@ -424,11 +440,13 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
     await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
     await runMatcher(sql, testShopId, { limit: 10 });
 
-    const [match] = await sql<{ id: string }[]>`
-      SELECT id FROM "Match"
+    const [match] = await sql<{ id: string; invoice_id: string }[]>`
+      SELECT id, "invoiceId" as invoice_id FROM "Match"
       WHERE "shopId" = ${testShopId} AND state = 'suggested'
       ORDER BY score DESC LIMIT 1
     `;
+    expect(match).toBeDefined();
+    expect(match.invoice_id).toBe(testInvoiceId);
 
     await confirmMatch(sql, testShopId, match.id, "e2e-test-user");
 
@@ -458,7 +476,7 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
   });
 
   it("E2E: partial payment leaves invoice open", async () => {
-    const syntheticUtr = `SYNTPRT${TEST_SUFFIX.toUpperCase().slice(0, 8)}`;
+    const syntheticUtr = makeValidNeftUtr("40000000004");
     const importPayload = {
       bank: "HDFC",
       fileName: "e2e-partial-test.csv",
@@ -477,11 +495,13 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
     await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
     await runMatcher(sql, testShopId, { limit: 10 });
 
-    const [match] = await sql<{ id: string }[]>`
-      SELECT id FROM "Match"
+    const [match] = await sql<{ id: string; invoice_id: string }[]>`
+      SELECT id, "invoiceId" as invoice_id FROM "Match"
       WHERE "shopId" = ${testShopId} AND state = 'suggested'
       ORDER BY score DESC LIMIT 1
     `;
+    expect(match).toBeDefined();
+    expect(match.invoice_id).toBe(testInvoiceId);
 
     await confirmMatch(sql, testShopId, match.id, "e2e-test-user");
 
@@ -504,7 +524,7 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
   });
 
   it("E2E: duplicate import yields all duplicates", async () => {
-    const syntheticUtr = `SYNTDUP${TEST_SUFFIX.toUpperCase().slice(0, 8)}`;
+    const syntheticUtr = makeValidNeftUtr("50000000005");
     const importPayload = {
       bank: "HDFC",
       fileName: "e2e-duplicate-test.csv",
@@ -550,7 +570,7 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
   });
 
   it("E2E: matcher produces no duplicate suggestions on re-run", async () => {
-    const syntheticUtr = `SYNTRMA${TEST_SUFFIX.toUpperCase().slice(0, 8)}`;
+    const syntheticUtr = makeValidNeftUtr("60000000006");
     const importPayload = {
       bank: "HDFC",
       fileName: "e2e-rematch-test.csv",
@@ -588,7 +608,7 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
   it("E2E: already-paid Shopify order is handled idempotently", async () => {
     mockAlreadyPaid = true;
 
-    const syntheticUtr = `SYNTALP${TEST_SUFFIX.toUpperCase().slice(0, 8)}`;
+    const syntheticUtr = makeValidNeftUtr("70000000007");
     const importPayload = {
       bank: "HDFC",
       fileName: "e2e-already-paid.csv",
@@ -607,11 +627,13 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
     await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
     await runMatcher(sql, testShopId, { limit: 10 });
 
-    const [match] = await sql<{ id: string }[]>`
-      SELECT id FROM "Match"
+    const [match] = await sql<{ id: string; invoice_id: string }[]>`
+      SELECT id, "invoiceId" as invoice_id FROM "Match"
       WHERE "shopId" = ${testShopId} AND state = 'suggested'
       ORDER BY score DESC LIMIT 1
     `;
+    expect(match).toBeDefined();
+    expect(match.invoice_id).toBe(testInvoiceId);
 
     await confirmMatch(sql, testShopId, match.id, "e2e-test-user");
 
@@ -631,7 +653,7 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
     expect(invoice.status).toBe("paid");
   });
 
-  it("E2E: logs contain no PII (payment narration, payer names)", async () => {
+  it("E2E: logs contain no PII (payment narration, payer names, amounts)", async () => {
     const consoleLogs: string[] = [];
     const logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
       consoleLogs.push(args.map(String).join(" "));
@@ -639,11 +661,18 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation((...args) => {
       consoleLogs.push(args.map(String).join(" "));
     });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation((...args) => {
+      consoleLogs.push(args.map(String).join(" "));
+    });
+    const debugSpy = vi.spyOn(console, "debug").mockImplementation((...args) => {
+      consoleLogs.push(args.map(String).join(" "));
+    });
 
     try {
-      const syntheticUtr = `SYNTPII${TEST_SUFFIX.toUpperCase().slice(0, 8)}`;
+      const syntheticUtr = makeValidNeftUtr("80000000008");
       const piiPayerName = "SECRET PAYER NAME PVT LTD";
       const piiNarration = `NEFT CR-${piiPayerName}-CONFIDENTIAL REF 12345`;
+      const piiAmount = 9876543;
 
       const importPayload = {
         bank: "HDFC",
@@ -651,7 +680,7 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
         credits: [
           {
             date: getUtcDateString(2),
-            amountPaise: 1000000,
+            amountPaise: piiAmount,
             rail: "NEFT",
             utr: syntheticUtr,
             payerName: piiPayerName,
@@ -663,19 +692,36 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
       await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
       await runMatcher(sql, testShopId, { limit: 10 });
 
+      const [match] = await sql<{ id: string }[]>`
+        SELECT id FROM "Match"
+        WHERE "shopId" = ${testShopId} AND state = 'suggested'
+        ORDER BY score DESC LIMIT 1
+      `;
+
+      if (match) {
+        await confirmMatch(sql, testShopId, match.id, "e2e-test-user");
+        await applyMatch(sql, testShopId, match.id, "e2e-test-user");
+      }
+
+      expect(consoleLogs.length).toBeGreaterThan(0);
+
       const allLogs = consoleLogs.join("\n");
 
       expect(allLogs).not.toContain(piiPayerName);
       expect(allLogs).not.toContain("SECRET");
       expect(allLogs).not.toContain("CONFIDENTIAL");
+      expect(allLogs).not.toContain(piiNarration);
       expect(allLogs).not.toContain(".myshopify.com");
+      expect(allLogs).not.toContain(String(piiAmount));
     } finally {
       logSpy.mockRestore();
       errorSpy.mockRestore();
+      warnSpy.mockRestore();
+      debugSpy.mockRestore();
     }
   });
 
-  it("E2E: cross-shop isolation (shop B cannot see shop A data)", async () => {
+  it("E2E: cross-shop isolation (shop B operations don't affect shop A)", async () => {
     const shopBSuffix = `${TEST_SUFFIX}-b`;
     const shopBDomain = `test-e2e-match-${shopBSuffix}.myshopify.com`;
 
@@ -686,7 +732,7 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
     `;
 
     try {
-      const syntheticUtr = `SYNTISO${TEST_SUFFIX.toUpperCase().slice(0, 8)}`;
+      const syntheticUtr = makeValidNeftUtr("90000000009");
       const importPayload = {
         bank: "HDFC",
         fileName: "e2e-isolation-test.csv",
@@ -703,18 +749,65 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
       };
 
       await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
+      await runMatcher(sql, testShopId, { limit: 10 });
 
-      const shopAPayments = await sql<{ count: string }[]>`
+      const [shopAMatch] = await sql<{ id: string }[]>`
+        SELECT id FROM "Match"
+        WHERE "shopId" = ${testShopId} AND state = 'suggested'
+        ORDER BY score DESC LIMIT 1
+      `;
+      expect(shopAMatch).toBeDefined();
+
+      const shopAPaymentsBefore = await sql<{ count: string }[]>`
         SELECT COUNT(*)::text as count FROM "Payment"
         WHERE "shopId" = ${testShopId}
       `;
-      expect(parseInt(shopAPayments[0].count, 10)).toBe(1);
+      expect(parseInt(shopAPaymentsBefore[0].count, 10)).toBe(1);
 
       const shopBPayments = await sql<{ count: string }[]>`
         SELECT COUNT(*)::text as count FROM "Payment"
         WHERE "shopId" = ${shopB.id}
       `;
       expect(parseInt(shopBPayments[0].count, 10)).toBe(0);
+
+      const shopBMatcherResult = await runMatcher(sql, shopB.id, { limit: 10 });
+      expect(shopBMatcherResult.paymentsProcessed).toBe(0);
+      expect(shopBMatcherResult.matchesCreated).toBe(0);
+
+      const crossShopConfirmResult = await confirmMatch(
+        sql,
+        shopB.id,
+        shopAMatch.id,
+        "malicious-user"
+      );
+      expect(crossShopConfirmResult.success).toBe(false);
+
+      const [shopAMatchAfterCrossConfirm] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${shopAMatch.id}
+      `;
+      expect(shopAMatchAfterCrossConfirm.state).toBe("suggested");
+
+      await confirmMatch(sql, testShopId, shopAMatch.id, "e2e-test-user");
+
+      const crossShopApplyResult = await applyMatch(
+        sql,
+        shopB.id,
+        shopAMatch.id,
+        "malicious-user"
+      );
+      expect(crossShopApplyResult.success).toBe(false);
+
+      const [shopAInvoiceAfterCrossApply] = await sql<{ outstanding: string; status: string }[]>`
+        SELECT outstanding::text, status FROM "Invoice" WHERE id = ${testInvoiceId}
+      `;
+      expect(shopAInvoiceAfterCrossApply.status).toBe("open");
+      expect(parseFloat(shopAInvoiceAfterCrossApply.outstanding)).toBe(85000);
+
+      const shopAPaymentsAfter = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text as count FROM "Payment"
+        WHERE "shopId" = ${testShopId}
+      `;
+      expect(parseInt(shopAPaymentsAfter[0].count, 10)).toBe(1);
     } finally {
       await sql`DELETE FROM "Shop" WHERE id = ${shopB.id}`;
     }
