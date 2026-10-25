@@ -33,9 +33,11 @@ vi.stubGlobal("fetch", mockFetch);
 // Mock SQL client factory
 function createMockSql() {
   const mockResults = new Map<string, unknown>();
+  const allCalls: string[] = [];
 
   const createQueryHandler = () => async (strings: TemplateStringsArray, ..._values: unknown[]) => {
     const query = strings.join("?");
+    allCalls.push(query);
 
     // Invoice lookup
     if (query.includes("FROM \"Invoice\"") && query.includes("INNER JOIN")) {
@@ -45,6 +47,16 @@ function createMockSql() {
     // Customer PII lookup
     if (query.includes("FROM s8_tagged_customers")) {
       return mockResults.get("customer") ?? [];
+    }
+
+    // getBuyerAccountId lookup (standalone query for buyer account ID)
+    if (query.includes("buyerAccountId") && query.includes("FROM \"Invoice\"") && !query.includes("INNER JOIN")) {
+      return mockResults.get("buyer_account_id") ?? [{ buyerAccountId: "buyer-123" }];
+    }
+
+    // isBuyerOptedOut check
+    if (query.includes("reminderOptOutAt") && query.includes("FROM \"BuyerAccount\"")) {
+      return mockResults.get("buyer_opted_out") ?? [{ optedOut: false }];
     }
 
     // ReminderLog exists check
@@ -122,14 +134,16 @@ function createMockSql() {
       json: vi.fn((v) => v),
       unsafe: vi.fn((s: string) => s),
       setMockResult: (key: string, value: unknown) => mockResults.set(key, value),
-      clearMockResults: () => mockResults.clear(),
+      clearMockResults: () => { mockResults.clear(); allCalls.length = 0; },
       begin: vi.fn(async <T>(callback: (tx: typeof mockTx) => Promise<T>): Promise<T> => {
         return callback(mockTx);
       }),
+      getAllCalls: () => allCalls,
     }
   ) as unknown as Sql & {
     setMockResult: (key: string, value: unknown) => void;
     clearMockResults: () => void;
+    getAllCalls: () => string[];
   };
 
   return sql;
@@ -259,7 +273,7 @@ describe("Payment Reminders (S18)", () => {
       expect(mockFetch).not.toHaveBeenCalled();
 
       // Should NOT insert ReminderLog (no slot claim)
-      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const sqlCalls = mockSql.getAllCalls();
       const reminderLogInserts = sqlCalls.filter((q: string) => q.includes("INSERT INTO \"ReminderLog\""));
       expect(reminderLogInserts).toHaveLength(0);
     });
@@ -273,11 +287,13 @@ describe("Payment Reminders (S18)", () => {
       shopTimezone: "Asia/Kolkata",
       invoiceName: "#1001",
       total: "100000",
+      outstanding: "100000",
       currency: "INR",
       dueAt: new Date("2026-10-30"),
       status: "open",
       buyerAccountId: "buyer-123",
       customerId: "gid://shopify/Customer/456",
+      shopUninstalledAt: null,
     };
 
     it("returns capped when daily GLOBAL cap (100) is reached", async () => {
@@ -290,11 +306,13 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "1000.00",
+        outstanding: "1000.00",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
 
       mockSql.setMockResult("invoice", [mockInvoice]);
@@ -311,7 +329,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
       );
 
       expect(result.success).toBe(true);
@@ -333,11 +351,13 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "1000.00",
+        outstanding: "1000.00",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
 
       mockSql.setMockResult("invoice", [mockInvoice]);
@@ -354,7 +374,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
       );
 
       expect(result.success).toBe(true);
@@ -375,10 +395,12 @@ describe("Payment Reminders (S18)", () => {
       shopTimezone: string;
       invoiceName: string;
       total: string;
+      outstanding: string;
       currency: string;
       dueAt: Date;
       buyerAccountId: string;
       customerId: string;
+      shopUninstalledAt: Date | null;
     };
 
     beforeEach(() => {
@@ -389,10 +411,12 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "100000",
+        outstanding: "100000",
         currency: "INR",
         dueAt: new Date(),
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
     });
 
@@ -409,7 +433,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
       );
 
       expect(result.success).toBe(true);
@@ -431,7 +455,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
       );
 
       expect(result.success).toBe(true);
@@ -452,11 +476,13 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "100000",
+        outstanding: "100000",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
 
       mockSql.setMockResult("global_daily", []);
@@ -471,7 +497,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
       );
 
       expect(result.success).toBe(true);
@@ -481,7 +507,7 @@ describe("Payment Reminders (S18)", () => {
       expect(mockFetch).not.toHaveBeenCalled();
 
       // Should NOT insert ReminderLog (no slot consumed)
-      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const sqlCalls = mockSql.getAllCalls();
       const reminderLogInserts = sqlCalls.filter((q: string) => q.includes("INSERT INTO \"ReminderLog\""));
       expect(reminderLogInserts).toHaveLength(0);
     });
@@ -498,11 +524,13 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "1000.00",
+        outstanding: "1000.00",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
 
       mockSql.setMockResult("invoice", [mockInvoiceData]);
@@ -516,7 +544,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
       );
 
       expect(result.success).toBe(true);
@@ -534,14 +562,16 @@ describe("Payment Reminders (S18)", () => {
       shopTimezone: string;
       invoiceName: string;
       total: string;
+      outstanding: string;
       currency: string;
       dueAt: Date;
       status: string;
       buyerAccountId: string;
       customerId: string;
+      shopUninstalledAt: Date | null;
     };
 
-    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" };
+    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
     beforeEach(() => {
       mockInvoiceData = {
@@ -551,11 +581,13 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "1000.00",
+        outstanding: "1000.00",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
     });
 
@@ -621,7 +653,7 @@ describe("Payment Reminders (S18)", () => {
       );
 
       // Verify cap was released (UPDATE query with GREATEST(0, daily_count - 1))
-      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const sqlCalls = mockSql.getAllCalls();
       const capReleaseCalls = sqlCalls.filter((q: string) => q.includes("GREATEST(0, daily_count - 1)"));
       expect(capReleaseCalls.length).toBeGreaterThan(0);
     });
@@ -654,7 +686,7 @@ describe("Payment Reminders (S18)", () => {
       expect(result.retryable).toBe(true);
 
       // Verify cap WAS released - only successful sends count toward cap
-      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const sqlCalls = mockSql.getAllCalls();
       const capReleaseCalls = sqlCalls.filter((q: string) => q.includes("GREATEST(0, daily_count - 1)"));
       expect(capReleaseCalls.length).toBeGreaterThan(0);
     });
@@ -687,7 +719,7 @@ describe("Payment Reminders (S18)", () => {
       expect(result.retryable).toBe(true);
 
       // Verify cap WAS released - only successful sends count toward cap
-      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const sqlCalls = mockSql.getAllCalls();
       const capReleaseCalls = sqlCalls.filter((q: string) => q.includes("GREATEST(0, daily_count - 1)"));
       expect(capReleaseCalls.length).toBeGreaterThan(0);
     });
@@ -741,7 +773,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "reminders@myapp.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "reminders@myapp.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
       );
 
       expect(mockFetch).toHaveBeenCalledTimes(1);
@@ -759,14 +791,16 @@ describe("Payment Reminders (S18)", () => {
       shopTimezone: string;
       invoiceName: string;
       total: string;
+      outstanding: string;
       currency: string;
       dueAt: Date;
       status: string;
       buyerAccountId: string;
       customerId: string;
+      shopUninstalledAt: Date | null;
     };
 
-    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" };
+    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
     beforeEach(() => {
       mockInvoiceData = {
@@ -776,11 +810,13 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "1000.00",
+        outstanding: "1000.00",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
     });
 
@@ -811,7 +847,7 @@ describe("Payment Reminders (S18)", () => {
       expect(result.errorCode).toBe("timeout");
 
       // Verify cap WAS released - only successful sends count toward cap
-      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const sqlCalls = mockSql.getAllCalls();
       const capReleaseCalls = sqlCalls.filter((q: string) => q.includes("GREATEST(0, daily_count - 1)"));
       expect(capReleaseCalls.length).toBeGreaterThan(0);
     });
@@ -830,11 +866,13 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "1000.00",
+        outstanding: "1000.00",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
 
       mockSql.setMockResult("invoice", [mockInvoiceData]);
@@ -847,7 +885,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
       );
 
       expect(result.success).toBe(true);
@@ -855,7 +893,7 @@ describe("Payment Reminders (S18)", () => {
       expect(result.skipReason).toContain("Outside send window");
       expect(mockFetch).not.toHaveBeenCalled();
 
-      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const sqlCalls = mockSql.getAllCalls();
       const reminderLogInserts = sqlCalls.filter((q: string) => q.includes("INSERT INTO \"ReminderLog\""));
       expect(reminderLogInserts).toHaveLength(0);
       const globalIncrements = sqlCalls.filter((q: string) => q.includes("WITH monthly_sum AS") && q.includes("upserted AS"));
@@ -1140,6 +1178,26 @@ describe("formatAmount (rendered in email)", () => {
 
     expect(html).toContain("₹1,234.56");
     expect(html).not.toContain("₹12.35"); // Would be wrong if we divided by 100
+  });
+});
+
+describe("Partly paid invoice email", () => {
+  it("email shows outstanding balance, not original total", async () => {
+    const { renderPaymentReminderEmail } = await import("~/emails/PaymentReminderEmail");
+
+    // Invoice has total of 5000.00, but only 3000.00 outstanding
+    // The email should show the OUTSTANDING amount (3000.00), not the total
+    const html = renderPaymentReminderEmail({
+      invoiceName: "#1002",
+      buyerName: "Partly Paid Customer",
+      amount: "₹3,000.00", // Outstanding amount, not total
+      dueDate: "November 15, 2026",
+      merchantName: "Test Shop",
+      reminderType: "Payment 7 days overdue",
+    });
+
+    expect(html).toContain("₹3,000.00"); // Outstanding
+    expect(html).not.toContain("₹5,000.00"); // Total should NOT appear
   });
 });
 
@@ -1519,5 +1577,212 @@ describe("ensureDefaultReminderRules", () => {
     expect(result.seeded).toBe(false);
     expect(result.count).toBe(0);
     expect(ruleInsertCalled).toBe(false);
+  });
+});
+
+describe("sendPaymentReminder - buyerAccountId null handling", () => {
+  const originalEnv = process.env;
+  let mockSql: ReturnType<typeof createMockSql>;
+  let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    // Set time within send window (12:00 IST = 06:30 UTC)
+    vi.setSystemTime(new Date("2026-10-24T06:30:00Z"));
+    mockSql = createMockSql();
+    mockFetch.mockReset();
+    process.env = { ...originalEnv };
+    consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    process.env = originalEnv;
+    consoleWarnSpy.mockRestore();
+  });
+
+  it("skips send and logs warning when getBuyerAccountId returns null", async () => {
+    // Mock DateTime.now to be within send window
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+    const { sendPaymentReminder } = await import("../reminders.server");
+
+    const mockInvoice = {
+      invoiceId: "inv-123",
+      shopId: "shop-123",
+      shopDomain: "test-shop.myshopify.com",
+      shopTimezone: "Asia/Kolkata",
+      invoiceName: "#1001",
+      total: "1000.00",
+      outstanding: "1000.00",
+      currency: "INR",
+      dueAt: new Date(),
+      status: "open",
+      buyerAccountId: "buyer-123",
+      customerId: "gid://shopify/Customer/456",
+      shopUninstalledAt: null,
+      buyerAccountGatedAt: null,
+    };
+
+    mockSql.setMockResult("invoice", [mockInvoice]);
+    mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
+    // Set buyer_account_id to empty to simulate null return
+    mockSql.setMockResult("buyer_account_id", []);
+
+    const result = await sendPaymentReminder(
+      mockSql,
+      "shop-123",
+      "inv-123",
+      "rule-123",
+      0,
+      "Asia/Kolkata",
+      {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@example.com",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
+        SHOPIFY_APP_URL: "https://app.example.com",
+      }
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("skipped");
+    expect(result.skipReason).toContain("Buyer account ID not found");
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    // Should log warning
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("reminders_no_buyer_account")
+    );
+  });
+});
+
+describe("sendPaymentReminder - SHOPIFY_APP_URL gate", () => {
+  const originalEnv = process.env;
+  let mockSql: ReturnType<typeof createMockSql>;
+  let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    // Set time within send window (12:00 IST = 06:30 UTC)
+    vi.setSystemTime(new Date("2026-10-24T06:30:00Z"));
+    mockSql = createMockSql();
+    mockFetch.mockReset();
+    process.env = { ...originalEnv };
+    consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    process.env = originalEnv;
+    consoleWarnSpy.mockRestore();
+  });
+
+  it("skips send and logs warning when SHOPIFY_APP_URL is missing", async () => {
+    // Mock DateTime.now to be within send window
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+    const { sendPaymentReminder } = await import("../reminders.server");
+
+    const mockInvoice = {
+      invoiceId: "inv-123",
+      shopId: "shop-123",
+      shopDomain: "test-shop.myshopify.com",
+      shopTimezone: "Asia/Kolkata",
+      invoiceName: "#1001",
+      total: "1000.00",
+      outstanding: "1000.00",
+      currency: "INR",
+      dueAt: new Date(),
+      status: "open",
+      buyerAccountId: "buyer-123",
+      customerId: "gid://shopify/Customer/456",
+      shopUninstalledAt: null,
+      buyerAccountGatedAt: null,
+    };
+
+    mockSql.setMockResult("invoice", [mockInvoice]);
+    mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
+
+    const result = await sendPaymentReminder(
+      mockSql,
+      "shop-123",
+      "inv-123",
+      "rule-123",
+      0,
+      "Asia/Kolkata",
+      {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@example.com",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
+        SHOPIFY_APP_URL: "", // Empty = not configured
+      }
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("skipped");
+    expect(result.skipReason).toContain("SHOPIFY_APP_URL not configured");
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    // Should log warning
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("reminders_no_app_url")
+    );
+  });
+
+  it("skips send when SHOPIFY_APP_URL is whitespace only", async () => {
+    // Mock DateTime.now to be within send window
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+    const { sendPaymentReminder } = await import("../reminders.server");
+
+    const mockInvoice = {
+      invoiceId: "inv-123",
+      shopId: "shop-123",
+      shopDomain: "test-shop.myshopify.com",
+      shopTimezone: "Asia/Kolkata",
+      invoiceName: "#1001",
+      total: "1000.00",
+      outstanding: "1000.00",
+      currency: "INR",
+      dueAt: new Date(),
+      status: "open",
+      buyerAccountId: "buyer-123",
+      customerId: "gid://shopify/Customer/456",
+      shopUninstalledAt: null,
+      buyerAccountGatedAt: null,
+    };
+
+    mockSql.setMockResult("invoice", [mockInvoice]);
+    mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
+
+    const result = await sendPaymentReminder(
+      mockSql,
+      "shop-123",
+      "inv-123",
+      "rule-123",
+      0,
+      "Asia/Kolkata",
+      {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@example.com",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
+        SHOPIFY_APP_URL: "   ", // Whitespace only
+      }
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("skipped");
+    expect(result.skipReason).toContain("SHOPIFY_APP_URL not configured");
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });

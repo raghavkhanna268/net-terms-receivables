@@ -61,6 +61,14 @@ function createMockSql() {
     if (query.includes("FROM \"Invoice\"") && query.includes("INNER JOIN")) {
       return mockResults.get("invoice") ?? [];
     }
+    // getBuyerAccountId lookup (standalone query)
+    if (query.includes("buyerAccountId") && query.includes("FROM \"Invoice\"") && !query.includes("INNER JOIN")) {
+      return mockResults.get("buyer_account_id") ?? [{ buyerAccountId: "buyer-123" }];
+    }
+    // isBuyerOptedOut check
+    if (query.includes("reminderOptOutAt") && query.includes("FROM \"BuyerAccount\"")) {
+      return mockResults.get("buyer_opted_out") ?? [{ optedOut: false }];
+    }
     if (query.includes("FROM s8_tagged_customers")) {
       return mockResults.get("customer") ?? [];
     }
@@ -203,12 +211,14 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
       shopTimezone: "Asia/Kolkata",
       invoiceName: "#1001",
       total: SENSITIVE_AMOUNT,
+      outstanding: SENSITIVE_AMOUNT,
       currency: "INR",
       dueAt: new Date(),
       status: "open",
       buyerAccountId: "buyer-123",
       customerId: "gid://shopify/Customer/456",
       buyerAccountGatedAt: null,
+      shopUninstalledAt: null,
     };
 
     mockSql.setMockResult("invoice", [mockInvoiceData]);
@@ -229,7 +239,7 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
       "rule-123",
       0,
       "Asia/Kolkata",
-      { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
+      { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
     );
 
     const errorLogs = parseLogCalls(consoleErrorSpy);
@@ -266,12 +276,14 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
       shopTimezone: "Asia/Kolkata",
       invoiceName: "#R1-001",
       total: "50000",
+      outstanding: "50000",
       currency: "INR",
       dueAt: new Date(),
       status: "open",
       buyerAccountId: "buyer-r1",
       customerId: "gid://shopify/Customer/r1",
       buyerAccountGatedAt: null,
+      shopUninstalledAt: null,
     };
 
     mockSql.setMockResult("invoice", [mockInvoiceData]);
@@ -291,7 +303,7 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
       "rule-r1",
       0,
       "Asia/Kolkata",
-      { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
+      { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
     );
 
     // Result should have errorCode, not error with raw message
@@ -336,12 +348,14 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
       shopTimezone: "Asia/Kolkata",
       invoiceName: "#R1-HTTP",
       total: "50000",
+      outstanding: "50000",
       currency: "INR",
       dueAt: new Date(),
       status: "open",
       buyerAccountId: "buyer-r1-http",
       customerId: "gid://shopify/Customer/r1-http",
       buyerAccountGatedAt: null,
+      shopUninstalledAt: null,
     };
 
     mockSql.setMockResult("invoice", [mockInvoiceData]);
@@ -363,7 +377,7 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
       "rule-r1-http",
       0,
       "Asia/Kolkata",
-      { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
+      { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
     );
 
     // Result should have errorCode, not error with interpolated status

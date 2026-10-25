@@ -1031,19 +1031,27 @@ jobs:
           echo "Limit: $REDRIVE_LIMIT"
           echo ""
 
-          # First, show how many messages match
-          MATCH_COUNT=$(psql -v ON_ERROR_STOP=1 -v topic="$REDRIVE_TOPIC" -t -A "$DATABASE_URL" <<'EOSQL'
-          SELECT COUNT(*)
+          # First, show how many messages match (excluding sanitized rows)
+          MATCH_COUNTS=$(psql -v ON_ERROR_STOP=1 -v topic="$REDRIVE_TOPIC" -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT json_build_object(
+            'redrivable', COUNT(*) FILTER (WHERE NOT (message ? 'sanitized')),
+            'sanitized', COUNT(*) FILTER (WHERE message ? 'sanitized')
+          )
           FROM s6_dead_letter
           WHERE message->>'topic' = :'topic';
           EOSQL
           )
 
-          echo "Messages matching topic '$REDRIVE_TOPIC': $MATCH_COUNT"
+          MATCH_COUNT=$(echo "$MATCH_COUNTS" | jq -r '.redrivable')
+          SANITIZED_COUNT=$(echo "$MATCH_COUNTS" | jq -r '.sanitized')
+
+          echo "Messages matching topic '$REDRIVE_TOPIC':"
+          echo "  Redrivable: $MATCH_COUNT"
+          echo "  Sanitized (skipped): $SANITIZED_COUNT"
           echo ""
 
           if [ "$MATCH_COUNT" = "0" ]; then
-            echo "No messages to redrive."
+            echo "No redrivable messages. (Sanitized rows have no payload to re-process.)"
             exit 0
           fi
 
@@ -1052,11 +1060,13 @@ jobs:
           # 2. For each, call pgmq.send to re-enqueue
           # 3. Delete from s6_dead_letter
           # This is idempotent: if the workflow is re-run, rows already deleted won't be processed again.
+          # NOTE: Sanitized rows (message ? 'sanitized') are excluded - they have no payload to re-process.
           REDRIVE_RESULT=$(psql -v ON_ERROR_STOP=1 -v topic="$REDRIVE_TOPIC" -v lim="$REDRIVE_LIMIT" -t -A "$DATABASE_URL" <<'EOSQL'
           WITH to_redrive AS (
             SELECT id, original_queue, message
             FROM s6_dead_letter
             WHERE message->>'topic' = :'topic'
+              AND NOT (message ? 'sanitized')
             ORDER BY dead_lettered_at ASC
             LIMIT :lim
           ),

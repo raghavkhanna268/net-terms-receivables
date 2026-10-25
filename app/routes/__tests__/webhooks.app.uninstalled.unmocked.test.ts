@@ -67,9 +67,15 @@ const mockSessionStorage = {
   deleteAllForShop: vi.fn().mockResolvedValue(0),
 };
 
+const mockTx = vi.fn().mockResolvedValue(Object.assign([], { count: 0 }));
 const mockSql = Object.assign(
   vi.fn().mockResolvedValue([]),
-  { json: vi.fn((v) => v) }
+  {
+    json: vi.fn((v) => v),
+    begin: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      return callback(mockTx);
+    }),
+  }
 );
 
 vi.mock("~/lib/request-context.server", () => ({
@@ -77,18 +83,16 @@ vi.mock("~/lib/request-context.server", () => ({
 }));
 
 const mockMarkShopUninstalled = vi.fn().mockResolvedValue(true);
+const mockDeleteProcessedWebhooksViaReceipts = vi.fn().mockResolvedValue(0);
 vi.mock("~/services/compliance", () => ({
   markShopUninstalled: (...args: unknown[]) => mockMarkShopUninstalled(...args),
+  deleteProcessedWebhooksViaReceipts: (...args: unknown[]) =>
+    mockDeleteProcessedWebhooksViaReceipts(...args),
 }));
 
 const mockEvictShopFromSetupCache = vi.fn();
 vi.mock("~/lib/after-auth.server", () => ({
   evictShopFromSetupCache: (...args: unknown[]) => mockEvictShopFromSetupCache(...args),
-}));
-
-const mockDeleteWebhookReceiptsForShop = vi.fn().mockResolvedValue(0);
-vi.mock("~/lib/webhook-receipts.server", () => ({
-  deleteWebhookReceiptsForShop: (...args: unknown[]) => mockDeleteWebhookReceiptsForShop(...args),
 }));
 
 import { action } from "../webhooks.app.uninstalled";

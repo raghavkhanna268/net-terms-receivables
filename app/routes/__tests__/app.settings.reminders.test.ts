@@ -20,6 +20,7 @@ vi.mock("~/services/reminders.server", async (importOriginal) => {
     // Only mock DB-accessing functions
     getShopReminderSettings: vi.fn(),
     getShopReminderRules: vi.fn(),
+    getShopReminderLogs: vi.fn(),
     updateShopReminderSettings: vi.fn(),
     updateReminderRule: vi.fn(),
     createReminderRule: vi.fn(),
@@ -75,6 +76,7 @@ describe("Reminder Settings Route", () => {
       const {
         getShopReminderSettings,
         getShopReminderRules,
+        getShopReminderLogs,
         getGlobalSendCounts,
         ensureDefaultReminderRules,
       } = await import("~/services/reminders.server");
@@ -86,6 +88,7 @@ describe("Reminder Settings Route", () => {
         null
       );
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (getShopReminderLogs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
       (getGlobalSendCounts as ReturnType<typeof vi.fn>).mockResolvedValue({
         daily: 0,
         monthly: 0,
@@ -115,6 +118,7 @@ describe("Reminder Settings Route", () => {
       const {
         getShopReminderSettings,
         getShopReminderRules,
+        getShopReminderLogs,
         getGlobalSendCounts,
         ensureDefaultReminderRules,
       } = await import("~/services/reminders.server");
@@ -126,6 +130,7 @@ describe("Reminder Settings Route", () => {
         enabled: false,
       });
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (getShopReminderLogs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
       (getGlobalSendCounts as ReturnType<typeof vi.fn>).mockResolvedValue({
         daily: 0,
         monthly: 0,
@@ -154,6 +159,7 @@ describe("Reminder Settings Route", () => {
       const {
         getShopReminderSettings,
         getShopReminderRules,
+        getShopReminderLogs,
         getGlobalSendCounts,
         ensureDefaultReminderRules,
       } = await import("~/services/reminders.server");
@@ -165,6 +171,7 @@ describe("Reminder Settings Route", () => {
         enabled: false,
       });
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (getShopReminderLogs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
       (getGlobalSendCounts as ReturnType<typeof vi.fn>).mockResolvedValue({
         daily: 0,
         monthly: 0,
@@ -193,6 +200,7 @@ describe("Reminder Settings Route", () => {
       const {
         getShopReminderSettings,
         getShopReminderRules,
+        getShopReminderLogs,
         getGlobalSendCounts,
         ensureDefaultReminderRules,
       } = await import("~/services/reminders.server");
@@ -204,6 +212,7 @@ describe("Reminder Settings Route", () => {
         enabled: true,
       });
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (getShopReminderLogs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
       (getGlobalSendCounts as ReturnType<typeof vi.fn>).mockResolvedValue({
         daily: 50,
         monthly: 1500,
@@ -235,6 +244,7 @@ describe("Reminder Settings Route", () => {
       const {
         getShopReminderSettings,
         getShopReminderRules,
+        getShopReminderLogs,
         getGlobalSendCounts,
         ensureDefaultReminderRules,
         DAILY_SEND_CAP,
@@ -248,6 +258,7 @@ describe("Reminder Settings Route", () => {
         enabled: false,
       });
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (getShopReminderLogs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
       (getGlobalSendCounts as ReturnType<typeof vi.fn>).mockResolvedValue({
         daily: 42,
         monthly: 1234,
@@ -277,6 +288,7 @@ describe("Reminder Settings Route", () => {
       const {
         getShopReminderSettings,
         getShopReminderRules,
+        getShopReminderLogs,
         getGlobalSendCounts,
         ensureDefaultReminderRules,
       } = await import("~/services/reminders.server");
@@ -288,6 +300,7 @@ describe("Reminder Settings Route", () => {
         enabled: false,
       });
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (getShopReminderLogs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
       (getGlobalSendCounts as ReturnType<typeof vi.fn>).mockRejectedValue(
         new Error("Database error")
       );
@@ -347,6 +360,7 @@ describe("Reminder Settings Route", () => {
       const {
         getShopReminderSettings,
         getShopReminderRules,
+        getShopReminderLogs,
         getGlobalSendCounts,
         ensureDefaultReminderRules,
       } = await import("~/services/reminders.server");
@@ -362,6 +376,7 @@ describe("Reminder Settings Route", () => {
         { id: "rule-2", offsetDays: 0, channel: "email", enabled: true },
         { id: "rule-3", offsetDays: 7, channel: "email", enabled: true },
       ]);
+      (getShopReminderLogs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
       (getGlobalSendCounts as ReturnType<typeof vi.fn>).mockResolvedValue({
         daily: 0,
         monthly: 0,
@@ -545,11 +560,12 @@ describe("Reminder Settings Route", () => {
 
   describe("action - update_rule (real isValidOffset)", () => {
     it("updates rule with valid offset (7)", async () => {
-      const { updateReminderRule } = await import("~/services/reminders.server");
+      const { updateReminderRule, getShopReminderRules } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+      (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
       (updateReminderRule as ReturnType<typeof vi.fn>).mockResolvedValue(true);
 
       // Provider configured (real isReminderSendingEnabled)
@@ -743,11 +759,12 @@ describe("Reminder Settings Route", () => {
     });
 
     it("returns error when rule not found", async () => {
-      const { updateReminderRule } = await import("~/services/reminders.server");
+      const { updateReminderRule, getShopReminderRules } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+      (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
       (updateReminderRule as ReturnType<typeof vi.fn>).mockResolvedValue(false);
 
       mockContext.cloudflare.env = {
@@ -780,6 +797,51 @@ describe("Reminder Settings Route", () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBe("Rule not found");
+    });
+
+    it("rejects duplicate offset when updating to match another rule", async () => {
+      const { getShopReminderRules } = await import(
+        "~/services/reminders.server"
+      );
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+      (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { id: "rule-1", offsetDays: 7, channel: "email", enabled: true },
+        { id: "rule-2", offsetDays: 14, channel: "email", enabled: true },
+      ]);
+
+      mockContext.cloudflare.env = {
+        RESEND_API_KEY: "re_test_123",
+        RESEND_FROM: "noreply@example.com",
+      };
+
+      const formData = new FormData();
+      formData.append("intent", "update_rule");
+      formData.append("ruleId", "rule-1");
+      formData.append("offsetDays", "14");
+      formData.append("enabled", "true");
+
+      const postRequest = new Request(
+        "https://example.com/app/settings/reminders",
+        {
+          method: "POST",
+          body: formData,
+        }
+      );
+
+      const { action } = await import("../app.settings.reminders");
+      const result = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("already exists");
     });
   });
 
@@ -1024,6 +1086,7 @@ describe("ensureDefaultReminderRules (via loader)", () => {
     const {
       getShopReminderSettings,
       getShopReminderRules,
+      getShopReminderLogs,
       getGlobalSendCounts,
       ensureDefaultReminderRules,
     } = await import("~/services/reminders.server");
@@ -1035,6 +1098,7 @@ describe("ensureDefaultReminderRules (via loader)", () => {
       enabled: false,
     });
     (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (getShopReminderLogs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
     (getGlobalSendCounts as ReturnType<typeof vi.fn>).mockResolvedValue({
       daily: 0,
       monthly: 0,
@@ -1117,6 +1181,7 @@ describe("Reminder Settings Route error logging (R2)", () => {
       const {
         getShopReminderSettings,
         getShopReminderRules,
+        getShopReminderLogs,
         getGlobalSendCounts,
         ensureDefaultReminderRules,
       } = await import("~/services/reminders.server");
@@ -1128,6 +1193,7 @@ describe("Reminder Settings Route error logging (R2)", () => {
         enabled: false,
       });
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (getShopReminderLogs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
       (ensureDefaultReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue({
         seeded: false,
         count: 0,
@@ -1168,6 +1234,7 @@ describe("Reminder Settings Route error logging (R2)", () => {
       const {
         getShopReminderSettings,
         getShopReminderRules,
+        getShopReminderLogs,
         getGlobalSendCounts,
         ensureDefaultReminderRules,
       } = await import("~/services/reminders.server");
@@ -1179,6 +1246,7 @@ describe("Reminder Settings Route error logging (R2)", () => {
         enabled: false,
       });
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (getShopReminderLogs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
       (ensureDefaultReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue({
         seeded: false,
         count: 0,
@@ -1366,6 +1434,7 @@ describe("Reminder Settings Route error logging (R2)", () => {
       const {
         getShopReminderSettings,
         getShopReminderRules,
+        getShopReminderLogs,
         getGlobalSendCounts,
         ensureDefaultReminderRules,
       } = await import("~/services/reminders.server");
@@ -1377,6 +1446,7 @@ describe("Reminder Settings Route error logging (R2)", () => {
         enabled: false,
       });
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (getShopReminderLogs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
       (getGlobalSendCounts as ReturnType<typeof vi.fn>).mockResolvedValue({
         daily: 0,
         monthly: 0,

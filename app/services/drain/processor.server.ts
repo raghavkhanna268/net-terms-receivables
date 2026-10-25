@@ -57,6 +57,12 @@ import {
   getManualKeyForBulkOp,
 } from "./reconcile-handlers.server";
 import { toErrorCode, safeLog, shopHash } from "~/lib/log.server";
+import {
+  isShopNotFoundReason,
+  sanitizeSyncMessage,
+  sanitizeBulkMessage,
+  type SanitizedDeadLetterMessage,
+} from "./dead-letter-sanitize.server";
 
 /**
  * Configuration for drain processing.
@@ -884,8 +890,32 @@ async function handleReminderSend(sql: Sql, message: SyncMessage): Promise<SyncR
   return processReminder(sql, message);
 }
 
+/**
+ * Handler for REMINDER_CATCHUP topic.
+ * Sends catch-up reminders for delayed (capped) entries.
+ */
+async function handleReminderCatchup(sql: Sql, message: SyncMessage): Promise<SyncResult> {
+  const { handleReminderCatchup: processCatchup, isReminderCatchupMessage } = await import(
+    "~/jobs/reminders"
+  );
+
+  if (!isReminderCatchupMessage(message)) {
+    return {
+      success: false,
+      action: "skipped",
+      error: "Invalid REMINDER_CATCHUP message format",
+      retryable: false,
+    };
+  }
+
+  return processCatchup(sql, message);
+}
+
 // Register REMINDER_SEND handler
 registerSyncHandler("REMINDER_SEND", handleReminderSend);
+
+// Register REMINDER_CATCHUP handler
+registerSyncHandler("REMINDER_CATCHUP", handleReminderCatchup);
 
 // =============================================================================
 // DRAIN RESULT & QUEUE OPERATIONS
@@ -901,6 +931,8 @@ export interface DrainResult {
   failed: number;
   /** Number of messages moved to DLQ */
   deadLettered: number;
+  /** Number of DLQ attempts where the message was already gone (e.g., shop/redact) */
+  deadLetterAlreadyGoneCount: number;
   /** Number of messages skipped (already processed or deferred) */
   skipped: number;
   /** Number of messages with no handler (visibility extended) */
@@ -970,30 +1002,86 @@ async function extendVisibility(sql: Sql, queue: string, msgId: string, seconds:
 
 /**
  * Move a message to the dead-letter queue.
+ *
+ * Delete-first design for shop/redact safety (#239):
+ * If shop/redact deleted this message while we held it under VT, pgmq.delete
+ * returns false and we skip the s6_dead_letter INSERT. This prevents the
+ * DLQ write from re-creating data that the redact just cleaned up.
+ *
+ * Shop-not-found sanitization (#239 part a):
+ * When the error is shop_not_found and the topic has reconcile coverage
+ * (companies, company_locations, orders, bulk companies/orders), the message
+ * is sanitized to an allowlisted object without PII. Draft orders and customers
+ * keep their full message because nothing re-fetches those after install.
+ *
+ * @param sql - postgres.js SQL client
+ * @param queue - Queue name (s6_sync or s6_bulk)
+ * @param msgId - Message ID from the queue
+ * @param message - Original message (sync or bulk)
+ * @param error - Error reason (e.g., 'shop_not_found', 'permanent:shop_not_found')
+ * @param readCt - Read count for attempt tracking (required for sanitization)
+ * @returns true if the message was successfully dead-lettered, false if
+ *          the message was already deleted (e.g., by shop/redact)
  */
 async function moveToDeadLetter(
   sql: Sql,
   queue: string,
   msgId: string,
   message: SyncMessage | BulkMessage,
-  error: string
-): Promise<void> {
-  await sql`
-    INSERT INTO s6_dead_letter (
-      original_queue,
-      original_msg_id,
-      message,
-      error,
-      dead_lettered_at
-    ) VALUES (
-      ${queue},
-      ${msgId},
-      ${sql.json(message)},
-      ${error},
-      NOW()
-    )
-  `;
-  await sql`SELECT pgmq.delete(${queue}, ${msgId}::bigint)`;
+  error: string,
+  readCt: number
+): Promise<boolean> {
+  let messageToStore: SyncMessage | BulkMessage | SanitizedDeadLetterMessage = message;
+
+  if (isShopNotFoundReason(error)) {
+    if (queue === S6_QUEUES.SYNC) {
+      const sanitized = sanitizeSyncMessage(message as SyncMessage, msgId, readCt);
+      if (sanitized) {
+        messageToStore = sanitized;
+        safeLog("info", "dlq_sanitized_shop_not_found", {
+          topic: message.topic,
+          originalMsgId: msgId,
+        });
+      }
+    } else if (queue === S6_QUEUES.BULK) {
+      const sanitized = sanitizeBulkMessage(message as BulkMessage, msgId, readCt);
+      if (sanitized) {
+        messageToStore = sanitized;
+        safeLog("info", "dlq_sanitized_shop_not_found", {
+          topic: message.topic,
+          bulkType: (message as BulkMessage).bulkType,
+          originalMsgId: msgId,
+        });
+      }
+    }
+  }
+
+  return sql.begin(async (tx) => {
+    const [result] = await tx<[{ delete: boolean }]>`
+      SELECT pgmq.delete(${queue}, ${msgId}::bigint)
+    `;
+
+    if (!result.delete) {
+      return false;
+    }
+
+    await tx`
+      INSERT INTO s6_dead_letter (
+        original_queue,
+        original_msg_id,
+        message,
+        error,
+        dead_lettered_at
+      ) VALUES (
+        ${queue},
+        ${msgId},
+        ${tx.json(messageToStore)},
+        ${error},
+        NOW()
+      )
+    `;
+    return true;
+  });
 }
 
 /**
@@ -1008,6 +1096,7 @@ async function processSyncQueue(
     processed: 0,
     failed: 0,
     deadLettered: 0,
+    deadLetterAlreadyGoneCount: 0,
     skipped: 0,
     noHandler: 0,
     timedOut: false,
@@ -1025,18 +1114,35 @@ async function processSyncQueue(
       break;
     }
 
+    // Skip already-sanitized messages (re-enqueued by hand)
+    if ((msg.message as Record<string, unknown>).sanitized === true) {
+      safeLog("warn", "drain_skip_sanitized_message", {
+        queue: S6_QUEUES.SYNC,
+        originalMsgId: msg.msg_id,
+        topic: msg.message.topic,
+      });
+      await archiveMessage(sql, S6_QUEUES.SYNC, msg.msg_id);
+      result.skipped++;
+      continue;
+    }
+
     const handler = getSyncHandler(msg.message.topic);
 
     if (!handler) {
       if (msg.read_ct >= config.noHandlerMaxReads) {
-        await moveToDeadLetter(
+        const dlqd = await moveToDeadLetter(
           sql,
           S6_QUEUES.SYNC,
           msg.msg_id,
           msg.message,
-          `permanent:no_handler`
+          `permanent:no_handler`,
+          msg.read_ct
         );
-        result.deadLettered++;
+        if (dlqd) {
+          result.deadLettered++;
+        } else {
+          result.deadLetterAlreadyGoneCount++;
+        }
       } else {
         // Extend visibility by 1 hour
         await extendVisibility(sql, S6_QUEUES.SYNC, msg.msg_id, 3600);
@@ -1089,14 +1195,19 @@ async function processSyncQueue(
             }
           }
 
-          await moveToDeadLetter(
+          const dlqd = await moveToDeadLetter(
             sql,
             S6_QUEUES.SYNC,
             msg.msg_id,
             msg.message,
-            dlqReason
+            dlqReason,
+            msg.read_ct
           );
-          result.deadLettered++;
+          if (dlqd) {
+            result.deadLettered++;
+          } else {
+            result.deadLetterAlreadyGoneCount++;
+          }
         } else {
           // Leave for retry (visibility timeout will make it available again)
           result.failed++;
@@ -1133,8 +1244,12 @@ async function processSyncQueue(
           }
         }
 
-        await moveToDeadLetter(sql, S6_QUEUES.SYNC, msg.msg_id, msg.message, errorCode);
-        result.deadLettered++;
+        const dlqd = await moveToDeadLetter(sql, S6_QUEUES.SYNC, msg.msg_id, msg.message, errorCode, msg.read_ct);
+        if (dlqd) {
+          result.deadLettered++;
+        } else {
+          result.deadLetterAlreadyGoneCount++;
+        }
       } else {
         result.failed++;
       }
@@ -1179,18 +1294,35 @@ async function processBulkQueue(
       break;
     }
 
+    // Skip already-sanitized messages (re-enqueued by hand)
+    if ((msg.message as Record<string, unknown>).sanitized === true) {
+      safeLog("warn", "drain_skip_sanitized_message", {
+        queue: S6_QUEUES.BULK,
+        originalMsgId: msg.msg_id,
+        topic: msg.message.topic,
+      });
+      await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
+      result.skipped++;
+      continue;
+    }
+
     const handler = getBulkHandler(msg.message.topic);
 
     if (!handler) {
       if (msg.read_ct >= config.noHandlerMaxReads) {
-        await moveToDeadLetter(
+        const dlqd = await moveToDeadLetter(
           sql,
           S6_QUEUES.BULK,
           msg.msg_id,
           msg.message,
-          `permanent:no_handler`
+          `permanent:no_handler`,
+          msg.read_ct
         );
-        result.deadLettered++;
+        if (dlqd) {
+          result.deadLettered++;
+        } else {
+          result.deadLetterAlreadyGoneCount++;
+        }
       } else {
         await extendVisibility(sql, S6_QUEUES.BULK, msg.msg_id, 3600);
         result.noHandler++;
@@ -1204,12 +1336,18 @@ async function processBulkQueue(
       if (bulkResult.success) {
         // Check status for progress vs complete
         if (bulkResult.status === "progress") {
-          // Atomically send continuation and archive old message in one transaction.
-          // This eliminates the duplicate-message window entirely:
-          // - If transaction commits: new message exists, old is archived
-          // - If transaction fails/crashes: old message retries normally
+          // Guard: only send continuation if Shop still exists and is not uninstalled (#239).
+          // FOR SHARE serializes with deleteShop's leading FOR UPDATE on the Shop row.
           await sql.begin(async (tx) => {
-            await tx`SELECT pgmq.send(${S6_QUEUES.BULK}, ${tx.json(msg.message)})`;
+            const [shopRow] = await tx<[{ id: string }?]>`
+              SELECT id FROM "Shop"
+              WHERE domain = ${msg.message.shop}
+                AND "uninstalledAt" IS NULL
+              FOR SHARE
+            `;
+            if (shopRow) {
+              await tx`SELECT pgmq.send(${S6_QUEUES.BULK}, ${tx.json(msg.message)})`;
+            }
             await tx`SELECT pgmq.archive(${S6_QUEUES.BULK}, ${msg.msg_id}::bigint)`;
           });
 
@@ -1230,14 +1368,19 @@ async function processBulkQueue(
 
         if (errorType === "permanent") {
           // Permanent error (4xx, bad data, exhausted retries) - go to DLQ
-          await moveToDeadLetter(
+          const dlqd = await moveToDeadLetter(
             sql,
             S6_QUEUES.BULK,
             msg.msg_id,
             msg.message,
-            `permanent:${errorCode}`
+            `permanent:${errorCode}`,
+            msg.read_ct
           );
-          result.deadLettered++;
+          if (dlqd) {
+            result.deadLettered++;
+          } else {
+            result.deadLetterAlreadyGoneCount++;
+          }
         } else if (errorType === "retryable") {
           // Retryable error - leave message in queue for retry via read_ct
           // The failure_count was already incremented by processBulkOperation
@@ -1246,14 +1389,19 @@ async function processBulkQueue(
         } else {
           // Unknown error type or legacy path - use read_ct for DLQ
           if (msg.read_ct >= config.maxRetries) {
-            await moveToDeadLetter(
+            const dlqd = await moveToDeadLetter(
               sql,
               S6_QUEUES.BULK,
               msg.msg_id,
               msg.message,
-              errorCode
+              errorCode,
+              msg.read_ct
             );
-            result.deadLettered++;
+            if (dlqd) {
+              result.deadLettered++;
+            } else {
+              result.deadLetterAlreadyGoneCount++;
+            }
           } else {
             result.failed++;
           }
@@ -1267,8 +1415,12 @@ async function processBulkQueue(
     } catch (err) {
       const errorCode = toErrorCode(err);
       if (msg.read_ct >= config.maxRetries) {
-        await moveToDeadLetter(sql, S6_QUEUES.BULK, msg.msg_id, msg.message, errorCode);
-        result.deadLettered++;
+        const dlqd = await moveToDeadLetter(sql, S6_QUEUES.BULK, msg.msg_id, msg.message, errorCode, msg.read_ct);
+        if (dlqd) {
+          result.deadLettered++;
+        } else {
+          result.deadLetterAlreadyGoneCount++;
+        }
       } else {
         result.failed++;
       }

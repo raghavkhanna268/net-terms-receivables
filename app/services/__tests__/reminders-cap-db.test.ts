@@ -218,7 +218,7 @@ describeWithDb("S18 reminder cap enforcement (DB)", () => {
   describe("sendPaymentReminder - multiple invoices same day", () => {
     it("two different invoices on the same day both send", async () => {
       const { sendPaymentReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
       const invoiceId1 = `inv-multi-1-${TEST_SUFFIX}`;
       const invoiceId2 = `inv-multi-2-${TEST_SUFFIX}`;
@@ -275,7 +275,7 @@ describeWithDb("S18 reminder cap enforcement (DB)", () => {
   describe("sendPaymentReminder - idempotency under concurrency", () => {
     it("concurrent sendPaymentReminder calls for the same invoice and rule give exactly 1 fetch and exactly 1 ReminderLog row", async () => {
       const { sendPaymentReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
       const invoiceId = `inv-idem-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/idem-${TEST_SUFFIX}`;
