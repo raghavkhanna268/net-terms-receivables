@@ -156,11 +156,87 @@ const DOMAIN_LITERAL_PATTERN = /myshopify\.com/i;
  * Validation regex patterns that are safe (these test strings, not log them).
  * P1: Removed `/\.test\(/` - line-wide skip was too broad.
  * Keep only: escaped-regex pattern and isValidShopDomain helper.
+ * NOTE: These are now used for per-match checking in isDomainProtectedByValidationPattern,
+ * not line-wide skipping. The patterns are checked inline in that function.
  */
-const VALIDATION_PATTERNS = [
+const _VALIDATION_PATTERNS_DOC = [
   /isValidShopDomain/,
   /\\\.myshopify\\\.com/,
 ];
+
+/**
+ * Check if a specific domain occurrence is protected by a validation pattern.
+ * Returns true if the domain is part of:
+ * 1. An escaped-regex form (\.myshopify\.com with no literal subdomain before the backslash)
+ * 2. An isValidShopDomain call whose argument has no literal real domain
+ *
+ * @param line The full line/text being checked
+ * @param domainMatch The regex match result for the domain
+ * @returns true if this specific occurrence is protected (exempt from flagging)
+ */
+function isDomainProtectedByValidationPattern(
+  line: string,
+  domainMatch: RegExpExecArray
+): boolean {
+  const matchStart = domainMatch.index;
+  const subdomain = domainMatch[1];
+
+  if (matchStart > 0) {
+    const charBeforeMatch = line[matchStart - 1];
+    if (charBeforeMatch === "\\") {
+      const lookback = line.slice(Math.max(0, matchStart - 10), matchStart);
+      if (!lookback.match(/[a-z0-9][-_a-z0-9]*\\/i)) {
+        return true;
+      }
+    }
+  }
+
+  const beforeMatch = line.slice(0, matchStart);
+  const isValidShopDomainMatch = beforeMatch.match(/isValidShopDomain\s*\(\s*$/);
+  if (isValidShopDomainMatch) {
+    if (FAKE_SUBDOMAINS.has(subdomain.toLowerCase()) || matchesFakePrefix(subdomain)) {
+      return true;
+    }
+    if (/^\$\{/.test(subdomain) || /^[a-zA-Z_$][\w$]*$/.test(subdomain)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Check if a line/text has any real (non-protected) domain occurrences.
+ * Per-match version of the validation pattern check.
+ *
+ * @param text The line or argument text to check
+ * @returns Array of violations (domain matches that are NOT protected)
+ */
+function findUnprotectedDomains(text: string): Array<{ subdomain: string; position: number }> {
+  const domainRegex = /([a-z0-9][-_a-z0-9]*)\.(myshopify\.com)/gi;
+  const unprotected: Array<{ subdomain: string; position: number }> = [];
+  let match;
+
+  while ((match = domainRegex.exec(text)) !== null) {
+    const subdomain = match[1].toLowerCase();
+
+    if (FAKE_SUBDOMAINS.has(subdomain) || matchesFakePrefix(subdomain)) {
+      continue;
+    }
+
+    if (/^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(match[1])) {
+      continue;
+    }
+
+    if (isDomainProtectedByValidationPattern(text, match)) {
+      continue;
+    }
+
+    unprotected.push({ subdomain: match[1], position: match.index });
+  }
+
+  return unprotected;
+}
 
 const CONSOLE_METHODS = new Set([
   "console.log",
@@ -294,12 +370,13 @@ function analyzeScriptFile(filePath: string): Violation[] {
     // Skip comments
     if (line.trim().startsWith("#") || line.trim().startsWith("//")) continue;
 
-    // Check for myshopify.com domain literal
+    // Check for myshopify.com domain literal (per-match, not line-wide)
     if (DOMAIN_LITERAL_PATTERN.test(line)) {
-      // Skip validation patterns
-      if (!VALIDATION_PATTERNS.some((p) => p.test(line))) {
-        // Skip if it's in a help/usage message context
-        if (!line.includes("e.g.") && !line.includes("example") && !line.includes("placeholder")) {
+      // Skip if it's in a help/usage message context
+      if (!line.includes("e.g.") && !line.includes("example") && !line.includes("placeholder")) {
+        // Per-match check: only flag domains that are NOT protected by validation patterns
+        const unprotectedDomains = findUnprotectedDomains(line);
+        if (unprotectedDomains.length > 0) {
           violations.push({
             file: relPath,
             line: lineNum,
@@ -1453,8 +1530,18 @@ function checkTemplateLiteral(
   return violations;
 }
 
+/**
+ * Check if a text is ENTIRELY a validation pattern with no real domains.
+ * Per-match version: returns true only if ALL domain occurrences are protected.
+ * This ensures fail-closed behavior: if ANY real domain is present, return false.
+ */
 function isValidationPattern(text: string): boolean {
-  return VALIDATION_PATTERNS.some((pattern) => pattern.test(text));
+  if (!DOMAIN_LITERAL_PATTERN.test(text)) {
+    return false;
+  }
+
+  const unprotectedDomains = findUnprotectedDomains(text);
+  return unprotectedDomains.length === 0;
 }
 
 function truncate(text: string, maxLen: number): string {

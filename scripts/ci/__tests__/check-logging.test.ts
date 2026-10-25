@@ -190,9 +190,10 @@ describe("check-logging.ts (AST-based)", () => {
     });
 
     it("fails for myshopify.com in mjs script", () => {
+      const realDomain = "bright" + "furniture" + ".myshopify.com";
       fs.writeFileSync(
         path.join(scriptsDir, "test.mjs"),
-        `const shop = "test.myshopify.com";\nconsole.log(shop);`
+        `const shop = "${realDomain}";\nconsole.log(shop);`
       );
       const { exitCode, output } = runGuard();
       expect(exitCode).not.toBe(0);
@@ -1304,6 +1305,100 @@ export function test() { return true; }`
       const { exitCode, output } = runGuard();
       expect(exitCode).not.toBe(0);
       expect(output).toContain("domain-literal");
+    });
+  });
+
+  // =========================================================================
+  // #190: Per-match VALIDATION_PATTERNS (not line-wide skip)
+  // =========================================================================
+  describe("#190: Per-match VALIDATION_PATTERNS", () => {
+    // Script file scan (~line 300)
+    describe("Script file scan", () => {
+      it("PASS: Pure escaped-regex validation pattern in script", () => {
+        fs.writeFileSync(
+          path.join(scriptsDir, "validate.sh"),
+          `#!/bin/bash\nif [[ "$1" =~ \\.myshopify\\.com$ ]]; then echo valid; fi`
+        );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
+      });
+
+      it("FAIL: Real domain + validation pattern on same line in script", () => {
+        const realDomain = "clearwater" + "-wholesale" + ".myshopify.com";
+        fs.writeFileSync(
+          path.join(scriptsDir, "mixed.sh"),
+          `#!/bin/bash\nif [[ "$1" =~ \\.myshopify\\.com$ ]]; then SHOP="${realDomain}"; fi`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("script-domain");
+      });
+    });
+
+    // Log args (~line 479)
+    describe("Log args (checkArgument)", () => {
+      it("PASS: Pure escaped-regex validation pattern in log string", () => {
+        fs.writeFileSync(
+          path.join(appDir, "validate.ts"),
+          `export function test() { console.log("Pattern: /[a-z]+\\\\.myshopify\\\\.com/"); }`
+        );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
+      });
+
+      it("FAIL: Real domain + validation pattern in same log string", () => {
+        const realDomain = "clearwater" + "-wholesale" + ".myshopify.com";
+        fs.writeFileSync(
+          path.join(appDir, "mixed.ts"),
+          `export function test() { console.log("Pattern: /[a-z]+\\\\.myshopify\\\\.com/ example: ${realDomain}"); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("domain-literal");
+      });
+
+      it("PASS: isValidShopDomain call with variable (no literal domain)", () => {
+        fs.writeFileSync(
+          path.join(appDir, "validate.ts"),
+          `export function test(shop: string) { console.log("Checking", isValidShopDomain(shop)); }`
+        );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
+      });
+
+      it("PASS: isValidShopDomain call with fake domain", () => {
+        fs.writeFileSync(
+          path.join(appDir, "validate.ts"),
+          `export function test() { console.log("Valid:", isValidShopDomain("test-shop.myshopify.com")); }`
+        );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
+      });
+    });
+
+    // Sentry args (~line 908)
+    describe("Sentry args (checkSentryCall)", () => {
+      it("PASS: Pure escaped-regex validation pattern in Sentry message", () => {
+        fs.writeFileSync(
+          path.join(appDir, "sentry-validate.ts"),
+          `import * as Sentry from "@sentry/cloudflare";
+export function test() { Sentry.captureMessage("Pattern: /[a-z]+\\\\.myshopify\\\\.com/", { tags: { type: "validation" } }); }`
+        );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
+      });
+
+      it("FAIL: Real domain + validation pattern in same Sentry string", () => {
+        const realDomain = "clearwater" + "-wholesale" + ".myshopify.com";
+        fs.writeFileSync(
+          path.join(appDir, "sentry-mixed.ts"),
+          `import * as Sentry from "@sentry/cloudflare";
+export function test() { Sentry.captureMessage("Pattern: /[a-z]+\\\\.myshopify\\\\.com/ fail: ${realDomain}", { tags: { type: "test" } }); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("domain-literal");
+      });
     });
   });
 
