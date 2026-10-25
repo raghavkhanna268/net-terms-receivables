@@ -56,7 +56,7 @@ vi.mock("../shopify-client.server", async (importOriginal) => {
 // Import after mock setup
 import { recomputeCreditStatus } from "../credit-status-recompute.server";
 import { hasOverdueInvoices } from "../overdue.server";
-import { getSyncHandler } from "../drain/processor.server";
+import { getSyncHandler, runDrain } from "../drain/processor.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -3418,5 +3418,329 @@ describeWithDb("leak checks (#204)", () => {
     const msgStr = JSON.stringify(dlqRow.message);
     expect(msgStr).not.toContain(SENTINEL_NAME);
     expect(msgStr).not.toContain(SENTINEL_EMAIL);
+  });
+});
+
+// =============================================================================
+// NO-OWNER ACCOUNT DRAIN TESTS (#203)
+// =============================================================================
+
+describeWithDb("CREDIT_STATUS_RECOMPUTE no-owner accounts (#203)", () => {
+  let sql: ReturnType<typeof postgres>;
+  let consoleSpy: ReturnType<typeof vi.spyOn>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-noowner-drain";
+  const TEST_SHOP_ID = `shop-noowner-drain-${TEST_SUFFIX}`;
+  const TEST_SHOP_DOMAIN = `noowner-drain-${TEST_SUFFIX}.myshopify.com`;
+  const TEST_ACCOUNT_ID = `acc-noowner-drain-${TEST_SUFFIX}`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+    `;
+
+    // Temporarily disable CHECK constraint
+    await sql`ALTER TABLE "BuyerAccount" DROP CONSTRAINT "BuyerAccount_kind_consistency"`;
+
+    // COMPANY with null companyLocationId (no-owner)
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name,
+        "creditLimit", "holdState", bypass, "syncPending", "syncVersion",
+        "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${TEST_ACCOUNT_ID}, ${TEST_SHOP_ID}, 'COMPANY',
+        ${"co-noowner-drain-" + TEST_SUFFIX}, NULL,
+        'No-Owner Drain Account', 100000.00, 'OK', false, true, 0,
+        NOW(), NOW()
+      )
+    `;
+
+    // Re-enable CHECK constraint (NOT VALID)
+    await sql`
+      ALTER TABLE "BuyerAccount"
+      ADD CONSTRAINT "BuyerAccount_kind_consistency" CHECK (
+        (kind = 'COMPANY' AND "companyLocationId" IS NOT NULL AND "companyId" IS NOT NULL)
+        OR (kind = 'TAGGED_CUSTOMER' AND "customerId" IS NOT NULL)
+      ) NOT VALID
+    `;
+  });
+
+  afterAll(async () => {
+    await sql`ALTER TABLE "BuyerAccount" DROP CONSTRAINT "BuyerAccount_kind_consistency"`;
+    
+    // Clean up queue/DLQ messages
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_recompute:' + TEST_ACCOUNT_ID + '%'}`;
+    await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+    
+    // Re-enable constraint as VALID
+    await sql`
+      ALTER TABLE "BuyerAccount"
+      ADD CONSTRAINT "BuyerAccount_kind_consistency" CHECK (
+        (kind = 'COMPANY' AND "companyLocationId" IS NOT NULL AND "companyId" IS NOT NULL)
+        OR (kind = 'TAGGED_CUSTOMER' AND "customerId" IS NOT NULL)
+      )
+    `;
+    
+    await sql.end();
+  });
+
+  beforeEach(async () => {
+    metafieldWriteCount = 0;
+    mockShouldFail = false;
+    mockShopifyGraphQLRequest.mockClear();
+    consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    
+    // Clean up messages and state
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_recompute:' + TEST_ACCOUNT_ID + '%'}`;
+    await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "holdState" = 'OK', "syncPending" = true, "syncVersion" = 0,
+          "metafieldSyncedAt" = NULL
+      WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+  });
+
+  afterEach(() => {
+    consoleSpy.mockRestore();
+  });
+
+  it("handler returns action:skipped (not created) and metafieldWritten:false", async () => {
+    const invoiceId = `inv-handler-noowner-${TEST_SUFFIX}`;
+    const orderId = `gid://shopify/Order/handler-noowner-${TEST_SUFFIX}`;
+
+    // Create overdue invoice
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+        status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+        '#HANDLER-NOOWNER-1', 10000.00, 10000.00, 'open',
+        NOW() - INTERVAL '30 days',
+        NOW() - INTERVAL '10 days',
+        NOW(), NOW()
+      )
+    `;
+
+    const webhookId = `credit_recompute:${TEST_ACCOUNT_ID}:${Date.now()}`;
+    const handler = getSyncHandler("CREDIT_STATUS_RECOMPUTE");
+    expect(handler).toBeDefined();
+
+    const message = {
+      topic: "CREDIT_STATUS_RECOMPUTE",
+      shop: TEST_SHOP_DOMAIN,
+      buyerAccountId: TEST_ACCOUNT_ID,
+      source: "daily_sweep",
+      webhookId,
+      resourceGid: TEST_ACCOUNT_ID,
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(sql, message);
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("skipped");
+    expect(result.skipReason).toContain("No owner GID");
+
+    // Metafield should NOT be written
+    expect(metafieldWriteCount).toBe(0);
+  });
+
+  it("two consecutive runs via drain: exactly ONE warn log, ONE audit, zero DLQ rows", async () => {
+    const invoiceId = `inv-tworuns-${TEST_SUFFIX}`;
+    const orderId = `gid://shopify/Order/tworuns-${TEST_SUFFIX}`;
+
+    // Create overdue invoice
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+        status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+        '#TWORUNS-1', 10000.00, 10000.00, 'open',
+        NOW() - INTERVAL '30 days',
+        NOW() - INTERVAL '10 days',
+        NOW(), NOW()
+      )
+    `;
+
+    // First run: enqueue and drain
+    const webhookId1 = `credit_recompute:${TEST_ACCOUNT_ID}:day1-${Date.now()}`;
+    const message1 = {
+      topic: "CREDIT_STATUS_RECOMPUTE",
+      shop: TEST_SHOP_DOMAIN,
+      buyerAccountId: TEST_ACCOUNT_ID,
+      source: "daily_sweep",
+      webhookId: webhookId1,
+      resourceGid: TEST_ACCOUNT_ID,
+    };
+
+    await sql`SELECT pgmq.send('s6_sync', ${sql.json(message1)})`;
+    await runDrain(sql, { batchSize: 10, timeBudgetMs: 10000 });
+
+    // Count logs and audits after first run
+    const logCount1 = consoleSpy.mock.calls.filter((call: unknown[]) => 
+      typeof call[0] === 'string' && call[0].includes('credit_status_no_owner')
+    ).length;
+    
+    const [auditCount1] = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "AuditEvent"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+        AND type = 'credit_status.hold_unenforceable'
+    `;
+
+    expect(logCount1).toBe(1);
+    expect(parseInt(auditCount1.count)).toBe(1);
+
+    // Second run: enqueue with different webhookId (simulating next day)
+    const webhookId2 = `credit_recompute:${TEST_ACCOUNT_ID}:day2-${Date.now() + 86400000}`;
+    const message2 = {
+      topic: "CREDIT_STATUS_RECOMPUTE",
+      shop: TEST_SHOP_DOMAIN,
+      buyerAccountId: TEST_ACCOUNT_ID,
+      source: "daily_sweep",
+      webhookId: webhookId2,
+      resourceGid: TEST_ACCOUNT_ID,
+    };
+
+    await sql`SELECT pgmq.send('s6_sync', ${sql.json(message2)})`;
+    await runDrain(sql, { batchSize: 10, timeBudgetMs: 10000 });
+
+    // Count logs and audits after second run
+    const logCount2 = consoleSpy.mock.calls.filter((call: unknown[]) => 
+      typeof call[0] === 'string' && call[0].includes('credit_status_no_owner')
+    ).length;
+    
+    const [auditCount2] = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "AuditEvent"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+        AND type = 'credit_status.hold_unenforceable'
+    `;
+
+    // STILL only 1 log and 1 audit (second run is no-op since state didn't change)
+    expect(logCount2).toBe(1);
+    expect(parseInt(auditCount2.count)).toBe(1);
+
+    // Zero DLQ rows for this account
+    const [dlqCount] = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM s6_dead_letter
+      WHERE message->>'buyerAccountId' = ${TEST_ACCOUNT_ID}
+    `;
+    expect(parseInt(dlqCount.count)).toBe(0);
+
+    // Verify no hold_applied audit events
+    const [holdAppliedCount] = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "AuditEvent"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+        AND type = 'credit_status.hold_applied'
+    `;
+    expect(parseInt(holdAppliedCount.count)).toBe(0);
+  });
+
+  it("regression: owner-present account via drain still sets metafieldSyncedAt and action:created", async () => {
+    // Create account WITH owner
+    const ownerAccountId = `acc-withowner-drain-${TEST_SUFFIX}`;
+    
+    await sql`ALTER TABLE "BuyerAccount" DROP CONSTRAINT "BuyerAccount_kind_consistency"`;
+    
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name,
+        "creditLimit", "holdState", bypass, "syncPending", "syncVersion",
+        "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${ownerAccountId}, ${TEST_SHOP_ID}, 'COMPANY',
+        ${"co-withowner-drain-" + TEST_SUFFIX}, ${"gid://shopify/CompanyLocation/withowner-drain-" + TEST_SUFFIX},
+        'With-Owner Drain Account', 100000.00, 'OK', false, true, 0,
+        NOW(), NOW()
+      )
+    `;
+    
+    await sql`
+      ALTER TABLE "BuyerAccount"
+      ADD CONSTRAINT "BuyerAccount_kind_consistency" CHECK (
+        (kind = 'COMPANY' AND "companyLocationId" IS NOT NULL AND "companyId" IS NOT NULL)
+        OR (kind = 'TAGGED_CUSTOMER' AND "customerId" IS NOT NULL)
+      ) NOT VALID
+    `;
+
+    const invoiceId = `inv-withowner-drain-${TEST_SUFFIX}`;
+    const orderId = `gid://shopify/Order/withowner-drain-${TEST_SUFFIX}`;
+
+    // Create overdue invoice
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+        status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoiceId}, ${TEST_SHOP_ID}, ${ownerAccountId}, ${orderId},
+        '#WITHOWNER-DRAIN-1', 10000.00, 10000.00, 'open',
+        NOW() - INTERVAL '30 days',
+        NOW() - INTERVAL '10 days',
+        NOW(), NOW()
+      )
+    `;
+
+    try {
+      const webhookId = `credit_recompute:${ownerAccountId}:${Date.now()}`;
+      const handler = getSyncHandler("CREDIT_STATUS_RECOMPUTE");
+      
+      const message = {
+        topic: "CREDIT_STATUS_RECOMPUTE",
+        shop: TEST_SHOP_DOMAIN,
+        buyerAccountId: ownerAccountId,
+        source: "daily_sweep",
+        webhookId,
+        resourceGid: ownerAccountId,
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      const result = await handler!(sql, message);
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("created");
+
+      // Metafield SHOULD be written
+      expect(metafieldWriteCount).toBe(1);
+
+      // Verify metafieldSyncedAt is set
+      const [account] = await sql<{ metafieldSyncedAt: Date | null }[]>`
+        SELECT "metafieldSyncedAt" FROM "BuyerAccount" WHERE id = ${ownerAccountId}
+      `;
+      expect(account.metafieldSyncedAt).not.toBeNull();
+    } finally {
+      // Clean up
+      await sql`ALTER TABLE "BuyerAccount" DROP CONSTRAINT "BuyerAccount_kind_consistency"`;
+      await sql`DELETE FROM "Invoice" WHERE id = ${invoiceId}`;
+      await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_recompute:' + ownerAccountId + '%'}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE id = ${ownerAccountId}`;
+      await sql`
+        ALTER TABLE "BuyerAccount"
+        ADD CONSTRAINT "BuyerAccount_kind_consistency" CHECK (
+          (kind = 'COMPANY' AND "companyLocationId" IS NOT NULL AND "companyId" IS NOT NULL)
+          OR (kind = 'TAGGED_CUSTOMER' AND "customerId" IS NOT NULL)
+        ) NOT VALID
+      `;
+    }
   });
 });
