@@ -199,4 +199,26 @@ ORDER BY 1, 2;
 SELECT ba.id LIKE 'seed-account-%' AS is_seed, ba.kind, COUNT(*) AS accounts
 FROM "BuyerAccount" ba GROUP BY 1, 2 ORDER BY 1, 2;
 
+\echo '== D syncPending accounts bucketed by last modified (updatedAt may change for reasons other than syncPending)'
+-- Buckets: <1h, 1-24h, >24h based on updatedAt (account's last modification timestamp, not necessarily when syncPending was set)
+SELECT
+  CASE
+    WHEN ba."updatedAt" > NOW() - INTERVAL '1 hour' THEN '<1h'
+    WHEN ba."updatedAt" > NOW() - INTERVAL '24 hours' THEN '1-24h'
+    ELSE '>24h'
+  END AS pending_age_bucket,
+  COUNT(*) AS accounts,
+  COUNT(*) FILTER (WHERE ba."metafieldSyncErrorCode" IS NOT NULL) AS with_error_marker,
+  COUNT(*) FILTER (WHERE EXISTS (
+    SELECT 1 FROM s6_dead_letter d
+    WHERE d.message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+      AND d.message->>'buyerAccountId' = ba.id
+      AND d.original_queue = 's6_sync'
+      AND d.dead_lettered_at > COALESCE(ba."metafieldSyncedAt", '-infinity')
+  )) AS dead_lettered
+FROM "BuyerAccount" ba
+WHERE ba."syncPending" = true
+GROUP BY 1
+ORDER BY 1;
+
 ROLLBACK;
