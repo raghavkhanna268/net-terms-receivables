@@ -55,6 +55,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * Lib DB tests:
  * - app/lib/__tests__/after-auth-db.test.ts
  * - app/lib/__tests__/aging-reconcile.test.ts
+ * - app/lib/__tests__/initial-sync-db.test.ts
  * - app/lib/__tests__/offline-token.test.ts
  * - app/lib/matching/__tests__/integration.test.ts
  *
@@ -100,6 +101,8 @@ const DB_TEST_PATTERNS = [
 
   // Route DB tests
   "app/routes/__tests__/app.imports.test.ts",
+  "app/routes/__tests__/app.imports-client-payload-db.test.ts",
+  "app/routes/__tests__/app.imports-pii-logging.test.ts",
   "app/routes/__tests__/app._index.test.ts",
   "app/routes/__tests__/app._index-overlimit-db.test.ts",
   "app/routes/__tests__/app.accounts.$id-db.test.ts",
@@ -108,6 +111,7 @@ const DB_TEST_PATTERNS = [
   // Lib DB tests
   "app/lib/__tests__/after-auth-db.test.ts",
   "app/lib/__tests__/aging-reconcile.test.ts",
+  "app/lib/__tests__/initial-sync-db.test.ts",
   "app/lib/__tests__/offline-token.test.ts",
   "app/lib/matching/__tests__/integration.test.ts",
 
