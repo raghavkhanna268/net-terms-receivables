@@ -27,7 +27,8 @@ import type {
 import { useLoaderData, useActionData, Form, useNavigation, useRevalidator, data } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
-import { safeLog, toErrorCode } from "~/lib/log.server";
+import { safeLog, toErrorCode, shopHash } from "~/lib/log.server";
+import { enqueueReconcileStage } from "~/services/drain/reconcile-handlers.server";
 
 /**
  * Check if a character is forbidden in Shopify tags.
@@ -226,8 +227,8 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
-  const [shop] = await sql<{ id: string }[]>`
-    SELECT id FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ id: string; domain: string }[]>`
+    SELECT id, domain FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
   if (!shop) {
@@ -362,6 +363,27 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       termsDays: parsedTermsDays,
     });
 
+    const [ruleCountResult] = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "AccountSource" WHERE "shopId" = ${shop.id}
+    `;
+    const ruleCount = parseInt(ruleCountResult?.count ?? "0", 10);
+
+    if (ruleCount === 1) {
+      const [alreadyQueued] = await sql<{ msg_id: string }[]>`
+        SELECT msg_id::text FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${shop.domain}
+          AND message->>'topic' = 'RECONCILE_CUSTOMERS'
+        LIMIT 1
+      `;
+      if (!alreadyQueued) {
+        const manualKey = `manual:${Date.now()}`;
+        await enqueueReconcileStage(sql, shop.domain, "customers", manualKey);
+        safeLog("info", "first_tag_rule_customers_enqueued", {
+          shopHash: await shopHash(shop.domain),
+        });
+      }
+    }
+
     return {
       success: true,
       createdRuleId: result[0].id,
@@ -415,9 +437,9 @@ function TagRuleTable({ rules }: { rules: TagRule[] }) {
   return (
     <s-table>
       <s-table-header-row>
-        <s-table-header>Customer Tag</s-table-header>
-        <s-table-header>Default Terms</s-table-header>
-        <s-table-header>Created</s-table-header>
+        <s-table-header listSlot="primary">Customer Tag</s-table-header>
+        <s-table-header listSlot="labeled">Default Terms</s-table-header>
+        <s-table-header listSlot="labeled">Created</s-table-header>
       </s-table-header-row>
       <s-table-body>
         {rules.map((rule) => (

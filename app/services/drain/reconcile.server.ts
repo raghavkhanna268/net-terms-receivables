@@ -29,7 +29,7 @@ import { S6_QUEUES } from "~/lib/pgmq.server";
  * When set, orders stage uses the same key base instead of the date key.
  */
 export interface ReconcileMessage {
-  topic: "RECONCILE_COMPANIES" | "RECONCILE_ORDERS";
+  topic: "RECONCILE_COMPANIES" | "RECONCILE_CUSTOMERS" | "RECONCILE_ORDERS";
   shop: string;
   webhookId: string;
   enqueuedAt: string;
@@ -46,6 +46,11 @@ function getTodayUTC(): string {
 }
 
 /**
+ * Reconcile stage type.
+ */
+export type ReconcileStageKind = "companies" | "customers" | "orders";
+
+/**
  * Generate an idempotent webhookId for reconcile.
  * Format: reconcile:<shop>:<YYYY-MM-DD>:<kind>
  *
@@ -53,9 +58,9 @@ function getTodayUTC(): string {
  * - Each shop gets at most one reconcile per kind per day
  * - Re-running the nightly job on the same day is idempotent
  */
-function makeReconcileWebhookId(
+export function makeReconcileWebhookId(
   shop: string,
-  kind: "companies" | "orders"
+  kind: ReconcileStageKind
 ): string {
   const today = getTodayUTC();
   return `reconcile:${shop}:${today}:${kind}`;
@@ -116,6 +121,7 @@ export function isReconcileMessage(
 ): message is ReconcileMessage {
   return (
     message.topic === "RECONCILE_COMPANIES" ||
+    message.topic === "RECONCILE_CUSTOMERS" ||
     message.topic === "RECONCILE_ORDERS"
   );
 }

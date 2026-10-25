@@ -131,9 +131,9 @@ function FeatureComparisonTable({ currentPlanKey }: { currentPlanKey: PlanKey })
   return (
     <s-table>
       <s-table-header-row>
-        <s-table-header>Feature</s-table-header>
+        <s-table-header listSlot="primary">Feature</s-table-header>
         {ALL_PLAN_KEYS.map((planKey) => (
-          <s-table-header key={planKey}>
+          <s-table-header listSlot="labeled" key={planKey}>
             {PLAN_DISPLAY_NAMES[planKey]}
             {planKey === currentPlanKey && " ✓"}
           </s-table-header>
