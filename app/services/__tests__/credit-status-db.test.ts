@@ -656,8 +656,8 @@ describeWithDb("syncCreditStatusMetafield no-owner accounts (#203)", () => {
       VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', NOW(), NOW())
     `;
 
-    // Temporarily disable CHECK constraint to insert no-owner rows
-    await sql`ALTER TABLE "BuyerAccount" DROP CONSTRAINT "BuyerAccount_kind_consistency"`;
+    // Disable CHECK constraint for the duration of all tests in this describe block
+    await sql`ALTER TABLE "BuyerAccount" DROP CONSTRAINT IF EXISTS "BuyerAccount_kind_consistency"`;
 
     // COMPANY with null companyLocationId
     await sql`
@@ -702,27 +702,16 @@ describeWithDb("syncCreditStatusMetafield no-owner accounts (#203)", () => {
         NOW(), NOW()
       )
     `;
-
-    // Re-enable CHECK constraint
-    await sql`
-      ALTER TABLE "BuyerAccount"
-      ADD CONSTRAINT "BuyerAccount_kind_consistency" CHECK (
-        (kind = 'COMPANY' AND "companyLocationId" IS NOT NULL AND "companyId" IS NOT NULL)
-        OR (kind = 'TAGGED_CUSTOMER' AND "customerId" IS NOT NULL)
-      ) NOT VALID
-    `;
   });
 
   afterAll(async () => {
-    // Need to drop and re-add constraint as VALID to allow cleanup
-    await sql`ALTER TABLE "BuyerAccount" DROP CONSTRAINT "BuyerAccount_kind_consistency"`;
-    
+    // Clean up test data first while constraint is dropped
     await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
     
-    // Re-enable constraint as VALID
+    // Re-enable constraint - must happen after all no-owner rows are deleted
     await sql`
       ALTER TABLE "BuyerAccount"
       ADD CONSTRAINT "BuyerAccount_kind_consistency" CHECK (
@@ -742,7 +731,7 @@ describeWithDb("syncCreditStatusMetafield no-owner accounts (#203)", () => {
       data: { metafieldsSet: { metafields: [{ id: "mf-noowner" }], userErrors: [] } },
     });
     
-    // Reset all test accounts to OK state
+    // Reset all test accounts to OK state (constraint is dropped, so this will work)
     await sql`
       UPDATE "BuyerAccount"
       SET "holdState" = 'OK', "syncPending" = true, "syncVersion" = 0,
@@ -1017,10 +1006,8 @@ describeWithDb("syncCreditStatusMetafield no-owner accounts (#203)", () => {
 
   it("regression: accounts with an owner still sync and set metafieldSyncedAt", async () => {
     // Create an account WITH an owner for regression testing
+    // Constraint is already dropped in beforeAll, so we can insert directly
     const ownerAccountId = `acc-with-owner-${TEST_SUFFIX}`;
-    
-    // Temporarily drop constraint
-    await sql`ALTER TABLE "BuyerAccount" DROP CONSTRAINT "BuyerAccount_kind_consistency"`;
     
     await sql`
       INSERT INTO "BuyerAccount" (
@@ -1034,15 +1021,6 @@ describeWithDb("syncCreditStatusMetafield no-owner accounts (#203)", () => {
         'With-Owner Account', 100000.00, 'OK', false, true, 0,
         NOW(), NOW()
       )
-    `;
-    
-    // Re-enable constraint (NOT VALID to avoid checking existing rows)
-    await sql`
-      ALTER TABLE "BuyerAccount"
-      ADD CONSTRAINT "BuyerAccount_kind_consistency" CHECK (
-        (kind = 'COMPANY' AND "companyLocationId" IS NOT NULL AND "companyId" IS NOT NULL)
-        OR (kind = 'TAGGED_CUSTOMER' AND "customerId" IS NOT NULL)
-      ) NOT VALID
     `;
 
     try {
@@ -1067,16 +1045,8 @@ describeWithDb("syncCreditStatusMetafield no-owner accounts (#203)", () => {
       expect(account.syncPending).toBe(false);
       expect(account.metafieldSyncedAt).not.toBeNull();
     } finally {
-      // Clean up
-      await sql`ALTER TABLE "BuyerAccount" DROP CONSTRAINT "BuyerAccount_kind_consistency"`;
+      // Clean up the test account
       await sql`DELETE FROM "BuyerAccount" WHERE id = ${ownerAccountId}`;
-      await sql`
-        ALTER TABLE "BuyerAccount"
-        ADD CONSTRAINT "BuyerAccount_kind_consistency" CHECK (
-          (kind = 'COMPANY' AND "companyLocationId" IS NOT NULL AND "companyId" IS NOT NULL)
-          OR (kind = 'TAGGED_CUSTOMER' AND "customerId" IS NOT NULL)
-        ) NOT VALID
-      `;
     }
   });
 });

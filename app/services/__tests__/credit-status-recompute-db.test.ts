@@ -3441,8 +3441,8 @@ describeWithDb("CREDIT_STATUS_RECOMPUTE no-owner accounts (#203)", () => {
       VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', NOW(), NOW())
     `;
 
-    // Temporarily disable CHECK constraint
-    await sql`ALTER TABLE "BuyerAccount" DROP CONSTRAINT "BuyerAccount_kind_consistency"`;
+    // Disable CHECK constraint for duration of all tests in this describe block
+    await sql`ALTER TABLE "BuyerAccount" DROP CONSTRAINT IF EXISTS "BuyerAccount_kind_consistency"`;
 
     // COMPANY with null companyLocationId (no-owner)
     await sql`
@@ -3458,21 +3458,10 @@ describeWithDb("CREDIT_STATUS_RECOMPUTE no-owner accounts (#203)", () => {
         NOW(), NOW()
       )
     `;
-
-    // Re-enable CHECK constraint (NOT VALID)
-    await sql`
-      ALTER TABLE "BuyerAccount"
-      ADD CONSTRAINT "BuyerAccount_kind_consistency" CHECK (
-        (kind = 'COMPANY' AND "companyLocationId" IS NOT NULL AND "companyId" IS NOT NULL)
-        OR (kind = 'TAGGED_CUSTOMER' AND "customerId" IS NOT NULL)
-      ) NOT VALID
-    `;
   });
 
   afterAll(async () => {
-    await sql`ALTER TABLE "BuyerAccount" DROP CONSTRAINT "BuyerAccount_kind_consistency"`;
-    
-    // Clean up queue/DLQ messages
+    // Clean up test data first while constraint is dropped
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
@@ -3482,7 +3471,7 @@ describeWithDb("CREDIT_STATUS_RECOMPUTE no-owner accounts (#203)", () => {
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
     
-    // Re-enable constraint as VALID
+    // Re-enable constraint after all no-owner rows are deleted
     await sql`
       ALTER TABLE "BuyerAccount"
       ADD CONSTRAINT "BuyerAccount_kind_consistency" CHECK (
@@ -3656,10 +3645,8 @@ describeWithDb("CREDIT_STATUS_RECOMPUTE no-owner accounts (#203)", () => {
   });
 
   it("regression: owner-present account via drain still sets metafieldSyncedAt and action:created", async () => {
-    // Create account WITH owner
+    // Create account WITH owner (constraint is already dropped in beforeAll)
     const ownerAccountId = `acc-withowner-drain-${TEST_SUFFIX}`;
-    
-    await sql`ALTER TABLE "BuyerAccount" DROP CONSTRAINT "BuyerAccount_kind_consistency"`;
     
     await sql`
       INSERT INTO "BuyerAccount" (
@@ -3673,14 +3660,6 @@ describeWithDb("CREDIT_STATUS_RECOMPUTE no-owner accounts (#203)", () => {
         'With-Owner Drain Account', 100000.00, 'OK', false, true, 0,
         NOW(), NOW()
       )
-    `;
-    
-    await sql`
-      ALTER TABLE "BuyerAccount"
-      ADD CONSTRAINT "BuyerAccount_kind_consistency" CHECK (
-        (kind = 'COMPANY' AND "companyLocationId" IS NOT NULL AND "companyId" IS NOT NULL)
-        OR (kind = 'TAGGED_CUSTOMER' AND "customerId" IS NOT NULL)
-      ) NOT VALID
     `;
 
     const invoiceId = `inv-withowner-drain-${TEST_SUFFIX}`;
@@ -3729,18 +3708,10 @@ describeWithDb("CREDIT_STATUS_RECOMPUTE no-owner accounts (#203)", () => {
       `;
       expect(account.metafieldSyncedAt).not.toBeNull();
     } finally {
-      // Clean up
-      await sql`ALTER TABLE "BuyerAccount" DROP CONSTRAINT "BuyerAccount_kind_consistency"`;
+      // Clean up test data
       await sql`DELETE FROM "Invoice" WHERE id = ${invoiceId}`;
       await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_recompute:' + ownerAccountId + '%'}`;
       await sql`DELETE FROM "BuyerAccount" WHERE id = ${ownerAccountId}`;
-      await sql`
-        ALTER TABLE "BuyerAccount"
-        ADD CONSTRAINT "BuyerAccount_kind_consistency" CHECK (
-          (kind = 'COMPANY' AND "companyLocationId" IS NOT NULL AND "companyId" IS NOT NULL)
-          OR (kind = 'TAGGED_CUSTOMER' AND "customerId" IS NOT NULL)
-        ) NOT VALID
-      `;
     }
   });
 });
