@@ -1180,7 +1180,7 @@ describe("S23-04: initial sync", () => {
       expect(result.initialSyncState?.status).toBe("failed");
     });
 
-    it("returns failed when entries exist in DLQ for latest bulk_op_id", async () => {
+    it("returns failed when entries exist in DLQ for latest bulk_operation_id", async () => {
       mockSql.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
@@ -1195,7 +1195,7 @@ describe("S23-04: initial sync", () => {
         if (query.includes("s6_bulk_operations")) {
           return Promise.resolve([
             {
-              bulk_op_id: "gid://shopify/BulkOperation/1",
+              bulk_operation_id: "gid://shopify/BulkOperation/1",
               reconcile_stage: "companies",
               completed_at: null,
               failure_count: 0,

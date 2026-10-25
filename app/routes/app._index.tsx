@@ -418,8 +418,8 @@ function AgingBucketSummary({
       </s-paragraph>
       <s-table>
         <s-table-header-row>
-          <s-table-header>Bucket</s-table-header>
-          <s-table-header format="currency">Amount</s-table-header>
+          <s-table-header listSlot="primary">Bucket</s-table-header>
+          <s-table-header listSlot="labeled" format="currency">Amount</s-table-header>
         </s-table-header-row>
         <s-table-body>
           {bucketData.map((bucket) => (
@@ -486,22 +486,22 @@ function BuyerLedgerTable({
     <s-stack>
       <s-table>
         <s-table-header-row>
-          <s-table-header>
+          <s-table-header listSlot="primary">
             <s-link href={buildSortUrl("name")}>Buyer{getSortIndicator("name")}</s-link>
           </s-table-header>
-          <s-table-header format="currency">Credit Limit</s-table-header>
-          <s-table-header format="currency">
+          <s-table-header listSlot="labeled" format="currency">Credit Limit</s-table-header>
+          <s-table-header listSlot="labeled" format="currency">
             <s-link href={buildSortUrl("outstanding")}>
               Outstanding{getSortIndicator("outstanding")}
             </s-link>
           </s-table-header>
-          <s-table-header format="currency">
+          <s-table-header listSlot="labeled" format="currency">
             <s-link href={buildSortUrl("overdue")}>
               Overdue{getSortIndicator("overdue")}
             </s-link>
           </s-table-header>
-          <s-table-header>Oldest Overdue</s-table-header>
-          <s-table-header>Hold Status</s-table-header>
+          <s-table-header listSlot="labeled">Oldest Overdue</s-table-header>
+          <s-table-header listSlot="inline">Hold Status</s-table-header>
         </s-table-header-row>
         <s-table-body>
           {rows.map((row) => {
@@ -596,11 +596,11 @@ function BuyerInvoiceList({
       <s-stack>
         <s-table>
           <s-table-header-row>
-            <s-table-header>Invoice</s-table-header>
-            <s-table-header>Due Date</s-table-header>
-            <s-table-header format="currency">Outstanding</s-table-header>
-            <s-table-header>Days Past Due</s-table-header>
-            <s-table-header>Order</s-table-header>
+            <s-table-header listSlot="primary">Invoice</s-table-header>
+            <s-table-header listSlot="labeled">Due Date</s-table-header>
+            <s-table-header listSlot="labeled" format="currency">Outstanding</s-table-header>
+            <s-table-header listSlot="inline">Days Past Due</s-table-header>
+            <s-table-header listSlot="labeled">Order</s-table-header>
           </s-table-header-row>
           <s-table-body>
             {invoices.map((inv) => {

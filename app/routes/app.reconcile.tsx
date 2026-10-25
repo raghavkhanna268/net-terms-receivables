@@ -544,12 +544,12 @@ function PaymentDetailView({
         ) : (
           <s-table>
             <s-table-header-row>
-              <s-table-header>Invoice</s-table-header>
-              <s-table-header>Buyer</s-table-header>
-              <s-table-header format="currency">Amount</s-table-header>
-              <s-table-header>Score</s-table-header>
-              <s-table-header>Reasons</s-table-header>
-              <s-table-header>Actions</s-table-header>
+              <s-table-header listSlot="primary">Invoice</s-table-header>
+              <s-table-header listSlot="secondary">Buyer</s-table-header>
+              <s-table-header listSlot="labeled" format="currency">Amount</s-table-header>
+              <s-table-header listSlot="inline">Score</s-table-header>
+              <s-table-header listSlot="labeled">Reasons</s-table-header>
+              <s-table-header listSlot="labeled">Actions</s-table-header>
             </s-table-header-row>
             <s-table-body>
               {matches.map((match) => (
@@ -642,12 +642,12 @@ function UnmatchedPaymentsView({
     <s-stack>
       <s-table>
         <s-table-header-row>
-          <s-table-header format="currency">Amount</s-table-header>
-          <s-table-header>Rail</s-table-header>
-          <s-table-header>UTR</s-table-header>
-          <s-table-header>Payer</s-table-header>
-          <s-table-header>Narration</s-table-header>
-          <s-table-header>Actions</s-table-header>
+          <s-table-header listSlot="labeled" format="currency">Amount</s-table-header>
+          <s-table-header listSlot="inline">Rail</s-table-header>
+          <s-table-header listSlot="primary">UTR</s-table-header>
+          <s-table-header listSlot="labeled">Payer</s-table-header>
+          <s-table-header listSlot="secondary">Narration</s-table-header>
+          <s-table-header listSlot="labeled">Actions</s-table-header>
         </s-table-header-row>
         <s-table-body>
           {payments.map((payment) => (
@@ -732,11 +732,11 @@ function SuggestedMatchesView({
     <s-stack>
       <s-table>
         <s-table-header-row>
-          <s-table-header>Invoice</s-table-header>
-          <s-table-header>Buyer</s-table-header>
-          <s-table-header format="currency">Amount</s-table-header>
-          <s-table-header>Score</s-table-header>
-          <s-table-header>Actions</s-table-header>
+          <s-table-header listSlot="primary">Invoice</s-table-header>
+          <s-table-header listSlot="secondary">Buyer</s-table-header>
+          <s-table-header listSlot="labeled" format="currency">Amount</s-table-header>
+          <s-table-header listSlot="inline">Score</s-table-header>
+          <s-table-header listSlot="labeled">Actions</s-table-header>
         </s-table-header-row>
         <s-table-body>
           {matches.map((match) => (
@@ -840,10 +840,10 @@ function ConfirmedMatchesView({
     <s-stack>
       <s-table>
         <s-table-header-row>
-          <s-table-header>Invoice</s-table-header>
-          <s-table-header>Buyer</s-table-header>
-          <s-table-header format="currency">Amount</s-table-header>
-          <s-table-header>Actions</s-table-header>
+          <s-table-header listSlot="primary">Invoice</s-table-header>
+          <s-table-header listSlot="secondary">Buyer</s-table-header>
+          <s-table-header listSlot="labeled" format="currency">Amount</s-table-header>
+          <s-table-header listSlot="labeled">Actions</s-table-header>
         </s-table-header-row>
         <s-table-body>
           {matches.map((match) => (
@@ -947,10 +947,10 @@ function PushingMatchesView({
 
       <s-table>
         <s-table-header-row>
-          <s-table-header>Invoice</s-table-header>
-          <s-table-header>Account</s-table-header>
-          <s-table-header>Amount</s-table-header>
-          <s-table-header>Actions</s-table-header>
+          <s-table-header listSlot="primary">Invoice</s-table-header>
+          <s-table-header listSlot="secondary">Account</s-table-header>
+          <s-table-header listSlot="labeled">Amount</s-table-header>
+          <s-table-header listSlot="labeled">Actions</s-table-header>
         </s-table-header-row>
         <s-table-body>
           {matches.map((match) => (
