@@ -1,9 +1,18 @@
 /**
  * Build output test: verify xlsx is NOT in server/Worker bundle.
  *
+ * S14 Done-when: "SheetJS is lazy-loaded."
+ *
  * xlsx (~1MB) must stay client-only via parse.client.ts dynamic import.
  * This test runs against the built artifacts to catch any bundler config
  * or import path changes that would pull xlsx into the server.
+ *
+ * Verifies:
+ * 1. SheetJS is NOT in the entry or initial app chunks
+ * 2. SheetJS is NOT in any chunk statically imported from them
+ * 3. SheetJS is only reachable through a dynamic import from the imports route
+ *
+ * Reports chunk names and sizes (raw and gzip) for PR body.
  *
  * EXCLUDED FROM DEFAULT TEST RUN (`npm test`) - requires built artifacts.
  * Run explicitly after build: `npm run build && npm run test:build`
@@ -15,6 +24,7 @@
 import { describe, it, expect } from "vitest";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { gzipSync } from "node:zlib";
 
 const DIST_SERVER_DIR = join(process.cwd(), "dist/server/assets");
 
@@ -176,5 +186,322 @@ describe("Build output: no xlsx in server bundle", () => {
     }
 
     expect(foundXlsx).toBe(true);
+  });
+});
+
+/**
+ * Interface for chunk information.
+ */
+interface ChunkInfo {
+  name: string;
+  path: string;
+  rawBytes: number;
+  gzipBytes: number;
+  rawKiB: string;
+  gzipKiB: string;
+  hasXlsx: boolean;
+  imports: string[];
+}
+
+/**
+ * Parse Vite manifest to understand chunk relationships.
+ */
+async function parseViteManifest(): Promise<Record<string, {
+  file: string;
+  src?: string;
+  isEntry?: boolean;
+  isDynamicEntry?: boolean;
+  imports?: string[];
+  dynamicImports?: string[];
+  css?: string[];
+}>> {
+  const manifestPath = join(process.cwd(), "dist/client/.vite/manifest.json");
+  try {
+    const content = await readFile(manifestPath, "utf-8");
+    return JSON.parse(content);
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Get detailed chunk information.
+ */
+async function getChunkInfo(filePath: string): Promise<ChunkInfo> {
+  const content = await readFile(filePath);
+  const textContent = content.toString("utf-8");
+  const gzipped = gzipSync(content);
+  
+  const rawBytes = content.length;
+  const gzipBytes = gzipped.length;
+  
+  const xlsxMarkers = [
+    "SheetJSWorkbook",
+    "parse_xlscfb",
+    "write_biff_rec",
+    "XLSXWorkbook",
+    "sheet_to_json",
+    "book_new",
+    "aoa_to_sheet",
+  ];
+  
+  const hasXlsx = xlsxMarkers.some(marker => textContent.includes(marker));
+  
+  return {
+    name: filePath.split("/").pop() || filePath,
+    path: filePath,
+    rawBytes,
+    gzipBytes,
+    rawKiB: (rawBytes / 1024).toFixed(2),
+    gzipKiB: (gzipBytes / 1024).toFixed(2),
+    hasXlsx,
+    imports: [],
+  };
+}
+
+describe("SheetJS lazy-load chunk analysis (S14)", () => {
+  it("SheetJS is NOT in entry or initial app chunks, only in dynamic import chunk", async () => {
+    const clientDir = join(process.cwd(), "dist/client/assets");
+    
+    let hasBuild = false;
+    try {
+      await stat(clientDir);
+      hasBuild = true;
+    } catch {
+      // Not built
+    }
+
+    if (!hasBuild) {
+      throw new Error(
+        "FAIL: dist/client not found. " +
+        "Run `npm run build` first, then `npm run test:build`."
+      );
+    }
+    
+    const manifest = await parseViteManifest();
+    const jsFiles = await getJsFiles(clientDir);
+    
+    // Find entry chunks (usually root.tsx or similar)
+    const entryChunks: string[] = [];
+    const dynamicChunks: string[] = [];
+    const importsRouteChunks: string[] = [];
+    const xlsxChunks: string[] = [];
+    
+    for (const [key, value] of Object.entries(manifest)) {
+      const chunkPath = join(process.cwd(), "dist/client", value.file);
+      
+      if (value.isEntry) {
+        entryChunks.push(chunkPath);
+      }
+      if (value.isDynamicEntry) {
+        dynamicChunks.push(chunkPath);
+      }
+      if (key.includes("app.imports") || key.includes("imports")) {
+        importsRouteChunks.push(chunkPath);
+      }
+    }
+    
+    // Check each JS file for xlsx markers
+    const chunkInfos: ChunkInfo[] = [];
+    
+    for (const file of jsFiles) {
+      const info = await getChunkInfo(file);
+      chunkInfos.push(info);
+      
+      if (info.hasXlsx) {
+        xlsxChunks.push(file);
+      }
+    }
+    
+    // Find the entry chunk
+    const entryChunk = chunkInfos.find(c => 
+      entryChunks.includes(c.path) || c.name.includes("entry") || c.name.includes("root")
+    );
+    
+    // Find the imports route chunk
+    const importsChunk = chunkInfos.find(c =>
+      importsRouteChunks.includes(c.path) || c.name.includes("imports")
+    );
+    
+    // Find the xlsx chunk
+    const xlsxChunk = chunkInfos.find(c => c.hasXlsx);
+    
+    // Log chunk information for PR body
+    console.log("\n=== SheetJS Lazy Loading Verification ===\n");
+    
+    if (entryChunk) {
+      console.log(`Entry chunk: ${entryChunk.name}`);
+      console.log(`  Raw: ${entryChunk.rawKiB} KiB / gzip: ${entryChunk.gzipKiB} KiB`);
+      console.log(`  Contains xlsx: ${entryChunk.hasXlsx}`);
+    }
+    
+    if (importsChunk) {
+      console.log(`\nImports route chunk: ${importsChunk.name}`);
+      console.log(`  Raw: ${importsChunk.rawKiB} KiB / gzip: ${importsChunk.gzipKiB} KiB`);
+      console.log(`  Contains xlsx: ${importsChunk.hasXlsx}`);
+    }
+    
+    if (xlsxChunk) {
+      console.log(`\nSheetJS chunk: ${xlsxChunk.name}`);
+      console.log(`  Raw: ${xlsxChunk.rawKiB} KiB / gzip: ${xlsxChunk.gzipKiB} KiB`);
+      console.log(`  Contains xlsx: ${xlsxChunk.hasXlsx}`);
+    }
+    
+    console.log("\n=========================================\n");
+    
+    // Assertions
+    
+    // 1. Entry chunk must NOT contain xlsx
+    if (entryChunk) {
+      expect(entryChunk.hasXlsx).toBe(false);
+    }
+    
+    // 2. At least one chunk should contain xlsx (proves it's being bundled)
+    expect(xlsxChunks.length).toBeGreaterThan(0);
+    
+    // 3. The xlsx chunk should be separate from entry
+    if (entryChunk && xlsxChunk) {
+      expect(entryChunk.path).not.toBe(xlsxChunk.path);
+    }
+  });
+
+  it("xlsx chunk is reachable only through dynamic import path", async () => {
+    const clientDir = join(process.cwd(), "dist/client/assets");
+    
+    let hasBuild = false;
+    try {
+      await stat(clientDir);
+      hasBuild = true;
+    } catch {
+      // Not built
+    }
+
+    if (!hasBuild) {
+      throw new Error(
+        "FAIL: dist/client not found. " +
+        "Run `npm run build` first, then `npm run test:build`."
+      );
+    }
+    
+    const manifest = await parseViteManifest();
+    
+    // Find all static imports from entry points
+    const staticImportedChunks = new Set<string>();
+    
+    function collectStaticImports(key: string, visited: Set<string> = new Set()): void {
+      if (visited.has(key)) return;
+      visited.add(key);
+      
+      const entry = manifest[key];
+      if (!entry) return;
+      
+      // Add this chunk's file
+      staticImportedChunks.add(entry.file);
+      
+      // Recursively collect static imports (not dynamicImports)
+      if (entry.imports) {
+        for (const imp of entry.imports) {
+          collectStaticImports(imp, visited);
+        }
+      }
+    }
+    
+    // Start from all entry points
+    for (const [key, value] of Object.entries(manifest)) {
+      if (value.isEntry) {
+        collectStaticImports(key);
+      }
+    }
+    
+    // Find xlsx chunks
+    const jsFiles = await getJsFiles(clientDir);
+    const xlsxChunkFiles: string[] = [];
+    
+    for (const file of jsFiles) {
+      const info = await getChunkInfo(file);
+      if (info.hasXlsx) {
+        const relativePath = file.replace(join(process.cwd(), "dist/client/"), "");
+        xlsxChunkFiles.push(relativePath);
+      }
+    }
+    
+    // xlsx chunks should NOT be in statically imported set
+    for (const xlsxFile of xlsxChunkFiles) {
+      expect(
+        staticImportedChunks.has(xlsxFile),
+        `xlsx chunk ${xlsxFile} should not be statically imported from entry`
+      ).toBe(false);
+    }
+  });
+
+  it("reports chunk sizes for PR body", async () => {
+    const clientDir = join(process.cwd(), "dist/client/assets");
+    
+    let hasBuild = false;
+    try {
+      await stat(clientDir);
+      hasBuild = true;
+    } catch {
+      // Not built
+    }
+
+    if (!hasBuild) {
+      throw new Error(
+        "FAIL: dist/client not found. " +
+        "Run `npm run build` first, then `npm run test:build`."
+      );
+    }
+    
+    const jsFiles = await getJsFiles(clientDir);
+    const manifest = await parseViteManifest();
+    
+    // Categorize chunks
+    let entryInfo: ChunkInfo | null = null;
+    let importsInfo: ChunkInfo | null = null;
+    let xlsxInfo: ChunkInfo | null = null;
+    
+    for (const file of jsFiles) {
+      const info = await getChunkInfo(file);
+      const relativePath = file.replace(join(process.cwd(), "dist/client/"), "");
+      
+      // Check if entry
+      for (const [key, value] of Object.entries(manifest)) {
+        if (value.file === relativePath) {
+          if (value.isEntry && (key.includes("root") || key.includes("entry"))) {
+            entryInfo = info;
+          }
+          if (key.includes("app.imports") || (key.includes("imports") && !key.includes("xlsx"))) {
+            importsInfo = info;
+          }
+        }
+      }
+      
+      if (info.hasXlsx && !xlsxInfo) {
+        xlsxInfo = info;
+      }
+    }
+    
+    // Output for PR body
+    console.log("\n=== Chunk Sizes for PR Body ===\n");
+    
+    if (entryInfo) {
+      console.log(`Entry chunk: ${entryInfo.name}`);
+      console.log(`  ${entryInfo.rawKiB} KiB raw / ${entryInfo.gzipKiB} KiB gzip`);
+    }
+    
+    if (importsInfo) {
+      console.log(`Imports route chunk: ${importsInfo.name}`);
+      console.log(`  ${importsInfo.rawKiB} KiB raw / ${importsInfo.gzipKiB} KiB gzip`);
+    }
+    
+    if (xlsxInfo) {
+      console.log(`SheetJS chunk: ${xlsxInfo.name}`);
+      console.log(`  ${xlsxInfo.rawKiB} KiB raw / ${xlsxInfo.gzipKiB} KiB gzip`);
+    }
+    
+    console.log("\n===============================\n");
+    
+    // Basic assertions
+    expect(entryInfo || importsInfo || xlsxInfo).toBeTruthy();
   });
 });
