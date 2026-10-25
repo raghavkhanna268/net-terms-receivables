@@ -24,8 +24,11 @@ import re
 import sys
 
 APPROVED_SCOPES = {
-    "read_companies", "read_customers", "read_draft_orders", "read_orders",
-    "read_payment_terms", "write_companies", "write_customers",
+    # S24: Dropped read_companies, read_customers, read_orders (implied by write_* scopes).
+    # See https://shopify.dev/docs/api/usage/access-scopes 'How it works':
+    # "Any scope that writes a resource also grants read access to it."
+    "read_draft_orders", "read_payment_terms",
+    "write_companies", "write_customers",
     "write_merchant_managed_fulfillment_orders", "write_orders",
     "write_payment_customizations", "write_validations",
 }
