@@ -26,7 +26,7 @@
 
 import type { Sql } from "~/lib/db-light.server";
 import { DateTime } from "luxon";
-import { getPlanByShopId } from "./plan.server";
+import { getPlanByShopId, isPlanConfirmed } from "./plan.server";
 import {
   type FeatureKey,
   type PlanKey,
@@ -122,6 +122,8 @@ export interface GatingCheckResult {
  * Check if a shop can create another BuyerAccount (company).
  * Excludes gated accounts from the count.
  *
+ * Ruling (b): Unconfirmed shops (no plan_cached_at) are NOT gated.
+ *
  * @param sql - postgres.js SQL client
  * @param shopId - Internal shop ID
  * @returns GatingCheckResult with allowed status and usage info
@@ -137,6 +139,17 @@ export async function checkCompanyLimit(
       currentUsage: 0,
       limit: -1,
       reason: "Gating not enforced (PLAN_GATING_ENFORCED is off)",
+    };
+  }
+
+  // Ruling (b): Unconfirmed plans are not gated
+  const confirmed = await isPlanConfirmed(sql, shopId);
+  if (!confirmed) {
+    return {
+      allowed: true,
+      currentUsage: 0,
+      limit: -1,
+      reason: "Plan not confirmed (no plan_cached_at)",
     };
   }
 
@@ -199,6 +212,8 @@ export async function enforceCompanyLimit(
  * Check if a shop can perform another bank statement import this month.
  * Calendar month is calculated in IST (Asia/Kolkata) timezone.
  *
+ * Ruling (b): Unconfirmed shops (no plan_cached_at) are NOT gated.
+ *
  * NOTE: Import limit enforcement is wired here but actual BankImport creation
  * is not yet implemented. See docs/plans-and-gating.md TODO for S15.
  *
@@ -217,6 +232,17 @@ export async function checkImportLimit(
       currentUsage: 0,
       limit: -1,
       reason: "Gating not enforced (PLAN_GATING_ENFORCED is off)",
+    };
+  }
+
+  // Ruling (b): Unconfirmed plans are not gated
+  const confirmed = await isPlanConfirmed(sql, shopId);
+  if (!confirmed) {
+    return {
+      allowed: true,
+      currentUsage: 0,
+      limit: -1,
+      reason: "Plan not confirmed (no plan_cached_at)",
     };
   }
 

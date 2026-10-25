@@ -528,19 +528,119 @@ describe("Partner API Plan Source (T2)", () => {
     });
   });
 
+  describe("6h Postgres freshness (ruling e)", () => {
+    beforeEach(() => {
+      setPartnerEnv();
+      mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+    });
+
+    it("returns fresh Postgres cache without Partner API fetch", async () => {
+      const freshCacheTime = new Date(Date.now() - 60 * 60 * 1000); // 1 hour ago
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "growth",
+        subscription_id: "sub-123",
+        subscription_name: "Growth",
+        is_test: false,
+        plan_cached_at: freshCacheTime,
+      }]);
+
+      const source = getPlanSource();
+      const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
+
+      expect(mockFetch).not.toHaveBeenCalled();
+      expect(result.planKey).toBe("growth");
+      expect(result.fromCache).toBe(true);
+      expect(result.resolutionState).toBe("active");
+    });
+
+    it("fetches from Partner API when Postgres cache is stale (> 6h)", async () => {
+      const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000); // 7 hours ago
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "growth",
+        subscription_id: "sub-123",
+        subscription_name: "Growth",
+        is_test: false,
+        plan_cached_at: staleCacheTime,
+      }]);
+
+      mockShopGidResponse();
+      mockPartnerApiResponse(activeGrowthFixture);
+
+      const source = getPlanSource();
+      const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(result.planKey).toBe("growth");
+      expect(result.fromCache).toBe(false);
+    });
+
+    it("forceRefresh bypasses 6h Postgres freshness", async () => {
+      const freshCacheTime = new Date(Date.now() - 60 * 60 * 1000); // 1 hour ago
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "growth",
+        subscription_id: "sub-123",
+        subscription_name: "Growth",
+        is_test: false,
+        plan_cached_at: freshCacheTime,
+      }]);
+
+      mockShopGidResponse();
+      mockPartnerApiResponse(activeGrowthFixture);
+
+      const source = getPlanSource();
+      const result = await source.resolveActivePlan({
+        sql: mockSql as unknown as Sql,
+        shopDomain: TEST_SHOP,
+        forceRefresh: true,
+      });
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(result.fromCache).toBe(false);
+    });
+
+    it("isolate cache takes precedence over Postgres cache", async () => {
+      const freshCacheTime = new Date(Date.now() - 60 * 60 * 1000);
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "starter",
+        subscription_id: "sub-456",
+        subscription_name: "Starter",
+        is_test: false,
+        plan_cached_at: freshCacheTime,
+      }]);
+
+      mockShopGidResponse();
+      mockPartnerApiResponse(activeGrowthFixture);
+
+      const source = getPlanSource();
+      // First call populates isolate cache
+      await source.resolveActivePlan({
+        sql: mockSql as unknown as Sql,
+        shopDomain: TEST_SHOP,
+        forceRefresh: true,
+      });
+
+      // Second call should use isolate cache (growth) not Postgres (starter)
+      const result2 = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
+
+      expect(result2.planKey).toBe("growth");
+      expect(result2.fromCache).toBe(true);
+    });
+  });
+
   describe("Error handling", () => {
     beforeEach(() => {
       setPartnerEnv();
       mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
     });
 
-    it("returns cached plan on 429 when Postgres row exists", async () => {
+    it("returns cached plan on 429 when Postgres row exists (stale cache)", async () => {
+      const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000); // 7 hours ago (stale)
       mockSql.setMockResult("shop_plan", [{
         plan_key: "growth",
         subscription_id: "sub-123",
         subscription_name: "Growth",
         is_test: false,
-        plan_cached_at: new Date(),
+        plan_cached_at: staleCacheTime,
       }]);
       mockShopGidResponse();
       mockFetch.mockResolvedValueOnce({ ok: false, status: 429, json: async () => throttledFixture });
@@ -553,13 +653,14 @@ describe("Partner API Plan Source (T2)", () => {
       expect(result.resolutionState).toBe("unknown");
     });
 
-    it("returns cached plan on 200 with errors when Postgres row exists", async () => {
+    it("returns cached plan on 200 with errors when Postgres row exists (stale cache)", async () => {
+      const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
       mockSql.setMockResult("shop_plan", [{
         plan_key: "starter",
         subscription_id: "sub-456",
         subscription_name: "Starter",
         is_test: false,
-        plan_cached_at: new Date(),
+        plan_cached_at: staleCacheTime,
       }]);
       mockShopGidResponse();
       mockPartnerApiResponse(graphqlErrorFixture);
@@ -571,13 +672,14 @@ describe("Partner API Plan Source (T2)", () => {
       expect(result.fromCache).toBe(true);
     });
 
-    it("returns cached plan on HTTP 401 when Postgres row exists", async () => {
+    it("returns cached plan on HTTP 401 when Postgres row exists (stale cache)", async () => {
+      const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
       mockSql.setMockResult("shop_plan", [{
         plan_key: "growth",
         subscription_id: "sub-789",
         subscription_name: "Growth",
         is_test: false,
-        plan_cached_at: new Date(),
+        plan_cached_at: staleCacheTime,
       }]);
       mockShopGidResponse();
       mockFetch.mockResolvedValueOnce({ ok: false, status: 401, json: async () => ({}) });
@@ -589,13 +691,14 @@ describe("Partner API Plan Source (T2)", () => {
       expect(result.fromCache).toBe(true);
     });
 
-    it("returns cached plan on HTTP 500 when Postgres row exists", async () => {
+    it("returns cached plan on HTTP 500 when Postgres row exists (stale cache)", async () => {
+      const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
       mockSql.setMockResult("shop_plan", [{
         plan_key: "scale",
         subscription_id: "sub-scale",
         subscription_name: "Scale",
         is_test: false,
-        plan_cached_at: new Date(),
+        plan_cached_at: staleCacheTime,
       }]);
       mockShopGidResponse();
       mockFetch.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) });
@@ -607,13 +710,14 @@ describe("Partner API Plan Source (T2)", () => {
       expect(result.fromCache).toBe(true);
     });
 
-    it("returns cached plan on malformed response when Postgres row exists", async () => {
+    it("returns cached plan on malformed response when Postgres row exists (stale cache)", async () => {
+      const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
       mockSql.setMockResult("shop_plan", [{
         plan_key: "growth",
         subscription_id: "sub-123",
         subscription_name: "Growth",
         is_test: false,
-        plan_cached_at: new Date(),
+        plan_cached_at: staleCacheTime,
       }]);
       mockShopGidResponse();
       mockPartnerApiResponse({ data: {} });
@@ -625,37 +729,52 @@ describe("Partner API Plan Source (T2)", () => {
       expect(result.fromCache).toBe(true);
     });
 
-    it("throws on 429 when no Postgres row exists", async () => {
+    it("returns unknown with default plan on 429 when no Postgres row exists (ruling d)", async () => {
       mockSql.setMockResult("shop_plan", []);
       mockShopGidResponse();
       mockFetch.mockResolvedValueOnce({ ok: false, status: 429, json: async () => throttledFixture });
 
       const source = getPlanSource();
+      const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
 
-      await expect(
-        source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP })
-      ).rejects.toThrow();
+      expect(result.planKey).toBe("free");
+      expect(result.resolutionState).toBe("unknown");
+      expect(result.fromCache).toBe(false);
     });
 
-    it("throws on HTTP 500 when no Postgres row exists", async () => {
+    it("returns unknown with default plan on HTTP 500 when no Postgres row exists (ruling d)", async () => {
       mockSql.setMockResult("shop_plan", []);
       mockShopGidResponse();
       mockFetch.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) });
 
       const source = getPlanSource();
+      const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
 
-      await expect(
-        source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP })
-      ).rejects.toThrow();
+      expect(result.planKey).toBe("free");
+      expect(result.resolutionState).toBe("unknown");
+      expect(result.fromCache).toBe(false);
     });
 
-    it("treats unknown handle as error (does not demote to free)", async () => {
+    it("never throws from resolveActivePlan (ruling d)", async () => {
+      mockSql.setMockResult("shop_plan", []);
+      mockShopGidResponse();
+      mockFetch.mockRejectedValueOnce(new Error("Network failure"));
+
+      const source = getPlanSource();
+      const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
+
+      expect(result.planKey).toBe("free");
+      expect(result.resolutionState).toBe("unknown");
+    });
+
+    it("treats unknown handle as error (does not demote to free) (stale cache)", async () => {
+      const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
       mockSql.setMockResult("shop_plan", [{
         plan_key: "growth",
         subscription_id: "sub-123",
         subscription_name: "Growth",
         is_test: false,
-        plan_cached_at: new Date(),
+        plan_cached_at: staleCacheTime,
       }]);
       mockShopGidResponse();
       mockPartnerApiResponse(unknownHandleFixture);
@@ -668,13 +787,14 @@ describe("Partner API Plan Source (T2)", () => {
       expect(captureMessage).toHaveBeenCalledWith("partner_plan_handle_unknown", "error");
     });
 
-    it("treats null handle as error (does not demote to free)", async () => {
+    it("treats null handle as error (does not demote to free) (stale cache)", async () => {
+      const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
       mockSql.setMockResult("shop_plan", [{
         plan_key: "starter",
         subscription_id: "sub-456",
         subscription_name: "Starter",
         is_test: false,
-        plan_cached_at: new Date(),
+        plan_cached_at: staleCacheTime,
       }]);
       mockShopGidResponse();
       mockPartnerApiResponse({
@@ -693,13 +813,14 @@ describe("Partner API Plan Source (T2)", () => {
       expect(result.fromCache).toBe(true);
     });
 
-    it("never returns getDefaultPlan on error (does not return free)", async () => {
+    it("never returns getDefaultPlan on error (does not return free) (stale cache)", async () => {
+      const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
       mockSql.setMockResult("shop_plan", [{
         plan_key: "scale",
         subscription_id: "sub-scale",
         subscription_name: "Scale",
         is_test: false,
-        plan_cached_at: new Date(),
+        plan_cached_at: staleCacheTime,
       }]);
       mockShopGidResponse();
       mockFetch.mockRejectedValueOnce(new Error("Network error"));
@@ -711,13 +832,14 @@ describe("Partner API Plan Source (T2)", () => {
       expect(result.planKey).not.toBe("free");
     });
 
-    it("does not report 429 to Sentry (only logs)", async () => {
+    it("does not report 429 to Sentry (only logs) (stale cache)", async () => {
+      const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
       mockSql.setMockResult("shop_plan", [{
         plan_key: "growth",
         subscription_id: "sub-123",
         subscription_name: "Growth",
         is_test: false,
-        plan_cached_at: new Date(),
+        plan_cached_at: staleCacheTime,
       }]);
       mockShopGidResponse();
       mockFetch.mockResolvedValueOnce({ ok: false, status: 429, json: async () => throttledFixture });
@@ -853,13 +975,14 @@ describe("Partner API Plan Source (T2)", () => {
       }
     });
 
-    it("logs shopHash instead of domain on errors", async () => {
+    it("logs shopHash instead of domain on errors (stale cache)", async () => {
+      const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
       mockSql.setMockResult("shop_plan", [{
         plan_key: "growth",
         subscription_id: "sub-123",
         subscription_name: "Growth",
         is_test: false,
-        plan_cached_at: new Date(),
+        plan_cached_at: staleCacheTime,
       }]);
       mockShopGidResponse();
       mockFetch.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) });
@@ -902,13 +1025,14 @@ describe("Partner API Plan Source (T2)", () => {
       expect(result.resolutionState).toBe("none");
     });
 
-    it("returns unknown state on fetch error with cached plan", async () => {
+    it("returns unknown state on fetch error with cached plan (stale cache)", async () => {
+      const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
       mockSql.setMockResult("shop_plan", [{
         plan_key: "growth",
         subscription_id: "sub-123",
         subscription_name: "Growth",
         is_test: false,
-        plan_cached_at: new Date(),
+        plan_cached_at: staleCacheTime,
       }]);
       mockShopGidResponse();
       mockFetch.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) });
@@ -940,7 +1064,7 @@ describe("Partner API Plan Source (T2)", () => {
       expect(result.resolutionState).toBe("active");
     });
 
-    it("returns none state for fresh fetch with no subscription", async () => {
+    it("returns none state for fresh fetch with no subscription (ruling c)", async () => {
       mockSql.setMockResult("shop_plan", [{
         plan_key: null,
         subscription_id: null,
@@ -972,7 +1096,7 @@ describe("Partner API Plan Source (T2)", () => {
       expect(result.resolutionState).toBe("unknown");
     });
 
-    it("returns unknown state when using cached plan on error", async () => {
+    it("returns unknown state when using cached plan on error (ruling a)", async () => {
       const cachedTime = new Date(Date.now() - 60 * 60 * 1000);
       mockSql.setMockResult("shop_plan", [{
         plan_key: "growth",
@@ -988,9 +1112,58 @@ describe("Partner API Plan Source (T2)", () => {
       expect(result.fromCache).toBe(true);
       expect(result.resolutionState).toBe("active");
     });
+
+    it("treats schema default free row without plan_cached_at as unconfirmed (ruling a)", async () => {
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "free",
+        subscription_id: null,
+        subscription_name: null,
+        is_test: false,
+        plan_cached_at: null, // Schema default, not confirmed
+      }]);
+      adminGraphQL.mockResolvedValueOnce({
+        success: true,
+        data: { currentAppInstallation: { activeSubscriptions: [] } },
+      });
+
+      const source = getPlanSource();
+      const result = await source.resolveActivePlan({
+        sql: mockSql as unknown as Sql,
+        shopDomain: TEST_SHOP,
+        forceRefresh: true,
+      });
+
+      // Should have fetched fresh since plan_cached_at was null
+      expect(result.fromCache).toBe(false);
+      expect(result.resolutionState).toBe("none");
+    });
+
+    it("returns unknown on fetch error with no confirmed cache (ruling a)", async () => {
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "free",
+        subscription_id: null,
+        subscription_name: null,
+        is_test: false,
+        plan_cached_at: null, // Unconfirmed
+      }]);
+      adminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: new Error("Network error"),
+      });
+
+      const source = getPlanSource();
+      const result = await source.resolveActivePlan({
+        sql: mockSql as unknown as Sql,
+        shopDomain: TEST_SHOP,
+        forceRefresh: true,
+      });
+
+      expect(result.planKey).toBe("free");
+      expect(result.resolutionState).toBe("unknown");
+    });
   });
 
-  describe("Background refresh routing", () => {
+  describe("Background refresh routing (QA item 5)", () => {
     it("uses Admin source for background refresh when PLAN_SOURCE is unset", async () => {
       const mockWaitUntil = vi.fn();
       const store: RequestStore = {
@@ -1056,6 +1229,40 @@ describe("Partner API Plan Source (T2)", () => {
 
       expect(mockFetch).toHaveBeenCalled();
       expect(mockWaitUntil).not.toHaveBeenCalled();
+    });
+
+    it("background refresh logs only on success, not always (QA item 5)", async () => {
+      const mockWaitUntil = vi.fn((p: Promise<unknown>) => p);
+      const store: RequestStore = {
+        getSql: () => mockSql as unknown as Sql,
+        waitUntil: mockWaitUntil as unknown as RequestStore["waitUntil"],
+      };
+
+      mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+      const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "growth",
+        subscription_id: "sub-123",
+        subscription_name: "Growth",
+        is_test: false,
+        plan_cached_at: staleCacheTime,
+      }]);
+
+      adminGraphQL.mockResolvedValueOnce({
+        success: true,
+        data: { currentAppInstallation: { activeSubscriptions: [{ id: "gid://1", name: "Growth", status: "ACTIVE", test: false, lineItems: [] }] } },
+      });
+
+      await requestContext.run(store, async () => {
+        const { resolvePlan, _resetInFlightRefreshesForTesting } = await import("../plan.server");
+        _resetInFlightRefreshesForTesting();
+        await resolvePlan(mockSql as unknown as Sql, TEST_SHOP);
+        // Wait for background refresh
+        await mockWaitUntil.mock.calls[0]?.[0];
+      });
+
+      const completedLogs = getAllLogs().filter((l) => l.includes("plan_background_refresh_completed"));
+      expect(completedLogs.length).toBe(1);
     });
   });
 

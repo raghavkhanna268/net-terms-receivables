@@ -357,8 +357,8 @@ function extractGraphQLDocuments(filePath: string, content: string): GraphQLDocu
   const documents: GraphQLDocument[] = [];
   const baseName = path.basename(filePath);
 
-  // Skip files that contain test fixtures for this validator
-  if (SKIP_FILES.some(f => baseName.includes(f))) {
+  // Skip files that contain test fixtures for this validator (exact match)
+  if (SKIP_FILES.includes(baseName)) {
     return documents;
   }
 
