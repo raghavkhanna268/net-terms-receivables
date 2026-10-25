@@ -362,6 +362,9 @@ function triggerBackgroundRefresh(
 /**
  * Resolve the current plan for a shop.
  *
+ * S24: Routes through PlanSource interface via getPlanSource().
+ * All callers of this function now go through the interface.
+ *
  * Design:
  * - Fresh cache: Return cached plan immediately
  * - Stale cache: Return cached plan, trigger background refresh (staleness never lowers tier)
@@ -378,6 +381,33 @@ export async function resolvePlan(
   sql: Sql,
   shopDomain: string,
   forceRefresh = false
+): Promise<ResolvedPlan> {
+  const source = getPlanSource();
+  const result = await source.resolveActivePlan({
+    sql,
+    shopDomain,
+    forceRefresh,
+  });
+
+  return {
+    plan: result.plan,
+    subscriptionId: result.subscriptionId,
+    subscriptionName: result.subscriptionName,
+    isTest: result.isTest,
+    fromCache: result.fromCache,
+  };
+}
+
+/**
+ * Internal plan resolution logic for AdminInstallationPlanSource.
+ * This contains the actual implementation that was previously in resolvePlan().
+ *
+ * @internal - Use resolvePlan() or getPlanSource().resolveActivePlan() instead
+ */
+async function _resolveFromAdminInstallation(
+  sql: Sql,
+  shopDomain: string,
+  forceRefresh: boolean
 ): Promise<ResolvedPlan> {
   const defaultResult: ResolvedPlan = {
     plan: getDefaultPlan(),
@@ -581,7 +611,7 @@ export async function isTestSubscription(
  * AdminInstallationPlanSource - Resolves plans from Shopify Admin GraphQL.
  *
  * This is the production implementation that reads currentAppInstallation
- * .activeSubscriptions from the Admin API. It wraps the existing plan
+ * .activeSubscriptions from the Admin API. Contains the actual plan
  * resolution logic with the same queries, cache, TTL, fallbacks, and logs.
  *
  * Design:
@@ -594,11 +624,15 @@ export class AdminInstallationPlanSource implements PlanSource {
   /**
    * Resolve the active plan for a shop from Admin GraphQL.
    *
-   * This method wraps the existing resolvePlan() function, converting its
-   * result to the SourceResolvedPlan format with source metadata.
+   * This is the main entry point for plan resolution. All callers
+   * (resolvePlan, getPlan, hasFeature, etc.) route through this method.
    */
   async resolveActivePlan(ctx: PlanResolutionContext): Promise<SourceResolvedPlan> {
-    const resolved = await resolvePlan(ctx.sql, ctx.shopDomain, ctx.forceRefresh);
+    const resolved = await _resolveFromAdminInstallation(
+      ctx.sql,
+      ctx.shopDomain,
+      ctx.forceRefresh ?? false
+    );
 
     const status = this.mapSubscriptionStatus(resolved);
 

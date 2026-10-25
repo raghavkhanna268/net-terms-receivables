@@ -843,7 +843,13 @@ describe("Plan Resolution Service", () => {
         { json: vi.fn((v) => v) }
       );
       
-      adminGraphQL.mockRejectedValueOnce(new Error("Network error"));
+      // Use a delayed rejection to ensure we can catch the in-flight state
+      // before the promise settles. The async interface adds await points that
+      // can process microtasks before assertions run.
+      adminGraphQL.mockImplementationOnce(async () => {
+        await new Promise(resolve => setTimeout(resolve, 10));
+        throw new Error("Network error");
+      });
       
       const store: RequestStore = {
         getSql: () => specialMockSql as unknown as Sql,
@@ -852,6 +858,7 @@ describe("Plan Resolution Service", () => {
       
       await requestContext.run(store, async () => {
         await resolvePlan(specialMockSql as unknown as Sql, TEST_SHOP);
+        // Background refresh was triggered and is now in-flight
         expect(_isRefreshInFlight(TEST_SHOP)).toBe(true);
       });
       
