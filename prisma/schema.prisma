@@ -42,6 +42,12 @@ enum HoldState {
   BYPASS
 }
 
+/// Source of reminder opt-out for a buyer account (S18)
+enum ReminderOptOutSource {
+  merchant
+  link
+}
+
 /// Source of default terms for a buyer account
 enum DefaultTermsSource {
   explicit
@@ -90,6 +96,7 @@ enum ReminderLogStatus {
   sent
   delayed
   skipped_daily_limit
+  skipped_opted_out
 }
 
 // =============================================================================
@@ -281,6 +288,12 @@ model BuyerAccount {
   ///    streak start for backoff calculation. Cleared on success.
   /// NULL only when no error has occurred or after a successful sync clears both fields.
   metafieldSyncErrorAt   DateTime?        @db.Timestamptz(3)
+  /// S18: When the buyer opted out of payment reminder emails. NULL means opted-in.
+  /// Set via unsubscribe link (RFC 8058) or merchant toggle on account page.
+  reminderOptOutAt       DateTime?        @db.Timestamptz(3)
+  /// S18: Source of the opt-out: 'merchant' (toggle) or 'link' (unsubscribe).
+  /// NULL when reminderOptOutAt is NULL. Both must be set together.
+  reminderOptOutSource   ReminderOptOutSource?
 
   // Relations (onDelete: CASCADE - accounts are shop-specific)
   shop     Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)

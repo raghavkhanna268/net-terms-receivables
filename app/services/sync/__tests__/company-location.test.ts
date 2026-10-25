@@ -229,7 +229,8 @@ describeWithDb("CompanyLocation Sync", () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain("Shop not found");
+      expect(result.error).toBe("shop_not_found");
+      expect(result.errorCode).toBe("shop_not_found");
     });
   });
 

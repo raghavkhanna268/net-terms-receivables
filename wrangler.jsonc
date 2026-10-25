@@ -60,4 +60,6 @@
   // Secrets are configured via wrangler CLI, not in this file:
   // wrangler secret put SHOPIFY_API_KEY
   // wrangler secret put SHOPIFY_API_SECRET
+  // wrangler secret put REMINDER_UNSUBSCRIBE_SECRET
+  // wrangler secret put REMINDER_UNSUBSCRIBE_SECRET_PREVIOUS  # optional, for key rotation
 }

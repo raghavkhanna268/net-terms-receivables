@@ -33,6 +33,15 @@ import { renderPaymentReminderEmail } from "~/emails/PaymentReminderEmail";
 import { validateTimezone } from "~/lib/aging-dates.server";
 import { DateTime } from "luxon";
 import { safeLog, toErrorCode } from "~/lib/log.server";
+import {
+  isBuyerOptedOut,
+  recordSkippedOptedOut,
+  transitionDelayedToOptedOut,
+} from "./reminder-optout.server";
+import {
+  buildUnsubscribeHeaders,
+  canGenerateUnsubscribeHeaders,
+} from "./reminder-headers.server";
 
 /**
  * Check if plan gating enforcement is enabled.
@@ -258,6 +267,23 @@ export async function getInvoiceForReminder(
     buyerAccountGatedAt: row.buyerAccountGatedAt,
     shopUninstalledAt: row.shopUninstalledAt,
   };
+}
+
+/**
+ * Get the buyer account ID for an invoice.
+ * Used for opt-out check before sending reminders.
+ */
+export async function getBuyerAccountId(
+  sql: Sql,
+  shopId: string,
+  invoiceId: string
+): Promise<string | null> {
+  const [row] = await sql<{ buyerAccountId: string }[]>`
+    SELECT "buyerAccountId"
+    FROM "Invoice"
+    WHERE id = ${invoiceId} AND "shopId" = ${shopId}
+  `;
+  return row?.buyerAccountId ?? null;
 }
 
 /**
@@ -717,7 +743,7 @@ export async function sendPaymentReminder(
   ruleId: string,
   offsetDays: number,
   timezone: string,
-  env: { RESEND_API_KEY?: string; RESEND_FROM?: string } = {},
+  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string } = {},
   deps: { reserveGlobalSendSlot?: typeof reserveGlobalSendSlot } = {}
 ): Promise<ReminderSendResult> {
   const resendKey = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
@@ -814,18 +840,67 @@ export async function sendPaymentReminder(
     };
   }
 
+  // Gate 9: Check unsubscribe secret is configured (fail closed)
+  // If missing, skip all reminders and log count only (no PII)
+  const unsubscribeSecret = env.REMINDER_UNSUBSCRIBE_SECRET ?? process.env.REMINDER_UNSUBSCRIBE_SECRET;
+  if (!canGenerateUnsubscribeHeaders({ REMINDER_UNSUBSCRIBE_SECRET: unsubscribeSecret })) {
+    safeLog("warn", "reminders_no_unsubscribe_secret", { shopId, invoiceCount: 1 });
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "REMINDER_UNSUBSCRIBE_SECRET not configured",
+    };
+  }
+
+  // Gate 10: Get buyerAccountId - required for opt-out check and unsubscribe headers
+  // If null, skip send entirely (count-only log, no slot claim or reservation)
+  const buyerAccountId = await getBuyerAccountId(sql, shopId, invoiceId);
+  if (!buyerAccountId) {
+    safeLog("warn", "reminders_no_buyer_account", { shopId, invoiceId, ruleId, skipped: true });
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Buyer account ID not found for invoice",
+    };
+  }
+
+  // Gate 10b: Check if buyer has opted out of payment reminders
+  // This check runs BEFORE any slot claim or cap reservation
+  const optedOut = await isBuyerOptedOut(sql, shopId, buyerAccountId);
+  if (optedOut) {
+    // Record skipped_opted_out status (prevents re-enqueue, no slot consumed)
+    await recordSkippedOptedOut(sql, shopId, ruleId, invoiceId);
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Buyer opted out of reminders",
+    };
+  }
+
+  // Gate 10c: Check SHOPIFY_APP_URL is configured (fail closed)
+  // Without it, we cannot build absolute unsubscribe URLs
+  const appUrl = env.SHOPIFY_APP_URL ?? process.env.SHOPIFY_APP_URL;
+  if (!appUrl || appUrl.trim().length === 0) {
+    safeLog("warn", "reminders_no_app_url", { shopId, invoiceCount: 1 });
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "SHOPIFY_APP_URL not configured",
+    };
+  }
+
   // Phase A: Short transaction to claim slot with per-invoice lock
   // This ensures at most one reminder per invoice per day
   const claimResult = await sql.begin(async (tx) => {
     await acquireInvoiceLock(tx, invoiceId);
 
-    // Gate 9: Check if already sent today (under the lock)
+    // Gate 11: Check if already sent today (under the lock)
     const alreadySentToday = await hasReminderSentToday(tx, shopId, invoiceId, validTz);
     if (alreadySentToday) {
       return { claimed: false, reason: "already_sent" } as const;
     }
 
-    // Gate 10: Claim the reminder slot (idempotency via unique index)
+    // Gate 12: Claim the reminder slot (idempotency via unique index)
     const claimed = await claimReminderSlot(tx, shopId, ruleId, invoiceId);
     if (!claimed) {
       return { claimed: false, reason: "idempotent" } as const;
@@ -883,6 +958,14 @@ export async function sendPaymentReminder(
     const subject = `${getReminderLabel(offsetDays)} - Invoice ${invoice.invoiceName}`;
     const idempotencyKey = `s18_${invoiceId}_${ruleId}`;
 
+    // Build RFC 8058 unsubscribe headers (appUrl validated in Gate 10c)
+    const unsubscribeHeaders = buildUnsubscribeHeaders(
+      appUrl,
+      shopId,
+      buyerAccountId,
+      unsubscribeSecret
+    );
+
     const response = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
@@ -895,6 +978,7 @@ export async function sendPaymentReminder(
         to: [invoice.buyerEmail],
         subject,
         html: emailHtml,
+        headers: unsubscribeHeaders,
       }),
     });
 
@@ -985,7 +1069,7 @@ export async function sendCatchupReminder(
   _logId: string,
   offsetDays: number,
   timezone: string,
-  env: { RESEND_API_KEY?: string; RESEND_FROM?: string } = {}
+  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string } = {}
 ): Promise<ReminderSendResult> {
   const resendKey = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
   const fromEmail = getResendFrom(env);
@@ -1104,6 +1188,57 @@ export async function sendCatchupReminder(
       success: true,
       action: "skipped",
       skipReason: "Buyer has no email (CUSTOMER_PII_FIELDS may be off)",
+    };
+  }
+
+  // Gate 8b: Check unsubscribe secret is configured (fail closed)
+  const unsubscribeSecret = env.REMINDER_UNSUBSCRIBE_SECRET ?? process.env.REMINDER_UNSUBSCRIBE_SECRET;
+  if (!canGenerateUnsubscribeHeaders({ REMINDER_UNSUBSCRIBE_SECRET: unsubscribeSecret })) {
+    // Don't delete the delayed row - wait for secret to be configured
+    safeLog("warn", "reminders_catchup_no_unsubscribe_secret", { shopId, invoiceCount: 1 });
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "REMINDER_UNSUBSCRIBE_SECRET not configured",
+    };
+  }
+
+  // Gate 8c: Get buyerAccountId - required for opt-out check and unsubscribe headers
+  // If null, skip send entirely (count-only log)
+  const buyerAccountId = await getBuyerAccountId(sql, shopId, invoiceId);
+  if (!buyerAccountId) {
+    await deleteDelayedReminder(sql, shopId, ruleId, invoiceId);
+    safeLog("warn", "reminders_catchup_no_buyer_account", { shopId, invoiceId, ruleId, skipped: true });
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Buyer account ID not found for invoice",
+    };
+  }
+
+  // Gate 8d: Check if buyer has opted out of payment reminders
+  // For catch-up, transition delayed row to skipped_opted_out
+  const optedOut = await isBuyerOptedOut(sql, shopId, buyerAccountId);
+  if (optedOut) {
+    // Transition delayed row to skipped_opted_out (prevents resend after re-enable)
+    await transitionDelayedToOptedOut(sql, shopId, ruleId, invoiceId);
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Buyer opted out of reminders",
+    };
+  }
+
+  // Gate 8e: Check SHOPIFY_APP_URL is configured (fail closed)
+  // Without it, we cannot build absolute unsubscribe URLs
+  const appUrl = env.SHOPIFY_APP_URL ?? process.env.SHOPIFY_APP_URL;
+  if (!appUrl || appUrl.trim().length === 0) {
+    // Don't delete the delayed row - wait for URL to be configured
+    safeLog("warn", "reminders_catchup_no_app_url", { shopId, invoiceCount: 1 });
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "SHOPIFY_APP_URL not configured",
     };
   }
 
@@ -1243,6 +1378,14 @@ export async function sendCatchupReminder(
     const subject = `${getReminderLabel(offsetDays)} - Invoice ${invoice.invoiceName}`;
     const idempotencyKey = `s18_catchup_${invoiceId}_${ruleId}`;
 
+    // Build RFC 8058 unsubscribe headers (appUrl validated in Gate 8e)
+    const unsubscribeHeaders = buildUnsubscribeHeaders(
+      appUrl,
+      shopId,
+      buyerAccountId,
+      unsubscribeSecret
+    );
+
     const response = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
@@ -1255,6 +1398,7 @@ export async function sendCatchupReminder(
         to: [invoice.buyerEmail],
         subject,
         html: emailHtml,
+        headers: unsubscribeHeaders,
       }),
     });
 

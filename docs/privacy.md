@@ -34,8 +34,11 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | Data Category | Purpose | Source |
 |---------------|---------|--------|
 | Buyer Account | Credit management (account kind, display name, credit limit, terms, hold state) | Synced from Shopify |
+| Reminder Opt-Out | Payment reminder preference (opt-out timestamp, opt-out source) | Buyer unsubscribe link or merchant toggle |
 | Invoice | Receivables tracking (invoice name, amounts, due date, status) | Synced from Shopify orders |
 | Payer Alias | Payment matching (normalized payer key) | Derived from bank statements |
+
+**Note on Reminder Opt-Out:** When a buyer opts out of payment reminders (via unsubscribe link in email or merchant toggle), the opt-out record stores only a timestamp and a source ('link' or 'merchant'), linked to the buyer account. Opted-out buyers receive no reminder emails until a merchant re-enables reminders.
 
 ### 2.3 Tagged Customer Data
 
@@ -78,7 +81,7 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | Data Category | Purpose |
 |---------------|---------|
 | Audit Events | Compliance and debugging (actor, action type, timestamp) |
-| Reminder Logs | Prevent duplicate reminders (rule ID, invoice ID, sent timestamp) |
+| Reminder Logs | Prevent duplicate reminders (rule ID, invoice ID, sent timestamp, opt-out status) |
 | Webhook Processing Records | Idempotent webhook processing |
 | Failed Message Tracking | Error recovery |
 
