@@ -1,7 +1,5 @@
-import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { LoaderFunctionArgs } from "react-router";
-import postgres from "postgres";
-import { sqlOptions } from "~/lib/db-light.server";
 
 /**
  * Tests for app._index loader (S7 Aging Dashboard).

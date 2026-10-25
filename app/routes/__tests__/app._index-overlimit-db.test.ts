@@ -23,7 +23,7 @@ describeWithDb("app._index over-limit queries (DB integration)", () => {
   let sql: ReturnType<typeof postgres>;
   const TEST_SUFFIX = Date.now().toString(36) + "-idx-ol";
   const TEST_SHOP_ID = `shop-idx-ol-${TEST_SUFFIX}`;
-  const TEST_SHOP_DOMAIN = `idx-ol-test-${TEST_SUFFIX}.myshopify.com`;
+  const TEST_SHOP_DOMAIN = `test-idx-ol-${TEST_SUFFIX}.myshopify.com`;
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
