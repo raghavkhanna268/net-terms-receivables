@@ -1329,12 +1329,15 @@ describe("Allowed dev store Admin checks", () => {
     expect(run).toContain("invalid_domain_format");
   });
 
-  it("computes shop comparison inside step via DB, never passes shop domain through env/outputs", () => {
+  it("compares shop via shell string compare using SHOP_DOMAIN from GITHUB_ENV (already masked)", () => {
     expect(run).toContain("shop_matches_allowed=");
     expect(run).toContain("SHOP_MATCHES");
-    expect(run).toContain('domain = :\'allowed\'');
+    expect(run).toContain("SHOP_DOMAIN");
+    expect(run).toContain("ALLOWED_DEV_STORE");
+    expect(run).toContain('[ "${SHOP_DOMAIN:-}" = "$ALLOWED_DEV_STORE" ]');
     expect(step?.env?.SHOP_DOMAIN).toBeUndefined();
     expect(run).not.toContain("steps.shop");
+    expect(run).not.toMatch(/echo.*\$SHOP_DOMAIN/);
   });
 
   it("skips with skipped_shop_mismatch when shop doesn't match allowed dev store", () => {
@@ -1347,7 +1350,7 @@ describe("Allowed dev store Admin checks", () => {
     expect(run).toContain("TOKEN_EXPIRED");
     expect(run).toContain("REFRESH_SUCCESS");
     expect(step?.env?.TOKEN_EXPIRED).toBe("${{ steps.session.outputs.token_expired }}");
-    expect(step?.env?.REFRESH_SUCCESS).toBe("${{ steps.refresh.outputs.success }}");
+    expect(step?.env?.REFRESH_SUCCESS).toBe("${{ steps.refresh.outputs.refresh_success }}");
   });
 
   it("is read-only and skips gracefully on missing config", () => {

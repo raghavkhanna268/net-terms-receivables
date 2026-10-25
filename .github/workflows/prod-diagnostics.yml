@@ -1848,7 +1848,7 @@ jobs:
       # Admin API checks for the allowed dev store: hide-terms-payment active and webhook subscription diff.
       # Read-only; uses the existing offline token path. Skips gracefully if token expired or shop mismatch.
       # ALLOWED_DEV_STORE comes from secrets (not vars) to prevent log header leaks.
-      # Shop comparison is done inside the step via masked DB query; only a boolean is exposed.
+      # Shop comparison uses $SHOP_DOMAIN from GITHUB_ENV (already masked); only a boolean is printed.
       - name: Allowed dev store Admin checks
         id: allowed_admin
         env:
@@ -1856,7 +1856,7 @@ jobs:
           PGOPTIONS: "-c default_transaction_read_only=on"
           ALLOWED_DEV_STORE: ${{ secrets.ALLOWED_DEV_STORE }}
           TOKEN_EXPIRED: ${{ steps.session.outputs.token_expired }}
-          REFRESH_SUCCESS: ${{ steps.refresh.outputs.success }}
+          REFRESH_SUCCESS: ${{ steps.refresh.outputs.refresh_success }}
         run: |
           set -euo pipefail
           source scripts/ci/psql-redacted.sh
@@ -1877,20 +1877,13 @@ jobs:
           fi
           echo "::add-mask::$ALLOWED_DEV_STORE"
 
-          if [ -z "$DATABASE_URL" ]; then
-            echo "allowed_admin=skipped_no_db"
-            exit 0
+          # Gate: compare this run's shop (SHOP_DOMAIN from GITHUB_ENV, already masked) to allowed dev store.
+          # Plain shell string compare; print only the boolean, never echo the domain.
+          SHOP_MATCHES=false
+          if [ "${SHOP_DOMAIN:-}" = "$ALLOWED_DEV_STORE" ]; then
+            SHOP_MATCHES=true
           fi
-
-          # Gate: compare diagnostic session's shop to allowed dev store via DB (masked, boolean only)
-          # Never pass shop domains through step env/outputs; compute inside this step.
-          SHOP_MATCHES=$(psql -X -v ON_ERROR_STOP=1 -v allowed="$ALLOWED_DEV_STORE" -t -A "$DATABASE_URL" <<'EOSQL'
-          SELECT CASE WHEN domain = :'allowed' THEN 'true' ELSE 'false' END
-          FROM "Shop" WHERE "uninstalledAt" IS NULL
-          ORDER BY "createdAt" LIMIT 1;
-          EOSQL
-          )
-          echo "shop_matches_allowed=${SHOP_MATCHES:-false}"
+          echo "shop_matches_allowed=$SHOP_MATCHES"
 
           if [ "$SHOP_MATCHES" != "true" ]; then
             echo "allowed_admin=skipped_shop_mismatch"
@@ -1900,6 +1893,11 @@ jobs:
           # Gate: skip if token expired and refresh didn't succeed
           if [ "$TOKEN_EXPIRED" = "true" ] && [ "$REFRESH_SUCCESS" != "true" ]; then
             echo "allowed_admin=skipped_token_expired"
+            exit 0
+          fi
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "allowed_admin=skipped_no_db"
             exit 0
           fi
 
