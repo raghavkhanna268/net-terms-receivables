@@ -3,6 +3,8 @@
  *
  * These tests verify that webhookId is never logged while dedupe/idempotency
  * still works correctly (webhookId is passed to recordAndEnqueueSync for DB).
+ *
+ * Uses real safeLog (no mock) per logging guard requirements.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -33,11 +35,6 @@ vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
 }));
 
-const mockSafeLog = vi.fn();
-vi.mock("~/lib/log.server", () => ({
-  safeLog: (...args: unknown[]) => mockSafeLog(...args),
-}));
-
 function createMockActionArgs(request: Request): ActionFunctionArgs {
   return {
     request,
@@ -58,16 +55,17 @@ describe("webhooks.draft_orders logging", () => {
   let consoleLogSpy: ReturnType<typeof vi.spyOn>;
   let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
   let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+  let consoleInfoSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockParseTriggeredAt.mockReturnValue(null);
-    mockSafeLog.mockClear();
     process.env = { ...originalEnv, SHOPIFY_API_SECRET: "test-secret" };
 
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    consoleInfoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -75,6 +73,7 @@ describe("webhooks.draft_orders logging", () => {
     consoleLogSpy.mockRestore();
     consoleWarnSpy.mockRestore();
     consoleErrorSpy.mockRestore();
+    consoleInfoSpy.mockRestore();
   });
 
   function getAllConsoleOutput(): string[] {
@@ -82,6 +81,7 @@ describe("webhooks.draft_orders logging", () => {
       ...consoleLogSpy.mock.calls,
       ...consoleWarnSpy.mock.calls,
       ...consoleErrorSpy.mock.calls,
+      ...consoleInfoSpy.mock.calls,
     ];
     return allCalls.map(args =>
       args.map((arg: unknown) =>
@@ -95,13 +95,6 @@ describe("webhooks.draft_orders logging", () => {
     const outputStr = allOutput.join("\n");
     expect(outputStr).not.toContain("webhookId");
     expect(outputStr).not.toContain("wh=");
-
-    for (const call of mockSafeLog.mock.calls) {
-      const payload = call[2];
-      if (payload && typeof payload === "object") {
-        expect(payload).not.toHaveProperty("webhookId");
-      }
-    }
   }
 
   describe("webhookId not logged but still used for idempotency", () => {
