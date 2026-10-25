@@ -22,6 +22,12 @@ export const S6_QUEUES = {
 } as const;
 
 /**
+ * Topic for bulk operations finish messages.
+ * Shared between webhook route, processor, and recovery.
+ */
+export const BULK_OPERATIONS_FINISH_TOPIC = "BULK_OPERATIONS_FINISH" as const;
+
+/**
  * Base message payload with common fields.
  */
 export interface BaseMessage {

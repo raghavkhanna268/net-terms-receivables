@@ -28,12 +28,13 @@
  */
 
 import type { Sql } from "./db-light.server";
-import { safeLog, shopHash } from "./log.server";
+import { safeLog, shopHash, toErrorCode } from "./log.server";
 import { S6_QUEUES } from "./pgmq.server";
 import type { ReconcileMessage } from "~/services/drain/reconcile.server";
 import {
   recoverStaleBulkOperationsForShop,
   STALE_THRESHOLD_MINUTES,
+  PAGE_LOAD_RECOVERY_LIMIT,
 } from "~/services/drain/bulk-op-recovery.server";
 
 /**
@@ -318,14 +319,20 @@ export async function getInitialSyncStateWithRecovery(
     return state;
   }
 
-  const hash = await shopHash(shopDomain);
-  safeLog("info", "bulk_op_recovery_triggered", {
-    shopHash: hash,
-    ageMinutes: Math.round(ageMinutes),
-    threshold: STALE_THRESHOLD_MINUTES,
-  });
+  try {
+    const hash = await shopHash(shopDomain);
+    safeLog("info", "bulk_op_recovery_triggered", {
+      shopHash: hash,
+    });
 
-  await recoverStaleBulkOperationsForShop(sql, shopDomain);
+    await recoverStaleBulkOperationsForShop(sql, shopDomain, STALE_THRESHOLD_MINUTES, PAGE_LOAD_RECOVERY_LIMIT);
+  } catch (err) {
+    const hash = await shopHash(shopDomain);
+    safeLog("error", "bulk_op_recovery_triggered_error", {
+      shopHash: hash,
+      err: toErrorCode(err),
+    });
+  }
 
   return getInitialSyncState(sql, shopDomain);
 }

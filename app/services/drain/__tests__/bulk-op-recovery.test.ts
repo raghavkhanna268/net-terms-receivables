@@ -18,6 +18,7 @@ vi.mock("../admin-client.server", () => ({
 
 vi.mock("~/lib/pgmq.server", () => ({
   sendBulkMessage: vi.fn().mockResolvedValue({ msgId: "mock-msg-id" }),
+  BULK_OPERATIONS_FINISH_TOPIC: "BULK_OPERATIONS_FINISH",
 }));
 
 const TEST_SUFFIX = Date.now().toString(36) + "-recovery-unit";
@@ -63,7 +64,8 @@ describe("bulk-op-recovery", () => {
       const { markBulkOperationFailed } = await import("../bulk-op-recovery.server");
       const result = await markBulkOperationFailed(
         mockSql as unknown as Parameters<typeof markBulkOperationFailed>[0],
-        "gid://shopify/BulkOperation/123"
+        "gid://shopify/BulkOperation/123",
+        "test.myshopify.com"
       );
 
       expect(result).toBe(true);
@@ -76,7 +78,8 @@ describe("bulk-op-recovery", () => {
       const { markBulkOperationFailed } = await import("../bulk-op-recovery.server");
       const result = await markBulkOperationFailed(
         mockSql as unknown as Parameters<typeof markBulkOperationFailed>[0],
-        "gid://shopify/BulkOperation/123"
+        "gid://shopify/BulkOperation/123",
+        "test.myshopify.com"
       );
 
       expect(result).toBe(false);
@@ -90,11 +93,11 @@ describe("bulk-op-recovery", () => {
       const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
       const result = await recoverStaleBulkOperations(mockSql as unknown as Parameters<typeof recoverStaleBulkOperations>[0], 60);
 
-      expect(result.found).toBe(0);
-      expect(result.enqueued).toBe(0);
-      expect(result.markedFailed).toBe(0);
-      expect(result.skipped).toBe(0);
-      expect(result.errors).toBe(0);
+      expect(result.foundCount).toBe(0);
+      expect(result.enqueuedCount).toBe(0);
+      expect(result.markedFailedCount).toBe(0);
+      expect(result.skippedCount).toBe(0);
+      expect(result.errorCount).toBe(0);
     });
 
     it("enqueues COMPLETED operations for processing", async () => {
@@ -120,7 +123,13 @@ describe("bulk-op-recovery", () => {
 
       let callCount = 0;
       const mockBeginTx = vi.fn().mockImplementation(async (callback) => {
-        const txSql = vi.fn().mockResolvedValue([{ bulk_operation_id: "gid://shopify/BulkOperation/123" }]);
+        const txSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+          const query = strings.join("");
+          if (query.includes("q_s6_bulk") && query.includes("webhookId")) {
+            return Promise.resolve([]);
+          }
+          return Promise.resolve([{ bulk_operation_id: "gid://shopify/BulkOperation/123" }]);
+        });
         return callback(txSql);
       });
 
@@ -136,8 +145,8 @@ describe("bulk-op-recovery", () => {
       const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
       const result = await recoverStaleBulkOperations(mockSql as unknown as Parameters<typeof recoverStaleBulkOperations>[0], 60);
 
-      expect(result.found).toBe(1);
-      expect(result.enqueued).toBe(1);
+      expect(result.foundCount).toBe(1);
+      expect(result.enqueuedCount).toBe(1);
       expect(result.attempts[0].status).toBe("enqueued");
       expect(result.attempts[0].shopifyStatus).toBe("COMPLETED");
       expect(sendBulkMessage).toHaveBeenCalled();
@@ -173,8 +182,8 @@ describe("bulk-op-recovery", () => {
       const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
       const result = await recoverStaleBulkOperations(mockSql as unknown as Parameters<typeof recoverStaleBulkOperations>[0], 60);
 
-      expect(result.found).toBe(1);
-      expect(result.markedFailed).toBe(1);
+      expect(result.foundCount).toBe(1);
+      expect(result.markedFailedCount).toBe(1);
       expect(result.attempts[0].status).toBe("marked_failed");
       expect(result.attempts[0].shopifyStatus).toBe("FAILED");
     });
@@ -209,7 +218,7 @@ describe("bulk-op-recovery", () => {
       const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
       const result = await recoverStaleBulkOperations(mockSql as unknown as Parameters<typeof recoverStaleBulkOperations>[0], 60);
 
-      expect(result.markedFailed).toBe(1);
+      expect(result.markedFailedCount).toBe(1);
       expect(result.attempts[0].shopifyStatus).toBe("CANCELED");
     });
 
@@ -243,7 +252,7 @@ describe("bulk-op-recovery", () => {
       const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
       const result = await recoverStaleBulkOperations(mockSql as unknown as Parameters<typeof recoverStaleBulkOperations>[0], 60);
 
-      expect(result.markedFailed).toBe(1);
+      expect(result.markedFailedCount).toBe(1);
       expect(result.attempts[0].shopifyStatus).toBe("EXPIRED");
     });
 
@@ -275,7 +284,7 @@ describe("bulk-op-recovery", () => {
       const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
       const result = await recoverStaleBulkOperations(mockSql as unknown as Parameters<typeof recoverStaleBulkOperations>[0], 60);
 
-      expect(result.markedFailed).toBe(1);
+      expect(result.markedFailedCount).toBe(1);
       expect(result.attempts[0].status).toBe("marked_failed");
       expect(result.attempts[0].shopifyStatus).toBe("NOT_FOUND");
     });
@@ -310,7 +319,7 @@ describe("bulk-op-recovery", () => {
       const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
       const result = await recoverStaleBulkOperations(mockSql as unknown as Parameters<typeof recoverStaleBulkOperations>[0], 60);
 
-      expect(result.skipped).toBe(1);
+      expect(result.skippedCount).toBe(1);
       expect(result.attempts[0].status).toBe("skipped");
       expect(result.attempts[0].shopifyStatus).toBe("CREATED");
     });
@@ -345,7 +354,7 @@ describe("bulk-op-recovery", () => {
       const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
       const result = await recoverStaleBulkOperations(mockSql as unknown as Parameters<typeof recoverStaleBulkOperations>[0], 60);
 
-      expect(result.skipped).toBe(1);
+      expect(result.skippedCount).toBe(1);
       expect(result.attempts[0].status).toBe("skipped");
       expect(result.attempts[0].shopifyStatus).toBe("RUNNING");
     });
@@ -378,7 +387,7 @@ describe("bulk-op-recovery", () => {
       const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
       const result = await recoverStaleBulkOperations(mockSql as unknown as Parameters<typeof recoverStaleBulkOperations>[0], 60);
 
-      expect(result.errors).toBe(1);
+      expect(result.errorCount).toBe(1);
       expect(result.attempts[0].status).toBe("error");
       expect(result.attempts[0].error).toBe("API error");
     });
@@ -422,7 +431,7 @@ describe("bulk-op-recovery", () => {
       const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
       const result = await recoverStaleBulkOperations(mockSql as unknown as Parameters<typeof recoverStaleBulkOperations>[0], 60);
 
-      expect(result.skipped).toBe(1);
+      expect(result.skippedCount).toBe(1);
       expect(result.attempts[0].status).toBe("skipped");
       expect(sendBulkMessage).not.toHaveBeenCalled();
     });
@@ -440,7 +449,7 @@ describe("bulk-op-recovery", () => {
         retryable: false,
       });
 
-      const testShop = `specific-${TEST_SUFFIX}.myshopify.com`;
+      const testShop = `test-specific-${TEST_SUFFIX}.myshopify.com`;
       const findStaleResult = [
         {
           bulk_operation_id: "gid://shopify/BulkOperation/123",
@@ -464,8 +473,8 @@ describe("bulk-op-recovery", () => {
         60
       );
 
-      expect(result.found).toBe(1);
-      expect(result.markedFailed).toBe(1);
+      expect(result.foundCount).toBe(1);
+      expect(result.markedFailedCount).toBe(1);
       const sqlCall = mockSql.mock.calls[0][0] as unknown as TemplateStringsArray;
       expect(sqlCall.join("")).toContain("shop =");
     });
@@ -475,6 +484,74 @@ describe("bulk-op-recovery", () => {
     it("exports a threshold of 60 minutes", async () => {
       const { STALE_THRESHOLD_MINUTES } = await import("../bulk-op-recovery.server");
       expect(STALE_THRESHOLD_MINUTES).toBe(60);
+    });
+  });
+
+  describe("PAGE_LOAD_RECOVERY_LIMIT", () => {
+    it("exports a limit of 5", async () => {
+      const { PAGE_LOAD_RECOVERY_LIMIT } = await import("../bulk-op-recovery.server");
+      expect(PAGE_LOAD_RECOVERY_LIMIT).toBe(5);
+    });
+  });
+
+  describe("topic constant", () => {
+    it("uses BULK_OPERATIONS_FINISH_TOPIC from pgmq", async () => {
+      const { BULK_OPERATIONS_FINISH_TOPIC } = await import("~/lib/pgmq.server");
+      expect(BULK_OPERATIONS_FINISH_TOPIC).toBe("BULK_OPERATIONS_FINISH");
+    });
+
+    it("enqueued message topic matches the drain handler topic", async () => {
+      const { adminGraphQL } = await import("../admin-client.server");
+      const { sendBulkMessage } = await import("~/lib/pgmq.server");
+      const { BULK_OPERATIONS_FINISH_TOPIC } = await import("~/lib/pgmq.server");
+
+      vi.mocked(adminGraphQL).mockResolvedValue({
+        success: true,
+        data: {
+          node: { id: "gid://shopify/BulkOperation/123", status: "COMPLETED" },
+        },
+        retryable: false,
+      });
+
+      const findStaleResult = [
+        {
+          bulk_operation_id: "gid://shopify/BulkOperation/123",
+          shop: "test.myshopify.com",
+          bulk_type: "companies" as const,
+          started_at: new Date("2026-10-24T10:00:00Z"),
+        },
+      ];
+
+      const mockBeginTx = vi.fn().mockImplementation(async (callback) => {
+        const txSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+          const query = strings.join("");
+          if (query.includes("q_s6_bulk") && query.includes("webhookId")) {
+            return Promise.resolve([]);
+          }
+          return Promise.resolve([{ bulk_operation_id: "gid://shopify/BulkOperation/123" }]);
+        });
+        return callback(txSql);
+      });
+
+      let callCount = 0;
+      const mockSql = Object.assign(
+        vi.fn().mockImplementation(() => {
+          callCount++;
+          if (callCount === 1) return Promise.resolve(findStaleResult);
+          return Promise.resolve([]);
+        }),
+        { begin: mockBeginTx }
+      );
+
+      const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
+      await recoverStaleBulkOperations(mockSql as unknown as Parameters<typeof recoverStaleBulkOperations>[0], 60);
+
+      expect(sendBulkMessage).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          topic: BULK_OPERATIONS_FINISH_TOPIC,
+        })
+      );
     });
   });
 });
