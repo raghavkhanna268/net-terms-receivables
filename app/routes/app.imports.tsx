@@ -629,6 +629,141 @@ function formatPaiseDisplay(paise: number, currency: string): string {
   }).format(rupees);
 }
 
+/**
+ * Parse error with row number, code, and message.
+ */
+export interface ParseErrorRow {
+  row: number;
+  code: string;
+  message: string;
+}
+
+/**
+ * Badge tone for error codes.
+ */
+export type ErrorBadgeTone = "warning" | "critical";
+
+/**
+ * Get badge tone for error code.
+ * NORMALIZE_FAILED gets warning (recoverable), others get critical.
+ * Exported for testing.
+ */
+export function getErrorBadgeTone(code: string): ErrorBadgeTone {
+  return code === "NORMALIZE_FAILED" ? "warning" : "critical";
+}
+
+/**
+ * Fixed error messages for each error code.
+ * Raw parser messages are NOT shown to merchants.
+ * Exported for testing.
+ */
+export const ERROR_CODE_MESSAGES: Record<string, string> = {
+  ROW_PARSE_FAILED: "Could not parse this row",
+  NORMALIZE_FAILED: "Could not normalize transaction data",
+  NO_HEADER_ROW: "Could not find header row in file",
+  COLUMN_MAP_FAILED: "Could not map columns to expected format",
+  UNKNOWN_BANK_FORMAT: "Unrecognized bank statement format",
+};
+
+/**
+ * Get fixed display message for an error code.
+ * Never returns raw parser error messages.
+ * Exported for testing.
+ */
+export function getErrorDisplayMessage(code: string): string {
+  return ERROR_CODE_MESSAGES[code] ?? "Unknown error";
+}
+
+/**
+ * Format row label for display.
+ * Row 0 indicates a file-level error, not a specific row.
+ * Exported for testing.
+ */
+export function formatErrorRowLabel(row: number): string {
+  return row === 0 ? "File-level" : `Row ${row}`;
+}
+
+/**
+ * Summarized parse errors for UI display.
+ */
+export interface SummarizedErrors {
+  /** Errors to show initially (up to initialLimit) */
+  initialErrors: ParseErrorRow[];
+  /** Remaining errors to show when expanded */
+  overflowErrors: ParseErrorRow[];
+  /** Total error count */
+  totalCount: number;
+  /** Count of errors not shown initially */
+  overflowCount: number;
+  /** Whether there are overflow errors */
+  hasOverflow: boolean;
+}
+
+/**
+ * Summarize parse errors for UI display.
+ * Shows first `initialLimit` errors initially, rest available for expansion.
+ * Exported for testing.
+ *
+ * @param errors - Array of parse errors
+ * @param initialLimit - Number of errors to show initially (default 10)
+ * @returns Summarized errors with initial/overflow split
+ */
+export function summarizeParseErrors(
+  errors: ParseErrorRow[],
+  initialLimit: number = 10
+): SummarizedErrors {
+  const initialErrors = errors.slice(0, initialLimit);
+  const overflowErrors = errors.slice(initialLimit);
+  return {
+    initialErrors,
+    overflowErrors,
+    totalCount: errors.length,
+    overflowCount: overflowErrors.length,
+    hasOverflow: overflowErrors.length > 0,
+  };
+}
+
+/**
+ * Credit row from parser for mapping to import payload.
+ */
+interface ParsedCreditRow {
+  date: string;
+  amountPaise: number;
+  balancePaise?: number;
+  rail: string;
+  utr?: string;
+  payerName?: string;
+  narration: string;
+  refNo?: string;
+}
+
+/**
+ * Map parsed credit rows to import payload format.
+ * Only includes fields needed for server-side processing.
+ * Raw file content (direction, dedupeKey, sourceRow) is NOT included.
+ * Exported for testing to ensure tests use the exact same mapping as the UI.
+ *
+ * @param credits - Parsed credit transactions
+ * @returns Array of credit objects for import payload
+ */
+export function mapCreditsForImport(
+  credits: ParsedCreditRow[]
+): Array<Record<string, string | number>> {
+  return credits.map((c) => {
+    const credit: Record<string, string | number> = {
+      date: c.date,
+      amountPaise: c.amountPaise,
+      rail: c.rail,
+      narration: c.narration,
+    };
+    if (c.balancePaise !== undefined) credit.balancePaise = c.balancePaise;
+    if (c.utr) credit.utr = c.utr;
+    if (c.payerName) credit.payerName = c.payerName;
+    if (c.refNo) credit.refNo = c.refNo;
+    return credit;
+  });
+}
+
 function RailBadge({ rail }: { rail: string }) {
   if (rail === "NEFT") return <s-badge tone="info">{rail}</s-badge>;
   if (rail === "RTGS") return <s-badge tone="success">{rail}</s-badge>;
@@ -647,6 +782,8 @@ export default function ImportsPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [overLimitError, setOverLimitError] = useState<{ rowCount: number; limit: number } | null>(null);
+  // Track whether error list is expanded to show all errors
+  const [errorsExpanded, setErrorsExpanded] = useState(false);
   // Track a reset key to properly clear importResult when user resets
   const [resetKey, setResetKey] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -732,24 +869,12 @@ export default function ImportsPage() {
   const handleImport = useCallback(() => {
     if (!result || result.credits.length === 0) return;
 
-    // Prepare import payload (only normalised credit data)
-    // Include balancePaise for dedupe, omit undefined values for JSON compatibility
+    // Prepare import payload using shared mapping function
+    // Only normalised credit data - raw file content never sent
     const payload = {
       bank: result.bank,
       fileName: fileName ?? "statement.csv",
-      credits: result.credits.map((c) => {
-        const credit: Record<string, string | number> = {
-          date: c.date,
-          amountPaise: c.amountPaise,
-          rail: c.rail,
-          narration: c.narration,
-        };
-        if (c.balancePaise !== undefined) credit.balancePaise = c.balancePaise;
-        if (c.utr) credit.utr = c.utr;
-        if (c.payerName) credit.payerName = c.payerName;
-        if (c.refNo) credit.refNo = c.refNo;
-        return credit;
-      }),
+      credits: mapCreditsForImport(result.credits),
     };
 
     fetcher.submit(payload, {
@@ -765,6 +890,7 @@ export default function ImportsPage() {
     setErrorMessage(null);
     setImportResult(null);
     setOverLimitError(null);
+    setErrorsExpanded(false);
     setResetKey((k) => k + 1);
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
@@ -863,27 +989,49 @@ export default function ImportsPage() {
                 </>
               )}
 
-              {result.errors.length > 0 && (
-                <s-banner tone="warning" heading={`${result.errors.length} row(s) could not be parsed`}>
-                  <s-unordered-list>
-                    {result.errors.slice(0, 10).map((err, idx) => (
-                      <s-list-item key={idx}>
-                        <s-text type="strong">Row {err.row}</s-text>
-                        {" "}
-                        <s-badge tone={err.code === "NORMALIZE_FAILED" ? "warning" : "critical"}>
-                          {err.code}
-                        </s-badge>
-                        {" "}{err.message}
-                      </s-list-item>
-                    ))}
-                    {result.errors.length > 10 && (
-                      <s-list-item>
-                        <s-text tone="caution">...and {result.errors.length - 10} more error(s)</s-text>
-                      </s-list-item>
+              {result.errors.length > 0 && (() => {
+                const summary = summarizeParseErrors(result.errors);
+                return (
+                  <s-banner tone="warning" heading={`${summary.totalCount} row(s) could not be parsed`}>
+                    <s-unordered-list>
+                      {summary.initialErrors.map((err, idx) => (
+                        <s-list-item key={idx}>
+                          <s-text type="strong">{formatErrorRowLabel(err.row)}</s-text>
+                          {" "}
+                          <s-badge tone={getErrorBadgeTone(err.code)}>
+                            {err.code}
+                          </s-badge>
+                          {" "}{getErrorDisplayMessage(err.code)}
+                        </s-list-item>
+                      ))}
+                    </s-unordered-list>
+                    {summary.hasOverflow && !errorsExpanded && (
+                      <s-button variant="tertiary" onClick={() => setErrorsExpanded(true)}>
+                        Show all {summary.totalCount} errors ({summary.overflowCount} more)
+                      </s-button>
                     )}
-                  </s-unordered-list>
-                </s-banner>
-              )}
+                    {summary.hasOverflow && errorsExpanded && (
+                      <>
+                        <s-unordered-list>
+                          {summary.overflowErrors.map((err, idx) => (
+                            <s-list-item key={`overflow-${idx}`}>
+                              <s-text type="strong">{formatErrorRowLabel(err.row)}</s-text>
+                              {" "}
+                              <s-badge tone={getErrorBadgeTone(err.code)}>
+                                {err.code}
+                              </s-badge>
+                              {" "}{getErrorDisplayMessage(err.code)}
+                            </s-list-item>
+                          ))}
+                        </s-unordered-list>
+                        <s-button variant="tertiary" onClick={() => setErrorsExpanded(false)}>
+                          Show fewer
+                        </s-button>
+                      </>
+                    )}
+                  </s-banner>
+                );
+              })()}
 
               {/* Over-limit error banner - blocks submit */}
               {overLimitError && (
