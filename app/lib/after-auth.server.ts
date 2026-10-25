@@ -67,7 +67,7 @@ const inFlightSetups = new Map<string, Promise<void>>();
  * 5. Without this check, Isolate B would skip upsertShopOnAuth
  *    and leave uninstalledAt set, breaking reconcile/reminders
  *
- * When clearUninstalledAtIfSet returns true (a row was cleared), we also
+ * When clearUninstalledAtAndMetafieldErrors returns wasReinstalled=true, we also
  * re-run the full setup because Shopify drops app-owned metafield definitions,
  * the validation function, and payment customization on uninstall.
  *

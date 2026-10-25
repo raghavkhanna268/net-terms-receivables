@@ -13,7 +13,7 @@
  *    - CompanyLocation sync (processCompanyLocationWebhook)
  *    - Reconcile (enqueueReconcileForAllShops excludes uninstalled shops)
  *    - Compliance webhooks (customers/data_request, customers/redact)
- * 5. Cross-isolate reinstall: clearUninstalledAtIfSet clears uninstalledAt
+ * 5. Cross-isolate reinstall: clearUninstalledAtAndMetafieldErrors clears uninstalledAt
  *    even when shop is in setupCompletedShops cache
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
@@ -142,7 +142,7 @@ describeWithDb("after-auth Shop row upsert (DB)", () => {
   });
 });
 
-describeWithDb("clearUninstalledAtIfSet cross-isolate reinstall (DB)", () => {
+describeWithDb("clearUninstalledAtAndMetafieldErrors cross-isolate reinstall (DB)", () => {
   let sql: ReturnType<typeof postgres>;
   const TEST_SUFFIX = Date.now().toString(36) + "-clearuninstalled";
 
@@ -160,7 +160,7 @@ describeWithDb("clearUninstalledAtIfSet cross-isolate reinstall (DB)", () => {
   });
 
   describe("clears uninstalledAt even when shop is in cache", () => {
-    it("clearUninstalledAtIfSet clears uninstalledAt for shop marked uninstalled", async () => {
+    it("clearUninstalledAtAndMetafieldErrors clears uninstalledAt for shop marked uninstalled", async () => {
       const TEST_SHOP = `cached-reinstall-${TEST_SUFFIX}.myshopify.com`;
       
       await sql`
@@ -184,7 +184,7 @@ describeWithDb("clearUninstalledAtIfSet cross-isolate reinstall (DB)", () => {
   });
 
   describe("does not touch other columns", () => {
-    it("clearUninstalledAtIfSet only sets uninstalledAt, preserves plan/timezone/other columns", async () => {
+    it("clearUninstalledAtAndMetafieldErrors only clears uninstalledAt, preserves plan/timezone/other columns", async () => {
       const TEST_SHOP = `preserve-columns-${TEST_SUFFIX}.myshopify.com`;
       
       await sql`
@@ -235,7 +235,7 @@ describeWithDb("clearUninstalledAtIfSet cross-isolate reinstall (DB)", () => {
   });
 
   describe("does not touch other shops", () => {
-    it("clearUninstalledAtIfSet does not affect another shop's uninstalledAt", async () => {
+    it("clearUninstalledAtAndMetafieldErrors does not affect another shop's uninstalledAt", async () => {
       const SHOP_A = `shop-a-${TEST_SUFFIX}.myshopify.com`;
       const SHOP_B = `shop-b-${TEST_SUFFIX}.myshopify.com`;
       
@@ -262,7 +262,7 @@ describeWithDb("clearUninstalledAtIfSet cross-isolate reinstall (DB)", () => {
   });
 
   describe("is a no-op when uninstalledAt is already NULL", () => {
-    it("clearUninstalledAtIfSet does nothing when shop is not uninstalled", async () => {
+    it("clearUninstalledAtAndMetafieldErrors does nothing when shop is not uninstalled", async () => {
       const TEST_SHOP = `not-uninstalled-${TEST_SUFFIX}.myshopify.com`;
       
       await sql`
@@ -305,7 +305,7 @@ describeWithDb("S23-09: reinstall resets onboarding_dismissed_at (DB)", () => {
   });
 
   describe("reinstall clears onboarding_dismissed_at", () => {
-    it("clearUninstalledAtIfSet resets onboarding_dismissed_at when shop was uninstalled", async () => {
+    it("clearUninstalledAtAndMetafieldErrors resets onboarding_dismissed_at when shop was uninstalled", async () => {
       const TEST_SHOP = `reinstall-onboarding-${TEST_SUFFIX}.myshopify.com`;
       const dismissedDate = new Date("2026-10-01T00:00:00Z");
 
@@ -486,7 +486,7 @@ describeWithDb("S23-09: reinstall resets onboarding_dismissed_at (DB)", () => {
       expect(shop.uninstalledAt).toBeNull();
     });
 
-    it("clearUninstalledAtIfSet is no-op on fresh install (no row exists)", async () => {
+    it("clearUninstalledAtAndMetafieldErrors is no-op on fresh install (no row exists)", async () => {
       const TEST_SHOP = `nonexistent-${TEST_SUFFIX}.myshopify.com`;
 
       const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("../after-auth.server");
@@ -497,7 +497,7 @@ describeWithDb("S23-09: reinstall resets onboarding_dismissed_at (DB)", () => {
   });
 
   describe("normal load does not reset dismissed onboarding", () => {
-    it("clearUninstalledAtIfSet does not touch onboarding when uninstalledAt is NULL", async () => {
+    it("clearUninstalledAtAndMetafieldErrors does not touch onboarding when uninstalledAt is NULL", async () => {
       const TEST_SHOP = `installed-dismissed-${TEST_SUFFIX}.myshopify.com`;
       const dismissedDate = new Date("2026-10-10T08:00:00Z");
 
@@ -998,7 +998,7 @@ describeWithDb("reinstall clears metafieldSyncErrorCode and metafieldSyncErrorAt
   });
 
   describe("normal re-auth preserves error fields", () => {
-    it("clearUninstalledAtIfSet is no-op when uninstalledAt is NULL, preserving error fields", async () => {
+    it("clearUninstalledAtAndMetafieldErrors is no-op when uninstalledAt is NULL, preserving error fields", async () => {
       const TEST_SHOP = `test-reauth-preserve-${TEST_SUFFIX}.myshopify.com`;
       const errorDate = new Date("2026-10-15T12:00:00Z");
 
