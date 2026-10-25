@@ -1101,3 +1101,83 @@ describe("credit-status.server", () => {
 
 // DB-backed integration tests moved to credit-status-db.test.ts
 // to avoid vitest mock hoisting issues
+
+describe("getOwnerGid", () => {
+  it("returns CompanyLocation GID for COMPANY with companyLocationId", async () => {
+    const { getOwnerGid } = await import("../credit-status.server");
+
+    const result = getOwnerGid({
+      kind: "COMPANY",
+      companyLocationId: "gid://shopify/CompanyLocation/123",
+      customerId: null,
+    });
+
+    expect(result).toEqual({
+      gid: "gid://shopify/CompanyLocation/123",
+      type: "CompanyLocation",
+    });
+  });
+
+  it("returns Customer GID for TAGGED_CUSTOMER with customerId", async () => {
+    const { getOwnerGid } = await import("../credit-status.server");
+
+    const result = getOwnerGid({
+      kind: "TAGGED_CUSTOMER",
+      companyLocationId: null,
+      customerId: "gid://shopify/Customer/456",
+    });
+
+    expect(result).toEqual({
+      gid: "gid://shopify/Customer/456",
+      type: "Customer",
+    });
+  });
+
+  it("returns null for COMPANY with null companyLocationId (no-owner)", async () => {
+    const { getOwnerGid } = await import("../credit-status.server");
+
+    const result = getOwnerGid({
+      kind: "COMPANY",
+      companyLocationId: null,
+      customerId: null,
+    });
+
+    expect(result).toBeNull();
+  });
+
+  it("returns null for TAGGED_CUSTOMER with null customerId (no-owner)", async () => {
+    const { getOwnerGid } = await import("../credit-status.server");
+
+    const result = getOwnerGid({
+      kind: "TAGGED_CUSTOMER",
+      companyLocationId: null,
+      customerId: null,
+    });
+
+    expect(result).toBeNull();
+  });
+
+  it("returns null for COMPANY with customerId but no companyLocationId (kind/owner mismatch)", async () => {
+    const { getOwnerGid } = await import("../credit-status.server");
+
+    const result = getOwnerGid({
+      kind: "COMPANY",
+      companyLocationId: null,
+      customerId: "gid://shopify/Customer/789",
+    });
+
+    expect(result).toBeNull();
+  });
+
+  it("returns null for TAGGED_CUSTOMER with companyLocationId but no customerId (kind/owner mismatch)", async () => {
+    const { getOwnerGid } = await import("../credit-status.server");
+
+    const result = getOwnerGid({
+      kind: "TAGGED_CUSTOMER",
+      companyLocationId: "gid://shopify/CompanyLocation/101",
+      customerId: null,
+    });
+
+    expect(result).toBeNull();
+  });
+});

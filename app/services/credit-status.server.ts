@@ -417,8 +417,10 @@ async function recordHoldTransitionAudit(
 
 /**
  * Get the Shopify GID for the metafield owner.
+ * Returns null if the account kind doesn't have the required owner column
+ * (COMPANY needs companyLocationId, TAGGED_CUSTOMER needs customerId).
  */
-function getOwnerGid(account: BuyerAccountData): { gid: string; type: MetafieldOwner } | null {
+export function getOwnerGid(account: Pick<BuyerAccountData, 'kind' | 'companyLocationId' | 'customerId'>): { gid: string; type: MetafieldOwner } | null {
   if (account.kind === "COMPANY" && account.companyLocationId) {
     return {
       gid: account.companyLocationId,
@@ -815,7 +817,7 @@ export async function syncCreditStatusMetafield(
   source: CreditStatusSource = "sync"
 ): Promise<CreditStatusUpdateResult> {
   type SyncTxSuccess = { success: true; metafieldWriteData: MetafieldWriteData; syncVersion: number };
-  type SyncTxNoOwner = { success: true; noOwner: true; holdStateChanged: boolean; kind: string; holdState: string; syncVersion: number; shopId: string };
+  type SyncTxNoOwner = { success: true; noOwner: true; effectiveHoldChanged: boolean; ownerType: string; holdState: string; syncVersion: number };
   type SyncTxError = { success: false; error: string };
   type SyncTxResult = SyncTxSuccess | SyncTxNoOwner | SyncTxError;
 
@@ -874,8 +876,10 @@ export async function syncCreditStatusMetafield(
 
     const owner = getOwnerGid(account);
     if (!owner) {
-      const previousHoldState = account.holdState;
-      const holdStateChanged = previousHoldState !== holdStateResult.holdState;
+      const wasHeld = isEffectivelyHeld(account.holdState, account.bypass);
+      const isNowHeld = isEffectivelyHeld(holdStateResult.holdState, account.bypass);
+      const effectiveHoldChanged = wasHeld !== isNowHeld;
+      const ownerType = account.kind === "COMPANY" ? "CompanyLocation" : "Customer";
 
       const [updatedRow] = await tx<{ syncVersion: number }[]>`
         UPDATE "BuyerAccount"
@@ -889,14 +893,31 @@ export async function syncCreditStatusMetafield(
 
       const syncVersion = updatedRow?.syncVersion ?? 0;
 
+      if (effectiveHoldChanged) {
+        await tx`
+          INSERT INTO "AuditEvent" ("shopId", actor, type, data, at)
+          VALUES (
+            ${account.shopId},
+            'system',
+            'credit_status.hold_unenforceable',
+            ${tx.json({
+              buyerAccountId,
+              ownerType,
+              holdState: holdStateResult.holdState,
+              syncVersion,
+            })},
+            NOW()
+          )
+        `;
+      }
+
       return {
         success: true,
         noOwner: true,
-        holdStateChanged,
-        kind: account.kind,
+        effectiveHoldChanged,
+        ownerType,
         holdState: holdStateResult.holdState,
         syncVersion,
-        shopId: account.shopId,
       } as const;
     }
 
@@ -954,34 +975,11 @@ export async function syncCreditStatusMetafield(
   }
 
   if ('noOwner' in txResult) {
-    if (txResult.holdStateChanged) {
+    if (txResult.effectiveHoldChanged) {
       safeLog("warn", "credit_status_no_owner", {
         buyerAccountId,
-        kind: txResult.kind,
+        ownerType: txResult.ownerType,
       });
-
-      try {
-        await sql`
-          INSERT INTO "AuditEvent" ("shopId", actor, type, data, at)
-          VALUES (
-            ${txResult.shopId},
-            'system',
-            'credit_status.hold_unenforceable',
-            ${sql.json({
-              buyerAccountId,
-              kind: txResult.kind,
-              holdState: txResult.holdState,
-              syncVersion: txResult.syncVersion,
-            })},
-            NOW()
-          )
-        `;
-      } catch (auditErr) {
-        safeLog("warn", "credit_status_hold_unenforceable_audit_error", {
-          buyerAccountId,
-          err: toErrorCode(auditErr),
-        });
-      }
     }
 
     return { success: true, metafieldSyncPending: false, noOwner: true };
