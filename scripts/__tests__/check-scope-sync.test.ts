@@ -95,6 +95,7 @@ scopes = "read_orders,write_orders"
     const wranglerScopes = extractJsoncScopes(wranglerContent);
 
     const EXPECTED_SCOPES = [
+      "read_all_orders",
       "read_draft_orders",
       "read_payment_terms",
       "write_companies",
@@ -105,10 +106,10 @@ scopes = "read_orders,write_orders"
       "write_validations",
     ].sort();
 
-    it("shopify.app.toml has exactly 8 scopes", () => {
+    it("shopify.app.toml has exactly 9 scopes", () => {
       expect(tomlScopes).not.toBeNull();
       const scopes = tomlScopes!.split(",").sort();
-      expect(scopes).toHaveLength(8);
+      expect(scopes).toHaveLength(9);
       expect(scopes).toEqual(EXPECTED_SCOPES);
     });
 
@@ -132,9 +133,9 @@ scopes = "read_orders,write_orders"
       expect(wranglerScopes).not.toContain("read_locations");
     });
 
-    it("read_all_orders is NOT present", () => {
-      expect(tomlScopes).not.toContain("read_all_orders");
-      expect(wranglerScopes).not.toContain("read_all_orders");
+    it("read_all_orders IS present (granted 25 Oct 2026)", () => {
+      expect(tomlScopes).toContain("read_all_orders");
+      expect(wranglerScopes).toContain("read_all_orders");
     });
 
     it("dropped read_companies, read_customers, read_orders are NOT present", () => {

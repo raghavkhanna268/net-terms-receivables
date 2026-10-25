@@ -1,6 +1,8 @@
 # Request `read_all_orders` Scope
 
-This checklist guides you through requesting Shopify approval for the `read_all_orders` protected scope. This scope extends order access to orders older than 60 days.
+**Status:** ✅ **GRANTED** on 25 Oct 2026 (22:13 IST)
+
+This checklist guided the request for Shopify approval of the `read_all_orders` protected scope. This scope extends order access to orders older than 60 days.
 
 **Note (S24):** We request `write_orders` which implies `read_orders` per [Shopify Access Scopes](https://shopify.dev/docs/api/usage/access-scopes). The `read_all_orders` scope extends this implied read access to orders beyond the 60-day window.
 
@@ -78,7 +80,7 @@ Net Terms Receivables is a B2B net-terms receivables management app for Shopify 
 
 - We fetch only the fields needed for receivables: order ID, name, total, payment status, payment terms, company/customer reference
 - We do NOT fetch line items, shipping details, or fulfillment data
-- Customer PII (email, phone, address) is handled per Protected Customer Data approval (Level 1 + Name + Email)
+- Customer PII (email, phone, address) is handled per Protected Customer Data Level 1 + Name + Email (REQUESTED, not yet approved)
 - Retention/purge jobs exist: `s22_data_requests` with 30-day expiration, GDPR `customers/redact` webhook deletes customer-linked data
 - All data is deleted on `shop/redact` webhook (48 hours post-uninstall)
 
@@ -86,13 +88,16 @@ Net Terms Receivables is a B2B net-terms receivables management app for Shopify 
 
 ## After Approval
 
-Once Shopify approves the request:
+**Approved:** 25 Oct 2026
 
-1. Add `read_all_orders` to `shopify.app.toml` scopes (extends access from `write_orders` which implies `read_orders`)
-2. Update `wrangler.jsonc` SCOPES variable to match
-3. Run `scripts/check-scope-sync.ts` to verify sync
-4. Deploy new app version with `shopify app deploy`
-5. Existing merchants must open the app to approve the new scope
+Post-approval steps:
+
+1. ✅ Add `read_all_orders` to `shopify.app.toml` scopes (extends access from `write_orders` which implies `read_orders`)
+2. ✅ Update `wrangler.jsonc` SCOPES variable to match
+3. ✅ Run `scripts/check-scope-sync.ts` to verify sync
+4. ⏳ Deploy new app version with `shopify app deploy` (included in next release)
+5. ⏳ Dev store must re-approve the scope after that release
+6. ⏳ Production merchants will approve when they next open the app after that release
 
 ## Data Minimization Evidence
 
@@ -110,11 +115,13 @@ See `docs/privacy.md` for the public privacy policy and `docs/privacy-implementa
 
 ## Checklist Summary
 
-- [ ] Log in to [Shopify Partner Dashboard](https://partners.shopify.com)
-- [ ] Navigate to Apps → Net Terms Receivables
-- [ ] Click **API access requests** (verify in UI)
-- [ ] Find **Read all orders** card and click **Request access**
-- [ ] Paste and customize the justification text above
-- [ ] Submit the request
-- [ ] Wait for Shopify approval (may take several business days)
-- [ ] After approval: create separate PR to add `read_all_orders` scope
+- [x] Log in to [Shopify Partner Dashboard](https://partners.shopify.com)
+- [x] Navigate to Apps → Net Terms Receivables
+- [x] Click **API access requests** (verify in UI)
+- [x] Find **Read all orders** card and click **Request access**
+- [x] Paste and customize the justification text above
+- [x] Submit the request
+- [x] **Granted:** 25 Oct 2026 (22:13 IST)
+- [x] Create PR to add `read_all_orders` scope
+- [ ] Deploy release with scope change (batched with next release)
+- [ ] Dev store re-approves scope after release
