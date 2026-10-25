@@ -298,6 +298,605 @@ describe("prod-diagnostics workflow read-only mode", () => {
 
 
 /**
+ * Second-shop E2E mode (e2e_second_shop) and default-mode shop selection.
+ * Static checks on the e2e_second_shop job, plus real bash slices run against
+ * a fake `psql` (sequential canned responses) and a fake `curl`.
+ */
+const E2E_PLANTED_DOMAIN = "planted-e2e-secret-shop.myshopify.com";
+const E2E_PLANTED_ALLOWED = "planted-allowed-dev-store.myshopify.com";
+const E2E_PLANTED_NAME = "Planted Buyer Name Zyxw";
+const E2E_PLANTED_EMAIL = "planted.buyer@example.invalid";
+
+interface BashResult {
+  stdout: string;
+  stderr: string;
+  status: number | null;
+  githubEnv: string;
+  githubOutput: string;
+}
+
+/**
+ * Runs the bash between two marker comments of a step's `run:` script.
+ * `psql` returns `psqlResponses` in order (one per call; "__FAIL__" exits 1).
+ * Non-zero exits are allowed (fail-closed tests assert on them).
+ */
+function runE2eSnippet(
+  run: string,
+  startMarker: string,
+  endMarker: string,
+  opts: {
+    env?: Record<string, string>;
+    psqlResponses?: string[];
+    curlBody?: string;
+    curlStatus?: string;
+    eventPayload?: unknown;
+    suffix?: string;
+  } = {}
+): BashResult {
+  const start = run.indexOf(startMarker);
+  const end = run.indexOf(endMarker);
+  expect(start).toBeGreaterThanOrEqual(0);
+  expect(end).toBeGreaterThan(start);
+  const snippet = run.slice(start, end) + (opts.suffix ?? "");
+
+  const dir = mkdtempSync(join(tmpdir(), "diag-e2e-"));
+  try {
+    (opts.psqlResponses ?? []).forEach((r, i) =>
+      writeFileSync(join(dir, `psql_resp_${i}`), r)
+    );
+    const fakePsql = join(dir, "psql");
+    writeFileSync(
+      fakePsql,
+      [
+        "#!/usr/bin/env bash",
+        '[ -t 0 ] || cat > /dev/null',
+        'n=$(cat "$FAKE_DIR/psql_count" 2>/dev/null || echo 0)',
+        'echo $((n + 1)) > "$FAKE_DIR/psql_count"',
+        'f="$FAKE_DIR/psql_resp_$n"',
+        '[ -f "$f" ] || { echo "fake psql: no response $n" >&2; exit 2; }',
+        'if [ "$(cat "$f")" = "__FAIL__" ]; then exit 1; fi',
+        'cat "$f"',
+        "",
+      ].join("\n")
+    );
+    chmodSync(fakePsql, 0o755);
+    const fakeCurl = join(dir, "curl");
+    writeFileSync(
+      fakeCurl,
+      [
+        "#!/usr/bin/env bash",
+        'out=""',
+        'while [ $# -gt 0 ]; do if [ "$1" = "-o" ]; then out="$2"; shift; fi; shift; done',
+        'cp "$FAKE_DIR/curl_body" "$out"',
+        'printf "%s" "${FAKE_CURL_STATUS:-200}"',
+        "",
+      ].join("\n")
+    );
+    chmodSync(fakeCurl, 0o755);
+    writeFileSync(join(dir, "curl_body"), opts.curlBody ?? "{}");
+    const eventPath = join(dir, "event.json");
+    writeFileSync(eventPath, JSON.stringify(opts.eventPayload ?? { inputs: {} }));
+    const githubEnv = join(dir, "github_env");
+    const githubOutput = join(dir, "github_output");
+    writeFileSync(githubEnv, "");
+    writeFileSync(githubOutput, "");
+    const childEnv: Record<string, string> = {
+      PATH: `${dir}:${process.env.PATH ?? ""}`,
+      FAKE_DIR: dir,
+      TMPDIR: dir,
+      FAKE_CURL_STATUS: opts.curlStatus ?? "200",
+      GITHUB_EVENT_PATH: eventPath,
+      GITHUB_ENV: githubEnv,
+      GITHUB_OUTPUT: githubOutput,
+      DATABASE_URL: "postgres://fake.invalid/db",
+      CURL_CONFIG: "/dev/null",
+      ...(opts.env ?? {}),
+    };
+    const result = spawnSync(
+      "bash",
+      ["--noprofile", "--norc", "-euo", "pipefail", "-c", snippet],
+      {
+        cwd: join(__dirname, "../../.."),
+        env: childEnv as NodeJS.ProcessEnv,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }
+    );
+    return {
+      stdout: result.stdout,
+      stderr: result.stderr,
+      status: result.status,
+      githubEnv: readFileSync(githubEnv, "utf-8"),
+      githubOutput: readFileSync(githubOutput, "utf-8"),
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** Printed output minus ::add-mask:: lines (those register the mask, they are not shown). */
+function visible(stdout: string): string {
+  return stdout
+    .split("\n")
+    .filter((l) => !l.startsWith("::add-mask::"))
+    .join("\n");
+}
+
+function expectNoPlanted(text: string) {
+  for (const planted of [
+    E2E_PLANTED_DOMAIN,
+    E2E_PLANTED_ALLOWED,
+    E2E_PLANTED_NAME,
+    E2E_PLANTED_EMAIL,
+  ]) {
+    expect(text).not.toContain(planted);
+  }
+}
+
+describe("prod-diagnostics second-shop E2E mode", () => {
+  let wf: Workflow & {
+    on: { workflow_dispatch: { inputs: Record<string, WorkflowInput> } };
+    jobs: Record<string, WorkflowJob & { if?: string }>;
+  };
+  let e2eSteps: WorkflowStep[];
+  let selectStep: WorkflowStep;
+  let dbStep: WorkflowStep;
+  let adminStep: WorkflowStep;
+  let maskStep: WorkflowStep;
+  let allowedStep: WorkflowStep;
+
+  beforeAll(() => {
+    wf = parseYaml(readFileSync(WORKFLOW_PATH, "utf-8")) as typeof wf;
+    e2eSteps = wf.jobs.e2e_second_shop?.steps ?? [];
+    const byName = (steps: WorkflowStep[], name: string) => {
+      const s = steps.find((x) => x.name === name);
+      expect(s, name).toBeDefined();
+      return s as WorkflowStep;
+    };
+    selectStep = byName(e2eSteps, "E2E select shop");
+    dbStep = byName(e2eSteps, "E2E DB checks");
+    adminStep = byName(e2eSteps, "E2E Admin checks");
+    const diagSteps = wf.jobs.diagnostics?.steps ?? [];
+    maskStep = byName(diagSteps, "Mask shop input");
+    allowedStep = byName(diagSteps, "Installed shop vs allowed dev store");
+  });
+
+  describe("static safety", () => {
+    it("e2e_second_shop is a boolean input defaulting to false", () => {
+      const input = wf.on.workflow_dispatch.inputs.e2e_second_shop;
+      expect(input).toBeDefined();
+      expect(input.type).toBe("boolean");
+      expect(input.default).toBe(false);
+    });
+
+    it("adds no shop input: the only shop-like input is the pre-existing `shop`", () => {
+      const names = Object.keys(wf.on.workflow_dispatch.inputs);
+      expect(names.filter((n) => /shop|domain|store/i.test(n)).sort()).toEqual(
+        ["e2e_second_shop", "shop"].sort()
+      );
+      // The e2e job never reads any input inside its steps; it rejects a
+      // `shop` input from the event payload instead.
+      expect(JSON.stringify(e2eSteps)).not.toMatch(/\$\{\{[^}]*inputs\./);
+      const payloadReads = (selectStep.run ?? "").match(/\.inputs\.[a-z_]+/g) ?? [];
+      expect(payloadReads).toEqual([".inputs.shop"]);
+      expect(selectStep.run).toContain("E2E_SHOP_INPUT_NOT_ALLOWED");
+    });
+
+    it("runs only in e2e mode, and the default diagnostics job is skipped in e2e mode", () => {
+      expect(wf.jobs.e2e_second_shop.if).toBe(
+        "github.ref == 'refs/heads/main' && inputs.e2e_second_shop"
+      );
+      expect(wf.jobs.diagnostics.if).toBe(
+        "github.ref == 'refs/heads/main' && !inputs.e2e_second_shop"
+      );
+    });
+
+    it("is read-only: read-only PGOPTIONS, no SQL writes, no mutations, no refresh", () => {
+      const runs = e2eSteps.map((s) => s.run ?? "").join("\n");
+      for (const step of e2eSteps) {
+        if (step.env?.DATABASE_URL) {
+          expect(step.env.PGOPTIONS, step.name).toContain(
+            "default_transaction_read_only=on"
+          );
+        }
+      }
+      expect(runs).not.toMatch(
+        /\b(INSERT|UPDATE|DELETE|UPSERT|MERGE|TRUNCATE|ALTER|DROP|CREATE|GRANT|REVOKE|COPY|VACUUM)\b/
+      );
+      expect(runs).not.toMatch(/mutation/i);
+      expect(runs).not.toMatch(REFRESH_CODE_PATTERN);
+      expect(runs).not.toMatch(/grant_type|["']refresh_token|\/oauth\/access_token/);
+      expect(runs).not.toMatch(/pgmq\.(send|delete|archive|pop|read)\b|cron\.|set_config|nextval/);
+      expect(runs).not.toMatch(/npm |npx |node /);
+      // Only the read-only DB URL and the two shop secrets.
+      const secrets = new Set<string>();
+      for (const step of e2eSteps) {
+        for (const v of Object.values(step.env ?? {})) {
+          for (const m of String(v).matchAll(/secrets\.([A-Z0-9_]+)/g)) secrets.add(m[1]);
+        }
+      }
+      expect([...secrets].sort()).toEqual(
+        ["ALLOWED_DEV_STORE", "DATABASE_URL_MIGRATIONS", "E2E_SHOP"].sort()
+      );
+    });
+
+    it("E2E_SHOP comes from a secret and is masked before anything is exported", () => {
+      const run = selectStep.run ?? "";
+      expect(selectStep.env?.E2E_SHOP).toBe("${{ secrets.E2E_SHOP }}");
+      const mask = run.indexOf('echo "::add-mask::$E2E_SHOP"');
+      expect(mask).toBeGreaterThan(-1);
+      expect(mask).toBeLessThan(run.indexOf("GITHUB_ENV"));
+      expect(run.indexOf('echo "::add-mask::$SELECTED"')).toBeLessThan(run.indexOf("GITHUB_ENV"));
+      // Step names never carry a domain or expression.
+      for (const s of e2eSteps) expect(s.name ?? "").not.toMatch(/\$\{\{|myshopify/);
+    });
+
+    it("Admin query is a read-only query against 2026-10", () => {
+      const run = adminStep.run ?? "";
+      expect(run).toContain("/admin/api/2026-10/graphql.json");
+      expect(run).toContain("webhookSubscriptions(first: 100)");
+      expect(run).toContain("credit-check-validation");
+      expect(run).toContain("hide-terms-payment");
+      expect(run).toContain("unset ACCESS_TOKEN");
+    });
+  });
+
+  describe("E2E shop selection (fail closed)", () => {
+    const START = "# E2E shop selection (domain never printed)";
+    const END = "# End E2E shop selection";
+
+    it("fails closed with E2E_SHOP_NOT_UNIQUE and only the candidate count", () => {
+      const r = runE2eSnippet(selectStep.run ?? "", START, END, {
+        env: { ALLOWED_DEV_STORE: E2E_PLANTED_ALLOWED, E2E_SHOP: "" },
+        psqlResponses: ["2"],
+      });
+      expect(r.status).toBe(1);
+      expect(r.stdout).toContain("e2e_shop_select=error code=E2E_SHOP_NOT_UNIQUE candidates=2");
+      expect(r.githubEnv).toBe("");
+      expectNoPlanted(visible(r.stdout));
+    });
+
+    it("fails closed with E2E_SHOP_NOT_FOUND (fallback and secret)", () => {
+      const a = runE2eSnippet(selectStep.run ?? "", START, END, {
+        env: { ALLOWED_DEV_STORE: E2E_PLANTED_ALLOWED, E2E_SHOP: "" },
+        psqlResponses: ["0"],
+      });
+      expect(a.status).toBe(1);
+      expect(a.stdout).toContain("e2e_shop_select=error code=E2E_SHOP_NOT_FOUND");
+      const b = runE2eSnippet(selectStep.run ?? "", START, END, {
+        env: { ALLOWED_DEV_STORE: E2E_PLANTED_ALLOWED, E2E_SHOP: E2E_PLANTED_DOMAIN },
+        psqlResponses: ["0"],
+      });
+      expect(b.status).toBe(1);
+      expect(b.stdout).toContain("e2e_shop_select=error code=E2E_SHOP_NOT_FOUND");
+      expectNoPlanted(visible(a.stdout + b.stdout));
+    });
+
+    it("refuses the allowed dev store, a shop input, and bad/unset secrets", () => {
+      const cases: [Record<string, string>, unknown, string][] = [
+        [{ ALLOWED_DEV_STORE: E2E_PLANTED_ALLOWED, E2E_SHOP: E2E_PLANTED_ALLOWED }, undefined, "E2E_SHOP_IS_ALLOWED_DEV_STORE"],
+        [{ ALLOWED_DEV_STORE: E2E_PLANTED_ALLOWED, E2E_SHOP: "" }, { inputs: { shop: E2E_PLANTED_DOMAIN } }, "E2E_SHOP_INPUT_NOT_ALLOWED"],
+        [{ ALLOWED_DEV_STORE: "", E2E_SHOP: "" }, undefined, "E2E_ALLOWED_DEV_STORE_UNSET"],
+        [{ ALLOWED_DEV_STORE: E2E_PLANTED_NAME, E2E_SHOP: "" }, undefined, "E2E_ALLOWED_DEV_STORE_INVALID"],
+        [{ ALLOWED_DEV_STORE: E2E_PLANTED_ALLOWED, E2E_SHOP: `${E2E_PLANTED_DOMAIN}\nx` }, undefined, "E2E_SHOP_INVALID"],
+      ];
+      for (const [env, eventPayload, code] of cases) {
+        const r = runE2eSnippet(selectStep.run ?? "", START, END, { env, eventPayload });
+        expect(r.status, code).toBe(1);
+        expect(r.stdout).toContain(`e2e_shop_select=error code=${code}`);
+        expect(r.githubEnv).toBe("");
+        expectNoPlanted(visible(r.stdout));
+      }
+    });
+
+    it("selects the single non-allowed shop, masks it, and never prints it", () => {
+      const r = runE2eSnippet(selectStep.run ?? "", START, END, {
+        env: { ALLOWED_DEV_STORE: E2E_PLANTED_ALLOWED, E2E_SHOP: "" },
+        psqlResponses: ["1", E2E_PLANTED_DOMAIN],
+      });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain(`::add-mask::${E2E_PLANTED_DOMAIN}`);
+      expect(r.stdout).toContain("e2e_shop_source=fallback_non_allowed");
+      expect(r.stdout).toContain("e2e_shop_select=ok");
+      expect(r.githubEnv).toBe(`E2E_SHOP_DOMAIN=${E2E_PLANTED_DOMAIN}\n`);
+      expectNoPlanted(visible(r.stdout));
+    });
+
+    it("uses the E2E_SHOP secret when set", () => {
+      const r = runE2eSnippet(selectStep.run ?? "", START, END, {
+        env: { ALLOWED_DEV_STORE: E2E_PLANTED_ALLOWED, E2E_SHOP: E2E_PLANTED_DOMAIN },
+        psqlResponses: ["1"],
+      });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain("e2e_shop_source=secret");
+      expect(r.githubEnv).toBe(`E2E_SHOP_DOMAIN=${E2E_PLANTED_DOMAIN}\n`);
+      expectNoPlanted(visible(r.stdout));
+    });
+  });
+
+  describe("E2E DB summary", () => {
+    const START = "# E2E DB summary (allow-listed shapes only)";
+    const END = "# End E2E DB summary";
+    const rows = [
+      "e2e_installed_shop_count|2",
+      "e2e_shop_rows_for_selected|1",
+      "e2e_uninstalled_at_set|false",
+      "e2e_uninstalled_at|null",
+      "e2e_db_currency_is_inr|true",
+      "e2e_onboarding_complete|unknown",
+      "e2e_offline_session_with_token|true",
+      "e2e_offline_session_expires_at|2026-10-25T10:00:00Z",
+      "e2e_offline_session_expired|false",
+      "e2e_initial_sync_status|in_progress",
+      "e2e_open_bulk_ops|1",
+      "e2e_dlq_rows|0",
+      `e2e_planted_value|${E2E_PLANTED_DOMAIN}`,
+      `e2e_planted_name|${E2E_PLANTED_NAME}`,
+      `${E2E_PLANTED_EMAIL}|1`,
+      "allowed_shop_buyer_accounts|3",
+      "allowed_shop_invoices|4",
+    ].join("\n");
+
+    it("prints allow-listed key=value lines and redacts anything else", () => {
+      const dir = mkdtempSync(join(tmpdir(), "diag-e2e-db-"));
+      try {
+        const f = join(dir, "db_out");
+        writeFileSync(f, rows + "\n");
+        const r = runE2eSnippet(dbStep.run ?? "", START, END, { env: { DB_OUT: f } });
+        expect(r.stderr).toBe("");
+        expect(r.status).toBe(0);
+        for (const line of [
+          "e2e_installed_shop_count=2",
+          "e2e_initial_sync_status=in_progress",
+          "e2e_offline_session_expires_at=2026-10-25T10:00:00Z",
+          "e2e_open_bulk_ops=1",
+          "e2e_dlq_rows=0",
+          "e2e_onboarding_complete=unknown",
+          "allowed_shop_buyer_accounts=3",
+          "allowed_shop_invoices=4",
+          "e2e_planted_value=invalid",
+          "e2e_planted_name=invalid",
+        ]) {
+          expect(r.stdout.split("\n")).toContain(line);
+        }
+        for (const line of r.stdout.trim().split("\n")) {
+          expect(line).toMatch(/^[a-z0-9_]+=[A-Za-z0-9_:-]+$/);
+        }
+        expectNoPlanted(r.stdout + r.githubOutput);
+        expect(r.githubOutput).toBe(
+          "offline_session_with_token=true\ntoken_expired=false\nuninstalled=false\n"
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("SQL emits every required key, filtered by the selected shop", () => {
+      const run = dbStep.run ?? "";
+      for (const key of [
+        "e2e_shop_rows_for_selected",
+        "e2e_uninstalled_at_set",
+        "e2e_uninstalled_at",
+        "e2e_session_rows",
+        "e2e_offline_session_with_token",
+        "e2e_offline_session_expires_at",
+        "e2e_onboarding_complete",
+        "e2e_initial_sync_status",
+        "e2e_open_bulk_ops",
+        "e2e_dlq_rows",
+        "e2e_webhook_receipts_app_uninstalled",
+        "allowed_shop_buyer_accounts",
+        "allowed_shop_invoices",
+      ]) {
+        expect(run).toContain(`'${key}'`);
+      }
+      expect(run).toContain("FROM bulk WHERE completed_at IS NULL");
+      expect(run).toContain("FROM s6_dead_letter WHERE message->>'shop' = :'shop'");
+      expect(run).toContain('-v shop="$E2E_SHOP_DOMAIN"');
+    });
+  });
+
+  describe("E2E Admin checks", () => {
+    const GATE_START = "# E2E Admin gate";
+    const GATE_END = "# End E2E Admin gate";
+    const START = "# E2E Admin query and summary (counts/booleans only)";
+    const END = "# End E2E Admin query and summary";
+    const adminEnv = { E2E_SHOP_DOMAIN: E2E_PLANTED_DOMAIN };
+
+    it("skips with a fixed reason instead of refreshing or using a missing token", () => {
+      const cases: [Record<string, string>, string][] = [
+        [{ UNINSTALLED: "true", OFFLINE_OK: "true", TOKEN_EXPIRED: "false" }, "e2e_admin=skipped_shop_uninstalled"],
+        [{ UNINSTALLED: "false", OFFLINE_OK: "false", TOKEN_EXPIRED: "false" }, "e2e_admin=skipped_no_offline_session"],
+        [{ UNINSTALLED: "false", OFFLINE_OK: "true", TOKEN_EXPIRED: "true" }, "e2e_admin=skipped_token_expired"],
+        [{ UNINSTALLED: "false", OFFLINE_OK: "true", TOKEN_EXPIRED: "unknown" }, "e2e_admin=skipped_token_expired"],
+      ];
+      for (const [env, line] of cases) {
+        const r = runE2eSnippet(adminStep.run ?? "", GATE_START, GATE_END, {
+          env,
+          suffix: "\necho REACHED_ADMIN\n",
+        });
+        expect(r.status).toBe(0);
+        expect(r.stdout.trim()).toBe(line);
+      }
+      const ok = runE2eSnippet(adminStep.run ?? "", GATE_START, GATE_END, {
+        env: { UNINSTALLED: "false", OFFLINE_OK: "true", TOKEN_EXPIRED: "false" },
+        suffix: "\necho REACHED_ADMIN\n",
+      });
+      expect(ok.stdout.trim()).toBe("REACHED_ADMIN");
+    });
+
+    it("prints webhook/validation/payment counts and currency; never names, domains or ids", () => {
+      const body = {
+        data: {
+          shop: { currencyCode: "INR", name: E2E_PLANTED_NAME, myshopifyDomain: E2E_PLANTED_DOMAIN },
+          webhookSubscriptions: {
+            nodes: [
+              { topic: "ORDERS_CREATE", id: "gid://shopify/WebhookSubscription/111", endpoint: E2E_PLANTED_DOMAIN },
+              { topic: "PRODUCTS_UPDATE" },
+              { topic: E2E_PLANTED_NAME },
+            ],
+          },
+          validations: {
+            nodes: [
+              { enabled: true, title: E2E_PLANTED_NAME, shopifyFunction: { handle: "credit-check-validation" } },
+              { enabled: false, shopifyFunction: { handle: "credit-check-validation" } },
+              { enabled: true, shopifyFunction: { handle: "other" } },
+            ],
+          },
+          paymentCustomizations: {
+            nodes: [{ enabled: true, title: E2E_PLANTED_EMAIL, shopifyFunction: { handle: "hide-terms-payment" } }],
+          },
+        },
+      };
+      const r = runE2eSnippet(adminStep.run ?? "", START, END, {
+        env: adminEnv,
+        curlBody: JSON.stringify(body),
+      });
+      expect(r.stderr).toBe("");
+      expect(r.status).toBe(0);
+      const lines = r.stdout.trim().split("\n");
+      expect(lines).toEqual([
+        "e2e_admin=ok",
+        "e2e_currency_is_inr=true",
+        "e2e_webhooks_expected=20",
+        "e2e_webhooks_shop_specific_rows=3",
+        "e2e_webhooks_present=1",
+        "e2e_webhooks_missing=19",
+        "e2e_webhooks_extra=2",
+        "e2e_webhooks_match=false",
+        "e2e_validation_count=2",
+        "e2e_validation_enabled_count=1",
+        "e2e_payment_customization_count=1",
+        "e2e_payment_customization_enabled_count=1",
+      ]);
+      expectNoPlanted(r.stdout);
+      expect(r.stdout).not.toMatch(/gid:\/\//);
+    });
+
+    it("webhooks_match is unknown when only app-specific (TOML) subscriptions exist; currency mismatch is false", () => {
+      const r = runE2eSnippet(adminStep.run ?? "", START, END, {
+        env: adminEnv,
+        curlBody: JSON.stringify({
+          data: {
+            shop: { currencyCode: "USD" },
+            webhookSubscriptions: { nodes: [] },
+            validations: { nodes: [] },
+            paymentCustomizations: { nodes: [] },
+          },
+        }),
+      });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain("e2e_webhooks_match=unknown");
+      expect(r.stdout).toContain("e2e_webhooks_extra=0");
+      expect(r.stdout).toContain("e2e_currency_is_inr=false");
+      expect(r.stdout).toContain("e2e_validation_count=0");
+    });
+
+    it("soft-fails with fixed error lines", () => {
+      const http = runE2eSnippet(adminStep.run ?? "", START, END, {
+        env: adminEnv,
+        curlBody: E2E_PLANTED_DOMAIN,
+        curlStatus: "401",
+      });
+      expect(http.stdout).toContain("e2e_admin=error http_status=401");
+      const parse = runE2eSnippet(adminStep.run ?? "", START, END, {
+        env: adminEnv,
+        curlBody: `not json ${E2E_PLANTED_NAME}`,
+      });
+      expect(parse.stdout).toContain("e2e_admin=error parse_failed");
+      const gql = runE2eSnippet(adminStep.run ?? "", START, END, {
+        env: adminEnv,
+        curlBody: JSON.stringify({
+          errors: [
+            { message: E2E_PLANTED_NAME, extensions: { code: "ACCESS_DENIED" } },
+            { message: "x", extensions: { code: E2E_PLANTED_DOMAIN } },
+          ],
+        }),
+      });
+      expect(gql.stdout).toContain("e2e_admin=error error_codes=ACCESS_DENIED,UNKNOWN");
+      for (const r of [http, parse, gql]) {
+        expect(r.status).toBe(0);
+        expectNoPlanted(r.stdout);
+      }
+    });
+  });
+
+  describe("default mode: shop selection with more than one installed shop", () => {
+    const START = "# Default shop selection (domain never printed)";
+    const END = "# End default shop selection";
+    const SUFFIX =
+      '\nif [ "$SHOP" = "${ALLOWED_DEV_STORE:-}" ]; then echo SELECTED_ALLOWED; elif [ -n "$SHOP" ]; then echo SELECTED_OTHER; fi\n';
+
+    it("selects ALLOWED_DEV_STORE when more than one shop is installed", () => {
+      const r = runE2eSnippet(maskStep.run ?? "", START, END, {
+        env: { SHOP: "", ALLOWED_DEV_STORE: E2E_PLANTED_ALLOWED },
+        psqlResponses: ["2", "1"],
+        suffix: SUFFIX,
+      });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain("installed_shop_count=2");
+      expect(r.stdout).toContain("shop_source=db_allowed_dev_store");
+      expect(r.stdout).toContain("SELECTED_ALLOWED");
+      expectNoPlanted(visible(r.stdout));
+    });
+
+    it("keeps the single-installed-shop behaviour", () => {
+      const r = runE2eSnippet(maskStep.run ?? "", START, END, {
+        env: { SHOP: "", ALLOWED_DEV_STORE: E2E_PLANTED_ALLOWED },
+        psqlResponses: ["1", E2E_PLANTED_DOMAIN],
+        suffix: SUFFIX,
+      });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain("shop_source=db_single_installed");
+      expect(r.stdout).toContain("SELECTED_OTHER");
+      expectNoPlanted(visible(r.stdout));
+    });
+
+    it("fails closed with fixed codes", () => {
+      const cases: [Record<string, string>, string[], string][] = [
+        [{ SHOP: "", ALLOWED_DEV_STORE: E2E_PLANTED_ALLOWED }, ["2", "0"], "ALLOWED_DEV_STORE_NOT_INSTALLED"],
+        [{ SHOP: "", ALLOWED_DEV_STORE: "" }, ["2"], "ALLOWED_DEV_STORE_UNSET"],
+        [{ SHOP: "", ALLOWED_DEV_STORE: E2E_PLANTED_NAME }, ["2"], "ALLOWED_DEV_STORE_INVALID"],
+        [{ SHOP: "", ALLOWED_DEV_STORE: E2E_PLANTED_ALLOWED }, ["0"], "NO_INSTALLED_SHOP"],
+        [{ SHOP: "", ALLOWED_DEV_STORE: E2E_PLANTED_ALLOWED }, [E2E_PLANTED_DOMAIN], "SHOP_COUNT_INVALID"],
+      ];
+      for (const [env, psqlResponses, code] of cases) {
+        const r = runE2eSnippet(maskStep.run ?? "", START, END, { env, psqlResponses, suffix: SUFFIX });
+        expect(r.status, code).toBe(1);
+        expect(r.stdout).toContain(`shop_select=error code=${code}`);
+        expect(r.stdout).not.toContain("SELECTED_");
+        expectNoPlanted(visible(r.stdout));
+      }
+    });
+
+    it("prints installed_shop_count, selected-shop boolean and guard counts", () => {
+      const START2 = "# Allowed dev store summary (counts/booleans only)";
+      const END2 = "# End allowed dev store summary";
+      const r = runE2eSnippet(allowedStep.run ?? "", START2, END2, {
+        env: { ALLOWED_DEV_STORE: E2E_PLANTED_ALLOWED, SHOP_DOMAIN: E2E_PLANTED_ALLOWED },
+        psqlResponses: ["2", "true", "5|7"],
+      });
+      expect(r.status).toBe(0);
+      expect(visible(r.stdout).trim().split("\n")).toEqual([
+        "installed_shop_count=2",
+        "installed_shop_is_allowed_dev_store=true",
+        "allowed_shop_buyer_accounts=5",
+        "allowed_shop_invoices=7",
+      ]);
+      const bad = runE2eSnippet(allowedStep.run ?? "", START2, END2, {
+        env: { ALLOWED_DEV_STORE: E2E_PLANTED_ALLOWED, SHOP_DOMAIN: E2E_PLANTED_DOMAIN },
+        psqlResponses: ["2", "false", `${E2E_PLANTED_NAME}|x`],
+      });
+      expect(visible(bad.stdout)).toContain("installed_shop_is_allowed_dev_store=false");
+      expect(visible(bad.stdout)).toContain("allowed_shop_buyer_accounts=unknown");
+      expect(visible(bad.stdout)).toContain("allowed_shop_invoices=unknown");
+      expectNoPlanted(visible(r.stdout + bad.stdout));
+      expect(allowedStep.run).toContain(":'shop' = :'allowed'");
+    });
+  });
+});
+
+/**
  * Runs a real slice of the "S12 Validation" step script (between two marker
  * comments) with bash, against fixture files. A fake `curl` on PATH serves
  * FAKE_CURL_BODY for the shopifyFunctions cross-check. Returns stdout and the
@@ -614,5 +1213,70 @@ describe("S12 Validation deployed inputQuery metrics (no text)", () => {
       expect(g.json[0]).toEqual({ cross_check: "error", error_codes: ["ACCESS_DENIED"] });
       expect(g.stdout).not.toContain(SENTINEL);
     });
+  });
+});
+
+describe("Active subscriptions probe (counts/booleans only)", () => {
+  let step: WorkflowStep | undefined;
+  let run: string;
+  const START = "# Active subscriptions query and summary";
+  const END = "# End active subscriptions";
+
+  beforeAll(() => {
+    const workflow = parseYaml(readFileSync(WORKFLOW_PATH, "utf-8")) as Workflow;
+    const steps = Object.values(workflow.jobs ?? {}).flatMap((j) => j.steps ?? []);
+    step = steps.find((s) => s.id === "active_subscriptions");
+    run = step?.run ?? "";
+    expect(run).not.toBe("");
+  });
+
+  function probe(body: unknown, httpStatus = "200") {
+    return runSnippet(run, START, END, {
+      FAKE_CURL_BODY_JSON: typeof body === "string" ? body : JSON.stringify(body),
+      FAKE_CURL_STATUS: httpStatus,
+    }).stdout;
+  }
+
+  it("is read-only, never refreshes, and skips with skipped_token_expired", () => {
+    expect(step?.env?.PGOPTIONS).toContain("default_transaction_read_only=on");
+    expect(step?.if).toBeUndefined();
+    expect(run).not.toMatch(REFRESH_CODE_PATTERN);
+    expect(run).not.toMatch(/mutation/);
+    expect(run).toContain('[ "$TOKEN_EXPIRED" = "true" ] && [ "$REFRESH_SUCCESS" != "true" ]');
+    expect(run).toContain("active_subscriptions=skipped_token_expired");
+  });
+
+  it("prints only the count and the has-name boolean, never names or statuses", () => {
+    const out = probe({
+      data: {
+        currentAppInstallation: {
+          activeSubscriptions: [
+            { name: `Plan ${SENTINEL}`, status: "ACTIVE" },
+            { name: "", status: "PENDING" },
+          ],
+        },
+      },
+    });
+    expect(out).toBe("active_subscriptions_count=2\nany_subscription_has_plan_name=true\n");
+    expect(out).not.toContain(SENTINEL);
+    expect(out).not.toContain("ACTIVE");
+    expect(out).not.toContain("PENDING");
+  });
+
+  it("empty/null names and no subscriptions report false", () => {
+    expect(probe({ data: { currentAppInstallation: { activeSubscriptions: [] } } })).toBe(
+      "active_subscriptions_count=0\nany_subscription_has_plan_name=false\n"
+    );
+    expect(
+      probe({ data: { currentAppInstallation: { activeSubscriptions: [{ name: "", status: "ACTIVE" }, { name: null }] } } })
+    ).toBe("active_subscriptions_count=2\nany_subscription_has_plan_name=false\n");
+  });
+
+  it("soft-fails on HTTP, GraphQL and parse errors (codes only)", () => {
+    expect(probe({}, "403")).toContain("active_subscriptions=error http_status=403");
+    const g = probe({ errors: [{ message: `secret ${SENTINEL}`, extensions: { code: "ACCESS_DENIED" } }] });
+    expect(g).toContain("active_subscriptions=error error_codes=ACCESS_DENIED");
+    expect(g).not.toContain(SENTINEL);
+    expect(probe("not json")).toContain("active_subscriptions=error parse_failed");
   });
 });

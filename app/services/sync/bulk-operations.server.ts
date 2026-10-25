@@ -240,8 +240,9 @@ export type BulkOperationOrigin = "reconcile" | "webhook" | "manual";
 
 /**
  * Reconcile stage for sequential processing.
+ * Sequence: companies → customers → orders (→ draft_orders in PR-B)
  */
-export type ReconcileStage = "companies" | "orders";
+export type ReconcileStage = "companies" | "customers" | "orders";
 
 /**
  * Start a bulk companies export.

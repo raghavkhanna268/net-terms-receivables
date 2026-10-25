@@ -3,14 +3,15 @@ import type { Sql } from "../db-light.server";
 import type { ReconcileMessage } from "~/services/drain/reconcile.server";
 
 /**
- * Tests for initial-sync.server.ts (S23-04).
+ * Tests for initial-sync.server.ts (S23-04 + S8).
  *
  * Tests verify:
- * 1. getInitialSyncState derives status from current run (latest companies op + orders ops at/after it)
+ * 1. getInitialSyncState derives status from current run (companies, customers, orders stages)
  * 2. enqueueInitialSync uses manual idempotency key with in-flight protection
  * 3. canStartSync logic
  * 4. Logs use shopHash, no PII (no domain or webhookId)
  * 5. Message shape matches reconcile.server.ts
+ * 6. Customers stage skip detection (no tag rules = skipped)
  */
 
 const mockSql = Object.assign(vi.fn(), {
@@ -24,6 +25,10 @@ vi.mock("~/lib/request-context.server", () => ({
 
 vi.mock("~/lib/pgmq.server", () => ({
   S6_QUEUES: { SYNC: "s6_sync", BULK: "s6_bulk" },
+}));
+
+vi.mock("~/services/sync/customer.server", () => ({
+  getTagRules: vi.fn().mockResolvedValue([]),
 }));
 
 describe("initial-sync.server", () => {
@@ -63,6 +68,9 @@ describe("initial-sync.server", () => {
             },
           ]);
         }
+        if (query.includes("s6_bulk_operations") && query.includes("customers")) {
+          return Promise.resolve([]);
+        }
         if (query.includes("s6_bulk_operations") && query.includes("orders")) {
           return Promise.resolve([]);
         }
@@ -93,6 +101,9 @@ describe("initial-sync.server", () => {
             },
           ]);
         }
+        if (query.includes("s6_bulk_operations") && query.includes("customers")) {
+          return Promise.resolve([]);
+        }
         if (query.includes("s6_bulk_operations") && query.includes("orders")) {
           return Promise.resolve([]);
         }
@@ -108,7 +119,7 @@ describe("initial-sync.server", () => {
       expect(result.status).toBe("in_progress");
     });
 
-    it("returns done when both companies and orders are completed in current run", async () => {
+    it("returns in_progress when companies complete but no orders op yet (no tag rules)", async () => {
       const companiesStarted = new Date("2026-10-24T10:00:00Z");
       mockSql.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
@@ -122,6 +133,45 @@ describe("initial-sync.server", () => {
               started_at: companiesStarted,
             },
           ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("customers")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes('"Shop"')) {
+          return Promise.resolve([{ id: "shop-123" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { getInitialSyncState } = await import("../initial-sync.server");
+      const result = await getInitialSyncState(mockSql as unknown as Sql, "test.myshopify.com");
+
+      expect(result.status).toBe("in_progress");
+    });
+
+    it("returns done when all stages are completed in current run (no tag rules = customers skipped)", async () => {
+      const companiesStarted = new Date("2026-10-24T10:00:00Z");
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
+          return Promise.resolve([
+            {
+              bulk_operation_id: "gid://shopify/BulkOperation/1",
+              reconcile_stage: "companies",
+              completed_at: new Date("2026-10-24T10:05:00Z"),
+              failure_count: 0,
+              started_at: companiesStarted,
+            },
+          ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("customers")) {
+          return Promise.resolve([]);
         }
         if (query.includes("s6_bulk_operations") && query.includes("orders")) {
           return Promise.resolve([
@@ -137,6 +187,9 @@ describe("initial-sync.server", () => {
         if (query.includes("s6_dead_letter")) {
           return Promise.resolve([{ count: "0" }]);
         }
+        if (query.includes('"Shop"')) {
+          return Promise.resolve([{ id: "shop-123" }]);
+        }
         return Promise.resolve([]);
       });
 
@@ -144,6 +197,96 @@ describe("initial-sync.server", () => {
       const result = await getInitialSyncState(mockSql as unknown as Sql, "test.myshopify.com");
 
       expect(result.status).toBe("done");
+    });
+
+    it("returns done when all three stages are completed (with customers)", async () => {
+      const companiesStarted = new Date("2026-10-24T10:00:00Z");
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
+          return Promise.resolve([
+            {
+              bulk_operation_id: "gid://shopify/BulkOperation/1",
+              reconcile_stage: "companies",
+              completed_at: new Date("2026-10-24T10:05:00Z"),
+              failure_count: 0,
+              started_at: companiesStarted,
+            },
+          ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("customers")) {
+          return Promise.resolve([
+            {
+              bulk_operation_id: "gid://shopify/BulkOperation/2",
+              reconcile_stage: "customers",
+              completed_at: new Date("2026-10-24T10:07:00Z"),
+              failure_count: 0,
+              started_at: new Date("2026-10-24T10:06:00Z"),
+            },
+          ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([
+            {
+              bulk_operation_id: "gid://shopify/BulkOperation/3",
+              reconcile_stage: "orders",
+              completed_at: new Date("2026-10-24T10:10:00Z"),
+              failure_count: 0,
+              started_at: new Date("2026-10-24T10:08:00Z"),
+            },
+          ]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { getInitialSyncState } = await import("../initial-sync.server");
+      const result = await getInitialSyncState(mockSql as unknown as Sql, "test.myshopify.com");
+
+      expect(result.status).toBe("done");
+    });
+
+    it("returns failed when customers failure_count >= 5", async () => {
+      const companiesStarted = new Date("2026-10-24T10:00:00Z");
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
+          return Promise.resolve([
+            {
+              bulk_operation_id: "gid://shopify/BulkOperation/1",
+              reconcile_stage: "companies",
+              completed_at: new Date("2026-10-24T10:05:00Z"),
+              failure_count: 0,
+              started_at: companiesStarted,
+            },
+          ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("customers")) {
+          return Promise.resolve([
+            {
+              bulk_operation_id: "gid://shopify/BulkOperation/2",
+              reconcile_stage: "customers",
+              completed_at: null,
+              failure_count: 5,
+              started_at: new Date("2026-10-24T10:06:00Z"),
+            },
+          ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { getInitialSyncState } = await import("../initial-sync.server");
+      const result = await getInitialSyncState(mockSql as unknown as Sql, "test.myshopify.com");
+
+      expect(result.status).toBe("failed");
     });
 
     it("returns failed when companies failure_count >= 5", async () => {
@@ -160,6 +303,9 @@ describe("initial-sync.server", () => {
               started_at: companiesStarted,
             },
           ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("customers")) {
+          return Promise.resolve([]);
         }
         if (query.includes("s6_bulk_operations") && query.includes("orders")) {
           return Promise.resolve([]);
@@ -534,6 +680,217 @@ describe("initial-sync.server", () => {
       expect(typeof msg.shop).toBe("string");
       expect(typeof msg.webhookId).toBe("string");
       expect(typeof msg.enqueuedAt).toBe("string");
+    });
+  });
+
+  describe("customers stage skip detection (pre-S8 runs and late tag rules)", () => {
+    it("returns done when run completed before customers stage existed (no customersOp, no queued message)", async () => {
+      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("");
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
+          return Promise.resolve([
+            {
+              bulk_operation_id: "gid://shopify/BulkOperation/pre-s8-companies",
+              reconcile_stage: "companies",
+              completed_at: new Date("2026-10-20"),
+              failure_count: 0,
+              started_at: new Date("2026-10-20"),
+            },
+          ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("customers")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([
+            {
+              bulk_operation_id: "gid://shopify/BulkOperation/pre-s8-orders",
+              reconcile_stage: "orders",
+              completed_at: new Date("2026-10-20"),
+              failure_count: 0,
+              started_at: new Date("2026-10-20"),
+            },
+          ]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("pgmq.q_s6_sync") && query.includes("RECONCILE_CUSTOMERS")) {
+          return Promise.resolve([]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { getInitialSyncState } = await import("../initial-sync.server");
+      const result = await getInitialSyncState(mockSql as unknown as Sql, "test-s8-presync.myshopify.com");
+
+      expect(result.status).toBe("done");
+    });
+
+    it("returns done when tag rule created after run completed (no queued customers message)", async () => {
+      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("");
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
+          return Promise.resolve([
+            {
+              bulk_operation_id: "gid://shopify/BulkOperation/late-tag-companies",
+              reconcile_stage: "companies",
+              completed_at: new Date("2026-10-22"),
+              failure_count: 0,
+              started_at: new Date("2026-10-22"),
+            },
+          ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("customers")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([
+            {
+              bulk_operation_id: "gid://shopify/BulkOperation/late-tag-orders",
+              reconcile_stage: "orders",
+              completed_at: new Date("2026-10-22"),
+              failure_count: 0,
+              started_at: new Date("2026-10-22"),
+            },
+          ]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("pgmq.q_s6_sync") && query.includes("RECONCILE_CUSTOMERS")) {
+          return Promise.resolve([]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { getInitialSyncState } = await import("../initial-sync.server");
+      const result = await getInitialSyncState(mockSql as unknown as Sql, "test-s8-latetag.myshopify.com");
+
+      expect(result.status).toBe("done");
+    });
+
+    it("returns in_progress when customers message is queued but not yet started", async () => {
+      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("");
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
+          return Promise.resolve([
+            {
+              bulk_operation_id: "gid://shopify/BulkOperation/queued-cust-companies",
+              reconcile_stage: "companies",
+              completed_at: new Date("2026-10-25"),
+              failure_count: 0,
+              started_at: new Date("2026-10-25"),
+            },
+          ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("customers")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("pgmq.q_s6_sync") && query.includes("RECONCILE_CUSTOMERS")) {
+          return Promise.resolve([{ msg_id: "123" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { getInitialSyncState } = await import("../initial-sync.server");
+      const result = await getInitialSyncState(mockSql as unknown as Sql, "test-s8-queuedcust.myshopify.com");
+
+      expect(result.status).toBe("in_progress");
+    });
+  });
+
+  describe("getInitialSyncStateWithRecovery", () => {
+    it("returns state without triggering recovery when status is not in_progress", async () => {
+      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("");
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
+          return Promise.resolve([]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { getInitialSyncStateWithRecovery } = await import("../initial-sync.server");
+      const result = await getInitialSyncStateWithRecovery(mockSql as unknown as Sql, "test-recovery-not-started.myshopify.com");
+
+      expect(result.status).toBe("not_started");
+    });
+
+    it("returns state without triggering recovery when operation is fresh", async () => {
+      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("");
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
+          return Promise.resolve([
+            {
+              bulk_operation_id: "gid://shopify/BulkOperation/fresh-recovery",
+              reconcile_stage: "companies",
+              completed_at: null,
+              failure_count: 0,
+              started_at: tenMinutesAgo,
+            },
+          ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("customers")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { getInitialSyncStateWithRecovery } = await import("../initial-sync.server");
+      const result = await getInitialSyncStateWithRecovery(mockSql as unknown as Sql, "test-recovery-fresh.myshopify.com");
+
+      expect(result.status).toBe("in_progress");
+    });
+
+    it("continues to return state even if recovery throws an error", async () => {
+      vi.doMock("~/services/drain/bulk-op-recovery.server", () => ({
+        recoverStaleBulkOperationsForShop: vi.fn().mockRejectedValue(new Error("Recovery failed")),
+        STALE_THRESHOLD_MINUTES: 60,
+      }));
+
+      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("");
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
+          return Promise.resolve([
+            {
+              bulk_operation_id: "gid://shopify/BulkOperation/stale-recovery-error",
+              reconcile_stage: "companies",
+              completed_at: null,
+              failure_count: 0,
+              started_at: twoHoursAgo,
+            },
+          ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("customers")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { getInitialSyncStateWithRecovery } = await import("../initial-sync.server");
+      const result = await getInitialSyncStateWithRecovery(mockSql as unknown as Sql, "test-recovery-error.myshopify.com");
+
+      expect(result.status).toBe("in_progress");
     });
   });
 });
