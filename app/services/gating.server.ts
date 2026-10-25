@@ -32,8 +32,6 @@
 import type { Sql } from "~/lib/db-light.server";
 import { getPlanByShopId } from "./plan.server";
 import {
-  type PlanKey,
-  getPlanConfig,
   planLimit,
   isLimitExceeded,
 } from "~/lib/entitlements";

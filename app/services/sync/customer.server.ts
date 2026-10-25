@@ -38,7 +38,7 @@ import type { Sql } from "~/lib/db-light.server";
 import type { ShopifyCustomer, SyncResult } from "./types";
 import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
 import { minimiseCustomerPiiIfInactive } from "~/services/compliance";
-import { decideNewAccountGate, isGatingEnforced } from "../gating.server";
+import { decideNewAccountGate } from "../gating.server";
 import { safeLog } from "~/lib/log.server";
 
 /**
