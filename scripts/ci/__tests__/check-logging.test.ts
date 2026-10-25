@@ -1308,6 +1308,255 @@ export function test() { return true; }`
   });
 
   // =========================================================================
+  // #190: Per-match VALIDATION_PATTERNS (not line-wide skip)
+  // No FAKE_SUBDOMAINS exemptions in non-test paths (script, log, Sentry)
+  // =========================================================================
+  describe("#190: Per-match VALIDATION_PATTERNS", () => {
+    // Script file scan (~line 300)
+    describe("Script file scan", () => {
+      it("PASS: Pure escaped-regex validation pattern in script", () => {
+        fs.writeFileSync(
+          path.join(scriptsDir, "validate.sh"),
+          `#!/bin/bash\nif [[ "$1" =~ \\.myshopify\\.com$ ]]; then echo valid; fi`
+        );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
+      });
+
+      it("FAIL: Real domain + validation pattern on same line in script", () => {
+        const realDomain = "clearwater" + "-wholesale" + ".myshopify.com";
+        fs.writeFileSync(
+          path.join(scriptsDir, "mixed.sh"),
+          `#!/bin/bash\nif [[ "$1" =~ \\.myshopify\\.com$ ]]; then SHOP="${realDomain}"; fi`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("script-domain");
+      });
+
+      // P1a: Fake subdomains must be flagged in script files
+      it("FAIL: test.myshopify.com in script (no fake exemption)", () => {
+        fs.writeFileSync(
+          path.join(scriptsDir, "fake-test.sh"),
+          `#!/bin/bash\nSHOP="test.myshopify.com"`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("script-domain");
+      });
+
+      it("FAIL: shop.myshopify.com in script (no fake exemption)", () => {
+        fs.writeFileSync(
+          path.join(scriptsDir, "fake-shop.sh"),
+          `#!/bin/bash\nSHOP="shop.myshopify.com"`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("script-domain");
+      });
+
+      it("FAIL: my-store.myshopify.com in script (no fake exemption)", () => {
+        fs.writeFileSync(
+          path.join(scriptsDir, "fake-mystore.sh"),
+          `#!/bin/bash\nSHOP="my-store.myshopify.com"`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("script-domain");
+      });
+
+      // P1b: Template and bare domain forms
+      it("FAIL: ${shop}.myshopify.com in script", () => {
+        fs.writeFileSync(
+          path.join(scriptsDir, "template.sh"),
+          `#!/bin/bash\nURL="\${SHOP}.myshopify.com"`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("script-domain");
+      });
+
+      it("FAIL: bare myshopify.com in script", () => {
+        fs.writeFileSync(
+          path.join(scriptsDir, "bare.sh"),
+          `#!/bin/bash\necho "Connect to myshopify.com"`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("script-domain");
+      });
+
+      it("FAIL: https://myshopify.com in script", () => {
+        fs.writeFileSync(
+          path.join(scriptsDir, "https.sh"),
+          `#!/bin/bash\ncurl https://myshopify.com/admin`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("script-domain");
+      });
+    });
+
+    // Log args (~line 479)
+    describe("Log args (checkArgument)", () => {
+      it("PASS: Pure escaped-regex validation pattern in log string", () => {
+        fs.writeFileSync(
+          path.join(appDir, "validate.ts"),
+          `export function test() { console.log("Pattern: /[a-z]+\\\\.myshopify\\\\.com/"); }`
+        );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
+      });
+
+      it("FAIL: Real domain + validation pattern in same log string", () => {
+        const realDomain = "clearwater" + "-wholesale" + ".myshopify.com";
+        fs.writeFileSync(
+          path.join(appDir, "mixed.ts"),
+          `export function test() { console.log("Pattern: /[a-z]+\\\\.myshopify\\\\.com/ example: ${realDomain}"); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("domain-literal");
+      });
+
+      // P1a: Fake subdomains must be flagged in log args
+      it("FAIL: test.myshopify.com in log string (no fake exemption)", () => {
+        fs.writeFileSync(
+          path.join(appDir, "log-test.ts"),
+          `export function test() { console.log("Shop: test.myshopify.com"); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("domain-literal");
+      });
+
+      it("FAIL: shop.myshopify.com in log string (no fake exemption)", () => {
+        fs.writeFileSync(
+          path.join(appDir, "log-shop.ts"),
+          `export function test() { console.log("Shop: shop.myshopify.com"); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("domain-literal");
+      });
+
+      it("FAIL: my-store.myshopify.com in log string (no fake exemption)", () => {
+        fs.writeFileSync(
+          path.join(appDir, "log-mystore.ts"),
+          `export function test() { console.log("Shop: my-store.myshopify.com"); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("domain-literal");
+      });
+
+      // P1b: Template and bare domain forms
+      it("FAIL: bare myshopify.com in log string", () => {
+        fs.writeFileSync(
+          path.join(appDir, "log-bare.ts"),
+          `export function test() { console.log("connect to myshopify.com"); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("domain-literal");
+      });
+
+      it("FAIL: https://myshopify.com in log string", () => {
+        fs.writeFileSync(
+          path.join(appDir, "log-https.ts"),
+          `export function test() { console.log("URL: https://myshopify.com/admin"); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("domain-literal");
+      });
+
+    });
+
+    // Sentry args (~line 908)
+    describe("Sentry args (checkSentryCall)", () => {
+      it("PASS: Pure escaped-regex validation pattern in Sentry message", () => {
+        fs.writeFileSync(
+          path.join(appDir, "sentry-validate.ts"),
+          `import * as Sentry from "@sentry/cloudflare";
+export function test() { Sentry.captureMessage("Pattern: /[a-z]+\\\\.myshopify\\\\.com/", { tags: { type: "validation" } }); }`
+        );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
+      });
+
+      it("FAIL: Real domain + validation pattern in same Sentry string", () => {
+        const realDomain = "clearwater" + "-wholesale" + ".myshopify.com";
+        fs.writeFileSync(
+          path.join(appDir, "sentry-mixed.ts"),
+          `import * as Sentry from "@sentry/cloudflare";
+export function test() { Sentry.captureMessage("Pattern: /[a-z]+\\\\.myshopify\\\\.com/ fail: ${realDomain}", { tags: { type: "test" } }); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("domain-literal");
+      });
+
+      // P1a: Fake subdomains must be flagged in Sentry args
+      it("FAIL: test.myshopify.com in Sentry string (no fake exemption)", () => {
+        fs.writeFileSync(
+          path.join(appDir, "sentry-test.ts"),
+          `import * as Sentry from "@sentry/cloudflare";
+export function test() { Sentry.captureMessage("Shop: test.myshopify.com", { tags: { t: "1" } }); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("domain-literal");
+      });
+
+      it("FAIL: shop.myshopify.com in Sentry string (no fake exemption)", () => {
+        fs.writeFileSync(
+          path.join(appDir, "sentry-shop.ts"),
+          `import * as Sentry from "@sentry/cloudflare";
+export function test() { Sentry.captureMessage("Shop: shop.myshopify.com", { tags: { t: "1" } }); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("domain-literal");
+      });
+
+      it("FAIL: my-store.myshopify.com in Sentry string (no fake exemption)", () => {
+        fs.writeFileSync(
+          path.join(appDir, "sentry-mystore.ts"),
+          `import * as Sentry from "@sentry/cloudflare";
+export function test() { Sentry.captureMessage("Shop: my-store.myshopify.com", { tags: { t: "1" } }); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("domain-literal");
+      });
+
+      // P1b: Bare domain forms
+      it("FAIL: bare myshopify.com in Sentry string", () => {
+        fs.writeFileSync(
+          path.join(appDir, "sentry-bare.ts"),
+          `import * as Sentry from "@sentry/cloudflare";
+export function test() { Sentry.captureMessage("connect to myshopify.com", { tags: { t: "1" } }); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("domain-literal");
+      });
+
+      it("FAIL: https://myshopify.com in Sentry string", () => {
+        fs.writeFileSync(
+          path.join(appDir, "sentry-https.ts"),
+          `import * as Sentry from "@sentry/cloudflare";
+export function test() { Sentry.captureMessage("URL: https://myshopify.com/admin", { tags: { t: "1" } }); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("domain-literal");
+      });
+    });
+  });
+
+  // =========================================================================
   // Gap 5: No-mock-logger rule
   // =========================================================================
   describe("Gap 5: No-mock-logger rule", () => {
