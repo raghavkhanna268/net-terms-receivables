@@ -1710,13 +1710,11 @@ describe("#292: Per-order currency guard in bulk sync", () => {
     
     await processOrderLines(mockSql as never, "shop-123", "test-shop.myshopify.com", lines);
     
-    // Should only process the INR order - order without currency should be skipped
-    if (mockUpsertInvoices.mock.calls.length > 0) {
-      const invoices = mockUpsertInvoices.mock.calls[0][1];
-      for (const inv of invoices) {
-        expect(inv.orderId).not.toContain("no-currency");
-      }
-    }
+    // Assert unconditionally: exactly the INR order, and only it, is upserted
+    expect(mockUpsertInvoices).toHaveBeenCalled();
+    const invoices = mockUpsertInvoices.mock.calls[0][1];
+    expect(invoices).toHaveLength(1);
+    expect(invoices[0].orderId).toBe("gid://shopify/Order/inr-1");
   });
 });
 

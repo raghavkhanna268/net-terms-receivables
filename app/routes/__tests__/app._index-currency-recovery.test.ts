@@ -136,17 +136,24 @@ describe("#292 currency recovery on /app load", () => {
     });
   }
 
-  function setupGraphqlMock(currencyResponse: string | null, throwError = false) {
+  function setupGraphqlMock(
+    currencyResponse: string | null,
+    throwError = false,
+    shopConfigCurrency?: string | null,
+  ) {
     mockGraphql.mockImplementation(async (query: string) => {
       if (throwError) {
         throw new Error("Network error");
       }
 
       if (query.includes("ShopCurrencyAndId")) {
+        const metafield = shopConfigCurrency !== undefined
+          ? (shopConfigCurrency === null ? null : { value: JSON.stringify({ schemaVersion: 1, currencyCode: shopConfigCurrency }) })
+          : (currencyResponse ? { value: JSON.stringify({ schemaVersion: 1, currencyCode: currencyResponse }) } : null);
         return {
           json: async () => ({
             data: currencyResponse
-              ? { shop: { id: TEST_SHOP_GID, currencyCode: currencyResponse } }
+              ? { shop: { id: TEST_SHOP_GID, currencyCode: currencyResponse, metafield } }
               : { shop: null },
           }),
         };
@@ -329,5 +336,74 @@ describe("#292 currency recovery on /app load", () => {
     expect(updateCalls.length).toBe(0);
 
     consoleSpy.mockRestore();
+  });
+
+  // #292 Stale shop_config tests
+  it("C.8: DB USD, live currency USD, stale shop_config INR → re-pushed as USD", async () => {
+    setupSqlMock("USD");
+    // DB is USD, Shopify returns USD, but shop_config metafield has INR (stale)
+    setupGraphqlMock("USD", false, "INR");
+
+    const { loader } = await import("../app._index");
+    const dataResponse = await loader(createLoaderArgs());
+    const result = dataResponse.data;
+
+    // Currency should stay USD (matches live)
+    expect(result.currencySupported).toBe(false);
+    expect(result.shopCurrency).toBe("USD");
+
+    // No DB update needed (currencies match)
+    const updateCalls = sqlCalls.filter((c) => c.query.includes("UPDATE") && c.query.includes("currency"));
+    expect(updateCalls.length).toBe(0);
+
+    // But shop_config should have been re-pushed because it was stale
+    const metafieldCalls = mockGraphql.mock.calls.filter((c) =>
+      c[0].includes("WriteShopConfig") || c[0].includes("metafieldsSet")
+    );
+    expect(metafieldCalls.length).toBeGreaterThan(0);
+  });
+
+  it("C.9: DB INR, live currency INR, stale shop_config USD → re-pushed as INR", async () => {
+    setupSqlMock("INR");
+    // DB is INR, Shopify returns INR, but shop_config metafield has USD (stale)
+    setupGraphqlMock("INR", false, "USD");
+
+    const { loader } = await import("../app._index");
+    const dataResponse = await loader(createLoaderArgs());
+    const result = dataResponse.data;
+
+    // Currency should stay INR (matches live)
+    expect(result.currencySupported).toBe(true);
+    expect(result.shopCurrency).toBe("INR");
+
+    // No DB update needed (currencies match)
+    const updateCalls = sqlCalls.filter((c) => c.query.includes("UPDATE") && c.query.includes("currency"));
+    expect(updateCalls.length).toBe(0);
+
+    // But shop_config should have been re-pushed because it was stale
+    const metafieldCalls = mockGraphql.mock.calls.filter((c) =>
+      c[0].includes("WriteShopConfig") || c[0].includes("metafieldsSet")
+    );
+    expect(metafieldCalls.length).toBeGreaterThan(0);
+  });
+
+  it("C.10: Missing shop_config metafield → pushed even when DB matches", async () => {
+    setupSqlMock("USD");
+    // DB is USD, Shopify returns USD, shop_config is missing (null)
+    setupGraphqlMock("USD", false, null);
+
+    const { loader } = await import("../app._index");
+    const dataResponse = await loader(createLoaderArgs());
+    const result = dataResponse.data;
+
+    // Currency should stay USD
+    expect(result.currencySupported).toBe(false);
+    expect(result.shopCurrency).toBe("USD");
+
+    // shop_config should have been pushed because it was missing
+    const metafieldCalls = mockGraphql.mock.calls.filter((c) =>
+      c[0].includes("WriteShopConfig") || c[0].includes("metafieldsSet")
+    );
+    expect(metafieldCalls.length).toBeGreaterThan(0);
   });
 });

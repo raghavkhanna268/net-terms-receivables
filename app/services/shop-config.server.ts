@@ -7,6 +7,7 @@
  */
 
 import { SHOP_CONFIG_METAFIELD, serializeShopConfig } from "~/lib/metafields-contract";
+import { toErrorCode } from "~/lib/log.server";
 
 /**
  * GraphQL mutation to write shop_config metafield.
@@ -84,7 +85,7 @@ export async function writeShopConfigMetafield(
     if (result.errors?.length) {
       return {
         success: false,
-        error: `graphql_errors: ${result.errors.map(e => e.message).join(", ")}`,
+        error: "graphql_errors",
       };
     }
 
@@ -92,7 +93,7 @@ export async function writeShopConfigMetafield(
     if (userErrors?.length) {
       return {
         success: false,
-        error: `user_errors: ${userErrors.map(e => e.message).join(", ")}`,
+        error: "user_errors",
       };
     }
 
@@ -102,10 +103,9 @@ export async function writeShopConfigMetafield(
       metafieldId,
     };
   } catch (error) {
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name ?? "unknown";
     return {
       success: false,
-      error: `exception: ${errInfo}`,
+      error: toErrorCode(error),
     };
   }
 }

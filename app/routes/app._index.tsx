@@ -219,15 +219,16 @@ async function checkOnboardingRedirect(
  * - Shops with hardcoded 'INR' rows (from bugs or manual data fixes)
  * - Shops that switched away from INR
  * - Shops that switched to INR (recovery)
+ * - Stale shop_config metafield (e.g., after-auth write failed)
  * 
  * Behavior (fail-closed throughout):
- * - Always re-read from Shopify Admin API
- * - If Shopify returns INR and current isn't INR:
- *   1. Write shop_config metafield FIRST
- *   2. Only if metafield succeeds, save currency to DB
- * - If Shopify returns non-INR and current is INR:
- *   1. Write shop_config metafield FIRST
- *   2. Only if metafield succeeds, save currency to DB
+ * - Always re-read from Shopify Admin API (includes shop_config metafield)
+ * - If fetched currency is XXX: return early without writing anything
+ * - Re-push shop_config when:
+ *   - shop_config is missing
+ *   - shop_config.currencyCode differs from fetched currency (stale)
+ *   - DB currency differs from fetched currency
+ * - Write shop_config metafield FIRST, only save DB on success
  * - If read fails: keep current value
  * 
  * Never writes 'XXX' over a known value.
@@ -239,11 +240,26 @@ async function checkAndRecoverCurrency(
   admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
 ): Promise<string> {
   try {
+    // Query includes shop_config metafield to detect stale values
     const response = await admin.graphql(`
-      query ShopCurrencyAndId { shop { id currencyCode } }
+      query ShopCurrencyAndId {
+        shop {
+          id
+          currencyCode
+          metafield(namespace: "$app", key: "shop_config") {
+            value
+          }
+        }
+      }
     `);
     const data = await response.json() as {
-      data?: { shop?: { id?: string; currencyCode?: string } };
+      data?: {
+        shop?: {
+          id?: string;
+          currencyCode?: string;
+          metafield?: { value?: string } | null;
+        };
+      };
     };
 
     const shopId = data.data?.shop?.id;
@@ -254,43 +270,68 @@ async function checkAndRecoverCurrency(
       return currentCurrency;
     }
 
-    // If fetched currency matches current, nothing to update
-    if (fetchedCurrency === currentCurrency) {
+    // If fetched currency is XXX (unknown), return early without writing anything
+    if (fetchedCurrency === NO_CURRENCY_SENTINEL) {
       return currentCurrency;
     }
 
-    // Currency changed: write shop_config metafield FIRST, only save DB on success
-    const writeResult = await writeShopConfigMetafield(admin, shopId, fetchedCurrency);
+    // Parse shop_config metafield to check for staleness
+    let shopConfigCurrency: string | null = null;
+    const metafieldValue = data.data?.shop?.metafield?.value;
+    if (metafieldValue) {
+      try {
+        const parsed = JSON.parse(metafieldValue) as { currencyCode?: string };
+        shopConfigCurrency = parsed.currencyCode ?? null;
+      } catch {
+        // Invalid JSON - treat as missing
+      }
+    }
+
     const hash = await shopHash(shopDomain);
 
-    if (!writeResult.success) {
-      // Metafield write failed: do NOT save currency, log and return current
-      // Next load will retry the metafield write
-      safeLog("warn", "currency_recovery_metafield_failed", {
-        shopHash: hash,
-        err: writeResult.error ?? "unknown",
-      });
-      return currentCurrency;
+    // Determine if we need to re-push shop_config:
+    // 1. shop_config is missing (null)
+    // 2. shop_config.currencyCode differs from fetched currency (stale)
+    const shopConfigMissing = shopConfigCurrency === null;
+    const shopConfigStale = shopConfigCurrency !== null && shopConfigCurrency !== fetchedCurrency;
+    const dbNeedsUpdate = currentCurrency !== fetchedCurrency;
+
+    const needsShopConfigPush = shopConfigMissing || shopConfigStale || dbNeedsUpdate;
+
+    if (needsShopConfigPush) {
+      // Write shop_config metafield FIRST
+      const writeResult = await writeShopConfigMetafield(admin, shopId, fetchedCurrency);
+
+      if (!writeResult.success) {
+        // Metafield write failed: do NOT save currency, log and return current
+        // Next load will retry the metafield write
+        safeLog("warn", "currency_recovery_metafield_failed", {
+          shopHash: hash,
+          err: writeResult.error ?? "unknown",
+        });
+        return currentCurrency;
+      }
+
+      // Log specific scenario for debugging
+      if (shopConfigStale && !dbNeedsUpdate) {
+        safeLog("info", "shop_config_stale_repushed", { shopHash: hash });
+      }
     }
 
-    // Metafield write succeeded: now safe to update DB
-    // Handle 'XXX' sentinel specially - don't write XXX over a known value
-    if (fetchedCurrency === NO_CURRENCY_SENTINEL) {
-      // Shopify returned invalid/no currency - don't overwrite a known value with XXX
-      return currentCurrency;
-    }
+    // Update DB if needed
+    if (dbNeedsUpdate) {
+      await sql`
+        UPDATE "Shop" SET currency = ${fetchedCurrency}, "updatedAt" = NOW()
+        WHERE domain = ${shopDomain}
+      `;
 
-    await sql`
-      UPDATE "Shop" SET currency = ${fetchedCurrency}, "updatedAt" = NOW()
-      WHERE domain = ${shopDomain}
-    `;
-
-    if (fetchedCurrency === "INR" && currentCurrency !== "INR") {
-      safeLog("info", "currency_recovery_success", { shopHash: hash });
-    } else if (fetchedCurrency !== "INR" && currentCurrency === "INR") {
-      safeLog("info", "currency_switched_away", { shopHash: hash });
-    } else if (currentCurrency === NO_CURRENCY_SENTINEL) {
-      safeLog("info", "currency_xxx_resolved", { shopHash: hash });
+      if (fetchedCurrency === "INR" && currentCurrency !== "INR") {
+        safeLog("info", "currency_recovery_success", { shopHash: hash });
+      } else if (fetchedCurrency !== "INR" && currentCurrency === "INR") {
+        safeLog("info", "currency_switched_away", { shopHash: hash });
+      } else if (currentCurrency === NO_CURRENCY_SENTINEL) {
+        safeLog("info", "currency_xxx_resolved", { shopHash: hash });
+      }
     }
 
     return fetchedCurrency;

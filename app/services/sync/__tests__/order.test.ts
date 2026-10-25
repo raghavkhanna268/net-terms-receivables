@@ -160,6 +160,46 @@ describeWithDb("Order Sync", () => {
       expect(invoices).toHaveLength(0);
     });
 
+    it("#292: skips order with missing currency (order_currency_missing)", async () => {
+      // An order without currency code should be skipped (fail-closed)
+      const order: ShopifyOrder = {
+        id: `gid://shopify/Order/ord-${TEST_SUFFIX}-nocurrency`,
+        name: "#NO-CURRENCY-ORDER",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
+        // No totalPriceSet - missing currency
+        paymentTerms: {
+          id: "pt-nocurrency",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+          dueInDays: 30,
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      const result = await processOrderWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "ORDERS_CREATE",
+        order,
+        `wh-ord-${TEST_SUFFIX}-nocurrency`
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("skipped");
+      expect(result.skipReason).toBe("order_currency_missing");
+
+      // Verify NO invoice was created
+      const invoicesNoCurrency = await sql`
+        SELECT * FROM "Invoice" WHERE "orderId" = ${order.id}
+      `;
+      expect(invoicesNoCurrency).toHaveLength(0);
+    });
+
     it("skips retail orders (no payment terms, no B2B, no tag) as permanent skip", async () => {
       // A retail order with no payment terms and no company location is a permanent skip
       const order: ShopifyOrder = {

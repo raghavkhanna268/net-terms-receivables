@@ -291,6 +291,10 @@ async function fetchShopAuthInfo(admin: AdminGraphqlClient): Promise<ShopAuthInf
  * - Fresh install: Creates new Shop row with timezone and currency (or defaults if query fails)
  * - Reinstall: Clears uninstalledAt and updates timezone/currency (preserves existing if query fails)
  * - Re-auth: Updates timezone/currency only (preserves existing if query fails)
+ *
+ * #292: Write order - shop_config FIRST, then DB. A failed shop_config write is logged
+ * but does not block the DB upsert (install must succeed). /app will detect and retry
+ * any shop_config mismatch on next load.
  */
 async function syncShopInfo(
   shop: string,
@@ -300,16 +304,20 @@ async function syncShopInfo(
 
   const authInfo = await fetchShopAuthInfo(admin);
 
+  // #292: Write shop_config metafield FIRST, log warning on failure but continue
+  if (authInfo.shopId) {
+    const writeResult = await writeShopConfigMetafield(admin, authInfo.shopId, authInfo.currencyCode);
+    if (!writeResult.success) {
+      safeLog("warn", "shop_config_write_failed", { err: writeResult.error ?? "unknown" });
+    }
+  }
+
   try {
     await upsertShopOnAuth(sql, shop, authInfo.timezone, authInfo.currencyCode);
   } catch (error) {
     const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
     console.error(`[afterAuth] upsert_shop_failed reason=db_error err=${errInfo}`);
     throw error;
-  }
-
-  if (authInfo.shopId) {
-    await writeShopConfigMetafield(admin, authInfo.shopId, authInfo.currencyCode);
   }
 }
 
