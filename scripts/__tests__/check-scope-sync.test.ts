@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { extractTomlScopes, extractJsoncScopes, normalizeScopes } from "../check-scope-sync";
 
 describe("check-scope-sync", () => {
@@ -82,6 +84,66 @@ scopes = "read_orders,write_orders"
 
     it("handles single scope", () => {
       expect(normalizeScopes("read_orders")).toBe("read_orders");
+    });
+  });
+
+  describe("S24 production scope assertions", () => {
+    const ROOT = resolve(import.meta.dirname, "..", "..");
+    const tomlContent = readFileSync(resolve(ROOT, "shopify.app.toml"), "utf-8");
+    const wranglerContent = readFileSync(resolve(ROOT, "wrangler.jsonc"), "utf-8");
+    const tomlScopes = extractTomlScopes(tomlContent);
+    const wranglerScopes = extractJsoncScopes(wranglerContent);
+
+    const EXPECTED_SCOPES = [
+      "read_draft_orders",
+      "read_payment_terms",
+      "write_companies",
+      "write_customers",
+      "write_merchant_managed_fulfillment_orders",
+      "write_orders",
+      "write_payment_customizations",
+      "write_validations",
+    ].sort();
+
+    it("shopify.app.toml has exactly 8 scopes", () => {
+      expect(tomlScopes).not.toBeNull();
+      const scopes = tomlScopes!.split(",").sort();
+      expect(scopes).toHaveLength(8);
+      expect(scopes).toEqual(EXPECTED_SCOPES);
+    });
+
+    it("wrangler.jsonc SCOPES matches shopify.app.toml exactly", () => {
+      expect(wranglerScopes).not.toBeNull();
+      expect(normalizeScopes(wranglerScopes!)).toBe(normalizeScopes(tomlScopes!));
+    });
+
+    it("write_payment_terms is NOT present", () => {
+      expect(tomlScopes).not.toContain("write_payment_terms");
+      expect(wranglerScopes).not.toContain("write_payment_terms");
+    });
+
+    it("write_draft_orders is NOT present", () => {
+      expect(tomlScopes).not.toContain("write_draft_orders");
+      expect(wranglerScopes).not.toContain("write_draft_orders");
+    });
+
+    it("read_locations is NOT present", () => {
+      expect(tomlScopes).not.toContain("read_locations");
+      expect(wranglerScopes).not.toContain("read_locations");
+    });
+
+    it("read_all_orders is NOT present", () => {
+      expect(tomlScopes).not.toContain("read_all_orders");
+      expect(wranglerScopes).not.toContain("read_all_orders");
+    });
+
+    it("dropped read_companies, read_customers, read_orders are NOT present", () => {
+      expect(tomlScopes).not.toContain("read_companies");
+      expect(tomlScopes).not.toContain("read_customers");
+      expect(tomlScopes).not.toContain("read_orders");
+      expect(wranglerScopes).not.toContain("read_companies");
+      expect(wranglerScopes).not.toContain("read_customers");
+      expect(wranglerScopes).not.toContain("read_orders");
     });
   });
 });
