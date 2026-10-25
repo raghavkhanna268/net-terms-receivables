@@ -448,5 +448,20 @@ describe("getPlanConfig", () => {
       expect(plan.limits.companies).toBe(0);
       expect(plan.limits.importsPerMonth).toBe(-1);
     });
+
+    it("returns none config for 'toString' (prototype pollution guard)", () => {
+      const plan = getPlanConfig("toString" as PlanKey);
+      expect(plan.key).toBe("none");
+    });
+
+    it("returns none config for 'constructor' (prototype pollution guard)", () => {
+      const plan = getPlanConfig("constructor" as PlanKey);
+      expect(plan.key).toBe("none");
+    });
+
+    it("returns none config for '__proto__' (prototype pollution guard)", () => {
+      const plan = getPlanConfig("__proto__" as PlanKey);
+      expect(plan.key).toBe("none");
+    });
   });
 });

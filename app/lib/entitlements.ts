@@ -203,14 +203,15 @@ export function mapSubscriptionToPlanKey(
  *
  * Defensive: returns none config for unknown/invalid keys.
  * This handles cases where a raw string from DB is cast to PlanKey.
+ * Uses Object.hasOwn to avoid prototype pollution (toString, constructor, __proto__).
  *
  * @param key - The plan key (may be unknown string cast to PlanKey)
  * @returns The plan configuration (none if key is unknown)
  */
 export function getPlanConfig(key: PlanKey): PlanConfig {
-  // Defensive: check if key exists in PLAN_CONFIGS before accessing
+  // Defensive: use Object.hasOwn to avoid prototype pollution attacks
   // This handles arbitrary strings that were cast to PlanKey
-  if (key in PLAN_CONFIGS) {
+  if (Object.hasOwn(PLAN_CONFIGS, key)) {
     return PLAN_CONFIGS[key];
   }
   return PLAN_CONFIGS.none;

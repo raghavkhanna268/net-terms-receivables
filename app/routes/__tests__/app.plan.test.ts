@@ -309,11 +309,14 @@ describe("Plan Page Component Logic", () => {
     expect(bannerTone).toBe("warning");
   });
 
-  it("uses info banner tone when gating is OFF and limit reached", () => {
+  it("shows no Usage Note banner when gating is OFF (T1: removed)", () => {
+    // The Usage Note banner was removed in T1 - when gating is OFF,
+    // no limit-related banners are shown at all
     const gatingEnforced = false;
     const hasLimitReached = true;
-    const bannerTone = hasLimitReached && !gatingEnforced ? "info" : "warning";
-    expect(bannerTone).toBe("info");
+    // With gating off, neither warning nor info banner is shown
+    const showBanner = hasLimitReached && gatingEnforced;
+    expect(showBanner).toBe(false);
   });
 });
 
@@ -616,5 +619,124 @@ describe("S21 No price strings in plan output", () => {
       expect(state.bodyText).not.toContain("$");
       expect(state.bodyText).not.toContain("₹");
     }
+  });
+});
+
+/**
+ * UsageDisplay component render tests (T1 QA2).
+ *
+ * Tests that UsageDisplay renders correctly with gating ON and OFF:
+ * - gatingEnforced=false: no 'At Limit', 'Near Limit' badges
+ * - gatingEnforced=true at limit: shows 'At Limit' badge
+ * - gatingEnforced=true near limit: shows 'Near Limit' badge
+ */
+describe("UsageDisplay component render tests", () => {
+  it("shows no badges when gatingEnforced is false (at limit)", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { UsageDisplay } = await import("../app.plan");
+
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 25,
+        limit: 25,
+        label: "Buyer Accounts",
+        gatingEnforced: false,
+      })
+    );
+
+    expect(html).not.toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+    expect(html).not.toContain("Usage Note");
+  });
+
+  it("shows no badges when gatingEnforced is false (near limit)", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { UsageDisplay } = await import("../app.plan");
+
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 20, // 80% of 25
+        limit: 25,
+        label: "Buyer Accounts",
+        gatingEnforced: false,
+      })
+    );
+
+    expect(html).not.toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+    expect(html).not.toContain("Usage Note");
+  });
+
+  it("shows At Limit badge when gatingEnforced is true and at limit", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { UsageDisplay } = await import("../app.plan");
+
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 25,
+        limit: 25,
+        label: "Buyer Accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+  });
+
+  it("shows Near Limit badge when gatingEnforced is true and near limit", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { UsageDisplay } = await import("../app.plan");
+
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 20, // 80% of 25
+        limit: 25,
+        label: "Buyer Accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).not.toContain("At Limit");
+    expect(html).toContain("Near Limit");
+  });
+
+  it("shows usage with limit format when gatingEnforced is true", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { UsageDisplay } = await import("../app.plan");
+
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 10,
+        limit: 25,
+        label: "Buyer Accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).toContain("10 / 25");
+  });
+
+  it("shows usage count only when gatingEnforced is false", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { UsageDisplay } = await import("../app.plan");
+
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 10,
+        limit: 25,
+        label: "Buyer Accounts",
+        gatingEnforced: false,
+      })
+    );
+
+    expect(html).toContain(">10<");
+    expect(html).not.toContain("/ 25");
   });
 });

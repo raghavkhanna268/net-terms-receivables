@@ -99,7 +99,11 @@ function formatLimit(limit: number): string {
   return limit === -1 ? "Unlimited" : String(limit);
 }
 
-function UsageDisplay({
+/**
+ * UsageDisplay component for showing usage statistics with optional badges.
+ * Exported for testing.
+ */
+export function UsageDisplay({
   current,
   limit,
   label,
