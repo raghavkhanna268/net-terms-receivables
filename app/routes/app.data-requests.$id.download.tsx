@@ -5,7 +5,7 @@ import {
   getDataRequestExport,
   markDataRequestDownloaded,
 } from "~/services/compliance";
-import { recordAccess, getActorFromSession } from "~/services/access-log.server";
+import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 
 /**
  * S22 Resource route for downloading data request exports.
@@ -23,7 +23,7 @@ import { recordAccess, getActorFromSession } from "~/services/access-log.server"
 
 export const loader = async ({ request, params, context }: LoaderFunctionArgs) => {
   const { shopify } = context;
-  const { session } = await shopify.authenticate.admin(request);
+  const { session, sessionToken } = await shopify.authenticate.admin(request);
 
   const requestId = params.id;
   if (!requestId) {
@@ -57,7 +57,7 @@ export const loader = async ({ request, params, context }: LoaderFunctionArgs) =
 
   recordAccess(sql, {
     shopId: shop.id,
-    actor: getActorFromSession(session),
+    actor: getActorFromSessionToken(sessionToken, session),
     action: "data_requests_download",
     recordType: "DataRequest",
     recordId: requestId,

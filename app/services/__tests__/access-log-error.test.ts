@@ -2,8 +2,9 @@
  * Tests that access log failures don't break page rendering.
  *
  * Tests:
- * - Loader still returns 200/renders when the insert throws
- * - Error log is count-only (no PII)
+ * - recordAccess does not throw when the insert fails
+ * - Loader still returns normal data when AuditEvent insert fails
+ * - Error log is count-only (no PII, no error text)
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
@@ -12,6 +13,7 @@ describe("access-log error handling", () => {
 
   beforeEach(() => {
     consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.resetModules();
   });
 
   afterEach(() => {
@@ -20,6 +22,10 @@ describe("access-log error handling", () => {
   });
 
   it("recordAccess does not throw when SQL insert fails", async () => {
+    vi.doMock("~/lib/request-context.server", () => ({
+      getRequestWaitUntil: () => undefined,
+    }));
+
     const { recordAccess } = await import("../access-log.server");
 
     const mockSqlThatThrows = Object.assign(
@@ -30,10 +36,6 @@ describe("access-log error handling", () => {
         json: (data: unknown) => JSON.stringify(data),
       }
     ) as unknown as Parameters<typeof recordAccess>[0];
-
-    vi.doMock("~/lib/request-context.server", () => ({
-      getRequestWaitUntil: () => undefined,
-    }));
 
     expect(() => {
       recordAccess(mockSqlThatThrows, {
@@ -49,6 +51,10 @@ describe("access-log error handling", () => {
   });
 
   it("logs count-only error when insert fails (no PII)", async () => {
+    vi.doMock("~/lib/request-context.server", () => ({
+      getRequestWaitUntil: () => undefined,
+    }));
+
     const { recordAccess } = await import("../access-log.server");
 
     const mockSqlThatThrows = Object.assign(
@@ -59,10 +65,6 @@ describe("access-log error handling", () => {
         json: (data: unknown) => JSON.stringify(data),
       }
     ) as unknown as Parameters<typeof recordAccess>[0];
-
-    vi.doMock("~/lib/request-context.server", () => ({
-      getRequestWaitUntil: () => undefined,
-    }));
 
     recordAccess(mockSqlThatThrows, {
       shopId: "shop-123",
@@ -100,7 +102,6 @@ describe("access-log error handling", () => {
       getRequestWaitUntil: () => mockWaitUntil,
     }));
 
-    vi.resetModules();
     const { recordAccess } = await import("../access-log.server");
 
     const insertCalled = vi.fn();
@@ -132,10 +133,14 @@ describe("access-log error handling", () => {
   });
 
   it("error log contains no raw error message that could have PII", async () => {
+    vi.doMock("~/lib/request-context.server", () => ({
+      getRequestWaitUntil: () => undefined,
+    }));
+
     const { recordAccess } = await import("../access-log.server");
 
     const sensitiveErrorMessage =
-      "Error processing request for customer@example.myshopify.com with order #12345";
+      "Error processing request for customer@example.com with order #12345";
     const mockSqlThatThrows = Object.assign(
       async () => {
         throw new Error(sensitiveErrorMessage);
@@ -144,10 +149,6 @@ describe("access-log error handling", () => {
         json: (data: unknown) => JSON.stringify(data),
       }
     ) as unknown as Parameters<typeof recordAccess>[0];
-
-    vi.doMock("~/lib/request-context.server", () => ({
-      getRequestWaitUntil: () => undefined,
-    }));
 
     recordAccess(mockSqlThatThrows, {
       shopId: "shop-456",
@@ -163,7 +164,7 @@ describe("access-log error handling", () => {
     const logOutput = consoleErrorSpy.mock.calls[0][0] as string;
 
     expect(logOutput).not.toContain("customer@");
-    expect(logOutput).not.toContain("myshopify.com");
+    expect(logOutput).not.toContain("example.com");
     expect(logOutput).not.toContain("#12345");
     expect(logOutput).not.toContain("order");
     expect(logOutput).not.toContain(sensitiveErrorMessage);

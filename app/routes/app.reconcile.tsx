@@ -36,7 +36,7 @@ import {
 import { applyMatch, unmatchMatch, RECONCILE_HUMAN_MESSAGES } from "~/services/apply.server";
 import { formatPaiseAmount } from "~/lib/aging";
 import { safeLog, toErrorCode } from "~/lib/log.server";
-import { recordAccess, getActorFromSession } from "~/services/access-log.server";
+import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 
 const PAGE_SIZE = 20;
 
@@ -112,7 +112,7 @@ interface MatchSummary {
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { shopify } = context;
-  const { session } = await shopify.authenticate.admin(request);
+  const { session, sessionToken } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
@@ -320,7 +320,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   recordAccess(sql, {
     shopId: shop.id,
-    actor: getActorFromSession(session),
+    actor: getActorFromSessionToken(sessionToken, session),
     action: "reconcile",
     recordType: "Payment",
     count: totalCount,

@@ -2,110 +2,142 @@
  * Unit tests for access-log.server.ts
  *
  * Tests:
+ * - getActorFromSessionToken prefers sessionToken.sub
+ * - Fallback to session.onlineAccessInfo.associated_user.id
+ * - Returns 'unknown' when neither available or sub is email-like
  * - Helper drops extra fields
  * - Written row contains no PII
- * - Actor falls back to 'unknown' and never takes an email
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { getActorFromSession } from "../access-log.server";
+import { getActorFromSessionToken } from "../access-log.server";
 
 describe("access-log.server", () => {
-  describe("getActorFromSession", () => {
-    it("returns user id as string when present", () => {
+  describe("getActorFromSessionToken", () => {
+    it("returns sessionToken.sub when present and numeric", () => {
+      const sessionToken = { sub: "12345" };
+      const session = {};
+      expect(getActorFromSessionToken(sessionToken, session)).toBe("12345");
+    });
+
+    it("prefers sessionToken.sub over session.associated_user.id", () => {
+      const sessionToken = { sub: "99999" };
       const session = {
         onlineAccessInfo: {
-          associatedUser: {
+          associated_user: {
             id: 12345,
           },
         },
       };
-      expect(getActorFromSession(session)).toBe("12345");
+      expect(getActorFromSessionToken(sessionToken, session)).toBe("99999");
     });
 
-    it("handles bigint user id", () => {
+    it("returns 'unknown' when sessionToken.sub is email-like", () => {
+      const sessionToken = { sub: "staff@example.myshopify.com" };
+      const session = {};
+      expect(getActorFromSessionToken(sessionToken, session)).toBe("unknown");
+    });
+
+    it("returns 'unknown' when sessionToken.sub contains non-digits", () => {
+      const sessionToken = { sub: "user-abc-123" };
+      const session = {};
+      expect(getActorFromSessionToken(sessionToken, session)).toBe("unknown");
+    });
+
+    it("falls back to session.associated_user.id when sessionToken is undefined", () => {
+      const sessionToken = undefined;
       const session = {
         onlineAccessInfo: {
-          associatedUser: {
+          associated_user: {
+            id: 67890,
+          },
+        },
+      };
+      expect(getActorFromSessionToken(sessionToken, session)).toBe("67890");
+    });
+
+    it("falls back to session.associated_user.id when sessionToken.sub is undefined", () => {
+      const sessionToken = {};
+      const session = {
+        onlineAccessInfo: {
+          associated_user: {
+            id: 54321,
+          },
+        },
+      };
+      expect(getActorFromSessionToken(sessionToken, session)).toBe("54321");
+    });
+
+    it("handles bigint user id in session fallback", () => {
+      const sessionToken = undefined;
+      const session = {
+        onlineAccessInfo: {
+          associated_user: {
             id: BigInt("9007199254740993"),
           },
         },
       };
-      expect(getActorFromSession(session)).toBe("9007199254740993");
+      expect(getActorFromSessionToken(sessionToken, session)).toBe("9007199254740993");
     });
 
-    it("handles string user id", () => {
-      const session = {
-        onlineAccessInfo: {
-          associatedUser: {
-            id: "user-123",
-          },
-        },
-      };
-      expect(getActorFromSession(session)).toBe("user-123");
-    });
-
-    it("returns 'unknown' when onlineAccessInfo is missing", () => {
+    it("returns 'unknown' when both sessionToken.sub and session.associated_user.id are missing", () => {
+      const sessionToken = {};
       const session = {};
-      expect(getActorFromSession(session)).toBe("unknown");
+      expect(getActorFromSessionToken(sessionToken, session)).toBe("unknown");
     });
 
-    it("returns 'unknown' when associatedUser is missing", () => {
+    it("returns 'unknown' when session.onlineAccessInfo is missing", () => {
+      const sessionToken = undefined;
+      const session = {};
+      expect(getActorFromSessionToken(sessionToken, session)).toBe("unknown");
+    });
+
+    it("returns 'unknown' when session.associated_user is missing", () => {
+      const sessionToken = undefined;
       const session = {
         onlineAccessInfo: {},
       };
-      expect(getActorFromSession(session)).toBe("unknown");
+      expect(getActorFromSessionToken(sessionToken, session)).toBe("unknown");
     });
 
-    it("returns 'unknown' when id is undefined", () => {
+    it("returns 'unknown' when session.associated_user.id is null", () => {
+      const sessionToken = undefined;
       const session = {
         onlineAccessInfo: {
-          associatedUser: {},
-        },
-      };
-      expect(getActorFromSession(session)).toBe("unknown");
-    });
-
-    it("returns 'unknown' when id is null", () => {
-      const session = {
-        onlineAccessInfo: {
-          associatedUser: {
+          associated_user: {
             id: null as unknown as undefined,
           },
         },
       };
-      expect(getActorFromSession(session)).toBe("unknown");
+      expect(getActorFromSessionToken(sessionToken, session)).toBe("unknown");
     });
 
     it("NEVER returns an email address - uses numeric id instead", () => {
+      const sessionToken = { sub: "78901" };
       const session = {
         onlineAccessInfo: {
-          associatedUser: {
+          associated_user: {
             id: 67890,
             email: "staff@example-store.myshopify.com",
           },
         },
       };
-      const actor = getActorFromSession(session);
-      expect(actor).toBe("67890");
+      const actor = getActorFromSessionToken(sessionToken, session);
+      expect(actor).toBe("78901");
       expect(actor).not.toContain("@");
       expect(actor).not.toContain("example");
       expect(actor).not.toContain("myshopify");
     });
 
-    it("does not use firstName or lastName", () => {
+    it("falls back correctly when sessionToken.sub is email but session has numeric id", () => {
+      const sessionToken = { sub: "admin@shop.myshopify.com" };
       const session = {
         onlineAccessInfo: {
-          associatedUser: {
-            id: 111,
-            firstName: "John",
-            lastName: "Doe",
+          associated_user: {
+            id: 11111,
           },
         },
       };
-      const actor = getActorFromSession(session);
-      expect(actor).toBe("111");
-      expect(actor).not.toContain("John");
-      expect(actor).not.toContain("Doe");
+      expect(getActorFromSessionToken(sessionToken, session)).toBe("unknown");
     });
   });
 
@@ -121,6 +153,11 @@ describe("access-log.server", () => {
     });
 
     it("event data contains only whitelisted fields", async () => {
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestWaitUntil: () => undefined,
+      }));
+      vi.resetModules();
+
       const { recordAccess } = await import("../access-log.server");
 
       let capturedData: Record<string, unknown> | null = null;
@@ -133,10 +170,6 @@ describe("access-log.server", () => {
           },
         }
       ) as unknown as Parameters<typeof recordAccess>[0];
-
-      vi.doMock("~/lib/request-context.server", () => ({
-        getRequestWaitUntil: () => undefined,
-      }));
 
       recordAccess(mockSql, {
         shopId: "shop-123",
@@ -158,6 +191,11 @@ describe("access-log.server", () => {
     });
 
     it("includes recordId when provided", async () => {
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestWaitUntil: () => undefined,
+      }));
+      vi.resetModules();
+
       const { recordAccess } = await import("../access-log.server");
 
       let capturedData: Record<string, unknown> | null = null;
@@ -174,7 +212,7 @@ describe("access-log.server", () => {
       recordAccess(mockSql, {
         shopId: "shop-123",
         actor: "12345",
-        action: "accounts.detail",
+        action: "accounts_detail",
         recordType: "BuyerAccount",
         recordId: "acc-456",
       });
@@ -190,6 +228,11 @@ describe("access-log.server", () => {
     });
 
     it("event data contains no PII fields", async () => {
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestWaitUntil: () => undefined,
+      }));
+      vi.resetModules();
+
       const { recordAccess } = await import("../access-log.server");
 
       let capturedData: Record<string, unknown> | null = null;
@@ -241,6 +284,11 @@ describe("access-log.server", () => {
     });
 
     it("written row keys are exactly: recordType, recordId?, count?", async () => {
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestWaitUntil: () => undefined,
+      }));
+      vi.resetModules();
+
       const { recordAccess } = await import("../access-log.server");
 
       let capturedData: Record<string, unknown> | null = null;
@@ -257,7 +305,7 @@ describe("access-log.server", () => {
       recordAccess(mockSql, {
         shopId: "shop-123",
         actor: "12345",
-        action: "data_requests.download",
+        action: "data_requests_download",
         recordType: "DataRequest",
         recordId: "req-789",
         count: 1,

@@ -28,7 +28,7 @@ import { useLoaderData, useActionData, Form, useNavigation } from "react-router"
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { isAccountActive, isGatingEnforced } from "~/services/gating.server";
-import { recordAccess, getActorFromSession } from "~/services/access-log.server";
+import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 import {
   getBuyerOptOutStatus,
   setBuyerOptOut,
@@ -141,7 +141,7 @@ interface ActionData {
 
 export const loader = async ({ request, context, params }: LoaderFunctionArgs) => {
   const { shopify } = context;
-  const { session } = await shopify.authenticate.admin(request);
+  const { session, sessionToken } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
   const accountId = params.id;
@@ -330,7 +330,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
 
   recordAccess(sql, {
     shopId: shop.id,
-    actor: getActorFromSession(session),
+    actor: getActorFromSessionToken(sessionToken, session),
     action: "accounts_detail",
     recordType: "BuyerAccount",
     recordId: accountId,
