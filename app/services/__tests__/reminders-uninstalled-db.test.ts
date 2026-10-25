@@ -98,7 +98,7 @@ describeWithDb("S18 reminder uninstalled shop handling (DB)", () => {
   describe("sendPaymentReminder - uninstalled shop", () => {
     it("skips with shop_uninstalled, no fetch, 0 ReminderLog rows", async () => {
       const { sendPaymentReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake" };
 
       const invoiceId = `inv-uninstall-send-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/uninstall-send-${TEST_SUFFIX}`;
@@ -154,7 +154,7 @@ describeWithDb("S18 reminder uninstalled shop handling (DB)", () => {
   describe("sendCatchupReminder - uninstalled shop", () => {
     it("deletes pre-existing delayed row when shop uninstalled", async () => {
       const { sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake" };
 
       const invoiceId = `inv-uninstall-catchup-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/uninstall-catchup-${TEST_SUFFIX}`;

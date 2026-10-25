@@ -140,7 +140,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   describe("cap boundary - delayed instead of deleted", () => {
     it("upserts as delayed when daily cap is reached", async () => {
       const { sendPaymentReminder, DAILY_SEND_CAP } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
       const invoiceId = `inv-cap-delayed-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/cap-delayed-${TEST_SUFFIX}`;
@@ -250,7 +250,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
 
     it("older delayed stage skipped when newer stage is already sent", async () => {
       const { sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
       const invoiceId = `inv-sent-newer-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/sent-newer-${TEST_SUFFIX}`;
@@ -318,7 +318,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   describe("payment mid-window - delayed row deleted silently", () => {
     it("deletes delayed row when invoice is paid before catch-up", async () => {
       const { sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
       const invoiceId = `inv-paid-mid-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/paid-mid-${TEST_SUFFIX}`;
@@ -409,7 +409,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   describe("at most one per invoice per day", () => {
     it("skips catch-up when invoice already has sent reminder today", async () => {
       const { sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
       const invoiceId = `inv-one-per-day-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/one-per-day-${TEST_SUFFIX}`;
@@ -479,7 +479,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
 
     it("REMINDER_SEND skips when another stage already sent today", async () => {
       const { sendPaymentReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
       const invoiceId = `inv-concurrent-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/concurrent-${TEST_SUFFIX}`;
@@ -542,7 +542,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   describe("duplicate catch-up messages", () => {
     it("second catch-up message skips when first already sent", async () => {
       const { sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
       const invoiceId = `inv-dup-catchup-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/dup-catchup-${TEST_SUFFIX}`;
@@ -757,7 +757,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   describe("partly paid invoice - sends with outstanding balance", () => {
     it("sends reminder for partly paid invoice (outstanding > 0)", async () => {
       const { sendPaymentReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
       const invoiceId = `inv-partly-paid-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/partly-paid-${TEST_SUFFIX}`;
@@ -810,7 +810,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
 
     it("skips invoice when outstanding is zero", async () => {
       const { sendPaymentReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
       const invoiceId = `inv-zero-outstanding-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/zero-outstanding-${TEST_SUFFIX}`;
@@ -865,7 +865,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   describe("delayed-to-sent transition preserves firstCappedAt", () => {
     it("markDelayedAsSent keeps firstCappedAt for 'sent late' tracking", async () => {
       const { sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
       const invoiceId = `inv-sent-late-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/sent-late-${TEST_SUFFIX}`;
@@ -934,7 +934,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   describe("one reminder per invoice per day - newer stage wins", () => {
     it("stage 1 delayed becomes skipped when stage 2 is due today, only stage 2 sends", async () => {
       const { sendPaymentReminder, sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
       const invoiceId = `inv-newer-stage-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/newer-stage-${TEST_SUFFIX}`;
@@ -1149,7 +1149,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   describe("auth error logging", () => {
     it("logs reminders_catchup_auth_error on 401 response", async () => {
       const { sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_invalid", RESEND_FROM: "noreply@test-reminders.example" };
+      const validEnv = { RESEND_API_KEY: "re_test_invalid", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
       const invoiceId = `inv-auth-error-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/auth-error-${TEST_SUFFIX}`;
@@ -1246,7 +1246,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
 
     it("flag=false: catch-up sends to gated account", async () => {
       const { sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
       const originalEnv = process.env.PLAN_GATING_ENFORCED;
 
       // Set gating flag to false via env var
@@ -1302,7 +1302,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
 
     it("flag=true: catch-up skips gated account", async () => {
       const { sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
       const originalEnv = process.env.PLAN_GATING_ENFORCED;
 
       // Set gating flag to true via env var
