@@ -24,13 +24,18 @@ import { S6_QUEUES } from "~/lib/pgmq.server";
 /**
  * Reconcile message for triggering bulk exports.
  * Extends string index signature for JSON serialization compatibility.
+ *
+ * Optional manualKey: present for manual (UI-triggered) runs only.
+ * When set, orders stage uses the same key base instead of the date key.
  */
 export interface ReconcileMessage {
   topic: "RECONCILE_COMPANIES" | "RECONCILE_ORDERS";
   shop: string;
   webhookId: string;
   enqueuedAt: string;
-  [key: string]: string;
+  /** Manual run key base (e.g. "manual:123456789") - present only for UI-triggered runs */
+  manualKey?: string;
+  [key: string]: string | undefined;
 }
 
 /**
