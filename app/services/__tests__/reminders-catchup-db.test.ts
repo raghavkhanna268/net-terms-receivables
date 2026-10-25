@@ -1210,7 +1210,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
 
     it("flag=false: catch-up sends to gated account", async () => {
       const { sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "catchup-buyer@test-reminders.example" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "gated-catchup@test-reminders.example" };
       const originalEnv = process.env.PLAN_GATING_ENFORCED;
 
       (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "false";

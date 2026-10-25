@@ -219,6 +219,7 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
         RESEND_FROM: "noreply@test-reminders.example",
         REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
         SHOPIFY_APP_URL: "https://example.com",
+        RESEND_TEST_RECIPIENTS: "optout-buyer@test-reminders.example,other-buyer@test-reminders.example",
       };
 
       const invoiceId = `inv-not-optout-${TEST_SUFFIX}`;
