@@ -137,14 +137,16 @@ function parseUpi(text: string, textUpper: string, bank?: BankId): ParsedNarrati
   }
   
   // ICICI: VPA may be without '@' - check segment index 2 only
-  // Format: UPI/CR/123456789012/vpa-id/SENDER NAME (vpa-id is at index 2 after split)
+  // Format: UPI/CR/vpa-id/SENDER NAME/BANK NAME (index 2 = VPA ID, index 4 = bank)
   if (!result.upiId && bank === "ICICI" && parts.length > 2) {
     const candidate = parts[2].trim();
-    // Must be 10+ chars, alphanumeric with optional dots, not a pure number
+    // Must be 10+ chars, alphanumeric with optional dots, not a pure number,
+    // and not a code-shaped ref (3-6 letters + digits like SYNT000001)
     if (
       candidate.length >= 10 &&
       /^[a-zA-Z0-9.]+$/.test(candidate) &&
       !/^\d+$/.test(candidate) &&
+      !/^[A-Z]{3,6}\d+$/i.test(candidate) &&
       !candidate.includes("@")
     ) {
       result.upiId = candidate.toLowerCase();
@@ -520,19 +522,8 @@ export function extractUtrForDedupe(
     if (rail === "RTGS" && RTGS_UTR_PATTERN.test(ref)) {
       return ref;
     }
-    if (rail === "IMPS" || rail === "UPI") {
-      // Check raw ref first
-      if (/^\d{12}$/.test(ref)) {
-        return ref;
-      }
-      // HDFC uses 16-digit zero-padded refs (0000 + 12-digit RRN)
-      // Strip leading zeros for comparison only, return the 12-digit RRN
-      if (/^\d+$/.test(ref)) {
-        const stripped = ref.replace(/^0+/, "");
-        if (/^\d{12}$/.test(stripped)) {
-          return stripped;
-        }
-      }
+    if ((rail === "IMPS" || rail === "UPI") && /^\d{12}$/.test(ref)) {
+      return ref;
     }
   }
 

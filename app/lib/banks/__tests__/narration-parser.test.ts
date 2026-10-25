@@ -274,6 +274,17 @@ describe("narration-parser", () => {
         expect(result.upiId).toBe("synttest.1234");
       });
 
+      it("does NOT extract code-shaped ref as UPI ID (ICICI format)", () => {
+        // Index 2 has "SYNT0000001234" which looks like a code (3-6 letters + digits)
+        const result = parseNarration(
+          "UPI/600000000001/SYNT0000001234/SYNT VENDOR/SYNT BANK",
+          "ICICI"
+        );
+        expect(result.rail).toBe("UPI");
+        // Should NOT be extracted as UPI ID since it matches ^[A-Z]{3,6}\d+$
+        expect(result.upiId).toBeUndefined();
+      });
+
       it("extracts standard VPA in HDFC format", () => {
         const result = parseNarration(
           "UPI-SYNT VENDOR-vendor9000@oksynt-SYNT0000001-600000000003-UPI"
@@ -355,17 +366,13 @@ describe("narration-parser", () => {
         expect(extractUtrForDedupe("some narration", "UPI", "123456789012")).toBe("123456789012");
       });
 
-      it("strips leading zeros from HDFC 16-digit zero-padded ref to get 12-digit RRN", () => {
-        // HDFC uses 0000 + 12-digit RRN format
-        expect(extractUtrForDedupe("some narration", "UPI", "0000600000000001")).toBe("600000000001");
+      it("returns null for non-12-digit ref and falls back to narration", () => {
+        // 16-digit ref doesn't match 12-digit pattern, so falls back to narration extraction
+        expect(extractUtrForDedupe("UPI/600000000001/vendor@synth", "UPI", "0000600000000001")).toBe("600000000001");
       });
 
-      it("returns null for all-zeros ref (no valid RRN)", () => {
-        expect(extractUtrForDedupe("some narration", "UPI", "0000000000000000")).toBeNull();
-      });
-
-      it("returns null for ref that strips to less than 12 digits", () => {
-        expect(extractUtrForDedupe("some narration", "UPI", "00001234")).toBeNull();
+      it("returns null when ref is all zeros and narration has no RRN", () => {
+        expect(extractUtrForDedupe("some narration without RRN", "UPI", "0000000000000000")).toBeNull();
       });
     });
 

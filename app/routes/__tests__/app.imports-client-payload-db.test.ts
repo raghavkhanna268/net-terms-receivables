@@ -343,6 +343,40 @@ describeWithDb("Server-side rejection with no DB writes", () => {
     expect(serialized).not.toContain("SGVsbG8gV29ybGQ"); // base64 data
     expect(serialized).not.toContain("TOP_LEVEL_SECRET");
   });
+});
+
+describeWithDb("CMS rail upload (DB)", () => {
+  let sql: ReturnType<typeof postgres>;
+  let testShopId: string;
+  let TEST_SHOP_DOMAIN: string;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    const suffix = Date.now().toString(36) + "cms";
+    TEST_SHOP_DOMAIN = `test-cms-upload-${suffix}.myshopify.com`;
+
+    const [shop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', NOW(), NOW())
+      RETURNING id
+    `;
+    testShopId = shop.id;
+  });
+
+  afterAll(async () => {
+    if (sql) {
+      await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+      await sql.end();
+    }
+  });
+
+  beforeEach(async () => {
+    await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+    await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+  });
 
   it("CMS rail upload returns 200 and stores rail = 'CMS'", async () => {
     const payload = {

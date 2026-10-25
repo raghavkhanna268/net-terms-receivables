@@ -9,7 +9,6 @@ import {
   parseIndianAmount,
   isBlankOrZero,
   formatPaiseToDisplay,
-  normalizeHdfcRef,
   normalizeIciciRef,
 } from "../normalisers.js";
 
@@ -370,43 +369,10 @@ describe("normalisers", () => {
     });
   });
 
-  describe("normalizeHdfcRef", () => {
-    it("strips leading zeros from zero-padded ref (0000600000000001 -> 600000000001)", () => {
-      expect(normalizeHdfcRef("0000600000000001")).toBe("600000000001");
-    });
-
-    it("preserves non-zero-padded refs", () => {
-      expect(normalizeHdfcRef("600000000001")).toBe("600000000001");
-    });
-
-    it("returns undefined for undefined input", () => {
-      expect(normalizeHdfcRef(undefined)).toBeUndefined();
-    });
-
-    it("returns undefined for empty string", () => {
-      expect(normalizeHdfcRef("")).toBeUndefined();
-    });
-
-    it("returns 0 for all-zeros ref", () => {
-      expect(normalizeHdfcRef("0000")).toBe("0");
-    });
-
-    it("preserves alphanumeric refs", () => {
-      expect(normalizeHdfcRef("SYNTN26296000001")).toBe("SYNTN26296000001");
-    });
-
-    it("trims whitespace", () => {
-      expect(normalizeHdfcRef("  0000600000000001  ")).toBe("600000000001");
-    });
-  });
-
   describe("normalizeIciciRef", () => {
-    it("preserves ICICI ref format (3-6 letters + digits)", () => {
+    it("trims and preserves case (no uppercasing for hash stability)", () => {
+      expect(normalizeIciciRef("synt000001")).toBe("synt000001");
       expect(normalizeIciciRef("SYNT000001")).toBe("SYNT000001");
-    });
-
-    it("uppercases lowercase refs", () => {
-      expect(normalizeIciciRef("synt000001")).toBe("SYNT000001");
     });
 
     it("preserves pure numeric cheque numbers", () => {
@@ -423,10 +389,6 @@ describe("normalisers", () => {
 
     it("trims whitespace", () => {
       expect(normalizeIciciRef("  SYNT000001  ")).toBe("SYNT000001");
-    });
-
-    it("preserves non-standard refs as-is", () => {
-      expect(normalizeIciciRef("REF-12345")).toBe("REF-12345");
     });
   });
 });

@@ -815,3 +815,39 @@ describe("transaction validation", () => {
     }
   });
 });
+
+describe("HDFC parser dedupe-key stability", () => {
+  it("preserves raw refNo with leading zeros and produces stable dedupe keys", async () => {
+    // Synthetic HDFC CSV with zero-padded UPI ref and cheque ref
+    const csv = `HDFC BANK
+Account No: XXXXXX1234
+Statement Period: 01/10/2026 to 31/10/2026
+
+Date,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance
+15/10/26,UPI-SYNTHETIC VENDOR-vendor@synth-SYNT0001234-600000000001-UPI,0000600000000001,15/10/26,,50000.00,150000.00
+16/10/26,CHQ DEP-SYNTHETIC RETAILER-000654,000654,16/10/26,,75000.00,225000.00
+`;
+    const file = new File([csv], "hdfc-stability-test.csv", { type: "text/csv" });
+    const result = await parseBankStatement(file);
+
+    expect(result.detection.bank).toBe("HDFC");
+    expect(result.transactions.length).toBe(2);
+
+    // UPI transaction with zero-padded ref
+    const upiTxn = result.transactions.find((t) => t.parsed.rail === "UPI");
+    expect(upiTxn).toBeDefined();
+    expect(upiTxn!.refNo).toBe("0000600000000001");
+    expect(upiTxn!.parsed.utr).toBe("600000000001");
+    expect(upiTxn!.dedupeKey).toBe("utr:UPI:CR:600000000001");
+
+    // Cheque transaction with leading-zero ref
+    const chqTxn = result.transactions.find((t) => t.parsed.rail === "CHEQUE");
+    expect(chqTxn).toBeDefined();
+    expect(chqTxn!.refNo).toBe("000654");
+    expect(chqTxn!.dedupeKey.startsWith("sha256:")).toBe(true);
+    // Hardcoded hash computed from main's code
+    expect(chqTxn!.dedupeKey).toBe(
+      "sha256:557be17f78038c7b70563ea8631a6751369032a923ab977f5f9a32848d5423a9"
+    );
+  });
+});

@@ -270,15 +270,13 @@ function mapIciciColumns(headers: string[]): IciciColumnMap | null {
     } else if (
       h.includes("withdrawal") ||
       h.includes("debit") ||
-      h === "dr" ||
-      h.includes("withdrawal amount")
+      h === "dr"
     ) {
       withdrawalCol = i;
     } else if (
       h.includes("deposit") ||
       h.includes("credit") ||
-      h === "cr" ||
-      h.includes("deposit amount")
+      h === "cr"
     ) {
       depositCol = i;
     } else if (h.includes("balance")) {
