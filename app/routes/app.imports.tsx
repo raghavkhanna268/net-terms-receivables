@@ -269,7 +269,6 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     actor: getActorFromSessionToken(sessionToken, session),
     action: "imports",
     recordType: "BankImport",
-    count: 0,
   });
 
   return {

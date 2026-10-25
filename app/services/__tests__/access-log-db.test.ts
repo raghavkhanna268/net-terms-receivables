@@ -218,7 +218,7 @@ describeWithDb("access-log DB integration", () => {
     });
 
     it("writes access.imports event", async () => {
-      await writeAccessEvent(SHOP_A_ID, "666", "imports", "BankImport", { count: 0 });
+      await writeAccessEvent(SHOP_A_ID, "666", "imports", "BankImport");
       const [event] = await sql<{ type: string }[]>`
         SELECT type FROM "AuditEvent" WHERE "shopId" = ${SHOP_A_ID}
       `;
@@ -343,7 +343,6 @@ describeWithDb("access-log DB integration", () => {
         actor: "user-y",
         action: "imports",
         recordType: "BankImport",
-        count: 0,
       });
 
       await Promise.all(capturedPromises);
