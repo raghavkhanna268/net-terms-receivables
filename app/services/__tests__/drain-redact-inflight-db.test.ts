@@ -136,11 +136,15 @@ describeWithDb("drain: in-flight message for a redacted shop (#239)", () => {
 
   it("leaves 0 rows for shop A, B untouched, C (near-miss) untouched, and counts deadLetterAlreadyGoneCount", async () => {
     const now = new Date();
+    // Shops being redacted need uninstalledAt set, matching real Shopify behavior
+    // where shop/redact arrives ~48h after uninstall
+    const uninstalledAt = new Date(Date.now() - 48 * 60 * 60 * 1000);
 
     // Create shops A, B, and C (near-miss)
+    // Shop A is being redacted, so set uninstalledAt
     await sqlRef`
-      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
-      VALUES (${A.id}, ${A.domain}, 'INR', ${now}, ${now})
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt", "uninstalledAt")
+      VALUES (${A.id}, ${A.domain}, 'INR', ${now}, ${now}, ${uninstalledAt})
     `;
     await sqlRef`
       INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
@@ -534,10 +538,12 @@ describeWithDb("drain guards: interleaving with deleteShop (#239)", () => {
   });
 
   it("Case (a): guard holds FOR SHARE, deleteShop waits, then both complete cleanly", async () => {
-    // Create shop
+    // Create shop with uninstalledAt set (matches real Shopify behavior where
+    // shop/redact arrives ~48h after uninstall)
+    const uninstalledAt = new Date(Date.now() - 48 * 60 * 60 * 1000);
     await sql1`
-      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
-      VALUES (${SHOP_A_ID}, ${SHOP_A_DOMAIN}, 'INR', NOW(), NOW())
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt", "uninstalledAt")
+      VALUES (${SHOP_A_ID}, ${SHOP_A_DOMAIN}, 'INR', NOW(), NOW(), ${uninstalledAt})
     `;
 
     let guardTxDone = false;
@@ -545,11 +551,11 @@ describeWithDb("drain guards: interleaving with deleteShop (#239)", () => {
     let deleteShopDone = false;
 
     // Connection 1: Start transaction, take FOR SHARE, send message, hold open
+    // This simulates any code path that takes FOR SHARE on the Shop row
     const guardPromise = sql1.begin(async (tx) => {
       const [shopRow] = await tx<[{ id: string }?]>`
         SELECT id FROM "Shop"
         WHERE domain = ${SHOP_A_DOMAIN}
-          AND "uninstalledAt" IS NULL
         FOR SHARE
       `;
       expect(shopRow).toBeDefined();
@@ -609,10 +615,12 @@ describeWithDb("drain guards: interleaving with deleteShop (#239)", () => {
   });
 
   it("Case (b): deleteShop runs first, guard sees no row and enqueues nothing", async () => {
-    // Create shop
+    // Create shop with uninstalledAt set (matches real Shopify behavior where
+    // shop/redact arrives ~48h after uninstall)
+    const uninstalledAt = new Date(Date.now() - 48 * 60 * 60 * 1000);
     await sql1`
-      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
-      VALUES (${SHOP_A_ID}, ${SHOP_A_DOMAIN}, 'INR', NOW(), NOW())
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt", "uninstalledAt")
+      VALUES (${SHOP_A_ID}, ${SHOP_A_DOMAIN}, 'INR', NOW(), NOW(), ${uninstalledAt})
     `;
 
     // Run deleteShop first

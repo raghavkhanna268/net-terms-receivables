@@ -59,6 +59,10 @@ describeWithDb("shop/redact complete DB deletion", () => {
 
   const CUSTOMER_GID = `gid://shopify/Customer/${TEST_SUFFIX}`;
 
+  // Shops being redacted need uninstalledAt set, matching real Shopify behavior
+  // where shop/redact arrives ~48h after uninstall
+  const UNINSTALLED_AT = new Date(Date.now() - 48 * 60 * 60 * 1000);
+
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
   });
@@ -107,7 +111,8 @@ describeWithDb("shop/redact complete DB deletion", () => {
   async function seedShopData(
     shopId: string,
     shopDomain: string,
-    suffix: string
+    suffix: string,
+    options?: { uninstalledAt?: Date }
   ): Promise<void> {
     const accountId = `acc-${suffix}`;
     const importId = `import-${suffix}`;
@@ -125,11 +130,12 @@ describeWithDb("shop/redact complete DB deletion", () => {
     const sessionId = `offline_${shopDomain}`;
 
     const now = new Date();
+    const uninstalledAt = options?.uninstalledAt ?? null;
 
     // Shop
     await sql`
-      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
-      VALUES (${shopId}, ${shopDomain}, 'INR', ${now}, ${now})
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt", "uninstalledAt")
+      VALUES (${shopId}, ${shopDomain}, 'INR', ${now}, ${now}, ${uninstalledAt})
     `;
 
     // Session (FK-cascade via shop domain index, but not FK-linked)
@@ -581,7 +587,8 @@ describeWithDb("shop/redact complete DB deletion", () => {
 
   it("deletes all shop A rows and leaves shop B intact", async () => {
     // Seed data for both shops
-    await seedShopData(SHOP_A_ID, SHOP_A_DOMAIN, `a-${TEST_SUFFIX}`);
+    // Shop A is being redacted, so set uninstalledAt (matches real Shopify behavior)
+    await seedShopData(SHOP_A_ID, SHOP_A_DOMAIN, `a-${TEST_SUFFIX}`, { uninstalledAt: UNINSTALLED_AT });
     await seedShopData(SHOP_B_ID, SHOP_B_DOMAIN, `b-${TEST_SUFFIX}`);
 
     // Verify both shops have data
@@ -666,11 +673,12 @@ describeWithDb("shop/redact complete DB deletion", () => {
     }
 
     // Create a temporary shop C with A's domain for deletion test
+    // Shop C is being redacted, so set uninstalledAt (matches real Shopify behavior)
     const SHOP_C_ID = `shop-c-${TEST_SUFFIX}`;
     const now = new Date();
     await sql`
-      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
-      VALUES (${SHOP_C_ID}, ${SHOP_A_DOMAIN}, 'INR', ${now}, ${now})
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt", "uninstalledAt")
+      VALUES (${SHOP_C_ID}, ${SHOP_A_DOMAIN}, 'INR', ${now}, ${now}, ${UNINSTALLED_AT})
     `;
 
     // Run shop/redact for shop A's domain (which shop C now has)
@@ -713,10 +721,11 @@ describeWithDb("shop/redact complete DB deletion", () => {
     const IN_FLIGHT_DOMAIN = `test-inflight-${TEST_SUFFIX}.myshopify.com`;
 
     // Create a shop for this test
+    // Shop is being redacted, so set uninstalledAt (matches real Shopify behavior)
     const now = new Date();
     await sql`
-      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
-      VALUES (${IN_FLIGHT_SHOP_ID}, ${IN_FLIGHT_DOMAIN}, 'INR', ${now}, ${now})
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt", "uninstalledAt")
+      VALUES (${IN_FLIGHT_SHOP_ID}, ${IN_FLIGHT_DOMAIN}, 'INR', ${now}, ${now}, ${UNINSTALLED_AT})
     `;
 
     // 1. Send messages to both queues
@@ -809,11 +818,13 @@ describeWithDb("shop/redact complete DB deletion", () => {
     const now = new Date();
 
     // Create shops
+    // PW_SHOP is being redacted, so set uninstalledAt (matches real Shopify behavior)
+    // PW_SHOP_B is not being redacted, so leave uninstalledAt NULL
     await sql`
-      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt", "uninstalledAt")
       VALUES
-        (${PW_SHOP_ID}, ${PW_DOMAIN}, 'INR', ${now}, ${now}),
-        (${PW_SHOP_B_ID}, ${PW_DOMAIN_B}, 'INR', ${now}, ${now})
+        (${PW_SHOP_ID}, ${PW_DOMAIN}, 'INR', ${now}, ${now}, ${UNINSTALLED_AT}),
+        (${PW_SHOP_B_ID}, ${PW_DOMAIN_B}, 'INR', ${now}, ${now}, ${null})
     `;
 
     // Seed webhook_receipts for Shop A (needed for receipt-linked ids)
@@ -925,9 +936,10 @@ describeWithDb("shop/redact complete DB deletion", () => {
     const now = new Date();
 
     // Create shop with % in domain
+    // Shop is being redacted, so set uninstalledAt (matches real Shopify behavior)
     await sql`
-      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
-      VALUES (${PCT_SHOP_ID}, ${PCT_DOMAIN}, 'INR', ${now}, ${now})
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt", "uninstalledAt")
+      VALUES (${PCT_SHOP_ID}, ${PCT_DOMAIN}, 'INR', ${now}, ${now}, ${UNINSTALLED_AT})
     `;
 
     // Seed reconcile id for this shop
