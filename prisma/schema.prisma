@@ -85,6 +85,13 @@ enum ReminderChannel {
   email
 }
 
+/// Status of a reminder log entry (S18 catch-up)
+enum ReminderLogStatus {
+  sent
+  delayed
+  skipped_daily_limit
+}
+
 // =============================================================================
 // SESSION STORAGE (existing, DO NOT MODIFY)
 // =============================================================================
@@ -555,14 +562,19 @@ model ReminderRule {
   @@index([shopId, enabled])
 }
 
-/// Reminder log: tracks sent reminders to prevent duplicates
+/// Reminder log: tracks sent and delayed reminders
+/// S18 catch-up: delayed reminders are retried within D+1..D+3 window
 model ReminderLog {
-  id        String   @id @default(dbgenerated("(gen_random_uuid())::text"))
-  shopId    String
-  ruleId    String
-  invoiceId String
-  /// When the reminder was sent
-  sentAt    DateTime @default(now()) @db.Timestamptz(3)
+  id           String             @id @default(dbgenerated("(gen_random_uuid())::text"))
+  shopId       String
+  ruleId       String
+  invoiceId    String
+  /// Status of this reminder: sent, delayed (capped), or skipped_daily_limit (expired)
+  status       ReminderLogStatus  @default(sent)
+  /// When the reminder was sent (NULL for delayed/skipped)
+  sentAt       DateTime?          @db.Timestamptz(3)
+  /// When the reminder was first capped (NULL for sent, set on first cap for delayed)
+  firstCappedAt DateTime?         @db.Timestamptz(3)
 
   // Relations
   // Direct Shop FK with CASCADE enables Shop delete to work
@@ -576,6 +588,8 @@ model ReminderLog {
   @@unique([ruleId, invoiceId])
   @@index([invoiceId])
   @@index([shopId])
+  // Partial index on delayed rows for efficient catch-up queries
+  @@index([shopId, invoiceId, ruleId], map: "idx_reminder_log_delayed")
 }
 
 // =============================================================================

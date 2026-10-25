@@ -102,3 +102,51 @@ This plan verifies that:
 | Monthly | 3,000 emails/month | Free tier transactional email quota |
 
 The code constants (`DAILY_SEND_CAP=100`, `MONTHLY_SEND_CAP=3000` in `app/services/reminders.server.ts:62-68`) match these limits exactly.
+
+## 8. Catch-up for Capped Reminders (#230)
+
+**Status:** Implemented in this PR. When daily/monthly cap is reached, reminders are deferred instead of being silently dropped.
+
+### 8.1 Behavior
+| # | Steps | Expected |
+|---|---|---|
+| S18-30 | Send hits daily/monthly cap. | Reminder is stored as `status='delayed'` with `firstCappedAt` timestamp. Not deleted. |
+| S18-31 | Catch-up window: D+1 to D+3 (shop-local days). | `s18_enqueue_reminders()` enqueues `REMINDER_CATCHUP` for delayed rows in window. |
+| S18-32 | Past D+3 window. | Delayed rows become `status='skipped_daily_limit'`. |
+| S18-33 | Multiple stages delayed for same invoice. | Latest stage (highest offsetDays) stays delayed; older stages become skipped. |
+| S18-34 | Oldest-first ordering. | Catch-up messages enqueued by oldest reminder date first within each batch. |
+| S18-35 | At most one per invoice per day. | Per-invoice advisory lock (`s18_invoice_<id>`) prevents multiple sends. |
+| S18-36 | Invoice paid mid-window. | Delayed row deleted silently on eligibility re-check. |
+| S18-37 | Shop disables reminders mid-window. | Delayed row deleted silently on eligibility re-check. |
+| S18-38 | Rule disabled mid-window. | Delayed row deleted silently on eligibility re-check. |
+| S18-39 | Account gated mid-window. | Delayed row deleted silently on eligibility re-check. |
+
+### 8.2 Migration `20261109000000_s18_reminder_catchup`
+- Purely additive: no drops, no destructive UPDATE/DELETE
+- Adds enum `ReminderLogStatus` (sent, delayed, skipped_daily_limit)
+- Adds `ReminderLog.status` NOT NULL DEFAULT 'sent'
+- Adds `ReminderLog.firstCappedAt` (nullable timestamp)
+- Makes `ReminderLog.sentAt` nullable
+- CHECK constraints tie sentAt/firstCappedAt to status
+- Partial index on delayed rows
+- Updates `s18_enqueue_reminders()` with catch-up logic
+
+### 8.3 UI
+- Reminder log table on settings page: invoice name, stage, status, date
+- No buyer name or email displayed
+
+### 8.4 Done criteria (catch-up)
+- [x] S18-30: `app/services/__tests__/reminders-catchup-db.test.ts` - cap boundary upserts as delayed
+- [x] S18-31-32: `app/services/__tests__/reminders-catchup-db.test.ts` - expiry after D+3
+- [x] S18-33: `app/services/__tests__/reminders-catchup-db.test.ts` - stage collapse
+- [x] S18-34: `app/services/__tests__/reminders-catchup-db.test.ts` - oldest-first ordering
+- [x] S18-35: `app/services/__tests__/reminders-catchup-db.test.ts` - at most one per day
+- [x] S18-36: `app/services/__tests__/reminders-catchup-db.test.ts` - payment mid-window deletion
+- [x] Migration backfill: existing rows remain status='sent' with unchanged count
+
+## 9. update_rule Duplicate Offset Fix
+
+**Status:** Implemented in separate commit. Previously `create_rule` blocked duplicate offsets but `update_rule` did not.
+
+### 9.1 Done criteria
+- [x] `app/routes/__tests__/app.settings.reminders.test.ts` - rejects duplicate offset when updating

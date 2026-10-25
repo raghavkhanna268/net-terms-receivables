@@ -20,6 +20,7 @@ import { getRequestSql } from "~/lib/request-context.server";
 import {
   getShopReminderSettings,
   getShopReminderRules,
+  getShopReminderLogs,
   updateShopReminderSettings,
   updateReminderRule,
   createReminderRule,
@@ -33,6 +34,7 @@ import {
   OFFSET_MIN,
   OFFSET_MAX,
 } from "~/services/reminders.server";
+import type { ReminderLogEntry } from "~/services/reminders.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 
 const VALID_INTENTS = ["toggle_enabled", "update_rule", "create_rule", "delete_rule"] as const;
@@ -64,6 +66,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       error: "Shop not found",
       settings: null,
       rules: [],
+      logs: [],
       providerConfigured: false,
       dailyCap: DAILY_SEND_CAP,
       monthlyCap: MONTHLY_SEND_CAP,
@@ -76,9 +79,10 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   // Ensure default rules exist (idempotent, only seeds when shop has no rules)
   await ensureDefaultReminderRules(sql, shop.id);
 
-  const [settings, rules] = await Promise.all([
+  const [settings, rules, logs] = await Promise.all([
     getShopReminderSettings(sql, shop.id),
     getShopReminderRules(sql, shop.id),
+    getShopReminderLogs(sql, shop.id, 50),
   ]);
 
   const env = (context as { cloudflare?: { env?: { RESEND_API_KEY?: string; RESEND_FROM?: string } } })
@@ -105,6 +109,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     error: null,
     settings: settings ?? { enabled: false },
     rules,
+    logs,
     providerConfigured,
     dailyCap: DAILY_SEND_CAP,
     monthlyCap: MONTHLY_SEND_CAP,
@@ -303,11 +308,55 @@ function RuleRow({
   );
 }
 
+function formatStatus(status: string): string {
+  switch (status) {
+    case "sent":
+      return "Sent";
+    case "delayed":
+      return "Delayed (daily limit)";
+    case "skipped_daily_limit":
+      return "Skipped (daily limit)";
+    default:
+      return status;
+  }
+}
+
+function formatLogDate(date: string | Date): string {
+  const d = typeof date === "string" ? new Date(date) : date;
+  return d.toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function ReminderLogRow({ entry }: { entry: ReminderLogEntry }) {
+  return (
+    <s-table-row key={entry.id}>
+      <s-table-cell>{entry.invoiceName}</s-table-cell>
+      <s-table-cell>
+        <RuleOffsetLabel offsetDays={entry.offsetDays} />
+      </s-table-cell>
+      <s-table-cell>
+        {entry.status === "sent" ? (
+          <s-badge tone="success">{formatStatus(entry.status)}</s-badge>
+        ) : entry.status === "delayed" ? (
+          <s-badge tone="warning">{formatStatus(entry.status)}</s-badge>
+        ) : (
+          <s-badge>{formatStatus(entry.status)}</s-badge>
+        )}
+      </s-table-cell>
+      <s-table-cell>{formatLogDate(entry.date)}</s-table-cell>
+    </s-table-row>
+  );
+}
+
 export default function RemindersSettingsPage() {
   const {
     error,
     settings,
     rules,
+    logs,
     providerConfigured,
     dailyCap,
     monthlyCap,
@@ -413,6 +462,37 @@ export default function RemindersSettingsPage() {
                     rule={rule}
                     isSubmitting={isSubmitting}
                   />
+                ))}
+              </s-table-body>
+            </s-table>
+          )}
+        </s-stack>
+      </s-section>
+
+      {/* Reminder Log */}
+      <s-section heading="Reminder Log">
+        <s-stack>
+          <s-paragraph>
+            Recent reminder activity. Shows invoice, stage, status, and date.
+          </s-paragraph>
+
+          {logs.length === 0 ? (
+            <s-empty-state heading="No reminder history">
+              <s-text slot="subheading">
+                Sent and delayed reminders will appear here.
+              </s-text>
+            </s-empty-state>
+          ) : (
+            <s-table>
+              <s-table-header-row>
+                <s-table-header>Invoice</s-table-header>
+                <s-table-header>Stage</s-table-header>
+                <s-table-header>Status</s-table-header>
+                <s-table-header>Date</s-table-header>
+              </s-table-header-row>
+              <s-table-body>
+                {logs.map((entry) => (
+                  <ReminderLogRow key={entry.id} entry={entry} />
                 ))}
               </s-table-body>
             </s-table>
