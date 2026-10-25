@@ -177,7 +177,7 @@ When enabled (`"1"`), the app fetches and stores buyer email and display name in
 
 ### 5.3 Token Handling
 
-- `Session.accessToken` (`prisma/schema.prisma:123`) and `Session.refreshToken` (`:132`) are stored as plain-text columns; Supabase encrypts data at rest with AES-256 (provider-managed, per [Supabase security](https://supabase.com/security)), not by the app. App-level encryption: not implemented (tracked in issue #266).
+- `Session.accessToken` (`prisma/schema.prisma:123`) and `Session.refreshToken` (`:132`) are stored as plain-text columns and are not encrypted by the app (app-level encryption: not implemented, tracked in issue #266). Supabase encrypts data at rest with AES-256 (provider-managed, per [Supabase security](https://supabase.com/security)).
 - Refresh token rotation handled by `app/lib/offline-token.server.ts`
 - Invalid tokens trigger `needsReauth` flag (`prisma/schema.prisma:136`) requiring merchant re-authentication
 

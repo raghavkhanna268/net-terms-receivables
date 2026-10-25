@@ -13,7 +13,7 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 **Owner/Operator and Contact:**
 - Raghav Khanna
 - **Contact Email:** [privacy contact email]
-- **Data Protection Officer:** Not applicable (individual operator)
+- **Data Protection Officer:** [Raghav to confirm]
 
 ---
 
@@ -128,9 +128,9 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | Cloudflare, Inc. | Application hosting (Workers), connection pooling (Hyperdrive) | Global (Worker placed ap-south-1) | [TBD: DPA] |
 | Supabase, Inc. | Database hosting (Postgres) | AWS ap-south-1 (Mumbai) | [TBD: DPA] |
 | Resend, Inc. | Email delivery (data request notifications, payment reminders) | US | [Resend DPA](https://resend.com/legal/dpa) |
-| Functional Software, Inc. | Error monitoring (Sentry) — planned, not active | US | [Sentry DPA](https://sentry.io/legal/dpa/) |
+| Functional Software, Inc. | Error monitoring (Sentry) — integration present, not enabled | [Raghav to confirm] | [Sentry DPA](https://sentry.io/legal/dpa/) |
 
-**Note:** Error monitoring is not yet enabled. Error events are scrubbed before transmission: request headers, cookies, query strings, and body data are removed; exception messages are replaced with error codes; breadcrumbs are deleted; and only allowlisted metadata keys (shopId, code, errorCode, requestId, webhookId, jobId, topic, status) are retained.
+**Note:** The Sentry integration code exists but error monitoring is not enabled in production (no DSN configured). Error events are scrubbed before transmission: request headers, cookies, query strings, and body data are removed; exception messages are replaced with error codes; breadcrumbs are deleted; and only allowlisted metadata keys (shopId, code, errorCode, requestId, webhookId, jobId, topic, status) are retained.
 
 **Resend data handling:**
 

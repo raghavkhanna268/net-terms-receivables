@@ -30,7 +30,7 @@
 | Order outstanding missing counts | `order_outstanding_missing` | 90 days | pg_cron job `purge_old_order_outstanding_missing` at 04:30 UTC daily; also deleted on shop/redact (`compliance.server.ts:150`) | `prisma/migrations/20261026010000_order_outstanding_missing/migration.sql:50-54` |
 | Bulk operations tracking | `s6_bulk_operations` | Until shop/redact | Deleted by `deleteShop()` at `compliance.server.ts:144` | No time-based purge |
 | Database backups | Supabase-managed (Free plan) | No automatic backups on Supabase Free. **PLANNED:** nightly encrypted (`age`) `pg_dump` to Cloudflare R2. | Not app-controlled | [Supabase Backups docs](https://supabase.com/docs/guides/platform/backups) |
-| Sentry error events | Sentry cloud | Error monitoring is not yet enabled. When enabled: 30 days (Developer), 90 days (Team/Business/Enterprise). | Sentry data retention settings | [Sentry Data Retention docs](https://docs.sentry.io/security-legal-pii/security/data-retention-periods/) |
+| Sentry error events | Sentry cloud | Integration present, not enabled (no DSN configured). When enabled: 30 days (Developer), 90 days (Team/Business/Enterprise). | Sentry data retention settings | [Sentry Data Retention docs](https://docs.sentry.io/security-legal-pii/security/data-retention-periods/) |
 | Worker logs | Cloudflare | [Raghav to confirm plan] — 3 days (Workers Free) / 7 days (Workers Paid) | Cloudflare Workers Logpush or dashboard | [Cloudflare Workers Logs](https://developers.cloudflare.com/workers/observability/logs/) |
 
 ---
