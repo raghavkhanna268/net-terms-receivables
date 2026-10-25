@@ -160,10 +160,13 @@ export async function startReconcileBulkOperation(
  * For manual runs, pass the manualKey from the companies message so
  * orders uses the same key base (allowing retry even if day key is used).
  *
+ * Guard: Does not enqueue if Shop no longer exists or is uninstalled (#239).
+ * FOR SHARE serializes with deleteShop's leading FOR UPDATE on the Shop row.
+ *
  * @param sql - postgres.js SQL client
  * @param shop - Shop domain
  * @param manualKey - Optional manual key base from companies stage
- * @returns Whether the message was enqueued
+ * @returns Whether the message was enqueued (false if shop doesn't exist or uninstalled)
  */
 export async function enqueueReconcileOrders(
   sql: Sql,
@@ -189,12 +192,28 @@ export async function enqueueReconcileOrders(
     message.manualKey = manualKey;
   }
 
-  await sql`SELECT pgmq.send('s6_sync', ${sql.json(message)})`;
-
-  safeLog("info", "reconcile_orders_enqueued", {
-    shopHash: await shopHash(shop),
+  // Guard: check and send in one transaction with FOR SHARE (#239).
+  // FOR SHARE serializes with deleteShop's leading FOR UPDATE on the Shop row.
+  const enqueued = await sql.begin(async (tx) => {
+    const [shopRow] = await tx<[{ id: string }?]>`
+      SELECT id FROM "Shop"
+      WHERE domain = ${shop}
+        AND "uninstalledAt" IS NULL
+      FOR SHARE
+    `;
+    if (!shopRow) {
+      return false;
+    }
+    await tx`SELECT pgmq.send('s6_sync', ${tx.json(message)})`;
+    return true;
   });
-  return true;
+
+  if (enqueued) {
+    safeLog("info", "reconcile_orders_enqueued", {
+      shopHash: await shopHash(shop),
+    });
+  }
+  return enqueued;
 }
 
 /**

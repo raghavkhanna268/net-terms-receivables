@@ -36,8 +36,12 @@ import { safeLog, toErrorCode } from "~/lib/log.server";
 
 /**
  * Check if plan gating enforcement is enabled.
- * Inlined from gating.server.ts to avoid import chain that breaks test mocking
- * in app.settings.reminders.test.ts (chain: gating → plan → shopify modules).
+ * Reads PLAN_GATING_ENFORCED from environment variable.
+ * 
+ * NOTE: SQL enqueue does NOT filter gated accounts. TS is the sole gating point.
+ * This prevents SQL and TS from disagreeing on gating policy. A gated invoice
+ * may be re-enqueued on its due day or within D+1..D+3, but TS drops it before
+ * any Resend call. The re-enqueue is bounded by the catch-up window.
  */
 function isGatingEnforced(): boolean {
   const env = process.env.PLAN_GATING_ENFORCED as string | undefined;
@@ -46,7 +50,7 @@ function isGatingEnforced(): boolean {
 
 /**
  * Check if a buyer account is active (not gated) for reminder purposes.
- * Inlined from gating.server.ts to avoid import chain.
+ * @param gatedAt - The gated_at timestamp from BuyerAccount
  */
 function isAccountActive(gatedAt: Date | null): boolean {
   if (!isGatingEnforced()) {
@@ -321,13 +325,14 @@ export async function upsertDelayedReminder(
  */
 export async function markDelayedAsSent(
   sql: Sql,
+  shopId: string,
   ruleId: string,
   invoiceId: string
 ): Promise<boolean> {
   const result = await sql`
     UPDATE "ReminderLog"
     SET status = 'sent'::"ReminderLogStatus", "sentAt" = NOW()
-    WHERE "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId} AND status = 'delayed'::"ReminderLogStatus"
+    WHERE "shopId" = ${shopId} AND "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId} AND status = 'delayed'::"ReminderLogStatus"
     RETURNING id
   `;
   return result.length > 0;
@@ -339,12 +344,13 @@ export async function markDelayedAsSent(
  */
 export async function deleteDelayedReminder(
   sql: Sql,
+  shopId: string,
   ruleId: string,
   invoiceId: string
 ): Promise<void> {
   await sql`
     DELETE FROM "ReminderLog"
-    WHERE "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId} AND status = 'delayed'::"ReminderLogStatus"
+    WHERE "shopId" = ${shopId} AND "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId} AND status = 'delayed'::"ReminderLogStatus"
   `;
 }
 
@@ -353,13 +359,14 @@ export async function deleteDelayedReminder(
  */
 export async function getReminderLogStatus(
   sql: Sql,
+  shopId: string,
   ruleId: string,
   invoiceId: string
 ): Promise<{ status: "sent" | "delayed" | "skipped_daily_limit"; firstCappedAt: Date | null } | null> {
   const [row] = await sql<{ status: string; firstCappedAt: Date | null }[]>`
     SELECT status, "firstCappedAt"
     FROM "ReminderLog"
-    WHERE "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId}
+    WHERE "shopId" = ${shopId} AND "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId}
   `;
   if (!row) return null;
   return {
@@ -410,6 +417,7 @@ export async function hasReminderSentToday(
  */
 export async function hasNewerStageForInvoice(
   sql: Sql,
+  shopId: string,
   invoiceId: string,
   ruleId: string,
   offsetDays: number
@@ -418,7 +426,8 @@ export async function hasNewerStageForInvoice(
     SELECT EXISTS(
       SELECT 1 FROM "ReminderLog" rl
       INNER JOIN "ReminderRule" r ON r.id = rl."ruleId"
-      WHERE rl."invoiceId" = ${invoiceId}
+      WHERE rl."shopId" = ${shopId}
+        AND rl."invoiceId" = ${invoiceId}
         AND rl."ruleId" != ${ruleId}
         AND r."offsetDays" > ${offsetDays}
     ) AS "hasNewer"
@@ -463,12 +472,13 @@ export async function hasNewerStageDueToday(
  */
 export async function releaseReminderSlot(
   sql: Sql,
+  shopId: string,
   ruleId: string,
   invoiceId: string
 ): Promise<void> {
   await sql`
     DELETE FROM "ReminderLog"
-    WHERE "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId}
+    WHERE "shopId" = ${shopId} AND "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId}
   `;
 }
 
@@ -755,8 +765,11 @@ export async function sendPaymentReminder(
   }
 
   // Gate 4: Check if buyer account is gated (over plan limit)
-  // When PLAN_GATING_ENFORCED is on, no reminders to gated accounts
+  // When PLAN_GATING_ENFORCED=true, no reminders to gated accounts.
+  // This check happens BEFORE any claim or reservation, writes no 'sent' row.
+  // SQL enqueue does not filter gated accounts; TS is the sole gating point.
   if (!isAccountActive(invoice.buyerAccountGatedAt)) {
+    safeLog("info", "reminders_gated_skip", { shopId, invoiceId, ruleId });
     return {
       success: true,
       action: "skipped",
@@ -801,60 +814,74 @@ export async function sendPaymentReminder(
     };
   }
 
-  // Use transaction with per-invoice lock to ensure at most one per day
-  // This lock is shared with REMINDER_CATCHUP to prevent races
-  return sql.begin(async (tx) => {
-    // Acquire per-invoice advisory lock
+  // Phase A: Short transaction to claim slot with per-invoice lock
+  // This ensures at most one reminder per invoice per day
+  const claimResult = await sql.begin(async (tx) => {
     await acquireInvoiceLock(tx, invoiceId);
 
     // Gate 9: Check if already sent today (under the lock)
     const alreadySentToday = await hasReminderSentToday(tx, shopId, invoiceId, validTz);
     if (alreadySentToday) {
-      return {
-        success: true,
-        action: "skipped",
-        skipReason: "Reminder already sent today for this invoice",
-      };
+      return { claimed: false, reason: "already_sent" } as const;
     }
 
     // Gate 10: Claim the reminder slot (idempotency via unique index)
     const claimed = await claimReminderSlot(tx, shopId, ruleId, invoiceId);
     if (!claimed) {
-      return {
-        success: true,
-        action: "skipped",
-        skipReason: "Reminder already sent (idempotent)",
-      };
+      return { claimed: false, reason: "idempotent" } as const;
     }
 
-    // Gate 11: Reserve global cap slot atomically (checks both daily and monthly)
-    const reserveSlot = deps.reserveGlobalSendSlot ?? reserveGlobalSendSlot;
-    const reservation = await reserveSlot(tx);
-    if (!reservation.reserved) {
-      // Upsert as 'delayed' instead of deleting - enables catch-up within D+1..D+3
-      await releaseReminderSlot(tx, ruleId, invoiceId);
+    return { claimed: true } as const;
+  });
+
+  if (!claimResult.claimed) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: claimResult.reason === "already_sent"
+        ? "Reminder already sent today for this invoice"
+        : "Reminder already sent (idempotent)",
+    };
+  }
+
+  // Phase B: Short transaction to reserve global cap slot
+  const reserveSlot = deps.reserveGlobalSendSlot ?? reserveGlobalSendSlot;
+  const reservation = await reserveSlot(sql);
+  if (!reservation.reserved) {
+    // Release claim and upsert as 'delayed' in one transaction
+    // This enables catch-up within D+1..D+3
+    await sql.begin(async (tx) => {
+      await releaseReminderSlot(tx, shopId, ruleId, invoiceId);
       await upsertDelayedReminder(tx, shopId, ruleId, invoiceId);
-      return {
-        success: true,
-        action: "capped",
-        skipReason: reservation.reason === "daily_cap"
-          ? `Daily send cap reached (${DAILY_SEND_CAP}/day)`
-          : `Monthly send cap reached (${MONTHLY_SEND_CAP}/month)`,
-      };
-    }
+    });
+    return {
+      success: true,
+      action: "capped",
+      skipReason: reservation.reason === "daily_cap"
+        ? `Daily send cap reached (${DAILY_SEND_CAP}/day)`
+        : `Monthly send cap reached (${MONTHLY_SEND_CAP}/month)`,
+    };
+  }
 
-    try {
-      const emailHtml = renderPaymentReminderEmail({
-        invoiceName: invoice.invoiceName,
-        buyerName: invoice.buyerName ?? "Customer",
-        amount: formatAmount(invoice.outstanding, invoice.currency),
-        dueDate: formatDate(invoice.dueAt, invoice.shopTimezone),
-        merchantName: invoice.shopName,
-        reminderType: getReminderLabel(offsetDays),
-      });
+  // Phase C: Send via Resend OUTSIDE any transaction
+  // This avoids holding locks during network I/O.
+  // Row is already 'sent' (claimed in Phase A). If send fails, we release.
+  //
+  // CRASH GAP: If the process crashes after the row is claimed as 'sent' but
+  // before the Resend call succeeds, the row stays 'sent', nothing retries it,
+  // so that stage's reminder is lost; the next enabled stage still sends normally.
+  try {
+    const emailHtml = renderPaymentReminderEmail({
+      invoiceName: invoice.invoiceName,
+      buyerName: invoice.buyerName ?? "Customer",
+      amount: formatAmount(invoice.outstanding, invoice.currency),
+      dueDate: formatDate(invoice.dueAt, invoice.shopTimezone),
+      merchantName: invoice.shopName,
+      reminderType: getReminderLabel(offsetDays),
+    });
 
-      const subject = `${getReminderLabel(offsetDays)} - Invoice ${invoice.invoiceName}`;
-      const idempotencyKey = `s18_${invoiceId}_${ruleId}`;
+    const subject = `${getReminderLabel(offsetDays)} - Invoice ${invoice.invoiceName}`;
+    const idempotencyKey = `s18_${invoiceId}_${ruleId}`;
 
     const response = await fetch("https://api.resend.com/emails", {
       method: "POST",
@@ -871,58 +898,57 @@ export async function sendPaymentReminder(
       }),
     });
 
-      if (!response.ok) {
-        const _errorText = await response.text();
-        const isAuthError = response.status === 401;
-        const isRateLimited = response.status === 429;
-        const isServerError = response.status >= 500;
-        const isRetryable = isRateLimited || isServerError;
+    if (!response.ok) {
+      const _errorText = await response.text();
+      const isAuthError = response.status === 401;
+      const isRateLimited = response.status === 429;
+      const isServerError = response.status >= 500;
+      const isRetryable = isRateLimited || isServerError;
 
-        if (isAuthError) {
-          safeLog("error", "reminders_auth_error", { shopId, httpStatus: response.status });
-        }
-
-        // Release reminder slot so it can retry
-        await releaseReminderSlot(tx, ruleId, invoiceId);
-
-        // Release cap slot on ALL failures so only successful sends count
-        // This keeps the cap atomic: reserve before send, release on any failure
-        await releaseGlobalSendSlot(tx);
-
-        // R1: Return error code only, no raw provider message
-        const errorCode = isAuthError ? "resend_auth_error"
-          : isRateLimited ? "resend_rate_limited"
-          : isServerError ? "resend_server_error"
-          : "resend_error";
-        return {
-          success: false,
-          action: "skipped",
-          errorCode,
-          retryable: isRetryable,
-        };
+      if (isAuthError) {
+        safeLog("error", "reminders_auth_error", { shopId, httpStatus: response.status });
       }
 
-      const result = (await response.json()) as { id?: string };
+      // Phase D failure: Release slots in one transaction
+      await sql.begin(async (tx) => {
+        await releaseReminderSlot(tx, shopId, ruleId, invoiceId);
+        await releaseGlobalSendSlot(tx);
+      });
 
-      return {
-        success: true,
-        action: "sent",
-        resendId: result.id,
-      };
-    } catch (err) {
-      // Release both slots so it can retry - only successful sends count toward cap
-      await releaseReminderSlot(tx, ruleId, invoiceId);
-      await releaseGlobalSendSlot(tx);
-
-      // R1: Return error code only, no raw provider message
+      const errorCode = isAuthError ? "resend_auth_error"
+        : isRateLimited ? "resend_rate_limited"
+        : isServerError ? "resend_server_error"
+        : "resend_error";
       return {
         success: false,
         action: "skipped",
-        errorCode: toErrorCode(err),
-        retryable: true,
+        errorCode,
+        retryable: isRetryable,
       };
     }
-  });
+
+    // Phase D success: Row already marked 'sent' by claimReminderSlot
+    const result = (await response.json()) as { id?: string };
+
+    return {
+      success: true,
+      action: "sent",
+      resendId: result.id,
+    };
+  } catch (err) {
+    // Phase D failure: Release slots in one transaction
+    await sql.begin(async (tx) => {
+      await releaseReminderSlot(tx, shopId, ruleId, invoiceId);
+      await releaseGlobalSendSlot(tx);
+    });
+
+    return {
+      success: false,
+      action: "skipped",
+      errorCode: toErrorCode(err),
+      retryable: true,
+    };
+  }
 }
 
 /**
@@ -930,12 +956,15 @@ export async function sendPaymentReminder(
  *
  * This function handles the REMINDER_CATCHUP message from the enqueue job.
  * It re-checks eligibility before sending:
- * - Invoice is still open
+ * - Invoice is still open and has outstanding balance
  * - Shop reminders toggle is on
  * - Rule is enabled
  * - Buyer account is not gated
+ * - Shop not uninstalled
+ * - Within D+1..D+3 catch-up window
+ * - No newer stage exists or is due today
  *
- * If any check fails, the delayed row is deleted silently.
+ * If any check fails, the delayed row is deleted or marked skipped.
  * If the cap is still reached, the row stays delayed for another catch-up attempt.
  * Uses per-invoice advisory lock to ensure at most one reminder per invoice per day.
  *
@@ -943,7 +972,7 @@ export async function sendPaymentReminder(
  * @param shopId - Shop ID
  * @param invoiceId - Invoice ID
  * @param ruleId - Reminder rule ID
- * @param logId - ReminderLog ID (for verification)
+ * @param _logId - Unused, kept for API compatibility (verification uses shopId/ruleId/invoiceId)
  * @param offsetDays - Days offset from due date
  * @param timezone - Shop's IANA timezone
  * @param env - Environment variables (RESEND_API_KEY, RESEND_FROM)
@@ -982,7 +1011,7 @@ export async function sendCatchupReminder(
   }
 
   // Gate 3: Re-check that the log entry is still delayed
-  const logStatus = await getReminderLogStatus(sql, ruleId, invoiceId);
+  const logStatus = await getReminderLogStatus(sql, shopId, ruleId, invoiceId);
   if (!logStatus || logStatus.status !== "delayed") {
     return {
       success: true,
@@ -994,7 +1023,7 @@ export async function sendCatchupReminder(
   // Fetch invoice data (also checks eligibility)
   const invoice = await getInvoiceForReminder(sql, shopId, invoiceId);
   if (!invoice) {
-    await deleteDelayedReminder(sql, ruleId, invoiceId);
+    await deleteDelayedReminder(sql, shopId, ruleId, invoiceId);
     return {
       success: true,
       action: "skipped",
@@ -1002,9 +1031,31 @@ export async function sendCatchupReminder(
     };
   }
 
+  // Gate 3b: Verify catch-up is within D+1..D+3 window
+  // SQL enqueue enforces this, but TS re-checks for defense in depth
+  if (invoice.dueAt) {
+    const reminderDate = DateTime.fromJSDate(invoice.dueAt, { zone: validTz })
+      .plus({ days: offsetDays })
+      .startOf("day");
+    const today = DateTime.now().setZone(validTz).startOf("day");
+    const daysSinceReminder = today.diff(reminderDate, "days").days;
+    if (daysSinceReminder < 1 || daysSinceReminder > CATCHUP_WINDOW_DAYS) {
+      await sql`
+        UPDATE "ReminderLog"
+        SET status = 'skipped_daily_limit'::"ReminderLogStatus"
+        WHERE "shopId" = ${shopId} AND "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId} AND status = 'delayed'::"ReminderLogStatus"
+      `;
+      return {
+        success: true,
+        action: "skipped",
+        skipReason: `Outside catch-up window (D+1..D+${CATCHUP_WINDOW_DAYS})`,
+      };
+    }
+  }
+
   // Gate 4: Check if shop was uninstalled (message queued before uninstall)
   if (invoice.shopUninstalledAt !== null) {
-    await deleteDelayedReminder(sql, ruleId, invoiceId);
+    await deleteDelayedReminder(sql, shopId, ruleId, invoiceId);
     return {
       success: true,
       action: "skipped",
@@ -1013,8 +1064,12 @@ export async function sendCatchupReminder(
   }
 
   // Gate 5: Check if buyer account is gated
+  // When PLAN_GATING_ENFORCED=true, no reminders to gated accounts.
+  // This check happens BEFORE any claim or cap reservation.
+  // SQL enqueue does not filter gated accounts; TS is the sole gating point.
   if (!isAccountActive(invoice.buyerAccountGatedAt)) {
-    await deleteDelayedReminder(sql, ruleId, invoiceId);
+    await deleteDelayedReminder(sql, shopId, ruleId, invoiceId);
+    safeLog("info", "reminders_catchup_gated_skip", { shopId, invoiceId, ruleId });
     return {
       success: true,
       action: "skipped",
@@ -1024,7 +1079,7 @@ export async function sendCatchupReminder(
 
   // Gate 6: Re-check invoice status
   if (invoice.status !== "open") {
-    await deleteDelayedReminder(sql, ruleId, invoiceId);
+    await deleteDelayedReminder(sql, shopId, ruleId, invoiceId);
     return {
       success: true,
       action: "skipped",
@@ -1034,7 +1089,7 @@ export async function sendCatchupReminder(
 
   // Gate 7: Skip invoice if fully paid (outstanding <= 0, even if status is still 'open')
   if (Number(invoice.outstanding) <= 0) {
-    await deleteDelayedReminder(sql, ruleId, invoiceId);
+    await deleteDelayedReminder(sql, shopId, ruleId, invoiceId);
     return {
       success: true,
       action: "skipped",
@@ -1044,7 +1099,7 @@ export async function sendCatchupReminder(
 
   // Gate 8: Check buyer has email
   if (!invoice.buyerEmail) {
-    await deleteDelayedReminder(sql, ruleId, invoiceId);
+    await deleteDelayedReminder(sql, shopId, ruleId, invoiceId);
     return {
       success: true,
       action: "skipped",
@@ -1055,7 +1110,7 @@ export async function sendCatchupReminder(
   // Gate 9: Check shop reminders are enabled
   const settings = await getShopReminderSettings(sql, shopId);
   if (!settings?.enabled) {
-    await deleteDelayedReminder(sql, ruleId, invoiceId);
+    await deleteDelayedReminder(sql, shopId, ruleId, invoiceId);
     return {
       success: true,
       action: "skipped",
@@ -1066,7 +1121,7 @@ export async function sendCatchupReminder(
   // Gate 10: Check rule is still enabled
   const rule = await getReminderRule(sql, shopId, ruleId);
   if (!rule?.enabled) {
-    await deleteDelayedReminder(sql, ruleId, invoiceId);
+    await deleteDelayedReminder(sql, shopId, ruleId, invoiceId);
     return {
       success: true,
       action: "skipped",
@@ -1075,12 +1130,12 @@ export async function sendCatchupReminder(
   }
 
   // Gate 11: Check if a newer stage exists (latest-stage-wins)
-  const newerStageExists = await hasNewerStageForInvoice(sql, invoiceId, ruleId, offsetDays);
+  const newerStageExists = await hasNewerStageForInvoice(sql, shopId, invoiceId, ruleId, offsetDays);
   if (newerStageExists) {
     await sql`
       UPDATE "ReminderLog"
       SET status = 'skipped_daily_limit'::"ReminderLogStatus"
-      WHERE "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId} AND status = 'delayed'::"ReminderLogStatus"
+      WHERE "shopId" = ${shopId} AND "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId} AND status = 'delayed'::"ReminderLogStatus"
     `;
     return {
       success: true,
@@ -1096,7 +1151,7 @@ export async function sendCatchupReminder(
     await sql`
       UPDATE "ReminderLog"
       SET status = 'skipped_daily_limit'::"ReminderLogStatus"
-      WHERE "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId} AND status = 'delayed'::"ReminderLogStatus"
+      WHERE "shopId" = ${shopId} AND "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId} AND status = 'delayed'::"ReminderLogStatus"
     `;
     return {
       success: true,
@@ -1105,120 +1160,164 @@ export async function sendCatchupReminder(
     };
   }
 
-  // Use transaction with per-invoice lock to ensure at most one per day
-  return sql.begin(async (tx) => {
-    // Acquire per-invoice advisory lock
+  // Phase A: Claim under per-invoice lock (same-day check + claim in one tx)
+  // This prevents a same-day new-stage send and catch-up from both going out.
+  // On send failure, we revert the claim.
+  const claimResult = await sql.begin(async (tx) => {
     await acquireInvoiceLock(tx, invoiceId);
 
     // Gate 12: Re-read status under the lock to handle duplicate catch-up messages
     // (enqueue runs hourly, so multiple REMINDER_CATCHUP messages may exist)
-    const statusUnderLock = await getReminderLogStatus(tx, ruleId, invoiceId);
+    const statusUnderLock = await getReminderLogStatus(tx, shopId, ruleId, invoiceId);
     if (!statusUnderLock || statusUnderLock.status !== "delayed") {
-      return {
-        success: true,
-        action: "skipped",
-        skipReason: "Reminder no longer in delayed state (duplicate catch-up message)",
-      };
+      return { claimed: false, reason: "not_delayed" } as const;
     }
 
-    // Gate 13: Check if already sent today (inside transaction for atomicity)
+    // Gate 13: Check if already sent today (any rule for this invoice)
     const alreadySentToday = await hasReminderSentToday(tx, shopId, invoiceId, validTz);
     if (alreadySentToday) {
-      return {
-        success: true,
-        action: "skipped",
-        skipReason: "Reminder already sent today for this invoice",
-      };
+      return { claimed: false, reason: "already_sent" } as const;
     }
 
-    // Gate 14: Reserve global cap slot
-    const reservation = await reserveGlobalSendSlot(tx);
-    if (!reservation.reserved) {
-      // Still capped - leave as delayed for next catch-up attempt
-      return {
-        success: true,
-        action: "capped",
-        skipReason: reservation.reason === "daily_cap"
-          ? `Daily send cap reached (${DAILY_SEND_CAP}/day)`
-          : `Monthly send cap reached (${MONTHLY_SEND_CAP}/month)`,
-      };
-    }
+    // CLAIM: Update delayed to sent under the lock (prevents concurrent send)
+    // firstCappedAt is preserved for "sent late" tracking.
+    // If send fails, we revert this in Phase D.
+    await tx`
+      UPDATE "ReminderLog"
+      SET status = 'sent'::"ReminderLogStatus", "sentAt" = NOW()
+      WHERE "shopId" = ${shopId} AND "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId}
+        AND status = 'delayed'::"ReminderLogStatus"
+    `;
 
-    try {
-      const emailHtml = renderPaymentReminderEmail({
-        invoiceName: invoice.invoiceName,
-        buyerName: invoice.buyerName ?? "Customer",
-        amount: formatAmount(invoice.outstanding, invoice.currency),
-        dueDate: formatDate(invoice.dueAt, invoice.shopTimezone),
-        merchantName: invoice.shopName,
-        reminderType: getReminderLabel(offsetDays),
-      });
+    return { claimed: true } as const;
+  });
 
-      const subject = `${getReminderLabel(offsetDays)} - Invoice ${invoice.invoiceName}`;
-      const idempotencyKey = `s18_catchup_${invoiceId}_${ruleId}`;
+  if (!claimResult.claimed) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: claimResult.reason === "not_delayed"
+        ? "Reminder no longer in delayed state (duplicate catch-up message)"
+        : "Reminder already sent today for this invoice",
+    };
+  }
 
-      const response = await fetch("https://api.resend.com/emails", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${resendKey}`,
-          "Content-Type": "application/json",
-          "Idempotency-Key": idempotencyKey,
-        },
-        body: JSON.stringify({
-          from: fromEmail,
-          to: [invoice.buyerEmail],
-          subject,
-          html: emailHtml,
-        }),
-      });
+  // Phase B: Reserve global cap slot
+  const reservation = await reserveGlobalSendSlot(sql);
+  if (!reservation.reserved) {
+    // Revert claim: mark back as delayed in one transaction
+    await sql.begin(async (tx) => {
+      await tx`
+        UPDATE "ReminderLog"
+        SET status = 'delayed'::"ReminderLogStatus", "sentAt" = NULL
+        WHERE "shopId" = ${shopId} AND "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId}
+          AND status = 'sent'::"ReminderLogStatus"
+      `;
+    });
+    return {
+      success: true,
+      action: "capped",
+      skipReason: reservation.reason === "daily_cap"
+        ? `Daily send cap reached (${DAILY_SEND_CAP}/day)`
+        : `Monthly send cap reached (${MONTHLY_SEND_CAP}/month)`,
+    };
+  }
 
-      if (!response.ok) {
-        const _errorText = await response.text();
-        const isAuthError = response.status === 401;
-        const isRateLimited = response.status === 429;
-        const isServerError = response.status >= 500;
-        const isRetryable = isRateLimited || isServerError;
+  // Phase C: Send via Resend OUTSIDE any transaction
+  // This avoids holding locks during network I/O.
+  // Row is already 'sent' (claimed in Phase A). If send fails, we revert.
+  //
+  // CRASH GAP: If the process crashes after the row is claimed as 'sent' but
+  // before the Resend call succeeds, the row stays 'sent', nothing retries it,
+  // so that stage's reminder is lost; the next enabled stage still sends normally.
+  try {
+    const emailHtml = renderPaymentReminderEmail({
+      invoiceName: invoice.invoiceName,
+      buyerName: invoice.buyerName ?? "Customer",
+      amount: formatAmount(invoice.outstanding, invoice.currency),
+      dueDate: formatDate(invoice.dueAt, invoice.shopTimezone),
+      merchantName: invoice.shopName,
+      reminderType: getReminderLabel(offsetDays),
+    });
 
-        if (isAuthError) {
-          safeLog("error", "reminders_catchup_auth_error", { shopId, httpStatus: response.status });
-        }
+    const subject = `${getReminderLabel(offsetDays)} - Invoice ${invoice.invoiceName}`;
+    const idempotencyKey = `s18_catchup_${invoiceId}_${ruleId}`;
 
-        // Release cap slot on failure
-        await releaseGlobalSendSlot(tx);
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${resendKey}`,
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
+      body: JSON.stringify({
+        from: fromEmail,
+        to: [invoice.buyerEmail],
+        subject,
+        html: emailHtml,
+      }),
+    });
 
-        const errorCode = isAuthError ? "resend_auth_error"
-          : isRateLimited ? "resend_rate_limited"
-          : isServerError ? "resend_server_error"
-          : "resend_error";
-        return {
-          success: false,
-          action: "skipped",
-          errorCode,
-          retryable: isRetryable,
-        };
+    if (!response.ok) {
+      const _errorText = await response.text();
+      const isAuthError = response.status === 401;
+      const isRateLimited = response.status === 429;
+      const isServerError = response.status >= 500;
+      const isRetryable = isRateLimited || isServerError;
+
+      if (isAuthError) {
+        safeLog("error", "reminders_catchup_auth_error", { shopId, httpStatus: response.status });
       }
 
-      // Mark the delayed reminder as sent
-      await markDelayedAsSent(tx, ruleId, invoiceId);
+      // Phase D failure: Revert claim and release cap in one transaction
+      await sql.begin(async (tx) => {
+        await tx`
+          UPDATE "ReminderLog"
+          SET status = 'delayed'::"ReminderLogStatus", "sentAt" = NULL
+          WHERE "shopId" = ${shopId} AND "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId}
+            AND status = 'sent'::"ReminderLogStatus"
+        `;
+        await releaseGlobalSendSlot(tx);
+      });
 
-      const result = (await response.json()) as { id?: string };
-      return {
-        success: true,
-        action: "sent",
-        resendId: result.id,
-      };
-    } catch (err) {
-      // Release cap slot on error
-      await releaseGlobalSendSlot(tx);
-
+      const errorCode = isAuthError ? "resend_auth_error"
+        : isRateLimited ? "resend_rate_limited"
+        : isServerError ? "resend_server_error"
+        : "resend_error";
       return {
         success: false,
         action: "skipped",
-        errorCode: toErrorCode(err),
-        retryable: true,
+        errorCode,
+        retryable: isRetryable,
       };
     }
-  });
+
+    // Phase D success: Row already marked 'sent' in Phase A claim
+    const result = (await response.json()) as { id?: string };
+    return {
+      success: true,
+      action: "sent",
+      resendId: result.id,
+    };
+  } catch (err) {
+    // Phase D failure: Revert claim and release cap in one transaction
+    await sql.begin(async (tx) => {
+      await tx`
+        UPDATE "ReminderLog"
+        SET status = 'delayed'::"ReminderLogStatus", "sentAt" = NULL
+        WHERE "shopId" = ${shopId} AND "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId}
+          AND status = 'sent'::"ReminderLogStatus"
+      `;
+      await releaseGlobalSendSlot(tx);
+    });
+
+    return {
+      success: false,
+      action: "skipped",
+      errorCode: toErrorCode(err),
+      retryable: true,
+    };
+  }
 }
 
 /**

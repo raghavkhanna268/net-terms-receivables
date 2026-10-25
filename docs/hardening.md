@@ -90,8 +90,10 @@ CREATE TABLE s6_processed_webhooks (
 ### Retention
 
 - **`webhook_receipts`**: 30-day retention via pg_cron (`s20_webhook_receipts_cleanup`, 04:30 UTC)
-- **`s6_processed_webhooks`**: 10-day retention via pg_cron (`s10_processed_webhooks_cleanup`, 03:00 UTC)
-- **Shop deletion**: Receipts are immediately purged on `app/uninstalled` and `shop/redact`
+- **`s6_processed_webhooks`**: 7-day retention via pg_cron (`s10_processed_webhooks_cleanup`, 04:00 UTC daily; see `prisma/migrations/20261024010000_s10_drain_cron/migration.sql:183-188`)
+- **Shop deletion**:
+  - `app/uninstalled`: Receipt-linked processed webhooks and receipts are purged immediately
+  - `shop/redact`: Reconcile-prefix and receipt-linked processed webhooks, and receipts, are purged; `credit_*` and receipt-less rows expire via the 7-day TTL.
 
 ## Ordering (No Explicit Guards)
 
@@ -183,8 +185,16 @@ const result = await shopifyGraphQLQueue(shop, query);
 
 ### Shop Deletion Flow
 
-1. `app/uninstalled`: Sessions deleted, shop marked uninstalled, receipts purged
-2. `shop/redact` (48h later): Full shop deletion via CASCADE, receipts already gone
+1. `app/uninstalled`: Sessions deleted, shop marked uninstalled. Receipt-linked processed
+   webhooks and receipts purged in one transaction. Reconcile-prefix processed webhooks
+   are NOT deleted (kept for reinstall grace period).
+2. `shop/redact` (48h later): Full shop deletion via CASCADE. Reconcile-prefix processed
+   webhooks purged. Any remaining receipts and receipt-linked processed webhooks purged
+   (in case uninstall webhook failed or was missed).
+
+**Intentionally NOT purged** (expire under 7-day TTL instead):
+- `credit_*` processed webhook rows: carry no shop domain, internal credit-status markers
+- Shopify-id processed webhook rows with no matching receipt (orphaned or pre-S20)
 
 ## Testing
 

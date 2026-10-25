@@ -40,6 +40,59 @@ import { safeLog, shopHash, toErrorCode } from "~/lib/log.server";
 export const UNMATCHED_NARRATION_RETENTION_DAYS = 180;
 
 /**
+ * Deletion counts returned by deleteShop.
+ */
+export interface DeleteShopResult {
+  deleted: boolean;
+  shopId: string | null;
+  refetchNullPurged: number;
+  bulkOperationsPurged: number;
+  orderGapPurged: number;
+  piiFallbackPurged: number;
+  pgmqSyncQueuePurged: number;
+  pgmqBulkQueuePurged: number;
+  pgmqSyncArchivePurged: number;
+  pgmqBulkArchivePurged: number;
+  deadLetterPurged: number;
+  processedWebhooksPurged: number;
+  webhookReceiptsPurged: number;
+}
+
+/**
+ * Delete s6_processed_webhooks rows linked to a shop's webhook_receipts.
+ *
+ * Uses exact-match join: deletes processed webhook rows where the webhook_id
+ * matches a receipt for this shop. This handles Shopify webhook ids that don't
+ * embed the shop domain.
+ *
+ * Intentionally NOT purged (expire under 7-day TTL instead):
+ * - credit_* keys: carry no shop domain, internal credit-status markers
+ * - Shopify webhook ids with no matching receipt (orphaned or pre-S20)
+ *
+ * MUST be called BEFORE webhook_receipts are deleted for this shop.
+ *
+ * Used by:
+ * - deleteShop (shop/redact): within transaction, before receipts delete
+ * - app/uninstalled: within transaction with receipts delete
+ *
+ * @param sql - postgres.js SQL client (or transaction)
+ * @param shopDomain - Shop domain
+ * @returns Number of processed webhook rows deleted
+ */
+export async function deleteProcessedWebhooksViaReceipts(
+  sql: Sql,
+  shopDomain: string
+): Promise<number> {
+  const result = await sql`
+    DELETE FROM s6_processed_webhooks p
+    USING webhook_receipts r
+    WHERE r.shop = ${shopDomain}
+      AND r.webhook_id = p.webhook_id
+  `;
+  return result.count;
+}
+
+/**
  * Delete a shop and all its data via ON DELETE CASCADE.
  * This is the final step in the shop/redact webhook handler.
  *
@@ -48,57 +101,174 @@ export const UNMATCHED_NARRATION_RETENTION_DAYS = 180;
  * - Shop -> Invoice, Payment, Match, ReminderLog (direct FKs)
  * - Shop -> s8_tagged_customers, s8_draft_orders (S22 FKs)
  * - Shop -> s22_data_requests (S22 FK)
+ * - Shop -> backstop_processed_orders (S13 FK)
+ * - Shop -> s18_shop_reminder_settings (S18 FK)
  *
- * Also deletes non-FK-linked data:
- * - s10b_order_refetch_null (aggregate counter, no FK)
+ * Also deletes non-FK-linked data (no FK, shop text column or shop in JSON):
+ * - s10b_order_refetch_null (aggregate counter, shop text column)
+ * - s6_bulk_operations (bulk op tracking, shop text column)
+ * - order_outstanding_missing (aggregate counter, shop text column)
+ * - s10b_customer_pii_fallback (aggregate counter, shop text column)
+ * - s6_dead_letter (dead-letter queue, shop in message JSON)
+ * - s6_processed_webhooks (reconcile ids embed domain; Shopify webhook ids via receipts join)
+ * - webhook_receipts (edge deduplication, shop text column)
+ *
+ * All deletes are wrapped in a single transaction for atomicity.
+ * If any statement fails, the entire operation rolls back.
  *
  * Per Shopify docs, shop/redact is sent 48 hours after app/uninstalled.
  * See: https://shopify.dev/docs/apps/build/privacy-law-compliance
  *
  * @param sql - postgres.js SQL client
  * @param shopDomain - Shop domain to delete
- * @returns Object with deletion result
+ * @returns Object with deletion result and counts
  */
 export async function deleteShop(
   sql: Sql,
   shopDomain: string
-): Promise<{ deleted: boolean; shopId: string | null; refetchNullPurged: number }> {
-  // Delete s10b_order_refetch_null first (not FK-linked)
-  const refetchResult = await sql`
-    DELETE FROM s10b_order_refetch_null
-    WHERE shop = ${shopDomain}
-  `;
+): Promise<DeleteShopResult> {
+  return sql.begin(async (tx) => {
+    // Serializes with drain's FOR SHARE Shop guards (#239)
+    await tx`SELECT id FROM "Shop" WHERE domain = ${shopDomain} FOR UPDATE`;
 
-  // Delete shop - all FK-linked data cascades
-  const [result] = await sql<{ id: string }[]>`
-    DELETE FROM "Shop"
-    WHERE domain = ${shopDomain}
-    RETURNING id
-  `;
+    // Delete non-FK-linked tables first (shop text column or shop in JSON)
 
-  return {
-    deleted: result !== undefined,
-    shopId: result?.id ?? null,
-    refetchNullPurged: refetchResult.count,
-  };
+    // s10b_order_refetch_null (aggregate counter, shop text column)
+    const refetchResult = await tx`
+      DELETE FROM s10b_order_refetch_null
+      WHERE shop = ${shopDomain}
+    `;
+
+    // s6_bulk_operations (bulk op tracking, shop text column)
+    const bulkOpsResult = await tx`
+      DELETE FROM s6_bulk_operations
+      WHERE shop = ${shopDomain}
+    `;
+
+    // order_outstanding_missing (aggregate counter, shop text column)
+    const outstandingResult = await tx`
+      DELETE FROM order_outstanding_missing
+      WHERE shop = ${shopDomain}
+    `;
+
+    // s10b_customer_pii_fallback (aggregate counter, shop text column)
+    const piiResult = await tx`
+      DELETE FROM s10b_customer_pii_fallback
+      WHERE shop = ${shopDomain}
+    `;
+
+    // pgmq queue and archive tables (message jsonb column at message->>'shop')
+    // Tables created by pgmq.create() at prisma/migrations/20261023000000_s6_pgmq_queues/migration.sql:70,75
+    // Schema: pgmq.q_<name> (queue), pgmq.a_<name> (archive), message column is jsonb
+    //
+    // Safety: A drain worker holding a message under its visibility timeout (VT) will later
+    // call pgmq.archive() or pgmq.delete() on that msg_id. If we delete the row here first,
+    // the worker's subsequent call returns false (0 rows affected) without throwing - this is
+    // the documented pgmq behavior (tested in shop-redact-complete-db.test.ts in-flight case).
+    //
+    // We use raw DELETE for direct control over the WHERE clause (exact shop match).
+    // pgmq.delete(queue, msg_id) requires knowing msg_ids upfront; a SELECT+DELETE would be
+    // two round-trips. Raw DELETE on the queue table is safe because we're only removing
+    // messages, not modifying queue metadata.
+    const pgmqSyncQueueResult = await tx`
+      DELETE FROM pgmq.q_s6_sync
+      WHERE message->>'shop' = ${shopDomain}
+    `;
+    const pgmqBulkQueueResult = await tx`
+      DELETE FROM pgmq.q_s6_bulk
+      WHERE message->>'shop' = ${shopDomain}
+    `;
+    const pgmqSyncArchiveResult = await tx`
+      DELETE FROM pgmq.a_s6_sync
+      WHERE message->>'shop' = ${shopDomain}
+    `;
+    const pgmqBulkArchiveResult = await tx`
+      DELETE FROM pgmq.a_s6_bulk
+      WHERE message->>'shop' = ${shopDomain}
+    `;
+
+    // s6_dead_letter (dead-letter queue, shop in message JSON at message->>'shop')
+    // Producer: app/services/drain/processor.server.ts:968-991 (moveToDeadLetter function)
+    // The message JSON contains { shop: string, topic: string, webhookId: string, ... }
+    const deadLetterResult = await tx`
+      DELETE FROM s6_dead_letter
+      WHERE message->>'shop' = ${shopDomain}
+    `;
+
+    // s6_processed_webhooks (no shop column; ids may embed the domain)
+    // Two deletion strategies for the two id formats:
+    //
+    // 1. Reconcile ids: embed domain as 'reconcile:<shop>:<date>:<stage>'
+    //    See: reconcile.server.ts:61, reconcile-handlers.server.ts:175/178, initial-sync.server.ts:140
+    //    Use anchored prefix match with left() - no LIKE wildcards so _ and % are safe
+    const reconcilePrefix = `reconcile:${shopDomain}:`;
+    const processedReconcileResult = await tx`
+      DELETE FROM s6_processed_webhooks
+      WHERE left(webhook_id, length(${reconcilePrefix})) = ${reconcilePrefix}
+    `;
+
+    // 2. Shopify webhook ids (domain-free): join to webhook_receipts
+    //    This MUST run BEFORE webhook_receipts are deleted
+    //    NOTE: credit_* rows and orphan Shopify ids (no matching receipt) are
+    //    intentionally NOT purged - they carry no shop domain and expire under 7-day TTL.
+    const processedReceiptsJoinCount = await deleteProcessedWebhooksViaReceipts(
+      tx,
+      shopDomain
+    );
+
+    const processedWebhooksPurged =
+      processedReconcileResult.count + processedReceiptsJoinCount;
+
+    // webhook_receipts (edge deduplication, shop text column)
+    // Moved here from webhooks.compliance.tsx to ensure join delete runs first
+    const webhookReceiptsResult = await tx`
+      DELETE FROM webhook_receipts WHERE shop = ${shopDomain}
+    `;
+
+    // Delete shop - all FK-linked data cascades
+    const [result] = await tx<{ id: string }[]>`
+      DELETE FROM "Shop"
+      WHERE domain = ${shopDomain}
+      RETURNING id
+    `;
+
+    return {
+      deleted: result !== undefined,
+      shopId: result?.id ?? null,
+      refetchNullPurged: refetchResult.count,
+      bulkOperationsPurged: bulkOpsResult.count,
+      orderGapPurged: outstandingResult.count,
+      piiFallbackPurged: piiResult.count,
+      pgmqSyncQueuePurged: pgmqSyncQueueResult.count,
+      pgmqBulkQueuePurged: pgmqBulkQueueResult.count,
+      pgmqSyncArchivePurged: pgmqSyncArchiveResult.count,
+      pgmqBulkArchivePurged: pgmqBulkArchiveResult.count,
+      deadLetterPurged: deadLetterResult.count,
+      processedWebhooksPurged,
+      webhookReceiptsPurged: webhookReceiptsResult.count,
+    };
+  });
 }
 
 /**
- * Purge pgmq messages for a shop.
+ * Legacy pgmq message purge function (no longer needed).
  *
- * Note: pgmq doesn't support per-shop message deletion directly.
- * Messages in the queue are JSON with a shop field. We can:
- * 1. Read messages and delete those matching the shop (slow, not recommended)
- * 2. Let messages expire naturally (default VT is short)
- * 3. Document that shop messages will be ignored by processors (preferred)
+ * As of this version, deleteShop() removes the shop's messages from the pgmq
+ * queue tables (pgmq.q_s6_sync, pgmq.q_s6_bulk) and archive tables
+ * (pgmq.a_s6_sync, pgmq.a_s6_bulk) directly within its transaction.
  *
- * For now, we document this limitation. The drain processor already
- * checks if the shop exists before processing, so orphaned messages
- * are safely ignored.
+ * This function remains for backward compatibility with callers but performs
+ * no operation. The returned reason documents the current behavior.
  *
- * @param sql - postgres.js SQL client
- * @param _shopDomain - Shop domain (unused, documented limitation)
- * @returns Documentation of the limitation
+ * Note: Drain-side handling of in-flight messages (where a worker holds a
+ * message under its visibility timeout when the shop is deleted) is tracked
+ * in https://github.com/raghavkhanna268/net-terms-receivables/issues/239.
+ * The worker's subsequent pgmq.archive() or pgmq.delete() on the missing
+ * msg_id returns false without throwing, which is safe but should be logged.
+ *
+ * @param sql - postgres.js SQL client (unused)
+ * @param _shopDomain - Shop domain (unused)
+ * @returns Documentation that deleteShop handles this now
  */
 export async function purgePgmqMessages(
   _sql: Sql,
@@ -107,9 +277,9 @@ export async function purgePgmqMessages(
   return {
     purged: false,
     reason:
-      "pgmq does not support per-shop message deletion. Messages for deleted shops " +
-      "are safely ignored by the drain processor which checks shop existence. " +
-      "Messages expire naturally based on queue visibility timeout.",
+      "deleteShop() now removes the shop's queue and archive messages directly. " +
+      "See https://github.com/raghavkhanna268/net-terms-receivables/issues/239 " +
+      "for drain-side ack of shop_not_found on in-flight retries.",
   };
 }
 

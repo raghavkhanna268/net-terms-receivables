@@ -1,6 +1,8 @@
 # Request `read_all_orders` Scope
 
-This checklist guides you through requesting Shopify approval for the `read_all_orders` protected scope. This scope extends `read_orders` and `write_orders` access to orders older than 60 days.
+This checklist guides you through requesting Shopify approval for the `read_all_orders` protected scope. This scope extends order access to orders older than 60 days.
+
+**Note (S24):** We request `write_orders` which implies `read_orders` per [Shopify Access Scopes](https://shopify.dev/docs/api/usage/access-scopes). The `read_all_orders` scope extends this implied read access to orders beyond the 60-day window.
 
 ## Why We Need This Scope
 
@@ -25,10 +27,10 @@ Without `read_all_orders`, orders older than 60 days return `null` from the API,
 The app currently declares these scopes in `shopify.app.toml`:
 
 ```text
-read_companies,read_customers,read_draft_orders,read_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations
+read_draft_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations
 ```
 
-After approval, `read_all_orders` will be added alongside `read_orders`. See `docs/scopes.md` for the full scope audit.
+After approval, `read_all_orders` will be added. Note: `write_orders` implies `read_orders` per [Shopify Access Scopes](https://shopify.dev/docs/api/usage/access-scopes), so `read_all_orders` extends that implied access. See `docs/scopes.md` for the full scope audit.
 
 > **Note**: This PR does not change scopes. The scope change will be a separate PR after approval is granted.
 
@@ -86,7 +88,7 @@ Net Terms Receivables is a B2B net-terms receivables management app for Shopify 
 
 Once Shopify approves the request:
 
-1. Add `read_all_orders` to `shopify.app.toml` scopes (alongside existing `read_orders`)
+1. Add `read_all_orders` to `shopify.app.toml` scopes (extends access from `write_orders` which implies `read_orders`)
 2. Update `wrangler.jsonc` SCOPES variable to match
 3. Run `scripts/check-scope-sync.ts` to verify sync
 4. Deploy new app version with `shopify app deploy`

@@ -57,8 +57,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
-  const [shop] = await sql<{ id: string }[]>`
-    SELECT id FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ id: string; timezone: string }[]>`
+    SELECT id, timezone FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
   if (!shop) {
@@ -73,6 +73,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       dailyUsage: 0,
       monthlyUsage: 0,
       usageError: false,
+      shopTimezone: "UTC",
     };
   }
 
@@ -116,6 +117,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     dailyUsage,
     monthlyUsage,
     usageError,
+    shopTimezone: shop.timezone,
   };
 };
 
@@ -321,16 +323,17 @@ function formatStatus(status: string): string {
   }
 }
 
-function formatLogDate(date: string | Date): string {
+function formatLogDate(date: string | Date, timezone: string): string {
   const d = typeof date === "string" ? new Date(date) : date;
   return d.toLocaleDateString("en-US", {
     year: "numeric",
     month: "short",
     day: "numeric",
+    timeZone: timezone,
   });
 }
 
-function ReminderLogRow({ entry }: { entry: ReminderLogEntry }) {
+function ReminderLogRow({ entry, timezone }: { entry: ReminderLogEntry; timezone: string }) {
   return (
     <s-table-row key={entry.id}>
       <s-table-cell>{entry.invoiceName}</s-table-cell>
@@ -346,7 +349,7 @@ function ReminderLogRow({ entry }: { entry: ReminderLogEntry }) {
           <s-badge>{formatStatus(entry.status)}</s-badge>
         )}
       </s-table-cell>
-      <s-table-cell>{formatLogDate(entry.date)}</s-table-cell>
+      <s-table-cell>{formatLogDate(entry.date, timezone)}</s-table-cell>
     </s-table-row>
   );
 }
@@ -363,6 +366,7 @@ export default function RemindersSettingsPage() {
     dailyUsage,
     monthlyUsage,
     usageError,
+    shopTimezone,
   } = useLoaderData<typeof loader>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
@@ -492,7 +496,7 @@ export default function RemindersSettingsPage() {
               </s-table-header-row>
               <s-table-body>
                 {logs.map((entry) => (
-                  <ReminderLogRow key={entry.id} entry={entry} />
+                  <ReminderLogRow key={entry.id} entry={entry} timezone={shopTimezone} />
                 ))}
               </s-table-body>
             </s-table>
