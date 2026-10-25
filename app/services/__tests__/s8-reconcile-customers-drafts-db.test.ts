@@ -10,7 +10,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import postgres from "postgres";
-import { sqlOptions } from "../../../app/lib/db-light.server";
+import { sqlOptions } from "~/lib/db-light.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
