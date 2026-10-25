@@ -1307,6 +1307,12 @@ jobs:
               unset IQ_FLAT
             fi
           fi
+          # A null/missing inputQuery tells us nothing about credit_status, so report
+          # the JSON string "unknown" rather than false. A non-null query (including the
+          # empty string "", which is non-null with length 0) keeps a true/false verdict.
+          if [ "$INPUT_QUERY_NULL" = "true" ]; then
+            DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS='"unknown"'
+          fi
 
           echo "S12 Validation status (read-only):"
           jq -n \
@@ -1325,7 +1331,8 @@ jobs:
 
           # Cross-check via shopifyFunctions(apiType: cart_checkout_validation), read-only.
           # Prints a count, function ids and per-function booleans/integers only; never
-          # titles or query text. Soft-fails (warning) so it can't break the step.
+          # titles or query text. has_credit_status is "unknown" when inputQuery is null.
+          # Soft-fails (warning) so it can't break the step.
           echo ""
           echo "S12 shopifyFunctions cross-check (read-only):"
           FN_QUERY='{"query":"{ shopifyFunctions(first: 25, apiType: \"cart_checkout_validation\") { nodes { id handle inputQuery } } }"}'
@@ -1354,7 +1361,7 @@ jobs:
                    handle_is_credit_check_validation: (.handle == "credit-check-validation"),
                    input_query_null: ((.inputQuery | type) != "string"),
                    input_query_length: (.inputQuery | if type == "string" then length else 0 end),
-                   has_credit_status: (.inputQuery | if type == "string" then (gsub("\n"; " ") | test($re)) else false end)
+                   has_credit_status: (.inputQuery | if type == "string" then (gsub("\n"; " ") | test($re)) else "unknown" end)
                  }]}' "$FN_RESPONSE"
           fi
           rm -f "$FN_RESPONSE"
