@@ -57,7 +57,7 @@ def edit(path, old, new):
 
 
 # 3. Extra scope in toml fails.
-if scratch(lambda d: edit(os.path.join(d, "shopify.app.toml"), 'scopes = "read_companies,', 'scopes = "read_products,read_companies,')) == 0:
+if scratch(lambda d: edit(os.path.join(d, "shopify.app.toml"), 'scopes = "read_draft_orders,', 'scopes = "read_products,read_draft_orders,')) == 0:
     fails.append("extra toml scope not failed")
 # 4. Wrangler mismatch fails.
 if scratch(lambda d: edit(os.path.join(d, "wrangler.jsonc"), ',write_validations"', '"')) == 0:
@@ -99,13 +99,35 @@ if scratch(lambda d: edit(os.path.join(d, ".github/workflows/shopify-app-release
 if scratch(lambda d: edit(os.path.join(d, "package.json"), '"@shopify/cli": "4.9.4"', '"@shopify/cli": "^4.9.4"')) == 0:
     fails.append("unpinned CLI devDependency not failed")
 
-# 13. Deploy step prints no CLI text and classifies errors (stub CLI, fake values only).
+# 13. S24: Adding read_locations (a 9th scope outside the approved 8) fails.
+def add_read_locations(d):
+    """Add read_locations to both files sequentially."""
+    edit(os.path.join(d, "shopify.app.toml"), 'scopes = "read_draft_orders,', 'scopes = "read_locations,read_draft_orders,')
+    edit(os.path.join(d, "wrangler.jsonc"), '"SCOPES": "read_draft_orders,', '"SCOPES": "read_locations,read_draft_orders,')
+
+# Capture output to verify read_locations is named
+import io
+import contextlib
+_test13_output = io.StringIO()
+with contextlib.redirect_stdout(_test13_output):
+    _test13_rc = scratch(add_read_locations)
+_test13_text = _test13_output.getvalue()
+if _test13_rc == 0:
+    fails.append("read_locations (9th scope) not rejected")
+elif "read_locations" not in _test13_text:
+    fails.append("read_locations not named in guard output")
+
+# 14. Deploy step prints no CLI text and classifies errors (stub CLI, fake values only).
 if subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "ci", "test_shopify_deploy_step.py")]).returncode != 0:
     fails.append("deploy step stub-CLI self-test failed")
+
+# 14. Post-deploy uid step prints only handle + uid (+ booleans), never other toml text.
+if subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "ci", "test_shopify_extension_uids_step.py")]).returncode != 0:
+    fails.append("extension uids step self-test failed")
 
 if fails:
     print("shopify release guards self-test: FAIL")
     for f in fails:
         print(" -", f)
     sys.exit(1)
-print("shopify release guards self-test: OK (18/18)")
+print("shopify release guards self-test: OK (19/19)")

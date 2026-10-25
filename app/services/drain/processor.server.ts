@@ -836,12 +836,23 @@ async function handleCreditStatusRecompute(sql: Sql, message: SyncMessage): Prom
   // Mark as processed
   await markWebhookProcessed(sql, message.webhookId, message.topic, message.resourceGid, message.shop);
 
+  let skipReason: string | undefined;
+  if (!result.metafieldWritten) {
+    if (result.noOwner) {
+      skipReason = "No owner GID, holdState persisted but metafield not written";
+    } else if (result.backoffSkipped) {
+      skipReason = "Backoff active, holdState persisted but metafield write skipped";
+    } else if (result.previousHold !== result.newHold) {
+      skipReason = "Hold value changed, DB updated but metafield sync pending";
+    } else {
+      skipReason = "Hold value unchanged, no metafield write needed";
+    }
+  }
+
   return {
     success: true,
     action: result.metafieldWritten ? "created" : "skipped",
-    skipReason: result.metafieldWritten
-      ? undefined
-      : "Hold value unchanged, no metafield write needed",
+    skipReason,
   };
 }
 

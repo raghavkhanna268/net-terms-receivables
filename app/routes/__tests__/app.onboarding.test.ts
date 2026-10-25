@@ -1,5 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
+import { renderToString } from "react-dom/server";
+import { createElement } from "react";
 
 /**
  * Tests for app.onboarding route (S23).
@@ -1915,5 +1917,259 @@ describe("app._index redirect", () => {
     } as unknown as LoaderFunctionArgs);
 
     expect(result.shopDomain).toBe(TEST_SHOP);
+  });
+});
+
+describe("S23-03: tag-rules link in buyer-setup step", () => {
+  afterEach(() => {
+    vi.doUnmock("react-router");
+    vi.resetModules();
+  });
+
+  it("computeBuyerSetupStep returns actionUrl /app/tag-rules when pending", async () => {
+    const { computeBuyerSetupStep } = await import("~/lib/onboarding-steps.server");
+    const step = computeBuyerSetupStep(0, 0);
+    expect(step.status).toBe("pending");
+    expect(step.actionUrl).toBe("/app/tag-rules");
+    expect(step.actionLabel).toBe("Create tag rule");
+  });
+
+  it("computeBuyerSetupStep does not return actionUrl when complete", async () => {
+    const { computeBuyerSetupStep } = await import("~/lib/onboarding-steps.server");
+    const step = computeBuyerSetupStep(5, 0);
+    expect(step.status).toBe("complete");
+    expect(step.actionUrl).toBeUndefined();
+    expect(step.actionLabel).toBeUndefined();
+  });
+
+  it("renders /app/tag-rules link in onboarding checklist when buyer-setup step is pending", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [
+              { id: "default-terms", title: "Set default payment terms", status: "complete", helpText: "Net 30 days" },
+              { id: "buyer-setup", title: "Configure buyer accounts", status: "pending", helpText: "No accounts", actionUrl: "/app/tag-rules", actionLabel: "Create tag rule" },
+              { id: "checkout-validation", title: "Enable checkout protection", status: "complete", helpText: "Active" },
+              { id: "payment-customization", title: "Configure payment options", status: "complete", helpText: "Active" },
+              { id: "reminders", title: "Email reminders", status: "coming_soon", helpText: "Coming soon" },
+            ],
+            isComplete: false,
+            completedCount: 3,
+            totalCount: 5,
+            dismissedAt: null,
+          },
+          registrationStatus: null,
+          initialSyncState: { status: "done" },
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    expect(html).toContain('href="/app/tag-rules"');
+    expect(html).toContain("Create tag rule");
+  });
+
+  it("does not render /app/tag-rules link when buyer-setup step is complete", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [
+              { id: "default-terms", title: "Set default payment terms", status: "complete", helpText: "Net 30 days" },
+              { id: "buyer-setup", title: "Configure buyer accounts", status: "complete", helpText: "5 accounts" },
+              { id: "checkout-validation", title: "Enable checkout protection", status: "complete", helpText: "Active" },
+              { id: "payment-customization", title: "Configure payment options", status: "complete", helpText: "Active" },
+              { id: "reminders", title: "Email reminders", status: "coming_soon", helpText: "Coming soon" },
+            ],
+            isComplete: true,
+            completedCount: 5,
+            totalCount: 5,
+            dismissedAt: null,
+          },
+          registrationStatus: null,
+          initialSyncState: { status: "done" },
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    expect(html).not.toContain("Create tag rule");
+  });
+});
+
+describe("S23-22: ErrorBoundary", () => {
+  afterEach(() => {
+    vi.doUnmock("react-router");
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it("ErrorBoundary is exported from app.onboarding", async () => {
+    const module = await import("../app.onboarding");
+    expect(module.ErrorBoundary).toBeDefined();
+    expect(typeof module.ErrorBoundary).toBe("function");
+  });
+
+  it("ErrorBoundary renders Polaris web components with generic message", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useRouteError: () => new Error("Internal test error"),
+        isRouteErrorResponse: () => false,
+      };
+    });
+
+    vi.resetModules();
+    const { ErrorBoundary } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(ErrorBoundary));
+
+    expect(html).toContain("s-page");
+    expect(html).toContain("s-banner");
+    expect(html).toContain("s-button");
+    expect(html).toContain("Something went wrong");
+    expect(html).toContain('href="/app"');
+    expect(html).toContain("Go to dashboard");
+  });
+
+  it("ErrorBoundary handles 404 route responses with Polaris UI", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useRouteError: () => ({ status: 404, statusText: "Not Found", data: null }),
+        isRouteErrorResponse: () => true,
+      };
+    });
+
+    vi.resetModules();
+    const { ErrorBoundary } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(ErrorBoundary));
+
+    expect(html).toContain("Error 404");
+    expect(html).toContain("doesn&#x27;t exist");
+    expect(html).toContain("s-page");
+    expect(html).toContain("s-banner");
+  });
+
+  it("ErrorBoundary delegates 401 auth responses to boundary.error, not Polaris UI", async () => {
+    const mockBoundaryError = vi.fn().mockReturnValue(null);
+
+    vi.doMock("@shopify/shopify-app-react-router/server", async () => {
+      const actual = await vi.importActual<typeof import("@shopify/shopify-app-react-router/server")>("@shopify/shopify-app-react-router/server");
+      return {
+        ...actual,
+        boundary: {
+          ...actual.boundary,
+          error: mockBoundaryError,
+        },
+      };
+    });
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useRouteError: () => ({ status: 401, statusText: "Unauthorized", data: null }),
+        isRouteErrorResponse: () => true,
+      };
+    });
+
+    vi.resetModules();
+    const { ErrorBoundary } = await import("../app.onboarding");
+
+    renderToString(createElement(ErrorBoundary));
+
+    expect(mockBoundaryError).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 401 })
+    );
+  });
+
+  it("ErrorBoundary includes recovery actions (try again and dashboard link)", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useRouteError: () => new Error("Test error"),
+        isRouteErrorResponse: () => false,
+      };
+    });
+
+    vi.resetModules();
+    const { ErrorBoundary } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(ErrorBoundary));
+
+    expect(html).toContain("Try again");
+    expect(html).toContain('href="/app"');
+  });
+
+  it("ErrorBoundary shows raw error text in dev mode", async () => {
+    vi.stubEnv("DEV", true);
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useRouteError: () => new Error("Dev mode error text visible"),
+        isRouteErrorResponse: () => false,
+      };
+    });
+
+    vi.resetModules();
+    const { ErrorBoundary } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(ErrorBoundary));
+
+    expect(html).toContain("Dev mode error text visible");
+  });
+
+  it("ErrorBoundary hides raw error text in prod mode", async () => {
+    vi.stubEnv("DEV", false);
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useRouteError: () => new Error("Sensitive error: test-shop.myshopify.com"),
+        isRouteErrorResponse: () => false,
+      };
+    });
+
+    vi.resetModules();
+    const { ErrorBoundary } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(ErrorBoundary));
+
+    expect(html).not.toContain("Sensitive error");
+    expect(html).not.toContain("test-shop.myshopify.com");
+    expect(html).toContain("An unexpected error occurred");
   });
 });

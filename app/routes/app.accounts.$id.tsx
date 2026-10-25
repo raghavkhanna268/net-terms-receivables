@@ -26,7 +26,7 @@ import type {
 import { useLoaderData, useActionData, Form, useNavigation } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
-import { isAccountActive } from "~/services/gating.server";
+import { isAccountActive, isGatingEnforced } from "~/services/gating.server";
 import {
   getCreditStatusDisplay,
   getCompanyTotals,
@@ -38,7 +38,9 @@ import {
   formatPaiseAmount,
   buildOrderAdminUrl,
 } from "~/lib/aging";
+import { buildAccountOverLimitBannerState } from "~/lib/over-limit-banner";
 import type { HoldReasonCode } from "~/lib/metafields-contract";
+import { getSyncErrorInfo, type SyncErrorInfo } from "~/lib/sync-error-info";
 
 const HOLD_REASON_OPTIONS: Array<{ value: HoldReasonCode; label: string }> = [
   { value: "MANUAL_HOLD", label: "Manual hold" },
@@ -47,6 +49,14 @@ const HOLD_REASON_OPTIONS: Array<{ value: HoldReasonCode; label: string }> = [
   { value: "NEW_ACCOUNT", label: "New account review" },
   { value: "FRAUD_SUSPECTED", label: "Fraud suspected" },
 ];
+
+/**
+ * Sync state enum for banner display:
+ * - pending_retry: syncPending=true, no permanent error, no dead-letter → auto-retries
+ * - needs_attention: syncPending=true with permanent error OR dead-lettered → manual action needed
+ * - synced: not syncPending → no banner
+ */
+type SyncState = "pending_retry" | "needs_attention" | "synced";
 
 interface LoaderData {
   account: {
@@ -75,6 +85,10 @@ interface LoaderData {
     isOverdue: boolean;
     utilizationPercent: number | null;
     syncPending: boolean;
+    syncErrorCode: string | null;
+    syncState: SyncState;
+    hasDeadLetteredSync: boolean;
+    syncErrorInfo: SyncErrorInfo | null;
   } | null;
   companyTotals: {
     locationCount: number;
@@ -98,6 +112,7 @@ interface LoaderData {
     }>;
     totalCount: number;
   };
+  gatingEnforced: boolean;
   error: string | null;
 }
 
@@ -120,6 +135,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       creditStatus: null,
       companyTotals: null,
       invoices: { rows: [], totalCount: 0 },
+      gatingEnforced: isGatingEnforced(),
       error: "Account ID is required",
     } satisfies LoaderData;
   }
@@ -134,6 +150,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       creditStatus: null,
       companyTotals: null,
       invoices: { rows: [], totalCount: 0 },
+      gatingEnforced: isGatingEnforced(),
       error: "Shop not found",
     } satisfies LoaderData;
   }
@@ -165,6 +182,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       creditStatus: null,
       companyTotals: null,
       invoices: { rows: [], totalCount: 0 },
+      gatingEnforced: isGatingEnforced(),
       error: "Account not found",
     } satisfies LoaderData;
   }
@@ -183,26 +201,60 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
 
   const creditStatusDisplay = await getCreditStatusDisplay(sql, accountId);
 
-  const creditStatus = creditStatusDisplay
-    ? {
-        creditLimitAmount: creditStatusDisplay.creditLimitAmount,
-        creditLimitPaise: creditStatusDisplay.creditLimitPaise?.toString() ?? null,
-        exposurePaise: creditStatusDisplay.exposurePaise.toString(),
-        draftExposurePaise: creditStatusDisplay.draftExposurePaise.toString(),
-        availableCreditPaise: creditStatusDisplay.availableCreditPaise?.toString() ?? null,
-        currency: creditStatusDisplay.currency,
-        holdState: creditStatusDisplay.holdState,
-        manualHold: creditStatusDisplay.manualHold,
-        holdReasonCode: creditStatusDisplay.holdReasonCode,
-        holdNote: creditStatusDisplay.holdNote,
-        isOnHold: creditStatusDisplay.isOnHold,
-        holdReasonDisplay: creditStatusDisplay.holdReasonDisplay,
-        isOverLimit: creditStatusDisplay.isOverLimit,
-        isOverdue: creditStatusDisplay.isOverdue,
-        utilizationPercent: creditStatusDisplay.utilizationPercent,
-        syncPending: creditStatusDisplay.syncPending,
+  let creditStatus: LoaderData["creditStatus"] = null;
+  if (creditStatusDisplay) {
+    const metafieldSyncedAt = creditStatusDisplay.metafieldSyncedAt;
+    const [deadLetterRow] = await sql<{ exists: boolean }[]>`
+      SELECT EXISTS (
+        SELECT 1 FROM s6_dead_letter
+        WHERE original_queue = 's6_sync'
+          AND message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+          AND message->>'buyerAccountId' = ${accountId}
+          AND message->>'shop' = ${shopDomain}
+          AND dead_lettered_at > COALESCE(${metafieldSyncedAt}, '-infinity'::timestamptz)
+      ) AS exists
+    `;
+    const hasDeadLetteredSync = deadLetterRow?.exists ?? false;
+
+    const syncErrorCode = creditStatusDisplay.syncErrorCode;
+    const syncPending = creditStatusDisplay.syncPending;
+
+    let syncState: SyncState = "synced";
+    if (syncPending) {
+      if (hasDeadLetteredSync || syncErrorCode !== null) {
+        syncState = "needs_attention";
+      } else {
+        syncState = "pending_retry";
       }
-    : null;
+    }
+
+    const syncErrorInfo = syncState === "needs_attention"
+      ? getSyncErrorInfo(hasDeadLetteredSync && !syncErrorCode ? null : syncErrorCode)
+      : null;
+
+    creditStatus = {
+      creditLimitAmount: creditStatusDisplay.creditLimitAmount,
+      creditLimitPaise: creditStatusDisplay.creditLimitPaise?.toString() ?? null,
+      exposurePaise: creditStatusDisplay.exposurePaise.toString(),
+      draftExposurePaise: creditStatusDisplay.draftExposurePaise.toString(),
+      availableCreditPaise: creditStatusDisplay.availableCreditPaise?.toString() ?? null,
+      currency: creditStatusDisplay.currency,
+      holdState: creditStatusDisplay.holdState,
+      manualHold: creditStatusDisplay.manualHold,
+      holdReasonCode: creditStatusDisplay.holdReasonCode,
+      holdNote: creditStatusDisplay.holdNote,
+      isOnHold: creditStatusDisplay.isOnHold,
+      holdReasonDisplay: creditStatusDisplay.holdReasonDisplay,
+      isOverLimit: creditStatusDisplay.isOverLimit,
+      isOverdue: creditStatusDisplay.isOverdue,
+      utilizationPercent: creditStatusDisplay.utilizationPercent,
+      syncPending,
+      syncErrorCode,
+      syncState,
+      hasDeadLetteredSync,
+      syncErrorInfo,
+    };
+  }
 
   const companyTotalsData = accountRow.kind === "COMPANY" && accountRow.companyId
     ? await getCompanyTotals(sql, accountRow.companyId, shop.id)
@@ -245,6 +297,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
     creditStatus,
     companyTotals,
     invoices,
+    gatingEnforced: isGatingEnforced(),
     error: null,
   } satisfies LoaderData;
 };
@@ -439,7 +492,7 @@ function InvoiceTable({
 }
 
 export default function AccountPage() {
-  const { account, creditStatus, companyTotals, invoices, error } = useLoaderData<typeof loader>();
+  const { account, creditStatus, companyTotals, invoices, gatingEnforced, error } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
@@ -490,13 +543,19 @@ export default function AccountPage() {
         </s-section>
       )}
 
-      {account.isGated && (
-        <s-section>
-          <s-banner tone="warning" heading="Credit limit and account details are read-only on your current plan">
-            Holds still work. Upgrade to edit credit settings.
-          </s-banner>
-        </s-section>
-      )}
+      {(() => {
+        const bannerState = buildAccountOverLimitBannerState(account.isGated, gatingEnforced);
+        return bannerState.show && (
+          <s-section>
+            <s-banner tone="warning" heading={bannerState.heading}>
+              <s-text>
+                {bannerState.bodyText}
+                {bannerState.enforcementNote && ` ${bannerState.enforcementNote}`}
+              </s-text>
+            </s-banner>
+          </s-section>
+        );
+      })()}
 
       <s-section heading="Account Details">
         <s-stack>
@@ -520,7 +579,12 @@ export default function AccountPage() {
 
       {creditStatus && (
         <s-section heading="Credit Status">
-          {creditStatus.syncPending && (
+          {creditStatus.syncState === "needs_attention" && creditStatus.syncErrorInfo && (
+            <s-banner tone="critical" heading="Sync Requires Attention">
+              {creditStatus.syncErrorInfo.message}
+            </s-banner>
+          )}
+          {creditStatus.syncState === "pending_retry" && (
             <s-banner tone="warning" heading="Sync Pending">
               Shopify metafield sync is pending. Changes will be retried automatically.
             </s-banner>
@@ -709,8 +773,8 @@ export default function AccountPage() {
               </s-text>
             </s-paragraph>
             <s-banner tone="info" heading="Upgrade to edit credit settings">
-              Credit limit and account detail editing is only available on paid plans.
-              Holds still work on all plans.
+              Credit limit and account detail editing requires an upgrade. Holds still
+              work on all plans.
             </s-banner>
             <Form method="post">
               <input type="hidden" name="_action" value="updateCredit" />

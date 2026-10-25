@@ -12,7 +12,9 @@
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
-import { readFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
@@ -290,6 +292,327 @@ describe("prod-diagnostics workflow read-only mode", () => {
       expect(s12Step?.run).toContain("ensure_validation=true but token is expired");
       expect(s12Step?.run).toContain("ensure_validation_skipped=true");
       expect(s12Step?.run).toContain("GITHUB_STEP_SUMMARY");
+    });
+  });
+});
+
+
+/**
+ * Runs a real slice of the "S12 Validation" step script (between two marker
+ * comments) with bash, against fixture files. A fake `curl` on PATH serves
+ * FAKE_CURL_BODY for the shopifyFunctions cross-check. Returns stdout and the
+ * printed JSON objects.
+ */
+function runSnippet(
+  run: string,
+  startMarker: string,
+  endMarker: string,
+  env: Record<string, string>
+): { stdout: string; json: Record<string, unknown>[] } {
+  const start = run.indexOf(startMarker);
+  const end = run.indexOf(endMarker);
+  expect(start).toBeGreaterThanOrEqual(0);
+  expect(end).toBeGreaterThan(start);
+  const snippet = run.slice(start, end);
+
+  const dir = mkdtempSync(join(tmpdir(), "diag-iq-"));
+  try {
+    const fakeCurl = join(dir, "curl");
+    writeFileSync(
+      fakeCurl,
+      [
+        "#!/usr/bin/env bash",
+        'out=""',
+        'while [ $# -gt 0 ]; do if [ "$1" = "-o" ]; then out="$2"; shift; fi; shift; done',
+        'cp "$FAKE_CURL_BODY" "$out"',
+        'printf "%s" "${FAKE_CURL_STATUS:-200}"',
+        "",
+      ].join("\n")
+    );
+    chmodSync(fakeCurl, 0o755);
+    const files: Record<string, string> = {};
+    for (const [k, v] of Object.entries(env)) {
+      if (k.endsWith("_JSON")) {
+        const f = join(dir, `${k}.json`);
+        writeFileSync(f, v);
+        files[k.replace(/_JSON$/, "")] = f;
+      } else {
+        files[k] = v;
+      }
+    }
+    // Minimal child env on purpose (no app secrets/config). Cast because the
+    // generated worker types make some ProcessEnv keys required.
+    const childEnv: Record<string, string> = {
+      PATH: `${dir}:${process.env.PATH ?? ""}`,
+      REPO_INPUT_QUERY_HAS_CREDIT_STATUS: "true",
+      CURL_CONFIG: "/dev/null",
+      SHOP_DOMAIN: "example.invalid",
+      ...files,
+    };
+    // Same flags GitHub Actions uses for `run:` (plus -u). --norc stops bash
+    // sourcing /etc/bash.bashrc when it thinks stdin is a remote shell socket.
+    const result = spawnSync(
+      "bash",
+      ["--noprofile", "--norc", "-euo", "pipefail", "-c", snippet],
+      {
+        env: childEnv as NodeJS.ProcessEnv,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }
+    );
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    const stdout = result.stdout;
+    // jq pretty-prints each object starting with "{" at column 0 and ending with "}".
+    const json = (stdout.match(/^\{[\s\S]*?^\}$/gm) ?? []).map(
+      (b) => JSON.parse(b) as Record<string, unknown>
+    );
+    return { stdout, json };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const STATUS_START = "# Find credit-check-validation node";
+const CROSS_START = "# Cross-check via shopifyFunctions";
+const FIXTURES_START = "# S12 checkout fixtures (read-only)";
+
+// Sentinel text that must never appear in any step output.
+const SENTINEL = "SENTINEL_QUERY_TEXT_zq9x";
+
+// Mirrors extensions/credit-check-validation/src/cart_validations_generate_run.graphql
+// (multiline, metafield on customer and CompanyLocation).
+// Built with join() rather than a `const X = \`query ...\`` literal so
+// scripts/validate-graphql-schema.ts doesn't validate it as an Admin API document
+// (it is a Function input query, not Admin).
+const MULTILINE_DOLLAR_APP = [
+  "query Input {",
+  `  # ${SENTINEL}`,
+  "  cart {",
+  "    buyerIdentity {",
+  "      customer {",
+  "        metafield(",
+  '          namespace: "$app"',
+  '          key: "credit_status"',
+  "        ) { jsonValue }",
+  "      }",
+  '      purchasingCompany { location { metafield(namespace: "$app", key: "credit_status") { jsonValue } } }',
+  "    }",
+  "  }",
+  "}",
+].join("\n");
+const MULTILINE_APP_PREFIX = MULTILINE_DOLLAR_APP.replaceAll('"$app"', '"app--123456"');
+
+describe("S12 Validation deployed inputQuery metrics (no text)", () => {
+  let run: string;
+
+  beforeAll(() => {
+    const workflow = parseYaml(readFileSync(WORKFLOW_PATH, "utf-8")) as Workflow;
+    const steps = Object.values(workflow.jobs ?? {}).flatMap((j) => j.steps ?? []);
+    run = steps.find((s) => s.id === "s12_validation")?.run ?? "";
+    expect(run).not.toBe("");
+  });
+
+  function validationsResponse(inputQuery: unknown, includeKey = true): string {
+    const shopifyFunction: Record<string, unknown> = { handle: "credit-check-validation" };
+    if (includeKey) shopifyFunction.inputQuery = inputQuery;
+    return JSON.stringify({
+      data: {
+        validations: {
+          nodes: [
+            { id: "gid://shopify/Validation/1", title: "x", enabled: true, blockOnFailure: true, shopifyFunction },
+          ],
+        },
+      },
+    });
+  }
+
+  function status(inputQuery: unknown, includeKey = true) {
+    const { stdout, json } = runSnippet(run, STATUS_START, CROSS_START, {
+      HTTP_RESPONSE_JSON: validationsResponse(inputQuery, includeKey),
+    });
+    expect(json).toHaveLength(1);
+    return { stdout, s: json[0] };
+  }
+
+  it("multiline query with $app: flags true, length = character count, text never printed", () => {
+    const { stdout, s } = status(MULTILINE_DOLLAR_APP);
+    expect(s).toMatchObject({
+      deployed_input_query_has_credit_status: true,
+      input_query_null: false,
+      input_query_length: [...MULTILINE_DOLLAR_APP].length,
+      iq_has_credit_status: true,
+      iq_has_dollar_app: true,
+      iq_has_app_prefix: false,
+      iq_has_metafield: true,
+    });
+    expect(stdout).not.toContain(SENTINEL);
+    expect(stdout).not.toContain("buyerIdentity");
+    expect(stdout).not.toContain("metafield(");
+    expect(stdout).not.toContain("jsonValue");
+  });
+
+  it("app--<digits> expanded namespace counts as credit_status", () => {
+    const { stdout, s } = status(MULTILINE_APP_PREFIX);
+    expect(s).toMatchObject({
+      deployed_input_query_has_credit_status: true,
+      input_query_null: false,
+      iq_has_dollar_app: false,
+      iq_has_app_prefix: true,
+      iq_has_metafield: true,
+      iq_has_credit_status: true,
+    });
+    expect(stdout).not.toContain(SENTINEL);
+    expect(stdout).not.toContain("app--123456");
+  });
+
+  it("key before namespace also matches", () => {
+    const { s } = status('query { cart { buyerIdentity { customer { metafield(key: "credit_status", namespace: "$app") { jsonValue } } } } }');
+    expect(s.deployed_input_query_has_credit_status).toBe(true);
+  });
+
+  it("other namespace or other key does not count as credit_status", () => {
+    expect(status('query { a { metafield(namespace: "custom", key: "credit_status") { jsonValue } } }').s.deployed_input_query_has_credit_status).toBe(false);
+    const other = status('query { a { metafield(namespace: "$app", key: "other") { jsonValue } } }').s;
+    expect(other.deployed_input_query_has_credit_status).toBe(false);
+    expect(other.iq_has_dollar_app).toBe(true);
+    expect(other.iq_has_metafield).toBe(true);
+    expect(other.iq_has_credit_status).toBe(false);
+  });
+
+  it("null inputQuery reports credit_status as \"unknown\", not false", () => {
+    const nul = status(null).s;
+    expect(nul).toMatchObject({ input_query_null: true, input_query_length: 0, deployed_input_query_has_credit_status: "unknown" });
+  });
+
+  it("empty-string inputQuery is non-null (length 0) and reports a definite false", () => {
+    const empty = status("").s;
+    expect(empty).toMatchObject({ input_query_null: false, input_query_length: 0, deployed_input_query_has_credit_status: false });
+  });
+
+  it("non-null inputQuery always reports a boolean credit_status", () => {
+    expect(status(MULTILINE_DOLLAR_APP).s.deployed_input_query_has_credit_status).toBe(true);
+    expect(status("query { cart { lines { id } } }").s.deployed_input_query_has_credit_status).toBe(false);
+  });
+
+  it("missing inputQuery key and missing validation node both read as null => unknown", () => {
+    expect(status(undefined, false).s).toMatchObject({
+      input_query_null: true,
+      input_query_length: 0,
+      deployed_input_query_has_credit_status: "unknown",
+    });
+    const { json } = runSnippet(run, STATUS_START, CROSS_START, {
+      HTTP_RESPONSE_JSON: JSON.stringify({ data: { validations: { nodes: [] } } }),
+    });
+    expect(json[0]).toMatchObject({
+      exists: false,
+      input_query_null: true,
+      input_query_length: 0,
+      iq_has_metafield: false,
+      deployed_input_query_has_credit_status: "unknown",
+    });
+  });
+
+  it("status prints only booleans and integers under a fixed key set", () => {
+    const { s } = status(MULTILINE_DOLLAR_APP);
+    expect(Object.keys(s).sort()).toEqual(
+      [
+        "blockOnFailure",
+        "deployed_input_query_has_credit_status",
+        "enabled",
+        "exists",
+        "input_query_length",
+        "input_query_null",
+        "iq_has_app_prefix",
+        "iq_has_credit_status",
+        "iq_has_dollar_app",
+        "iq_has_metafield",
+        "repo_input_query_has_credit_status",
+      ].sort()
+    );
+    for (const [k, v] of Object.entries(s)) {
+      if (k === "input_query_length") expect(Number.isInteger(v)).toBe(true);
+      else expect(typeof v).toBe("boolean");
+    }
+    // Null case: the only non-boolean allowed is the fixed enum "unknown".
+    const nul = status(null).s;
+    for (const [k, v] of Object.entries(nul)) {
+      if (k === "input_query_length") expect(v).toBe(0);
+      else if (k === "deployed_input_query_has_credit_status") expect(v).toBe("unknown");
+      else expect(typeof v).toBe("boolean");
+    }
+  });
+
+  describe("shopifyFunctions cross-check", () => {
+    function cross(body: unknown, httpStatus = "200") {
+      return runSnippet(run, CROSS_START, FIXTURES_START, {
+        FAKE_CURL_BODY_JSON: JSON.stringify(body),
+        FAKE_CURL_STATUS: httpStatus,
+      });
+    }
+
+    it("prints count, ids and per-function booleans/ints only, never text or titles", () => {
+      const { stdout, json } = cross({
+        data: {
+          shopifyFunctions: {
+            nodes: [
+              { id: "01a1681b-c9af-7830-9995-f515e3eada0b", handle: "credit-check-validation", title: `T ${SENTINEL}`, inputQuery: MULTILINE_APP_PREFIX },
+              { id: "fn-2", handle: "other", inputQuery: null },
+            ],
+          },
+        },
+      });
+      expect(json).toHaveLength(1);
+      expect(json[0]).toEqual({
+        cross_check: "ok",
+        function_count: 2,
+        functions: [
+          {
+            id: "01a1681b-c9af-7830-9995-f515e3eada0b",
+            handle_is_credit_check_validation: true,
+            input_query_null: false,
+            input_query_length: [...MULTILINE_APP_PREFIX].length,
+            has_credit_status: true,
+          },
+          { id: "fn-2", handle_is_credit_check_validation: false, input_query_null: true, input_query_length: 0, has_credit_status: "unknown" },
+        ],
+      });
+      expect(stdout).not.toContain(SENTINEL);
+      expect(stdout).not.toContain("metafield(");
+    });
+
+    it("per-function has_credit_status: null => \"unknown\", empty string and non-matching => false", () => {
+      const { stdout, json } = cross({
+        data: {
+          shopifyFunctions: {
+            nodes: [
+              { id: "fn-null", handle: "credit-check-validation", inputQuery: null },
+              { id: "fn-missing", handle: "other" },
+              { id: "fn-empty", handle: "other", inputQuery: "" },
+              { id: "fn-nomatch", handle: "other", inputQuery: `query { cart { lines { id } } } # ${SENTINEL}` },
+              { id: "fn-match", handle: "other", inputQuery: MULTILINE_DOLLAR_APP },
+            ],
+          },
+        },
+      });
+      const fns = (json[0] as { functions: Array<Record<string, unknown>> }).functions;
+      expect(fns.map((f) => [f.id, f.input_query_null, f.has_credit_status])).toEqual([
+        ["fn-null", true, "unknown"],
+        ["fn-missing", true, "unknown"],
+        ["fn-empty", false, false],
+        ["fn-nomatch", false, false],
+        ["fn-match", false, true],
+      ]);
+      expect(stdout).not.toContain(SENTINEL);
+      expect(stdout).not.toContain("buyerIdentity");
+      expect(stdout).not.toContain("lines {");
+    });
+
+    it("soft-fails on HTTP error and on GraphQL errors (codes only)", () => {
+      expect(cross({}, "403").json[0]).toEqual({ cross_check: "error", http_status: "403" });
+      const g = cross({ errors: [{ message: `secret ${SENTINEL}`, extensions: { code: "ACCESS_DENIED" } }] });
+      expect(g.json[0]).toEqual({ cross_check: "error", error_codes: ["ACCESS_DENIED"] });
+      expect(g.stdout).not.toContain(SENTINEL);
     });
   });
 });
