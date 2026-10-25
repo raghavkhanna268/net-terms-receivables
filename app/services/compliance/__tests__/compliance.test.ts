@@ -140,7 +140,7 @@ describe("compliance.server", () => {
       // 13. DELETE Shop (no rows)
       mockTx.mockResolvedValueOnce([]);
 
-      const result = await deleteShop(mockSql, "nonexistent.myshopify.com");
+      const result = await deleteShop(mockSql, "test-nonexistent.myshopify.com");
 
       expect(result).toEqual({
         deleted: false,
@@ -165,7 +165,7 @@ describe("compliance.server", () => {
       // 0. SELECT FOR UPDATE returns shop with uninstalledAt: null
       mockTx.mockResolvedValueOnce([{ id: "shop-reinstalled-123", uninstalledAt: null }]);
 
-      const result = await deleteShop(mockSql, "reinstalled-shop.myshopify.com");
+      const result = await deleteShop(mockSql, "test-reinstalled.myshopify.com");
 
       expect(result).toEqual({
         deleted: false,
