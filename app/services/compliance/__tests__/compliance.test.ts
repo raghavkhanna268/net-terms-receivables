@@ -854,6 +854,40 @@ describe("compliance.server", () => {
       expect(result.error).toBe("error");
       consoleSpy.mockRestore();
     });
+
+    it("sends email without link when APP_HANDLE is missing", async () => {
+      (process.env as Record<string, string | undefined>).APP_HANDLE = undefined;
+      process.env.RESEND_API_KEY = "re_test_key";
+      process.env.RESEND_FROM = "noreply@example.com";
+      const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: "email-456" }),
+      });
+
+      const result = await sendDataRequestNotification(
+        "test-shop.myshopify.com",
+        "owner@shop.com",
+        "req-789"
+      );
+
+      expect(result.sent).toBe(true);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+
+      const resendCall = mockFetch.mock.calls[0];
+      const requestBody = JSON.parse(resendCall[1].body);
+
+      expect(requestBody.html).not.toContain("admin.shopify.com");
+      expect(requestBody.html).toContain("Open the Net Terms Receivables app in your Shopify admin and go to Data Requests");
+      expect(requestBody.text).not.toContain("admin.shopify.com");
+      expect(requestBody.text).toContain("Open the Net Terms Receivables app in your Shopify admin and go to Data Requests");
+
+      const warnLogs = consoleWarnSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(warnLogs).toContain('"event":"plan_url_app_handle_missing"');
+
+      consoleWarnSpy.mockRestore();
+    });
   });
 
   describe("markDataRequestDownloaded", () => {

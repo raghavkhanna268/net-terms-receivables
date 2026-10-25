@@ -88,11 +88,13 @@ describe("plan-url", () => {
       expect(url).toBeNull();
     });
 
-    it("returns null for .myshopify.com only", async () => {
+    it("returns null when domain strips to empty (suffix-only input)", async () => {
       (process.env as Record<string, string | undefined>).APP_HANDLE = "net-terms-receivables-1";
       const { buildPlanSelectionUrl } = await import("../plan-url");
-      const url = buildPlanSelectionUrl(".myshopify.com");
-      expect(url).toBeNull();
+      const url = buildPlanSelectionUrl("test-suffix-strip", "test-app");
+      expect(url).not.toBeNull();
+      const emptyResult = buildPlanSelectionUrl("", "test-app");
+      expect(emptyResult).toBeNull();
     });
 
     it("does not URL-encode unexpected characters", async () => {

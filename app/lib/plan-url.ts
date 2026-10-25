@@ -13,7 +13,7 @@
  * Returns null when it's unset or empty (fail closed, never a hardcoded guess).
  */
 export function getAppHandle(): string | null {
-  const handle = process.env.APP_HANDLE;
+  const handle = process.env.APP_HANDLE as string | undefined;
   if (!handle || handle.trim() === "" || handle === "undefined") {
     return null;
   }

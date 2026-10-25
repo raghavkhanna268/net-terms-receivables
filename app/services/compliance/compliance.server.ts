@@ -868,13 +868,16 @@ export async function sendDataRequestNotification(
   const downloadUrl = buildDataRequestsAdminUrl(shopDomain);
 
   if (downloadUrl === null) {
-    safeLog("info", "data_request_email_skipped", {
-      shopHash: hash,
-      requestId,
-      reason: "no_app_handle",
-    });
-    return { sent: false, skippedReason: "no_app_handle" };
+    safeLog("warn", "plan_url_app_handle_missing", {});
   }
+
+  const downloadLinkHtml = downloadUrl
+    ? `<p><a href="${downloadUrl}">Download Customer Data Export</a></p>`
+    : `<p>Open the Net Terms Receivables app in your Shopify admin and go to Data Requests.</p>`;
+
+  const downloadLinkText = downloadUrl
+    ? downloadUrl
+    : "Open the Net Terms Receivables app in your Shopify admin and go to Data Requests.";
 
   const emailBody = {
     from: resendFrom,
@@ -884,7 +887,7 @@ export async function sendDataRequestNotification(
       <p>Hello,</p>
       <p>A customer has requested a copy of their data under GDPR/CCPA regulations.</p>
       <p>The data export is ready for download in your Shopify admin:</p>
-      <p><a href="${downloadUrl}">Download Customer Data Export</a></p>
+      ${downloadLinkHtml}
       <p>Please review and provide this data to the customer within the required timeframe.</p>
       <p>The export will be available for 30 days.</p>
       <p>— Net Terms Receivables</p>
@@ -894,7 +897,7 @@ export async function sendDataRequestNotification(
 A customer has requested a copy of their data under GDPR/CCPA regulations.
 
 The data export is ready for download in your Shopify admin:
-${downloadUrl}
+${downloadLinkText}
 
 Please review and provide this data to the customer within the required timeframe.
 The export will be available for 30 days.
