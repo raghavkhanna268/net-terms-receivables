@@ -100,6 +100,8 @@ const DB_TEST_PATTERNS = [
 
   // Route DB tests
   "app/routes/__tests__/app.imports.test.ts",
+  "app/routes/__tests__/app.imports-client-payload-db.test.ts",
+  "app/routes/__tests__/app.imports-pii-logging.test.ts",
   "app/routes/__tests__/app._index.test.ts",
   "app/routes/__tests__/app._index-overlimit-db.test.ts",
   "app/routes/__tests__/app.accounts.$id-db.test.ts",
