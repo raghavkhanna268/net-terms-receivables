@@ -763,6 +763,7 @@ describe("compliance.server", () => {
     it("sends email with NO customer PII in request body", async () => {
       process.env.RESEND_API_KEY = "re_test_key";
       process.env.RESEND_FROM = "noreply@example.com";
+      process.env.RESEND_TEST_RECIPIENTS = "owner@shop.com";
 
       // Mock Resend API call
       mockFetch.mockResolvedValueOnce({
@@ -802,6 +803,7 @@ describe("compliance.server", () => {
     it("returns error when Resend API fails but does not throw", async () => {
       process.env.RESEND_API_KEY = "re_test_key";
       process.env.RESEND_FROM = "noreply@example.com";
+      process.env.RESEND_TEST_RECIPIENTS = "owner@shop.com";
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
       // Mock Resend API failure
@@ -818,7 +820,7 @@ describe("compliance.server", () => {
       );
 
       expect(result.sent).toBe(false);
-      expect(result.error).toBe("resend_api_error_500");
+      expect(result.error).toBe("resend_server_error");
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining("data_request_email_failed")
       );
@@ -828,6 +830,7 @@ describe("compliance.server", () => {
     it("handles fetch network errors gracefully", async () => {
       process.env.RESEND_API_KEY = "re_test_key";
       process.env.RESEND_FROM = "noreply@example.com";
+      process.env.RESEND_TEST_RECIPIENTS = "owner@shop.com";
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
       // Mock network error
@@ -841,7 +844,7 @@ describe("compliance.server", () => {
 
       expect(result.sent).toBe(false);
       // Error code is returned, not raw message (per security rule)
-      expect(result.error).toBe("error");
+      expect(result.error).toBe("fetch_error");
       consoleSpy.mockRestore();
     });
   });

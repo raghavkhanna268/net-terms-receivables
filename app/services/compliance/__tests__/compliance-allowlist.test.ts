@@ -1,0 +1,167 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+
+/**
+ * Tests for compliance email sending with recipient allowlist.
+ *
+ * These tests verify that:
+ * 1. Skipped sends don't throw
+ * 2. No email addresses or domains are logged (uses REAL safeLog)
+ */
+
+const mockFetch = vi.fn();
+vi.stubGlobal("fetch", mockFetch);
+
+describe("sendDataRequestNotification - allowlist", () => {
+  const originalEnv = process.env;
+  let consoleLogOutput: string[] = [];
+  let consoleInfoOutput: string[] = [];
+  let consoleWarnOutput: string[] = [];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockFetch.mockReset();
+    process.env = { ...originalEnv };
+    consoleLogOutput = [];
+    consoleInfoOutput = [];
+    consoleWarnOutput = [];
+
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogOutput.push(args.map(String).join(" "));
+    });
+    vi.spyOn(console, "info").mockImplementation((...args) => {
+      consoleInfoOutput.push(args.map(String).join(" "));
+    });
+    vi.spyOn(console, "warn").mockImplementation((...args) => {
+      consoleWarnOutput.push(args.map(String).join(" "));
+    });
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    vi.restoreAllMocks();
+  });
+
+  it("does not throw when recipient is not allowlisted", async () => {
+    process.env.RESEND_API_KEY = "re_test_1234";
+    process.env.RESEND_FROM = "noreply@test-example.com";
+    process.env.RESEND_TEST_RECIPIENTS = "other@test-example.com";
+
+    const { sendDataRequestNotification } = await import("../compliance.server");
+
+    const result = await sendDataRequestNotification(
+      "test-shop.myshopify.com",
+      "owner@test-shop-domain.com",
+      "req-123"
+    );
+
+    expect(result.sent).toBe(false);
+    expect(result.skippedReason).toBe("recipient_not_allowlisted");
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("does not throw when allowlist is empty", async () => {
+    process.env.RESEND_API_KEY = "re_test_1234";
+    process.env.RESEND_FROM = "noreply@test-example.com";
+    process.env.RESEND_TEST_RECIPIENTS = "";
+
+    const { sendDataRequestNotification } = await import("../compliance.server");
+
+    const result = await sendDataRequestNotification(
+      "test-shop.myshopify.com",
+      "owner@test-shop-domain.com",
+      "req-456"
+    );
+
+    expect(result.sent).toBe(false);
+    expect(result.skippedReason).toBe("recipient_allowlist_empty");
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("does not log any email addresses when skipped (recipient_not_allowlisted)", async () => {
+    process.env.RESEND_API_KEY = "re_test_1234";
+    process.env.RESEND_FROM = "noreply@test-example.com";
+    process.env.RESEND_TEST_RECIPIENTS = "allowed@test-example.com";
+
+    const { sendDataRequestNotification } = await import("../compliance.server");
+
+    await sendDataRequestNotification(
+      "test-shop.myshopify.com",
+      "owner@test-shop-domain.com",
+      "req-789"
+    );
+
+    const allLogs = [...consoleLogOutput, ...consoleInfoOutput, ...consoleWarnOutput].join("\n");
+
+    expect(allLogs).not.toContain("owner@test-shop-domain.com");
+    expect(allLogs).not.toContain("test-shop-domain.com");
+    expect(allLogs).not.toContain("allowed@test-example.com");
+    expect(allLogs).toContain("recipient_not_allowlisted");
+  });
+
+  it("does not log any email addresses when skipped (recipient_allowlist_empty)", async () => {
+    process.env.RESEND_API_KEY = "re_test_1234";
+    process.env.RESEND_FROM = "noreply@test-example.com";
+    process.env.RESEND_TEST_RECIPIENTS = "";
+
+    const { sendDataRequestNotification } = await import("../compliance.server");
+
+    await sendDataRequestNotification(
+      "test-another-shop.myshopify.com",
+      "shopowner@test-another-domain.com",
+      "req-101"
+    );
+
+    const allLogs = [...consoleLogOutput, ...consoleInfoOutput, ...consoleWarnOutput].join("\n");
+
+    expect(allLogs).not.toContain("shopowner@test-another-domain.com");
+    expect(allLogs).not.toContain("test-another-domain.com");
+    expect(allLogs).toContain("recipient_allowlist_empty");
+  });
+
+  it("logs reason enum and counts only, not addresses", async () => {
+    process.env.RESEND_API_KEY = "re_test_1234";
+    process.env.RESEND_FROM = "noreply@test-example.com";
+    process.env.RESEND_TEST_RECIPIENTS = "allowed@test-example.com";
+
+    const { sendDataRequestNotification } = await import("../compliance.server");
+
+    await sendDataRequestNotification(
+      "test-myshop.myshopify.com",
+      "notallowed@test-some-domain.com",
+      "req-202"
+    );
+
+    const allLogs = [...consoleLogOutput, ...consoleInfoOutput, ...consoleWarnOutput].join("\n");
+
+    expect(allLogs).toContain("data_request_email_skipped");
+    expect(allLogs).toContain("recipient_not_allowlisted");
+    expect(allLogs).toContain("skippedCount");
+    expect(allLogs).toContain("allowedCount");
+
+    expect(allLogs).not.toContain("notallowed@test-some-domain.com");
+    expect(allLogs).not.toContain("test-some-domain.com");
+    expect(allLogs).not.toContain("allowed@test-example.com");
+  });
+
+  it("sends successfully when recipient is allowlisted", async () => {
+    process.env.RESEND_API_KEY = "re_test_1234";
+    process.env.RESEND_FROM = "noreply@test-example.com";
+    process.env.RESEND_TEST_RECIPIENTS = "allowed@test-example.com";
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "email-123" }),
+    });
+
+    const { sendDataRequestNotification } = await import("../compliance.server");
+
+    const result = await sendDataRequestNotification(
+      "test-shop.myshopify.com",
+      "allowed@test-example.com",
+      "req-303"
+    );
+
+    expect(result.sent).toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+});

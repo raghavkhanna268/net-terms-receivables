@@ -16,6 +16,7 @@
 
 import type { Sql } from "~/lib/db-light.server";
 import { safeLog, shopHash, toErrorCode } from "~/lib/log.server";
+import { sendViaResend } from "~/services/resend-client.server";
 
 // ============================================================================
 // RETENTION CONSTANTS
@@ -861,11 +862,7 @@ export async function sendDataRequestNotification(
 
   const downloadUrl = buildDataRequestsAdminUrl(shopDomain);
 
-  const emailBody = {
-    from: resendFrom,
-    to: shopOwnerEmail,
-    subject: "Customer Data Request Ready for Download",
-    html: `
+  const htmlContent = `
       <p>Hello,</p>
       <p>A customer has requested a copy of their data under GDPR/CCPA regulations.</p>
       <p>The data export is ready for download in your Shopify admin:</p>
@@ -873,8 +870,9 @@ export async function sendDataRequestNotification(
       <p>Please review and provide this data to the customer within the required timeframe.</p>
       <p>The export will be available for 30 days.</p>
       <p>— Net Terms Receivables</p>
-    `.trim(),
-    text: `Hello,
+    `.trim();
+
+  const textContent = `Hello,
 
 A customer has requested a copy of their data under GDPR/CCPA regulations.
 
@@ -884,41 +882,45 @@ ${downloadUrl}
 Please review and provide this data to the customer within the required timeframe.
 The export will be available for 30 days.
 
-— Net Terms Receivables`,
-  };
+— Net Terms Receivables`;
 
-  try {
-    const response = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${resendApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(emailBody),
-    });
+  const sendResult = await sendViaResend(
+    {
+      from: resendFrom,
+      to: [shopOwnerEmail],
+      subject: "Customer Data Request Ready for Download",
+      html: htmlContent,
+      text: textContent,
+    },
+    { RESEND_API_KEY: resendApiKey }
+  );
 
-    if (!response.ok) {
-      safeLog("info", "data_request_email_failed", {
-        shopHash: hash,
-        requestId,
-        httpStatus: response.status,
-      });
-      return { sent: false, error: `resend_api_error_${response.status}` };
-    }
-
+  if (sendResult.sent) {
     safeLog("info", "data_request_email_sent", {
       shopHash: hash,
       requestId,
     });
     return { sent: true };
-  } catch (err) {
-    safeLog("info", "data_request_email_failed", {
+  }
+
+  if (sendResult.skipped) {
+    safeLog("info", "data_request_email_skipped", {
       shopHash: hash,
       requestId,
-      err: toErrorCode(err),
+      reason: sendResult.reason,
+      skippedCount: sendResult.skippedCount,
+      allowedCount: sendResult.allowedCount,
     });
-    return { sent: false, error: toErrorCode(err) };
+    return { sent: false, skippedReason: sendResult.reason };
   }
+
+  safeLog("info", "data_request_email_failed", {
+    shopHash: hash,
+    requestId,
+    httpStatus: sendResult.httpStatus,
+    errorCode: sendResult.error,
+  });
+  return { sent: false, error: sendResult.error };
 }
 
 // ============================================================================
