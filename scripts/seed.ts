@@ -7,14 +7,16 @@
  * buyer account defaults so S9 inference can compute due dates.
  *
  * SCOPE REQUIREMENTS:
- * This script runs with the 11 PRODUCTION scopes only - no separate dev app needed.
+ * This script runs with the 8 PRODUCTION scopes only - no separate dev app needed.
  * Uses only the dev-store token (SHOPIFY_ADMIN_TOKEN env var).
- *   - read_companies, write_companies  - Create companies, set payment terms on locations
- *   - read_customers, write_customers  - Create test customers (for future use)
- *   - read_orders, write_orders        - Create orders via orderCreate
- *   - read_payment_terms               - Read payment terms templates
+ *   - write_companies  - Create companies, set payment terms on locations (implies read_companies)
+ *   - write_customers  - Create test customers (implies read_customers)
+ *   - write_orders     - Create orders via orderCreate (implies read_orders)
+ *   - read_payment_terms - Read payment terms templates
+ *   - read_draft_orders  - Draft order payment terms
  *   - write_validations, write_payment_customizations, write_merchant_managed_fulfillment_orders
  *     (pre-granted for S12/S13, not used by seed)
+ * Per https://shopify.dev/docs/api/usage/access-scopes: write_* scopes imply read_* access.
  *
  * HOW PAYMENT TERMS WORK:
  * 1. Each company has 3 locations with Net 15, Net 30, Net 60 via buyerExperienceConfiguration

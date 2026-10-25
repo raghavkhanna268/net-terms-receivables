@@ -627,11 +627,9 @@ describeWithDb("syncCreditStatusMetafield gated account", () => {
   });
 });
 
-// Note: The "no owner GID" skip branch in syncCreditStatusMetafield cannot be tested
-// with real data. The BuyerAccount_kind_consistency constraint requires:
-// - COMPANY accounts must have companyLocationId AND companyId
-// - TAGGED_CUSTOMER accounts must have customerId
-// This ensures all valid accounts have an owner GID, making the skip branch unreachable.
+// Note: The no-owner logic in getOwnerGid is tested via unit tests in credit-status.test.ts.
+// The BuyerAccount_kind_consistency CHECK constraint prevents inserting no-owner rows in the DB,
+// so DB tests only use valid rows that satisfy the constraint.
 
 describeWithDb("hold-transition audit events", () => {
   let sql: ReturnType<typeof postgres>;
@@ -802,16 +800,27 @@ describeWithDb("hold-transition audit events", () => {
     expect(result.success).toBe(true);
     expect(result.metafieldSyncPending).toBe(true);
 
-    // Audit event should still be recorded (it was in the same tx as holdState UPDATE)
+    // Two audit events should be recorded:
+    // 1. credit_status.hold_applied (in the same tx as holdState UPDATE)
+    // 2. credit_status.sync_failed (after metafield failure, #212 fix)
     const events = await sql<{ type: string; data: Record<string, unknown> }[]>`
       SELECT type, data FROM "AuditEvent"
       WHERE "shopId" = ${TEST_SHOP_ID}
         AND type LIKE 'credit_status.%'
+      ORDER BY at
     `;
 
-    expect(events.length).toBe(1);
-    expect(events[0].type).toBe("credit_status.hold_applied");
-    expect(events[0].data.buyerAccountId).toBe(TEST_ACCOUNT_ID);
+    expect(events.length).toBe(2);
+    
+    // First event: hold_applied (from transaction)
+    const holdEvent = events.find(e => e.type === "credit_status.hold_applied");
+    expect(holdEvent).toBeDefined();
+    expect(holdEvent!.data.buyerAccountId).toBe(TEST_ACCOUNT_ID);
+    
+    // Second event: sync_failed (from metafield failure handling, #212)
+    const syncFailedEvent = events.find(e => e.type === "credit_status.sync_failed");
+    expect(syncFailedEvent).toBeDefined();
+    expect(syncFailedEvent!.data.buyerAccountId).toBe(TEST_ACCOUNT_ID);
   });
 
   it("syncCreditStatusMetafield records audit event with source", async () => {

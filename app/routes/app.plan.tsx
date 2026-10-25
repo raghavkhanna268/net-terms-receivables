@@ -29,6 +29,7 @@ import {
   PLAN_DISPLAY_NAMES,
   FEATURE_DISPLAY_NAMES,
 } from "~/components/UpgradePrompt";
+import { buildOverLimitBannerState } from "~/lib/over-limit-banner";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 
 const FEATURE_DESCRIPTIONS: Record<FeatureKey, string> = {
@@ -267,22 +268,17 @@ export default function PlanPage() {
                 label="Bank Imports This Month"
               />
 
-              {gatingEnforced && gatedCount > 0 && (
-                <s-banner tone="warning" heading="Gated Accounts">
-                  <s-text>
-                    {gatedCount} buyer account{gatedCount !== 1 ? "s are" : " is"} currently
-                    gated due to plan limits. Upgrade to reactivate them.
-                  </s-text>
-                </s-banner>
-              )}
-
-              {!gatingEnforced && gatedCount > 0 && (
-                <s-paragraph>
-                  <s-text>
-                    {gatedCount} account{gatedCount !== 1 ? "s" : ""} pending (gating not enforced)
-                  </s-text>
-                </s-paragraph>
-              )}
+              {(() => {
+                const bannerState = buildOverLimitBannerState(gatedCount, gatingEnforced);
+                return bannerState.show && (
+                  <s-banner tone="warning" heading={bannerState.heading}>
+                    <s-text>
+                      {bannerState.bodyText}
+                      {bannerState.enforcementNote && ` ${bannerState.enforcementNote}`}
+                    </s-text>
+                  </s-banner>
+                );
+              })()}
             </s-stack>
           </s-section>
 

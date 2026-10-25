@@ -357,7 +357,7 @@ async function checkCompanyAccount(
   _customerId: string
 ): Promise<boolean> {
   // TODO (S10): Query for COMPANY BuyerAccount linked to orders from this customer,
-  // or implement CompanyContact lookup via read_companies scope.
+  // or implement CompanyContact lookup via write_companies (which implies read_companies).
   return false;
 }
 

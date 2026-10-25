@@ -56,11 +56,28 @@ describe("compliance.server", () => {
   });
 
   describe("deleteShop", () => {
-    it("deletes shop and returns deleted=true with shopId", async () => {
+    it("deletes shop and all non-FK-linked tables in a transaction", async () => {
+      // All queries run inside sql.begin() using mockTx
       // 1. DELETE s10b_order_refetch_null
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 5 }));
-      // 2. DELETE Shop
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 5 }));
+      // 2. DELETE s6_bulk_operations
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
+      // 3. DELETE order_outstanding_missing
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
+      // 4. DELETE s10b_customer_pii_fallback
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+      // 5. DELETE pgmq.q_s6_sync
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 6 }));
+      // 6. DELETE pgmq.q_s6_bulk
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 7 }));
+      // 7. DELETE pgmq.a_s6_sync
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 8 }));
+      // 8. DELETE pgmq.a_s6_bulk
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 9 }));
+      // 9. DELETE s6_dead_letter
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 4 }));
+      // 10. DELETE Shop
+      mockTx.mockResolvedValueOnce([{ id: "shop-123" }]);
 
       const result = await deleteShop(mockSql, "test-shop.myshopify.com");
 
@@ -68,15 +85,40 @@ describe("compliance.server", () => {
         deleted: true,
         shopId: "shop-123",
         refetchNullPurged: 5,
+        bulkOperationsPurged: 2,
+        orderGapPurged: 3,
+        piiFallbackPurged: 1,
+        pgmqSyncQueuePurged: 6,
+        pgmqBulkQueuePurged: 7,
+        pgmqSyncArchivePurged: 8,
+        pgmqBulkArchivePurged: 9,
+        deadLetterPurged: 4,
       });
-      expect(mockSql).toHaveBeenCalledTimes(2);
+      expect(mockSql.begin).toHaveBeenCalledTimes(1);
     });
 
     it("returns deleted=false when shop not found", async () => {
+      // All queries run inside sql.begin() using mockTx
       // 1. DELETE s10b_order_refetch_null (may have rows even if shop doesn't exist)
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 2. DELETE Shop (no rows)
-      mockSql.mockResolvedValueOnce([]);
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 2. DELETE s6_bulk_operations
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 3. DELETE order_outstanding_missing
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 4. DELETE s10b_customer_pii_fallback
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 5. DELETE pgmq.q_s6_sync
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 6. DELETE pgmq.q_s6_bulk
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 7. DELETE pgmq.a_s6_sync
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 8. DELETE pgmq.a_s6_bulk
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 9. DELETE s6_dead_letter
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 10. DELETE Shop (no rows)
+      mockTx.mockResolvedValueOnce([]);
 
       const result = await deleteShop(mockSql, "nonexistent.myshopify.com");
 
@@ -84,16 +126,24 @@ describe("compliance.server", () => {
         deleted: false,
         shopId: null,
         refetchNullPurged: 0,
+        bulkOperationsPurged: 0,
+        orderGapPurged: 0,
+        piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
+        deadLetterPurged: 0,
       });
     });
   });
 
   describe("purgePgmqMessages", () => {
-    it("returns documented limitation (pgmq does not support per-shop deletion)", async () => {
+    it("returns that deleteShop now handles pgmq deletion", async () => {
       const result = await purgePgmqMessages(mockSql, "test-shop.myshopify.com");
 
       expect(result.purged).toBe(false);
-      expect(result.reason).toContain("pgmq does not support per-shop message deletion");
+      expect(result.reason).toContain("deleteShop() now removes the shop's queue and archive messages");
     });
   });
 

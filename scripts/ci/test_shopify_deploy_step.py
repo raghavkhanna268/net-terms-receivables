@@ -37,7 +37,7 @@ def step_body():
     y = open(WF).read()
     i = y.index("- name: Deploy app version (shopify app deploy)")
     r = y.index("run: |", i)
-    e = y.index("- name: Summary", r)
+    e = y.index("\n      - name: ", r)  # next step
     lines = y[r + len("run: |"):e].splitlines()[1:]
     return "\n".join(l[10:] if l.startswith(" " * 10) else l.strip() for l in lines) + "\n"
 
