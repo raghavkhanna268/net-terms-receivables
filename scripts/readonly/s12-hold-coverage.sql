@@ -213,6 +213,8 @@ SELECT
     SELECT 1 FROM s6_dead_letter d
     WHERE d.message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
       AND d.message->>'buyerAccountId' = ba.id
+      AND d.original_queue = 's6_sync'
+      AND d.dead_lettered_at > COALESCE(ba."metafieldSyncedAt", '-infinity')
   )) AS dead_lettered
 FROM "BuyerAccount" ba
 WHERE ba."syncPending" = true

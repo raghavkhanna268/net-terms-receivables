@@ -222,35 +222,95 @@ describe("app.accounts.$id loader syncState", () => {
     });
   });
 
-  describe("error marker types", () => {
-    it("handles no_session error marker", async () => {
+  describe("banner render output (syncErrorInfo messages)", () => {
+    it("pending_retry shows warning banner message", async () => {
+      setupBaseMocks({ syncPending: true, syncErrorCode: null, hasDeadLetteredSync: false });
+
+      const { loader } = await import("../app.accounts.$id");
+      const result = await loader(createLoaderArgs());
+
+      expect(result.creditStatus?.syncState).toBe("pending_retry");
+      expect(result.creditStatus?.syncErrorInfo).toBeNull();
+    });
+
+    it("session error (no_session) shows reinstall message without raw code", async () => {
       setupBaseMocks({ syncPending: true, syncErrorCode: "no_session", hasDeadLetteredSync: false });
 
       const { loader } = await import("../app.accounts.$id");
       const result = await loader(createLoaderArgs());
 
-      expect(result.creditStatus?.syncErrorCode).toBe("no_session");
       expect(result.creditStatus?.syncState).toBe("needs_attention");
+      expect(result.creditStatus?.syncErrorInfo?.category).toBe("session");
+      expect(result.creditStatus?.syncErrorInfo?.message).toContain("reopen the app or reinstall");
+      expect(result.creditStatus?.syncErrorInfo?.message).not.toContain("no_session");
     });
 
-    it("handles invalid_grant error marker", async () => {
+    it("session error (invalid_grant) shows reinstall message without raw code", async () => {
       setupBaseMocks({ syncPending: true, syncErrorCode: "invalid_grant", hasDeadLetteredSync: false });
 
       const { loader } = await import("../app.accounts.$id");
       const result = await loader(createLoaderArgs());
 
-      expect(result.creditStatus?.syncErrorCode).toBe("invalid_grant");
       expect(result.creditStatus?.syncState).toBe("needs_attention");
+      expect(result.creditStatus?.syncErrorInfo?.category).toBe("session");
+      expect(result.creditStatus?.syncErrorInfo?.message).not.toContain("invalid_grant");
     });
 
-    it("handles user_error marker", async () => {
+    it("permission error (access_denied) shows permission message without raw code", async () => {
+      setupBaseMocks({ syncPending: true, syncErrorCode: "access_denied", hasDeadLetteredSync: false });
+
+      const { loader } = await import("../app.accounts.$id");
+      const result = await loader(createLoaderArgs());
+
+      expect(result.creditStatus?.syncState).toBe("needs_attention");
+      expect(result.creditStatus?.syncErrorInfo?.category).toBe("permission");
+      expect(result.creditStatus?.syncErrorInfo?.message).toContain("missing required permissions");
+      expect(result.creditStatus?.syncErrorInfo?.message).not.toContain("access_denied");
+    });
+
+    it("owner error (owner_not_found) shows entity deleted message without raw code", async () => {
+      setupBaseMocks({ syncPending: true, syncErrorCode: "owner_not_found", hasDeadLetteredSync: false });
+
+      const { loader } = await import("../app.accounts.$id");
+      const result = await loader(createLoaderArgs());
+
+      expect(result.creditStatus?.syncState).toBe("needs_attention");
+      expect(result.creditStatus?.syncErrorInfo?.category).toBe("owner");
+      expect(result.creditStatus?.syncErrorInfo?.message).toContain("no longer exists");
+      expect(result.creditStatus?.syncErrorInfo?.message).not.toContain("owner_not_found");
+    });
+
+    it("generic error (user_error) shows support message without raw code", async () => {
       setupBaseMocks({ syncPending: true, syncErrorCode: "user_error", hasDeadLetteredSync: false });
 
       const { loader } = await import("../app.accounts.$id");
       const result = await loader(createLoaderArgs());
 
-      expect(result.creditStatus?.syncErrorCode).toBe("user_error");
       expect(result.creditStatus?.syncState).toBe("needs_attention");
+      expect(result.creditStatus?.syncErrorInfo?.category).toBe("generic");
+      expect(result.creditStatus?.syncErrorInfo?.message).toContain("contact support");
+      expect(result.creditStatus?.syncErrorInfo?.message).not.toContain("user_error");
+    });
+
+    it("dead-letter only (no error code) shows support message", async () => {
+      setupBaseMocks({ syncPending: true, syncErrorCode: null, hasDeadLetteredSync: true });
+
+      const { loader } = await import("../app.accounts.$id");
+      const result = await loader(createLoaderArgs());
+
+      expect(result.creditStatus?.syncState).toBe("needs_attention");
+      expect(result.creditStatus?.syncErrorInfo?.category).toBe("generic");
+      expect(result.creditStatus?.syncErrorInfo?.message).toContain("multiple failures");
+    });
+
+    it("synced state shows no banner (syncErrorInfo is null)", async () => {
+      setupBaseMocks({ syncPending: false, syncErrorCode: null, hasDeadLetteredSync: false });
+
+      const { loader } = await import("../app.accounts.$id");
+      const result = await loader(createLoaderArgs());
+
+      expect(result.creditStatus?.syncState).toBe("synced");
+      expect(result.creditStatus?.syncErrorInfo).toBeNull();
     });
   });
 
@@ -560,6 +620,114 @@ describe("app.accounts.$id loader syncState", () => {
       const result = await loader(createLoaderArgs());
 
       expect(result.account?.isGated).toBe(false);
+    });
+
+    it("gated account with syncPending=true still gets banner data", async () => {
+      const gatedDate = new Date("2026-10-01T00:00:00Z");
+      setupBaseMocks({ 
+        syncPending: true, 
+        syncErrorCode: "no_session", 
+        hasDeadLetteredSync: false,
+        gatedAt: gatedDate,
+      });
+
+      const { loader } = await import("../app.accounts.$id");
+      const result = await loader(createLoaderArgs());
+
+      expect(result.account?.isGated).toBe(true);
+      expect(result.creditStatus?.syncState).toBe("needs_attention");
+      expect(result.creditStatus?.syncErrorInfo?.category).toBe("session");
+      expect(result.creditStatus?.syncErrorInfo?.message).toContain("reopen the app or reinstall");
+    });
+  });
+
+  describe("cross-shop isolation", () => {
+    it("account from different shop returns not found, no credit-status or dead-letter queries", async () => {
+      const OTHER_ACCOUNT_ID = "other-shop-acc-999";
+      let deadLetterQueryCount = 0;
+
+      mockSql.mockImplementation((strings: TemplateStringsArray, ..._values: unknown[]) => {
+        const query = strings.join("?");
+
+        if (query.includes("SELECT id FROM \"Shop\"")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        }
+
+        if (query.includes("SELECT") && query.includes("FROM \"BuyerAccount\"") && query.includes("WHERE id =")) {
+          return Promise.resolve([]);
+        }
+
+        if (query.includes("s6_dead_letter")) {
+          deadLetterQueryCount++;
+        }
+
+        return Promise.resolve([]);
+      });
+
+      mockGetCreditStatusDisplay.mockClear();
+      mockGetCreditStatusDisplay.mockResolvedValue(null);
+
+      const { loader } = await import("../app.accounts.$id");
+      const result = await loader(createLoaderArgs(OTHER_ACCOUNT_ID));
+
+      expect(result.error).toBe("Account not found");
+      expect(result.account).toBeNull();
+      expect(result.creditStatus).toBeNull();
+
+      expect(mockGetCreditStatusDisplay).not.toHaveBeenCalled();
+      expect(deadLetterQueryCount).toBe(0);
+    });
+  });
+
+  describe("old dead-letter row (time filter)", () => {
+    it("passes metafieldSyncedAt to time filter, old row gives pending_retry", async () => {
+      const syncTime = new Date("2026-10-24T12:00:00Z");
+      let capturedTimeParam: unknown;
+
+      mockIsAccountActive.mockReturnValue(true);
+
+      mockSql.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
+        const query = strings.join("?");
+
+        if (query.includes("SELECT id FROM \"Shop\"")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        }
+
+        if (query.includes("SELECT") && query.includes("FROM \"BuyerAccount\"") && query.includes("WHERE id =")) {
+          return Promise.resolve([{
+            id: TEST_ACCOUNT_ID,
+            name: "Test Account",
+            kind: "COMPANY",
+            companyId: "gid://shopify/Company/123",
+            companyLocationId: "gid://shopify/CompanyLocation/456",
+            customerId: null,
+            defaultTermsDays: 30,
+            defaultTermsSource: "explicit",
+            gatedAt: null,
+          }]);
+        }
+
+        if (query.includes("s6_dead_letter")) {
+          capturedTimeParam = values[2];
+          return Promise.resolve([{ exists: false }]);
+        }
+
+        return Promise.resolve([]);
+      });
+
+      mockGetCreditStatusDisplay.mockResolvedValue(createBaseCreditStatus({
+        syncPending: true,
+        syncErrorCode: null,
+        metafieldSyncedAt: syncTime,
+      }));
+
+      const { loader } = await import("../app.accounts.$id");
+      const result = await loader(createLoaderArgs());
+
+      expect(capturedTimeParam).toEqual(syncTime);
+
+      expect(result.creditStatus?.syncState).toBe("pending_retry");
+      expect(result.creditStatus?.hasDeadLetteredSync).toBe(false);
     });
   });
 });

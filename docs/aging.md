@@ -33,7 +33,7 @@ Invoices are categorized into these buckets based on days past due:
 Invoices become overdue 1 day after the due date (end of day, shop time). This means:
 - An invoice due on October 23 is **not** overdue until October 25 (after the end of October 24)
 - The 1-day grace period allows for same-day and next-day payments without triggering credit holds
-- The overdue check uses `dueAt < NOW() - INTERVAL '1 day'` in shop timezone
+- `dueAt` is stored as end-of-day in shop time (a `timestamptz` instant). The overdue check `dueAt < NOW() - INTERVAL '1 day'` compares absolute instants, not calendar days in any timezone.
 
 ### Timezone
 
