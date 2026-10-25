@@ -167,7 +167,7 @@ The app accesses **Level 1 + Name + Email** protected customer fields.
 ### What the App Writes to Shopify
 
 - **Metafields** (`$app:credit_status`): Credit limit, exposure, hold state synced to Company/CompanyLocation/Customer for use by Shopify Functions.
-- **Fulfillment holds**: Places holds on merchant-managed fulfillment orders from held accounts (`app/services/backstop.server.ts:45`).
+- **Fulfillment holds**: Places holds on merchant-managed fulfillment orders from held accounts (`app/services/backstop.server.ts:200`).
 - **Order mutations**: `orderMarkAsPaid` after confirmed bank matches; `tagsAdd` for credit-hold tag (`ntr-credit-hold`).
 - **Function registrations**: Creates/updates the Cart Validation and Payment Customization Functions.
 
