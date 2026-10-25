@@ -52,7 +52,6 @@ import {
   fetchActiveSubscription,
   mapPlanHandleToKey,
   PartnerApiError,
-  _resetConfigLoggingForTesting,
   type PartnerConfig,
 } from "./partner-api.server";
 
@@ -711,14 +710,13 @@ export class AdminInstallationPlanSource implements PlanSource {
 
 /**
  * Isolate cache for confirmed Partner API subscriptions.
- * Only confirmed (non-null) subscriptions are cached.
+ * Used to throttle background refreshes - only one refresh per shop per 5 minutes.
  * Entries expire after 5 minutes.
  */
 interface PartnerCacheEntry {
   planKey: PlanKey;
   subscriptionId: string | null;
   handle: string;
-  isTest: boolean;
   expiresAt: number;
 }
 
@@ -727,7 +725,6 @@ const PARTNER_CACHE_MAX_ENTRIES = 1000;
 
 const partnerPlanCache = new Map<string, PartnerCacheEntry>();
 const shopGidMemo = new Map<string, string>();
-const inFlightPartner = new Map<string, Promise<SourceResolvedPlan>>();
 
 /**
  * Query to get shop GID from Admin API.
@@ -756,16 +753,17 @@ function evictPartnerCacheIfNeeded(): void {
  * determine the shop's current plan under Shopify App Pricing.
  *
  * Design:
- * - Honors 6h Postgres freshness (same TTL as Admin source)
- * - 5-minute isolate cache for confirmed subscriptions only
- * - In-flight deduplication per shop domain
+ * - Fresh Postgres (< 6h): return immediately, no Partner call
+ * - Stale Postgres: return immediately, schedule background refresh via waitUntil
+ * - No confirmed row: blocking fetch (new install)
+ * - forceRefresh (plan_handle redirect): blocking fetch
+ * - 5-minute isolate cache throttles background refreshes
  * - Shop GID memoized per isolate (never changes)
  * - Error fallback to last confirmed Postgres plan, or 'unknown' with default
  * - Never throws from resolveActivePlan (per ruling d)
  *
  * Note on isTest: Partner API activeSubscription does not expose a test flag.
- * All subscriptions are treated as production (isTest=false). The test flag
- * in the response would come from legacy subscription data if available.
+ * All subscriptions are treated as production (isTest=false).
  *
  * @see https://shopify.dev/docs/apps/launch/billing/shopify-app-pricing
  */
@@ -814,52 +812,104 @@ export class PartnerApiPlanSource implements PlanSource {
 
     const lastConfirmed = await getCachedPlan(ctx.sql, shopId);
 
-    if (!ctx.forceRefresh) {
-      // Check isolate cache first (5 min TTL)
-      const cached = partnerPlanCache.get(ctx.shopDomain);
-      if (cached && cached.expiresAt > Date.now()) {
-        return {
-          plan: getPlanConfig(cached.planKey),
-          planKey: cached.planKey,
-          subscriptionId: cached.subscriptionId,
-          subscriptionName: cached.handle,
-          isTest: cached.isTest,
-          fromCache: true,
-          sourceTag: "partner_api",
-          status: "active",
-          resolutionState: "active",
-        };
-      }
-
-      // Honour 6h Postgres freshness (ruling e)
-      if (lastConfirmed && !lastConfirmed.isStale) {
-        return {
-          plan: getPlanConfig(lastConfirmed.planKey),
-          planKey: lastConfirmed.planKey,
-          subscriptionId: lastConfirmed.subscriptionId,
-          subscriptionName: lastConfirmed.subscriptionName,
-          isTest: lastConfirmed.isTest,
-          fromCache: true,
-          sourceTag: "partner_api",
-          status: lastConfirmed.subscriptionId ? "active" : "unknown",
-          resolutionState: lastConfirmed.subscriptionId ? "active" : "unknown",
-        };
-      }
+    // forceRefresh (plan_handle redirect): do blocking fetch
+    if (ctx.forceRefresh) {
+      return this.fetchAndCache(ctx, shopId, lastConfirmed);
     }
 
-    const existing = inFlightPartner.get(ctx.shopDomain);
-    if (existing) {
-      return existing;
+    // Check isolate cache first (5 min TTL) - throttles background refreshes
+    const cached = partnerPlanCache.get(ctx.shopDomain);
+    if (cached && cached.expiresAt > Date.now()) {
+      return {
+        plan: getPlanConfig(cached.planKey),
+        planKey: cached.planKey,
+        subscriptionId: cached.subscriptionId,
+        subscriptionName: cached.handle,
+        isTest: false,
+        fromCache: true,
+        sourceTag: "partner_api",
+        status: "active",
+        resolutionState: "active",
+      };
     }
 
-    const promise = this.fetchAndCache(ctx, shopId, lastConfirmed);
-    inFlightPartner.set(ctx.shopDomain, promise);
-
-    try {
-      return await promise;
-    } finally {
-      inFlightPartner.delete(ctx.shopDomain);
+    // Fresh Postgres (< 6h): return immediately, no Partner call
+    if (lastConfirmed && !lastConfirmed.isStale) {
+      return {
+        plan: getPlanConfig(lastConfirmed.planKey),
+        planKey: lastConfirmed.planKey,
+        subscriptionId: lastConfirmed.subscriptionId,
+        subscriptionName: lastConfirmed.subscriptionName,
+        isTest: lastConfirmed.isTest,
+        fromCache: true,
+        sourceTag: "partner_api",
+        status: lastConfirmed.subscriptionId ? "active" : "unknown",
+        resolutionState: lastConfirmed.subscriptionId ? "active" : "unknown",
+      };
     }
+
+    // Stale Postgres: return immediately, schedule background refresh via waitUntil
+    if (lastConfirmed && lastConfirmed.isStale) {
+      this.scheduleBackgroundRefresh(ctx, shopId, lastConfirmed);
+      return {
+        plan: getPlanConfig(lastConfirmed.planKey),
+        planKey: lastConfirmed.planKey,
+        subscriptionId: lastConfirmed.subscriptionId,
+        subscriptionName: lastConfirmed.subscriptionName,
+        isTest: lastConfirmed.isTest,
+        fromCache: true,
+        sourceTag: "partner_api",
+        status: lastConfirmed.subscriptionId ? "active" : "unknown",
+        resolutionState: lastConfirmed.subscriptionId ? "active" : "unknown",
+      };
+    }
+
+    // No confirmed row: blocking fetch (new install)
+    return this.fetchAndCache(ctx, shopId, lastConfirmed);
+  }
+
+  /**
+   * Schedule a background refresh via waitUntil if available.
+   * Uses isolate cache to throttle - only one refresh per shop per 5 minutes.
+   */
+  private scheduleBackgroundRefresh(
+    ctx: PlanResolutionContext,
+    shopId: string,
+    lastConfirmed: CachedPlanRow
+  ): void {
+    const waitUntil = getRequestWaitUntil();
+    if (!waitUntil) {
+      return;
+    }
+
+    // Use isolate cache entry as throttle marker - if present, skip refresh
+    if (partnerPlanCache.has(ctx.shopDomain)) {
+      return;
+    }
+
+    // Set a temporary marker to prevent duplicate refreshes in this isolate
+    partnerPlanCache.set(ctx.shopDomain, {
+      planKey: lastConfirmed.planKey,
+      subscriptionId: lastConfirmed.subscriptionId,
+      handle: lastConfirmed.subscriptionName ?? "",
+      expiresAt: Date.now() + PARTNER_CACHE_TTL_MS,
+    });
+
+    waitUntil(
+      this.fetchAndCache(ctx, shopId, lastConfirmed)
+        .then((result) => {
+          if (!result.fromCache) {
+            safeLog("info", "partner_plan_background_refresh_completed", { shopId });
+          }
+        })
+        .catch((err) => {
+          safeLog("error", "partner_plan_background_refresh_failed", {
+            shopId,
+            err: toErrorCode(err),
+          });
+          captureExceptionWithTags(err, { shopId });
+        })
+    );
   }
 
   private async fetchAndCache(
@@ -877,11 +927,12 @@ export class PartnerApiPlanSource implements PlanSource {
 
         if (!mappedKey || mappedKey === "none") {
           if (mappedKey === "none") {
-            await setCachedPlan(ctx.sql, shopId, "free", null, handle ?? null, false);
+            // shopify-test handle - use legacySubscriptionId ?? null consistently
+            await setCachedPlan(ctx.sql, shopId, "free", sub.legacySubscriptionId ?? null, handle ?? null, false);
             return {
               plan: getDefaultPlan(),
               planKey: "free",
-              subscriptionId: sub.legacySubscriptionId,
+              subscriptionId: sub.legacySubscriptionId ?? null,
               subscriptionName: handle ?? null,
               isTest: false,
               fromCache: false,
@@ -900,9 +951,8 @@ export class PartnerApiPlanSource implements PlanSource {
 
         partnerPlanCache.set(ctx.shopDomain, {
           planKey: mappedKey,
-          subscriptionId: sub.legacySubscriptionId,
+          subscriptionId: sub.legacySubscriptionId ?? null,
           handle: handle!,
-          isTest: false,
           expiresAt: Date.now() + PARTNER_CACHE_TTL_MS,
         });
         evictPartnerCacheIfNeeded();
@@ -911,7 +961,7 @@ export class PartnerApiPlanSource implements PlanSource {
           ctx.sql,
           shopId,
           mappedKey,
-          sub.legacySubscriptionId,
+          sub.legacySubscriptionId ?? null,
           handle!,
           false
         );
@@ -919,7 +969,7 @@ export class PartnerApiPlanSource implements PlanSource {
         return {
           plan: getPlanConfig(mappedKey),
           planKey: mappedKey,
-          subscriptionId: sub.legacySubscriptionId,
+          subscriptionId: sub.legacySubscriptionId ?? null,
           subscriptionName: handle!,
           isTest: false,
           fromCache: false,
@@ -929,6 +979,7 @@ export class PartnerApiPlanSource implements PlanSource {
         };
       }
 
+      // No subscription - confirmed 'none' state
       await setCachedPlan(ctx.sql, shopId, "free", null, null, false);
 
       return {
@@ -1093,15 +1144,14 @@ export function _getPartnerSourceForTesting(): PartnerApiPlanSource {
 
 /**
  * Reset Partner API caches for testing.
+ * Note: Call _resetConfigLoggingForTesting() from partner-api.server.ts separately if needed.
  * @internal
  */
 export function _resetPartnerCachesForTesting(): void {
   partnerPlanCache.clear();
   shopGidMemo.clear();
-  inFlightPartner.clear();
   partnerNotConfiguredLogged = false;
   partnerSource = null;
-  _resetConfigLoggingForTesting();
 }
 
 // Re-export types from plan-source.server.ts for convenience

@@ -16,7 +16,7 @@ const TEST_SHOP = "test-shop.myshopify.com";
 const TEST_SHOP_ID = "shop-ruling-test-123";
 const TEST_SHOP_GID = "gid://shopify/Shop/1";
 const TEST_APP_GID = "gid://shopify/App/1";
-const TEST_ORG_ID = "5273426";
+const TEST_ORG_ID = "123";
 const TEST_TOKEN = "test-partner-token-not-real";
 
 vi.mock("../drain/admin-client.server", () => ({
@@ -101,6 +101,7 @@ const setPartnerEnv = () => {
 
 const clearEnv = () => {
   vi.unstubAllEnvs();
+  vi.stubEnv("SHOPIFY_PARTNER_API_TOKEN", "");
 };
 
 const mockPartnerApiResponse = (data: unknown, status = 200) => {
@@ -245,7 +246,7 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
   });
 
   describe("(2) Partner outage falls back to last confirmed plan", () => {
-    const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000); // 7 hours ago (stale)
+    const freshCacheTime = new Date(Date.now() - 60 * 60 * 1000); // 1 hour ago (fresh)
 
     beforeEach(() => {
       setPartnerEnv();
@@ -255,7 +256,7 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
         subscription_id: "sub-confirmed-123",
         subscription_name: "Growth",
         is_test: false,
-        plan_cached_at: staleCacheTime, // Confirmed but stale, triggers fetch
+        plan_cached_at: freshCacheTime, // Confirmed, use forceRefresh to trigger fetch
       }]);
     });
 
@@ -264,7 +265,7 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
       mockFetch.mockRejectedValueOnce(Object.assign(new Error("Timeout"), { name: "TimeoutError" }));
 
       const source = getPlanSource();
-      const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
+      const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP, forceRefresh: true });
 
       expect(result.planKey).toBe("growth");
       expect(result.resolutionState).toBe("unknown");
@@ -276,7 +277,7 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
       mockFetch.mockRejectedValueOnce(new Error("Network failure"));
 
       const source = getPlanSource();
-      const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
+      const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP, forceRefresh: true });
 
       expect(result.planKey).toBe("growth");
       expect(result.resolutionState).toBe("unknown");
@@ -288,7 +289,7 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
       mockPartnerApiResponse({ errors: [{ message: "Throttled", extensions: { code: "429" } }] }, 429);
 
       const source = getPlanSource();
-      const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
+      const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP, forceRefresh: true });
 
       expect(result.planKey).toBe("growth");
       expect(result.resolutionState).toBe("unknown");
@@ -300,7 +301,7 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
       mockPartnerApiResponse({}, 500);
 
       const source = getPlanSource();
-      const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
+      const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP, forceRefresh: true });
 
       expect(result.planKey).toBe("growth");
       expect(result.resolutionState).toBe("unknown");
@@ -312,7 +313,7 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
       mockFetch.mockRejectedValueOnce(new Error("Network failure"));
 
       const source = getPlanSource();
-      await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
+      await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP, forceRefresh: true });
 
       // Check that no UPDATE was called on the Shop table
       const sqlMock = mockSql as unknown as { mock: { calls: unknown[][] } };
@@ -408,7 +409,7 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
     });
 
     describe("Partner source", () => {
-      const staleCacheTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
+      const freshCacheTime = new Date(Date.now() - 60 * 60 * 1000);
 
       beforeEach(() => {
         setPartnerEnv();
@@ -427,55 +428,55 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
         expect(result.resolutionState).toBe("none");
       });
 
-      it("returns unknown for 429 with stale cache", async () => {
+      it("returns unknown for 429 with forceRefresh", async () => {
         mockSql.setMockResult("shop_plan", [{
           plan_key: "starter",
           subscription_id: "sub-456",
           subscription_name: "Starter",
           is_test: false,
-          plan_cached_at: staleCacheTime,
+          plan_cached_at: freshCacheTime,
         }]);
         mockShopGidResponse();
         mockPartnerApiResponse({}, 429);
 
         const source = getPlanSource();
-        const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
+        const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP, forceRefresh: true });
 
         expect(result.planKey).toBe("starter");
         expect(result.resolutionState).toBe("unknown");
       });
 
-      it("returns unknown for 500 with stale cache", async () => {
+      it("returns unknown for 500 with forceRefresh", async () => {
         mockSql.setMockResult("shop_plan", [{
           plan_key: "scale",
           subscription_id: "sub-789",
           subscription_name: "Scale",
           is_test: false,
-          plan_cached_at: staleCacheTime,
+          plan_cached_at: freshCacheTime,
         }]);
         mockShopGidResponse();
         mockPartnerApiResponse({}, 500);
 
         const source = getPlanSource();
-        const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
+        const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP, forceRefresh: true });
 
         expect(result.planKey).toBe("scale");
         expect(result.resolutionState).toBe("unknown");
       });
 
-      it("returns unknown for GraphQL error with stale cache", async () => {
+      it("returns unknown for GraphQL error with forceRefresh", async () => {
         mockSql.setMockResult("shop_plan", [{
           plan_key: "growth",
           subscription_id: "sub-growth",
           subscription_name: "Growth",
           is_test: false,
-          plan_cached_at: staleCacheTime,
+          plan_cached_at: freshCacheTime,
         }]);
         mockShopGidResponse();
         mockPartnerApiResponse({ errors: [{ message: "Internal error" }] });
 
         const source = getPlanSource();
-        const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
+        const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP, forceRefresh: true });
 
         expect(result.planKey).toBe("growth");
         expect(result.resolutionState).toBe("unknown");

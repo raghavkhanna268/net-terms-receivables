@@ -83,7 +83,7 @@ const configInvalidLogged = new Set<string>();
  * Read Partner API configuration from environment variables.
  *
  * Required env vars:
- * - SHOPIFY_PARTNER_ORG_ID: Numeric org ID (e.g., "5273426")
+ * - SHOPIFY_PARTNER_ORG_ID: Numeric org ID (e.g., "123")
  * - SHOPIFY_PARTNER_API_TOKEN: Partner API token (never logged)
  * - SHOPIFY_APP_GID: App GID in format gid://shopify/App/{id}
  *
@@ -132,17 +132,12 @@ export function _resetConfigLoggingForTesting(): void {
 
 /**
  * GraphQL query for active subscription.
- * Minimal fields needed for plan resolution.
+ * Data minimization: only fetch fields we actually use (items.handle, legacySubscriptionId).
  */
 const ACTIVE_SUBSCRIPTION_QUERY = `
 query ActiveSubscription($appId: ID!, $shopId: ID!) {
   activeSubscription(appId: $appId, shopId: $shopId) {
-    billingPeriod
-    cancelAtEndOfCycle
-    trialEndsAt
-    currentBillingCycle { startTime endTime }
     items { handle }
-    pendingUpdate { billingPeriod items { handle } }
     legacySubscriptionId
   }
 }
@@ -150,17 +145,10 @@ query ActiveSubscription($appId: ID!, $shopId: ID!) {
 
 /**
  * Shape of the activeSubscription response from Partner API.
+ * Only includes fields we query (data minimization).
  */
 export interface ActiveSubscription {
-  billingPeriod: "ANNUAL" | "EVERY_30_DAYS";
-  cancelAtEndOfCycle: boolean;
-  trialEndsAt: string | null;
-  currentBillingCycle: { startTime: string; endTime: string } | null;
   items: Array<{ handle: string | null }>;
-  pendingUpdate: {
-    billingPeriod: "ANNUAL" | "EVERY_30_DAYS";
-    items: Array<{ handle: string | null }>;
-  } | null;
   legacySubscriptionId: string | null;
 }
 
