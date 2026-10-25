@@ -3,7 +3,7 @@
 -- names, emails, addresses, payloads, free text (reasons/errors mapped to enums),
 -- or individual buyer/invoice/order IDs (QA 2 audit: aggregates only).
 -- Vars: since (ISO timestamp, redrive start), location_id (CompanyLocation numeric id
---       of one held account for the overdue drill-down, sourced from masked env secret).
+--       of one held account for the overdue drill-down, passed as workflow input).
 -- Usage: psql -v since='2026-10-24T08:29:23Z' -v location_id='...' -f ...
 -- Output column kinds for passthrough columns (scripts/ci/check-readonly-columns.ts,
 -- see scripts/readonly/README.md). Derived counts/booleans/CASE enums need no entry.
@@ -211,7 +211,7 @@ GROUP BY 1 ORDER BY 1;
 
 \echo '== held account drill-down: aggregated account hold fields'
 -- QA 2 audit: individual account IDs removed; aggregated by holdState.
--- The location_id variable is sourced from a masked environment secret.
+-- The location_id variable is passed as a numeric workflow input.
 SELECT a.kind, a."holdState",
        CASE WHEN a."holdReasonCode" ~ '^[A-Z0-9_]{1,40}$' THEN a."holdReasonCode" WHEN a."holdReasonCode" IS NULL THEN NULL ELSE '<other>' END AS hold_reason_code,
        a."manualHold", a.bypass, a."syncPending",

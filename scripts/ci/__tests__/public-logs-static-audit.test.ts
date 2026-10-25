@@ -100,7 +100,7 @@ describe("public-logs-static-audit: SQL files", () => {
         .join("\n");
       expect.fail(
         `Found ${violations.length} hardcoded GID/UUID(s) in SQL files:\n${report}\n\n` +
-        "Use parameterized variables from masked environment secrets instead."
+        "Derive in SQL from webhook records; no new psql vars or workflow inputs."
       );
     }
   });
@@ -168,7 +168,7 @@ describe("public-logs-static-audit: workflow file", () => {
         .join("\n");
       expect.fail(
         `Found ${violations.length} hardcoded GID/UUID(s) in workflow:\n${report}\n\n` +
-        "Use masked secrets for production IDs."
+        "Derive in SQL from webhook records; no new psql vars or workflow inputs."
       );
     }
   });

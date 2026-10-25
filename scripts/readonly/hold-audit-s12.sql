@@ -6,7 +6,7 @@
 -- Note: AuditEvent's timestamp column is "at" (no createdAt).
 -- Vars:
 --   since (ISO-8601 UTC, e.g. 2026-10-24T09:30:00Z)
---   location_ids (comma-separated CompanyLocation GIDs for Q4, sourced from masked env secret)
+-- Q4's location set is derived inside the SQL from COMPANY_LOCATIONS_DELETE webhooks.
 -- Output column kinds for passthrough columns (scripts/ci/check-readonly-columns.ts,
 -- see scripts/readonly/README.md). Derived counts/booleans/CASE enums need no entry.
 -- @col holdState, type, proname: enum
@@ -85,20 +85,36 @@ WHERE ba."updatedAt" > (:'since')::timestamptz
 GROUP BY 1, 2, 3, 4, 5
 ORDER BY 1, 2, 3, 4, 5;
 
-\echo '== Q4 CompanyLocations from :location_ids: aggregated account + invoice state'
--- QA 2 audit: hardcoded CompanyLocation GIDs removed. Pass location_ids via psql variable
--- from a masked environment secret (workflow uses ::add-mask:: before setting).
--- Example: psql -v location_ids='gid://shopify/CompanyLocation/123,gid://shopify/CompanyLocation/456' ...
+\echo '== Q4 Deleted CompanyLocations (from COMPANY_LOCATIONS_DELETE webhooks): aggregated account + invoice state'
+-- QA 2 audit: Location set derived inside SQL from COMPANY_LOCATIONS_DELETE webhook records.
+-- No psql variables or workflow dispatch inputs needed.
 -- Output is aggregated by holdState; no individual IDs are printed.
+WITH deleted_locations AS (
+  SELECT DISTINCT
+    CASE
+      WHEN w.resource_gid LIKE 'gid://shopify/CompanyLocation/%' THEN w.resource_gid
+      ELSE 'gid://shopify/CompanyLocation/' || w.resource_gid
+    END AS company_location_gid
+  FROM s6_processed_webhooks w
+  WHERE w.topic = 'COMPANY_LOCATIONS_DELETE'
+  UNION
+  SELECT DISTINCT
+    CASE
+      WHEN wr.resource_gid LIKE 'gid://shopify/CompanyLocation/%' THEN wr.resource_gid
+      ELSE 'gid://shopify/CompanyLocation/' || wr.resource_gid
+    END AS company_location_gid
+  FROM webhook_receipts wr
+  WHERE wr.topic = 'COMPANY_LOCATIONS_DELETE'
+)
 SELECT ba."holdState", ba."manualHold", ba.bypass, ba."syncPending",
        (ba.gated_at IS NOT NULL) AS gated,
        COUNT(DISTINCT ba.id) AS account_count,
        COUNT(DISTINCT i.id) AS invoice_count,
        COUNT(*) FILTER (WHERE i.outstanding > 0) AS outstanding_gt_0_count,
        COUNT(*) FILTER (WHERE i."dueAt" < NOW() - INTERVAL '1 day') AS more_than_1_day_past_due_count
-FROM "BuyerAccount" ba
+FROM deleted_locations dl
+JOIN "BuyerAccount" ba ON ba."companyLocationId" = dl.company_location_gid
 LEFT JOIN "Invoice" i ON i."buyerAccountId" = ba.id AND i.status = 'open' AND i.outstanding > 0
-WHERE ba."companyLocationId" = ANY (string_to_array(:'location_ids', ','))
 GROUP BY 1, 2, 3, 4, 5
 ORDER BY 1, 2, 3, 4, 5;
 
