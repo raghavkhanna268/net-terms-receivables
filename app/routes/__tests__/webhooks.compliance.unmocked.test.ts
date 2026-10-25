@@ -83,7 +83,7 @@ const mockDeleteShop = vi.fn().mockResolvedValue({
   shopId: "shop-123",
   refetchNullPurged: 0,
   bulkOperationsPurged: 0,
-  outstandingMissingPurged: 0,
+  orderGapPurged: 0,
   piiFallbackPurged: 0,
   pgmqSyncQueuePurged: 0,
   pgmqBulkQueuePurged: 0,

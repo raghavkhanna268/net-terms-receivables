@@ -238,7 +238,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
           webhookId,
           refetchNullPurged: result.refetchNullPurged,
           bulkOperationsPurged: result.bulkOperationsPurged,
-          outstandingMissingPurged: result.outstandingMissingPurged,
+          orderGapPurged: result.orderGapPurged,
           piiFallbackPurged: result.piiFallbackPurged,
           pgmqSyncQueuePurged: result.pgmqSyncQueuePurged,
           pgmqBulkQueuePurged: result.pgmqBulkQueuePurged,

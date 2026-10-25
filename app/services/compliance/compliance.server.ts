@@ -47,7 +47,7 @@ export interface DeleteShopResult {
   shopId: string | null;
   refetchNullPurged: number;
   bulkOperationsPurged: number;
-  outstandingMissingPurged: number;
+  orderGapPurged: number;
   piiFallbackPurged: number;
   pgmqSyncQueuePurged: number;
   pgmqBulkQueuePurged: number;
@@ -166,7 +166,7 @@ export async function deleteShop(
       shopId: result?.id ?? null,
       refetchNullPurged: refetchResult.count,
       bulkOperationsPurged: bulkOpsResult.count,
-      outstandingMissingPurged: outstandingResult.count,
+      orderGapPurged: outstandingResult.count,
       piiFallbackPurged: piiResult.count,
       pgmqSyncQueuePurged: pgmqSyncQueueResult.count,
       pgmqBulkQueuePurged: pgmqBulkQueueResult.count,
