@@ -128,12 +128,26 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | Cloudflare, Inc. | Application hosting (Workers), connection pooling (Hyperdrive) | Global (Worker placed ap-south-1) | [TBD: DPA] |
 | Supabase, Inc. | Database hosting (Postgres) | AWS ap-south-1 (Mumbai) | [TBD: DPA] |
 | Resend, Inc. | Email delivery (data request notifications, payment reminders) | US | [Resend DPA](https://resend.com/legal/dpa) |
+| Functional Software, Inc. | Error monitoring (Sentry) | [TBD] | [Sentry DPA](https://sentry.io/legal/dpa/) |
+
+**Note:** Sentry is only active when error monitoring is enabled. Error events are scrubbed before transmission: request headers, cookies, query strings, and body data are removed; exception messages are replaced with error codes; breadcrumbs are deleted; and only allowlisted metadata keys (shopId, code, errorCode, requestId, webhookId, jobId, topic, status) are retained.
 
 **Resend data handling:**
-- Data request notification emails contain **no customer PII** — only a notice and download link
-- Shop owner email is fetched at send time from Shopify Admin API and passed directly to Resend
-- Shop owner email is **never stored** in our database or logged
-- Resend is only used when configured; emails are not sent otherwise
+
+Data request notification emails:
+- Contain **no customer PII** — only a notice and download link
+- Shop owner email is fetched at send time from Shopify Admin API and passed directly to Resend; **never stored** in our database or logged
+
+Payment reminder emails (sent to buyer email address):
+- Recipient: buyer email address (from tagged customer record)
+- Invoice name (e.g. "#1001")
+- Invoice total (formatted with shop currency)
+- Invoice due date (formatted in shop timezone)
+- Buyer display name (from tagged customer record, or "Customer" if not available)
+- Shop name (derived from shop domain)
+- Reminder type label (e.g. "Payment due today")
+
+Resend is only used when email delivery is configured; emails are not sent otherwise
 
 ---
 
@@ -150,6 +164,14 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | Payer Alias | Until customer erasure or shop redact | Deleted on customer erasure for the customer's buyer account |
 | Data Request Records | 30 days (data minimisation) | Purged automatically; also on customer or shop erasure |
 | Audit Events | Until shop redact | Automatic cascade |
+
+### 6.1 Data Retention After Deletion — Known Limitations
+
+**Background job queue:** Background jobs for the shop are deleted when the shop's data is deleted. A job that is being processed at the exact moment of deletion may still be kept in a list of failed jobs afterwards; such leftover entries are purged automatically, up to about 37 days later.
+
+**Database backups:** Supabase-managed database backups may retain deleted data for the provider's backup retention window (7–30 days depending on plan). See [Supabase Backups documentation](https://supabase.com/docs/guides/platform/backups).
+
+**Shopify metafields:** The app's credit status field on Shopify Company records is not explicitly cleared by the app on uninstall or shop/redact. Per [Shopify metafield documentation](https://shopify.dev/docs/apps/build/metafields/definitions), when a user uninstalls an app, Shopify deletes its app-owned metafield definitions and temporarily retains the metafield values without a definition; cleanup of the retained data runs asynchronously (no guaranteed timeframe). Uninstalling the app removes the app's Shopify Functions, so the field value cannot affect checkout even if it persists temporarily.
 
 ---
 

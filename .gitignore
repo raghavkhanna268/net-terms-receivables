@@ -18,6 +18,10 @@ dist
 .env.*
 !.env.example
 
+# Redacted real bank statement samples - NEVER commit to public repo
+# Place redacted samples in tests/fixtures/redacted/<bank>/ for local testing
+tests/fixtures/redacted/
+
 # Lock files (npm is primary; commit package-lock.json)
 yarn.lock
 pnpm-lock.yaml
