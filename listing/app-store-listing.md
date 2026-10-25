@@ -192,15 +192,15 @@ Only `email` and `displayName` are persisted (controlled by `CUSTOMER_PII_FIELDS
 
 - **Embedded App:** Yes (Shopify App Bridge)
 - **Session Tokens:** Yes (no third-party cookies)
-- **Hosting:** Cloudflare Workers
-- **Database:** Supabase Postgres (Mumbai region)
+- **Hosting:** App runs on Cloudflare's global network
+- **Database:** Supabase Postgres (stored in India, Mumbai region)
 
 ---
 
 ## Data Handling
 
 - **Privacy Policy:** `/privacy` route (see `docs/privacy.md`)
-- **Data Location:** India (Mumbai)
+- **Data Location:** Data stored in India (Mumbai); the app runs on Cloudflare's global network
 - **GDPR/CCPA Webhooks:** `customers/data_request`, `customers/redact`, `shop/redact` handled
 - **Data Sales:** We do not sell merchant or customer data
 
