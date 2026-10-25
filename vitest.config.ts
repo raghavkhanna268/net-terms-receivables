@@ -71,6 +71,7 @@ const DB_TEST_PATTERNS = [
   "app/__tests__/integration/s10b-bulk-queue.test.ts",
   "app/__tests__/integration/s20-idempotency.test.ts",
   "app/__tests__/integration/s22-compliance.test.ts",
+  "app/__tests__/integration/shop-redact-complete-db.test.ts",
   "app/__tests__/integration/s5-schema.test.ts",
   "app/__tests__/integration/light-session-storage.test.ts",
   "app/__tests__/integration/prisma-session-storage.test.ts",
@@ -97,6 +98,7 @@ const DB_TEST_PATTERNS = [
   // Route DB tests
   "app/routes/__tests__/app.imports.test.ts",
   "app/routes/__tests__/app._index.test.ts",
+  "app/routes/__tests__/app._index-overlimit-db.test.ts",
   "app/routes/__tests__/app.accounts.$id-db.test.ts",
 
   // Lib DB tests

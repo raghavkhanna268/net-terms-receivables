@@ -275,7 +275,11 @@ model BuyerAccount {
   /// NULL means no permanent error. Set on permanent failure, cleared on success.
   /// Only stores fixed codes from PERMANENT_SYNC_ERROR_CODES allowlist; never raw error text.
   metafieldSyncErrorCode String?
-  /// When the permanent metafield sync error occurred. NULL when metafieldSyncErrorCode is NULL.
+  /// When the metafield sync error occurred. Has two semantic modes:
+  /// 1. Permanent failure: set alongside metafieldSyncErrorCode (both non-NULL).
+  /// 2. Retryable failure streak: set while metafieldSyncErrorCode is NULL, marking the
+  ///    streak start for backoff calculation. Cleared on success.
+  /// NULL only when no error has occurred or after a successful sync clears both fields.
   metafieldSyncErrorAt   DateTime?        @db.Timestamptz(3)
 
   // Relations (onDelete: CASCADE - accounts are shop-specific)

@@ -1,5 +1,68 @@
 # S24 Scope Audit: Production OAuth scope verification
 
+---
+
+## 2026-10-25: Scope reduction 11 → 8
+
+**Commit:** This PR  
+**Change:** Dropped `read_companies`, `read_customers`, `read_orders` from production scopes.
+
+### Justification
+
+Per [Shopify Access Scopes documentation](https://shopify.dev/docs/api/usage/access-scopes), 'How it works' section:
+
+> "Any scope that writes a resource also grants read access to it, so request the write scope only when your app needs both."
+
+### Scope Mapping
+
+| Dropped Scope | Granted By | Code That Relies on Read Access |
+|---------------|------------|--------------------------------|
+| `read_companies` | `write_companies` | `bulk-operations.server.ts:32-70` (BULK_COMPANIES_QUERY), `webhooks.companies.tsx`, `webhooks.company_locations.tsx` |
+| `read_customers` | `write_customers` | `admin-client.server.ts:136-191` (ORDER_QUERY `customer { id }`), `bulk-operations.server.ts:108-186` (BULK_ORDERS_QUERY `purchasingEntity … on Customer`, `customer { id }`), `customer-fields.server.ts:149,229` (`getCustomerQuery`, `getBulkCustomersQuery`), `webhooks.customers.tsx` |
+| `read_orders` | `write_orders` | `bulk-operations.server.ts:108-186` (BULK_ORDERS_QUERY), `webhooks.orders.tsx` |
+
+**Protected Customer Data note:** Reading customer data via `write_customers` is still protected customer data. The PCD approval (Level 1 + Name + Email, 2026-10-23) remains required.
+
+### Final Production Scope List (8)
+
+```
+read_draft_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations
+```
+
+### Runtime Scope Checking
+
+The app does NOT compare granted scopes against requested scopes:
+
+- **afterAuth** (`app/lib/after-auth.server.ts`): No scope validation. The `afterAuth` hook calls `upsertShopOnAuth` (line 354) and `syncShopTimezone` (line 222) but does not check session scopes against expected scopes.
+- **app/scopes_update handler** (`app/routes/webhooks.app.scopes_update.tsx:42-48`): Stores whatever scopes Shopify grants via `sessionStorage.updateScopeForShop`. No comparison against expected scopes.
+
+### Behaviour for Already-Installed Stores
+
+Behaviour for already-installed stores (whether removed scopes are revoked, and whether a re-auth prompt appears) is to be verified by DevOps on the dev store after deploy.
+
+### Webhook Subscription Scope Requirements
+
+All webhook topics in `shopify.app.toml` are verified deliverable with the 8 production scopes:
+
+| Topic | Required Scope | Status |
+|-------|---------------|--------|
+| `app/uninstalled` | None (app lifecycle) | ✓ |
+| `app/scopes_update` | None (app lifecycle) | ✓ |
+| `app_subscriptions/update` | None (app billing) | ✓ |
+| `customers/data_request`, `customers/redact`, `shop/redact` | None (mandatory compliance) | ✓ |
+| `companies/*` | `read_companies` (implied by `write_companies`) | ✓ |
+| `company_locations/*` | `read_companies` (implied by `write_companies`) | ✓ |
+| `orders/*` | `read_orders` (implied by `write_orders`) | ✓ |
+| `bulk_operations/finish` | None (app's own operations) | ✓ |
+| `customers/*` | `read_customers` (implied by `write_customers`) | ✓ |
+| `draft_orders/*` | `read_draft_orders` (explicit) | ✓ |
+
+**Verification method:** The original 2026-10-23 audit (below) documented that `companies/*`, `company_locations/*`, `customers/*`, `orders/*`, and `draft_orders/*` webhook subscriptions existed and were deliverable with the then-11 scopes. Per [Shopify Access Scopes](https://shopify.dev/docs/api/usage/access-scopes), write scopes imply read access, so these webhooks remain deliverable. App lifecycle, billing, and compliance webhooks do not require resource scopes.
+
+---
+
+## 2026-10-23: Original audit at 51d2266
+
 **Audit date:** 2026-10-23  
 **Commit:** `main` @ [`51d2266`](https://github.com/raghavkhanna268/net-terms-receivables/commit/51d22662b0629656fb810221a01054ef012f0d93) (`51d22662b0629656fb810221a01054ef012f0d93`, #70 S10b). All file:line citations below are at this SHA.  
 **Auditor:** QA
