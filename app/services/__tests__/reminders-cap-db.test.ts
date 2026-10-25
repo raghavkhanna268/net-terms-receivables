@@ -160,16 +160,64 @@ describeWithDb("S18 reminder cap enforcement (DB)", () => {
 
   describe("reserveGlobalSendSlot - monthly cap", () => {
     it("concurrent reservations at the monthly boundary give exactly the remaining count", async () => {
-      const { reserveGlobalSendSlot, MONTHLY_SEND_CAP } = await import("../reminders.server");
+      const { reserveGlobalSendSlot, MONTHLY_SEND_CAP, DAILY_SEND_CAP } = await import("../reminders.server");
       expect(MONTHLY_SEND_CAP).toBe(3000);
+      expect(DAILY_SEND_CAP).toBe(100);
 
       const remainingSlots = 5;
-      const dailyCountToSet = MONTHLY_SEND_CAP - remainingSlots;
+      const monthlyTotalNeeded = MONTHLY_SEND_CAP - remainingSlots; // 2995
 
-      await sql`
-        INSERT INTO s18_global_sends (send_key, send_date, send_month, daily_count, monthly_count, updated_at)
-        VALUES ('global', ${todayStr}::DATE, ${monthStr}, ${dailyCountToSet}, 0, NOW())
+      // Insert data for previous days in this month to get monthly total near cap
+      // We need 2995 emails across previous days (not today)
+      // Use 30 previous days with 100 emails each = 3000, but we need 2995
+      // So: 29 days * 100 = 2900, then 1 day with 95 = 2995
+      const year = parseInt(monthStr.substring(0, 4));
+      const month = parseInt(monthStr.substring(5, 7));
+
+      // Insert 29 previous days at 100 each
+      for (let day = 1; day <= 29; day++) {
+        const previousDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        // Skip if this is today
+        if (previousDate === todayStr) continue;
+        await sql`
+          INSERT INTO s18_global_sends (send_key, send_date, send_month, daily_count, monthly_count, updated_at)
+          VALUES ('global', ${previousDate}::DATE, ${monthStr}, 100, 0, NOW())
+          ON CONFLICT (send_key, send_date) DO NOTHING
+        `;
+      }
+
+      // Check current monthly total
+      const [countRow] = await sql<{ total: number }[]>`
+        SELECT COALESCE(SUM(daily_count), 0)::INT AS total 
+        FROM s18_global_sends 
+        WHERE send_key = 'global' AND send_month = ${monthStr}
       `;
+
+      // If we have less than 2995, add a row to make it 2995
+      // But we must keep today at 0 for the test
+      const currentTotal = countRow?.total ?? 0;
+      if (currentTotal < monthlyTotalNeeded) {
+        // Find a day that isn't today and add the difference
+        const extraNeeded = monthlyTotalNeeded - currentTotal;
+        const extraDate = `${year}-${String(month).padStart(2, '0')}-01`;
+        if (extraDate !== todayStr) {
+          await sql`
+            UPDATE s18_global_sends
+            SET daily_count = daily_count + ${extraNeeded}
+            WHERE send_key = 'global' AND send_date = ${extraDate}::DATE
+          `;
+        }
+      }
+
+      // Verify the setup: monthly total should be 2995, today should be 0
+      const [verifyRow] = await sql<{ monthlyTotal: number; todayCount: number }[]>`
+        SELECT 
+          COALESCE((SELECT SUM(daily_count)::INT FROM s18_global_sends 
+                    WHERE send_key = 'global' AND send_month = ${monthStr}), 0) AS "monthlyTotal",
+          COALESCE((SELECT daily_count FROM s18_global_sends 
+                    WHERE send_key = 'global' AND send_date = ${todayStr}::DATE), 0) AS "todayCount"
+      `;
+      expect(verifyRow?.todayCount ?? 0).toBe(0); // Today starts at 0
 
       const N = 10;
       const results = await Promise.all(
@@ -186,6 +234,14 @@ describeWithDb("S18 reminder cap enforcement (DB)", () => {
           expect(r.reason).toBe("monthly_cap");
         }
       });
+
+      // Clean up the extra rows we inserted
+      await sql`
+        DELETE FROM s18_global_sends 
+        WHERE send_key = 'global' 
+          AND send_month = ${monthStr}
+          AND send_date != ${todayStr}::DATE
+      `;
     });
   });
 
