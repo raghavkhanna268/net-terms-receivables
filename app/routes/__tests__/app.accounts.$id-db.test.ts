@@ -34,8 +34,9 @@ describeWithDb("app.accounts.$id dead-letter time filter (DB)", () => {
   let sql: ReturnType<typeof postgres>;
   const TEST_SUFFIX = Date.now().toString(36) + "-dlq-db";
   const TEST_SHOP_ID = `shop-dlq-${TEST_SUFFIX}`;
-  const TEST_SHOP_DOMAIN = `dlq-test-${TEST_SUFFIX}.myshopify.com`;
+  const TEST_SHOP_DOMAIN = `test-dlq-${TEST_SUFFIX}.myshopify.com`;
   const TEST_ACCOUNT_ID = `acc-dlq-${TEST_SUFFIX}`;
+  const OTHER_SHOP_DOMAIN = `test-other-shop-${TEST_SUFFIX}.myshopify.com`;
 
   const SYNC_TIME = new Date("2026-10-24T12:00:00Z");
   const OLD_DLQ_TIME = new Date("2026-10-24T10:00:00Z");
@@ -296,7 +297,7 @@ describeWithDb("app.accounts.$id dead-letter time filter (DB)", () => {
         ${sql.json({
           topic: "CREDIT_STATUS_RECOMPUTE",
           buyerAccountId: TEST_ACCOUNT_ID,
-          shop: "other-shop.myshopify.com",
+          shop: OTHER_SHOP_DOMAIN,
         })},
         'test error',
         ${NEW_DLQ_TIME}
