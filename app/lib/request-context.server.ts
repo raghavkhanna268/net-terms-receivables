@@ -14,6 +14,8 @@ export interface WorkerEnv {
   CUSTOMER_PII_FIELDS?: string;
   RESEND_API_KEY?: string;
   RESEND_FROM?: string;
+  /** S18: HMAC secret for signed unsubscribe tokens (wrangler secret, never in code) */
+  REMINDER_UNSUBSCRIBE_SECRET?: string;
 }
 
 export interface RequestStore {
