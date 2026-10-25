@@ -17,6 +17,10 @@
 import type { Sql } from "~/lib/db-light.server";
 import { safeLog, shopHash, toErrorCode } from "~/lib/log.server";
 import { getAppHandle } from "~/lib/plan-url";
+import {
+  parseRecipientAllowlist,
+  isRecipientAllowed,
+} from "~/services/recipient-allowlist.server";
 
 // ============================================================================
 // RETENTION CONSTANTS
@@ -915,11 +919,7 @@ export async function sendDataRequestNotification(
     ? downloadUrl
     : "Open the Net Terms Receivables app in your Shopify admin and go to Data Requests.";
 
-  const emailBody = {
-    from: resendFrom,
-    to: shopOwnerEmail,
-    subject: "Customer Data Request Ready for Download",
-    html: `
+  const htmlContent = `
       <p>Hello,</p>
       <p>A customer has requested a copy of their data under GDPR/CCPA regulations.</p>
       <p>The data export is ready for download in your Shopify admin:</p>
@@ -927,8 +927,9 @@ export async function sendDataRequestNotification(
       <p>Please review and provide this data to the customer within the required timeframe.</p>
       <p>The export will be available for 30 days.</p>
       <p>— Net Terms Receivables</p>
-    `.trim(),
-    text: `Hello,
+    `.trim();
+
+  const textContent = `Hello,
 
 A customer has requested a copy of their data under GDPR/CCPA regulations.
 
@@ -938,7 +939,33 @@ ${downloadLinkText}
 Please review and provide this data to the customer within the required timeframe.
 The export will be available for 30 days.
 
-— Net Terms Receivables`,
+— Net Terms Receivables`;
+
+  // Pre-launch recipient allowlist check (fail closed)
+  const allowlist = parseRecipientAllowlist(process.env.RESEND_TEST_RECIPIENTS);
+  if (allowlist.size === 0) {
+    safeLog("info", "data_request_email_skipped", {
+      shopHash: hash,
+      requestId,
+      reason: "recipient_allowlist_empty",
+    });
+    return { sent: false, skippedReason: "recipient_allowlist_empty" };
+  }
+  if (!isRecipientAllowed(shopOwnerEmail, allowlist)) {
+    safeLog("info", "data_request_email_skipped", {
+      shopHash: hash,
+      requestId,
+      reason: "recipient_not_allowlisted",
+    });
+    return { sent: false, skippedReason: "recipient_not_allowlisted" };
+  }
+
+  const emailBody = {
+    from: resendFrom,
+    to: shopOwnerEmail,
+    subject: "Customer Data Request Ready for Download",
+    html: htmlContent,
+    text: textContent,
   };
 
   try {
