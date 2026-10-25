@@ -3847,12 +3847,13 @@ describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
     await sql`
       INSERT INTO "Invoice" (
         id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
-        "dueAt", status, "createdAt", "updatedAt"
+        status, "issuedAt", "dueAt", "createdAt", "updatedAt"
       )
       VALUES (
         ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
-        'BACKOFF-HOLD-001', 50000.00, 50000.00,
-        NOW() - INTERVAL '3 days', 'open', NOW(), NOW()
+        'BACKOFF-HOLD-001', 50000.00, 50000.00, 'open',
+        NOW() - INTERVAL '10 days',
+        NOW() - INTERVAL '3 days', NOW(), NOW()
       )
     `;
     
@@ -3910,12 +3911,13 @@ describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
     await sql`
       INSERT INTO "Invoice" (
         id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
-        "dueAt", status, "createdAt", "updatedAt"
+        status, "issuedAt", "dueAt", "createdAt", "updatedAt"
       )
       VALUES (
         ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
-        'BACKOFF-RELEASE-001', 50000.00, 0.00,
-        NOW() - INTERVAL '3 days', 'open', NOW(), NOW()
+        'BACKOFF-RELEASE-001', 50000.00, 0.00, 'open',
+        NOW() - INTERVAL '10 days',
+        NOW() - INTERVAL '3 days', NOW(), NOW()
       )
     `;
     
