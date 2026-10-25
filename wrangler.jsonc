@@ -36,7 +36,7 @@
     // CI checks this with scripts/check-scope-sync.ts
     "SCOPES": "read_all_orders,read_draft_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations",
     "SHOPIFY_APP_URL": "https://net-terms-receivables.raghavkhanna.workers.dev",
-    // Protected Customer Data: Level 1 + Name + Email (confirmed 2026-10-23).
+    // Protected Customer Data: Level 1 (Name, Email) requested, not approved.
     // Enables fetching email and displayName in customer queries.
     // Phone and address are NEVER fetched regardless of this setting.
     "CUSTOMER_PII_FIELDS": "1",

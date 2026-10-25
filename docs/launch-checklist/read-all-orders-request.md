@@ -1,6 +1,6 @@
 # Request `read_all_orders` Scope
 
-**Status:** ✅ **GRANTED** on 25 Oct 2026 (22:13 IST)
+**Status:** ⏳ **Requested** 25 Oct 22:13 IST; grant pending confirmation
 
 This checklist guided the request for Shopify approval of the `read_all_orders` protected scope. This scope extends order access to orders older than 60 days.
 
@@ -88,14 +88,14 @@ Net Terms Receivables is a B2B net-terms receivables management app for Shopify 
 
 ## After Approval
 
-**Approved:** 25 Oct 2026
+**Request submitted:** 25 Oct 2026 22:13 IST — grant pending confirmation
 
-Post-approval steps:
+Post-approval steps (once grant is confirmed):
 
 1. ✅ Add `read_all_orders` to `shopify.app.toml` scopes (extends access from `write_orders` which implies `read_orders`)
 2. ✅ Update `wrangler.jsonc` SCOPES variable to match
 3. ✅ Run `scripts/check-scope-sync.ts` to verify sync
-4. ⏳ Deploy new app version with `shopify app deploy` (included in next release)
+4. ⏳ Deploy new app version with `shopify app deploy` (batched with next release)
 5. ⏳ Dev store must re-approve the scope after that release
 6. ⏳ Production merchants will approve when they next open the app after that release
 
@@ -120,8 +120,8 @@ See `docs/privacy.md` for the public privacy policy and `docs/privacy-implementa
 - [x] Click **API access requests** (verify in UI)
 - [x] Find **Read all orders** card and click **Request access**
 - [x] Paste and customize the justification text above
-- [x] Submit the request
-- [x] **Granted:** 25 Oct 2026 (22:13 IST)
+- [x] Submit the request (25 Oct 22:13 IST)
+- [ ] **Grant pending confirmation** — check API access request status in Partner Dashboard
 - [x] Create PR to add `read_all_orders` scope
 - [ ] Deploy release with scope change (batched with next release)
 - [ ] Dev store re-approves scope after release
