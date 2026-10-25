@@ -85,6 +85,11 @@ on:
         required: false
         default: false
         type: boolean
+      e2e_second_shop:
+        description: "Read-only: second-shop E2E mode (install/uninstall/reinstall test). Runs ONLY the e2e_second_shop job; shop comes from the E2E_SHOP secret or the single non-allowed Shop row (never an input, never printed)"
+        required: false
+        default: false
+        type: boolean
       drain_cron:
         description: "NOT read-only unless none: pause/resume ONLY the s10_drain_every_minute pg_cron job (cron.alter_job active=false/true)"
         required: false
@@ -106,7 +111,9 @@ jobs:
     # Uncomment to require approval via GitHub Environment:
     # environment: production
 
-    if: github.ref == 'refs/heads/main'
+    # Skipped in e2e_second_shop mode: that mode runs only the e2e_second_shop
+    # job below, which never touches the allowed dev store.
+    if: github.ref == 'refs/heads/main' && !inputs.e2e_second_shop
 
     steps:
       # Checkout runs first so every psql step can source
@@ -125,36 +132,73 @@ jobs:
       # masked, and only then exported via GITHUB_ENV. Later steps see
       # SHOP_DOMAIN in their env header as ***.
       #
-      # If the shop input is empty, the shop is resolved from the DB as the
-      # single installed shop ("Shop"."uninstalledAt" IS NULL), read-only. It
-      # fails if 0 or more than 1 shops are installed. Only the count is printed.
+      # If the shop input is empty, the shop is resolved from the DB, read-only:
+      #   - exactly 1 installed shop ("Shop"."uninstalledAt" IS NULL): that shop
+      #   - more than 1 installed (e.g. during the second-shop E2E test): the
+      #     shop equal to the ALLOWED_DEV_STORE secret, which must be installed
+      #   - otherwise fail closed with a fixed shop_select=error code=<CODE>
+      # Only counts and fixed codes are printed, never a domain.
       - name: Mask shop input
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          # Secret, so the env header prints *** (#190 F1).
+          ALLOWED_DEV_STORE: ${{ secrets.ALLOWED_DEV_STORE }}
           PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
           set -euo pipefail
           source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
           SHOP=$(jq -r '.inputs.shop // empty' "$GITHUB_EVENT_PATH")
+          # Default shop selection (domain never printed)
           if [ -z "$SHOP" ]; then
-            echo "shop input empty: resolving the single installed shop from the DB (domain not printed)"
+            echo "shop input empty: resolving the shop from the DB (domain not printed)"
             if [ -z "$DATABASE_URL" ]; then
               echo "::error::DATABASE_URL_MIGRATIONS secret not set (needed to resolve shop)"
               exit 1
             fi
             INSTALLED=$(psql -X -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" \
               -c 'SELECT COUNT(*) FROM "Shop" WHERE "uninstalledAt" IS NULL;')
-            echo "installed_shop_count=$INSTALLED"
-            if [ "$INSTALLED" != "1" ]; then
-              echo "::error::Expected exactly 1 installed shop to resolve an empty shop input, found $INSTALLED. Pass the shop input explicitly."
+            if [[ ! "$INSTALLED" =~ ^[0-9]+$ ]]; then
+              echo "shop_select=error code=SHOP_COUNT_INVALID"
+              echo "::error::Installed shop count was not an integer"
               exit 1
             fi
-            SHOP=$(psql -X -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" \
-              -c 'SELECT domain FROM "Shop" WHERE "uninstalledAt" IS NULL;')
-            echo "shop_source=db_single_installed"
+            echo "installed_shop_count=$INSTALLED"
+            if [ "$INSTALLED" = "0" ]; then
+              echo "shop_select=error code=NO_INSTALLED_SHOP"
+              echo "::error::No installed shop found. Pass the shop input explicitly."
+              exit 1
+            elif [ "$INSTALLED" = "1" ]; then
+              SHOP=$(psql -X -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" \
+                -c 'SELECT domain FROM "Shop" WHERE "uninstalledAt" IS NULL;')
+              echo "shop_source=db_single_installed"
+            else
+              # More than 1 installed: select the allowed dev store, never the
+              # other shop(s). Fail closed if it is unset or not installed.
+              if [ -z "${ALLOWED_DEV_STORE:-}" ]; then
+                echo "shop_select=error code=ALLOWED_DEV_STORE_UNSET"
+                echo "::error::More than 1 installed shop and ALLOWED_DEV_STORE is not set. Pass the shop input explicitly."
+                exit 1
+              fi
+              if [[ ! "$ALLOWED_DEV_STORE" =~ ^[a-z0-9-]+\.myshopify\.com$ ]]; then
+                echo "shop_select=error code=ALLOWED_DEV_STORE_INVALID"
+                echo "::error::ALLOWED_DEV_STORE has an invalid format"
+                exit 1
+              fi
+              echo "::add-mask::$ALLOWED_DEV_STORE"
+              MATCH=$(psql -X -v ON_ERROR_STOP=1 -t -A -v allowed="$ALLOWED_DEV_STORE" "$DATABASE_URL" \
+                <<< "SELECT COUNT(*) FROM \"Shop\" WHERE \"uninstalledAt\" IS NULL AND domain = :'allowed';")
+              if [ "$MATCH" != "1" ]; then
+                echo "shop_select=error code=ALLOWED_DEV_STORE_NOT_INSTALLED"
+                echo "::error::More than 1 installed shop and ALLOWED_DEV_STORE matches no installed shop. Pass the shop input explicitly."
+                exit 1
+              fi
+              SHOP="$ALLOWED_DEV_STORE"
+              echo "shop_source=db_allowed_dev_store"
+            fi
           else
             echo "shop_source=input"
           fi
+          # End default shop selection
           # Validate before masking (never printed) so a multi-line value
           # cannot slip partly past ::add-mask::.
           if [[ ! "$SHOP" =~ ^[a-z0-9-]+\.myshopify\.com$ ]]; then
@@ -164,10 +208,14 @@ jobs:
           echo "::add-mask::$SHOP"
           echo "SHOP_DOMAIN=$SHOP" >> "$GITHUB_ENV"
 
-      # Public boolean only: true iff exactly one shop is installed and its
-      # domain equals the ALLOWED_DEV_STORE secret. The comparison runs inside
-      # SQL via a psql variable; neither domain is ever printed. 'unknown' if
-      # the secret is unset.
+      # Public counts/booleans only:
+      #   installed_shop_count=<int>
+      #   installed_shop_is_allowed_dev_store=<true|false|unknown>: true iff the
+      #     SELECTED shop (SHOP_DOMAIN) equals the ALLOWED_DEV_STORE secret and
+      #     is installed
+      #   allowed_shop_buyer_accounts=<int|unknown>, allowed_shop_invoices=<int|unknown>:
+      #     existing-store guard counts (show the E2E test didn't change them)
+      # Comparisons run inside SQL via psql variables; no domain is printed.
       - name: Installed shop vs allowed dev store
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
@@ -177,26 +225,48 @@ jobs:
         run: |
           set -euo pipefail
           source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
+          # Allowed dev store summary (counts/booleans only)
+          INSTALLED=$(psql -X -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" \
+            -c 'SELECT COUNT(*) FROM "Shop" WHERE "uninstalledAt" IS NULL;')
+          [[ "$INSTALLED" =~ ^[0-9]+$ ]] || INSTALLED=unknown
+          echo "installed_shop_count=$INSTALLED"
           if [ -z "${ALLOWED_DEV_STORE:-}" ]; then
             echo "installed_shop_is_allowed_dev_store=unknown"
+            echo "allowed_shop_buyer_accounts=unknown"
+            echo "allowed_shop_invoices=unknown"
             exit 0
           fi
           # Validate before masking (never printed), as in seed-dev-store.yml.
           if [[ ! "$ALLOWED_DEV_STORE" =~ ^[a-z0-9-]+\.myshopify\.com$ ]]; then
             echo "installed_shop_is_allowed_dev_store=false"
+            echo "allowed_shop_buyer_accounts=unknown"
+            echo "allowed_shop_invoices=unknown"
             exit 0
           fi
           echo "::add-mask::$ALLOWED_DEV_STORE"
-          RESULT=$(psql -X -v ON_ERROR_STOP=1 -t -A -v allowed="$ALLOWED_DEV_STORE" "$DATABASE_URL" <<'EOSQL'
-          SELECT CASE WHEN COUNT(*) = 1 AND bool_and(domain = :'allowed')
-                      THEN 'true' ELSE 'false' END
-          FROM "Shop" WHERE "uninstalledAt" IS NULL;
+          RESULT=$(psql -X -v ON_ERROR_STOP=1 -t -A -v allowed="$ALLOWED_DEV_STORE" -v shop="$SHOP_DOMAIN" "$DATABASE_URL" <<'EOSQL'
+          SELECT CASE WHEN :'shop' = :'allowed'
+                       AND EXISTS (SELECT 1 FROM "Shop" WHERE domain = :'shop' AND "uninstalledAt" IS NULL)
+                      THEN 'true' ELSE 'false' END;
           EOSQL
           )
           if [ "$RESULT" != "true" ]; then
             RESULT=false
           fi
           echo "installed_shop_is_allowed_dev_store=$RESULT"
+          GUARD=$(psql -X -v ON_ERROR_STOP=1 -t -A -F '|' -v allowed="$ALLOWED_DEV_STORE" "$DATABASE_URL" <<'EOSQL'
+          SELECT
+            (SELECT COUNT(*) FROM "BuyerAccount" ba JOIN "Shop" s ON s.id = ba."shopId" WHERE s.domain = :'allowed'),
+            (SELECT COUNT(*) FROM "Invoice" i JOIN "Shop" s ON s.id = i."shopId" WHERE s.domain = :'allowed');
+          EOSQL
+          )
+          BA=$(echo "$GUARD" | cut -d'|' -f1)
+          INV=$(echo "$GUARD" | cut -d'|' -f2)
+          [[ "$BA" =~ ^[0-9]+$ ]] || BA=unknown
+          [[ "$INV" =~ ^[0-9]+$ ]] || INV=unknown
+          echo "allowed_shop_buyer_accounts=$BA"
+          echo "allowed_shop_invoices=$INV"
+          # End allowed dev store summary
 
       - name: Validate inputs
         env:
@@ -1670,3 +1740,316 @@ jobs:
 
           echo ""
           echo "::notice::Reconcile probe completed successfully (status $STATUS_CODE)"
+
+  # Second-shop E2E mode (install/uninstall/reinstall test on a throwaway dev
+  # store). Read-only, dispatch-only, and the ONLY job that runs when
+  # e2e_second_shop=true.
+  #
+  # SAFETY:
+  #   - No shop input: the shop comes from the masked E2E_SHOP secret, else the
+  #     single Shop row whose domain != ALLOWED_DEV_STORE. Anything else fails
+  #     closed with e2e_shop_select=error code=<CODE> (counts only).
+  #   - Never selects the allowed dev store (Admin calls never go to it; it is
+  #     only counted in SQL for the allowed_shop_* guard lines).
+  #   - SELECT only (PGOPTIONS read-only), Admin GraphQL queries only (no
+  #     mutations), never refreshes tokens.
+  #   - Prints only e2e_<name>=<int|bool|enum|UTC ISO timestamp> lines and
+  #     fixed codes; never a domain, name, email, money or per-entity id.
+  e2e_second_shop:
+    name: Second-shop E2E checks (read-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.ref == 'refs/heads/main' && inputs.e2e_second_shop
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      # Must stay the FIRST step that touches the shop. The selected domain is
+      # masked before it is exported via GITHUB_ENV, so later env headers show
+      # E2E_SHOP_DOMAIN as ***.
+      - name: E2E select shop
+        id: e2e_select
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          # Secrets, so the env header prints *** (#190 F1).
+          E2E_SHOP: ${{ secrets.E2E_SHOP }}
+          ALLOWED_DEV_STORE: ${{ secrets.ALLOWED_DEV_STORE }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
+        run: |
+          set -euo pipefail
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
+          # E2E shop selection (domain never printed)
+          fail() {
+            echo "e2e_shop_select=error code=$1${2:+ $2}"
+            echo "::error::e2e shop selection failed: $1"
+            exit 1
+          }
+          SHOP_RE='^[a-z0-9-]+\.myshopify\.com$'
+          if [ -n "$(jq -r '.inputs.shop // empty' "$GITHUB_EVENT_PATH")" ]; then
+            fail E2E_SHOP_INPUT_NOT_ALLOWED
+          fi
+          [ -n "${DATABASE_URL:-}" ] || fail E2E_DATABASE_URL_UNSET
+          [ -n "${ALLOWED_DEV_STORE:-}" ] || fail E2E_ALLOWED_DEV_STORE_UNSET
+          [[ "$ALLOWED_DEV_STORE" =~ $SHOP_RE ]] || fail E2E_ALLOWED_DEV_STORE_INVALID
+          echo "::add-mask::$ALLOWED_DEV_STORE"
+          if [ -n "${E2E_SHOP:-}" ]; then
+            # Validate before masking so a multi-line value cannot slip past it.
+            [[ "$E2E_SHOP" =~ $SHOP_RE ]] || fail E2E_SHOP_INVALID
+            echo "::add-mask::$E2E_SHOP"
+            [ "$E2E_SHOP" != "$ALLOWED_DEV_STORE" ] || fail E2E_SHOP_IS_ALLOWED_DEV_STORE
+            echo "e2e_shop_source=secret"
+            N=$(psql -X -v ON_ERROR_STOP=1 -t -A -v shop="$E2E_SHOP" "$DATABASE_URL" \
+              <<< "SELECT COUNT(*) FROM \"Shop\" WHERE domain = :'shop';")
+            [[ "$N" =~ ^[0-9]+$ ]] || fail E2E_SHOP_COUNT_INVALID
+            echo "e2e_shop_candidates=$N"
+            [ "$N" != "0" ] || fail E2E_SHOP_NOT_FOUND
+            [ "$N" = "1" ] || fail E2E_SHOP_NOT_UNIQUE "candidates=$N"
+            SELECTED="$E2E_SHOP"
+          else
+            echo "e2e_shop_source=fallback_non_allowed"
+            N=$(psql -X -v ON_ERROR_STOP=1 -t -A -v allowed="$ALLOWED_DEV_STORE" "$DATABASE_URL" \
+              <<< "SELECT COUNT(*) FROM \"Shop\" WHERE domain <> :'allowed';")
+            [[ "$N" =~ ^[0-9]+$ ]] || fail E2E_SHOP_COUNT_INVALID
+            echo "e2e_shop_candidates=$N"
+            [ "$N" != "0" ] || fail E2E_SHOP_NOT_FOUND
+            [ "$N" = "1" ] || fail E2E_SHOP_NOT_UNIQUE "candidates=$N"
+            SELECTED=$(psql -X -v ON_ERROR_STOP=1 -t -A -v allowed="$ALLOWED_DEV_STORE" "$DATABASE_URL" \
+              <<< "SELECT domain FROM \"Shop\" WHERE domain <> :'allowed';")
+            [[ "$SELECTED" =~ $SHOP_RE ]] || fail E2E_SHOP_INVALID
+            echo "::add-mask::$SELECTED"
+          fi
+          [ "$SELECTED" != "$ALLOWED_DEV_STORE" ] || fail E2E_SHOP_IS_ALLOWED_DEV_STORE
+          echo "E2E_SHOP_DOMAIN=$SELECTED" >> "$GITHUB_ENV"
+          echo "e2e_shop_select=ok"
+          # End E2E shop selection
+
+      # DB state for the selected shop, plus the allowed-store guard counts.
+      # Session has no created/updated columns, so freshness after reinstall is
+      # shown by e2e_offline_session_expires_at (expiring offline tokens get a
+      # new expiry when issued). Onboarding "complete" is computed per request
+      # from Admin API + DB + env and is not stored, so it prints unknown; the
+      # stored parts (default terms, dismissed) are printed instead.
+      # e2e_initial_sync_status mirrors getInitialSyncState()
+      # (app/lib/initial-sync.server.ts).
+      - name: E2E DB checks
+        id: e2e_db
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          # Secret, so the env header prints *** (#190 F1).
+          ALLOWED_DEV_STORE: ${{ secrets.ALLOWED_DEV_STORE }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
+        run: |
+          set -euo pipefail
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
+          DB_OUT=$(mktemp)
+          trap 'rm -f "$DB_OUT"' EXIT
+          psql -X -v ON_ERROR_STOP=1 -t -A -F '|' \
+            -v shop="$E2E_SHOP_DOMAIN" -v allowed="$ALLOWED_DEV_STORE" "$DATABASE_URL" > "$DB_OUT" <<'EOSQL'
+          WITH s AS (SELECT * FROM "Shop" WHERE domain = :'shop'),
+          sess AS (SELECT * FROM "Session" WHERE shop = :'shop'),
+          off AS (SELECT * FROM sess WHERE "isOnline" = false),
+          bulk AS (SELECT * FROM s6_bulk_operations WHERE shop = :'shop'),
+          comp AS (
+            SELECT bulk_operation_id, completed_at, failure_count, started_at FROM bulk
+            WHERE origin = 'reconcile' AND reconcile_stage = 'companies'
+            ORDER BY started_at DESC LIMIT 1),
+          cust AS (
+            SELECT bulk_operation_id, completed_at, failure_count FROM bulk
+            WHERE origin = 'reconcile' AND reconcile_stage = 'customers'
+              AND started_at >= (SELECT started_at FROM comp)
+            ORDER BY started_at DESC LIMIT 1),
+          ord AS (
+            SELECT bulk_operation_id, completed_at, failure_count FROM bulk
+            WHERE origin = 'reconcile' AND reconcile_stage = 'orders'
+              AND started_at >= (SELECT started_at FROM comp)
+            ORDER BY started_at DESC LIMIT 1),
+          ids AS (
+            SELECT bulk_operation_id FROM comp
+            UNION ALL SELECT bulk_operation_id FROM cust
+            UNION ALL SELECT bulk_operation_id FROM ord),
+          sync AS (
+            SELECT CASE
+              WHEN NOT EXISTS (SELECT 1 FROM comp) THEN 'not_started'
+              WHEN EXISTS (SELECT 1 FROM comp WHERE failure_count >= 5)
+                OR EXISTS (SELECT 1 FROM cust WHERE failure_count >= 5)
+                OR EXISTS (SELECT 1 FROM ord WHERE failure_count >= 5)
+                OR EXISTS (
+                  SELECT 1 FROM s6_dead_letter d
+                  WHERE d.message->>'bulkOperationId' IN (SELECT bulk_operation_id FROM ids)
+                    AND d.message->>'topic' IN ('RECONCILE_COMPANIES', 'RECONCILE_CUSTOMERS', 'RECONCILE_ORDERS', 'BULK_OPERATIONS_FINISH'))
+                THEN 'failed'
+              WHEN EXISTS (SELECT 1 FROM comp WHERE completed_at IS NOT NULL)
+                AND EXISTS (SELECT 1 FROM ord WHERE completed_at IS NOT NULL)
+                AND CASE WHEN EXISTS (SELECT 1 FROM cust)
+                         THEN EXISTS (SELECT 1 FROM cust WHERE completed_at IS NOT NULL)
+                         ELSE NOT EXISTS (
+                           SELECT 1 FROM pgmq.q_s6_sync q
+                           WHERE q.message->>'shop' = :'shop' AND q.message->>'topic' = 'RECONCILE_CUSTOMERS')
+                    END
+                THEN 'done'
+              ELSE 'in_progress'
+            END AS status)
+          SELECT k, v FROM (VALUES
+            (1, 'e2e_installed_shop_count', (SELECT COUNT(*) FROM "Shop" WHERE "uninstalledAt" IS NULL)::text),
+            (2, 'e2e_shop_rows_for_selected', (SELECT COUNT(*) FROM s)::text),
+            (3, 'e2e_uninstalled_at_set', COALESCE((SELECT bool_or("uninstalledAt" IS NOT NULL) FROM s)::text, 'unknown')),
+            (4, 'e2e_uninstalled_at', COALESCE((SELECT to_char(max("uninstalledAt") AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') FROM s), 'null')),
+            (5, 'e2e_db_currency_is_inr', COALESCE((SELECT bool_and(currency = 'INR') FROM s)::text, 'unknown')),
+            (6, 'e2e_onboarding_default_terms_set', COALESCE((SELECT bool_and("defaultTermsDays" IS NOT NULL AND "defaultTermsDays" > 0) FROM s)::text, 'unknown')),
+            (7, 'e2e_onboarding_dismissed', COALESCE((SELECT bool_and(onboarding_dismissed_at IS NOT NULL) FROM s)::text, 'unknown')),
+            (8, 'e2e_onboarding_complete', 'unknown'),
+            (9, 'e2e_session_rows', (SELECT COUNT(*) FROM sess)::text),
+            (10, 'e2e_offline_session_rows', (SELECT COUNT(*) FROM off)::text),
+            (11, 'e2e_offline_session_with_token', (SELECT COALESCE(bool_or("accessToken" IS NOT NULL AND "accessToken" <> ''), false) FROM off)::text),
+            (12, 'e2e_offline_session_expires_at', COALESCE((SELECT to_char(max(expires), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') FROM off), 'null')),
+            (13, 'e2e_offline_session_expired', (SELECT COALESCE(max(expires) <= (now() AT TIME ZONE 'UTC'), false) FROM off)::text),
+            (14, 'e2e_offline_session_has_refresh_token', (SELECT COALESCE(bool_or("refreshToken" IS NOT NULL AND "refreshToken" <> ''), false) FROM off)::text),
+            (15, 'e2e_offline_session_needs_reauth', (SELECT COALESCE(bool_or("needsReauth"), false) FROM off)::text),
+            (16, 'e2e_initial_sync_status', (SELECT status FROM sync)),
+            (17, 'e2e_bulk_ops_rows', (SELECT COUNT(*) FROM bulk)::text),
+            (18, 'e2e_open_bulk_ops', (SELECT COUNT(*) FROM bulk WHERE completed_at IS NULL)::text),
+            (19, 'e2e_dlq_rows', (SELECT COUNT(*) FROM s6_dead_letter WHERE message->>'shop' = :'shop')::text),
+            (20, 'e2e_webhook_receipts_rows', (SELECT COUNT(*) FROM webhook_receipts WHERE shop = :'shop')::text),
+            (21, 'e2e_webhook_receipts_app_uninstalled', (SELECT COUNT(*) FROM webhook_receipts WHERE shop = :'shop' AND topic = 'APP_UNINSTALLED')::text),
+            (22, 'e2e_buyer_accounts', (SELECT COUNT(*) FROM "BuyerAccount" WHERE "shopId" IN (SELECT id FROM s))::text),
+            (23, 'e2e_invoices', (SELECT COUNT(*) FROM "Invoice" WHERE "shopId" IN (SELECT id FROM s))::text),
+            (24, 'allowed_shop_buyer_accounts', (SELECT COUNT(*) FROM "BuyerAccount" ba JOIN "Shop" a ON a.id = ba."shopId" WHERE a.domain = :'allowed')::text),
+            (25, 'allowed_shop_invoices', (SELECT COUNT(*) FROM "Invoice" i JOIN "Shop" a ON a.id = i."shopId" WHERE a.domain = :'allowed')::text)
+          ) AS t(n, k, v)
+          ORDER BY n;
+          EOSQL
+          # E2E DB summary (allow-listed shapes only)
+          VALUE_RE='^([0-9]{1,12}|true|false|null|unknown|not_started|in_progress|done|failed|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)$'
+          OFFLINE_OK=false
+          TOKEN_EXPIRED=unknown
+          UNINSTALLED=unknown
+          while IFS='|' read -r k v; do
+            [[ "$k" =~ ^[a-z0-9_]{1,64}$ ]] || continue
+            [[ "$v" =~ $VALUE_RE ]] || v=invalid
+            echo "$k=$v"
+            case "$k" in
+              e2e_offline_session_with_token) OFFLINE_OK="$v" ;;
+              e2e_offline_session_expired) TOKEN_EXPIRED="$v" ;;
+              e2e_uninstalled_at_set) UNINSTALLED="$v" ;;
+            esac
+          done < "$DB_OUT"
+          {
+            echo "offline_session_with_token=$OFFLINE_OK"
+            echo "token_expired=$TOKEN_EXPIRED"
+            echo "uninstalled=$UNINSTALLED"
+          } >> "$GITHUB_OUTPUT"
+          # End E2E DB summary
+
+      # Admin API (queries only) with the selected shop's offline token.
+      # NOTE: webhookSubscriptions returns only shop-specific (API-created)
+      # subscriptions; this app's subscriptions are app-specific (declared in
+      # shopify.app.toml), which the Admin API does not list. So present=0 is
+      # expected and e2e_webhooks_match prints unknown in that case; the
+      # meaningful check is e2e_webhooks_extra=0 (no stray API subscriptions).
+      # Delivery is shown by e2e_webhook_receipts_rows in the DB step.
+      - name: E2E Admin checks
+        id: e2e_admin
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          OFFLINE_OK: ${{ steps.e2e_db.outputs.offline_session_with_token }}
+          TOKEN_EXPIRED: ${{ steps.e2e_db.outputs.token_expired }}
+          UNINSTALLED: ${{ steps.e2e_db.outputs.uninstalled }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
+        run: |
+          set -euo pipefail
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
+          # E2E Admin gate
+          if [ "$UNINSTALLED" != "false" ]; then
+            echo "e2e_admin=skipped_shop_uninstalled"
+            exit 0
+          fi
+          if [ "$OFFLINE_OK" != "true" ]; then
+            echo "e2e_admin=skipped_no_offline_session"
+            exit 0
+          fi
+          # Read-only mode never refreshes; skip unless definitely not expired.
+          if [ "$TOKEN_EXPIRED" != "false" ]; then
+            echo "e2e_admin=skipped_token_expired"
+            exit 0
+          fi
+          # End E2E Admin gate
+
+          ACCESS_TOKEN=$(psql -X -v ON_ERROR_STOP=1 -v shop="$E2E_SHOP_DOMAIN" -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT "accessToken"
+          FROM "Session"
+          WHERE shop = :'shop' AND "isOnline" = false AND "accessToken" <> ''
+          ORDER BY expires DESC NULLS LAST
+          LIMIT 1;
+          EOSQL
+          )
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "e2e_admin=skipped_no_access_token"
+            exit 0
+          fi
+          echo "::add-mask::$ACCESS_TOKEN"
+
+          CURL_CONFIG=""
+          HTTP_RESPONSE=""
+          EXPECTED_TOPICS_FILE=""
+          cleanup() {
+            rm -f "$CURL_CONFIG" "$HTTP_RESPONSE" "$EXPECTED_TOPICS_FILE"
+          }
+          trap cleanup EXIT
+
+          CURL_CONFIG=$(mktemp)
+          chmod 600 "$CURL_CONFIG"
+          cat > "$CURL_CONFIG" <<EOF
+          header = "Content-Type: application/json"
+          header = "X-Shopify-Access-Token: $ACCESS_TOKEN"
+          EOF
+          unset ACCESS_TOKEN
+
+          # E2E Admin query and summary (counts/booleans only)
+          # Expected topics: every `topics = [...]` entry in shopify.app.toml
+          # (compliance_topics excluded: they cannot be API subscriptions),
+          # as WebhookSubscriptionTopic enums (orders/updated -> ORDERS_UPDATED).
+          EXPECTED_TOPICS_FILE=$(mktemp)
+          { grep -E '^[[:space:]]*topics[[:space:]]*=' shopify.app.toml || true; } \
+            | grep -oE '"[a-z_]+/[a-z_]+"' | tr -d '"' | tr 'a-z/' 'A-Z_' | sort -u > "$EXPECTED_TOPICS_FILE"
+          E2E_QUERY='{"query":"{ shop { currencyCode } webhookSubscriptions(first: 100) { nodes { topic } } validations(first: 50) { nodes { enabled shopifyFunction { handle } } } paymentCustomizations(first: 50) { nodes { enabled shopifyFunction { handle } } } }"}'
+          HTTP_RESPONSE=$(mktemp)
+          E2E_STATUS=$(curl -s -w "%{http_code}" -o "$HTTP_RESPONSE" \
+            -X POST \
+            --config "$CURL_CONFIG" \
+            --data-binary "$E2E_QUERY" \
+            "https://${E2E_SHOP_DOMAIN}/admin/api/2026-10/graphql.json" || echo "000")
+          if [ "$E2E_STATUS" != "200" ]; then
+            echo "::warning::e2e Admin query failed with HTTP $E2E_STATUS"
+            echo "e2e_admin=error http_status=$E2E_STATUS"
+          elif ! jq -e . "$HTTP_RESPONSE" >/dev/null 2>&1; then
+            echo "::warning::e2e Admin response was not JSON"
+            echo "e2e_admin=error parse_failed"
+          elif jq -e '(.errors | length) > 0' "$HTTP_RESPONSE" >/dev/null 2>&1; then
+            echo "::warning::e2e Admin query returned GraphQL errors"
+            echo "e2e_admin=error error_codes=$(jq -r '[.errors[] | .extensions.code // "UNKNOWN" | tostring | if test("^[A-Z0-9_]{1,40}$") then . else "UNKNOWN" end] | join(",")' "$HTTP_RESPONSE")"
+          else
+            jq -r --rawfile exp "$EXPECTED_TOPICS_FILE" '
+              def okenum: type == "string" and test("^[A-Z0-9_]{1,64}$");
+              ($exp | split("\n") | map(select(okenum)) | unique) as $e
+              | [.data.webhookSubscriptions.nodes[]? | .topic] as $raw
+              | ($raw | map(if okenum then . else "INVALID_TOPIC" end) | unique) as $p
+              | [.data.validations.nodes[]? | select(.shopifyFunction.handle == "credit-check-validation")] as $v
+              | [.data.paymentCustomizations.nodes[]? | select(.shopifyFunction.handle == "hide-terms-payment")] as $pc
+              | .data.shop.currencyCode as $cur
+              | "e2e_admin=ok",
+                "e2e_currency_is_inr=\(if ($cur | type) == "string" then ($cur == "INR") else "unknown" end)",
+                "e2e_webhooks_expected=\($e | length)",
+                "e2e_webhooks_shop_specific_rows=\($raw | length)",
+                "e2e_webhooks_present=\([$p[] | select(. as $t | $e | index($t))] | length)",
+                "e2e_webhooks_missing=\([$e[] | select(. as $t | $p | index($t) | not)] | length)",
+                "e2e_webhooks_extra=\([$p[] | select(. as $t | $e | index($t) | not)] | length)",
+                "e2e_webhooks_match=\(if ($raw | length) == 0 then "unknown" else ($p == $e) end)",
+                "e2e_validation_count=\($v | length)",
+                "e2e_validation_enabled_count=\([$v[] | select(.enabled == true)] | length)",
+                "e2e_payment_customization_count=\($pc | length)",
+                "e2e_payment_customization_enabled_count=\([$pc[] | select(.enabled == true)] | length)"' "$HTTP_RESPONSE"
+          fi
+          # End E2E Admin query and summary
