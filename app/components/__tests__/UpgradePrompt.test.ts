@@ -329,4 +329,52 @@ describe("PlanBanner component", () => {
     const html = renderToString(createElement(PlanBanner, baseProps));
     expect(html).toContain('target="_top"');
   });
+
+  describe("gating OFF: no plan-limit UI for EVERY plan over limit", () => {
+    const planConfigs = [
+      { planKey: "none" as const, companiesLimit: 0, companiesUsed: 3 },
+      { planKey: "starter" as const, companiesLimit: 25, companiesUsed: 30 },
+      { planKey: "growth" as const, companiesLimit: 100, companiesUsed: 150 },
+      { planKey: "unlimited" as const, companiesLimit: -1, companiesUsed: 500 },
+    ];
+
+    for (const config of planConfigs) {
+      it(`${config.planKey} plan over limit with gating OFF: no badge, no banner, no Upgrade CTA`, () => {
+        const html = renderToString(
+          createElement(PlanBanner, {
+            ...baseProps,
+            planKey: config.planKey,
+            planName: config.planKey.charAt(0).toUpperCase() + config.planKey.slice(1),
+            companiesLimit: config.companiesLimit,
+            companiesUsed: config.companiesUsed,
+            gatingEnforced: false,
+          })
+        );
+        expect(html).not.toContain("Limit Reached");
+        expect(html).not.toContain("At Limit");
+        expect(html).not.toContain("Upgrade to Add More");
+        // Should still show the plan name and usage count
+        expect(html).toContain(`${config.companiesUsed} companies`);
+      });
+    }
+  });
+
+  describe("gating ON: none plan shows limit UI", () => {
+    it("none plan with 1 account, gating ON shows Limit Reached badge", () => {
+      const html = renderToString(
+        createElement(PlanBanner, {
+          ...baseProps,
+          planKey: "none",
+          planName: "No Plan",
+          companiesUsed: 1,
+          companiesLimit: 0,
+          gatingEnforced: true,
+        })
+      );
+      expect(html).toContain("1 / 0 companies");
+      expect(html).toContain('tone="critical"');
+      expect(html).toContain("Limit Reached");
+      expect(html).toContain("Upgrade to Add More");
+    });
+  });
 });

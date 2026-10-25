@@ -740,3 +740,33 @@ describe("UsageDisplay component render tests", () => {
     expect(html).not.toContain("/ 25");
   });
 });
+
+/**
+ * Credit-hold feature availability tests (T1).
+ *
+ * Verifies that credit_holds feature and FEATURE_DISPLAY_NAMES are
+ * available on ALL plans regardless of gating status. Plan-limit gating
+ * only affects the "at limit" badges and "Upgrade to Add More" CTAs,
+ * not feature availability.
+ */
+describe("credit-hold feature availability (unaffected by plan gating)", () => {
+  it("credit_holds is in FEATURE_DISPLAY_NAMES", async () => {
+    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
+    expect(FEATURE_DISPLAY_NAMES.credit_holds).toBeDefined();
+    expect(FEATURE_DISPLAY_NAMES.credit_holds).toBe("Credit Holds");
+  });
+
+  it("credit_holds feature is available on all plans including none", async () => {
+    const { ALL_PLAN_KEYS, getPlanConfig, planHasFeature } = await import("~/lib/entitlements");
+    
+    for (const planKey of ALL_PLAN_KEYS) {
+      const plan = getPlanConfig(planKey);
+      expect(planHasFeature(plan, "credit_holds")).toBe(true);
+    }
+  });
+
+  it("credit_holds is in ALL_FEATURE_KEYS (shown in feature comparison table)", async () => {
+    const { ALL_FEATURE_KEYS } = await import("~/lib/entitlements");
+    expect(ALL_FEATURE_KEYS).toContain("credit_holds");
+  });
+});
