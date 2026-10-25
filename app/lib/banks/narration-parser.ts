@@ -113,8 +113,8 @@ function parseUpi(text: string, textUpper: string, bank?: BankId): ParsedNarrati
 
   // First, try to find VPA in the entire text (handles hyphenated VPAs)
   // Pattern: alphanumeric/dots/hyphens @ alphanumeric handle
-  // Must be bounded by non-VPA-like characters
-  const fullVpaMatch = text.match(/(?:^|[^a-zA-Z0-9._-])([a-zA-Z0-9._]+(?:-\d+)?@[a-zA-Z0-9]+)(?:[^a-zA-Z0-9]|$)/);
+  // Must be bounded by non-VPA-like characters (allow hyphen as delimiter for HDFC dash-format)
+  const fullVpaMatch = text.match(/(?:^|[^a-zA-Z0-9._])([a-zA-Z0-9._]+(?:-\d+)?@[a-zA-Z0-9]+)(?:[^a-zA-Z0-9]|$)/);
   if (fullVpaMatch) {
     result.upiId = fullVpaMatch[1].toLowerCase();
   }

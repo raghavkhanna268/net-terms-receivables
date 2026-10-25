@@ -459,7 +459,6 @@ function RailBadge({ rail }: { rail: string | null }) {
   if (rail === "NEFT") return <s-badge tone="info">{rail}</s-badge>;
   if (rail === "RTGS") return <s-badge tone="success">{rail}</s-badge>;
   if (rail === "IMPS") return <s-badge tone="warning">{rail}</s-badge>;
-  if (rail === "CMS") return <s-badge>{rail}</s-badge>;
   return <s-badge>{rail}</s-badge>;
 }
 

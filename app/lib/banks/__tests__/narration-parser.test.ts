@@ -293,6 +293,14 @@ describe("narration-parser", () => {
         expect(result.upiId).toBe("vendor9000@oksynt");
       });
 
+      it("extracts hyphenated VPA in HDFC dash-format", () => {
+        const result = parseNarration(
+          "UPI-9000000000-1@oksynt-SYNT VENDOR-SBIN00TEST12-300000000101-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("9000000000-1@oksynt");
+      });
+
       it("extracts payer bank from IFSC segment (HDFC UPI)", () => {
         const result = parseNarration(
           "UPI-SYNT VENDOR-vendor@oksynt-SYNT0000001-600000000004-UPI"
@@ -301,7 +309,7 @@ describe("narration-parser", () => {
         expect(result.payerBank).toBe("SYNT0000001");
       });
 
-      it("extracts payer bank from bank name segment for ICICI UPI", () => {
+      it("extracts payer bank from VPA handle for ICICI UPI", () => {
         const result = parseNarration(
           "UPI/SYNT VENDOR/vendor@oksynt/Test Remark/SYNT BANK/600000000005/SYNT000002",
           "ICICI"
@@ -366,7 +374,7 @@ describe("narration-parser", () => {
         expect(extractUtrForDedupe("some narration", "UPI", "123456789012")).toBe("123456789012");
       });
 
-      it("returns null for non-12-digit ref and falls back to narration", () => {
+      it("falls back to narration extraction for non-12-digit ref", () => {
         // 16-digit ref doesn't match 12-digit pattern, so falls back to narration extraction
         expect(extractUtrForDedupe("UPI/600000000001/vendor@synth", "UPI", "0000600000000001")).toBe("600000000001");
       });

@@ -437,12 +437,25 @@ export function detectFooterRows(sheet: SheetData, dataStartRow: number): Set<nu
 
     // Check against footer patterns
     let isFooter = false;
+    let isTerminalFooter = false;
     for (const pattern of footerPatterns) {
       if (pattern.test(firstCell) || pattern.test(firstNonEmptyCell) || pattern.test(rowText)) {
         footerIndices.add(i);
         isFooter = true;
+        // Legends and End Of Statement mark the end of data region
+        if (/^Legends\b/i.test(firstNonEmptyCell) || /^---\s*End\s*Of\s*Statement/i.test(firstNonEmptyCell)) {
+          isTerminalFooter = true;
+        }
         break;
       }
+    }
+    
+    // Terminal footer patterns end the data region - mark all remaining rows as footer
+    if (isTerminalFooter) {
+      for (let j = i; j < sheet.rows.length; j++) {
+        footerIndices.add(j);
+      }
+      break;
     }
     
     // HDFC summary-values row: numeric values only, no text labels
@@ -480,7 +493,7 @@ export function detectFooterRows(sheet: SheetData, dataStartRow: number): Set<nu
       row.some((c, idx) => idx > 0 && idx < row.length - 1 && 
         c !== null && c !== undefined && String(c).trim().length > 3);
     
-    if (nonEmptyCells.length <= 1 && !looksLikeContinuation) {
+    if (nonEmptyCells.length <= 1 && (isFooter || !looksLikeContinuation)) {
       // Check if subsequent rows are also empty or footer-like
       let allEmpty = true;
       for (let j = i + 1; j < Math.min(i + 5, sheet.rows.length); j++) {

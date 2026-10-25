@@ -851,3 +851,65 @@ Date,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balanc
     );
   });
 });
+
+describe("ICICI parser real-layout handling", () => {
+  it("parses Value-Date-first header, wrapped narration, Legends footer, and CMS credit", async () => {
+    // Synthetic ICICI CSV matching real .xls layout:
+    // - Blank col A (spacer)
+    // - Value Date column (not Transaction Date)
+    // - Wrapped narration continuation row
+    // - Legends footer block (regression test for footer detection)
+    // - CMS credit with stable dedupe key
+    const csv = `,S No.,Value Date,Transaction Date,Cheque Number,Transaction Remarks,Withdrawal Amount(INR),Deposit Amount(INR),Balance(INR),
+,1,15/10/2026,15/10/2026,,UPI/SYNT VENDOR/syntvendor@oksynt/Payment for invoice,0.00,50000.00,150000.00,
+,2,16/10/2026,16/10/2026,,UPI/SYNT WHOLESALER/syntwholesaler/Order payment/SYNT BANK/600000000002/SYNT000001 with additional,0.00,25000.00,175000.00,
+,,,,,remarks text that wraps to next row,,,,
+,3,17/10/2026,17/10/2026,,CMS/ SYNT00123456/SYNT CORPORATE COLLECTIONS PVT LTD,0.00,100000.00,275000.00,
+,4,18/10/2026,18/10/2026,,UPI/SYNT STORE/syntstore.payments@oksynt/Purchase/SYNT CO-OP BANK/600000000003/SYNT000002,10000.00,0.00,265000.00,
+,Legends,,,,,,,
+,1. SYNT - Synthetic test legend entry,,,,,,,
+,2. TEST - Another synthetic legend,,,,,,,
+`;
+    const file = new File([csv], "icici-real-layout-test.csv", { type: "text/csv" });
+    const result = await parseBankStatement(file);
+
+    expect(result.detection.bank).toBe("ICICI");
+    // Should have 4 transactions (Legends rows should be detected as footer)
+    expect(result.transactions.length).toBe(4);
+
+    // First UPI credit
+    const upiTxn1 = result.transactions.find((t) => t.narration.includes("SYNT VENDOR"));
+    expect(upiTxn1).toBeDefined();
+    expect(upiTxn1!.parsed.rail).toBe("UPI");
+    expect(upiTxn1!.parsed.upiId).toBe("syntvendor@oksynt");
+
+    // Wrapped narration should be joined
+    const wrappedTxn = result.transactions.find((t) => t.narration.includes("SYNT WHOLESALER"));
+    expect(wrappedTxn).toBeDefined();
+    expect(wrappedTxn!.narration).toContain("remarks text that wraps to next row");
+    expect(wrappedTxn!.parsed.utr).toBe("600000000002");
+
+    // CMS credit
+    const cmsTxn = result.transactions.find((t) => t.parsed.rail === "CMS");
+    expect(cmsTxn).toBeDefined();
+    expect(cmsTxn!.narration).toContain("SYNT CORPORATE COLLECTIONS");
+    // CMS has no UTR, uses sha256 dedupe key
+    expect(cmsTxn!.dedupeKey.startsWith("sha256:")).toBe(true);
+    // Pinned sha256 key for CMS transaction
+    expect(cmsTxn!.dedupeKey).toBe(
+      "sha256:4d06048bd385336d1fd8793059c3bb62660f53d256b45e7a0e06a9cf31bc132b"
+    );
+
+    // Legends footer should NOT appear in any transaction's narration
+    for (const txn of result.transactions) {
+      expect(txn.narration).not.toContain("Legends");
+      expect(txn.narration).not.toContain("Synthetic test legend");
+    }
+
+    // Debit transaction
+    const debitTxn = result.transactions.find((t) => t.direction === "DR");
+    expect(debitTxn).toBeDefined();
+    expect(debitTxn!.parsed.rail).toBe("UPI");
+    expect(debitTxn!.amountPaise).toBe(1000000); // 10000.00 INR
+  });
+});
