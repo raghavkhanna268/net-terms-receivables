@@ -912,6 +912,55 @@ mod tests {
         assert!(result.operations.is_empty(), "Empty object metafield must ALLOW (fail-open)");
     }
 
+    /// #292: Both credit_status AND shop_config missing must ALLOW (fail-open).
+    /// This is the scenario for brand-new CompanyLocations before any metafield sync.
+    #[test]
+    fn test_missing_credit_status_and_missing_shop_config_allows_checkout() {
+        let input = make_input_with_step_and_shop_config(
+            "100.00",
+            "INR",
+            None,  // No credit_status metafield
+            false,
+            Some("CHECKOUT_COMPLETION"),
+            None,  // No shop_config metafield
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Missing credit_status AND missing shop_config must ALLOW (fail-open)");
+    }
+
+    /// #292: B2B location with both metafields missing must ALLOW.
+    #[test]
+    fn test_b2b_missing_credit_status_and_missing_shop_config_allows_checkout() {
+        let input = r#"
+        {
+            "cart": {
+                "cost": {
+                    "totalAmount": {
+                        "amount": "100.00",
+                        "currencyCode": "INR"
+                    }
+                },
+                "buyerIdentity": {
+                    "customer": null,
+                    "purchasingCompany": {
+                        "location": {
+                            "metafield": null
+                        }
+                    }
+                }
+            },
+            "buyerJourney": {
+                "step": "CHECKOUT_COMPLETION"
+            },
+            "shop": {
+                "metafield": null
+            }
+        }
+        "#;
+        let result = run_test(input).unwrap();
+        assert!(result.operations.is_empty(), "B2B with missing credit_status AND missing shop_config must ALLOW");
+    }
+
     fn make_b2b_input(metafield_json: Option<&str>, _payment_methods: &[(&str, &str)]) -> String {
         let location_metafield = match metafield_json {
             Some(mf) => format!(r#"{{ "jsonValue": {} }}"#, mf),

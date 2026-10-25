@@ -177,7 +177,8 @@ describe("#292 currency recovery on /app load", () => {
 
     const updateCalls = sqlCalls.filter((c) => c.query.includes("UPDATE") && c.query.includes("currency"));
     expect(updateCalls.length).toBeGreaterThan(0);
-    expect(updateCalls.some((c) => c.query.includes("'INR'"))).toBe(true);
+    // Check that 'INR' is in the values array (parameterized query)
+    expect(updateCalls.some((c) => c.values.includes("INR"))).toBe(true);
 
     const graphqlCalls = mockGraphql.mock.calls;
     expect(graphqlCalls.length).toBeGreaterThanOrEqual(2);
@@ -239,11 +240,94 @@ describe("#292 currency recovery on /app load", () => {
 
     const updateCalls = sqlCalls.filter((c) => c.query.includes("UPDATE") && c.query.includes("currency"));
     expect(updateCalls.length).toBeGreaterThan(0);
-    expect(updateCalls.some((c) => c.query.includes("'INR'"))).toBe(true);
+    // Check that 'INR' is in the values array (parameterized query)
+    expect(updateCalls.some((c) => c.values.includes("INR"))).toBe(true);
 
     const metafieldCalls = mockGraphql.mock.calls.filter((c) =>
       c[0].includes("WriteShopConfig") || c[0].includes("metafieldsSet")
     );
     expect(metafieldCalls.length).toBeGreaterThan(0);
+  });
+
+  // #292 Item 4: Re-read currency on EVERY /app load to catch hardcoded INR rows
+  it("C.5: INR shop re-read returns INR → stays supported, no DB update", async () => {
+    setupSqlMock("INR");
+    setupGraphqlMock("INR");
+
+    const { loader } = await import("../app._index");
+    const dataResponse = await loader(createLoaderArgs());
+    const result = dataResponse.data;
+
+    expect(result.currencySupported).toBe(true);
+    expect(result.shopCurrency).toBe("INR");
+
+    // No DB update should occur (currencies match)
+    const updateCalls = sqlCalls.filter((c) => c.query.includes("UPDATE") && c.query.includes("currency"));
+    expect(updateCalls.length).toBe(0);
+  });
+
+  // #292 Item 4: Catch shops that switch away from INR
+  it("C.6: INR shop re-read returns USD → becomes not-supported, updates currency", async () => {
+    setupSqlMock("INR");
+    setupGraphqlMock("USD");
+
+    const { loader } = await import("../app._index");
+    const dataResponse = await loader(createLoaderArgs());
+    const result = dataResponse.data;
+
+    expect(result.currencySupported).toBe(false);
+    expect(result.shopCurrency).toBe("USD");
+
+    // Should have written metafield and updated DB
+    const updateCalls = sqlCalls.filter((c) => c.query.includes("UPDATE") && c.query.includes("currency"));
+    expect(updateCalls.length).toBeGreaterThan(0);
+    expect(updateCalls.some((c) => c.values.includes("USD"))).toBe(true);
+
+    const metafieldCalls = mockGraphql.mock.calls.filter((c) =>
+      c[0].includes("WriteShopConfig") || c[0].includes("metafieldsSet")
+    );
+    expect(metafieldCalls.length).toBeGreaterThan(0);
+  });
+
+  // #292 Item 3: Metafield write fails → currency NOT updated in DB
+  it("C.7: USD shop switches to INR but metafield write fails → stays USD (no DB update)", async () => {
+    setupSqlMock("USD");
+    
+    // Configure graphql mock to fail the metafield write
+    mockGraphql.mockImplementation(async (query: string) => {
+      if (query.includes("ShopCurrencyAndId")) {
+        return {
+          json: async () => ({
+            data: { shop: { id: TEST_SHOP_GID, currencyCode: "INR" } },
+          }),
+        };
+      }
+
+      if (query.includes("WriteShopConfig") || query.includes("metafieldsSet")) {
+        return {
+          json: async () => ({
+            data: { metafieldsSet: { metafields: [], userErrors: [{ field: "value", message: "Write failed" }] } },
+          }),
+        };
+      }
+
+      return { json: async () => ({ data: {} }) };
+    });
+
+    const consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { loader } = await import("../app._index");
+    const dataResponse = await loader(createLoaderArgs());
+    const result = dataResponse.data;
+
+    // Should stay as USD because metafield write failed
+    expect(result.currencySupported).toBe(false);
+    expect(result.shopCurrency).toBe("USD");
+
+    // No DB update should occur (metafield write failed)
+    const updateCalls = sqlCalls.filter((c) => c.query.includes("UPDATE") && c.query.includes("currency"));
+    expect(updateCalls.length).toBe(0);
+
+    consoleSpy.mockRestore();
   });
 });

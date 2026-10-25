@@ -17,8 +17,8 @@ import { ensurePaymentCustomization } from "./payment-customization-registration
 import { getRequestSql } from "./request-context.server";
 import { validateTimezone } from "./aging-dates.server";
 import { safeLog, shopHash, toErrorCode } from "./log.server";
-import { serializeShopConfig } from "./metafields-contract";
 import { validateCurrencyCode, NO_CURRENCY_SENTINEL } from "./shop-currency.server";
+import { writeShopConfigMetafield } from "~/services/shop-config.server";
 import type { Sql } from "./db-light.server";
 
 /**
@@ -220,15 +220,6 @@ const SHOP_AUTH_INFO_QUERY = `
 `;
 
 /**
- * #292: Shop config metafield for Rust functions.
- * Contains shop currency for INR-only validation.
- */
-const SHOP_CONFIG_METAFIELD = {
-  namespace: "$app",
-  key: "shop_config",
-} as const;
-
-/**
  * #292: Result from fetching shop auth info.
  */
 interface ShopAuthInfo {
@@ -289,57 +280,6 @@ async function fetchShopAuthInfo(admin: AdminGraphqlClient): Promise<ShopAuthInf
   }
 
   return result;
-}
-
-/**
- * #292: Write shop_config metafield with shop currency for Rust functions.
- */
-async function writeShopConfigMetafield(
-  admin: AdminGraphqlClient,
-  shopId: string,
-  currencyCode: string,
-): Promise<void> {
-  const metafieldValue = serializeShopConfig(currencyCode);
-
-  const mutation = `
-    mutation WriteShopConfig($metafields: [MetafieldsSetInput!]!) {
-      metafieldsSet(metafields: $metafields) {
-        metafields { id }
-        userErrors { field message }
-      }
-    }
-  `;
-
-  try {
-    const response = await admin.graphql(mutation, {
-      variables: {
-        metafields: [{
-          ownerId: shopId,
-          namespace: SHOP_CONFIG_METAFIELD.namespace,
-          key: SHOP_CONFIG_METAFIELD.key,
-          type: "json",
-          value: metafieldValue,
-        }],
-      },
-    });
-
-    const result = await response.json() as {
-      data?: {
-        metafieldsSet?: {
-          metafields?: Array<{ id: string }>;
-          userErrors?: Array<{ field: string; message: string }>;
-        };
-      };
-      errors?: Array<{ message: string }>;
-    };
-
-    if (result.errors || result.data?.metafieldsSet?.userErrors?.length) {
-      console.warn(`[afterAuth] shop_config_metafield_write_failed reason=user_errors`);
-    }
-  } catch (error) {
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.warn(`[afterAuth] shop_config_metafield_write_failed reason=exception err=${errInfo}`);
-  }
 }
 
 /**

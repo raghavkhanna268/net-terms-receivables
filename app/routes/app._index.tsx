@@ -21,7 +21,7 @@ import {
   type BuyerInvoiceRow,
 } from "~/lib/aging";
 import type { Sql } from "~/lib/db-light.server";
-import { safeLog, toErrorCode } from "~/lib/log.server";
+import { safeLog, toErrorCode, shopHash } from "~/lib/log.server";
 import { buildOverLimitBannerState } from "~/lib/over-limit-banner";
 import {
   isShopCurrencySupported,
@@ -32,6 +32,7 @@ import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
 import { ServerTiming, mergeServerTimingHeaders, readColdOnce } from "~/lib/server-timing.server";
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
+import { writeShopConfigMetafield } from "~/services/shop-config.server";
 
 const PAGE_SIZE = 20;
 
@@ -212,76 +213,24 @@ async function checkOnboardingRedirect(
 }
 
 /**
- * #292: Shop config metafield for Rust functions.
- */
-const SHOP_CONFIG_METAFIELD = {
-  namespace: "$app",
-  key: "shop_config",
-} as const;
-
-/**
- * #292: Write shop_config metafield with updated currency.
- * Called when shop currency changes to INR so functions stop hiding net-terms.
- */
-async function writeShopConfigMetafield(
-  admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
-  shopId: string,
-  currencyCode: string,
-): Promise<boolean> {
-  const metafieldValue = JSON.stringify({ schemaVersion: 1, currencyCode });
-
-  const mutation = `
-    mutation WriteShopConfig($metafields: [MetafieldsSetInput!]!) {
-      metafieldsSet(metafields: $metafields) {
-        metafields { id }
-        userErrors { field message }
-      }
-    }
-  `;
-
-  try {
-    const response = await admin.graphql(mutation, {
-      variables: {
-        metafields: [{
-          ownerId: shopId,
-          namespace: SHOP_CONFIG_METAFIELD.namespace,
-          key: SHOP_CONFIG_METAFIELD.key,
-          type: "json",
-          value: metafieldValue,
-        }],
-      },
-    });
-
-    const result = await response.json() as {
-      data?: {
-        metafieldsSet?: {
-          metafields?: Array<{ id: string }>;
-          userErrors?: Array<{ field: string; message: string }>;
-        };
-      };
-      errors?: Array<{ message: string }>;
-    };
-
-    if (result.errors || result.data?.metafieldsSet?.userErrors?.length) {
-      return false;
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * #292: Re-read currency on every /app load where Shop.currency is not 'INR'.
+ * #292: Re-read currency on EVERY /app load.
+ * 
+ * Called on every load to catch:
+ * - Shops with hardcoded 'INR' rows (from bugs or manual data fixes)
+ * - Shops that switched away from INR
+ * - Shops that switched to INR (recovery)
  * 
  * Behavior (fail-closed throughout):
- * - If current currency is INR: return immediately (no API call)
- * - If current currency is not INR (including 'XXX'): re-read from Shopify
- *   - If Shopify returns INR: update Shop.currency, push shop_config metafield, return 'INR'
- *   - If Shopify returns non-INR: stay not-supported, keep stored value, return stored value
- *   - If read fails: stay not-supported, keep stored value, return stored value
+ * - Always re-read from Shopify Admin API
+ * - If Shopify returns INR and current isn't INR:
+ *   1. Write shop_config metafield FIRST
+ *   2. Only if metafield succeeds, save currency to DB
+ * - If Shopify returns non-INR and current is INR:
+ *   1. Write shop_config metafield FIRST
+ *   2. Only if metafield succeeds, save currency to DB
+ * - If read fails: keep current value
  * 
- * Never writes 'XXX' over a known value (e.g., USD stays USD even if re-read fails).
+ * Never writes 'XXX' over a known value.
  */
 async function checkAndRecoverCurrency(
   sql: Sql,
@@ -289,11 +238,6 @@ async function checkAndRecoverCurrency(
   currentCurrency: string,
   admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
 ): Promise<string> {
-  // INR shops don't need recovery
-  if (isShopCurrencySupported(currentCurrency)) {
-    return currentCurrency;
-  }
-
   try {
     const response = await admin.graphql(`
       query ShopCurrencyAndId { shop { id currencyCode } }
@@ -305,39 +249,55 @@ async function checkAndRecoverCurrency(
     const shopId = data.data?.shop?.id;
     const fetchedCurrency = validateCurrencyCode(data.data?.shop?.currencyCode);
 
-    // If read fails or returns invalid, stay not-supported with current value
+    // If read fails or returns invalid, keep current value
     if (!fetchedCurrency || !shopId) {
       return currentCurrency;
     }
 
-    // If shop is now INR, recover: update DB and push metafield
-    if (fetchedCurrency === "INR") {
-      await sql`
-        UPDATE "Shop" SET currency = 'INR', "updatedAt" = NOW()
-        WHERE domain = ${shopDomain}
-      `;
-
-      // Push shop_config metafield so functions know shop is now INR
-      const metafieldWritten = await writeShopConfigMetafield(admin, shopId, "INR");
-      console.log(`[app._index] currency_recovery_success domain_hash=${shopDomain.slice(0, 8)} metafield=${metafieldWritten}`);
-      return "INR";
+    // If fetched currency matches current, nothing to update
+    if (fetchedCurrency === currentCurrency) {
+      return currentCurrency;
     }
 
-    // Shop is still non-INR: update stored value if it was 'XXX', otherwise keep current
-    // This ensures we don't keep 'XXX' when the real currency is known
-    if (currentCurrency === NO_CURRENCY_SENTINEL && fetchedCurrency !== NO_CURRENCY_SENTINEL) {
-      await sql`
-        UPDATE "Shop" SET currency = ${fetchedCurrency}, "updatedAt" = NOW()
-        WHERE domain = ${shopDomain} AND currency = ${NO_CURRENCY_SENTINEL}
-      `;
-      console.log(`[app._index] currency_xxx_resolved domain_hash=${shopDomain.slice(0, 8)} currency=${fetchedCurrency}`);
-      return fetchedCurrency;
+    // Currency changed: write shop_config metafield FIRST, only save DB on success
+    const writeResult = await writeShopConfigMetafield(admin, shopId, fetchedCurrency);
+    const hash = await shopHash(shopDomain);
+
+    if (!writeResult.success) {
+      // Metafield write failed: do NOT save currency, log and return current
+      // Next load will retry the metafield write
+      safeLog("warn", "currency_recovery_metafield_failed", {
+        shopHash: hash,
+        err: writeResult.error ?? "unknown",
+      });
+      return currentCurrency;
     }
 
-    return currentCurrency;
+    // Metafield write succeeded: now safe to update DB
+    // Handle 'XXX' sentinel specially - don't write XXX over a known value
+    if (fetchedCurrency === NO_CURRENCY_SENTINEL) {
+      // Shopify returned invalid/no currency - don't overwrite a known value with XXX
+      return currentCurrency;
+    }
+
+    await sql`
+      UPDATE "Shop" SET currency = ${fetchedCurrency}, "updatedAt" = NOW()
+      WHERE domain = ${shopDomain}
+    `;
+
+    if (fetchedCurrency === "INR" && currentCurrency !== "INR") {
+      safeLog("info", "currency_recovery_success", { shopHash: hash });
+    } else if (fetchedCurrency !== "INR" && currentCurrency === "INR") {
+      safeLog("info", "currency_switched_away", { shopHash: hash });
+    } else if (currentCurrency === NO_CURRENCY_SENTINEL) {
+      safeLog("info", "currency_xxx_resolved", { shopHash: hash });
+    }
+
+    return fetchedCurrency;
   } catch {
-    // Read failed: stay not-supported with current value (never overwrite known value with XXX)
-    console.warn(`[app._index] currency_check_failed domain_hash=${shopDomain.slice(0, 8)}`);
+    // Read failed: keep current value (never overwrite known value with XXX)
+    const hash = await shopHash(shopDomain);
+    safeLog("warn", "currency_check_failed", { shopHash: hash });
     return currentCurrency;
   }
 }

@@ -470,18 +470,20 @@ export async function processOrderLines(
     console.warn(`[bulk-jsonl] ${errors.length} parse errors in orders batch`);
   }
 
-  // #292: Filter out non-INR orders (created before shop switched to INR)
-  const nonInrOrders = orders.filter((o) => {
+  // #292: Filter out orders with missing or non-INR currency (fail-closed)
+  // Orders created before shop switched to INR should not be stored as INR amounts
+  // Orders without currency code are also skipped
+  const skippedOrders = orders.filter((o) => {
     const currency = o.totalPriceSet?.shopMoney?.currencyCode;
-    return currency && currency !== SUPPORTED_SHOP_CURRENCY;
+    return !currency || currency !== SUPPORTED_SHOP_CURRENCY;
   });
-  if (nonInrOrders.length > 0) {
+  if (skippedOrders.length > 0) {
     const hash = await shopHash(shopDomain);
-    safeLog("info", "drain_skip_non_inr_order", { shopHash: hash, count: nonInrOrders.length });
+    safeLog("info", "drain_skip_non_inr_order", { shopHash: hash, count: skippedOrders.length });
   }
   const inrOrders = orders.filter((o) => {
     const currency = o.totalPriceSet?.shopMoney?.currencyCode;
-    return !currency || currency === SUPPORTED_SHOP_CURRENCY;
+    return currency && currency === SUPPORTED_SHOP_CURRENCY;
   });
 
   if (attachedChildCount > 0 || orphanChildCount > 0) {

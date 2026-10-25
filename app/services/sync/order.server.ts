@@ -94,28 +94,31 @@ export async function processOrderWebhook(
 
   const { shopId, context } = contextResult;
 
-  // #292: Per-order currency guard - skip orders whose currency is not INR
+  // Handle CANCELLED topic - updates existing invoices only
+  // Currency guard not needed for terminal states - we want to update records regardless of currency
+  if (topic === "ORDERS_CANCELLED") {
+    return await cancelInvoice(sql, shopId, order.id, webhookId);
+  }
+
+  // Handle PAID topic - updates existing invoices only
+  // Currency guard not needed for terminal states - we want to update records regardless of currency
+  if (topic === "ORDERS_PAID") {
+    return await markInvoicePaid(sql, shopId, order.id, webhookId);
+  }
+
+  // #292: Per-order currency guard - skip orders with missing or non-INR currency
   // Orders created before the shop switched to INR should not be stored as INR amounts
+  // Orders without currency code are also skipped (fail-closed)
   const orderCurrency = order.totalPriceSet?.shopMoney?.currencyCode;
-  if (orderCurrency && orderCurrency !== SUPPORTED_SHOP_CURRENCY) {
+  if (!orderCurrency || orderCurrency !== SUPPORTED_SHOP_CURRENCY) {
     // Log count-only with shopHash (no PII)
     const hash = await shopHash(shopDomain);
     safeLog("info", "drain_skip_non_inr_order", { shopHash: hash, count: 1 });
     return {
       success: true,
       action: "skipped",
-      skipReason: "order_currency_not_supported",
+      skipReason: orderCurrency ? "order_currency_not_supported" : "order_currency_missing",
     };
-  }
-
-  // Handle CANCELLED topic - updates existing invoices only
-  if (topic === "ORDERS_CANCELLED") {
-    return await cancelInvoice(sql, shopId, order.id, webhookId);
-  }
-
-  // Handle PAID topic - updates existing invoices only
-  if (topic === "ORDERS_PAID") {
-    return await markInvoicePaid(sql, shopId, order.id, webhookId);
   }
 
   // Check if Invoice already exists for this order

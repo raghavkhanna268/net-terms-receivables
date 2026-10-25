@@ -1034,6 +1034,35 @@ mod tests {
         assert!(result.operations.is_empty(), "Missing shop_config should fail-open (not hide)");
     }
 
+    /// #292: Both credit_status AND shop_config missing must show all payment methods (fail-open).
+    /// This is the scenario for brand-new CompanyLocations before any metafield sync.
+    #[test]
+    fn test_missing_credit_status_and_missing_shop_config_shows_all() {
+        let input = make_b2b_input_full(
+            None,  // No credit_status metafield
+            &default_payment_methods(),
+            None,
+            "INR",
+            None,  // No shop_config metafield
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Missing credit_status AND missing shop_config must show all payment methods (fail-open)");
+    }
+
+    /// #292: Customer with both metafields missing must show all payment methods.
+    #[test]
+    fn test_customer_missing_credit_status_and_missing_shop_config_shows_all() {
+        let input = make_customer_input_full(
+            None,  // No credit_status metafield
+            &default_payment_methods(),
+            None,
+            "INR",
+            None,  // No shop_config metafield
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Customer with missing credit_status AND missing shop_config must show all payment methods");
+    }
+
     #[test]
     fn test_customer_non_inr_shop_hides_deferred() {
         // Non-INR shop should hide deferred payment for customer path too
