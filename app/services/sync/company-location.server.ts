@@ -48,7 +48,7 @@ export async function processCompanyLocationWebhook(
   topic: string,
   location: ShopifyCompanyLocation,
   webhookId: string,
-  env: PiiEnv = {}
+  env: PiiEnv
 ): Promise<SyncResult> {
   // Idempotency check
   if (await isWebhookProcessed(sql, webhookId)) {
@@ -179,19 +179,10 @@ export async function processCompanyLocationWebhook(
 }
 
 /**
- * Map a Shopify CompanyLocation to BuyerAccount insert data.
- * Used by bulk processing to prepare batch inserts.
- *
- * @param shopId - Our internal shop ID
- * @param location - Shopify CompanyLocation data
- * @param env - Environment for PII flag check
- * @returns Data ready for BuyerAccount upsert
+ * Return type for mapCompanyLocationToBuyerAccount.
+ * Includes contactKnown flag to distinguish orphans from real contact removals.
  */
-export function mapCompanyLocationToBuyerAccount(
-  shopId: string,
-  location: ShopifyCompanyLocation,
-  env: PiiEnv = {}
-): {
+export interface MappedBuyerAccount {
   shopId: string;
   kind: "COMPANY";
   companyId: string;
@@ -202,7 +193,30 @@ export function mapCompanyLocationToBuyerAccount(
   mainContactEmail: string | null;
   mainContactName: string | null;
   mainContactCustomerId: string | null;
-} {
+  /**
+   * Whether the mainContact was fetched (company was in this batch).
+   * - true: mainContact was fetched, values should be written (even if null = contact removed)
+   * - false: mainContact was not fetched (orphan location), preserve existing values
+   */
+  contactKnown: boolean;
+}
+
+/**
+ * Map a Shopify CompanyLocation to BuyerAccount insert data.
+ * Used by bulk processing to prepare batch inserts.
+ *
+ * @param shopId - Our internal shop ID
+ * @param location - Shopify CompanyLocation data
+ * @param env - Environment for PII flag check (required, no default)
+ * @param contactKnown - Whether the mainContact was fetched (false for orphan locations)
+ * @returns Data ready for BuyerAccount upsert with contactKnown flag
+ */
+export function mapCompanyLocationToBuyerAccount(
+  shopId: string,
+  location: ShopifyCompanyLocation,
+  env: PiiEnv,
+  contactKnown: boolean = true
+): MappedBuyerAccount {
   const paymentTerms = location.buyerExperienceConfiguration?.paymentTermsTemplate;
   const defaultTermsDays = paymentTerms?.dueInDays ?? null;
 
@@ -230,6 +244,7 @@ export function mapCompanyLocationToBuyerAccount(
     mainContactEmail,
     mainContactName: mainContactDisplayName,
     mainContactCustomerId,
+    contactKnown,
   };
 }
 
@@ -242,6 +257,10 @@ export function mapCompanyLocationToBuyerAccount(
  * always allowed (downgrade-safe). Gated accounts are excluded from the
  * limit count and can be reactivated on upgrade.
  *
+ * Orphan location handling: When contactKnown is false (orphan location whose
+ * parent company was in an earlier chunk), the mainContact* columns are preserved
+ * rather than overwritten with NULL. This prevents losing stored contacts.
+ *
  * Performance: Uses per-batch count check instead of per-account to minimize
  * database queries. Computes which accounts need gating upfront based on the
  * current count and plan limit.
@@ -252,12 +271,12 @@ export function mapCompanyLocationToBuyerAccount(
  */
 export async function bulkUpsertBuyerAccounts(
   sql: Sql,
-  accounts: ReturnType<typeof mapCompanyLocationToBuyerAccount>[]
+  accounts: MappedBuyerAccount[]
 ): Promise<number> {
   if (accounts.length === 0) return 0;
 
   // Group accounts by shopId for batch limit checking
-  const accountsByShop = new Map<string, typeof accounts>();
+  const accountsByShop = new Map<string, MappedBuyerAccount[]>();
   for (const a of accounts) {
     const existing = accountsByShop.get(a.shopId) ?? [];
     existing.push(a);
@@ -307,47 +326,92 @@ export async function bulkUpsertBuyerAccounts(
         newAccountsProcessed++;
       }
 
-      const result = await sql`
-        INSERT INTO "BuyerAccount" (
-          "shopId",
-          kind,
-          "companyId",
-          "companyLocationId",
-          name,
-          "defaultTermsDays",
-          "defaultTermsSource",
-          gated_at,
-          "mainContactEmail",
-          "mainContactName",
-          "mainContactCustomerId",
-          "createdAt",
-          "updatedAt"
-        ) VALUES (
-          ${a.shopId},
-          ${a.kind},
-          ${a.companyId},
-          ${a.companyLocationId},
-          ${a.name},
-          ${a.defaultTermsDays},
-          ${a.defaultTermsSource},
-          ${shouldGate ? new Date() : null},
-          ${a.mainContactEmail},
-          ${a.mainContactName},
-          ${a.mainContactCustomerId},
-          NOW(),
-          NOW()
-        )
-        ON CONFLICT ("shopId", "companyLocationId")
-        DO UPDATE SET
-          "companyId" = EXCLUDED."companyId",
-          name = EXCLUDED.name,
-          "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
-          "mainContactEmail" = EXCLUDED."mainContactEmail",
-          "mainContactName" = EXCLUDED."mainContactName",
-          "mainContactCustomerId" = EXCLUDED."mainContactCustomerId",
-          "updatedAt" = NOW()
-      `;
-      totalCount += result.count;
+      // Use different UPDATE logic based on contactKnown:
+      // - contactKnown=true: write mainContact* values (even if null = contact removed)
+      // - contactKnown=false: preserve existing mainContact* values (orphan location)
+      if (a.contactKnown) {
+        const result = await sql`
+          INSERT INTO "BuyerAccount" (
+            "shopId",
+            kind,
+            "companyId",
+            "companyLocationId",
+            name,
+            "defaultTermsDays",
+            "defaultTermsSource",
+            gated_at,
+            "mainContactEmail",
+            "mainContactName",
+            "mainContactCustomerId",
+            "createdAt",
+            "updatedAt"
+          ) VALUES (
+            ${a.shopId},
+            ${a.kind},
+            ${a.companyId},
+            ${a.companyLocationId},
+            ${a.name},
+            ${a.defaultTermsDays},
+            ${a.defaultTermsSource},
+            ${shouldGate ? new Date() : null},
+            ${a.mainContactEmail},
+            ${a.mainContactName},
+            ${a.mainContactCustomerId},
+            NOW(),
+            NOW()
+          )
+          ON CONFLICT ("shopId", "companyLocationId")
+          DO UPDATE SET
+            "companyId" = EXCLUDED."companyId",
+            name = EXCLUDED.name,
+            "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
+            "mainContactEmail" = EXCLUDED."mainContactEmail",
+            "mainContactName" = EXCLUDED."mainContactName",
+            "mainContactCustomerId" = EXCLUDED."mainContactCustomerId",
+            "updatedAt" = NOW()
+        `;
+        totalCount += result.count;
+      } else {
+        // Orphan location: preserve existing mainContact* columns
+        const result = await sql`
+          INSERT INTO "BuyerAccount" (
+            "shopId",
+            kind,
+            "companyId",
+            "companyLocationId",
+            name,
+            "defaultTermsDays",
+            "defaultTermsSource",
+            gated_at,
+            "mainContactEmail",
+            "mainContactName",
+            "mainContactCustomerId",
+            "createdAt",
+            "updatedAt"
+          ) VALUES (
+            ${a.shopId},
+            ${a.kind},
+            ${a.companyId},
+            ${a.companyLocationId},
+            ${a.name},
+            ${a.defaultTermsDays},
+            ${a.defaultTermsSource},
+            ${shouldGate ? new Date() : null},
+            ${a.mainContactEmail},
+            ${a.mainContactName},
+            ${a.mainContactCustomerId},
+            NOW(),
+            NOW()
+          )
+          ON CONFLICT ("shopId", "companyLocationId")
+          DO UPDATE SET
+            "companyId" = EXCLUDED."companyId",
+            name = EXCLUDED.name,
+            "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
+            "updatedAt" = NOW()
+        `;
+        totalCount += result.count;
+      }
     }
   }
 

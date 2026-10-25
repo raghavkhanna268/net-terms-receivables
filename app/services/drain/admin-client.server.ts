@@ -18,7 +18,7 @@
  */
 
 import { shopifyGraphQLQueue, type ShopifyClientResult } from "~/services/shopify-client.server";
-import { getCustomerByNodeQuery } from "~/services/sync/customer-fields.server";
+import { getCustomerByNodeQuery, shouldIncludePiiFields, type PiiEnv } from "~/services/sync/customer-fields.server";
 import { getRequestEnv } from "~/lib/request-context.server";
 
 export const API_VERSION = "2026-10";
@@ -83,15 +83,56 @@ export const COMPANY_QUERY = `
 `;
 
 /**
- * Fetch a CompanyLocation by GID.
- * Fetches id, name, company (with mainContact), billingAddress.companyName (name fallback),
- * and payment terms.
+ * Build a CompanyLocation query dynamically based on PII flag.
+ *
+ * DPDP data minimization:
+ * - When CUSTOMER_PII_FIELDS=1: requests mainContact.customer { id email displayName }
+ * - When flag is off: requests mainContact.customer { id } only
  *
  * The B2B recipient is the COMPANY's main contact (not on CompanyLocation directly).
- * mainContact.customer PII (email, displayName) is only stored when CUSTOMER_PII_FIELDS=1.
- * The query always fetches them; the sync layer gates storage.
- *
  * Note: CompanyAddress.company was renamed to companyName in 2026-10.
+ *
+ * @param env - Environment for PII flag check (required, no default)
+ * @returns GraphQL query string
+ */
+export function getCompanyLocationQuery(env: PiiEnv): string {
+  const piiEnabled = shouldIncludePiiFields(env);
+  const customerFields = piiEnabled ? "id\n              email\n              displayName" : "id";
+  
+  return `
+  query CompanyLocationById($id: ID!) {
+    node(id: $id) {
+      ... on CompanyLocation {
+        id
+        name
+        company {
+          id
+          mainContact {
+            customer {
+              ${customerFields}
+            }
+          }
+        }
+        billingAddress {
+          companyName
+        }
+        buyerExperienceConfiguration {
+          paymentTermsTemplate {
+            id
+            name
+            dueInDays
+            paymentTermsType
+          }
+        }
+      }
+    }
+  }
+`;
+}
+
+/**
+ * @deprecated Use getCompanyLocationQuery(env) instead for DPDP compliance.
+ * This static version always requests PII fields regardless of flag state.
  */
 export const COMPANY_LOCATION_QUERY = `
   query CompanyLocationById($id: ID!) {

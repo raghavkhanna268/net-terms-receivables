@@ -18,19 +18,88 @@
  * removed to backfill all historical orders with payment terms.
  */
 
+import { shouldIncludePiiFields, type PiiEnv } from "./customer-fields.server";
+
 /**
- * GraphQL mutation to start a bulk operation for companies and locations.
+ * Build a bulk companies export mutation dynamically based on PII flag.
  *
- * This query exports all companies with their locations and payment terms
- * configuration. The JSONL output will contain Company and CompanyLocation
- * objects linked by __parentId.
+ * DPDP data minimization:
+ * - When CUSTOMER_PII_FIELDS=1: requests mainContact.customer { id email displayName }
+ * - When flag is off: requests mainContact.customer { id } only
  *
- * DPDP note: Only billingAddress.companyName is fetched (name fallback for BuyerAccount).
  * The B2B recipient is the COMPANY's main contact (mainContact is on Company, not Location).
- * mainContact.customer PII (email, displayName) is fetched for B2B reminder emails.
- * Storage is gated by CUSTOMER_PII_FIELDS=1.
- *
  * Note: CompanyAddress.company was renamed to companyName in 2026-10.
+ *
+ * @param env - Environment for PII flag check (required, no default)
+ * @returns GraphQL mutation string
+ */
+export function getBulkCompaniesQuery(env: PiiEnv): string {
+  const piiEnabled = shouldIncludePiiFields(env);
+  const customerFields = piiEnabled ? "id\n                  email\n                  displayName" : "id";
+  
+  return `
+  mutation BulkCompaniesExport {
+    bulkOperationRunQuery(
+      query: """
+      {
+        companies {
+          edges {
+            node {
+              id
+              name
+              externalId
+              note
+              createdAt
+              updatedAt
+              mainContact {
+                customer {
+                  ${customerFields}
+                }
+              }
+              locations {
+                edges {
+                  node {
+                    id
+                    name
+                    createdAt
+                    updatedAt
+                    billingAddress {
+                      companyName
+                    }
+                    buyerExperienceConfiguration {
+                      paymentTermsTemplate {
+                        id
+                        name
+                        dueInDays
+                        paymentTermsType
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      """
+    ) {
+      bulkOperation {
+        id
+        status
+        url
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+}
+
+/**
+ * @deprecated Use getBulkCompaniesQuery(env) instead for DPDP compliance.
+ * This static version always requests PII fields regardless of flag state.
  */
 export const BULK_COMPANIES_QUERY = `
   mutation BulkCompaniesExport {

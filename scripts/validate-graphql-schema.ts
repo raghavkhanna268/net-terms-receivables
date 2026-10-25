@@ -1340,6 +1340,94 @@ async function validateDynamicQueryBuilders(schema: GraphQLSchema): Promise<{ re
     }
   }
 
+  // ===== getCompanyLocationQuery variants (B2B main contact queries) =====
+
+  // Import getCompanyLocationQuery from admin-client.server.ts
+  let getCompanyLocationQuery: (env: { CUSTOMER_PII_FIELDS?: string }) => string;
+  try {
+    const adminClientModule = await import("../app/services/drain/admin-client.server");
+    getCompanyLocationQuery = adminClientModule.getCompanyLocationQuery;
+  } catch {
+    console.error("❌ FATAL: Failed to import admin-client.server.ts");
+    process.exit(1);
+  }
+
+  // Variant: getCompanyLocationQuery without PII
+  const companyLocQueryNoPii = getCompanyLocationQuery(envNoPii);
+  const companyLocDocNoPii: GraphQLDocument = {
+    name: "getCompanyLocationQuery({})",
+    source: companyLocQueryNoPii,
+    filePath: path.join(__dirname, "../app/services/drain/admin-client.server.ts"),
+  };
+  const companyLocErrorsNoPii = validateDocument(schema, companyLocDocNoPii);
+  if (companyLocErrorsNoPii.length > 0) {
+    results.push({ document: companyLocDocNoPii, errors: companyLocErrorsNoPii });
+    console.log(`  ✗ getCompanyLocationQuery (no PII): FAILED`);
+  } else {
+    validatedCount++;
+    console.log(`  ✓ getCompanyLocationQuery (no PII): validated`);
+  }
+
+  // Variant: getCompanyLocationQuery with PII
+  const companyLocQueryWithPii = getCompanyLocationQuery(envWithPii);
+  const companyLocDocWithPii: GraphQLDocument = {
+    name: "getCompanyLocationQuery({CUSTOMER_PII_FIELDS:'1'})",
+    source: companyLocQueryWithPii,
+    filePath: path.join(__dirname, "../app/services/drain/admin-client.server.ts"),
+  };
+  const companyLocErrorsWithPii = validateDocument(schema, companyLocDocWithPii);
+  if (companyLocErrorsWithPii.length > 0) {
+    results.push({ document: companyLocDocWithPii, errors: companyLocErrorsWithPii });
+    console.log(`  ✗ getCompanyLocationQuery (with PII): FAILED`);
+  } else {
+    validatedCount++;
+    console.log(`  ✓ getCompanyLocationQuery (with PII): validated`);
+  }
+
+  // ===== getBulkCompaniesQuery variants =====
+
+  // Import getBulkCompaniesQuery from bulk-operations.server.ts
+  let getBulkCompaniesQuery: (env: { CUSTOMER_PII_FIELDS?: string }) => string;
+  try {
+    const bulkOpsModule = await import("../app/services/sync/bulk-operations.server");
+    getBulkCompaniesQuery = bulkOpsModule.getBulkCompaniesQuery;
+  } catch {
+    console.error("❌ FATAL: Failed to import bulk-operations.server.ts");
+    process.exit(1);
+  }
+
+  // Variant: getBulkCompaniesQuery without PII
+  const bulkCompaniesQueryNoPii = getBulkCompaniesQuery(envNoPii);
+  const bulkCompaniesDocNoPii: GraphQLDocument = {
+    name: "getBulkCompaniesQuery({})",
+    source: bulkCompaniesQueryNoPii,
+    filePath: path.join(__dirname, "../app/services/sync/bulk-operations.server.ts"),
+  };
+  const bulkCompaniesErrorsNoPii = validateDocument(schema, bulkCompaniesDocNoPii);
+  if (bulkCompaniesErrorsNoPii.length > 0) {
+    results.push({ document: bulkCompaniesDocNoPii, errors: bulkCompaniesErrorsNoPii });
+    console.log(`  ✗ getBulkCompaniesQuery (no PII): FAILED`);
+  } else {
+    validatedCount++;
+    console.log(`  ✓ getBulkCompaniesQuery (no PII): validated`);
+  }
+
+  // Variant: getBulkCompaniesQuery with PII
+  const bulkCompaniesQueryWithPii = getBulkCompaniesQuery(envWithPii);
+  const bulkCompaniesDocWithPii: GraphQLDocument = {
+    name: "getBulkCompaniesQuery({CUSTOMER_PII_FIELDS:'1'})",
+    source: bulkCompaniesQueryWithPii,
+    filePath: path.join(__dirname, "../app/services/sync/bulk-operations.server.ts"),
+  };
+  const bulkCompaniesErrorsWithPii = validateDocument(schema, bulkCompaniesDocWithPii);
+  if (bulkCompaniesErrorsWithPii.length > 0) {
+    results.push({ document: bulkCompaniesDocWithPii, errors: bulkCompaniesErrorsWithPii });
+    console.log(`  ✗ getBulkCompaniesQuery (with PII): FAILED`);
+  } else {
+    validatedCount++;
+    console.log(`  ✓ getBulkCompaniesQuery (with PII): validated`);
+  }
+
   // ===== getCustomerQuery variants =====
 
   // Variant 5: getCustomerQuery without PII

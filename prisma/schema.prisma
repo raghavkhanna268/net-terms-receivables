@@ -295,10 +295,10 @@ model BuyerAccount {
   /// NULL when reminderOptOutAt is NULL. Both must be set together.
   reminderOptOutSource   ReminderOptOutSource?
   /// B2B main contact email for payment reminders. NULL for TAGGED_CUSTOMER kind.
-  /// Requires CUSTOMER_PII_FIELDS=1 and read_companies scope.
+  /// Requires CUSTOMER_PII_FIELDS=1 and write_companies + write_customers scopes.
   mainContactEmail       String?
   /// B2B main contact display name for payment reminders. NULL for TAGGED_CUSTOMER kind.
-  /// Requires CUSTOMER_PII_FIELDS=1 and read_companies scope.
+  /// Requires CUSTOMER_PII_FIELDS=1 and write_companies + write_customers scopes.
   mainContactName        String?
   /// B2B main contact's Shopify Customer GID. Used by customers/redact to match and null the PII.
   /// NULL for TAGGED_CUSTOMER kind.

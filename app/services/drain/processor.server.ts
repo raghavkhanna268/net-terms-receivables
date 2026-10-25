@@ -38,9 +38,9 @@ import type {
 import {
   adminGraphQL,
   COMPANY_QUERY,
-  COMPANY_LOCATION_QUERY,
   ORDER_QUERY,
   DRAFT_ORDER_QUERY,
+  getCompanyLocationQuery,
 } from "./admin-client.server";
 import {
   fetchCustomerWithFallback,
@@ -207,6 +207,10 @@ async function handleCompany(sql: Sql, message: SyncMessage): Promise<SyncResult
 /**
  * Handler for COMPANY_LOCATIONS_* topics.
  * Fetches the location via GraphQL and processes it.
+ *
+ * PII handling: Uses getRequestEnv() to read CUSTOMER_PII_FIELDS flag.
+ * When flag is on, mainContact.customer { email displayName } are stored.
+ * The query is built dynamically to only request PII when the flag is on.
  */
 async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<SyncResult> {
   // Idempotency check (S20: use shop for new table)
@@ -218,6 +222,9 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
     };
   }
 
+  // Get Worker env for PII flag (passed to sync functions)
+  const env = getRequestEnv() ?? {};
+
   // For DELETE, process without fetch
   if (message.topic === "COMPANY_LOCATIONS_DELETE") {
     const location: ShopifyCompanyLocation = {
@@ -225,15 +232,41 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
       name: "",
       company: { id: "" },
     };
-    return processCompanyLocationWebhook(sql, message.shop, message.topic, location, message.webhookId);
+    return processCompanyLocationWebhook(sql, message.shop, message.topic, location, message.webhookId, env);
   }
+
+  // Build query dynamically based on PII flag (data minimization)
+  const query = getCompanyLocationQuery(env);
 
   // Fetch location data via GraphQL
   const result = await adminGraphQL<{
     node: ShopifyCompanyLocation | null;
-  }>(message.shop, COMPANY_LOCATION_QUERY, { id: message.resourceGid });
+  }>(message.shop, query, { id: message.resourceGid });
 
   if (!result.success) {
+    // Handle access denied on mainContact gracefully - don't fail the whole sync
+    // Log and continue with NULL contact fields
+    if (result.errorCode === "ACCESS_DENIED" || result.error?.includes("access")) {
+      safeLog("warn", "company_location_contact_access_denied", {
+        shopHash: await shopHash(message.shop),
+        locationGid: message.resourceGid,
+      });
+      // Retry without mainContact fields by fetching base query only
+      const baseResult = await adminGraphQL<{
+        node: ShopifyCompanyLocation | null;
+      }>(message.shop, getCompanyLocationQuery({}), { id: message.resourceGid });
+      
+      if (baseResult.success && baseResult.data?.node) {
+        return processCompanyLocationWebhook(
+          sql,
+          message.shop,
+          message.topic,
+          baseResult.data.node,
+          message.webhookId,
+          {} // Force PII off since we couldn't fetch it
+        );
+      }
+    }
     return {
       success: false,
       action: "skipped",
@@ -249,7 +282,7 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
       name: "",
       company: { id: "" },
     };
-    return processCompanyLocationWebhook(sql, message.shop, "COMPANY_LOCATIONS_DELETE", location, message.webhookId);
+    return processCompanyLocationWebhook(sql, message.shop, "COMPANY_LOCATIONS_DELETE", location, message.webhookId, env);
   }
 
   return processCompanyLocationWebhook(
@@ -257,7 +290,8 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
     message.shop,
     message.topic,
     result.data.node,
-    message.webhookId
+    message.webhookId,
+    env
   );
 }
 

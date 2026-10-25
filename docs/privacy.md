@@ -34,7 +34,7 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | Data Category | Purpose | Source |
 |---------------|---------|--------|
 | Buyer Account | Credit management (account kind, display name, credit limit, terms, hold state) | Synced from Shopify |
-| B2B Main Contact | Payment reminders for B2B accounts (email, display name, customer ID) | Synced from Shopify CompanyLocation mainContact |
+| B2B Main Contact | Payment reminders for B2B accounts (email, display name, customer ID) | Synced from Shopify Company.mainContact |
 | Reminder Opt-Out | Payment reminder preference (opt-out timestamp, opt-out source) | Buyer unsubscribe link or merchant toggle |
 | Invoice | Receivables tracking (invoice name, amounts, due date, status) | Synced from Shopify orders |
 | Payer Alias | Payment matching (normalized payer key) | Derived from bank statements |
@@ -202,7 +202,9 @@ When a customer requests their data:
    - Tagged customer data: ID, tags, status, email, display name
    - Draft orders linked to customer's buyer account
    - Buyer account details
+   - B2B buyer accounts where this customer is the main contact (Company.mainContact)
    - Invoice history linked to buyer account
+   - Payment matches linked to buyer account invoices
 3. **Generate** JSON export with all found data
 4. **Persist** data request record with status, export data, and 30-day expiration
 5. **Notify** shop owner via email (if configured)

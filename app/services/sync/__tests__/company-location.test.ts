@@ -70,7 +70,8 @@ describeWithDb("CompanyLocation Sync", () => {
         TEST_SHOP_DOMAIN,
         "COMPANY_LOCATIONS_CREATE",
         location,
-        `wh-loc-${TEST_SUFFIX}-1`
+        `wh-loc-${TEST_SUFFIX}-1`,
+        {}
       );
 
       expect(result.success).toBe(true);
@@ -122,7 +123,8 @@ describeWithDb("CompanyLocation Sync", () => {
         TEST_SHOP_DOMAIN,
         "COMPANY_LOCATIONS_UPDATE",
         location,
-        `wh-loc-${TEST_SUFFIX}-2`
+        `wh-loc-${TEST_SUFFIX}-2`,
+        {}
       );
 
       expect(result.success).toBe(true);
@@ -162,7 +164,8 @@ describeWithDb("CompanyLocation Sync", () => {
         TEST_SHOP_DOMAIN,
         "COMPANY_LOCATIONS_DELETE",
         location,
-        `wh-loc-${TEST_SUFFIX}-3`
+        `wh-loc-${TEST_SUFFIX}-3`,
+        {}
       );
 
       expect(result.success).toBe(true);
@@ -191,7 +194,8 @@ describeWithDb("CompanyLocation Sync", () => {
         TEST_SHOP_DOMAIN,
         "COMPANY_LOCATIONS_CREATE",
         location,
-        webhookId
+        webhookId,
+        {}
       );
       expect(result1.action).toBe("created");
 
@@ -201,7 +205,8 @@ describeWithDb("CompanyLocation Sync", () => {
         TEST_SHOP_DOMAIN,
         "COMPANY_LOCATIONS_CREATE",
         location,
-        webhookId
+        webhookId,
+        {}
       );
       expect(result2.action).toBe("skipped");
       expect(result2.skipReason).toContain("idempotent");
@@ -225,7 +230,8 @@ describeWithDb("CompanyLocation Sync", () => {
         "test-unknown-shop.myshopify.com",
         "COMPANY_LOCATIONS_CREATE",
         location,
-        `wh-loc-${TEST_SUFFIX}-5`
+        `wh-loc-${TEST_SUFFIX}-5`,
+        {}
       );
 
       expect(result.success).toBe(false);
@@ -250,7 +256,7 @@ describeWithDb("CompanyLocation Sync", () => {
         },
       };
 
-      const result = mapCompanyLocationToBuyerAccount("shop-id", location);
+      const result = mapCompanyLocationToBuyerAccount("shop-id", location, {});
 
       expect(result.shopId).toBe("shop-id");
       expect(result.kind).toBe("COMPANY");
@@ -268,7 +274,7 @@ describeWithDb("CompanyLocation Sync", () => {
         company: { id: "gid://shopify/Company/456" },
       };
 
-      const result = mapCompanyLocationToBuyerAccount("shop-id", location);
+      const result = mapCompanyLocationToBuyerAccount("shop-id", location, {});
 
       expect(result.defaultTermsDays).toBeNull();
       expect(result.defaultTermsSource).toBeNull();
@@ -285,7 +291,7 @@ describeWithDb("CompanyLocation Sync", () => {
         },
       };
 
-      const result = mapCompanyLocationToBuyerAccount("shop-id", location);
+      const result = mapCompanyLocationToBuyerAccount("shop-id", location, {});
 
       expect(result.name).toBe("Billing Corp");
     });
@@ -297,9 +303,33 @@ describeWithDb("CompanyLocation Sync", () => {
         company: { id: "gid://shopify/Company/456" },
       };
 
-      const result = mapCompanyLocationToBuyerAccount("shop-id", location);
+      const result = mapCompanyLocationToBuyerAccount("shop-id", location, {});
 
       expect(result.name).toBe("Location 999");
+    });
+
+    it("returns contactKnown=true by default", () => {
+      const location: ShopifyCompanyLocation = {
+        id: "gid://shopify/CompanyLocation/999",
+        name: "Test",
+        company: { id: "gid://shopify/Company/456" },
+      };
+
+      const result = mapCompanyLocationToBuyerAccount("shop-id", location, {});
+
+      expect(result.contactKnown).toBe(true);
+    });
+
+    it("returns contactKnown=false when explicitly set (orphan locations)", () => {
+      const location: ShopifyCompanyLocation = {
+        id: "gid://shopify/CompanyLocation/999",
+        name: "Orphan",
+        company: { id: "gid://shopify/Company/456" },
+      };
+
+      const result = mapCompanyLocationToBuyerAccount("shop-id", location, {}, false);
+
+      expect(result.contactKnown).toBe(false);
     });
   });
 
@@ -310,12 +340,12 @@ describeWithDb("CompanyLocation Sync", () => {
           id: `gid://shopify/CompanyLocation/bulk-${TEST_SUFFIX}-1`,
           name: "Bulk 1",
           company: { id: `gid://shopify/Company/bulk-co-${TEST_SUFFIX}` },
-        }),
+        }, {}),
         mapCompanyLocationToBuyerAccount(TEST_SHOP_ID, {
           id: `gid://shopify/CompanyLocation/bulk-${TEST_SUFFIX}-2`,
           name: "Bulk 2",
           company: { id: `gid://shopify/Company/bulk-co-${TEST_SUFFIX}` },
-        }),
+        }, {}),
       ];
 
       const count = await bulkUpsertBuyerAccounts(sql, accounts);
@@ -354,7 +384,7 @@ describeWithDb("CompanyLocation Sync", () => {
           id: locationId,
           name: "Updated via Bulk",
           company: { id: companyId },
-        }),
+        }, {}),
       ];
 
       await bulkUpsertBuyerAccounts(sql, accounts);
@@ -386,7 +416,7 @@ describeWithDb("CompanyLocation Sync", () => {
             id: newLocationId,
             name: "Over Limit Account",
             company: { id: newCompanyId },
-          }),
+          }, {}),
         ];
 
         await bulkUpsertBuyerAccounts(sql, accounts);
@@ -427,7 +457,7 @@ describeWithDb("CompanyLocation Sync", () => {
             id: newLocationId,
             name: "Not Gated Account",
             company: { id: newCompanyId },
-          }),
+          }, {}),
         ];
 
         await bulkUpsertBuyerAccounts(sql, accounts);

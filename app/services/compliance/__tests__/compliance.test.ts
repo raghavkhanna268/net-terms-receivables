@@ -382,7 +382,7 @@ describe("compliance.server", () => {
         status: "open",
         created_at: new Date("2026-01-15"),
       }]);
-      // 3. SELECT BuyerAccount
+      // 3. SELECT BuyerAccount (for customerId)
       mockSql.mockResolvedValueOnce([{
         id: "ba-1",
         name: "Test Customer",
@@ -391,7 +391,9 @@ describe("compliance.server", () => {
         defaultTermsDays: 30,
         holdState: "OK",
       }]);
-      // 4. SELECT Invoice
+      // 4. SELECT BuyerAccount (for mainContactCustomerId - B2B main contact accounts)
+      mockSql.mockResolvedValueOnce([]);
+      // 5. SELECT Invoice
       mockSql.mockResolvedValueOnce([{
         id: "inv-1",
         name: "#1001",
@@ -401,7 +403,7 @@ describe("compliance.server", () => {
         issuedAt: new Date("2026-01-10"),
         dueAt: new Date("2026-02-10"),
       }]);
-      // 5. SELECT Match (payment matches)
+      // 6. SELECT Match (payment matches)
       mockSql.mockResolvedValueOnce([{
         id: "match-1",
         invoiceId: "inv-1",
@@ -549,7 +551,7 @@ describe("compliance.server", () => {
       }]);
       // 2. SELECT s8_draft_orders
       mockSql.mockResolvedValueOnce([]);
-      // 3. SELECT BuyerAccount
+      // 3. SELECT BuyerAccount (for customerId)
       mockSql.mockResolvedValueOnce([{
         id: "ba-1",
         name: "Account Name",
@@ -558,7 +560,9 @@ describe("compliance.server", () => {
         defaultTermsDays: 30,
         holdState: "OK",
       }]);
-      // 4. SELECT Invoice
+      // 4. SELECT BuyerAccount (for mainContactCustomerId - B2B main contact accounts)
+      mockSql.mockResolvedValueOnce([]);
+      // 5. SELECT Invoice
       mockSql.mockResolvedValueOnce([{
         id: "inv-1",
         name: "#1001",
@@ -568,7 +572,7 @@ describe("compliance.server", () => {
         issuedAt: new Date("2026-01-10"),
         dueAt: new Date("2026-02-10"),
       }]);
-      // 5. SELECT Match - include payerText/narration in mock to prove they're dropped
+      // 6. SELECT Match - include payerText/narration in mock to prove they're dropped
       mockSql.mockResolvedValueOnce([{
         id: "match-1",
         invoiceId: "inv-1",
@@ -613,6 +617,7 @@ describe("compliance.server", () => {
       // This is a belt-and-suspenders check on top of the mapping test.
 
       // Setup: provide minimal mocks to get to the Match query
+      // 1. SELECT s8_tagged_customers
       mockSql.mockResolvedValueOnce([{
         tags: [],
         tag_active: true,
@@ -620,7 +625,9 @@ describe("compliance.server", () => {
         display_name: null,
         created_at: new Date(),
       }]);
+      // 2. SELECT s8_draft_orders
       mockSql.mockResolvedValueOnce([]);
+      // 3. SELECT BuyerAccount (for customerId)
       mockSql.mockResolvedValueOnce([{
         id: "ba-1",
         name: "Test",
@@ -629,7 +636,11 @@ describe("compliance.server", () => {
         defaultTermsDays: 30,
         holdState: "OK",
       }]);
+      // 4. SELECT BuyerAccount (for mainContactCustomerId - B2B main contact accounts)
       mockSql.mockResolvedValueOnce([]);
+      // 5. SELECT Invoice
+      mockSql.mockResolvedValueOnce([]);
+      // 6. SELECT Match
       mockSql.mockResolvedValueOnce([]);
 
       await generateCustomerDataExport(
@@ -639,9 +650,9 @@ describe("compliance.server", () => {
         "req-sql-check"
       );
 
-      // The 5th call is the Match query
-      expect(mockSql).toHaveBeenCalledTimes(5);
-      const matchQueryCall = mockSql.mock.calls[4];
+      // The 6th call is the Match query
+      expect(mockSql).toHaveBeenCalledTimes(6);
+      const matchQueryCall = mockSql.mock.calls[5];
       
       // The template literal is passed as an array of strings
       // Convert to string to check what columns are selected
@@ -670,7 +681,7 @@ describe("compliance.server", () => {
         customerGid: "gid://shopify/Customer/456",
         requestId: "req-789",
         requestedAt: new Date().toISOString(),
-        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [], paymentMatches: [] },
+        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, b2bMainContactAccounts: [], invoices: [], paymentMatches: [] },
       };
 
       const result = await persistDataRequest(
@@ -692,7 +703,7 @@ describe("compliance.server", () => {
         customerGid: "gid://shopify/Customer/456",
         requestId: "req-duplicate",
         requestedAt: new Date().toISOString(),
-        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [], paymentMatches: [] },
+        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, b2bMainContactAccounts: [], invoices: [], paymentMatches: [] },
       };
 
       const result = await persistDataRequest(

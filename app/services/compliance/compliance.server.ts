@@ -525,6 +525,18 @@ interface CustomerDataExport {
       defaultTermsDays: number | null;
       holdState: string;
     } | null;
+    /**
+     * B2B buyer accounts where this customer is the main contact.
+     * Includes contact fields (email, name, customer ID) for this customer only.
+     */
+    b2bMainContactAccounts: Array<{
+      id: string;
+      name: string;
+      kind: string;
+      mainContactEmail: string | null;
+      mainContactName: string | null;
+      mainContactCustomerId: string;
+    }>;
     invoices: Array<{
       id: string;
       name: string;
@@ -604,6 +616,26 @@ export async function generateCustomerDataExport(
       "holdState"::text as "holdState"
     FROM "BuyerAccount"
     WHERE "shopId" = ${shopId} AND "customerId" = ${customerGid}
+  `;
+
+  // Fetch B2B buyer accounts where this customer is the main contact
+  // This includes COMPANY accounts where mainContactCustomerId matches
+  const b2bMainContactAccounts = await sql<{
+    id: string;
+    name: string;
+    kind: string;
+    mainContactEmail: string | null;
+    mainContactName: string | null;
+    mainContactCustomerId: string;
+  }[]>`
+    SELECT 
+      id, name, kind::text,
+      "mainContactEmail",
+      "mainContactName",
+      "mainContactCustomerId"
+    FROM "BuyerAccount"
+    WHERE "shopId" = ${shopId}
+      AND "mainContactCustomerId" = ${customerGid}
   `;
 
   // No LIMIT - data request should be complete
@@ -686,6 +718,14 @@ export async function generateCustomerDataExport(
             holdState: buyerAccount.holdState,
           }
         : null,
+      b2bMainContactAccounts: b2bMainContactAccounts.map((a) => ({
+        id: a.id,
+        name: a.name,
+        kind: a.kind,
+        mainContactEmail: a.mainContactEmail,
+        mainContactName: a.mainContactName,
+        mainContactCustomerId: a.mainContactCustomerId,
+      })),
       invoices: invoices.map((i) => ({
         id: i.id,
         name: i.name,
