@@ -623,8 +623,8 @@ function RegistrationStatusSection({
 
       <s-table>
         <s-table-header-row>
-          <s-table-header>Item</s-table-header>
-          <s-table-header>Status</s-table-header>
+          <s-table-header listSlot="primary">Item</s-table-header>
+          <s-table-header listSlot="inline">Status</s-table-header>
         </s-table-header-row>
         <s-table-body>
           {items.map((item) => (
@@ -724,10 +724,10 @@ function OnboardingChecklist({
 
       <s-table>
         <s-table-header-row>
-          <s-table-header>Status</s-table-header>
-          <s-table-header>Step</s-table-header>
-          <s-table-header>Details</s-table-header>
-          <s-table-header>Action</s-table-header>
+          <s-table-header listSlot="inline">Status</s-table-header>
+          <s-table-header listSlot="primary">Step</s-table-header>
+          <s-table-header listSlot="secondary">Details</s-table-header>
+          <s-table-header listSlot="labeled">Action</s-table-header>
         </s-table-header-row>
         <s-table-body>
           {steps.map((step) => (

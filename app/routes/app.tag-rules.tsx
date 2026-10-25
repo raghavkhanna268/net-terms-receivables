@@ -437,9 +437,9 @@ function TagRuleTable({ rules }: { rules: TagRule[] }) {
   return (
     <s-table>
       <s-table-header-row>
-        <s-table-header>Customer Tag</s-table-header>
-        <s-table-header>Default Terms</s-table-header>
-        <s-table-header>Created</s-table-header>
+        <s-table-header listSlot="primary">Customer Tag</s-table-header>
+        <s-table-header listSlot="labeled">Default Terms</s-table-header>
+        <s-table-header listSlot="labeled">Created</s-table-header>
       </s-table-header-row>
       <s-table-body>
         {rules.map((rule) => (

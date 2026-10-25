@@ -1106,12 +1106,12 @@ export default function ImportsPage() {
             <s-section heading={`Credit Transactions (${result.credits.length})`}>
               <s-table>
                 <s-table-header-row>
-                  <s-table-header>Date</s-table-header>
-                  <s-table-header format="currency">Amount</s-table-header>
-                  <s-table-header>Rail</s-table-header>
-                  <s-table-header>UTR/RRN</s-table-header>
-                  <s-table-header>Payer</s-table-header>
-                  <s-table-header>Narration</s-table-header>
+                  <s-table-header listSlot="labeled">Date</s-table-header>
+                  <s-table-header listSlot="labeled" format="currency">Amount</s-table-header>
+                  <s-table-header listSlot="inline">Rail</s-table-header>
+                  <s-table-header listSlot="primary">UTR/RRN</s-table-header>
+                  <s-table-header listSlot="labeled">Payer</s-table-header>
+                  <s-table-header listSlot="secondary">Narration</s-table-header>
                 </s-table-header-row>
                 <s-table-body>
                   {result.credits.slice(0, 50).map((txn, idx) => (
