@@ -5,7 +5,7 @@ import { getRequestSql } from "~/lib/request-context.server";
 import { resolvePlan, type ResolvedPlan } from "~/services/plan.server";
 import { getUsageStats, isGatingEnforced } from "~/services/gating.server";
 import type { PlanKey } from "~/lib/entitlements";
-import { PlanBanner } from "~/components/UpgradePrompt";
+import { PlanBanner, PLAN_DISPLAY_NAMES } from "~/components/UpgradePrompt";
 import {
   getShopAgingTotals,
   getBuyerLedger,
@@ -330,8 +330,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         }
       : null,
     usage: usage ?? {
-      companies: { current: 0, limit: 3 },
-      importsThisMonth: { current: 0, limit: 1 },
+      companies: { current: 0, limit: 0 },
+      importsThisMonth: { current: 0, limit: -1 },
     },
     appHandle: process.env.APP_HANDLE ?? "net-terms-receivables",
     gatingEnforced,
@@ -403,8 +403,8 @@ function AgingBucketSummary({
       </s-paragraph>
       <s-table>
         <s-table-header-row>
-          <s-table-header>Bucket</s-table-header>
-          <s-table-header format="currency">Amount</s-table-header>
+          <s-table-header listSlot="primary">Bucket</s-table-header>
+          <s-table-header listSlot="labeled" format="currency">Amount</s-table-header>
         </s-table-header-row>
         <s-table-body>
           {bucketData.map((bucket) => (
@@ -471,22 +471,22 @@ function BuyerLedgerTable({
     <s-stack>
       <s-table>
         <s-table-header-row>
-          <s-table-header>
+          <s-table-header listSlot="primary">
             <s-link href={buildSortUrl("name")}>Buyer{getSortIndicator("name")}</s-link>
           </s-table-header>
-          <s-table-header format="currency">Credit Limit</s-table-header>
-          <s-table-header format="currency">
+          <s-table-header listSlot="labeled" format="currency">Credit Limit</s-table-header>
+          <s-table-header listSlot="labeled" format="currency">
             <s-link href={buildSortUrl("outstanding")}>
               Outstanding{getSortIndicator("outstanding")}
             </s-link>
           </s-table-header>
-          <s-table-header format="currency">
+          <s-table-header listSlot="labeled" format="currency">
             <s-link href={buildSortUrl("overdue")}>
               Overdue{getSortIndicator("overdue")}
             </s-link>
           </s-table-header>
-          <s-table-header>Oldest Overdue</s-table-header>
-          <s-table-header>Hold Status</s-table-header>
+          <s-table-header listSlot="labeled">Oldest Overdue</s-table-header>
+          <s-table-header listSlot="inline">Hold Status</s-table-header>
         </s-table-header-row>
         <s-table-body>
           {rows.map((row) => {
@@ -581,11 +581,11 @@ function BuyerInvoiceList({
       <s-stack>
         <s-table>
           <s-table-header-row>
-            <s-table-header>Invoice</s-table-header>
-            <s-table-header>Due Date</s-table-header>
-            <s-table-header format="currency">Outstanding</s-table-header>
-            <s-table-header>Days Past Due</s-table-header>
-            <s-table-header>Order</s-table-header>
+            <s-table-header listSlot="primary">Invoice</s-table-header>
+            <s-table-header listSlot="labeled">Due Date</s-table-header>
+            <s-table-header listSlot="labeled" format="currency">Outstanding</s-table-header>
+            <s-table-header listSlot="inline">Days Past Due</s-table-header>
+            <s-table-header listSlot="labeled">Order</s-table-header>
           </s-table-header-row>
           <s-table-body>
             {invoices.map((inv) => {
@@ -650,8 +650,8 @@ export default function Index() {
     error,
   } = useLoaderData<typeof loader>();
 
-  const planKey = (plan?.key ?? "free") as PlanKey;
-  const planName = plan?.name ?? "Free";
+  const planKey = (plan?.key ?? "none") as PlanKey;
+  const planName = plan?.name ?? PLAN_DISPLAY_NAMES.none;
   const isTest = plan?.isTest ?? false;
 
   const upgradeUrl = `https://admin.shopify.com/store/${storeHandle}/charges/${appHandle}/pricing_plans`;

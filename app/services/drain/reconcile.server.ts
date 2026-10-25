@@ -19,7 +19,9 @@
  */
 
 import type { Sql } from "~/lib/db-light.server";
+import { safeLog, toErrorCode } from "~/lib/log.server";
 import { S6_QUEUES } from "~/lib/pgmq.server";
+import { recoverStaleBulkOperations } from "./bulk-op-recovery.server";
 
 /**
  * Reconcile message for triggering bulk exports.
@@ -29,7 +31,7 @@ import { S6_QUEUES } from "~/lib/pgmq.server";
  * When set, orders stage uses the same key base instead of the date key.
  */
 export interface ReconcileMessage {
-  topic: "RECONCILE_COMPANIES" | "RECONCILE_ORDERS";
+  topic: "RECONCILE_COMPANIES" | "RECONCILE_CUSTOMERS" | "RECONCILE_ORDERS";
   shop: string;
   webhookId: string;
   enqueuedAt: string;
@@ -46,6 +48,11 @@ function getTodayUTC(): string {
 }
 
 /**
+ * Reconcile stage type.
+ */
+export type ReconcileStageKind = "companies" | "customers" | "orders";
+
+/**
  * Generate an idempotent webhookId for reconcile.
  * Format: reconcile:<shop>:<YYYY-MM-DD>:<kind>
  *
@@ -53,9 +60,9 @@ function getTodayUTC(): string {
  * - Each shop gets at most one reconcile per kind per day
  * - Re-running the nightly job on the same day is idempotent
  */
-function makeReconcileWebhookId(
+export function makeReconcileWebhookId(
   shop: string,
-  kind: "companies" | "orders"
+  kind: ReconcileStageKind
 ): string {
   const today = getTodayUTC();
   return `reconcile:${shop}:${today}:${kind}`;
@@ -75,6 +82,26 @@ function makeReconcileWebhookId(
  * @returns Number of messages enqueued
  */
 export async function enqueueReconcileForAllShops(sql: Sql): Promise<number> {
+  // Recover any stale bulk operations before starting new reconciles.
+  // This ensures missed finish webhooks don't leave shops stuck in in_progress
+  // state indefinitely. Recovery is idempotent and safe to run repeatedly.
+  try {
+    const recoveryResult = await recoverStaleBulkOperations(sql);
+    if (recoveryResult.foundCount > 0) {
+      safeLog("info", "reconcile_recovery_completed", {
+        foundCount: recoveryResult.foundCount,
+        enqueuedCount: recoveryResult.enqueuedCount,
+        markedFailedCount: recoveryResult.markedFailedCount,
+        skippedCount: recoveryResult.skippedCount,
+        errorCount: recoveryResult.errorCount,
+      });
+    }
+  } catch (err) {
+    safeLog("error", "reconcile_recovery_error", {
+      err: toErrorCode(err),
+    });
+  }
+
   // Get all installed shops (exclude uninstalled)
   const shops = await sql<{ domain: string }[]>`
     SELECT domain FROM "Shop" WHERE "uninstalledAt" IS NULL
@@ -116,6 +143,7 @@ export function isReconcileMessage(
 ): message is ReconcileMessage {
   return (
     message.topic === "RECONCILE_COMPANIES" ||
+    message.topic === "RECONCILE_CUSTOMERS" ||
     message.topic === "RECONCILE_ORDERS"
   );
 }

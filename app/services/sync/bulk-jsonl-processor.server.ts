@@ -90,6 +90,28 @@ export const MAX_FAILURE_COUNT = 5;
 export type ErrorType = "retryable" | "permanent";
 
 /**
+ * Get the next reconcile stage after the current one completes.
+ * Sequence: companies → customers → orders (→ draft_orders in PR-B)
+ *
+ * @param currentStage - The stage that just completed
+ * @returns The next stage to enqueue, or undefined if this is the final stage
+ */
+export function getNextStage(
+  currentStage: string | null
+): "customers" | "orders" | undefined {
+  switch (currentStage) {
+    case "companies":
+      return "customers";
+    case "customers":
+      return "orders";
+    case "orders":
+      return undefined;
+    default:
+      return undefined;
+  }
+}
+
+/**
  * Check if a raw JSONL line has __parentId (is a child line).
  * Used for batch boundary detection to avoid splitting parent/child groups.
  * Exported for testing.
@@ -111,7 +133,9 @@ export function lineHasParentId(line: string): boolean {
 export interface BulkProcessResult extends SyncResult {
   /** Processing status: 'complete', 'progress', or 'error' */
   status?: "complete" | "progress" | "error";
-  /** Whether to chain to orders reconcile after companies complete */
+  /** Next stage to enqueue after this one completes (for reconcile chaining) */
+  nextStage?: "customers" | "orders";
+  /** @deprecated Use nextStage instead. Kept for compatibility. */
   chainToOrders?: boolean;
   /** Error classification for retry logic (only set when status='error') */
   errorType?: ErrorType;
@@ -976,16 +1000,18 @@ export async function processBulkOperation(
     });
 
     const metadata = await getBulkOperationMetadata(sql, bulkOperationId);
-    const chainToOrders =
-      metadata?.origin === "reconcile" &&
-      metadata?.reconcileStage === "companies";
+    const nextStage =
+      metadata?.origin === "reconcile"
+        ? getNextStage(metadata.reconcileStage)
+        : undefined;
 
     return {
       success: true,
       action: "updated",
       entityId: bulkOperationId,
       status: "complete",
-      chainToOrders,
+      nextStage,
+      chainToOrders: nextStage === "orders",
     };
   }
 
@@ -1131,16 +1157,18 @@ export async function processBulkOperation(
     });
 
     const metadata = await getBulkOperationMetadata(sql, bulkOperationId);
-    const chainToOrders =
-      metadata?.origin === "reconcile" &&
-      metadata?.reconcileStage === "companies";
+    const nextStage =
+      metadata?.origin === "reconcile"
+        ? getNextStage(metadata.reconcileStage)
+        : undefined;
 
     return {
       success: true,
       action: "updated",
       entityId: bulkOperationId,
       status: "complete",
-      chainToOrders,
+      nextStage,
+      chainToOrders: nextStage === "orders",
     };
   }
 
