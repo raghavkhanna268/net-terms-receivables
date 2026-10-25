@@ -12,7 +12,7 @@
 
 | Person | Access Level | Notes |
 |--------|--------------|-------|
-| Raghav (Owner) | Full access to Supabase, Cloudflare, Sentry, Resend | Proposed, pending owner review |
+| Raghav (Owner) | Full access to Supabase, Cloudflare, GitHub, Shopify Partners | Proposed, pending owner review. Sentry and Resend not yet enabled. |
 
 **Proposed, pending owner review:** Human access is limited to the owner:
 - **GitHub:** Sole collaborator `raghavkhanna268` (admin) on a user-owned public repository.
@@ -27,8 +27,8 @@
 | Cloudflare Workers | Hyperdrive binding | Database read/write via connection string | Runtime DB access; pooled connections |
 | GitHub Actions CI | `DATABASE_URL_MIGRATIONS`, `DATABASE_URL_SESSION` | Prisma migrations; prod-diagnostics; prod-readonly-query; prod-backfill-dry-run; prod-credit-status-backfill-dry-run; sync-vault-secrets; seed-dev-store | CI tests use ephemeral local Postgres; listed workflows connect to production |
 | Shopify App | Offline access tokens | Per-shop scoped | Stored in `Session` table |
-| Resend | API key | Email sending | `RESEND_API_KEY` env var |
-| Sentry | DSN | Error reporting | `SENTRY_DSN` env var |
+| Resend | API key | Email sending | Not yet enabled (`RESEND_API_KEY` not set) |
+| Sentry | DSN | Error reporting | Not enabled (no `SENTRY_DSN`) |
 
 **Proposed, pending owner review:** AI automation bots operate via scoped API tokens in their own environments:
 - Cloudflare API token (Worker deployment)
@@ -50,7 +50,7 @@
 
 ### 2.1 Two-Factor Authentication (2FA)
 
-**Proposed, pending owner review:** 2FA status is intentionally omitted from this public repository. Owner verifies 2FA is enabled on all production accounts out-of-band.
+**Proposed, pending owner review:** 2FA status per account is not published in this public repository; it is tracked privately by the owner.
 
 ---
 

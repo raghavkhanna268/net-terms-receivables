@@ -136,10 +136,9 @@ For incidents affecting merchant data:
 
 ### 4.3 Shopify Notification
 
-Per [Shopify Partner Agreement](https://www.shopify.com/partners/terms):
-- **Critical breaches:** Notify Shopify Partner Security immediately
-- **Timeline:** [TBD — no explicit timeframe found in Partner Agreement]
-- **Contact:** [TBD — Raghav to decide]
+Per [Shopify Partner Program Agreement](https://www.shopify.com/partners/terms) §1(vi):
+- **Data Breach:** "notify Shopify of any actual or suspected breach or compromise of Merchant Data... immediately upon, but no later than twenty-four (24) hours of, becoming aware of such occurrence"
+- **Contact:** Report via [Shopify Partner Support](https://help.shopify.com/questions/partners)
 
 ---
 
@@ -156,8 +155,8 @@ Per [GDPR Article 33](https://gdpr-info.eu/art-33-gdpr/):
 
 ### 5.2 DPDP Rules 2025 (India)
 
-Per the Digital Personal Data Protection Rules, 2025:
-- **Rule 7 — Breach notification:** The Data Fiduciary (merchant) must intimate each affected Data Principal and the Data Protection Board without delay; detailed report to the Board within **72 hours**.
+Per the [Digital Personal Data Protection Rules, 2025](https://www.meity.gov.in/static/uploads/2025/11/53450e6e5dc0bfa85ebd78686cadad39.pdf) (MeitY, published 14 Nov 2025):
+- **Rule 7(2)(b) — Breach notification:** The Data Fiduciary (merchant) must intimate the Board "within seventy-two hours of becoming aware of the breach, or within such longer period as the Board may allow on a request made in writing".
 - **Our role as Processor:** We notify the merchant (the Data Fiduciary) without delay so they can meet their Rule 7 duties.
 - **Commencement:** [Unverified — Raghav/lawyer to confirm dates from official text]
 
