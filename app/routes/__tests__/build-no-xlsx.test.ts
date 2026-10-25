@@ -453,31 +453,34 @@ describe("SheetJS lazy-load chunk analysis (S14)", () => {
     }
     
     const jsFiles = await getJsFiles(clientDir);
-    const manifest = await parseViteManifest();
     
-    // Categorize chunks
+    // Find chunks by filename pattern
     let entryInfo: ChunkInfo | null = null;
     let importsInfo: ChunkInfo | null = null;
-    let xlsxInfo: ChunkInfo | null = null;
+    let parseClientInfo: ChunkInfo | null = null;
+    let xlsxLibInfo: ChunkInfo | null = null;
     
     for (const file of jsFiles) {
       const info = await getChunkInfo(file);
-      const relativePath = file.replace(join(process.cwd(), "dist/client/"), "");
+      const name = info.name;
       
-      // Check if entry
-      for (const [key, value] of Object.entries(manifest)) {
-        if (value.file === relativePath) {
-          if (value.isEntry && (key.includes("root") || key.includes("entry"))) {
-            entryInfo = info;
-          }
-          if (key.includes("app.imports") || (key.includes("imports") && !key.includes("xlsx"))) {
-            importsInfo = info;
-          }
-        }
+      // Entry client chunk (main React/Router bundle)
+      if (name.includes("entry.client")) {
+        entryInfo = info;
       }
-      
-      if (info.hasXlsx && !xlsxInfo) {
-        xlsxInfo = info;
+      // Imports route chunk
+      if (name.includes("app.imports")) {
+        importsInfo = info;
+      }
+      // Lazy-loaded banks parsing module
+      if (name.includes("parse.client")) {
+        parseClientInfo = info;
+      }
+      // Actual xlsx library chunk (largest xlsx-containing chunk)
+      if (name.includes("xlsx") && !name.includes("parse")) {
+        if (!xlsxLibInfo || info.rawBytes > xlsxLibInfo.rawBytes) {
+          xlsxLibInfo = info;
+        }
       }
     }
     
@@ -487,21 +490,37 @@ describe("SheetJS lazy-load chunk analysis (S14)", () => {
     if (entryInfo) {
       console.log(`Entry chunk: ${entryInfo.name}`);
       console.log(`  ${entryInfo.rawKiB} KiB raw / ${entryInfo.gzipKiB} KiB gzip`);
+      console.log(`  Contains xlsx: ${entryInfo.hasXlsx}`);
     }
     
     if (importsInfo) {
       console.log(`Imports route chunk: ${importsInfo.name}`);
       console.log(`  ${importsInfo.rawKiB} KiB raw / ${importsInfo.gzipKiB} KiB gzip`);
+      console.log(`  Contains xlsx: ${importsInfo.hasXlsx}`);
     }
     
-    if (xlsxInfo) {
-      console.log(`SheetJS chunk: ${xlsxInfo.name}`);
-      console.log(`  ${xlsxInfo.rawKiB} KiB raw / ${xlsxInfo.gzipKiB} KiB gzip`);
+    if (parseClientInfo) {
+      console.log(`Banks parser chunk (lazy): ${parseClientInfo.name}`);
+      console.log(`  ${parseClientInfo.rawKiB} KiB raw / ${parseClientInfo.gzipKiB} KiB gzip`);
+    }
+    
+    if (xlsxLibInfo) {
+      console.log(`SheetJS library chunk: ${xlsxLibInfo.name}`);
+      console.log(`  ${xlsxLibInfo.rawKiB} KiB raw / ${xlsxLibInfo.gzipKiB} KiB gzip`);
     }
     
     console.log("\n===============================\n");
     
-    // Basic assertions
-    expect(entryInfo || importsInfo || xlsxInfo).toBeTruthy();
+    // Assertions
+    // Entry chunk must not contain xlsx
+    if (entryInfo) {
+      expect(entryInfo.hasXlsx).toBe(false);
+    }
+    // Imports route chunk must not contain xlsx
+    if (importsInfo) {
+      expect(importsInfo.hasXlsx).toBe(false);
+    }
+    // Should have at least found the entry chunk
+    expect(entryInfo).toBeTruthy();
   });
 });
