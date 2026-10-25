@@ -155,7 +155,13 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
     // 9. DELETE s6_dead_letter
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-    // 10. DELETE Shop (returns deleted shop)
+    // 10. DELETE s6_processed_webhooks (reconcile prefix)
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
+    // 11. DELETE s6_processed_webhooks (receipts join)
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
+    // 12. DELETE webhook_receipts
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 5 }));
+    // 13. DELETE Shop (returns deleted shop)
     mockTx.mockResolvedValueOnce([{ id: "shop-logging-test" }]);
 
     const payload = { shop_id: 123, shop_domain: TEST_SHOP };
@@ -180,6 +186,8 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     expect(outputStr).toContain("bulkOperationsPurged");
     expect(outputStr).toContain("pgmqSyncQueuePurged");
     expect(outputStr).toContain("deadLetterPurged");
+    expect(outputStr).toContain("processedWebhooksPurged");
+    expect(outputStr).toContain("webhookReceiptsPurged");
 
     // Assert NO raw shop domain appears in any output
     expect(outputStr).not.toContain(".myshopify.com");
@@ -198,6 +206,9 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // pgmq.a_s6_sync
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // pgmq.a_s6_bulk
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // s6_dead_letter
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // s6_processed_webhooks (reconcile)
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // s6_processed_webhooks (receipts)
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // webhook_receipts
     mockTx.mockResolvedValueOnce([]); // Shop (empty - not found)
 
     const payload = { shop_id: 999, shop_domain: TEST_SHOP };

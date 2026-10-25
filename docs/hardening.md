@@ -90,8 +90,8 @@ CREATE TABLE s6_processed_webhooks (
 ### Retention
 
 - **`webhook_receipts`**: 30-day retention via pg_cron (`s20_webhook_receipts_cleanup`, 04:30 UTC)
-- **`s6_processed_webhooks`**: 10-day retention via pg_cron (`s10_processed_webhooks_cleanup`, 03:00 UTC)
-- **Shop deletion**: Receipts are immediately purged on `app/uninstalled` and `shop/redact`
+- **`s6_processed_webhooks`**: 7-day retention via pg_cron (`s10_processed_webhooks_cleanup`, 04:00 UTC daily; see `prisma/migrations/20261024010000_s10_drain_cron/migration.sql:183-188`)
+- **Shop deletion**: Receipts and processed webhooks are immediately purged on `shop/redact`
 
 ## Ordering (No Explicit Guards)
 
