@@ -12,7 +12,13 @@
 
 | Person | Access Level | Notes |
 |--------|--------------|-------|
-| Raghav (Owner) | Full access to Supabase, Cloudflare, Sentry, Resend | [Raghav to confirm] |
+| Raghav (Owner) | Full access to Supabase, Cloudflare, Sentry, Resend | Proposed, pending owner review |
+
+**Proposed, pending owner review:** Human access is limited to the owner:
+- **GitHub:** Sole collaborator `raghavkhanna268` (admin) on a user-owned public repository.
+- **Cloudflare:** 1 member (Raghav, Super Administrator).
+- **Supabase:** [Unverified — Raghav to confirm] (expected sole owner).
+- **Shopify Partners:** [Unverified — Raghav to confirm] (expected sole owner).
 
 ### 1.2 Automated Access
 
@@ -24,20 +30,27 @@
 | Resend | API key | Email sending | `RESEND_API_KEY` env var |
 | Sentry | DSN | Error reporting | `SENTRY_DSN` env var |
 
+**Proposed, pending owner review:** AI automation bots operate via scoped API tokens in their own environments:
+- Cloudflare API token (Worker deployment)
+- GitHub fine-grained token (repository access)
+- Shopify Partner API token (Partner API access)
+- Shopify app automation token (app release)
+- Supabase access (database operations)
+
+**GitHub Actions Secrets (by name):**
+`AGE_RECIPIENT`, `ALLOWED_DEV_STORE`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `DATABASE_URL_MIGRATIONS`, `DATABASE_URL_SESSION`, `E2E_SHOP`, `JOBS_DRAIN_SECRET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, `SHOPIFY_PARTNER_API_TOKEN`.
+
+**Environment `shopify-release`:** `SHOPIFY_APP_AUTOMATION_TOKEN` (requires reviewer `raghavkhanna268`, main branch only).
+
+**Worker Secrets:** `JOBS_DRAIN_SECRET`, `REMINDER_UNSUBSCRIBE_SECRET`, `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`.
+
 ---
 
 ## 2. Account Security
 
 ### 2.1 Two-Factor Authentication (2FA)
 
-| Service | 2FA Status | Notes |
-|---------|------------|-------|
-| GitHub | [Raghav to confirm] | Repository and Actions |
-| Shopify Partners | [Raghav to confirm] | App management |
-| Cloudflare | [Raghav to confirm] | Workers, Hyperdrive |
-| Supabase | [Raghav to confirm] | Database access |
-| Sentry | [Raghav to confirm] | Error monitoring |
-| Resend | [Raghav to confirm] | Email delivery |
+**Proposed, pending owner review:** 2FA status is intentionally omitted from this public repository. Owner verifies 2FA is enabled on all production accounts out-of-band.
 
 ---
 
