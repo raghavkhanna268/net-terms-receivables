@@ -26,6 +26,7 @@ import { runMatcher, MAX_PAYMENTS_PER_REQUEST } from "~/services/matcher.server"
 import { generateDedupeKey, isValidUtrForRail } from "~/lib/banks/dedupe";
 import type { PaymentRail } from "~/lib/banks/types";
 import { safeLog, toErrorCode } from "~/lib/log.server";
+import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 
 /**
  * Maximum rows per import request.
@@ -242,7 +243,7 @@ export function validateImportRequest(body: unknown): { valid: ImportRequest | n
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { shopify } = context;
-  const { session } = await shopify.authenticate.admin(request);
+  const { session, sessionToken } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
@@ -257,6 +258,13 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       maxImportRows: MAX_IMPORT_ROWS,
     };
   }
+
+  recordAccess(sql, {
+    shopId: shop.id,
+    actor: getActorFromSessionToken(sessionToken, session),
+    action: "imports",
+    recordType: "BankImport",
+  });
 
   return {
     shopDomain,

@@ -329,7 +329,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
       expect(result.success).toBe(true);
@@ -374,7 +374,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
       expect(result.success).toBe(true);
@@ -433,7 +433,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
       expect(result.success).toBe(true);
@@ -455,7 +455,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
       expect(result.success).toBe(true);
@@ -497,7 +497,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
       expect(result.success).toBe(true);
@@ -544,7 +544,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
       expect(result.success).toBe(true);
@@ -571,7 +571,7 @@ describe("Payment Reminders (S18)", () => {
       shopUninstalledAt: Date | null;
     };
 
-    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" };
 
     beforeEach(() => {
       mockInvoiceData = {
@@ -773,7 +773,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "reminders@myapp.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "reminders@myapp.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
       expect(mockFetch).toHaveBeenCalledTimes(1);
@@ -800,7 +800,7 @@ describe("Payment Reminders (S18)", () => {
       shopUninstalledAt: Date | null;
     };
 
-    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" };
 
     beforeEach(() => {
       mockInvoiceData = {
@@ -885,7 +885,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
       expect(result.success).toBe(true);

@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { renderToString } from "react-dom/server";
+import { createElement } from "react";
 
 /**
  * Tests for plan page loader (S21).
@@ -309,12 +311,11 @@ describe("Plan Page Component Logic", () => {
     expect(bannerTone).toBe("warning");
   });
 
-  it("shows no Usage Note banner when gating is OFF (T1: removed)", () => {
-    // The Usage Note banner was removed in T1 - when gating is OFF,
-    // no limit-related banners are shown at all
+  it("shows no limit-related banners when gating is OFF (T1: Usage Note removed)", () => {
+    // When gating is off, no limit-related banners are shown at all
+    // (Usage Note banner was removed in T1)
     const gatingEnforced = false;
     const hasLimitReached = true;
-    // With gating off, neither warning nor info banner is shown
     const showBanner = hasLimitReached && gatingEnforced;
     expect(showBanner).toBe(false);
   });
@@ -573,5 +574,163 @@ describe("UsageDisplay component render tests", () => {
 
     expect(html).toContain(">10<");
     expect(html).not.toContain("/ 25");
+  });
+});
+
+/**
+ * Credit-hold and credit-status feature availability tests (T1/T5).
+ *
+ * Verifies that credit_holds feature is available on ALL plans regardless
+ * of gating status. Plan-limit gating only affects the "at limit" badges
+ * and "Upgrade to Add More" CTAs, not feature availability or credit-status UI.
+ *
+ * T5 removed the feature comparison table and FEATURE_DISPLAY_NAMES,
+ * so these tests only verify entitlements-level feature availability.
+ */
+describe("credit-hold feature availability (unaffected by plan gating)", () => {
+  it("credit_holds feature is available on all plans including none", async () => {
+    const { ALL_PLAN_KEYS, getPlanConfig, planHasFeature } = await import("~/lib/entitlements");
+    
+    for (const planKey of ALL_PLAN_KEYS) {
+      const plan = getPlanConfig(planKey);
+      expect(planHasFeature(plan, "credit_holds")).toBe(true);
+    }
+  });
+
+  it("credit_holds is in ALL_FEATURE_KEYS", async () => {
+    const { ALL_FEATURE_KEYS } = await import("~/lib/entitlements");
+    expect(ALL_FEATURE_KEYS).toContain("credit_holds");
+  });
+
+  it("banner-state builder: no over-limit banner when gating off, credit_holds on all plans", async () => {
+    const { buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    
+    // Over-limit banner hidden when gating is off (plan-limit gating)
+    const overLimitState = buildAccountOverLimitBannerState(true, false);
+    expect(overLimitState.show).toBe(false);
+    
+    // Credit-hold feature still available on all plans - verified by entitlements
+    const { ALL_PLAN_KEYS, getPlanConfig, planHasFeature } = await import("~/lib/entitlements");
+    for (const planKey of ALL_PLAN_KEYS) {
+      const plan = getPlanConfig(planKey);
+      // Credit holds feature is available on ALL plans including over-limit shops
+      // This means credit-status badges (OK/Near Limit/Held) and manual hold controls render
+      expect(planHasFeature(plan, "credit_holds")).toBe(true);
+    }
+  });
+});
+
+/**
+ * Render tests for UsageDisplay component (T1 plan-limit gating).
+ *
+ * Real renderToString tests verifying that usage badges only show
+ * when gating is enforced.
+ */
+describe("UsageDisplay render tests (T1)", () => {
+  it("gating OFF at-limit: does NOT show At Limit, Near Limit, or Usage Note", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 25,
+        limit: 25,
+        label: "Buyer accounts",
+        gatingEnforced: false,
+      })
+    );
+
+    expect(html).not.toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+    expect(html).not.toContain("Usage Note");
+  });
+
+  it("gating OFF near-limit: does NOT show At Limit, Near Limit, or Usage Note", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 22,
+        limit: 25,
+        label: "Buyer accounts",
+        gatingEnforced: false,
+      })
+    );
+
+    expect(html).not.toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+    expect(html).not.toContain("Usage Note");
+  });
+
+  it("gating ON at-limit: shows At Limit badge", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 25,
+        limit: 25,
+        label: "Buyer accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+  });
+
+  it("gating ON over-limit: shows At Limit badge", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 30,
+        limit: 25,
+        label: "Buyer accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+  });
+
+  it("gating ON near-limit: shows Near Limit badge", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 22,
+        limit: 25,
+        label: "Buyer accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).toContain("Near Limit");
+    expect(html).not.toContain("At Limit");
+  });
+
+  it("gating ON below near-limit threshold: shows neither badge", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 10,
+        limit: 25,
+        label: "Buyer accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).not.toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+  });
+
+  it("unlimited plan: shows neither badge regardless of gating", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 100,
+        limit: -1,
+        label: "Buyer accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).not.toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
   });
 });
