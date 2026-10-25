@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach, beforeAll } from "vitest";
-import { execSync } from "child_process";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import { runAnalysis } from "../check-logging";
 
 /**
  * Tests for the AST-based logging guard (check-logging.ts).
@@ -24,12 +24,6 @@ describe("check-logging.ts (AST-based)", () => {
   let tmpDir: string;
   let appDir: string;
   let scriptsDir: string;
-  let scriptPath: string;
-
-  beforeAll(() => {
-    scriptPath = path.join(__dirname, "..", "check-logging.ts");
-    expect(fs.existsSync(scriptPath)).toBe(true);
-  });
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "logging-test-"));
@@ -48,26 +42,10 @@ describe("check-logging.ts (AST-based)", () => {
     allowlist: string[] = []
   ): { exitCode: number; output: string } => {
     const allowlistFile = path.join(tmpDir, "logging-allowlist.txt");
+    const loggerMockAllowlistFile = path.join(tmpDir, "logger-mock-allowlist.txt");
     fs.writeFileSync(allowlistFile, allowlist.join("\n"));
-
-    try {
-      const output = execSync(`npx tsx "${scriptPath}"`, {
-        encoding: "utf-8",
-        cwd: tmpDir,
-        env: {
-          ...process.env,
-          LOGGING_GUARD_ROOT: tmpDir,
-          LOGGING_GUARD_ALLOWLIST: allowlistFile,
-        },
-      });
-      return { exitCode: 0, output };
-    } catch (err) {
-      const error = err as { status: number; stdout: string; stderr: string };
-      return {
-        exitCode: error.status || 1,
-        output: (error.stdout || "") + (error.stderr || ""),
-      };
-    }
+    fs.writeFileSync(loggerMockAllowlistFile, "");
+    return runAnalysis(tmpDir, allowlistFile, loggerMockAllowlistFile);
   };
 
   // =========================================================================
