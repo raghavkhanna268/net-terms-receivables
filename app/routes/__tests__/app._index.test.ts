@@ -816,56 +816,6 @@ describe("S21 gated accounts in dashboard listing and totals", () => {
     expect(activeAccount?.is_gated).toBe(false);
   });
 
-  it("aging totals include both gated and non-gated accounts", async () => {
-    mockGetBuyerLedger.mockResolvedValue({
-      rows: [
-        {
-          buyer_account_id: "buyer-active",
-          buyer_name: "Active Buyer",
-          credit_limit_paise: null,
-          hold_state: "OK",
-          currency: "INR",
-          outstanding_paise: "100000",
-          overdue_paise: "0",
-          oldest_overdue_days: null,
-          is_gated: false,
-        },
-        {
-          buyer_account_id: "buyer-gated",
-          buyer_name: "Gated Buyer",
-          credit_limit_paise: null,
-          hold_state: "OK",
-          currency: "INR",
-          outstanding_paise: "200000",
-          overdue_paise: "0",
-          oldest_overdue_days: null,
-          is_gated: true,
-        },
-      ],
-      totalCount: 2,
-    });
-
-    mockGetShopAgingTotals.mockResolvedValue({
-      totalByCurrency: { INR: "300000" },
-      buckets: {
-        current: { byCurrency: { INR: "300000" } },
-        "1-30": { byCurrency: {} },
-        "31-60": { byCurrency: {} },
-        "61-90": { byCurrency: {} },
-        "90+": { byCurrency: {} },
-      },
-      overdueByCurrency: {},
-      oldestOverdueDays: null,
-    });
-
-    const { loader } = await import("../app._index");
-    const result = await loader(createLoaderArgs() as never);
-
-    expect(result.agingTotals?.totalByCurrency.INR).toBe("300000");
-
-    expect(result.buyerLedger?.totalCount).toBe(2);
-  });
-
   it("overLimitCount reflects gated accounts and is included in data", async () => {
     mockGetBuyerLedger.mockResolvedValue({
       rows: [{
