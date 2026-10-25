@@ -50,6 +50,7 @@ Net Terms Receivables helps Indian wholesale merchants track outstanding invoice
 - **Annual billing** at 10× monthly (2 months free)
 - **Every feature included** on every plan
 - **No free plan**
+- **Development and partner stores:** free
 
 Spec: Configure these plans in the Partner Dashboard "Pricing" section using Shopify App Pricing (recommended) or Billing API.
 Ref: https://shopify.dev/docs/apps/launch/billing
