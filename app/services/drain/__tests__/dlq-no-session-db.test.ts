@@ -124,6 +124,11 @@ describeWithDb("DLQ no_session sanitization (#239 follow-up)", () => {
   beforeAll(async () => {
     sqlRef = postgres(TEST_DATABASE_URL!, sqlOptions);
 
+    // Purge any leftover messages from earlier Sequential DB files.
+    // Without this, runDrain(batchSize:10) may exhaust its budget on those
+    // leftovers and never reach this test's message, causing the first test to fail.
+    await sqlRef`SELECT pgmq.purge_queue('s6_sync')`;
+
     await sqlRef`
       INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
       VALUES (${installedShopId}, ${INSTALLED_SHOP_DOMAIN}, 'USD', NOW(), NOW())
