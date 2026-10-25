@@ -740,4 +740,254 @@ describe("app.accounts.$id loader syncState", () => {
       expect(result.creditStatus?.hasDeadLetteredSync).toBe(false);
     });
   });
+
+  describe("upgradeUrl in loader", () => {
+    it("returns upgradeUrl in loader data", async () => {
+      setupBaseMocks({ syncPending: false });
+
+      const { loader } = await import("../app.accounts.$id");
+      const result = await loader(createLoaderArgs());
+
+      expect(result.upgradeUrl).toBeDefined();
+      expect(result.upgradeUrl).toContain("https://admin.shopify.com/store/");
+      expect(result.upgradeUrl).toContain("/charges/");
+      expect(result.upgradeUrl).toContain("/pricing_plans");
+    });
+
+    it("upgradeUrl uses shop domain to derive store handle", async () => {
+      setupBaseMocks({ syncPending: false });
+
+      const { loader } = await import("../app.accounts.$id");
+      const result = await loader(createLoaderArgs());
+
+      expect(result.upgradeUrl).toContain("test-shop");
+    });
+  });
+});
+
+import { updateCreditStatus } from "~/services/credit-status.server";
+const mockUpdateCreditStatus = vi.mocked(updateCreditStatus);
+
+interface ActionResultData {
+  ok?: boolean;
+  success: boolean;
+  error?: string;
+  upgradeRequired?: boolean;
+  code?: string;
+}
+
+function extractActionData(result: unknown): ActionResultData {
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    "type" in result &&
+    (result as { type: string }).type === "DataWithResponseInit" &&
+    "data" in result
+  ) {
+    return (result as { data: ActionResultData }).data;
+  }
+  return result as ActionResultData;
+}
+
+function extractStatus(result: unknown): number | undefined {
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    "type" in result &&
+    (result as { type: string }).type === "DataWithResponseInit" &&
+    "init" in result
+  ) {
+    const init = (result as { init: { status?: number } | null }).init;
+    return init?.status;
+  }
+  return undefined;
+}
+
+describe("app.accounts.$id action gated credit edit", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockUpdateCreditStatus.mockResolvedValue({ success: true });
+  });
+
+  function createActionArgs(
+    accountId: string,
+    formData: FormData
+  ) {
+    return {
+      request: new Request("https://example.com/app/accounts/" + accountId, {
+        method: "POST",
+        body: formData,
+      }),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+            }),
+          },
+        },
+        cloudflare: {
+          env: {},
+          ctx: { waitUntil: vi.fn() },
+        },
+      },
+      params: { id: accountId },
+    } as unknown;
+  }
+
+  function setupActionMocks(options: {
+    gatedAt?: Date | null;
+    gatingEnforced?: boolean;
+  } = {}) {
+    const { gatedAt = null, gatingEnforced = false } = options;
+
+    mockIsGatingEnforced.mockReturnValue(gatingEnforced);
+    mockIsAccountActive.mockReturnValue(gatedAt === null || !gatingEnforced);
+
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+
+      if (query.includes("SELECT id FROM \"Shop\"")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID }]);
+      }
+
+      if (query.includes("SELECT id, gated_at") && query.includes("FROM \"BuyerAccount\"")) {
+        return Promise.resolve([{
+          id: TEST_ACCOUNT_ID,
+          gatedAt,
+        }]);
+      }
+
+      return Promise.resolve([]);
+    });
+  }
+
+  describe("gated account credit edit rejection", () => {
+    it("returns 403 with upgradeRequired=true when gating enforced and credit edit attempted on gated account", async () => {
+      const gatedDate = new Date("2026-10-01T00:00:00Z");
+      setupActionMocks({ gatedAt: gatedDate, gatingEnforced: true });
+
+      const { action } = await import("../app.accounts.$id");
+
+      const formData = new FormData();
+      formData.set("_action", "updateCredit");
+      formData.set("creditLimit", "50000");
+
+      const result = await action(createActionArgs(TEST_ACCOUNT_ID, formData) as never);
+
+      const status = extractStatus(result);
+      expect(status).toBe(403);
+
+      const data = extractActionData(result);
+      expect(data.ok).toBe(false);
+      expect(data.success).toBe(false);
+      expect(data.upgradeRequired).toBe(true);
+      expect(data.code).toBe("plan_limit_account_gated");
+      expect(data.error).toContain("plan limit");
+    });
+
+    it("does not call updateCreditStatus when gated account attempts credit edit", async () => {
+      const gatedDate = new Date("2026-10-01T00:00:00Z");
+      setupActionMocks({ gatedAt: gatedDate, gatingEnforced: true });
+
+      const { action } = await import("../app.accounts.$id");
+
+      const formData = new FormData();
+      formData.set("_action", "updateCredit");
+      formData.set("creditLimit", "50000");
+
+      await action(createActionArgs(TEST_ACCOUNT_ID, formData) as never);
+
+      expect(mockUpdateCreditStatus).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("gated account hold-only update succeeds", () => {
+    it("allows hold-only update for gated account", async () => {
+      const gatedDate = new Date("2026-10-01T00:00:00Z");
+      setupActionMocks({ gatedAt: gatedDate, gatingEnforced: true });
+
+      const { action } = await import("../app.accounts.$id");
+
+      const formData = new FormData();
+      formData.set("_action", "updateCredit");
+      formData.set("holdOnly", "true");
+      formData.set("manualHold", "true");
+      formData.set("holdReasonCode", "MANUAL_HOLD");
+
+      const result = await action(createActionArgs(TEST_ACCOUNT_ID, formData) as never);
+
+      const status = extractStatus(result);
+      expect(status).toBeUndefined(); // 200 OK returns undefined status
+
+      const data = extractActionData(result);
+      expect(data.success).toBe(true);
+
+      expect(mockUpdateCreditStatus).toHaveBeenCalledWith(
+        expect.anything(),
+        TEST_ACCOUNT_ID,
+        expect.objectContaining({
+          manualHold: true,
+          holdReasonCode: "MANUAL_HOLD",
+        })
+      );
+    });
+  });
+
+  describe("non-gated account credit edit succeeds", () => {
+    it("allows credit edit for non-gated account", async () => {
+      setupActionMocks({ gatedAt: null, gatingEnforced: true });
+
+      const { action } = await import("../app.accounts.$id");
+
+      const formData = new FormData();
+      formData.set("_action", "updateCredit");
+      formData.set("creditLimit", "50000");
+
+      const result = await action(createActionArgs(TEST_ACCOUNT_ID, formData) as never);
+
+      const status = extractStatus(result);
+      expect(status).toBeUndefined(); // 200 OK
+
+      const data = extractActionData(result);
+      expect(data.success).toBe(true);
+
+      expect(mockUpdateCreditStatus).toHaveBeenCalledWith(
+        expect.anything(),
+        TEST_ACCOUNT_ID,
+        expect.objectContaining({
+          creditLimitAmount: 50000,
+        })
+      );
+    });
+  });
+
+  describe("gating flag OFF allows gated_at account edit", () => {
+    it("allows credit edit when gating flag is OFF even if account has gated_at set", async () => {
+      const gatedDate = new Date("2026-10-01T00:00:00Z");
+      setupActionMocks({ gatedAt: gatedDate, gatingEnforced: false });
+
+      const { action } = await import("../app.accounts.$id");
+
+      const formData = new FormData();
+      formData.set("_action", "updateCredit");
+      formData.set("creditLimit", "75000");
+
+      const result = await action(createActionArgs(TEST_ACCOUNT_ID, formData) as never);
+
+      const status = extractStatus(result);
+      expect(status).toBeUndefined(); // 200 OK
+
+      const data = extractActionData(result);
+      expect(data.success).toBe(true);
+
+      expect(mockUpdateCreditStatus).toHaveBeenCalledWith(
+        expect.anything(),
+        TEST_ACCOUNT_ID,
+        expect.objectContaining({
+          creditLimitAmount: 75000,
+        })
+      );
+    });
+  });
 });

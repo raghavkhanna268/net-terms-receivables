@@ -543,16 +543,49 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
       };
     }
 
+    interface AccountsActionResult {
+      success: boolean;
+      error?: string;
+      metafieldSyncPending?: boolean;
+      upgradeRequired?: boolean;
+      code?: string;
+      ok?: boolean;
+    }
+
+    interface AccountsActionResultWithStatus {
+      data: AccountsActionResult;
+      status: number | undefined;
+    }
+
+    function extractAccountsActionDataWithStatus(result: unknown): AccountsActionResultWithStatus {
+      if (
+        typeof result === "object" &&
+        result !== null &&
+        "type" in result &&
+        (result as { type: string }).type === "DataWithResponseInit" &&
+        "data" in result &&
+        "init" in result
+      ) {
+        const typed = result as unknown as { data: AccountsActionResult; init: { status?: number } | null };
+        return {
+          data: typed.data,
+          status: typed.init?.status,
+        };
+      }
+      return { data: result as AccountsActionResult, status: undefined };
+    }
+
     /**
      * Call the real accounts action inside request context.
      * Dynamically imports request-context after vi.resetModules() to use the same fresh instance.
+     * Returns both the data and HTTP status for assertions.
      */
     async function callAccountsAction(
       testSql: ReturnType<typeof postgres>,
       shopDomain: string,
       accountId: string,
       formFields: Record<string, string>
-    ): Promise<{ success: boolean; error?: string; metafieldSyncPending?: boolean }> {
+    ): Promise<AccountsActionResultWithStatus> {
       const request = createAccountsRequest(formFields, accountId);
       const context = createMockContext(shopDomain);
       const url = new URL(request.url);
@@ -569,7 +602,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
           url,
           pattern: "/app/accounts/:id",
         });
-        return result as { success: boolean; error?: string; metafieldSyncPending?: boolean };
+        return extractAccountsActionDataWithStatus(result);
       });
     }
 
@@ -587,9 +620,13 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
         creditLimit: "200000",
       });
 
-      // Should be rejected
-      expect(result.success).toBe(false);
-      expect(result.error).toContain("Cannot edit gated accounts");
+      // Should be rejected with 403 response containing upgradeRequired flag
+      expect(result.status).toBe(403);
+      expect(result.data.success).toBe(false);
+      expect(result.data.ok).toBe(false);
+      expect(result.data.upgradeRequired).toBe(true);
+      expect(result.data.code).toBe("plan_limit_account_gated");
+      expect(result.data.error).toContain("plan limit");
 
       // DB row should be unchanged
       const [afterAccount] = await sql<{ creditLimit: string }[]>`
@@ -607,8 +644,9 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
         creditLimit: "200000",
       });
 
-      // Should succeed
-      expect(result.success).toBe(true);
+      // Should succeed (no special status code)
+      expect(result.status).toBeUndefined();
+      expect(result.data.success).toBe(true);
 
       // DB row should be updated
       const [afterAccount] = await sql<{ creditLimit: string }[]>`
@@ -631,8 +669,9 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
         creditLimit: "150000",
       });
 
-      // Should succeed when gating is OFF
-      expect(result.success).toBe(true);
+      // Should succeed when gating is OFF (no special status code)
+      expect(result.status).toBeUndefined();
+      expect(result.data.success).toBe(true);
 
       // Restore original credit limit
       await sql`
@@ -657,8 +696,9 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
           holdReasonCode: "MANUAL_HOLD",
         });
 
-        // Should succeed - holds are NOT gated
-        expect(result.success).toBe(true);
+        // Should succeed - holds are NOT gated (no special status code)
+        expect(result.status).toBeUndefined();
+        expect(result.data.success).toBe(true);
 
         // DB row should be updated
         const [afterAccount] = await sql<{ manualHold: boolean; holdState: string }[]>`
@@ -695,8 +735,9 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
           holdReasonCode: "MANUAL_HOLD",
         });
 
-        // Should succeed - holds are NOT gated
-        expect(result.success).toBe(true);
+        // Should succeed - holds are NOT gated (no special status code)
+        expect(result.status).toBeUndefined();
+        expect(result.data.success).toBe(true);
 
         // DB credit limit should be UNCHANGED (noLimit was ignored)
         const [afterAccount] = await sql<{ creditLimit: string; manualHold: boolean; holdState: string }[]>`
@@ -736,8 +777,9 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
           holdReasonCode: "MANUAL_HOLD",
         });
 
-        // Should succeed - holds are NOT gated
-        expect(result.success).toBe(true);
+        // Should succeed - holds are NOT gated (no special status code)
+        expect(result.status).toBeUndefined();
+        expect(result.data.success).toBe(true);
 
         // DB credit limit should be UNCHANGED (creditLimit was ignored)
         const [afterAccount] = await sql<{ creditLimit: string; manualHold: boolean; holdState: string }[]>`
