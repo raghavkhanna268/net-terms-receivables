@@ -54,6 +54,42 @@ export interface DeleteShopResult {
   pgmqSyncArchivePurged: number;
   pgmqBulkArchivePurged: number;
   deadLetterPurged: number;
+  processedWebhooksPurged: number;
+  webhookReceiptsPurged: number;
+}
+
+/**
+ * Delete s6_processed_webhooks rows linked to a shop's webhook_receipts.
+ *
+ * Uses exact-match join: deletes processed webhook rows where the webhook_id
+ * matches a receipt for this shop. This handles Shopify webhook ids that don't
+ * embed the shop domain.
+ *
+ * Intentionally NOT purged (expire under 7-day TTL instead):
+ * - credit_* keys: carry no shop domain, internal credit-status markers
+ * - Shopify webhook ids with no matching receipt (orphaned or pre-S20)
+ *
+ * MUST be called BEFORE webhook_receipts are deleted for this shop.
+ *
+ * Used by:
+ * - deleteShop (shop/redact): within transaction, before receipts delete
+ * - app/uninstalled: within transaction with receipts delete
+ *
+ * @param sql - postgres.js SQL client (or transaction)
+ * @param shopDomain - Shop domain
+ * @returns Number of processed webhook rows deleted
+ */
+export async function deleteProcessedWebhooksViaReceipts(
+  sql: Sql,
+  shopDomain: string
+): Promise<number> {
+  const result = await sql`
+    DELETE FROM s6_processed_webhooks p
+    USING webhook_receipts r
+    WHERE r.shop = ${shopDomain}
+      AND r.webhook_id = p.webhook_id
+  `;
+  return result.count;
 }
 
 /**
@@ -74,6 +110,8 @@ export interface DeleteShopResult {
  * - order_outstanding_missing (aggregate counter, shop text column)
  * - s10b_customer_pii_fallback (aggregate counter, shop text column)
  * - s6_dead_letter (dead-letter queue, shop in message JSON)
+ * - s6_processed_webhooks (reconcile ids embed domain; Shopify webhook ids via receipts join)
+ * - webhook_receipts (edge deduplication, shop text column)
  *
  * All deletes are wrapped in a single transaction for atomicity.
  * If any statement fails, the entire operation rolls back.
@@ -157,6 +195,36 @@ export async function deleteShop(
       WHERE message->>'shop' = ${shopDomain}
     `;
 
+    // s6_processed_webhooks (no shop column; ids may embed the domain)
+    // Two deletion strategies for the two id formats:
+    //
+    // 1. Reconcile ids: embed domain as 'reconcile:<shop>:<date>:<stage>'
+    //    See: reconcile.server.ts:61, reconcile-handlers.server.ts:175/178, initial-sync.server.ts:140
+    //    Use anchored prefix match with left() - no LIKE wildcards so _ and % are safe
+    const reconcilePrefix = `reconcile:${shopDomain}:`;
+    const processedReconcileResult = await tx`
+      DELETE FROM s6_processed_webhooks
+      WHERE left(webhook_id, length(${reconcilePrefix})) = ${reconcilePrefix}
+    `;
+
+    // 2. Shopify webhook ids (domain-free): join to webhook_receipts
+    //    This MUST run BEFORE webhook_receipts are deleted
+    //    NOTE: credit_* rows and orphan Shopify ids (no matching receipt) are
+    //    intentionally NOT purged - they carry no shop domain and expire under 7-day TTL.
+    const processedReceiptsJoinCount = await deleteProcessedWebhooksViaReceipts(
+      tx,
+      shopDomain
+    );
+
+    const processedWebhooksPurged =
+      processedReconcileResult.count + processedReceiptsJoinCount;
+
+    // webhook_receipts (edge deduplication, shop text column)
+    // Moved here from webhooks.compliance.tsx to ensure join delete runs first
+    const webhookReceiptsResult = await tx`
+      DELETE FROM webhook_receipts WHERE shop = ${shopDomain}
+    `;
+
     // Delete shop - all FK-linked data cascades
     const [result] = await tx<{ id: string }[]>`
       DELETE FROM "Shop"
@@ -176,6 +244,8 @@ export async function deleteShop(
       pgmqSyncArchivePurged: pgmqSyncArchiveResult.count,
       pgmqBulkArchivePurged: pgmqBulkArchiveResult.count,
       deadLetterPurged: deadLetterResult.count,
+      processedWebhooksPurged,
+      webhookReceiptsPurged: webhookReceiptsResult.count,
     };
   });
 }
