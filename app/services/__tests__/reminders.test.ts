@@ -33,9 +33,11 @@ vi.stubGlobal("fetch", mockFetch);
 // Mock SQL client factory
 function createMockSql() {
   const mockResults = new Map<string, unknown>();
+  const allCalls: string[] = [];
 
   const createQueryHandler = () => async (strings: TemplateStringsArray, ..._values: unknown[]) => {
     const query = strings.join("?");
+    allCalls.push(query);
 
     // Invoice lookup
     if (query.includes("FROM \"Invoice\"") && query.includes("INNER JOIN")) {
@@ -122,14 +124,16 @@ function createMockSql() {
       json: vi.fn((v) => v),
       unsafe: vi.fn((s: string) => s),
       setMockResult: (key: string, value: unknown) => mockResults.set(key, value),
-      clearMockResults: () => mockResults.clear(),
+      clearMockResults: () => { mockResults.clear(); allCalls.length = 0; },
       begin: vi.fn(async <T>(callback: (tx: typeof mockTx) => Promise<T>): Promise<T> => {
         return callback(mockTx);
       }),
+      getAllCalls: () => allCalls,
     }
   ) as unknown as Sql & {
     setMockResult: (key: string, value: unknown) => void;
     clearMockResults: () => void;
+    getAllCalls: () => string[];
   };
 
   return sql;
@@ -259,7 +263,7 @@ describe("Payment Reminders (S18)", () => {
       expect(mockFetch).not.toHaveBeenCalled();
 
       // Should NOT insert ReminderLog (no slot claim)
-      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const sqlCalls = mockSql.getAllCalls();
       const reminderLogInserts = sqlCalls.filter((q: string) => q.includes("INSERT INTO \"ReminderLog\""));
       expect(reminderLogInserts).toHaveLength(0);
     });
@@ -481,7 +485,7 @@ describe("Payment Reminders (S18)", () => {
       expect(mockFetch).not.toHaveBeenCalled();
 
       // Should NOT insert ReminderLog (no slot consumed)
-      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const sqlCalls = mockSql.getAllCalls();
       const reminderLogInserts = sqlCalls.filter((q: string) => q.includes("INSERT INTO \"ReminderLog\""));
       expect(reminderLogInserts).toHaveLength(0);
     });
@@ -621,7 +625,7 @@ describe("Payment Reminders (S18)", () => {
       );
 
       // Verify cap was released (UPDATE query with GREATEST(0, daily_count - 1))
-      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const sqlCalls = mockSql.getAllCalls();
       const capReleaseCalls = sqlCalls.filter((q: string) => q.includes("GREATEST(0, daily_count - 1)"));
       expect(capReleaseCalls.length).toBeGreaterThan(0);
     });
@@ -654,7 +658,7 @@ describe("Payment Reminders (S18)", () => {
       expect(result.retryable).toBe(true);
 
       // Verify cap WAS released - only successful sends count toward cap
-      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const sqlCalls = mockSql.getAllCalls();
       const capReleaseCalls = sqlCalls.filter((q: string) => q.includes("GREATEST(0, daily_count - 1)"));
       expect(capReleaseCalls.length).toBeGreaterThan(0);
     });
@@ -687,7 +691,7 @@ describe("Payment Reminders (S18)", () => {
       expect(result.retryable).toBe(true);
 
       // Verify cap WAS released - only successful sends count toward cap
-      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const sqlCalls = mockSql.getAllCalls();
       const capReleaseCalls = sqlCalls.filter((q: string) => q.includes("GREATEST(0, daily_count - 1)"));
       expect(capReleaseCalls.length).toBeGreaterThan(0);
     });
@@ -811,7 +815,7 @@ describe("Payment Reminders (S18)", () => {
       expect(result.errorCode).toBe("timeout");
 
       // Verify cap WAS released - only successful sends count toward cap
-      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const sqlCalls = mockSql.getAllCalls();
       const capReleaseCalls = sqlCalls.filter((q: string) => q.includes("GREATEST(0, daily_count - 1)"));
       expect(capReleaseCalls.length).toBeGreaterThan(0);
     });
@@ -855,7 +859,7 @@ describe("Payment Reminders (S18)", () => {
       expect(result.skipReason).toContain("Outside send window");
       expect(mockFetch).not.toHaveBeenCalled();
 
-      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const sqlCalls = mockSql.getAllCalls();
       const reminderLogInserts = sqlCalls.filter((q: string) => q.includes("INSERT INTO \"ReminderLog\""));
       expect(reminderLogInserts).toHaveLength(0);
       const globalIncrements = sqlCalls.filter((q: string) => q.includes("WITH monthly_sum AS") && q.includes("upserted AS"));

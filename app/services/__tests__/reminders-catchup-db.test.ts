@@ -34,7 +34,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   const TEST_RULE_ID_3 = `rule-catchup-3-${TEST_SUFFIX}`;
 
   const _FIXED_DATE = new Date("2026-10-15T12:00:00Z");
-  const FIXED_DATE_STR = "2026-10-15";
+  const _FIXED_DATE_STR = "2026-10-15";
   const FIXED_MONTH_STR = "2026-10";
 
   beforeAll(async () => {
@@ -122,6 +122,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
       const invoiceId = `inv-cap-delayed-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/cap-delayed-${TEST_SUFFIX}`;
 
+      // Invoice dueAt is TODAY (so offsetDays=0 fires today)
       await sql`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
@@ -134,13 +135,18 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         )
       `;
 
-      await sql`
-        INSERT INTO s18_global_sends (send_key, send_date, send_month, daily_count, monthly_count, updated_at)
-        VALUES ('global', ${FIXED_DATE_STR}::DATE, ${FIXED_MONTH_STR}, ${DAILY_SEND_CAP}, 0, NOW())
-      `;
-
+      // Fill the daily cap for TODAY (not FIXED_DATE)
       const luxon = await import("luxon");
       const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const todayStr = mockNow.toISODate()!;
+      const monthStr = todayStr.substring(0, 7);
+
+      await sql`
+        INSERT INTO s18_global_sends (send_key, send_date, send_month, daily_count, monthly_count, updated_at)
+        VALUES ('global', ${todayStr}::DATE, ${monthStr}, ${DAILY_SEND_CAP}, 0, NOW())
+        ON CONFLICT (send_key, send_date) DO UPDATE SET daily_count = ${DAILY_SEND_CAP}
+      `;
+
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       try {
@@ -438,6 +444,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
       const orderId = `gid://shopify/Order/concurrent-${TEST_SUFFIX}`;
       const logIdDelayed = `log-concurrent-delayed-${TEST_SUFFIX}`;
 
+      // dueAt is TODAY - 7 days so that offsetDays=7 means reminder fires TODAY
       await sql`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
@@ -446,14 +453,14 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#CONCURRENT', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          NOW() - INTERVAL '12 days', NOW() - INTERVAL '7 days', NOW(), NOW()
         )
       `;
 
-      // Older stage delayed
+      // Older stage (offsetDays=0) is delayed - would have fired 7 days ago but was capped
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES (${logIdDelayed}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '1 day')
+        VALUES (${logIdDelayed}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '7 days')
       `;
 
       const luxon = await import("luxon");
@@ -462,7 +469,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
       mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-concurrent" }) });
 
       try {
-        // First: catch-up sends (older stage)
+        // First: catch-up sends (older stage, offsetDays=0)
         const catchupResult = await sendCatchupReminder(
           sql,
           TEST_SHOP_ID,
@@ -475,7 +482,8 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         );
         expect(catchupResult.action).toBe("sent");
 
-        // Second: REMINDER_SEND for newer stage same day should be skipped
+        // Second: REMINDER_SEND for same invoice TODAY (offsetDays=7, dueAt was 7 days ago)
+        // Should be skipped because invoice already got a reminder today
         const sendResult = await sendPaymentReminder(
           sql,
           TEST_SHOP_ID,

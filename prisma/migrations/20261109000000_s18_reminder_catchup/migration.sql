@@ -29,7 +29,9 @@ ALTER TABLE "ReminderLog" ADD COLUMN "status" "ReminderLogStatus" NOT NULL DEFAU
 -- Step 3: Add firstCappedAt column (nullable timestamp)
 ALTER TABLE "ReminderLog" ADD COLUMN "firstCappedAt" TIMESTAMPTZ(3);
 
--- Step 4: Make sentAt nullable (existing rows already have values, so this is safe)
+-- Step 4: Make sentAt nullable and drop default (existing rows already have values, so this is safe)
+-- Must drop default first, then drop not null
+ALTER TABLE "ReminderLog" ALTER COLUMN "sentAt" DROP DEFAULT;
 ALTER TABLE "ReminderLog" ALTER COLUMN "sentAt" DROP NOT NULL;
 
 -- Step 5: Add CHECK constraints that tie timestamps to status
@@ -78,11 +80,11 @@ BEGIN
     -- Mark them as skipped_daily_limit
     -- ==========================================================================
     UPDATE public."ReminderLog" rl
-    SET status = 'skipped_daily_limit'::"ReminderLogStatus"
+    SET status = 'skipped_daily_limit'::public."ReminderLogStatus"
     FROM public."Invoice" i,
          public."Shop" s,
          public."ReminderRule" r
-    WHERE rl.status = 'delayed'::"ReminderLogStatus"
+    WHERE rl.status = 'delayed'::public."ReminderLogStatus"
       AND rl."invoiceId" = i.id
       AND rl."shopId" = i."shopId"
       AND rl."ruleId" = r.id
@@ -109,10 +111,10 @@ BEGIN
         GROUP BY rl."invoiceId"
     )
     UPDATE public."ReminderLog" rl
-    SET status = 'skipped_daily_limit'::"ReminderLogStatus"
+    SET status = 'skipped_daily_limit'::public."ReminderLogStatus"
     FROM public."ReminderRule" r,
          latest_stage_per_invoice lsp
-    WHERE rl.status = 'delayed'::"ReminderLogStatus"
+    WHERE rl.status = 'delayed'::public."ReminderLogStatus"
       AND rl."invoiceId" = lsp."invoiceId"
       AND rl."ruleId" = r.id
       AND r."offsetDays" < lsp.max_offset;
@@ -212,7 +214,7 @@ BEGIN
             ON ba.id = i."buyerAccountId"
             AND ba."shopId" = i."shopId"
             AND ba.gated_at IS NULL
-        WHERE rl.status = 'delayed'::"ReminderLogStatus"
+        WHERE rl.status = 'delayed'::public."ReminderLogStatus"
           AND r.channel = 'email'::public."ReminderChannel"
           -- Check send window
           AND EXTRACT(HOUR FROM (NOW() AT TIME ZONE public.s18_safe_timezone(s.timezone))) BETWEEN 9 AND 18

@@ -518,8 +518,12 @@ export async function reserveGlobalSendSlot(
   const dateStr = date.toISOString().split("T")[0];
   const monthStr = dateStr.substring(0, 7); // YYYY-MM
 
-  return sql.begin(async (tx) => {
-    // Acquire advisory lock for the duration of this transaction.
+  // The actual reservation logic
+  const doReserve = async (tx: Sql): Promise<
+    | { reserved: true; daily: number; monthly: number }
+    | { reserved: false; reason: "daily_cap" | "monthly_cap" }
+  > => {
+    // Acquire advisory lock for the duration of the transaction.
     // This serializes all concurrent reservations across all shops.
     await tx`SELECT pg_advisory_xact_lock(hashtext(${GLOBAL_SEND_CAP_LOCK_KEY}))`;
 
@@ -565,7 +569,15 @@ export async function reserveGlobalSendSlot(
       daily: result.dailyCount,
       monthly: currentMonthly + 1,
     };
-  });
+  };
+
+  // Check if sql has a begin method (i.e., it's a root sql, not a transaction)
+  // If it does, start our own transaction. If not, we're already in one.
+  if (typeof (sql as { begin?: unknown }).begin === "function") {
+    return (sql as Sql & { begin: <T>(fn: (tx: Sql) => Promise<T>) => Promise<T> }).begin(doReserve);
+  }
+  // Already in a transaction, use the tx directly
+  return doReserve(sql);
 }
 
 /**
