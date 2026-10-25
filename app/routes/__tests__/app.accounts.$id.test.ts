@@ -23,6 +23,7 @@ vi.mock("~/lib/request-context.server", () => ({
 
 vi.mock("~/services/gating.server", () => ({
   isAccountActive: vi.fn().mockReturnValue(true),
+  isGatingEnforced: vi.fn().mockReturnValue(false),
 }));
 
 vi.mock("~/services/credit-status.server", () => ({

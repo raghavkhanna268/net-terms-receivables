@@ -14,6 +14,7 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
 vi.mock("~/services/gating.server", () => ({
   isAccountActive: vi.fn().mockReturnValue(true),
+  isGatingEnforced: vi.fn().mockReturnValue(false),
 }));
 
 vi.mock("~/lib/aging-queries.server", () => ({
