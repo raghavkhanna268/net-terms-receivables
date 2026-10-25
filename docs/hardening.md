@@ -185,8 +185,16 @@ const result = await shopifyGraphQLQueue(shop, query);
 
 ### Shop Deletion Flow
 
-1. `app/uninstalled`: Sessions deleted, shop marked uninstalled, receipts purged
-2. `shop/redact` (48h later): Full shop deletion via CASCADE, receipts already gone
+1. `app/uninstalled`: Sessions deleted, shop marked uninstalled. Receipt-linked processed
+   webhooks and receipts purged in one transaction. Reconcile-prefix processed webhooks
+   are NOT deleted (kept for reinstall grace period).
+2. `shop/redact` (48h later): Full shop deletion via CASCADE. Reconcile-prefix processed
+   webhooks purged. Any remaining receipts and receipt-linked processed webhooks purged
+   (in case uninstall webhook failed or was missed).
+
+**Intentionally NOT purged** (expire under 7-day TTL instead):
+- `credit_*` processed webhook rows: carry no shop domain, internal credit-status markers
+- Shopify-id processed webhook rows with no matching receipt (orphaned or pre-S20)
 
 ## Testing
 

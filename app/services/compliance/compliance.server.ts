@@ -62,8 +62,12 @@ export interface DeleteShopResult {
  * Delete s6_processed_webhooks rows linked to a shop's webhook_receipts.
  *
  * Uses exact-match join: deletes processed webhook rows where the webhook_id
- * matches a receipt for this shop. This handles domain-free ids (Shopify webhook
- * ids, credit_ keys) that don't embed the shop domain.
+ * matches a receipt for this shop. This handles Shopify webhook ids that don't
+ * embed the shop domain.
+ *
+ * Intentionally NOT purged (expire under 7-day TTL instead):
+ * - credit_* keys: carry no shop domain, internal credit-status markers
+ * - Shopify webhook ids with no matching receipt (orphaned or pre-S20)
  *
  * MUST be called BEFORE webhook_receipts are deleted for this shop.
  *
@@ -200,8 +204,10 @@ export async function deleteShop(
       WHERE left(webhook_id, length(${reconcilePrefix})) = ${reconcilePrefix}
     `;
 
-    // 2. Domain-free ids (Shopify webhook ids, credit_ keys): join to webhook_receipts
+    // 2. Shopify webhook ids (domain-free): join to webhook_receipts
     //    This MUST run BEFORE webhook_receipts are deleted
+    //    NOTE: credit_* rows and orphan Shopify ids (no matching receipt) are
+    //    intentionally NOT purged - they carry no shop domain and expire under 7-day TTL.
     const processedReceiptsJoinCount = await deleteProcessedWebhooksViaReceipts(
       tx,
       shopDomain

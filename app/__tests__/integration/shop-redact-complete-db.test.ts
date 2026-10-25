@@ -90,11 +90,9 @@ describeWithDb("shop/redact complete DB deletion", () => {
     await sql`DELETE FROM s6_bulk_operations WHERE shop IN ${sql(allDomains)}`;
     await sql`DELETE FROM order_outstanding_missing WHERE shop IN ${sql(allDomains)}`;
     await sql`DELETE FROM s10b_customer_pii_fallback WHERE shop IN ${sql(allDomains)}`;
-    // s6_processed_webhooks (reconcile ids contain domain, test near-misses)
-    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE 'reconcile:test-%'`;
-    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE 'xreconcile:test-%'`;
-    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE 'shopify-wh-%'`;
-    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE 'credit_%'`;
+    // s6_processed_webhooks: use test-specific suffix to avoid deleting other tests' rows
+    const testPrefix = `%-${TEST_SUFFIX}%`;
+    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${testPrefix}`;
     // pgmq queue and archive tables
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' IN ${sql(allDomains)}`;
     await sql`DELETE FROM pgmq.q_s6_bulk WHERE message->>'shop' IN ${sql(allDomains)}`;
@@ -1056,5 +1054,122 @@ describeWithDb("shop/redact complete DB deletion", () => {
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id IN ${sql(surviveIds)}`;
     await sql`DELETE FROM webhook_receipts WHERE shop = ${UNINST_DOMAIN_B}`;
     await sql`DELETE FROM "Shop" WHERE id IN (${UNINST_SHOP_ID}, ${UNINST_SHOP_B_ID})`;
+  });
+
+  it("reinstall after uninstall: new webhooks are processed normally, no wrong dedupe", async () => {
+    const REINST_SUFFIX = `reinst-${TEST_SUFFIX}`;
+    const REINST_SHOP_ID = `shop-reinst-${REINST_SUFFIX}`;
+    const REINST_DOMAIN = `test-reinst-${REINST_SUFFIX}.myshopify.com`;
+    const now = new Date();
+
+    // === Phase 1: Initial install and webhook processing ===
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+      VALUES (${REINST_SHOP_ID}, ${REINST_DOMAIN}, 'INR', ${now}, ${now})
+    `;
+
+    // Simulate initial webhooks: create receipts and processed webhook rows
+    const initialWhId1 = `shopify-wh-reinst-init1-${REINST_SUFFIX}`;
+    const initialWhId2 = `shopify-wh-reinst-init2-${REINST_SUFFIX}`;
+    await sql`
+      INSERT INTO webhook_receipts (shop, webhook_id, topic, received_at)
+      VALUES
+        (${REINST_DOMAIN}, ${initialWhId1}, 'ORDERS_CREATE', ${now}),
+        (${REINST_DOMAIN}, ${initialWhId2}, 'ORDERS_UPDATE', ${now})
+    `;
+    await sql`
+      INSERT INTO s6_processed_webhooks (webhook_id, topic, resource_gid, processed_at)
+      VALUES
+        (${initialWhId1}, 'ORDERS_CREATE', 'gid://shopify/Order/reinst-init1', ${now}),
+        (${initialWhId2}, 'ORDERS_UPDATE', 'gid://shopify/Order/reinst-init2', ${now})
+    `;
+
+    // Verify initial state
+    const [initialCounts] = await sql<[{ receipts: string; processed: string }]>`
+      SELECT
+        (SELECT COUNT(*)::text FROM webhook_receipts WHERE shop = ${REINST_DOMAIN}) as receipts,
+        (SELECT COUNT(*)::text FROM s6_processed_webhooks WHERE webhook_id IN (${initialWhId1}, ${initialWhId2})) as processed
+    `;
+    expect(parseInt(initialCounts.receipts, 10)).toBe(2);
+    expect(parseInt(initialCounts.processed, 10)).toBe(2);
+
+    // === Phase 2: Uninstall (simulates app/uninstalled webhook) ===
+    // This deletes receipts and their linked processed_webhooks in one transaction
+    const { processedDeleted, receiptsDeleted } = await sql.begin(async (tx) => {
+      const pwCount = await deleteProcessedWebhooksViaReceipts(tx, REINST_DOMAIN);
+      const rcptResult = await tx`
+        DELETE FROM webhook_receipts WHERE shop = ${REINST_DOMAIN}
+      `;
+      return { processedDeleted: pwCount, receiptsDeleted: rcptResult.count };
+    });
+    expect(processedDeleted).toBe(2);
+    expect(receiptsDeleted).toBe(2);
+
+    // Shop row still exists (full deletion is on shop/redact, 48h later)
+    const [shopExists] = await sql<[{ count: string }]>`
+      SELECT COUNT(*)::text as count FROM "Shop" WHERE id = ${REINST_SHOP_ID}
+    `;
+    expect(parseInt(shopExists.count, 10)).toBe(1);
+
+    // Verify receipts and processed webhooks are gone
+    const [afterUninstall] = await sql<[{ receipts: string; processed: string }]>`
+      SELECT
+        (SELECT COUNT(*)::text FROM webhook_receipts WHERE shop = ${REINST_DOMAIN}) as receipts,
+        (SELECT COUNT(*)::text FROM s6_processed_webhooks WHERE webhook_id IN (${initialWhId1}, ${initialWhId2})) as processed
+    `;
+    expect(parseInt(afterUninstall.receipts, 10)).toBe(0);
+    expect(parseInt(afterUninstall.processed, 10)).toBe(0);
+
+    // === Phase 3: Reinstall and new webhooks ===
+    // Shop reinstalls (in real flow, a new session is created and shop.uninstalledAt is cleared)
+    // Simulate new webhooks arriving after reinstall
+
+    const newWhId1 = `shopify-wh-reinst-new1-${REINST_SUFFIX}`;
+    const newWhId2 = `shopify-wh-reinst-new2-${REINST_SUFFIX}`;
+    // Also test: what if Shopify redelivers an old webhook ID after reinstall?
+    // Current dedupe: receipts are per-shop+webhook_id, so redelivery of initialWhId1
+    // creates a new receipt (since old one was deleted on uninstall).
+    const redeliveredWhId = initialWhId1;
+
+    // Insert new receipts (simulates edge receipt recording)
+    await sql`
+      INSERT INTO webhook_receipts (shop, webhook_id, topic, received_at)
+      VALUES
+        (${REINST_DOMAIN}, ${newWhId1}, 'ORDERS_CREATE', ${now}),
+        (${REINST_DOMAIN}, ${newWhId2}, 'COMPANIES_UPDATE', ${now}),
+        (${REINST_DOMAIN}, ${redeliveredWhId}, 'ORDERS_CREATE', ${now})
+    `;
+
+    // Insert processed webhook rows (simulates drain processing)
+    await sql`
+      INSERT INTO s6_processed_webhooks (webhook_id, topic, resource_gid, processed_at)
+      VALUES
+        (${newWhId1}, 'ORDERS_CREATE', 'gid://shopify/Order/reinst-new1', ${now}),
+        (${newWhId2}, 'COMPANIES_UPDATE', 'gid://shopify/Company/reinst-new2', ${now}),
+        (${redeliveredWhId}, 'ORDERS_CREATE', 'gid://shopify/Order/reinst-redelivered', ${now})
+    `;
+
+    // Verify new webhooks are recorded - no dedupe blocked them wrongly
+    const [afterReinstall] = await sql<[{ receipts: string; processed: string }]>`
+      SELECT
+        (SELECT COUNT(*)::text FROM webhook_receipts WHERE shop = ${REINST_DOMAIN}) as receipts,
+        (SELECT COUNT(*)::text FROM s6_processed_webhooks WHERE webhook_id IN (${newWhId1}, ${newWhId2}, ${redeliveredWhId})) as processed
+    `;
+    expect(parseInt(afterReinstall.receipts, 10)).toBe(3);
+    expect(parseInt(afterReinstall.processed, 10)).toBe(3);
+
+    // Verify the redelivered webhook ID was accepted (it's a new receipt row after reinstall)
+    const [redeliveryCheck] = await sql<[{ receiptExists: string; processedExists: string }]>`
+      SELECT
+        (SELECT COUNT(*)::text FROM webhook_receipts WHERE shop = ${REINST_DOMAIN} AND webhook_id = ${redeliveredWhId}) as "receiptExists",
+        (SELECT COUNT(*)::text FROM s6_processed_webhooks WHERE webhook_id = ${redeliveredWhId}) as "processedExists"
+    `;
+    expect(parseInt(redeliveryCheck.receiptExists, 10)).toBe(1);
+    expect(parseInt(redeliveryCheck.processedExists, 10)).toBe(1);
+
+    // === Cleanup ===
+    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id IN (${newWhId1}, ${newWhId2}, ${redeliveredWhId})`;
+    await sql`DELETE FROM webhook_receipts WHERE shop = ${REINST_DOMAIN}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${REINST_SHOP_ID}`;
   });
 });
