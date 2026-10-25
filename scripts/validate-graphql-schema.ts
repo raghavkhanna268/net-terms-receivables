@@ -147,7 +147,7 @@ export const CUSTOMER_PII_ALLOWLIST: Set<string> = new Set(["email", "displayNam
 /**
  * SCOPE DENYLIST: Fields that require scopes we don't have.
  *
- * Our production scopes (shopify.app.toml): 8 scopes total.
+ * Our production scopes (shopify.app.toml): 9 scopes total.
  * We do NOT have: read_locations, read_inventory, read_markets.
  *
  * This denylist prevents queries that would fail at runtime with

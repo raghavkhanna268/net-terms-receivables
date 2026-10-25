@@ -311,4 +311,4 @@ Per [Shopify Access Scopes documentation](https://shopify.dev/docs/api/usage/acc
 | `write_payment_customizations` | Configure payment method visibility based on account status |
 | `write_validations` | Configure checkout validation to enforce credit limits and holds |
 
-**Protected Customer Data:** The `write_customers` scope (which implies `read_customers`) requires Shopify's Protected Customer Data (PCD) approval. Level 1 access plus Name and Email fields have been approved. The email and display name fields are fetched for tagged customers.
+**Protected Customer Data:** The `write_customers` scope (which implies `read_customers`) requires Shopify's Protected Customer Data (PCD) approval. PCD Level 1 (Name, Email): requested/draft, not approved. The email and display name fields are fetched for tagged customers.

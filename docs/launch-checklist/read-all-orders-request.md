@@ -34,7 +34,7 @@ read_draft_orders,read_payment_terms,write_companies,write_customers,write_merch
 
 After approval, `read_all_orders` will be added. Note: `write_orders` implies `read_orders` per [Shopify Access Scopes](https://shopify.dev/docs/api/usage/access-scopes), so `read_all_orders` extends that implied access. See `docs/scopes.md` for the full scope audit.
 
-> **Note**: This PR does not change scopes. The scope change will be a separate PR after approval is granted.
+> **Note**: This PR adds `read_all_orders` to scopes. Grant pending confirmation.
 
 ## Where to Request
 
