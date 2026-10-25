@@ -23,7 +23,8 @@ export function buildOverLimitBannerState(
   gatedCount: number,
   gatingEnforced: boolean
 ): OverLimitBannerState {
-  if (gatedCount <= 0) {
+  // Don't show over-limit banner when gating is not enforced
+  if (gatedCount <= 0 || !gatingEnforced) {
     return {
       show: false,
       heading: "",
@@ -41,15 +42,11 @@ export function buildOverLimitBannerState(
     "bulk statement import. Matching, confirming a match and mark-paid are " +
     "never gated. Credit holds and the checkout block work on every plan.";
 
-  const enforcementNote = gatingEnforced
-    ? null
-    : "(Limits are not currently enforced.)";
-
   return {
     show: true,
     heading,
     bodyText,
-    enforcementNote,
+    enforcementNote: null,
   };
 }
 
@@ -64,7 +61,8 @@ export function buildAccountOverLimitBannerState(
   isGated: boolean,
   gatingEnforced: boolean
 ): OverLimitBannerState {
-  if (!isGated) {
+  // Don't show over-limit banner when gating is not enforced
+  if (!isGated || !gatingEnforced) {
     return {
       show: false,
       heading: "",
@@ -81,14 +79,10 @@ export function buildAccountOverLimitBannerState(
     "a match and mark-paid are never gated. Credit holds and the checkout block " +
     "work on every plan.";
 
-  const enforcementNote = gatingEnforced
-    ? null
-    : "(Limits are not currently enforced.)";
-
   return {
     show: true,
     heading,
     bodyText,
-    enforcementNote,
+    enforcementNote: null,
   };
 }

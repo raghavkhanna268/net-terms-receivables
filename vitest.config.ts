@@ -90,6 +90,7 @@ const DB_TEST_PATTERNS = [
   "app/services/drain/__tests__/processor-backstop-db.test.ts",
   "app/services/drain/__tests__/reconcile-manual-key-db.test.ts",
   "app/services/drain/__tests__/dlq-sanitize-db.test.ts",
+  "app/services/drain/__tests__/bulk-op-recovery-db.test.ts",
 
   // Compliance DB tests
   "app/services/compliance/__tests__/redact-customer-db.test.ts",
