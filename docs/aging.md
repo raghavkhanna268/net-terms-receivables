@@ -37,7 +37,7 @@ Invoices become overdue 1 day after the due date (end of day, shop time). This m
 
 ### Timezone
 
-All date calculations use the **Asia/Kolkata** timezone. The "as of" date is determined by the start of the current day in IST. This ensures consistent bucket assignment regardless of the server's local time.
+All date calculations use the **shop's configured timezone** (stored in `Shop.timezone`), with **Asia/Kolkata** as the fallback when no timezone is set. The "as of" date is determined by the start of the current day in the shop's timezone. This ensures consistent bucket assignment regardless of the server's local time.
 
 ## Amount Handling
 

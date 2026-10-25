@@ -48,6 +48,56 @@ const HOLD_REASON_OPTIONS: Array<{ value: HoldReasonCode; label: string }> = [
   { value: "FRAUD_SUSPECTED", label: "Fraud suspected" },
 ];
 
+type SyncErrorCategory = "session" | "permission" | "owner" | "generic";
+
+interface SyncErrorInfo {
+  category: SyncErrorCategory;
+  message: string;
+}
+
+const KNOWN_SESSION_ERRORS = [
+  "no_session",
+  "invalid_grant",
+  "token_refresh_failed",
+  "no_refresh_token",
+  "missing_credentials",
+] as const;
+
+function getSyncErrorInfo(errorCode: string | null): SyncErrorInfo {
+  if (errorCode === null) {
+    return {
+      category: "generic",
+      message: "Shopify metafield sync has been stopped after multiple failures. Automatic retries have stopped. Please contact support if this persists.",
+    };
+  }
+
+  if ((KNOWN_SESSION_ERRORS as readonly string[]).includes(errorCode)) {
+    return {
+      category: "session",
+      message: "Shopify metafield sync failed because the app session is missing or expired. Automatic retries have stopped. Please reopen the app or reinstall it to restore the connection.",
+    };
+  }
+
+  if (errorCode === "access_denied") {
+    return {
+      category: "permission",
+      message: "Shopify metafield sync failed because the app is missing required permissions. Automatic retries have stopped. Please reinstall the app to grant the necessary access.",
+    };
+  }
+
+  if (errorCode === "owner_not_found") {
+    return {
+      category: "owner",
+      message: "Shopify metafield sync failed because the company location or customer no longer exists in Shopify. The buyer account may need to be removed or reassigned.",
+    };
+  }
+
+  return {
+    category: "generic",
+    message: "Shopify metafield sync has been stopped after repeated failures. Automatic retries have stopped. Please contact support for assistance.",
+  };
+}
+
 /**
  * Sync state enum for banner display:
  * - pending_retry: syncPending=true, no permanent error, no dead-letter → auto-retries
@@ -86,6 +136,7 @@ interface LoaderData {
     syncErrorCode: string | null;
     syncState: SyncState;
     hasDeadLetteredSync: boolean;
+    syncErrorInfo: SyncErrorInfo | null;
   } | null;
   companyTotals: {
     locationCount: number;
@@ -196,11 +247,15 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
 
   let creditStatus: LoaderData["creditStatus"] = null;
   if (creditStatusDisplay) {
+    const metafieldSyncedAt = creditStatusDisplay.metafieldSyncedAt;
     const [deadLetterRow] = await sql<{ exists: boolean }[]>`
       SELECT EXISTS (
         SELECT 1 FROM s6_dead_letter
-        WHERE message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+        WHERE original_queue = 's6_sync'
+          AND message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
           AND message->>'buyerAccountId' = ${accountId}
+          AND message->>'shop' = ${shopDomain}
+          AND dead_lettered_at > COALESCE(${metafieldSyncedAt}, '-infinity'::timestamptz)
       ) AS exists
     `;
     const hasDeadLetteredSync = deadLetterRow?.exists ?? false;
@@ -216,6 +271,10 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
         syncState = "pending_retry";
       }
     }
+
+    const syncErrorInfo = syncState === "needs_attention"
+      ? getSyncErrorInfo(hasDeadLetteredSync && !syncErrorCode ? null : syncErrorCode)
+      : null;
 
     creditStatus = {
       creditLimitAmount: creditStatusDisplay.creditLimitAmount,
@@ -237,6 +296,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       syncErrorCode,
       syncState,
       hasDeadLetteredSync,
+      syncErrorInfo,
     };
   }
 
@@ -556,24 +616,9 @@ export default function AccountPage() {
 
       {creditStatus && (
         <s-section heading="Credit Status">
-          {creditStatus.syncState === "needs_attention" && (
+          {creditStatus.syncState === "needs_attention" && creditStatus.syncErrorInfo && (
             <s-banner tone="critical" heading="Sync Requires Attention">
-              {creditStatus.syncErrorCode === "no_session" || creditStatus.syncErrorCode === "invalid_grant" ? (
-                <>
-                  Shopify metafield sync failed because the app session is missing or expired.
-                  Automatic retries have stopped. Please reopen the app or reinstall it to restore the connection.
-                </>
-              ) : creditStatus.hasDeadLetteredSync ? (
-                <>
-                  Shopify metafield sync has been stopped after multiple failures.
-                  Automatic retries have stopped. Please contact support if this persists.
-                </>
-              ) : (
-                <>
-                  Shopify metafield sync failed permanently ({creditStatus.syncErrorCode ?? "unknown error"}).
-                  Automatic retries have stopped. Please contact support for assistance.
-                </>
-              )}
+              {creditStatus.syncErrorInfo.message}
             </s-banner>
           )}
           {creditStatus.syncState === "pending_retry" && (

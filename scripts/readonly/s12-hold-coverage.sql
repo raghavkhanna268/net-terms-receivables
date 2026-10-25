@@ -199,8 +199,8 @@ ORDER BY 1, 2;
 SELECT ba.id LIKE 'seed-account-%' AS is_seed, ba.kind, COUNT(*) AS accounts
 FROM "BuyerAccount" ba GROUP BY 1, 2 ORDER BY 1, 2;
 
-\echo '== D syncPending accounts bucketed by pending age (updatedAt reflects when syncPending was last set)'
--- Buckets: <1h, 1-24h, >24h based on updatedAt (the timestamp when syncPending was set true)
+\echo '== D syncPending accounts bucketed by last modified (updatedAt may change for reasons other than syncPending)'
+-- Buckets: <1h, 1-24h, >24h based on updatedAt (account's last modification timestamp, not necessarily when syncPending was set)
 SELECT
   CASE
     WHEN ba."updatedAt" > NOW() - INTERVAL '1 hour' THEN '<1h'
