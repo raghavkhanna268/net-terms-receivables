@@ -128,7 +128,7 @@ Implementation details for shop data deletion:
 1. **Verify** payload `shop_domain` matches header shop (returns 401 on mismatch)
 2. **Delete** all OAuth sessions for the shop (`Session` table)
 3. **Delete** `webhook_receipts` for the shop
-4. **Delete** shop data via `deleteShop` (`app/services/compliance/compliance.server.ts:127-251`) in a single transaction:
+4. **Delete** shop data via `deleteShop` (in `app/services/compliance/compliance.server.ts`) in a single transaction:
    - Non-FK tables with `shop` text column: `s10b_order_refetch_null`, `s6_bulk_operations`, `order_outstanding_missing`, `s10b_customer_pii_fallback`
    - pgmq queue and archive tables: `pgmq.q_s6_sync`, `pgmq.q_s6_bulk`, `pgmq.a_s6_sync`, `pgmq.a_s6_bulk` (messages where `message->>'shop'` matches)
    - Dead-letter queue: `s6_dead_letter` (rows where `message->>'shop'` matches)
@@ -146,25 +146,25 @@ Implementation details for shop data deletion:
 
 **Shop deletion removes queue messages:**
 
-`deleteShop` (`app/services/compliance/compliance.server.ts:88-178`) deletes the shop's messages from:
-- Live queues: `pgmq.q_s6_sync`, `pgmq.q_s6_bulk` (lines 132-139)
-- Archive tables: `pgmq.a_s6_sync`, `pgmq.a_s6_bulk` (lines 140-147)
-- Dead-letter queue: `s6_dead_letter` (lines 152-155)
+`deleteShop` (in `app/services/compliance/compliance.server.ts`) deletes the shop's messages from:
+- Live queues: `pgmq.q_s6_sync`, `pgmq.q_s6_bulk`
+- Archive tables: `pgmq.a_s6_sync`, `pgmq.a_s6_bulk`
+- Dead-letter queue: `s6_dead_letter`
 
 All deletes match `message->>'shop' = shopDomain` and run in a single transaction.
 
-The legacy `purgePgmqMessages` function (`compliance.server.ts:200-211`) is now a no-op kept for backward compatibility; `deleteShop` handles the pgmq cleanup.
+The legacy `purgePgmqMessages` function (in `compliance.server.ts`) is now a no-op kept for backward compatibility; `deleteShop` handles the pgmq cleanup.
 
 **In-flight message edge case:**
 
-pgmq visibility timeout (VT) is not a row lock. When a drain worker holds a message under VT and `deleteShop` runs, `deleteShop` deletes the message row from the queue table (see in-code comment at `compliance.server.ts:123-126`). The test at `app/__tests__/integration/shop-redact-complete-db.test.ts` (the in-flight case, line 666) confirms this behavior.
+pgmq visibility timeout (VT) is not a row lock. When a drain worker holds a message under VT and `deleteShop` runs, `deleteShop` deletes the message row from the queue table (see the in-code comment above the pgmq deletes in `deleteShop`). The test at `app/__tests__/integration/shop-redact-complete-db.test.ts` (the in-flight case) confirms this behavior.
 
 When the worker finishes:
 - If the handler succeeds, its `pgmq.archive()` or `pgmq.delete()` on the now-missing `msg_id` returns `false` without throwing — this is safe.
-- If the handler fails with `retryable: false` (e.g., `no_session` because sessions were deleted), it dead-letters immediately on the first read (`processor.server.ts:1062-1063`). The worker's in-memory copy gets dead-lettered by `moveToDeadLetter` (`processor.server.ts:974-997`), which INSERTs into `s6_dead_letter` **before** calling `pgmq.delete`. This writes the shop's message back after the redact.
+- If the handler fails with `retryable: false` (e.g., `no_session` because sessions were deleted), it dead-letters immediately. The `moveToDeadLetter` function (in `processor.server.ts`) calls `pgmq.delete` **before** inserting into `s6_dead_letter`. If the message was already deleted by `deleteShop`, `pgmq.delete` returns false and the dead-letter insert is skipped — no data is re-created.
 - If the handler fails without `retryable: false` (e.g., `shop_not_found`), the message is dead-lettered only if that read had already reached `maxRetries`; otherwise it's left for retry, and because `deleteShop` removed its queue row, it never comes back.
 
-This race is fixed by [#247](https://github.com/raghavkhanna268/net-terms-receivables/pull/247), which added the FOR UPDATE lock to serialize deleteShop with drain transactions.
+This race is fixed by [#247](https://github.com/raghavkhanna268/net-terms-receivables/pull/247), which added delete-first dead-lettering in `moveToDeadLetter` plus FOR UPDATE (`deleteShop`) / FOR SHARE (drain senders) serialization. Refs [#239](https://github.com/raghavkhanna268/net-terms-receivables/issues/239); part (a) drain-side ack logging is tracked in [#254](https://github.com/raghavkhanna268/net-terms-receivables/pull/254).
 
 **Dead-letter retention:**
 
