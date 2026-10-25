@@ -537,13 +537,12 @@ describeWithDb("drain guards: interleaving with deleteShop (#239)", () => {
     await sql2.end();
   });
 
-  it("Case (a): guard holds FOR SHARE, deleteShop waits, then both complete cleanly", async () => {
-    // Create shop with uninstalledAt set (matches real Shopify behavior where
-    // shop/redact arrives ~48h after uninstall)
-    const uninstalledAt = new Date(Date.now() - 48 * 60 * 60 * 1000);
+  it("Case (a): guard holds FOR SHARE on installed shop, deleteShop waits then skips (reinstall guard)", async () => {
+    // Create shop with uninstalledAt NULL (shop is installed / has reinstalled)
+    // This tests the reinstall guard: shop/redact arrives but shop has reinstalled
     await sql1`
-      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt", "uninstalledAt")
-      VALUES (${SHOP_A_ID}, ${SHOP_A_DOMAIN}, 'INR', NOW(), NOW(), ${uninstalledAt})
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+      VALUES (${SHOP_A_ID}, ${SHOP_A_DOMAIN}, 'INR', NOW(), NOW())
     `;
 
     let guardTxDone = false;
@@ -551,11 +550,12 @@ describeWithDb("drain guards: interleaving with deleteShop (#239)", () => {
     let deleteShopDone = false;
 
     // Connection 1: Start transaction, take FOR SHARE, send message, hold open
-    // This simulates any code path that takes FOR SHARE on the Shop row
+    // This mirrors the drain's real guard query (uninstalledAt IS NULL)
     const guardPromise = sql1.begin(async (tx) => {
       const [shopRow] = await tx<[{ id: string }?]>`
         SELECT id FROM "Shop"
         WHERE domain = ${SHOP_A_DOMAIN}
+          AND "uninstalledAt" IS NULL
         FOR SHARE
       `;
       expect(shopRow).toBeDefined();
@@ -601,17 +601,75 @@ describeWithDb("drain guards: interleaving with deleteShop (#239)", () => {
     await guardPromise;
     expect(guardTxDone).toBe(true);
 
-    // Now deleteShop should complete
+    // Now deleteShop should complete - but it should SKIP because uninstalledAt IS NULL
     const deleteResult = await deletePromise;
     expect(deleteShopDone).toBe(true);
-    expect(deleteResult.deleted).toBe(true);
+    expect(deleteResult.deleted).toBe(false);
+    expect(deleteResult.skippedReinstalled).toBe(true);
+    expect(deleteResult.shopId).toBe(SHOP_A_ID);
 
-    // All shop A data should be gone, including the message sent during the guard
-    const [count] = await sql1<[{ count: string }]>`
+    // Shop row should still exist (not deleted)
+    const [shopCount] = await sql1<[{ count: string }]>`
+      SELECT COUNT(*)::text as count FROM "Shop" WHERE id = ${SHOP_A_ID}
+    `;
+    expect(parseInt(shopCount.count, 10)).toBe(1);
+
+    // The message sent during the guard should still exist (not purged)
+    const [msgCount] = await sql1<[{ count: string }]>`
       SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync
       WHERE message->>'shop' = ${SHOP_A_DOMAIN}
     `;
-    expect(parseInt(count.count, 10)).toBe(0);
+    expect(parseInt(msgCount.count, 10)).toBe(1);
+
+    // Clean up shop and message for next test
+    await sql1`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${SHOP_A_DOMAIN}`;
+    await sql1`DELETE FROM "Shop" WHERE id = ${SHOP_A_ID}`;
+  });
+
+  it("Case (a2): guard sees no row for uninstalled shop, deleteShop erases", async () => {
+    // Create shop with uninstalledAt set (shop was uninstalled)
+    const uninstalledAt = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    await sql1`
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt", "uninstalledAt")
+      VALUES (${SHOP_A_ID}, ${SHOP_A_DOMAIN}, 'INR', NOW(), NOW(), ${uninstalledAt})
+    `;
+
+    // Send a message for this shop
+    await sql1`SELECT pgmq.send('s6_sync', ${sql1.json({
+      shop: SHOP_A_DOMAIN,
+      topic: "RECONCILE_ORDERS",
+      webhookId: `wh-interleave-a2-${INTERLEAVE_SUFFIX}`,
+      enqueuedAt: new Date().toISOString(),
+    })})`;
+
+    // Guard query (uninstalledAt IS NULL) should NOT find this shop
+    const [guardResult] = await sql1<[{ id: string }?]>`
+      SELECT id FROM "Shop"
+      WHERE domain = ${SHOP_A_DOMAIN}
+        AND "uninstalledAt" IS NULL
+      FOR SHARE
+    `;
+    expect(guardResult).toBeUndefined();
+
+    // deleteShop should delete the shop (uninstalledAt is set)
+    const { deleteShop } = await import("~/services/compliance/compliance.server");
+    const deleteResult = await deleteShop(sql1, SHOP_A_DOMAIN);
+    expect(deleteResult.deleted).toBe(true);
+    expect(deleteResult.skippedReinstalled).toBe(false);
+    expect(deleteResult.shopId).toBe(SHOP_A_ID);
+
+    // Shop row should be gone
+    const [shopCount] = await sql1<[{ count: string }]>`
+      SELECT COUNT(*)::text as count FROM "Shop" WHERE id = ${SHOP_A_ID}
+    `;
+    expect(parseInt(shopCount.count, 10)).toBe(0);
+
+    // Message should be purged
+    const [msgCount] = await sql1<[{ count: string }]>`
+      SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync
+      WHERE message->>'shop' = ${SHOP_A_DOMAIN}
+    `;
+    expect(parseInt(msgCount.count, 10)).toBe(0);
   });
 
   it("Case (b): deleteShop runs first, guard sees no row and enqueues nothing", async () => {
