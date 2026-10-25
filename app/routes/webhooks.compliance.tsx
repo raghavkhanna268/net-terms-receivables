@@ -68,7 +68,7 @@ async function fetchShopOwnerEmail(shop: string): Promise<string | null> {
  * Security: All handlers verify payload shop_domain matches header shop.
  * This prevents attackers from forging payloads to delete wrong shop's data.
  */
-export const action = async ({ request, context }: ActionFunctionArgs) => {
+export const action = async ({ request }: ActionFunctionArgs) => {
   const apiSecret = process.env.SHOPIFY_API_SECRET;
   if (!apiSecret) {
     console.error("[Compliance] SHOPIFY_API_SECRET not configured");
@@ -211,26 +211,28 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     case "SHOP_REDACT": {
       const payloadShop = verifyPayloadShopMatch(shop, payload);
 
-      const { sessionStorage } = context;
-      const sessionCount = await sessionStorage.deleteAllForShop(payloadShop);
-      console.log(
-        `[Compliance] shop/redact: Deleted ${sessionCount} session(s) wh=${webhookId}`
-      );
-
       const pgmqResult = await purgePgmqMessages(sql, payloadShop);
       console.log(
         `[Compliance] shop/redact: pgmq purge - ${pgmqResult.reason}`
       );
 
-      // deleteShop now handles webhook_receipts and s6_processed_webhooks internally
-      // to ensure proper ordering (join delete before receipts delete)
+      // deleteShop handles sessions, webhook_receipts, and s6_processed_webhooks
+      // internally within its transaction. Sessions are only deleted when the
+      // shop is actually being erased (not skipped by reinstall guard). See #291.
       const result = await deleteShop(sql, payloadShop);
       const hash = await shopHash(payloadShop);
 
-      if (result.deleted) {
+      if (result.skippedReinstalled) {
+        // Shop reinstalled within the 48h window before shop/redact arrived (#291).
+        // Skip deletion to preserve the reinstalled shop's data.
+        safeLog("info", "shop_redact_skipped_reinstalled", {
+          shopHash: hash,
+        });
+      } else if (result.deleted) {
         safeLog("info", "shop_redact_deleted", {
           shopHash: hash,
           webhookId,
+          sessionsDeleted: result.sessionsDeleted,
           refetchNullPurged: result.refetchNullPurged,
           bulkOperationsPurged: result.bulkOperationsPurged,
           orderGapPurged: result.orderGapPurged,

@@ -665,10 +665,7 @@ describeWithDb("CompanyLocation Sync", () => {
   });
 
   describe("shop/redact deletes BuyerAccount", () => {
-    // FIXME: This test passes locally but fails in CI due to database transaction isolation
-    // differences. The shop is created and verified, but deleteShop returns deleted:false.
-    // This is unrelated to the mainContact feature - needs separate investigation.
-    it.skip("removes BuyerAccount row entirely on shop deletion", async () => {
+    it("removes BuyerAccount row entirely on shop deletion", async () => {
       const { deleteShop } = await import("../../compliance/compliance.server");
 
       const redactShopId = `shop-redact-${TEST_SUFFIX}`;
@@ -679,17 +676,13 @@ describeWithDb("CompanyLocation Sync", () => {
       await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${redactShopId}`;
       await sql`DELETE FROM "Shop" WHERE id = ${redactShopId}`;
 
+      // Per #303: deleteShop skips erase when uninstalledAt IS NULL (shop reinstalled).
+      // Set uninstalledAt to simulate a genuinely uninstalled shop awaiting redact.
+      const uninstalledAt = new Date(Date.now() - 48 * 60 * 60 * 1000); // 48h ago
       await sql`
-        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
-        VALUES (${redactShopId}, ${redactDomain}, NOW(), NOW())
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt", "uninstalledAt")
+        VALUES (${redactShopId}, ${redactDomain}, NOW(), NOW(), ${uninstalledAt})
       `;
-
-      // Verify the shop was created
-      const [createdShop] = await sql<{ id: string; domain: string }[]>`
-        SELECT id, domain FROM "Shop" WHERE id = ${redactShopId}
-      `;
-      expect(createdShop).toBeDefined();
-      expect(createdShop.domain).toBe(redactDomain);
 
       await sql`
         INSERT INTO "BuyerAccount" (
@@ -711,7 +704,9 @@ describeWithDb("CompanyLocation Sync", () => {
 
       const result = await deleteShop(sql, redactDomain);
       expect(result.deleted).toBe(true);
+      expect(result.skippedReinstalled).toBe(false);
 
+      // BuyerAccount row should be gone (cascade delete)
       const after = await sql`
         SELECT id FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
       `;

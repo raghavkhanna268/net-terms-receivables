@@ -48,6 +48,8 @@ import {
 import { buildAccountOverLimitBannerState } from "~/lib/over-limit-banner";
 import type { HoldReasonCode } from "~/lib/metafields-contract";
 import { getSyncErrorInfo, type SyncErrorInfo } from "~/lib/sync-error-info";
+import { safeLog } from "~/lib/log.server";
+import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 
 const HOLD_REASON_OPTIONS: Array<{ value: HoldReasonCode; label: string }> = [
   { value: "MANUAL_HOLD", label: "Manual hold" },
@@ -75,7 +77,7 @@ interface LoaderData {
     defaultTermsSource: "explicit" | "tag" | null;
     isGated: boolean;
   } | null;
-  upgradeUrl: string;
+  upgradeUrl: string | null;
   creditStatus: {
     creditLimitAmount: number | null;
     creditLimitPaise: string | null;
@@ -146,9 +148,14 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
   const shopDomain = session.shop;
   const accountId = params.id;
 
-  const storeHandle = shopDomain.replace(".myshopify.com", "");
-  const appHandle = process.env.APP_HANDLE ?? "net-terms-receivables";
-  const upgradeUrl = `https://admin.shopify.com/store/${storeHandle}/charges/${appHandle}/pricing_plans`;
+  const upgradeUrl = (() => {
+    const handle = getAppHandle();
+    if (handle === null) {
+      safeLog("warn", "plan_url_app_handle_missing", {});
+      return null;
+    }
+    return buildPlanSelectionUrl(shopDomain, handle);
+  })();
 
   if (!accountId) {
     return {
@@ -648,9 +655,11 @@ export default function AccountPage() {
                   {bannerState.bodyText}
                   {bannerState.enforcementNote && ` ${bannerState.enforcementNote}`}
                 </s-text>
-                <s-button href={upgradeUrl} target="_top" variant="secondary">
-                  Upgrade
-                </s-button>
+                {upgradeUrl && (
+                  <s-button href={upgradeUrl} target="_top" variant="secondary">
+                    Upgrade
+                  </s-button>
+                )}
               </s-stack>
             </s-banner>
           </s-section>
@@ -878,9 +887,11 @@ export default function AccountPage() {
                   Credit limit and account detail editing requires an upgrade. Holds still
                   work on all plans.
                 </s-text>
-                <s-button href={upgradeUrl} target="_top" variant="secondary">
-                  Upgrade
-                </s-button>
+                {upgradeUrl && (
+                  <s-button href={upgradeUrl} target="_top" variant="secondary">
+                    Upgrade
+                  </s-button>
+                )}
               </s-stack>
             </s-banner>
             <Form method="post">

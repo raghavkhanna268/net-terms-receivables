@@ -74,6 +74,7 @@ const DB_TEST_PATTERNS = [
   "app/__tests__/integration/s20-idempotency.test.ts",
   "app/__tests__/integration/s22-compliance.test.ts",
   "app/__tests__/integration/shop-redact-complete-db.test.ts",
+  "app/__tests__/integration/shop-redact-reinstall-guard-db.test.ts",
   "app/__tests__/integration/s5-schema.test.ts",
   "app/__tests__/integration/light-session-storage.test.ts",
   "app/__tests__/integration/prisma-session-storage.test.ts",
@@ -84,6 +85,7 @@ const DB_TEST_PATTERNS = [
   "app/services/__tests__/reminders-catchup-db.test.ts",
   "app/services/__tests__/reminders-uninstalled-db.test.ts",
   "app/services/__tests__/reminder-optout-db.test.ts",
+  "app/services/__tests__/retention-db.test.ts",
 
   // Drain processor DB tests
   "app/services/drain/__tests__/processor-backstop-db.test.ts",
