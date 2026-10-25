@@ -1,7 +1,5 @@
 # App Store Listing — Net Terms Receivables
 
-> **Status:** Draft for QA review. Features marked ⚠️ depend on unmerged PRs.
-
 ---
 
 ## App Name
@@ -10,143 +8,212 @@
 
 ---
 
-## Tagline (80 characters max)
+## App Introduction
 
-B2B net-terms invoicing, credit limits, and Indian bank payment matching
-
----
-
-## Introduction (Brief Description)
-
-Net Terms Receivables helps Indian B2B wholesale merchants manage payment terms, track outstanding invoices, enforce credit limits, and match bank transfer payments (NEFT/RTGS/IMPS/UPI) to orders — all within Shopify.
+<!-- 88 characters -->
+Track B2B net-terms invoices, manage credit limits and holds, match Indian bank payments
 
 ---
 
-## Key Features
+## App Details
 
-### ✅ Available Now (main branch)
+<!-- 490 characters -->
+Net Terms Receivables helps Indian wholesale merchants track outstanding invoices, enforce credit limits, and reconcile bank payments — without spreadsheets. Sync buyer accounts from Shopify B2B Companies or tagged Customers. Track open invoices by aging bucket. Set credit limits and manual holds per buyer. Block checkout or hide payment methods for held accounts. Import Indian bank statements and confirm matches to mark orders paid. Send payment reminders before and after due dates.
 
-- **Shopify OAuth Integration** — Secure embedded app with session management
-- **Shop Configuration** — Set default payment terms, timezone (for due date calculations), and currency (INR)
-- **GDPR/CCPA Compliance** — Handles `customers/data_request`, `customers/redact`, and `shop/redact` webhooks
-- **Webhook HMAC Verification** — All webhooks verified with constant-time HMAC-SHA256
-
-### ⚠️ Coming with PR #28 (S6 — Company & Order Sync)
-
-- **B2B Company Sync** — Automatically create buyer accounts from Shopify B2B Companies and CompanyLocations
-- **Order Invoice Sync** — Create invoices from orders with payment terms (NET 15/30/60, fixed dates)
-- **Bulk Backfill** — Import existing companies and orders via Shopify's bulk operations API
-- **Payment Terms Tracking** — Due dates computed from order payment terms schedules
-
-### ⚠️ Coming with PR #32 (S8 — Tag Rules & Customer Sync)
-
-- **Tag-Based Buyer Accounts** — Map customer tags (e.g., "net30", "wholesale") to default payment terms
-- **Customer Sync** — Track tagged customers as net-terms buyers
-- **Draft Order Tracking** — Track draft orders with payment terms for pending credit exposure
-- **Tag Activation/Deactivation** — Graceful handling when tags are added or removed
-
-### Planned Features (Not Yet Implemented)
-
-- **Credit Limit Enforcement** — Set per-buyer credit limits with hold states (OK, NEAR_LIMIT, HELD)
-- **Indian Bank Statement Import** — Upload HDFC, ICICI, or mapped CSV statements
-- **Payment Matching** — Automatic and manual matching of bank payments to invoices
-- **Payment Reminders** — Email reminders before, on, or after due dates (via Resend)
-- **Aging Reports** — Track overdue invoices and DSO metrics
-- **GST Invoice Numbers** — Indian tax compliance fields
+**This app does not lend money, provide financing, or purchase/factor receivables.** It helps merchants track payment terms they extend themselves (App Store requirement 1.1.16).
 
 ---
 
-## Pricing
+## Feature List
 
-**TBD**
+<!-- Each feature ≤80 characters -->
+- Sync buyer accounts from B2B Companies or tagged Customers <!-- 57 chars -->
+- Track invoices with aging buckets (current through 90+ days) <!-- 60 chars -->
+- Set credit limits and manual holds per buyer <!-- 45 chars -->
+- Block checkout when accounts are on hold or over limit <!-- 54 chars -->
+- Hide payment methods for held accounts at checkout <!-- 50 chars -->
+- Import HDFC, ICICI, SBI, Axis bank statements (browser-side) <!-- 61 chars -->
+- Match payments to invoices; confirm to mark orders paid <!-- 55 chars -->
+- Send payment reminders before and after due dates <!-- 49 chars -->
 
-Options under consideration:
-- Free tier with limits
-- Paid tier via Shopify Billing API
+---
+
+## Pricing Details
+
+**[OWNER]** Pricing not finalized. Create plans in Partner Dashboard before submission.
+
+Spec: Define pricing tiers in the Partner Dashboard "Pricing" section. Use Shopify App Pricing (recommended) or Billing API. Include free trial if applicable.
+Ref: https://shopify.dev/docs/apps/launch/billing
+
+---
+
+## App Icon
+
+**[OWNER]** Upload a 1200×1200 px square JPEG or PNG.
+
+Spec: Bold colors, simple pattern, no text or Shopify trademarks. Corners are rounded automatically.
+Ref: https://shopify.dev/docs/apps/launch/app-requirements-checklist (section 5, "App icon")
+
+---
+
+## Feature Image
+
+**[OWNER]** Upload a 1600×900 px (16:9) image.
+
+Spec: One focal point, solid background with 4.5:1 contrast. No Shopify logos, no pricing, no app card subtitle text.
+Ref: https://shopify.dev/docs/apps/launch/app-requirements-checklist (section 5, "Feature media")
 
 ---
 
 ## Screenshots
 
-**TBD** — Screenshots to be added after UI implementation
+**[OWNER]** Upload 3–6 desktop screenshots at 1600×900 px.
 
-Planned screenshots:
-1. Dashboard with outstanding receivables
-2. Buyer account list with credit status
-3. Invoice detail with payment history
-4. Bank statement import
-5. Payment matching interface
+Required:
+1. Dashboard with aging summary and buyer ledger
+2. Buyer account page with credit status and invoices
+3. Bank statement import (parsed preview)
+4. Payment reconciliation queue
+5. Reminder settings
+6. (Optional) Tag rules for non-B2B stores
 
----
-
-## Demo Video
-
-**TBD** — Video walkthrough to be recorded after core features complete
+Spec: Crop out browser chrome. No PII (blur customer names/emails). No pricing. Include alt text.
+Ref: https://shopify.dev/docs/apps/launch/app-requirements-checklist (section 5, "Screenshots")
 
 ---
 
-## Support
+## Demo Screencast
 
-- **Support Email:** **TBD**
-- **Documentation:** **TBD**
-- **Response Time SLA:** **TBD**
+**[OWNER]** Provide an English screencast URL (2–3 minutes).
+
+Spec: Show onboarding, key features as described in listing. Limit screencasts to 25% of video; keep it promotional. English audio or subtitles required.
+Ref: https://shopify.dev/docs/apps/launch/app-requirements-checklist (section 5, "Include a demo screencast")
+
+---
+
+## Demo Store & Test Instructions
+
+**[OWNER]** Provide a demo store URL and reviewer instructions.
+
+Spec: Link directly to the page demonstrating app functionality. Include test credentials if needed. Explain how to trigger key flows (e.g., "Import the sample bank statement at /app/imports").
+Ref: https://shopify.dev/docs/apps/launch/app-requirements-checklist (section 5, "Demo store URL" and "Include test credentials")
+
+---
+
+## Support Contact
+
+**[OWNER]** Provide support email (e.g., support@example.com).
+
+Spec: Must be a monitored email. Response time SLA recommended.
+
+---
+
+## Emergency Developer Contact
+
+**[OWNER]** Add to Partner Dashboard: email and phone.
+
+Spec: Partner Dashboard → Account → Emergency developer contact. Required before App Store submission.
+Ref: https://shopify.dev/docs/apps/launch/app-requirements-checklist (section 4.5.6)
+
+---
+
+## Privacy Policy URL
+
+**[OWNER]** Host privacy policy at a public URL (the app's `/privacy` route once `docs/privacy.md` TBDs are filled).
+
+Spec: URL must be accessible without authentication. Fill all TBD items in `docs/privacy.md`, then deploy.
+Ref: https://shopify.dev/docs/apps/launch/app-requirements-checklist (section 5, "Privacy policy")
+
+---
+
+## Permissions and Data Access
+
+### OAuth Scopes (8 total)
+
+Write scopes include read access to the same resource type. See [Access scopes](https://shopify.dev/docs/api/usage/access-scopes).
+
+| Scope | Why the app needs it |
+|-------|----------------------|
+| `read_draft_orders` | Track pending draft orders with payment terms to calculate credit exposure before orders are finalized. |
+| `read_payment_terms` | Read payment terms on orders and company locations to compute invoice due dates. |
+| `write_companies` | Write credit-status metafields to Company and CompanyLocation; also reads B2B company data for buyer account sync. |
+| `write_customers` | Write credit-status metafields to Customer; also reads customer tags and email/name for buyer account sync and reminders. |
+| `write_merchant_managed_fulfillment_orders` | Place and release fulfillment holds on orders from accounts that are overdue or on credit hold. |
+| `write_orders` | Mark orders as paid after the merchant confirms a bank payment match, add/remove tags (e.g., overdue); also reads orders to sync invoices. |
+| `write_payment_customizations` | Register and update the Payment Customization Function that hides the terms payment method for held accounts. |
+| `write_validations` | Register and update the Cart Validation Function that blocks checkout for accounts on hold or over their credit limit. |
+
+### Protected Customer Data
+
+The app accesses **Level 1 + Name + Email** protected customer fields.
+
+| Field | Accessed | Purpose |
+|-------|----------|---------|
+| `id` | Yes | Link customers to buyer accounts |
+| `tags` | Yes | Match tag rules for net-terms eligibility |
+| `email` | Yes | Payment reminders; payment matching |
+| `displayName` | Yes | Display in buyer ledger; payment matching |
+| Phone, addresses | **No** | Not requested, blocked in code |
+
+Only `email` and `displayName` are persisted (controlled by `CUSTOMER_PII_FIELDS` env var). Phone and address fields are explicitly forbidden and rejected by `validateNoForbiddenFields()`.
+
+### What the App Writes to Shopify
+
+- **Metafields** (`$app:credit_status`): Credit limit, exposure, hold state synced to Company/CompanyLocation/Customer for use by Shopify Functions.
+- **Fulfillment holds**: Places/releases holds on merchant-managed fulfillment orders.
+- **Order mutations**: `orderMarkAsPaid` after confirmed bank matches; `tagsAdd`/`tagsRemove` for overdue or hold tags.
+- **Function registrations**: Creates/updates the Cart Validation and Payment Customization Functions.
 
 ---
 
 ## App Categories
 
-Suggested categories for Shopify App Store:
 - **Primary:** Orders and shipping → Orders → Invoices and receipts
 - **Secondary:** Store management → Finances → Accounting
-- **Note:** Confirm category availability in Partner Dashboard before submission
-- **Reference:** [Shopify App Listing Categories](https://shopify.dev/docs/apps/launch/app-store-review/app-listing-categories)
 
 ---
 
 ## Merchant Requirements
 
-- **Shopify Plan:** Basic, Grow, Advanced, or Shopify Plus ([B2B features by plan](https://help.shopify.com/en/manual/b2b))
-- **Region:** Optimized for Indian merchants (bank statement formats, INR currency, IST timezone)
-- **B2B:** B2B features require B2B to be enabled on the store (not available on Starter or Retail plans)
+- **Shopify Plan:** Basic, Grow, Advanced, or Shopify Plus
+- **B2B (optional):** B2B features require B2B on the store (not available on Starter or Retail plans)
+- **Region:** Optimized for Indian merchants (bank statement formats for HDFC, ICICI, SBI, Axis; INR currency; IST timezone)
 
 ---
 
 ## Technical Details
 
-- **Embedded App:** Yes (uses Shopify App Bridge)
+- **Embedded App:** Yes (Shopify App Bridge)
 - **Session Tokens:** Yes (no third-party cookies)
-- **Hosting:** Cloudflare Workers (edge runtime)
+- **Hosting:** Cloudflare Workers
 - **Database:** Supabase Postgres (Mumbai region)
-
----
-
-## Permissions Requested
-
-**Current (main branch):** No scopes requested
-
-**⚠️ After PR #28 (S6):**
-
-| Scope | Purpose |
-|-------|---------|
-| `read_companies` | Access B2B companies and locations for buyer accounts |
-| `read_orders` | Access orders to create invoices (60-day window without `read_all_orders`) |
-| `read_payment_terms` | Access payment terms on orders and company locations |
-| `read_customers` | Access customers with net-terms tags |
-| `read_draft_orders` | Access draft orders for pending credit exposure |
-
-**Note:** These are read-only scopes. The app does not modify orders, customers, or companies.
-
-**Protected Customer Data:** `read_customers` and `read_orders` require Shopify's PCD access approval.
 
 ---
 
 ## Data Handling
 
-- **Privacy Policy:** See `docs/privacy.md`
-- **Data Location:** India (AWS ap-south-1 Mumbai)
-- **GDPR Webhooks:** Handled
-- **No Data Selling:** We do not sell merchant or customer data
+- **Privacy Policy:** `/privacy` route (see `docs/privacy.md`)
+- **Data Location:** India (Mumbai)
+- **GDPR/CCPA Webhooks:** `customers/data_request`, `customers/redact`, `shop/redact` handled
+- **Data Sales:** We do not sell merchant or customer data
 
 ---
 
-*This listing draft describes features based on the current main branch and open PRs #28 and #32. Features marked ⚠️ are not yet merged. All **TBD** items require decisions before App Store submission.*
+## Partner Dashboard Steps
+
+**[OWNER]** Before submission:
+
+1. Upload app icon (1200×1200)
+2. Upload feature image (1600×900)
+3. Upload 3–6 screenshots (1600×900) with alt text
+4. Add screencast URL
+5. Set demo store URL and test instructions
+6. Set support email
+7. Add emergency developer contact (email + phone)
+8. Set privacy policy URL
+9. Configure pricing plans
+10. Submit for review
+
+---
+
+*This listing describes features merged on main as of 2026-10-25. All **[OWNER]** items require decisions or assets before App Store submission.*
