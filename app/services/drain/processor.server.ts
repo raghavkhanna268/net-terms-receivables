@@ -1121,8 +1121,9 @@ async function loadShopCurrencies(
   }
 
   const uniqueDomains = [...new Set(shopDomains)];
+  // Note: use IN ${sql(ids)} instead of ANY(${ids}) for fetch_types:false compatibility
   const rows = await sql<{ domain: string; currency: string | null }[]>`
-    SELECT domain, currency FROM "Shop" WHERE domain = ANY(${sql.array(uniqueDomains)})
+    SELECT domain, currency FROM "Shop" WHERE domain IN ${sql(uniqueDomains)}
   `;
 
   const result = new Map<string, string | undefined>();

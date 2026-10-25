@@ -23,7 +23,12 @@ import {
 import type { Sql } from "~/lib/db-light.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { buildOverLimitBannerState } from "~/lib/over-limit-banner";
-import { isShopCurrencySupported, NO_CURRENCY_SENTINEL, validateCurrencyCode } from "~/lib/shop-currency.server";
+import {
+  isShopCurrencySupported,
+  NO_CURRENCY_SENTINEL,
+  validateCurrencyCode,
+  CURRENCY_NOT_SUPPORTED_BANNER_COPY,
+} from "~/lib/shop-currency.server";
 
 const PAGE_SIZE = 20;
 
@@ -816,9 +821,7 @@ export default function Index() {
       {!currencySupported && (
         <s-section>
           <s-banner tone="critical" heading="Currency Not Supported">
-            Termwise is built for Indian merchants and currently supports INR only.
-            To use it, change your store currency to Indian Rupee (INR) in Shopify
-            admin → Settings → Store details / Markets, then reload this page.
+            {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
           </s-banner>
         </s-section>
       )}

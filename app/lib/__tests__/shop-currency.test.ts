@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   SUPPORTED_SHOP_CURRENCY,
   NO_CURRENCY_SENTINEL,
+  CURRENCY_NOT_SUPPORTED_BANNER_COPY,
   isShopCurrencySupported,
   validateCurrencyCode,
 } from "../shop-currency.server";
@@ -13,6 +14,15 @@ describe("shop-currency constants", () => {
 
   it("NO_CURRENCY_SENTINEL is XXX", () => {
     expect(NO_CURRENCY_SENTINEL).toBe("XXX");
+  });
+
+  it("CURRENCY_NOT_SUPPORTED_BANNER_COPY contains required elements", () => {
+    expect(CURRENCY_NOT_SUPPORTED_BANNER_COPY).toContain("Termwise is built for Indian merchants");
+    expect(CURRENCY_NOT_SUPPORTED_BANNER_COPY).toContain("INR only");
+    expect(CURRENCY_NOT_SUPPORTED_BANNER_COPY).toContain("store owner must change");
+    expect(CURRENCY_NOT_SUPPORTED_BANNER_COPY).toContain("Settings → General → Store defaults");
+    expect(CURRENCY_NOT_SUPPORTED_BANNER_COPY).toContain("Change store currency");
+    expect(CURRENCY_NOT_SUPPORTED_BANNER_COPY).toContain("Shopify asks you to confirm");
   });
 });
 

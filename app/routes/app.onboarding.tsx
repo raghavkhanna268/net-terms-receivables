@@ -40,7 +40,7 @@ import {
   type InitialSyncStatus,
   type InitialSyncState,
 } from "~/lib/initial-sync.server";
-import { isShopCurrencySupported } from "~/lib/shop-currency.server";
+import { isShopCurrencySupported, CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency.server";
 
 /**
  * Client-side version of canStartSync to avoid importing server-only module in client code.
@@ -840,9 +840,7 @@ export default function OnboardingPage() {
       {!currencySupported && (
         <s-section>
           <s-banner tone="critical" heading="Currency Not Supported">
-            Termwise is built for Indian merchants and currently supports INR only.
-            To use it, change your store currency to Indian Rupee (INR) in Shopify
-            admin → Settings → Store details / Markets, then reload this page.
+            {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
           </s-banner>
         </s-section>
       )}
