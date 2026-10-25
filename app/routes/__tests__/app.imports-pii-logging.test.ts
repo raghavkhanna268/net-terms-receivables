@@ -187,13 +187,17 @@ describeWithDb("PII never logged to console or Sentry on import path (with REAL 
     testShopId = shop.id;
 
     // Create a BuyerAccount with PII marker in name (for matcher to fuzzy match)
+    // Use TAGGED_CUSTOMER kind which requires customerId per BuyerAccount_kind_consistency constraint
+    const testCustomerId = `gid://shopify/Customer/pii-test-${Date.now()}`;
     const [buyer] = await sql<{ id: string }[]>`
       INSERT INTO "BuyerAccount" (
-        "shopId", kind, name, "createdAt", "updatedAt"
+        "shopId", kind, "customerId", name, "holdState", "createdAt", "updatedAt"
       ) VALUES (
         ${testShopId}, 
-        'TAGGED_CUSTOMER', 
+        'TAGGED_CUSTOMER',
+        ${testCustomerId},
         ${PII_MARKERS.buyerName},
+        'OK',
         NOW(), 
         NOW()
       )

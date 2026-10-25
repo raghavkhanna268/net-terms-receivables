@@ -282,8 +282,9 @@ describeWithDb("Server-side rejection with no DB writes", () => {
     expect(payments.length).toBe(1);
     const payment = payments[0];
 
-    // Known fields should be present
-    expect(payment.amountPaise).toBe(75000);
+    // Known fields should be present (DB uses 'amount' Decimal, not 'amountPaise')
+    // 75000 paise = 750.00 rupees
+    expect(Number(payment.amount)).toBe(750);
     expect(payment.rail).toBe("NEFT");
     expect(payment.narration).toBe("NEFT CR-EXTRA-FIELDS-TEST-MARKER");
 
@@ -328,8 +329,8 @@ describeWithDb("Server-side rejection with no DB writes", () => {
     expect(imports.length).toBe(1);
     const bankImport = imports[0];
 
-    // Known fields should be present
-    expect(bankImport.bank).toBe("HDFC");
+    // Known fields should be present (bank is stored lowercase)
+    expect(bankImport.bank).toBe("hdfc");
     expect(bankImport.fileName).toBe("toplevel-extra.csv");
 
     // Extra top-level fields should NOT be stored

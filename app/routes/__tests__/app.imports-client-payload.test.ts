@@ -209,8 +209,8 @@ describe("buildImportPayload: no raw file data, only mapped credits", () => {
   });
 });
 
-describe("Server-side validation: ignores extra fields", () => {
-  it("ignores direction field in credits (not rejected, not passed through)", () => {
+describe("Server-side validation: extra fields pass through", () => {
+  it("accepts and passes through direction field in credits (not stripped)", () => {
     const payload = {
       bank: "HDFC",
       fileName: "test.csv",
@@ -220,16 +220,20 @@ describe("Server-side validation: ignores extra fields", () => {
           amountPaise: 100000,
           rail: "NEFT",
           narration: "NEFT CR-TEST",
-          direction: "DR", // Extra field - should be ignored
+          direction: "DR", // Extra field - passes through validation
         },
       ],
     };
     
     const result = validateImportRequest(payload);
     
-    // Validation passes (extra field ignored, not rejected)
+    // Validation passes
     expect(result.valid).not.toBeNull();
     expect(result.errors.length).toBe(0);
+    
+    // Direction field IS passed through (validateImportRequest does `as CreditRow[]` cast)
+    // The DB insert only uses known columns, so it won't be stored
+    expect((result.valid!.credits[0] as unknown as Record<string, unknown>).direction).toBe("DR");
   });
 
   it("ignores top-level file field (base64 data not passed through)", () => {
