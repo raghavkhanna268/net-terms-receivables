@@ -30,11 +30,13 @@ describe("sendViaResend", () => {
       );
 
       expect(result.sent).toBe(false);
-      expect(result.skipped).toBe(true);
-      if (result.skipped) {
-        expect(result.reason).toBe("recipient_allowlist_empty");
-        expect(result.skippedCount).toBe(1);
-        expect(result.allowedCount).toBe(0);
+      if (!result.sent) {
+        expect(result.skipped).toBe(true);
+        if (result.skipped) {
+          expect(result.reason).toBe("recipient_allowlist_empty");
+          expect(result.skippedCount).toBe(1);
+          expect(result.allowedCount).toBe(0);
+        }
       }
       expect(mockFetch).not.toHaveBeenCalled();
     });
@@ -51,9 +53,11 @@ describe("sendViaResend", () => {
       );
 
       expect(result.sent).toBe(false);
-      expect(result.skipped).toBe(true);
-      if (result.skipped) {
-        expect(result.reason).toBe("recipient_allowlist_empty");
+      if (!result.sent) {
+        expect(result.skipped).toBe(true);
+        if (result.skipped) {
+          expect(result.reason).toBe("recipient_allowlist_empty");
+        }
       }
       expect(mockFetch).not.toHaveBeenCalled();
     });
@@ -70,11 +74,13 @@ describe("sendViaResend", () => {
       );
 
       expect(result.sent).toBe(false);
-      expect(result.skipped).toBe(true);
-      if (result.skipped) {
-        expect(result.reason).toBe("recipient_not_allowlisted");
-        expect(result.skippedCount).toBe(1);
-        expect(result.allowedCount).toBe(0);
+      if (!result.sent) {
+        expect(result.skipped).toBe(true);
+        if (result.skipped) {
+          expect(result.reason).toBe("recipient_not_allowlisted");
+          expect(result.skippedCount).toBe(1);
+          expect(result.allowedCount).toBe(0);
+        }
       }
       expect(mockFetch).not.toHaveBeenCalled();
     });
@@ -223,11 +229,13 @@ describe("sendViaResend", () => {
       );
 
       expect(result.sent).toBe(false);
-      expect(result.skipped).toBe(true);
-      if (result.skipped) {
-        expect(result.reason).toBe("recipient_not_allowlisted");
-        expect(result.skippedCount).toBe(3);
-        expect(result.allowedCount).toBe(0);
+      if (!result.sent) {
+        expect(result.skipped).toBe(true);
+        if (result.skipped) {
+          expect(result.reason).toBe("recipient_not_allowlisted");
+          expect(result.skippedCount).toBe(3);
+          expect(result.allowedCount).toBe(0);
+        }
       }
       expect(mockFetch).not.toHaveBeenCalled();
     });
@@ -266,10 +274,12 @@ describe("sendViaResend", () => {
       );
 
       expect(result.sent).toBe(false);
-      expect(result.skipped).toBe(false);
-      if (!result.skipped && !result.sent) {
-        expect(result.error).toBe("resend_no_api_key");
-        expect(result.retryable).toBe(false);
+      if (!result.sent) {
+        expect(result.skipped).toBe(false);
+        if (!result.skipped) {
+          expect(result.error).toBe("resend_no_api_key");
+          expect(result.retryable).toBe(false);
+        }
       }
       expect(mockFetch).not.toHaveBeenCalled();
     });
@@ -286,9 +296,11 @@ describe("sendViaResend", () => {
       );
 
       expect(result.sent).toBe(false);
-      expect(result.skipped).toBe(false);
-      if (!result.skipped && !result.sent) {
-        expect(result.error).toBe("resend_no_api_key");
+      if (!result.sent) {
+        expect(result.skipped).toBe(false);
+        if (!result.skipped) {
+          expect(result.error).toBe("resend_no_api_key");
+        }
       }
       expect(mockFetch).not.toHaveBeenCalled();
     });
@@ -312,11 +324,13 @@ describe("sendViaResend", () => {
       );
 
       expect(result.sent).toBe(false);
-      expect(result.skipped).toBe(false);
-      if (!result.skipped && !result.sent) {
-        expect(result.error).toBe("resend_auth_error");
-        expect(result.httpStatus).toBe(401);
-        expect(result.retryable).toBe(false);
+      if (!result.sent) {
+        expect(result.skipped).toBe(false);
+        if (!result.skipped) {
+          expect(result.error).toBe("resend_auth_error");
+          expect(result.httpStatus).toBe(401);
+          expect(result.retryable).toBe(false);
+        }
       }
     });
 
@@ -337,9 +351,12 @@ describe("sendViaResend", () => {
       );
 
       expect(result.sent).toBe(false);
-      if (!result.skipped && !result.sent) {
-        expect(result.error).toBe("resend_rate_limited");
-        expect(result.retryable).toBe(true);
+      if (!result.sent) {
+        expect(result.skipped).toBe(false);
+        if (!result.skipped) {
+          expect(result.error).toBe("resend_rate_limited");
+          expect(result.retryable).toBe(true);
+        }
       }
     });
 
@@ -360,9 +377,12 @@ describe("sendViaResend", () => {
       );
 
       expect(result.sent).toBe(false);
-      if (!result.skipped && !result.sent) {
-        expect(result.error).toBe("resend_server_error");
-        expect(result.retryable).toBe(true);
+      if (!result.sent) {
+        expect(result.skipped).toBe(false);
+        if (!result.skipped) {
+          expect(result.error).toBe("resend_server_error");
+          expect(result.retryable).toBe(true);
+        }
       }
     });
 
@@ -380,9 +400,12 @@ describe("sendViaResend", () => {
       );
 
       expect(result.sent).toBe(false);
-      if (!result.skipped && !result.sent) {
-        expect(result.error).toBe("timeout");
-        expect(result.retryable).toBe(true);
+      if (!result.sent) {
+        expect(result.skipped).toBe(false);
+        if (!result.skipped) {
+          expect(result.error).toBe("timeout");
+          expect(result.retryable).toBe(true);
+        }
       }
     });
   });

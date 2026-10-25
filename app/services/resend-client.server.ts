@@ -146,7 +146,7 @@ export async function sendViaResend(
     };
   }
 
-  const { filteredParams, totalSkipped, totalAllowed, hasAnyRecipient } =
+  const { filteredParams, totalSkipped, hasAnyRecipient } =
     filterAllRecipients(params, allowlist);
 
   if (!hasAnyRecipient) {

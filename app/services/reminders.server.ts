@@ -515,7 +515,7 @@ export async function releaseReminderSlot(
 
 /**
  * Get current GLOBAL daily and monthly send counts.
- * Uses UTC for date boundaries (resets at 05:30 IST). Monthly count is computed
+ * Uses UTC day by design (resets at 05:30 IST). Monthly count is computed
  * as SUM of daily_count for all days in the current month (not stored in
  * monthly_count column for consistency - that column is deprecated).
  */
@@ -581,7 +581,7 @@ export const CATCHUP_WINDOW_DAYS = 3;
  * Returns { reserved: true, daily, monthly } if reservation succeeded.
  * Returns { reserved: false, reason } if caps would be exceeded.
  *
- * Uses UTC for date boundaries (resets at 05:30 IST).
+ * Uses UTC day by design (resets at 05:30 IST).
  *
  * Uses pg_advisory_xact_lock inside a transaction to serialize concurrent
  * reservations. The lock and all reads/writes happen on the same connection,
@@ -667,7 +667,7 @@ export async function reserveGlobalSendSlot(
 /**
  * Release a previously reserved send slot (decrement count).
  * Used when send fails with non-retryable error to avoid wasting cap.
- * Uses UTC for date boundaries (resets at 05:30 IST).
+ * Uses UTC day by design (resets at 05:30 IST).
  */
 export async function releaseGlobalSendSlot(
   sql: Sql,
@@ -751,7 +751,7 @@ export async function sendPaymentReminder(
   ruleId: string,
   offsetDays: number,
   timezone: string,
-  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string } = {},
+  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string } = {},
   deps: { reserveGlobalSendSlot?: typeof reserveGlobalSendSlot } = {}
 ): Promise<ReminderSendResult> {
   const resendKey = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
@@ -996,13 +996,28 @@ export async function sendPaymentReminder(
       unsubscribeSecret
     );
 
+    // Gate 10e: Defensive check for fromEmail (should be guaranteed by Gate 1)
+    if (!fromEmail) {
+      safeLog("error", "reminders_no_from_address", { shopId });
+      await sql.begin(async (tx) => {
+        await releaseReminderSlot(tx, shopId, ruleId, invoiceId);
+        await releaseGlobalSendSlot(tx);
+      });
+      return {
+        success: false,
+        action: "skipped",
+        errorCode: "resend_from_not_configured",
+        retryable: false,
+      };
+    }
+
     const sendResult = await sendViaResend(
       {
-        from: fromEmail!,
+        from: fromEmail,
         to: [invoice.buyerEmail],
         subject,
         html: emailHtml,
-        headers: unsubscribeHeaders,
+        headers: unsubscribeHeaders ?? undefined,
         idempotencyKey,
       },
       { RESEND_API_KEY: resendKey, RESEND_TEST_RECIPIENTS: env.RESEND_TEST_RECIPIENTS ?? process.env.RESEND_TEST_RECIPIENTS }
@@ -1100,7 +1115,7 @@ export async function sendCatchupReminder(
   _logId: string,
   offsetDays: number,
   timezone: string,
-  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string } = {}
+  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string } = {}
 ): Promise<ReminderSendResult> {
   const resendKey = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
   const fromEmail = getResendFrom(env);
@@ -1440,13 +1455,33 @@ export async function sendCatchupReminder(
       unsubscribeSecret
     );
 
+    // Gate 8f: Defensive check for fromEmail (should be guaranteed by Gate 1)
+    if (!fromEmail) {
+      safeLog("error", "reminders_catchup_no_from_address", { shopId });
+      await sql.begin(async (tx) => {
+        await tx`
+          UPDATE "ReminderLog"
+          SET status = 'delayed'::"ReminderLogStatus", "sentAt" = NULL
+          WHERE "shopId" = ${shopId} AND "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId}
+            AND status = 'sent'::"ReminderLogStatus"
+        `;
+        await releaseGlobalSendSlot(tx);
+      });
+      return {
+        success: false,
+        action: "skipped",
+        errorCode: "resend_from_not_configured",
+        retryable: false,
+      };
+    }
+
     const sendResult = await sendViaResend(
       {
-        from: fromEmail!,
+        from: fromEmail,
         to: [invoice.buyerEmail],
         subject,
         html: emailHtml,
-        headers: unsubscribeHeaders,
+        headers: unsubscribeHeaders ?? undefined,
         idempotencyKey,
       },
       { RESEND_API_KEY: resendKey, RESEND_TEST_RECIPIENTS: env.RESEND_TEST_RECIPIENTS ?? process.env.RESEND_TEST_RECIPIENTS }

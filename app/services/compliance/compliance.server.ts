@@ -15,7 +15,7 @@
  */
 
 import type { Sql } from "~/lib/db-light.server";
-import { safeLog, shopHash, toErrorCode } from "~/lib/log.server";
+import { safeLog, shopHash } from "~/lib/log.server";
 import { sendViaResend } from "~/services/resend-client.server";
 
 // ============================================================================

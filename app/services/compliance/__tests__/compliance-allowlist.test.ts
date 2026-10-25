@@ -12,7 +12,6 @@ const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
 describe("sendDataRequestNotification - allowlist", () => {
-  const originalEnv = process.env;
   let consoleLogOutput: string[] = [];
   let consoleInfoOutput: string[] = [];
   let consoleWarnOutput: string[] = [];
@@ -20,7 +19,7 @@ describe("sendDataRequestNotification - allowlist", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockFetch.mockReset();
-    process.env = { ...originalEnv };
+    vi.unstubAllEnvs();
     consoleLogOutput = [];
     consoleInfoOutput = [];
     consoleWarnOutput = [];
@@ -37,14 +36,14 @@ describe("sendDataRequestNotification - allowlist", () => {
   });
 
   afterEach(() => {
-    process.env = originalEnv;
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
 
   it("does not throw when recipient is not allowlisted", async () => {
-    process.env.RESEND_API_KEY = "re_test_1234";
-    process.env.RESEND_FROM = "noreply@test-example.com";
-    process.env.RESEND_TEST_RECIPIENTS = "other@test-example.com";
+    vi.stubEnv("RESEND_API_KEY", "re_test_1234");
+    vi.stubEnv("RESEND_FROM", "noreply@test-example.com");
+    vi.stubEnv("RESEND_TEST_RECIPIENTS", "other@test-example.com");
 
     const { sendDataRequestNotification } = await import("../compliance.server");
 
@@ -60,9 +59,9 @@ describe("sendDataRequestNotification - allowlist", () => {
   });
 
   it("does not throw when allowlist is empty", async () => {
-    process.env.RESEND_API_KEY = "re_test_1234";
-    process.env.RESEND_FROM = "noreply@test-example.com";
-    process.env.RESEND_TEST_RECIPIENTS = "";
+    vi.stubEnv("RESEND_API_KEY", "re_test_1234");
+    vi.stubEnv("RESEND_FROM", "noreply@test-example.com");
+    vi.stubEnv("RESEND_TEST_RECIPIENTS", "");
 
     const { sendDataRequestNotification } = await import("../compliance.server");
 
@@ -78,9 +77,9 @@ describe("sendDataRequestNotification - allowlist", () => {
   });
 
   it("does not log any email addresses when skipped (recipient_not_allowlisted)", async () => {
-    process.env.RESEND_API_KEY = "re_test_1234";
-    process.env.RESEND_FROM = "noreply@test-example.com";
-    process.env.RESEND_TEST_RECIPIENTS = "allowed@test-example.com";
+    vi.stubEnv("RESEND_API_KEY", "re_test_1234");
+    vi.stubEnv("RESEND_FROM", "noreply@test-example.com");
+    vi.stubEnv("RESEND_TEST_RECIPIENTS", "allowed@test-example.com");
 
     const { sendDataRequestNotification } = await import("../compliance.server");
 
@@ -99,9 +98,9 @@ describe("sendDataRequestNotification - allowlist", () => {
   });
 
   it("does not log any email addresses when skipped (recipient_allowlist_empty)", async () => {
-    process.env.RESEND_API_KEY = "re_test_1234";
-    process.env.RESEND_FROM = "noreply@test-example.com";
-    process.env.RESEND_TEST_RECIPIENTS = "";
+    vi.stubEnv("RESEND_API_KEY", "re_test_1234");
+    vi.stubEnv("RESEND_FROM", "noreply@test-example.com");
+    vi.stubEnv("RESEND_TEST_RECIPIENTS", "");
 
     const { sendDataRequestNotification } = await import("../compliance.server");
 
@@ -119,9 +118,9 @@ describe("sendDataRequestNotification - allowlist", () => {
   });
 
   it("logs reason enum and counts only, not addresses", async () => {
-    process.env.RESEND_API_KEY = "re_test_1234";
-    process.env.RESEND_FROM = "noreply@test-example.com";
-    process.env.RESEND_TEST_RECIPIENTS = "allowed@test-example.com";
+    vi.stubEnv("RESEND_API_KEY", "re_test_1234");
+    vi.stubEnv("RESEND_FROM", "noreply@test-example.com");
+    vi.stubEnv("RESEND_TEST_RECIPIENTS", "allowed@test-example.com");
 
     const { sendDataRequestNotification } = await import("../compliance.server");
 
@@ -144,9 +143,9 @@ describe("sendDataRequestNotification - allowlist", () => {
   });
 
   it("sends successfully when recipient is allowlisted", async () => {
-    process.env.RESEND_API_KEY = "re_test_1234";
-    process.env.RESEND_FROM = "noreply@test-example.com";
-    process.env.RESEND_TEST_RECIPIENTS = "allowed@test-example.com";
+    vi.stubEnv("RESEND_API_KEY", "re_test_1234");
+    vi.stubEnv("RESEND_FROM", "noreply@test-example.com");
+    vi.stubEnv("RESEND_TEST_RECIPIENTS", "allowed@test-example.com");
 
     mockFetch.mockResolvedValueOnce({
       ok: true,
