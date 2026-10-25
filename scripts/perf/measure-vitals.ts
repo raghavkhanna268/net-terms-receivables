@@ -438,7 +438,8 @@ async function main() {
   console.log(`\nResults saved to ${outputPath}`);
 }
 
-main().catch(() => {
-  console.error("Measurement failed. Check the stack trace above.");
+main().catch((e: unknown) => {
+  const code = e instanceof Error ? e.constructor.name : "UnknownError";
+  console.error(`Measurement failed: ${code}`);
   process.exit(1);
 });
