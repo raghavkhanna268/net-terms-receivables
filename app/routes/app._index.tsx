@@ -1,5 +1,5 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useLoaderData } from "react-router";
+import { useLoaderData, data } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { resolvePlan, type ResolvedPlan } from "~/services/plan.server";
@@ -23,6 +23,7 @@ import {
 import type { Sql } from "~/lib/db-light.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { buildOverLimitBannerState } from "~/lib/over-limit-banner";
+import { ServerTiming, mergeServerTimingHeaders, readColdOnce } from "~/lib/server-timing.server";
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 
@@ -205,8 +206,18 @@ async function checkOnboardingRedirect(
 }
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
+  // Read cold once - layout and index get same value with same context object
+  const cold = readColdOnce(context);
+  const timing = new ServerTiming(cold);
+  timing.startPhase("loader_total");
+
   const { shopify } = context;
+
+  // Time auth_index phase
+  timing.startPhase("auth_index");
   const { session, sessionToken, redirect: shopifyRedirect } = await shopify.authenticate.admin(request);
+  timing.endPhase("auth_index");
+
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
@@ -218,12 +229,18 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const skipOnboarding = url.searchParams.get("skipOnboarding") === "true";
   const onlyOverLimit = url.searchParams.get("overlimit") === "true";
 
+  // Time shop_lookup phase
+  timing.startPhase("shop_lookup");
   const [shop] = await sql<{ id: string; currency: string; timezone: string }[]>`
     SELECT id, currency, timezone FROM "Shop" WHERE domain = ${shopDomain}
   `;
+  timing.endPhase("shop_lookup");
 
+  // Time onboarding_checks phase
   if (shop && !skipOnboarding) {
+    timing.startPhase("onboarding_checks");
     const shouldRedirect = await checkOnboardingRedirect(sql, shop.id);
+    timing.endPhase("onboarding_checks");
     if (shouldRedirect) {
       throw shopifyRedirect("/app/onboarding");
     }
@@ -256,23 +273,19 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         sortOrder,
       };
 
-      // Choose ledger function BEFORE Promise.all - never run both
-      const ledgerFn = onlyOverLimit
-        ? getOverLimitBuyerLedger(sql, shop.id, asOf, ledgerOptions)
-        : getBuyerLedger(sql, shop.id, asOf, ledgerOptions);
-
-      // When filtering over-limit, reuse buyerLedger.totalCount as overLimitCount
-      // Otherwise, run getOverLimitCount separately
-      const overLimitCountFn = onlyOverLimit
-        ? Promise.resolve(null) // will use buyerLedger.totalCount
-        : getOverLimitCount(sql, shop.id);
-
+      // Run all main queries in parallel with timing
       const [planResult, usageResult, agingResult, ledgerResult, countResult] = await Promise.all([
-        resolvePlan(sql, shopDomain),
+        timing.time("plan_resolve", () => resolvePlan(sql, shopDomain)),
         getUsageStats(sql, shop.id),
         getShopAgingTotals(sql, shop.id, asOf),
-        ledgerFn,
-        overLimitCountFn,
+        timing.time("ledger_rows", () =>
+          onlyOverLimit
+            ? getOverLimitBuyerLedger(sql, shop.id, asOf, ledgerOptions)
+            : getBuyerLedger(sql, shop.id, asOf, ledgerOptions)
+        ),
+        onlyOverLimit
+          ? Promise.resolve(null)
+          : timing.time("ledger_count", () => getOverLimitCount(sql, shop.id)),
       ]);
 
       planData = planResult;
@@ -333,7 +346,15 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     recordAccess(sql, accessParams);
   }
 
-  return {
+  // End loader_total timing and log all phases
+  timing.endPhase("loader_total");
+
+  // Log timing: one line per phase with { route, stage, durationMs }
+  timing.logAllPhases();
+
+  const serverTiming = timing.toHeaderValue();
+
+  const responseData = {
     shopName: storeHandle,
     shopDomain,
     storeHandle,
@@ -373,6 +394,13 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     overLimitCount,
     error,
   };
+
+  const headers: HeadersInit = {};
+  if (serverTiming) {
+    headers["Server-Timing"] = serverTiming;
+  }
+
+  return data(responseData, { headers });
 };
 
 const BUCKET_LABELS: Record<AgingBucketKey, string> = {
@@ -857,5 +885,16 @@ export default function Index() {
 }
 
 export const headers: HeadersFunction = (headersArgs) => {
-  return boundary.headers(headersArgs);
+  const boundaryHeaders = boundary.headers(headersArgs);
+  const resultHeaders = new Headers(boundaryHeaders);
+
+  // Merge Server-Timing from layout (parent) and index (this loader)
+  const parentTiming = headersArgs.parentHeaders?.get("Server-Timing");
+  const loaderTiming = headersArgs.loaderHeaders?.get("Server-Timing");
+  const mergedTiming = mergeServerTimingHeaders(parentTiming, loaderTiming);
+  if (mergedTiming) {
+    resultHeaders.set("Server-Timing", mergedTiming);
+  }
+
+  return resultHeaders;
 };

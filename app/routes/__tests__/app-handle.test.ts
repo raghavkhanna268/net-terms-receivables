@@ -72,6 +72,22 @@ vi.mock("@shopify/shopify-app-react-router/server", () => ({
 const TEST_SHOP = "test-shop.myshopify.com";
 const TEST_SHOP_ID = "shop-123";
 
+/**
+ * Helper to extract loader data from data() wrapper.
+ */
+function extractLoaderData<T>(result: unknown): T {
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    "type" in result &&
+    (result as { type: string }).type === "DataWithResponseInit" &&
+    "data" in result
+  ) {
+    return (result as { data: T }).data;
+  }
+  return result as T;
+}
+
 function createLoaderArgs(searchParams: Record<string, string> = {}): LoaderFunctionArgs {
   const url = new URL("https://example.com/app");
   for (const [key, value] of Object.entries(searchParams)) {
@@ -85,6 +101,7 @@ function createLoaderArgs(searchParams: Record<string, string> = {}): LoaderFunc
         authenticate: {
           admin: vi.fn().mockResolvedValue({
             session: { shop: TEST_SHOP },
+            sessionToken: "test-session-token",
             redirect: vi.fn(),
           }),
         },
@@ -155,7 +172,7 @@ describe("app._index upgradeUrl behavior", () => {
   it("returns correct upgradeUrl when APP_HANDLE env is set", async () => {
     (process.env as Record<string, string | undefined>).APP_HANDLE = "net-terms-receivables-1";
     const { loader } = await import("../app._index");
-    const result = await loader(createLoaderArgs({ skipOnboarding: "true" }));
+    const result = extractLoaderData<{ upgradeUrl: string | null }>(await loader(createLoaderArgs({ skipOnboarding: "true" })));
 
     expect(result.upgradeUrl).toBe(
       "https://admin.shopify.com/store/test-shop/charges/net-terms-receivables-1/pricing_plans"
@@ -167,7 +184,7 @@ describe("app._index upgradeUrl behavior", () => {
     const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const { loader } = await import("../app._index");
-    const result = await loader(createLoaderArgs({ skipOnboarding: "true" }));
+    const result = extractLoaderData<{ upgradeUrl: string | null }>(await loader(createLoaderArgs({ skipOnboarding: "true" })));
 
     expect(result.upgradeUrl).toBeNull();
 
