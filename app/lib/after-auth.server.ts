@@ -109,10 +109,11 @@ async function clearAndMaybeSetup(
   admin: AdminGraphqlClient,
   waitUntil: WaitUntilFn,
 ): Promise<void> {
-  const wasReinstalled = await clearUninstalledAtIfSet(sql, shop);
+  const reinstallResult = await clearUninstalledAtIfSet(sql, shop);
 
-  if (wasReinstalled) {
+  if (reinstallResult.wasReinstalled && reinstallResult.shopId) {
     setupCompletedShops.delete(shop);
+    await clearMetafieldSyncErrorsOnReinstall(sql, reinstallResult.shopId, shop);
   }
 
   runSetupIfNeeded(shop, admin, waitUntil);
@@ -142,6 +143,14 @@ function runSetupIfNeeded(
 }
 
 /**
+ * Result of clearUninstalledAtIfSet containing reinstall status and shop ID.
+ */
+interface ClearUninstalledResult {
+  wasReinstalled: boolean;
+  shopId?: string;
+}
+
+/**
  * Clear uninstalledAt and reset onboarding state if the shop was uninstalled.
  *
  * This is called on every /app load BEFORE the cache early-return to handle
@@ -156,9 +165,9 @@ function runSetupIfNeeded(
  *
  * @param sql - postgres.js SQL client
  * @param shop - The shop domain
- * @returns true if a row was updated (shop was reinstalled), false otherwise
+ * @returns Object with wasReinstalled flag and shopId if reinstalled
  */
-async function clearUninstalledAtIfSet(sql: Sql, shop: string): Promise<boolean> {
+async function clearUninstalledAtIfSet(sql: Sql, shop: string): Promise<ClearUninstalledResult> {
   try {
     const result = await sql<{ id: string }[]>`
       UPDATE "Shop"
@@ -170,13 +179,50 @@ async function clearUninstalledAtIfSet(sql: Sql, shop: string): Promise<boolean>
       safeLog("info", "cleared_uninstalled_at_and_onboarding", {
         shopHash: await shopHash(shop),
       });
-      return true;
+      return { wasReinstalled: true, shopId: result[0].id };
     }
-    return false;
+    return { wasReinstalled: false };
   } catch (error) {
     const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
     console.error(`[afterAuth] clear_uninstalled_at_failed reason=db_error err=${errInfo}`);
-    return false;
+    return { wasReinstalled: false };
+  }
+}
+
+/**
+ * Clear metafield sync error fields on BuyerAccount rows for a reinstalled shop.
+ *
+ * Called only when clearUninstalledAtIfSet detects a reinstall (uninstalledAt was set).
+ * Clears metafieldSyncErrorCode and metafieldSyncErrorAt for all BuyerAccount rows
+ * belonging to the shop, allowing the resync sweep to retry previously failed accounts.
+ *
+ * This is a shop-scoped UPDATE using the indexed shopId column.
+ * Normal re-auth (uninstalledAt already NULL) never calls this function.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopId - The shop's internal ID (from clearUninstalledAtIfSet)
+ * @param shopDomain - The shop domain (for logging only)
+ */
+async function clearMetafieldSyncErrorsOnReinstall(
+  sql: Sql,
+  shopId: string,
+  shopDomain: string,
+): Promise<void> {
+  try {
+    const result = await sql<{ count: string }[]>`
+      UPDATE "BuyerAccount"
+      SET "metafieldSyncErrorCode" = NULL, "metafieldSyncErrorAt" = NULL
+      WHERE "shopId" = ${shopId}
+        AND ("metafieldSyncErrorCode" IS NOT NULL OR "metafieldSyncErrorAt" IS NOT NULL)
+    `;
+    const clearedCount = result.count ?? 0;
+    safeLog("info", "cleared_metafield_sync_errors_on_reinstall", {
+      shopHash: await shopHash(shopDomain),
+      clearedCount: Number(clearedCount),
+    });
+  } catch (error) {
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.error(`[afterAuth] clear_metafield_sync_errors_failed reason=db_error err=${errInfo}`);
   }
 }
 
@@ -378,3 +424,9 @@ export function evictShopFromSetupCache(shop: string): void {
  * @internal
  */
 export { clearUninstalledAtIfSet as _clearUninstalledAtIfSetForTesting };
+
+/**
+ * Exported for testing: clear metafield sync errors on reinstall.
+ * @internal
+ */
+export { clearMetafieldSyncErrorsOnReinstall as _clearMetafieldSyncErrorsOnReinstallForTesting };
