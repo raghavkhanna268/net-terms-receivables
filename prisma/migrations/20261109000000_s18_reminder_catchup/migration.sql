@@ -16,7 +16,7 @@
 -- - Partial index on delayed rows for efficient catch-up queries
 --
 -- The s18_enqueue_reminders() function is updated to:
--- 1. Keep the gated-account skip from 20261106
+-- 1. SQL does not gate; TS PLAN_GATING_ENFORCED is the only gate
 -- 2. Add catch-up logic for delayed reminders (D+1..D+3)
 -- 3. Enforce latest-stage-wins and one-per-invoice-per-day
 
@@ -145,6 +145,7 @@ BEGIN
     WHERE rl.status = 'delayed'::public."ReminderLogStatus"
       AND rl."ruleId" = r_delayed.id
       AND rl."invoiceId" = i.id
+      AND i."shopId" = rl."shopId"
       AND i."shopId" = s.id
       AND i."dueAt" IS NOT NULL
       -- A newer enabled email rule for the same invoice exists AND is due today
@@ -164,7 +165,7 @@ BEGIN
 
     -- ==========================================================================
     -- PART 3: Enqueue NEW reminders (due today, no existing log entry)
-    -- Keeps the gated-account skip from 20261106 migration
+    -- SQL does not gate; TS PLAN_GATING_ENFORCED is the only gate
     -- ==========================================================================
     FOR reminder_row IN
         SELECT
@@ -191,8 +192,7 @@ BEGIN
         INNER JOIN public."BuyerAccount" ba
             ON ba.id = i."buyerAccountId"
             AND ba."shopId" = i."shopId"
-            -- NOTE: No gating filter here. TS send path handles PLAN_GATING_ENFORCED.
-            -- This allows SQL and TS to use different gating policies without conflict.
+            -- NOTE: SQL does not gate; TS is the only gate.
         WHERE r.enabled = true
           AND r.channel = 'email'::public."ReminderChannel"
           -- Check send window: shop's local hour must be 09-18
@@ -228,7 +228,8 @@ BEGIN
     -- ==========================================================================
     -- PART 4: Enqueue CATCH-UP reminders (delayed, within D+1..D+3 window)
     -- Only the latest stage per invoice (older stages already marked skipped above)
-    -- Re-checks eligibility: invoice open, shop enabled, rule enabled, not gated
+    -- Re-checks eligibility: invoice open, shop enabled, rule enabled
+    -- SQL does not gate; TS PLAN_GATING_ENFORCED is the only gate
     -- Excludes invoices that have ANY stage due today (Part 3 handles those)
     -- ==========================================================================
     FOR catchup_row IN
@@ -305,4 +306,4 @@ BEGIN
 END;
 $func$;
 
-COMMENT ON FUNCTION public.s18_enqueue_reminders() IS 'S18: Enqueues REMINDER_SEND for new reminders and REMINDER_CATCHUP for delayed ones. Handles D+1..D+3 catch-up window, oldest-first ordering, latest-stage-wins. Skips gated accounts. Called by pg_cron hourly.';
+COMMENT ON FUNCTION public.s18_enqueue_reminders() IS 'S18: Enqueues REMINDER_SEND for new reminders and REMINDER_CATCHUP for delayed ones. Handles D+1..D+3 catch-up window, oldest-first ordering, latest-stage-wins. SQL does not gate; TS PLAN_GATING_ENFORCED is the only gate. Called by pg_cron hourly.';
