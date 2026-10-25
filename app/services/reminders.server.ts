@@ -140,12 +140,14 @@ export interface ReminderInvoiceData {
   shopTimezone: string;
   invoiceName: string;
   total: string;
+  outstanding: string;
   currency: string;
   dueAt: Date;
   status: "open" | "paid" | "cancelled";
   buyerEmail: string | null;
   buyerName: string | null;
   buyerAccountGatedAt: Date | null;
+  shopUninstalledAt: Date | null;
 }
 
 /**
@@ -178,12 +180,14 @@ export async function getInvoiceForReminder(
       shopTimezone: string;
       invoiceName: string;
       total: string;
+      outstanding: string;
       currency: string;
       dueAt: Date | null;
       status: string;
       buyerAccountId: string;
       customerId: string | null;
       buyerAccountGatedAt: Date | null;
+      shopUninstalledAt: Date | null;
     }[]
   >`
     SELECT
@@ -193,12 +197,14 @@ export async function getInvoiceForReminder(
       s.timezone AS "shopTimezone",
       i.name AS "invoiceName",
       i.total::TEXT,
+      i.outstanding::TEXT,
       s.currency,
       i."dueAt",
       i.status,
       i."buyerAccountId",
       ba."customerId",
-      ba.gated_at AS "buyerAccountGatedAt"
+      ba.gated_at AS "buyerAccountGatedAt",
+      s."uninstalledAt" AS "shopUninstalledAt"
     FROM "Invoice" i
     INNER JOIN "Shop" s ON s.id = i."shopId"
     INNER JOIN "BuyerAccount" ba ON ba.id = i."buyerAccountId"
@@ -239,12 +245,14 @@ export async function getInvoiceForReminder(
     shopTimezone,
     invoiceName: row.invoiceName,
     total: row.total,
+    outstanding: row.outstanding,
     currency: row.currency,
     dueAt: row.dueAt,
     status: row.status as "open" | "paid" | "cancelled",
     buyerEmail,
     buyerName,
     buyerAccountGatedAt: row.buyerAccountGatedAt,
+    shopUninstalledAt: row.shopUninstalledAt,
   };
 }
 
@@ -703,7 +711,17 @@ export async function sendPaymentReminder(
     };
   }
 
-  // Gate 3: Check if buyer account is gated (over plan limit)
+  // Gate 3: Check if shop was uninstalled (message queued before uninstall)
+  // The SQL enqueue filters uninstalled shops, but messages already in queue need this check
+  if (invoice.shopUninstalledAt !== null) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Shop was uninstalled",
+    };
+  }
+
+  // Gate 4: Check if buyer account is gated (over plan limit)
   // When PLAN_GATING_ENFORCED is on, no reminders to gated accounts
   if (!isAccountActive(invoice.buyerAccountGatedAt)) {
     return {
@@ -713,7 +731,7 @@ export async function sendPaymentReminder(
     };
   }
 
-  // Gate 4: Re-check invoice status at send time
+  // Gate 5: Re-check invoice status at send time
   if (invoice.status !== "open") {
     return {
       success: true,
@@ -722,7 +740,16 @@ export async function sendPaymentReminder(
     };
   }
 
-  // Gate 5: Re-check if this is the right day in shop's timezone
+  // Gate 6: Skip invoice if fully paid (outstanding <= 0, even if status is still 'open')
+  if (Number(invoice.outstanding) <= 0) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Invoice fully paid (outstanding is zero)",
+    };
+  }
+
+  // Gate 7: Re-check if this is the right day in shop's timezone
   if (!isReminderDueToday(invoice.dueAt, offsetDays, invoice.shopTimezone)) {
     return {
       success: true,
@@ -731,7 +758,7 @@ export async function sendPaymentReminder(
     };
   }
 
-  // Gate 6: Check buyer has email (via CUSTOMER_PII_FIELDS)
+  // Gate 8: Check buyer has email (via CUSTOMER_PII_FIELDS)
   // If PII field is off or email missing, skip without consuming slot or cap
   if (!invoice.buyerEmail) {
     return {
@@ -747,7 +774,7 @@ export async function sendPaymentReminder(
     // Acquire per-invoice advisory lock
     await acquireInvoiceLock(tx, invoiceId);
 
-    // Gate 7: Check if already sent today (under the lock)
+    // Gate 9: Check if already sent today (under the lock)
     const alreadySentToday = await hasReminderSentToday(tx, shopId, invoiceId, validTz);
     if (alreadySentToday) {
       return {
@@ -757,7 +784,7 @@ export async function sendPaymentReminder(
       };
     }
 
-    // Gate 8: Claim the reminder slot (idempotency via unique index)
+    // Gate 10: Claim the reminder slot (idempotency via unique index)
     const claimed = await claimReminderSlot(tx, shopId, ruleId, invoiceId);
     if (!claimed) {
       return {
@@ -767,7 +794,7 @@ export async function sendPaymentReminder(
       };
     }
 
-    // Gate 9: Reserve global cap slot atomically (checks both daily and monthly)
+    // Gate 11: Reserve global cap slot atomically (checks both daily and monthly)
     const reserveSlot = deps.reserveGlobalSendSlot ?? reserveGlobalSendSlot;
     const reservation = await reserveSlot(tx);
     if (!reservation.reserved) {
@@ -787,7 +814,7 @@ export async function sendPaymentReminder(
       const emailHtml = renderPaymentReminderEmail({
         invoiceName: invoice.invoiceName,
         buyerName: invoice.buyerName ?? "Customer",
-        amount: formatAmount(invoice.total, invoice.currency),
+        amount: formatAmount(invoice.outstanding, invoice.currency),
         dueDate: formatDate(invoice.dueAt, invoice.shopTimezone),
         merchantName: invoice.shopName,
         reminderType: getReminderLabel(offsetDays),
@@ -942,7 +969,17 @@ export async function sendCatchupReminder(
     };
   }
 
-  // Gate 4: Check if buyer account is gated
+  // Gate 4: Check if shop was uninstalled (message queued before uninstall)
+  if (invoice.shopUninstalledAt !== null) {
+    await deleteDelayedReminder(sql, ruleId, invoiceId);
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Shop was uninstalled",
+    };
+  }
+
+  // Gate 5: Check if buyer account is gated
   if (!isAccountActive(invoice.buyerAccountGatedAt)) {
     await deleteDelayedReminder(sql, ruleId, invoiceId);
     return {
@@ -952,7 +989,7 @@ export async function sendCatchupReminder(
     };
   }
 
-  // Gate 5: Re-check invoice status
+  // Gate 6: Re-check invoice status
   if (invoice.status !== "open") {
     await deleteDelayedReminder(sql, ruleId, invoiceId);
     return {
@@ -962,7 +999,17 @@ export async function sendCatchupReminder(
     };
   }
 
-  // Gate 6: Check buyer has email
+  // Gate 7: Skip invoice if fully paid (outstanding <= 0, even if status is still 'open')
+  if (Number(invoice.outstanding) <= 0) {
+    await deleteDelayedReminder(sql, ruleId, invoiceId);
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Invoice fully paid (outstanding is zero)",
+    };
+  }
+
+  // Gate 8: Check buyer has email
   if (!invoice.buyerEmail) {
     await deleteDelayedReminder(sql, ruleId, invoiceId);
     return {
@@ -972,7 +1019,7 @@ export async function sendCatchupReminder(
     };
   }
 
-  // Gate 7: Check shop reminders are enabled
+  // Gate 9: Check shop reminders are enabled
   const settings = await getShopReminderSettings(sql, shopId);
   if (!settings?.enabled) {
     await deleteDelayedReminder(sql, ruleId, invoiceId);
@@ -983,7 +1030,7 @@ export async function sendCatchupReminder(
     };
   }
 
-  // Gate 8: Check rule is still enabled
+  // Gate 10: Check rule is still enabled
   const rule = await getReminderRule(sql, shopId, ruleId);
   if (!rule?.enabled) {
     await deleteDelayedReminder(sql, ruleId, invoiceId);
@@ -994,7 +1041,7 @@ export async function sendCatchupReminder(
     };
   }
 
-  // Gate 9: Check if a newer stage exists (latest-stage-wins)
+  // Gate 11: Check if a newer stage exists (latest-stage-wins)
   const newerStageExists = await hasNewerStageForInvoice(sql, invoiceId, ruleId, offsetDays);
   if (newerStageExists) {
     await sql`
@@ -1014,7 +1061,7 @@ export async function sendCatchupReminder(
     // Acquire per-invoice advisory lock
     await acquireInvoiceLock(tx, invoiceId);
 
-    // Gate 10: Re-read status under the lock to handle duplicate catch-up messages
+    // Gate 12: Re-read status under the lock to handle duplicate catch-up messages
     // (enqueue runs hourly, so multiple REMINDER_CATCHUP messages may exist)
     const statusUnderLock = await getReminderLogStatus(tx, ruleId, invoiceId);
     if (!statusUnderLock || statusUnderLock.status !== "delayed") {
@@ -1025,7 +1072,7 @@ export async function sendCatchupReminder(
       };
     }
 
-    // Gate 11: Check if already sent today (inside transaction for atomicity)
+    // Gate 13: Check if already sent today (inside transaction for atomicity)
     const alreadySentToday = await hasReminderSentToday(tx, shopId, invoiceId, validTz);
     if (alreadySentToday) {
       return {
@@ -1035,7 +1082,7 @@ export async function sendCatchupReminder(
       };
     }
 
-    // Gate 12: Reserve global cap slot
+    // Gate 14: Reserve global cap slot
     const reservation = await reserveGlobalSendSlot(tx);
     if (!reservation.reserved) {
       // Still capped - leave as delayed for next catch-up attempt
@@ -1052,7 +1099,7 @@ export async function sendCatchupReminder(
       const emailHtml = renderPaymentReminderEmail({
         invoiceName: invoice.invoiceName,
         buyerName: invoice.buyerName ?? "Customer",
-        amount: formatAmount(invoice.total, invoice.currency),
+        amount: formatAmount(invoice.outstanding, invoice.currency),
         dueDate: formatDate(invoice.dueAt, invoice.shopTimezone),
         merchantName: invoice.shopName,
         reminderType: getReminderLabel(offsetDays),

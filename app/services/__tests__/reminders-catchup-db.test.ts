@@ -718,4 +718,235 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
       expect(result.length).toBe(1);
     });
   });
+
+  describe("partly paid invoice - sends with outstanding balance", () => {
+    it("sends reminder for partly paid invoice (outstanding > 0)", async () => {
+      const { sendPaymentReminder } = await import("../reminders.server");
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com" };
+
+      const invoiceId = `inv-partly-paid-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/partly-paid-${TEST_SUFFIX}`;
+
+      // Invoice with total=10000 but outstanding=3000 (partly paid)
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+          '#PARTLY-PAID', 10000.00, 3000.00, 'open',
+          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+        )
+      `;
+
+      const luxon = await import("luxon");
+      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-partly-paid" }) });
+
+      try {
+        const result = await sendPaymentReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID_1,
+          0,
+          "Asia/Kolkata",
+          validEnv
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("sent");
+
+        // Verify fetch was called (email sent)
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+
+        // Verify ReminderLog was created with 'sent' status
+        const [log] = await sql<{ status: string }[]>`
+          SELECT status FROM "ReminderLog"
+          WHERE "invoiceId" = ${invoiceId} AND "ruleId" = ${TEST_RULE_ID_1}
+        `;
+        expect(log.status).toBe("sent");
+      } finally {
+        luxonSpy.mockRestore();
+      }
+    });
+
+    it("skips invoice when outstanding is zero", async () => {
+      const { sendPaymentReminder } = await import("../reminders.server");
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com" };
+
+      const invoiceId = `inv-zero-outstanding-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/zero-outstanding-${TEST_SUFFIX}`;
+
+      // Invoice with outstanding=0 (fully paid but status still 'open')
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+          '#ZERO-OUTSTANDING', 10000.00, 0.00, 'open',
+          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+        )
+      `;
+
+      const luxon = await import("luxon");
+      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+
+      try {
+        const result = await sendPaymentReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID_1,
+          0,
+          "Asia/Kolkata",
+          validEnv
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("skipped");
+        expect(result.skipReason).toContain("outstanding is zero");
+
+        // Verify no fetch was called
+        expect(mockFetch).not.toHaveBeenCalled();
+
+        // Verify no ReminderLog was created
+        const logs = await sql<{ id: string }[]>`
+          SELECT id FROM "ReminderLog"
+          WHERE "invoiceId" = ${invoiceId} AND "ruleId" = ${TEST_RULE_ID_1}
+        `;
+        expect(logs.length).toBe(0);
+      } finally {
+        luxonSpy.mockRestore();
+      }
+    });
+  });
+
+  describe("uninstalled shop - no reminder sent", () => {
+    it("skips sending when shop was uninstalled after message queued", async () => {
+      const { sendPaymentReminder } = await import("../reminders.server");
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com" };
+
+      const invoiceId = `inv-uninstalled-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/uninstalled-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+          '#UNINSTALLED', 10000.00, 10000.00, 'open',
+          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+        )
+      `;
+
+      // Mark shop as uninstalled (simulates uninstall after message was queued)
+      await sql`
+        UPDATE "Shop" SET "uninstalledAt" = NOW() WHERE id = ${TEST_SHOP_ID}
+      `;
+
+      const luxon = await import("luxon");
+      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+
+      try {
+        const result = await sendPaymentReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID_1,
+          0,
+          "Asia/Kolkata",
+          validEnv
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("skipped");
+        expect(result.skipReason).toContain("Shop was uninstalled");
+
+        // Verify NO fetch was called (no email sent)
+        expect(mockFetch).not.toHaveBeenCalled();
+
+        // Verify NO ReminderLog 'sent' row was created
+        const logs = await sql<{ status: string }[]>`
+          SELECT status FROM "ReminderLog"
+          WHERE "invoiceId" = ${invoiceId} AND "ruleId" = ${TEST_RULE_ID_1}
+        `;
+        expect(logs.length).toBe(0);
+      } finally {
+        // Restore shop to installed state for other tests
+        await sql`UPDATE "Shop" SET "uninstalledAt" = NULL WHERE id = ${TEST_SHOP_ID}`;
+        luxonSpy.mockRestore();
+      }
+    });
+
+    it("catch-up deletes delayed row when shop uninstalled", async () => {
+      const { sendCatchupReminder } = await import("../reminders.server");
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com" };
+
+      const invoiceId = `inv-catchup-uninstalled-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/catchup-uninstalled-${TEST_SUFFIX}`;
+      const logId = `log-catchup-uninstalled-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+          '#CATCHUP-UNINSTALLED', 10000.00, 10000.00, 'open',
+          NOW() - INTERVAL '5 days', NOW() - INTERVAL '1 day', NOW(), NOW()
+        )
+      `;
+
+      // Create delayed ReminderLog row
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
+        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '1 day')
+      `;
+
+      // Mark shop as uninstalled
+      await sql`UPDATE "Shop" SET "uninstalledAt" = NOW() WHERE id = ${TEST_SHOP_ID}`;
+
+      const luxon = await import("luxon");
+      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+
+      try {
+        const result = await sendCatchupReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID_1,
+          logId,
+          0,
+          "Asia/Kolkata",
+          validEnv
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("skipped");
+        expect(result.skipReason).toContain("Shop was uninstalled");
+
+        // Verify delayed row was deleted (not just left as delayed)
+        const logs = await sql<{ id: string }[]>`
+          SELECT id FROM "ReminderLog"
+          WHERE id = ${logId}
+        `;
+        expect(logs.length).toBe(0);
+      } finally {
+        // Restore shop to installed state for other tests
+        await sql`UPDATE "Shop" SET "uninstalledAt" = NULL WHERE id = ${TEST_SHOP_ID}`;
+        luxonSpy.mockRestore();
+      }
+    });
+  });
 });

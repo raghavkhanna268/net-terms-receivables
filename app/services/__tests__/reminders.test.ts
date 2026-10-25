@@ -277,11 +277,13 @@ describe("Payment Reminders (S18)", () => {
       shopTimezone: "Asia/Kolkata",
       invoiceName: "#1001",
       total: "100000",
+      outstanding: "100000",
       currency: "INR",
       dueAt: new Date("2026-10-30"),
       status: "open",
       buyerAccountId: "buyer-123",
       customerId: "gid://shopify/Customer/456",
+      shopUninstalledAt: null,
     };
 
     it("returns capped when daily GLOBAL cap (100) is reached", async () => {
@@ -294,11 +296,13 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "1000.00",
+        outstanding: "1000.00",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
 
       mockSql.setMockResult("invoice", [mockInvoice]);
@@ -337,11 +341,13 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "1000.00",
+        outstanding: "1000.00",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
 
       mockSql.setMockResult("invoice", [mockInvoice]);
@@ -379,10 +385,12 @@ describe("Payment Reminders (S18)", () => {
       shopTimezone: string;
       invoiceName: string;
       total: string;
+      outstanding: string;
       currency: string;
       dueAt: Date;
       buyerAccountId: string;
       customerId: string;
+      shopUninstalledAt: Date | null;
     };
 
     beforeEach(() => {
@@ -393,10 +401,12 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "100000",
+        outstanding: "100000",
         currency: "INR",
         dueAt: new Date(),
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
     });
 
@@ -456,11 +466,13 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "100000",
+        outstanding: "100000",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
 
       mockSql.setMockResult("global_daily", []);
@@ -502,11 +514,13 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "1000.00",
+        outstanding: "1000.00",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
 
       mockSql.setMockResult("invoice", [mockInvoiceData]);
@@ -538,11 +552,13 @@ describe("Payment Reminders (S18)", () => {
       shopTimezone: string;
       invoiceName: string;
       total: string;
+      outstanding: string;
       currency: string;
       dueAt: Date;
       status: string;
       buyerAccountId: string;
       customerId: string;
+      shopUninstalledAt: Date | null;
     };
 
     const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" };
@@ -555,11 +571,13 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "1000.00",
+        outstanding: "1000.00",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
     });
 
@@ -763,11 +781,13 @@ describe("Payment Reminders (S18)", () => {
       shopTimezone: string;
       invoiceName: string;
       total: string;
+      outstanding: string;
       currency: string;
       dueAt: Date;
       status: string;
       buyerAccountId: string;
       customerId: string;
+      shopUninstalledAt: Date | null;
     };
 
     const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" };
@@ -780,11 +800,13 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "1000.00",
+        outstanding: "1000.00",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
     });
 
@@ -834,11 +856,13 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "1000.00",
+        outstanding: "1000.00",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
 
       mockSql.setMockResult("invoice", [mockInvoiceData]);
@@ -1144,6 +1168,26 @@ describe("formatAmount (rendered in email)", () => {
 
     expect(html).toContain("₹1,234.56");
     expect(html).not.toContain("₹12.35"); // Would be wrong if we divided by 100
+  });
+});
+
+describe("Partly paid invoice email", () => {
+  it("email shows outstanding balance, not original total", async () => {
+    const { renderPaymentReminderEmail } = await import("~/emails/PaymentReminderEmail");
+
+    // Invoice has total of 5000.00, but only 3000.00 outstanding
+    // The email should show the OUTSTANDING amount (3000.00), not the total
+    const html = renderPaymentReminderEmail({
+      invoiceName: "#1002",
+      buyerName: "Partly Paid Customer",
+      amount: "₹3,000.00", // Outstanding amount, not total
+      dueDate: "November 15, 2026",
+      merchantName: "Test Shop",
+      reminderType: "Payment 7 days overdue",
+    });
+
+    expect(html).toContain("₹3,000.00"); // Outstanding
+    expect(html).not.toContain("₹5,000.00"); // Total should NOT appear
   });
 });
 

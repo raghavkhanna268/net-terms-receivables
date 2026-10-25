@@ -150,3 +150,45 @@ The code constants (`DAILY_SEND_CAP=100`, `MONTHLY_SEND_CAP=3000` in `app/servic
 
 ### 9.1 Done criteria
 - [x] `app/routes/__tests__/app.settings.reminders.test.ts` - rejects duplicate offset when updating
+
+## 10. Partly Paid Invoices
+
+**Status:** Implemented. Reminders show outstanding balance instead of original total.
+
+### 10.1 Behavior
+| # | Steps | Expected |
+|---|---|---|
+| S18-40 | Invoice partly paid (outstanding > 0, outstanding < total). | Reminder is sent with the **outstanding** balance displayed, not the original total. |
+| S18-41 | Invoice fully paid (outstanding = 0) but status still 'open'. | Reminder is **skipped**. No email sent, no ReminderLog created. |
+| S18-42 | Email content for partly paid invoice. | Shows "₹3,000.00" (outstanding), not "₹10,000.00" (total). |
+
+### 10.2 Implementation
+- `getInvoiceForReminder` fetches `outstanding` field
+- Gate added: skip if `outstanding <= 0` (before cap reservation)
+- `renderPaymentReminderEmail` receives `outstanding`, not `total`
+- No amount logged (DPDP compliance)
+
+### 10.3 Done criteria
+- [x] S18-40: `app/services/__tests__/reminders-catchup-db.test.ts` - partly paid invoice sends
+- [x] S18-41: `app/services/__tests__/reminders-catchup-db.test.ts` - zero outstanding skipped
+- [x] S18-42: `app/services/__tests__/reminders.test.ts` - email shows outstanding amount
+
+## 11. Uninstalled Shop Handling
+
+**Status:** Implemented. Pre-send eligibility checks prevent reminders to uninstalled shops.
+
+### 11.1 Behavior
+| # | Steps | Expected |
+|---|---|---|
+| S18-50 | REMINDER_SEND message processed after shop uninstalled. | Reminder is **skipped**. No email sent, no ReminderLog 'sent' row created. |
+| S18-51 | REMINDER_CATCHUP for delayed row after shop uninstalled. | Delayed row is **deleted silently**. No email sent. |
+
+### 11.2 Implementation
+- `getInvoiceForReminder` fetches `Shop.uninstalledAt`
+- Gate added in both `sendPaymentReminder` and `sendCatchupReminder`
+- SQL enqueue already filters uninstalled shops, but queued messages need the check
+- For catch-up, failed eligibility deletes the delayed row (same as other eligibility failures)
+
+### 11.3 Done criteria
+- [x] S18-50: `app/services/__tests__/reminders-catchup-db.test.ts` - uninstalled shop skips send
+- [x] S18-51: `app/services/__tests__/reminders-catchup-db.test.ts` - catch-up deletes delayed row
