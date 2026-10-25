@@ -90,11 +90,14 @@ describe("webhooks.draft_orders logging", () => {
     );
   }
 
-  function assertNoWebhookIdInLogs(): void {
+  function assertNoWebhookIdInLogs(testWebhookId?: string): void {
     const allOutput = getAllConsoleOutput();
     const outputStr = allOutput.join("\n");
     expect(outputStr).not.toContain("webhookId");
     expect(outputStr).not.toContain("wh=");
+    if (testWebhookId) {
+      expect(outputStr).not.toContain(testWebhookId);
+    }
   }
 
   describe("webhookId not logged but still used for idempotency", () => {
@@ -117,7 +120,7 @@ describe("webhooks.draft_orders logging", () => {
 
       const response = await action(createMockActionArgs(request));
       expect(response.status).toBe(200);
-      assertNoWebhookIdInLogs();
+      assertNoWebhookIdInLogs(testWebhookId);
     });
 
     it("missing admin_graphql_api_id path logs no webhookId", async () => {
@@ -139,7 +142,7 @@ describe("webhooks.draft_orders logging", () => {
 
       const response = await action(createMockActionArgs(request));
       expect(response.status).toBe(200);
-      assertNoWebhookIdInLogs();
+      assertNoWebhookIdInLogs(testWebhookId);
     });
 
     it("duplicate webhook path logs no webhookId but still passes it to DB", async () => {
@@ -162,7 +165,7 @@ describe("webhooks.draft_orders logging", () => {
 
       const response = await action(createMockActionArgs(request));
       expect(response.status).toBe(200);
-      assertNoWebhookIdInLogs();
+      assertNoWebhookIdInLogs(testWebhookId);
 
       expect(mockRecordAndEnqueueSync).toHaveBeenCalledWith(
         expect.anything(),
@@ -189,7 +192,7 @@ describe("webhooks.draft_orders logging", () => {
       });
 
       await expect(action(createMockActionArgs(request))).rejects.toThrow("DB_ERROR");
-      assertNoWebhookIdInLogs();
+      assertNoWebhookIdInLogs(testWebhookId);
     });
 
     it("success enqueue path logs no webhookId but still passes it to DB", async () => {
@@ -212,7 +215,7 @@ describe("webhooks.draft_orders logging", () => {
 
       const response = await action(createMockActionArgs(request));
       expect(response.status).toBe(200);
-      assertNoWebhookIdInLogs();
+      assertNoWebhookIdInLogs(testWebhookId);
 
       expect(mockRecordAndEnqueueSync).toHaveBeenCalledWith(
         expect.anything(),

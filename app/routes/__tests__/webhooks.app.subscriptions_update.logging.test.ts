@@ -97,18 +97,22 @@ describe("webhooks.app.subscriptions_update logging", () => {
     );
   }
 
-  function assertNoWebhookIdInLogs(): void {
+  function assertNoWebhookIdInLogs(testWebhookId?: string): void {
     const allOutput = getAllConsoleOutput();
     const outputStr = allOutput.join("\n");
     expect(outputStr).not.toContain("webhookId");
     expect(outputStr).not.toContain("wh=");
+    if (testWebhookId) {
+      expect(outputStr).not.toContain(testWebhookId);
+    }
   }
 
   it("unexpected topic path logs no webhookId", async () => {
+    const testWebhookId = "test-wh-123";
     mockVerifyWebhook.mockResolvedValue({
       shop: TEST_SHOP,
       topic: "other/topic",
-      webhookId: "test-wh-123",
+      webhookId: testWebhookId,
       payload: {},
       apiVersion: "2026-10",
       rawBody: new ArrayBuffer(0),
@@ -122,14 +126,15 @@ describe("webhooks.app.subscriptions_update logging", () => {
 
     const response = await action(createMockActionArgs(request));
     expect(response.status).toBe(200);
-    assertNoWebhookIdInLogs();
+    assertNoWebhookIdInLogs(testWebhookId);
   });
 
   it("success path with plan refresh logs no webhookId", async () => {
+    const testWebhookId = "test-wh-456";
     mockVerifyWebhook.mockResolvedValue({
       shop: TEST_SHOP,
       topic: "app_subscriptions/update",
-      webhookId: "test-wh-456",
+      webhookId: testWebhookId,
       payload: {},
       apiVersion: "2026-10",
       rawBody: new ArrayBuffer(0),
@@ -145,14 +150,15 @@ describe("webhooks.app.subscriptions_update logging", () => {
     expect(response.status).toBe(200);
 
     await new Promise(resolve => setTimeout(resolve, 10));
-    assertNoWebhookIdInLogs();
+    assertNoWebhookIdInLogs(testWebhookId);
   });
 
   it("success path with reactivated accounts logs no webhookId", async () => {
+    const testWebhookId = "test-wh-789";
     mockVerifyWebhook.mockResolvedValue({
       shop: TEST_SHOP,
       topic: "app_subscriptions/update",
-      webhookId: "test-wh-789",
+      webhookId: testWebhookId,
       payload: {},
       apiVersion: "2026-10",
       rawBody: new ArrayBuffer(0),
@@ -169,14 +175,15 @@ describe("webhooks.app.subscriptions_update logging", () => {
     expect(response.status).toBe(200);
 
     await new Promise(resolve => setTimeout(resolve, 10));
-    assertNoWebhookIdInLogs();
+    assertNoWebhookIdInLogs(testWebhookId);
   });
 
   it("error path logs no webhookId", async () => {
+    const testWebhookId = "test-wh-error";
     mockVerifyWebhook.mockResolvedValue({
       shop: TEST_SHOP,
       topic: "app_subscriptions/update",
-      webhookId: "test-wh-error",
+      webhookId: testWebhookId,
       payload: {},
       apiVersion: "2026-10",
       rawBody: new ArrayBuffer(0),
@@ -193,6 +200,6 @@ describe("webhooks.app.subscriptions_update logging", () => {
     expect(response.status).toBe(200);
 
     await new Promise(resolve => setTimeout(resolve, 10));
-    assertNoWebhookIdInLogs();
+    assertNoWebhookIdInLogs(testWebhookId);
   });
 });

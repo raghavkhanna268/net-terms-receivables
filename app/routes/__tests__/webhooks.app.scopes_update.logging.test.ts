@@ -77,18 +77,22 @@ describe("webhooks.app.scopes_update logging", () => {
     );
   }
 
-  function assertNoWebhookIdInLogs(): void {
+  function assertNoWebhookIdInLogs(testWebhookId?: string): void {
     const allOutput = getAllConsoleOutput();
     const outputStr = allOutput.join("\n");
     expect(outputStr).not.toContain("webhookId");
     expect(outputStr).not.toContain("wh=");
+    if (testWebhookId) {
+      expect(outputStr).not.toContain(testWebhookId);
+    }
   }
 
   it("received topic path logs no webhookId", async () => {
+    const testWebhookId = "test-wh-123";
     mockVerifyWebhook.mockResolvedValue({
       shop: TEST_SHOP,
       topic: "app/scopes_update",
-      webhookId: "test-wh-123",
+      webhookId: testWebhookId,
       payload: { current: ["read_products", "write_products"] },
       apiVersion: "2026-10",
       rawBody: new ArrayBuffer(0),
@@ -101,14 +105,15 @@ describe("webhooks.app.scopes_update logging", () => {
     });
 
     await action(createMockActionArgs(request));
-    assertNoWebhookIdInLogs();
+    assertNoWebhookIdInLogs(testWebhookId);
   });
 
   it("unexpected topic path logs no webhookId", async () => {
+    const testWebhookId = "test-wh-456";
     mockVerifyWebhook.mockResolvedValue({
       shop: TEST_SHOP,
       topic: "other/topic",
-      webhookId: "test-wh-456",
+      webhookId: testWebhookId,
       payload: {},
       apiVersion: "2026-10",
       rawBody: new ArrayBuffer(0),
@@ -121,14 +126,15 @@ describe("webhooks.app.scopes_update logging", () => {
     });
 
     await action(createMockActionArgs(request));
-    assertNoWebhookIdInLogs();
+    assertNoWebhookIdInLogs(testWebhookId);
   });
 
   it("success update path logs no webhookId", async () => {
+    const testWebhookId = "test-wh-789";
     mockVerifyWebhook.mockResolvedValue({
       shop: TEST_SHOP,
       topic: "app/scopes_update",
-      webhookId: "test-wh-789",
+      webhookId: testWebhookId,
       payload: { current: ["read_products", "write_orders"] },
       apiVersion: "2026-10",
       rawBody: new ArrayBuffer(0),
@@ -142,14 +148,15 @@ describe("webhooks.app.scopes_update logging", () => {
     });
 
     await action(createMockActionArgs(request));
-    assertNoWebhookIdInLogs();
+    assertNoWebhookIdInLogs(testWebhookId);
   });
 
   it("error path logs no webhookId", async () => {
+    const testWebhookId = "test-wh-error";
     mockVerifyWebhook.mockResolvedValue({
       shop: TEST_SHOP,
       topic: "app/scopes_update",
-      webhookId: "test-wh-error",
+      webhookId: testWebhookId,
       payload: { current: ["read_products"] },
       apiVersion: "2026-10",
       rawBody: new ArrayBuffer(0),
@@ -163,6 +170,6 @@ describe("webhooks.app.scopes_update logging", () => {
     });
 
     await action(createMockActionArgs(request));
-    assertNoWebhookIdInLogs();
+    assertNoWebhookIdInLogs(testWebhookId);
   });
 });

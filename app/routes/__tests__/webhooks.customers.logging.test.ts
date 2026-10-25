@@ -89,18 +89,22 @@ describe("webhooks.customers logging", () => {
     );
   }
 
-  function assertNoWebhookIdInLogs(): void {
+  function assertNoWebhookIdInLogs(testWebhookId?: string): void {
     const allOutput = getAllConsoleOutput();
     const outputStr = allOutput.join("\n");
     expect(outputStr).not.toContain("webhookId");
     expect(outputStr).not.toContain("wh=");
+    if (testWebhookId) {
+      expect(outputStr).not.toContain(testWebhookId);
+    }
   }
 
   it("unexpected topic path logs no webhookId", async () => {
+    const testWebhookId = "test-wh-123";
     mockVerifyWebhook.mockResolvedValue({
       shop: TEST_SHOP,
       topic: "orders/create",
-      webhookId: "test-wh-123",
+      webhookId: testWebhookId,
       payload: { admin_graphql_api_id: "gid://shopify/Order/123" },
       apiVersion: "2026-10",
       rawBody: new ArrayBuffer(0),
@@ -114,14 +118,15 @@ describe("webhooks.customers logging", () => {
 
     const response = await action(createMockActionArgs(request));
     expect(response.status).toBe(200);
-    assertNoWebhookIdInLogs();
+    assertNoWebhookIdInLogs(testWebhookId);
   });
 
   it("missing admin_graphql_api_id path logs no webhookId", async () => {
+    const testWebhookId = "test-wh-456";
     mockVerifyWebhook.mockResolvedValue({
       shop: TEST_SHOP,
       topic: "customers/create",
-      webhookId: "test-wh-456",
+      webhookId: testWebhookId,
       payload: {},
       apiVersion: "2026-10",
       rawBody: new ArrayBuffer(0),
@@ -135,7 +140,7 @@ describe("webhooks.customers logging", () => {
 
     const response = await action(createMockActionArgs(request));
     expect(response.status).toBe(200);
-    assertNoWebhookIdInLogs();
+    assertNoWebhookIdInLogs(testWebhookId);
   });
 
   it("duplicate webhook path logs no webhookId but still passes it to DB", async () => {
@@ -158,7 +163,7 @@ describe("webhooks.customers logging", () => {
 
     const response = await action(createMockActionArgs(request));
     expect(response.status).toBe(200);
-    assertNoWebhookIdInLogs();
+    assertNoWebhookIdInLogs(testWebhookId);
 
     expect(mockRecordAndEnqueueSync).toHaveBeenCalledWith(
       expect.anything(),
@@ -167,10 +172,11 @@ describe("webhooks.customers logging", () => {
   });
 
   it("error path logs no webhookId", async () => {
+    const testWebhookId = "test-wh-error";
     mockVerifyWebhook.mockResolvedValue({
       shop: TEST_SHOP,
       topic: "customers/update",
-      webhookId: "test-wh-error",
+      webhookId: testWebhookId,
       payload: { admin_graphql_api_id: "gid://shopify/Customer/456" },
       apiVersion: "2026-10",
       rawBody: new ArrayBuffer(0),
@@ -184,7 +190,7 @@ describe("webhooks.customers logging", () => {
     });
 
     await expect(action(createMockActionArgs(request))).rejects.toThrow("DB_ERROR");
-    assertNoWebhookIdInLogs();
+    assertNoWebhookIdInLogs(testWebhookId);
   });
 
   it("success enqueue path logs no webhookId but still passes it to DB", async () => {
@@ -207,7 +213,7 @@ describe("webhooks.customers logging", () => {
 
     const response = await action(createMockActionArgs(request));
     expect(response.status).toBe(200);
-    assertNoWebhookIdInLogs();
+    assertNoWebhookIdInLogs(testWebhookId);
 
     expect(mockRecordAndEnqueueSync).toHaveBeenCalledWith(
       expect.anything(),

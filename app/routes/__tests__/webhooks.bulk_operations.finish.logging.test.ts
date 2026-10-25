@@ -101,18 +101,22 @@ describe("webhooks.bulk_operations.finish logging", () => {
     );
   }
 
-  function assertNoWebhookIdInLogs(): void {
+  function assertNoWebhookIdInLogs(testWebhookId?: string): void {
     const allOutput = getAllConsoleOutput();
     const outputStr = allOutput.join("\n");
     expect(outputStr).not.toContain("webhookId");
     expect(outputStr).not.toContain("wh=");
+    if (testWebhookId) {
+      expect(outputStr).not.toContain(testWebhookId);
+    }
   }
 
   it("missing admin_graphql_api_id path logs no webhookId", async () => {
+    const testWebhookId = "test-wh-123";
     mockAuthenticateWebhook.mockResolvedValue({
       shop: TEST_SHOP,
       topic: "bulk_operations/finish",
-      webhookId: "test-wh-123",
+      webhookId: testWebhookId,
       payload: { status: "COMPLETED" },
     });
 
@@ -124,14 +128,15 @@ describe("webhooks.bulk_operations.finish logging", () => {
 
     const response = await action(createMockActionArgs(request));
     expect(response.status).toBe(200);
-    assertNoWebhookIdInLogs();
+    assertNoWebhookIdInLogs(testWebhookId);
   });
 
   it("non-completed status path logs no webhookId", async () => {
+    const testWebhookId = "test-wh-456";
     mockAuthenticateWebhook.mockResolvedValue({
       shop: TEST_SHOP,
       topic: "bulk_operations/finish",
-      webhookId: "test-wh-456",
+      webhookId: testWebhookId,
       payload: {
         admin_graphql_api_id: "gid://shopify/BulkOperation/123",
         status: "RUNNING",
@@ -146,14 +151,15 @@ describe("webhooks.bulk_operations.finish logging", () => {
 
     const response = await action(createMockActionArgs(request));
     expect(response.status).toBe(200);
-    assertNoWebhookIdInLogs();
+    assertNoWebhookIdInLogs(testWebhookId);
   });
 
   it("unknown bulk operation path logs no webhookId", async () => {
+    const testWebhookId = "test-wh-789";
     mockAuthenticateWebhook.mockResolvedValue({
       shop: TEST_SHOP,
       topic: "bulk_operations/finish",
-      webhookId: "test-wh-789",
+      webhookId: testWebhookId,
       payload: {
         admin_graphql_api_id: "gid://shopify/BulkOperation/999",
         status: "COMPLETED",
@@ -169,7 +175,7 @@ describe("webhooks.bulk_operations.finish logging", () => {
 
     const response = await action(createMockActionArgs(request));
     expect(response.status).toBe(200);
-    assertNoWebhookIdInLogs();
+    assertNoWebhookIdInLogs(testWebhookId);
   });
 
   it("duplicate webhook path logs no webhookId but still passes it to DB", async () => {
@@ -194,7 +200,7 @@ describe("webhooks.bulk_operations.finish logging", () => {
 
     const response = await action(createMockActionArgs(request));
     expect(response.status).toBe(200);
-    assertNoWebhookIdInLogs();
+    assertNoWebhookIdInLogs(testWebhookId);
 
     expect(mockRecordWebhookReceipt).toHaveBeenCalledWith(
       expect.anything(),
@@ -227,7 +233,7 @@ describe("webhooks.bulk_operations.finish logging", () => {
 
     const response = await action(createMockActionArgs(request));
     expect(response.status).toBe(200);
-    assertNoWebhookIdInLogs();
+    assertNoWebhookIdInLogs(testWebhookId);
 
     expect(mockSendBulkMessage).toHaveBeenCalledWith(
       expect.anything(),
