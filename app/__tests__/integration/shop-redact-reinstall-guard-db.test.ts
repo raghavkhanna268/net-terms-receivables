@@ -17,7 +17,6 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { deleteShop } from "~/services/compliance/compliance.server";
-import { LightSessionStorage } from "~/lib/session-storage-light.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -173,26 +172,27 @@ describeWithDb("shop/redact reinstall guard (#291)", () => {
       await sql`DELETE FROM "Shop" WHERE id = ${SHOP_UNINSTALLED_ID}`;
     });
 
-    it("erases the shop and all data", async () => {
+    it("erases the shop and all data, including sessions", async () => {
       // Verify data exists before
       const beforeCounts = await getShopRowCounts(SHOP_UNINSTALLED_ID, SHOP_UNINSTALLED_DOMAIN);
       expect(beforeCounts.shop).toBe(1);
+      expect(beforeCounts.session).toBe(1);
       expect(beforeCounts.buyerAccount).toBe(1);
       expect(beforeCounts.taggedCustomers).toBe(1);
 
-      // Run shop/redact
-      const sessionStorage = new LightSessionStorage(sql);
-      await sessionStorage.deleteAllForShop(SHOP_UNINSTALLED_DOMAIN);
+      // Run shop/redact - deleteShop now handles session deletion internally
       const result = await deleteShop(sql, SHOP_UNINSTALLED_DOMAIN);
 
       // Should delete successfully
       expect(result.deleted).toBe(true);
       expect(result.shopId).toBe(SHOP_UNINSTALLED_ID);
       expect(result.skippedReinstalled).toBe(false);
+      expect(result.sessionsDeleted).toBe(1);
 
-      // Verify all data is gone
+      // Verify all data is gone, including sessions
       const afterCounts = await getShopRowCounts(SHOP_UNINSTALLED_ID, SHOP_UNINSTALLED_DOMAIN);
       expect(afterCounts.shop).toBe(0);
+      expect(afterCounts.session).toBe(0);
       expect(afterCounts.buyerAccount).toBe(0);
       expect(afterCounts.taggedCustomers).toBe(0);
     });
@@ -213,32 +213,31 @@ describeWithDb("shop/redact reinstall guard (#291)", () => {
       await sql`DELETE FROM "Shop" WHERE id = ${SHOP_REINSTALLED_ID}`;
     });
 
-    it("skips deletion, returns skippedReinstalled=true, row counts unchanged", async () => {
+    it("skips deletion, returns skippedReinstalled=true, ALL data including sessions preserved", async () => {
       // Verify data exists before
       const beforeCounts = await getShopRowCounts(SHOP_REINSTALLED_ID, SHOP_REINSTALLED_DOMAIN);
       expect(beforeCounts.shop).toBe(1);
+      expect(beforeCounts.session).toBe(1);
       expect(beforeCounts.buyerAccount).toBe(1);
       expect(beforeCounts.taggedCustomers).toBe(1);
 
-      // Run shop/redact
-      const sessionStorage = new LightSessionStorage(sql);
-      await sessionStorage.deleteAllForShop(SHOP_REINSTALLED_DOMAIN);
+      // Run shop/redact - deleteShop skips deletion when shop has reinstalled
       const result = await deleteShop(sql, SHOP_REINSTALLED_DOMAIN);
 
       // Should skip deletion
       expect(result.deleted).toBe(false);
       expect(result.shopId).toBe(SHOP_REINSTALLED_ID);
       expect(result.skippedReinstalled).toBe(true);
+      expect(result.sessionsDeleted).toBe(0);
       expect(result.refetchNullPurged).toBe(0);
       expect(result.bulkOperationsPurged).toBe(0);
 
-      // Verify shop data is preserved (only sessions deleted by sessionStorage)
+      // Verify ALL shop data is preserved, including sessions (#291)
       const afterCounts = await getShopRowCounts(SHOP_REINSTALLED_ID, SHOP_REINSTALLED_DOMAIN);
       expect(afterCounts.shop).toBe(1);
+      expect(afterCounts.session).toBe(1);
       expect(afterCounts.buyerAccount).toBe(1);
       expect(afterCounts.taggedCustomers).toBe(1);
-      // Session was deleted by sessionStorage.deleteAllForShop before deleteShop
-      expect(afterCounts.session).toBe(0);
     });
   });
 
@@ -247,19 +246,18 @@ describeWithDb("shop/redact reinstall guard (#291)", () => {
       // Seed as uninstalled
       await seedShopData(SHOP_IDEMPOTENT_ID, SHOP_IDEMPOTENT_DOMAIN, true);
 
-      // First redact
-      const sessionStorage = new LightSessionStorage(sql);
-      await sessionStorage.deleteAllForShop(SHOP_IDEMPOTENT_DOMAIN);
+      // First redact - deleteShop handles session deletion internally
       const firstResult = await deleteShop(sql, SHOP_IDEMPOTENT_DOMAIN);
       expect(firstResult.deleted).toBe(true);
       expect(firstResult.skippedReinstalled).toBe(false);
+      expect(firstResult.sessionsDeleted).toBe(1);
 
       // Second redact (shop already gone)
-      await sessionStorage.deleteAllForShop(SHOP_IDEMPOTENT_DOMAIN);
       const secondResult = await deleteShop(sql, SHOP_IDEMPOTENT_DOMAIN);
       expect(secondResult.deleted).toBe(false);
       expect(secondResult.shopId).toBeNull();
       expect(secondResult.skippedReinstalled).toBe(false);
+      expect(secondResult.sessionsDeleted).toBe(0);
     });
   });
 
@@ -317,6 +315,7 @@ describeWithDb("shop/redact reinstall guard (#291)", () => {
         expect(redactResult.deleted).toBe(false);
         expect(redactResult.shopId).toBe(SHOP_RACE_ID);
         expect(redactResult.skippedReinstalled).toBe(true);
+        expect(redactResult.sessionsDeleted).toBe(0);
 
         // Verify shop still exists and is marked as installed
         const [finalShop] = await sql<[{ id: string; uninstalledAt: Date | null } | undefined]>`
@@ -325,9 +324,10 @@ describeWithDb("shop/redact reinstall guard (#291)", () => {
         expect(finalShop).toBeDefined();
         expect(finalShop!.uninstalledAt).toBeNull();
 
-        // Verify data is still intact
+        // Verify ALL data is still intact, including sessions (#291)
         const finalCounts = await getShopRowCounts(SHOP_RACE_ID, SHOP_RACE_DOMAIN);
         expect(finalCounts.shop).toBe(1);
+        expect(finalCounts.session).toBe(1);
         expect(finalCounts.buyerAccount).toBe(1);
         expect(finalCounts.taggedCustomers).toBe(1);
       } finally {

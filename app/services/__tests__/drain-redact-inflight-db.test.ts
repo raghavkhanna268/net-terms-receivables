@@ -81,12 +81,9 @@ vi.mock("~/services/sync/company.server", async (importOriginal) => {
       async (sql: unknown, webhookId: string, shop: string) => {
         if (shop === A.domain && !redactTriggered.done) {
           redactTriggered.done = true;
-          const { LightSessionStorage } = await import("~/lib/session-storage-light.server");
-          const { deleteWebhookReceiptsForShop } = await import("~/lib/webhook-receipts.server");
           const { deleteShop } = await import("~/services/compliance/compliance.server");
 
-          await new LightSessionStorage(sqlRef).deleteAllForShop(A.domain);
-          await deleteWebhookReceiptsForShop(sqlRef, A.domain);
+          // deleteShop now handles sessions and webhook_receipts internally
           await deleteShop(sqlRef, A.domain);
         }
         return (actual.isWebhookProcessed as typeof actual.isWebhookProcessed)(

@@ -115,6 +115,7 @@ describe("webhooks.compliance", () => {
       deleted: true,
       shopId: "shop-123",
       skippedReinstalled: false,
+      sessionsDeleted: 0,
       refetchNullPurged: 0,
       bulkOperationsPurged: 0,
       orderGapPurged: 0,
@@ -124,6 +125,8 @@ describe("webhooks.compliance", () => {
       pgmqSyncArchivePurged: 0,
       pgmqBulkArchivePurged: 0,
       deadLetterPurged: 0,
+      processedWebhooksPurged: 0,
+      webhookReceiptsPurged: 0,
     });
     mockPurgePgmqMessages.mockResolvedValue({ purged: false, reason: "deleteShop handles it" });
     mockRedactCustomer.mockResolvedValue({
@@ -700,7 +703,24 @@ describe("webhooks.compliance", () => {
     });
 
     it("deletes sessions and the Shop row (cascade deletes all data)", async () => {
-      mockDeleteAllForShop.mockResolvedValue(3);
+      // Session deletion is now handled inside deleteShop
+      mockDeleteShop.mockResolvedValue({
+        deleted: true,
+        shopId: "shop-123",
+        skippedReinstalled: false,
+        sessionsDeleted: 3,
+        refetchNullPurged: 1,
+        bulkOperationsPurged: 0,
+        orderGapPurged: 0,
+        piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
+        deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
+      });
 
       const payload = { shop_domain: "test-shop.myshopify.com", shop_id: 123 };
 
@@ -723,19 +743,20 @@ describe("webhooks.compliance", () => {
 
       expect(response.status).toBe(200);
       expect(mockVerifyPayloadShopMatch).toHaveBeenCalledWith("test-shop.myshopify.com", payload);
-      expect(mockDeleteAllForShop).toHaveBeenCalledWith("test-shop.myshopify.com");
+      // Session deletion is now inside deleteShop, not via sessionStorage
+      expect(mockDeleteAllForShop).not.toHaveBeenCalled();
       expect(mockDeleteShop).toHaveBeenCalledWith(
         expect.anything(),
         "test-shop.myshopify.com"
       );
     });
 
-    it("returns 200 even when no sessions exist (idempotent)", async () => {
-      mockDeleteAllForShop.mockResolvedValue(0);
+    it("returns 200 even when shop not found (idempotent)", async () => {
       mockDeleteShop.mockResolvedValue({
         deleted: false,
         shopId: null,
         skippedReinstalled: false,
+        sessionsDeleted: 0,
         refetchNullPurged: 0,
         bulkOperationsPurged: 0,
         orderGapPurged: 0,
@@ -745,6 +766,8 @@ describe("webhooks.compliance", () => {
         pgmqSyncArchivePurged: 0,
         pgmqBulkArchivePurged: 0,
         deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
       });
 
       const payload = { shop_domain: "test-no-sessions-shop.myshopify.com", shop_id: 999 };
@@ -767,7 +790,8 @@ describe("webhooks.compliance", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-      expect(mockDeleteAllForShop).toHaveBeenCalledWith("test-no-sessions-shop.myshopify.com");
+      // Session deletion is handled inside deleteShop
+      expect(mockDeleteAllForShop).not.toHaveBeenCalled();
       expect(mockDeleteShop).toHaveBeenCalled();
     });
 
@@ -848,11 +872,12 @@ describe("webhooks.compliance", () => {
     });
 
     it("returns 200 and skips deletion when shop reinstalled (uninstalledAt is NULL)", async () => {
-      mockDeleteAllForShop.mockResolvedValue(3);
+      // deleteShop returns skippedReinstalled=true, sessions not deleted
       mockDeleteShop.mockResolvedValue({
         deleted: false,
         shopId: "shop-reinstalled-123",
         skippedReinstalled: true,
+        sessionsDeleted: 0,
         refetchNullPurged: 0,
         bulkOperationsPurged: 0,
         orderGapPurged: 0,
@@ -886,10 +911,60 @@ describe("webhooks.compliance", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-      expect(mockDeleteAllForShop).toHaveBeenCalledWith("test-reinstalled.myshopify.com");
+      // Session deletion is now handled inside deleteShop, not in route
+      // On skip path, mockDeleteAllForShop should NOT be called
+      expect(mockDeleteAllForShop).not.toHaveBeenCalled();
       expect(mockDeleteShop).toHaveBeenCalledWith(
         expect.anything(),
         "test-reinstalled.myshopify.com"
+      );
+    });
+
+    it("deletes sessions via deleteShop when shop is erased (not reinstalled)", async () => {
+      // deleteShop returns deleted=true, sessions deleted
+      mockDeleteShop.mockResolvedValue({
+        deleted: true,
+        shopId: "shop-erase-123",
+        skippedReinstalled: false,
+        sessionsDeleted: 2,
+        refetchNullPurged: 1,
+        bulkOperationsPurged: 0,
+        orderGapPurged: 0,
+        piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
+        deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
+      });
+
+      const payload = { shop_domain: "test-erase.myshopify.com", shop_id: 456 };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: "test-erase.myshopify.com",
+        topic: "shop/redact",
+        webhookId: "test-webhook-erase",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const response = await action(createMockActionArgs(request));
+
+      expect(response.status).toBe(200);
+      // Session deletion is handled inside deleteShop, not in route
+      expect(mockDeleteAllForShop).not.toHaveBeenCalled();
+      expect(mockDeleteShop).toHaveBeenCalledWith(
+        expect.anything(),
+        "test-erase.myshopify.com"
       );
     });
   });
@@ -899,8 +974,26 @@ describe("webhooks.compliance", () => {
       mockVerifyPayloadShopMatch.mockImplementation((headerShop: string) => headerShop);
     });
 
-    it("uses sessionStorage from context (not module-level state)", async () => {
-      mockDeleteAllForShop.mockResolvedValue(1);
+    it("shop/redact no longer uses sessionStorage (sessions deleted inside deleteShop)", async () => {
+      // Session deletion was moved from the route into deleteShop's transaction
+      // to ensure sessions are only deleted when shop is actually erased (#291)
+      mockDeleteShop.mockResolvedValue({
+        deleted: true,
+        shopId: "shop-context-123",
+        skippedReinstalled: false,
+        sessionsDeleted: 1,
+        refetchNullPurged: 0,
+        bulkOperationsPurged: 0,
+        orderGapPurged: 0,
+        piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
+        deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
+      });
       const payload = { shop_domain: "test-context.myshopify.com" };
 
       mockVerifyWebhook.mockResolvedValue({
@@ -919,7 +1012,9 @@ describe("webhooks.compliance", () => {
 
       await action(createMockActionArgs(request));
 
-      expect(mockDeleteAllForShop).toHaveBeenCalled();
+      // sessionStorage.deleteAllForShop should NOT be called in the route
+      expect(mockDeleteAllForShop).not.toHaveBeenCalled();
+      expect(mockDeleteShop).toHaveBeenCalled();
     });
   });
 
@@ -1232,11 +1327,11 @@ describe("webhooks.compliance", () => {
     });
 
     it("SHOP_REDACT success path logs no shop domain", async () => {
-      mockDeleteAllForShop.mockResolvedValue(3);
       mockDeleteShop.mockResolvedValue({
         deleted: true,
         shopId: "shop-del-123",
         skippedReinstalled: false,
+        sessionsDeleted: 3,
         refetchNullPurged: 1,
         bulkOperationsPurged: 1,
         orderGapPurged: 1,
@@ -1246,6 +1341,8 @@ describe("webhooks.compliance", () => {
         pgmqSyncArchivePurged: 1,
         pgmqBulkArchivePurged: 1,
         deadLetterPurged: 1,
+        processedWebhooksPurged: 1,
+        webhookReceiptsPurged: 1,
       });
 
       const payload = { shop_domain: TEST_SHOP, shop_id: 123 };
@@ -1270,11 +1367,11 @@ describe("webhooks.compliance", () => {
     });
 
     it("SHOP_REDACT skipped reinstall path logs shop_redact_skipped_reinstalled with shopHash only, no domain", async () => {
-      mockDeleteAllForShop.mockResolvedValue(3);
       mockDeleteShop.mockResolvedValue({
         deleted: false,
         shopId: "shop-reinstalled-456",
         skippedReinstalled: true,
+        sessionsDeleted: 0,
         refetchNullPurged: 0,
         bulkOperationsPurged: 0,
         orderGapPurged: 0,
@@ -1310,11 +1407,11 @@ describe("webhooks.compliance", () => {
     });
 
     it("SHOP_REDACT shop not found path logs no shop domain", async () => {
-      mockDeleteAllForShop.mockResolvedValue(0);
       mockDeleteShop.mockResolvedValue({
         deleted: false,
         shopId: null,
         skippedReinstalled: false,
+        sessionsDeleted: 0,
         refetchNullPurged: 0,
         bulkOperationsPurged: 0,
         orderGapPurged: 0,
@@ -1324,6 +1421,8 @@ describe("webhooks.compliance", () => {
         pgmqSyncArchivePurged: 0,
         pgmqBulkArchivePurged: 0,
         deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
       });
 
       const payload = { shop_domain: TEST_SHOP, shop_id: 123 };

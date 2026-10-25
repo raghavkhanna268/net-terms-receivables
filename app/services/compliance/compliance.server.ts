@@ -47,6 +47,7 @@ export interface DeleteShopResult {
   shopId: string | null;
   /** True when the shop row exists but was skipped because it reinstalled (uninstalledAt IS NULL) */
   skippedReinstalled: boolean;
+  sessionsDeleted: number;
   refetchNullPurged: number;
   bulkOperationsPurged: number;
   orderGapPurged: number;
@@ -145,6 +146,7 @@ export async function deleteShop(
         deleted: false,
         shopId: lockedShop.id,
         skippedReinstalled: true,
+        sessionsDeleted: 0,
         refetchNullPurged: 0,
         bulkOperationsPurged: 0,
         orderGapPurged: 0,
@@ -160,6 +162,14 @@ export async function deleteShop(
     }
 
     // Delete non-FK-linked tables first (shop text column or shop in JSON)
+
+    // Session table: delete all OAuth sessions for this shop.
+    // Moved here from webhooks.compliance.tsx to ensure sessions are only deleted
+    // when the shop is actually being erased (not skipped by reinstall guard).
+    // See issue #291.
+    const sessionsResult = await tx`
+      DELETE FROM "Session" WHERE shop = ${shopDomain}
+    `;
 
     // s10b_order_refetch_null (aggregate counter, shop text column)
     const refetchResult = await tx`
@@ -264,6 +274,7 @@ export async function deleteShop(
       deleted: result !== undefined,
       shopId: result?.id ?? null,
       skippedReinstalled: false,
+      sessionsDeleted: sessionsResult.count,
       refetchNullPurged: refetchResult.count,
       bulkOperationsPurged: bulkOpsResult.count,
       orderGapPurged: outstandingResult.count,

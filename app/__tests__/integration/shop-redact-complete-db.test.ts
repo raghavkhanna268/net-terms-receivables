@@ -6,7 +6,7 @@
  *   Payment, Match, PayerAlias, RejectedMatch, ReminderRule, ReminderLog, AuditEvent,
  *   s8_tagged_customers, s8_draft_orders, s22_data_requests, backstop_processed_orders,
  *   s18_shop_reminder_settings)
- * - Session (deleted via sessionStorage.deleteAllForShop before deleteShop)
+ * - Session (deleted inside deleteShop transaction)
  * - webhook_receipts (deleted inside deleteShop transaction)
  * - s6_processed_webhooks (reconcile ids with domain prefix; Shopify ids via receipts join)
  * - s10b_order_refetch_null, s6_bulk_operations, order_outstanding_missing,
@@ -33,7 +33,6 @@ import {
   deleteShop,
   deleteProcessedWebhooksViaReceipts,
 } from "~/services/compliance/compliance.server";
-import { LightSessionStorage } from "~/lib/session-storage-light.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -611,11 +610,7 @@ describeWithDb("shop/redact complete DB deletion", () => {
     }
 
     // Run shop/redact path for Shop A
-    // 1. Delete sessions (as the webhook handler does)
-    const sessionStorage = new LightSessionStorage(sql);
-    await sessionStorage.deleteAllForShop(SHOP_A_DOMAIN);
-
-    // 2. Delete shop and all related data (deleteShop now handles webhook_receipts and s6_processed_webhooks)
+    // deleteShop handles sessions, webhook_receipts, and s6_processed_webhooks internally
     const result = await deleteShop(sql, SHOP_A_DOMAIN);
     expect(result.deleted).toBe(true);
     expect(result.shopId).toBe(SHOP_A_ID);
@@ -637,9 +632,7 @@ describeWithDb("shop/redact complete DB deletion", () => {
 
   it("is idempotent: second call for already-deleted shop does not throw and leaves B intact", async () => {
     // Shop A should already be deleted from previous test
-    // Run shop/redact again for Shop A (deleteShop handles receipts and processed webhooks internally)
-    const sessionStorage = new LightSessionStorage(sql);
-    await sessionStorage.deleteAllForShop(SHOP_A_DOMAIN);
+    // Run shop/redact again for Shop A
     const result = await deleteShop(sql, SHOP_A_DOMAIN);
 
     // Should not throw and should report not deleted (already gone)
@@ -682,9 +675,7 @@ describeWithDb("shop/redact complete DB deletion", () => {
     `;
 
     // Run shop/redact for shop A's domain (which shop C now has)
-    // deleteShop handles webhook_receipts and s6_processed_webhooks internally
-    const sessionStorage = new LightSessionStorage(sql);
-    await sessionStorage.deleteAllForShop(SHOP_A_DOMAIN);
+    // deleteShop handles sessions, webhook_receipts, and s6_processed_webhooks internally
     const result = await deleteShop(sql, SHOP_A_DOMAIN);
 
     expect(result.deleted).toBe(true);
@@ -764,9 +755,7 @@ describeWithDb("shop/redact complete DB deletion", () => {
     expect(parseInt(bulkExists.count, 10)).toBe(1);
 
     // 3. Run shop/redact to delete the messages from the queue
-    // deleteShop handles webhook_receipts and s6_processed_webhooks internally
-    const sessionStorage = new LightSessionStorage(sql);
-    await sessionStorage.deleteAllForShop(IN_FLIGHT_DOMAIN);
+    // deleteShop handles sessions, webhook_receipts, and s6_processed_webhooks internally
     const result = await deleteShop(sql, IN_FLIGHT_DOMAIN);
 
     expect(result.deleted).toBe(true);
@@ -902,9 +891,7 @@ describeWithDb("shop/redact complete DB deletion", () => {
     expect(parseInt(beforeCounts.targets, 10)).toBe(3);
     expect(parseInt(beforeCounts.nearMisses, 10)).toBe(8);
 
-    // Run deleteShop for Shop A
-    const sessionStorage = new LightSessionStorage(sql);
-    await sessionStorage.deleteAllForShop(PW_DOMAIN);
+    // Run deleteShop for Shop A (handles sessions internally)
     const result = await deleteShop(sql, PW_DOMAIN);
 
     expect(result.deleted).toBe(true);
@@ -954,9 +941,7 @@ describeWithDb("shop/redact complete DB deletion", () => {
         (${falsePositive}, 'BULK_OPERATIONS_FINISH', 'gid://shopify/BulkOperation/pct2', ${now})
     `;
 
-    // Run deleteShop
-    const sessionStorage = new LightSessionStorage(sql);
-    await sessionStorage.deleteAllForShop(PCT_DOMAIN);
+    // Run deleteShop (handles sessions internally)
     const result = await deleteShop(sql, PCT_DOMAIN);
 
     expect(result.deleted).toBe(true);

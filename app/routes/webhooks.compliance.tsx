@@ -211,19 +211,14 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     case "SHOP_REDACT": {
       const payloadShop = verifyPayloadShopMatch(shop, payload);
 
-      const { sessionStorage } = context;
-      const sessionCount = await sessionStorage.deleteAllForShop(payloadShop);
-      console.log(
-        `[Compliance] shop/redact: Deleted ${sessionCount} session(s) wh=${webhookId}`
-      );
-
       const pgmqResult = await purgePgmqMessages(sql, payloadShop);
       console.log(
         `[Compliance] shop/redact: pgmq purge - ${pgmqResult.reason}`
       );
 
-      // deleteShop now handles webhook_receipts and s6_processed_webhooks internally
-      // to ensure proper ordering (join delete before receipts delete)
+      // deleteShop handles sessions, webhook_receipts, and s6_processed_webhooks
+      // internally within its transaction. Sessions are only deleted when the
+      // shop is actually being erased (not skipped by reinstall guard). See #291.
       const result = await deleteShop(sql, payloadShop);
       const hash = await shopHash(payloadShop);
 
@@ -237,6 +232,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         safeLog("info", "shop_redact_deleted", {
           shopHash: hash,
           webhookId,
+          sessionsDeleted: result.sessionsDeleted,
           refetchNullPurged: result.refetchNullPurged,
           bulkOperationsPurged: result.bulkOperationsPurged,
           orderGapPurged: result.orderGapPurged,
