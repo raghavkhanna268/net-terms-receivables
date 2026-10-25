@@ -1,0 +1,202 @@
+# Nightly encrypted database backup -> Cloudflare R2
+#
+# Streams pg_dump (custom format) through age (public-key encryption) straight
+# into R2 via the aws CLI. Plaintext never touches the runner's disk and
+# nothing from the dump is printed: this repo is public, so Actions logs are
+# public. Restore steps: docs/runbooks/restore.md.
+#
+# Schedule: 21:00 UTC daily = 02:30 IST. Also runnable via workflow_dispatch
+# (main only).
+#
+# Required secrets (if ANY is missing the run prints
+# `backup_skipped=true reason=secrets_missing missing_count=N` and exits 0):
+#   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET,
+#   R2_ENDPOINT, AGE_RECIPIENT
+# Plus the existing DATABASE_URL_MIGRATIONS (Supabase SESSION pooler, port
+# 5432; same secret and connection path as migrate.yml). The transaction
+# pooler (6543) is unsuitable for pg_dump, and the direct db.<ref>.supabase.co
+# host is IPv6-only without Supabase's IPv4 add-on, which GitHub-hosted
+# runners cannot reach.
+#
+# Retention: no automatic deletion here (see restore.md, "Retention").
+
+name: DB Backup
+
+on:
+  schedule:
+    - cron: '0 21 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: db-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    name: Encrypted pg_dump to R2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Check required secrets
+        id: secrets
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          AGE_RECIPIENT: ${{ secrets.AGE_RECIPIENT }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET R2_ENDPOINT AGE_RECIPIENT; do
+            if [ -z "${!name:-}" ]; then
+              missing=$((missing + 1))
+            fi
+          done
+          if [ "$missing" -gt 0 ]; then
+            echo "backup_skipped=true reason=secrets_missing missing_count=${missing}"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "present=true" >> "$GITHUB_OUTPUT"
+
+      - name: Install pg_dump 17 (PGDG) and age
+        if: steps.secrets.outputs.present == 'true'
+        env:
+          # Supabase prod runs Postgres 17 (docs/qa/post-redrive-verification.md).
+          # pg_dump must be >= the server major; the backup step re-checks this
+          # against the live server and fails if the server is newer.
+          PG_MAJOR: '17'
+        run: |
+          set -euo pipefail
+          sudo install -d -m 0755 /usr/share/postgresql-common/pgdg
+          curl -fsSL -o /tmp/pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          # Fingerprint of the PGDG apt signing key (ACCC4CF8).
+          gpg --show-keys --with-colons /tmp/pgdg.asc | grep -q '^fpr:::::::::B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8:$'
+          sudo install -m 0644 /tmp/pgdg.asc /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update -qq
+          # age comes from Ubuntu's own archive (universe), signed by Ubuntu.
+          sudo apt-get install -y -qq --no-install-recommends "postgresql-client-${PG_MAJOR}" age > /dev/null
+          echo "pg_dump_version=$("/usr/lib/postgresql/${PG_MAJOR}/bin/pg_dump" --version | awk '{print $3}')"
+          echo "age_version=$(age --version)"
+          aws --version
+
+      - name: Dump, encrypt, upload
+        if: steps.secrets.outputs.present == 'true'
+        env:
+          PG_MAJOR: '17'
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          AGE_RECIPIENT: ${{ secrets.AGE_RECIPIENT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          # aws CLI >= 2.23 sends new default integrity checksums; Cloudflare
+          # recommends only sending them when required for R2.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          AWS_PAGER: ''
+          PGCONNECT_TIMEOUT: '30'
+          PGAPPNAME: db-backup
+          # App data (public, incl. _prisma_migrations) and pgmq queues.
+          # Supabase-managed schemas (auth, storage, vault, ...) are excluded;
+          # see restore.md "What is backed up".
+          DUMP_SCHEMAS: 'public pgmq'
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_URL:-}" ]; then
+            echo "::error::DATABASE_URL_MIGRATIONS secret is not set"
+            exit 1
+          fi
+          case "$AGE_RECIPIENT" in
+            age1*) ;;
+            *) echo "::error::AGE_RECIPIENT is not an age public key (expected age1...)"; exit 1 ;;
+          esac
+          PG_BIN="/usr/lib/postgresql/${PG_MAJOR}/bin"
+
+          # pg_dump must be >= server major. Only the major number is printed.
+          # stderr is discarded: libpq errors can include the DB host.
+          set +e
+          SERVER_NUM=$(PGOPTIONS="-c default_transaction_read_only=on" \
+            "$PG_BIN/psql" -X -q -t -A -v ON_ERROR_STOP=1 -c 'SHOW server_version_num' "$DATABASE_URL" 2>/dev/null)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ] || ! [[ "$SERVER_NUM" =~ ^[0-9]+$ ]]; then
+            echo "::error::could not read server version (psql exit=${rc})"
+            exit 1
+          fi
+          SERVER_MAJOR=$((SERVER_NUM / 10000))
+          echo "server_major=${SERVER_MAJOR} pg_dump_major=${PG_MAJOR}"
+          if [ "$SERVER_MAJOR" -gt "$PG_MAJOR" ]; then
+            echo "::error::server major ${SERVER_MAJOR} is newer than pg_dump ${PG_MAJOR}; bump PG_MAJOR"
+            exit 1
+          fi
+
+          STAMP=$(date -u +%Y-%m-%dT%H%M%SZ)
+          KEY="db/$(date -u +%Y)/$(date -u +%m)/net-terms-${STAMP}.dump.age"
+          SCHEMA_ARGS=()
+          for s in $DUMP_SCHEMAS; do SCHEMA_ARGS+=("--schema=$s"); done
+
+          SIZE_FILE="$RUNNER_TEMP/backup-size"
+          START=$SECONDS
+          # Plaintext only ever exists inside this pipe. pg_dump stderr may name
+          # tables/hosts, so it is discarded; only exit codes are printed.
+          set +e
+          "$PG_BIN/pg_dump" -Fc --no-owner --no-privileges "${SCHEMA_ARGS[@]}" \
+              --dbname="$DATABASE_URL" 2>/dev/null \
+            | age -r "$AGE_RECIPIENT" 2>/dev/null \
+            | tee >(wc -c > "$SIZE_FILE") \
+            | aws s3 cp - "s3://${R2_BUCKET}/${KEY}" --endpoint-url "$R2_ENDPOINT" --only-show-errors > /dev/null 2>&1
+          STATUS=("${PIPESTATUS[@]}")
+          set -e
+          echo "exit_codes pg_dump=${STATUS[0]} age=${STATUS[1]} tee=${STATUS[2]} aws_cp=${STATUS[3]}"
+          for code in "${STATUS[@]}"; do
+            if [ "$code" -ne 0 ]; then
+              echo "::error::backup pipeline failed (see exit_codes above)"
+              # A partial object may exist under this date; it is not a valid
+              # backup (age refuses truncated input). Not auto-deleted.
+              echo "object_date=${STAMP}"
+              echo "backup_success=false"
+              exit 1
+            fi
+          done
+
+          # The tee >(wc -c) process substitution is not part of PIPESTATUS;
+          # give it a moment to flush its count after EOF.
+          for _ in $(seq 1 50); do
+            [ -s "$SIZE_FILE" ] && break
+            sleep 0.2
+          done
+          LOCAL_BYTES=$(tr -d '[:space:]' < "$SIZE_FILE" 2>/dev/null || true)
+          rm -f "$SIZE_FILE"
+
+          # Verify the object landed and matches what we streamed.
+          set +e
+          REMOTE_BYTES=$(aws s3api head-object --bucket "$R2_BUCKET" --key "$KEY" \
+            --endpoint-url "$R2_ENDPOINT" --query ContentLength --output text 2>/dev/null)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ] || ! [[ "$REMOTE_BYTES" =~ ^[0-9]+$ ]]; then
+            echo "::error::head-object failed (exit=${rc})"
+            echo "backup_success=false"
+            exit 1
+          fi
+          if [ "$REMOTE_BYTES" -eq 0 ] || [ "$REMOTE_BYTES" != "$LOCAL_BYTES" ]; then
+            echo "::error::size mismatch or empty object (remote=${REMOTE_BYTES} streamed=${LOCAL_BYTES})"
+            echo "backup_success=false"
+            exit 1
+          fi
+
+          echo "bytes=${REMOTE_BYTES}"
+          echo "duration_seconds=$((SECONDS - START))"
+          echo "object_date=${STAMP}"
+          echo "backup_success=true"

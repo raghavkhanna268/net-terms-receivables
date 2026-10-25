@@ -58,33 +58,36 @@ describe("compliance.server", () => {
   describe("deleteShop", () => {
     it("deletes shop and all non-FK-linked tables in a transaction", async () => {
       // All queries run inside sql.begin() using mockTx
-      // 0. SELECT FOR UPDATE (serializes with drain's FOR SHARE guards, #239)
-      mockTx.mockResolvedValueOnce([{ id: "shop-123" }]);
-      // 1. DELETE s10b_order_refetch_null
+      // 0. SELECT FOR UPDATE with uninstalledAt (reinstall guard #291)
+      const uninstalledDate = new Date();
+      mockTx.mockResolvedValueOnce([{ id: "shop-123", uninstalledAt: uninstalledDate }]);
+      // 1. DELETE Session (moved inside transaction per #291)
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
+      // 2. DELETE s10b_order_refetch_null
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 5 }));
-      // 2. DELETE s6_bulk_operations
+      // 3. DELETE s6_bulk_operations
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-      // 3. DELETE order_outstanding_missing
+      // 4. DELETE order_outstanding_missing
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-      // 4. DELETE s10b_customer_pii_fallback
+      // 5. DELETE s10b_customer_pii_fallback
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-      // 5. DELETE pgmq.q_s6_sync
+      // 6. DELETE pgmq.q_s6_sync
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 6 }));
-      // 6. DELETE pgmq.q_s6_bulk
+      // 7. DELETE pgmq.q_s6_bulk
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 7 }));
-      // 7. DELETE pgmq.a_s6_sync
+      // 8. DELETE pgmq.a_s6_sync
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 8 }));
-      // 8. DELETE pgmq.a_s6_bulk
+      // 9. DELETE pgmq.a_s6_bulk
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 9 }));
-      // 9. DELETE s6_dead_letter
+      // 10. DELETE s6_dead_letter
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 4 }));
-      // 10. DELETE s6_processed_webhooks (reconcile prefix)
+      // 11. DELETE s6_processed_webhooks (reconcile prefix)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-      // 11. DELETE s6_processed_webhooks (receipts join)
+      // 12. DELETE s6_processed_webhooks (receipts join)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-      // 12. DELETE webhook_receipts
+      // 13. DELETE webhook_receipts
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 10 }));
-      // 13. DELETE Shop
+      // 14. DELETE Shop
       mockTx.mockResolvedValueOnce([{ id: "shop-123" }]);
 
       const result = await deleteShop(mockSql, "test-shop.myshopify.com");
@@ -92,6 +95,8 @@ describe("compliance.server", () => {
       expect(result).toEqual({
         deleted: true,
         shopId: "shop-123",
+        skippedReinstalled: false,
+        sessionsDeleted: 2,
         refetchNullPurged: 5,
         bulkOperationsPurged: 2,
         orderGapPurged: 3,
@@ -109,40 +114,44 @@ describe("compliance.server", () => {
 
     it("returns deleted=false when shop not found", async () => {
       // All queries run inside sql.begin() using mockTx
-      // 0. SELECT FOR UPDATE (serializes with drain's FOR SHARE guards, #239)
+      // 0. SELECT FOR UPDATE (shop not found)
       mockTx.mockResolvedValueOnce([]);
-      // 1. DELETE s10b_order_refetch_null (may have rows even if shop doesn't exist)
+      // 1. DELETE Session (still runs even if shop not in "Shop" table)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 2. DELETE s6_bulk_operations
+      // 2. DELETE s10b_order_refetch_null (may have rows even if shop doesn't exist)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 3. DELETE order_outstanding_missing
+      // 3. DELETE s6_bulk_operations
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 4. DELETE s10b_customer_pii_fallback
+      // 4. DELETE order_outstanding_missing
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 5. DELETE pgmq.q_s6_sync
+      // 5. DELETE s10b_customer_pii_fallback
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 6. DELETE pgmq.q_s6_bulk
+      // 6. DELETE pgmq.q_s6_sync
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 7. DELETE pgmq.a_s6_sync
+      // 7. DELETE pgmq.q_s6_bulk
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 8. DELETE pgmq.a_s6_bulk
+      // 8. DELETE pgmq.a_s6_sync
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 9. DELETE s6_dead_letter
+      // 9. DELETE pgmq.a_s6_bulk
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 10. DELETE s6_processed_webhooks (reconcile prefix)
+      // 10. DELETE s6_dead_letter
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 11. DELETE s6_processed_webhooks (receipts join)
+      // 11. DELETE s6_processed_webhooks (reconcile prefix)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 12. DELETE webhook_receipts
+      // 12. DELETE s6_processed_webhooks (receipts join)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 13. DELETE Shop (no rows)
+      // 13. DELETE webhook_receipts
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 14. DELETE Shop (no rows)
       mockTx.mockResolvedValueOnce([]);
 
-      const result = await deleteShop(mockSql, "nonexistent.myshopify.com");
+      const result = await deleteShop(mockSql, "test-nonexistent.myshopify.com");
 
       expect(result).toEqual({
         deleted: false,
         shopId: null,
+        skippedReinstalled: false,
+        sessionsDeleted: 0,
         refetchNullPurged: 0,
         bulkOperationsPurged: 0,
         orderGapPurged: 0,
@@ -155,6 +164,34 @@ describe("compliance.server", () => {
         processedWebhooksPurged: 0,
         webhookReceiptsPurged: 0,
       });
+    });
+
+    it("skips deletion when shop has reinstalled (uninstalledAt is NULL)", async () => {
+      // Shop exists but uninstalledAt is NULL (shop reinstalled after uninstall)
+      // 0. SELECT FOR UPDATE returns shop with uninstalledAt: null
+      mockTx.mockResolvedValueOnce([{ id: "shop-reinstalled-123", uninstalledAt: null }]);
+
+      const result = await deleteShop(mockSql, "test-reinstalled.myshopify.com");
+
+      // Sessions are NOT deleted on skip path - they survive the reinstall guard
+      expect(result).toEqual({
+        deleted: false,
+        shopId: "shop-reinstalled-123",
+        skippedReinstalled: true,
+        sessionsDeleted: 0,
+        refetchNullPurged: 0,
+        bulkOperationsPurged: 0,
+        orderGapPurged: 0,
+        piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
+        deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
+      });
+      expect(mockSql.begin).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -716,6 +753,16 @@ describe("compliance.server", () => {
   });
 
   describe("sendDataRequestNotification", () => {
+    const originalAppHandle = process.env.APP_HANDLE;
+
+    beforeEach(() => {
+      process.env.APP_HANDLE = "net-terms-receivables-1";
+    });
+
+    afterEach(() => {
+      process.env.APP_HANDLE = originalAppHandle;
+    });
+
     it("skips email when RESEND_API_KEY is not set and logs correctly", async () => {
       delete process.env.RESEND_API_KEY;
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -843,6 +890,40 @@ describe("compliance.server", () => {
       // Error code is returned, not raw message (per security rule)
       expect(result.error).toBe("error");
       consoleSpy.mockRestore();
+    });
+
+    it("sends email without link when APP_HANDLE is missing", async () => {
+      (process.env as Record<string, string | undefined>).APP_HANDLE = undefined;
+      process.env.RESEND_API_KEY = "re_test_key";
+      process.env.RESEND_FROM = "noreply@example.com";
+      const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: "email-456" }),
+      });
+
+      const result = await sendDataRequestNotification(
+        "test-shop.myshopify.com",
+        "owner@shop.com",
+        "req-789"
+      );
+
+      expect(result.sent).toBe(true);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+
+      const resendCall = mockFetch.mock.calls[0];
+      const requestBody = JSON.parse(resendCall[1].body);
+
+      expect(requestBody.html).not.toContain("admin.shopify.com");
+      expect(requestBody.html).toContain("Open the Net Terms Receivables app in your Shopify admin and go to Data Requests");
+      expect(requestBody.text).not.toContain("admin.shopify.com");
+      expect(requestBody.text).toContain("Open the Net Terms Receivables app in your Shopify admin and go to Data Requests");
+
+      const warnLogs = consoleWarnSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(warnLogs).toContain('"event":"plan_url_app_handle_missing"');
+
+      consoleWarnSpy.mockRestore();
     });
   });
 

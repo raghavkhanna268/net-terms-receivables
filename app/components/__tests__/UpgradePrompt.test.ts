@@ -325,6 +325,18 @@ describe("PlanBanner component", () => {
     expect(html).not.toContain("View Plans");
   });
 
+  it("renders no CTA button when upgradeUrl is null", () => {
+    const html = renderToString(
+      createElement(PlanBanner, {
+        ...baseProps,
+        upgradeUrl: null,
+      })
+    );
+    expect(html).not.toContain("<s-button");
+    expect(html).not.toContain("View Plans");
+    expect(html).not.toContain("Upgrade");
+  });
+
   it("includes target _top for parent frame navigation", () => {
     const html = renderToString(createElement(PlanBanner, baseProps));
     expect(html).toContain('target="_top"');
