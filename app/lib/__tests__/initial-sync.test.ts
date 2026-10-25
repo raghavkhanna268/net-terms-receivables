@@ -805,4 +805,92 @@ describe("initial-sync.server", () => {
       expect(result.status).toBe("in_progress");
     });
   });
+
+  describe("getInitialSyncStateWithRecovery", () => {
+    it("returns state without triggering recovery when status is not in_progress", async () => {
+      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("");
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
+          return Promise.resolve([]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { getInitialSyncStateWithRecovery } = await import("../initial-sync.server");
+      const result = await getInitialSyncStateWithRecovery(mockSql as unknown as Sql, "test-recovery-not-started.myshopify.com");
+
+      expect(result.status).toBe("not_started");
+    });
+
+    it("returns state without triggering recovery when operation is fresh", async () => {
+      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("");
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
+          return Promise.resolve([
+            {
+              bulk_operation_id: "gid://shopify/BulkOperation/fresh-recovery",
+              reconcile_stage: "companies",
+              completed_at: null,
+              failure_count: 0,
+              started_at: tenMinutesAgo,
+            },
+          ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("customers")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { getInitialSyncStateWithRecovery } = await import("../initial-sync.server");
+      const result = await getInitialSyncStateWithRecovery(mockSql as unknown as Sql, "test-recovery-fresh.myshopify.com");
+
+      expect(result.status).toBe("in_progress");
+    });
+
+    it("continues to return state even if recovery throws an error", async () => {
+      vi.doMock("~/services/drain/bulk-op-recovery.server", () => ({
+        recoverStaleBulkOperationsForShop: vi.fn().mockRejectedValue(new Error("Recovery failed")),
+        STALE_THRESHOLD_MINUTES: 60,
+      }));
+
+      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("");
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
+          return Promise.resolve([
+            {
+              bulk_operation_id: "gid://shopify/BulkOperation/stale-recovery-error",
+              reconcile_stage: "companies",
+              completed_at: null,
+              failure_count: 0,
+              started_at: twoHoursAgo,
+            },
+          ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("customers")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { getInitialSyncStateWithRecovery } = await import("../initial-sync.server");
+      const result = await getInitialSyncStateWithRecovery(mockSql as unknown as Sql, "test-recovery-error.myshopify.com");
+
+      expect(result.status).toBe("in_progress");
+    });
+  });
 });
