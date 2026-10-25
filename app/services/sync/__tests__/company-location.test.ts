@@ -370,24 +370,15 @@ describeWithDb("CompanyLocation Sync", () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
       
       try {
-        // Set up free plan (limit 3)
+        // T1: 'free' resolves to 'none' plan which has limit 0
+        // Any new account is immediately over the limit
         await sql`
           UPDATE "Shop" 
           SET plan_key = 'free', plan_cached_at = NOW()
           WHERE id = ${TEST_SHOP_ID}
         `;
 
-        // Create 3 existing accounts to hit the limit
-        for (let i = 1; i <= 3; i++) {
-          await sql`
-            INSERT INTO "BuyerAccount" 
-            ("shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
-            VALUES (${TEST_SHOP_ID}, 'COMPANY', ${`gid://shopify/Company/existing${i}`}, 
-                    ${`gid://shopify/CompanyLocation/existing${i}`}, ${`Existing ${i}`}, NOW(), NOW())
-          `;
-        }
-
-        // Now try to bulk insert a 4th account - should be gated
+        // Insert a new account - should be gated since none plan has limit 0
         const newLocationId = `gid://shopify/CompanyLocation/${Date.now()}`;
         const newCompanyId = `gid://shopify/Company/${Date.now()}`;
         const accounts = [
@@ -420,24 +411,15 @@ describeWithDb("CompanyLocation Sync", () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
       
       try {
-        // Set up free plan (limit 3)
+        // T1: 'free' resolves to 'none' plan which has limit 0
+        // But gating is OFF, so accounts should NOT be gated
         await sql`
           UPDATE "Shop" 
           SET plan_key = 'free', plan_cached_at = NOW()
           WHERE id = ${TEST_SHOP_ID}
         `;
 
-        // Create 3 existing accounts to hit the limit
-        for (let i = 1; i <= 3; i++) {
-          await sql`
-            INSERT INTO "BuyerAccount" 
-            ("shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
-            VALUES (${TEST_SHOP_ID}, 'COMPANY', ${`gid://shopify/Company/off${i}`}, 
-                    ${`gid://shopify/CompanyLocation/off${i}`}, ${`Off ${i}`}, NOW(), NOW())
-          `;
-        }
-
-        // Bulk insert a 4th account - should NOT be gated when flag is off
+        // Insert a new account - should NOT be gated when flag is off
         const newLocationId = `gid://shopify/CompanyLocation/nogate-${Date.now()}`;
         const newCompanyId = `gid://shopify/Company/nogate-${Date.now()}`;
         const accounts = [
