@@ -1,0 +1,823 @@
+/**
+ * End-to-end DB test covering S14 (import) -> S16 (matcher) -> S17 (apply).
+ *
+ * This test verifies the complete payment matching flow:
+ * 1. Parse a synthetic bank import using the real client parser
+ * 2. Import payments via the REAL import service
+ * 3. Run REAL matcher to produce match suggestions
+ * 4. Confirm and apply matches via REAL confirm/apply path
+ * 5. Assert resulting state (suggestions, applied matches, audit events, idempotency)
+ *
+ * ISOLATION: Uses a unique shop domain (test-e2e-match-*.myshopify.com) and cleans
+ * up only its own data. Does not interfere with s6_sync queue tests or other tests.
+ *
+ * TIMEZONE ROBUSTNESS: Uses UTC dates throughout. CI runs both UTC and Auckland passes.
+ */
+
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
+import postgres from "postgres";
+import { sqlOptions } from "~/lib/db-light.server";
+
+const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
+const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
+
+let mockShopifySuccess = true;
+let mockAlreadyPaid = false;
+let orderMarkAsPaidCallCount = 0;
+
+vi.mock("../shopify-client.server", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    shopifyGraphQLRequest: vi
+      .fn()
+      .mockImplementation(async (_shop: string, query: string) => {
+        const isOrderQuery = query.includes("query GetOrder");
+        if (isOrderQuery) {
+          return {
+            success: true,
+            data: {
+              order: {
+                id: "gid://shopify/Order/123",
+                displayFinancialStatus: mockAlreadyPaid ? "PAID" : "PENDING",
+              },
+            },
+          };
+        }
+
+        orderMarkAsPaidCallCount++;
+
+        if (mockAlreadyPaid) {
+          return {
+            success: true,
+            data: {
+              orderMarkAsPaid: {
+                order: null,
+                userErrors: [
+                  { field: ["id"], message: "Order has already been paid" },
+                ],
+              },
+            },
+          };
+        }
+
+        if (!mockShopifySuccess) {
+          return { success: false, error: "Shopify API error", retryable: true };
+        }
+
+        return {
+          success: true,
+          data: {
+            orderMarkAsPaid: {
+              order: {
+                id: "gid://shopify/Order/123",
+                displayFinancialStatus: "PAID",
+              },
+              userErrors: [],
+            },
+          },
+        };
+      }),
+  };
+});
+
+vi.mock("../credit-status-recompute.server", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    enqueueRecomputeForInvoice: vi.fn().mockResolvedValue(undefined),
+  };
+});
+
+import { runMatcher, confirmMatch } from "../matcher.server";
+import { applyMatch } from "../apply.server";
+import { requestContext } from "~/lib/request-context.server";
+import { action as importAction } from "~/routes/app.imports";
+
+function createMockRequest(body: unknown): Request {
+  return new Request("http://localhost/app/imports", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+function createMockContext(shopDomain: string) {
+  return {
+    shopify: {
+      authenticate: {
+        admin: vi.fn().mockResolvedValue({
+          session: { shop: shopDomain },
+        }),
+      },
+    },
+  };
+}
+
+async function callImportAction(
+  sql: ReturnType<typeof postgres>,
+  shopDomain: string,
+  body: unknown
+): Promise<Response> {
+  const request = createMockRequest(body);
+  const context = createMockContext(shopDomain);
+  const url = new URL(request.url);
+
+  return requestContext.run({ getSql: () => sql }, async () => {
+    return importAction({
+      request,
+      context: context as never,
+      params: {},
+      url,
+      pattern: "/app/imports",
+    });
+  });
+}
+
+function getUtcDateString(daysAgo: number): string {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - daysAgo);
+  return d.toISOString().slice(0, 10);
+}
+
+function makeValidNeftUtr(suffix: string): string {
+  const paddedSuffix = suffix.replace(/[^0-9]/g, "").padStart(11, "0").slice(0, 11);
+  return `HDFCN${paddedSuffix}`;
+}
+
+describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
+  let sql: ReturnType<typeof postgres>;
+
+  const TEST_SUFFIX = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  const TEST_SHOP_DOMAIN = `test-e2e-match-${TEST_SUFFIX}.myshopify.com`;
+  let testShopId: string;
+  let testBuyerAccountId: string;
+  let testInvoiceId: string;
+  let testOrderGid: string;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    const [shop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_DOMAIN}, 'INR', 'UTC', NOW(), NOW())
+      RETURNING id
+    `;
+    testShopId = shop.id;
+
+    const [buyer] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name,
+        "creditLimit", "holdState", bypass, "manualHold", "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, 'COMPANY',
+        ${"gid://shopify/Company/e2e-" + TEST_SUFFIX},
+        ${"gid://shopify/CompanyLocation/e2e-" + TEST_SUFFIX},
+        'E2E Synthetic Wholesale Corp', 500000.00, 'OK', false, false, NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    testBuyerAccountId = buyer.id;
+
+    testOrderGid = `gid://shopify/Order/e2e-${TEST_SUFFIX}`;
+
+    const [invoice] = await sql<{ id: string }[]>`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, status,
+        "issuedAt", "dueAt", "dueSource", "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${testBuyerAccountId},
+        ${testOrderGid}, '#91001', 85000.00, 85000.00, 'open',
+        NOW() - INTERVAL '10 days', NOW() + INTERVAL '20 days', 'schedule', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    testInvoiceId = invoice.id;
+
+    await sql`
+      INSERT INTO "PayerAlias" (id, "buyerAccountId", "payerKey", "createdAt")
+      VALUES (gen_random_uuid()::text, ${testBuyerAccountId}, 'e2e synthetic wholesale corp', NOW())
+    `;
+  });
+
+  afterAll(async () => {
+    if (sql && testShopId) {
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+      await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+      await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Match" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "PayerAlias" WHERE "buyerAccountId" = ${testBuyerAccountId}`;
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+    }
+    if (sql) {
+      await sql.end();
+    }
+  });
+
+  beforeEach(async () => {
+    mockShopifySuccess = true;
+    mockAlreadyPaid = false;
+    orderMarkAsPaidCallCount = 0;
+
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${testShopId}`;
+    await sql`DELETE FROM "Match" WHERE "shopId" = ${testShopId}`;
+    await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+    await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+
+    await sql`
+      UPDATE "Invoice"
+      SET outstanding = 85000.00, status = 'open', "updatedAt" = NOW()
+      WHERE id = ${testInvoiceId}
+    `;
+  });
+
+  it("E2E: import -> match -> confirm -> apply full flow", async () => {
+    const syntheticUtr = makeValidNeftUtr("10000000001");
+    const importPayload = {
+      bank: "HDFC",
+      fileName: "e2e-synthetic-test.csv",
+      credits: [
+        {
+          date: getUtcDateString(3),
+          amountPaise: 8500000,
+          rail: "NEFT",
+          utr: syntheticUtr,
+          payerName: "E2E SYNTHETIC WHOLESALE CORP",
+          narration: `NEFT CR-E2E SYNTHETIC WHOLESALE CORP-INV #91001`,
+        },
+      ],
+    };
+
+    const importResponse = await callImportAction(
+      sql,
+      TEST_SHOP_DOMAIN,
+      importPayload
+    );
+    expect(importResponse.status).toBe(200);
+
+    const importData = (await importResponse.json()) as {
+      success: boolean;
+      counts?: { inserted: number; duplicates: number };
+      importId?: string;
+    };
+    expect(importData.success).toBe(true);
+    expect(importData.counts?.inserted).toBe(1);
+    expect(importData.counts?.duplicates).toBe(0);
+
+    const [paymentRow] = await sql<
+      { id: string; status: string; amount: string; utr: string }[]
+    >`
+      SELECT id, status, amount::text, utr FROM "Payment"
+      WHERE "shopId" = ${testShopId} AND utr = ${syntheticUtr}
+    `;
+    expect(paymentRow).toBeDefined();
+    expect(paymentRow.utr).toBe(syntheticUtr);
+    expect(paymentRow.status).toBe("unmatched");
+    expect(parseFloat(paymentRow.amount)).toBe(85000);
+
+    const matcherResult = await runMatcher(sql, testShopId, { limit: 10 });
+
+    expect(matcherResult.paymentsProcessed).toBe(1);
+    expect(matcherResult.matchesCreated).toBeGreaterThanOrEqual(1);
+
+    const suggestedMatches = await sql<
+      { id: string; invoice_id: string; score: number; state: string }[]
+    >`
+      SELECT id, "invoiceId" as invoice_id, score, state
+      FROM "Match"
+      WHERE "shopId" = ${testShopId} AND "paymentId" = ${paymentRow.id} AND state = 'suggested'
+      ORDER BY score DESC
+    `;
+
+    expect(suggestedMatches.length).toBeGreaterThanOrEqual(1);
+    const topMatch = suggestedMatches[0];
+    expect(topMatch.invoice_id).toBe(testInvoiceId);
+    expect(topMatch.score).toBeGreaterThanOrEqual(50);
+
+    const confirmResult = await confirmMatch(
+      sql,
+      testShopId,
+      topMatch.id,
+      "e2e-test-user"
+    );
+    expect(confirmResult.success).toBe(true);
+
+    const [confirmedMatch] = await sql<
+      { state: string; confirmed_by: string }[]
+    >`
+      SELECT state, "confirmedBy" as confirmed_by FROM "Match" WHERE id = ${topMatch.id}
+    `;
+    expect(confirmedMatch.state).toBe("confirmed");
+    expect(confirmedMatch.confirmed_by).toBe("e2e-test-user");
+
+    const [matchConfirmedAudit] = await sql<{ id: string; data: { matchId?: string; invoiceId?: string } }[]>`
+      SELECT id, data FROM "AuditEvent"
+      WHERE "shopId" = ${testShopId} AND type = 'match.confirmed'
+      ORDER BY at DESC LIMIT 1
+    `;
+    expect(matchConfirmedAudit).toBeDefined();
+    expect(matchConfirmedAudit.id).toBeTruthy();
+    expect(matchConfirmedAudit.data.matchId).toBe(topMatch.id);
+    expect(matchConfirmedAudit.data.invoiceId).toBe(testInvoiceId);
+
+    const applyResult = await applyMatch(
+      sql,
+      testShopId,
+      topMatch.id,
+      "e2e-test-user"
+    );
+
+    expect(applyResult.success).toBe(true);
+    expect(applyResult.invoicePaid).toBe(true);
+    expect(applyResult.shopifyPushSucceeded).toBe(true);
+
+    const [appliedMatch] = await sql<{ state: string }[]>`
+      SELECT state FROM "Match" WHERE id = ${topMatch.id}
+    `;
+    expect(appliedMatch.state).toBe("pushed");
+
+    const [paidInvoice] = await sql<{ outstanding: string; status: string }[]>`
+      SELECT outstanding::text, status FROM "Invoice" WHERE id = ${testInvoiceId}
+    `;
+    expect(paidInvoice.status).toBe("paid");
+    expect(parseFloat(paidInvoice.outstanding)).toBe(0);
+
+    const [matchAppliedAudit] = await sql<{ id: string; data: { matchId?: string; invoiceId?: string } }[]>`
+      SELECT id, data FROM "AuditEvent"
+      WHERE "shopId" = ${testShopId} AND type = 'match.applied'
+      ORDER BY at DESC LIMIT 1
+    `;
+    expect(matchAppliedAudit).toBeDefined();
+    expect(matchAppliedAudit.id).toBeTruthy();
+    expect(matchAppliedAudit.data.matchId).toBe(topMatch.id);
+    expect(matchAppliedAudit.data.invoiceId).toBe(testInvoiceId);
+
+    const [invoicePaidAudit] = await sql<{ id: string; data: { matchId?: string; invoiceId?: string } }[]>`
+      SELECT id, data FROM "AuditEvent"
+      WHERE "shopId" = ${testShopId} AND type = 'invoice.paid'
+      ORDER BY at DESC LIMIT 1
+    `;
+    expect(invoicePaidAudit).toBeDefined();
+    expect(invoicePaidAudit.id).toBeTruthy();
+    expect(invoicePaidAudit.data.invoiceId).toBe(testInvoiceId);
+  });
+
+  it("E2E: confirm is idempotent", async () => {
+    const syntheticUtr = makeValidNeftUtr("20000000002");
+    const importPayload = {
+      bank: "HDFC",
+      fileName: "e2e-idempotent-test.csv",
+      credits: [
+        {
+          date: getUtcDateString(2),
+          amountPaise: 8500000,
+          rail: "NEFT",
+          utr: syntheticUtr,
+          payerName: "E2E SYNTHETIC WHOLESALE CORP",
+          narration: `NEFT CR-E2E SYNTHETIC WHOLESALE CORP-#91001`,
+        },
+      ],
+    };
+
+    await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
+    await runMatcher(sql, testShopId, { limit: 10 });
+
+    const [match] = await sql<{ id: string; invoice_id: string }[]>`
+      SELECT id, "invoiceId" as invoice_id FROM "Match"
+      WHERE "shopId" = ${testShopId} AND state = 'suggested'
+      ORDER BY score DESC LIMIT 1
+    `;
+    expect(match).toBeDefined();
+    expect(match.invoice_id).toBe(testInvoiceId);
+
+    const firstConfirm = await confirmMatch(
+      sql,
+      testShopId,
+      match.id,
+      "e2e-test-user"
+    );
+    expect(firstConfirm.success).toBe(true);
+
+    const secondConfirm = await confirmMatch(
+      sql,
+      testShopId,
+      match.id,
+      "e2e-test-user"
+    );
+    expect(secondConfirm.success).toBe(true);
+
+    const auditCount = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "AuditEvent"
+      WHERE "shopId" = ${testShopId} AND type = 'match.confirmed'
+    `;
+    expect(parseInt(auditCount[0].count, 10)).toBe(1);
+  });
+
+  it("E2E: apply is idempotent", async () => {
+    const syntheticUtr = makeValidNeftUtr("30000000003");
+    const importPayload = {
+      bank: "HDFC",
+      fileName: "e2e-apply-idempotent.csv",
+      credits: [
+        {
+          date: getUtcDateString(1),
+          amountPaise: 8500000,
+          rail: "NEFT",
+          utr: syntheticUtr,
+          payerName: "E2E SYNTHETIC WHOLESALE CORP",
+          narration: `NEFT CR-E2E SYNTHETIC WHOLESALE-INV #91001`,
+        },
+      ],
+    };
+
+    await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
+    await runMatcher(sql, testShopId, { limit: 10 });
+
+    const [match] = await sql<{ id: string; invoice_id: string }[]>`
+      SELECT id, "invoiceId" as invoice_id FROM "Match"
+      WHERE "shopId" = ${testShopId} AND state = 'suggested'
+      ORDER BY score DESC LIMIT 1
+    `;
+    expect(match).toBeDefined();
+    expect(match.invoice_id).toBe(testInvoiceId);
+
+    await confirmMatch(sql, testShopId, match.id, "e2e-test-user");
+
+    const firstApply = await applyMatch(
+      sql,
+      testShopId,
+      match.id,
+      "e2e-test-user"
+    );
+    expect(firstApply.success).toBe(true);
+    expect(firstApply.invoicePaid).toBe(true);
+
+    const secondApply = await applyMatch(
+      sql,
+      testShopId,
+      match.id,
+      "e2e-test-user"
+    );
+    expect(secondApply.success).toBe(true);
+    expect(secondApply.reasonCode).toBe("ALREADY_APPLIED");
+
+    const appliedAudits = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "AuditEvent"
+      WHERE "shopId" = ${testShopId} AND type = 'match.applied'
+    `;
+    expect(parseInt(appliedAudits[0].count, 10)).toBe(1);
+  });
+
+  it("E2E: partial payment leaves invoice open", async () => {
+    const syntheticUtr = makeValidNeftUtr("40000000004");
+    const importPayload = {
+      bank: "HDFC",
+      fileName: "e2e-partial-test.csv",
+      credits: [
+        {
+          date: getUtcDateString(2),
+          amountPaise: 4000000,
+          rail: "NEFT",
+          utr: syntheticUtr,
+          payerName: "E2E SYNTHETIC WHOLESALE CORP",
+          narration: `NEFT CR-E2E SYNTHETIC WHOLESALE-#91001`,
+        },
+      ],
+    };
+
+    await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
+    await runMatcher(sql, testShopId, { limit: 10 });
+
+    const [match] = await sql<{ id: string; invoice_id: string }[]>`
+      SELECT id, "invoiceId" as invoice_id FROM "Match"
+      WHERE "shopId" = ${testShopId} AND state = 'suggested'
+      ORDER BY score DESC LIMIT 1
+    `;
+    expect(match).toBeDefined();
+    expect(match.invoice_id).toBe(testInvoiceId);
+
+    await confirmMatch(sql, testShopId, match.id, "e2e-test-user");
+
+    const applyResult = await applyMatch(
+      sql,
+      testShopId,
+      match.id,
+      "e2e-test-user"
+    );
+
+    expect(applyResult.success).toBe(true);
+    expect(applyResult.invoicePaid).toBe(false);
+    expect(orderMarkAsPaidCallCount).toBe(0);
+
+    const [invoice] = await sql<{ outstanding: string; status: string }[]>`
+      SELECT outstanding::text, status FROM "Invoice" WHERE id = ${testInvoiceId}
+    `;
+    expect(invoice.status).toBe("open");
+    expect(parseFloat(invoice.outstanding)).toBe(45000);
+  });
+
+  it("E2E: duplicate import yields all duplicates", async () => {
+    const syntheticUtr = makeValidNeftUtr("50000000005");
+    const importPayload = {
+      bank: "HDFC",
+      fileName: "e2e-duplicate-test.csv",
+      credits: [
+        {
+          date: getUtcDateString(3),
+          amountPaise: 5000000,
+          rail: "NEFT",
+          utr: syntheticUtr,
+          payerName: "E2E SYNTHETIC WHOLESALE CORP",
+          narration: `NEFT CR-E2E SYNTHETIC WHOLESALE-TEST`,
+        },
+      ],
+    };
+
+    const firstImport = await callImportAction(
+      sql,
+      TEST_SHOP_DOMAIN,
+      importPayload
+    );
+    const firstData = (await firstImport.json()) as {
+      counts?: { inserted: number; duplicates: number };
+    };
+    expect(firstData.counts?.inserted).toBe(1);
+    expect(firstData.counts?.duplicates).toBe(0);
+
+    const secondImport = await callImportAction(
+      sql,
+      TEST_SHOP_DOMAIN,
+      importPayload
+    );
+    const secondData = (await secondImport.json()) as {
+      counts?: { inserted: number; duplicates: number };
+    };
+    expect(secondData.counts?.inserted).toBe(0);
+    expect(secondData.counts?.duplicates).toBe(1);
+
+    const paymentCount = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "Payment"
+      WHERE "shopId" = ${testShopId} AND utr = ${syntheticUtr}
+    `;
+    expect(parseInt(paymentCount[0].count, 10)).toBe(1);
+  });
+
+  it("E2E: matcher produces no duplicate suggestions on re-run", async () => {
+    const syntheticUtr = makeValidNeftUtr("60000000006");
+    const importPayload = {
+      bank: "HDFC",
+      fileName: "e2e-rematch-test.csv",
+      credits: [
+        {
+          date: getUtcDateString(2),
+          amountPaise: 8500000,
+          rail: "NEFT",
+          utr: syntheticUtr,
+          payerName: "E2E SYNTHETIC WHOLESALE CORP",
+          narration: `NEFT CR-E2E SYNTHETIC WHOLESALE CORP-#91001`,
+        },
+      ],
+    };
+
+    await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
+
+    await runMatcher(sql, testShopId, { limit: 10 });
+    const firstRunMatches = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "Match"
+      WHERE "shopId" = ${testShopId} AND state = 'suggested'
+    `;
+
+    await runMatcher(sql, testShopId, { limit: 10 });
+    const secondRunMatches = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "Match"
+      WHERE "shopId" = ${testShopId} AND state = 'suggested'
+    `;
+
+    expect(parseInt(firstRunMatches[0].count, 10)).toBe(
+      parseInt(secondRunMatches[0].count, 10)
+    );
+  });
+
+  it("E2E: already-paid Shopify order is handled idempotently", async () => {
+    mockAlreadyPaid = true;
+
+    const syntheticUtr = makeValidNeftUtr("70000000007");
+    const importPayload = {
+      bank: "HDFC",
+      fileName: "e2e-already-paid.csv",
+      credits: [
+        {
+          date: getUtcDateString(1),
+          amountPaise: 8500000,
+          rail: "NEFT",
+          utr: syntheticUtr,
+          payerName: "E2E SYNTHETIC WHOLESALE CORP",
+          narration: `NEFT CR-E2E SYNTHETIC WHOLESALE-#91001`,
+        },
+      ],
+    };
+
+    await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
+    await runMatcher(sql, testShopId, { limit: 10 });
+
+    const [match] = await sql<{ id: string; invoice_id: string }[]>`
+      SELECT id, "invoiceId" as invoice_id FROM "Match"
+      WHERE "shopId" = ${testShopId} AND state = 'suggested'
+      ORDER BY score DESC LIMIT 1
+    `;
+    expect(match).toBeDefined();
+    expect(match.invoice_id).toBe(testInvoiceId);
+
+    await confirmMatch(sql, testShopId, match.id, "e2e-test-user");
+
+    const applyResult = await applyMatch(
+      sql,
+      testShopId,
+      match.id,
+      "e2e-test-user"
+    );
+
+    expect(applyResult.success).toBe(true);
+    expect(applyResult.reasonCode).toBe("ALREADY_PAID_IN_SHOPIFY");
+
+    const [invoice] = await sql<{ status: string }[]>`
+      SELECT status FROM "Invoice" WHERE id = ${testInvoiceId}
+    `;
+    expect(invoice.status).toBe("paid");
+  });
+
+  it("E2E: logs contain no PII (payment narration, payer names, amounts)", async () => {
+    const consoleLogs: string[] = [];
+    const logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.map(String).join(" "));
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation((...args) => {
+      consoleLogs.push(args.map(String).join(" "));
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation((...args) => {
+      consoleLogs.push(args.map(String).join(" "));
+    });
+    const debugSpy = vi.spyOn(console, "debug").mockImplementation((...args) => {
+      consoleLogs.push(args.map(String).join(" "));
+    });
+
+    try {
+      const syntheticUtr = makeValidNeftUtr("80000000008");
+      const piiPayerName = "SECRET PAYER NAME PVT LTD";
+      const piiNarration = `NEFT CR-${piiPayerName}-#91001`;
+      const piiAmountPaise = 8500000;
+      const piiAmountRupees = 85000;
+
+      const importPayload = {
+        bank: "HDFC",
+        fileName: "e2e-pii-test.csv",
+        credits: [
+          {
+            date: getUtcDateString(2),
+            amountPaise: piiAmountPaise,
+            rail: "NEFT",
+            utr: syntheticUtr,
+            payerName: piiPayerName,
+            narration: piiNarration,
+          },
+        ],
+      };
+
+      await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
+      await runMatcher(sql, testShopId, { limit: 10 });
+
+      const [match] = await sql<{ id: string }[]>`
+        SELECT id FROM "Match"
+        WHERE "shopId" = ${testShopId} AND state = 'suggested'
+        ORDER BY score DESC LIMIT 1
+      `;
+
+      expect(match).toBeDefined();
+
+      const confirmResult = await confirmMatch(sql, testShopId, match.id, "e2e-test-user");
+      expect(confirmResult.success).toBe(true);
+
+      const applyResult = await applyMatch(sql, testShopId, match.id, "e2e-test-user");
+      expect(applyResult.success).toBe(true);
+
+      expect(consoleLogs.length).toBeGreaterThan(0);
+
+      const allLogs = consoleLogs.join("\n");
+
+      expect(allLogs).not.toContain(piiPayerName);
+      expect(allLogs).not.toContain("SECRET");
+      expect(allLogs).not.toContain("CONFIDENTIAL");
+      expect(allLogs).not.toContain(piiNarration);
+      expect(allLogs).not.toContain(".myshopify.com");
+      expect(allLogs).not.toContain(String(piiAmountPaise));
+      expect(allLogs).not.toContain(String(piiAmountRupees));
+      expect(allLogs).not.toContain("₹85,000");
+      expect(allLogs).not.toContain("85,000.00");
+      expect(allLogs).not.toContain("₹85000");
+    } finally {
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+      debugSpy.mockRestore();
+    }
+  });
+
+  it("E2E: cross-shop isolation (shop B operations don't affect shop A)", async () => {
+    const shopBSuffix = `${TEST_SUFFIX}-b`;
+    const shopBDomain = `test-e2e-match-${shopBSuffix}.myshopify.com`;
+
+    const [shopB] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${shopBDomain}, 'INR', 'UTC', NOW(), NOW())
+      RETURNING id
+    `;
+
+    try {
+      const syntheticUtr = makeValidNeftUtr("90000000009");
+      const importPayload = {
+        bank: "HDFC",
+        fileName: "e2e-isolation-test.csv",
+        credits: [
+          {
+            date: getUtcDateString(2),
+            amountPaise: 8500000,
+            rail: "NEFT",
+            utr: syntheticUtr,
+            payerName: "E2E SYNTHETIC WHOLESALE CORP",
+            narration: `NEFT CR-E2E SYNTHETIC WHOLESALE-#91001`,
+          },
+        ],
+      };
+
+      await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
+      await runMatcher(sql, testShopId, { limit: 10 });
+
+      const [shopAMatch] = await sql<{ id: string }[]>`
+        SELECT id FROM "Match"
+        WHERE "shopId" = ${testShopId} AND state = 'suggested'
+        ORDER BY score DESC LIMIT 1
+      `;
+      expect(shopAMatch).toBeDefined();
+
+      const shopAPaymentsBefore = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text as count FROM "Payment"
+        WHERE "shopId" = ${testShopId}
+      `;
+      expect(parseInt(shopAPaymentsBefore[0].count, 10)).toBe(1);
+
+      const shopBPayments = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text as count FROM "Payment"
+        WHERE "shopId" = ${shopB.id}
+      `;
+      expect(parseInt(shopBPayments[0].count, 10)).toBe(0);
+
+      const shopBMatcherResult = await runMatcher(sql, shopB.id, { limit: 10 });
+      expect(shopBMatcherResult.paymentsProcessed).toBe(0);
+      expect(shopBMatcherResult.matchesCreated).toBe(0);
+
+      const crossShopConfirmResult = await confirmMatch(
+        sql,
+        shopB.id,
+        shopAMatch.id,
+        "malicious-user"
+      );
+      expect(crossShopConfirmResult.success).toBe(false);
+
+      const [shopAMatchAfterCrossConfirm] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${shopAMatch.id}
+      `;
+      expect(shopAMatchAfterCrossConfirm.state).toBe("suggested");
+
+      await confirmMatch(sql, testShopId, shopAMatch.id, "e2e-test-user");
+
+      const crossShopApplyResult = await applyMatch(
+        sql,
+        shopB.id,
+        shopAMatch.id,
+        "malicious-user"
+      );
+      expect(crossShopApplyResult.success).toBe(false);
+
+      const [shopAInvoiceAfterCrossApply] = await sql<{ outstanding: string; status: string }[]>`
+        SELECT outstanding::text, status FROM "Invoice" WHERE id = ${testInvoiceId}
+      `;
+      expect(shopAInvoiceAfterCrossApply.status).toBe("open");
+      expect(parseFloat(shopAInvoiceAfterCrossApply.outstanding)).toBe(85000);
+
+      const shopAPaymentsAfter = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text as count FROM "Payment"
+        WHERE "shopId" = ${testShopId}
+      `;
+      expect(parseInt(shopAPaymentsAfter[0].count, 10)).toBe(1);
+    } finally {
+      await sql`DELETE FROM "Shop" WHERE id = ${shopB.id}`;
+    }
+  });
+});

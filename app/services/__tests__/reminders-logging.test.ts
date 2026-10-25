@@ -203,12 +203,14 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
       shopTimezone: "Asia/Kolkata",
       invoiceName: "#1001",
       total: SENSITIVE_AMOUNT,
+      outstanding: SENSITIVE_AMOUNT,
       currency: "INR",
       dueAt: new Date(),
       status: "open",
       buyerAccountId: "buyer-123",
       customerId: "gid://shopify/Customer/456",
       buyerAccountGatedAt: null,
+      shopUninstalledAt: null,
     };
 
     mockSql.setMockResult("invoice", [mockInvoiceData]);
@@ -266,12 +268,14 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
       shopTimezone: "Asia/Kolkata",
       invoiceName: "#R1-001",
       total: "50000",
+      outstanding: "50000",
       currency: "INR",
       dueAt: new Date(),
       status: "open",
       buyerAccountId: "buyer-r1",
       customerId: "gid://shopify/Customer/r1",
       buyerAccountGatedAt: null,
+      shopUninstalledAt: null,
     };
 
     mockSql.setMockResult("invoice", [mockInvoiceData]);
@@ -336,12 +340,14 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
       shopTimezone: "Asia/Kolkata",
       invoiceName: "#R1-HTTP",
       total: "50000",
+      outstanding: "50000",
       currency: "INR",
       dueAt: new Date(),
       status: "open",
       buyerAccountId: "buyer-r1-http",
       customerId: "gid://shopify/Customer/r1-http",
       buyerAccountGatedAt: null,
+      shopUninstalledAt: null,
     };
 
     mockSql.setMockResult("invoice", [mockInvoiceData]);
