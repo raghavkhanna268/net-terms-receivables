@@ -32,7 +32,7 @@
 | Bulk operations tracking | `s6_bulk_operations` | Until shop/redact | Deleted by `deleteShop()` at `compliance.server.ts:144` | No time-based purge |
 | Database backups | Supabase-managed | Provider-controlled. Supabase automatic daily backups only on Pro (7 days), Team (14 days), Enterprise (up to 30 days); no automatic backups on the Free plan (Supabase advises Free projects to export with `pg_dump`). PITR add-on: 7/14/28 days. [Raghav to confirm plan and any manual dump schedule] | Not app-controlled | [Supabase Backups docs](https://supabase.com/docs/guides/platform/backups) |
 | Sentry error events | Sentry cloud | [Raghav to confirm plan] — Errors: 30 days (Developer), 90 days (Team/Business/Enterprise) | Sentry data retention settings | [Sentry Data Retention docs](https://docs.sentry.io/security-legal-pii/security/data-retention-periods/) |
-| Worker logs | Cloudflare | [Raghav to confirm plan] — 3 days (Workers Free) / 7 days (Workers Paid) | Cloudflare Workers Logpush or dashboard | [Cloudflare Workers Logs](https://developers.cloudflare.com/workers/observability/logs/) |
+| Worker logs | Cloudflare | **Proposed, pending owner review:** Workers Logs retained by Cloudflare for 3 days on the Workers Free plan (7 days on Paid); plan: [Unverified — Raghav to confirm]. Logpush not used (Paid-only). `wrangler.jsonc` has `observability.enabled: true`; sampling 100%, invocation logs on, traces off, no tail consumers. Logs carry only counts/ids/enums/booleans/timestamps/error codes per the `safeLog()` allowlist. | Cloudflare Workers dashboard or `wrangler tail` | [Cloudflare Workers Logs](https://developers.cloudflare.com/workers/observability/logs/workers-logs/) |
 
 ---
 
