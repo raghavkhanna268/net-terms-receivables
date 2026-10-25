@@ -10,30 +10,39 @@ import {
 
 describe("server-timing.server", () => {
   describe("ServerTiming", () => {
+    let performanceNowSpy: ReturnType<typeof vi.spyOn>;
+    let mockTime: number;
+
     beforeEach(() => {
       _resetIsolateStateForTesting();
+      mockTime = 1000;
+      performanceNowSpy = vi.spyOn(performance, "now").mockImplementation(() => mockTime);
     });
 
-    it("records phase timing", async () => {
+    afterEach(() => {
+      performanceNowSpy.mockRestore();
+    });
+
+    it("records phase timing", () => {
       const timing = new ServerTiming();
       timing.startPhase("auth_layout");
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      mockTime = 1050; // Advance 50ms
       timing.endPhase("auth_layout");
 
       const duration = timing.getDuration("auth_layout");
-      expect(duration).toBeGreaterThanOrEqual(10);
-      expect(duration).toBeLessThan(1000);
+      expect(duration).toBe(50);
     });
 
     it("time() helper records duration", async () => {
       const timing = new ServerTiming();
-      await timing.time("shop_lookup", async () => {
-        await new Promise((resolve) => setTimeout(resolve, 10));
+      const result = await timing.time("shop_lookup", async () => {
+        mockTime = 1025; // Advance 25ms during the operation
         return "result";
       });
 
       const duration = timing.getDuration("shop_lookup");
-      expect(duration).toBeGreaterThanOrEqual(10);
+      expect(duration).toBe(25);
+      expect(result).toBe("result");
     });
 
     it("time() returns the operation result", async () => {
@@ -56,11 +65,15 @@ describe("server-timing.server", () => {
 
     it("toHeaderValue() returns correct format", async () => {
       const timing = new ServerTiming();
-      await timing.time("auth_layout", async () => {});
-      await timing.time("shop_lookup", async () => {});
+      await timing.time("auth_layout", async () => {
+        mockTime = 1010;
+      });
+      await timing.time("shop_lookup", async () => {
+        mockTime = 1030;
+      });
 
       const header = timing.toHeaderValue();
-      expect(header).toMatch(/^auth_layout;dur=\d+(\.\d+)?, shop_lookup;dur=\d+(\.\d+)?$/);
+      expect(header).toBe("auth_layout;dur=10.0, shop_lookup;dur=20.0");
     });
 
     it("toHeaderValue() omits phases not ended", () => {
@@ -72,13 +85,12 @@ describe("server-timing.server", () => {
       expect(header).toBe("");
     });
 
-    it("getTotalDuration() returns time since construction", async () => {
+    it("getTotalDuration() returns time since construction", () => {
       const timing = new ServerTiming();
-      await new Promise((resolve) => setTimeout(resolve, 15));
+      mockTime = 1100; // Advance 100ms
 
       const total = timing.getTotalDuration();
-      // Allow some slack for timing variance
-      expect(total).toBeGreaterThanOrEqual(10);
+      expect(total).toBe(100);
     });
 
     it("accepts optional cold parameter override", () => {
