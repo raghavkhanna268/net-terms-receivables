@@ -781,6 +781,51 @@ describe("Reminder Settings Route", () => {
       expect(result.success).toBe(false);
       expect(result.error).toBe("Rule not found");
     });
+
+    it("rejects duplicate offset when updating to match another rule", async () => {
+      const { getShopReminderRules } = await import(
+        "~/services/reminders.server"
+      );
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+      (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { id: "rule-1", offsetDays: 7, channel: "email", enabled: true },
+        { id: "rule-2", offsetDays: 14, channel: "email", enabled: true },
+      ]);
+
+      mockContext.cloudflare.env = {
+        RESEND_API_KEY: "re_test_123",
+        RESEND_FROM: "noreply@example.com",
+      };
+
+      const formData = new FormData();
+      formData.append("intent", "update_rule");
+      formData.append("ruleId", "rule-1");
+      formData.append("offsetDays", "14");
+      formData.append("enabled", "true");
+
+      const postRequest = new Request(
+        "https://example.com/app/settings/reminders",
+        {
+          method: "POST",
+          body: formData,
+        }
+      );
+
+      const { action } = await import("../app.settings.reminders");
+      const result = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("already exists");
+    });
   });
 
   describe("action - create_rule", () => {

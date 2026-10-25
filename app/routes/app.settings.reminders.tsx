@@ -167,6 +167,15 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
           };
         }
 
+        // Check for duplicate offset (excluding the rule being updated)
+        const existingRules = await getShopReminderRules(sql, shop.id);
+        if (existingRules.some((r) => r.id !== ruleId && r.offsetDays === offsetDays)) {
+          return {
+            success: false,
+            error: "A rule with this offset already exists",
+          };
+        }
+
         const updated = await updateReminderRule(sql, shop.id, ruleId, {
           offsetDays,
           enabled,
