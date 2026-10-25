@@ -61,6 +61,8 @@ describeWithDb("access-log DB integration", () => {
     recordType: string,
     opts?: { recordId?: string; count?: number }
   ): Promise<void> {
+    vi.resetModules();
+
     const capturedPromises: Promise<unknown>[] = [];
     const mockWaitUntil = (p: Promise<unknown>) => {
       capturedPromises.push(p);
