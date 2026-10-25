@@ -372,20 +372,25 @@ const SENTINEL = "SENTINEL_QUERY_TEXT_zq9x";
 
 // Mirrors extensions/credit-check-validation/src/cart_validations_generate_run.graphql
 // (multiline, metafield on customer and CompanyLocation).
-const MULTILINE_DOLLAR_APP = `query Input {
-  # ${SENTINEL}
-  cart {
-    buyerIdentity {
-      customer {
-        metafield(
-          namespace: "$app"
-          key: "credit_status"
-        ) { jsonValue }
-      }
-      purchasingCompany { location { metafield(namespace: "$app", key: "credit_status") { jsonValue } } }
-    }
-  }
-}`;
+// Built with join() rather than a `const X = \`query ...\`` literal so
+// scripts/validate-graphql-schema.ts doesn't validate it as an Admin API document
+// (it is a Function input query, not Admin).
+const MULTILINE_DOLLAR_APP = [
+  "query Input {",
+  `  # ${SENTINEL}`,
+  "  cart {",
+  "    buyerIdentity {",
+  "      customer {",
+  "        metafield(",
+  '          namespace: "$app"',
+  '          key: "credit_status"',
+  "        ) { jsonValue }",
+  "      }",
+  '      purchasingCompany { location { metafield(namespace: "$app", key: "credit_status") { jsonValue } } }',
+  "    }",
+  "  }",
+  "}",
+].join("\n");
 const MULTILINE_APP_PREFIX = MULTILINE_DOLLAR_APP.replaceAll('"$app"', '"app--123456"');
 
 describe("S12 Validation deployed inputQuery metrics (no text)", () => {
