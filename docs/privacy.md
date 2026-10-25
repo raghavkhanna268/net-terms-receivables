@@ -164,7 +164,7 @@ Resend is only used when email delivery is configured; emails are not sent other
 
 ### 6.1 Data Retention After Deletion — Known Limitations
 
-**Background job queue:** Background jobs for the shop are deleted when the shop's data is deleted. A job that is being processed at the exact moment of deletion may fail afterwards and be moved to a retry queue; such leftover failed jobs are purged up to about 37 days later.
+**Background job queue:** Background jobs for the shop are deleted when the shop's data is deleted. A job that is being processed at the exact moment of deletion may still be kept in a list of failed jobs afterwards; such leftover entries are purged automatically, up to about 37 days later.
 
 **Database backups:** Supabase-managed database backups may retain deleted data for the provider's backup retention window (7–30 days depending on plan). See [Supabase Backups documentation](https://supabase.com/docs/guides/platform/backups).
 

@@ -146,25 +146,30 @@ Implementation details for shop data deletion:
 
 **Shop deletion removes queue messages:**
 
-`deleteShop` (`app/services/compliance/compliance.server.ts:88-170`) deletes the shop's messages from:
-- Live queues: `pgmq.q_s6_sync`, `pgmq.q_s6_bulk` (lines 125-131)
-- Archive tables: `pgmq.a_s6_sync`, `pgmq.a_s6_bulk` (lines 133-139)
-- Dead-letter queue: `s6_dead_letter` (lines 144-147)
+`deleteShop` (`app/services/compliance/compliance.server.ts:88-178`) deletes the shop's messages from:
+- Live queues: `pgmq.q_s6_sync`, `pgmq.q_s6_bulk` (lines 132-139)
+- Archive tables: `pgmq.a_s6_sync`, `pgmq.a_s6_bulk` (lines 140-147)
+- Dead-letter queue: `s6_dead_letter` (lines 152-155)
 
 All deletes match `message->>'shop' = shopDomain` and run in a single transaction.
 
+The legacy `purgePgmqMessages` function (`compliance.server.ts:200-211`) is now a no-op kept for backward compatibility; `deleteShop` handles the pgmq cleanup.
+
 **In-flight message edge case:**
 
-A drain worker holding a message under its visibility timeout (VT) at the moment `deleteShop` runs will not see that message deleted (it's locked by the worker). When the worker finishes:
-- If it calls `pgmq.archive()` or `pgmq.delete()` on the now-missing `msg_id`, pgmq returns `0` (no rows affected) without throwing — this is safe
-- If the handler fails (e.g., shop lookup returns error), the message retries up to `maxRetries` (5) via the drain processor (`app/services/drain/processor.server.ts`)
-- After 5 failed reads, `moveToDeadLetter` (`app/services/drain/processor.server.ts:968-991`) inserts the full message JSON into `s6_dead_letter`
+pgmq visibility timeout (VT) is not a row lock. When a drain worker holds a message under VT and `deleteShop` runs, `deleteShop` deletes the message row from the queue table (see in-code comment at `compliance.server.ts:123-126`). The test at `app/__tests__/integration/shop-redact-complete-db.test.ts` (the in-flight case, line 666) confirms this behavior.
 
-This in-flight edge case is tracked in [#239](https://github.com/raghavkhanna268/net-terms-receivables/issues/239).
+When the worker finishes:
+- If the handler succeeds, its `pgmq.archive()` or `pgmq.delete()` on the now-missing `msg_id` returns `false` without throwing — this is safe.
+- If the handler fails permanently (e.g., `no_session` because sessions were deleted, or `shop_not_found`) or at the retry limit, the worker's in-memory copy gets dead-lettered by `moveToDeadLetter` (`app/services/drain/processor.server.ts:968-991`), which INSERTs into `s6_dead_letter` **before** calling `pgmq.delete`. This writes the shop's message back after the redact.
+
+The failure typically happens on the first read, not after retries: shop/redact deletes sessions first, so API-calling handlers fail immediately with `retryable: false`. A message left for retry never comes back because its queue row is gone.
+
+This leak is tracked in [#239](https://github.com/raghavkhanna268/net-terms-receivables/issues/239), which fixes it by reversing the order (delete from queue first, then insert into dead-letter).
 
 **Dead-letter retention:**
 
-The weekly `s10_dlq_cleanup_weekly` cron job (`prisma/migrations/20261024010000_s10_drain_cron/migration.sql:175-181`) deletes dead-letter rows older than 30 days. Combined with the weekly schedule, leftover failed jobs are purged up to about 37 days after they dead-lettered.
+The weekly `s10_dlq_cleanup_weekly` cron job (`prisma/migrations/20261024010000_s10_drain_cron/migration.sql:176-180`) deletes dead-letter rows older than 30 days. Combined with the weekly schedule, leftover failed jobs are purged up to about 37 days after they dead-lettered.
 
 **Sync handlers with shop lookup:**
 
