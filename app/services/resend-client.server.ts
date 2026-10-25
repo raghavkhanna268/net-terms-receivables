@@ -1,8 +1,13 @@
 /**
  * Shared Resend email client with pre-launch recipient allowlist guard.
  *
- * All email sends MUST go through sendViaResend() to ensure the allowlist
- * is enforced. Direct fetch() calls to api.resend.com are not allowed.
+ * Payment and catch-up reminders MUST go through sendViaResend() to ensure
+ * the allowlist is enforced.
+ *
+ * Note: sendDataRequestNotification in compliance.server.ts makes its own
+ * direct fetch to api.resend.com on purpose, preserving main's error codes
+ * (resend_api_error_{status}, toErrorCode for network errors). It enforces
+ * the allowlist itself before the fetch call.
  *
  * Pre-launch behavior:
  * - RESEND_TEST_RECIPIENTS env var contains a comma-separated allowlist

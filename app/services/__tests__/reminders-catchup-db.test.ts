@@ -1453,6 +1453,12 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
     });
 
     it("skips with success=true when allowlist env var is absent (undefined), keeps delayed row, no cap consumed", async () => {
+      // Make test hermetic: ensure process.env.RESEND_TEST_RECIPIENTS is unset
+      // so the ?? process.env fallback in sendCatchupReminder sees undefined
+      vi.stubEnv("RESEND_TEST_RECIPIENTS", "");
+      const originalEnvValue = process.env.RESEND_TEST_RECIPIENTS;
+      delete process.env.RESEND_TEST_RECIPIENTS;
+
       const { sendCatchupReminder, getGlobalSendCounts } = await import("../reminders.server");
       const envUnsetAllowlist = {
         RESEND_API_KEY: "re_test_1234",
@@ -1516,6 +1522,11 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         expect(countsAfter.monthly).toBe(countsBefore.monthly);
       } finally {
         luxonSpy.mockRestore();
+        // Restore process.env
+        if (originalEnvValue !== undefined) {
+          process.env.RESEND_TEST_RECIPIENTS = originalEnvValue;
+        }
+        vi.unstubAllEnvs();
       }
     });
   });

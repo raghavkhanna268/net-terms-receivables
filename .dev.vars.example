@@ -17,8 +17,10 @@ SENTRY_TRACES_SAMPLE_RATE=0
 RESEND_API_KEY=
 # Sender address - must be a verified domain in Resend (e.g. noreply@yourdomain.com)
 RESEND_FROM=
-# Pre-launch recipient allowlist - comma-separated emails allowed to receive reminders.
-# Leave empty to block all sends (fail closed). Remove this guard before launch.
+# Pre-launch recipient allowlist - comma-separated emails allowed to receive
+# payment reminders, catch-up reminders, and data-request notification emails.
+# When set, sends only to listed addresses; when empty or unset, blocks ALL emails (fail closed).
+# Remove this guard (code change) before launch.
 RESEND_TEST_RECIPIENTS=ops@test-example.com
 
 # Database connection for local development
