@@ -235,10 +235,11 @@ describe("narration-parser", () => {
         expect(result.rail).toBe("CMS");
       });
 
-      it("extracts ref from CMS narration", () => {
+      it("does NOT extract ref as UTR from CMS narration (CMS refs are not UTRs)", () => {
         const result = parseNarration("CMS/ SYNT123 45/SYNT TEST TRADERS");
         expect(result.rail).toBe("CMS");
-        expect(result.utr).toBe("SYNT123 45");
+        // CMS refs are internal refs, NOT UTRs - utr should be undefined
+        expect(result.utr).toBeUndefined();
       });
 
       it("extracts payer name from CMS narration", () => {
@@ -247,16 +248,18 @@ describe("narration-parser", () => {
         expect(result.payerName).toBe("SYNT TEST TRADERS");
       });
 
-      it("handles CMS with only ref segment", () => {
+      it("handles CMS with only ref segment (no UTR, but may extract name)", () => {
         const result = parseNarration("CMS/ REF00001");
         expect(result.rail).toBe("CMS");
-        expect(result.utr).toBe("REF00001");
+        // CMS refs are NOT UTRs
+        expect(result.utr).toBeUndefined();
       });
 
       it("handles CMS corporate collection format", () => {
         const result = parseNarration("CMS/ SYNTCORP 99/SYNT WHOLESALE PVT LTD");
         expect(result.rail).toBe("CMS");
-        expect(result.utr).toBe("SYNTCORP 99");
+        // CMS refs are NOT UTRs
+        expect(result.utr).toBeUndefined();
         expect(result.payerName).toBe("SYNT WHOLESALE");
       });
     });
@@ -350,6 +353,19 @@ describe("narration-parser", () => {
 
       it("returns refNo if it's 12 digits", () => {
         expect(extractUtrForDedupe("some narration", "UPI", "123456789012")).toBe("123456789012");
+      });
+
+      it("strips leading zeros from HDFC 16-digit zero-padded ref to get 12-digit RRN", () => {
+        // HDFC uses 0000 + 12-digit RRN format
+        expect(extractUtrForDedupe("some narration", "UPI", "0000600000000001")).toBe("600000000001");
+      });
+
+      it("returns null for all-zeros ref (no valid RRN)", () => {
+        expect(extractUtrForDedupe("some narration", "UPI", "0000000000000000")).toBeNull();
+      });
+
+      it("returns null for ref that strips to less than 12 digits", () => {
+        expect(extractUtrForDedupe("some narration", "UPI", "00001234")).toBeNull();
       });
     });
 

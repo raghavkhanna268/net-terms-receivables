@@ -136,20 +136,18 @@ function parseUpi(text: string, textUpper: string, bank?: BankId): ParsedNarrati
     }
   }
   
-  // ICICI: VPA may be without '@' - look for alphanumeric/dotted id (10+ chars)
-  if (!result.upiId && bank === "ICICI") {
-    for (const part of parts) {
-      const trimmed = part.trim();
-      // Must be 10+ chars, alphanumeric with optional dots, not a pure number
-      if (
-        trimmed.length >= 10 &&
-        /^[a-zA-Z0-9.]+$/.test(trimmed) &&
-        !/^\d+$/.test(trimmed) &&
-        !trimmed.includes("@")
-      ) {
-        result.upiId = trimmed.toLowerCase();
-        break;
-      }
+  // ICICI: VPA may be without '@' - check segment index 2 only
+  // Format: UPI/CR/123456789012/vpa-id/SENDER NAME (vpa-id is at index 2 after split)
+  if (!result.upiId && bank === "ICICI" && parts.length > 2) {
+    const candidate = parts[2].trim();
+    // Must be 10+ chars, alphanumeric with optional dots, not a pure number
+    if (
+      candidate.length >= 10 &&
+      /^[a-zA-Z0-9.]+$/.test(candidate) &&
+      !/^\d+$/.test(candidate) &&
+      !candidate.includes("@")
+    ) {
+      result.upiId = candidate.toLowerCase();
     }
   }
 
@@ -178,12 +176,23 @@ function parseUpi(text: string, textUpper: string, bank?: BankId): ParsedNarrati
 
   // For ICICI, try to extract payer bank from narration (bank name segment)
   // Only if we don't already have a bank from IFSC
+  // Prefer segment index 4 (typical ICICI format: UPI/CR/RRN/VPA/BANK NAME)
   if (bank === "ICICI" && !result.payerBank) {
-    for (const part of parts) {
-      const trimmed = part.trim().toUpperCase();
-      if (trimmed.includes("BANK") && trimmed !== "UPI") {
-        result.payerBank = trimmed;
-        break;
+    // Check index 4 first
+    if (parts.length > 4) {
+      const candidate = parts[4].trim().toUpperCase();
+      if (candidate.includes("BANK") && candidate !== "UPI") {
+        result.payerBank = candidate;
+      }
+    }
+    // Fallback to any segment with "BANK"
+    if (!result.payerBank) {
+      for (const part of parts) {
+        const trimmed = part.trim().toUpperCase();
+        if (trimmed.includes("BANK") && trimmed !== "UPI") {
+          result.payerBank = trimmed;
+          break;
+        }
       }
     }
   }
@@ -389,7 +398,8 @@ function parseAch(text: string, _textUpper: string, _bank?: BankId): ParsedNarra
  * e.g., "CMS/ SYNT123 45/<SYNT TEST TRADERS>"
  *
  * CMS credits are corporate collection payments (receivables).
- * NOTE: CMS reference numbers are NOT UTRs. They are internal refs.
+ * NOTE: CMS reference numbers are NOT UTRs - they are internal refs.
+ * We do NOT store them in result.utr; leave utr empty.
  */
 function parseCms(text: string, _textUpper: string, _bank?: BankId): ParsedNarration {
   const result: ParsedNarration = { rail: "CMS" };
@@ -409,12 +419,8 @@ function parseCms(text: string, _textUpper: string, _bank?: BankId): ParsedNarra
     return result;
   }
 
-  // Extract reference from the first non-empty part after CMS/
-  // The ref typically contains alphanumeric tokens with digits
+  // NOTE: CMS refs are internal, NOT UTRs. Do not store in result.utr.
   const refPart = nonEmptyParts[0].trim();
-  if (refPart && /\d/.test(refPart)) {
-    result.utr = refPart.replace(/\s+/g, " ").trim();
-  }
 
   // The payer name is typically the last segment
   if (nonEmptyParts.length > 1) {
@@ -514,8 +520,19 @@ export function extractUtrForDedupe(
     if (rail === "RTGS" && RTGS_UTR_PATTERN.test(ref)) {
       return ref;
     }
-    if ((rail === "IMPS" || rail === "UPI") && /^\d{12}$/.test(ref)) {
-      return ref;
+    if (rail === "IMPS" || rail === "UPI") {
+      // Check raw ref first
+      if (/^\d{12}$/.test(ref)) {
+        return ref;
+      }
+      // HDFC uses 16-digit zero-padded refs (0000 + 12-digit RRN)
+      // Strip leading zeros for comparison only, return the 12-digit RRN
+      if (/^\d+$/.test(ref)) {
+        const stripped = ref.replace(/^0+/, "");
+        if (/^\d{12}$/.test(stripped)) {
+          return stripped;
+        }
+      }
     }
   }
 

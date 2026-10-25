@@ -54,22 +54,6 @@ const ICICI_CORPORATE_HEADERS = [
 const ICICI_DETAILED_HEADERS = ["Date", "Particulars", "Chq. No.", "Withdrawals", "Deposits", "Balance"];
 
 /**
- * ICICI real .xls layout: Value-Date-first header with blank columns A and J.
- * Header row has: blank | S No. | Value Date | Transaction Date | Cheque Number | 
- *                 Transaction Remarks | Withdrawal Amount(INR) | Deposit Amount(INR) | Balance(INR) | blank
- */
-const ICICI_REAL_XLS_HEADERS = [
-  "S No.",
-  "Value Date",
-  "Transaction Date",
-  "Cheque Number",
-  "Transaction Remarks",
-  "Withdrawal Amount(INR)",
-  "Deposit Amount(INR)",
-  "Balance(INR)",
-];
-
-/**
  * SBI Header patterns (SYNTHETIC / UNVERIFIED)
  * Sources:
  * - https://www.tieout.in/banks/sbi/
@@ -349,10 +333,6 @@ export function detectHeaderRow(
     if (matchesHeaderPattern(cells, ICICI_DETAILED_HEADERS)) {
       return { bank: "ICICI", row: i, columns: cells };
     }
-    // ICICI real .xls layout: Value-Date-first with blank columns A/J
-    if (matchesHeaderPattern(cells, ICICI_REAL_XLS_HEADERS)) {
-      return { bank: "ICICI", row: i, columns: cells };
-    }
 
     // Check SBI patterns (UNVERIFIED)
     if (matchesHeaderPattern(cells, SBI_HEADERS)) {
@@ -442,11 +422,23 @@ export function detectFooterRows(sheet: SheetData, dataStartRow: number): Set<nu
 
     const firstCell = String(row[0] ?? "").trim();
     const rowText = row.map((c) => String(c ?? "")).join(" ");
+    
+    // Find first non-empty cell (for formats like ICICI where column A is blank)
+    let firstNonEmptyCell = firstCell;
+    if (!firstCell) {
+      for (const cell of row) {
+        const cellStr = String(cell ?? "").trim();
+        if (cellStr) {
+          firstNonEmptyCell = cellStr;
+          break;
+        }
+      }
+    }
 
     // Check against footer patterns
     let isFooter = false;
     for (const pattern of footerPatterns) {
-      if (pattern.test(firstCell) || pattern.test(rowText)) {
+      if (pattern.test(firstCell) || pattern.test(firstNonEmptyCell) || pattern.test(rowText)) {
         footerIndices.add(i);
         isFooter = true;
         break;
