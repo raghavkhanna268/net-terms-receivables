@@ -35,6 +35,7 @@ import { ensureMetafieldDefinitions, getMetafieldDefinitionSpecs } from "~/lib/m
 import { METAFIELD } from "~/lib/metafields-contract";
 import {
   getInitialSyncState,
+  getInitialSyncStateWithRecovery,
   enqueueInitialSync,
   canStartSync as canStartSyncServer,
   type InitialSyncStatus,
@@ -359,7 +360,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     fetchValidationInfo(admin),
     fetchPaymentCustomizationInfo(admin),
     checkMetafieldDefinitionsStatus(admin),
-    getInitialSyncState(sql, shopDomain),
+    getInitialSyncStateWithRecovery(sql, shopDomain),
   ]);
 
   const validation = validationResult.info;
@@ -684,11 +685,11 @@ function InitialSyncSection({
 
       <s-paragraph>
         {syncState.status === "not_started" &&
-          "Sync your B2B companies and orders to import existing buyer accounts and invoices."}
+          "Sync your B2B companies, tagged customers, and orders to import existing buyer accounts and invoices."}
         {syncState.status === "in_progress" &&
-          "Syncing B2B companies and orders. This may take a few minutes."}
+          "Syncing B2B companies, tagged customers, and orders. This may take a few minutes."}
         {syncState.status === "done" &&
-          "B2B companies and orders have been synced."}
+          "B2B companies, tagged customers, and orders have been synced."}
         {syncState.status === "failed" &&
           "Sync failed. You can retry to attempt the sync again."}
       </s-paragraph>

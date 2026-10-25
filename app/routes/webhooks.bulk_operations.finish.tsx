@@ -39,6 +39,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   };
 
   const bulkOperationId = typedPayload.admin_graphql_api_id;
+  const status = String(typedPayload.status ?? "").toUpperCase();
 
   if (!bulkOperationId) {
     console.warn(
@@ -47,9 +48,9 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     return new Response(null, { status: 200 });
   }
 
-  if (typedPayload.status !== "COMPLETED") {
+  if (status !== "COMPLETED") {
     console.log(
-      `[webhooks.bulk_operations.finish] Ignoring non-completed operation: ${typedPayload.status} wh=${webhookId}`
+      `[webhooks.bulk_operations.finish] Ignoring non-completed operation: ${status} wh=${webhookId}`
     );
     return new Response(null, { status: 200 });
   }

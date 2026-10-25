@@ -5,7 +5,7 @@ import { getRequestSql } from "~/lib/request-context.server";
 import { resolvePlan, type ResolvedPlan } from "~/services/plan.server";
 import { getUsageStats, isGatingEnforced } from "~/services/gating.server";
 import type { PlanKey } from "~/lib/entitlements";
-import { PlanBanner } from "~/components/UpgradePrompt";
+import { PlanBanner, PLAN_DISPLAY_NAMES } from "~/components/UpgradePrompt";
 import {
   getShopAgingTotals,
   getBuyerLedger,
@@ -345,8 +345,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         }
       : null,
     usage: usage ?? {
-      companies: { current: 0, limit: 3 },
-      importsThisMonth: { current: 0, limit: 1 },
+      companies: { current: 0, limit: 0 },
+      importsThisMonth: { current: 0, limit: -1 },
     },
     appHandle: process.env.APP_HANDLE ?? "net-terms-receivables",
     gatingEnforced,
@@ -665,8 +665,8 @@ export default function Index() {
     error,
   } = useLoaderData<typeof loader>();
 
-  const planKey = (plan?.key ?? "free") as PlanKey;
-  const planName = plan?.name ?? "Free";
+  const planKey = (plan?.key ?? "none") as PlanKey;
+  const planName = plan?.name ?? PLAN_DISPLAY_NAMES.none;
   const isTest = plan?.isTest ?? false;
 
   const upgradeUrl = `https://admin.shopify.com/store/${storeHandle}/charges/${appHandle}/pricing_plans`;
