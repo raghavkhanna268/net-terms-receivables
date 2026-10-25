@@ -133,7 +133,7 @@ Implementation details for shop data deletion:
    - `s8_tagged_customers`, `s8_draft_orders` (S8 FKs)
    - `s22_data_requests` (S22 FK — exports purged even if not yet expired)
 
-**pgmq messages:** Cannot be purged per-shop (documented limitation). Messages for deleted shops are safely ignored by the drain processor.
+**pgmq messages:** Cannot be purged per-shop (documented limitation). Messages for deleted shops fail at the sync handler level and eventually dead-letter.
 
 ---
 
@@ -141,19 +141,20 @@ Implementation details for shop data deletion:
 
 ### pgmq Message Queue
 
-pgmq does not support per-shop message deletion. The `purgePgmqMessages` function in `app/services/compliance/compliance.server.ts` (lines 85–113) documents this limitation and returns a no-op:
+pgmq does not support per-shop message deletion. The `purgePgmqMessages` function in `app/services/compliance/compliance.server.ts` (lines 86–114) documents this limitation.
 
-```typescript
-return {
-  purged: false,
-  reason:
-    "pgmq does not support per-shop message deletion. Messages for deleted shops " +
-    "are safely ignored by the drain processor which checks shop existence. " +
-    "Messages expire naturally based on queue visibility timeout.",
-};
-```
+**Actual behaviour for messages targeting deleted shops:**
 
-Messages for deleted shops are safely ignored by the drain processor (which verifies shop existence before processing) and expire naturally based on queue visibility timeout.
+1. The drain processor (`app/services/drain/processor.server.ts`) reads messages and dispatches to topic handlers
+2. Handlers call `adminGraphQL` which may fail if the shop's offline session was deleted
+3. If the GraphQL call succeeds, sync functions (e.g., `processCompanyWebhook`, `processOrderWebhook`) lookup the Shop by domain:
+   - `app/services/sync/company.server.ts` — returns `error: "Shop not found"` (no `retryable: false`)
+   - `app/services/sync/order.server.ts:89-91` — returns `error: "shop_not_found"`, `errorCode: "shop_not_found"`
+   - `app/services/sync/customer.server.ts:93` — returns `error: "Shop not found"`
+4. Without explicit `retryable: false`, these errors retry until `maxRetries` (default 5), then dead-letter
+5. Messages also expire naturally based on queue visibility timeout
+
+**Note:** The `purgePgmqMessages` comment claims the drain processor "checks if the shop exists before processing" — this is inaccurate. The shop existence check occurs in individual sync handlers, not the drain processor itself.
 
 ### Supabase Database Backups
 
@@ -172,6 +173,25 @@ Per [Shopify metafield documentation](https://shopify.dev/docs/apps/build/metafi
 > "When a user uninstalls your app, Shopify deletes its app-owned metafield definitions and temporarily retains the metafields and their values without a definition. This applies to any app-owned definition, whether declared in `shopify.app.toml` or created with the GraphQL Admin API. Cleanup of the retained data runs asynchronously."
 
 **Impact:** Uninstalling the app removes the app's Shopify Functions (payment customization, checkout validation), so the `credit_status` metafield value cannot affect checkout behaviour even if it persists temporarily before Shopify's asynchronous cleanup removes it.
+
+### Sentry Error Events — Data Scrubbing
+
+When Sentry is enabled, error events are scrubbed by `beforeSend` and `beforeSendTransaction` hooks (`app/lib/sentry.ts:140-150`) before transmission:
+
+**Removed entirely:**
+- `request.headers`, `request.cookies`, `request.query_string`, `request.data` (lines 85-95)
+- `event.breadcrumbs` (line 115)
+
+**Transformed:**
+- `request.url` — query string stripped (lines 89-92)
+- `exception.value` — replaced with error code via `toErrorCode` (lines 99-106)
+- `event.message` — redacted via `redactString` (lines 110-112)
+
+**Scrubbed to allowlist:**
+- `event.extra`, `event.tags`, `event.contexts` — only keys in `ALLOWED_SENTRY_KEYS` (lines 37-46) are retained: `shopId`, `code`, `requestId`, `webhookId`, `jobId`, `topic`, `status`, `errorCode`
+
+**Disabled via `dataCollection` config (lines 19-31):**
+- `userInfo`, `cookies`, `httpHeaders`, `httpBodies`, `urlQueryParams`, `graphQL`, `genAI`, `databaseQueryData`, `queues`, `stackFrameVariables`, `frameContextLines`
 
 ---
 

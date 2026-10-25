@@ -127,7 +127,7 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | Resend, Inc. | Email delivery (data request notifications, payment reminders) | US | [Resend DPA](https://resend.com/legal/dpa) |
 | Functional Software, Inc. | Error monitoring (Sentry) | [TBD] | [Sentry DPA](https://sentry.io/legal/dpa/) |
 
-**Note:** Sentry is only active when error monitoring is enabled (SENTRY_DSN set).
+**Note:** Sentry is only active when error monitoring is enabled. Error events are scrubbed before transmission: request headers, cookies, query strings, and body data are removed; exception messages are replaced with error codes; breadcrumbs are deleted; and only allowlisted metadata keys (shopId, errorCode, requestId, webhookId, jobId, topic, status) are retained.
 
 **Resend data handling:**
 
@@ -136,15 +136,15 @@ Data request notification emails:
 - Shop owner email is fetched at send time from Shopify Admin API and passed directly to Resend; **never stored** in our database or logged
 
 Payment reminder emails (sent to buyer email address):
-- Recipient: buyer email (from `s8_tagged_customers.email`)
+- Recipient: buyer email address (from tagged customer record)
 - Invoice name (e.g. "#1001")
 - Invoice total (formatted with shop currency)
 - Invoice due date (formatted in shop timezone)
-- Buyer display name (from `s8_tagged_customers.display_name`, or "Customer" if null)
+- Buyer display name (from tagged customer record, or "Customer" if not available)
 - Shop name (derived from shop domain)
 - Reminder type label (e.g. "Payment due today")
 
-Resend is only used when configured (RESEND_API_KEY and RESEND_FROM set); emails are not sent otherwise
+Resend is only used when email delivery is configured; emails are not sent otherwise
 
 ---
 
@@ -164,11 +164,11 @@ Resend is only used when configured (RESEND_API_KEY and RESEND_FROM set); emails
 
 ### 6.1 Data Retention After Deletion — Known Limitations
 
-**Message queues:** Internal message queues (pgmq) do not support per-shop message deletion. Messages for deleted shops are safely ignored by the processor (which verifies shop existence before processing) and expire naturally based on queue visibility timeout.
+**Background job queue:** The internal job queue does not support per-shop message deletion. Messages for deleted shops fail when the sync handler cannot find the shop record, and are eventually moved to a dead-letter queue after retry exhaustion. Messages also expire naturally based on queue visibility timeout.
 
 **Database backups:** Supabase-managed database backups may retain deleted data for the provider's backup retention window (7–30 days depending on plan). See [Supabase Backups documentation](https://supabase.com/docs/guides/platform/backups).
 
-**Shopify metafields:** The app's `credit_status` metafield on Shopify Company records is not explicitly cleared by the app on uninstall or shop/redact. Per [Shopify metafield documentation](https://shopify.dev/docs/apps/build/metafields/definitions), when a user uninstalls an app, Shopify deletes its app-owned metafield definitions and temporarily retains the metafield values without a definition; cleanup of the retained data runs asynchronously (no guaranteed timeframe). Uninstalling the app removes the app's Shopify Functions, so the metafield value cannot affect checkout even if it persists temporarily.
+**Shopify metafields:** The app's credit status field on Shopify Company records is not explicitly cleared by the app on uninstall or shop/redact. Per [Shopify metafield documentation](https://shopify.dev/docs/apps/build/metafields/definitions), when a user uninstalls an app, Shopify deletes its app-owned metafield definitions and temporarily retains the metafield values without a definition; cleanup of the retained data runs asynchronously (no guaranteed timeframe). Uninstalling the app removes the app's Shopify Functions, so the field value cannot affect checkout even if it persists temporarily.
 
 ---
 

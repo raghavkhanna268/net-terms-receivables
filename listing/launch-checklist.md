@@ -79,7 +79,7 @@
 - [ ] **⚠️ Privacy policy URL hosted and accessible**
   - Draft: `docs/privacy.md`
   - [ ] **TBD:** Host on public URL (e.g., /privacy route in app, or external URL)
-  - [ ] **Raghav: fill privacy.md TBDs** (legal entity, contact email, DPO, effective date, DPA links for Cloudflare and Supabase)
+  - [ ] **Raghav: fill privacy.md TBDs** (legal entity, contact email, DPO, effective date, DPA links for Cloudflare and Supabase, Sentry data region)
   - [ ] Legal review of privacy policy
 
 ### GDPR Webhooks
