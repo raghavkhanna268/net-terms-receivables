@@ -681,6 +681,13 @@ describeWithDb("CompanyLocation Sync", () => {
         VALUES (${redactShopId}, ${redactDomain}, NOW(), NOW())
       `;
 
+      // Verify the shop was created
+      const [createdShop] = await sql<{ id: string; domain: string }[]>`
+        SELECT id, domain FROM "Shop" WHERE id = ${redactShopId}
+      `;
+      expect(createdShop).toBeDefined();
+      expect(createdShop.domain).toBe(redactDomain);
+
       await sql`
         INSERT INTO "BuyerAccount" (
           "shopId", kind, "companyId", "companyLocationId", name,
