@@ -137,10 +137,10 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app built for Indian 
 
 | Data Category | Retention Period | Deletion Trigger |
 |---------------|------------------|------------------|
-| Access Logs | 1 year | Deleted automatically after 1 year |
+| Access Logs | Until 48 hours after uninstall (shop/redact) | Automatic cascade. An automatic 1-year deletion is planned and will be stated here once it is active. |
 | OAuth Sessions | Until logout, expiry, or uninstall | App uninstall webhook or session expiry |
-| Shop and Account Data | Until app uninstall | Shop redact webhook (sent by Shopify 48h after uninstall) |
-| Payment and Financial Records | Until app uninstall | Deleted on Shopify's shop/redact request |
+| Shop and Account Data | Until 48 hours after uninstall (shop/redact) | Shop redact webhook (sent by Shopify 48h after uninstall) |
+| Payment and Financial Records | Until 48 hours after uninstall (shop/redact) | Deleted on Shopify's shop/redact request |
 | Tagged Customer Data | Until customer erasure or shop redact | Compliance webhooks |
 | Invoices | Retained (no customer-identifying fields) | Buyer relationship anonymized on customer erasure |
 | Payments (matched) | Until shop redact | Narration/payer text redacted on customer erasure if linked to customer |
@@ -188,7 +188,7 @@ When a customer requests their data:
 
 **Data delivery:**
 - **Primary:** In-admin download via data requests page (creates download, marks as downloaded on success)
-- **Notification:** Email to shop owner via Resend API (if configured)
+- **Notification:** Email to shop owner via Resend API (not yet enabled)
 - **Retention:** Exports are retained for **30 days** (data minimisation), then purged automatically
 
 **Shopify compliance deadline:** Per [Shopify compliance webhook documentation](https://shopify.dev/docs/apps/build/privacy-law-compliance#customers-data_request), merchants must provide the customer's data within **30 days** of receiving the request. Our 30-day export retention ensures exports remain available for the full compliance window.
