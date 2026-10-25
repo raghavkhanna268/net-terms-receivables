@@ -14,10 +14,10 @@ vi.mock("~/lib/webhook-receipts.server", () => ({
   parseTriggeredAt: (...args: unknown[]) => mockParseTriggeredAt(...args),
 }));
 
-const mockMarkShopUninstalled = vi.fn();
+const mockMarkUninstalledAndDeleteSessions = vi.fn();
 const mockPurgeReceiptsAndProcessedWebhooks = vi.fn();
 vi.mock("~/services/compliance", () => ({
-  markShopUninstalled: (...args: unknown[]) => mockMarkShopUninstalled(...args),
+  markUninstalledAndDeleteSessions: (...args: unknown[]) => mockMarkUninstalledAndDeleteSessions(...args),
   purgeReceiptsAndProcessedWebhooks: (...args: unknown[]) =>
     mockPurgeReceiptsAndProcessedWebhooks(...args),
 }));
@@ -43,16 +43,6 @@ describe("webhooks.app.uninstalled", () => {
   const TEST_SHOP = "test-shop.myshopify.com";
   const originalEnv = process.env;
 
-  const mockSessionStorage = {
-    deleteAllForShop: vi.fn(),
-  };
-
-  const createMockContext = () => ({
-    shopify: {},
-    sessionStorage: mockSessionStorage,
-    cloudflare: { env: {}, ctx: {} },
-  });
-
   const createMockRequest = () =>
     new Request("https://example.com/webhooks/app/uninstalled", {
       method: "POST",
@@ -66,7 +56,7 @@ describe("webhooks.app.uninstalled", () => {
 
   const createActionArgs = (): ActionFunctionArgs => ({
     request: createMockRequest(),
-    context: createMockContext(),
+    context: { cloudflare: { env: {}, ctx: {} } },
     params: {},
     url: new URL("https://example.com/webhooks/app/uninstalled"),
     pattern: "/webhooks/app/uninstalled",
@@ -83,7 +73,7 @@ describe("webhooks.app.uninstalled", () => {
       apiVersion: "2026-10",
       rawBody: new ArrayBuffer(0),
     });
-    mockMarkShopUninstalled.mockResolvedValue(true);
+    mockMarkUninstalledAndDeleteSessions.mockResolvedValue({ shopFound: true, sessionsDeleted: 1 });
     mockRecordWebhookReceipt.mockResolvedValue(true);
     mockParseTriggeredAt.mockReturnValue(null);
     mockPurgeReceiptsAndProcessedWebhooks.mockResolvedValue({
@@ -97,26 +87,25 @@ describe("webhooks.app.uninstalled", () => {
     process.env = originalEnv;
   });
 
-  it("deletes all sessions for the shop using deleteAllForShop", async () => {
-    mockSessionStorage.deleteAllForShop.mockResolvedValue(5);
+  it("calls markUninstalledAndDeleteSessions with shop domain", async () => {
+    mockMarkUninstalledAndDeleteSessions.mockResolvedValue({ shopFound: true, sessionsDeleted: 5 });
 
     const response = await action(createActionArgs());
 
     expect(response).toBeInstanceOf(Response);
-    expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledWith(TEST_SHOP);
+    expect(mockMarkUninstalledAndDeleteSessions).toHaveBeenCalledWith(mockSql, TEST_SHOP);
   });
 
-  it("marks shop as uninstalled (S22)", async () => {
-    mockSessionStorage.deleteAllForShop.mockResolvedValue(1);
+  it("marks shop as uninstalled and deletes sessions atomically (S22, #258)", async () => {
+    mockMarkUninstalledAndDeleteSessions.mockResolvedValue({ shopFound: true, sessionsDeleted: 3 });
 
     await action(createActionArgs());
 
-    expect(mockMarkShopUninstalled).toHaveBeenCalledWith(expect.anything(), TEST_SHOP);
+    expect(mockMarkUninstalledAndDeleteSessions).toHaveBeenCalledWith(expect.anything(), TEST_SHOP);
   });
 
   it("evicts shop from setup cache after successful uninstall", async () => {
-    mockSessionStorage.deleteAllForShop.mockResolvedValue(1);
-    mockMarkShopUninstalled.mockResolvedValue(true);
+    mockMarkUninstalledAndDeleteSessions.mockResolvedValue({ shopFound: true, sessionsDeleted: 1 });
 
     await action(createActionArgs());
 
@@ -124,8 +113,7 @@ describe("webhooks.app.uninstalled", () => {
   });
 
   it("evicts shop from setup cache even if shop not found in DB", async () => {
-    mockSessionStorage.deleteAllForShop.mockResolvedValue(0);
-    mockMarkShopUninstalled.mockResolvedValue(false);
+    mockMarkUninstalledAndDeleteSessions.mockResolvedValue({ shopFound: false, sessionsDeleted: 0 });
 
     await action(createActionArgs());
 
@@ -133,40 +121,26 @@ describe("webhooks.app.uninstalled", () => {
   });
 
   it("handles shops with no sessions gracefully", async () => {
-    mockSessionStorage.deleteAllForShop.mockResolvedValue(0);
+    mockMarkUninstalledAndDeleteSessions.mockResolvedValue({ shopFound: true, sessionsDeleted: 0 });
 
     const response = await action(createActionArgs());
 
     expect(response).toBeInstanceOf(Response);
-    expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledWith(TEST_SHOP);
-    expect(mockMarkShopUninstalled).toHaveBeenCalled();
+    expect(mockMarkUninstalledAndDeleteSessions).toHaveBeenCalledWith(mockSql, TEST_SHOP);
   });
 
   it("deletes more than 25 sessions (bypasses findSessionsByShop limit)", async () => {
-    mockSessionStorage.deleteAllForShop.mockResolvedValue(50);
+    mockMarkUninstalledAndDeleteSessions.mockResolvedValue({ shopFound: true, sessionsDeleted: 50 });
 
     const response = await action(createActionArgs());
 
     expect(response).toBeInstanceOf(Response);
-    expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledTimes(1);
-    expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledWith(TEST_SHOP);
+    expect(mockMarkUninstalledAndDeleteSessions).toHaveBeenCalledTimes(1);
   });
 
-  it("session delete failure returns 5xx", async () => {
+  it("helper failure returns 5xx", async () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    mockSessionStorage.deleteAllForShop.mockRejectedValue(new Error("DB error"));
-
-    const response = await action(createActionArgs());
-
-    expect(response.status).toBe(500);
-    expect(consoleSpy).toHaveBeenCalled();
-    consoleSpy.mockRestore();
-  });
-
-  it("uninstalledAt write failure returns 5xx", async () => {
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    mockSessionStorage.deleteAllForShop.mockResolvedValue(1);
-    mockMarkShopUninstalled.mockRejectedValue(new Error("DB error"));
+    mockMarkUninstalledAndDeleteSessions.mockRejectedValue(new Error("DB error"));
 
     const response = await action(createActionArgs());
 
@@ -176,8 +150,7 @@ describe("webhooks.app.uninstalled", () => {
   });
 
   it("retry after success is idempotent", async () => {
-    mockSessionStorage.deleteAllForShop.mockResolvedValue(0);
-    mockMarkShopUninstalled.mockResolvedValue(false);
+    mockMarkUninstalledAndDeleteSessions.mockResolvedValue({ shopFound: false, sessionsDeleted: 0 });
     mockPurgeReceiptsAndProcessedWebhooks.mockResolvedValue({
       processedWebhooksDeleted: 0,
       receiptsDeleted: 0,
@@ -189,13 +162,11 @@ describe("webhooks.app.uninstalled", () => {
     const response2 = await action(createActionArgs());
     expect(response2.status).toBe(200);
 
-    expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledTimes(2);
-    expect(mockMarkShopUninstalled).toHaveBeenCalledTimes(2);
+    expect(mockMarkUninstalledAndDeleteSessions).toHaveBeenCalledTimes(2);
   });
 
   it("processed webhooks and receipts purge calls purgeReceiptsAndProcessedWebhooks", async () => {
-    mockSessionStorage.deleteAllForShop.mockResolvedValue(1);
-    mockMarkShopUninstalled.mockResolvedValue(true);
+    mockMarkUninstalledAndDeleteSessions.mockResolvedValue({ shopFound: true, sessionsDeleted: 1 });
     mockPurgeReceiptsAndProcessedWebhooks.mockResolvedValue({
       processedWebhooksDeleted: 3,
       receiptsDeleted: 5,
@@ -210,8 +181,7 @@ describe("webhooks.app.uninstalled", () => {
   it("receipts purge failure is non-fatal, logs count and code only", async () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-    mockSessionStorage.deleteAllForShop.mockResolvedValue(1);
-    mockMarkShopUninstalled.mockResolvedValue(true);
+    mockMarkUninstalledAndDeleteSessions.mockResolvedValue({ shopFound: true, sessionsDeleted: 1 });
     mockPurgeReceiptsAndProcessedWebhooks.mockRejectedValue(
       new Error("Transaction failed")
     );
@@ -240,7 +210,7 @@ describe("webhooks.app.uninstalled", () => {
   });
 
   it("uses lightweight verifyWebhook instead of authenticate.webhook", async () => {
-    mockSessionStorage.deleteAllForShop.mockResolvedValue(1);
+    mockMarkUninstalledAndDeleteSessions.mockResolvedValue({ shopFound: true, sessionsDeleted: 1 });
     const args = createActionArgs();
 
     await action(args);
@@ -249,7 +219,7 @@ describe("webhooks.app.uninstalled", () => {
   });
 
   describe("topic guard", () => {
-    it("does NOT delete sessions when topic is app/scopes_update", async () => {
+    it("does NOT process uninstall when topic is app/scopes_update", async () => {
       mockVerifyWebhook.mockResolvedValue({
         shop: TEST_SHOP,
         topic: "app/scopes_update",
@@ -262,11 +232,10 @@ describe("webhooks.app.uninstalled", () => {
       const response = await action(createActionArgs());
 
       expect(response).toBeInstanceOf(Response);
-      expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
-      expect(mockMarkShopUninstalled).not.toHaveBeenCalled();
+      expect(mockMarkUninstalledAndDeleteSessions).not.toHaveBeenCalled();
     });
 
-    it("does NOT delete sessions when topic is shop/redact", async () => {
+    it("does NOT process uninstall when topic is shop/redact", async () => {
       mockVerifyWebhook.mockResolvedValue({
         shop: TEST_SHOP,
         topic: "shop/redact",
@@ -279,8 +248,7 @@ describe("webhooks.app.uninstalled", () => {
       const response = await action(createActionArgs());
 
       expect(response).toBeInstanceOf(Response);
-      expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
-      expect(mockMarkShopUninstalled).not.toHaveBeenCalled();
+      expect(mockMarkUninstalledAndDeleteSessions).not.toHaveBeenCalled();
     });
 
     it("returns 200 even for unexpected topics (logs and no-ops)", async () => {
@@ -297,8 +265,7 @@ describe("webhooks.app.uninstalled", () => {
       const response = await action(createActionArgs());
 
       expect(response).toBeInstanceOf(Response);
-      expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
-      expect(mockMarkShopUninstalled).not.toHaveBeenCalled();
+      expect(mockMarkUninstalledAndDeleteSessions).not.toHaveBeenCalled();
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining("topic_ignored")
       );
@@ -323,8 +290,7 @@ describe("webhooks.app.uninstalled", () => {
         expect((error as Response).statusText).toBe("Unauthorized");
       }
 
-      expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
-      expect(mockMarkShopUninstalled).not.toHaveBeenCalled();
+      expect(mockMarkUninstalledAndDeleteSessions).not.toHaveBeenCalled();
     });
 
     it("returns 401 when verifyWebhook throws 401 (invalid HMAC)", async () => {
@@ -342,7 +308,7 @@ describe("webhooks.app.uninstalled", () => {
         expect((error as Response).status).toBe(401);
       }
 
-      expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
+      expect(mockMarkUninstalledAndDeleteSessions).not.toHaveBeenCalled();
     });
 
     it("returns 400 when verifyWebhook throws 400 (missing header after valid HMAC)", async () => {
@@ -361,7 +327,7 @@ describe("webhooks.app.uninstalled", () => {
         expect((error as Response).statusText).toBe("Bad Request");
       }
 
-      expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
+      expect(mockMarkUninstalledAndDeleteSessions).not.toHaveBeenCalled();
     });
   });
 });

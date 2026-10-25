@@ -1019,6 +1019,65 @@ export async function markShopUninstalled(
 }
 
 /**
+ * Result of markUninstalledAndDeleteSessions operation.
+ */
+export interface MarkUninstalledResult {
+  shopFound: boolean;
+  sessionsDeleted: number;
+}
+
+/**
+ * Atomically mark a shop as uninstalled and delete all its sessions.
+ *
+ * This ensures no window exists where sessions are deleted but uninstalledAt
+ * is still NULL. The drain's no_session path can then correctly identify
+ * uninstalled shops by checking uninstalledAt.
+ *
+ * Transaction order (matches deleteShop's lock order for deadlock safety):
+ * 1. SELECT id FROM "Shop" WHERE domain=$1 FOR UPDATE (lock row)
+ * 2. UPDATE "Shop" SET uninstalledAt = COALESCE(uninstalledAt, NOW()) (idempotent)
+ * 3. DELETE FROM "Session" WHERE shop=$1 (always runs, even if Shop is missing)
+ *
+ * Idempotency:
+ * - COALESCE preserves the earlier uninstalledAt on duplicate webhooks
+ * - DELETE returns 0 if sessions already gone
+ * - If Shop row is missing, only sessions are deleted
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopDomain - Shop domain
+ * @returns Object with shopFound flag and sessionsDeleted count
+ */
+export async function markUninstalledAndDeleteSessions(
+  sql: Sql,
+  shopDomain: string
+): Promise<MarkUninstalledResult> {
+  return sql.begin(async (tx) => {
+    const [shopRow] = await tx<[{ id: string }?]>`
+      SELECT id FROM "Shop"
+      WHERE domain = ${shopDomain}
+      FOR UPDATE
+    `;
+
+    if (shopRow) {
+      await tx`
+        UPDATE "Shop"
+        SET "uninstalledAt" = COALESCE("uninstalledAt", NOW()), "updatedAt" = NOW()
+        WHERE domain = ${shopDomain}
+      `;
+    }
+
+    const sessionResult = await tx`
+      DELETE FROM "Session" WHERE shop = ${shopDomain}
+    `;
+
+    return {
+      shopFound: !!shopRow,
+      sessionsDeleted: sessionResult.count,
+    };
+  });
+}
+
+/**
  * Result of purgeReceiptsAndProcessedWebhooks operation.
  */
 export interface PurgeReceiptsResult {

@@ -5,7 +5,7 @@ import {
 } from "~/lib/webhook-verify.server";
 import { getRequestSql } from "~/lib/request-context.server";
 import {
-  markShopUninstalled,
+  markUninstalledAndDeleteSessions,
   purgeReceiptsAndProcessedWebhooks,
 } from "~/services/compliance";
 import { evictShopFromSetupCache } from "~/lib/after-auth.server";
@@ -14,9 +14,18 @@ import { evictShopFromSetupCache } from "~/lib/after-auth.server";
  * App uninstalled webhook handler.
  *
  * When a merchant uninstalls the app:
- * 1. Delete all sessions immediately (required for logout)
- * 2. Mark the shop as uninstalled (sets uninstalledAt timestamp)
+ * 1. Atomically mark shop as uninstalled AND delete all sessions (single transaction)
+ * 2. Evict shop from setup cache (in-memory)
  * 3. Purge receipt-linked processed webhooks and webhook receipts (S20/S22 compliance)
+ *
+ * CRITICAL: The uninstalledAt timestamp MUST be set in the same transaction as
+ * session deletion. This closes the window where a drain message gets no_session
+ * while the Shop row still looks installed (uninstalledAt NULL). See #258.
+ *
+ * Transaction order (matches deleteShop's lock order for deadlock safety):
+ * - SELECT id FROM "Shop" WHERE domain=$1 FOR UPDATE
+ * - UPDATE "Shop" SET uninstalledAt = COALESCE(uninstalledAt, NOW())
+ * - DELETE FROM "Session" WHERE shop=$1
  *
  * Full data deletion happens later on shop/redact webhook.
  * Per Shopify docs, shop/redact is sent 48 hours after uninstall:
@@ -29,20 +38,20 @@ import { evictShopFromSetupCache } from "~/lib/after-auth.server";
  * (only on shop/redact) in case the shop reinstalls within the 48h window.
  *
  * Idempotency: No edge deduplication - handlers are fully idempotent:
- * - deleteAllForShop: deleting 0 sessions is safe
- * - markShopUninstalled: re-marking is safe (timestamp already set)
+ * - markUninstalledAndDeleteSessions: COALESCE preserves first uninstalledAt,
+ *   DELETE returns 0 if sessions gone, Shop missing is handled (sessions still deleted)
  * - purgeReceiptsAndProcessedWebhooks: deleting 0 rows is safe
  *
  * OPTIMIZATION: Uses lightweight verifyWebhook() instead of authenticate.webhook()
  * to avoid unnecessary session loading. This webhook only needs to DELETE sessions,
- * not read them - deleteAllForShop runs a single DELETE query.
+ * not read them.
  *
  * CPU savings: ~5-10ms by avoiding session DB round-trip.
  *
- * Error handling: Returns 500 on session delete or uninstalledAt write failure
+ * Error handling: Returns 500 on the atomic uninstall operation failure
  * so Shopify retries. Processed webhooks and receipt purge failure is non-fatal.
  */
-export const action = async ({ request, context }: ActionFunctionArgs) => {
+export const action = async ({ request }: ActionFunctionArgs) => {
   const apiSecret = process.env.SHOPIFY_API_SECRET;
   if (!apiSecret) {
     console.error("[uninstalled] SHOPIFY_API_SECRET not configured");
@@ -62,26 +71,17 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const sql = getRequestSql();
 
   try {
-    const { sessionStorage } = context;
-    const count = await sessionStorage.deleteAllForShop(shop);
-    console.log(`[uninstalled] sessions_deleted count=${count}`);
-  } catch (error) {
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[uninstalled] sessions_delete_failed reason=db_error err=${errInfo}`);
-    return new Response(null, { status: 500 });
-  }
-
-  try {
-    const marked = await markShopUninstalled(sql, shop);
-    if (marked) {
+    const { shopFound, sessionsDeleted } = await markUninstalledAndDeleteSessions(sql, shop);
+    if (shopFound) {
       console.log(`[uninstalled] shop_marked_uninstalled status=updated`);
     } else {
       console.log(`[uninstalled] shop_marked_uninstalled status=not_found`);
     }
+    console.log(`[uninstalled] sessions_deleted count=${sessionsDeleted}`);
     evictShopFromSetupCache(shop);
   } catch (error) {
     const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[uninstalled] mark_uninstalled_failed reason=db_error err=${errInfo}`);
+    console.error(`[uninstalled] uninstall_failed reason=db_error err=${errInfo}`);
     return new Response(null, { status: 500 });
   }
 
