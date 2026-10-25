@@ -543,6 +543,28 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
       };
     }
 
+    interface AccountsActionResult {
+      success: boolean;
+      error?: string;
+      metafieldSyncPending?: boolean;
+      upgradeRequired?: boolean;
+      code?: string;
+      ok?: boolean;
+    }
+
+    function extractAccountsActionData(result: unknown): AccountsActionResult {
+      if (
+        typeof result === "object" &&
+        result !== null &&
+        "type" in result &&
+        (result as { type: string }).type === "DataWithResponseInit" &&
+        "data" in result
+      ) {
+        return (result as { data: AccountsActionResult }).data;
+      }
+      return result as AccountsActionResult;
+    }
+
     /**
      * Call the real accounts action inside request context.
      * Dynamically imports request-context after vi.resetModules() to use the same fresh instance.
@@ -552,7 +574,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
       shopDomain: string,
       accountId: string,
       formFields: Record<string, string>
-    ): Promise<{ success: boolean; error?: string; metafieldSyncPending?: boolean }> {
+    ): Promise<AccountsActionResult> {
       const request = createAccountsRequest(formFields, accountId);
       const context = createMockContext(shopDomain);
       const url = new URL(request.url);
@@ -569,7 +591,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
           url,
           pattern: "/app/accounts/:id",
         });
-        return result as { success: boolean; error?: string; metafieldSyncPending?: boolean };
+        return extractAccountsActionData(result);
       });
     }
 
@@ -587,9 +609,12 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
         creditLimit: "200000",
       });
 
-      // Should be rejected
+      // Should be rejected with 403 response containing upgradeRequired flag
       expect(result.success).toBe(false);
-      expect(result.error).toContain("Cannot edit gated accounts");
+      expect(result.ok).toBe(false);
+      expect(result.upgradeRequired).toBe(true);
+      expect(result.code).toBe("plan_limit_account_gated");
+      expect(result.error).toContain("plan limit");
 
       // DB row should be unchanged
       const [afterAccount] = await sql<{ creditLimit: string }[]>`
