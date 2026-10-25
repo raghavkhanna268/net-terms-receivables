@@ -290,15 +290,15 @@ describe("Plan Page Loader", () => {
 });
 
 describe("Plan Page Component Logic", () => {
-  it("shows upgrade section for non-scale plans", () => {
+  it("shows upgrade section for non-unlimited plans", () => {
     const planKey = "growth" as string;
-    const canUpgrade = planKey !== "scale";
+    const canUpgrade = planKey !== "unlimited";
     expect(canUpgrade).toBe(true);
   });
 
-  it("hides upgrade section for scale plan", () => {
-    const planKey = "scale" as string;
-    const canUpgrade = planKey !== "scale";
+  it("hides upgrade section for unlimited plan", () => {
+    const planKey = "unlimited" as string;
+    const canUpgrade = planKey !== "unlimited";
     expect(canUpgrade).toBe(false);
   });
 
@@ -339,10 +339,10 @@ describe("FeatureComparisonTable logic", () => {
     });
 
     expect(creditHoldsRow).toEqual([
-      { planKey: "free", hasFeature: true },
+      { planKey: "none", hasFeature: true },
       { planKey: "starter", hasFeature: true },
       { planKey: "growth", hasFeature: true },
-      { planKey: "scale", hasFeature: true },
+      { planKey: "unlimited", hasFeature: true },
     ]);
   });
 
@@ -368,23 +368,24 @@ describe("FeatureComparisonTable logic", () => {
     });
 
     expect(matchingRow).toEqual([
-      { planKey: "free", hasFeature: true },
+      { planKey: "none", hasFeature: true },
       { planKey: "starter", hasFeature: true },
       { planKey: "growth", hasFeature: true },
-      { planKey: "scale", hasFeature: true },
+      { planKey: "unlimited", hasFeature: true },
     ]);
   });
 
-  it("pdf_statements shows as NOT included for free and starter", async () => {
+  it("pdf_statements shows as included for all four tiers (all features on all plans)", async () => {
     const { getPlanConfig, planHasFeature } = await import("~/lib/entitlements");
 
-    expect(planHasFeature(getPlanConfig("free"), "pdf_statements")).toBe(false);
-    expect(planHasFeature(getPlanConfig("starter"), "pdf_statements")).toBe(false);
+    // All features are now on all plans
+    expect(planHasFeature(getPlanConfig("none"), "pdf_statements")).toBe(true);
+    expect(planHasFeature(getPlanConfig("starter"), "pdf_statements")).toBe(true);
     expect(planHasFeature(getPlanConfig("growth"), "pdf_statements")).toBe(true);
-    expect(planHasFeature(getPlanConfig("scale"), "pdf_statements")).toBe(true);
+    expect(planHasFeature(getPlanConfig("unlimited"), "pdf_statements")).toBe(true);
   });
 
-  it("generates correct table data for all features", async () => {
+  it("generates correct table data for all features (all true on all plans)", async () => {
     const { ALL_PLAN_KEYS, ALL_FEATURE_KEYS, getPlanConfig, planHasFeature } =
       await import("~/lib/entitlements");
 
@@ -396,6 +397,7 @@ describe("FeatureComparisonTable logic", () => {
       return { feature, cells };
     });
 
+    // All features are true on all plans
     const creditHoldsRowData = tableRows.find((row) => row.feature === "credit_holds");
     expect(creditHoldsRowData?.cells).toEqual([true, true, true, true]);
 
@@ -406,7 +408,7 @@ describe("FeatureComparisonTable logic", () => {
     expect(matchingRowData?.cells).toEqual([true, true, true, true]);
 
     const auditExportRowData = tableRows.find((row) => row.feature === "audit_export");
-    expect(auditExportRowData?.cells).toEqual([false, false, false, true]);
+    expect(auditExportRowData?.cells).toEqual([true, true, true, true]);
   });
 });
 

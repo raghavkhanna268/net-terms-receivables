@@ -18,10 +18,10 @@ import {
  * Display names for plans. Single source of truth for UI.
  */
 export const PLAN_DISPLAY_NAMES: Record<PlanKey, string> = {
-  free: "Free",
+  none: "No Plan",
   starter: "Starter",
   growth: "Growth",
-  scale: "Scale",
+  unlimited: "Unlimited",
 };
 
 /**
@@ -49,7 +49,7 @@ export function getRequiredPlanForFeature(feature: FeatureKey): PlanKey {
       return planKey;
     }
   }
-  return "scale";
+  return "unlimited";
 }
 
 interface UpgradePromptProps {
@@ -198,7 +198,7 @@ export function PlanBanner({
 }: PlanBannerProps) {
   const displayPlanName = PLAN_DISPLAY_NAMES[planKey] || planName;
   const companiesAtLimit = companiesLimit !== -1 && companiesUsed >= companiesLimit;
-  const canUpgrade = planKey !== "scale";
+  const canUpgrade = planKey !== "unlimited";
 
   const companiesText =
     companiesLimit === -1

@@ -1,29 +1,42 @@
 /**
  * Entitlements configuration for plan tiers (S21).
  *
- * IMPORTANT: These limits are the PRICING HYPOTHESIS from the tracker
- * and are NOT final. Raghav decides final tier limits and pricing via
- * the Partner Dashboard (managed App Pricing).
+ * Pricing approved 2026-10-25:
+ * - Starter: $9/mo, 25 buyer accounts, standard support
+ * - Growth: $19/mo, 100 buyer accounts, standard support
+ * - Unlimited: $29/mo, no limit, priority support
  *
- * Plans are configured in the Shopify Partner Dashboard, not in code.
- * This module maps subscription names to feature limits.
+ * There is no free plan. Every feature is on every plan.
+ *
+ * Plans are configured in the Shopify Partner Dashboard.
+ * This module maps subscription handles/names to feature limits.
  *
  * Key design decisions:
- * - fail-to-free: Any error or unknown plan defaults to 'free'
- * - case-insensitive: Plan names matched case-insensitively
+ * - fail-to-none: Any error or unknown plan defaults to 'none'
+ * - case-insensitive: Plan handles/names matched case-insensitively
  * - limits.companies: How many BuyerAccounts a shop can create
- * - limits.importsPerMonth: Bank statement imports per calendar month (IST)
- * - features: Boolean feature flags for capability gating
+ * - limits.importsPerMonth: Bank statement imports (-1 = unlimited on all plans)
+ * - features: Boolean feature flags - all true on every plan (T5 removes these later)
  */
 
 /**
- * Plan keys. Case-insensitive match against subscription name.
+ * Plan keys.
+ * - none: No active subscription (limit 0 for new accounts)
+ * - starter: 25 buyer accounts
+ * - growth: 100 buyer accounts
+ * - unlimited: No limit
  */
-export type PlanKey = "free" | "starter" | "growth" | "scale";
+export type PlanKey = "none" | "starter" | "growth" | "unlimited";
+
+/**
+ * Support tier for each plan.
+ */
+export type SupportTier = "standard" | "priority";
 
 /**
  * Feature keys for capability gating.
- * Some features are not yet implemented (marked with TODO comments).
+ * NOTE: All features are true on every plan. These fields are kept for
+ * compatibility and will be removed by T5.
  *
  * credit_holds is an all-plans feature: holds, recompute, sweep, and the
  * Validation Function run on every plan. It must never be gated.
@@ -32,11 +45,11 @@ export type FeatureKey =
   | "aging_dashboard"
   | "unlimited_imports"
   | "matching"
-  | "reminders" // TODO: Not implemented yet (S-future)
-  | "credit_holds" // All-plans feature - never gate
-  | "pdf_statements" // TODO: Not implemented yet (S-future)
-  | "payer_memory" // TODO: Not implemented yet (S-future)
-  | "audit_export"; // TODO: Not implemented yet (S-future)
+  | "reminders"
+  | "credit_holds"
+  | "pdf_statements"
+  | "payer_memory"
+  | "audit_export";
 
 /**
  * Limit keys for numeric constraints.
@@ -53,38 +66,47 @@ export interface PlanConfig {
     importsPerMonth: number; // -1 means unlimited
   };
   features: Set<FeatureKey>;
+  supportTier: SupportTier;
 }
 
 /**
- * HYPOTHESIS LIMITS - subject to Raghav's pricing decision.
- * See tracker step S21 for context.
+ * All features - every feature is enabled on every plan.
+ */
+const ALL_FEATURES = new Set<FeatureKey>([
+  "aging_dashboard",
+  "unlimited_imports",
+  "matching",
+  "reminders",
+  "credit_holds",
+  "pdf_statements",
+  "payer_memory",
+  "audit_export",
+]);
+
+/**
+ * Plan configurations.
+ * Account limits: none=0, starter=25, growth=100, unlimited=-1.
+ * All features are enabled on every plan (including none).
+ * Imports are unlimited (-1) on every plan.
  */
 const PLAN_CONFIGS: Record<PlanKey, PlanConfig> = {
-  free: {
-    key: "free",
+  none: {
+    key: "none",
     limits: {
-      companies: 3,
-      importsPerMonth: 1,
+      companies: 0,
+      importsPerMonth: -1,
     },
-    features: new Set<FeatureKey>([
-      "aging_dashboard",
-      "matching", // All-plans feature
-      "credit_holds", // All-plans feature
-    ]),
+    features: new Set(ALL_FEATURES),
+    supportTier: "standard",
   },
   starter: {
     key: "starter",
     limits: {
       companies: 25,
-      importsPerMonth: -1, // unlimited
+      importsPerMonth: -1,
     },
-    features: new Set<FeatureKey>([
-      "aging_dashboard",
-      "unlimited_imports",
-      "matching",
-      "reminders",
-      "credit_holds", // All-plans feature
-    ]),
+    features: new Set(ALL_FEATURES),
+    supportTier: "standard",
   },
   growth: {
     key: "growth",
@@ -92,41 +114,69 @@ const PLAN_CONFIGS: Record<PlanKey, PlanConfig> = {
       companies: 100,
       importsPerMonth: -1,
     },
-    features: new Set<FeatureKey>([
-      "aging_dashboard",
-      "unlimited_imports",
-      "matching",
-      "reminders",
-      "credit_holds", // All-plans feature
-      "pdf_statements",
-      "payer_memory",
-    ]),
+    features: new Set(ALL_FEATURES),
+    supportTier: "standard",
   },
-  scale: {
-    key: "scale",
+  unlimited: {
+    key: "unlimited",
     limits: {
-      companies: -1, // unlimited
+      companies: -1,
       importsPerMonth: -1,
     },
-    features: new Set<FeatureKey>([
-      "aging_dashboard",
-      "unlimited_imports",
-      "matching",
-      "reminders",
-      "credit_holds", // All-plans feature
-      "pdf_statements",
-      "payer_memory",
-      "audit_export",
-    ]),
+    features: new Set(ALL_FEATURES),
+    supportTier: "priority",
   },
 };
+
+/**
+ * Resolve a plan key from Partner API handle or subscription display name.
+ *
+ * Resolution order:
+ * 1. Match Partner plan_handle (case-insensitive, trimmed)
+ * 2. Fall back to subscription/plan display name (case-insensitive)
+ * 3. Legacy cached values: 'free' → none, 'scale' → unlimited
+ * 4. Unknown/empty/null → none
+ *
+ * Expected handles: 'starter', 'growth', 'unlimited'
+ * (confirmed in Partner Dashboard 2026-10-25)
+ *
+ * @param handleOrName - The plan_handle from Partner API or subscription display name
+ * @returns The resolved plan key
+ */
+export function resolvePlanKey(
+  handleOrName: string | null | undefined
+): PlanKey {
+  if (!handleOrName) return "none";
+
+  const normalized = handleOrName.toLowerCase().trim();
+  if (!normalized) return "none";
+
+  // Match plan handles (confirmed in Partner Dashboard 2026-10-25)
+  if (normalized === "starter") return "starter";
+  if (normalized === "growth") return "growth";
+  if (normalized === "unlimited") return "unlimited";
+
+  // Legacy cached values from old plan_key column
+  if (normalized === "free") return "none";
+  if (normalized === "scale") return "unlimited";
+
+  // Match by display name fallback (case-insensitive)
+  // Display names are expected to be "Starter", "Growth", "Unlimited"
+  // Already handled above since they match handles
+
+  // Unknown handle/name defaults to none
+  return "none";
+}
 
 /**
  * Map subscription name (from Shopify) to plan key.
  * Case-insensitive matching.
  *
+ * @deprecated Use resolvePlanKey() instead. This function is kept for
+ * compatibility with existing callers and delegates to resolvePlanKey().
+ *
  * @param subscriptionName - The subscription name from Shopify
- * @returns The plan key, or null if no match
+ * @returns The plan key, or null if no match (for backwards compatibility)
  */
 export function mapSubscriptionToPlanKey(
   subscriptionName: string | null | undefined
@@ -134,13 +184,19 @@ export function mapSubscriptionToPlanKey(
   if (!subscriptionName) return null;
 
   const normalized = subscriptionName.toLowerCase().trim();
+  if (!normalized) return null;
 
-  // Match against known plan keys
-  if (normalized === "free") return "free";
+  // Match against known plan keys and handles
   if (normalized === "starter") return "starter";
   if (normalized === "growth") return "growth";
-  if (normalized === "scale") return "scale";
+  if (normalized === "unlimited") return "unlimited";
 
+  // Legacy values
+  if (normalized === "free") return "none";
+  if (normalized === "scale") return "unlimited";
+
+  // For backwards compatibility, return null for unknown names
+  // Callers expecting null should migrate to resolvePlanKey()
   return null;
 }
 
@@ -155,18 +211,20 @@ export function getPlanConfig(key: PlanKey): PlanConfig {
 }
 
 /**
- * Get the default (free) plan configuration.
+ * Get the default (none) plan configuration.
+ * Used when no subscription exists or plan resolution fails.
  */
 export function getDefaultPlan(): PlanConfig {
-  return PLAN_CONFIGS.free;
+  return PLAN_CONFIGS.none;
 }
 
 /**
  * Check if a plan has a specific feature.
+ * NOTE: All features are true on every plan. This is kept for compatibility.
  *
  * @param plan - The plan configuration
  * @param feature - The feature key to check
- * @returns true if the plan has the feature
+ * @returns true if the plan has the feature (always true currently)
  */
 export function planHasFeature(plan: PlanConfig, feature: FeatureKey): boolean {
   return plan.features.has(feature);
@@ -187,6 +245,7 @@ export function planLimit(plan: PlanConfig, limitKey: LimitKey): number {
 /**
  * Check if a limit is exceeded.
  * Handles unlimited (-1) correctly.
+ * Uses >= semantics: at the limit means exceeded (can't add more).
  *
  * @param plan - The plan configuration
  * @param limitKey - The limit key
@@ -201,6 +260,16 @@ export function isLimitExceeded(
   const limit = plan.limits[limitKey];
   if (limit === -1) return false; // unlimited
   return currentValue >= limit;
+}
+
+/**
+ * Get the support tier for a plan.
+ *
+ * @param plan - The plan configuration
+ * @returns The support tier ('standard' or 'priority')
+ */
+export function getSupportTier(plan: PlanConfig): SupportTier {
+  return plan.supportTier;
 }
 
 /**
@@ -229,8 +298,8 @@ export const ALL_LIMIT_KEYS: readonly LimitKey[] = [
  * All available plan keys.
  */
 export const ALL_PLAN_KEYS: readonly PlanKey[] = [
-  "free",
+  "none",
   "starter",
   "growth",
-  "scale",
+  "unlimited",
 ] as const;

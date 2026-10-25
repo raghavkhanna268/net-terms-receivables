@@ -210,8 +210,8 @@ export default function PlanPage() {
     error,
   } = useLoaderData<typeof loader>();
 
-  const planKey = (plan?.key ?? "free") as PlanKey;
-  const planName = plan?.name ?? "Free";
+  const planKey = (plan?.key ?? "none") as PlanKey;
+  const planName = plan?.name ?? "No Plan";
   const isTest = plan?.isTest ?? false;
   const displayPlanName = PLAN_DISPLAY_NAMES[planKey] || planName;
 
@@ -225,7 +225,7 @@ export default function PlanPage() {
   const importsLimit = usage.importsThisMonth.limit;
   const importsAtLimit = importsLimit !== -1 && importsUsed >= importsLimit;
 
-  const canUpgrade = planKey !== "scale";
+  const canUpgrade = planKey !== "unlimited";
   const hasLimitReached = companiesAtLimit || importsAtLimit;
 
   return (
@@ -317,11 +317,11 @@ export default function PlanPage() {
             </s-section>
           )}
 
-          {planKey === "scale" && (
+          {planKey === "unlimited" && (
             <s-section heading="Plan Status">
-              <s-banner tone="success" heading="Scale Plan">
+              <s-banner tone="success" heading="Unlimited Plan">
                 <s-text>
-                  You&apos;re on the Scale plan with unlimited companies and all features.
+                  You&apos;re on the Unlimited plan with unlimited buyer accounts and priority support.
                 </s-text>
               </s-banner>
             </s-section>

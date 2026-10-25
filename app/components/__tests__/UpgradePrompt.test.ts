@@ -21,11 +21,12 @@ import { ALL_PLAN_KEYS, ALL_FEATURE_KEYS } from "~/lib/entitlements";
  */
 
 describe("getRequiredPlanForFeature", () => {
-  it("derives required plan from entitlements.ts", () => {
-    expect(getRequiredPlanForFeature("aging_dashboard")).toBe("free");
-    expect(getRequiredPlanForFeature("matching")).toBe("free");
-    expect(getRequiredPlanForFeature("pdf_statements")).toBe("growth");
-    expect(getRequiredPlanForFeature("audit_export")).toBe("scale");
+  it("derives required plan from entitlements.ts (all features on all plans)", () => {
+    // All features are now available on every plan, so they return 'none'
+    expect(getRequiredPlanForFeature("aging_dashboard")).toBe("none");
+    expect(getRequiredPlanForFeature("matching")).toBe("none");
+    expect(getRequiredPlanForFeature("pdf_statements")).toBe("none");
+    expect(getRequiredPlanForFeature("audit_export")).toBe("none");
   });
 
   it("returns valid plan for all features", () => {
@@ -35,9 +36,9 @@ describe("getRequiredPlanForFeature", () => {
     }
   });
 
-  it("credit_holds is available on free plan (all-plans feature)", () => {
+  it("credit_holds is available on none plan (all-plans feature)", () => {
     // credit_holds must never be shown as requiring an upgrade
-    expect(getRequiredPlanForFeature("credit_holds")).toBe("free");
+    expect(getRequiredPlanForFeature("credit_holds")).toBe("none");
   });
 });
 
@@ -61,12 +62,12 @@ describe("FEATURE_DISPLAY_NAMES", () => {
 
 describe("UpgradePrompt component", () => {
   const baseProps = {
-    currentPlan: "free" as const,
+    currentPlan: "none" as const,
     upgradeUrl: "https://admin.shopify.com/store/test/charges/app/pricing_plans",
   };
 
   describe("feature-based prompts", () => {
-    it("renders nothing when feature is available on current plan", () => {
+    it("renders nothing for aging_dashboard (all features on all plans)", () => {
       const html = renderToString(
         createElement(UpgradePrompt, {
           ...baseProps,
@@ -77,7 +78,7 @@ describe("UpgradePrompt component", () => {
       expect(html).toBe("");
     });
 
-    it("renders nothing when matching feature is requested (matching is on all plans)", () => {
+    it("renders nothing for matching (all features on all plans)", () => {
       const html = renderToString(
         createElement(UpgradePrompt, {
           ...baseProps,
@@ -88,7 +89,8 @@ describe("UpgradePrompt component", () => {
       expect(html).toBe("");
     });
 
-    it("renders info banner when gating is OFF and feature needs upgrade", () => {
+    it("renders nothing for reminders (all features on all plans)", () => {
+      // All features are now available on every plan, including none
       const html = renderToString(
         createElement(UpgradePrompt, {
           ...baseProps,
@@ -96,13 +98,11 @@ describe("UpgradePrompt component", () => {
           gatingEnforced: false,
         })
       );
-      expect(html).toContain('tone="info"');
-      expect(html).toContain("Premium Feature");
-      expect(html).toContain("View Plans");
-      expect(html).toContain("Starter");
+      expect(html).toBe("");
     });
 
-    it("renders warning banner when gating is ON and feature needs upgrade", () => {
+    it("renders nothing for reminders even with gating ON (all features on all plans)", () => {
+      // All features are now available on every plan
       const html = renderToString(
         createElement(UpgradePrompt, {
           ...baseProps,
@@ -110,10 +110,7 @@ describe("UpgradePrompt component", () => {
           gatingEnforced: true,
         })
       );
-      expect(html).toContain('tone="warning"');
-      expect(html).toContain("Feature Unavailable");
-      expect(html).toContain("Upgrade to");
-      expect(html).toContain("Starter");
+      expect(html).toBe("");
     });
   });
 
@@ -215,7 +212,7 @@ describe("PlanBanner component", () => {
     const html = renderToString(
       createElement(PlanBanner, {
         ...baseProps,
-        planKey: "scale",
+        planKey: "unlimited",
         companiesLimit: -1,
         companiesUsed: 100,
       })
@@ -274,11 +271,11 @@ describe("PlanBanner component", () => {
     expect(html).toContain("View Plans");
   });
 
-  it("hides upgrade button for scale plan", () => {
+  it("hides upgrade button for unlimited plan", () => {
     const html = renderToString(
       createElement(PlanBanner, {
         ...baseProps,
-        planKey: "scale",
+        planKey: "unlimited",
         companiesLimit: -1,
       })
     );
