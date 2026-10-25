@@ -136,14 +136,14 @@ describe("dead-letter-sanitize", () => {
     it("never includes shop or shopDomain in sanitized output", () => {
       const msgWithShop: SyncMessage = {
         ...baseSyncMessage,
-        shop: "pii-shop.myshopify.com",
+        shop: "test-pii-shop.myshopify.com",
       };
       const result = sanitizeSyncMessage(msgWithShop, "msg-004", 1);
 
       expect(result).not.toBeNull();
       expect(result).not.toHaveProperty("shop");
       expect(result).not.toHaveProperty("shopDomain");
-      expect(JSON.stringify(result)).not.toContain("pii-shop");
+      expect(JSON.stringify(result)).not.toContain("test-pii-shop");
       expect(JSON.stringify(result)).not.toContain("myshopify.com");
     });
 
