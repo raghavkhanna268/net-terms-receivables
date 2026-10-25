@@ -16,6 +16,7 @@
 
 import type { Sql } from "~/lib/db-light.server";
 import { safeLog, shopHash, toErrorCode } from "~/lib/log.server";
+import { getAppHandle } from "~/lib/plan-url";
 
 // ============================================================================
 // RETENTION CONSTANTS
@@ -814,11 +815,16 @@ export interface DataRequestEmailResult {
  * Build the embedded admin URL for the data requests page.
  *
  * @param shopDomain - Shop domain
- * @returns Embedded admin URL
+ * @returns Embedded admin URL, or null if app handle is not configured
  */
-function buildDataRequestsAdminUrl(shopDomain: string): string {
+function buildDataRequestsAdminUrl(shopDomain: string): string | null {
+  const appHandle = getAppHandle();
+  if (appHandle === null) {
+    safeLog("warn", "plan_url_app_handle_missing", {});
+    return null;
+  }
   const shopName = shopDomain.replace(".myshopify.com", "");
-  return `https://admin.shopify.com/store/${shopName}/apps/net-terms-receivables/app/data-requests`;
+  return `https://admin.shopify.com/store/${shopName}/apps/${appHandle}/app/data-requests`;
 }
 
 /**
@@ -860,6 +866,15 @@ export async function sendDataRequestNotification(
   }
 
   const downloadUrl = buildDataRequestsAdminUrl(shopDomain);
+
+  if (downloadUrl === null) {
+    safeLog("info", "data_request_email_skipped", {
+      shopHash: hash,
+      requestId,
+      reason: "no_app_handle",
+    });
+    return { sent: false, skippedReason: "no_app_handle" };
+  }
 
   const emailBody = {
     from: resendFrom,

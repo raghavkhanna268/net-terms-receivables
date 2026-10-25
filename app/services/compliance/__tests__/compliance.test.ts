@@ -716,6 +716,16 @@ describe("compliance.server", () => {
   });
 
   describe("sendDataRequestNotification", () => {
+    const originalAppHandle = process.env.APP_HANDLE;
+
+    beforeEach(() => {
+      process.env.APP_HANDLE = "net-terms-receivables-1";
+    });
+
+    afterEach(() => {
+      process.env.APP_HANDLE = originalAppHandle;
+    });
+
     it("skips email when RESEND_API_KEY is not set and logs correctly", async () => {
       delete process.env.RESEND_API_KEY;
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});

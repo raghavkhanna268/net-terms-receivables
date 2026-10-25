@@ -184,7 +184,7 @@ interface PlanBannerProps {
   companiesUsed: number;
   companiesLimit: number;
   gatingEnforced: boolean;
-  upgradeUrl: string;
+  upgradeUrl: string | null;
 }
 
 export function PlanBanner({
@@ -224,7 +224,7 @@ export function PlanBanner({
           <s-badge tone="warning">At Limit</s-badge>
         )}
       </s-paragraph>
-      {canUpgrade && (
+      {canUpgrade && upgradeUrl && (
         <s-button href={upgradeUrl} target="_top" variant={companiesAtLimit ? "primary" : "secondary"}>
           {companiesAtLimit ? "Upgrade to Add More" : "View Plans"}
         </s-button>
