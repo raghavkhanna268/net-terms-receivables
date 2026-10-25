@@ -86,3 +86,57 @@ export function buildAccountOverLimitBannerState(
     enforcementNote: null,
   };
 }
+
+/**
+ * Banner state for "new accounts paused" condition.
+ */
+export interface NewAccountsPausedBannerState {
+  show: boolean;
+  heading: string;
+  bodyText: string;
+}
+
+/**
+ * Build the banner state for the "new accounts paused" condition.
+ * Shows on Dashboard, Accounts list, Plan page, and Tag rules page.
+ *
+ * Displayed when gating is enforced and the shop has reached its plan limit.
+ *
+ * @param usedCount - Number of active (non-gated) buyer accounts
+ * @param limitCount - Plan limit for buyer accounts (-1 means unlimited)
+ * @param gatingEnforced - Whether plan gating is currently enforced
+ * @returns Banner state with heading and body text
+ */
+export function buildNewAccountsPausedBannerState(
+  usedCount: number,
+  limitCount: number,
+  gatingEnforced: boolean
+): NewAccountsPausedBannerState {
+  // Don't show when gating is not enforced or unlimited plan
+  if (!gatingEnforced || limitCount === -1) {
+    return {
+      show: false,
+      heading: "",
+      bodyText: "",
+    };
+  }
+
+  // Only show when at or over limit
+  if (usedCount < limitCount) {
+    return {
+      show: false,
+      heading: "",
+      bodyText: "",
+    };
+  }
+
+  const heading = `${usedCount} of ${limitCount} buyer accounts`;
+  const bodyText =
+    "New accounts can't be added or imported over your plan limit.";
+
+  return {
+    show: true,
+    heading,
+    bodyText,
+  };
+}

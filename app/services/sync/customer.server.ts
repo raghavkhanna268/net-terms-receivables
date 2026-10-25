@@ -38,7 +38,8 @@ import type { Sql } from "~/lib/db-light.server";
 import type { ShopifyCustomer, SyncResult } from "./types";
 import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
 import { minimiseCustomerPiiIfInactive } from "~/services/compliance";
-import { checkCompanyLimit, isGatingEnforced } from "../gating.server";
+import { decideNewAccountGate, isGatingEnforced } from "../gating.server";
+import { safeLog } from "~/lib/log.server";
 
 /**
  * PII write mode for customer sync.
@@ -368,6 +369,10 @@ async function checkCompanyAccount(
  * - holdState belongs to credit logic (HELD, NEAR_LIMIT, BYPASS)
  * - Tag activation state is tracked in s8_tagged_customers.tag_active
  *
+ * T4: Uses pg_advisory_xact_lock inside a transaction to prevent concurrent
+ * creates from overshooting the plan limit. Existing rows and updates never
+ * change gated_at.
+ *
  * - hasTag=true: Create or update TAGGED_CUSTOMER account (terms only if source allows)
  * - hasTag=false: Just update tag_active flag (already done), don't touch BuyerAccount
  *
@@ -401,74 +406,80 @@ async function syncTaggedCustomerBuyerAccount(
   const customerId_numeric = customerId.split("/").pop() ?? customerId;
   const displayName = `Customer ${customerId_numeric}`;
 
-  // S21: Check if this is a new account (for gating)
-  const [existingAccount] = await sql<{ id: string; gated_at: Date | null }[]>`
-    SELECT id, gated_at FROM "BuyerAccount"
-    WHERE "shopId" = ${shopId} AND "customerId" = ${customerId}
-  `;
-
-  // Determine if we need to gate this account
-  let shouldGate = false;
-  if (!existingAccount && isGatingEnforced()) {
-    const limitCheck = await checkCompanyLimit(sql, shopId);
-    shouldGate = !limitCheck.allowed;
-  }
-
   // Pre-compute derived values
   const termsSource = defaultTermsDays !== null ? "tag" : null;
 
-  // Must-fix #2: Only apply defaultTermsDays when existing source is NULL or 'tag'
-  // Never overwrite 'explicit' (merchant-set) terms
-  const [result] = await sql<{ id: string; isNew: string; gated_at: Date | null }[]>`
-    INSERT INTO "BuyerAccount" (
-      "shopId",
-      kind,
-      "customerId",
-      name,
-      "defaultTermsDays",
-      "defaultTermsSource",
-      gated_at,
-      "createdAt",
-      "updatedAt"
-    ) VALUES (
-      ${shopId},
-      'TAGGED_CUSTOMER',
-      ${customerId},
-      ${displayName},
-      ${defaultTermsDays},
-      ${termsSource},
-      ${shouldGate ? new Date() : null},
-      NOW(),
-      NOW()
-    )
-    ON CONFLICT ("shopId", "customerId")
-    DO UPDATE SET
-      name = COALESCE("BuyerAccount".name, EXCLUDED.name),
-      -- Only apply tag terms if source is NULL or 'tag', never override 'explicit'
-      "defaultTermsDays" = CASE
-        WHEN "BuyerAccount"."defaultTermsSource" = 'explicit' THEN "BuyerAccount"."defaultTermsDays"
-        ELSE COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays")
-      END,
-      "defaultTermsSource" = CASE
-        WHEN "BuyerAccount"."defaultTermsSource" = 'explicit' THEN 'explicit'
-        ELSE COALESCE(EXCLUDED."defaultTermsSource", "BuyerAccount"."defaultTermsSource")
-      END,
-      -- NEVER touch holdState - that belongs to credit logic
-      "updatedAt" = NOW()
-    RETURNING id, (xmax = 0)::text as "isNew", gated_at
-  `;
+  // T4: Use transaction with lock for gating decision
+  const { action, entityId } = await sql.begin(async (tx) => {
+    const [existingAccount] = await tx<{ id: string; gated_at: Date | null }[]>`
+      SELECT id, gated_at FROM "BuyerAccount"
+      WHERE "shopId" = ${shopId} AND "customerId" = ${customerId}
+    `;
 
-  let action: "created" | "updated" | "gated";
-  if (result.isNew === "true") {
-    action = shouldGate ? "gated" : "created";
-  } else {
-    action = "updated";
-  }
+    let shouldGate = false;
+    if (!existingAccount) {
+      const decision = await decideNewAccountGate(tx, shopId);
+      shouldGate = decision.gate;
+    }
+
+    // Must-fix #2: Only apply defaultTermsDays when existing source is NULL or 'tag'
+    // Never overwrite 'explicit' (merchant-set) terms
+    const [result] = await tx<{ id: string; isNew: string; gated_at: Date | null }[]>`
+      INSERT INTO "BuyerAccount" (
+        "shopId",
+        kind,
+        "customerId",
+        name,
+        "defaultTermsDays",
+        "defaultTermsSource",
+        gated_at,
+        "createdAt",
+        "updatedAt"
+      ) VALUES (
+        ${shopId},
+        'TAGGED_CUSTOMER',
+        ${customerId},
+        ${displayName},
+        ${defaultTermsDays},
+        ${termsSource},
+        ${shouldGate ? new Date() : null},
+        NOW(),
+        NOW()
+      )
+      ON CONFLICT ("shopId", "customerId")
+      DO UPDATE SET
+        name = COALESCE("BuyerAccount".name, EXCLUDED.name),
+        -- Only apply tag terms if source is NULL or 'tag', never override 'explicit'
+        "defaultTermsDays" = CASE
+          WHEN "BuyerAccount"."defaultTermsSource" = 'explicit' THEN "BuyerAccount"."defaultTermsDays"
+          ELSE COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays")
+        END,
+        "defaultTermsSource" = CASE
+          WHEN "BuyerAccount"."defaultTermsSource" = 'explicit' THEN 'explicit'
+          ELSE COALESCE(EXCLUDED."defaultTermsSource", "BuyerAccount"."defaultTermsSource")
+        END,
+        -- NEVER touch holdState - that belongs to credit logic
+        "updatedAt" = NOW()
+      RETURNING id, (xmax = 0)::text as "isNew", gated_at
+    `;
+
+    let resultAction: "created" | "updated" | "gated";
+    if (result.isNew === "true") {
+      resultAction = shouldGate ? "gated" : "created";
+      if (shouldGate) {
+        safeLog("info", "account_gated_new", { kind: "TAGGED_CUSTOMER" });
+      }
+    } else {
+      resultAction = "updated";
+    }
+
+    return { action: resultAction, entityId: result.id };
+  });
 
   return {
     success: true,
     action,
-    entityId: result.id,
+    entityId,
   };
 }
 

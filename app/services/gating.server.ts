@@ -1,5 +1,5 @@
 /**
- * Gating service for S21 plan enforcement.
+ * Gating service for S21 plan enforcement (T4: account-count gating).
  *
  * Provides server-side limit checking and feature gating.
  * Called before creating resources that have plan-based limits.
@@ -18,6 +18,13 @@
  * - Over-limit accounts are gated (gated_at set) not blocked/skipped
  * - Gated accounts are excluded from limit count and enforcement
  * - On upgrade, gated accounts are reactivated up to new limit (oldest first)
+ * - Existing rows and updates NEVER change gated_at
+ *
+ * Concurrency (T4):
+ * - decideNewAccountGate() uses pg_advisory_xact_lock inside the insert tx
+ * - Lock key: hashtextextended('ba_limit:' || shopId, 0)
+ * - Lock is taken ONLY when PLAN_GATING_ENFORCED is on AND limit != -1
+ * - reactivateGatedAccounts() uses the same lock
  *
  * Environment:
  * - PLAN_GATING_ENFORCED: Set to '1' or 'true' to enable enforcement
@@ -90,6 +97,87 @@ export function isAccountActive(gatedAt: Date | null): boolean {
 }
 
 /**
+ * Count active (non-gated) buyer accounts for a shop.
+ *
+ * This is the single source of truth for account counts used by:
+ * - checkCompanyLimit() for enforcement decisions
+ * - getUsageStats() for UI display
+ * - decideNewAccountGate() inside transactions
+ *
+ * Note: Currently counts all rows with gated_at IS NULL. The Team Lead ruling
+ * says to exclude rows with deleted-location or removed-tag markers, but there's
+ * no such marker on BuyerAccount for deleted company locations. Implementing this
+ * would require a migration to add a deleted_at column or similar. Per the ruling,
+ * we count all rows and this is noted for a backlog issue.
+ *
+ * @param sql - postgres.js SQL client (or transaction)
+ * @param shopId - Internal shop ID
+ * @returns Count of active (non-gated) accounts
+ */
+export async function countActiveAccounts(
+  sql: Sql,
+  shopId: string
+): Promise<number> {
+  const [result] = await sql<{ count: string }[]>`
+    SELECT COUNT(*)::text as count
+    FROM "BuyerAccount"
+    WHERE "shopId" = ${shopId}
+      AND gated_at IS NULL
+  `;
+  return parseInt(result?.count ?? "0", 10);
+}
+
+/**
+ * Result of the gating decision for a new account.
+ */
+export interface GateDecision {
+  gate: boolean;
+  used: number;
+  limit: number;
+}
+
+/**
+ * Decide whether a new account should be gated.
+ *
+ * MUST be called inside a sql.begin() transaction. When gating is enforced
+ * and limit != -1, takes pg_advisory_xact_lock to prevent concurrent creates
+ * from overshooting the limit.
+ *
+ * Lock key: hashtextextended('ba_limit:' || shopId, 0)
+ *
+ * The lock is per-shop and held only for the transaction duration. It's only
+ * taken when PLAN_GATING_ENFORCED is on AND limit != -1, so there's no cost
+ * while the flag is false or for unlimited plans.
+ *
+ * @param tx - postgres.js transaction (from sql.begin)
+ * @param shopId - Internal shop ID
+ * @returns GateDecision with gate flag and usage info
+ */
+export async function decideNewAccountGate(
+  tx: Sql,
+  shopId: string
+): Promise<GateDecision> {
+  if (!isGatingEnforced()) {
+    return { gate: false, used: 0, limit: -1 };
+  }
+
+  const plan = await getPlanByShopId(tx, shopId);
+  const limit = planLimit(plan, "companies");
+
+  if (limit === -1) {
+    return { gate: false, used: 0, limit: -1 };
+  }
+
+  await tx`SELECT pg_advisory_xact_lock(hashtextextended(${'ba_limit:' + shopId}, 0))`;
+
+  const used = await countActiveAccounts(tx, shopId);
+
+  const gate = used >= limit;
+
+  return { gate, used, limit };
+}
+
+/**
  * Error thrown when a plan limit is exceeded.
  */
 export class UpgradeRequiredError extends Error {
@@ -122,6 +210,9 @@ export interface GatingCheckResult {
  * Check if a shop can create another BuyerAccount (company).
  * Excludes gated accounts from the count.
  *
+ * NOTE: This does NOT take the lock. For actual inserts, use decideNewAccountGate()
+ * inside a transaction. This function is for pre-checks and UI display.
+ *
  * @param sql - postgres.js SQL client
  * @param shopId - Internal shop ID
  * @returns GatingCheckResult with allowed status and usage info
@@ -130,7 +221,6 @@ export async function checkCompanyLimit(
   sql: Sql,
   shopId: string
 ): Promise<GatingCheckResult> {
-  // If gating is not enforced, always allow
   if (!isGatingEnforced()) {
     return {
       allowed: true,
@@ -143,7 +233,6 @@ export async function checkCompanyLimit(
   const plan = await getPlanByShopId(sql, shopId);
   const limit = planLimit(plan, "companies");
 
-  // Unlimited
   if (limit === -1) {
     return {
       allowed: true,
@@ -152,15 +241,7 @@ export async function checkCompanyLimit(
     };
   }
 
-  // Count existing active (non-gated) BuyerAccounts for this shop
-  const [result] = await sql<{ count: string }[]>`
-    SELECT COUNT(*)::text as count
-    FROM "BuyerAccount"
-    WHERE "shopId" = ${shopId}
-      AND gated_at IS NULL
-  `;
-
-  const currentCount = parseInt(result?.count ?? "0", 10);
+  const currentCount = await countActiveAccounts(sql, shopId);
 
   if (isLimitExceeded(plan, "companies", currentCount)) {
     return {
@@ -321,23 +402,19 @@ export async function getUsageStats(
 }> {
   const plan = await getPlanByShopId(sql, shopId);
 
-  // Count companies (exclude gated when PLAN_GATING_ENFORCED is ON)
-  // Using raw SQL with the gating predicate
-  const companyResult = isGatingEnforced()
-    ? await sql<{ count: string }[]>`
-        SELECT COUNT(*)::text as count
-        FROM "BuyerAccount"
-        WHERE "shopId" = ${shopId}
-          AND gated_at IS NULL
-      `
-    : await sql<{ count: string }[]>`
-        SELECT COUNT(*)::text as count
-        FROM "BuyerAccount"
-        WHERE "shopId" = ${shopId}
-      `;
-  const companyCount = parseInt(companyResult[0]?.count ?? "0", 10);
+  const companyCount = isGatingEnforced()
+    ? await countActiveAccounts(sql, shopId)
+    : parseInt(
+        (
+          await sql<{ count: string }[]>`
+          SELECT COUNT(*)::text as count
+          FROM "BuyerAccount"
+          WHERE "shopId" = ${shopId}
+        `
+        )[0]?.count ?? "0",
+        10
+      );
 
-  // Count imports this month (IST)
   const now = DateTime.now().setZone("Asia/Kolkata");
   const monthStart = now.startOf("month");
   const monthEnd = now.endOf("month");
@@ -364,137 +441,61 @@ export async function getUsageStats(
 }
 
 /**
- * Gate a BuyerAccount due to plan limits.
- * Sets gated_at to current timestamp.
- *
- * @param sql - postgres.js SQL client
- * @param accountId - BuyerAccount ID to gate
- */
-export async function gateAccount(
-  sql: Sql,
-  accountId: string
-): Promise<void> {
-  await sql`
-    UPDATE "BuyerAccount"
-    SET gated_at = NOW(), "updatedAt" = NOW()
-    WHERE id = ${accountId}
-  `;
-}
-
-/**
- * Create a new BuyerAccount in gated state.
- * Used when limit is exceeded but we still want to persist the data.
- *
- * @param sql - postgres.js SQL client
- * @param data - Account data to insert
- * @returns The created account ID
- */
-export async function createGatedAccount(
-  sql: Sql,
-  data: {
-    shopId: string;
-    kind: "COMPANY" | "TAGGED_CUSTOMER";
-    companyId?: string | null;
-    companyLocationId?: string | null;
-    customerId?: string | null;
-    name: string;
-    defaultTermsDays?: number | null;
-    defaultTermsSource?: "explicit" | "tag" | null;
-  }
-): Promise<string> {
-  const [result] = await sql<{ id: string }[]>`
-    INSERT INTO "BuyerAccount" (
-      "shopId",
-      kind,
-      "companyId",
-      "companyLocationId",
-      "customerId",
-      name,
-      "defaultTermsDays",
-      "defaultTermsSource",
-      gated_at,
-      "createdAt",
-      "updatedAt"
-    ) VALUES (
-      ${data.shopId},
-      ${data.kind},
-      ${data.companyId ?? null},
-      ${data.companyLocationId ?? null},
-      ${data.customerId ?? null},
-      ${data.name},
-      ${data.defaultTermsDays ?? null},
-      ${data.defaultTermsSource ?? null},
-      NOW(),
-      NOW(),
-      NOW()
-    )
-    ON CONFLICT ("shopId", "companyLocationId") WHERE "companyLocationId" IS NOT NULL
-    DO UPDATE SET
-      "companyId" = EXCLUDED."companyId",
-      name = EXCLUDED.name,
-      "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
-      gated_at = COALESCE("BuyerAccount".gated_at, NOW()),
-      "updatedAt" = NOW()
-    RETURNING id
-  `;
-  return result.id;
-}
-
-/**
  * Reactivate gated accounts up to the new plan limit.
  * Reactivates oldest accounts first (by createdAt).
  *
+ * Uses the same pg_advisory_xact_lock as decideNewAccountGate() to prevent
+ * race conditions between reactivation and concurrent creates.
+ *
  * Called on plan upgrade via APP_SUBSCRIPTIONS_UPDATE webhook.
+ * The caller (T2) is responsible for determining when to call this.
  *
  * @param sql - postgres.js SQL client
  * @param shopId - Shop ID
- * @param newPlanKey - The new plan key after upgrade
  * @returns Number of accounts reactivated
  */
 export async function reactivateGatedAccounts(
   sql: Sql,
-  shopId: string,
-  newPlanKey: PlanKey
+  shopId: string
 ): Promise<number> {
-  const newPlan = getPlanConfig(newPlanKey);
-  const newLimit = planLimit(newPlan, "companies");
+  const plan = await getPlanByShopId(sql, shopId);
+  const newLimit = planLimit(plan, "companies");
 
-  // Count current active (non-gated) accounts
-  const [activeResult] = await sql<{ count: string }[]>`
-    SELECT COUNT(*)::text as count
-    FROM "BuyerAccount"
-    WHERE "shopId" = ${shopId}
-      AND gated_at IS NULL
-  `;
-  const activeCount = parseInt(activeResult?.count ?? "0", 10);
-
-  // Calculate how many more we can activate
-  let canActivate: number;
   if (newLimit === -1) {
-    // Unlimited - activate all gated accounts
-    canActivate = Number.MAX_SAFE_INTEGER;
-  } else {
-    canActivate = Math.max(0, newLimit - activeCount);
-  }
-
-  if (canActivate === 0) {
-    return 0;
-  }
-
-  // Reactivate oldest gated accounts up to the limit
-  const result = await sql`
-    UPDATE "BuyerAccount"
-    SET gated_at = NULL, "updatedAt" = NOW()
-    WHERE id IN (
-      SELECT id FROM "BuyerAccount"
+    const result = await sql`
+      UPDATE "BuyerAccount"
+      SET gated_at = NULL, "updatedAt" = NOW()
       WHERE "shopId" = ${shopId}
         AND gated_at IS NOT NULL
-      ORDER BY "createdAt" ASC
-      LIMIT ${canActivate}
-    )
-  `;
+    `;
+    return result.count;
+  }
 
-  return result.count;
+  return await sql.begin(async (tx) => {
+    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${'ba_limit:' + shopId}, 0))`;
+
+    const activeCount = await countActiveAccounts(tx, shopId);
+
+    const canActivate = Math.max(0, newLimit - activeCount);
+
+    if (canActivate === 0) {
+      return 0;
+    }
+
+    const result = await tx`
+      UPDATE "BuyerAccount"
+      SET gated_at = NULL, "updatedAt" = NOW()
+      WHERE id IN (
+        SELECT id FROM "BuyerAccount"
+        WHERE "shopId" = ${shopId}
+          AND gated_at IS NOT NULL
+        ORDER BY "createdAt" ASC
+        LIMIT ${canActivate}
+      )
+    `;
+
+    return result.count;
+  });
 }
 
 /**

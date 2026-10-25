@@ -1,9 +1,8 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { getRequestSql } from "~/lib/request-context.server";
 import { verifyWebhook, normalizeWebhookTopic } from "~/lib/webhook-verify.server";
-import { refreshPlanCache, resolvePlan } from "~/services/plan.server";
+import { refreshPlanCache } from "~/services/plan.server";
 import { reactivateGatedAccounts } from "~/services/gating.server";
-import type { PlanKey } from "~/lib/entitlements";
 
 /**
  * Webhook handler for APP_SUBSCRIPTIONS_UPDATE.
@@ -67,17 +66,13 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         `[webhooks.app.subscriptions_update] Refreshed plan wh=${webhookId}`
       );
 
-      // Get the new plan and reactivate gated accounts if upgraded
-      const resolved = await resolvePlan(sql, shop);
-      const newPlanKey = resolved.plan.key as PlanKey;
-
-      // Get shop ID for reactivation
+      // Reactivate gated accounts if upgraded (reads plan from DB)
       const [shopRow] = await sql<{ id: string }[]>`
         SELECT id FROM "Shop" WHERE domain = ${shop}
       `;
 
       if (shopRow) {
-        const reactivated = await reactivateGatedAccounts(sql, shopRow.id, newPlanKey);
+        const reactivated = await reactivateGatedAccounts(sql, shopRow.id);
         if (reactivated > 0) {
           console.log(
             `[webhooks.app.subscriptions_update] Reactivated ${reactivated} gated accounts shop_id=${shopRow.id} wh=${webhookId}`

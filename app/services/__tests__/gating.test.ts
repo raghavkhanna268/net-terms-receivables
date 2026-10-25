@@ -17,43 +17,55 @@ import type { Sql } from "~/lib/db-light.server";
 const createMockSql = () => {
   const mockResults: Map<string, unknown[]> = new Map();
   
-  const sql = Object.assign(
-    vi.fn(async (strings: TemplateStringsArray, ..._values: unknown[]) => {
-      const query = strings.join("?");
-      
-      // Check for plan cache lookup
-      if (query.includes("plan_key") && query.includes("plan_cached_at")) {
-        return mockResults.get("shop_plan") ?? [];
-      }
-      
-      // Check for BuyerAccount count with gated_at IS NULL filter (active, non-gated)
-      // This matches both checkCompanyLimit and getUsageStats when gating is ON
-      if (query.includes('COUNT') && query.includes('"BuyerAccount"') && query.includes('gated_at IS NULL')) {
-        return mockResults.get("active_account_count") ?? [{ count: "0" }];
-      }
+  const queryHandler = async (strings: TemplateStringsArray, ..._values: unknown[]) => {
+    const query = strings.join("?");
+    
+    // Check for plan cache lookup
+    if (query.includes("plan_key") && query.includes("plan_cached_at")) {
+      return mockResults.get("shop_plan") ?? [];
+    }
+    
+    // Check for BuyerAccount count with gated_at IS NULL filter (active, non-gated)
+    // This matches both checkCompanyLimit and getUsageStats when gating is ON
+    if (query.includes('COUNT') && query.includes('"BuyerAccount"') && query.includes('gated_at IS NULL')) {
+      return mockResults.get("active_account_count") ?? [{ count: "0" }];
+    }
 
-      // Check for BuyerAccount count without gated_at filter (all accounts)
-      // This matches getUsageStats when gating is OFF
-      if (query.includes('COUNT') && query.includes('"BuyerAccount"') && !query.includes('gated_at')) {
-        return mockResults.get("account_count") ?? [{ count: "0" }];
-      }
-      
-      // Check for BankImport count
-      if (query.includes('COUNT') && query.includes('"BankImport"')) {
-        return mockResults.get("import_count") ?? [{ count: "0" }];
-      }
+    // Check for BuyerAccount count without gated_at filter (all accounts)
+    // This matches getUsageStats when gating is OFF
+    if (query.includes('COUNT') && query.includes('"BuyerAccount"') && !query.includes('gated_at')) {
+      return mockResults.get("account_count") ?? [{ count: "0" }];
+    }
+    
+    // Check for BankImport count
+    if (query.includes('COUNT') && query.includes('"BankImport"')) {
+      return mockResults.get("import_count") ?? [{ count: "0" }];
+    }
 
-      // Check for gated account reactivation
-      if (query.includes('UPDATE') && query.includes('gated_at = NULL')) {
-        return mockResults.get("reactivate_result") ?? { count: 0 };
-      }
-      
+    // Check for gated account reactivation
+    if (query.includes('UPDATE') && query.includes('gated_at = NULL')) {
+      return mockResults.get("reactivate_result") ?? { count: 0 };
+    }
+
+    // Check for pg_advisory_xact_lock (used in transactions)
+    if (query.includes('pg_advisory_xact_lock')) {
       return [];
-    }),
+    }
+    
+    return [];
+  };
+  
+  const sql = Object.assign(
+    vi.fn(queryHandler),
     {
       json: vi.fn((v) => v),
       setMockResult: (key: string, value: unknown) => mockResults.set(key, value as unknown[]),
       clearMockResults: () => mockResults.clear(),
+      begin: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+        // Create a mock transaction that delegates to the same query handler
+        const mockTx = Object.assign(vi.fn(queryHandler), { json: vi.fn((v) => v) });
+        return callback(mockTx);
+      }),
     }
   ) as unknown as Sql & {
     setMockResult: (key: string, value: unknown) => void;
@@ -249,39 +261,52 @@ describe("Gating Service", () => {
       vi.resetModules();
       const { reactivateGatedAccounts } = await import("../gating.server");
       
+      // Set plan to growth (limit 100)
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "growth",
+        subscription_id: "sub-123",
+        subscription_name: "Growth",
+        is_test: false,
+        plan_cached_at: new Date(),
+      }]);
+      
       // 2 active accounts currently
       mockSql.setMockResult("active_account_count", [{ count: "2" }]);
       
       // Reactivation updates 3 accounts
       mockSql.setMockResult("reactivate_result", { count: 3 });
       
-      // Upgrade to growth (limit 100)
+      // Reads plan from DB
       const reactivated = await reactivateGatedAccounts(
         mockSql as unknown as Sql,
-        TEST_SHOP_ID,
-        "growth"
+        TEST_SHOP_ID
       );
       
       // Should have reactivated accounts
       expect(reactivated).toBe(3);
     });
 
-    it("reactivates all gated accounts on upgrade to scale (unlimited)", async () => {
+    it("reactivates all gated accounts on upgrade to unlimited", async () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
       vi.resetModules();
       const { reactivateGatedAccounts } = await import("../gating.server");
       
-      // 5 active accounts
-      mockSql.setMockResult("active_account_count", [{ count: "5" }]);
+      // Set plan to unlimited (-1)
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "unlimited",
+        subscription_id: "sub-123",
+        subscription_name: "Unlimited",
+        is_test: false,
+        plan_cached_at: new Date(),
+      }]);
       
       // Reactivation updates 50 accounts
       mockSql.setMockResult("reactivate_result", { count: 50 });
       
-      // Upgrade to unlimited
+      // Reads plan from DB
       const reactivated = await reactivateGatedAccounts(
         mockSql as unknown as Sql,
-        TEST_SHOP_ID,
-        "unlimited"
+        TEST_SHOP_ID
       );
       
       expect(reactivated).toBe(50);
@@ -292,13 +317,21 @@ describe("Gating Service", () => {
       vi.resetModules();
       const { reactivateGatedAccounts } = await import("../gating.server");
       
+      // Set plan to starter (limit 25)
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "starter",
+        subscription_id: "sub-123",
+        subscription_name: "Starter",
+        is_test: false,
+        plan_cached_at: new Date(),
+      }]);
+      
       // Already at starter limit (25)
       mockSql.setMockResult("active_account_count", [{ count: "25" }]);
       
       const reactivated = await reactivateGatedAccounts(
         mockSql as unknown as Sql,
-        TEST_SHOP_ID,
-        "starter"
+        TEST_SHOP_ID
       );
       
       expect(reactivated).toBe(0);
@@ -540,10 +573,10 @@ describe("Gating Service", () => {
       // Simulate reactivation (5 gated accounts activated)
       mockSql.setMockResult("reactivate_result", { count: 5 });
       
+      // Reads plan from DB
       const reactivated = await reactivateGatedAccounts(
         mockSql as unknown as Sql,
-        TEST_SHOP_ID,
-        "growth"
+        TEST_SHOP_ID
       );
       expect(reactivated).toBe(5);
       
