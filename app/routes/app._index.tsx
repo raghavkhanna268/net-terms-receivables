@@ -23,6 +23,7 @@ import {
 import type { Sql } from "~/lib/db-light.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { buildOverLimitBannerState } from "~/lib/over-limit-banner";
+import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 
 const PAGE_SIZE = 20;
 
@@ -204,7 +205,7 @@ async function checkOnboardingRedirect(
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { shopify } = context;
-  const { session, redirect: shopifyRedirect } = await shopify.authenticate.admin(request);
+  const { session, sessionToken, redirect: shopifyRedirect } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
@@ -316,6 +317,20 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   const storeHandle = shopDomain.replace(".myshopify.com", "");
   const gatingEnforced = isGatingEnforced();
+
+  if (shop && !error) {
+    const accessParams: Parameters<typeof recordAccess>[1] = {
+      shopId: shop.id,
+      actor: getActorFromSessionToken(sessionToken, session),
+      action: "dashboard",
+      recordType: "BuyerAccount",
+      count: buyerLedger?.totalCount ?? 0,
+    };
+    if (selectedBuyerId) {
+      accessParams.recordId = selectedBuyerId;
+    }
+    recordAccess(sql, accessParams);
+  }
 
   return {
     shopName: storeHandle,
