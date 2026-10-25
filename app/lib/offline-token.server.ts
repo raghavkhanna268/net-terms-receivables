@@ -531,6 +531,20 @@ async function performTokenRefresh(
         };
       }
 
+      // Handle 401 invalid_request - dead refresh token per Shopify docs
+      // "When a refresh token can no longer be used, Shopify returns 401 Unauthorized
+      // with {"error": "invalid_request"}" - covers unknown, replaced, expired,
+      // revoked, or uninstalled cases. Do NOT widen to other 401 errors (e.g.
+      // invalid_client means bad app credentials, not a dead token).
+      // @see https://shopify.dev/docs/apps/build/authentication-authorization/implement-token-exchange#refresh-an-expiring-offline-token
+      if (response.status === 401 && errorBody.error === "invalid_request") {
+        return {
+          success: false,
+          errorCode: "invalid_grant",
+          error: "Token refresh failed: invalid_request",
+        };
+      }
+
       return {
         success: false,
         errorCode: "http_error",
