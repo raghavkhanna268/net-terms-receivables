@@ -490,9 +490,9 @@ describeWithDb("S23-09: reinstall resets onboarding_dismissed_at (DB)", () => {
       const TEST_SHOP = `nonexistent-${TEST_SUFFIX}.myshopify.com`;
 
       const { _clearUninstalledAtIfSetForTesting } = await import("../after-auth.server");
-      const wasReinstalled = await _clearUninstalledAtIfSetForTesting(sql, TEST_SHOP);
+      const result = await _clearUninstalledAtIfSetForTesting(sql, TEST_SHOP);
 
-      expect(wasReinstalled).toBe(false);
+      expect(result.wasReinstalled).toBe(false);
     });
   });
 
@@ -526,9 +526,9 @@ describeWithDb("S23-09: reinstall resets onboarding_dismissed_at (DB)", () => {
       expect(before.uninstalledAt).toBeNull();
 
       const { _clearUninstalledAtIfSetForTesting } = await import("../after-auth.server");
-      const wasReinstalled = await _clearUninstalledAtIfSetForTesting(sql, TEST_SHOP);
+      const result = await _clearUninstalledAtIfSetForTesting(sql, TEST_SHOP);
 
-      expect(wasReinstalled).toBe(false);
+      expect(result.wasReinstalled).toBe(false);
 
       const [after] = await sql<{
         onboarding_dismissed_at: Date | null;
