@@ -102,3 +102,93 @@ This plan verifies that:
 | Monthly | 3,000 emails/month | Free tier transactional email quota |
 
 The code constants (`DAILY_SEND_CAP=100`, `MONTHLY_SEND_CAP=3000` in `app/services/reminders.server.ts:62-68`) match these limits exactly.
+
+## 8. Catch-up for Capped Reminders (#230)
+
+**Status:** Implemented in this PR. When daily/monthly cap is reached, reminders are deferred instead of being silently dropped.
+
+### 8.1 Behavior
+| # | Steps | Expected |
+|---|---|---|
+| S18-30 | Send hits daily/monthly cap. | Reminder is stored as `status='delayed'` with `firstCappedAt` timestamp. Not deleted. |
+| S18-31 | Catch-up window: D+1 to D+3 (shop-local days). | `s18_enqueue_reminders()` enqueues `REMINDER_CATCHUP` for delayed rows in window. |
+| S18-32 | Past D+3 window. | Delayed rows become `status='skipped_daily_limit'`. |
+| S18-33 | Multiple stages delayed for same invoice. | Latest stage (highest offsetDays) stays delayed; older stages become skipped. |
+| S18-34 | Oldest-first ordering. | Catch-up messages enqueued by oldest reminder date first within each batch. |
+| S18-35 | At most one per invoice per day. | Per-invoice advisory lock (`s18_invoice_<id>`) prevents multiple sends. |
+| S18-36 | Invoice paid mid-window. | Delayed row deleted silently on eligibility re-check. |
+| S18-37 | Shop disables reminders mid-window. | Delayed row deleted silently on eligibility re-check. |
+| S18-38 | Rule disabled mid-window. | Delayed row deleted silently on eligibility re-check. |
+| S18-39 | Account gated mid-window. | Delayed row deleted silently on eligibility re-check. |
+
+### 8.2 Migration `20261112000000_s18_reminder_catchup`
+- Purely additive: no drops, no destructive UPDATE/DELETE
+- Adds enum `ReminderLogStatus` (sent, delayed, skipped_daily_limit)
+- Adds `ReminderLog.status` NOT NULL DEFAULT 'sent'
+- Adds `ReminderLog.firstCappedAt` (nullable timestamp)
+- Makes `ReminderLog.sentAt` nullable
+- CHECK constraints tie sentAt/firstCappedAt to status
+- Partial index on delayed rows
+- Updates `s18_enqueue_reminders()` with catch-up logic
+
+### 8.3 UI
+- Reminder log table on settings page: invoice name, stage, status, date
+- No buyer name or email displayed
+
+### 8.4 Done criteria (catch-up)
+- [x] S18-30: `app/services/__tests__/reminders-catchup-db.test.ts` - cap boundary upserts as delayed
+- [x] S18-31-32: `app/services/__tests__/reminders-catchup-db.test.ts` - expiry after D+3
+- [x] S18-33: `app/services/__tests__/reminders-catchup-db.test.ts` - stage collapse
+- [x] S18-34: `app/services/__tests__/reminders-catchup-db.test.ts` - oldest-first ordering
+- [x] S18-35: `app/services/__tests__/reminders-catchup-db.test.ts` - at most one per day
+- [x] S18-36: `app/services/__tests__/reminders-catchup-db.test.ts` - payment mid-window deletion
+- [x] Migration backfill: existing rows remain status='sent' with unchanged count
+
+## 9. update_rule Duplicate Offset Fix
+
+**Status:** Implemented in separate commit. Previously `create_rule` blocked duplicate offsets but `update_rule` did not.
+
+### 9.1 Done criteria
+- [x] `app/routes/__tests__/app.settings.reminders.test.ts` - rejects duplicate offset when updating
+
+## 10. Partly Paid Invoices
+
+**Status:** Implemented. Reminders show outstanding balance instead of original total.
+
+### 10.1 Behavior
+| # | Steps | Expected |
+|---|---|---|
+| S18-40 | Invoice partly paid (outstanding > 0, outstanding < total). | Reminder is sent with the **outstanding** balance displayed, not the original total. |
+| S18-41 | Invoice fully paid (outstanding = 0) but status still 'open'. | Reminder is **skipped**. No email sent, no ReminderLog created. |
+| S18-42 | Email content for partly paid invoice. | Shows "₹3,000.00" (outstanding), not "₹10,000.00" (total). |
+
+### 10.2 Implementation
+- `getInvoiceForReminder` fetches `outstanding` field
+- Gate added: skip if `outstanding <= 0` (before cap reservation)
+- `renderPaymentReminderEmail` receives `outstanding`, not `total`
+- No amount logged (DPDP compliance)
+
+### 10.3 Done criteria
+- [x] S18-40: `app/services/__tests__/reminders-catchup-db.test.ts` - partly paid invoice sends
+- [x] S18-41: `app/services/__tests__/reminders-catchup-db.test.ts` - zero outstanding skipped
+- [x] S18-42: `app/services/__tests__/reminders.test.ts` - email shows outstanding amount
+
+## 11. Uninstalled Shop Handling
+
+**Status:** Implemented. Pre-send eligibility checks prevent reminders to uninstalled shops.
+
+### 11.1 Behavior
+| # | Steps | Expected |
+|---|---|---|
+| S18-50 | REMINDER_SEND message processed after shop uninstalled. | Reminder is **skipped**. No email sent, no ReminderLog 'sent' row created. |
+| S18-51 | REMINDER_CATCHUP for delayed row after shop uninstalled. | Delayed row is **deleted silently**. No email sent. |
+
+### 11.2 Implementation
+- `getInvoiceForReminder` fetches `Shop.uninstalledAt`
+- Gate added in both `sendPaymentReminder` and `sendCatchupReminder`
+- SQL enqueue already filters uninstalled shops, but queued messages need the check
+- For catch-up, failed eligibility deletes the delayed row (same as other eligibility failures)
+
+### 11.3 Done criteria
+- [x] S18-50: `app/services/__tests__/reminders-uninstalled-db.test.ts` - uninstalled shop skips send
+- [x] S18-51: `app/services/__tests__/reminders-uninstalled-db.test.ts` - catch-up deletes delayed row

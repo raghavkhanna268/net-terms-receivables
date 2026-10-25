@@ -58,6 +58,8 @@ describe("compliance.server", () => {
   describe("deleteShop", () => {
     it("deletes shop and all non-FK-linked tables in a transaction", async () => {
       // All queries run inside sql.begin() using mockTx
+      // 0. SELECT FOR UPDATE (serializes with drain's FOR SHARE guards, #239)
+      mockTx.mockResolvedValueOnce([{ id: "shop-123" }]);
       // 1. DELETE s10b_order_refetch_null
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 5 }));
       // 2. DELETE s6_bulk_operations
@@ -76,7 +78,13 @@ describe("compliance.server", () => {
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 9 }));
       // 9. DELETE s6_dead_letter
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 4 }));
-      // 10. DELETE Shop
+      // 10. DELETE s6_processed_webhooks (reconcile prefix)
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
+      // 11. DELETE s6_processed_webhooks (receipts join)
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
+      // 12. DELETE webhook_receipts
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 10 }));
+      // 13. DELETE Shop
       mockTx.mockResolvedValueOnce([{ id: "shop-123" }]);
 
       const result = await deleteShop(mockSql, "test-shop.myshopify.com");
@@ -93,12 +101,16 @@ describe("compliance.server", () => {
         pgmqSyncArchivePurged: 8,
         pgmqBulkArchivePurged: 9,
         deadLetterPurged: 4,
+        processedWebhooksPurged: 5,
+        webhookReceiptsPurged: 10,
       });
       expect(mockSql.begin).toHaveBeenCalledTimes(1);
     });
 
     it("returns deleted=false when shop not found", async () => {
       // All queries run inside sql.begin() using mockTx
+      // 0. SELECT FOR UPDATE (serializes with drain's FOR SHARE guards, #239)
+      mockTx.mockResolvedValueOnce([]);
       // 1. DELETE s10b_order_refetch_null (may have rows even if shop doesn't exist)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
       // 2. DELETE s6_bulk_operations
@@ -117,7 +129,13 @@ describe("compliance.server", () => {
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
       // 9. DELETE s6_dead_letter
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 10. DELETE Shop (no rows)
+      // 10. DELETE s6_processed_webhooks (reconcile prefix)
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 11. DELETE s6_processed_webhooks (receipts join)
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 12. DELETE webhook_receipts
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 13. DELETE Shop (no rows)
       mockTx.mockResolvedValueOnce([]);
 
       const result = await deleteShop(mockSql, "nonexistent.myshopify.com");
@@ -134,6 +152,8 @@ describe("compliance.server", () => {
         pgmqSyncArchivePurged: 0,
         pgmqBulkArchivePurged: 0,
         deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
       });
     });
   });
