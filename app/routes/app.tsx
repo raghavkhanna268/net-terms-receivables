@@ -1,33 +1,45 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { Outlet, useLoaderData, useRouteError } from "react-router";
+import { Outlet, useLoaderData, useRouteError, data } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "~/components/AppProvider";
 import { runAfterAuth } from "~/lib/after-auth.server";
 import { useEffect } from "react";
-import { ServerTiming } from "~/lib/server-timing.server";
+import { ServerTiming, markRequestServed, readColdOnce } from "~/lib/server-timing.server";
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
-  const timing = new ServerTiming();
+  // Read cold once at the start - index will read same cached value
+  const cold = readColdOnce();
+  const timing = new ServerTiming(cold);
 
   // Session storage is injected per-request via loadContext in workers/app.ts
   const { shopify, cloudflare } = context;
 
-  timing.startPhase("auth_layout");
-  const { admin, session } = await shopify.authenticate.admin(request);
-  timing.endPhase("auth_layout");
+  try {
+    timing.startPhase("auth_layout");
+    const { admin, session } = await shopify.authenticate.admin(request);
+    timing.endPhase("auth_layout");
 
-  // Bind waitUntil to ctx to avoid "Illegal invocation" on workerd
-  runAfterAuth(session.shop, admin, (p) => cloudflare.ctx.waitUntil(p));
+    // Bind waitUntil to ctx to avoid "Illegal invocation" on workerd
+    runAfterAuth(session.shop, admin, (p) => cloudflare.ctx.waitUntil(p));
 
-  const serverTiming = timing.toHeaderValue();
-  const responseData = { apiKey: process.env.SHOPIFY_API_KEY || "" };
+    // Log auth_layout timing
+    timing.logAllPhases();
 
-  const headers: HeadersInit = { "Content-Type": "application/json" };
-  if (serverTiming) {
-    headers["Server-Timing"] = serverTiming;
+    const serverTiming = timing.toHeaderValue();
+    const responseData = {
+      apiKey: process.env.SHOPIFY_API_KEY || "",
+      _cold: timing.isCold(),
+    };
+
+    const headers: HeadersInit = {};
+    if (serverTiming) {
+      headers["Server-Timing"] = serverTiming;
+    }
+
+    return data(responseData, { headers });
+  } finally {
+    markRequestServed();
   }
-
-  return new Response(JSON.stringify(responseData), { headers });
 };
 
 export default function App() {

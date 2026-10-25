@@ -1,5 +1,5 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useLoaderData } from "react-router";
+import { useLoaderData, data } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { resolvePlan, type ResolvedPlan } from "~/services/plan.server";
@@ -23,48 +23,9 @@ import {
 import type { Sql } from "~/lib/db-light.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { buildOverLimitBannerState } from "~/lib/over-limit-banner";
-import { ServerTiming, markRequestServed } from "~/lib/server-timing.server";
+import { ServerTiming, mergeServerTimingHeaders, readColdOnce } from "~/lib/server-timing.server";
 
 const PAGE_SIZE = 20;
-
-/**
- * Type for the loader response data.
- */
-interface LoaderData {
-  shopName: string;
-  shopDomain: string;
-  storeHandle: string;
-  shopCurrency: string;
-  plan: {
-    key: string;
-    name: string;
-    isTest: boolean;
-  } | null;
-  usage: {
-    companies: { current: number; limit: number };
-    importsThisMonth: { current: number; limit: number };
-  };
-  appHandle: string;
-  gatingEnforced: boolean;
-  agingTotals: SerializableAgingTotals | null;
-  buyerLedger: { rows: BuyerLedgerRow[]; totalCount: number } | null;
-  selectedBuyerInvoices: {
-    rows: BuyerInvoiceRow[];
-    totalCount: number;
-    buyerName: string;
-  } | null;
-  selectedBuyerId: string | null;
-  pagination: {
-    page: number;
-    pageSize: number;
-    totalCount: number;
-  };
-  sortBy: string;
-  sortOrder: string;
-  onlyOverLimit: boolean;
-  overLimitCount: number;
-  error: string | null;
-}
 
 /**
  * Get the count of over-limit (gated) accounts with open outstanding invoices.
@@ -243,7 +204,9 @@ async function checkOnboardingRedirect(
 }
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
-  const timing = new ServerTiming();
+  // Read cold once - layout and index get same cached value for this request
+  const cold = readColdOnce();
+  const timing = new ServerTiming(cold);
   timing.startPhase("loader_total");
 
   const { shopify } = context;
@@ -384,9 +347,6 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   // Log timing: one line per phase with { route, stage, durationMs }
   timing.logAllPhases();
 
-  // Mark request served for cold start tracking
-  markRequestServed();
-
   const serverTiming = timing.toHeaderValue();
 
   const responseData = {
@@ -423,12 +383,12 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     error,
   };
 
-  const headers: HeadersInit = { "Content-Type": "application/json" };
+  const headers: HeadersInit = {};
   if (serverTiming) {
     headers["Server-Timing"] = serverTiming;
   }
 
-  return new Response(JSON.stringify(responseData), { headers });
+  return data(responseData, { headers });
 };
 
 const BUCKET_LABELS: Record<AgingBucketKey, string> = {
@@ -727,7 +687,7 @@ export default function Index() {
     onlyOverLimit,
     overLimitCount,
     error,
-  } = useLoaderData<LoaderData>();
+  } = useLoaderData<typeof loader>();
 
   const planKey = (plan?.key ?? "free") as PlanKey;
   const planName = plan?.name ?? "Free";
@@ -919,10 +879,12 @@ export const headers: HeadersFunction = (headersArgs) => {
   const boundaryHeaders = boundary.headers(headersArgs);
   const resultHeaders = new Headers(boundaryHeaders);
 
-  // Pass through Server-Timing header from loader
-  const serverTiming = headersArgs.loaderHeaders?.get("Server-Timing");
-  if (serverTiming) {
-    resultHeaders.set("Server-Timing", serverTiming);
+  // Merge Server-Timing from layout (parent) and index (this loader)
+  const parentTiming = headersArgs.parentHeaders?.get("Server-Timing");
+  const loaderTiming = headersArgs.loaderHeaders?.get("Server-Timing");
+  const mergedTiming = mergeServerTimingHeaders(parentTiming, loaderTiming);
+  if (mergedTiming) {
+    resultHeaders.set("Server-Timing", mergedTiming);
   }
 
   return resultHeaders;

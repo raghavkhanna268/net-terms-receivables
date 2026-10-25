@@ -30,7 +30,6 @@ import { safeLog } from "./log.server";
 const ALLOWED_PHASES = new Set([
   "auth_layout",
   "auth_index",
-  "db_connect",
   "shop_lookup",
   "onboarding_checks",
   "plan_resolve",
@@ -67,17 +66,36 @@ export type PhaseStage =
 let isolateRequestCount = 0;
 
 /**
+ * Cached cold value for current request (ensures layout and index get same value).
+ */
+let cachedColdForRequest: boolean | null = null;
+
+/**
  * Check if this is the first request in the isolate.
+ * Used internally; prefer readColdOnce() for request-scoped cold reading.
  */
 export function isFirstRequestInIsolate(): boolean {
   return isolateRequestCount === 0;
 }
 
 /**
- * Increment the isolate request counter.
+ * Read cold flag once per request. Both layout and index will get the same value.
+ * The first call caches the result; subsequent calls return the cached value.
+ * markRequestServed() clears the cache for the next request.
+ */
+export function readColdOnce(): boolean {
+  if (cachedColdForRequest === null) {
+    cachedColdForRequest = isFirstRequestInIsolate();
+  }
+  return cachedColdForRequest;
+}
+
+/**
+ * Increment the isolate request counter and clear cold cache.
  * Call this once per request after timing is complete.
  */
 export function markRequestServed(): void {
+  cachedColdForRequest = null;
   isolateRequestCount++;
 }
 
@@ -87,6 +105,7 @@ export function markRequestServed(): void {
  */
 export function _resetIsolateStateForTesting(): void {
   isolateRequestCount = 0;
+  cachedColdForRequest = null;
 }
 
 /**
@@ -105,9 +124,13 @@ export class ServerTiming {
   private requestStart: number;
   private cold: boolean;
 
-  constructor() {
+  /**
+   * @param cold - Override cold flag (pass from layout to index for same request).
+   *               If not provided, reads from isolate state.
+   */
+  constructor(cold?: boolean) {
     this.requestStart = performance.now();
-    this.cold = isFirstRequestInIsolate();
+    this.cold = cold ?? isFirstRequestInIsolate();
   }
 
   /**
@@ -205,27 +228,6 @@ export class ServerTiming {
   }
 
   /**
-   * Build timing data for logging.
-   * Returns only phase codes with durationMs numbers.
-   * @deprecated Use logAllPhases() instead for per-phase logging.
-   */
-  toLogFields(): Record<string, number | boolean> {
-    try {
-      const fields: Record<string, number | boolean> = {
-        cold: this.cold,
-      };
-      for (const [phase, entry] of this.phases) {
-        if (entry.end !== undefined) {
-          fields[`${phase}Ms`] = Math.round(entry.end - entry.start);
-        }
-      }
-      return fields;
-    } catch {
-      return { cold: this.cold };
-    }
-  }
-
-  /**
    * Log all completed phases with safeLog.
    * Emits one app_home_timing line per phase with:
    * { route: 'app_home', stage: <phase>_cold | <phase>, durationMs }
@@ -237,7 +239,7 @@ export class ServerTiming {
     try {
       for (const [phase, entry] of this.phases) {
         if (entry.end !== undefined) {
-          const stage = this.cold ? `${phase}_cold` : phase;
+          const stage: PhaseStage = (this.cold ? `${phase}_cold` : phase) as PhaseStage;
           const durationMs = Math.round(entry.end - entry.start);
           safeLog("info", "app_home_timing", {
             route: "app_home",

@@ -82,15 +82,12 @@ describe("server-timing.server", () => {
       expect(total).toBeGreaterThanOrEqual(10);
     });
 
-    it("toLogFields() returns phase timings with Ms suffix", async () => {
-      const timing = new ServerTiming();
-      await timing.time("auth_layout", async () => {});
-      await timing.time("loader_total", async () => {});
+    it("accepts optional cold parameter override", () => {
+      const coldTiming = new ServerTiming(true);
+      expect(coldTiming.isCold()).toBe(true);
 
-      const fields = timing.toLogFields();
-      expect(fields.cold).toBe(true); // First request in test
-      expect(typeof fields.auth_layoutMs).toBe("number");
-      expect(typeof fields.loader_totalMs).toBe("number");
+      const warmTiming = new ServerTiming(false);
+      expect(warmTiming.isCold()).toBe(false);
     });
   });
 
@@ -186,6 +183,11 @@ describe("server-timing.server", () => {
       const phases = getAllowedPhases();
       expect(phases.has("unknown")).toBe(false);
       expect(phases.has("")).toBe(false);
+    });
+
+    it("does not include db_connect (never measured)", () => {
+      const phases = getAllowedPhases();
+      expect(phases.has("db_connect")).toBe(false);
     });
   });
 
