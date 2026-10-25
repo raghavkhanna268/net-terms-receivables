@@ -27,8 +27,10 @@ import type { Sql } from "~/lib/db-light.server";
 import {
   syncCreditStatusMetafield,
   getCreditStatusDisplay,
+  shouldSkipForBackoff,
   type CreditStatusSource,
 } from "./credit-status.server";
+import { safeLog } from "~/lib/log.server";
 
 /**
  * Result of a credit status recompute.
@@ -49,6 +51,8 @@ export interface RecomputeResult {
   retryable?: boolean;
   /** Whether the account has no owner (no metafield write attempted) */
   noOwner?: boolean;
+  /** Whether metafield write was skipped due to backoff (DB update still happened) */
+  backoffSkipped?: boolean;
 }
 
 /**
@@ -61,6 +65,8 @@ interface BuyerAccountForRecompute {
   gatedAt: Date | null;
   syncPending: boolean;
   metafieldSyncedAt: Date | null;
+  metafieldSyncErrorAt: Date | null;
+  metafieldSyncErrorCode: string | null;
 }
 
 /**
@@ -85,7 +91,7 @@ export async function recomputeCreditStatus(
   buyerAccountId: string,
   source: CreditStatusSource = "unknown",
 ): Promise<RecomputeResult> {
-  // Fetch account data to check gated status and current hold
+  // Fetch account data to check gated status, current hold, and backoff state
   const [account] = await sql<BuyerAccountForRecompute[]>`
     SELECT
       id,
@@ -93,7 +99,9 @@ export async function recomputeCreditStatus(
       bypass,
       gated_at AS "gatedAt",
       "syncPending",
-      "metafieldSyncedAt"
+      "metafieldSyncedAt",
+      "metafieldSyncErrorAt",
+      "metafieldSyncErrorCode"
     FROM "BuyerAccount"
     WHERE id = ${buyerAccountId}
   `;
@@ -109,11 +117,10 @@ export async function recomputeCreditStatus(
     };
   }
 
-  // Capture previous hold value
+  // Capture previous hold value BEFORE any updates
   const previousHold = account.holdState === "HELD" && !account.bypass;
 
   // Get what the new hold would be by computing current state
-  // (This is a read-only check to determine if metafield write is needed)
   const statusDisplay = await getCreditStatusDisplay(sql, buyerAccountId);
   if (!statusDisplay) {
     return {
@@ -128,11 +135,44 @@ export async function recomputeCreditStatus(
 
   const newHold = statusDisplay.isOnHold;
 
-  // Early return only when:
-  // 1. Hold value hasn't changed, AND
-  // 2. No sync is pending (previous metafield write completed), AND
+  // Check backoff for persistent retryable failures.
+  // Backoff applies ONLY when:
+  // - metafieldSyncErrorCode is NULL (retryable streak, not a permanent failure)
+  // - metafieldSyncErrorAt is set (we have a failure timestamp marking the streak start)
+  // - The backoff period hasn't elapsed
+  // - AND the hold value is UNCHANGED (previousHold === newHold)
+  // 
+  // IMPORTANT: Backoff only skips the Shopify metafield write when hold is unchanged.
+  // If hold changed (applied or released), we ALWAYS attempt the metafield write
+  // to keep Shopify in sync with the actual hold state.
+  // The DB recompute (holdState calculation, hold apply/release, audit) ALWAYS runs.
+  //
+  // Permanent failures (metafieldSyncErrorCode IS NOT NULL) are excluded by the sweep SQL,
+  // so they shouldn't reach here via daily_sweep. If they do reach here via another path
+  // (e.g., invoice_change), we still allow retry (success clears the marker).
+  let skipMetafieldWrite = false;
+  let backoffInfo: { errorAgeDays?: number; nextRetryDay?: number } | undefined;
+  
+  const holdChanged = previousHold !== newHold;
+  
+  if (
+    !holdChanged &&
+    account.metafieldSyncErrorCode === null &&
+    account.metafieldSyncErrorAt !== null
+  ) {
+    const backoffResult = shouldSkipForBackoff(account.metafieldSyncErrorAt);
+    if (backoffResult.skip) {
+      skipMetafieldWrite = true;
+      backoffInfo = { errorAgeDays: backoffResult.errorAgeDays, nextRetryDay: backoffResult.nextRetryDay };
+    }
+  }
+
+  // Early return only when ALL of the following are true:
+  // 1. Hold value hasn't changed
+  // 2. No sync is pending (previous metafield write completed)
   // 3. Metafield has been written at least once (metafieldSyncedAt is not NULL)
-  if (previousHold === newHold && !account.syncPending && account.metafieldSyncedAt !== null) {
+  // 4. NOT in backoff (backoff requires DB update to keep syncPending=true)
+  if (!holdChanged && !account.syncPending && account.metafieldSyncedAt !== null && !skipMetafieldWrite) {
     return {
       success: true,
       metafieldWritten: false,
@@ -141,11 +181,16 @@ export async function recomputeCreditStatus(
     };
   }
 
-  // Route through syncCreditStatusMetafield which has:
-  // - FOR UPDATE lock on BuyerAccount row
-  // - syncVersion increment and guard
-  // - Proper metafield write error handling
-  const syncResult = await syncCreditStatusMetafield(sql, buyerAccountId, source);
+  // Route through syncCreditStatusMetafield which:
+  // - Locks the BuyerAccount row with FOR UPDATE
+  // - Computes holdState from current data (invoices, exposure, overdue status)
+  // - Updates DB with new holdState, increments syncVersion
+  // - Records hold_applied/hold_released audit events if effective hold changed
+  // - Writes metafield to Shopify (unless skipMetafieldWrite is true)
+  // - Clears syncPending on metafield success, leaves true on failure/skip
+  const syncResult = await syncCreditStatusMetafield(sql, buyerAccountId, source, {
+    skipMetafieldWrite,
+  });
 
   if (!syncResult.success) {
     return {
@@ -160,9 +205,10 @@ export async function recomputeCreditStatus(
   }
 
   // metafieldSyncPending tells us if the metafield write succeeded
-  // Two cases when metafieldSyncPending is true:
+  // Three cases when metafieldSyncPending is true:
   // 1. Metafield write failed (has error) - return failure for retry
   // 2. A newer syncVersion owns the sync (no error) - return success, not our problem
+  // 3. Backoff skipped the metafield write - return success with backoffSkipped flag
   if (syncResult.metafieldSyncPending && syncResult.error) {
     return {
       success: false,
@@ -185,8 +231,17 @@ export async function recomputeCreditStatus(
   `;
   const finalHold = postSyncAccount?.holdState === "HELD" && !postSyncAccount?.bypass;
 
+  // Log backoff skip with safeLog (buyerAccountId and *Count keys are in the allowlist)
+  if (skipMetafieldWrite && backoffInfo) {
+    safeLog("info", "credit_status_sync_backoff_skip", {
+      buyerAccountId,
+      errorAgeDayCount: backoffInfo.errorAgeDays,
+      nextRetryDayCount: backoffInfo.nextRetryDay,
+    });
+  }
+
   console.log(
-    `[credit-status-recompute] ${metafieldWritten ? "Updated" : "Synced"} ${buyerAccountId}: hold ${previousHold} -> ${finalHold}`,
+    `[credit-status-recompute] ${metafieldWritten ? "Updated" : skipMetafieldWrite ? "Backoff-skipped" : "Synced"} ${buyerAccountId}: hold ${previousHold} -> ${finalHold}`,
   );
 
   return {
@@ -195,6 +250,7 @@ export async function recomputeCreditStatus(
     previousHold,
     newHold: finalHold,
     noOwner: syncResult.noOwner,
+    backoffSkipped: skipMetafieldWrite,
   };
 }
 

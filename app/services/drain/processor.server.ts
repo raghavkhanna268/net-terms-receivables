@@ -838,9 +838,15 @@ async function handleCreditStatusRecompute(sql: Sql, message: SyncMessage): Prom
 
   let skipReason: string | undefined;
   if (!result.metafieldWritten) {
-    skipReason = result.noOwner
-      ? "No owner GID, holdState persisted but metafield not written"
-      : "Hold value unchanged, no metafield write needed";
+    if (result.noOwner) {
+      skipReason = "No owner GID, holdState persisted but metafield not written";
+    } else if (result.backoffSkipped) {
+      skipReason = "Backoff active, holdState persisted but metafield write skipped";
+    } else if (result.previousHold !== result.newHold) {
+      skipReason = "Hold value changed, DB updated but metafield sync pending";
+    } else {
+      skipReason = "Hold value unchanged, no metafield write needed";
+    }
   }
 
   return {
