@@ -126,14 +126,92 @@ Implementation details for customer erasure:
 
 Implementation details for shop data deletion:
 1. **Verify** payload `shop_domain` matches header shop (returns 401 on mismatch)
-2. **Delete** all OAuth sessions for the shop
-3. **Delete** `Shop` row — **all shop data cascades via ON DELETE CASCADE FKs**:
-   - `AccountSource`, `BuyerAccount`, `BankImport`, `ReminderRule`, `AuditEvent`
-   - `Invoice`, `Payment`, `Match`, `ReminderLog` (direct Shop FKs)
-   - `s8_tagged_customers`, `s8_draft_orders` (S8 FKs)
-   - `s22_data_requests` (S22 FK — exports purged even if not yet expired)
+2. **Delete** all OAuth sessions for the shop (`Session` table)
+3. **Delete** `webhook_receipts` for the shop
+4. **Delete** shop data via `deleteShop` (`app/services/compliance/compliance.server.ts:88-170`) in a single transaction:
+   - Non-FK tables with `shop` text column: `s10b_order_refetch_null`, `s6_bulk_operations`, `order_outstanding_missing`, `s10b_customer_pii_fallback`
+   - pgmq queue and archive tables: `pgmq.q_s6_sync`, `pgmq.q_s6_bulk`, `pgmq.a_s6_sync`, `pgmq.a_s6_bulk` (messages where `message->>'shop'` matches)
+   - Dead-letter queue: `s6_dead_letter` (rows where `message->>'shop'` matches)
+   - `Shop` row — **all shop data cascades via ON DELETE CASCADE FKs**:
+     - `AccountSource`, `BuyerAccount`, `BankImport`, `ReminderRule`, `AuditEvent`
+     - `Invoice`, `Payment`, `Match`, `ReminderLog` (direct Shop FKs)
+     - `s8_tagged_customers`, `s8_draft_orders` (S8 FKs)
+     - `s22_data_requests`, `backstop_processed_orders`, `s18_shop_reminder_settings` (S22/S13/S18 FKs)
 
-**pgmq messages:** Cannot be purged per-shop (documented limitation). Messages for deleted shops are safely ignored by the drain processor.
+---
+
+## Data Retention After Deletion — Known Limitations
+
+### pgmq Message Queue and Dead-Letter Cleanup
+
+**Shop deletion removes queue messages:**
+
+`deleteShop` (`app/services/compliance/compliance.server.ts:88-178`) deletes the shop's messages from:
+- Live queues: `pgmq.q_s6_sync`, `pgmq.q_s6_bulk` (lines 132-139)
+- Archive tables: `pgmq.a_s6_sync`, `pgmq.a_s6_bulk` (lines 140-147)
+- Dead-letter queue: `s6_dead_letter` (lines 152-155)
+
+All deletes match `message->>'shop' = shopDomain` and run in a single transaction.
+
+The legacy `purgePgmqMessages` function (`compliance.server.ts:200-211`) is now a no-op kept for backward compatibility; `deleteShop` handles the pgmq cleanup.
+
+**In-flight message edge case:**
+
+pgmq visibility timeout (VT) is not a row lock. When a drain worker holds a message under VT and `deleteShop` runs, `deleteShop` deletes the message row from the queue table (see in-code comment at `compliance.server.ts:123-126`). The test at `app/__tests__/integration/shop-redact-complete-db.test.ts` (the in-flight case, line 666) confirms this behavior.
+
+When the worker finishes:
+- If the handler succeeds, its `pgmq.archive()` or `pgmq.delete()` on the now-missing `msg_id` returns `false` without throwing — this is safe.
+- If the handler fails with `retryable: false` (e.g., `no_session` because sessions were deleted), it dead-letters immediately on the first read (`processor.server.ts:1062-1063`). The worker's in-memory copy gets dead-lettered by `moveToDeadLetter` (`processor.server.ts:974-997`), which INSERTs into `s6_dead_letter` **before** calling `pgmq.delete`. This writes the shop's message back after the redact.
+- If the handler fails without `retryable: false` (e.g., `shop_not_found`), the message is dead-lettered only if that read had already reached `maxRetries`; otherwise it's left for retry, and because `deleteShop` removed its queue row, it never comes back.
+
+This leak is tracked in [#239](https://github.com/raghavkhanna268/net-terms-receivables/issues/239), which fixes it by reversing the order (delete from queue first, then insert into dead-letter).
+
+**Dead-letter retention:**
+
+The weekly `s10_dlq_cleanup_weekly` cron job (`prisma/migrations/20261024010000_s10_drain_cron/migration.sql:176-180`) deletes dead-letter rows older than 30 days. Combined with the weekly schedule, leftover failed jobs are purged up to about 37 days after they dead-lettered.
+
+**Sync handlers with shop lookup:**
+
+Handlers that perform shop lookup return an error if the Shop row is missing:
+- `app/services/sync/customer.server.ts:85-95` — returns `{ success: false, error: "Shop not found: {domain}" }`
+- `app/services/sync/order.server.ts:84-91` — returns `{ success: false, error: "shop_not_found", errorCode: "shop_not_found" }`
+
+### Supabase Database Backups
+
+Supabase-managed database backups may retain deleted data for the provider's backup retention window:
+- Pro Plan: 7 days of daily backups
+- Team Plan: 14 days of daily backups
+- Enterprise Plan: up to 30 days of daily backups
+
+See [Supabase Backups documentation](https://supabase.com/docs/guides/platform/backups).
+
+### Shopify App-Owned Metafields
+
+The app's `credit_status` metafield (namespace `$app`, key `credit_status`) on Shopify Company records is not explicitly cleared by the app on uninstall or shop/redact.
+
+Per [Shopify metafield documentation](https://shopify.dev/docs/apps/build/metafields/definitions):
+> "When a user uninstalls your app, Shopify deletes its app-owned metafield definitions and temporarily retains the metafields and their values without a definition. This applies to any app-owned definition, whether declared in `shopify.app.toml` or created with the GraphQL Admin API. Cleanup of the retained data runs asynchronously."
+
+**Impact:** Uninstalling the app removes the app's Shopify Functions (payment customization, checkout validation), so the `credit_status` metafield value cannot affect checkout behaviour even if it persists temporarily before Shopify's asynchronous cleanup removes it.
+
+### Sentry Error Events — Data Scrubbing
+
+When Sentry is enabled, error events are scrubbed by `beforeSend` and `beforeSendTransaction` hooks (`app/lib/sentry.ts:140-150`) before transmission:
+
+**Removed entirely:**
+- `request.headers`, `request.cookies`, `request.query_string`, `request.data` (lines 85-95)
+- `event.breadcrumbs` (line 115)
+
+**Transformed:**
+- `request.url` — query string stripped (lines 89-92)
+- `exception.value` — replaced with error code via `toErrorCode` (lines 99-106)
+- `event.message` — redacted via `redactString` (lines 110-112)
+
+**Scrubbed to allowlist:**
+- `event.extra`, `event.tags`, `event.contexts` — only keys in `ALLOWED_SENTRY_KEYS` (lines 37-46) are retained: `shopId`, `code`, `requestId`, `webhookId`, `jobId`, `topic`, `status`, `errorCode`
+
+**Disabled via `dataCollection` config (lines 19-31):**
+- `userInfo`, `cookies`, `httpHeaders`, `httpBodies`, `urlQueryParams`, `graphQL`, `genAI`, `databaseQueryData`, `queues`, `stackFrameVariables`, `frameContextLines`
 
 ---
 
