@@ -150,6 +150,25 @@ describe("App Bridge script positioning", () => {
       expect(firstScriptMatch![0]).toContain("app-bridge.js");
     });
 
+    it("/app renders exactly ONE app-bridge.js script tag in head", async () => {
+      mockReactRouter("/app", true);
+
+      const { default: App } = await import("../../root");
+      const html = renderToString(createElement(App));
+
+      const appBridgeMatches = html.match(/shopifycloud\/app-bridge\.js/g);
+      expect(appBridgeMatches).not.toBeNull();
+      expect(appBridgeMatches!.length).toBe(1);
+
+      const headMatch = html.match(/<head[^>]*>([\s\S]*?)<\/head>/);
+      expect(headMatch).not.toBeNull();
+      expect(headMatch![1]).toContain("app-bridge.js");
+
+      const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/);
+      expect(bodyMatch).not.toBeNull();
+      expect(bodyMatch![1]).not.toContain("app-bridge.js");
+    });
+
     it("/app/accounts renders app-bridge.js", async () => {
       mockReactRouter("/app/accounts", true);
 

@@ -6,10 +6,11 @@
  * - Payload never contains shop domain, query strings, id, or version
  * - registerWebVitalsReporter is a no-op when shopify.webVitals is missing
  * - Value rounding is correct (CLS 4 decimals, others integer)
+ * - Debug logging logs only name and value
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { filterMetrics, registerWebVitalsReporter } from "../web-vitals.client";
+import { filterMetrics, registerWebVitalsReporter, isDebugEnabled, debugLogMetric } from "../web-vitals.client";
 
 describe("filterMetrics", () => {
   it("filters to LCP, CLS, INP only", () => {
@@ -254,5 +255,157 @@ describe("value bounds", () => {
     const result = filterMetrics(metrics, "/app");
 
     expect(result!.metrics[0].value).toBe(0.0001);
+  });
+});
+
+describe("debug logging", () => {
+  const originalWindow = global.window;
+  const originalLocalStorage = global.localStorage;
+
+  beforeEach(() => {
+    // @ts-expect-error - Mocking window
+    global.window = { location: { pathname: "/app" } };
+  });
+
+  afterEach(() => {
+    global.window = originalWindow;
+    global.localStorage = originalLocalStorage;
+    vi.restoreAllMocks();
+  });
+
+  describe("isDebugEnabled", () => {
+    it("returns false when window is undefined (SSR)", () => {
+      // @ts-expect-error - Simulating SSR
+      delete global.window;
+
+      expect(isDebugEnabled()).toBe(false);
+    });
+
+    it("returns false when localStorage is undefined", () => {
+      // @ts-expect-error - No localStorage
+      global.localStorage = undefined;
+
+      expect(isDebugEnabled()).toBe(false);
+    });
+
+    it("returns false when debug flag is not set", () => {
+      // @ts-expect-error - Mocking localStorage
+      global.localStorage = {
+        getItem: vi.fn().mockReturnValue(null),
+      };
+
+      expect(isDebugEnabled()).toBe(false);
+    });
+
+    it("returns false when debug flag is not '1'", () => {
+      // @ts-expect-error - Mocking localStorage
+      global.localStorage = {
+        getItem: vi.fn().mockReturnValue("true"),
+      };
+
+      expect(isDebugEnabled()).toBe(false);
+    });
+
+    it("returns true when debug flag is '1'", () => {
+      // @ts-expect-error - Mocking localStorage
+      global.localStorage = {
+        getItem: vi.fn().mockReturnValue("1"),
+      };
+
+      expect(isDebugEnabled()).toBe(true);
+    });
+
+    it("returns false when localStorage.getItem throws", () => {
+      // @ts-expect-error - Mocking localStorage
+      global.localStorage = {
+        getItem: vi.fn().mockImplementation(() => {
+          throw new Error("Access denied");
+        }),
+      };
+
+      expect(isDebugEnabled()).toBe(false);
+    });
+  });
+
+  describe("debugLogMetric", () => {
+    it("logs metricName and metricValue when debug is enabled", () => {
+      // @ts-expect-error - Mocking localStorage
+      global.localStorage = {
+        getItem: vi.fn().mockReturnValue("1"),
+      };
+      const consoleSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+
+      debugLogMetric("LCP", 2500);
+
+      expect(consoleSpy).toHaveBeenCalledTimes(1);
+      expect(consoleSpy).toHaveBeenCalledWith("[web-vitals]", "LCP", 2500);
+    });
+
+    it("logs only metricName and metricValue - no other arguments", () => {
+      // @ts-expect-error - Mocking localStorage
+      global.localStorage = {
+        getItem: vi.fn().mockReturnValue("1"),
+      };
+      const consoleSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+
+      debugLogMetric("CLS", 0.05);
+
+      expect(consoleSpy).toHaveBeenCalledTimes(1);
+      const callArgs = consoleSpy.mock.calls[0];
+      expect(callArgs).toHaveLength(3);
+      expect(callArgs[0]).toBe("[web-vitals]");
+      expect(callArgs[1]).toBe("CLS");
+      expect(callArgs[2]).toBe(0.05);
+    });
+
+    it("does not log when debug is disabled", () => {
+      // @ts-expect-error - Mocking localStorage
+      global.localStorage = {
+        getItem: vi.fn().mockReturnValue(null),
+      };
+      const consoleSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+
+      debugLogMetric("INP", 100);
+
+      expect(consoleSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("filterMetrics with debug logging", () => {
+    it("logs metrics when debug is enabled", () => {
+      // @ts-expect-error - Mocking localStorage
+      global.localStorage = {
+        getItem: vi.fn().mockReturnValue("1"),
+      };
+      const consoleSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+
+      const metrics = [
+        { id: "v1-1", name: "LCP" as const, value: 2500 },
+        { id: "v1-2", name: "CLS" as const, value: 0.05 },
+      ];
+
+      filterMetrics(metrics, "/app");
+
+      expect(consoleSpy).toHaveBeenCalledTimes(2);
+      expect(consoleSpy).toHaveBeenCalledWith("[web-vitals]", "LCP", 2500);
+      expect(consoleSpy).toHaveBeenCalledWith("[web-vitals]", "CLS", 0.05);
+    });
+
+    it("does not log non-allowed metrics even with debug enabled", () => {
+      // @ts-expect-error - Mocking localStorage
+      global.localStorage = {
+        getItem: vi.fn().mockReturnValue("1"),
+      };
+      const consoleSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+
+      const metrics = [
+        { id: "v1-1", name: "FCP" as const, value: 1000 },
+        { id: "v1-2", name: "TTFB" as const, value: 200 },
+      ];
+
+      filterMetrics(metrics, "/app");
+
+      expect(consoleSpy).not.toHaveBeenCalled();
+    });
   });
 });

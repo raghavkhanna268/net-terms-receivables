@@ -53,8 +53,9 @@ import {
 import {
   startReconcileBulkOperation,
   incrementOrderRefetchNull,
-  enqueueReconcileOrders,
+  enqueueReconcileStage,
   getManualKeyForBulkOp,
+  type StartReconcileResult,
 } from "./reconcile-handlers.server";
 import { toErrorCode, safeLog, shopHash } from "~/lib/log.server";
 import {
@@ -735,23 +736,17 @@ registerSyncHandler("DRAFT_ORDERS_DELETE", handleDraftOrder);
  * Handler for BULK_OPERATIONS_FINISH topic.
  * Downloads JSONL in chunks using HTTP Range and processes via S6 services.
  *
- * For reconcile operations (companies bulk type):
- * - When companies reconcile completes, enqueue RECONCILE_ORDERS
- * - This ensures companies exist before order-to-account mapping
- * - Uses chainToOrders flag from result (based on origin/stage in s6_bulk_operations)
+ * For reconcile operations:
+ * - Chains to the next stage in sequence: companies → customers → orders
+ * - Uses nextStage from result (based on origin/stage in s6_bulk_operations)
+ * - Manual key is propagated from the original stage's webhookId
  */
 async function handleBulkOperationsFinish(sql: Sql, message: BulkMessage): Promise<BulkProcessResult> {
   const result = await processBulkOperation(sql, message);
 
-  // If companies reconcile completed successfully, chain to orders reconcile
-  // The chainToOrders flag is set based on origin='reconcile' and reconcile_stage='companies'
-  // from the s6_bulk_operations row, not from webhookId
-  if (result.chainToOrders) {
-    // Look up the manualKey from the original RECONCILE_COMPANIES webhookId
-    // For manual runs, this ensures orders uses the same key base (not the date key)
-    // Shop is passed to scope the lookup and prevent cross-shop matches
+  if (result.nextStage) {
     const manualKey = await getManualKeyForBulkOp(sql, message.bulkOperationId, message.shop);
-    await enqueueReconcileOrders(sql, message.shop, manualKey);
+    await enqueueReconcileStage(sql, message.shop, result.nextStage, manualKey);
   }
 
   return result;
@@ -781,6 +776,33 @@ async function handleReconcileCompanies(sql: Sql, message: SyncMessage): Promise
 }
 
 /**
+ * Handler for RECONCILE_CUSTOMERS topic.
+ * Starts a bulk customers export for the shop (filtered by tag rules).
+ *
+ * If the shop has no tag rules, the stage is skipped and the next stage
+ * (orders) is enqueued immediately.
+ */
+async function handleReconcileCustomers(sql: Sql, message: SyncMessage): Promise<SyncResult> {
+  if (await isWebhookProcessed(sql, message.webhookId, message.shop)) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Reconcile already processed (idempotent)",
+    };
+  }
+
+  const result = await startReconcileBulkOperation(sql, message.shop, "customers", message.webhookId) as StartReconcileResult;
+
+  if (result.skipped) {
+    const manualKey = message.manualKey;
+    await enqueueReconcileStage(sql, message.shop, "orders", manualKey);
+    await markWebhookProcessed(sql, message.webhookId, "RECONCILE_CUSTOMERS", "skipped", message.shop);
+  }
+
+  return result;
+}
+
+/**
  * Handler for RECONCILE_ORDERS topic.
  * Starts a bulk orders export for the shop.
  */
@@ -798,6 +820,7 @@ async function handleReconcileOrders(sql: Sql, message: SyncMessage): Promise<Sy
 
 // Register RECONCILE_* handlers
 registerSyncHandler("RECONCILE_COMPANIES", handleReconcileCompanies);
+registerSyncHandler("RECONCILE_CUSTOMERS", handleReconcileCustomers);
 registerSyncHandler("RECONCILE_ORDERS", handleReconcileOrders);
 
 // =============================================================================
