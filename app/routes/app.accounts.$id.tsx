@@ -28,6 +28,7 @@ import { useLoaderData, useActionData, Form, useNavigation } from "react-router"
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { isAccountActive, isGatingEnforced } from "~/services/gating.server";
+import { recordAccess, getActorFromSession } from "~/services/access-log.server";
 import {
   getBuyerOptOutStatus,
   setBuyerOptOut,
@@ -326,6 +327,14 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
         optOutSource: optOutStatus.optOutSource,
       }
     : null;
+
+  recordAccess(sql, {
+    shopId: shop.id,
+    actor: getActorFromSession(session),
+    action: "accounts_detail",
+    recordType: "BuyerAccount",
+    recordId: accountId,
+  });
 
   return {
     account,

@@ -5,6 +5,7 @@ import {
   getDataRequestExport,
   markDataRequestDownloaded,
 } from "~/services/compliance";
+import { recordAccess, getActorFromSession } from "~/services/access-log.server";
 
 /**
  * S22 Resource route for downloading data request exports.
@@ -53,6 +54,14 @@ export const loader = async ({ request, params, context }: LoaderFunctionArgs) =
       headers: { "Content-Type": "application/json" },
     });
   }
+
+  recordAccess(sql, {
+    shopId: shop.id,
+    actor: getActorFromSession(session),
+    action: "data_requests_download",
+    recordType: "DataRequest",
+    recordId: requestId,
+  });
 
   await markDataRequestDownloaded(sql, shop.id, requestId);
 

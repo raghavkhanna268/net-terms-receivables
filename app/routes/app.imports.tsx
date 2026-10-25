@@ -27,6 +27,7 @@ import { generateDedupeKey, isValidUtrForRail } from "~/lib/banks/dedupe";
 import type { PaymentRail } from "~/lib/banks/types";
 import { checkImportLimit, enforceImportLimit, UpgradeRequiredError } from "~/services/gating.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
+import { recordAccess, getActorFromSession } from "~/services/access-log.server";
 
 /**
  * Maximum rows per import request.
@@ -262,6 +263,14 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   // Get import usage for the current month (IST calendar month)
   const importCheck = await checkImportLimit(sql, shop.id);
+
+  recordAccess(sql, {
+    shopId: shop.id,
+    actor: getActorFromSession(session),
+    action: "imports",
+    recordType: "BankImport",
+    count: importCheck.currentUsage,
+  });
 
   return {
     shopDomain,

@@ -23,6 +23,7 @@ import {
 import type { Sql } from "~/lib/db-light.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { buildOverLimitBannerState } from "~/lib/over-limit-banner";
+import { recordAccess, getActorFromSession } from "~/services/access-log.server";
 
 const PAGE_SIZE = 20;
 
@@ -316,6 +317,16 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   const storeHandle = shopDomain.replace(".myshopify.com", "");
   const gatingEnforced = isGatingEnforced();
+
+  if (shop) {
+    recordAccess(sql, {
+      shopId: shop.id,
+      actor: getActorFromSession(session),
+      action: "dashboard",
+      recordType: "BuyerAccount",
+      count: buyerLedger?.totalCount ?? 0,
+    });
+  }
 
   return {
     shopName: storeHandle,

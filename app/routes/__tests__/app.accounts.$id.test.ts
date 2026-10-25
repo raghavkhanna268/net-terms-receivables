@@ -19,6 +19,7 @@ const mockSql = Object.assign(vi.fn(), {
 
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
+  getRequestWaitUntil: vi.fn(() => undefined),
 }));
 
 vi.mock("~/services/gating.server", () => ({

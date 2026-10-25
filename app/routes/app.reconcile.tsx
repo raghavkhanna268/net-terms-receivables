@@ -36,6 +36,7 @@ import {
 import { applyMatch, unmatchMatch, RECONCILE_HUMAN_MESSAGES } from "~/services/apply.server";
 import { formatPaiseAmount } from "~/lib/aging";
 import { safeLog, toErrorCode } from "~/lib/log.server";
+import { recordAccess, getActorFromSession } from "~/services/access-log.server";
 
 const PAGE_SIZE = 20;
 
@@ -316,6 +317,14 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       tabCounts,
     };
   }
+
+  recordAccess(sql, {
+    shopId: shop.id,
+    actor: getActorFromSession(session),
+    action: "reconcile",
+    recordType: "Payment",
+    count: totalCount,
+  });
 
   return {
     shopCurrency: shop.currency,
