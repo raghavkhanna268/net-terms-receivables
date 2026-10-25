@@ -17,7 +17,7 @@ Track B2B net-terms invoices, manage credit limits and holds, match Indian bank 
 
 ## App Details
 
-<!-- 490 characters -->
+<!-- 488 characters -->
 Net Terms Receivables helps Indian wholesale merchants track outstanding invoices, enforce credit limits, and reconcile bank payments — without spreadsheets. Sync buyer accounts from Shopify B2B Companies or tagged Customers. Track open invoices by aging bucket. Set credit limits and manual holds per buyer. Block checkout or hide payment methods for held accounts. Import Indian bank statements and confirm matches to mark orders paid. Send payment reminders before and after due dates.
 
 **This app does not lend money, provide financing, or purchase/factor receivables.** It helps merchants track payment terms they extend themselves (App Store requirement 1.1.16).
@@ -27,12 +27,12 @@ Net Terms Receivables helps Indian wholesale merchants track outstanding invoice
 ## Feature List
 
 <!-- Each feature ≤80 characters -->
-- Sync buyer accounts from B2B Companies or tagged Customers <!-- 57 chars -->
+- Sync buyer accounts from B2B Companies or tagged Customers <!-- 58 chars -->
 - Track invoices with aging buckets (current through 90+ days) <!-- 60 chars -->
-- Set credit limits and manual holds per buyer <!-- 45 chars -->
+- Set credit limits and manual holds per buyer <!-- 44 chars -->
 - Block checkout when accounts are on hold or over limit <!-- 54 chars -->
 - Hide payment methods for held accounts at checkout <!-- 50 chars -->
-- Import HDFC, ICICI, SBI, Axis bank statements (browser-side) <!-- 61 chars -->
+- Import HDFC, ICICI, SBI, Axis bank statements (browser-side) <!-- 60 chars -->
 - Match payments to invoices; confirm to mark orders paid <!-- 55 chars -->
 - Send payment reminders before and after due dates <!-- 49 chars -->
 
@@ -145,7 +145,7 @@ Write scopes imply read access per [Shopify Access Scopes](https://shopify.dev/d
 |-------|---------|
 | `write_companies` | View and update B2B companies and locations for buyer account sync and credit status |
 | `write_customers` | View and update customers for net-terms eligibility and credit status |
-| `write_merchant_managed_fulfillment_orders` | Place fulfillment holds on orders from accounts that are overdue or on credit hold |
+| `write_merchant_managed_fulfillment_orders` | Place fulfillment holds on orders from accounts on credit hold |
 | `write_orders` | View orders for invoice tracking, mark as paid after bank payment matching, and add status tags |
 | `write_payment_customizations` | Configure payment method visibility based on account status |
 | `write_validations` | Configure checkout validation to enforce credit limits and holds |
@@ -162,13 +162,13 @@ The app accesses **Level 1 + Name + Email** protected customer fields.
 | `displayName` | Yes | Display in buyer ledger; payment matching |
 | Phone, addresses | **No** | Not requested, blocked in code |
 
-Only `email` and `displayName` are persisted (controlled by `CUSTOMER_PII_FIELDS` env var). Phone and address fields are explicitly forbidden and rejected by `validateNoForbiddenFields()`.
+`email` and `displayName` are fetched and stored only when `CUSTOMER_PII_FIELDS=1`. Phone and address fields are explicitly forbidden and rejected by `validateNoForbiddenFields()`.
 
 ### What the App Writes to Shopify
 
 - **Metafields** (`$app:credit_status`): Credit limit, exposure, hold state synced to Company/CompanyLocation/Customer for use by Shopify Functions.
-- **Fulfillment holds**: Places/releases holds on merchant-managed fulfillment orders.
-- **Order mutations**: `orderMarkAsPaid` after confirmed bank matches; `tagsAdd`/`tagsRemove` for overdue or hold tags.
+- **Fulfillment holds**: Places holds on merchant-managed fulfillment orders from held accounts (`app/services/backstop.server.ts:45`).
+- **Order mutations**: `orderMarkAsPaid` after confirmed bank matches; `tagsAdd` for credit-hold tag (`ntr-credit-hold`).
 - **Function registrations**: Creates/updates the Cart Validation and Payment Customization Functions.
 
 ---
