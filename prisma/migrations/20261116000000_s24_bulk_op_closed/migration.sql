@@ -15,11 +15,29 @@ ALTER TABLE s6_bulk_operations
   ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ NULL,
   ADD COLUMN IF NOT EXISTS closed_reason TEXT NULL;
 
-ALTER TABLE s6_bulk_operations
-  ADD CONSTRAINT s6_bulk_operations_closed_reason_check
-    CHECK (closed_reason IS NULL OR closed_reason IN ('reinstall_reset')),
-  ADD CONSTRAINT s6_bulk_operations_closed_pair_check
-    CHECK ((closed_at IS NULL) = (closed_reason IS NULL));
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 's6_bulk_operations_closed_reason_check'
+      AND conrelid = 's6_bulk_operations'::regclass
+  ) THEN
+    ALTER TABLE s6_bulk_operations
+      ADD CONSTRAINT s6_bulk_operations_closed_reason_check
+        CHECK (closed_reason IS NULL OR closed_reason IN ('reinstall_reset'));
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 's6_bulk_operations_closed_pair_check'
+      AND conrelid = 's6_bulk_operations'::regclass
+  ) THEN
+    ALTER TABLE s6_bulk_operations
+      ADD CONSTRAINT s6_bulk_operations_closed_pair_check
+        CHECK ((closed_at IS NULL) = (closed_reason IS NULL));
+  END IF;
+END $$;
 
 COMMENT ON COLUMN s6_bulk_operations.closed_at IS 'When the operation was closed. NULL means open.';
 COMMENT ON COLUMN s6_bulk_operations.closed_reason IS 'Why the operation was closed. Currently only reinstall_reset.';
