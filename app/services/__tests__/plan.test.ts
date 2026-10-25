@@ -37,6 +37,13 @@ import {
   getPlanByShopId,
   _resetInFlightRefreshesForTesting,
   _isRefreshInFlight,
+  getPlanSource,
+  AdminInstallationPlanSource,
+  PartnerApiPlanSource,
+  _getAdminSourceForTesting,
+  _getPartnerSourceForTesting,
+  type PlanSource,
+  type SourceResolvedPlan,
 } from "../plan.server";
 
 const adminGraphQL = _adminGraphQL as ReturnType<typeof vi.fn>;
@@ -992,6 +999,358 @@ describe("Plan Resolution Service", () => {
       
       // Refresh should now be completed
       expect(refreshCompleted).toBe(true);
+    });
+  });
+});
+
+// =============================================================================
+// PlanSource Interface Tests (S24)
+// =============================================================================
+
+describe("PlanSource Interface", () => {
+  const TEST_SHOP = "test-shop-interface.myshopify.com";
+  const TEST_SHOP_ID = "shop-interface-123";
+
+  let mockSql: ReturnType<typeof createMockSql>;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockSql = createMockSql();
+    _resetInFlightRefreshesForTesting();
+  });
+
+  afterEach(() => {
+    vi.resetAllMocks();
+  });
+
+  describe("getPlanSource selector", () => {
+    it("always returns AdminInstallationPlanSource", () => {
+      const source = getPlanSource();
+      expect(source).toBeInstanceOf(AdminInstallationPlanSource);
+    });
+
+    it("returns the same instance on multiple calls", () => {
+      const source1 = getPlanSource();
+      const source2 = getPlanSource();
+      expect(source1).toBe(source2);
+    });
+  });
+
+  describe("AdminInstallationPlanSource", () => {
+    it("implements PlanSource interface", () => {
+      const source = _getAdminSourceForTesting();
+      expect(typeof source.resolveActivePlan).toBe("function");
+    });
+
+    it("resolveActivePlan returns SourceResolvedPlan with admin_installation tag", async () => {
+      const source = _getAdminSourceForTesting();
+
+      mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+
+      const freshCacheTime = new Date(Date.now() - 60 * 60 * 1000);
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "starter",
+        subscription_id: "gid://shopify/AppSubscription/123",
+        subscription_name: "Starter",
+        is_test: false,
+        plan_cached_at: freshCacheTime,
+      }]);
+
+      const result = await source.resolveActivePlan({
+        sql: mockSql as unknown as Sql,
+        shopDomain: TEST_SHOP,
+      });
+
+      expect(result.sourceTag).toBe("admin_installation");
+      expect(result.planKey).toBe("starter");
+      expect(result.plan.key).toBe("starter");
+      expect(result.subscriptionId).toBe("gid://shopify/AppSubscription/123");
+      expect(result.fromCache).toBe(true);
+    });
+
+    it("resolveActivePlan returns active status when subscription exists", async () => {
+      const source = _getAdminSourceForTesting();
+
+      mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+
+      const freshCacheTime = new Date(Date.now() - 60 * 60 * 1000);
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "growth",
+        subscription_id: "gid://shopify/AppSubscription/456",
+        subscription_name: "Growth",
+        is_test: false,
+        plan_cached_at: freshCacheTime,
+      }]);
+
+      const result = await source.resolveActivePlan({
+        sql: mockSql as unknown as Sql,
+        shopDomain: TEST_SHOP,
+      });
+
+      expect(result.status).toBe("active");
+    });
+
+    it("resolveActivePlan returns unknown status when no subscription", async () => {
+      const source = _getAdminSourceForTesting();
+
+      mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: null,
+        subscription_id: null,
+        subscription_name: null,
+        is_test: null,
+        plan_cached_at: null,
+      }]);
+
+      adminGraphQL.mockResolvedValueOnce({
+        success: true,
+        data: {
+          currentAppInstallation: {
+            activeSubscriptions: [],
+          },
+        },
+      });
+
+      const result = await source.resolveActivePlan({
+        sql: mockSql as unknown as Sql,
+        shopDomain: TEST_SHOP,
+        forceRefresh: true,
+      });
+
+      expect(result.status).toBe("unknown");
+      expect(result.planKey).toBe("free");
+    });
+
+    it("resolveActivePlan passes forceRefresh to underlying resolvePlan", async () => {
+      const source = _getAdminSourceForTesting();
+
+      mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+
+      const freshCacheTime = new Date(Date.now() - 60 * 60 * 1000);
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "starter",
+        subscription_id: "gid://shopify/AppSubscription/123",
+        subscription_name: "Starter",
+        is_test: false,
+        plan_cached_at: freshCacheTime,
+      }]);
+
+      adminGraphQL.mockResolvedValueOnce({
+        success: true,
+        data: {
+          currentAppInstallation: {
+            activeSubscriptions: [{
+              id: "gid://shopify/AppSubscription/789",
+              name: "Growth",
+              status: "ACTIVE",
+              test: false,
+              lineItems: [],
+            }],
+          },
+        },
+      });
+
+      const result = await source.resolveActivePlan({
+        sql: mockSql as unknown as Sql,
+        shopDomain: TEST_SHOP,
+        forceRefresh: true,
+      });
+
+      expect(adminGraphQL).toHaveBeenCalled();
+      expect(result.planKey).toBe("growth");
+      expect(result.fromCache).toBe(false);
+    });
+
+    it("resolveActivePlan preserves isTest flag", async () => {
+      const source = _getAdminSourceForTesting();
+
+      mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+
+      const freshCacheTime = new Date(Date.now() - 60 * 60 * 1000);
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "scale",
+        subscription_id: "gid://shopify/AppSubscription/test-123",
+        subscription_name: "Scale",
+        is_test: true,
+        plan_cached_at: freshCacheTime,
+      }]);
+
+      const result = await source.resolveActivePlan({
+        sql: mockSql as unknown as Sql,
+        shopDomain: TEST_SHOP,
+      });
+
+      expect(result.isTest).toBe(true);
+    });
+  });
+
+  describe("PartnerApiPlanSource (stub)", () => {
+    it("implements PlanSource interface", () => {
+      const source = _getPartnerSourceForTesting();
+      expect(typeof source.resolveActivePlan).toBe("function");
+      expect(typeof source.onPlanRedirect).toBe("function");
+    });
+
+    it("resolveActivePlan throws Error and makes no network calls", async () => {
+      const source = _getPartnerSourceForTesting();
+
+      await expect(source.resolveActivePlan({
+        sql: mockSql as unknown as Sql,
+        shopDomain: TEST_SHOP,
+      })).rejects.toThrow("PartnerApiPlanSource is not configured");
+
+      expect(adminGraphQL).not.toHaveBeenCalled();
+    });
+
+    it("onPlanRedirect returns null (stub behavior)", () => {
+      const source = _getPartnerSourceForTesting();
+
+      const result = source.onPlanRedirect("growth_monthly");
+      expect(result).toBeNull();
+    });
+
+    it("onPlanRedirect makes no network calls", () => {
+      const source = _getPartnerSourceForTesting();
+
+      source.onPlanRedirect("any_handle");
+
+      expect(adminGraphQL).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("PlanSource interface contract", () => {
+    it("all sources satisfy the PlanSource interface", () => {
+      const adminSource: PlanSource = _getAdminSourceForTesting();
+      const partnerSource: PlanSource = _getPartnerSourceForTesting();
+
+      expect(adminSource).toBeDefined();
+      expect(partnerSource).toBeDefined();
+
+      expect(typeof adminSource.resolveActivePlan).toBe("function");
+      expect(typeof partnerSource.resolveActivePlan).toBe("function");
+    });
+
+    it("SourceResolvedPlan has required fields", async () => {
+      const source = _getAdminSourceForTesting();
+
+      mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "free",
+        subscription_id: null,
+        subscription_name: null,
+        is_test: false,
+        plan_cached_at: new Date(),
+      }]);
+
+      const result: SourceResolvedPlan = await source.resolveActivePlan({
+        sql: mockSql as unknown as Sql,
+        shopDomain: TEST_SHOP,
+      });
+
+      expect(result).toHaveProperty("plan");
+      expect(result).toHaveProperty("planKey");
+      expect(result).toHaveProperty("subscriptionId");
+      expect(result).toHaveProperty("subscriptionName");
+      expect(result).toHaveProperty("isTest");
+      expect(result).toHaveProperty("fromCache");
+      expect(result).toHaveProperty("sourceTag");
+      expect(result).toHaveProperty("status");
+    });
+
+    it("sourceTag is one of the valid values", async () => {
+      const adminSource = _getAdminSourceForTesting();
+
+      mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "starter",
+        subscription_id: "gid://shopify/AppSubscription/123",
+        subscription_name: "Starter",
+        is_test: false,
+        plan_cached_at: new Date(),
+      }]);
+
+      const result = await adminSource.resolveActivePlan({
+        sql: mockSql as unknown as Sql,
+        shopDomain: TEST_SHOP,
+      });
+
+      const validTags = ["admin_installation", "partner_api", "not_configured"];
+      expect(validTags).toContain(result.sourceTag);
+    });
+  });
+
+  describe("AdminInstallationPlanSource matches existing resolvePlan behavior", () => {
+    it("returns same plan as direct resolvePlan call", async () => {
+      const source = _getAdminSourceForTesting();
+
+      mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+
+      const freshCacheTime = new Date(Date.now() - 60 * 60 * 1000);
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "growth",
+        subscription_id: "gid://shopify/AppSubscription/456",
+        subscription_name: "Growth",
+        is_test: false,
+        plan_cached_at: freshCacheTime,
+      }]);
+
+      const sourceResult = await source.resolveActivePlan({
+        sql: mockSql as unknown as Sql,
+        shopDomain: TEST_SHOP,
+      });
+
+      const directResult = await resolvePlan(mockSql as unknown as Sql, TEST_SHOP);
+
+      expect(sourceResult.plan.key).toBe(directResult.plan.key);
+      expect(sourceResult.subscriptionId).toBe(directResult.subscriptionId);
+      expect(sourceResult.subscriptionName).toBe(directResult.subscriptionName);
+      expect(sourceResult.isTest).toBe(directResult.isTest);
+      expect(sourceResult.fromCache).toBe(directResult.fromCache);
+    });
+
+    it("handles shop not found same as resolvePlan", async () => {
+      const source = _getAdminSourceForTesting();
+
+      mockSql.setMockResult("shop_id", []);
+
+      const sourceResult = await source.resolveActivePlan({
+        sql: mockSql as unknown as Sql,
+        shopDomain: "fake-nonexistent.myshopify.com",
+      });
+
+      expect(sourceResult.planKey).toBe("free");
+      expect(sourceResult.fromCache).toBe(false);
+    });
+
+    it("handles API errors same as resolvePlan (fail-to-cached)", async () => {
+      const source = _getAdminSourceForTesting();
+
+      mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+
+      const cachedTime = new Date(Date.now() - 60 * 60 * 1000);
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "starter",
+        subscription_id: "sub-123",
+        subscription_name: "Starter",
+        is_test: false,
+        plan_cached_at: cachedTime,
+      }]);
+
+      adminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "Network error",
+        retryable: true,
+      });
+
+      const sourceResult = await source.resolveActivePlan({
+        sql: mockSql as unknown as Sql,
+        shopDomain: TEST_SHOP,
+        forceRefresh: true,
+      });
+
+      expect(sourceResult.planKey).toBe("starter");
+      expect(sourceResult.fromCache).toBe(true);
+      expect(sourceResult.sourceTag).toBe("admin_installation");
     });
   });
 });

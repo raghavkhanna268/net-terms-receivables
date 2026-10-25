@@ -1,5 +1,5 @@
 /**
- * Plan resolution service for S21.
+ * Plan resolution service for S21/S24.
  *
  * IMPORTANT: These limits are the PRICING HYPOTHESIS from the tracker
  * and are NOT final. Raghav decides final tier limits and pricing via
@@ -10,12 +10,18 @@
  * 2. Caches the result in Postgres with ~6h TTL
  * 3. Provides getPlan(), hasFeature(), and limit() helpers
  *
+ * S24 Refactor: Plan resolution is now behind the PlanSource interface,
+ * allowing future integration with Shopify App Pricing via Partner API
+ * without changing callers.
+ *
  * Design decisions:
  * - Staleness never lowers tier: Always use last known plan, trigger background refresh
  * - Fail-to-cached: On error, use cached plan if one exists; only Free when no cache
  * - Never calls Shopify when cache is fresh (respects 10ms CPU budget)
  * - Cache refresh happens via APP_SUBSCRIPTIONS_UPDATE webhook
  * - Background refresh uses ctx.waitUntil() to avoid blocking requests
+ *
+ * @see plan-source.server.ts for the PlanSource interface
  */
 
 import type { Sql } from "~/lib/db-light.server";
@@ -34,6 +40,13 @@ import {
   planLimit,
 } from "~/lib/entitlements";
 import { adminGraphQL } from "./drain/admin-client.server";
+import type {
+  PlanSource,
+  PlanResolutionContext,
+  SourceResolvedPlan,
+  PlanSourceTag,
+  PlanStatus,
+} from "./plan-source.server";
 
 /**
  * Cache TTL in milliseconds (~6 hours).
@@ -559,3 +572,157 @@ export async function isTestSubscription(
   const resolved = await resolvePlan(sql, shopDomain);
   return resolved.isTest;
 }
+
+// =============================================================================
+// PlanSource Interface Implementations (S24)
+// =============================================================================
+
+/**
+ * AdminInstallationPlanSource - Resolves plans from Shopify Admin GraphQL.
+ *
+ * This is the production implementation that reads currentAppInstallation
+ * .activeSubscriptions from the Admin API. It wraps the existing plan
+ * resolution logic with the same queries, cache, TTL, fallbacks, and logs.
+ *
+ * Design:
+ * - Uses 6h cache TTL in Postgres
+ * - Staleness never lowers tier (returns cached plan, triggers background refresh)
+ * - Fail-to-cached: On error, use cached plan; only Free when no cache exists
+ * - Background refresh via ctx.waitUntil() to avoid blocking requests
+ */
+export class AdminInstallationPlanSource implements PlanSource {
+  /**
+   * Resolve the active plan for a shop from Admin GraphQL.
+   *
+   * This method wraps the existing resolvePlan() function, converting its
+   * result to the SourceResolvedPlan format with source metadata.
+   */
+  async resolveActivePlan(ctx: PlanResolutionContext): Promise<SourceResolvedPlan> {
+    const resolved = await resolvePlan(ctx.sql, ctx.shopDomain, ctx.forceRefresh);
+
+    const status = this.mapSubscriptionStatus(resolved);
+
+    return {
+      plan: resolved.plan,
+      planKey: resolved.plan.key as PlanKey,
+      subscriptionId: resolved.subscriptionId,
+      subscriptionName: resolved.subscriptionName,
+      isTest: resolved.isTest,
+      fromCache: resolved.fromCache,
+      sourceTag: "admin_installation" as PlanSourceTag,
+      status,
+    };
+  }
+
+  private mapSubscriptionStatus(resolved: ResolvedPlan): PlanStatus {
+    if (resolved.subscriptionId) {
+      return "active";
+    }
+    return "unknown";
+  }
+}
+
+/**
+ * PartnerApiPlanSource - STUB for future Shopify App Pricing integration.
+ *
+ * This source is NEVER SELECTED today. It exists to define the interface
+ * for future Partner API integration without touching callers.
+ *
+ * Design notes for future implementation:
+ * - Query Partner API's activeSubscription when cache is stale
+ * - Map plan_handle (from post-checkout redirect) to internal plan keys
+ * - Keep last known plan and safeLog a fixed code if Partner API unavailable
+ * - Eventual retirement of APP_SUBSCRIPTIONS_UPDATE webhook requires:
+ *   - QA's slot for testing
+ *   - TOML change to remove webhook subscription
+ *   - Blocked on Raghav's pricing decision and Partner API credentials
+ *
+ * @see https://shopify.dev/docs/apps/launch/billing/shopify-app-pricing
+ * @see https://shopify.dev/docs/apps/launch/billing/shopify-app-pricing/migrating-to-shopify-app-pricing
+ */
+export class PartnerApiPlanSource implements PlanSource {
+  /**
+   * STUB: Always returns not_configured status.
+   *
+   * This method makes NO network calls. It exists only to satisfy the
+   * PlanSource interface for future implementation.
+   *
+   * @throws Error if called (source should never be selected)
+   */
+  async resolveActivePlan(_ctx: PlanResolutionContext): Promise<SourceResolvedPlan> {
+    safeLog("error", "partner_api_source_not_configured", {});
+    throw new Error(
+      "PartnerApiPlanSource is not configured. " +
+      "This source should never be selected in the current implementation."
+    );
+  }
+
+  /**
+   * STUB: Map plan_handle from post-checkout redirect to internal plan key.
+   *
+   * Future implementation will:
+   * - Receive plan_handle query param from Shopify's post-checkout redirect
+   * - Map it to internal plan keys (free, starter, growth, scale)
+   * - Update the cached plan state
+   *
+   * @param _planHandle - The plan_handle from redirect (unused in stub)
+   * @returns null (stub always returns null)
+   */
+  onPlanRedirect(_planHandle: string): PlanKey | null {
+    safeLog("warn", "partner_api_redirect_not_configured", {});
+    return null;
+  }
+}
+
+// =============================================================================
+// PlanSource Selector (S24)
+// =============================================================================
+
+/**
+ * Singleton instances of plan sources.
+ * Created once and reused for all requests.
+ */
+const adminSource = new AdminInstallationPlanSource();
+const partnerSource = new PartnerApiPlanSource();
+
+/**
+ * Get the active PlanSource for plan resolution.
+ *
+ * Today, this ALWAYS returns AdminInstallationPlanSource.
+ * No env var, credential, wrangler secret, or config flag controls selection.
+ *
+ * Future Partner API integration will add selection logic here without
+ * changing callers of resolvePlan(), getPlan(), etc.
+ *
+ * @returns The active PlanSource instance
+ */
+export function getPlanSource(): PlanSource {
+  return adminSource;
+}
+
+/**
+ * Get the AdminInstallationPlanSource instance.
+ * Exported for testing purposes only.
+ * @internal
+ */
+export function _getAdminSourceForTesting(): AdminInstallationPlanSource {
+  return adminSource;
+}
+
+/**
+ * Get the PartnerApiPlanSource instance.
+ * Exported for testing purposes only.
+ * @internal
+ */
+export function _getPartnerSourceForTesting(): PartnerApiPlanSource {
+  return partnerSource;
+}
+
+// Re-export types from plan-source.server.ts for convenience
+export type {
+  PlanSource,
+  PlanResolutionContext,
+  SourceResolvedPlan,
+  PlanSourceTag,
+  PlanStatus,
+} from "./plan-source.server";
