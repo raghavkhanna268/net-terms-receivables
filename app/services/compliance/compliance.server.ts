@@ -1017,3 +1017,42 @@ export async function markShopUninstalled(
   `;
   return result.count > 0;
 }
+
+/**
+ * Result of purgeReceiptsAndProcessedWebhooks operation.
+ */
+export interface PurgeReceiptsResult {
+  processedWebhooksDeleted: number;
+  receiptsDeleted: number;
+}
+
+/**
+ * Purge receipt-linked processed webhooks and webhook receipts in one transaction.
+ *
+ * Used by app/uninstalled webhook to clean up S20/S22 edge-level idempotency data.
+ * Must be called in ONE transaction: the helper deletes processed webhooks via
+ * receipts join, then receipts are deleted. Order matters because the join
+ * references the receipts table.
+ *
+ * Note: Reconcile-prefix processed webhooks are NOT deleted on uninstall
+ * (only on shop/redact) in case the shop reinstalls within the 48h window.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopDomain - Shop domain
+ * @returns Counts of rows deleted
+ */
+export async function purgeReceiptsAndProcessedWebhooks(
+  sql: Sql,
+  shopDomain: string
+): Promise<PurgeReceiptsResult> {
+  return sql.begin(async (tx) => {
+    const pwCount = await deleteProcessedWebhooksViaReceipts(tx, shopDomain);
+    const rcptResult = await tx`
+      DELETE FROM webhook_receipts WHERE shop = ${shopDomain}
+    `;
+    return {
+      processedWebhooksDeleted: pwCount,
+      receiptsDeleted: rcptResult.count,
+    };
+  });
+}

@@ -6,7 +6,7 @@ import {
 import { getRequestSql } from "~/lib/request-context.server";
 import {
   markShopUninstalled,
-  deleteProcessedWebhooksViaReceipts,
+  purgeReceiptsAndProcessedWebhooks,
 } from "~/services/compliance";
 import { evictShopFromSetupCache } from "~/lib/after-auth.server";
 
@@ -31,7 +31,7 @@ import { evictShopFromSetupCache } from "~/lib/after-auth.server";
  * Idempotency: No edge deduplication - handlers are fully idempotent:
  * - deleteAllForShop: deleting 0 sessions is safe
  * - markShopUninstalled: re-marking is safe (timestamp already set)
- * - deleteProcessedWebhooksViaReceipts + receipts delete: deleting 0 rows is safe
+ * - purgeReceiptsAndProcessedWebhooks: deleting 0 rows is safe
  *
  * OPTIMIZATION: Uses lightweight verifyWebhook() instead of authenticate.webhook()
  * to avoid unnecessary session loading. This webhook only needs to DELETE sessions,
@@ -89,18 +89,8 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   // Must be in ONE transaction: helper deletes processed webhooks via receipts join,
   // then receipts are deleted. Non-fatal on failure.
   try {
-    const { processedWebhooksDeleted, receiptsDeleted } = await sql.begin(
-      async (tx) => {
-        const pwCount = await deleteProcessedWebhooksViaReceipts(tx, shop);
-        const rcptResult = await tx`
-          DELETE FROM webhook_receipts WHERE shop = ${shop}
-        `;
-        return {
-          processedWebhooksDeleted: pwCount,
-          receiptsDeleted: rcptResult.count,
-        };
-      }
-    );
+    const { processedWebhooksDeleted, receiptsDeleted } =
+      await purgeReceiptsAndProcessedWebhooks(sql, shop);
     console.log(
       `[uninstalled] processed_webhooks_deleted count=${processedWebhooksDeleted}`
     );

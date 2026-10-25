@@ -15,11 +15,11 @@ vi.mock("~/lib/webhook-receipts.server", () => ({
 }));
 
 const mockMarkShopUninstalled = vi.fn();
-const mockDeleteProcessedWebhooksViaReceipts = vi.fn();
+const mockPurgeReceiptsAndProcessedWebhooks = vi.fn();
 vi.mock("~/services/compliance", () => ({
   markShopUninstalled: (...args: unknown[]) => mockMarkShopUninstalled(...args),
-  deleteProcessedWebhooksViaReceipts: (...args: unknown[]) =>
-    mockDeleteProcessedWebhooksViaReceipts(...args),
+  purgeReceiptsAndProcessedWebhooks: (...args: unknown[]) =>
+    mockPurgeReceiptsAndProcessedWebhooks(...args),
 }));
 
 const mockEvictShopFromSetupCache = vi.fn();
@@ -86,8 +86,10 @@ describe("webhooks.app.uninstalled", () => {
     mockMarkShopUninstalled.mockResolvedValue(true);
     mockRecordWebhookReceipt.mockResolvedValue(true);
     mockParseTriggeredAt.mockReturnValue(null);
-    mockDeleteProcessedWebhooksViaReceipts.mockResolvedValue(0);
-    mockTx.mockResolvedValue(Object.assign([], { count: 0 }));
+    mockPurgeReceiptsAndProcessedWebhooks.mockResolvedValue({
+      processedWebhooksDeleted: 0,
+      receiptsDeleted: 0,
+    });
     mockEvictShopFromSetupCache.mockReturnValue(undefined);
   });
 
@@ -176,8 +178,10 @@ describe("webhooks.app.uninstalled", () => {
   it("retry after success is idempotent", async () => {
     mockSessionStorage.deleteAllForShop.mockResolvedValue(0);
     mockMarkShopUninstalled.mockResolvedValue(false);
-    mockDeleteProcessedWebhooksViaReceipts.mockResolvedValue(0);
-    mockTx.mockResolvedValue(Object.assign([], { count: 0 }));
+    mockPurgeReceiptsAndProcessedWebhooks.mockResolvedValue({
+      processedWebhooksDeleted: 0,
+      receiptsDeleted: 0,
+    });
 
     const response1 = await action(createActionArgs());
     expect(response1.status).toBe(200);
@@ -189,33 +193,28 @@ describe("webhooks.app.uninstalled", () => {
     expect(mockMarkShopUninstalled).toHaveBeenCalledTimes(2);
   });
 
-  it("processed webhooks and receipts purge runs helper before receipts delete in transaction", async () => {
+  it("processed webhooks and receipts purge calls purgeReceiptsAndProcessedWebhooks", async () => {
     mockSessionStorage.deleteAllForShop.mockResolvedValue(1);
     mockMarkShopUninstalled.mockResolvedValue(true);
-
-    const callOrder: string[] = [];
-    mockDeleteProcessedWebhooksViaReceipts.mockImplementation(async () => {
-      callOrder.push("helper");
-      return 3;
-    });
-    mockTx.mockImplementation(async () => {
-      callOrder.push("receiptsDelete");
-      return Object.assign([], { count: 5 });
+    mockPurgeReceiptsAndProcessedWebhooks.mockResolvedValue({
+      processedWebhooksDeleted: 3,
+      receiptsDeleted: 5,
     });
 
     await action(createActionArgs());
 
-    expect(mockSql.begin).toHaveBeenCalledTimes(1);
-    expect(callOrder).toEqual(["helper", "receiptsDelete"]);
-    expect(mockDeleteProcessedWebhooksViaReceipts).toHaveBeenCalledWith(mockTx, TEST_SHOP);
+    expect(mockPurgeReceiptsAndProcessedWebhooks).toHaveBeenCalledTimes(1);
+    expect(mockPurgeReceiptsAndProcessedWebhooks).toHaveBeenCalledWith(mockSql, TEST_SHOP);
   });
 
-  it("receipts purge transaction failure is non-fatal, logs count and code only", async () => {
+  it("receipts purge failure is non-fatal, logs count and code only", async () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     mockSessionStorage.deleteAllForShop.mockResolvedValue(1);
     mockMarkShopUninstalled.mockResolvedValue(true);
-    mockSql.begin.mockRejectedValue(new Error("Transaction failed"));
+    mockPurgeReceiptsAndProcessedWebhooks.mockRejectedValue(
+      new Error("Transaction failed")
+    );
 
     const response = await action(createActionArgs());
 
