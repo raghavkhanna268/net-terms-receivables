@@ -142,7 +142,7 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
   describe("(1) Unconfirmed shop is not gated", () => {
     it("isPlanConfirmed returns false when plan_cached_at is null", async () => {
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "free",
+        plan_key: "none",
         subscription_id: null,
         subscription_name: null,
         is_test: false,
@@ -155,7 +155,7 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
 
     it("isPlanConfirmed returns true when plan_cached_at is set", async () => {
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "free",
+        plan_key: "none",
         subscription_id: null,
         subscription_name: null,
         is_test: false,
@@ -166,16 +166,16 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
       expect(confirmed).toBe(true);
     });
 
-    it("checkCompanyLimit allows unconfirmed shop over free limit with gating ON", async () => {
+    it("checkCompanyLimit allows unconfirmed shop over none limit with gating ON", async () => {
       vi.stubEnv("PLAN_GATING_ENFORCED", "1");
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "free",
+        plan_key: "none",
         subscription_id: null,
         subscription_name: null,
         is_test: false,
         plan_cached_at: null, // Unconfirmed
       }]);
-      mockSql.setMockResult("buyer_account_count", [{ count: "100" }]); // Way over free limit
+      mockSql.setMockResult("buyer_account_count", [{ count: "100" }]); // Way over none limit
 
       const result = await checkCompanyLimit(mockSql as unknown as Sql, TEST_SHOP_ID);
 
@@ -183,16 +183,16 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
       expect(result.reason).toContain("Plan not confirmed");
     });
 
-    it("checkImportLimit allows unconfirmed shop over free limit with gating ON", async () => {
+    it("checkImportLimit allows unconfirmed shop over none limit with gating ON", async () => {
       vi.stubEnv("PLAN_GATING_ENFORCED", "1");
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "free",
+        plan_key: "none",
         subscription_id: null,
         subscription_name: null,
         is_test: false,
         plan_cached_at: null, // Unconfirmed
       }]);
-      mockSql.setMockResult("bank_import_count", [{ count: "100" }]); // Way over free limit
+      mockSql.setMockResult("bank_import_count", [{ count: "100" }]); // Way over none limit
 
       const result = await checkImportLimit(mockSql as unknown as Sql, TEST_SHOP_ID);
 
@@ -203,7 +203,7 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
     it("resolvePlan returns unknown for unconfirmed shop with fetch error", async () => {
       mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "free",
+        plan_key: "none",
         subscription_id: null,
         subscription_name: null,
         is_test: false,
@@ -222,21 +222,21 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
         forceRefresh: true,
       });
 
-      expect(result.planKey).toBe("free");
+      expect(result.planKey).toBe("none");
       expect(result.resolutionState).toBe("unknown");
       expect(result.resolutionState).not.toBe("none");
     });
 
-    it("confirmed free shop over limit is blocked with gating ON", async () => {
+    it("confirmed none shop over limit is blocked with gating ON", async () => {
       vi.stubEnv("PLAN_GATING_ENFORCED", "1");
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "free",
+        plan_key: "none",
         subscription_id: null,
         subscription_name: null,
         is_test: false,
         plan_cached_at: new Date(), // Confirmed
       }]);
-      mockSql.setMockResult("buyer_account_count", [{ count: "10" }]); // Over free limit of 1
+      mockSql.setMockResult("buyer_account_count", [{ count: "10" }]); // Over none limit of 1
 
       const result = await checkCompanyLimit(mockSql as unknown as Sql, TEST_SHOP_ID);
 
@@ -347,7 +347,7 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
           forceRefresh: true,
         });
 
-        expect(result.planKey).toBe("free");
+        expect(result.planKey).toBe("none");
         expect(result.resolutionState).toBe("none");
       });
 
@@ -365,7 +365,7 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
           forceRefresh: true,
         });
 
-        expect(result.planKey).toBe("free");
+        expect(result.planKey).toBe("none");
         expect(result.resolutionState).toBe("unknown");
       });
 
@@ -403,7 +403,7 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
           shopDomain: TEST_SHOP,
         });
 
-        expect(result.planKey).toBe("free");
+        expect(result.planKey).toBe("none");
         expect(result.resolutionState).toBe("unknown");
       });
     });
@@ -424,7 +424,7 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
         const source = getPlanSource();
         const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
 
-        expect(result.planKey).toBe("free");
+        expect(result.planKey).toBe("none");
         expect(result.resolutionState).toBe("none");
       });
 
@@ -448,9 +448,9 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
 
       it("returns unknown for 500 with forceRefresh", async () => {
         mockSql.setMockResult("shop_plan", [{
-          plan_key: "scale",
+          plan_key: "unlimited",
           subscription_id: "sub-789",
-          subscription_name: "Scale",
+          subscription_name: "Unlimited",
           is_test: false,
           plan_cached_at: freshCacheTime,
         }]);
@@ -460,7 +460,7 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
         const source = getPlanSource();
         const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP, forceRefresh: true });
 
-        expect(result.planKey).toBe("scale");
+        expect(result.planKey).toBe("unlimited");
         expect(result.resolutionState).toBe("unknown");
       });
 
@@ -490,7 +490,7 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
         const source = getPlanSource();
         const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
 
-        expect(result.planKey).toBe("free");
+        expect(result.planKey).toBe("none");
         expect(result.resolutionState).toBe("unknown");
       });
 
@@ -500,7 +500,7 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
         const source = getPlanSource();
         const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
 
-        expect(result.planKey).toBe("free");
+        expect(result.planKey).toBe("none");
         expect(result.resolutionState).toBe("unknown");
       });
     });

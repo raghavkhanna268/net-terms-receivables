@@ -126,21 +126,21 @@ describe("Gating Service", () => {
 
   describe("Ruling (b): Unconfirmed shops are not gated", () => {
     describe("checkCompanyLimit", () => {
-      it("allows unconfirmed shop over free limit with gating ON", async () => {
+      it("allows unconfirmed shop over none limit with gating ON", async () => {
         (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
         vi.resetModules();
         const { checkCompanyLimit } = await import("../gating.server");
 
         // No plan_cached_at means unconfirmed
         mockSql.setMockResult("shop_plan", [{
-          plan_key: "free",
+          plan_key: "none",
           subscription_id: null,
           subscription_name: null,
           is_test: false,
           plan_cached_at: null, // Unconfirmed
         }]);
 
-        // 100 companies would be way over free limit (3)
+        // 100 companies would be way over none limit (0)
         mockSql.setMockResult("active_account_count", [{ count: "100" }]);
 
         const result = await checkCompanyLimit(mockSql as unknown as Sql, TEST_SHOP_ID);
@@ -149,21 +149,21 @@ describe("Gating Service", () => {
         expect(result.reason).toContain("Plan not confirmed");
       });
 
-      it("blocks confirmed free shop over limit with gating ON", async () => {
+      it("blocks confirmed none shop over limit with gating ON", async () => {
         (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
         vi.resetModules();
         const { checkCompanyLimit } = await import("../gating.server");
 
         // plan_cached_at set means confirmed
         mockSql.setMockResult("shop_plan", [{
-          plan_key: "free",
+          plan_key: "none",
           subscription_id: null,
           subscription_name: null,
           is_test: false,
           plan_cached_at: new Date(), // Confirmed
         }]);
 
-        // 3 companies at free limit (3)
+        // 3 companies at none limit (0)
         mockSql.setMockResult("active_account_count", [{ count: "3" }]);
 
         const result = await checkCompanyLimit(mockSql as unknown as Sql, TEST_SHOP_ID);
@@ -179,7 +179,7 @@ describe("Gating Service", () => {
 
         // Even with a confirmed shop over limit
         mockSql.setMockResult("shop_plan", [{
-          plan_key: "free",
+          plan_key: "none",
           subscription_id: null,
           subscription_name: null,
           is_test: false,
@@ -195,21 +195,21 @@ describe("Gating Service", () => {
     });
 
     describe("checkImportLimit", () => {
-      it("allows unconfirmed shop over free limit with gating ON", async () => {
+      it("allows unconfirmed shop over none limit with gating ON", async () => {
         (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
         vi.resetModules();
         const { checkImportLimit } = await import("../gating.server");
 
         // No plan_cached_at means unconfirmed
         mockSql.setMockResult("shop_plan", [{
-          plan_key: "free",
+          plan_key: "none",
           subscription_id: null,
           subscription_name: null,
           is_test: false,
           plan_cached_at: null, // Unconfirmed
         }]);
 
-        // 100 imports would be way over free limit (1)
+        // 100 imports would be way over none limit
         mockSql.setMockResult("import_count", [{ count: "100" }]);
 
         const result = await checkImportLimit(mockSql as unknown as Sql, TEST_SHOP_ID);
@@ -218,27 +218,28 @@ describe("Gating Service", () => {
         expect(result.reason).toContain("Plan not confirmed");
       });
 
-      it("blocks confirmed free shop over limit with gating ON", async () => {
+      it("allows confirmed none shop imports (imports are unlimited on all plans)", async () => {
         (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
         vi.resetModules();
         const { checkImportLimit } = await import("../gating.server");
 
         // plan_cached_at set means confirmed
         mockSql.setMockResult("shop_plan", [{
-          plan_key: "free",
+          plan_key: "none",
           subscription_id: null,
           subscription_name: null,
           is_test: false,
           plan_cached_at: new Date(), // Confirmed
         }]);
 
-        // 1 import at free limit (1)
-        mockSql.setMockResult("import_count", [{ count: "1" }]);
+        // Even with many imports, should be allowed (unlimited on all plans)
+        mockSql.setMockResult("import_count", [{ count: "100" }]);
 
         const result = await checkImportLimit(mockSql as unknown as Sql, TEST_SHOP_ID);
 
-        expect(result.allowed).toBe(false);
-        expect(result.reason).toContain("Import limit reached");
+        // Imports are unlimited (-1) on all plans including 'none'
+        expect(result.allowed).toBe(true);
+        expect(result.limit).toBe(-1);
       });
 
       it("allows everything when gating flag is false", async () => {
@@ -248,7 +249,7 @@ describe("Gating Service", () => {
 
         // Even with a confirmed shop over limit
         mockSql.setMockResult("shop_plan", [{
-          plan_key: "free",
+          plan_key: "none",
           subscription_id: null,
           subscription_name: null,
           is_test: false,

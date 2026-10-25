@@ -11,36 +11,12 @@
  * @see https://shopify.dev/docs/api/partner/2026-10
  */
 
-import type { PlanKey } from "~/lib/entitlements";
 import { safeLog } from "~/lib/log.server";
 
 /**
  * Partner API version, pinned to the newest dated version verified working on 2026-10-25.
  */
 export const PARTNER_API_VERSION = "2026-10";
-
-/**
- * Map plan handles from Partner API to internal plan keys.
- * T1 will move this to a shared location; for now it's local.
- *
- * Handles: starter, growth, unlimited
- * Private test plan: shopify-test maps to 'none' state (not a PlanKey)
- */
-const PLAN_HANDLE_TO_KEY: Record<string, PlanKey | "none"> = {
-  starter: "starter",
-  growth: "growth",
-  unlimited: "scale",
-  "shopify-test": "none",
-};
-
-/**
- * Map a plan handle to internal plan key.
- * Returns undefined for unknown handles (treated as error, not demotion).
- */
-export function mapPlanHandleToKey(handle: string | null | undefined): PlanKey | "none" | undefined {
-  if (!handle) return undefined;
-  return PLAN_HANDLE_TO_KEY[handle.toLowerCase()];
-}
 
 /**
  * Partner API configuration from environment variables.

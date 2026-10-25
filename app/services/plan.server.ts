@@ -50,7 +50,6 @@ import type {
 import {
   readPartnerConfig,
   fetchActiveSubscription,
-  mapPlanHandleToKey,
   PartnerApiError,
   type PartnerConfig,
 } from "./partner-api.server";
@@ -829,7 +828,7 @@ export class PartnerApiPlanSource implements PlanSource {
       safeLog("error", "partner_api_no_config", {});
       return {
         plan: getDefaultPlan(),
-        planKey: "free",
+        planKey: "none",
         subscriptionId: null,
         subscriptionName: null,
         isTest: false,
@@ -845,7 +844,7 @@ export class PartnerApiPlanSource implements PlanSource {
       safeLog("warn", "plan_shop_not_found", {});
       return {
         plan: getDefaultPlan(),
-        planKey: "free",
+        planKey: "none",
         subscriptionId: null,
         subscriptionName: null,
         isTest: false,
@@ -969,34 +968,39 @@ export class PartnerApiPlanSource implements PlanSource {
 
       if (sub) {
         const handle = sub.items.find((i) => i.handle)?.handle;
-        const mappedKey = mapPlanHandleToKey(handle);
+        const normalizedHandle = handle?.toLowerCase().trim();
 
-        if (!mappedKey || mappedKey === "none") {
-          if (mappedKey === "none") {
-            // shopify-test handle - use legacySubscriptionId ?? null consistently
-            await setCachedPlan(ctx.sql, shopId, "free", sub.legacySubscriptionId ?? null, handle ?? null, false);
-            return {
-              plan: getDefaultPlan(),
-              planKey: "free",
-              subscriptionId: sub.legacySubscriptionId ?? null,
-              subscriptionName: handle ?? null,
-              isTest: false,
-              fromCache: false,
-              sourceTag: "partner_api",
-              status: "unknown",
-              resolutionState: "none",
-            };
-          }
+        // shopify-test is a private test plan - returns 'none' state
+        if (normalizedHandle === "shopify-test") {
+          await setCachedPlan(ctx.sql, shopId, "none", sub.legacySubscriptionId ?? null, handle ?? null, false);
+          return {
+            plan: getDefaultPlan(),
+            planKey: "none",
+            subscriptionId: sub.legacySubscriptionId ?? null,
+            subscriptionName: handle ?? null,
+            isTest: false,
+            fromCache: false,
+            sourceTag: "partner_api",
+            status: "unknown",
+            resolutionState: "none",
+          };
+        }
+
+        // Use #287's resolvePlanKey for known handles
+        const resolvedKey = resolvePlanKey(handle);
+
+        // If resolvePlanKey returns "none" for a handle that's not shopify-test,
+        // it's an unknown handle - treat as error (ruling: unknown handles don't demote)
+        if (resolvedKey === "none") {
           safeLog("error", "partner_plan_handle_unknown", {
             shopHash: await shopHash(ctx.shopDomain),
           });
           captureMessage("partner_plan_handle_unknown", "error");
-          // Unknown handle is an error - fall through to error handling
           throw new Error("partner_plan_handle_unknown");
         }
 
         partnerPlanCache.set(ctx.shopDomain, {
-          planKey: mappedKey,
+          planKey: resolvedKey,
           subscriptionId: sub.legacySubscriptionId ?? null,
           handle: handle!,
           expiresAt: Date.now() + PARTNER_CACHE_TTL_MS,
@@ -1006,15 +1010,15 @@ export class PartnerApiPlanSource implements PlanSource {
         await setCachedPlan(
           ctx.sql,
           shopId,
-          mappedKey,
+          resolvedKey,
           sub.legacySubscriptionId ?? null,
           handle!,
           false
         );
 
         return {
-          plan: getPlanConfig(mappedKey),
-          planKey: mappedKey,
+          plan: getPlanConfig(resolvedKey),
+          planKey: resolvedKey,
           subscriptionId: sub.legacySubscriptionId ?? null,
           subscriptionName: handle!,
           isTest: false,
@@ -1026,11 +1030,11 @@ export class PartnerApiPlanSource implements PlanSource {
       }
 
       // No subscription - confirmed 'none' state
-      await setCachedPlan(ctx.sql, shopId, "free", null, null, false);
+      await setCachedPlan(ctx.sql, shopId, "none", null, null, false);
 
       return {
         plan: getDefaultPlan(),
-        planKey: "free",
+        planKey: "none",
         subscriptionId: null,
         subscriptionName: null,
         isTest: false,
@@ -1069,7 +1073,7 @@ export class PartnerApiPlanSource implements PlanSource {
       // No confirmed cache - return unknown state with default plan (ruling d)
       return {
         plan: getDefaultPlan(),
-        planKey: "free",
+        planKey: "none",
         subscriptionId: null,
         subscriptionName: null,
         isTest: false,
@@ -1115,11 +1119,17 @@ export class PartnerApiPlanSource implements PlanSource {
    * Used by T6 for informational logging (mismatch detection).
    */
   onPlanRedirect(planHandle: string): PlanKey | null {
-    const mapped = mapPlanHandleToKey(planHandle);
-    if (!mapped || mapped === "none") {
+    const normalized = planHandle.toLowerCase().trim();
+    // shopify-test is a private test plan, not a real plan key
+    if (normalized === "shopify-test") {
       return null;
     }
-    return mapped;
+    const resolved = resolvePlanKey(planHandle);
+    // If resolvePlanKey returns "none" for non-shopify-test handle, it's unknown
+    if (resolved === "none") {
+      return null;
+    }
+    return resolved;
   }
 }
 

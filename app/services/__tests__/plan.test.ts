@@ -1221,7 +1221,7 @@ describe("PlanSource Interface", () => {
 
       expect(source.onPlanRedirect("starter")).toBe("starter");
       expect(source.onPlanRedirect("growth")).toBe("growth");
-      expect(source.onPlanRedirect("unlimited")).toBe("scale");
+      expect(source.onPlanRedirect("unlimited")).toBe("unlimited");
     });
 
     it("onPlanRedirect returns null for unknown handles", () => {

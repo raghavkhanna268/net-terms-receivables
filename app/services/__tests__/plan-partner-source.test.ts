@@ -393,7 +393,7 @@ describe("Partner API Plan Source (T2)", () => {
       expect(result.resolutionState).toBe("active");
     });
 
-    it("maps unlimited handle to scale", async () => {
+    it("maps unlimited handle to unlimited", async () => {
       mockShopGidResponse();
       mockPartnerApiResponse({
         data: {
@@ -407,7 +407,7 @@ describe("Partner API Plan Source (T2)", () => {
       const source = getPlanSource();
       const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
 
-      expect(result.planKey).toBe("scale");
+      expect(result.planKey).toBe("unlimited");
     });
 
     it("returns none state for null subscription", async () => {
@@ -417,7 +417,7 @@ describe("Partner API Plan Source (T2)", () => {
       const source = getPlanSource();
       const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
 
-      expect(result.planKey).toBe("free");
+      expect(result.planKey).toBe("none");
       expect(result.resolutionState).toBe("none");
       expect(result.fromCache).toBe(false);
     });
@@ -429,7 +429,7 @@ describe("Partner API Plan Source (T2)", () => {
       const source = getPlanSource();
       const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
 
-      expect(result.planKey).toBe("free");
+      expect(result.planKey).toBe("none");
       expect(result.resolutionState).toBe("none");
     });
   });
@@ -662,9 +662,9 @@ describe("Partner API Plan Source (T2)", () => {
     it("returns cached plan on HTTP 500 with forceRefresh when Postgres row exists", async () => {
       const freshCacheTime = new Date(Date.now() - 60 * 60 * 1000);
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "scale",
-        subscription_id: "sub-scale",
-        subscription_name: "Scale",
+        plan_key: "unlimited",
+        subscription_id: "sub-unlimited",
+        subscription_name: "Unlimited",
         is_test: false,
         plan_cached_at: freshCacheTime,
       }]);
@@ -674,7 +674,7 @@ describe("Partner API Plan Source (T2)", () => {
       const source = getPlanSource();
       const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP, forceRefresh: true });
 
-      expect(result.planKey).toBe("scale");
+      expect(result.planKey).toBe("unlimited");
       expect(result.fromCache).toBe(true);
     });
 
@@ -705,7 +705,7 @@ describe("Partner API Plan Source (T2)", () => {
       const source = getPlanSource();
       const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
 
-      expect(result.planKey).toBe("free");
+      expect(result.planKey).toBe("none");
       expect(result.resolutionState).toBe("unknown");
       expect(result.fromCache).toBe(false);
     });
@@ -718,7 +718,7 @@ describe("Partner API Plan Source (T2)", () => {
       const source = getPlanSource();
       const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
 
-      expect(result.planKey).toBe("free");
+      expect(result.planKey).toBe("none");
       expect(result.resolutionState).toBe("unknown");
       expect(result.fromCache).toBe(false);
     });
@@ -731,7 +731,7 @@ describe("Partner API Plan Source (T2)", () => {
       const source = getPlanSource();
       const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
 
-      expect(result.planKey).toBe("free");
+      expect(result.planKey).toBe("none");
       expect(result.resolutionState).toBe("unknown");
     });
 
@@ -745,7 +745,7 @@ describe("Partner API Plan Source (T2)", () => {
       const source = getPlanSource();
       const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
 
-      expect(result.planKey).toBe("free");
+      expect(result.planKey).toBe("none");
       expect(result.resolutionState).toBe("unknown");
     });
 
@@ -761,7 +761,7 @@ describe("Partner API Plan Source (T2)", () => {
       const source = getPlanSource();
       const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
 
-      expect(result.planKey).toBe("free");
+      expect(result.planKey).toBe("none");
       expect(result.resolutionState).toBe("unknown");
     });
 
@@ -775,7 +775,7 @@ describe("Partner API Plan Source (T2)", () => {
       const source = getPlanSource();
       const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
 
-      expect(result.planKey).toBe("free");
+      expect(result.planKey).toBe("none");
       expect(result.resolutionState).toBe("unknown");
     });
 
@@ -785,7 +785,7 @@ describe("Partner API Plan Source (T2)", () => {
       const source = getPlanSource();
       const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
 
-      expect(result.planKey).toBe("free");
+      expect(result.planKey).toBe("none");
       expect(result.resolutionState).toBe("unknown");
     });
 
@@ -797,7 +797,7 @@ describe("Partner API Plan Source (T2)", () => {
       const source = getPlanSource();
       const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP });
 
-      expect(result.planKey).toBe("free");
+      expect(result.planKey).toBe("none");
       expect(result.resolutionState).toBe("unknown");
     });
 
@@ -847,12 +847,12 @@ describe("Partner API Plan Source (T2)", () => {
       expect(result.fromCache).toBe(true);
     });
 
-    it("never returns free on error with forceRefresh when cache exists", async () => {
+    it("never returns none on error with forceRefresh when cache exists", async () => {
       const freshCacheTime = new Date(Date.now() - 60 * 60 * 1000);
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "scale",
-        subscription_id: "sub-scale",
-        subscription_name: "Scale",
+        plan_key: "unlimited",
+        subscription_id: "sub-unlimited",
+        subscription_name: "Unlimited",
         is_test: false,
         plan_cached_at: freshCacheTime,
       }]);
@@ -862,8 +862,8 @@ describe("Partner API Plan Source (T2)", () => {
       const source = getPlanSource();
       const result = await source.resolveActivePlan({ sql: mockSql as unknown as Sql, shopDomain: TEST_SHOP, forceRefresh: true });
 
-      expect(result.planKey).toBe("scale");
-      expect(result.planKey).not.toBe("free");
+      expect(result.planKey).toBe("unlimited");
+      expect(result.planKey).not.toBe("none");
     });
 
     it("does not report 429 to Sentry (only logs) with forceRefresh", async () => {
@@ -1112,9 +1112,9 @@ describe("Partner API Plan Source (T2)", () => {
       expect(result.resolutionState).toBe("active");
     });
 
-    it("treats schema default free row without plan_cached_at as unconfirmed (ruling a)", async () => {
+    it("treats schema default none row without plan_cached_at as unconfirmed (ruling a)", async () => {
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "free",
+        plan_key: "none",
         subscription_id: null,
         subscription_name: null,
         is_test: false,
@@ -1139,7 +1139,7 @@ describe("Partner API Plan Source (T2)", () => {
 
     it("returns unknown on fetch error with no confirmed cache (ruling a)", async () => {
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "free",
+        plan_key: "none",
         subscription_id: null,
         subscription_name: null,
         is_test: false,
@@ -1157,7 +1157,7 @@ describe("Partner API Plan Source (T2)", () => {
         forceRefresh: true,
       });
 
-      expect(result.planKey).toBe("free");
+      expect(result.planKey).toBe("none");
       expect(result.resolutionState).toBe("unknown");
     });
   });
@@ -1377,7 +1377,7 @@ describe("Partner API Plan Source (T2)", () => {
 
       expect(source.onPlanRedirect("starter")).toBe("starter");
       expect(source.onPlanRedirect("growth")).toBe("growth");
-      expect(source.onPlanRedirect("unlimited")).toBe("scale");
+      expect(source.onPlanRedirect("unlimited")).toBe("unlimited");
     });
 
     it("returns null for unknown handles", () => {
