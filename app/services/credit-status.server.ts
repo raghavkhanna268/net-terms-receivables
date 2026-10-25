@@ -178,36 +178,56 @@ export const RETRYABLE_BACKOFF_CAP_DAYS = 7;
 /**
  * Check if an account should be skipped due to backoff from persistent retryable failures.
  * 
+ * IMPORTANT: Backoff applies ONLY to retryable===true errors. Errors with retryable===false
+ * that aren't known permanent codes keep daily retry behavior (nightly resync retries daily).
+ * 
  * The backoff is based on time since the first failure in the current failure streak:
  * - Day 0: Initial failure (handled by event trigger)
  * - Day 1, 2, 4, 7: Retry allowed
  * - After day 7: Retry every 7 days (capped)
  * 
+ * Uses elapsed >= next scheduled day comparison to handle sweep drift:
+ * if the sweep runs slightly late (e.g., day 4.5 instead of day 4), the retry still happens.
+ * 
  * On success, metafieldSyncErrorAt is cleared, resetting the streak.
  * 
  * @param metafieldSyncErrorAt - Time of first failure in current streak (null = no failure)
- * @returns true if account should be skipped (backoff not elapsed)
+ * @returns Object with skip decision and computed values for logging
  */
-export function shouldSkipForBackoff(metafieldSyncErrorAt: Date | null): boolean {
-  if (!metafieldSyncErrorAt) return false;
+export function shouldSkipForBackoff(metafieldSyncErrorAt: Date | null): {
+  skip: boolean;
+  errorAgeDays?: number;
+  nextRetryDay?: number;
+} {
+  if (!metafieldSyncErrorAt) return { skip: false };
   
   const errorAgeMs = Date.now() - metafieldSyncErrorAt.getTime();
-  const errorAgeDays = Math.floor(errorAgeMs / (24 * 60 * 60 * 1000));
+  const errorAgeDays = errorAgeMs / (24 * 60 * 60 * 1000);
+  const flooredDays = Math.floor(errorAgeDays);
   
-  // Always allow if exact match to a retry day
-  if (RETRYABLE_BACKOFF_DAYS.includes(errorAgeDays as typeof RETRYABLE_BACKOFF_DAYS[number])) {
-    return false;
-  }
-  
-  // After cap, allow retry every RETRYABLE_BACKOFF_CAP_DAYS days
-  if (errorAgeDays >= RETRYABLE_BACKOFF_CAP_DAYS) {
-    const daysSinceCap = errorAgeDays - RETRYABLE_BACKOFF_CAP_DAYS;
-    if (daysSinceCap % RETRYABLE_BACKOFF_CAP_DAYS === 0) {
-      return false;
+  // Find the next scheduled retry day at or after current floored day
+  let nextRetryDay: number | null = null;
+  for (const day of RETRYABLE_BACKOFF_DAYS) {
+    if (day >= flooredDays) {
+      nextRetryDay = day;
+      break;
     }
   }
   
-  return true;
+  if (nextRetryDay === null) {
+    // Past the explicit schedule, use cap intervals
+    // Next retry is on the next multiple of cap after passing day 7
+    const daysPastCap = flooredDays - RETRYABLE_BACKOFF_CAP_DAYS;
+    const nextMultiple = Math.ceil(daysPastCap / RETRYABLE_BACKOFF_CAP_DAYS);
+    nextRetryDay = RETRYABLE_BACKOFF_CAP_DAYS + nextMultiple * RETRYABLE_BACKOFF_CAP_DAYS;
+  }
+  
+  // Allow retry if elapsed >= next scheduled day (handles drift)
+  if (errorAgeDays >= nextRetryDay) {
+    return { skip: false, errorAgeDays: flooredDays, nextRetryDay };
+  }
+  
+  return { skip: true, errorAgeDays: flooredDays, nextRetryDay };
 }
 
 /**
@@ -671,7 +691,7 @@ export async function updateCreditStatus(
     return { success: false, error: reasonValidation.error };
   }
 
-  type TxSuccess = { success: true; metafieldWriteData: MetafieldWriteData; syncVersion: number };
+  type TxSuccess = { success: true; metafieldWriteData: MetafieldWriteData; syncVersion: number; shopId: string };
   type TxError = { success: false; error: string };
   type TxResult = TxSuccess | TxError;
 
@@ -798,6 +818,7 @@ export async function updateCreditStatus(
         metafieldValue,
       },
       syncVersion,
+      shopId: account.shopId,
     } as TxSuccess;
   });
 
@@ -829,35 +850,34 @@ export async function updateCreditStatus(
 
     // Write credit_status.sync_failed audit event (ids and codes only)
     // Wrapped in try/catch so audit failure doesn't block the marker UPDATE or return value
-    const [accountInfo] = await sql<{ shopId: string }[]>`
-      SELECT "shopId" FROM "BuyerAccount" WHERE id = ${buyerAccountId}
-    `;
-    if (accountInfo) {
-      try {
-        await sql`
-          INSERT INTO "AuditEvent" ("shopId", actor, type, data, at)
-          VALUES (
-            ${accountInfo.shopId},
-            'system',
-            'credit_status.sync_failed',
-            ${sql.json({
-              buyerAccountId,
-              errorCode,
-              syncVersion: txResult.syncVersion,
-            })},
-            NOW()
-          )
-        `;
-      } catch (auditErr) {
-        safeLog("warn", "credit_status_sync_failed_audit_error", {
-          buyerAccountId,
-          err: toErrorCode(auditErr),
-        });
-      }
+    // Use txResult.shopId from the transaction - no extra lookup needed
+    try {
+      await sql`
+        INSERT INTO "AuditEvent" ("shopId", actor, type, data, at)
+        VALUES (
+          ${txResult.shopId},
+          'system',
+          'credit_status.sync_failed',
+          ${sql.json({
+            buyerAccountId,
+            errorCode,
+            syncVersion: txResult.syncVersion,
+          })},
+          NOW()
+        )
+      `;
+    } catch (auditErr) {
+      safeLog("warn", "credit_status_sync_failed_audit_error", {
+        buyerAccountId,
+        err: toErrorCode(auditErr),
+      });
     }
 
     // Set permanent error marker for known permanent codes.
-    // For retryable errors, set metafieldSyncErrorAt only if not already set (tracks failure streak start).
+    // Three cases based on retryable flag and error code:
+    // 1. markerCode !== null: Permanent failure (retryable=false + known code) → set both markers
+    // 2. retryable === true: Transient failure → set metafieldSyncErrorAt only (tracks streak start for backoff)
+    // 3. retryable === false + unknown code: Leave markers NULL → retry daily via nightly resync
     if (markerCode !== null) {
       await sql`
         UPDATE "BuyerAccount"
@@ -866,8 +886,9 @@ export async function updateCreditStatus(
         WHERE id = ${buyerAccountId}
           AND "syncVersion" = ${txResult.syncVersion}
       `;
-    } else {
+    } else if (retryable === true) {
       // Retryable error: set metafieldSyncErrorAt only if NULL (preserve streak start time)
+      // This triggers backoff schedule (day 0, 1, 2, 4, 7, then every 7 days)
       await sql`
         UPDATE "BuyerAccount"
         SET "metafieldSyncErrorAt" = COALESCE("metafieldSyncErrorAt", NOW())
@@ -875,6 +896,7 @@ export async function updateCreditStatus(
           AND "syncVersion" = ${txResult.syncVersion}
       `;
     }
+    // else: retryable===false with unknown code → no marker update, retry daily
 
     return {
       success: true,
@@ -893,31 +915,27 @@ export async function updateCreditStatus(
     });
 
     // Write credit_status.sync_failed audit event for userErrors
-    const [accountInfoForUserError] = await sql<{ shopId: string }[]>`
-      SELECT "shopId" FROM "BuyerAccount" WHERE id = ${buyerAccountId}
-    `;
-    if (accountInfoForUserError) {
-      try {
-        await sql`
-          INSERT INTO "AuditEvent" ("shopId", actor, type, data, at)
-          VALUES (
-            ${accountInfoForUserError.shopId},
-            'system',
-            'credit_status.sync_failed',
-            ${sql.json({
-              buyerAccountId,
-              errorCode: "user_error",
-              syncVersion: txResult.syncVersion,
-            })},
-            NOW()
-          )
-        `;
-      } catch (auditErr) {
-        safeLog("warn", "credit_status_sync_failed_audit_error", {
-          buyerAccountId,
-          err: toErrorCode(auditErr),
-        });
-      }
+    // Use txResult.shopId from the transaction - no extra lookup needed
+    try {
+      await sql`
+        INSERT INTO "AuditEvent" ("shopId", actor, type, data, at)
+        VALUES (
+          ${txResult.shopId},
+          'system',
+          'credit_status.sync_failed',
+          ${sql.json({
+            buyerAccountId,
+            errorCode: "user_error",
+            syncVersion: txResult.syncVersion,
+          })},
+          NOW()
+        )
+      `;
+    } catch (auditErr) {
+      safeLog("warn", "credit_status_sync_failed_audit_error", {
+        buyerAccountId,
+        err: toErrorCode(auditErr),
+      });
     }
 
     // userErrors are permanent failures - set marker
@@ -959,6 +977,14 @@ export async function updateCreditStatus(
 }
 
 /**
+ * Options for syncCreditStatusMetafield.
+ */
+export interface SyncMetafieldOptions {
+  /** Skip the Shopify metafield write (DB update still happens). Used during backoff. */
+  skipMetafieldWrite?: boolean;
+}
+
+/**
  * Sync credit status metafield for a buyer account.
  *
  * Called during reconciliation or when a sync is pending.
@@ -967,19 +993,21 @@ export async function updateCreditStatus(
  *
  * Structure:
  * 1. In transaction: lock, compute, update holdState with syncPending=true
- * 2. After commit: write metafield
+ * 2. After commit: write metafield (unless skipMetafieldWrite is true)
  * 3. On success: clear syncPending
- * 4. On failure: leave syncPending=true and log
+ * 4. On failure or skip: leave syncPending=true and log
  *
  * @param sql - Database connection
  * @param buyerAccountId - The buyer account to sync
  * @param source - Source of the sync (for audit trail), defaults to 'sync'
+ * @param options - Optional settings (skipMetafieldWrite for backoff)
  * @returns Result indicating success or failure
  */
 export async function syncCreditStatusMetafield(
   sql: Sql,
   buyerAccountId: string,
-  source: CreditStatusSource = "sync"
+  source: CreditStatusSource = "sync",
+  options?: SyncMetafieldOptions
 ): Promise<CreditStatusUpdateResult> {
   type SyncTxSuccess = { success: true; metafieldWriteData: MetafieldWriteData; syncVersion: number };
   type SyncTxNoOwner = { success: true; noOwner: true; effectiveHoldChanged: boolean; ownerType: string; holdState: string; syncVersion: number };
@@ -1148,6 +1176,11 @@ export async function syncCreditStatusMetafield(
     }
 
     return { success: true, metafieldSyncPending: false, noOwner: true };
+  }
+
+  // Skip metafield write during backoff - DB update already done, leave syncPending=true
+  if (options?.skipMetafieldWrite) {
+    return { success: true, metafieldSyncPending: true };
   }
 
   const metafieldResult = await writeMetafield(
