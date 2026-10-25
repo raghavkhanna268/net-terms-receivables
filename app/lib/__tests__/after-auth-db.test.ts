@@ -1130,7 +1130,7 @@ describeWithDb("reinstall clears metafieldSyncErrorCode and metafieldSyncErrorAt
         VALUES (
           ${shopId}, 'COMPANY'::"AccountKind",
           'gid://shopify/Company/test-cols', 'gid://shopify/CompanyLocation/test-cols',
-          'Preserve Columns Account', 50000.00, 45, 'CREDIT_HOLD', 'MANUAL_HOLD',
+          'Preserve Columns Account', 50000.00, 45, 'HELD', 'MANUAL_HOLD',
           true, true, true, 5,
           ${syncedAt}, 'no_session', ${errorDate},
           NOW(), NOW()
