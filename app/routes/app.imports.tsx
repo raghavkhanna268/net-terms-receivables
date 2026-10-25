@@ -597,7 +597,7 @@ interface ParseResultSummary {
   creditCount: number;
   debitCount: number;
   credits: ParsedTransaction[];
-  errors: { row: number; message: string }[];
+  errors: { row: number; code: string; message: string }[];
 }
 
 interface ImportResult {
@@ -864,9 +864,24 @@ export default function ImportsPage() {
               )}
 
               {result.errors.length > 0 && (
-                <s-banner tone="warning" heading="Parse warnings">
-                  {result.errors.length} row(s) could not be parsed. First
-                  error: Row {result.errors[0].row}: {result.errors[0].message}
+                <s-banner tone="warning" heading={`${result.errors.length} row(s) could not be parsed`}>
+                  <s-unordered-list>
+                    {result.errors.slice(0, 10).map((err, idx) => (
+                      <s-list-item key={idx}>
+                        <s-text type="strong">Row {err.row}</s-text>
+                        {" "}
+                        <s-badge tone={err.code === "NORMALIZE_FAILED" ? "warning" : "critical"}>
+                          {err.code}
+                        </s-badge>
+                        {" "}{err.message}
+                      </s-list-item>
+                    ))}
+                    {result.errors.length > 10 && (
+                      <s-list-item>
+                        <s-text tone="caution">...and {result.errors.length - 10} more error(s)</s-text>
+                      </s-list-item>
+                    )}
+                  </s-unordered-list>
                 </s-banner>
               )}
 
