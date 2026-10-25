@@ -160,9 +160,10 @@ export async function startReconcileBulkOperation(
  * For manual runs, pass the manualKey from the companies message so
  * orders uses the same key base (allowing retry even if day key is used).
  *
- * Guard: Does not enqueue if Shop no longer exists (#239). If shop/redact
- * ran while companies reconcile was in flight, re-enqueueing would create
- * a message that can't be processed and would dead-letter.
+ * Guard: Does not enqueue if Shop no longer exists (#239). The FOR SHARE
+ * lock waits behind any concurrent deleteShop transaction, so if deleteShop
+ * is running we wait, and after it commits the SELECT returns no row,
+ * preventing the re-enqueue.
  *
  * @param sql - postgres.js SQL client
  * @param shop - Shop domain
@@ -174,14 +175,6 @@ export async function enqueueReconcileOrders(
   shop: string,
   manualKey?: string
 ): Promise<boolean> {
-  // Guard: don't re-enqueue for a shop that was deleted (redact) (#239)
-  const [shopExists] = await sql<[{ exists: boolean }]>`
-    SELECT EXISTS(SELECT 1 FROM "Shop" WHERE domain = ${shop}) as exists
-  `;
-  if (!shopExists.exists) {
-    return false;
-  }
-
   let webhookId: string;
   if (manualKey) {
     webhookId = `reconcile:${shop}:${manualKey}:orders`;
@@ -201,12 +194,26 @@ export async function enqueueReconcileOrders(
     message.manualKey = manualKey;
   }
 
-  await sql`SELECT pgmq.send('s6_sync', ${sql.json(message)})`;
-
-  safeLog("info", "reconcile_orders_enqueued", {
-    shopHash: await shopHash(shop),
+  // Guard: check and send in one transaction with FOR SHARE (#239).
+  // FOR SHARE waits behind deleteShop's exclusive lock on the Shop row,
+  // so the check sees the committed state.
+  const enqueued = await sql.begin(async (tx) => {
+    const [shopRow] = await tx<[{ id: string }?]>`
+      SELECT id FROM "Shop" WHERE domain = ${shop} FOR SHARE
+    `;
+    if (!shopRow) {
+      return false;
+    }
+    await tx`SELECT pgmq.send('s6_sync', ${tx.json(message)})`;
+    return true;
   });
-  return true;
+
+  if (enqueued) {
+    safeLog("info", "reconcile_orders_enqueued", {
+      shopHash: await shopHash(shop),
+    });
+  }
+  return enqueued;
 }
 
 /**

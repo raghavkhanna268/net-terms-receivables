@@ -1217,17 +1217,14 @@ async function processBulkQueue(
         // Check status for progress vs complete
         if (bulkResult.status === "progress") {
           // Guard: only send continuation if Shop still exists (#239).
-          // If shop was deleted (redact) while we processed this batch, don't re-enqueue.
-          const [shopExists] = await sql<[{ exists: boolean }]>`
-            SELECT EXISTS(SELECT 1 FROM "Shop" WHERE domain = ${msg.message.shop}) as exists
-          `;
-
-          // Atomically send continuation (if shop exists) and archive old message.
-          // This eliminates the duplicate-message window entirely:
-          // - If transaction commits: new message exists (if shop alive), old is archived
-          // - If transaction fails/crashes: old message retries normally
+          // The FOR SHARE lock waits behind any concurrent deleteShop transaction,
+          // so if deleteShop is running we wait, and after it commits the SELECT
+          // returns no row, preventing the re-enqueue.
           await sql.begin(async (tx) => {
-            if (shopExists.exists) {
+            const [shopRow] = await tx<[{ id: string }?]>`
+              SELECT id FROM "Shop" WHERE domain = ${msg.message.shop} FOR SHARE
+            `;
+            if (shopRow) {
               await tx`SELECT pgmq.send(${S6_QUEUES.BULK}, ${tx.json(msg.message)})`;
             }
             await tx`SELECT pgmq.archive(${S6_QUEUES.BULK}, ${msg.msg_id}::bigint)`;

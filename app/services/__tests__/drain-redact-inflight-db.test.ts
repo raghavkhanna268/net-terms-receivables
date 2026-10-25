@@ -332,3 +332,90 @@ describeWithDb("drain: in-flight message for a redacted shop (#239)", () => {
     };
   }
 });
+
+/**
+ * Direct DB tests for the Shop existence guards (no mocks).
+ * These verify that when Shop row doesn't exist, the guards prevent re-enqueue.
+ */
+describeWithDb("drain guards: Shop existence check (#239)", () => {
+  let sql: ReturnType<typeof postgres>;
+  const GUARD_SUFFIX = Date.now().toString(36) + "-guard";
+  const NO_SHOP_DOMAIN = `test-noexist-${GUARD_SUFFIX}.myshopify.com`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${NO_SHOP_DOMAIN}`;
+    await sql`DELETE FROM pgmq.q_s6_bulk WHERE message->>'shop' = ${NO_SHOP_DOMAIN}`;
+    await sql`DELETE FROM pgmq.a_s6_bulk WHERE message->>'shop' = ${NO_SHOP_DOMAIN}`;
+    await sql.end();
+  });
+
+  it("enqueueReconcileOrders returns false and does not enqueue when Shop row is missing", async () => {
+    const { enqueueReconcileOrders } = await import("~/services/drain/reconcile-handlers.server");
+
+    const [beforeCount] = await sql<[{ count: string }]>`
+      SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync
+      WHERE message->>'shop' = ${NO_SHOP_DOMAIN}
+        AND message->>'topic' = 'RECONCILE_ORDERS'
+    `;
+    expect(parseInt(beforeCount.count, 10)).toBe(0);
+
+    const result = await enqueueReconcileOrders(sql, NO_SHOP_DOMAIN);
+    expect(result).toBe(false);
+
+    const [afterCount] = await sql<[{ count: string }]>`
+      SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync
+      WHERE message->>'shop' = ${NO_SHOP_DOMAIN}
+        AND message->>'topic' = 'RECONCILE_ORDERS'
+    `;
+    expect(parseInt(afterCount.count, 10)).toBe(0);
+  });
+
+  it("bulk progress continuation: no Shop row → no continuation sent, but archive still happens", async () => {
+    const now = new Date();
+    const bulkMsg = {
+      shop: NO_SHOP_DOMAIN,
+      topic: "BULK_OPERATIONS_FINISH",
+      webhookId: `wh-guard-bulk-${GUARD_SUFFIX}`,
+      bulkOperationId: `gid://shopify/BulkOperation/guard-${GUARD_SUFFIX}`,
+      bulkType: "orders",
+      enqueuedAt: now.toISOString(),
+    };
+
+    const [sendResult] = await sql<[{ send: string }]>`
+      SELECT pgmq.send('s6_bulk', ${sql.json(bulkMsg)})
+    `;
+    const msgId = sendResult.send;
+
+    const [queueBefore] = await sql<[{ count: string }]>`
+      SELECT COUNT(*)::text as count FROM pgmq.q_s6_bulk WHERE msg_id = ${msgId}::bigint
+    `;
+    expect(parseInt(queueBefore.count, 10)).toBe(1);
+
+    const { S6_QUEUES } = await import("~/lib/pgmq.server");
+
+    await sql.begin(async (tx) => {
+      const [shopRow] = await tx<[{ id: string }?]>`
+        SELECT id FROM "Shop" WHERE domain = ${NO_SHOP_DOMAIN} FOR SHARE
+      `;
+      if (shopRow) {
+        await tx`SELECT pgmq.send(${S6_QUEUES.BULK}, ${tx.json(bulkMsg)})`;
+      }
+      await tx`SELECT pgmq.archive(${S6_QUEUES.BULK}, ${msgId}::bigint)`;
+    });
+
+    const [queueAfter] = await sql<[{ count: string }]>`
+      SELECT COUNT(*)::text as count FROM pgmq.q_s6_bulk
+      WHERE message->>'shop' = ${NO_SHOP_DOMAIN}
+    `;
+    expect(parseInt(queueAfter.count, 10)).toBe(0);
+
+    const [archiveAfter] = await sql<[{ count: string }]>`
+      SELECT COUNT(*)::text as count FROM pgmq.a_s6_bulk WHERE msg_id = ${msgId}::bigint
+    `;
+    expect(parseInt(archiveAfter.count, 10)).toBe(1);
+  });
+});
