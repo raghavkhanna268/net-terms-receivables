@@ -6,12 +6,11 @@
 
 ---
 
-**Owner/Operator:** Raghav Khanna  
-**Address:** [Raghav to confirm]  
-**Governing Law:** [Raghav to confirm]  
-**Jurisdiction:** [Raghav to confirm]
+**Owner/Operator:** Raghav Khanna, individual developer, India
 
-**Effective Date:** [App Store submission date]  
+**Contact:** raghavkhanna468@gmail.com
+
+**Effective Date:** 2026-10-25  
 **Last Updated:** 2026-10-25
 
 ---
@@ -21,6 +20,8 @@
 ### 1. Introduction
 
 These Terms of Service ("Terms") govern the use of Net Terms Receivables ("the App", "we", "us") by merchants ("you", "Merchant") who install the App through the Shopify App Store.
+
+The App is built for Indian merchants with INR (Indian rupee) stores.
 
 By installing or using the App, you agree to these Terms.
 
@@ -106,20 +107,16 @@ The App processes the following categories of buyer personal data:
 
 We use the following sub-processors to provide the App:
 
-| Sub-Processor | Service | Data Processed | Location | DPA |
-|---------------|---------|----------------|----------|-----|
-| **Cloudflare, Inc.** | Application hosting (Workers), connection pooling (Hyperdrive) | All App data in transit; edge processing | Global (Worker placed ap-south-1 via region hint) | [Raghav to confirm] |
-| **Supabase, Inc.** | Database hosting (Postgres) | All App data at rest | AWS ap-south-1 (Mumbai) | [Raghav to confirm] |
-| **Plus Five Five, Inc. (Resend)** | Email delivery | Buyer name and email, merchant name (`app/services/reminders.server.ts:949-956`), shop-owner email (data-request notice) | US | [Resend DPA](https://resend.com/legal/dpa) (DPA §6.1) |
-| **Functional Software, Inc. d/b/a Sentry** | Error monitoring (integration present, not enabled) | Scrubbed error events only (no PII by design — see `app/lib/sentry.ts:83-137`) | [Raghav to confirm] | [Sentry DPA](https://sentry.io/legal/dpa/) |
+| Sub-Processor | Service | Data Processed | Location |
+|---------------|---------|----------------|----------|
+| **Cloudflare, Inc.** | Application hosting (Workers), connection pooling (Hyperdrive) | All App data in transit; edge processing | Global (Worker placed ap-south-1 via region hint) |
+| **Supabase, Inc.** | Database hosting (Postgres), encrypted at rest (AES-256) and in transit (TLS) | All App data at rest | AWS ap-south-1 (Mumbai, India) |
+
+**Not in use; will be listed here before they are enabled:**
+- Plus Five Five, Inc. (Resend) — email delivery
+- Functional Software, Inc. d/b/a Sentry — error monitoring
 
 **Note:** Shopify is the platform and data source, not our sub-processor. Shopify's DPA governs your relationship with Shopify: [Shopify DPA](https://www.shopify.com/legal/dpa).
-
-**Sub-processor code references:**
-- Cloudflare Workers entry: `workers/app.ts`
-- Supabase connection: `app/lib/db-light.server.ts`
-- Resend email sending: `app/services/compliance/compliance.server.ts:837-920` (data request notification), `app/services/reminders.server.ts` (payment reminders)
-- Sentry initialization: `app/lib/sentry.ts:173-199`
 
 ### 5. Data Subject Rights
 
@@ -164,10 +161,9 @@ In the event of a personal data breach affecting your data:
 ### 10. Cross-Border Transfers
 
 Personal data may be transferred to:
-- **US:** Resend (email delivery), potentially Sentry
 - **EU/other:** Cloudflare edge nodes (transient processing only)
 
-Transfer mechanisms: [Raghav to confirm — SCCs, adequacy decisions, or other]
+When Resend and Sentry are enabled, transfers to the US will be documented here.
 
 ### 11. Term and Termination
 
@@ -187,5 +183,5 @@ Upon termination:
 **App Provider:**
 
 Raghav Khanna  
-Owner  
-[App Store submission date]
+Individual Developer, India  
+2026-10-25
