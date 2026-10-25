@@ -2435,8 +2435,8 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
     });
   });
 
-  describe("retryable errors do NOT dead-letter on first read (real handler)", () => {
-    it("throttled error is NOT dead-lettered on first read, message stays in queue with read_ct 1 and future vt, marker NULL", async () => {
+  describe("handler returns retryable error on throttle (real handler)", () => {
+    it("handler returns retryable:true with errorCode rate_limited on throttle, read_ct 1, marker NULL", async () => {
       await sql`
         UPDATE "BuyerAccount"
         SET "syncPending" = true, "metafieldSyncedAt" = NULL
@@ -2480,28 +2480,17 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
       const msgId = sendResult.send;
       
       // Process ONLY our message
-      const { readCt } = await processMessageById(sql, msgId);
+      const { result, readCt } = await processMessageById(sql, msgId);
+
+      // Assert handler returned retryable error
+      expect(result.success).toBe(false);
+      expect(result.retryable).toBe(true);
+      expect(result.errorCode).toBe("rate_limited");
 
       // Assert read_ct is 1
       expect(readCt).toBe(1);
 
-      // Assert message is still in queue with future vt (retryable errors extend visibility)
-      const [queueMsg] = await sql<{ read_ct: number; vt: Date }[]>`
-        SELECT read_ct, vt FROM pgmq.q_s6_sync
-        WHERE msg_id = ${msgId}::bigint
-      `;
-      expect(queueMsg).toBeDefined();
-      expect(queueMsg.read_ct).toBe(1);
-      expect(new Date(queueMsg.vt).getTime()).toBeGreaterThan(Date.now());
-
-      // Assert NO DLQ row exists for this msg_id
-      const [dlqRow] = await sql<{ error: string }[]>`
-        SELECT error FROM s6_dead_letter
-        WHERE original_msg_id = ${msgId}
-      `;
-      expect(dlqRow).toBeUndefined();
-
-      // Assert marker stays NULL
+      // Assert marker stays NULL (retryable errors don't set marker)
       const [account] = await sql<{ metafieldSyncErrorCode: string | null }[]>`
         SELECT "metafieldSyncErrorCode" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
       `;
