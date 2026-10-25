@@ -5,7 +5,7 @@
  * Provides enqueue function to trigger reconcile for a single shop.
  *
  * Status is derived from the LATEST run only (most recent s6_bulk_operations row
- * per reconcile stage). DLQ lookups are scoped to that run's bulk_op_id.
+ * per reconcile stage). DLQ lookups are scoped to that run's bulk_operation_id.
  *
  * Reconcile sequence: companies → customers → orders
  *
@@ -54,7 +54,7 @@ export interface InitialSyncState {
  * Bulk operation row from s6_bulk_operations.
  */
 interface BulkOperation {
-  bulk_op_id: string;
+  bulk_operation_id: string;
   reconcile_stage: string | null;
   completed_at: Date | null;
   failure_count: number;
@@ -72,7 +72,7 @@ interface BulkOperation {
  *
  * Stage ops are only considered if they started at or after the latest
  * companies op's started_at (to avoid mixing old failed ops with new runs).
- * DLQ lookups are scoped to the current run's bulk_op_ids.
+ * DLQ lookups are scoped to the current run's bulk_operation_ids.
  *
  * Customers stage detection:
  * The customers stage is only required if it was planned for the current run:
@@ -90,7 +90,7 @@ export async function getInitialSyncState(
   shopDomain: string
 ): Promise<InitialSyncState> {
   const [companiesOp] = await sql<BulkOperation[]>`
-    SELECT bulk_op_id, reconcile_stage, completed_at, failure_count, started_at
+    SELECT bulk_operation_id, reconcile_stage, completed_at, failure_count, started_at
     FROM s6_bulk_operations
     WHERE shop = ${shopDomain} AND origin = 'reconcile' AND reconcile_stage = 'companies'
     ORDER BY started_at DESC
@@ -102,7 +102,7 @@ export async function getInitialSyncState(
   }
 
   const [customersOp] = await sql<BulkOperation[]>`
-    SELECT bulk_op_id, reconcile_stage, completed_at, failure_count, started_at
+    SELECT bulk_operation_id, reconcile_stage, completed_at, failure_count, started_at
     FROM s6_bulk_operations
     WHERE shop = ${shopDomain}
       AND origin = 'reconcile'
@@ -113,7 +113,7 @@ export async function getInitialSyncState(
   `;
 
   const [ordersOp] = await sql<BulkOperation[]>`
-    SELECT bulk_op_id, reconcile_stage, completed_at, failure_count, started_at
+    SELECT bulk_operation_id, reconcile_stage, completed_at, failure_count, started_at
     FROM s6_bulk_operations
     WHERE shop = ${shopDomain}
       AND origin = 'reconcile'
@@ -123,18 +123,18 @@ export async function getInitialSyncState(
     LIMIT 1
   `;
 
-  const bulkOpIds = [companiesOp.bulk_op_id];
+  const bulkOpIds = [companiesOp.bulk_operation_id];
   if (customersOp) {
-    bulkOpIds.push(customersOp.bulk_op_id);
+    bulkOpIds.push(customersOp.bulk_operation_id);
   }
   if (ordersOp) {
-    bulkOpIds.push(ordersOp.bulk_op_id);
+    bulkOpIds.push(ordersOp.bulk_operation_id);
   }
 
   const dlqCount = await sql<{ count: string }[]>`
     SELECT COUNT(*)::text as count
     FROM s6_dead_letter
-    WHERE message->>'bulkOperationId' = ANY(${bulkOpIds})
+    WHERE message->>'bulkOperationId' IN ${sql(bulkOpIds)}
       AND message->>'topic' IN ('RECONCILE_COMPANIES', 'RECONCILE_CUSTOMERS', 'RECONCILE_ORDERS', 'BULK_OPERATIONS_FINISH')
   `;
 
