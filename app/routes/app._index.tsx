@@ -23,6 +23,7 @@ import {
 import type { Sql } from "~/lib/db-light.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { buildOverLimitBannerState } from "~/lib/over-limit-banner";
+import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 
 const PAGE_SIZE = 20;
@@ -348,7 +349,14 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       companies: { current: 0, limit: 0 },
       importsThisMonth: { current: 0, limit: -1 },
     },
-    appHandle: process.env.APP_HANDLE ?? "net-terms-receivables",
+    upgradeUrl: (() => {
+      const handle = getAppHandle();
+      if (handle === null) {
+        safeLog("warn", "plan_url_app_handle_missing", {});
+        return null;
+      }
+      return buildPlanSelectionUrl(shopDomain, handle);
+    })(),
     gatingEnforced,
     agingTotals,
     buyerLedger,
@@ -649,10 +657,9 @@ function BuyerInvoiceList({
 
 export default function Index() {
   const {
-    storeHandle,
     plan,
     usage,
-    appHandle,
+    upgradeUrl,
     gatingEnforced,
     agingTotals,
     buyerLedger,
@@ -668,8 +675,6 @@ export default function Index() {
   const planKey = (plan?.key ?? "none") as PlanKey;
   const planName = plan?.name ?? PLAN_DISPLAY_NAMES.none;
   const isTest = plan?.isTest ?? false;
-
-  const upgradeUrl = `https://admin.shopify.com/store/${storeHandle}/charges/${appHandle}/pricing_plans`;
 
   const companiesUsed = usage.companies.current;
   const companiesLimit = usage.companies.limit;
