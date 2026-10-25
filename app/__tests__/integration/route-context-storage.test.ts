@@ -6,9 +6,17 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 // Mock SQL client for S8 compliance redaction functions
 // Returns an empty array (for SELECT queries) with count property (for DELETE queries)
 const mockSqlResult = Object.assign([], { count: 0 });
+// Mock transaction function that calls the callback with itself
+const mockTx = vi.fn().mockResolvedValue(mockSqlResult);
 const mockSql = Object.assign(
   vi.fn().mockResolvedValue(mockSqlResult),
-  { json: vi.fn((v) => v) }
+  {
+    json: vi.fn((v) => v),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    begin: vi.fn(async (callback: (tx: any) => Promise<unknown>) => {
+      return callback(mockTx);
+    }),
+  }
 );
 
 // Mock the request context module for compliance webhook tests
