@@ -127,7 +127,7 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | Resend, Inc. | Email delivery (data request notifications, payment reminders) | US | [Resend DPA](https://resend.com/legal/dpa) |
 | Functional Software, Inc. | Error monitoring (Sentry) | [TBD] | [Sentry DPA](https://sentry.io/legal/dpa/) |
 
-**Note:** Sentry is only active when error monitoring is enabled. Error events are scrubbed before transmission: request headers, cookies, query strings, and body data are removed; exception messages are replaced with error codes; breadcrumbs are deleted; and only allowlisted metadata keys (shopId, errorCode, requestId, webhookId, jobId, topic, status) are retained.
+**Note:** Sentry is only active when error monitoring is enabled. Error events are scrubbed before transmission: request headers, cookies, query strings, and body data are removed; exception messages are replaced with error codes; breadcrumbs are deleted; and only allowlisted metadata keys (shopId, code, errorCode, requestId, webhookId, jobId, topic, status) are retained.
 
 **Resend data handling:**
 
@@ -164,7 +164,7 @@ Resend is only used when email delivery is configured; emails are not sent other
 
 ### 6.1 Data Retention After Deletion — Known Limitations
 
-**Background job queue:** The internal job queue does not support per-shop message deletion. Messages for deleted shops fail when the sync handler cannot find the shop record, and are eventually moved to a dead-letter queue after retry exhaustion. Messages also expire naturally based on queue visibility timeout.
+**Background job queue:** Failed background jobs are deleted when the shop's data is deleted. Any that remain (e.g., queued after the deletion) are purged within about 30 days.
 
 **Database backups:** Supabase-managed database backups may retain deleted data for the provider's backup retention window (7–30 days depending on plan). See [Supabase Backups documentation](https://supabase.com/docs/guides/platform/backups).
 
