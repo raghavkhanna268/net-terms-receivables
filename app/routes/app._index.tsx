@@ -828,7 +828,8 @@ export default function Index() {
           </s-list-item>
         </s-unordered-list>
         <s-paragraph>
-          All calculations use the Asia/Kolkata timezone.
+          Invoices become overdue 1 day after the due date (end of day, shop time).
+          All calculations use the shop timezone.
         </s-paragraph>
       </s-section>
     </s-page>
