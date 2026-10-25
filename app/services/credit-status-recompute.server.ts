@@ -231,12 +231,12 @@ export async function recomputeCreditStatus(
   `;
   const finalHold = postSyncAccount?.holdState === "HELD" && !postSyncAccount?.bypass;
 
-  // Log backoff skip with safeLog (buyerAccountId is in the allowlist, numbers pass through)
+  // Log backoff skip with safeLog (buyerAccountId and *Count keys are in the allowlist)
   if (skipMetafieldWrite && backoffInfo) {
     safeLog("info", "credit_status_sync_backoff_skip", {
       buyerAccountId,
-      errorAgeDays: backoffInfo.errorAgeDays,
-      nextRetryDay: backoffInfo.nextRetryDay,
+      errorAgeDayCount: backoffInfo.errorAgeDays,
+      nextRetryDayCount: backoffInfo.nextRetryDay,
     });
   }
 

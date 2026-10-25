@@ -4006,8 +4006,8 @@ describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
       log => typeof log === "string" && log.includes("credit_status_sync_backoff_skip")
     );
     expect(backoffSkipLog).toBeDefined();
-    expect(backoffSkipLog).toContain("errorAgeDays");
-    expect(backoffSkipLog).toContain("nextRetryDay");
+    expect(backoffSkipLog).toContain("errorAgeDayCount");
+    expect(backoffSkipLog).toContain("nextRetryDayCount");
     
     consoleSpy.mockRestore();
   });
@@ -4115,8 +4115,8 @@ describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
     const logPayload = JSON.parse(backoffLogCalls[0][0] as string);
     expect(logPayload.event).toBe("credit_status_sync_backoff_skip");
     expect(logPayload.buyerAccountId).toBe(TEST_ACCOUNT_ID);
-    expect(logPayload.errorAgeDays).toBe(3);
-    expect(logPayload.nextRetryDay).toBe(4);
+    expect(logPayload.errorAgeDayCount).toBe(3);
+    expect(logPayload.nextRetryDayCount).toBe(4);
     
     consoleSpy.mockRestore();
   });
