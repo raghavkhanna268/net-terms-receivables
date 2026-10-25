@@ -51,14 +51,16 @@ return (
 
 There is no prop to disable this script, and `AppBridge` is not exported separately.
 
-**App Bridge CDN source check:** The minified CDN script (`curl https://cdn.shopify.com/shopifycloud/app-bridge.js`) contains `window.shopify=n.shopify` but no visible guard like `if (window.shopify) return;` or `__SHOPIFY_APP_BRIDGE_INITIALIZED`. Whether App Bridge handles double-loading gracefully is **unverified from source**.
+**Solution:** We use a custom `AppProvider` component (`app/components/AppProvider.tsx`) that provides the same functionality (Polaris script + `shopify:navigate` event handler) but without injecting the app-bridge.js script. The script is loaded once in `<head>` via `app/root.tsx` as the first script, satisfying BFS 3.1.1 requirements.
+
+**App Bridge CDN source check:** The minified CDN script (`curl https://cdn.shopify.com/shopifycloud/app-bridge.js`) contains `window.shopify=n.shopify` but no visible guard like `if (window.shopify) return;` or `__SHOPIFY_APP_BRIDGE_INITIALIZED`. This is why we ensure only one script tag is rendered.
 
 ### Dev-store Verification (pending)
 
 Before merging, verify in Raghav's dev-store admin with DevTools open:
 
-1. **Script count**: In Elements, search for `app-bridge.js`. Record the number of `<script>` tags (expected: 2, one in head, one in body from AppProvider).
-2. **Network load count**: In Network tab, filter by `app-bridge.js`. Record the number of requests (expected: 1 if cached, or 2 if not).
+1. **Script count**: In Elements, search for `app-bridge.js`. Record the number of `<script>` tags (expected: 1, in head only - we use a custom AppProvider that skips body injection).
+2. **Network load count**: In Network tab, filter by `app-bridge.js`. Record the number of requests (expected: 1).
 3. **Console errors**: Check for any App Bridge errors, double-init warnings, or "missing configuration" errors.
 4. **`window.shopify` defined**: In Console, run `typeof window.shopify` (expected: `'object'`).
 5. **Navigation works**: Click links in `<s-app-nav>` / NavMenu. Verify navigation occurs without errors.

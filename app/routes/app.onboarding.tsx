@@ -623,8 +623,8 @@ function RegistrationStatusSection({
 
       <s-table>
         <s-table-header-row>
-          <s-table-header>Item</s-table-header>
-          <s-table-header>Status</s-table-header>
+          <s-table-header listSlot="primary">Item</s-table-header>
+          <s-table-header listSlot="inline">Status</s-table-header>
         </s-table-header-row>
         <s-table-body>
           {items.map((item) => (
@@ -684,11 +684,11 @@ function InitialSyncSection({
 
       <s-paragraph>
         {syncState.status === "not_started" &&
-          "Sync your B2B companies and orders to import existing buyer accounts and invoices."}
+          "Sync your B2B companies, tagged customers, and orders to import existing buyer accounts and invoices."}
         {syncState.status === "in_progress" &&
-          "Syncing B2B companies and orders. This may take a few minutes."}
+          "Syncing B2B companies, tagged customers, and orders. This may take a few minutes."}
         {syncState.status === "done" &&
-          "B2B companies and orders have been synced."}
+          "B2B companies, tagged customers, and orders have been synced."}
         {syncState.status === "failed" &&
           "Sync failed. You can retry to attempt the sync again."}
       </s-paragraph>
@@ -724,10 +724,10 @@ function OnboardingChecklist({
 
       <s-table>
         <s-table-header-row>
-          <s-table-header>Status</s-table-header>
-          <s-table-header>Step</s-table-header>
-          <s-table-header>Details</s-table-header>
-          <s-table-header>Action</s-table-header>
+          <s-table-header listSlot="inline">Status</s-table-header>
+          <s-table-header listSlot="primary">Step</s-table-header>
+          <s-table-header listSlot="secondary">Details</s-table-header>
+          <s-table-header listSlot="labeled">Action</s-table-header>
         </s-table-header-row>
         <s-table-body>
           {steps.map((step) => (
