@@ -1175,7 +1175,7 @@ describe("MAX_IMPORT_ROWS constant", () => {
   });
 });
 
-describeWithDb("Bank imports unlimited (T5 - no import limits)", () => {
+describeWithDb("Monthly import limit enforcement", () => {
   let sql: ReturnType<typeof postgres>;
   let testShopId: string;
   let TEST_SHOP_DOMAIN: string;
@@ -1183,10 +1183,10 @@ describeWithDb("Bank imports unlimited (T5 - no import limits)", () => {
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
 
-    const suffix = Date.now().toString(36) + "unlim";
-    TEST_SHOP_DOMAIN = `test-import-unlimited-${suffix}.myshopify.com`;
+    const suffix = Date.now().toString(36) + "lim";
+    TEST_SHOP_DOMAIN = `import-limit-test-${suffix}.myshopify.com`;
 
-    // Create test shop with free plan
+    // Create test shop with free plan (1 import/month limit)
     const [shop] = await sql<{ id: string }[]>`
       INSERT INTO "Shop" (domain, currency, timezone, plan_key, plan_cached_at, "createdAt", "updatedAt")
       VALUES (${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'free', NOW(), NOW(), NOW())
@@ -1208,33 +1208,26 @@ describeWithDb("Bank imports unlimited (T5 - no import limits)", () => {
     await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
     await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
     matcherCalls.length = 0;
+    
+    // Ensure free plan (1 import/month) and PLAN_GATING_ENFORCED is ON for this test
+    await sql`UPDATE "Shop" SET plan_key = 'free', plan_cached_at = NOW() WHERE id = ${testShopId}`;
   });
 
-  it("imports allowed with PLAN_GATING_ENFORCED=true and many prior imports on free plan", async () => {
+  it("first import succeeds when under monthly limit", async () => {
+    // Enable gating for this test
     vi.stubEnv("PLAN_GATING_ENFORCED", "true");
 
     try {
-      // Create many BankImport records (far exceeding old free plan limit of 1)
-      await sql`
-        INSERT INTO "BankImport" ("shopId", bank, "fileName", "rowCount", "createdAt")
-        VALUES 
-          (${testShopId}, 'hdfc', 'import1.csv', 10, NOW()),
-          (${testShopId}, 'hdfc', 'import2.csv', 10, NOW()),
-          (${testShopId}, 'hdfc', 'import3.csv', 10, NOW()),
-          (${testShopId}, 'hdfc', 'import4.csv', 10, NOW()),
-          (${testShopId}, 'hdfc', 'import5.csv', 10, NOW())
-      `;
-
       const payload = {
         bank: "HDFC",
-        fileName: "unlimited-import.csv",
+        fileName: "first-import.csv",
         credits: [
           {
             date: yesterday(),
             amountPaise: 1000000,
             rail: "NEFT",
-            utr: "HDFCN26296700001",
-            narration: "NEFT CR-UNLIMITED IMPORT TEST",
+            utr: "HDFCN26296600001",
+            narration: "NEFT CR-FIRST IMPORT TEST",
           },
         ],
       };
@@ -1245,22 +1238,105 @@ describeWithDb("Bank imports unlimited (T5 - no import limits)", () => {
       const data = await parseResponse(response);
       expect(data.success).toBe(true);
       expect(data.counts?.inserted).toBe(1);
-
-      // Verify total imports is now 6
-      const [count] = await sql<{ c: string }[]>`
-        SELECT COUNT(*)::text AS c FROM "BankImport" WHERE "shopId" = ${testShopId}
-      `;
-      expect(parseInt(count.c, 10)).toBe(6);
     } finally {
       vi.unstubAllEnvs();
     }
   });
 
-  it("imports allowed with PLAN_GATING_ENFORCED=false on free plan", async () => {
+  it("multiple imports in same month allowed (T1: all plans have unlimited imports)", async () => {
+    // Enable gating for this test
+    vi.stubEnv("PLAN_GATING_ENFORCED", "true");
+
+    try {
+      // Create a BankImport record to simulate a previous import this month
+      await sql`
+        INSERT INTO "BankImport" ("shopId", bank, "fileName", "rowCount", "createdAt")
+        VALUES (${testShopId}, 'hdfc', 'previous.csv', 10, NOW())
+      `;
+
+      const payload = {
+        bank: "HDFC",
+        fileName: "second-import.csv",
+        credits: [
+          {
+            date: yesterday(),
+            amountPaise: 2000000,
+            rail: "NEFT",
+            utr: "HDFCN26296600002",
+            narration: "NEFT CR-SECOND IMPORT TEST",
+          },
+        ],
+      };
+
+      // T1 pricing: all plans have unlimited imports, so this should succeed
+      const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      expect(response.status).toBe(200);
+
+      const data = await parseResponse(response);
+      expect(data.success).toBe(true);
+      expect(data.counts?.inserted).toBe(1);
+
+      // Verify both BankImport records exist
+      const [count] = await sql<{ c: string }[]>`
+        SELECT COUNT(*)::text AS c FROM "BankImport" WHERE "shopId" = ${testShopId}
+      `;
+      expect(parseInt(count.c, 10)).toBe(2); // Both imports
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("import succeeds when on unlimited plan (starter/growth/scale)", async () => {
+    // Enable gating for this test
+    vi.stubEnv("PLAN_GATING_ENFORCED", "true");
+
+    try {
+      // Upgrade to starter plan (unlimited imports)
+      await sql`UPDATE "Shop" SET plan_key = 'starter', plan_cached_at = NOW() WHERE id = ${testShopId}`;
+
+      // Create multiple BankImport records
+      await sql`
+        INSERT INTO "BankImport" ("shopId", bank, "fileName", "rowCount", "createdAt")
+        VALUES 
+          (${testShopId}, 'hdfc', 'import1.csv', 10, NOW()),
+          (${testShopId}, 'hdfc', 'import2.csv', 10, NOW()),
+          (${testShopId}, 'hdfc', 'import3.csv', 10, NOW())
+      `;
+
+      const payload = {
+        bank: "HDFC",
+        fileName: "unlimited-import.csv",
+        credits: [
+          {
+            date: yesterday(),
+            amountPaise: 3000000,
+            rail: "NEFT",
+            utr: "HDFCN26296600003",
+            narration: "NEFT CR-UNLIMITED PLAN TEST",
+          },
+        ],
+      };
+
+      const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      expect(response.status).toBe(200);
+
+      const data = await parseResponse(response);
+      expect(data.success).toBe(true);
+      expect(data.counts?.inserted).toBe(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("gating off allows unlimited imports on free plan", async () => {
+    // Ensure gating is OFF
     vi.stubEnv("PLAN_GATING_ENFORCED", "false");
 
     try {
-      // Create prior imports
+      // Ensure free plan
+      await sql`UPDATE "Shop" SET plan_key = 'free', plan_cached_at = NOW() WHERE id = ${testShopId}`;
+
+      // Create many BankImport records
       await sql`
         INSERT INTO "BankImport" ("shopId", bank, "fileName", "rowCount", "createdAt")
         VALUES 
@@ -1274,14 +1350,52 @@ describeWithDb("Bank imports unlimited (T5 - no import limits)", () => {
         credits: [
           {
             date: yesterday(),
-            amountPaise: 2000000,
+            amountPaise: 4000000,
             rail: "NEFT",
-            utr: "HDFCN26296700002",
+            utr: "HDFCN26296600004",
             narration: "NEFT CR-GATING OFF TEST",
           },
         ],
       };
 
+      const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+      expect(response.status).toBe(200);
+
+      const data = await parseResponse(response);
+      expect(data.success).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("T1 pricing: legacy 'free' plan maps to 'none' with unlimited imports", async () => {
+    // Enable gating
+    vi.stubEnv("PLAN_GATING_ENFORCED", "true");
+
+    try {
+      // Set legacy 'free' plan_key in DB (should map to 'none' with unlimited imports)
+      await sql`UPDATE "Shop" SET plan_key = 'free', plan_cached_at = NOW() WHERE id = ${testShopId}`;
+
+      // Create multiple BankImport records
+      await sql`
+        INSERT INTO "BankImport" ("shopId", bank, "fileName", "rowCount", "createdAt")
+        VALUES (${testShopId}, 'hdfc', 'existing.csv', 10, NOW())
+      `;
+
+      const payload = {
+        bank: "HDFC",
+        fileName: "another-import.csv",
+        credits: [
+          {
+            date: yesterday(),
+            amountPaise: 5000000,
+            rail: "NEFT",
+            narration: "NEFT CR-UNLIMITED TEST",
+          },
+        ],
+      };
+
+      // T1: 'free' maps to 'none' which has unlimited imports
       const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
       expect(response.status).toBe(200);
 

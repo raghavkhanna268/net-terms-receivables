@@ -31,9 +31,9 @@ describe("buildOverLimitBannerState", () => {
       expect(state.show).toBe(false);
     });
 
-    it("shows banner when gatingEnforced is false (flag-off behavior)", () => {
+    it("hides banner when gatingEnforced is false (T1: no banner when gating off)", () => {
       const state = buildOverLimitBannerState(3, false);
-      expect(state.show).toBe(true);
+      expect(state.show).toBe(false);
     });
   });
 
@@ -88,20 +88,16 @@ describe("buildOverLimitBannerState", () => {
     });
   });
 
-  describe("enforcement note (gatingEnforced flag)", () => {
+  describe("enforcement note", () => {
     it("returns null enforcementNote when gatingEnforced is true", () => {
       const state = buildOverLimitBannerState(1, true);
       expect(state.enforcementNote).toBeNull();
     });
 
-    it("returns enforcement note when gatingEnforced is false", () => {
+    it("banner hidden when gatingEnforced is false (T1: no banner when gating off)", () => {
       const state = buildOverLimitBannerState(1, false);
-      expect(state.enforcementNote).toBe("(Limits are not currently enforced.)");
-    });
-
-    it("enforcement note is shown even with multiple accounts", () => {
-      const state = buildOverLimitBannerState(10, false);
-      expect(state.enforcementNote).toBe("(Limits are not currently enforced.)");
+      expect(state.show).toBe(false);
+      expect(state.enforcementNote).toBeNull();
     });
   });
 
@@ -120,10 +116,9 @@ describe("buildOverLimitBannerState", () => {
       expect(state.heading).not.toContain("₹");
     });
 
-    it("enforcement note contains no currency symbols", () => {
-      const state = buildOverLimitBannerState(1, false);
-      expect(state.enforcementNote).not.toContain("$");
-      expect(state.enforcementNote).not.toContain("₹");
+    it("enforcement note is null when banner shown (T1: no enforcement note)", () => {
+      const state = buildOverLimitBannerState(1, true);
+      expect(state.enforcementNote).toBeNull();
     });
   });
 });
@@ -140,9 +135,9 @@ describe("buildAccountOverLimitBannerState", () => {
       expect(state.show).toBe(false);
     });
 
-    it("shows banner when gatingEnforced is false (flag-off behavior)", () => {
+    it("hides banner when gatingEnforced is false (T1: no banner when gating off)", () => {
       const state = buildAccountOverLimitBannerState(true, false);
-      expect(state.show).toBe(true);
+      expect(state.show).toBe(false);
     });
 
     it("hides banner when account is not gated even if gatingEnforced is false", () => {
@@ -187,15 +182,16 @@ describe("buildAccountOverLimitBannerState", () => {
     });
   });
 
-  describe("enforcement note (gatingEnforced flag)", () => {
+  describe("enforcement note", () => {
     it("returns null enforcementNote when gatingEnforced is true", () => {
       const state = buildAccountOverLimitBannerState(true, true);
       expect(state.enforcementNote).toBeNull();
     });
 
-    it("returns enforcement note when gatingEnforced is false", () => {
+    it("banner hidden when gatingEnforced is false (T1: no banner when gating off)", () => {
       const state = buildAccountOverLimitBannerState(true, false);
-      expect(state.enforcementNote).toBe("(Limits are not currently enforced.)");
+      expect(state.show).toBe(false);
+      expect(state.enforcementNote).toBeNull();
     });
   });
 
