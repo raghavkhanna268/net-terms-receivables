@@ -349,10 +349,17 @@ function runSnippet(
       SHOP_DOMAIN: "example.invalid",
       ...files,
     };
-    const result = spawnSync("bash", ["-euo", "pipefail", "-c", snippet], {
-      env: childEnv as NodeJS.ProcessEnv,
-      encoding: "utf-8",
-    });
+    // Same flags GitHub Actions uses for `run:` (plus -u). --norc stops bash
+    // sourcing /etc/bash.bashrc when it thinks stdin is a remote shell socket.
+    const result = spawnSync(
+      "bash",
+      ["--noprofile", "--norc", "-euo", "pipefail", "-c", snippet],
+      {
+        env: childEnv as NodeJS.ProcessEnv,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }
+    );
     expect(result.stderr).toBe("");
     expect(result.status).toBe(0);
     const stdout = result.stdout;
