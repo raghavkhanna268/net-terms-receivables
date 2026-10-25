@@ -555,6 +555,91 @@ jobs:
             echo "{\"status\": \"error\", \"http_status\": $HTTP_STATUS, \"error_codes\": $ERROR_CODES}" | jq .
           fi
 
+      - name: Active subscriptions probe
+        id: active_subscriptions
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          TOKEN_EXPIRED: ${{ steps.session.outputs.token_expired }}
+          OFFLINE_SESSION_EXISTS: ${{ steps.session.outputs.offline_session_exists }}
+          REFRESH_SUCCESS: ${{ steps.refresh.outputs.refresh_success }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
+        run: |
+          set -euo pipefail
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
+
+          # Read-only: currentAppInstallation { activeSubscriptions { name status } }.
+          # Public-repo safe: prints ONLY active_subscriptions_count=<int> and
+          # any_subscription_has_plan_name=<true|false>. Never the names or statuses.
+          # Soft-fails (warning + status line) so it can't break the run.
+          echo "=== Active subscriptions (read-only) ==="
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::warning::DATABASE_URL_MIGRATIONS secret not set"
+            echo "active_subscriptions=skipped_no_database_url"
+            exit 0
+          fi
+          if [ "$OFFLINE_SESSION_EXISTS" != "true" ]; then
+            echo "active_subscriptions=skipped_no_offline_session"
+            exit 0
+          fi
+          # Default read-only mode never refreshes; skip when the token is expired.
+          if [ "$TOKEN_EXPIRED" = "true" ] && [ "$REFRESH_SUCCESS" != "true" ]; then
+            echo "active_subscriptions=skipped_token_expired"
+            exit 0
+          fi
+
+          ACCESS_TOKEN=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT "accessToken"
+          FROM "Session"
+          WHERE shop = :'shop' AND "isOnline" = false
+          LIMIT 1;
+          EOSQL
+          )
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "active_subscriptions=skipped_no_access_token"
+            exit 0
+          fi
+          echo "::add-mask::$ACCESS_TOKEN"
+
+          CURL_CONFIG=""
+          HTTP_RESPONSE=""
+          cleanup() {
+            rm -f "$CURL_CONFIG" "$HTTP_RESPONSE"
+          }
+          trap cleanup EXIT
+
+          CURL_CONFIG=$(mktemp)
+          chmod 600 "$CURL_CONFIG"
+          cat > "$CURL_CONFIG" <<EOF
+          header = "Content-Type: application/json"
+          header = "X-Shopify-Access-Token: $ACCESS_TOKEN"
+          EOF
+          unset ACCESS_TOKEN
+
+          # Active subscriptions query and summary (counts/booleans only)
+          SUBS_QUERY='{"query":"{ currentAppInstallation { activeSubscriptions { name status } } }"}'
+          HTTP_RESPONSE=$(mktemp)
+          SUBS_STATUS=$(curl -s -w "%{http_code}" -o "$HTTP_RESPONSE" \
+            -X POST \
+            --config "$CURL_CONFIG" \
+            --data-binary "$SUBS_QUERY" \
+            "https://${SHOP_DOMAIN}/admin/api/2026-10/graphql.json" || echo "000")
+          if [ "$SUBS_STATUS" != "200" ]; then
+            echo "::warning::activeSubscriptions query failed with HTTP $SUBS_STATUS"
+            echo "active_subscriptions=error http_status=$SUBS_STATUS"
+          elif ! jq -e . "$HTTP_RESPONSE" >/dev/null 2>&1; then
+            echo "::warning::activeSubscriptions response was not JSON"
+            echo "active_subscriptions=error parse_failed"
+          elif jq -e '(.errors | length) > 0' "$HTTP_RESPONSE" >/dev/null 2>&1; then
+            echo "::warning::activeSubscriptions query returned GraphQL errors"
+            echo "active_subscriptions=error error_codes=$(jq -r '[.errors[] | .extensions.code // "UNKNOWN" | tostring | if test("^[A-Z0-9_]{1,40}$") then . else "UNKNOWN" end] | join(",")' "$HTTP_RESPONSE")"
+          else
+            jq -r '[.data.currentAppInstallation.activeSubscriptions[]?] as $subs
+              | "active_subscriptions_count=\($subs | length)",
+                "any_subscription_has_plan_name=\([$subs[] | .name | select(type == "string" and length > 0)] | length > 0)"' "$HTTP_RESPONSE"
+          fi
+          # End active subscriptions
+
       - name: Database extensions and jobs check
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
