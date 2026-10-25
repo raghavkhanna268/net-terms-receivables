@@ -93,7 +93,7 @@ CREATE TABLE s6_processed_webhooks (
 - **`s6_processed_webhooks`**: 7-day retention via pg_cron (`s10_processed_webhooks_cleanup`, 04:00 UTC daily; see `prisma/migrations/20261024010000_s10_drain_cron/migration.sql:183-188`)
 - **Shop deletion**:
   - `app/uninstalled`: Receipt-linked processed webhooks and receipts are purged immediately
-  - `shop/redact`: All remaining processed webhooks (including reconcile-prefix ids) and receipts are purged
+  - `shop/redact`: Reconcile-prefix and receipt-linked processed webhooks, and receipts, are purged; `credit_*` and receipt-less rows expire via the 7-day TTL.
 
 ## Ordering (No Explicit Guards)
 
