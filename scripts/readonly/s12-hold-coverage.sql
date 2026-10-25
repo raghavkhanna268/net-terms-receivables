@@ -5,8 +5,8 @@
 -- shop-level config_int defaultTermsDays (H1 only; per-account terms print as booleans). Never selects name, holdNote, emails, domains, money
 -- amounts (outstanding/total/creditLimit only appear inside comparisons), payloads
 -- or free-text fields.
--- Section A prints counts only (no Customer, CompanyLocation or BuyerAccount ids):
--- public logs carry no per-customer ids (Team Lead ruling, 2026-10-25).
+-- Sections A, B and C print counts/aggregates only (no Customer, CompanyLocation or
+-- BuyerAccount ids): public logs carry no per-entity ids (Team Lead ruling, 2026-10-25).
 -- "past_due"  = open invoice, outstanding > 0, dueAt < NOW().
 -- "overdue"   = the sweep / hasOverdueInvoices predicate: same, but dueAt < NOW() - 1 day.
 -- "is_seed"   = BuyerAccount.id LIKE 'seed-account-%' (same as s12-checkout-fixtures.sql).
@@ -15,7 +15,7 @@
 -- Var: since (ISO-8601 UTC of the sweep run, e.g. 2026-10-24T19:00:00Z). The sweep's
 --      dedupe key date is since's UTC date.
 -- @col kind, "holdState", proname, dep_table: enum
--- @col "manualHold", bypass, "syncPending": boolean
+-- @col "manualHold", bypass: boolean
 -- @col "defaultTermsDays": config_int
 \set ON_ERROR_STOP 1
 BEGIN TRANSACTION READ ONLY;
@@ -139,28 +139,34 @@ UNION ALL
 SELECT 'dlq_daily_sweep_since', COUNT(*) FROM s6_dead_letter
 WHERE message->>'source' = 'daily_sweep' AND dead_lettered_at >= (:'since')::timestamptz;
 
-\echo '== B #200 orphan gids: COMPANY_LOCATIONS_DELETE dedupe rows + account sync state. NOTE: s6_processed_webhooks rows are purged after 7 days (pg_cron), so 0 delete rows may only mean they aged out; webhook_receipts (B2) keeps 30 days'
+\echo '== B #200 orphan locations (3 known, committed below): COMPANY_LOCATIONS_DELETE dedupe rows + linked account sync state, counts only. NOTE: s6_processed_webhooks rows are purged after 7 days (pg_cron), so 0 delete rows may only mean they aged out; webhook_receipts (B2) keeps 30 days'
 WITH g(company_location_gid) AS (
   SELECT 'gid://shopify/CompanyLocation/24539463845' UNION ALL
   SELECT 'gid://shopify/CompanyLocation/24539529381' UNION ALL
   SELECT 'gid://shopify/CompanyLocation/24539594917'
+),
+gd AS (
+  SELECT g.company_location_gid,
+         w.topic = 'COMPANY_LOCATIONS_DELETE' AS is_delete
+  FROM g
+  JOIN s6_processed_webhooks w
+    ON w.resource_gid = g.company_location_gid
+    OR (w.topic = 'COMPANY_LOCATIONS_DELETE'
+        AND w.resource_gid = replace(g.company_location_gid, 'gid://shopify/CompanyLocation/', ''))
 )
-SELECT g.company_location_gid,
-       (SELECT COUNT(*) FROM s6_processed_webhooks w
-         WHERE w.topic = 'COMPANY_LOCATIONS_DELETE'
-           AND (w.resource_gid = g.company_location_gid
-                OR w.resource_gid = replace(g.company_location_gid, 'gid://shopify/CompanyLocation/', ''))) AS delete_webhook_rows,
-       (SELECT COUNT(*) FROM s6_processed_webhooks w
-         WHERE w.resource_gid = g.company_location_gid) AS any_topic_dedupe_rows,
-       ba.id AS buyer_account_id,
-       ba.id LIKE 'seed-account-%' AS is_seed,
-       ba."holdState",
-       ba."syncPending",
-       ba."metafieldSyncedAt" IS NULL AS metafield_synced_at_is_null,
-       ba."updatedAt" AS account_updated_at
+SELECT COUNT(DISTINCT g.company_location_gid) AS known_orphan_locations,
+       (SELECT COUNT(DISTINCT gd.company_location_gid) FROM gd WHERE gd.is_delete) AS locations_with_delete_webhook_rows,
+       (SELECT COUNT(*) FROM gd WHERE gd.is_delete) AS delete_webhook_rows,
+       (SELECT COUNT(*) FROM s6_processed_webhooks w JOIN g g2 ON w.resource_gid = g2.company_location_gid) AS any_topic_dedupe_rows,
+       COUNT(DISTINCT g.company_location_gid) FILTER (WHERE ba.id IS NOT NULL) AS locations_with_buyer_account,
+       COUNT(ba.id) AS linked_buyer_accounts,
+       COUNT(ba.id) FILTER (WHERE ba.id LIKE 'seed-account-%') AS linked_seed_accounts,
+       COUNT(ba.id) FILTER (WHERE ba."holdState" = 'HELD') AS linked_accounts_held,
+       COUNT(ba.id) FILTER (WHERE ba."syncPending") AS linked_accounts_sync_pending,
+       COUNT(ba.id) FILTER (WHERE ba."metafieldSyncedAt" IS NULL) AS linked_accounts_metafield_never_synced,
+       MAX(ba."updatedAt") AS latest_linked_account_updated_at
 FROM g
-LEFT JOIN "BuyerAccount" ba ON ba."companyLocationId" = g.company_location_gid
-ORDER BY 1;
+LEFT JOIN "BuyerAccount" ba ON ba."companyLocationId" = g.company_location_gid;
 
 \echo '== B2 COMPANY_LOCATIONS_DELETE totals (dedupe table / edge receipts)'
 SELECT 'processed_webhooks' AS src, COUNT(*) AS n, MIN(processed_at) AS min_at, MAX(processed_at) AS max_at
@@ -169,25 +175,38 @@ UNION ALL
 SELECT 'webhook_receipts', COUNT(*), MIN(received_at), MAX(received_at)
 FROM webhook_receipts WHERE topic = 'COMPANY_LOCATIONS_DELETE';
 
-\echo '== C dependent rows per seed BuyerAccount (pair with checkout_fixtures owner_found for node-null)'
-SELECT ba.id AS buyer_account_id,
-       ba."companyLocationId" AS company_location_gid,
-       ba."companyLocationId" IN ('gid://shopify/CompanyLocation/24539463845',
-                                  'gid://shopify/CompanyLocation/24539529381',
-                                  'gid://shopify/CompanyLocation/24539594917') AS known_orphan,
-       (SELECT COUNT(*) FROM "Invoice" i WHERE i."buyerAccountId" = ba.id) AS invoices,
-       (SELECT COUNT(*) FROM "Match" m JOIN "Invoice" i ON i.id = m."invoiceId" WHERE i."buyerAccountId" = ba.id) AS matches,
-       (SELECT COUNT(DISTINCT m."paymentId") FROM "Match" m JOIN "Invoice" i ON i.id = m."invoiceId" WHERE i."buyerAccountId" = ba.id) AS matched_payments,
-       (SELECT COUNT(*) FROM rejected_matches r JOIN "Invoice" i ON i.id = r."invoiceId" WHERE i."buyerAccountId" = ba.id) AS rejected_matches,
-       (SELECT COUNT(*) FROM "ReminderLog" rl JOIN "Invoice" i ON i.id = rl."invoiceId" WHERE i."buyerAccountId" = ba.id) AS reminder_logs,
-       (SELECT COUNT(*) FROM "PayerAlias" pa WHERE pa."buyerAccountId" = ba.id) AS payer_aliases,
-       (SELECT COUNT(*) FROM s8_draft_orders d WHERE d.buyer_account_id = ba.id) AS draft_orders,
-       (SELECT COUNT(*) FROM "AuditEvent" e WHERE e."shopId" = ba."shopId" AND e.data->>'buyerAccountId' = ba.id) AS audit_events,
-       (SELECT COUNT(*) FROM s6_processed_webhooks w WHERE w.webhook_id LIKE 'credit_recompute:' || ba.id || ':%') AS recompute_dedupe_rows
-FROM "BuyerAccount" ba
-WHERE ba.id LIKE 'seed-account-%'
-ORDER BY ba.id
-LIMIT 200;
+\echo '== C seed BuyerAccounts with dependent rows, by known-orphan location (counts only; row totals per table are in C3)'
+WITH sa AS (
+  SELECT ba."companyLocationId" IN ('gid://shopify/CompanyLocation/24539463845',
+                                    'gid://shopify/CompanyLocation/24539529381',
+                                    'gid://shopify/CompanyLocation/24539594917') AS known_orphan,
+         EXISTS (SELECT 1 FROM "Invoice" i WHERE i."buyerAccountId" = ba.id) AS has_invoices,
+         EXISTS (SELECT 1 FROM "Match" m JOIN "Invoice" i ON i.id = m."invoiceId" WHERE i."buyerAccountId" = ba.id) AS has_matches,
+         EXISTS (SELECT 1 FROM rejected_matches r JOIN "Invoice" i ON i.id = r."invoiceId" WHERE i."buyerAccountId" = ba.id) AS has_rejected_matches,
+         EXISTS (SELECT 1 FROM "ReminderLog" rl JOIN "Invoice" i ON i.id = rl."invoiceId" WHERE i."buyerAccountId" = ba.id) AS has_reminder_logs,
+         EXISTS (SELECT 1 FROM "PayerAlias" pa WHERE pa."buyerAccountId" = ba.id) AS has_payer_aliases,
+         EXISTS (SELECT 1 FROM s8_draft_orders d WHERE d.buyer_account_id = ba.id) AS has_draft_orders,
+         EXISTS (SELECT 1 FROM "AuditEvent" e WHERE e."shopId" = ba."shopId" AND e.data->>'buyerAccountId' = ba.id) AS has_audit_events,
+         EXISTS (SELECT 1 FROM s6_processed_webhooks w WHERE w.webhook_id LIKE 'credit_recompute:' || ba.id || ':%') AS has_recompute_dedupe_rows
+  FROM "BuyerAccount" ba
+  WHERE ba.id LIKE 'seed-account-%'
+)
+SELECT known_orphan,
+       COUNT(*) AS seed_accounts,
+       COUNT(*) FILTER (WHERE has_invoices) AS with_invoices,
+       COUNT(*) FILTER (WHERE has_matches) AS with_matches,
+       COUNT(*) FILTER (WHERE has_rejected_matches) AS with_rejected_matches,
+       COUNT(*) FILTER (WHERE has_reminder_logs) AS with_reminder_logs,
+       COUNT(*) FILTER (WHERE has_payer_aliases) AS with_payer_aliases,
+       COUNT(*) FILTER (WHERE has_draft_orders) AS with_draft_orders,
+       COUNT(*) FILTER (WHERE has_audit_events) AS with_audit_events,
+       COUNT(*) FILTER (WHERE has_recompute_dedupe_rows) AS with_recompute_dedupe_rows,
+       COUNT(*) FILTER (WHERE NOT (has_invoices OR has_matches OR has_rejected_matches OR has_reminder_logs
+                                   OR has_payer_aliases OR has_draft_orders OR has_audit_events
+                                   OR has_recompute_dedupe_rows)) AS with_no_dependents
+FROM sa
+GROUP BY 1
+ORDER BY 1;
 
 \echo '== C3 dependent-row totals per table, seed vs non-seed (all BuyerAccounts; tables with 0 rows for a split are omitted)'
 SELECT 'buyer_accounts' AS dep_table, ba.id LIKE 'seed-account-%' AS is_seed, COUNT(*) AS n FROM "BuyerAccount" ba GROUP BY 2
