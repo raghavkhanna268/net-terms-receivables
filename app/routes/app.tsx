@@ -4,17 +4,30 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "~/components/AppProvider";
 import { runAfterAuth } from "~/lib/after-auth.server";
 import { useEffect } from "react";
+import { ServerTiming } from "~/lib/server-timing.server";
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
+  const timing = new ServerTiming();
+
   // Session storage is injected per-request via loadContext in workers/app.ts
   const { shopify, cloudflare } = context;
 
+  timing.startPhase("auth_layout");
   const { admin, session } = await shopify.authenticate.admin(request);
+  timing.endPhase("auth_layout");
 
   // Bind waitUntil to ctx to avoid "Illegal invocation" on workerd
   runAfterAuth(session.shop, admin, (p) => cloudflare.ctx.waitUntil(p));
 
-  return { apiKey: process.env.SHOPIFY_API_KEY || "" };
+  const serverTiming = timing.toHeaderValue();
+  const responseData = { apiKey: process.env.SHOPIFY_API_KEY || "" };
+
+  const headers: HeadersInit = { "Content-Type": "application/json" };
+  if (serverTiming) {
+    headers["Server-Timing"] = serverTiming;
+  }
+
+  return new Response(JSON.stringify(responseData), { headers });
 };
 
 export default function App() {
@@ -57,5 +70,14 @@ export function ErrorBoundary() {
 }
 
 export const headers: HeadersFunction = (headersArgs) => {
-  return boundary.headers(headersArgs);
+  const boundaryHeaders = boundary.headers(headersArgs);
+  const resultHeaders = new Headers(boundaryHeaders);
+
+  // Merge Server-Timing from layout loader
+  const layoutTiming = headersArgs.loaderHeaders?.get("Server-Timing");
+  if (layoutTiming) {
+    resultHeaders.set("Server-Timing", layoutTiming);
+  }
+
+  return resultHeaders;
 };

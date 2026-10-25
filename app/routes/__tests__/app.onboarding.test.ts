@@ -1769,7 +1769,7 @@ describe("app._index redirect", () => {
 
     const { loader } = await import("../app._index");
 
-    const result = await loader({
+    const response = await loader({
       request: new Request("https://example.com/app?skipOnboarding=true"),
       context: {
         shopify: {
@@ -1786,6 +1786,7 @@ describe("app._index redirect", () => {
       params: {},
     } as unknown as LoaderFunctionArgs);
 
+    const result = (await (response as Response).json()) as { shopDomain: string };
     expect(result.shopDomain).toBe(TEST_SHOP);
   });
 
@@ -1857,7 +1858,7 @@ describe("app._index redirect", () => {
 
     const { loader } = await import("../app._index");
 
-    const result = await loader({
+    const response = await loader({
       request: new Request("https://example.com/app"),
       context: {
         shopify: {
@@ -1874,6 +1875,7 @@ describe("app._index redirect", () => {
       params: {},
     } as unknown as LoaderFunctionArgs);
 
+    const result = (await (response as Response).json()) as { shopDomain: string };
     expect(result.shopDomain).toBe(TEST_SHOP);
   });
 
@@ -1899,7 +1901,7 @@ describe("app._index redirect", () => {
 
     const { loader } = await import("../app._index");
 
-    const result = await loader({
+    const response = await loader({
       request: new Request("https://example.com/app"),
       context: {
         shopify: {
@@ -1916,6 +1918,7 @@ describe("app._index redirect", () => {
       params: {},
     } as unknown as LoaderFunctionArgs);
 
+    const result = (await (response as Response).json()) as { shopDomain: string };
     expect(result.shopDomain).toBe(TEST_SHOP);
   });
 });

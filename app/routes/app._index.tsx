@@ -23,8 +23,48 @@ import {
 import type { Sql } from "~/lib/db-light.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { buildOverLimitBannerState } from "~/lib/over-limit-banner";
+import { ServerTiming, markRequestServed } from "~/lib/server-timing.server";
 
 const PAGE_SIZE = 20;
+
+/**
+ * Type for the loader response data.
+ */
+interface LoaderData {
+  shopName: string;
+  shopDomain: string;
+  storeHandle: string;
+  shopCurrency: string;
+  plan: {
+    key: string;
+    name: string;
+    isTest: boolean;
+  } | null;
+  usage: {
+    companies: { current: number; limit: number };
+    importsThisMonth: { current: number; limit: number };
+  };
+  appHandle: string;
+  gatingEnforced: boolean;
+  agingTotals: SerializableAgingTotals | null;
+  buyerLedger: { rows: BuyerLedgerRow[]; totalCount: number } | null;
+  selectedBuyerInvoices: {
+    rows: BuyerInvoiceRow[];
+    totalCount: number;
+    buyerName: string;
+  } | null;
+  selectedBuyerId: string | null;
+  pagination: {
+    page: number;
+    pageSize: number;
+    totalCount: number;
+  };
+  sortBy: string;
+  sortOrder: string;
+  onlyOverLimit: boolean;
+  overLimitCount: number;
+  error: string | null;
+}
 
 /**
  * Get the count of over-limit (gated) accounts with open outstanding invoices.
@@ -203,8 +243,16 @@ async function checkOnboardingRedirect(
 }
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
+  const timing = new ServerTiming();
+  timing.startPhase("loader_total");
+
   const { shopify } = context;
+
+  // Time auth_index phase
+  timing.startPhase("auth_index");
   const { session, redirect: shopifyRedirect } = await shopify.authenticate.admin(request);
+  timing.endPhase("auth_index");
+
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
@@ -216,12 +264,18 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const skipOnboarding = url.searchParams.get("skipOnboarding") === "true";
   const onlyOverLimit = url.searchParams.get("overlimit") === "true";
 
+  // Time shop_lookup phase
+  timing.startPhase("shop_lookup");
   const [shop] = await sql<{ id: string; currency: string; timezone: string }[]>`
     SELECT id, currency, timezone FROM "Shop" WHERE domain = ${shopDomain}
   `;
+  timing.endPhase("shop_lookup");
 
+  // Time onboarding_checks phase
   if (shop && !skipOnboarding) {
+    timing.startPhase("onboarding_checks");
     const shouldRedirect = await checkOnboardingRedirect(sql, shop.id);
+    timing.endPhase("onboarding_checks");
     if (shouldRedirect) {
       throw shopifyRedirect("/app/onboarding");
     }
@@ -254,24 +308,31 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         sortOrder,
       };
 
-      // Choose ledger function BEFORE Promise.all - never run both
-      const ledgerFn = onlyOverLimit
-        ? getOverLimitBuyerLedger(sql, shop.id, asOf, ledgerOptions)
-        : getBuyerLedger(sql, shop.id, asOf, ledgerOptions);
+      // Time plan_resolve phase
+      timing.startPhase("plan_resolve");
+      const planResult = await resolvePlan(sql, shopDomain);
+      timing.endPhase("plan_resolve");
 
-      // When filtering over-limit, reuse buyerLedger.totalCount as overLimitCount
-      // Otherwise, run getOverLimitCount separately
-      const overLimitCountFn = onlyOverLimit
-        ? Promise.resolve(null) // will use buyerLedger.totalCount
-        : getOverLimitCount(sql, shop.id);
-
-      const [planResult, usageResult, agingResult, ledgerResult, countResult] = await Promise.all([
-        resolvePlan(sql, shopDomain),
+      // Run usage and aging queries concurrently (not individually timed)
+      const [usageResult, agingResult] = await Promise.all([
         getUsageStats(sql, shop.id),
         getShopAgingTotals(sql, shop.id, asOf),
-        ledgerFn,
-        overLimitCountFn,
       ]);
+
+      // Time ledger_rows phase
+      timing.startPhase("ledger_rows");
+      const ledgerResult = onlyOverLimit
+        ? await getOverLimitBuyerLedger(sql, shop.id, asOf, ledgerOptions)
+        : await getBuyerLedger(sql, shop.id, asOf, ledgerOptions);
+      timing.endPhase("ledger_rows");
+
+      // Time ledger_count phase (only when not filtering over-limit)
+      let countResult: number | null = null;
+      if (!onlyOverLimit) {
+        timing.startPhase("ledger_count");
+        countResult = await getOverLimitCount(sql, shop.id);
+        timing.endPhase("ledger_count");
+      }
 
       planData = planResult;
       usage = usageResult;
@@ -317,7 +378,23 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const storeHandle = shopDomain.replace(".myshopify.com", "");
   const gatingEnforced = isGatingEnforced();
 
-  return {
+  // End loader_total timing and log
+  timing.endPhase("loader_total");
+
+  // Log timing with only allowlisted fields
+  const loaderTotalMs = timing.getDuration("loader_total");
+  safeLog("info", "app_home_timing", {
+    route: "app_home",
+    cold: timing.isCold(),
+    durationMs: loaderTotalMs !== undefined ? Math.round(loaderTotalMs) : 0,
+  });
+
+  // Mark request served for cold start tracking
+  markRequestServed();
+
+  const serverTiming = timing.toHeaderValue();
+
+  const responseData = {
     shopName: storeHandle,
     shopDomain,
     storeHandle,
@@ -350,6 +427,13 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     overLimitCount,
     error,
   };
+
+  const headers: HeadersInit = { "Content-Type": "application/json" };
+  if (serverTiming) {
+    headers["Server-Timing"] = serverTiming;
+  }
+
+  return new Response(JSON.stringify(responseData), { headers });
 };
 
 const BUCKET_LABELS: Record<AgingBucketKey, string> = {
@@ -648,7 +732,7 @@ export default function Index() {
     onlyOverLimit,
     overLimitCount,
     error,
-  } = useLoaderData<typeof loader>();
+  } = useLoaderData<LoaderData>();
 
   const planKey = (plan?.key ?? "free") as PlanKey;
   const planName = plan?.name ?? "Free";
@@ -837,5 +921,14 @@ export default function Index() {
 }
 
 export const headers: HeadersFunction = (headersArgs) => {
-  return boundary.headers(headersArgs);
+  const boundaryHeaders = boundary.headers(headersArgs);
+  const resultHeaders = new Headers(boundaryHeaders);
+
+  // Pass through Server-Timing header from loader
+  const serverTiming = headersArgs.loaderHeaders?.get("Server-Timing");
+  if (serverTiming) {
+    resultHeaders.set("Server-Timing", serverTiming);
+  }
+
+  return resultHeaders;
 };

@@ -11,6 +11,70 @@ import type { LoaderFunctionArgs } from "react-router";
  * 4. Error handling
  */
 
+/**
+ * Type for the loader result data.
+ */
+interface LoaderResult {
+  shopName: string;
+  shopDomain: string;
+  storeHandle: string;
+  shopCurrency: string;
+  plan: { key: string; name: string; isTest: boolean } | null;
+  usage: {
+    companies: { current: number; limit: number };
+    importsThisMonth: { current: number; limit: number };
+  };
+  appHandle: string;
+  gatingEnforced: boolean;
+  agingTotals: {
+    totalByCurrency: Record<string, string>;
+    buckets: Record<string, { byCurrency: Record<string, string> }>;
+    overdueByCurrency: Record<string, string>;
+    oldestOverdueDays: number | null;
+  } | null;
+  buyerLedger: {
+    rows: Array<{
+      buyer_account_id: string;
+      buyer_name: string;
+      credit_limit_paise: string | null;
+      hold_state: string;
+      currency: string;
+      outstanding_paise: string;
+      overdue_paise: string;
+      oldest_overdue_days: number | null;
+      is_gated: boolean;
+    }>;
+    totalCount: number;
+  } | null;
+  selectedBuyerInvoices: {
+    rows: Array<unknown>;
+    totalCount: number;
+    buyerName: string;
+  } | null;
+  selectedBuyerId: string | null;
+  pagination: {
+    page: number;
+    pageSize: number;
+    totalCount: number;
+  };
+  sortBy: string;
+  sortOrder: string;
+  onlyOverLimit: boolean;
+  overLimitCount: number;
+  error: string | null;
+}
+
+/**
+ * Helper to parse loader response.
+ * The loader returns a Response object; this extracts the JSON data.
+ */
+async function parseLoaderResponse(response: unknown): Promise<LoaderResult> {
+  if (response instanceof Response) {
+    return (await response.json()) as LoaderResult;
+  }
+  return response as LoaderResult;
+}
+
 // Mock SQL client
 const mockSql = Object.assign(vi.fn(), { unsafe: vi.fn((s) => s) });
 
@@ -141,7 +205,7 @@ describe("app._index loader", () => {
   describe("empty state", () => {
     it("returns empty aging totals when no invoices exist", async () => {
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = await parseLoaderResponse(await loader(createLoaderArgs()));
 
       expect(result.agingTotals).toEqual({
         totalByCurrency: {},
@@ -176,7 +240,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = await parseLoaderResponse(await loader(createLoaderArgs()));
 
       expect(result.agingTotals?.totalByCurrency).toEqual({ INR: "10000000" });
       expect(result.agingTotals?.overdueByCurrency).toEqual({ INR: "5000000" });
@@ -198,7 +262,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = await parseLoaderResponse(await loader(createLoaderArgs()));
 
       expect(result.agingTotals?.totalByCurrency.INR).toBe("10000000");
       expect(result.agingTotals?.totalByCurrency.USD).toBe("5000000");
@@ -341,7 +405,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = await parseLoaderResponse(await loader(createLoaderArgs()));
 
       expect(result.buyerLedger?.rows).toHaveLength(1);
       expect(result.buyerLedger?.rows[0].buyer_name).toBe("Acme Corp");
@@ -384,7 +448,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs({ buyer: "buyer-1" }));
+      const result = await parseLoaderResponse(await loader(createLoaderArgs({ buyer: "buyer-1" })));
 
       expect(mockGetBuyerInvoices).toHaveBeenCalledWith(
         expect.anything(),
@@ -409,7 +473,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs({ buyer: "buyer-unknown" }));
+      const result = await parseLoaderResponse(await loader(createLoaderArgs({ buyer: "buyer-unknown" })));
 
       expect(result.selectedBuyerInvoices?.buyerName).toBe("Test Buyer");
     });
@@ -420,7 +484,7 @@ describe("app._index loader", () => {
       mockGetShopAgingTotals.mockRejectedValue(new Error("Database error"));
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = await parseLoaderResponse(await loader(createLoaderArgs()));
 
       expect(result.error).toBe("Failed to load aging data. Please try again.");
       expect(result.agingTotals).toBeNull();
@@ -447,7 +511,7 @@ describe("app._index loader", () => {
       mockSql.mockImplementation(() => Promise.resolve([]));
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = await parseLoaderResponse(await loader(createLoaderArgs()));
 
       expect(result.agingTotals).toBeNull();
       expect(result.buyerLedger).toBeNull();
@@ -457,7 +521,7 @@ describe("app._index loader", () => {
   describe("shop metadata", () => {
     it("returns shop domain and currency", async () => {
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = await parseLoaderResponse(await loader(createLoaderArgs()));
 
       expect(result.shopDomain).toBe(TEST_SHOP);
       expect(result.shopCurrency).toBe("INR");
@@ -468,7 +532,7 @@ describe("app._index loader", () => {
   describe("over-limit account filter", () => {
     it("defaults onlyOverLimit to false when no query param", async () => {
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = await parseLoaderResponse(await loader(createLoaderArgs()));
 
       expect(result.onlyOverLimit).toBe(false);
     });
@@ -515,7 +579,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs({ overlimit: "true" }));
+      const result = await parseLoaderResponse(await loader(createLoaderArgs({ overlimit: "true" })));
 
       expect(result.onlyOverLimit).toBe(true);
     });
@@ -561,7 +625,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = await parseLoaderResponse(await loader(createLoaderArgs()));
 
       // overLimitCount is from SQL (2), not from current page (which has 0 gated)
       expect(result.overLimitCount).toBe(2);
@@ -623,7 +687,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs({ overlimit: "true" }));
+      const result = await parseLoaderResponse(await loader(createLoaderArgs({ overlimit: "true" })));
 
       expect(result.onlyOverLimit).toBe(true);
       expect(result.buyerLedger?.rows).toHaveLength(2);
@@ -663,7 +727,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = await parseLoaderResponse(await loader(createLoaderArgs()));
 
       expect(result.onlyOverLimit).toBe(false);
       expect(result.buyerLedger?.rows).toHaveLength(2);
@@ -802,7 +866,7 @@ describe("S21 gated accounts in dashboard listing and totals", () => {
     });
 
     const { loader } = await import("../app._index");
-    const result = await loader(createLoaderArgs() as never);
+    const result = await parseLoaderResponse(await loader(createLoaderArgs() as never));
 
     expect(result.buyerLedger?.rows).toHaveLength(2);
 
@@ -846,7 +910,7 @@ describe("S21 gated accounts in dashboard listing and totals", () => {
     });
 
     const { loader } = await import("../app._index");
-    const result = await loader(createLoaderArgs() as never);
+    const result = await parseLoaderResponse(await loader(createLoaderArgs() as never));
 
     expect(result.overLimitCount).toBe(1);
   });
