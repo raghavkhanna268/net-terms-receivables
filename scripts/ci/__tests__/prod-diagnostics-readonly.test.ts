@@ -12,7 +12,9 @@
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
@@ -291,5 +293,122 @@ describe("prod-diagnostics workflow read-only mode", () => {
       expect(s12Step?.run).toContain("ensure_validation_skipped=true");
       expect(s12Step?.run).toContain("GITHUB_STEP_SUMMARY");
     });
+  });
+});
+
+/**
+ * Runs the real "S12 Validation" snippet that parses the validations response
+ * (from the VALIDATION_NODE lookup through the read-only status print) against a
+ * fixture response, and returns the printed status JSON plus raw stdout.
+ */
+function runDeployedInputQuerySnippet(
+  run: string,
+  response: unknown
+): { stdout: string; status: Record<string, unknown> } {
+  const startMarker = "# Find credit-check-validation node";
+  const endMarker = "# S12 checkout fixtures (read-only)";
+  const start = run.indexOf(startMarker);
+  const end = run.indexOf(endMarker);
+  expect(start).toBeGreaterThanOrEqual(0);
+  expect(end).toBeGreaterThan(start);
+  const snippet = run.slice(start, end);
+
+  const dir = mkdtempSync(join(tmpdir(), "diag-iq-"));
+  try {
+    const responsePath = join(dir, "response.json");
+    writeFileSync(responsePath, JSON.stringify(response));
+    const result = spawnSync("bash", ["-euo", "pipefail", "-c", snippet], {
+      env: {
+        PATH: process.env.PATH ?? "",
+        HTTP_RESPONSE: responsePath,
+        REPO_INPUT_QUERY_HAS_CREDIT_STATUS: "true",
+      },
+      encoding: "utf-8",
+    });
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    const stdout = result.stdout;
+    const jsonStart = stdout.indexOf("{");
+    expect(jsonStart).toBeGreaterThanOrEqual(0);
+    return {
+      stdout,
+      status: JSON.parse(stdout.slice(jsonStart)) as Record<string, unknown>,
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+describe("S12 Validation deployed inputQuery metrics (no text)", () => {
+  // Sentinel text that must never appear in the step output.
+  const SENTINEL = "SENTINEL_QUERY_TEXT_zq9x";
+  const QUERY = `query Input { cart { buyerIdentity { customer { metafield(namespace: "$app", key: "credit_status") { jsonValue } } } } } # ${SENTINEL} \u00e9`;
+
+  let run: string;
+
+  beforeAll(() => {
+    const workflow = parseYaml(readFileSync(WORKFLOW_PATH, "utf-8")) as Workflow;
+    const steps = Object.values(workflow.jobs ?? {}).flatMap((j) => j.steps ?? []);
+    run = steps.find((s) => s.id === "s12_validation")?.run ?? "";
+    expect(run).not.toBe("");
+  });
+
+  function responseWith(inputQuery: unknown, includeKey = true) {
+    const shopifyFunction: Record<string, unknown> = { handle: "credit-check-validation" };
+    if (includeKey) shopifyFunction.inputQuery = inputQuery;
+    return {
+      data: {
+        validations: {
+          nodes: [
+            { id: "gid://shopify/Validation/1", title: "x", enabled: true, blockOnFailure: true, shopifyFunction },
+          ],
+        },
+      },
+    };
+  }
+
+  it("prints deployed_input_query_nonempty=true and the character length, never the text", () => {
+    const { stdout, status } = runDeployedInputQuerySnippet(run, responseWith(QUERY));
+    expect(status.deployed_input_query_has_credit_status).toBe(true);
+    expect(status.deployed_input_query_nonempty).toBe(true);
+    expect(status.deployed_input_query_length).toBe([...QUERY].length);
+    expect(typeof status.deployed_input_query_length).toBe("number");
+    expect(stdout).not.toContain(SENTINEL);
+    expect(stdout).not.toContain("buyerIdentity");
+    expect(stdout).not.toContain("metafield(");
+  });
+
+  it.each([
+    ["null", null, true],
+    ["missing", undefined, false],
+    ["empty string", "", true],
+    ["non-string", { a: 1 }, true],
+  ])("prints nonempty=false and length=0 when inputQuery is %s", (_label, value, includeKey) => {
+    const { status } = runDeployedInputQuerySnippet(run, responseWith(value, includeKey));
+    expect(status.deployed_input_query_nonempty).toBe(false);
+    expect(status.deployed_input_query_length).toBe(0);
+    expect(status.deployed_input_query_has_credit_status).toBe(false);
+  });
+
+  it("prints nonempty=false and length=0 when the validation node is absent", () => {
+    const { status } = runDeployedInputQuerySnippet(run, { data: { validations: { nodes: [] } } });
+    expect(status.exists).toBe(false);
+    expect(status.deployed_input_query_nonempty).toBe(false);
+    expect(status.deployed_input_query_length).toBe(0);
+  });
+
+  it("status print adds only the two new keys next to has_credit_status", () => {
+    const { status } = runDeployedInputQuerySnippet(run, responseWith(QUERY));
+    expect(Object.keys(status).sort()).toEqual(
+      [
+        "blockOnFailure",
+        "deployed_input_query_has_credit_status",
+        "deployed_input_query_length",
+        "deployed_input_query_nonempty",
+        "enabled",
+        "exists",
+        "repo_input_query_has_credit_status",
+      ].sort()
+    );
   });
 });

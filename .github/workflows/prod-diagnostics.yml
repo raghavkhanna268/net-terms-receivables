@@ -1270,6 +1270,10 @@ jobs:
           VALIDATION_ENABLED=false
           VALIDATION_BLOCK_ON_FAILURE=false
           DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS=false
+          # Shape-only metrics for the deployed inputQuery (boolean + integer count).
+          # NEVER print the query text or any part of it (public Actions logs).
+          DEPLOYED_INPUT_QUERY_NONEMPTY=false
+          DEPLOYED_INPUT_QUERY_LENGTH=0
 
           if [ -n "$VALIDATION_NODE" ] && [ "$VALIDATION_NODE" != "null" ]; then
             VALIDATION_EXISTS=true
@@ -1281,6 +1285,11 @@ jobs:
             if echo "$INPUT_QUERY" | grep -qE 'metafield.*namespace.*\$app.*key.*credit_status'; then
               DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS=true
             fi
+            # Character length of the deployed inputQuery; missing/null/non-string => 0.
+            DEPLOYED_INPUT_QUERY_LENGTH=$(echo "$VALIDATION_NODE" | jq '.shopifyFunction.inputQuery | if type == "string" then length else 0 end')
+            if [ "$DEPLOYED_INPUT_QUERY_LENGTH" -gt 0 ]; then
+              DEPLOYED_INPUT_QUERY_NONEMPTY=true
+            fi
           fi
 
           echo "S12 Validation status (read-only):"
@@ -1290,7 +1299,9 @@ jobs:
             --argjson block_on_failure "$VALIDATION_BLOCK_ON_FAILURE" \
             --argjson repo_input_query_has_credit_status "$REPO_INPUT_QUERY_HAS_CREDIT_STATUS" \
             --argjson deployed_input_query_has_credit_status "$DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS" \
-            '{exists: $exists, enabled: $enabled, blockOnFailure: $block_on_failure, repo_input_query_has_credit_status: $repo_input_query_has_credit_status, deployed_input_query_has_credit_status: $deployed_input_query_has_credit_status}'
+            --argjson deployed_input_query_nonempty "$DEPLOYED_INPUT_QUERY_NONEMPTY" \
+            --argjson deployed_input_query_length "$DEPLOYED_INPUT_QUERY_LENGTH" \
+            '{exists: $exists, enabled: $enabled, blockOnFailure: $block_on_failure, repo_input_query_has_credit_status: $repo_input_query_has_credit_status, deployed_input_query_has_credit_status: $deployed_input_query_has_credit_status, deployed_input_query_nonempty: $deployed_input_query_nonempty, deployed_input_query_length: $deployed_input_query_length}'
 
           # S12 checkout fixtures (read-only). Prints ids, enums, booleans and the
           # whitelisted credit_status fields only. Never names, emails, phones or addresses.
