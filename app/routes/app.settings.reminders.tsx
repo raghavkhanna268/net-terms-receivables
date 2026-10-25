@@ -462,9 +462,9 @@ export default function RemindersSettingsPage() {
               </s-paragraph>
               <s-table>
                 <s-table-header-row>
-                  <s-table-header>Invoice</s-table-header>
-                  <s-table-header>Stage</s-table-header>
-                  <s-table-header>Catch-up by</s-table-header>
+                  <s-table-header listSlot="primary">Invoice</s-table-header>
+                  <s-table-header listSlot="labeled">Stage</s-table-header>
+                  <s-table-header listSlot="labeled">Catch-up by</s-table-header>
                 </s-table-header-row>
                 <s-table-body>
                   {delayedReminders.map((reminder) => (
@@ -502,9 +502,9 @@ export default function RemindersSettingsPage() {
           ) : (
             <s-table>
               <s-table-header-row>
-                <s-table-header>Timing</s-table-header>
-                <s-table-header>Status</s-table-header>
-                <s-table-header>Actions</s-table-header>
+                <s-table-header listSlot="primary">Timing</s-table-header>
+                <s-table-header listSlot="inline">Status</s-table-header>
+                <s-table-header listSlot="labeled">Actions</s-table-header>
               </s-table-header-row>
               <s-table-body>
                 {rules.map((rule) => (
@@ -536,10 +536,10 @@ export default function RemindersSettingsPage() {
           ) : (
             <s-table>
               <s-table-header-row>
-                <s-table-header>Invoice</s-table-header>
-                <s-table-header>Stage</s-table-header>
-                <s-table-header>Status</s-table-header>
-                <s-table-header>Date</s-table-header>
+                <s-table-header listSlot="primary">Invoice</s-table-header>
+                <s-table-header listSlot="labeled">Stage</s-table-header>
+                <s-table-header listSlot="inline">Status</s-table-header>
+                <s-table-header listSlot="labeled">Date</s-table-header>
               </s-table-header-row>
               <s-table-body>
                 {logs.map((entry) => (
