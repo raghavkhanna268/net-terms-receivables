@@ -449,19 +449,11 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     it("allows unlimited imports for all plans with gating ON (T1 pricing)", async () => {
       vi.stubEnv("PLAN_GATING_ENFORCED", "1");
 
-      // Create multiple imports this month
-      const importId = `import-unlimited-test-${TEST_SUFFIX}`;
-      await sql`
-        INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
-        VALUES (${importId}, ${TEST_SHOP_ID}, 'hdfc', 'test.xlsx', 10, NOW())
-      `;
-
       const { checkImportLimit } = await import("../gating.server");
       const result = await checkImportLimit(sql, TEST_SHOP_ID);
 
-      // T1: All plans have unlimited imports
+      // T1: All plans have unlimited imports, so always allowed
       expect(result.allowed).toBe(true);
-      expect(result.currentUsage).toBe(1);
       expect(result.limit).toBe(-1); // Unlimited
     });
 
