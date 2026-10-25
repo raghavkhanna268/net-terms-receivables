@@ -1239,9 +1239,10 @@ export async function syncCreditStatusMetafield(
       }
     }
 
-    // Set permanent error marker for known permanent codes.
-    // For retryable errors (markerCode is null), set metafieldSyncErrorAt only if not already set
-    // (tracks failure streak start for backoff).
+    // Set error markers based on error type:
+    // 1. markerCode !== null: Permanent failure (retryable=false + known code) → set both markers
+    // 2. retryable === true: Transient failure → set metafieldSyncErrorAt only (triggers backoff schedule)
+    // 3. retryable === false with unknown code OR retryable === undefined → no marker update (retry daily via nightly resync)
     if (markerCode !== null) {
       await sql`
         UPDATE "BuyerAccount"
@@ -1250,8 +1251,9 @@ export async function syncCreditStatusMetafield(
         WHERE id = ${buyerAccountId}
           AND "syncVersion" = ${txResult.syncVersion}
       `;
-    } else {
+    } else if (retryable === true) {
       // Retryable error: set metafieldSyncErrorAt only if NULL (preserve streak start time)
+      // This triggers backoff schedule (day 0, 1, 2, 4, 7, then every 7 days)
       await sql`
         UPDATE "BuyerAccount"
         SET "metafieldSyncErrorAt" = COALESCE("metafieldSyncErrorAt", NOW())
@@ -1259,6 +1261,7 @@ export async function syncCreditStatusMetafield(
           AND "syncVersion" = ${txResult.syncVersion}
       `;
     }
+    // else: retryable===false with unknown code OR undefined → no marker update, retry daily
 
     return {
       success: true,

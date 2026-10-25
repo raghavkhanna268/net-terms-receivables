@@ -120,36 +120,7 @@ export async function recomputeCreditStatus(
   // Capture previous hold value BEFORE any updates
   const previousHold = account.holdState === "HELD" && !account.bypass;
 
-  // Check backoff for persistent retryable failures.
-  // Backoff applies ONLY when:
-  // - metafieldSyncErrorCode is NULL (retryable streak, not a permanent failure)
-  // - metafieldSyncErrorAt is set (we have a failure timestamp marking the streak start)
-  // - The backoff period hasn't elapsed
-  // 
-  // IMPORTANT: Backoff only skips the Shopify metafield write.
-  // The DB recompute (holdState calculation, hold apply/release, audit) ALWAYS runs.
-  // This ensures holds and releases are computed and persisted for every trigger source
-  // (invoice_change, manual edit, daily_sweep) even during backoff.
-  //
-  // Permanent failures (metafieldSyncErrorCode IS NOT NULL) are excluded by the sweep SQL,
-  // so they shouldn't reach here via daily_sweep. If they do reach here via another path
-  // (e.g., invoice_change), we still allow retry (success clears the marker).
-  let skipMetafieldWrite = false;
-  let backoffInfo: { errorAgeDays?: number; nextRetryDay?: number } | undefined;
-  
-  if (
-    account.metafieldSyncErrorCode === null &&
-    account.metafieldSyncErrorAt !== null
-  ) {
-    const backoffResult = shouldSkipForBackoff(account.metafieldSyncErrorAt);
-    if (backoffResult.skip) {
-      skipMetafieldWrite = true;
-      backoffInfo = { errorAgeDays: backoffResult.errorAgeDays, nextRetryDay: backoffResult.nextRetryDay };
-    }
-  }
-
   // Get what the new hold would be by computing current state
-  // (This is a read-only check for early exit optimization only)
   const statusDisplay = await getCreditStatusDisplay(sql, buyerAccountId);
   if (!statusDisplay) {
     return {
@@ -164,12 +135,44 @@ export async function recomputeCreditStatus(
 
   const newHold = statusDisplay.isOnHold;
 
+  // Check backoff for persistent retryable failures.
+  // Backoff applies ONLY when:
+  // - metafieldSyncErrorCode is NULL (retryable streak, not a permanent failure)
+  // - metafieldSyncErrorAt is set (we have a failure timestamp marking the streak start)
+  // - The backoff period hasn't elapsed
+  // - AND the hold value is UNCHANGED (previousHold === newHold)
+  // 
+  // IMPORTANT: Backoff only skips the Shopify metafield write when hold is unchanged.
+  // If hold changed (applied or released), we ALWAYS attempt the metafield write
+  // to keep Shopify in sync with the actual hold state.
+  // The DB recompute (holdState calculation, hold apply/release, audit) ALWAYS runs.
+  //
+  // Permanent failures (metafieldSyncErrorCode IS NOT NULL) are excluded by the sweep SQL,
+  // so they shouldn't reach here via daily_sweep. If they do reach here via another path
+  // (e.g., invoice_change), we still allow retry (success clears the marker).
+  let skipMetafieldWrite = false;
+  let backoffInfo: { errorAgeDays?: number; nextRetryDay?: number } | undefined;
+  
+  const holdChanged = previousHold !== newHold;
+  
+  if (
+    !holdChanged &&
+    account.metafieldSyncErrorCode === null &&
+    account.metafieldSyncErrorAt !== null
+  ) {
+    const backoffResult = shouldSkipForBackoff(account.metafieldSyncErrorAt);
+    if (backoffResult.skip) {
+      skipMetafieldWrite = true;
+      backoffInfo = { errorAgeDays: backoffResult.errorAgeDays, nextRetryDay: backoffResult.nextRetryDay };
+    }
+  }
+
   // Early return only when ALL of the following are true:
   // 1. Hold value hasn't changed
   // 2. No sync is pending (previous metafield write completed)
   // 3. Metafield has been written at least once (metafieldSyncedAt is not NULL)
   // 4. NOT in backoff (backoff requires DB update to keep syncPending=true)
-  if (previousHold === newHold && !account.syncPending && account.metafieldSyncedAt !== null && !skipMetafieldWrite) {
+  if (!holdChanged && !account.syncPending && account.metafieldSyncedAt !== null && !skipMetafieldWrite) {
     return {
       success: true,
       metafieldWritten: false,

@@ -3827,9 +3827,10 @@ describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
     expect(after2.metafieldSyncErrorAt!.getTime()).toBe(firstErrorAt.getTime());
   });
 
-  it("backoff skips metafield write but DB update still happens (day 3: overdue invoice applies hold)", async () => {
+  it("day 3 of backoff: hold applied triggers metafield write attempt", async () => {
     // Set up: error started 3 days ago (between allowed days 2 and 4)
     // Account is currently OK, but will become HELD due to overdue invoice
+    // Since hold CHANGES, metafield write should be ATTEMPTED (not skipped by backoff)
     const invoiceId = `inv-backoff-hold-${TEST_SUFFIX}`;
     const orderId = `gid://shopify/Order/backoff-hold-${TEST_SUFFIX}`;
     
@@ -3860,24 +3861,24 @@ describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
     // Clear any previous audit events
     await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${TEST_SHOP_ID}`;
 
-    mockShouldFail = false; // Won't be called anyway
+    mockShouldFail = false; // Metafield write succeeds
     metafieldWriteCount = 0;
 
     const result = await recomputeCreditStatus(sql, TEST_ACCOUNT_ID, "invoice_change");
 
-    // Should return success with backoffSkipped flag
+    // Hold changed: metafield write should be ATTEMPTED (not skipped by backoff)
     expect(result.success).toBe(true);
-    expect(result.metafieldWritten).toBe(false);
-    expect(result.backoffSkipped).toBe(true);
-    // Shopify API should NOT have been called
-    expect(mockShopifyGraphQLRequest).not.toHaveBeenCalled();
+    expect(result.metafieldWritten).toBe(true); // Write was attempted and succeeded
+    expect(result.backoffSkipped).toBeUndefined(); // Not skipped
+    // Shopify API SHOULD have been called because hold changed
+    expect(mockShopifyGraphQLRequest).toHaveBeenCalled();
     
-    // But DB should be updated - holdState should be HELD
+    // DB should be updated - holdState should be HELD
     const [after] = await sql<{ holdState: string; syncPending: boolean }[]>`
       SELECT "holdState", "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
     `;
     expect(after.holdState).toBe("HELD");
-    expect(after.syncPending).toBe(true); // Still pending because metafield write was skipped
+    expect(after.syncPending).toBe(false); // Completed because metafield write succeeded
     
     // Audit event should have been written
     const audits = await sql<{ type: string }[]>`
@@ -3890,8 +3891,9 @@ describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
     await sql`DELETE FROM "Invoice" WHERE id = ${invoiceId}`;
   });
 
-  it("backoff skips metafield write but DB update still happens (day 3: payment releases hold)", async () => {
+  it("day 3 of backoff: hold released triggers metafield write attempt", async () => {
     // Set up: error started 3 days ago, account is currently HELD
+    // Since hold CHANGES (released), metafield write should be ATTEMPTED (not skipped by backoff)
     const invoiceId = `inv-backoff-release-${TEST_SUFFIX}`;
     const orderId = `gid://shopify/Order/backoff-release-${TEST_SUFFIX}`;
     
@@ -3929,18 +3931,19 @@ describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
 
     const result = await recomputeCreditStatus(sql, TEST_ACCOUNT_ID, "invoice_change");
 
-    // Should return success with backoffSkipped flag
+    // Hold changed: metafield write should be ATTEMPTED (not skipped by backoff)
     expect(result.success).toBe(true);
-    expect(result.metafieldWritten).toBe(false);
-    expect(result.backoffSkipped).toBe(true);
-    expect(mockShopifyGraphQLRequest).not.toHaveBeenCalled();
+    expect(result.metafieldWritten).toBe(true); // Write was attempted and succeeded
+    expect(result.backoffSkipped).toBeUndefined(); // Not skipped
+    // Shopify API SHOULD have been called because hold changed
+    expect(mockShopifyGraphQLRequest).toHaveBeenCalled();
     
     // DB should be updated - holdState should be OK (released)
     const [after] = await sql<{ holdState: string; syncPending: boolean }[]>`
       SELECT "holdState", "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
     `;
     expect(after.holdState).toBe("OK");
-    expect(after.syncPending).toBe(true); // Still pending because metafield write was skipped
+    expect(after.syncPending).toBe(false); // Completed because metafield write succeeded
     
     // Audit event should have been written for hold release
     const audits = await sql<{ type: string }[]>`
@@ -3951,6 +3954,62 @@ describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
     
     // Clean up
     await sql`DELETE FROM "Invoice" WHERE id = ${invoiceId}`;
+  });
+
+  it("day 3 of backoff: hold unchanged skips metafield write and logs", async () => {
+    // Set up: error started 3 days ago (between allowed days 2 and 4)
+    // Account is OK and will stay OK (no overdue invoices)
+    // Since hold is UNCHANGED, metafield write should be SKIPPED by backoff
+    
+    // Account starts OK with no overdue invoices
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "holdState" = 'OK',
+          "syncPending" = true,
+          "metafieldSyncedAt" = NOW() - INTERVAL '10 days',
+          "metafieldSyncErrorAt" = NOW() - INTERVAL '3 days',
+          "metafieldSyncErrorCode" = NULL
+      WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+    
+    // Delete any invoices that could cause hold
+    await sql`DELETE FROM "Invoice" WHERE "buyerAccountId" = ${TEST_ACCOUNT_ID}`;
+    
+    // Clear any previous audit events
+    await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${TEST_SHOP_ID}`;
+
+    mockShouldFail = false;
+    metafieldWriteCount = 0;
+
+    // Capture console output for safeLog
+    const consoleSpy = vi.spyOn(console, "log");
+
+    const result = await recomputeCreditStatus(sql, TEST_ACCOUNT_ID, "daily_sweep");
+
+    // Hold unchanged: metafield write should be SKIPPED by backoff
+    expect(result.success).toBe(true);
+    expect(result.metafieldWritten).toBe(false);
+    expect(result.backoffSkipped).toBe(true);
+    // Shopify API should NOT have been called because backoff skipped it
+    expect(mockShopifyGraphQLRequest).not.toHaveBeenCalled();
+    
+    // DB should still show holdState = OK
+    const [after] = await sql<{ holdState: string; syncPending: boolean }[]>`
+      SELECT "holdState", "syncPending" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+    expect(after.holdState).toBe("OK");
+    expect(after.syncPending).toBe(true); // Still pending because metafield write was skipped
+    
+    // Check that backoff skip was logged
+    const logCalls = consoleSpy.mock.calls.map(call => call[0]);
+    const backoffSkipLog = logCalls.find(
+      log => typeof log === "string" && log.includes("credit_status_sync_backoff_skip")
+    );
+    expect(backoffSkipLog).toBeDefined();
+    expect(backoffSkipLog).toContain("errorAgeDays");
+    expect(backoffSkipLog).toContain("nextRetryDay");
+    
+    consoleSpy.mockRestore();
   });
 
   it("recompute proceeds when backoff has elapsed (day 4 after failure)", async () => {
@@ -4356,6 +4415,34 @@ describeWithDb("retryable vs non-retryable error handling (#212)", () => {
     `;
 
     // retryable=false + unknown code: leave markers NULL (retry daily via nightly resync)
+    expect(after.metafieldSyncErrorAt).toBeNull();
+    expect(after.metafieldSyncErrorCode).toBeNull();
+  });
+
+  it("retryable=undefined leaves markers NULL (retry daily)", async () => {
+    const { updateCreditStatus } = await import("../credit-status.server");
+    
+    // Error response without retryable field (undefined)
+    mockShopifyGraphQLRequest.mockImplementationOnce(async () => ({
+      success: false,
+      error: "Unknown error",
+      errorCode: "unknown",
+      // retryable is undefined
+    }));
+
+    await updateCreditStatus(sql, TEST_ACCOUNT_ID, {
+      creditLimitAmount: 100000,
+      manualHold: false,
+    });
+
+    const [after] = await sql<{ metafieldSyncErrorAt: Date | null; metafieldSyncErrorCode: string | null }[]>`
+      SELECT "metafieldSyncErrorAt", "metafieldSyncErrorCode"
+      FROM "BuyerAccount"
+      WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+
+    // retryable=undefined: leave markers NULL (retry daily via nightly resync)
+    // No backoff streak is started
     expect(after.metafieldSyncErrorAt).toBeNull();
     expect(after.metafieldSyncErrorCode).toBeNull();
   });
