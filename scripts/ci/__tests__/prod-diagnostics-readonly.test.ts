@@ -1307,20 +1307,39 @@ describe("Active subscriptions probe (counts/booleans only)", () => {
 describe("Allowed dev store Admin checks", () => {
   let step: WorkflowStep | undefined;
   let run: string;
+  let workflowText: string;
 
   beforeAll(() => {
-    const workflow = parseYaml(readFileSync(WORKFLOW_PATH, "utf-8")) as Workflow;
+    workflowText = readFileSync(WORKFLOW_PATH, "utf-8");
+    const workflow = parseYaml(workflowText) as Workflow;
     const steps = Object.values(workflow.jobs ?? {}).flatMap((j) => j.steps ?? []);
     step = steps.find((s) => s.id === "allowed_admin");
     run = step?.run ?? "";
     expect(run).not.toBe("");
   });
 
-  it("is read-only and skips gracefully on token expired", () => {
+  it("uses secrets.ALLOWED_DEV_STORE, never vars.ALLOWED_DEV_STORE (public log leak)", () => {
+    expect(workflowText).not.toContain("vars.ALLOWED_DEV_STORE");
+    expect(step?.env?.ALLOWED_DEV_STORE).toBe("${{ secrets.ALLOWED_DEV_STORE }}");
+  });
+
+  it("validates domain format and masks immediately", () => {
+    expect(run).toContain("myshopify.com");
+    expect(run).toContain("::add-mask::$ALLOWED_DEV_STORE");
+    expect(run).toContain("invalid_domain_format");
+  });
+
+  it("gates on shop equality for token check", () => {
+    expect(run).toContain("shop_matches_allowed=");
+    expect(run).toContain("SHOP_DOMAIN");
+    expect(run).toContain("ALLOWED_DEV_STORE");
+  });
+
+  it("is read-only and skips gracefully on missing config", () => {
     expect(step?.env?.PGOPTIONS).toContain("default_transaction_read_only=on");
-    expect(run).toContain("allowed_admin=skipped_token_expired");
     expect(run).toContain("allowed_admin=skipped_no_allowed_dev_store");
     expect(run).toContain("allowed_admin=skipped_no_offline_session");
+    expect(run).toContain("allowed_admin=skipped_no_db");
   });
 
   it("queries paymentCustomizations and webhookSubscriptions", () => {
@@ -1343,6 +1362,10 @@ describe("Allowed dev store Admin checks", () => {
     expect(run).toContain("webhook_extra_topics=");
     expect(run).not.toContain(".endpoint");
     expect(run).not.toContain(".callbackUrl");
+  });
+
+  it("uses psql -X to ignore .psqlrc", () => {
+    expect(run).toMatch(/psql\s+-X/);
   });
 });
 
@@ -1394,5 +1417,9 @@ describe("Cron sweep diagnostics", () => {
     expect(run).not.toContain("buyerAccountId");
     expect(run).not.toContain(".command");
     expect(run).not.toContain("return_message");
+  });
+
+  it("uses psql -X to ignore .psqlrc", () => {
+    expect(run).toMatch(/psql\s+-X/);
   });
 });

@@ -1757,7 +1757,7 @@ jobs:
           echo ""
 
           # Check if cron schema exists
-          CRON_EXISTS=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          CRON_EXISTS=$(psql -X -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
           SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = 'cron');
           EOSQL
           )
@@ -1768,7 +1768,7 @@ jobs:
           fi
 
           # Check if job_run_details table exists (pg_cron 1.4+)
-          JRD_EXISTS=$(psql -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          JRD_EXISTS=$(psql -X -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
           SELECT to_regclass('cron.job_run_details') IS NOT NULL;
           EOSQL
           )
@@ -1780,7 +1780,7 @@ jobs:
 
           # Query last run of credit_status_daily_sweep by job name
           echo "credit_status_daily_sweep last run (by jobname):"
-          LAST_RUN=$(psql -v ON_ERROR_STOP=1 -t -A -F '|' "$DATABASE_URL" <<'EOSQL'
+          LAST_RUN=$(psql -X -v ON_ERROR_STOP=1 -t -A -F '|' "$DATABASE_URL" <<'EOSQL'
           SELECT
             jrd.runid,
             jrd.start_time AT TIME ZONE 'UTC',
@@ -1798,9 +1798,9 @@ jobs:
           if [ -z "$LAST_RUN" ]; then
             echo "cron_sweep_last_run=none"
           else
-            RUNID=$(echo "$LAST_RUN" | cut -d'|' -f1)
+            # Fields: runid|start_time|end_time|status|duration_sec
+            # Only use start_time (f2), status (f4), duration (f5); skip runid and end_time (SC2034)
             START_TIME=$(echo "$LAST_RUN" | cut -d'|' -f2)
-            END_TIME=$(echo "$LAST_RUN" | cut -d'|' -f3)
             STATUS=$(echo "$LAST_RUN" | cut -d'|' -f4)
             DURATION=$(echo "$LAST_RUN" | cut -d'|' -f5)
             jq -n \
@@ -1816,7 +1816,7 @@ jobs:
 
           # Current syncPending count and count changed since last sweep start
           # "before" is not stored, so we report current and delta based on audit events
-          SWEEP_COUNTS=$(psql -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          SWEEP_COUNTS=$(psql -X -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
           WITH last_sweep AS (
             SELECT jrd.start_time
             FROM cron.job_run_details jrd
@@ -1847,14 +1847,14 @@ jobs:
 
       # Admin API checks for the allowed dev store: hide-terms-payment active and webhook subscription diff.
       # Read-only; uses the existing offline token path. Skips gracefully if token expired.
+      # ALLOWED_DEV_STORE comes from secrets (not vars) to prevent log header leaks.
       - name: Allowed dev store Admin checks
         id: allowed_admin
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
           PGOPTIONS: "-c default_transaction_read_only=on"
-          TOKEN_EXPIRED: ${{ steps.session.outputs.token_expired }}
-          REFRESH_SUCCESS: ${{ steps.refresh.outputs.success }}
-          ALLOWED_DEV_STORE: ${{ vars.ALLOWED_DEV_STORE }}
+          SHOP_DOMAIN: ${{ steps.shop.outputs.domain }}
+          ALLOWED_DEV_STORE: ${{ secrets.ALLOWED_DEV_STORE }}
         run: |
           set -euo pipefail
           source scripts/ci/psql-redacted.sh
@@ -1868,11 +1868,19 @@ jobs:
             exit 0
           fi
 
-          # Gate: skip if token expired and refresh didn't succeed
-          if [ "$TOKEN_EXPIRED" = "true" ] && [ "$REFRESH_SUCCESS" != "true" ]; then
-            echo "allowed_admin=skipped_token_expired"
+          # Validate myshopify.com domain format and mask immediately (fail closed)
+          if ! [[ "$ALLOWED_DEV_STORE" =~ ^[a-z0-9][a-z0-9-]*\.myshopify\.com$ ]]; then
+            echo "allowed_admin=error code=invalid_domain_format"
             exit 0
           fi
+          echo "::add-mask::$ALLOWED_DEV_STORE"
+
+          # Gate: token check is for SHOP_DOMAIN; skip unless allowed store matches (equality gate)
+          SHOP_MATCHES_ALLOWED=false
+          if [ "${SHOP_DOMAIN:-}" = "$ALLOWED_DEV_STORE" ]; then
+            SHOP_MATCHES_ALLOWED=true
+          fi
+          echo "shop_matches_allowed=$SHOP_MATCHES_ALLOWED"
 
           if [ -z "$DATABASE_URL" ]; then
             echo "allowed_admin=skipped_no_db"
@@ -1880,7 +1888,7 @@ jobs:
           fi
 
           # Fetch offline access token for allowed dev store
-          ACCESS_TOKEN=$(psql -v ON_ERROR_STOP=1 -v shop="$ALLOWED_DEV_STORE" -t -A "$DATABASE_URL" <<'EOSQL'
+          ACCESS_TOKEN=$(psql -X -v ON_ERROR_STOP=1 -v shop="$ALLOWED_DEV_STORE" -t -A "$DATABASE_URL" <<'EOSQL'
           SELECT "accessToken"
           FROM "Session"
           WHERE shop = :'shop' AND "isOnline" = false
