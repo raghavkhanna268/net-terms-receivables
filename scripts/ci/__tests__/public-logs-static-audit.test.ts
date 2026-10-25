@@ -107,7 +107,7 @@ describe("public-logs-static-audit: SQL files", () => {
 });
 
 describe("public-logs-static-audit: workflow file", () => {
-  it("prod-diagnostics.yml should not print fixture IDs in jq output", () => {
+  it("prod-diagnostics.yml should not print Shopify GIDs in jq output", () => {
     if (!fs.existsSync(WORKFLOW_PATH)) {
       return; // Skip if workflow doesn't exist
     }
@@ -116,15 +116,16 @@ describe("public-logs-static-audit: workflow file", () => {
     const lines = content.split("\n");
     const violations: Violation[] = [];
 
-    // Look for jq output that includes id fields
+    // Look for jq output that includes Shopify GID fields.
+    // QA 2 ruling: internal DB ids (cuids like buyer_account_id) ARE allowed.
+    // Shopify GIDs (company_id, company_location_id, customer_id) are NOT.
     const idOutputPatterns = [
-      // jq selections that output id fields directly
-      /\{buyer_account_id,/gi,
+      // jq selections that output Shopify GID fields directly
       /\{.*company_location_id,/gi,
       /\{.*customer_id,/gi,
       /\{.*company_id,/gi,
-      // echo or printf that would print fixture ids
-      /echo.*\$\{.*_id\}/gi,
+      // echo or printf that would print Shopify GID fields
+      /echo.*\$\{.*(company_location_id|customer_id|company_id)\}/gi,
     ];
 
     lines.forEach((line, idx) => {
@@ -148,8 +149,8 @@ describe("public-logs-static-audit: workflow file", () => {
         .map(v => `${v.file}:${v.line}: ${v.content}`)
         .join("\n");
       expect.fail(
-        `Found ${violations.length} fixture ID output(s) in workflow:\n${report}\n\n` +
-        "Print counts only, not individual IDs."
+        `Found ${violations.length} Shopify GID output(s) in workflow:\n${report}\n\n` +
+        "Internal DB ids (cuids like buyer_account_id) are allowed, but Shopify GIDs are not."
       );
     }
   });

@@ -13,8 +13,8 @@
 -- Vars:
 --   since (ISO-8601 UTC of the sweep run, e.g. 2026-10-24T19:00:00Z). The sweep's dedupe key
 --         date is since's UTC date.
---   orphan_gids (comma-separated CompanyLocation GIDs for B and C sections, sourced from
---               masked env secret via ::add-mask::)
+-- Orphan locations (sections B and C) are derived inside SQL from COMPANY_LOCATIONS_DELETE
+-- webhook receipts, not passed as psql variables.
 -- @col kind, "holdState", proname, dep_table: enum
 -- @col "manualHold", bypass, "syncPending": boolean
 -- @col "defaultTermsDays": config_int
@@ -115,14 +115,26 @@ SELECT 'dlq_daily_sweep_since', COUNT(*) FROM s6_dead_letter
 WHERE message->>'source' = 'daily_sweep' AND dead_lettered_at >= (:'since')::timestamptz;
 
 \echo '== B #200 orphan gids: COMPANY_LOCATIONS_DELETE dedupe rows + account sync state (aggregated)'
--- QA 2 audit: hardcoded CompanyLocation GIDs removed. Pass orphan_gids via psql variable
--- from a masked environment secret (workflow uses ::add-mask:: before setting).
--- Example: psql -v orphan_gids='gid://shopify/CompanyLocation/123,gid://shopify/CompanyLocation/456' ...
--- NOTE: s6_processed_webhooks rows are purged after 7 days (pg_cron), so 0 delete rows may only
--- mean they aged out; webhook_receipts (B2) keeps 30 days.
+-- QA 2 audit: orphan CompanyLocations derived from COMPANY_LOCATIONS_DELETE webhook receipts.
+-- No psql variables or workflow dispatch inputs. Locations are identified by the presence of
+-- a delete webhook in s6_processed_webhooks (7-day retention) or webhook_receipts (30-day).
 -- Output is aggregated by holdState; individual IDs are not printed.
-WITH g AS (
-  SELECT unnest(string_to_array(:'orphan_gids', ',')) AS company_location_gid
+WITH deleted_locations AS (
+  SELECT DISTINCT
+    CASE
+      WHEN w.resource_gid LIKE 'gid://shopify/CompanyLocation/%' THEN w.resource_gid
+      ELSE 'gid://shopify/CompanyLocation/' || w.resource_gid
+    END AS company_location_gid
+  FROM s6_processed_webhooks w
+  WHERE w.topic = 'COMPANY_LOCATIONS_DELETE'
+  UNION
+  SELECT DISTINCT
+    CASE
+      WHEN wr.resource_gid LIKE 'gid://shopify/CompanyLocation/%' THEN wr.resource_gid
+      ELSE 'gid://shopify/CompanyLocation/' || wr.resource_gid
+    END AS company_location_gid
+  FROM webhook_receipts wr
+  WHERE wr.topic = 'COMPANY_LOCATIONS_DELETE'
 ),
 delete_counts AS (
   SELECT w.resource_gid, COUNT(*) AS delete_ct
@@ -138,15 +150,15 @@ any_topic_counts AS (
 SELECT ba."holdState", ba."syncPending",
        ba."metafieldSyncedAt" IS NULL AS metafield_synced_at_is_null,
        ba.id LIKE 'seed-account-%' AS is_seed,
-       COUNT(DISTINCT g.company_location_gid) AS location_count,
+       COUNT(DISTINCT dl.company_location_gid) AS location_count,
        COUNT(DISTINCT ba.id) AS account_count,
        COALESCE(SUM(dc.delete_ct), 0) + COALESCE(SUM(dc2.delete_ct), 0) AS total_delete_webhook_rows,
        COALESCE(SUM(atc.topic_ct), 0) AS total_any_topic_dedupe_rows
-FROM g
-LEFT JOIN "BuyerAccount" ba ON ba."companyLocationId" = g.company_location_gid
-LEFT JOIN delete_counts dc ON dc.resource_gid = g.company_location_gid
-LEFT JOIN delete_counts dc2 ON dc2.resource_gid = replace(g.company_location_gid, 'gid://shopify/CompanyLocation/', '')
-LEFT JOIN any_topic_counts atc ON atc.resource_gid = g.company_location_gid
+FROM deleted_locations dl
+LEFT JOIN "BuyerAccount" ba ON ba."companyLocationId" = dl.company_location_gid
+LEFT JOIN delete_counts dc ON dc.resource_gid = dl.company_location_gid
+LEFT JOIN delete_counts dc2 ON dc2.resource_gid = replace(dl.company_location_gid, 'gid://shopify/CompanyLocation/', '')
+LEFT JOIN any_topic_counts atc ON atc.resource_gid = dl.company_location_gid
 GROUP BY 1, 2, 3, 4
 ORDER BY 1, 2, 3, 4;
 
@@ -159,9 +171,26 @@ FROM webhook_receipts WHERE topic = 'COMPANY_LOCATIONS_DELETE';
 
 \echo '== C dependent rows per seed BuyerAccount (aggregated totals)'
 -- QA 2 audit: individual buyer_account_id and company_location_gid removed.
--- Hardcoded orphan GIDs replaced with parameterized orphan_gids variable (masked env secret).
+-- Orphan locations derived from COMPANY_LOCATIONS_DELETE webhooks (same as section B).
 -- Output aggregated by known_orphan status, using pre-aggregated CTEs to avoid whole-row refs.
-WITH invoice_counts AS (
+WITH deleted_locations AS (
+  SELECT DISTINCT
+    CASE
+      WHEN w.resource_gid LIKE 'gid://shopify/CompanyLocation/%' THEN w.resource_gid
+      ELSE 'gid://shopify/CompanyLocation/' || w.resource_gid
+    END AS company_location_gid
+  FROM s6_processed_webhooks w
+  WHERE w.topic = 'COMPANY_LOCATIONS_DELETE'
+  UNION
+  SELECT DISTINCT
+    CASE
+      WHEN wr.resource_gid LIKE 'gid://shopify/CompanyLocation/%' THEN wr.resource_gid
+      ELSE 'gid://shopify/CompanyLocation/' || wr.resource_gid
+    END AS company_location_gid
+  FROM webhook_receipts wr
+  WHERE wr.topic = 'COMPANY_LOCATIONS_DELETE'
+),
+invoice_counts AS (
   SELECT i."buyerAccountId" AS ba_id, COUNT(*) AS ct FROM "Invoice" i GROUP BY 1
 ),
 match_counts AS (
@@ -182,7 +211,7 @@ payer_counts AS (
 draft_counts AS (
   SELECT d.buyer_account_id AS ba_id, COUNT(*) AS ct FROM s8_draft_orders d GROUP BY 1
 )
-SELECT ba."companyLocationId" = ANY (string_to_array(:'orphan_gids', ',')) AS known_orphan,
+SELECT EXISTS (SELECT 1 FROM deleted_locations dl WHERE dl.company_location_gid = ba."companyLocationId") AS known_orphan,
        COUNT(DISTINCT ba.id) AS seed_account_count,
        COALESCE(SUM(ic.ct), 0) AS total_invoices,
        COALESCE(SUM(mc.ct), 0) AS total_matches,
