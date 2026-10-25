@@ -161,8 +161,8 @@ describe("prod-bulk-count workflow", () => {
       const on = workflow.on as Record<string, { inputs?: Record<string, WorkflowInput> }>;
       for (const opt of on.workflow_dispatch?.inputs?.query.options ?? []) {
         expect(script).toContain(`${opt})`);
-        expect(script).toContain(`QUERY_FILE=scripts/readonly/bulk/${opt}.graphql`);
-        expect(() => readFileSync(join(ROOT, `scripts/readonly/bulk/${opt}.graphql`))).not.toThrow();
+        expect(script).toContain("QUERY_FILE=scripts/readonly/bulk/" + opt + ".graphql");
+        expect(() => readFileSync(join(ROOT, "scripts/readonly/bulk/" + opt + ".graphql"))).not.toThrow();
       }
       expect(script).toMatch(/\*\)\s*\n\s*echo "bulk_count=refused code=UNKNOWN_QUERY"/);
     });
