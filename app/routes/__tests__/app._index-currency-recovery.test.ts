@@ -29,6 +29,7 @@ const mockSql = Object.assign(createMockSqlFn(), {
 
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
+  getRequestWaitUntil: vi.fn(() => () => {}),
 }));
 
 vi.mock("~/services/plan.server", () => ({
@@ -168,7 +169,8 @@ describe("#292 currency recovery on /app load", () => {
     setupGraphqlMock("INR");
 
     const { loader } = await import("../app._index");
-    const result = await loader(createLoaderArgs());
+    const dataResponse = await loader(createLoaderArgs());
+    const result = dataResponse.data;
 
     expect(result.currencySupported).toBe(true);
     expect(result.shopCurrency).toBe("INR");
@@ -192,7 +194,8 @@ describe("#292 currency recovery on /app load", () => {
     setupGraphqlMock("USD");
 
     const { loader } = await import("../app._index");
-    const result = await loader(createLoaderArgs());
+    const dataResponse = await loader(createLoaderArgs());
+    const result = dataResponse.data;
 
     expect(result.currencySupported).toBe(false);
     expect(result.shopCurrency).toBe("USD");
@@ -210,7 +213,8 @@ describe("#292 currency recovery on /app load", () => {
     const consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const { loader } = await import("../app._index");
-    const result = await loader(createLoaderArgs());
+    const dataResponse = await loader(createLoaderArgs());
+    const result = dataResponse.data;
 
     expect(result.currencySupported).toBe(false);
     expect(result.shopCurrency).toBe("USD");
@@ -227,7 +231,8 @@ describe("#292 currency recovery on /app load", () => {
     setupGraphqlMock("INR");
 
     const { loader } = await import("../app._index");
-    const result = await loader(createLoaderArgs());
+    const dataResponse = await loader(createLoaderArgs());
+    const result = dataResponse.data;
 
     expect(result.currencySupported).toBe(true);
     expect(result.shopCurrency).toBe("INR");

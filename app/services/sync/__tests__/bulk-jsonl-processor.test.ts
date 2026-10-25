@@ -1374,7 +1374,7 @@ describe("Processor-level tests: batch cut and due date handling", () => {
       // Orphan schedule line only (parent order not in batch)
       const lines = ['{"id":"gid://shopify/PaymentSchedule/10","dueAt":"2025-01-31T00:00:00Z","__parentId":"gid://shopify/Order/999"}'];
       
-      await processOrderLines(mockSql as never, "shop-123", lines);
+      await processOrderLines(mockSql as never, "shop-123", "test-shop.myshopify.com", lines);
       
       // Verify the orphan lookup query includes status='open' filter
       const lookupQuery = recordedQueries.find(q => 
@@ -1434,7 +1434,7 @@ describe("Processor-level tests: batch cut and due date handling", () => {
       // Order without schedule (existing invoice has account-default dueAt)
       const lines = ['{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING"}'];
       
-      await processOrderLines(mockSql as never, "shop-123", lines);
+      await processOrderLines(mockSql as never, "shop-123", "test-shop.myshopify.com", lines);
       
       // Verify bulkUpsertInvoices was called with correct dueAt/dueSource
       expect(mockUpsertInvoices).toHaveBeenCalled();
@@ -1489,7 +1489,7 @@ describe("Processor-level tests: batch cut and due date handling", () => {
       // Order without schedule dueAt
       const lines = ['{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING"}'];
       
-      await processOrderLines(mockSql as never, "shop-123", lines);
+      await processOrderLines(mockSql as never, "shop-123", "test-shop.myshopify.com", lines);
       
       // Verify merchant override is preserved
       expect(mockUpsertInvoices).toHaveBeenCalled();
@@ -1546,7 +1546,7 @@ describe("Processor-level tests: batch cut and due date handling", () => {
         '{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","paymentTerms":{"id":"pt1","paymentSchedules":{"edges":[{"node":{"id":"gid://shopify/PaymentSchedule/456","dueAt":"2025-02-15T00:00:00Z"}}]}}}',
       ];
       
-      await processOrderLines(mockSql as never, "shop-123", lines);
+      await processOrderLines(mockSql as never, "shop-123", "test-shop.myshopify.com", lines);
       
       // Verify schedule dueAt is used
       expect(mockUpsertInvoices).toHaveBeenCalled();
@@ -1601,7 +1601,7 @@ describe("Processor-level tests: batch cut and due date handling", () => {
         '{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","paymentTerms":{"id":"pt1","paymentSchedules":{"edges":[{"node":{"id":"gid://shopify/PaymentSchedule/456","dueAt":"2025-02-15T00:00:00Z"}}]}}}',
       ];
       
-      await processOrderLines(mockSql as never, "shop-123", lines);
+      await processOrderLines(mockSql as never, "shop-123", "test-shop.myshopify.com", lines);
       
       // Schedule beats override
       expect(mockUpsertInvoices).toHaveBeenCalled();

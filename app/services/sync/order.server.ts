@@ -37,7 +37,8 @@ import {
 import { incrementOrderOutstandingMissing } from "../drain/reconcile-handlers.server";
 import { enqueueRecomputeForInvoice } from "../credit-status-recompute.server";
 import { captureExceptionWithTags } from "~/lib/sentry";
-import { safeLog, toErrorCode } from "~/lib/log.server";
+import { safeLog, toErrorCode, shopHash } from "~/lib/log.server";
+import { SUPPORTED_SHOP_CURRENCY } from "~/lib/shop-currency.server";
 
 /**
  * Process an Order webhook event.
@@ -92,6 +93,20 @@ export async function processOrderWebhook(
   }
 
   const { shopId, context } = contextResult;
+
+  // #292: Per-order currency guard - skip orders whose currency is not INR
+  // Orders created before the shop switched to INR should not be stored as INR amounts
+  const orderCurrency = order.totalPriceSet?.shopMoney?.currencyCode;
+  if (orderCurrency && orderCurrency !== SUPPORTED_SHOP_CURRENCY) {
+    // Log count-only with shopHash (no PII)
+    const hash = await shopHash(shopDomain);
+    safeLog("info", "drain_skip_non_inr_order", { shopHash: hash, count: 1 });
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "order_currency_not_supported",
+    };
+  }
 
   // Handle CANCELLED topic - updates existing invoices only
   if (topic === "ORDERS_CANCELLED") {

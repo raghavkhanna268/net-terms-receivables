@@ -41,7 +41,7 @@ impl ShopConfig {
 
     /// #292: Check if the shop is an INR shop.
     /// Returns Some(true) if shop_config has INR currency, Some(false) if non-INR.
-    /// Returns None if shop_config is missing/invalid (fail-open for rollout safety).
+    /// Returns None if shop_config is missing/invalid (caller decides fail-open vs fail-closed).
     fn is_inr_shop(&self) -> Option<bool> {
         self.currency_code.as_ref().map(|c| c == SUPPORTED_SHOP_CURRENCY)
     }
@@ -197,7 +197,7 @@ fn evaluate_credit_status(
     }
 
     // #292: Non-INR shop → pass (non-held buyers never blocked in non-INR shop)
-    // Missing shop_config alone does NOT block (fail-open for rollout safety)
+    // Missing shop_config: continue checking (fail-closed, not fail-open)
     if let Some(is_inr) = shop_config.is_inr_shop() {
         if !is_inr {
             return pass();
@@ -663,6 +663,42 @@ mod tests {
         );
         let result = run_test(&input).unwrap();
         assert!(result.operations.is_empty(), "Currency mismatch should pass (fail-open)");
+    }
+
+    /// #292: Non-INR shop with over-limit buyer should NOT block (net-terms not enforced)
+    /// This test verifies the validation function does NOT fail-open incorrectly:
+    /// - shop_config.currencyCode = "EUR" (non-INR shop)
+    /// - Buyer has a limit that would be exceeded (limit=10000000, exposure=5000000, cart=60000.00)
+    /// - Checkout should PASS because non-INR shop = no net-terms enforcement
+    #[test]
+    fn test_non_inr_shop_over_limit_passes() {
+        let input = make_input_with_step_and_shop_config(
+            "60000.00",  // 6000000 paise - would exceed limit if enforced
+            "EUR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": "EUR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#),
+            false,
+            Some("CHECKOUT_COMPLETION"),
+            Some(r#"{"schemaVersion": 1, "currencyCode": "EUR"}"#),
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Non-INR shop should NOT block over-limit buyer (net-terms not enforced)");
+    }
+
+    /// #292: Missing shop_config must NOT fail-open - over-limit buyer should be blocked.
+    /// When shop_config is missing, we cannot determine if the shop is INR or not,
+    /// so we conservatively continue checking credit limits.
+    #[test]
+    fn test_missing_shop_config_over_limit_blocks() {
+        let input = make_input_with_step_and_shop_config(
+            "60000.00",  // 6000000 paise - would exceed limit if enforced
+            "INR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#),
+            false,
+            Some("CHECKOUT_COMPLETION"),
+            None,  // Missing shop_config - should NOT fail-open
+        );
+        let result = run_test(&input).unwrap();
+        assert!(!result.operations.is_empty(), "Missing shop_config must NOT fail-open - over-limit buyer should be blocked");
     }
 
     #[test]

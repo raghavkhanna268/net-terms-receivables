@@ -1643,7 +1643,7 @@ describeWithDb("Bulk JSONL Processor - existing invoice handling (DB-backed)", (
     });
 
     // Process through real bulk path
-    const upserted = await processOrderLines(sql, TEST_SHOP_ID, [jsonlLine]);
+    const upserted = await processOrderLines(sql, TEST_SHOP_ID, TEST_SHOP_DOMAIN, [jsonlLine]);
     expect(upserted).toBe(1);
 
     // Verify invoice is still paid with outstanding 0.00
@@ -1693,7 +1693,7 @@ describeWithDb("Bulk JSONL Processor - existing invoice handling (DB-backed)", (
     });
 
     // Process through real bulk path
-    const upserted = await processOrderLines(sql, TEST_SHOP_ID, [jsonlLine]);
+    const upserted = await processOrderLines(sql, TEST_SHOP_ID, TEST_SHOP_DOMAIN, [jsonlLine]);
     expect(upserted).toBe(1);
 
     // Verify invoice is still cancelled with outstanding 0.00
@@ -1743,7 +1743,7 @@ describeWithDb("Bulk JSONL Processor - existing invoice handling (DB-backed)", (
     });
 
     // Process through real bulk path
-    const upserted = await processOrderLines(sql, TEST_SHOP_ID, [jsonlLine]);
+    const upserted = await processOrderLines(sql, TEST_SHOP_ID, TEST_SHOP_DOMAIN, [jsonlLine]);
     expect(upserted).toBe(1);
 
     // Verify invoice was updated with new outstanding
@@ -1801,7 +1801,7 @@ describeWithDb("Bulk JSONL Processor - existing invoice handling (DB-backed)", (
     );
 
     // Process through real bulk path
-    const upserted = await processOrderLines(sql, TEST_SHOP_ID, jsonlLines);
+    const upserted = await processOrderLines(sql, TEST_SHOP_ID, TEST_SHOP_DOMAIN, jsonlLines);
     expect(upserted).toBe(3);
 
     // Verify counter was incremented by exactly 3 (not 3 separate increments)
