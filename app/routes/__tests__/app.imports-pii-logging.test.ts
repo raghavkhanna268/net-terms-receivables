@@ -207,16 +207,20 @@ describeWithDb("PII never logged to console or Sentry on import path (with REAL 
 
     // Create an Invoice for the buyer (amount in range for matching)
     // Amount is ~₹12,345 (1234500 paise) - close to PII_MARKERS.amount1
+    // Invoice requires orderId per Invoice_order_xor_draft constraint
+    const testOrderId = `gid://shopify/Order/pii-test-${Date.now()}`;
     const [invoice] = await sql<{ id: string }[]>`
       INSERT INTO "Invoice" (
-        "shopId", "buyerAccountId", name, total, outstanding, "issuedAt", "createdAt", "updatedAt"
+        "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", "dueAt", "createdAt", "updatedAt"
       ) VALUES (
         ${testShopId},
         ${testBuyerAccountId},
+        ${testOrderId},
         '#TEST-PII-001',
         12345.67,
         12345.67,
         NOW(),
+        NOW() + INTERVAL '30 days',
         NOW(),
         NOW()
       )
