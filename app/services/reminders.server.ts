@@ -867,11 +867,9 @@ export async function sendPaymentReminder(
   // This avoids holding locks during network I/O.
   // Row is already 'sent' (claimed in Phase A). If send fails, we release.
   //
-  // CRASH GAP: If crash occurs after Phase A claim but before Phase C completes,
-  // the row stays 'sent' with sentAt set but no email actually sent. Nothing
-  // retries a 'sent' row, so this stage's reminder is lost (the next enabled
-  // stage still sends normally). Stale 'sent' rows can be identified by
-  // comparing sentAt to Resend delivery logs if needed.
+  // CRASH GAP: If the process crashes after the row is claimed as 'sent' but
+  // before the Resend call succeeds, the row stays 'sent', nothing retries it,
+  // so that stage's reminder is lost; the next enabled stage still sends normally.
   try {
     const emailHtml = renderPaymentReminderEmail({
       invoiceName: invoice.invoiceName,
@@ -1229,11 +1227,9 @@ export async function sendCatchupReminder(
   // This avoids holding locks during network I/O.
   // Row is already 'sent' (claimed in Phase A). If send fails, we revert.
   //
-  // CRASH GAP: If crash occurs after Phase A claim but before Phase C completes,
-  // the row stays 'sent' with sentAt set but no email actually sent. Nothing
-  // retries a 'sent' row, so this stage's reminder is lost (the next enabled
-  // stage still sends normally). Stale 'sent' rows can be identified by
-  // comparing sentAt to Resend delivery logs if needed.
+  // CRASH GAP: If the process crashes after the row is claimed as 'sent' but
+  // before the Resend call succeeds, the row stays 'sent', nothing retries it,
+  // so that stage's reminder is lost; the next enabled stage still sends normally.
   try {
     const emailHtml = renderPaymentReminderEmail({
       invoiceName: invoice.invoiceName,
