@@ -18,12 +18,31 @@ The app is measured by Shopify's Web Vitals collection when running in the Shopi
 
 ## App Bridge Setup
 
-App Bridge is loaded from the Shopify CDN in `<head>` before any other scripts. This is required for:
+App Bridge is loaded from the Shopify CDN in `<head>` before any other scripts, but **only for embedded admin routes** (`/app/*` and `/auth/*`). This is required for:
 1. Shopify to collect Web Vitals metrics
 2. Built for Shopify eligibility
 3. App Bridge APIs (idToken, navigation, etc.)
 
-The script is added in `app/root.tsx` and applies to all routes using the React Router layout.
+The script is added conditionally in `app/root.tsx` based on the route pathname.
+
+### Why only embedded routes?
+
+App Bridge requires Shopify admin context (host/shop parameters provided by the admin iframe). When loaded outside the admin:
+- It throws: "App Bridge Next: missing required configuration fields: shop"
+- `window.shopify` is not initialized
+- Console errors would appear on public pages
+
+Public routes like `/privacy` (App Store listing link) and `/unsubscribe` (buyer-facing) run outside the Shopify admin, so they must not load App Bridge. The gating in `app/root.tsx` uses `useMatches()` to check if the current route is under `/app` or `/auth`; any other path does not render the App Bridge script or debug meta tag.
+
+### Duplicate Script from AppProvider
+
+The `AppProvider` component from `@shopify/shopify-app-react-router` (v4.0.0) also renders an App Bridge `<script>` tag in the body (see `node_modules/@shopify/shopify-app-react-router/src/react/components/AppProvider/AppProvider.tsx`, lines 101-106). There is no option to disable this.
+
+Having the script in `<head>` (from our root layout) AND in `<body>` (from AppProvider) results in two script tags, but this is harmless because:
+
+1. **Browser caching**: The second script tag triggers no additional network request; the browser serves it from cache.
+2. **Script execution**: Only the first `<script>` tag executes the script. The browser doesn't re-execute JavaScript from duplicate script tags pointing to the same URL.
+3. **BFS compliance**: What matters for Built for Shopify is that App Bridge is in `<head>` before any other scripts, which we satisfy. The duplicate in body has no functional impact.
 
 ## Debug Meta Tag
 
