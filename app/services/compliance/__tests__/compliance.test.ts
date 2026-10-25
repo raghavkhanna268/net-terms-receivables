@@ -58,8 +58,9 @@ describe("compliance.server", () => {
   describe("deleteShop", () => {
     it("deletes shop and all non-FK-linked tables in a transaction", async () => {
       // All queries run inside sql.begin() using mockTx
-      // 0. SELECT FOR UPDATE (serializes with drain's FOR SHARE guards, #239)
-      mockTx.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // 0. SELECT FOR UPDATE with uninstalledAt (reinstall guard #291)
+      const uninstalledDate = new Date();
+      mockTx.mockResolvedValueOnce([{ id: "shop-123", uninstalledAt: uninstalledDate }]);
       // 1. DELETE s10b_order_refetch_null
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 5 }));
       // 2. DELETE s6_bulk_operations
@@ -92,6 +93,7 @@ describe("compliance.server", () => {
       expect(result).toEqual({
         deleted: true,
         shopId: "shop-123",
+        skippedReinstalled: false,
         refetchNullPurged: 5,
         bulkOperationsPurged: 2,
         orderGapPurged: 3,
@@ -109,7 +111,7 @@ describe("compliance.server", () => {
 
     it("returns deleted=false when shop not found", async () => {
       // All queries run inside sql.begin() using mockTx
-      // 0. SELECT FOR UPDATE (serializes with drain's FOR SHARE guards, #239)
+      // 0. SELECT FOR UPDATE (shop not found)
       mockTx.mockResolvedValueOnce([]);
       // 1. DELETE s10b_order_refetch_null (may have rows even if shop doesn't exist)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
@@ -143,6 +145,7 @@ describe("compliance.server", () => {
       expect(result).toEqual({
         deleted: false,
         shopId: null,
+        skippedReinstalled: false,
         refetchNullPurged: 0,
         bulkOperationsPurged: 0,
         orderGapPurged: 0,
@@ -155,6 +158,32 @@ describe("compliance.server", () => {
         processedWebhooksPurged: 0,
         webhookReceiptsPurged: 0,
       });
+    });
+
+    it("skips deletion when shop has reinstalled (uninstalledAt is NULL)", async () => {
+      // Shop exists but uninstalledAt is NULL (shop reinstalled after uninstall)
+      // 0. SELECT FOR UPDATE returns shop with uninstalledAt: null
+      mockTx.mockResolvedValueOnce([{ id: "shop-reinstalled-123", uninstalledAt: null }]);
+
+      const result = await deleteShop(mockSql, "reinstalled-shop.myshopify.com");
+
+      expect(result).toEqual({
+        deleted: false,
+        shopId: "shop-reinstalled-123",
+        skippedReinstalled: true,
+        refetchNullPurged: 0,
+        bulkOperationsPurged: 0,
+        orderGapPurged: 0,
+        piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
+        deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
+      });
+      expect(mockSql.begin).toHaveBeenCalledTimes(1);
     });
   });
 

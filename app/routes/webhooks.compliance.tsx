@@ -227,7 +227,13 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       const result = await deleteShop(sql, payloadShop);
       const hash = await shopHash(payloadShop);
 
-      if (result.deleted) {
+      if (result.skippedReinstalled) {
+        // Shop reinstalled within the 48h window before shop/redact arrived (#291).
+        // Skip deletion to preserve the reinstalled shop's data.
+        safeLog("info", "shop_redact_skipped_reinstalled", {
+          shopHash: hash,
+        });
+      } else if (result.deleted) {
         safeLog("info", "shop_redact_deleted", {
           shopHash: hash,
           webhookId,

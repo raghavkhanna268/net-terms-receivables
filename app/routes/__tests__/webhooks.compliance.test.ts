@@ -114,6 +114,7 @@ describe("webhooks.compliance", () => {
     mockDeleteShop.mockResolvedValue({
       deleted: true,
       shopId: "shop-123",
+      skippedReinstalled: false,
       refetchNullPurged: 0,
       bulkOperationsPurged: 0,
       orderGapPurged: 0,
@@ -734,6 +735,7 @@ describe("webhooks.compliance", () => {
       mockDeleteShop.mockResolvedValue({
         deleted: false,
         shopId: null,
+        skippedReinstalled: false,
         refetchNullPurged: 0,
         bulkOperationsPurged: 0,
         orderGapPurged: 0,
@@ -843,6 +845,52 @@ describe("webhooks.compliance", () => {
 
       expect(mockDeleteAllForShop).not.toHaveBeenCalled();
       expect(mockDeleteShop).not.toHaveBeenCalled();
+    });
+
+    it("returns 200 and skips deletion when shop reinstalled (uninstalledAt is NULL)", async () => {
+      mockDeleteAllForShop.mockResolvedValue(3);
+      mockDeleteShop.mockResolvedValue({
+        deleted: false,
+        shopId: "shop-reinstalled-123",
+        skippedReinstalled: true,
+        refetchNullPurged: 0,
+        bulkOperationsPurged: 0,
+        orderGapPurged: 0,
+        piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
+        deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
+      });
+
+      const payload = { shop_domain: "test-reinstalled.myshopify.com", shop_id: 123 };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: "test-reinstalled.myshopify.com",
+        topic: "shop/redact",
+        webhookId: "test-webhook-reinstalled",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const response = await action(createMockActionArgs(request));
+
+      expect(response.status).toBe(200);
+      expect(mockDeleteAllForShop).toHaveBeenCalledWith("test-reinstalled.myshopify.com");
+      expect(mockDeleteShop).toHaveBeenCalledWith(
+        expect.anything(),
+        "test-reinstalled.myshopify.com"
+      );
     });
   });
 
@@ -1188,6 +1236,7 @@ describe("webhooks.compliance", () => {
       mockDeleteShop.mockResolvedValue({
         deleted: true,
         shopId: "shop-del-123",
+        skippedReinstalled: false,
         refetchNullPurged: 1,
         bulkOperationsPurged: 1,
         orderGapPurged: 1,
@@ -1220,11 +1269,52 @@ describe("webhooks.compliance", () => {
       expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
     });
 
+    it("SHOP_REDACT skipped reinstall path logs shop_redact_skipped_reinstalled with shopHash only, no domain", async () => {
+      mockDeleteAllForShop.mockResolvedValue(3);
+      mockDeleteShop.mockResolvedValue({
+        deleted: false,
+        shopId: "shop-reinstalled-456",
+        skippedReinstalled: true,
+        refetchNullPurged: 0,
+        bulkOperationsPurged: 0,
+        orderGapPurged: 0,
+        piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
+        deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
+      });
+
+      const payload = { shop_domain: TEST_SHOP, shop_id: 123 };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "shop/redact",
+        webhookId: "wh-shop-redact-reinstalled",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      const response = await action(createMockActionArgs(request));
+      expect(response.status).toBe(200);
+      expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
+    });
+
     it("SHOP_REDACT shop not found path logs no shop domain", async () => {
       mockDeleteAllForShop.mockResolvedValue(0);
       mockDeleteShop.mockResolvedValue({
         deleted: false,
         shopId: null,
+        skippedReinstalled: false,
         refetchNullPurged: 0,
         bulkOperationsPurged: 0,
         orderGapPurged: 0,

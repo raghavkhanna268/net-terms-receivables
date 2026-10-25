@@ -137,8 +137,9 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
   it("shop/redact deleted logs shop_redact_deleted with shopHash and counts, no raw domain", async () => {
     // Setup mocks for successful deletion
     // Transaction operations:
-    // 0. SELECT FOR UPDATE (serializes with drain's FOR SHARE guards, #239)
-    mockTx.mockResolvedValueOnce([{ id: "shop-logging-test" }]);
+    // 0. SELECT FOR UPDATE with uninstalledAt (reinstall guard #291)
+    const uninstalledDate = new Date();
+    mockTx.mockResolvedValueOnce([{ id: "shop-logging-test", uninstalledAt: uninstalledDate }]);
     // 1. DELETE s10b_order_refetch_null
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
     // 2. DELETE s6_bulk_operations
@@ -196,10 +197,40 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     expect(outputStr).not.toContain(TEST_SHOP);
   });
 
+  it("shop/redact skipped reinstall logs shop_redact_skipped_reinstalled with shopHash only, no raw domain", async () => {
+    // Setup mocks for reinstalled shop (uninstalledAt is NULL)
+    // Transaction returns shop with uninstalledAt: null - this triggers the skip path
+    mockTx.mockResolvedValueOnce([{ id: "shop-reinstalled-test", uninstalledAt: null }]);
+
+    const payload = { shop_id: 123, shop_domain: TEST_SHOP };
+    const body = JSON.stringify(payload);
+    const request = createSignedRequest(body, "shop/redact", SYNTHETIC_TEST_SECRET);
+
+    const response = await action(createMockActionArgs(request));
+    expect(response.status).toBe(200);
+
+    const allOutput = getAllConsoleOutput();
+    const outputStr = allOutput.join("\n");
+
+    // Assert shop_redact_skipped_reinstalled event appears
+    expect(outputStr).toContain("shop_redact_skipped_reinstalled");
+
+    // Assert shopHash is present (12-char truncated hex SHA-256)
+    expect(outputStr).toMatch(/shopHash[":]+[a-f0-9]{12}/i);
+
+    // Assert NO raw shop domain appears in any output
+    expect(outputStr).not.toContain(".myshopify.com");
+    expect(outputStr).not.toContain(TEST_SHOP);
+
+    // Assert no other fields are logged (only shopHash)
+    expect(outputStr).not.toContain("webhookId");
+    expect(outputStr).not.toContain("refetchNullPurged");
+  });
+
   it("shop/redact not found logs shop_redact_not_found with shopHash, no raw domain", async () => {
     // Setup mocks for shop not found (all deletes return 0, shop delete returns empty)
     // Transaction operations:
-    mockTx.mockResolvedValueOnce([]); // SELECT FOR UPDATE (serializes with drain's FOR SHARE guards, #239)
+    mockTx.mockResolvedValueOnce([]); // SELECT FOR UPDATE (shop not found)
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // s10b_order_refetch_null
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // s6_bulk_operations
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // order_outstanding_missing
