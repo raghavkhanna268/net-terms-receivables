@@ -239,7 +239,7 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
       "rule-123",
       0,
       "Asia/Kolkata",
-      { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
+      { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@pii-reminder-test.com,buyer@example.test" }
     );
 
     const errorLogs = parseLogCalls(consoleErrorSpy);
@@ -303,7 +303,7 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
       "rule-r1",
       0,
       "Asia/Kolkata",
-      { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
+      { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@pii-reminder-test.com,buyer@example.test" }
     );
 
     // Result should have errorCode, not error with raw message
@@ -377,7 +377,7 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
       "rule-r1-http",
       0,
       "Asia/Kolkata",
-      { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
+      { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@pii-reminder-test.com,buyer@example.test" }
     );
 
     // Result should have errorCode, not error with interpolated status
