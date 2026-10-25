@@ -31,6 +31,21 @@ re-fetches those topics after install. They keep their full message unchanged.
 A follow-up (S8 customers/draft-orders reconcile) will enable sanitization for those
 topics once reconcile coverage exists.
 
+### Coverage nuances
+
+**COMPANIES_\* topics:** The company handler has no Shop lookup, so companies
+never produce `shop_not_found`. They are listed as covered but cannot be sanitized.
+
+**ORDER/LOCATION CREATE/UPDATE:** These run `adminGraphQL` before the Shop lookup.
+After uninstall or redact, sessions are gone, so these fail with `No session found`
+(`retryable: false`). The DLQ reason becomes `non_retryable:...`, which is not
+sanitized. Only DELETE operations and existing-session cases reach the Shop lookup.
+
+**What actually gets sanitized:**
+- `COMPANY_LOCATIONS_DELETE` when the Shop row is missing
+- `ORDERS_*` or location updates if a session still exists while the Shop row is missing
+- Bulk `companies`/`orders` (Shop check runs first, gives `permanent:shop_not_found`)
+
 ## Diagnosing DLQ Issues
 
 ### Check DLQ Contents

@@ -1090,6 +1090,18 @@ async function processSyncQueue(
       break;
     }
 
+    // Skip already-sanitized messages (re-enqueued by hand)
+    if ((msg.message as Record<string, unknown>).sanitized === true) {
+      safeLog("warn", "drain_skip_sanitized_message", {
+        queue: S6_QUEUES.SYNC,
+        originalMsgId: msg.msg_id,
+        topic: msg.message.topic,
+      });
+      await archiveMessage(sql, S6_QUEUES.SYNC, msg.msg_id);
+      result.skipped++;
+      continue;
+    }
+
     const handler = getSyncHandler(msg.message.topic);
 
     if (!handler) {
@@ -1256,6 +1268,18 @@ async function processBulkQueue(
     if (currentElapsed >= config.timeBudgetMs) {
       result.timedOut = true;
       break;
+    }
+
+    // Skip already-sanitized messages (re-enqueued by hand)
+    if ((msg.message as Record<string, unknown>).sanitized === true) {
+      safeLog("warn", "drain_skip_sanitized_message", {
+        queue: S6_QUEUES.BULK,
+        originalMsgId: msg.msg_id,
+        topic: msg.message.topic,
+      });
+      await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
+      result.skipped++;
+      continue;
     }
 
     const handler = getBulkHandler(msg.message.topic);
