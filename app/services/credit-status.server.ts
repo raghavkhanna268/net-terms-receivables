@@ -227,6 +227,8 @@ interface BuyerAccountData {
   holdNote: string | null;
   syncPending: boolean;
   gatedAt: Date | null;
+  metafieldSyncErrorCode: string | null;
+  metafieldSyncedAt: Date | null;
 }
 
 /**
@@ -1292,6 +1294,10 @@ export interface CreditStatusDisplay {
   isOverdue: boolean;
   utilizationPercent: number | null;
   syncPending: boolean;
+  /** Error code from permanent sync failure (e.g., no_session, access_denied). Null if no permanent error. */
+  syncErrorCode: string | null;
+  /** Timestamp of last successful metafield sync. Null if never synced. */
+  metafieldSyncedAt: Date | null;
 }
 
 /**
@@ -1315,7 +1321,9 @@ export async function getCreditStatusDisplay(
       "holdReasonCode",
       "holdNote",
       "syncPending",
-      gated_at AS "gatedAt"
+      gated_at AS "gatedAt",
+      "metafieldSyncErrorCode",
+      "metafieldSyncedAt"
     FROM "BuyerAccount"
     WHERE id = ${buyerAccountId}
   `;
@@ -1389,5 +1397,7 @@ export async function getCreditStatusDisplay(
     isOverdue,
     utilizationPercent,
     syncPending: account.syncPending,
+    syncErrorCode: account.metafieldSyncErrorCode,
+    metafieldSyncedAt: account.metafieldSyncedAt,
   };
 }

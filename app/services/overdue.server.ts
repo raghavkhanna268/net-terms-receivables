@@ -7,11 +7,13 @@
  * - credit-status-recompute.server.ts (event/cron-driven recompute)
  *
  * Overdue definition:
+ * Invoices become overdue 1 day after the due date (end of day, shop time).
+ *
  * An invoice is overdue if:
  * - status = 'open'
  * - outstanding > 0
  * - dueAt IS NOT NULL
- * - dueAt < NOW() - INTERVAL '1 day' (1-day grace period after due date)
+ * - dueAt < NOW() - INTERVAL '1 day'
  *
  * This means an invoice due yesterday is NOT yet overdue. An invoice due
  * 2+ days ago IS overdue.
@@ -22,7 +24,8 @@ import type { Sql } from "~/lib/db-light.server";
 /**
  * Check if a buyer account has any overdue invoices.
  *
- * Uses a 1-day grace period: dueAt < NOW() - INTERVAL '1 day'
+ * Invoices become overdue 1 day after the due date (end of day, shop time).
+ * Uses: dueAt < NOW() - INTERVAL '1 day'
  *
  * @param sql - Database connection
  * @param buyerAccountId - Buyer account ID
