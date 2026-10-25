@@ -1321,7 +1321,7 @@ describe("PlanSource Interface", () => {
 
       const sourceResult = await source.resolveActivePlan({
         sql: mockSql as unknown as Sql,
-        shopDomain: "fake-nonexistent.myshopify.com",
+        shopDomain: "test-nonexistent.myshopify.com",
       });
 
       expect(sourceResult.planKey).toBe("free");

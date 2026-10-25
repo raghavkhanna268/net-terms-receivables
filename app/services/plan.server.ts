@@ -363,7 +363,8 @@ function triggerBackgroundRefresh(
  * Resolve the current plan for a shop.
  *
  * S24: Routes through PlanSource interface via getPlanSource().
- * All callers of this function now go through the interface.
+ * Note: getPlanByShopId() reads the DB-cached plan directly for performance;
+ * it does not route through the interface since it never calls Shopify.
  *
  * Design:
  * - Fresh cache: Return cached plan immediately
@@ -624,8 +625,9 @@ export class AdminInstallationPlanSource implements PlanSource {
   /**
    * Resolve the active plan for a shop from Admin GraphQL.
    *
-   * This is the main entry point for plan resolution. All callers
-   * (resolvePlan, getPlan, hasFeature, etc.) route through this method.
+   * This is the main entry point for plan resolution. Callers using
+   * resolvePlan, getPlan, hasFeature, etc. route through this method.
+   * Note: getPlanByShopId() reads the DB-cached plan directly for performance.
    */
   async resolveActivePlan(ctx: PlanResolutionContext): Promise<SourceResolvedPlan> {
     const resolved = await _resolveFromAdminInstallation(
@@ -648,6 +650,14 @@ export class AdminInstallationPlanSource implements PlanSource {
     };
   }
 
+  /**
+   * Map resolved plan to subscription status.
+   *
+   * Current logic: returns 'active' if subscriptionId exists, 'unknown' otherwise.
+   * This mirrors the existing behavior where we only track active vs no-subscription.
+   * TODO(S24-followup): Extend to map actual Shopify subscription statuses
+   * (CANCELLED, EXPIRED, FROZEN, PENDING) when Partner API source is implemented.
+   */
   private mapSubscriptionStatus(resolved: ResolvedPlan): PlanStatus {
     if (resolved.subscriptionId) {
       return "active";

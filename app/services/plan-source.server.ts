@@ -62,7 +62,12 @@ export interface PlanResolutionContext {
   sql: Sql;
   /** Shop domain (e.g., "example.myshopify.com") */
   shopDomain: string;
-  /** Internal shop ID (if available) */
+  /**
+   * Internal shop ID (optional).
+   * Reserved for future Partner API source which may receive shopId
+   * from the post-checkout redirect instead of resolving from domain.
+   * Currently unused by AdminInstallationPlanSource.
+   */
   shopId?: string;
   /** Force refresh from source (skip cache) */
   forceRefresh?: boolean;
