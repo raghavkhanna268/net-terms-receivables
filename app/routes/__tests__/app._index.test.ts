@@ -118,8 +118,8 @@ vi.mock("~/services/plan.server", () => ({
 
 vi.mock("~/services/gating.server", () => ({
   getUsageStats: vi.fn().mockResolvedValue({
-    companies: { current: 2, limit: 3 },
-    importsThisMonth: { current: 0, limit: 1 },
+    companies: { current: 2, limit: 25 },
+    importsThisMonth: { current: 0, limit: -1 },
   }),
   isGatingEnforced: vi.fn().mockReturnValue(false),
 }));
@@ -778,11 +778,10 @@ describe("S21 over-limit banner using buildOverLimitBannerState helper", () => {
     expect(state.show).toBe(false);
   });
 
-  it("banner shows enforcement note when gatingEnforced is false", async () => {
+  it("banner is hidden when gatingEnforced is false (T1: no banner when gating off)", async () => {
     const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
     const state = buildOverLimitBannerState(2, false);
-    expect(state.show).toBe(true);
-    expect(state.enforcementNote).toBe("(Limits are not currently enforced.)");
+    expect(state.show).toBe(false);
   });
 
   it("banner does not show enforcement note when gatingEnforced is true", async () => {

@@ -72,8 +72,8 @@ vi.mock("~/services/plan.server", () => ({
 
 vi.mock("~/services/gating.server", () => ({
   getUsageStats: vi.fn().mockResolvedValue({
-    companies: { current: 0, limit: 3 },
-    importsThisMonth: { current: 0, limit: 1 },
+    companies: { current: 0, limit: 25 },
+    importsThisMonth: { current: 0, limit: -1 },
   }),
   isGatingEnforced: vi.fn().mockReturnValue(false),
 }));
