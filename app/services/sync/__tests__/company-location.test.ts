@@ -450,15 +450,18 @@ describeWithDb("CompanyLocation Sync", () => {
 
   describe("B2B main contact PII handling", () => {
     it("stores mainContact fields when CUSTOMER_PII_FIELDS=1", async () => {
+      // mainContact is on Company, not Location (B2B recipient is the company's main contact)
       const location: ShopifyCompanyLocation = {
         id: `gid://shopify/CompanyLocation/pii-on-${TEST_SUFFIX}`,
         name: "PII On Company",
-        company: { id: `gid://shopify/Company/pii-on-co-${TEST_SUFFIX}` },
-        mainContact: {
-          customer: {
-            id: `gid://shopify/Customer/contact-${TEST_SUFFIX}`,
-            email: "contact@example.com",
-            displayName: "Contact Person",
+        company: {
+          id: `gid://shopify/Company/pii-on-co-${TEST_SUFFIX}`,
+          mainContact: {
+            customer: {
+              id: `gid://shopify/Customer/contact-${TEST_SUFFIX}`,
+              email: "contact@example.com",
+              displayName: "Contact Person",
+            },
           },
         },
       };
@@ -484,15 +487,18 @@ describeWithDb("CompanyLocation Sync", () => {
     });
 
     it("nulls mainContact fields when CUSTOMER_PII_FIELDS is off", async () => {
+      // mainContact is on Company, not Location (B2B recipient is the company's main contact)
       const location: ShopifyCompanyLocation = {
         id: `gid://shopify/CompanyLocation/pii-off-${TEST_SUFFIX}`,
         name: "PII Off Company",
-        company: { id: `gid://shopify/Company/pii-off-co-${TEST_SUFFIX}` },
-        mainContact: {
-          customer: {
-            id: `gid://shopify/Customer/contact-piioff-${TEST_SUFFIX}`,
-            email: "should-not-store@example.com",
-            displayName: "Should Not Store",
+        company: {
+          id: `gid://shopify/Company/pii-off-co-${TEST_SUFFIX}`,
+          mainContact: {
+            customer: {
+              id: `gid://shopify/Customer/contact-piioff-${TEST_SUFFIX}`,
+              email: "should-not-store@example.com",
+              displayName: "Should Not Store",
+            },
           },
         },
       };
@@ -533,15 +539,18 @@ describeWithDb("CompanyLocation Sync", () => {
         )
       `;
 
+      // mainContact is on Company, not Location (B2B recipient is the company's main contact)
       const location: ShopifyCompanyLocation = {
         id: locationId,
         name: "Turn Off PII",
-        company: { id: companyId },
-        mainContact: {
-          customer: {
-            id: "gid://shopify/Customer/new-contact",
-            email: "new-contact@example.com",
-            displayName: "New Contact",
+        company: {
+          id: companyId,
+          mainContact: {
+            customer: {
+              id: "gid://shopify/Customer/new-contact",
+              email: "new-contact@example.com",
+              displayName: "New Contact",
+            },
           },
         },
       };
@@ -580,15 +589,18 @@ describeWithDb("CompanyLocation Sync", () => {
         )
       `;
 
+      // mainContact is on Company, not Location (B2B recipient is the company's main contact)
       const location: ShopifyCompanyLocation = {
         id: locationId,
         name: "Contact Change",
-        company: { id: companyId },
-        mainContact: {
-          customer: {
-            id: "gid://shopify/Customer/new",
-            email: "new-contact@example.com",
-            displayName: "New Contact",
+        company: {
+          id: companyId,
+          mainContact: {
+            customer: {
+              id: "gid://shopify/Customer/new",
+              email: "new-contact@example.com",
+              displayName: "New Contact",
+            },
           },
         },
       };

@@ -84,9 +84,10 @@ export const COMPANY_QUERY = `
 
 /**
  * Fetch a CompanyLocation by GID.
- * Fetches id, name, company, billingAddress.companyName (name fallback), payment terms,
- * and mainContact (customer id, email, displayName for B2B reminder emails).
+ * Fetches id, name, company (with mainContact), billingAddress.companyName (name fallback),
+ * and payment terms.
  *
+ * The B2B recipient is the COMPANY's main contact (not on CompanyLocation directly).
  * mainContact.customer PII (email, displayName) is only stored when CUSTOMER_PII_FIELDS=1.
  * The query always fetches them; the sync layer gates storage.
  *
@@ -100,6 +101,13 @@ export const COMPANY_LOCATION_QUERY = `
         name
         company {
           id
+          mainContact {
+            customer {
+              id
+              email
+              displayName
+            }
+          }
         }
         billingAddress {
           companyName
@@ -110,13 +118,6 @@ export const COMPANY_LOCATION_QUERY = `
             name
             dueInDays
             paymentTermsType
-          }
-        }
-        mainContact {
-          customer {
-            id
-            email
-            displayName
           }
         }
       }

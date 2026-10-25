@@ -98,9 +98,10 @@ export async function processCompanyLocationWebhook(
     `Location ${location.id.split("/").pop()}`;
 
   // Extract main contact PII (only when CUSTOMER_PII_FIELDS=1)
+  // mainContact is on Company, not Location (B2B recipient is the company's main contact)
   // If flag is off or mainContact is null/missing, all fields are null
   const piiEnabled = shouldIncludePiiFields(env);
-  const mainContact = location.mainContact?.customer;
+  const mainContact = location.company.mainContact?.customer;
   const mainContactEmail = piiEnabled && mainContact ? (mainContact.email ?? null) : null;
   const mainContactDisplayName = piiEnabled && mainContact ? (mainContact.displayName ?? null) : null;
   const mainContactCustomerId = piiEnabled && mainContact ? (mainContact.id ?? null) : null;
@@ -211,8 +212,9 @@ export function mapCompanyLocationToBuyerAccount(
     `Location ${location.id.split("/").pop()}`;
 
   // Extract main contact PII (only when CUSTOMER_PII_FIELDS=1)
+  // mainContact is on Company, not Location (B2B recipient is the company's main contact)
   const piiEnabled = shouldIncludePiiFields(env);
-  const mainContact = location.mainContact?.customer;
+  const mainContact = location.company.mainContact?.customer;
   const mainContactEmail = piiEnabled && mainContact ? (mainContact.email ?? null) : null;
   const mainContactDisplayName = piiEnabled && mainContact ? (mainContact.displayName ?? null) : null;
   const mainContactCustomerId = piiEnabled && mainContact ? (mainContact.id ?? null) : null;

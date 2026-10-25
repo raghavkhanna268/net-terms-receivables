@@ -426,9 +426,10 @@ async function processCompanyLines(
   const accounts: ReturnType<typeof mapCompanyLocationToBuyerAccount>[] = [];
 
   // Process locations from companies in this batch
-  for (const { locations } of companies.values()) {
+  // Pass company's mainContact to each location (B2B recipient is the company's main contact)
+  for (const { company, locations } of companies.values()) {
     for (const loc of locations) {
-      const shopifyLoc = bulkLocationToShopifyLocation(loc);
+      const shopifyLoc = bulkLocationToShopifyLocation(loc, company.mainContact);
       accounts.push(mapCompanyLocationToBuyerAccount(shopId, shopifyLoc));
     }
   }
@@ -436,6 +437,7 @@ async function processCompanyLines(
   // Handle orphan locations: parent company from earlier chunk or slice
   // Map unconditionally using parent company GID - guarded upserts handle duplicates
   // This ensures locations are processed even when company ended previous slice
+  // Note: orphan locations won't have mainContact (company ended in previous slice)
   for (const orphanLoc of orphanLocations) {
     const shopifyLoc = bulkLocationToShopifyLocation(orphanLoc);
     accounts.push(mapCompanyLocationToBuyerAccount(shopId, shopifyLoc));

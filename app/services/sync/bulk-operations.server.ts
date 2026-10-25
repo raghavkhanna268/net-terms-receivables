@@ -26,6 +26,7 @@
  * objects linked by __parentId.
  *
  * DPDP note: Only billingAddress.companyName is fetched (name fallback for BuyerAccount).
+ * The B2B recipient is the COMPANY's main contact (mainContact is on Company, not Location).
  * mainContact.customer PII (email, displayName) is fetched for B2B reminder emails.
  * Storage is gated by CUSTOMER_PII_FIELDS=1.
  *
@@ -45,6 +46,13 @@ export const BULK_COMPANIES_QUERY = `
               note
               createdAt
               updatedAt
+              mainContact {
+                customer {
+                  id
+                  email
+                  displayName
+                }
+              }
               locations {
                 edges {
                   node {
@@ -61,13 +69,6 @@ export const BULK_COMPANIES_QUERY = `
                         name
                         dueInDays
                         paymentTermsType
-                      }
-                    }
-                    mainContact {
-                      customer {
-                        id
-                        email
-                        displayName
                       }
                     }
                   }

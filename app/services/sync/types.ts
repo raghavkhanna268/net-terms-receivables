@@ -75,6 +75,7 @@ export interface ShopifyCompany {
  *
  * DPDP note: billingAddress only includes companyName (name fallback).
  * No PII fields (names, addresses, phones) are stored.
+ * The B2B recipient is the COMPANY's main contact (mainContact is on Company, not Location).
  * mainContact PII (email, displayName) is only fetched when CUSTOMER_PII_FIELDS=1.
  *
  * Note: CompanyAddress.company was renamed to companyName in 2026-10.
@@ -84,6 +85,13 @@ export interface ShopifyCompanyLocation {
   name: string;
   company: {
     id: string; // Parent company GID
+    mainContact?: {
+      customer?: {
+        id: string;
+        email?: string | null;
+        displayName?: string | null;
+      } | null;
+    } | null;
   };
   billingAddress?: {
     companyName?: string | null;
@@ -94,13 +102,6 @@ export interface ShopifyCompanyLocation {
       name: string;
       dueInDays: number;
       paymentTermsType: string;
-    } | null;
-  } | null;
-  mainContact?: {
-    customer?: {
-      id: string;
-      email?: string | null;
-      displayName?: string | null;
     } | null;
   } | null;
   createdAt?: string;
@@ -207,6 +208,7 @@ export interface SyncResult {
 
 /**
  * Bulk JSONL line for company export.
+ * mainContact is on Company, not Location (B2B recipient is the company's main contact).
  */
 export interface BulkCompanyLine {
   id: string;
@@ -214,10 +216,18 @@ export interface BulkCompanyLine {
   externalId?: string | null;
   note?: string | null;
   __parentId?: string; // For nested locations
+  mainContact?: {
+    customer?: {
+      id: string;
+      email?: string | null;
+      displayName?: string | null;
+    } | null;
+  } | null;
 }
 
 /**
  * Bulk JSONL line for company location export.
+ * Note: mainContact is on Company, not Location - it's passed to location during parsing.
  */
 export interface BulkCompanyLocationLine {
   id: string;
@@ -225,7 +235,6 @@ export interface BulkCompanyLocationLine {
   __parentId: string; // Company GID
   billingAddress?: ShopifyCompanyLocation["billingAddress"];
   buyerExperienceConfiguration?: ShopifyCompanyLocation["buyerExperienceConfiguration"];
-  mainContact?: ShopifyCompanyLocation["mainContact"];
 }
 
 /**
