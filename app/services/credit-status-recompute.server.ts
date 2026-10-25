@@ -27,6 +27,7 @@ import type { Sql } from "~/lib/db-light.server";
 import {
   syncCreditStatusMetafield,
   getCreditStatusDisplay,
+  shouldSkipForBackoff,
   type CreditStatusSource,
 } from "./credit-status.server";
 
@@ -61,6 +62,8 @@ interface BuyerAccountForRecompute {
   gatedAt: Date | null;
   syncPending: boolean;
   metafieldSyncedAt: Date | null;
+  metafieldSyncErrorAt: Date | null;
+  metafieldSyncErrorCode: string | null;
 }
 
 /**
@@ -85,7 +88,7 @@ export async function recomputeCreditStatus(
   buyerAccountId: string,
   source: CreditStatusSource = "unknown",
 ): Promise<RecomputeResult> {
-  // Fetch account data to check gated status and current hold
+  // Fetch account data to check gated status, current hold, and backoff state
   const [account] = await sql<BuyerAccountForRecompute[]>`
     SELECT
       id,
@@ -93,7 +96,9 @@ export async function recomputeCreditStatus(
       bypass,
       gated_at AS "gatedAt",
       "syncPending",
-      "metafieldSyncedAt"
+      "metafieldSyncedAt",
+      "metafieldSyncErrorAt",
+      "metafieldSyncErrorCode"
     FROM "BuyerAccount"
     WHERE id = ${buyerAccountId}
   `;
@@ -106,6 +111,31 @@ export async function recomputeCreditStatus(
       newHold: false,
       error: "Buyer account not found",
       retryable: false,
+    };
+  }
+
+  // Check backoff for persistent retryable failures.
+  // Skip if:
+  // - metafieldSyncErrorCode is NULL (retryable, not permanent)
+  // - metafieldSyncErrorAt is set (we have a failure timestamp)
+  // - Backoff period hasn't elapsed
+  // 
+  // Permanent failures (metafieldSyncErrorCode IS NOT NULL) are excluded by the sweep SQL,
+  // so they shouldn't reach here via daily_sweep. If they do reach here via another path
+  // (e.g., invoice_change), we still allow retry (success clears the marker).
+  if (
+    account.metafieldSyncErrorCode === null &&
+    account.metafieldSyncErrorAt !== null &&
+    shouldSkipForBackoff(account.metafieldSyncErrorAt)
+  ) {
+    // Return success with metafieldWritten=false to indicate we skipped due to backoff.
+    // This allows the message to be archived (not retried) while the backoff elapses.
+    const previousHold = account.holdState === "HELD" && !account.bypass;
+    return {
+      success: true,
+      metafieldWritten: false,
+      previousHold,
+      newHold: previousHold,
     };
   }
 

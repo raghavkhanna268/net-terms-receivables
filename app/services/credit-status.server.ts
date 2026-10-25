@@ -167,6 +167,63 @@ export const MAX_CREDIT_LIMIT_PAISE = 999_999_999_999_999n;
 export const MAX_CREDIT_LIMIT_AMOUNT = 9_999_999_999_999.99;
 
 /**
+ * Backoff schedule for persistent retryable sync failures.
+ * Days since first failure when retry is allowed: 0 (initial), 1, 2, 4, 7, then every 7 days.
+ * This prevents hammering accounts with persistent retryable errors while still
+ * allowing recovery when the issue resolves.
+ */
+export const RETRYABLE_BACKOFF_DAYS = [0, 1, 2, 4, 7] as const;
+export const RETRYABLE_BACKOFF_CAP_DAYS = 7;
+
+/**
+ * Check if an account should be skipped due to backoff from persistent retryable failures.
+ * 
+ * The backoff is based on time since the first failure in the current failure streak:
+ * - Day 0: Initial failure (handled by event trigger)
+ * - Day 1, 2, 4, 7: Retry allowed
+ * - After day 7: Retry every 7 days (capped)
+ * 
+ * On success, metafieldSyncErrorAt is cleared, resetting the streak.
+ * 
+ * @param metafieldSyncErrorAt - Time of first failure in current streak (null = no failure)
+ * @returns true if account should be skipped (backoff not elapsed)
+ */
+export function shouldSkipForBackoff(metafieldSyncErrorAt: Date | null): boolean {
+  if (!metafieldSyncErrorAt) return false;
+  
+  const errorAgeMs = Date.now() - metafieldSyncErrorAt.getTime();
+  const errorAgeDays = Math.floor(errorAgeMs / (24 * 60 * 60 * 1000));
+  
+  // Always allow if exact match to a retry day
+  if (RETRYABLE_BACKOFF_DAYS.includes(errorAgeDays as typeof RETRYABLE_BACKOFF_DAYS[number])) {
+    return false;
+  }
+  
+  // After cap, allow retry every RETRYABLE_BACKOFF_CAP_DAYS days
+  if (errorAgeDays >= RETRYABLE_BACKOFF_CAP_DAYS) {
+    const daysSinceCap = errorAgeDays - RETRYABLE_BACKOFF_CAP_DAYS;
+    if (daysSinceCap % RETRYABLE_BACKOFF_CAP_DAYS === 0) {
+      return false;
+    }
+  }
+  
+  return true;
+}
+
+/**
+ * Compute the next retry day based on current error age.
+ * Used for logging and testing.
+ */
+export function computeNextRetryDay(errorAgeDays: number): number {
+  for (const day of RETRYABLE_BACKOFF_DAYS) {
+    if (day > errorAgeDays) return day;
+  }
+  // After cap, next retry is on the next multiple of cap after current age
+  const capMultiple = Math.ceil((errorAgeDays + 1 - RETRYABLE_BACKOFF_CAP_DAYS) / RETRYABLE_BACKOFF_CAP_DAYS);
+  return RETRYABLE_BACKOFF_CAP_DAYS + capMultiple * RETRYABLE_BACKOFF_CAP_DAYS;
+}
+
+/**
  * Owner type for metafield writes.
  */
 export type MetafieldOwner = "CompanyLocation" | "Customer";
@@ -753,14 +810,76 @@ export async function updateCreditStatus(
   );
 
   if (!metafieldResult.success) {
+    const rawErrorCode = metafieldResult.errorCode ?? toErrorCode(metafieldResult.error);
+    const retryable = metafieldResult.retryable;
+    
+    // For return/audit: validate code with local toSafeSyncErrorCode
+    const errorCode = toSafeSyncErrorCode(rawErrorCode);
+    
+    // For marker column only: map to known permanent codes, or null if unknown
+    const markerCode = retryable === false ? toPermanentSyncErrorCode(rawErrorCode) : null;
+
     safeLog("error", "credit_status_metafield_write_failed", {
       buyerAccountId,
-      err: toErrorCode(metafieldResult.error),
+      err: errorCode,
+      retryable,
     });
+
+    // Write credit_status.sync_failed audit event (ids and codes only)
+    // Wrapped in try/catch so audit failure doesn't block the marker UPDATE or return value
+    const [accountInfo] = await sql<{ shopId: string }[]>`
+      SELECT "shopId" FROM "BuyerAccount" WHERE id = ${buyerAccountId}
+    `;
+    if (accountInfo) {
+      try {
+        await sql`
+          INSERT INTO "AuditEvent" ("shopId", actor, type, data, at)
+          VALUES (
+            ${accountInfo.shopId},
+            'system',
+            'credit_status.sync_failed',
+            ${sql.json({
+              buyerAccountId,
+              errorCode,
+              syncVersion: txResult.syncVersion,
+            })},
+            NOW()
+          )
+        `;
+      } catch (auditErr) {
+        safeLog("warn", "credit_status_sync_failed_audit_error", {
+          buyerAccountId,
+          err: toErrorCode(auditErr),
+        });
+      }
+    }
+
+    // Set permanent error marker for known permanent codes.
+    // For retryable errors, set metafieldSyncErrorAt only if not already set (tracks failure streak start).
+    if (markerCode !== null) {
+      await sql`
+        UPDATE "BuyerAccount"
+        SET "metafieldSyncErrorCode" = ${markerCode},
+            "metafieldSyncErrorAt" = NOW()
+        WHERE id = ${buyerAccountId}
+          AND "syncVersion" = ${txResult.syncVersion}
+      `;
+    } else {
+      // Retryable error: set metafieldSyncErrorAt only if NULL (preserve streak start time)
+      await sql`
+        UPDATE "BuyerAccount"
+        SET "metafieldSyncErrorAt" = COALESCE("metafieldSyncErrorAt", NOW())
+        WHERE id = ${buyerAccountId}
+          AND "syncVersion" = ${txResult.syncVersion}
+      `;
+    }
+
     return {
       success: true,
       metafieldSyncPending: true,
       error: `metafield_sync_failed`,
+      errorCode,
+      retryable,
     };
   }
 
@@ -770,18 +889,62 @@ export async function updateCreditStatus(
       buyerAccountId,
       errorCount: userErrors.length,
     });
+
+    // Write credit_status.sync_failed audit event for userErrors
+    const [accountInfoForUserError] = await sql<{ shopId: string }[]>`
+      SELECT "shopId" FROM "BuyerAccount" WHERE id = ${buyerAccountId}
+    `;
+    if (accountInfoForUserError) {
+      try {
+        await sql`
+          INSERT INTO "AuditEvent" ("shopId", actor, type, data, at)
+          VALUES (
+            ${accountInfoForUserError.shopId},
+            'system',
+            'credit_status.sync_failed',
+            ${sql.json({
+              buyerAccountId,
+              errorCode: "user_error",
+              syncVersion: txResult.syncVersion,
+            })},
+            NOW()
+          )
+        `;
+      } catch (auditErr) {
+        safeLog("warn", "credit_status_sync_failed_audit_error", {
+          buyerAccountId,
+          err: toErrorCode(auditErr),
+        });
+      }
+    }
+
+    // userErrors are permanent failures - set marker
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "metafieldSyncErrorCode" = 'user_error',
+          "metafieldSyncErrorAt" = NOW()
+      WHERE id = ${buyerAccountId}
+        AND "syncVersion" = ${txResult.syncVersion}
+    `;
+
     return {
       success: true,
       metafieldSyncPending: true,
       userErrors,
       error: `metafield_user_errors`,
+      errorCode: "user_error",
+      retryable: false,
     };
   }
 
-  // Clear syncPending and set metafieldSyncedAt only if syncVersion matches (no newer write occurred)
+  // Clear syncPending, set metafieldSyncedAt, and clear any error marker
+  // Only if syncVersion matches (no newer write occurred)
   const clearResult = await sql<{ id: string }[]>`
     UPDATE "BuyerAccount"
-    SET "syncPending" = false, "metafieldSyncedAt" = NOW()
+    SET "syncPending" = false,
+        "metafieldSyncedAt" = NOW(),
+        "metafieldSyncErrorCode" = NULL,
+        "metafieldSyncErrorAt" = NULL
     WHERE id = ${buyerAccountId}
       AND "syncVersion" = ${txResult.syncVersion}
     RETURNING id
@@ -1041,13 +1204,22 @@ export async function syncCreditStatusMetafield(
       }
     }
 
-    // Set permanent error marker ONLY for known permanent codes.
-    // Unknown non-retryable codes leave marker NULL for nightly resync retry.
+    // Set permanent error marker for known permanent codes.
+    // For retryable errors (markerCode is null), set metafieldSyncErrorAt only if not already set
+    // (tracks failure streak start for backoff).
     if (markerCode !== null) {
       await sql`
         UPDATE "BuyerAccount"
         SET "metafieldSyncErrorCode" = ${markerCode},
             "metafieldSyncErrorAt" = NOW()
+        WHERE id = ${buyerAccountId}
+          AND "syncVersion" = ${txResult.syncVersion}
+      `;
+    } else {
+      // Retryable error: set metafieldSyncErrorAt only if NULL (preserve streak start time)
+      await sql`
+        UPDATE "BuyerAccount"
+        SET "metafieldSyncErrorAt" = COALESCE("metafieldSyncErrorAt", NOW())
         WHERE id = ${buyerAccountId}
           AND "syncVersion" = ${txResult.syncVersion}
       `;

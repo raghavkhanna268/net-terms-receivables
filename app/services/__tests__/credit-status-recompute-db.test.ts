@@ -3701,3 +3701,442 @@ describeWithDb("leak checks (#204)", () => {
 // Note: The no-owner logic in getOwnerGid is tested via unit tests in credit-status.test.ts.
 // The BuyerAccount_kind_consistency CHECK constraint prevents inserting no-owner rows in the DB,
 // so drain handler tests only use valid rows that satisfy the constraint.
+
+// =============================================================================
+// BACKOFF FOR PERSISTENT RETRYABLE SYNC FAILURES (#212)
+// =============================================================================
+
+describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-backoff";
+  const TEST_SHOP_ID = `shop-backoff-${TEST_SUFFIX}`;
+  const TEST_SHOP_DOMAIN = `backoff-test-${TEST_SUFFIX}.myshopify.com`;
+  const TEST_ACCOUNT_ID = `acc-backoff-${TEST_SUFFIX}`;
+  const TEST_COMPANY_LOCATION_ID = `gid://shopify/CompanyLocation/${TEST_SUFFIX}`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+    `;
+
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name,
+        "creditLimit", "holdState", bypass, "manualHold",
+        "syncPending", "syncVersion", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${TEST_ACCOUNT_ID}, ${TEST_SHOP_ID}, 'COMPANY',
+        ${"co-" + TEST_SUFFIX}, ${TEST_COMPANY_LOCATION_ID},
+        'Backoff Test Account', 100000.00, 'OK', false, false,
+        false, 1, NOW(), NOW()
+      )
+    `;
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_re%:' + TEST_ACCOUNT_ID + '%'}`;
+    await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+    await sql.end();
+  });
+
+  beforeEach(async () => {
+    mockShouldFail = false;
+    mockShopifyGraphQLRequest.mockReset();
+    mockShopifyGraphQLRequest.mockImplementation(async () => {
+      if (mockShouldFail) {
+        return {
+          success: false,
+          error: "Simulated transient failure",
+          errorCode: "network_error",
+          retryable: true,
+        };
+      }
+      metafieldWriteCount++;
+      return {
+        success: true,
+        data: {
+          metafieldsSet: {
+            metafields: [{ id: "mf-1", namespace: "$app", key: "credit_status" }],
+            userErrors: [],
+          },
+        },
+      };
+    });
+
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "holdState" = 'OK', "holdReasonCode" = NULL, "manualHold" = false,
+          "syncPending" = false, "syncVersion" = 1, bypass = false,
+          gated_at = NULL, "metafieldSyncedAt" = NULL,
+          "metafieldSyncErrorCode" = NULL, "metafieldSyncErrorAt" = NULL
+      WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+
+    await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_re%:' + TEST_ACCOUNT_ID + '%'}`;
+    metafieldWriteCount = 0;
+  });
+
+  it("retryable failure sets metafieldSyncErrorAt only if NULL (preserves streak start)", async () => {
+    // Set syncPending to trigger recompute
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "syncPending" = true, "metafieldSyncedAt" = NULL
+      WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+
+    // First failure - should set metafieldSyncErrorAt
+    mockShouldFail = true;
+    mockShopifyGraphQLRequest.mockImplementation(async () => ({
+      success: false,
+      error: "Transient failure",
+      errorCode: "network_error",
+      retryable: true,
+    }));
+
+    await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
+
+    const [after1] = await sql<{ metafieldSyncErrorAt: Date | null; metafieldSyncErrorCode: string | null }[]>`
+      SELECT "metafieldSyncErrorAt", "metafieldSyncErrorCode" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+    expect(after1.metafieldSyncErrorAt).not.toBeNull();
+    expect(after1.metafieldSyncErrorCode).toBeNull(); // Only set for permanent errors
+    const firstErrorAt = after1.metafieldSyncErrorAt!;
+
+    // Second failure - should NOT update metafieldSyncErrorAt (preserves streak start)
+    await sql`UPDATE "BuyerAccount" SET "syncPending" = true WHERE id = ${TEST_ACCOUNT_ID}`;
+    await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
+
+    const [after2] = await sql<{ metafieldSyncErrorAt: Date | null }[]>`
+      SELECT "metafieldSyncErrorAt" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+    expect(after2.metafieldSyncErrorAt!.getTime()).toBe(firstErrorAt.getTime());
+  });
+
+  it("recompute is skipped when backoff has not elapsed (day 3 after failure)", async () => {
+    // Set up: error started 3 days ago (between allowed days 2 and 4)
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "syncPending" = true,
+          "metafieldSyncedAt" = NULL,
+          "metafieldSyncErrorAt" = NOW() - INTERVAL '3 days',
+          "metafieldSyncErrorCode" = NULL
+      WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+
+    mockShouldFail = true;
+    metafieldWriteCount = 0;
+
+    const result = await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
+
+    // Should return success but no metafield written (skipped due to backoff)
+    expect(result.success).toBe(true);
+    expect(result.metafieldWritten).toBe(false);
+    // Shopify API should NOT have been called
+    expect(mockShopifyGraphQLRequest).not.toHaveBeenCalled();
+  });
+
+  it("recompute proceeds when backoff has elapsed (day 4 after failure)", async () => {
+    // Set up: error started 4 days ago (allowed retry day)
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "syncPending" = true,
+          "metafieldSyncedAt" = NULL,
+          "metafieldSyncErrorAt" = NOW() - INTERVAL '4 days',
+          "metafieldSyncErrorCode" = NULL
+      WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+
+    // Make it succeed this time
+    mockShouldFail = false;
+    metafieldWriteCount = 0;
+
+    const result = await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
+
+    // Should proceed with sync attempt
+    expect(result.success).toBe(true);
+    // Shopify API should have been called
+    expect(mockShopifyGraphQLRequest).toHaveBeenCalled();
+  });
+
+  it("success clears metafieldSyncErrorAt and metafieldSyncErrorCode", async () => {
+    // Set up: has error state
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "syncPending" = true,
+          "metafieldSyncedAt" = NOW() - INTERVAL '2 days',
+          "metafieldSyncErrorAt" = NOW() - INTERVAL '2 days',
+          "metafieldSyncErrorCode" = NULL
+      WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+
+    // Success
+    mockShouldFail = false;
+    const result = await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
+
+    expect(result.success).toBe(true);
+
+    const [after] = await sql<{ metafieldSyncErrorAt: Date | null; metafieldSyncErrorCode: string | null; syncPending: boolean }[]>`
+      SELECT "metafieldSyncErrorAt", "metafieldSyncErrorCode", "syncPending"
+      FROM "BuyerAccount"
+      WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+
+    expect(after.metafieldSyncErrorAt).toBeNull();
+    expect(after.metafieldSyncErrorCode).toBeNull();
+    expect(after.syncPending).toBe(false);
+  });
+
+  it("permanent failure accounts are not affected by retryable backoff", async () => {
+    // Set up: permanent error (metafieldSyncErrorCode IS NOT NULL)
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "syncPending" = true,
+          "metafieldSyncedAt" = NULL,
+          "metafieldSyncErrorAt" = NOW() - INTERVAL '3 days',
+          "metafieldSyncErrorCode" = 'no_session'
+      WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+
+    mockShouldFail = false;
+    metafieldWriteCount = 0;
+
+    // Permanent failures bypass retryable backoff - they can still be retried
+    // (the sweep excludes them, but event-driven paths should allow retry)
+    const result = await recomputeCreditStatus(sql, TEST_ACCOUNT_ID);
+
+    // Should proceed (not skipped due to backoff)
+    expect(mockShopifyGraphQLRequest).toHaveBeenCalled();
+    expect(result.success).toBe(true);
+  });
+});
+
+// =============================================================================
+// updateCreditStatus MARKER AND AUDIT (#212 item 5)
+// =============================================================================
+
+describeWithDb("updateCreditStatus marker and audit (#212)", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-ucsmrk";
+  const TEST_SHOP_ID = `shop-ucsmrk-${TEST_SUFFIX}`;
+  const TEST_SHOP_DOMAIN = `ucs-marker-test-${TEST_SUFFIX}.myshopify.com`;
+  const TEST_ACCOUNT_ID = `acc-ucsmrk-${TEST_SUFFIX}`;
+  const TEST_COMPANY_LOCATION_ID = `gid://shopify/CompanyLocation/${TEST_SUFFIX}`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+    `;
+
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name,
+        "creditLimit", "holdState", bypass, "manualHold",
+        "syncPending", "syncVersion", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${TEST_ACCOUNT_ID}, ${TEST_SHOP_ID}, 'COMPANY',
+        ${"co-" + TEST_SUFFIX}, ${TEST_COMPANY_LOCATION_ID},
+        'UCS Marker Test Account', 100000.00, 'OK', false, false,
+        false, 1, NOW(), NOW()
+      )
+    `;
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+    await sql.end();
+  });
+
+  beforeEach(async () => {
+    mockShopifyGraphQLRequest.mockReset();
+
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "holdState" = 'OK', "holdReasonCode" = NULL, "manualHold" = false,
+          "syncPending" = false, "syncVersion" = 1, bypass = false,
+          "metafieldSyncedAt" = NULL,
+          "metafieldSyncErrorCode" = NULL, "metafieldSyncErrorAt" = NULL
+      WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+
+    await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${TEST_SHOP_ID}`;
+  });
+
+  it("permanent failure sets marker and writes exactly one sync_failed audit row", async () => {
+    const { updateCreditStatus } = await import("../credit-status.server");
+
+    mockShopifyGraphQLRequest.mockResolvedValue({
+      success: false,
+      error: "Session not found",
+      errorCode: "no_session",
+      retryable: false,
+    });
+
+    const result = await updateCreditStatus(sql, TEST_ACCOUNT_ID, {
+      creditLimitAmount: 100000,
+      manualHold: false,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.metafieldSyncPending).toBe(true);
+    expect(result.errorCode).toBe("no_session");
+    expect(result.retryable).toBe(false);
+
+    // Verify marker is set
+    const [account] = await sql<{ metafieldSyncErrorCode: string | null; metafieldSyncErrorAt: Date | null }[]>`
+      SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+      FROM "BuyerAccount"
+      WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+    expect(account.metafieldSyncErrorCode).toBe("no_session");
+    expect(account.metafieldSyncErrorAt).not.toBeNull();
+
+    // Verify exactly one sync_failed audit row
+    const auditEvents = await sql<{ type: string; data: Record<string, unknown> }[]>`
+      SELECT type, data FROM "AuditEvent"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+        AND type = 'credit_status.sync_failed'
+    `;
+    expect(auditEvents.length).toBe(1);
+    expect(auditEvents[0].data.buyerAccountId).toBe(TEST_ACCOUNT_ID);
+    expect(auditEvents[0].data.errorCode).toBe("no_session");
+    expect(typeof auditEvents[0].data.syncVersion).toBe("number");
+  });
+
+  it("userErrors sets user_error marker and writes sync_failed audit", async () => {
+    const { updateCreditStatus } = await import("../credit-status.server");
+
+    mockShopifyGraphQLRequest.mockResolvedValue({
+      success: true,
+      data: {
+        metafieldsSet: {
+          metafields: null,
+          userErrors: [{ field: ["ownerId"], message: "Invalid owner" }],
+        },
+      },
+    });
+
+    const result = await updateCreditStatus(sql, TEST_ACCOUNT_ID, {
+      creditLimitAmount: 100000,
+      manualHold: false,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.metafieldSyncPending).toBe(true);
+    expect(result.errorCode).toBe("user_error");
+    expect(result.retryable).toBe(false);
+
+    // Verify marker is set
+    const [account] = await sql<{ metafieldSyncErrorCode: string | null }[]>`
+      SELECT "metafieldSyncErrorCode" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+    expect(account.metafieldSyncErrorCode).toBe("user_error");
+
+    // Verify audit row
+    const [auditEvent] = await sql<{ data: Record<string, unknown> }[]>`
+      SELECT data FROM "AuditEvent"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+        AND type = 'credit_status.sync_failed'
+      LIMIT 1
+    `;
+    expect(auditEvent).toBeDefined();
+    expect(auditEvent.data.errorCode).toBe("user_error");
+  });
+
+  it("retryable failure sets metafieldSyncErrorAt but not metafieldSyncErrorCode", async () => {
+    const { updateCreditStatus } = await import("../credit-status.server");
+
+    mockShopifyGraphQLRequest.mockResolvedValue({
+      success: false,
+      error: "Network timeout",
+      errorCode: "network_error",
+      retryable: true,
+    });
+
+    const result = await updateCreditStatus(sql, TEST_ACCOUNT_ID, {
+      creditLimitAmount: 100000,
+      manualHold: false,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.metafieldSyncPending).toBe(true);
+    expect(result.retryable).toBe(true);
+
+    // Verify metafieldSyncErrorAt is set but metafieldSyncErrorCode is NULL
+    const [account] = await sql<{ metafieldSyncErrorCode: string | null; metafieldSyncErrorAt: Date | null }[]>`
+      SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+      FROM "BuyerAccount"
+      WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+    expect(account.metafieldSyncErrorCode).toBeNull();
+    expect(account.metafieldSyncErrorAt).not.toBeNull();
+
+    // Still writes audit row for retryable failures
+    const [auditEvent] = await sql<{ data: Record<string, unknown> }[]>`
+      SELECT data FROM "AuditEvent"
+      WHERE "shopId" = ${TEST_SHOP_ID}
+        AND type = 'credit_status.sync_failed'
+      LIMIT 1
+    `;
+    expect(auditEvent).toBeDefined();
+  });
+
+  it("success clears marker and error timestamp", async () => {
+    const { updateCreditStatus } = await import("../credit-status.server");
+
+    // Set up with existing error state
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "metafieldSyncErrorCode" = 'no_session',
+          "metafieldSyncErrorAt" = NOW()
+      WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+
+    mockShopifyGraphQLRequest.mockResolvedValue({
+      success: true,
+      data: {
+        metafieldsSet: {
+          metafields: [{ id: "mf-1", namespace: "$app", key: "credit_status" }],
+          userErrors: [],
+        },
+      },
+    });
+
+    const result = await updateCreditStatus(sql, TEST_ACCOUNT_ID, {
+      creditLimitAmount: 100000,
+      manualHold: false,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.metafieldSyncPending).toBe(false);
+
+    // Verify marker and error timestamp are cleared
+    const [account] = await sql<{ metafieldSyncErrorCode: string | null; metafieldSyncErrorAt: Date | null }[]>`
+      SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+      FROM "BuyerAccount"
+      WHERE id = ${TEST_ACCOUNT_ID}
+    `;
+    expect(account.metafieldSyncErrorCode).toBeNull();
+    expect(account.metafieldSyncErrorAt).toBeNull();
+  });
+});
