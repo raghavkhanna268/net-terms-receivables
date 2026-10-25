@@ -1329,10 +1329,11 @@ describe("Allowed dev store Admin checks", () => {
     expect(run).toContain("invalid_domain_format");
   });
 
-  it("gates on shop equality for token check", () => {
+  it("gates on shop equality for token check (SHOP_DOMAIN from GITHUB_ENV)", () => {
     expect(run).toContain("shop_matches_allowed=");
     expect(run).toContain("SHOP_DOMAIN");
     expect(run).toContain("ALLOWED_DEV_STORE");
+    expect(step?.env?.SHOP_DOMAIN).toBeUndefined();
   });
 
   it("is read-only and skips gracefully on missing config", () => {

@@ -1848,12 +1848,12 @@ jobs:
       # Admin API checks for the allowed dev store: hide-terms-payment active and webhook subscription diff.
       # Read-only; uses the existing offline token path. Skips gracefully if token expired.
       # ALLOWED_DEV_STORE comes from secrets (not vars) to prevent log header leaks.
+      # SHOP_DOMAIN comes from GITHUB_ENV (set by "Mask shop input" step).
       - name: Allowed dev store Admin checks
         id: allowed_admin
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
           PGOPTIONS: "-c default_transaction_read_only=on"
-          SHOP_DOMAIN: ${{ steps.shop.outputs.domain }}
           ALLOWED_DEV_STORE: ${{ secrets.ALLOWED_DEV_STORE }}
         run: |
           set -euo pipefail
