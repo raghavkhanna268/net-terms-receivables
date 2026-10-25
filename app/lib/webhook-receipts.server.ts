@@ -57,7 +57,10 @@ export async function recordWebhookReceipt(
 
 /**
  * Delete all webhook receipts for a shop.
- * Called on app/uninstalled and shop/redact for compliance.
+ *
+ * TEST-ONLY: Production code uses inline DELETE within sql.begin() transactions
+ * (see app/routes/webhooks.app.uninstalled.tsx and compliance.server.ts deleteShop).
+ * This helper exists for integration tests that verify receipts cleanup behavior.
  *
  * @param sql - postgres.js SQL client
  * @param shop - Shop domain
