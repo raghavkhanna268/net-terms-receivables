@@ -109,6 +109,7 @@ vi.mock("../reconcile-handlers.server", () => ({
   }),
   incrementOrderRefetchNull: vi.fn().mockResolvedValue(undefined),
   enqueueReconcileOrders: vi.fn().mockResolvedValue(true),
+  getManualKeyForBulkOp: vi.fn().mockResolvedValue(undefined),
 }));
 
 describe("Drain Processor", () => {
@@ -805,9 +806,11 @@ describe("S10b BULK_OPERATIONS_FINISH handler", () => {
     expect(result.success).toBe(true);
     expect(result.status).toBe("complete");
     // Should chain because chainToOrders=true, not because of webhookId
+    // Third arg is manualKey (undefined for cron path since mock returns undefined)
     expect(mockEnqueueReconcileOrders).toHaveBeenCalledWith(
       mockSql,
-      "test.myshopify.com"
+      "test.myshopify.com",
+      undefined
     );
   });
 

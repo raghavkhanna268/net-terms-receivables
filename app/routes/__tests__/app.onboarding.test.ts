@@ -14,7 +14,10 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
  * 7. S23-02: safeLog with no PII
  */
 
-const mockSql = Object.assign(vi.fn(), { unsafe: vi.fn((s) => s) });
+const mockSql = Object.assign(vi.fn(), {
+  unsafe: vi.fn((s) => s),
+  json: vi.fn((obj) => JSON.stringify(obj)),
+});
 
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
@@ -789,8 +792,10 @@ describe("app.onboarding", () => {
       expect(mockEnsureValidation).toHaveBeenCalledOnce();
       expect(mockEnsurePaymentCustomization).not.toHaveBeenCalled();
       expect(mockEnsureMetafieldDefinitions).toHaveBeenCalledOnce();
-      expect(result.action).toBe("retry_registration");
-      expect(result.success).toBe(true);
+      expect(result).not.toBeInstanceOf(Response);
+      const data = result as { action: string; success: boolean };
+      expect(data.action).toBe("retry_registration");
+      expect(data.success).toBe(true);
     });
 
     it("returns error status when ensure* helper fails", async () => {
@@ -864,9 +869,11 @@ describe("app.onboarding", () => {
         params: {},
       } as unknown as ActionFunctionArgs);
 
-      expect(result.action).toBe("retry_registration");
-      expect(result.success).toBe(false);
-      expect(result.registrationStatus?.validation.status).toBe("error");
+      expect(result).not.toBeInstanceOf(Response);
+      const data = result as { action: string; success: boolean; registrationStatus?: { validation: { status: string } } };
+      expect(data.action).toBe("retry_registration");
+      expect(data.success).toBe(false);
+      expect(data.registrationStatus?.validation.status).toBe("error");
     });
 
     it("in-flight guard prevents double registration", async () => {
@@ -931,8 +938,10 @@ describe("app.onboarding", () => {
         params: {},
       } as unknown as ActionFunctionArgs);
 
-      expect(secondResult.success).toBe(false);
-      expect(secondResult.error).toBe("Retry already in progress");
+      expect(secondResult).not.toBeInstanceOf(Response);
+      const data = secondResult as { success: boolean; error: string };
+      expect(data.success).toBe(false);
+      expect(data.error).toBe("Retry already in progress");
 
       resolveFirst!();
       await firstRequest;
@@ -974,8 +983,643 @@ describe("app.onboarding", () => {
         params: {},
       } as unknown as ActionFunctionArgs);
 
-      expect(result.action).toBe("retry_registration");
-      expect(result.registrationStatus).toBeDefined();
+      expect(result).not.toBeInstanceOf(Response);
+      const data = result as { action: string; registrationStatus?: unknown };
+      expect(data.action).toBe("retry_registration");
+      expect(data.registrationStatus).toBeDefined();
+    });
+  });
+});
+
+describe("S23-04: initial sync", () => {
+  const TEST_SHOP = "test-shop.myshopify.com";
+  const TEST_SHOP_ID = "shop-123";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  describe("loader sync state mapping", () => {
+    const mockGraphql = vi.fn()
+      .mockResolvedValueOnce({ json: () => Promise.resolve({ data: { validations: { edges: [] } } }) })
+      .mockResolvedValueOnce({ json: () => Promise.resolve({ data: { paymentCustomizations: { edges: [] } } }) })
+      .mockResolvedValue({ json: () => Promise.resolve({ data: { metafieldDefinitions: { edges: [] } } }) });
+
+    it("returns not_started when no bulk operations exist", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, defaultTermsDays: 30, onboardingDismissedAt: null }]);
+        }
+        if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("s6_bulk_operations")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { loader } = await import("../app.onboarding");
+
+      const result = await loader({
+        request: new Request("https://example.com/app/onboarding"),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+                admin: { graphql: mockGraphql },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as never);
+
+      expect(result.initialSyncState).not.toBeNull();
+      expect(result.initialSyncState?.status).toBe("not_started");
+    });
+
+    it("returns in_progress when bulk operations exist without completed_at", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, defaultTermsDays: 30, onboardingDismissedAt: null }]);
+        }
+        if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("s6_bulk_operations")) {
+          return Promise.resolve([
+            { reconcile_stage: "companies", completed_at: null, failure_count: 0 },
+          ]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { loader } = await import("../app.onboarding");
+
+      const result = await loader({
+        request: new Request("https://example.com/app/onboarding"),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+                admin: { graphql: mockGraphql },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as never);
+
+      expect(result.initialSyncState?.status).toBe("in_progress");
+    });
+
+    it("returns done when both companies and orders are completed", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, defaultTermsDays: 30, onboardingDismissedAt: null }]);
+        }
+        if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("s6_bulk_operations")) {
+          return Promise.resolve([
+            { reconcile_stage: "companies", completed_at: new Date(), failure_count: 0 },
+            { reconcile_stage: "orders", completed_at: new Date(), failure_count: 0 },
+          ]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { loader } = await import("../app.onboarding");
+
+      const result = await loader({
+        request: new Request("https://example.com/app/onboarding"),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+                admin: { graphql: mockGraphql },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as never);
+
+      expect(result.initialSyncState?.status).toBe("done");
+    });
+
+    it("returns failed when failure_count >= 5", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, defaultTermsDays: 30, onboardingDismissedAt: null }]);
+        }
+        if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("s6_bulk_operations")) {
+          return Promise.resolve([
+            { reconcile_stage: "companies", completed_at: null, failure_count: 5 },
+          ]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { loader } = await import("../app.onboarding");
+
+      const result = await loader({
+        request: new Request("https://example.com/app/onboarding"),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+                admin: { graphql: mockGraphql },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as never);
+
+      expect(result.initialSyncState?.status).toBe("failed");
+    });
+
+    it("returns failed when entries exist in DLQ for latest bulk_op_id", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, defaultTermsDays: 30, onboardingDismissedAt: null }]);
+        }
+        if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("s6_bulk_operations")) {
+          return Promise.resolve([
+            {
+              bulk_op_id: "gid://shopify/BulkOperation/1",
+              reconcile_stage: "companies",
+              completed_at: null,
+              failure_count: 0,
+              started_at: new Date(),
+            },
+          ]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "1" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { loader } = await import("../app.onboarding");
+
+      const result = await loader({
+        request: new Request("https://example.com/app/onboarding"),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+                admin: { graphql: mockGraphql },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as never);
+
+      expect(result.initialSyncState?.status).toBe("failed");
+    });
+  });
+
+  describe("action start_sync", () => {
+    it("enqueues sync when status is not_started", async () => {
+      let enqueued = false;
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id FROM")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("origin")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("s6_processed_webhooks") && query.includes("webhook_id")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("pgmq.q_s6_sync") && query.includes("webhookId")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("pgmq.send")) {
+          enqueued = true;
+          return Promise.resolve([{ send: "1" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { action } = await import("../app.onboarding");
+
+      const formData = new FormData();
+      formData.set("_action", "start_sync");
+
+      const result = await action({
+        request: new Request("https://example.com/app/onboarding", {
+          method: "POST",
+          body: formData,
+        }),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as never);
+
+      expect(result).not.toBeInstanceOf(Response);
+      const data = result as { success: boolean; action: string };
+      expect(data.success).toBe(true);
+      expect(data.action).toBe("start_sync");
+      expect(enqueued).toBe(true);
+    });
+
+    it("enqueues sync when status is failed", async () => {
+      let enqueued = false;
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id FROM")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("origin")) {
+          return Promise.resolve([
+            { reconcile_stage: "companies", completed_at: null, failure_count: 5 },
+          ]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("s6_processed_webhooks") && query.includes("webhook_id")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("pgmq.q_s6_sync") && query.includes("webhookId")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("pgmq.send")) {
+          enqueued = true;
+          return Promise.resolve([{ send: "1" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { action } = await import("../app.onboarding");
+
+      const formData = new FormData();
+      formData.set("_action", "start_sync");
+
+      const result = await action({
+        request: new Request("https://example.com/app/onboarding", {
+          method: "POST",
+          body: formData,
+        }),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as never);
+
+      expect(result).not.toBeInstanceOf(Response);
+      const data = result as { success: boolean; action: string };
+      expect(data.success).toBe(true);
+      expect(data.action).toBe("start_sync");
+      expect(enqueued).toBe(true);
+    });
+
+    it("does not enqueue when status is in_progress", async () => {
+      let enqueued = false;
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id FROM")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("origin")) {
+          return Promise.resolve([
+            { reconcile_stage: "companies", completed_at: null, failure_count: 0 },
+          ]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("pgmq.send")) {
+          enqueued = true;
+          return Promise.resolve([{ send: "1" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { action } = await import("../app.onboarding");
+
+      const formData = new FormData();
+      formData.set("_action", "start_sync");
+
+      const result = await action({
+        request: new Request("https://example.com/app/onboarding", {
+          method: "POST",
+          body: formData,
+        }),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as never);
+
+      expect(result).not.toBeInstanceOf(Response);
+      const data = result as { success: boolean; error: string };
+      expect(data.success).toBe(false);
+      expect(data.error).toBe("Sync already in progress or complete");
+      expect(enqueued).toBe(false);
+    });
+
+    it("does not enqueue when status is done", async () => {
+      let enqueued = false;
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id FROM")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("origin")) {
+          return Promise.resolve([
+            { reconcile_stage: "companies", completed_at: new Date(), failure_count: 0 },
+            { reconcile_stage: "orders", completed_at: new Date(), failure_count: 0 },
+          ]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("pgmq.send")) {
+          enqueued = true;
+          return Promise.resolve([{ send: "1" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { action } = await import("../app.onboarding");
+
+      const formData = new FormData();
+      formData.set("_action", "start_sync");
+
+      const result = await action({
+        request: new Request("https://example.com/app/onboarding", {
+          method: "POST",
+          body: formData,
+        }),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as never);
+
+      expect(result).not.toBeInstanceOf(Response);
+      const data = result as { success: boolean; error: string };
+      expect(data.success).toBe(false);
+      expect(data.error).toBe("Sync already in progress or complete");
+      expect(enqueued).toBe(false);
+    });
+
+    it("does not duplicate enqueue when already queued", async () => {
+      let enqueueCount = 0;
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id FROM")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("origin")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("s6_processed_webhooks") && query.includes("webhook_id")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("pgmq.q_s6_sync") && query.includes("webhookId")) {
+          return Promise.resolve([{ msg_id: "123" }]);
+        }
+        if (query.includes("pgmq.send")) {
+          enqueueCount++;
+          return Promise.resolve([{ send: "1" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { action } = await import("../app.onboarding");
+
+      const formData = new FormData();
+      formData.set("_action", "start_sync");
+
+      const result = await action({
+        request: new Request("https://example.com/app/onboarding", {
+          method: "POST",
+          body: formData,
+        }),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as never);
+
+      expect(result).not.toBeInstanceOf(Response);
+      const data = result as { success: boolean; error: string };
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("already queued");
+      expect(enqueueCount).toBe(0);
+    });
+
+    it("returns 400 for any JSON content-type request including {}", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id FROM")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { action } = await import("../app.onboarding");
+
+      const result = await action({
+        request: new Request("https://example.com/app/onboarding", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        }),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as never);
+
+      expect(result).toBeInstanceOf(Response);
+      const response = result as Response;
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toBe("JSON requests not supported");
+    });
+
+    it("returns 400 for JSON content-type with valid body like {\"a\":1}", async () => {
+      mockSql.mockImplementation(() => Promise.resolve([]));
+
+      const { action } = await import("../app.onboarding");
+
+      const result = await action({
+        request: new Request("https://example.com/app/onboarding", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ a: 1 }),
+        }),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as never);
+
+      expect(result).toBeInstanceOf(Response);
+      const response = result as Response;
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toBe("JSON requests not supported");
+    });
+
+    it("start_sync logs use shopHash, not raw domain or ids", async () => {
+      const consoleInfoSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id FROM")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("origin")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("s6_processed_webhooks") && query.includes("webhook_id")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("pgmq.q_s6_sync") && query.includes("webhookId")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("pgmq.send")) {
+          return Promise.resolve([{ send: "1" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { action } = await import("../app.onboarding");
+
+      const formData = new FormData();
+      formData.set("_action", "start_sync");
+
+      await action({
+        request: new Request("https://example.com/app/onboarding", {
+          method: "POST",
+          body: formData,
+        }),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as never);
+
+      const allLogs = consoleInfoSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+
+      expect(allLogs).toContain('"shopHash":');
+      expect(allLogs).not.toContain(".myshopify.com");
+      expect(allLogs).not.toContain(TEST_SHOP);
+      expect(allLogs).not.toContain(TEST_SHOP_ID);
+
+      consoleInfoSpy.mockRestore();
     });
   });
 });
