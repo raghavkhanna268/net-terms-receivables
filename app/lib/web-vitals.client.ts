@@ -83,14 +83,14 @@ export function isDebugEnabled(): boolean {
 
 /**
  * Log a metric to console.debug if debug mode is enabled.
- * Only logs metric name and value - no other data (privacy-safe).
+ * Only logs metric type and numeric value - no other data (privacy-safe).
  *
- * @param metricName - Metric name (e.g., "LCP", "CLS", "INP")
- * @param metricValue - Metric value (rounded appropriately)
+ * @param metric - Metric type (e.g., "LCP", "CLS", "INP")
+ * @param val - Metric value (rounded appropriately)
  */
-export function debugLogMetric(metricName: string, metricValue: number): void {
+export function debugLogMetric(metric: string, val: number): void {
   if (isDebugEnabled()) {
-    console.debug("[web-vitals]", metricName, metricValue);
+    console.debug("[web-vitals]", metric, val);
   }
 }
 

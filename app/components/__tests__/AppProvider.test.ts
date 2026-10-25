@@ -1,6 +1,11 @@
+/**
+ * @vitest-environment jsdom
+ */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderToString } from "react-dom/server";
 import React, { createElement } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { act } from "react";
 
 /**
  * Tests for custom AppProvider component.
@@ -42,6 +47,7 @@ describe("AppProvider", () => {
 
       const child = createElement("div", null, "Test content");
       const html = renderToString(
+        // eslint-disable-next-line react/no-children-prop
         createElement(AppProvider as React.FC<{ apiKey: string; children: React.ReactNode }>, {
           apiKey: "test-api-key",
           children: child,
@@ -58,6 +64,7 @@ describe("AppProvider", () => {
 
       const child = createElement("div", null, "Test content");
       const html = renderToString(
+        // eslint-disable-next-line react/no-children-prop
         createElement(AppProvider as React.FC<{ apiKey: string; children: React.ReactNode }>, {
           apiKey: "test-api-key",
           children: child,
@@ -74,6 +81,7 @@ describe("AppProvider", () => {
 
       const child = createElement("div", { "data-testid": "child" }, "Test content");
       const html = renderToString(
+        // eslint-disable-next-line react/no-children-prop
         createElement(AppProvider as React.FC<{ apiKey: string; children: React.ReactNode }>, {
           apiKey: "test-api-key",
           children: child,
@@ -91,6 +99,7 @@ describe("AppProvider", () => {
       const customUrl = "https://cdn.shopify.com/shopifycloud/polaris-1.js";
       const child = createElement("div", null, "Test");
       const html = renderToString(
+        // eslint-disable-next-line react/no-children-prop
         createElement(
           AppProvider as React.FC<{ apiKey: string; polarisUrl: string; children: React.ReactNode }>,
           { apiKey: "test-api-key", polarisUrl: customUrl, children: child }
@@ -117,6 +126,7 @@ describe("AppProvider", () => {
 
       const child = createElement("div", null, "Test");
       const html = renderToString(
+        // eslint-disable-next-line react/no-children-prop
         createElement(AppProvider as React.FC<{ apiKey: string; children: React.ReactNode }>, {
           apiKey: "test-api-key",
           children: child,
@@ -132,80 +142,86 @@ describe("AppProvider", () => {
   });
 });
 
-describe("AppProvider shopify:navigate handler", () => {
-  let originalDocument: typeof document;
-  let listeners: Map<string, EventListener>;
+describe("AppProvider shopify:navigate handler (jsdom)", () => {
   let navigateMock: ReturnType<typeof vi.fn>;
+  let container: HTMLDivElement;
+  let root: Root;
 
   beforeEach(() => {
     vi.resetModules();
-    listeners = new Map();
-
-    // Store original document
-    originalDocument = global.document;
-
-    // Create mock document with event listener tracking
-    // @ts-expect-error - Mocking document
-    global.document = {
-      addEventListener: vi.fn((event: string, handler: EventListener) => {
-        listeners.set(event, handler);
-      }),
-      removeEventListener: vi.fn((_event: string) => {
-        listeners.delete(_event);
-      }),
-    };
-
     navigateMock = mockReactRouter();
+    container = document.createElement("div");
+    document.body.appendChild(container);
   });
 
   afterEach(() => {
-    global.document = originalDocument;
     vi.doUnmock("react-router");
+    if (root) {
+      act(() => {
+        root.unmount();
+      });
+    }
+    document.body.removeChild(container);
   });
 
   it("calls navigate(href) when shopify:navigate event is dispatched on element with href", async () => {
+    expect.assertions(2);
+
     const { AppProvider } = await import("../AppProvider");
 
-    // The component uses useEffect to register a shopify:navigate listener.
-    // We verify the expected behavior by checking:
-    // 1. Component is properly defined
-    // 2. The listener registration code path exists (document.addEventListener mock)
-    // 3. If a handler is registered, it calls navigate with the href
+    const targetElement = createElement("div", {
+      id: "nav-target",
+      href: "/app/test-destination",
+    });
 
-    expect(AppProvider).toBeDefined();
-    expect(typeof AppProvider).toBe("function");
+    root = createRoot(container);
+    await act(async () => {
+      // eslint-disable-next-line react/no-children-prop
+      root.render(createElement(AppProvider as React.FC<{ apiKey: string; children: React.ReactNode }>, {
+        apiKey: "test-key",
+        children: targetElement,
+      }));
+    });
 
-    // Verify that when a handler IS registered, it would call navigate correctly
-    // This is a behavioral documentation test - the actual effect runs in browser
-    const mockTarget = {
-      getAttribute: vi.fn().mockReturnValue("/app/test-destination"),
-    };
+    const target = document.getElementById("nav-target")!;
+    target.setAttribute("href", "/app/test-destination");
 
-    // Simulate what the handler does: get href and call navigate
-    const href = mockTarget.getAttribute("href") as string;
-    if (href) {
-      (navigateMock as (path: string) => void)(href);
-    }
+    const event = new Event("shopify:navigate", { bubbles: true });
+    Object.defineProperty(event, "target", { value: target, writable: false });
 
+    await act(async () => {
+      document.dispatchEvent(event);
+    });
+
+    expect(navigateMock).toHaveBeenCalledTimes(1);
     expect(navigateMock).toHaveBeenCalledWith("/app/test-destination");
   });
 
-  it("does not call navigate when target has no href", async () => {
-    await import("../AppProvider");
+  it("does NOT call navigate when target element has no href", async () => {
+    expect.assertions(1);
 
-    // Get handler directly from mock
-    const handler = listeners.get("shopify:navigate");
+    const { AppProvider } = await import("../AppProvider");
 
-    if (handler) {
-      const mockTarget = {
-        getAttribute: vi.fn().mockReturnValue(null),
-      };
-      const mockEvent = { target: mockTarget } as unknown as Event;
+    const targetElement = createElement("div", { id: "no-href-target" });
 
-      handler(mockEvent);
+    root = createRoot(container);
+    await act(async () => {
+      // eslint-disable-next-line react/no-children-prop
+      root.render(createElement(AppProvider as React.FC<{ apiKey: string; children: React.ReactNode }>, {
+        apiKey: "test-key",
+        children: targetElement,
+      }));
+    });
 
-      // navigate should not be called when href is null
-      expect(navigateMock).not.toHaveBeenCalled();
-    }
+    const target = document.getElementById("no-href-target")!;
+
+    const event = new Event("shopify:navigate", { bubbles: true });
+    Object.defineProperty(event, "target", { value: target, writable: false });
+
+    await act(async () => {
+      document.dispatchEvent(event);
+    });
+
+    expect(navigateMock).not.toHaveBeenCalled();
   });
 });
