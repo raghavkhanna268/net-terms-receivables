@@ -563,12 +563,13 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
         result !== null &&
         "type" in result &&
         (result as { type: string }).type === "DataWithResponseInit" &&
-        "data" in result
+        "data" in result &&
+        "init" in result
       ) {
-        const init = (result as { init: { status?: number } | null }).init;
+        const typed = result as unknown as { data: AccountsActionResult; init: { status?: number } | null };
         return {
-          data: (result as { data: AccountsActionResult }).data,
-          status: init?.status,
+          data: typed.data,
+          status: typed.init?.status,
         };
       }
       return { data: result as AccountsActionResult, status: undefined };
