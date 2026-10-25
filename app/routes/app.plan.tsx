@@ -39,9 +39,6 @@ const FEATURE_DESCRIPTIONS: Record<FeatureKey, string> = {
   matching: "Automatic matching of payments to invoices",
   reminders: "Send payment reminders to buyers",
   credit_holds: "Automatic credit holds for overdue accounts",
-  pdf_statements: "Generate PDF statements for buyers",
-  payer_memory: "Remember payer preferences and patterns",
-  audit_export: "Export audit logs for compliance",
 };
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
@@ -89,8 +86,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         }
       : null,
     usage: usage ?? {
-      companies: { current: 0, limit: 3 },
-      importsThisMonth: { current: 0, limit: 1 },
+      companies: { current: 0, limit: 0 },
+      importsThisMonth: { current: 0, limit: -1 },
     },
     gatedCount,
     gatingEnforced,
@@ -110,27 +107,37 @@ function formatLimit(limit: number): string {
   return limit === -1 ? "Unlimited" : String(limit);
 }
 
-function UsageDisplay({
+/**
+ * UsageDisplay component for showing usage statistics with optional badges.
+ * Exported for testing.
+ */
+export function UsageDisplay({
   current,
   limit,
   label,
+  gatingEnforced,
 }: {
   current: number;
   limit: number;
   label: string;
+  gatingEnforced: boolean;
 }) {
   const isUnlimited = limit === -1;
   const isAtLimit = !isUnlimited && current >= limit;
   const isNearLimit = !isUnlimited && current >= limit * 0.8 && current < limit;
 
+  // When gating is off, just show the count without limit comparison
+  // This avoids showing confusing '0 / 0' for no-plan shops
+  const usageText = gatingEnforced
+    ? `${current} / ${formatLimit(limit)}`
+    : `${current}`;
+
   return (
     <s-paragraph>
       <s-text type="strong">{label}: </s-text>
-      <s-text>
-        {current} / {formatLimit(limit)}
-      </s-text>
-      {isAtLimit && <s-badge tone="critical">At Limit</s-badge>}
-      {!isAtLimit && isNearLimit && <s-badge tone="warning">Near Limit</s-badge>}
+      <s-text>{usageText}</s-text>
+      {gatingEnforced && isAtLimit && <s-badge tone="critical">At Limit</s-badge>}
+      {gatingEnforced && !isAtLimit && isNearLimit && <s-badge tone="warning">Near Limit</s-badge>}
     </s-paragraph>
   );
 }
@@ -217,8 +224,8 @@ export default function PlanPage() {
     error,
   } = useLoaderData<typeof loader>();
 
-  const planKey = (plan?.key ?? "free") as PlanKey;
-  const planName = plan?.name ?? "Free";
+  const planKey = (plan?.key ?? "none") as PlanKey;
+  const planName = plan?.name ?? "No Plan";
   const isTest = plan?.isTest ?? false;
   const displayPlanName = PLAN_DISPLAY_NAMES[planKey] || planName;
 
@@ -230,7 +237,7 @@ export default function PlanPage() {
   const importsLimit = usage.importsThisMonth.limit;
   const importsAtLimit = importsLimit !== -1 && importsUsed >= importsLimit;
 
-  const canUpgrade = planKey !== "scale";
+  const canUpgrade = planKey !== "unlimited";
   const hasLimitReached = companiesAtLimit || importsAtLimit;
 
   return (
@@ -266,11 +273,13 @@ export default function PlanPage() {
                 current={companiesUsed}
                 limit={companiesLimit}
                 label="Buyer Accounts"
+                gatingEnforced={gatingEnforced}
               />
               <UsageDisplay
                 current={importsUsed}
                 limit={importsLimit}
                 label="Bank Imports This Month"
+                gatingEnforced={gatingEnforced}
               />
 
               {(() => {
@@ -300,13 +309,6 @@ export default function PlanPage() {
                       {importsAtLimit ? " importing bank statements" : ""}.
                     </s-text>
                   </s-banner>
-                ) : hasLimitReached && !gatingEnforced ? (
-                  <s-banner tone="info" heading="Usage Note">
-                    <s-text>
-                      You&apos;ve reached the plan limit, but limits are not currently
-                      enforced.
-                    </s-text>
-                  </s-banner>
                 ) : (
                   <s-paragraph>
                     <s-text>
@@ -324,11 +326,11 @@ export default function PlanPage() {
             </s-section>
           )}
 
-          {planKey === "scale" && (
+          {planKey === "unlimited" && (
             <s-section heading="Plan Status">
-              <s-banner tone="success" heading="Scale Plan">
+              <s-banner tone="success" heading="Unlimited Plan">
                 <s-text>
-                  You&apos;re on the Scale plan with unlimited companies and all features.
+                  You&apos;re on the Unlimited plan with unlimited buyer accounts and priority support.
                 </s-text>
               </s-banner>
             </s-section>
