@@ -76,19 +76,26 @@ All secrets are stored in Cloudflare Workers environment and can be rotated via:
 wrangler secret put SECRET_NAME
 ```
 
-| Secret | Rotation Procedure |
-|--------|-------------------|
-| `SHOPIFY_API_SECRET` | Regenerate in Shopify Partners → App setup → Client credentials; redeploy |
-| `SENTRY_DSN` | Rotate in Sentry project settings → Client Keys |
-| `RESEND_API_KEY` | Regenerate in Resend dashboard → API Keys |
-| `SUPABASE_SERVICE_ROLE_KEY` | [Raghav to confirm] — Supabase dashboard procedure |
+| Secret | Location | Rotation Procedure |
+|--------|----------|-------------------|
+| `SHOPIFY_API_SECRET` | Cloudflare Workers (`wrangler secret put`) | Regenerate in Shopify Partners → App setup → Client credentials; redeploy [Raghav to confirm] |
+| `SHOPIFY_API_KEY` | Cloudflare Workers (`wrangler secret put`) | Regenerate in Shopify Partners → App setup → Client credentials; redeploy [Raghav to confirm] |
+| `RESEND_API_KEY` | Cloudflare Workers (`wrangler secret put`) | Regenerate in Resend dashboard → API Keys [Raghav to confirm] |
+| `REMINDER_UNSUBSCRIBE_SECRET` | Cloudflare Workers (`wrangler.jsonc:61-64`) | Generate new HMAC key; set `_PREVIOUS` to old value during transition [Raghav to confirm] |
+| `JOBS_DRAIN_SECRET` | Vault `jobs_drain_secret` (`jobs.drain.tsx:97-98`) | Regenerate in Vault; sync with `sync-vault-secrets` workflow [Raghav to confirm] |
+| Hyperdrive DB password | Hyperdrive binding connection string | Rotate in Supabase; update Hyperdrive binding [Raghav to confirm] |
+| `DATABASE_URL_MIGRATIONS` | GitHub Actions secret | Rotate in Supabase; update GitHub secret [Raghav to confirm] |
+| `DATABASE_URL_SESSION` | GitHub Actions secret | Rotate in Supabase; update GitHub secret [Raghav to confirm] |
+| `CLOUDFLARE_API_TOKEN` | GitHub Actions secret | Regenerate in Cloudflare dashboard → API Tokens [Raghav to confirm] |
+| `SHOPIFY_APP_AUTOMATION_TOKEN` | GitHub Actions secret (`shopify-app-release.yml:188`) | Regenerate in Shopify Partners [Raghav to confirm] |
 
 ### 3.3 Offline Token Revocation
 
 If an offline access token is compromised:
 1. Mark the session `needsReauth=true` in the database
-2. The affected shop will need to re-authenticate on next access
-3. Token refresh automatically handled by `app/lib/offline-token.server.ts`
+2. Setting `needsReauth=true` stops this app's background jobs from using/refreshing the token (`app/lib/offline-token.server.ts:197-203`, `:409-414`)
+3. **Important:** This does NOT revoke the token at Shopify; the leaked token stays valid until revoked by Shopify (e.g., uninstall/reinstall or secret rotation) [Raghav to confirm revocation procedure]
+4. The affected shop will need to re-authenticate on next access
 
 ---
 
@@ -133,14 +140,12 @@ Per GDPR Article 33:
 - **Authority:** Supervisory authority of the lead establishment (or affected Member State)
 - **Timeline for data subjects:** [Raghav to confirm]
 
-### 5.2 DPDP Act 2023 (India)
+### 5.2 DPDP Rules 2025 (India)
 
-Per the Digital Personal Data Protection Act, 2023:
-- **Board notification:** Data Fiduciary must notify the Data Protection Board of India of a personal data breach as prescribed
-- **Data Principal notification:** Data Fiduciary must notify affected Data Principals of a breach in the manner as may be prescribed
-- **Timeline:** [Raghav to confirm] — awaiting Rules to be notified under the Act
-
-*Note: Specific timelines and procedures will be prescribed by Rules under the DPDP Act. Update this section when Rules are published.*
+Per the Digital Personal Data Protection Rules, 2025 (notified 13 Nov 2025):
+- **Rule 7 — Breach notification:** The Data Fiduciary (merchant) must intimate each affected Data Principal and the Data Protection Board without delay; detailed report to the Board within 72 hours
+- **Our role as Processor:** We notify the merchant (the Data Fiduciary) without delay so they can meet their Rule 7 duties
+- **Commencement:** Rule 7 applies from 13 May 2027 (18 months after publication) [Raghav/lawyer to confirm dates]
 
 ---
 

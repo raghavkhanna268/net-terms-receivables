@@ -19,7 +19,7 @@
 | System | Token Type | Scope | Notes |
 |--------|-----------|-------|-------|
 | Cloudflare Workers | Hyperdrive binding | Database read/write via connection string | Runtime DB access; pooled connections |
-| GitHub Actions CI | `DATABASE_URL` | Prisma migrations | Migrations only; no production data |
+| GitHub Actions CI | `DATABASE_URL_MIGRATIONS`, `DATABASE_URL_SESSION` | Prisma migrations; prod-diagnostics; prod-readonly-query; prod-backfill-dry-run; prod-credit-status-backfill-dry-run; sync-vault-secrets; seed-dev-store | CI tests use ephemeral local Postgres; listed workflows connect to production |
 | Shopify App | Offline access tokens | Per-shop scoped | Stored in `Session` table |
 | Resend | API key | Email sending | `RESEND_API_KEY` env var |
 | Sentry | DSN | Error reporting | `SENTRY_DSN` env var |
@@ -150,14 +150,14 @@ Tests that mock `safeLog`, `toErrorCode`, or `shopHash` must be explicitly allow
 
 ### 4.5 CUSTOMER_PII_FIELDS Gating
 
-**Environment variable:** `CUSTOMER_PII_FIELDS=1`
+**Environment variable:** `CUSTOMER_PII_FIELDS`
 
-When disabled (default), the app does not fetch or store buyer email and display name:
-- `s8_tagged_customers.email` and `s8_tagged_customers.display_name` remain NULL
-- Feature requires Shopify PCD approval before enabling
+**Enabled in production** (`wrangler.jsonc:42`, PCD Level 1 + Name + Email per the comment at line 39).
+
+When enabled (`"1"`), the app fetches and stores buyer email and display name in `s8_tagged_customers.email` and `s8_tagged_customers.display_name`.
 
 **References:**
-- Environment check: `wrangler.jsonc` (env var definition)
+- Environment definition: `wrangler.jsonc:42` (`"CUSTOMER_PII_FIELDS": "1"`)
 - Usage in drain: `workers/app.ts:44` passes `env` to request context for handlers to check
 
 ---
@@ -177,6 +177,13 @@ When disabled (default), the app does not fetch or store buyer email and display
 
 ### 5.3 Token Handling
 
-- Offline access tokens stored encrypted in Supabase
+- `Session.accessToken` (`prisma/schema.prisma:123`) and `Session.refreshToken` (`:132`) are stored as plain-text columns; encrypted at rest by Supabase (AES-256) at the storage layer, not encrypted by the app. App-level encryption: not implemented.
 - Refresh token rotation handled by `app/lib/offline-token.server.ts`
-- Invalid tokens trigger `needsReauth` flag requiring merchant re-authentication
+- Invalid tokens trigger `needsReauth` flag (`prisma/schema.prisma:136`) requiring merchant re-authentication
+
+### 5.4 Per-Shop Scoping
+
+Queries are filtered by `shopId` and `session.shop` in loaders and services to ensure shop isolation:
+- Invoice queries: `app/services/sync/order.server.ts:117` (`WHERE "shopId" = ${shopId}`)
+- Buyer account queries: `app/routes/app._index.tsx:188` (`WHERE "shopId" = ${shopId}`)
+- Tagged customer queries: `app/services/sync/customer.server.ts:204` (`WHERE shop_id = ${shopId}`)

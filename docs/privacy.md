@@ -286,12 +286,6 @@ For privacy inquiries:
 
 ---
 
-## 12. Merchant Terms and Data Processing
-
-For merchant terms of service and our Data Processing Addendum, see [Merchant Terms](legal/merchant-terms.md) (DRAFT — not in effect).
-
----
-
 ## Appendix A: Shopify OAuth Scopes
 
 The app requests the following scopes to provide its core features.

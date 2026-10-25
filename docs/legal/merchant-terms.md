@@ -107,10 +107,11 @@ We use the following sub-processors to provide the App:
 | Sub-Processor | Service | Data Processed | Location | DPA |
 |---------------|---------|----------------|----------|-----|
 | **Cloudflare, Inc.** | Application hosting (Workers), connection pooling (Hyperdrive) | All App data in transit; edge processing | Global (Worker placed ap-south-1 via region hint) | [Raghav to confirm] |
-| **Supabase, Inc.** | Database hosting (Postgres) | All App data at rest | AWS ap-south-1 (Mumbai, India) | [Raghav to confirm] |
-| **Resend, Inc.** | Email delivery | Buyer email address, invoice name, amounts, due dates | US | [Resend DPA](https://resend.com/legal/dpa) |
-| **Functional Software, Inc. (Sentry)** | Error monitoring | Scrubbed error events only (no PII by design — see `app/lib/sentry.ts:83-137`) | [Raghav to confirm] | [Sentry DPA](https://sentry.io/legal/dpa/) |
-| **Shopify Inc.** | Platform | Merchant and buyer data per Shopify's terms | Per Shopify | [Shopify DPA](https://www.shopify.com/legal/dpa) |
+| **Supabase, Inc.** | Database hosting (Postgres) | All App data at rest | [Raghav to confirm region] | [Raghav to confirm] |
+| **Plus Five Five, Inc. (Resend)** | Email delivery | Buyer name and email, merchant name (`app/services/reminders.server.ts:949-956`), shop-owner email (data-request notice) | US | [Resend DPA](https://resend.com/legal/dpa) (DPA §6.1) |
+| **Functional Software, Inc. d/b/a Sentry** | Error monitoring | Scrubbed error events only (no PII by design — see `app/lib/sentry.ts:83-137`) | US and other countries [Raghav to confirm] | [Sentry DPA](https://sentry.io/legal/dpa/) |
+
+**Note:** Shopify is the platform and data source, not our sub-processor. Shopify's DPA governs your relationship with Shopify: [Shopify DPA](https://www.shopify.com/legal/dpa).
 
 **Sub-processor code references:**
 - Cloudflare Workers entry: `workers/app.ts`
