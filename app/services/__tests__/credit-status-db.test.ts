@@ -627,11 +627,9 @@ describeWithDb("syncCreditStatusMetafield gated account", () => {
   });
 });
 
-// Note: The "no owner GID" skip branch in syncCreditStatusMetafield cannot be tested
-// with real data. The BuyerAccount_kind_consistency constraint requires:
-// - COMPANY accounts must have companyLocationId AND companyId
-// - TAGGED_CUSTOMER accounts must have customerId
-// This ensures all valid accounts have an owner GID, making the skip branch unreachable.
+// Note: The no-owner logic in getOwnerGid is tested via unit tests in credit-status.test.ts.
+// The BuyerAccount_kind_consistency CHECK constraint prevents inserting no-owner rows in the DB,
+// so DB tests only use valid rows that satisfy the constraint.
 
 describeWithDb("hold-transition audit events", () => {
   let sql: ReturnType<typeof postgres>;
