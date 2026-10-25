@@ -6,6 +6,8 @@ import {
   type Event as SentryEvent,
   type ErrorEvent,
   type EventHint,
+  type Breadcrumb,
+  type BreadcrumbHint,
 } from "@sentry/cloudflare";
 import type { TransactionEvent, DataCollection } from "@sentry/core";
 import { redactString, toErrorCode } from "./log.server";
@@ -46,12 +48,113 @@ const ALLOWED_SENTRY_KEYS = new Set([
 ]);
 
 /**
+ * Allowlisted HTTP headers that are safe to send to Sentry.
+ * Only these headers pass through; all others are removed.
+ */
+const ALLOWED_HEADERS = new Set([
+  "content-type",
+  "user-agent",
+  "cf-ray",
+]);
+
+/**
+ * Patterns for detecting shop domains (custom domains and myshopify.com).
+ */
+const SHOP_DOMAIN_PATTERN = /[a-z0-9][-a-z0-9]*\.myshopify\.com/gi;
+const CUSTOM_DOMAIN_PATTERN = /(?:shop|store|www)\.[a-z0-9][-a-z0-9]*\.[a-z]{2,}/gi;
+
+/**
+ * Patterns for Shopify GIDs that contain customer/buyer PII.
+ * These are scrubbed to keep only the resource type (e.g., gid://shopify/Customer/<redacted>).
+ */
+const SHOPIFY_GID_PATTERNS = [
+  /gid:\/\/shopify\/Customer\/\d+/gi,
+  /gid:\/\/shopify\/CompanyContact\/\d+/gi,
+  /gid:\/\/shopify\/CompanyLocation\/\d+/gi,
+  /gid:\/\/shopify\/Company\/\d+/gi,
+  /gid:\/\/shopify\/Order\/\d+/gi,
+  /gid:\/\/shopify\/DraftOrder\/\d+/gi,
+  /gid:\/\/shopify\/BuyerIdentity\/\d+/gi,
+];
+
+/**
+ * Patterns for money/balance/credit values that may be PII.
+ * Matches: ₹1,23,456.78, 12345678 paise, creditLimit: 500000, amount: 1234
+ */
+const MONEY_PATTERNS = [
+  /₹[\d,]+(?:\.\d{1,2})?/g,
+  /\d+\s*(?:paise|paisa)/gi,
+  /(?:creditLimit|credit_limit|balance|amount|total):\s*\d+/gi,
+  /(?:creditLimit|credit_limit|balance|amount|total)"\s*:\s*\d+/gi,
+];
+
+/**
+ * Patterns for bank narration strings (NEFT/RTGS/IMPS/UPI).
+ * These contain payer names, account details, and UTRs.
+ */
+const BANK_NARRATION_PATTERNS = [
+  /NEFT[- ]?CR[-/]?[A-Z0-9]+[-/][^\s]+(?:[-/][A-Z0-9]+)?/gi,
+  /RTGS[- ]?CR[-/]?[A-Z0-9]+[-/][^\s]+(?:[-/][A-Z0-9]+)?/gi,
+  /IMPS[-/][A-Z0-9]+[-/][^\s]+/gi,
+  /UPI[-/][A-Z0-9@]+[-/][^\s]*/gi,
+  /UTR[- ]?[A-Z0-9]{16,22}/gi,
+  /[A-Z]{4}N\d{10,}/gi, // HDFC/ICICI UTR pattern
+];
+
+/**
  * Environment variables for Sentry configuration.
  * These are optional - Sentry is a no-op when DSN is not set.
  */
 export interface SentryEnv {
   SENTRY_DSN?: string;
   SENTRY_TRACES_SAMPLE_RATE?: string;
+  SENTRY_RELEASE?: string;
+  SENTRY_ENVIRONMENT?: string;
+}
+
+/**
+ * Scrub PII from a string value.
+ * Removes: shop domains, Shopify GIDs (preserving type), money values, bank narrations, emails.
+ */
+function scrubPiiFromString(str: string): string {
+  let result = str;
+
+  result = result.replace(SHOP_DOMAIN_PATTERN, "<shop-redacted>");
+  result = result.replace(CUSTOM_DOMAIN_PATTERN, "<shop-redacted>");
+
+  for (const pattern of SHOPIFY_GID_PATTERNS) {
+    result = result.replace(pattern, (match) => {
+      const resourceType = match.match(/gid:\/\/shopify\/([A-Za-z]+)\//)?.[1] ?? "Unknown";
+      return `gid://shopify/${resourceType}/<redacted>`;
+    });
+  }
+
+  for (const pattern of MONEY_PATTERNS) {
+    result = result.replace(pattern, "<money-redacted>");
+  }
+
+  for (const pattern of BANK_NARRATION_PATTERNS) {
+    result = result.replace(pattern, "<narration-redacted>");
+  }
+
+  result = result.replace(/[^\s"'<>]+@[^\s"'<>]+\.[a-z]{2,}/gi, "<email-redacted>");
+
+  result = result.replace(/[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+(?:\s+(?:TRADERS|ENTERPRISES|PRIVATE|LIMITED|LTD|PVT|INC|LLC|CORP))?/g, "<name-redacted>");
+
+  return result;
+}
+
+/**
+ * Scrub headers to only keep allowlisted ones.
+ */
+function scrubHeaders(headers: Record<string, string>): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (ALLOWED_HEADERS.has(key.toLowerCase())) {
+      result[key] = value;
+    }
+  }
+  return result;
 }
 
 /**
@@ -61,8 +164,9 @@ function scrubRecord(record: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
     if (ALLOWED_SENTRY_KEYS.has(key)) {
-      // Keep only safe string values
-      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      if (typeof value === "string") {
+        result[key] = scrubPiiFromString(value);
+      } else if (typeof value === "number" || typeof value === "boolean") {
         result[key] = value;
       }
     }
@@ -74,57 +178,56 @@ function scrubRecord(record: Record<string, unknown>): Record<string, unknown> {
  * Scrub sensitive data from a Sentry event.
  *
  * Security rules per #174:
- * - Deletes request.headers, cookies, query_string
+ * - Keeps only allowlisted request.headers (content-type, user-agent, cf-ray)
+ * - Deletes cookies, query_string, request body
  * - Strips query string from request.url
  * - Replaces exception values with error code (not raw messages)
  * - Scrubs tags, extra, contexts to only allowlisted keys
+ * - Scrubs PII (shop domains, GIDs, money, bank narrations) from all string values
  * - Removes breadcrumbs entirely (can contain sensitive data)
+ * - Removes user object entirely (contains PII)
  */
 function scrubEvent(event: SentryEvent): SentryEvent {
   if (event.request) {
-    delete event.request.headers;
+    if (event.request.headers && typeof event.request.headers === "object") {
+      event.request.headers = scrubHeaders(event.request.headers as Record<string, string>);
+    }
     delete event.request.cookies;
     delete event.request.query_string;
 
     if (event.request.url) {
       const urlParts = event.request.url.split("?");
-      event.request.url = urlParts[0];
+      event.request.url = scrubPiiFromString(urlParts[0]);
     }
 
-    // Delete request body entirely
     delete event.request.data;
   }
 
-  // Replace exception values with error code (P1b)
+  delete event.user;
+
   if (event.exception?.values) {
     for (const exception of event.exception.values) {
       if (exception.value) {
-        // Replace raw error message with error code
         const errorCode = toErrorCode(new Error(exception.value));
         exception.value = errorCode;
       }
     }
   }
 
-  // Replace message with redacted version
   if (event.message) {
-    event.message = redactString(event.message);
+    event.message = scrubPiiFromString(redactString(event.message));
   }
 
-  // Remove breadcrumbs entirely (can contain sensitive logs/navigation)
   delete event.breadcrumbs;
 
-  // Scrub extra to only allowlisted keys
   if (event.extra && typeof event.extra === "object") {
     event.extra = scrubRecord(event.extra as Record<string, unknown>);
   }
 
-  // Scrub tags to only allowlisted keys
   if (event.tags && typeof event.tags === "object") {
     event.tags = scrubRecord(event.tags as Record<string, unknown>) as Record<string, string>;
   }
 
-  // Scrub contexts to only allowlisted keys per context
   if (event.contexts && typeof event.contexts === "object") {
     for (const [contextName, context] of Object.entries(event.contexts)) {
       if (context && typeof context === "object") {
@@ -148,6 +251,28 @@ function beforeSend(event: ErrorEvent, _hint: EventHint): ErrorEvent | null {
  */
 function beforeSendTransaction(event: TransactionEvent, _hint: EventHint): TransactionEvent | null {
   return scrubEvent(event) as TransactionEvent;
+}
+
+/**
+ * beforeBreadcrumb hook to filter out console breadcrumbs.
+ * Console logs can contain PII; drop them entirely.
+ * Other breadcrumbs (http, navigation) are allowed but scrubbed by scrubEvent.
+ */
+function beforeBreadcrumb(breadcrumb: Breadcrumb, _hint?: BreadcrumbHint): Breadcrumb | null {
+  if (breadcrumb.category === "console") {
+    return null;
+  }
+  if (breadcrumb.message) {
+    breadcrumb.message = scrubPiiFromString(breadcrumb.message);
+  }
+  if (breadcrumb.data && typeof breadcrumb.data === "object") {
+    for (const [key, value] of Object.entries(breadcrumb.data)) {
+      if (typeof value === "string") {
+        breadcrumb.data[key] = scrubPiiFromString(value);
+      }
+    }
+  }
+  return breadcrumb;
 }
 
 /**
@@ -181,6 +306,8 @@ export function wrapWithSentry<E extends SentryEnv>(
       }
       return {
         dsn,
+        release: env.SENTRY_RELEASE || undefined,
+        environment: env.SENTRY_ENVIRONMENT || "development",
         tracesSampleRate: parseFloat(env.SENTRY_TRACES_SAMPLE_RATE ?? "0"),
         // A1: Disable all automatic data collection. @sentry/core 11.8.0 replaced
         // sendDefaultPii with dataCollection, which defaults to permissive settings.
@@ -193,6 +320,7 @@ export function wrapWithSentry<E extends SentryEnv>(
         enhanceFetchErrorMessages: false,
         beforeSend,
         beforeSendTransaction,
+        beforeBreadcrumb,
       };
     },
     handler
@@ -245,3 +373,17 @@ export function captureExceptionWithTags(
 export function captureMessage(message: string, level?: SeverityLevel): void {
   sentryCaptureMessage(message, level);
 }
+
+/**
+ * Test-only exports for leak testing.
+ * These should not be used in production code.
+ */
+export const _testExports = {
+  scrubPiiFromString,
+  scrubHeaders,
+  scrubRecord,
+  scrubEvent,
+  beforeSend,
+  beforeSendTransaction,
+  beforeBreadcrumb,
+};

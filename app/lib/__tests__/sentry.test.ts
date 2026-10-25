@@ -134,17 +134,26 @@ describe("sentry.ts", () => {
     });
 
     describe("request scrubbing", () => {
-      it("deletes request.headers", () => {
+      it("keeps only allowlisted headers (content-type, user-agent, cf-ray)", () => {
         const event = {
           request: {
-            headers: { Authorization: "Bearer shpat_secret" },
+            headers: {
+              Authorization: "Bearer shpat_secret",
+              "content-type": "application/json",
+              "user-agent": "Test/1.0",
+              "cf-ray": "abc123",
+            },
             url: "https://example.com/app",
           },
         };
 
         const result = beforeSend(event, {});
+        const headers = result?.request?.headers as Record<string, string>;
 
-        expect(result?.request?.headers).toBeUndefined();
+        expect(headers["content-type"]).toBe("application/json");
+        expect(headers["user-agent"]).toBe("Test/1.0");
+        expect(headers["cf-ray"]).toBe("abc123");
+        expect(headers["Authorization"]).toBeUndefined();
       });
 
       it("deletes request.cookies", () => {
