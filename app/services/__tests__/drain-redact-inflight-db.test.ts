@@ -30,7 +30,7 @@ const B = {
 };
 const C = {
   id: `shop-c-${SUFFIX}`,
-  domain: `test-a-${SUFFIX}x.myshopify.com`, // near-miss of A
+  domain: `test-c-${SUFFIX}.myshopify.com`, // near-miss: different shop that exists during deleteShop
 };
 
 let sqlRef: ReturnType<typeof postgres>;
@@ -370,17 +370,13 @@ describeWithDb("drain guards: Shop existence check (#239)", () => {
 
   describe("bulk progress continuation via runDrain", () => {
     it("no Shop row: no continuation sent, but archive still happens", async () => {
-      vi.doMock("~/services/sync/bulk-jsonl-processor.server", async (importOriginal) => {
-        const actual = await importOriginal<typeof import("~/services/sync/bulk-jsonl-processor.server")>();
-        return {
-          ...actual,
-          processBulkOperation: vi.fn().mockResolvedValue({
-            success: true,
-            action: "updated",
-            status: "progress",
-          }),
-        };
-      });
+      const { processBulkOperation } = await import("~/services/sync/bulk-jsonl-processor.server");
+      const mockedProcessBulkOperation = vi.mocked(processBulkOperation);
+      mockedProcessBulkOperation.mockImplementation(async () => ({
+        success: true,
+        action: "updated" as const,
+        status: "progress" as const,
+      }));
 
       const { runDrain } = await import("~/services/drain/processor.server");
       const { S6_QUEUES } = await import("~/lib/pgmq.server");
@@ -414,21 +410,17 @@ describeWithDb("drain guards: Shop existence check (#239)", () => {
       `;
       expect(parseInt(archiveCount.count, 10)).toBe(1);
 
-      vi.doUnmock("~/services/sync/bulk-jsonl-processor.server");
+      mockedProcessBulkOperation.mockRestore();
     });
 
     it("uninstalled Shop: no continuation sent, but archive still happens", async () => {
-      vi.doMock("~/services/sync/bulk-jsonl-processor.server", async (importOriginal) => {
-        const actual = await importOriginal<typeof import("~/services/sync/bulk-jsonl-processor.server")>();
-        return {
-          ...actual,
-          processBulkOperation: vi.fn().mockResolvedValue({
-            success: true,
-            action: "updated",
-            status: "progress",
-          }),
-        };
-      });
+      const { processBulkOperation } = await import("~/services/sync/bulk-jsonl-processor.server");
+      const mockedProcessBulkOperation = vi.mocked(processBulkOperation);
+      mockedProcessBulkOperation.mockImplementation(async () => ({
+        success: true,
+        action: "updated" as const,
+        status: "progress" as const,
+      }));
 
       const { runDrain } = await import("~/services/drain/processor.server");
       const { S6_QUEUES } = await import("~/lib/pgmq.server");
@@ -462,21 +454,17 @@ describeWithDb("drain guards: Shop existence check (#239)", () => {
       `;
       expect(parseInt(archiveCount.count, 10)).toBe(1);
 
-      vi.doUnmock("~/services/sync/bulk-jsonl-processor.server");
+      mockedProcessBulkOperation.mockRestore();
     });
 
     it("live Shop: continuation IS sent, and archive happens", async () => {
-      vi.doMock("~/services/sync/bulk-jsonl-processor.server", async (importOriginal) => {
-        const actual = await importOriginal<typeof import("~/services/sync/bulk-jsonl-processor.server")>();
-        return {
-          ...actual,
-          processBulkOperation: vi.fn().mockResolvedValue({
-            success: true,
-            action: "updated",
-            status: "progress",
-          }),
-        };
-      });
+      const { processBulkOperation } = await import("~/services/sync/bulk-jsonl-processor.server");
+      const mockedProcessBulkOperation = vi.mocked(processBulkOperation);
+      mockedProcessBulkOperation.mockImplementation(async () => ({
+        success: true,
+        action: "updated" as const,
+        status: "progress" as const,
+      }));
 
       const { runDrain } = await import("~/services/drain/processor.server");
       const { S6_QUEUES } = await import("~/lib/pgmq.server");
@@ -510,7 +498,7 @@ describeWithDb("drain guards: Shop existence check (#239)", () => {
       `;
       expect(parseInt(archiveCount.count, 10)).toBe(1);
 
-      vi.doUnmock("~/services/sync/bulk-jsonl-processor.server");
+      mockedProcessBulkOperation.mockRestore();
     });
   });
 });
