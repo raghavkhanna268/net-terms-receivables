@@ -128,46 +128,46 @@ describe("Gating Service", () => {
       vi.resetModules();
       const { checkCompanyLimit } = await import("../gating.server");
       
-      // Free plan cached
+      // Starter plan cached (limit 25)
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "free",
-        subscription_id: null,
-        subscription_name: null,
+        plan_key: "starter",
+        subscription_id: "sub-123",
+        subscription_name: "Starter",
         is_test: false,
         plan_cached_at: new Date(),
       }]);
       
-      // 2 active companies exist (limit is 3)
-      mockSql.setMockResult("active_account_count", [{ count: "2" }]);
+      // 10 active companies exist (limit is 25)
+      mockSql.setMockResult("active_account_count", [{ count: "10" }]);
       
       const result = await checkCompanyLimit(mockSql as unknown as Sql, TEST_SHOP_ID);
       
       expect(result.allowed).toBe(true);
-      expect(result.currentUsage).toBe(2);
-      expect(result.limit).toBe(3);
+      expect(result.currentUsage).toBe(10);
+      expect(result.limit).toBe(25);
     });
 
-    it("blocks creation at limit (3rd vs 4th company boundary)", async () => {
+    it("blocks creation at limit (25th company boundary on starter)", async () => {
       vi.resetModules();
       const { checkCompanyLimit } = await import("../gating.server");
       
-      // Free plan cached
+      // Starter plan cached (limit 25)
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "free",
-        subscription_id: null,
-        subscription_name: null,
+        plan_key: "starter",
+        subscription_id: "sub-123",
+        subscription_name: "Starter",
         is_test: false,
         plan_cached_at: new Date(),
       }]);
       
-      // 3 active companies exist (at limit)
-      mockSql.setMockResult("active_account_count", [{ count: "3" }]);
+      // 25 active companies exist (at limit)
+      mockSql.setMockResult("active_account_count", [{ count: "25" }]);
       
       const result = await checkCompanyLimit(mockSql as unknown as Sql, TEST_SHOP_ID);
       
       expect(result.allowed).toBe(false);
-      expect(result.currentUsage).toBe(3);
-      expect(result.limit).toBe(3);
+      expect(result.currentUsage).toBe(25);
+      expect(result.limit).toBe(25);
       expect(result.reason).toContain("Company limit reached");
     });
 
@@ -175,35 +175,35 @@ describe("Gating Service", () => {
       vi.resetModules();
       const { checkCompanyLimit } = await import("../gating.server");
       
-      // Free plan cached
+      // Starter plan cached (limit 25)
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "free",
-        subscription_id: null,
-        subscription_name: null,
+        plan_key: "starter",
+        subscription_id: "sub-123",
+        subscription_name: "Starter",
         is_test: false,
         plan_cached_at: new Date(),
       }]);
       
-      // 2 active accounts (gated ones not counted)
-      // This simulates having 5 total accounts but only 2 active
-      mockSql.setMockResult("active_account_count", [{ count: "2" }]);
+      // 10 active accounts (gated ones not counted)
+      // This simulates having 30 total accounts but only 10 active
+      mockSql.setMockResult("active_account_count", [{ count: "10" }]);
       
       const result = await checkCompanyLimit(mockSql as unknown as Sql, TEST_SHOP_ID);
       
-      // Should allow because only 2 active, even if there are more gated
+      // Should allow because only 10 active, even if there are more gated
       expect(result.allowed).toBe(true);
-      expect(result.currentUsage).toBe(2);
+      expect(result.currentUsage).toBe(10);
     });
 
-    it("allows creation on scale plan (unlimited)", async () => {
+    it("allows creation on unlimited plan", async () => {
       vi.resetModules();
       const { checkCompanyLimit } = await import("../gating.server");
       
-      // Scale plan cached
+      // Unlimited plan cached
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "scale",
+        plan_key: "unlimited",
         subscription_id: "sub-123",
-        subscription_name: "Scale",
+        subscription_name: "Unlimited",
         is_test: false,
         plan_cached_at: new Date(),
       }]);
@@ -272,11 +272,11 @@ describe("Gating Service", () => {
       // Reactivation updates 50 accounts
       mockSql.setMockResult("reactivate_result", { count: 50 });
       
-      // Upgrade to scale (unlimited)
+      // Upgrade to unlimited
       const reactivated = await reactivateGatedAccounts(
         mockSql as unknown as Sql,
         TEST_SHOP_ID,
-        "scale"
+        "unlimited"
       );
       
       expect(reactivated).toBe(50);
@@ -306,16 +306,16 @@ describe("Gating Service", () => {
       vi.resetModules();
       const { enforceCompanyLimit } = await import("../gating.server");
       
-      // Free plan with 2 active accounts (limit 3)
+      // Starter plan with 10 active accounts (limit 25)
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "free",
-        subscription_id: null,
-        subscription_name: null,
+        plan_key: "starter",
+        subscription_id: "sub-123",
+        subscription_name: "Starter",
         is_test: false,
         plan_cached_at: new Date(),
       }]);
       // checkCompanyLimit uses gated_at IS NULL, so set active_account_count
-      mockSql.setMockResult("active_account_count", [{ count: "2" }]);
+      mockSql.setMockResult("active_account_count", [{ count: "10" }]);
       
       await expect(enforceCompanyLimit(mockSql as unknown as Sql, TEST_SHOP_ID)).resolves.toBeUndefined();
     });
@@ -325,16 +325,16 @@ describe("Gating Service", () => {
       vi.resetModules();
       const { enforceCompanyLimit, UpgradeRequiredError } = await import("../gating.server");
       
-      // Free plan at limit (3 active accounts, limit is 3)
+      // Starter plan at limit (25 active accounts, limit is 25)
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "free",
-        subscription_id: null,
-        subscription_name: null,
+        plan_key: "starter",
+        subscription_id: "sub-123",
+        subscription_name: "Starter",
         is_test: false,
         plan_cached_at: new Date(),
       }]);
       // checkCompanyLimit uses gated_at IS NULL, so set active_account_count
-      mockSql.setMockResult("active_account_count", [{ count: "3" }]);
+      mockSql.setMockResult("active_account_count", [{ count: "25" }]);
       
       await expect(enforceCompanyLimit(mockSql as unknown as Sql, TEST_SHOP_ID))
         .rejects.toThrow(UpgradeRequiredError);
@@ -345,14 +345,14 @@ describe("Gating Service", () => {
     it("has correct properties", async () => {
       const { UpgradeRequiredError } = await import("../gating.server");
       
-      const error = new UpgradeRequiredError("companies", 3, 3);
+      const error = new UpgradeRequiredError("companies", 25, 25);
       
       expect(error.name).toBe("UpgradeRequiredError");
       expect(error.limitType).toBe("companies");
-      expect(error.currentUsage).toBe(3);
-      expect(error.limit).toBe(3);
+      expect(error.currentUsage).toBe(25);
+      expect(error.limit).toBe(25);
       expect(error.message).toContain("Upgrade required");
-      expect(error.message).toContain("3/3");
+      expect(error.message).toContain("25/25");
     });
   });
 
@@ -362,17 +362,17 @@ describe("Gating Service", () => {
       vi.resetModules();
       const { checkCompanyLimit, reactivateGatedAccounts } = await import("../gating.server");
       
-      // Free plan, 3 active accounts (at limit)
+      // Starter plan, 25 active accounts (at limit)
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "free",
-        subscription_id: null,
-        subscription_name: null,
+        plan_key: "starter",
+        subscription_id: "sub-123",
+        subscription_name: "Starter",
         is_test: false,
         plan_cached_at: new Date(),
       }]);
-      mockSql.setMockResult("active_account_count", [{ count: "3" }]);
+      mockSql.setMockResult("active_account_count", [{ count: "25" }]);
       
-      // Creating 4th account should be blocked
+      // Creating 26th account should be blocked
       const beforeUpgrade = await checkCompanyLimit(mockSql as unknown as Sql, TEST_SHOP_ID);
       expect(beforeUpgrade.allowed).toBe(false);
       
@@ -395,12 +395,12 @@ describe("Gating Service", () => {
       );
       expect(reactivated).toBe(5);
       
-      // After upgrade + reactivation, we have 8 active accounts (limit 100)
-      mockSql.setMockResult("active_account_count", [{ count: "8" }]);
+      // After upgrade + reactivation, we have 30 active accounts (limit 100)
+      mockSql.setMockResult("active_account_count", [{ count: "30" }]);
       
       const afterUpgrade = await checkCompanyLimit(mockSql as unknown as Sql, TEST_SHOP_ID);
       expect(afterUpgrade.allowed).toBe(true);
-      expect(afterUpgrade.currentUsage).toBe(8);
+      expect(afterUpgrade.currentUsage).toBe(30);
       expect(afterUpgrade.limit).toBe(100);
     });
   });
@@ -451,22 +451,22 @@ describe("Gating Service", () => {
       vi.resetModules();
       const { getUsageStats } = await import("../gating.server");
       
-      // Free plan cached
+      // Starter plan cached (limit 25)
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "free",
-        subscription_id: null,
-        subscription_name: null,
+        plan_key: "starter",
+        subscription_id: "sub-123",
+        subscription_name: "Starter",
         is_test: false,
         plan_cached_at: new Date(),
       }]);
       
-      // 5 total companies (some might be gated, but we count all when OFF)
-      mockSql.setMockResult("account_count", [{ count: "5" }]);
+      // 15 total companies (some might be gated, but we count all when OFF)
+      mockSql.setMockResult("account_count", [{ count: "15" }]);
       
       const stats = await getUsageStats(mockSql as unknown as Sql, TEST_SHOP_ID);
       
-      expect(stats.companies.current).toBe(5);
-      expect(stats.companies.limit).toBe(3);
+      expect(stats.companies.current).toBe(15);
+      expect(stats.companies.limit).toBe(25);
       // importsThisMonth is always unlimited
       expect(stats.importsThisMonth.limit).toBe(-1);
     });
@@ -476,23 +476,23 @@ describe("Gating Service", () => {
       vi.resetModules();
       const { getUsageStats } = await import("../gating.server");
       
-      // Free plan cached
+      // Starter plan cached (limit 25)
       mockSql.setMockResult("shop_plan", [{
-        plan_key: "free",
-        subscription_id: null,
-        subscription_name: null,
+        plan_key: "starter",
+        subscription_id: "sub-123",
+        subscription_name: "Starter",
         is_test: false,
         plan_cached_at: new Date(),
       }]);
       
       // The query with gated_at IS NULL filter returns active count
-      mockSql.setMockResult("active_account_count", [{ count: "3" }]);
+      mockSql.setMockResult("active_account_count", [{ count: "15" }]);
       
       const stats = await getUsageStats(mockSql as unknown as Sql, TEST_SHOP_ID);
       
       // Should return only active (non-gated) count
-      expect(stats.companies.current).toBe(3);
-      expect(stats.companies.limit).toBe(3);
+      expect(stats.companies.current).toBe(15);
+      expect(stats.companies.limit).toBe(25);
       // importsThisMonth is always unlimited
       expect(stats.importsThisMonth.limit).toBe(-1);
     });

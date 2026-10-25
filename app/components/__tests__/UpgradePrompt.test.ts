@@ -1,47 +1,17 @@
 import { describe, it, expect } from "vitest";
 import { renderToString } from "react-dom/server";
 import { createElement } from "react";
-import {
-  UpgradePrompt,
-  PlanBanner,
-  PLAN_DISPLAY_NAMES,
-  FEATURE_DISPLAY_NAMES,
-  getRequiredPlanForFeature,
-} from "../UpgradePrompt";
-import { ALL_PLAN_KEYS, ALL_FEATURE_KEYS } from "~/lib/entitlements";
+import { UpgradePrompt, PlanBanner, PLAN_DISPLAY_NAMES } from "../UpgradePrompt";
+import { ALL_PLAN_KEYS } from "~/lib/entitlements";
 
 /**
  * Tests for UpgradePrompt component (S21).
  *
  * These tests render the actual components and verify:
- * 1. Gating flag OFF: prompts use "info" tone and "View Plans" button
+ * 1. Gating flag OFF: prompts return null (no limit prompts when gating off)
  * 2. Gating flag ON: prompts use "warning" tone and "Upgrade" button
- * 3. Feature-to-plan mapping is derived from entitlements.ts
- * 4. Display names are exported and used correctly
+ * 3. Display names are exported and used correctly
  */
-
-describe("getRequiredPlanForFeature", () => {
-  it("derives required plan from entitlements.ts (all features on all plans)", () => {
-    // All features are now available on every plan, so they return 'none'
-    // HIDDEN (issue #286): pdf_statements, payer_memory, audit_export removed
-    expect(getRequiredPlanForFeature("aging_dashboard")).toBe("none");
-    expect(getRequiredPlanForFeature("matching")).toBe("none");
-    expect(getRequiredPlanForFeature("reminders")).toBe("none");
-    expect(getRequiredPlanForFeature("credit_holds")).toBe("none");
-  });
-
-  it("returns valid plan for all features", () => {
-    for (const feature of ALL_FEATURE_KEYS) {
-      const plan = getRequiredPlanForFeature(feature);
-      expect(ALL_PLAN_KEYS).toContain(plan);
-    }
-  });
-
-  it("credit_holds is available on none plan (all-plans feature)", () => {
-    // credit_holds must never be shown as requiring an upgrade
-    expect(getRequiredPlanForFeature("credit_holds")).toBe("none");
-  });
-});
 
 describe("PLAN_DISPLAY_NAMES", () => {
   it("has display name for all plan keys", () => {
@@ -52,68 +22,11 @@ describe("PLAN_DISPLAY_NAMES", () => {
   });
 });
 
-describe("FEATURE_DISPLAY_NAMES", () => {
-  it("has display name for all feature keys", () => {
-    for (const feature of ALL_FEATURE_KEYS) {
-      expect(FEATURE_DISPLAY_NAMES[feature]).toBeDefined();
-      expect(FEATURE_DISPLAY_NAMES[feature].length).toBeGreaterThan(0);
-    }
-  });
-});
-
 describe("UpgradePrompt component", () => {
   const baseProps = {
     currentPlan: "none" as const,
     upgradeUrl: "https://admin.shopify.com/store/test/charges/app/pricing_plans",
   };
-
-  describe("feature-based prompts", () => {
-    it("renders nothing for aging_dashboard (all features on all plans)", () => {
-      const html = renderToString(
-        createElement(UpgradePrompt, {
-          ...baseProps,
-          feature: "aging_dashboard",
-          gatingEnforced: false,
-        })
-      );
-      expect(html).toBe("");
-    });
-
-    it("renders nothing for matching (all features on all plans)", () => {
-      const html = renderToString(
-        createElement(UpgradePrompt, {
-          ...baseProps,
-          feature: "matching",
-          gatingEnforced: false,
-        })
-      );
-      expect(html).toBe("");
-    });
-
-    it("renders nothing for reminders (all features on all plans)", () => {
-      // All features are now available on every plan, including none
-      const html = renderToString(
-        createElement(UpgradePrompt, {
-          ...baseProps,
-          feature: "reminders",
-          gatingEnforced: false,
-        })
-      );
-      expect(html).toBe("");
-    });
-
-    it("renders nothing for reminders even with gating ON (all features on all plans)", () => {
-      // All features are now available on every plan
-      const html = renderToString(
-        createElement(UpgradePrompt, {
-          ...baseProps,
-          feature: "reminders",
-          gatingEnforced: true,
-        })
-      );
-      expect(html).toBe("");
-    });
-  });
 
   describe("limit-based prompts", () => {
     it("renders nothing when gating is OFF (T1: no limit prompts when gating off)", () => {

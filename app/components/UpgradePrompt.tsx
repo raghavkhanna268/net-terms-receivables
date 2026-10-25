@@ -6,13 +6,7 @@
  * When PLAN_GATING_ENFORCED is on, prompts indicate actual limitations.
  */
 
-import {
-  type PlanKey,
-  type FeatureKey,
-  ALL_PLAN_KEYS,
-  getPlanConfig,
-  planHasFeature,
-} from "~/lib/entitlements";
+import type { PlanKey } from "~/lib/entitlements";
 
 /**
  * Display names for plans. Single source of truth for UI.
@@ -24,35 +18,8 @@ export const PLAN_DISPLAY_NAMES: Record<PlanKey, string> = {
   unlimited: "Unlimited",
 };
 
-/**
- * Display names for features. Single source of truth for UI.
- * HIDDEN (issue #286): pdf_statements, payer_memory, audit_export removed.
- */
-export const FEATURE_DISPLAY_NAMES: Record<FeatureKey, string> = {
-  aging_dashboard: "Aging Dashboard",
-  unlimited_imports: "Unlimited Bank Imports",
-  matching: "Payment Matching",
-  reminders: "Payment Reminders",
-  credit_holds: "Credit Holds",
-};
-
-/**
- * Get the minimum plan required for a feature.
- * Derived from entitlements.ts using ALL_PLAN_KEYS + getPlanConfig + planHasFeature.
- */
-export function getRequiredPlanForFeature(feature: FeatureKey): PlanKey {
-  for (const planKey of ALL_PLAN_KEYS) {
-    const plan = getPlanConfig(planKey);
-    if (planHasFeature(plan, feature)) {
-      return planKey;
-    }
-  }
-  return "unlimited";
-}
-
 interface UpgradePromptProps {
   currentPlan: PlanKey;
-  feature?: FeatureKey;
   limitType?: "companies" | "imports";
   gatingEnforced: boolean;
   upgradeUrl: string;
@@ -60,20 +27,11 @@ interface UpgradePromptProps {
 }
 
 export function UpgradePrompt({
-  currentPlan,
-  feature,
   limitType,
   gatingEnforced,
   upgradeUrl,
   compact = false,
 }: UpgradePromptProps) {
-  const requiredPlan = feature ? getRequiredPlanForFeature(feature) : null;
-  const currentIndex = ALL_PLAN_KEYS.indexOf(currentPlan);
-  const requiredIndex = requiredPlan ? ALL_PLAN_KEYS.indexOf(requiredPlan) : -1;
-
-  const needsUpgrade = requiredPlan && requiredIndex > currentIndex;
-  const suggestedPlan = needsUpgrade ? requiredPlan : null;
-
   if (compact) {
     // Don't show limit-based prompts when gating is off
     if (limitType) {
@@ -84,19 +42,6 @@ export function UpgradePrompt({
         <s-stack direction="inline">
           <s-text tone="critical">
             {limitType === "companies" ? "Company" : "Import"} limit reached
-          </s-text>
-          <s-link href={upgradeUrl} target="_top">
-            Upgrade
-          </s-link>
-        </s-stack>
-      );
-    }
-
-    if (suggestedPlan) {
-      return (
-        <s-stack direction="inline">
-          <s-text>
-            {gatingEnforced ? "Requires" : "Available on"} {PLAN_DISPLAY_NAMES[suggestedPlan]}+
           </s-text>
           <s-link href={upgradeUrl} target="_top">
             Upgrade
@@ -124,39 +69,6 @@ export function UpgradePrompt({
           </s-text>
           <s-button href={upgradeUrl} target="_top">
             Upgrade Plan
-          </s-button>
-        </s-stack>
-      </s-banner>
-    );
-  }
-
-  if (suggestedPlan) {
-    const featureLabel = feature ? FEATURE_DISPLAY_NAMES[feature] : "this feature";
-
-    if (gatingEnforced) {
-      return (
-        <s-banner tone="warning" heading="Feature Unavailable">
-          <s-stack>
-            <s-text>
-              {featureLabel} requires the {PLAN_DISPLAY_NAMES[suggestedPlan]} plan or higher.
-            </s-text>
-            <s-button href={upgradeUrl} target="_top">
-              Upgrade to {PLAN_DISPLAY_NAMES[suggestedPlan]}
-            </s-button>
-          </s-stack>
-        </s-banner>
-      );
-    }
-
-    return (
-      <s-banner tone="info" heading="Premium Feature">
-        <s-stack>
-          <s-text>
-            {featureLabel} is included in the {PLAN_DISPLAY_NAMES[suggestedPlan]} plan.
-            Currently available to all users while plan gating is not enforced.
-          </s-text>
-          <s-button href={upgradeUrl} target="_top" variant="secondary">
-            View Plans
           </s-button>
         </s-stack>
       </s-banner>
