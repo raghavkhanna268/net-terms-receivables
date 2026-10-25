@@ -868,9 +868,9 @@ export async function sendPaymentReminder(
   // Row is already 'sent' (claimed in Phase A). If send fails, we release.
   //
   // CRASH GAP: If crash occurs after Phase A claim but before Phase C completes,
-  // the row stays 'sent' with sentAt set but no email actually sent. This is a
-  // known trade-off vs holding locks during fetch. Recovery: the Resend idempotency
-  // key means retry won't double-send; stale 'sent' rows can be identified by
+  // the row stays 'sent' with sentAt set but no email actually sent. Nothing
+  // retries a 'sent' row, so this stage's reminder is lost (the next enabled
+  // stage still sends normally). Stale 'sent' rows can be identified by
   // comparing sentAt to Resend delivery logs if needed.
   try {
     const emailHtml = renderPaymentReminderEmail({
@@ -1230,9 +1230,9 @@ export async function sendCatchupReminder(
   // Row is already 'sent' (claimed in Phase A). If send fails, we revert.
   //
   // CRASH GAP: If crash occurs after Phase A claim but before Phase C completes,
-  // the row stays 'sent' with sentAt set but no email actually sent. This is a
-  // known trade-off vs holding locks during fetch. Recovery: the Resend idempotency
-  // key means retry won't double-send; stale 'sent' rows can be identified by
+  // the row stays 'sent' with sentAt set but no email actually sent. Nothing
+  // retries a 'sent' row, so this stage's reminder is lost (the next enabled
+  // stage still sends normally). Stale 'sent' rows can be identified by
   // comparing sentAt to Resend delivery logs if needed.
   try {
     const emailHtml = renderPaymentReminderEmail({
