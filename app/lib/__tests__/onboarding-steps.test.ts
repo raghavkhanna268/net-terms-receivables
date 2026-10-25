@@ -60,6 +60,27 @@ describe("onboarding-steps", () => {
       const step = computeBuyerSetupStep(0, 0);
       expect(step.status).toBe("pending");
     });
+
+    it("S23-03: returns actionUrl /app/tag-rules when pending", () => {
+      const step = computeBuyerSetupStep(0, 0);
+      expect(step.status).toBe("pending");
+      expect(step.actionUrl).toBe("/app/tag-rules");
+      expect(step.actionLabel).toBe("Create tag rule");
+    });
+
+    it("S23-03: does not return actionUrl when complete", () => {
+      const step = computeBuyerSetupStep(5, 0);
+      expect(step.status).toBe("complete");
+      expect(step.actionUrl).toBeUndefined();
+      expect(step.actionLabel).toBeUndefined();
+    });
+
+    it("S23-03: does not return actionUrl when complete via tag rules", () => {
+      const step = computeBuyerSetupStep(0, 2);
+      expect(step.status).toBe("complete");
+      expect(step.actionUrl).toBeUndefined();
+      expect(step.actionLabel).toBeUndefined();
+    });
   });
 
   describe("computeValidationStep", () => {
