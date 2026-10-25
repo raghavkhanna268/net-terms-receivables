@@ -4,6 +4,7 @@
 
 export {
   deleteShop,
+  deleteProcessedWebhooksViaReceipts,
   purgePgmqMessages,
   redactCustomer,
   generateCustomerDataExport,

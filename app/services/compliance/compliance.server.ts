@@ -59,6 +59,36 @@ export interface DeleteShopResult {
 }
 
 /**
+ * Delete s6_processed_webhooks rows linked to a shop's webhook_receipts.
+ *
+ * Uses exact-match join: deletes processed webhook rows where the webhook_id
+ * matches a receipt for this shop. This handles domain-free ids (Shopify webhook
+ * ids, credit_ keys) that don't embed the shop domain.
+ *
+ * MUST be called BEFORE webhook_receipts are deleted for this shop.
+ *
+ * Used by:
+ * - deleteShop (shop/redact): within transaction, before receipts delete
+ * - app/uninstalled: within transaction with receipts delete
+ *
+ * @param sql - postgres.js SQL client (or transaction)
+ * @param shopDomain - Shop domain
+ * @returns Number of processed webhook rows deleted
+ */
+export async function deleteProcessedWebhooksViaReceipts(
+  sql: Sql,
+  shopDomain: string
+): Promise<number> {
+  const result = await sql`
+    DELETE FROM s6_processed_webhooks p
+    USING webhook_receipts r
+    WHERE r.shop = ${shopDomain}
+      AND r.webhook_id = p.webhook_id
+  `;
+  return result.count;
+}
+
+/**
  * Delete a shop and all its data via ON DELETE CASCADE.
  * This is the final step in the shop/redact webhook handler.
  *
@@ -172,15 +202,13 @@ export async function deleteShop(
 
     // 2. Domain-free ids (Shopify webhook ids, credit_ keys): join to webhook_receipts
     //    This MUST run BEFORE webhook_receipts are deleted
-    const processedReceiptsJoinResult = await tx`
-      DELETE FROM s6_processed_webhooks p
-      USING webhook_receipts r
-      WHERE r.shop = ${shopDomain}
-        AND r.webhook_id = p.webhook_id
-    `;
+    const processedReceiptsJoinCount = await deleteProcessedWebhooksViaReceipts(
+      tx,
+      shopDomain
+    );
 
     const processedWebhooksPurged =
-      processedReconcileResult.count + processedReceiptsJoinResult.count;
+      processedReconcileResult.count + processedReceiptsJoinCount;
 
     // webhook_receipts (edge deduplication, shop text column)
     // Moved here from webhooks.compliance.tsx to ensure join delete runs first

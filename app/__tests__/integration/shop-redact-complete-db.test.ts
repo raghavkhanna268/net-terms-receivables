@@ -29,7 +29,10 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
-import { deleteShop } from "~/services/compliance/compliance.server";
+import {
+  deleteShop,
+  deleteProcessedWebhooksViaReceipts,
+} from "~/services/compliance/compliance.server";
 import { LightSessionStorage } from "~/lib/session-storage-light.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -960,5 +963,98 @@ describeWithDb("shop/redact complete DB deletion", () => {
 
     // Cleanup
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id = ${falsePositive}`;
+  });
+
+  it("app/uninstalled: deleteProcessedWebhooksViaReceipts deletes receipt-linked rows, leaves others", async () => {
+    const UNINST_SUFFIX = `uninst-${TEST_SUFFIX}`;
+    const UNINST_SHOP_ID = `shop-uninst-${UNINST_SUFFIX}`;
+    const UNINST_DOMAIN = `test-uninst-${UNINST_SUFFIX}.myshopify.com`;
+    const UNINST_SHOP_B_ID = `shop-uninstb-${UNINST_SUFFIX}`;
+    const UNINST_DOMAIN_B = `test-uninstb-${UNINST_SUFFIX}.myshopify.com`;
+    const now = new Date();
+
+    // Create shops
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+      VALUES
+        (${UNINST_SHOP_ID}, ${UNINST_DOMAIN}, 'INR', ${now}, ${now}),
+        (${UNINST_SHOP_B_ID}, ${UNINST_DOMAIN_B}, 'INR', ${now}, ${now})
+    `;
+
+    // Seed webhook_receipts for both shops
+    const shopifyWhIdA = `shopify-wh-uninst-a-${UNINST_SUFFIX}`;
+    const shopifyWhIdA2 = `shopify-wh-uninst-a2-${UNINST_SUFFIX}`;
+    const shopifyWhIdB = `shopify-wh-uninst-b-${UNINST_SUFFIX}`;
+    await sql`
+      INSERT INTO webhook_receipts (shop, webhook_id, topic, received_at)
+      VALUES
+        (${UNINST_DOMAIN}, ${shopifyWhIdA}, 'ORDERS_CREATE', ${now}),
+        (${UNINST_DOMAIN}, ${shopifyWhIdA2}, 'ORDERS_UPDATE', ${now}),
+        (${UNINST_DOMAIN_B}, ${shopifyWhIdB}, 'ORDERS_CREATE', ${now})
+    `;
+
+    // Seed s6_processed_webhooks rows:
+    // - Two linked to Shop A's receipts (should be deleted)
+    // - One linked to Shop B's receipt (should survive)
+    // - One reconcile id for Shop A (should survive - uninstall doesn't delete reconcile ids)
+    // - One orphan Shopify webhook id not in any receipt (should survive)
+    const reconcileA = `reconcile:${UNINST_DOMAIN}:2026-10-25:companies`;
+    const orphanWhId = `shopify-wh-orphan-uninst-${UNINST_SUFFIX}`;
+    await sql`
+      INSERT INTO s6_processed_webhooks (webhook_id, topic, resource_gid, processed_at)
+      VALUES
+        (${shopifyWhIdA}, 'ORDERS_CREATE', 'gid://shopify/Order/uninst-a1', ${now}),
+        (${shopifyWhIdA2}, 'ORDERS_UPDATE', 'gid://shopify/Order/uninst-a2', ${now}),
+        (${shopifyWhIdB}, 'ORDERS_CREATE', 'gid://shopify/Order/uninst-b1', ${now}),
+        (${reconcileA}, 'BULK_OPERATIONS_FINISH', 'gid://shopify/BulkOperation/uninst-rec', ${now}),
+        (${orphanWhId}, 'ORDERS_CREATE', 'gid://shopify/Order/uninst-orphan', ${now})
+    `;
+
+    // Verify initial state
+    const targetIds = [shopifyWhIdA, shopifyWhIdA2];
+    const surviveIds = [shopifyWhIdB, reconcileA, orphanWhId];
+
+    const [beforeCounts] = await sql<[{ targets: string; survivors: string }]>`
+      SELECT
+        (SELECT COUNT(*)::text FROM s6_processed_webhooks WHERE webhook_id IN ${sql(targetIds)}) as targets,
+        (SELECT COUNT(*)::text FROM s6_processed_webhooks WHERE webhook_id IN ${sql(surviveIds)}) as survivors
+    `;
+    expect(parseInt(beforeCounts.targets, 10)).toBe(2);
+    expect(parseInt(beforeCounts.survivors, 10)).toBe(3);
+
+    // Simulate app/uninstalled: run helper + receipts delete in one transaction
+    const { processedDeleted, receiptsDeleted } = await sql.begin(async (tx) => {
+      const pwCount = await deleteProcessedWebhooksViaReceipts(tx, UNINST_DOMAIN);
+      const rcptResult = await tx`
+        DELETE FROM webhook_receipts WHERE shop = ${UNINST_DOMAIN}
+      `;
+      return { processedDeleted: pwCount, receiptsDeleted: rcptResult.count };
+    });
+
+    expect(processedDeleted).toBe(2);
+    expect(receiptsDeleted).toBe(2);
+
+    // Verify targets are deleted
+    const [afterTargets] = await sql<[{ count: string }]>`
+      SELECT COUNT(*)::text as count FROM s6_processed_webhooks WHERE webhook_id IN ${sql(targetIds)}
+    `;
+    expect(parseInt(afterTargets.count, 10)).toBe(0);
+
+    // Verify survivors are intact
+    const [afterSurvivors] = await sql<[{ count: string }]>`
+      SELECT COUNT(*)::text as count FROM s6_processed_webhooks WHERE webhook_id IN ${sql(surviveIds)}
+    `;
+    expect(parseInt(afterSurvivors.count, 10)).toBe(3);
+
+    // Shop B's receipt should still exist
+    const [shopBReceipt] = await sql<[{ count: string }]>`
+      SELECT COUNT(*)::text as count FROM webhook_receipts WHERE shop = ${UNINST_DOMAIN_B}
+    `;
+    expect(parseInt(shopBReceipt.count, 10)).toBe(1);
+
+    // Cleanup
+    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id IN ${sql(surviveIds)}`;
+    await sql`DELETE FROM webhook_receipts WHERE shop = ${UNINST_DOMAIN_B}`;
+    await sql`DELETE FROM "Shop" WHERE id IN (${UNINST_SHOP_ID}, ${UNINST_SHOP_B_ID})`;
   });
 });
