@@ -878,8 +878,32 @@ async function handleReminderSend(sql: Sql, message: SyncMessage): Promise<SyncR
   return processReminder(sql, message);
 }
 
+/**
+ * Handler for REMINDER_CATCHUP topic.
+ * Sends catch-up reminders for delayed (capped) entries.
+ */
+async function handleReminderCatchup(sql: Sql, message: SyncMessage): Promise<SyncResult> {
+  const { handleReminderCatchup: processCatchup, isReminderCatchupMessage } = await import(
+    "~/jobs/reminders"
+  );
+
+  if (!isReminderCatchupMessage(message)) {
+    return {
+      success: false,
+      action: "skipped",
+      error: "Invalid REMINDER_CATCHUP message format",
+      retryable: false,
+    };
+  }
+
+  return processCatchup(sql, message);
+}
+
 // Register REMINDER_SEND handler
 registerSyncHandler("REMINDER_SEND", handleReminderSend);
+
+// Register REMINDER_CATCHUP handler
+registerSyncHandler("REMINDER_CATCHUP", handleReminderCatchup);
 
 // =============================================================================
 // DRAIN RESULT & QUEUE OPERATIONS

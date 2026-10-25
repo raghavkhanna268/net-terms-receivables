@@ -52,7 +52,8 @@ ALTER TABLE "ReminderLog" ADD CONSTRAINT "ReminderLog_status_skipped_check"
 
 -- Step 6: Partial index on delayed rows for efficient catch-up queries
 -- Only indexes rows that need catch-up processing
-CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_reminder_log_delayed"
+-- Note: Cannot use CONCURRENTLY inside Prisma's migration transaction
+CREATE INDEX IF NOT EXISTS "idx_reminder_log_delayed"
     ON "ReminderLog" ("shopId", "invoiceId", "ruleId")
     WHERE status = 'delayed';
 
@@ -95,28 +96,26 @@ BEGIN
     GET DIAGNOSTICS expired_count = ROW_COUNT;
     
     -- ==========================================================================
-    -- PART 2: Mark older delayed stages as skipped when a later stage exists
-    -- For each invoice, only the LATEST delayed stage should be sent
+    -- PART 2: Mark older delayed stages as skipped when a NEWER stage exists
+    -- For each invoice, only the LATEST stage should be sent.
+    -- A "newer" stage is one with higher offsetDays that has ANY status
+    -- (sent, delayed, or skipped_daily_limit).
     -- ==========================================================================
-    WITH latest_delayed AS (
-        SELECT DISTINCT ON (rl."invoiceId")
-            rl.id,
-            rl."invoiceId",
-            r."offsetDays"
+    WITH latest_stage_per_invoice AS (
+        -- Find the highest offsetDays for each invoice that has ANY ReminderLog row
+        SELECT rl."invoiceId", MAX(r."offsetDays") AS max_offset
         FROM public."ReminderLog" rl
         INNER JOIN public."ReminderRule" r ON r.id = rl."ruleId"
-        WHERE rl.status = 'delayed'::"ReminderLogStatus"
-        ORDER BY rl."invoiceId", r."offsetDays" DESC
+        GROUP BY rl."invoiceId"
     )
     UPDATE public."ReminderLog" rl
     SET status = 'skipped_daily_limit'::"ReminderLogStatus"
     FROM public."ReminderRule" r,
-         latest_delayed ld
+         latest_stage_per_invoice lsp
     WHERE rl.status = 'delayed'::"ReminderLogStatus"
-      AND rl."invoiceId" = ld."invoiceId"
+      AND rl."invoiceId" = lsp."invoiceId"
       AND rl."ruleId" = r.id
-      AND r."offsetDays" < ld."offsetDays"
-      AND rl.id != ld.id;
+      AND r."offsetDays" < lsp.max_offset;
     
     GET DIAGNOSTICS skipped_older_stages = ROW_COUNT;
 
