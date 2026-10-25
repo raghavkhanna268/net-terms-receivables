@@ -251,6 +251,7 @@ jobs:
             --project net-terms-app \
             --url https://sentry.io
 
+          # shellcheck disable=SC2088 # tilde is literal URL prefix, not home dir
           npx --yes @sentry/cli@2.58.6 sourcemaps upload \
             --org termwise \
             --project net-terms-app \
