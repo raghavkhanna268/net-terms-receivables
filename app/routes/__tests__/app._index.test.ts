@@ -702,3 +702,202 @@ describe("S21 over-limit banner using buildOverLimitBannerState helper", () => {
     expect(state.enforcementNote).toBeNull();
   });
 });
+
+/**
+ * S21 Plan Gating: Gated accounts in dashboard.
+ * Verifies that gated accounts have is_gated set and are included in totals.
+ * The UI uses is_gated to render the "over plan limit" badge.
+ */
+describe("S21 gated accounts in dashboard listing and totals", () => {
+  const TEST_SHOP = "test-gated-dash.myshopify.com";
+  const TEST_SHOP_ID = "shop-gated-dash";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id, currency, timezone FROM")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" }]);
+      }
+      if (query.includes("onboarding_dismissed_at")) {
+        return Promise.resolve([{ onboarding_dismissed_at: new Date() }]);
+      }
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
+        return Promise.resolve([{ count: "1" }]);
+      }
+      if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
+        return Promise.resolve([{ count: "2" }]);
+      }
+      if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+  });
+
+  function createLoaderArgs() {
+    const url = new URL(`https://example.com/app?skipOnboarding=true`);
+    return {
+      request: new Request(url),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+              redirect: vi.fn(),
+            }),
+          },
+        },
+        cloudflare: {
+          env: {},
+          ctx: { waitUntil: vi.fn() },
+        },
+      },
+      params: {},
+      url,
+      pattern: "/app",
+    } as unknown;
+  }
+
+  it("gated account in ledger has is_gated=true for badge rendering", async () => {
+    mockGetBuyerLedger.mockResolvedValue({
+      rows: [
+        {
+          buyer_account_id: "buyer-active",
+          buyer_name: "Active Buyer",
+          credit_limit_paise: "10000000",
+          hold_state: "OK",
+          currency: "INR",
+          outstanding_paise: "100000",
+          overdue_paise: "0",
+          oldest_overdue_days: null,
+          is_gated: false,
+        },
+        {
+          buyer_account_id: "buyer-gated",
+          buyer_name: "Over Limit Buyer",
+          credit_limit_paise: "5000000",
+          hold_state: "OK",
+          currency: "INR",
+          outstanding_paise: "300000",
+          overdue_paise: "0",
+          oldest_overdue_days: null,
+          is_gated: true,
+        },
+      ],
+      totalCount: 2,
+    });
+
+    mockGetShopAgingTotals.mockResolvedValue({
+      totalByCurrency: { INR: "400000" },
+      buckets: {
+        current: { byCurrency: { INR: "400000" } },
+        "1-30": { byCurrency: {} },
+        "31-60": { byCurrency: {} },
+        "61-90": { byCurrency: {} },
+        "90+": { byCurrency: {} },
+      },
+      overdueByCurrency: {},
+      oldestOverdueDays: null,
+    });
+
+    const { loader } = await import("../app._index");
+    const result = await loader(createLoaderArgs() as never);
+
+    expect(result.buyerLedger?.rows).toHaveLength(2);
+
+    const gatedAccount = result.buyerLedger?.rows.find(r => r.buyer_account_id === "buyer-gated");
+    expect(gatedAccount).toBeDefined();
+    expect(gatedAccount?.is_gated).toBe(true);
+    expect(gatedAccount?.buyer_name).toBe("Over Limit Buyer");
+
+    const activeAccount = result.buyerLedger?.rows.find(r => r.buyer_account_id === "buyer-active");
+    expect(activeAccount).toBeDefined();
+    expect(activeAccount?.is_gated).toBe(false);
+  });
+
+  it("aging totals include both gated and non-gated accounts", async () => {
+    mockGetBuyerLedger.mockResolvedValue({
+      rows: [
+        {
+          buyer_account_id: "buyer-active",
+          buyer_name: "Active Buyer",
+          credit_limit_paise: null,
+          hold_state: "OK",
+          currency: "INR",
+          outstanding_paise: "100000",
+          overdue_paise: "0",
+          oldest_overdue_days: null,
+          is_gated: false,
+        },
+        {
+          buyer_account_id: "buyer-gated",
+          buyer_name: "Gated Buyer",
+          credit_limit_paise: null,
+          hold_state: "OK",
+          currency: "INR",
+          outstanding_paise: "200000",
+          overdue_paise: "0",
+          oldest_overdue_days: null,
+          is_gated: true,
+        },
+      ],
+      totalCount: 2,
+    });
+
+    mockGetShopAgingTotals.mockResolvedValue({
+      totalByCurrency: { INR: "300000" },
+      buckets: {
+        current: { byCurrency: { INR: "300000" } },
+        "1-30": { byCurrency: {} },
+        "31-60": { byCurrency: {} },
+        "61-90": { byCurrency: {} },
+        "90+": { byCurrency: {} },
+      },
+      overdueByCurrency: {},
+      oldestOverdueDays: null,
+    });
+
+    const { loader } = await import("../app._index");
+    const result = await loader(createLoaderArgs() as never);
+
+    expect(result.agingTotals?.totalByCurrency.INR).toBe("300000");
+
+    expect(result.buyerLedger?.totalCount).toBe(2);
+  });
+
+  it("overLimitCount reflects gated accounts and is included in data", async () => {
+    mockGetBuyerLedger.mockResolvedValue({
+      rows: [{
+        buyer_account_id: "buyer-1",
+        buyer_name: "Active Buyer",
+        credit_limit_paise: null,
+        hold_state: "OK",
+        currency: "INR",
+        outstanding_paise: "100000",
+        overdue_paise: "0",
+        oldest_overdue_days: null,
+        is_gated: false,
+      }],
+      totalCount: 1,
+    });
+
+    mockGetShopAgingTotals.mockResolvedValue({
+      totalByCurrency: {},
+      buckets: {
+        current: { byCurrency: {} },
+        "1-30": { byCurrency: {} },
+        "31-60": { byCurrency: {} },
+        "61-90": { byCurrency: {} },
+        "90+": { byCurrency: {} },
+      },
+      overdueByCurrency: {},
+      oldestOverdueDays: null,
+    });
+
+    const { loader } = await import("../app._index");
+    const result = await loader(createLoaderArgs() as never);
+
+    expect(result.overLimitCount).toBe(1);
+  });
+});
