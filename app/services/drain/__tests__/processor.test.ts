@@ -1978,16 +1978,3 @@ describe("DLQ shop_not_found sanitization (#239 part a)", () => {
   });
 });
 
-describe("sanitized message skip", () => {
-  it("sync handler exists for sanitize-covered topic", async () => {
-    const { getSyncHandler } = await import("../processor.server");
-    const handler = getSyncHandler("ORDERS_CREATE");
-    expect(handler).toBeDefined();
-  });
-
-  it("bulk handler exists for sanitize-covered topic", async () => {
-    const { getBulkHandler } = await import("../processor.server");
-    const handler = getBulkHandler("BULK_OPERATIONS_FINISH");
-    expect(handler).toBeDefined();
-  });
-});

@@ -143,6 +143,7 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     await sqlRef`DELETE FROM pgmq.a_s6_bulk WHERE message->>'shop' = ${MISSING_SHOP_DOMAIN}`;
     await sqlRef`DELETE FROM s6_dead_letter WHERE message->>'webhookId' LIKE ${`%${SUFFIX}%`}`;
     await sqlRef`DELETE FROM s6_dead_letter WHERE message->>'bulkOperationId' LIKE ${`%${SUFFIX}%`}`;
+    await sqlRef`DELETE FROM s6_bulk_operations WHERE bulk_operation_id LIKE ${`%${SUFFIX}%`}`;
     await sqlRef`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${`%${SUFFIX}%`}`;
     await sqlRef.end();
   });
@@ -179,27 +180,39 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     );
   }
 
-  it("company_locations shop_not_found stores sanitized message in DLQ", async () => {
+  async function driveToMaxRetries(webhookId: string, maxRetries: number): Promise<void> {
+    const { runDrain } = await import("~/services/drain/processor.server");
+    for (let i = 0; i < maxRetries; i++) {
+      await sqlRef`
+        UPDATE pgmq.q_s6_sync
+        SET vt = NOW() - interval '1 second'
+        WHERE message->>'webhookId' = ${webhookId}
+      `;
+      await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000, maxRetries });
+    }
+  }
+
+  it("company_locations shop_not_found stores sanitized message in DLQ after maxRetries", async () => {
+    const webhookId = `wh-loc-${SUFFIX}`;
     const message = {
       shop: MISSING_SHOP_DOMAIN,
       topic: "COMPANY_LOCATIONS_CREATE",
-      webhookId: `wh-loc-${SUFFIX}`,
+      webhookId,
       resourceGid: `gid://shopify/CompanyLocation/loc-${SUFFIX}`,
       enqueuedAt: new Date().toISOString(),
     };
 
     await sqlRef`
       INSERT INTO pgmq.q_s6_sync (vt, read_ct, enqueued_at, message)
-      VALUES (NOW() - interval '1 second', 5, NOW(), ${sqlRef.json(message)}::jsonb)
+      VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(message)}::jsonb)
     `;
 
-    const { runDrain } = await import("~/services/drain/processor.server");
-    await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000, maxRetries: 5 });
+    await driveToMaxRetries(webhookId, 3);
 
     const [dlqRow] = await sqlRef<[{ message: Record<string, unknown>; error: string }?]>`
       SELECT message, error
       FROM s6_dead_letter
-      WHERE message->>'webhookId' = ${`wh-loc-${SUFFIX}`}
+      WHERE message->>'webhookId' = ${webhookId}
     `;
 
     expect(dlqRow).toBeDefined();
@@ -207,9 +220,9 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     expect(dlqRow!.message.reason).toBe("shop_not_found");
     expect(dlqRow!.message.topic).toBe("COMPANY_LOCATIONS_CREATE");
     expect(dlqRow!.message.originalMsgId).toBeDefined();
-    expect(dlqRow!.message.webhookId).toBe(`wh-loc-${SUFFIX}`);
+    expect(dlqRow!.message.webhookId).toBe(webhookId);
     expect(dlqRow!.message.resourceGid).toBe(`gid://shopify/CompanyLocation/loc-${SUFFIX}`);
-    expect(dlqRow!.message.attemptCount).toBeGreaterThanOrEqual(5);
+    expect(dlqRow!.message.attemptCount).toBeGreaterThanOrEqual(3);
 
     expect(dlqRow!.message).not.toHaveProperty("shop");
     expect(dlqRow!.message).not.toHaveProperty("shopHash");
@@ -225,27 +238,27 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     expect(allOutput).toContain("dlq_sanitized_shop_not_found");
   });
 
-  it("orders shop_not_found stores sanitized message in DLQ", async () => {
+  it("orders shop_not_found stores sanitized message in DLQ after maxRetries", async () => {
+    const webhookId = `wh-order-${SUFFIX}`;
     const message = {
       shop: MISSING_SHOP_DOMAIN,
       topic: "ORDERS_CREATE",
-      webhookId: `wh-order-${SUFFIX}`,
+      webhookId,
       resourceGid: `gid://shopify/Order/order-${SUFFIX}`,
       enqueuedAt: new Date().toISOString(),
     };
 
     await sqlRef`
       INSERT INTO pgmq.q_s6_sync (vt, read_ct, enqueued_at, message)
-      VALUES (NOW() - interval '1 second', 5, NOW(), ${sqlRef.json(message)}::jsonb)
+      VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(message)}::jsonb)
     `;
 
-    const { runDrain } = await import("~/services/drain/processor.server");
-    await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000, maxRetries: 5 });
+    await driveToMaxRetries(webhookId, 3);
 
     const [dlqRow] = await sqlRef<[{ message: Record<string, unknown> }?]>`
       SELECT message
       FROM s6_dead_letter
-      WHERE message->>'webhookId' = ${`wh-order-${SUFFIX}`}
+      WHERE message->>'webhookId' = ${webhookId}
     `;
 
     expect(dlqRow).toBeDefined();
@@ -266,56 +279,58 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
   });
 
   it("draft_orders shop_not_found keeps FULL message in DLQ (uncovered topic)", async () => {
+    const webhookId = `wh-draft-${SUFFIX}`;
     const message = {
       shop: MISSING_SHOP_DOMAIN,
       topic: "DRAFT_ORDERS_CREATE",
-      webhookId: `wh-draft-${SUFFIX}`,
+      webhookId,
       resourceGid: `gid://shopify/DraftOrder/draft-${SUFFIX}`,
       enqueuedAt: new Date().toISOString(),
     };
 
     await sqlRef`
       INSERT INTO pgmq.q_s6_sync (vt, read_ct, enqueued_at, message)
-      VALUES (NOW() - interval '1 second', 5, NOW(), ${sqlRef.json(message)}::jsonb)
+      VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(message)}::jsonb)
     `;
 
     const { runDrain } = await import("~/services/drain/processor.server");
-    await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000, maxRetries: 5 });
+    await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000, maxRetries: 1 });
 
     const [dlqRow] = await sqlRef<[{ message: Record<string, unknown>; error: string }?]>`
       SELECT message, error
       FROM s6_dead_letter
-      WHERE message->>'webhookId' = ${`wh-draft-${SUFFIX}`}
+      WHERE message->>'webhookId' = ${webhookId}
     `;
 
     expect(dlqRow).toBeDefined();
     expect(dlqRow!.message.sanitized).toBeUndefined();
     expect(dlqRow!.message.shop).toBe(MISSING_SHOP_DOMAIN);
     expect(dlqRow!.message.topic).toBe("DRAFT_ORDERS_CREATE");
-    expect(dlqRow!.message.webhookId).toBe(`wh-draft-${SUFFIX}`);
+    expect(dlqRow!.message.webhookId).toBe(webhookId);
   });
 
   it("customers shop_not_found keeps FULL message in DLQ (uncovered topic)", async () => {
+    const webhookId = `wh-cust-${SUFFIX}`;
     const message = {
       shop: MISSING_SHOP_DOMAIN,
       topic: "CUSTOMERS_CREATE",
-      webhookId: `wh-cust-${SUFFIX}`,
+      webhookId,
       resourceGid: `gid://shopify/Customer/cust-${SUFFIX}`,
       enqueuedAt: new Date().toISOString(),
     };
 
     await sqlRef`
       INSERT INTO pgmq.q_s6_sync (vt, read_ct, enqueued_at, message)
-      VALUES (NOW() - interval '1 second', 5, NOW(), ${sqlRef.json(message)}::jsonb)
+      VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(message)}::jsonb)
     `;
 
     const { runDrain } = await import("~/services/drain/processor.server");
-    await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000, maxRetries: 5 });
+    await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000, maxRetries: 1 });
 
     const [dlqRow] = await sqlRef<[{ message: Record<string, unknown> }?]>`
       SELECT message
       FROM s6_dead_letter
-      WHERE message->>'webhookId' = ${`wh-cust-${SUFFIX}`}
+      WHERE message->>'webhookId' = ${webhookId}
     `;
 
     expect(dlqRow).toBeDefined();
@@ -334,17 +349,18 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
         retryable: false,
       });
 
+    const webhookId = `wh-graphql-${SUFFIX}`;
     const message = {
       shop: MISSING_SHOP_DOMAIN,
       topic: "COMPANY_LOCATIONS_UPDATE",
-      webhookId: `wh-graphql-${SUFFIX}`,
+      webhookId,
       resourceGid: `gid://shopify/CompanyLocation/graphql-${SUFFIX}`,
       enqueuedAt: new Date().toISOString(),
     };
 
     await sqlRef`
       INSERT INTO pgmq.q_s6_sync (vt, read_ct, enqueued_at, message)
-      VALUES (NOW() - interval '1 second', 1, NOW(), ${sqlRef.json(message)}::jsonb)
+      VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(message)}::jsonb)
     `;
 
     const { runDrain } = await import("~/services/drain/processor.server");
@@ -353,7 +369,7 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     const [dlqRow] = await sqlRef<[{ message: Record<string, unknown>; error: string }?]>`
       SELECT message, error
       FROM s6_dead_letter
-      WHERE message->>'webhookId' = ${`wh-graphql-${SUFFIX}`}
+      WHERE message->>'webhookId' = ${webhookId}
     `;
 
     expect(dlqRow).toBeDefined();
@@ -363,33 +379,33 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
   });
 
   it("counts DLQ rows by original_msg_id, never by message->>shop", async () => {
+    const webhookId = `wh-count-${SUFFIX}`;
     const message = {
       shop: MISSING_SHOP_DOMAIN,
       topic: "ORDERS_UPDATED",
-      webhookId: `wh-count-${SUFFIX}`,
+      webhookId,
       resourceGid: `gid://shopify/Order/count-${SUFFIX}`,
       enqueuedAt: new Date().toISOString(),
     };
 
     await sqlRef`
       INSERT INTO pgmq.q_s6_sync (vt, read_ct, enqueued_at, message)
-      VALUES (NOW() - interval '1 second', 5, NOW(), ${sqlRef.json(message)}::jsonb)
+      VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(message)}::jsonb)
     `;
 
-    const { runDrain } = await import("~/services/drain/processor.server");
-    await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000, maxRetries: 5 });
+    await driveToMaxRetries(webhookId, 3);
 
     const [byWebhookId] = await sqlRef<[{ count: string }]>`
       SELECT COUNT(*)::text as count
       FROM s6_dead_letter
-      WHERE message->>'webhookId' = ${`wh-count-${SUFFIX}`}
+      WHERE message->>'webhookId' = ${webhookId}
     `;
     expect(parseInt(byWebhookId.count, 10)).toBe(1);
 
     const [dlqRow] = await sqlRef<[{ original_msg_id: string }?]>`
       SELECT original_msg_id
       FROM s6_dead_letter
-      WHERE message->>'webhookId' = ${`wh-count-${SUFFIX}`}
+      WHERE message->>'webhookId' = ${webhookId}
     `;
     expect(dlqRow).toBeDefined();
 
@@ -401,51 +417,52 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     expect(parseInt(byOriginalMsgId.count, 10)).toBe(1);
   });
 
-  it("retryable shop_not_found is re-queued until maxRetries, then dead-lettered sanitized", async () => {
+  it("retryable shop_not_found is re-queued before maxRetries, then dead-lettered sanitized", async () => {
+    const webhookId = `wh-retry-${SUFFIX}`;
     const message = {
       shop: MISSING_SHOP_DOMAIN,
       topic: "COMPANY_LOCATIONS_UPDATE",
-      webhookId: `wh-retry-${SUFFIX}`,
+      webhookId,
       resourceGid: `gid://shopify/CompanyLocation/retry-${SUFFIX}`,
       enqueuedAt: new Date().toISOString(),
     };
 
     await sqlRef`
       INSERT INTO pgmq.q_s6_sync (vt, read_ct, enqueued_at, message)
-      VALUES (NOW() - interval '1 second', 1, NOW(), ${sqlRef.json(message)}::jsonb)
+      VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(message)}::jsonb)
     `;
 
     const { runDrain } = await import("~/services/drain/processor.server");
 
-    await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000, maxRetries: 3 });
+    await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000, maxRetries: 5 });
 
     const [stillInQueue] = await sqlRef<[{ count: string }]>`
       SELECT COUNT(*)::text as count
       FROM pgmq.q_s6_sync
-      WHERE message->>'webhookId' = ${`wh-retry-${SUFFIX}`}
+      WHERE message->>'webhookId' = ${webhookId}
     `;
-    expect(parseInt(stillInQueue.count, 10)).toBeGreaterThanOrEqual(0);
+    expect(parseInt(stillInQueue.count, 10)).toBe(1);
 
-    for (let i = 0; i < 3; i++) {
-      await sqlRef`
-        UPDATE pgmq.q_s6_sync
-        SET vt = NOW() - interval '1 second'
-        WHERE message->>'webhookId' = ${`wh-retry-${SUFFIX}`}
-      `;
-      await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000, maxRetries: 3 });
-    }
+    const [noDlqYet] = await sqlRef<[{ count: string }]>`
+      SELECT COUNT(*)::text as count
+      FROM s6_dead_letter
+      WHERE message->>'webhookId' = ${webhookId}
+    `;
+    expect(parseInt(noDlqYet.count, 10)).toBe(0);
+
+    await driveToMaxRetries(webhookId, 5);
 
     const [dlqRow] = await sqlRef<[{ message: Record<string, unknown>; error: string }?]>`
       SELECT message, error
       FROM s6_dead_letter
-      WHERE message->>'webhookId' = ${`wh-retry-${SUFFIX}`}
+      WHERE message->>'webhookId' = ${webhookId}
     `;
 
     expect(dlqRow).toBeDefined();
     expect(dlqRow!.message.sanitized).toBe(true);
     expect(dlqRow!.message.reason).toBe("shop_not_found");
     expect(dlqRow!.message.topic).toBe("COMPANY_LOCATIONS_UPDATE");
-    expect(dlqRow!.message.attemptCount).toBeGreaterThanOrEqual(3);
+    expect(dlqRow!.message.attemptCount).toBeGreaterThanOrEqual(5);
     expect(dlqRow!.message).not.toHaveProperty("shop");
     expect(dlqRow!.message).not.toHaveProperty("shopHash");
     expect(dlqRow!.error).toBe("shop_not_found");
@@ -459,30 +476,36 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     const bulkOpId = `bulk-${SUFFIX}`;
     const message = {
       shop: MISSING_SHOP_DOMAIN,
-      topic: "BULK_OPERATION_FINISH",
+      topic: "BULK_OPERATIONS_FINISH",
       bulkOperationId: bulkOpId,
       bulkType: "companies",
       enqueuedAt: new Date().toISOString(),
     };
 
     await sqlRef`
-      INSERT INTO s6_bulk_operation_progress (
-        bulk_operation_id, shop_id, bulk_type, stage, status,
-        created_at, updated_at
+      INSERT INTO s6_bulk_operations (
+        bulk_operation_id, shop, bulk_type, started_at, origin, failure_count, chunk_size
       ) VALUES (
-        ${bulkOpId}, 'test-shop-id', 'companies', 'poll', 'in_progress',
-        NOW(), NOW()
+        ${bulkOpId}, ${MISSING_SHOP_DOMAIN}, 'companies', NOW(), 'webhook', 0, 524288
       )
       ON CONFLICT (bulk_operation_id) DO NOTHING
     `;
 
     await sqlRef`
       INSERT INTO pgmq.q_s6_bulk (vt, read_ct, enqueued_at, message)
-      VALUES (NOW() - interval '1 second', 5, NOW(), ${sqlRef.json(message)}::jsonb)
+      VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(message)}::jsonb)
     `;
 
     const { runDrain } = await import("~/services/drain/processor.server");
-    await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000, maxRetries: 5 });
+
+    for (let i = 0; i < 3; i++) {
+      await sqlRef`
+        UPDATE pgmq.q_s6_bulk
+        SET vt = NOW() - interval '1 second'
+        WHERE message->>'bulkOperationId' = ${bulkOpId}
+      `;
+      await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000, maxRetries: 3 });
+    }
 
     const [dlqRow] = await sqlRef<[{ message: Record<string, unknown>; error: string }?]>`
       SELECT message, error
@@ -510,12 +533,13 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
   });
 
   it("already-sanitized message is skipped and archived, not re-processed", async () => {
+    const webhookId = `wh-skip-${SUFFIX}`;
     const sanitizedMessage = {
       sanitized: true,
       reason: "shop_not_found",
       topic: "COMPANY_LOCATIONS_CREATE",
       originalMsgId: "old-msg-123",
-      webhookId: `wh-skip-${SUFFIX}`,
+      webhookId,
       resourceGid: `gid://shopify/CompanyLocation/skip-${SUFFIX}`,
       attemptCount: 5,
       failedAt: new Date().toISOString(),
@@ -523,7 +547,7 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
 
     await sqlRef`
       INSERT INTO pgmq.q_s6_sync (vt, read_ct, enqueued_at, message)
-      VALUES (NOW() - interval '1 second', 1, NOW(), ${sqlRef.json(sanitizedMessage)}::jsonb)
+      VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(sanitizedMessage)}::jsonb)
     `;
 
     const { runDrain } = await import("~/services/drain/processor.server");
@@ -534,7 +558,7 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     const [archivedMsg] = await sqlRef<[{ message: Record<string, unknown> }?]>`
       SELECT message
       FROM pgmq.a_s6_sync
-      WHERE message->>'webhookId' = ${`wh-skip-${SUFFIX}`}
+      WHERE message->>'webhookId' = ${webhookId}
     `;
     expect(archivedMsg).toBeDefined();
     expect(archivedMsg!.message.sanitized).toBe(true);
@@ -542,7 +566,7 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     const [dlqRow] = await sqlRef<[{ message: Record<string, unknown> }?]>`
       SELECT message
       FROM s6_dead_letter
-      WHERE message->>'webhookId' = ${`wh-skip-${SUFFIX}`}
+      WHERE message->>'webhookId' = ${webhookId}
     `;
     expect(dlqRow).toBeUndefined();
 
