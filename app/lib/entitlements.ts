@@ -205,7 +205,7 @@ export function mapSubscriptionToPlanKey(
  * @returns The plan configuration
  */
 export function getPlanConfig(key: PlanKey): PlanConfig {
-  return PLAN_CONFIGS[key];
+  return PLAN_CONFIGS[key] ?? PLAN_CONFIGS.none;
 }
 
 /**

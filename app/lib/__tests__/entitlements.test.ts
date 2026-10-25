@@ -423,4 +423,23 @@ describe("getPlanConfig", () => {
       expect(["standard", "priority"]).toContain(plan.supportTier);
     }
   );
+
+  describe("defensive fallback for legacy DB values", () => {
+    it("returns none config for 'free' (legacy cached value)", () => {
+      const plan = getPlanConfig("free" as PlanKey);
+      expect(plan.key).toBe("none");
+      expect(plan.limits.companies).toBe(0);
+    });
+
+    it("returns none config for 'scale' (legacy cached value)", () => {
+      const plan = getPlanConfig("scale" as PlanKey);
+      expect(plan.key).toBe("none");
+      expect(plan.limits.companies).toBe(0);
+    });
+
+    it("returns none config for any unknown key", () => {
+      const plan = getPlanConfig("enterprise" as PlanKey);
+      expect(plan.key).toBe("none");
+    });
+  });
 });

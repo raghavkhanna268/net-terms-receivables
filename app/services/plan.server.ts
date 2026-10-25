@@ -38,6 +38,7 @@ import {
   mapSubscriptionToPlanKey,
   planHasFeature,
   planLimit,
+  resolvePlanKey,
 } from "~/lib/entitlements";
 import { adminGraphQL } from "./drain/admin-client.server";
 import type {
@@ -166,7 +167,7 @@ async function getCachedPlan(
 ): Promise<CachedPlanRow | null> {
   const [row] = await sql<
     {
-      plan_key: PlanKey | null;
+      plan_key: string | null;
       subscription_id: string | null;
       subscription_name: string | null;
       is_test: boolean | null;
@@ -195,7 +196,7 @@ async function getCachedPlan(
   const isStale = cacheAge > CACHE_TTL_MS;
 
   return {
-    planKey: row.plan_key,
+    planKey: resolvePlanKey(row.plan_key),
     subscriptionId: row.subscription_id,
     subscriptionName: row.subscription_name,
     isTest: row.is_test ?? false,
