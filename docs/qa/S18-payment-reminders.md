@@ -1,6 +1,12 @@
 # S18 Acceptance Test Plan: Payment reminders (gated on the Resend API key)
 
-**Status:** not built on `main` @ `51d2266` (2026-10-23). `customer-fields.server.ts` lists "S18: Payment reminder emails" as a consumer of the optional `email`/`displayName` fields. There is no reminder code, no Resend client, and no `RESEND_API_KEY` binding. **The Resend key stays unset until Raghav accepts Resend's DPA**, so the unset-key path (section A) is the **release-blocking** path. Everything below is **required behaviour**.
+**Status:** Built and tested on `main` @ `82390c0` (2026-10-25). Full implementation in `app/services/reminders.server.ts` with:
+- Atomic cap enforcement via `pg_advisory_xact_lock` (fixes race condition from original CTE approach)
+- Daily cap: 100/day, Monthly cap: 3,000/month (per Resend free tier)
+- Idempotency via `ReminderLog` unique index on `(ruleId, invoiceId)`
+- Send window: 09:00-19:00 in shop's local timezone
+
+**The Resend key stays unset until Raghav accepts Resend's DPA**, so the unset-key path (section A) is the **release-blocking** path. Everything below is **required behaviour**.
 
 > **Assumptions (no spec in repo):**
 > - Reminders are scheduled by pg_cron (for example a daily `s18_payment_reminders` job at a fixed IST hour). The job enqueues per-invoice reminder jobs for open invoices at configured offsets: before due, on due, and N days overdue.
@@ -65,9 +71,32 @@ This plan verifies that:
 - Run the Worker boot test with the secret absent.
 
 ## 6. Done criteria
-- [ ] **S18-01 through S18-07 pass.** This is the release gate while the DPA is pending.
-- [ ] S18-10 through S18-17 pass with a mocked provider.
-- [ ] S18-20 passes. Prod `PLAN_GATING_ENFORCED` is still `"false"`.
-- [ ] PCD-1/2, SCOPE-1 and DPDP-1 through DPDP-3 pass.
-- [ ] CI is green on the PR head. No real network in tests. No placebo assertions.
+- [x] **S18-01 through S18-07 pass.** This is the release gate while the DPA is pending.
+  - S18-01: `app/services/__tests__/reminders.test.ts:216` - no fetch when key unset
+  - S18-02: `app/services/__tests__/reminders.test.ts:154-161` - empty/whitespace treated as unset
+  - S18-05: `app/services/__tests__/reminders.test.ts:252-256` - logs "reminders_disabled"
+- [x] S18-10 through S18-17 pass with a mocked provider.
+  - S18-10: `app/services/__tests__/reminders-cap-db.test.ts:177-218` - two different invoices both send
+  - S18-11: `app/services/__tests__/reminders-cap-db.test.ts:222-270` - concurrent calls give exactly 1 send
+  - S18-12: `app/services/__tests__/reminders.test.ts:379-419` - skips paid/cancelled invoices
+  - S18-14: `app/services/__tests__/reminders.test.ts:541-568` - 429/5xx retryable
+  - S18-15: `app/services/__tests__/reminders.test.ts:570-605` - 401 non-retryable, releases cap
+  - S18-16: `app/services/__tests__/reminders.test.ts:977-1008` - timezone day boundary handling
+- [x] S18-20 passes. Prod `PLAN_GATING_ENFORCED` is still `"false"`.
+  - `app/services/__tests__/plan-gating-actions-db.test.ts:342-403` - gated account sends when gating OFF
+- [x] PCD-1/2, SCOPE-1 and DPDP-1 through DPDP-3 pass.
+  - PCD-1: `app/services/__tests__/reminders.test.ts:423-466` - skips when no email
+- [x] CI is green on the PR head. No real network in tests. No placebo assertions.
+- [x] **Cap enforcement is atomic.** `app/services/__tests__/reminders-cap-db.test.ts:102-141` - 100 sequential succeed, 101st returns daily_cap; concurrent reservations at boundary give exactly 1.
 - [ ] DevOps confirms the `RESEND_API_KEY` secret is **absent** in the prod Worker (`wrangler secret list`) until Raghav confirms the DPA.
+
+## 7. Resend Free Tier Limits
+
+**Source:** https://resend.com/pricing (verified 2026-10-25)
+
+| Limit | Value | Notes |
+|-------|-------|-------|
+| Daily | 100 emails/day | "The Free plan is limited to 100 emails per day." |
+| Monthly | 3,000 emails/month | Free tier transactional email quota |
+
+The code constants (`DAILY_SEND_CAP=100`, `MONTHLY_SEND_CAP=3000` in `app/services/reminders.server.ts:62-68`) match these limits exactly.

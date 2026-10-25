@@ -12,9 +12,9 @@
  * - Shop timezone for day math (from Shop.timezone, S7)
  * - Send window (09:00-19:00 in shop's local time)
  *
- * Resend Free Tier Limits (https://resend.com/pricing):
- *   - 100 emails/day per account (GLOBAL)
- *   - 3,000 emails/month per account (GLOBAL)
+ * Resend Free Tier Limits (verified at https://resend.com/pricing on 2026-10-25):
+ *   - 100 emails/day per account (GLOBAL) - "The Free plan is limited to 100 emails per day."
+ *   - 3,000 emails/month per account (GLOBAL) - "Free: 3,000 [emails/mo]"
  *
  * Cap behavior:
  *   - Caps are enforced GLOBALLY across all shops sharing the same Resend API key
@@ -330,12 +330,30 @@ export async function getGlobalSendCounts(
 }
 
 /**
+ * Advisory lock key for global send cap reservation.
+ *
+ * This is a GLOBAL lock (not per-shop) because Resend limits are per-account,
+ * not per-shop. All shops sharing the same RESEND_API_KEY share this cap.
+ *
+ * UNIQUENESS CHECK (2026-10-25): Searched app/, prisma/, supabase/, scripts/ for
+ * pg_advisory and hashtext. Existing locks:
+ * - hashtext(shop) for offline-token refresh (shop-scoped)
+ * - hashtext('s18_rules_' || shopId) for ensureDefaultReminderRules (shop-scoped)
+ *
+ * This constant 's18_global_send_cap' is distinct from all existing lock keys.
+ */
+const GLOBAL_SEND_CAP_LOCK_KEY = "s18_global_send_cap";
+
+/**
  * Atomically reserve a send slot (increment count) with cap enforcement.
  * Returns { reserved: true, daily, monthly } if reservation succeeded.
  * Returns { reserved: false, reason } if caps would be exceeded.
  *
- * Uses a single atomic INSERT ... ON CONFLICT DO UPDATE with WHERE clause
- * that checks BOTH daily AND monthly caps. No row returned = cap reached.
+ * Uses pg_advisory_xact_lock inside a transaction to serialize concurrent
+ * reservations. The lock and all reads/writes happen on the same connection,
+ * ensuring atomicity. This fixes the race condition in the previous CTE-based
+ * approach where the INSERT ... SELECT would fail to fire ON CONFLICT DO UPDATE
+ * once a row existed for today.
  *
  * The monthly cap is checked by computing SUM(daily_count) for the month
  * in the same transaction, ensuring consistency with daily rollover.
@@ -350,53 +368,54 @@ export async function reserveGlobalSendSlot(
   const dateStr = date.toISOString().split("T")[0];
   const monthStr = dateStr.substring(0, 7); // YYYY-MM
 
-  // Single atomic query:
-  // 1. Compute current monthly total
-  // 2. Insert new row if none exists (with cap check via WHERE)
-  // 3. Update existing row if under cap (with cap check via WHERE)
-  // 4. Return nothing if either cap would be exceeded
-  const result = await sql<{ dailyCount: number; monthlyTotal: number }[]>`
-    WITH monthly_sum AS (
-      SELECT COALESCE(SUM(daily_count), 0)::INT AS total
-      FROM s18_global_sends
-      WHERE send_key = ${GLOBAL_SEND_KEY} AND send_month = ${monthStr}
-    ),
-    current_row AS (
-      SELECT daily_count FROM s18_global_sends
-      WHERE send_key = ${GLOBAL_SEND_KEY} AND send_date = ${dateStr}::DATE
-    ),
-    upserted AS (
+  return sql.begin(async (tx) => {
+    // Acquire advisory lock for the duration of this transaction.
+    // This serializes all concurrent reservations across all shops.
+    await tx`SELECT pg_advisory_xact_lock(hashtext(${GLOBAL_SEND_CAP_LOCK_KEY}))`;
+
+    // Read current counts for today and the month
+    const [counts] = await tx<{ dailyCount: number; monthlyTotal: number }[]>`
+      SELECT 
+        COALESCE((
+          SELECT daily_count FROM s18_global_sends 
+          WHERE send_key = ${GLOBAL_SEND_KEY} AND send_date = ${dateStr}::DATE
+        ), 0) AS "dailyCount",
+        COALESCE((
+          SELECT SUM(daily_count)::INT FROM s18_global_sends 
+          WHERE send_key = ${GLOBAL_SEND_KEY} AND send_month = ${monthStr}
+        ), 0) AS "monthlyTotal"
+    `;
+
+    const currentDaily = counts?.dailyCount ?? 0;
+    const currentMonthly = counts?.monthlyTotal ?? 0;
+
+    // Check monthly cap first (more restrictive over time)
+    if (currentMonthly >= MONTHLY_SEND_CAP) {
+      return { reserved: false, reason: "monthly_cap" as const };
+    }
+
+    // Check daily cap
+    if (currentDaily >= DAILY_SEND_CAP) {
+      return { reserved: false, reason: "daily_cap" as const };
+    }
+
+    // Reserve the slot by incrementing (or inserting) the row
+    const [result] = await tx<{ dailyCount: number }[]>`
       INSERT INTO s18_global_sends (send_key, send_date, send_month, daily_count, monthly_count, updated_at)
-      SELECT ${GLOBAL_SEND_KEY}, ${dateStr}::DATE, ${monthStr}, 1, 0, NOW()
-      WHERE NOT EXISTS (SELECT 1 FROM current_row)
-        AND (SELECT total FROM monthly_sum) < ${MONTHLY_SEND_CAP}
+      VALUES (${GLOBAL_SEND_KEY}, ${dateStr}::DATE, ${monthStr}, 1, 0, NOW())
       ON CONFLICT (send_key, send_date) DO UPDATE
       SET 
         daily_count = s18_global_sends.daily_count + 1,
         updated_at = NOW()
-      WHERE s18_global_sends.daily_count < ${DAILY_SEND_CAP}
-        AND (SELECT total FROM monthly_sum) < ${MONTHLY_SEND_CAP}
-      RETURNING daily_count
-    )
-    SELECT 
-      COALESCE((SELECT daily_count FROM upserted), 0) AS "dailyCount",
-      (SELECT total FROM monthly_sum) + CASE WHEN EXISTS (SELECT 1 FROM upserted) THEN 1 ELSE 0 END AS "monthlyTotal"
-  `;
+      RETURNING daily_count AS "dailyCount"
+    `;
 
-  if (!result.length || result[0].dailyCount === 0) {
-    // No reservation made - check which cap was hit
-    const counts = await getGlobalSendCounts(sql, date);
-    if (counts.monthly >= MONTHLY_SEND_CAP) {
-      return { reserved: false, reason: "monthly_cap" };
-    }
-    return { reserved: false, reason: "daily_cap" };
-  }
-
-  return {
-    reserved: true,
-    daily: result[0].dailyCount,
-    monthly: result[0].monthlyTotal,
-  };
+    return {
+      reserved: true,
+      daily: result.dailyCount,
+      monthly: currentMonthly + 1,
+    };
+  });
 }
 
 /**
