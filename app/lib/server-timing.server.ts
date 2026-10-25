@@ -21,9 +21,11 @@
  * @module
  */
 
+import { safeLog } from "./log.server";
+
 /**
- * Allowed phase codes for Server-Timing.
- * These are the ONLY phase names that can appear in headers or logs.
+ * Allowed phase codes for Server-Timing header.
+ * These are the ONLY phase names that can appear in headers.
  */
 const ALLOWED_PHASES = new Set([
   "auth_layout",
@@ -36,6 +38,28 @@ const ALLOWED_PHASES = new Set([
   "ledger_count",
   "loader_total",
 ]);
+
+/**
+ * Stage codes for logging (includes _cold variants).
+ * The `stage` key is in the safeLog allowlist.
+ */
+export type PhaseStage =
+  | "auth_layout"
+  | "auth_layout_cold"
+  | "auth_index"
+  | "auth_index_cold"
+  | "shop_lookup"
+  | "shop_lookup_cold"
+  | "onboarding_checks"
+  | "onboarding_checks_cold"
+  | "plan_resolve"
+  | "plan_resolve_cold"
+  | "ledger_rows"
+  | "ledger_rows_cold"
+  | "ledger_count"
+  | "ledger_count_cold"
+  | "loader_total"
+  | "loader_total_cold";
 
 /**
  * Track cold start (first request in this isolate).
@@ -183,6 +207,7 @@ export class ServerTiming {
   /**
    * Build timing data for logging.
    * Returns only phase codes with durationMs numbers.
+   * @deprecated Use logAllPhases() instead for per-phase logging.
    */
   toLogFields(): Record<string, number | boolean> {
     try {
@@ -197,6 +222,32 @@ export class ServerTiming {
       return fields;
     } catch {
       return { cold: this.cold };
+    }
+  }
+
+  /**
+   * Log all completed phases with safeLog.
+   * Emits one app_home_timing line per phase with:
+   * { route: 'app_home', stage: <phase>_cold | <phase>, durationMs }
+   *
+   * The cold flag is encoded in the stage name because `cold` is not
+   * in the safeLog allowlist, but `stage` is.
+   */
+  logAllPhases(): void {
+    try {
+      for (const [phase, entry] of this.phases) {
+        if (entry.end !== undefined) {
+          const stage = this.cold ? `${phase}_cold` : phase;
+          const durationMs = Math.round(entry.end - entry.start);
+          safeLog("info", "app_home_timing", {
+            route: "app_home",
+            stage,
+            durationMs,
+          });
+        }
+      }
+    } catch {
+      // Timing must never throw
     }
   }
 }

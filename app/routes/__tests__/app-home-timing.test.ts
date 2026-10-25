@@ -159,8 +159,18 @@ describe("app home timing instrumentation", () => {
     });
   });
 
-  describe("app_home_timing log line", () => {
+  describe("app_home_timing log lines (one per phase)", () => {
     let consoleLogSpy: ReturnType<typeof vi.spyOn>;
+
+    const EXPECTED_PHASES = [
+      "auth_index",
+      "shop_lookup",
+      "onboarding_checks",
+      "plan_resolve",
+      "ledger_rows",
+      "ledger_count",
+      "loader_total",
+    ];
 
     beforeEach(() => {
       consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -170,32 +180,64 @@ describe("app home timing instrumentation", () => {
       consoleLogSpy.mockRestore();
     });
 
-    it("logs app_home_timing with allowed fields only", async () => {
+    it("emits one log line per phase with exact fields: event, route, stage, durationMs", async () => {
       const { loader } = await import("../app._index");
       await loader(createLoaderArgs());
 
       const allLogs = consoleLogSpy.mock.calls
         .map((c: unknown[]) => c[0])
-        .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"));
+        .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"))
+        .map((logStr: unknown) => JSON.parse(logStr as string));
 
-      expect(allLogs.length).toBeGreaterThanOrEqual(1);
+      // Should have at least one log per timed phase
+      expect(allLogs.length).toBeGreaterThanOrEqual(EXPECTED_PHASES.length);
 
-      for (const logStr of allLogs) {
-        const log = JSON.parse(logStr as string);
-
+      for (const log of allLogs) {
         // Check event name
         expect(log.event).toBe("app_home_timing");
 
-        // Check allowed fields
+        // Check allowed fields: exactly event, route, stage, durationMs
         expect(log.route).toBe("app_home");
-        expect(typeof log.cold).toBe("boolean");
+        expect(typeof log.stage).toBe("string");
         expect(typeof log.durationMs).toBe("number");
 
-        // Verify only allowed keys are present
-        const allowedKeys = ["event", "route", "cold", "durationMs"];
-        for (const key of Object.keys(log)) {
-          expect(allowedKeys).toContain(key);
-        }
+        // Verify ONLY these exact keys are present
+        const allowedKeys = ["event", "route", "stage", "durationMs"];
+        const actualKeys = Object.keys(log);
+        expect(actualKeys.sort()).toEqual(allowedKeys.sort());
+
+        // cold field must NOT be present (encoded in stage name)
+        expect(log.cold).toBeUndefined();
+
+        // No domain, id, or other fields
+        expect(log.domain).toBeUndefined();
+        expect(log.id).toBeUndefined();
+        expect(log.shopId).toBeUndefined();
+      }
+    });
+
+    it("stage names are from allowed phase codes (with optional _cold suffix)", async () => {
+      const { loader } = await import("../app._index");
+      await loader(createLoaderArgs());
+
+      const allLogs = consoleLogSpy.mock.calls
+        .map((c: unknown[]) => c[0])
+        .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"))
+        .map((logStr: unknown) => JSON.parse(logStr as string));
+
+      const validStages = [
+        "auth_layout", "auth_layout_cold",
+        "auth_index", "auth_index_cold",
+        "shop_lookup", "shop_lookup_cold",
+        "onboarding_checks", "onboarding_checks_cold",
+        "plan_resolve", "plan_resolve_cold",
+        "ledger_rows", "ledger_rows_cold",
+        "ledger_count", "ledger_count_cold",
+        "loader_total", "loader_total_cold",
+      ];
+
+      for (const log of allLogs) {
+        expect(validStages).toContain(log.stage);
       }
     });
 
@@ -228,35 +270,54 @@ describe("app home timing instrumentation", () => {
       );
 
       // safeLog at "info" level uses console.log
-      expect(timingLogs.length).toBeGreaterThanOrEqual(1);
+      expect(timingLogs.length).toBeGreaterThanOrEqual(EXPECTED_PHASES.length);
 
       consoleInfoSpy.mockRestore();
     });
 
-    it("cold flag reflects isolate state", async () => {
+    it("cold flag encoded in stage name reflects isolate state", async () => {
       // First request should be cold
       const { loader } = await import("../app._index");
       await loader(createLoaderArgs());
 
-      let timingLog = consoleLogSpy.mock.calls
+      let allLogs = consoleLogSpy.mock.calls
         .map((c: unknown[]) => c[0])
-        .find((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"));
+        .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"))
+        .map((logStr: unknown) => JSON.parse(logStr as string));
 
-      expect(timingLog).toBeDefined();
-      let parsed = JSON.parse(timingLog as string);
-      expect(parsed.cold).toBe(true);
+      // All first-request stages should have _cold suffix
+      for (const log of allLogs) {
+        expect(log.stage).toMatch(/_cold$/);
+      }
 
       // Clear and make second request
       consoleLogSpy.mockClear();
       await loader(createLoaderArgs());
 
-      timingLog = consoleLogSpy.mock.calls
+      allLogs = consoleLogSpy.mock.calls
         .map((c: unknown[]) => c[0])
-        .find((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"));
+        .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"))
+        .map((logStr: unknown) => JSON.parse(logStr as string));
 
-      expect(timingLog).toBeDefined();
-      parsed = JSON.parse(timingLog as string);
-      expect(parsed.cold).toBe(false);
+      // Second request stages should NOT have _cold suffix
+      for (const log of allLogs) {
+        expect(log.stage).not.toMatch(/_cold$/);
+      }
+    });
+
+    it("emits log for loader_total phase", async () => {
+      const { loader } = await import("../app._index");
+      await loader(createLoaderArgs());
+
+      const allLogs = consoleLogSpy.mock.calls
+        .map((c: unknown[]) => c[0])
+        .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"))
+        .map((logStr: unknown) => JSON.parse(logStr as string));
+
+      const loaderTotalLogs = allLogs.filter(
+        (log: { stage: string }) => log.stage === "loader_total_cold" || log.stage === "loader_total"
+      );
+      expect(loaderTotalLogs.length).toBe(1);
     });
   });
 

@@ -378,16 +378,11 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const storeHandle = shopDomain.replace(".myshopify.com", "");
   const gatingEnforced = isGatingEnforced();
 
-  // End loader_total timing and log
+  // End loader_total timing and log all phases
   timing.endPhase("loader_total");
 
-  // Log timing with only allowlisted fields
-  const loaderTotalMs = timing.getDuration("loader_total");
-  safeLog("info", "app_home_timing", {
-    route: "app_home",
-    cold: timing.isCold(),
-    durationMs: loaderTotalMs !== undefined ? Math.round(loaderTotalMs) : 0,
-  });
+  // Log timing: one line per phase with { route, stage, durationMs }
+  timing.logAllPhases();
 
   // Mark request served for cold start tracking
   markRequestServed();

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import {
   ServerTiming,
   isValidServerTimingHeader,
@@ -233,6 +233,111 @@ describe("server-timing.server", () => {
     it("getDuration returns undefined for phases not started", () => {
       const timing = new ServerTiming();
       expect(timing.getDuration("auth_layout")).toBeUndefined();
+    });
+  });
+
+  describe("logAllPhases", () => {
+    let consoleLogSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      _resetIsolateStateForTesting();
+      consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      consoleLogSpy.mockRestore();
+    });
+
+    it("emits one safeLog line per completed phase", async () => {
+      const timing = new ServerTiming();
+      await timing.time("auth_layout", async () => {});
+      await timing.time("shop_lookup", async () => {});
+      await timing.time("loader_total", async () => {});
+
+      timing.logAllPhases();
+
+      const logs = consoleLogSpy.mock.calls
+        .map((c: unknown[]) => c[0])
+        .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"))
+        .map((logStr: unknown) => JSON.parse(logStr as string));
+
+      expect(logs.length).toBe(3);
+
+      const stages = logs.map((l: { stage: string }) => l.stage);
+      expect(stages).toContain("auth_layout_cold");
+      expect(stages).toContain("shop_lookup_cold");
+      expect(stages).toContain("loader_total_cold");
+    });
+
+    it("each log line has exactly event, route, stage, durationMs", async () => {
+      const timing = new ServerTiming();
+      await timing.time("auth_layout", async () => {});
+
+      timing.logAllPhases();
+
+      const logs = consoleLogSpy.mock.calls
+        .map((c: unknown[]) => c[0])
+        .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"))
+        .map((logStr: unknown) => JSON.parse(logStr as string));
+
+      expect(logs.length).toBe(1);
+      const log = logs[0];
+
+      expect(Object.keys(log).sort()).toEqual(["durationMs", "event", "route", "stage"]);
+      expect(log.event).toBe("app_home_timing");
+      expect(log.route).toBe("app_home");
+      expect(log.stage).toBe("auth_layout_cold");
+      expect(typeof log.durationMs).toBe("number");
+    });
+
+    it("cold flag encoded in stage name (cold request)", async () => {
+      const timing = new ServerTiming();
+      await timing.time("loader_total", async () => {});
+
+      timing.logAllPhases();
+
+      const logs = consoleLogSpy.mock.calls
+        .map((c: unknown[]) => c[0])
+        .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"))
+        .map((logStr: unknown) => JSON.parse(logStr as string));
+
+      expect(logs[0].stage).toBe("loader_total_cold");
+    });
+
+    it("cold flag NOT in stage name for warm request", async () => {
+      markRequestServed(); // Make it warm
+
+      const timing = new ServerTiming();
+      await timing.time("loader_total", async () => {});
+
+      timing.logAllPhases();
+
+      const logs = consoleLogSpy.mock.calls
+        .map((c: unknown[]) => c[0])
+        .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"))
+        .map((logStr: unknown) => JSON.parse(logStr as string));
+
+      expect(logs[0].stage).toBe("loader_total");
+      expect(logs[0].stage).not.toMatch(/_cold$/);
+    });
+
+    it("does not emit log for phases not ended", async () => {
+      const timing = new ServerTiming();
+      timing.startPhase("auth_layout");
+      // Don't end it
+
+      timing.logAllPhases();
+
+      const logs = consoleLogSpy.mock.calls
+        .map((c: unknown[]) => c[0])
+        .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"));
+
+      expect(logs.length).toBe(0);
+    });
+
+    it("never throws", () => {
+      const timing = new ServerTiming();
+      expect(() => timing.logAllPhases()).not.toThrow();
     });
   });
 });
