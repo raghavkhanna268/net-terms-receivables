@@ -27,11 +27,44 @@ vi.mock("~/services/drain/admin-client.server", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/services/drain/admin-client.server")>();
   return {
     ...actual,
-    adminGraphQL: vi.fn().mockResolvedValue({
-      success: true,
-      data: { node: null },
-      retryable: false,
-    }),
+    adminGraphQL: vi.fn().mockImplementation(
+      async (_shop: string, query: string, variables?: Record<string, unknown>) => {
+        if (query.includes("OrderById") && variables?.id) {
+          return {
+            success: true,
+            data: {
+              node: {
+                id: variables.id as string,
+                name: "#TEST-1001",
+                createdAt: new Date().toISOString(),
+                processedAt: null,
+                cancelledAt: null,
+                closedAt: null,
+                displayFinancialStatus: "PENDING",
+                totalPriceSet: {
+                  shopMoney: { amount: "100.00", currencyCode: "USD" },
+                },
+                totalOutstandingSet: {
+                  shopMoney: { amount: "100.00", currencyCode: "USD" },
+                },
+                paymentTerms: {
+                  id: "gid://shopify/PaymentTerms/test-123",
+                  paymentTermsName: "Net 30",
+                  paymentTermsType: "NET",
+                  dueInDays: 30,
+                },
+              },
+            },
+            retryable: false,
+          };
+        }
+        return {
+          success: true,
+          data: { node: null },
+          retryable: false,
+        };
+      }
+    ),
   };
 });
 
