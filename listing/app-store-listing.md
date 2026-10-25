@@ -17,8 +17,8 @@ Track B2B net-terms invoices, manage credit limits and holds, match Indian bank 
 
 ## App Details
 
-<!-- 488 characters -->
-Built for Indian merchants on INR stores. Track outstanding invoices, enforce credit limits, and reconcile bank payments — without spreadsheets. Sync buyer accounts from Shopify B2B Companies or tagged Customers. Track open invoices by aging bucket. Set credit limits and manual holds per buyer. Block checkout or hide payment methods for held accounts. Import Indian bank statements and confirm matches to mark orders paid. Send payment reminders before and after due dates.
+<!-- 482 characters -->
+Built for Indian merchants. Requires INR as the store currency. Track invoices, enforce credit limits, and reconcile bank payments — without spreadsheets. Sync buyer accounts from Shopify B2B Companies or tagged Customers. Track invoices by aging bucket. Set credit limits and manual holds per buyer. Block checkout or hide payment methods for held accounts. Import Indian bank statements and confirm matches to mark orders paid. Send payment reminders before and after due dates.
 
 **This app does not lend money, provide financing, or purchase/factor receivables.** It helps merchants track payment terms they extend themselves (App Store requirement 1.1.16).
 
@@ -218,7 +218,7 @@ The app accesses **Level 1 + Name + Email** protected customer fields.
 - **Shopify Plan:** Basic, Grow, Advanced, or Shopify Plus
 - **B2B (optional):** B2B features require B2B on the store (not available on Starter or Retail plans)
 - **Region:** Optimized for Indian merchants (bank statement formats for HDFC, ICICI, SBI, Axis; INR currency; IST timezone)
-- **Currency:** v1 supports stores with INR as the store currency only
+- **Currency:** Requires INR as the store currency (v1)
 
 ---
 
