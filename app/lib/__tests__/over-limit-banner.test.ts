@@ -65,12 +65,11 @@ describe("buildOverLimitBannerState", () => {
       expect(state.bodyText).toContain("totals include all accounts");
     });
 
-    it("lists limited actions: reminders, credit-limit edits, account-detail edits, bulk statement import", () => {
+    it("lists limited actions: reminders, credit-limit edits, account-detail edits", () => {
       const state = buildOverLimitBannerState(1, true);
       expect(state.bodyText).toContain("reminders");
       expect(state.bodyText).toContain("credit-limit edits");
       expect(state.bodyText).toContain("account-detail edits");
-      expect(state.bodyText).toContain("bulk statement import");
     });
 
     it("states matching, confirming, mark-paid are never gated", () => {
@@ -148,9 +147,9 @@ describe("buildAccountOverLimitBannerState", () => {
   });
 
   describe("banner heading", () => {
-    it("uses 'This account is over your plan limit'", () => {
+    it("uses correct heading for gated account", () => {
       const state = buildAccountOverLimitBannerState(true, true);
-      expect(state.heading).toBe("This account is over your plan limit");
+      expect(state.heading).toBe("This account was added after you reached your plan limit");
     });
   });
 
@@ -165,7 +164,6 @@ describe("buildAccountOverLimitBannerState", () => {
       expect(state.bodyText).toContain("reminders");
       expect(state.bodyText).toContain("credit-limit");
       expect(state.bodyText).toContain("account-detail edits");
-      expect(state.bodyText).toContain("bulk statement import");
     });
 
     it("states matching, confirming, mark-paid are never gated", () => {

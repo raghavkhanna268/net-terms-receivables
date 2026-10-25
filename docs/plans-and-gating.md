@@ -1,25 +1,23 @@
 # Plans and Gating (S21)
 
-This document describes the plan-based feature gating system implemented in S21.
+This document describes the plan-based account gating system implemented in S21.
 
 ## Overview
 
-The app uses Shopify App Pricing (managed pricing) where plans are configured in the Partner Dashboard, not in code. This module maps subscription names to feature limits and enforces server-side gating.
+The app uses Shopify App Pricing (managed pricing) where plans are configured in the Partner Dashboard, not in code. This module maps subscription names to account limits and enforces server-side gating.
 
-**IMPORTANT**: The limits documented here are the **pricing HYPOTHESIS** from the tracker and are **NOT final**. Raghav decides final tier limits and pricing via the Partner Dashboard.
+**Current State**: No feature gates. All features are available on every plan. The only enforcement is on the number of buyer accounts (companies) per plan. Bank statement imports are unlimited on all plans.
 
-## Plan Tiers (Hypothesis)
+## Plan Tiers
 
 | Plan | Companies | Imports/Month | Features |
 |------|-----------|---------------|----------|
-| **Free** | 3 | 1 | Aging dashboard, Matching |
-| **Starter** | 25 | Unlimited | + Reminders |
-| **Growth** | 100 | Unlimited | + PDF statements, Payer memory |
-| **Scale** | Unlimited | Unlimited | + Audit export |
+| **none** | 0 | Unlimited | All features |
+| **starter** | 25 | Unlimited | All features |
+| **growth** | 100 | Unlimited | All features |
+| **unlimited** | Unlimited | Unlimited | All features |
 
-**Note on credit holds**: The `credit_holds` feature key exists in `entitlements.ts`, but nothing in the codebase calls `checkFeature()` or `hasFeature()` to enforce it. Credit holds, hold recomputation, the daily sweep, and the checkout Validation Function run on **all plans**. The tier table above reflects features that are (or will be) actually gated.
-
-**Note on matching**: Payment matching (suggestions, confirm-match, and mark-paid) is available on every plan and is never gated.
+The only difference between plans is the number of buyer accounts (companies) allowed.
 
 ## Partner Dashboard Configuration
 
@@ -27,7 +25,7 @@ Plans must be configured in the Shopify Partner Dashboard with these exact names
 
 - **Free** - The default plan for shops without an active subscription
 - **Starter** - Entry-level paid plan
-- **Growth** - Mid-tier plan with PDF statements
+- **Growth** - Mid-tier plan
 - **Scale** - Enterprise plan with unlimited accounts
 
 The app matches subscription names case-insensitively, so "Growth", "growth", "GROWTH" all map to the growth plan.
@@ -36,25 +34,25 @@ The app matches subscription names case-insensitively, so "Growth", "growth", "G
 
 ### Configuration
 
-- `app/lib/entitlements.ts` - Plan definitions, feature keys, limit helpers
+- `app/lib/entitlements.ts` - Plan definitions, limit helpers
 - `app/services/plan.server.ts` - Plan resolution from Shopify Admin API with caching
-- `app/services/gating.server.ts` - Limit enforcement and feature checks
+- `app/services/gating.server.ts` - Account limit enforcement
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PLAN_GATING_ENFORCED` | `"false"` | Set to `"1"` or `"true"` to enable limit enforcement |
+| `PLAN_GATING_ENFORCED` | `"false"` | Set to `"1"` or `"true"` to enable account limit enforcement |
 | `APP_HANDLE` | `"net-terms-receivables-1"` | App handle for upgrade URL (read from `APP_HANDLE` env var; must match Partner Dashboard) |
 
 When `PLAN_GATING_ENFORCED` is OFF (default):
 - Plan resolution works (cached from Shopify)
 - Plan banner and usage display work
-- Limits are NOT enforced (no gating, no blocking)
+- Limits are NOT enforced (no gating)
 
 When `PLAN_GATING_ENFORCED` is ON:
 - Over-limit accounts are gated (`gated_at` set)
-- Gated accounts are excluded from limit count and enforcement
+- Gated accounts are excluded from limit count
 - On upgrade, gated accounts are reactivated (oldest first)
 
 ### Cache Strategy
@@ -132,14 +130,19 @@ When `PLAN_GATING_ENFORCED` is ON and a new BuyerAccount would exceed the limit:
 
 4. **Gated accounts are blocked from value-add actions only:**
    - Payment reminders (skipped at send time; skipped at enqueue time via `s18_enqueue_reminders`)
-   - Credit-limit edits (returns "Cannot edit gated accounts")
+   - Credit-limit edits (returns error message about account being added after plan limit)
    - Account detail edits (UI shows read-only state)
-   - Bulk statement import (shop-level monthly limit via `enforceImportLimit`, not a per-account restriction)
    - Hold-only updates remain allowed (holds work on all plans)
 
 5. On plan upgrade, gated accounts are reactivated:
    - Up to the new limit
    - Oldest accounts first (by `createdAt`)
+
+### Bank Statement Imports
+
+Bank statement imports are **unlimited on all plans**. There is no import limit enforcement.
+Even shops with gated accounts can import statements freely. Imports help with payment
+matching which still works for gated accounts.
 
 ### Downgrade Behavior
 
@@ -169,45 +172,9 @@ slightly overshoot the limit under concurrent webhooks. This is acceptable becau
 If exact enforcement is needed in the future, use `SELECT ... FOR UPDATE` on the
 Shop row, but this is unlikely to be necessary for the current use case.
 
-### Import Limit
-
-The import limit enforcement is fully implemented in `gating.server.ts`:
-
-- `checkImportLimit(sql, shopId)` - Returns whether an import is allowed
-- `enforceImportLimit(sql, shopId)` - Throws `UpgradeRequiredError` if limit exceeded
-
-**Already wired**: The import route (`app/routes/app.imports.tsx`) calls `enforceImportLimit()`
-before creating a new `BankImport` record:
-
-```typescript
-// In app/routes/app.imports.tsx action():
-import { enforceImportLimit, UpgradeRequiredError } from "~/services/gating.server";
-
-await enforceImportLimit(sql, shopId);
-// Creates BankImport and Payments...
-```
-
-When `PLAN_GATING_ENFORCED` is OFF, `enforceImportLimit()` is a no-op and always allows.
-
-**Note**: Unlike company limits which gate accounts (persist but mark as inactive),
-import limits simply block the operation since there's no persistent state to preserve.
-
-**Important**: Import limits are a PLAN FEATURE, not a gated-account restriction. Even
-shops with gated accounts can still import (up to their plan limit). Imports help with
-payment matching which still works for gated accounts.
-
-### Feature Checks
-
-For features not yet implemented, the feature key can be checked at runtime:
-
-```typescript
-// Check if shop has a feature (example: audit_export)
-const canUseAuditExport = await checkFeature(sql, shopId, "audit_export");
-```
-
 ## Credit Holds
 
-**Credit holds work on all plans.** The `credit_holds` feature key exists in `entitlements.ts`, but no production code calls `checkFeature()` or `hasFeature()` to enforce it. Hold recomputation, the daily sweep (`enqueue_credit_status_recomputes`), and the checkout Validation Function run unconditionally regardless of plan.
+**Credit holds work on all plans.** Hold recomputation, the daily sweep (`enqueue_credit_status_recomputes`), and the checkout Validation Function run unconditionally regardless of plan.
 
 ## Bulk Ingestion
 
@@ -249,7 +216,7 @@ Items 1-5 from issue #57 are done on main; item 6 is deferred (acceptable). Stat
 | 1 | Background plan refresh wiring | Done on main | `workers/app.ts:44` passes `waitUntil` via ALS `requestContext.run()`; `plan.server.ts:319` uses `getRequestWaitUntil()`. PRs #67, #149. Tests: `plan.test.ts`, `als-request-isolation.test.ts`. |
 | 2 | Gated accounts exclusion from queries | Revised on main | Product decision (#127): gated accounts stay VISIBLE in ledger/UI, holds, aging. Only gated ACTIONS blocked. Tests: `gated-account-db.test.ts`, `plan-gating-actions-db.test.ts`. |
 | 3 | S10b bulk/reconcile gating | Done on main | `bulk-jsonl-processor.server.ts:420` calls `bulkUpsertBuyerAccounts()`; that function at `company-location.server.ts:229` calls `checkCompanyLimit()` per-batch. PR #67. Tests: `company-location.test.ts`. |
-| 4 | Import limit wiring | Done on main | `app/routes/app.imports.tsx:355` calls `enforceImportLimit()`. PR #69. Tests: `gating.test.ts` ("enforceImportLimit" tests), `plan-gating-actions-db.test.ts` ("checkImportLimit" tests). |
+| 4 | Import limit wiring | Removed (T5) | Import limits removed; imports unlimited on all plans. |
 | 5 | Migration hygiene (index drift) | Done on main | Migration `20261025000001_s21_fix_gated_at_index` creates regular index; `schema.prisma:286` uses `@@index([gatedAt], map: "BuyerAccount_gated_at_idx")`. No drift (`prisma migrate diff` shows "No difference detected"). PR #67. |
 | 6 | Count-then-insert concurrency | Deferred (acceptable) | See "Concurrent webhook note" in Company Limit section above. Reason: Slight overshoot is acceptable; gated accounts don't consume functional capacity; proper locking would add latency to every webhook. |
 
@@ -302,7 +269,6 @@ Tests proving over-limit (gated) accounts stay visible and only gated actions ar
 | Reminders (catch-up) | `s18-enqueue-skip-gated-db.test.ts` | "flag false sends to gated account on catch-up path" |
 | Credit-limit edit | `plan-gating-actions-db.test.ts` | "allows credit-limit edit on gated account when gating OFF" |
 | Company limit | `gating.test.ts` | "checkCompanyLimit with gating OFF" (allows all) |
-| Import limit | `gating.test.ts` | "checkImportLimit with gating OFF" (allows all) |
 | Active fragment | `gating.test.ts` | "returns TRUE fragment when gating is OFF" |
 | isAccountActive | `gating.test.ts` | "returns true for all accounts when gating is OFF" |
 | Bulk gating | `company-location.test.ts` | "does not gate new accounts when PLAN_GATING_ENFORCED=false" |
@@ -324,11 +290,9 @@ Test coverage includes:
 - Limit enforcement at boundaries (3rd vs 4th company on free)
 - Gated account creation and reactivation on upgrade
 - PLAN_GATING_ENFORCED on/off modes
-- Feature checks per plan tier
 - **Gated account visibility** (aging, ledger, invoices - `gated-account-db.test.ts`)
 - **Gated action blocking** (reminders, credit edits - `plan-gating-actions-db.test.ts`)
 - **Scheduled reminder filtering** (enqueue skips gated - `s18-enqueue-skip-gated-db.test.ts`)
-- **Import limit enforcement** (`gating.test.ts`, `plan-gating-actions-db.test.ts`)
 - **Bulk ingestion gating** (`company-location.test.ts`)
 
 ## Database Schema
