@@ -388,3 +388,155 @@ describe("FeatureComparisonTable logic", () => {
     expect(auditExportRowData?.cells).toEqual([false, false, false, true]);
   });
 });
+
+/**
+ * S21 UI Tests: Over-limit banner using the actual helper imported by routes.
+ *
+ * These tests verify the buildOverLimitBannerState helper that is used by:
+ * - app/routes/app.plan.tsx
+ * - app/routes/app._index.tsx
+ */
+describe("S21 Over-limit banner using buildOverLimitBannerState helper", () => {
+  it("shows banner when gatedCount > 0 (gatingEnforced=true)", async () => {
+    const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildOverLimitBannerState(5, true);
+    expect(state.show).toBe(true);
+    expect(state.heading).toBe("5 accounts over your plan limit");
+  });
+
+  it("hides banner when gatedCount === 0", async () => {
+    const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildOverLimitBannerState(0, true);
+    expect(state.show).toBe(false);
+  });
+
+  it("shows banner when gatingEnforced is false (flag-off behavior)", async () => {
+    const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildOverLimitBannerState(3, false);
+    expect(state.show).toBe(true);
+    expect(state.enforcementNote).toBe("(Limits are not currently enforced.)");
+  });
+
+  it("no enforcement note when gatingEnforced is true", async () => {
+    const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildOverLimitBannerState(3, true);
+    expect(state.enforcementNote).toBeNull();
+  });
+
+  it("singular heading for gatedCount === 1", async () => {
+    const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildOverLimitBannerState(1, true);
+    expect(state.heading).toBe("1 account over your plan limit");
+  });
+
+  it("banner body text includes required product rule content", async () => {
+    const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildOverLimitBannerState(1, true);
+    expect(state.bodyText).toContain("Nothing is hidden");
+    expect(state.bodyText).toContain("totals include all accounts");
+    expect(state.bodyText).toContain("reminders");
+    expect(state.bodyText).toContain("credit-limit edits");
+    expect(state.bodyText).toContain("Matching");
+    expect(state.bodyText).toContain("never gated");
+    expect(state.bodyText).toContain("Credit holds");
+    expect(state.bodyText).toContain("checkout block");
+  });
+});
+
+describe("S21 Account page banner using buildAccountOverLimitBannerState helper", () => {
+  it("shows banner when isGated is true", async () => {
+    const { buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildAccountOverLimitBannerState(true, true);
+    expect(state.show).toBe(true);
+    expect(state.heading).toBe("This account is over your plan limit");
+  });
+
+  it("hides banner when isGated is false", async () => {
+    const { buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildAccountOverLimitBannerState(false, true);
+    expect(state.show).toBe(false);
+  });
+
+  it("shows banner when gatingEnforced is false (flag-off behavior)", async () => {
+    const { buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildAccountOverLimitBannerState(true, false);
+    expect(state.show).toBe(true);
+    expect(state.enforcementNote).toBe("(Limits are not currently enforced.)");
+  });
+
+  it("hides banner when account not gated even if gatingEnforced is false", async () => {
+    const { buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildAccountOverLimitBannerState(false, false);
+    expect(state.show).toBe(false);
+  });
+});
+
+describe("S21 No price strings in plan output", () => {
+  it("PLAN_DISPLAY_NAMES contains no currency symbols", async () => {
+    const { PLAN_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
+    
+    const allNames = Object.values(PLAN_DISPLAY_NAMES).join("");
+    
+    expect(allNames).not.toContain("$");
+    expect(allNames).not.toContain("₹");
+    expect(allNames).not.toContain("€");
+    expect(allNames).not.toContain("£");
+    expect(allNames).not.toContain("¥");
+    expect(allNames).not.toMatch(/\d+\.\d{2}/);
+  });
+
+  it("FEATURE_DISPLAY_NAMES contains no currency symbols", async () => {
+    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
+    
+    const allNames = Object.values(FEATURE_DISPLAY_NAMES).join("");
+    
+    expect(allNames).not.toContain("$");
+    expect(allNames).not.toContain("₹");
+    expect(allNames).not.toContain("€");
+    expect(allNames).not.toContain("£");
+    expect(allNames).not.toContain("¥");
+    expect(allNames).not.toMatch(/\d+\.\d{2}/);
+  });
+
+  it("plan config contains no price values", async () => {
+    const { ALL_PLAN_KEYS, getPlanConfig } = await import("~/lib/entitlements");
+    
+    for (const planKey of ALL_PLAN_KEYS) {
+      const plan = getPlanConfig(planKey);
+      const planString = JSON.stringify(plan);
+      
+      expect(planString).not.toContain("$");
+      expect(planString).not.toContain("₹");
+      expect(planString).not.toContain("price");
+      expect(planString).not.toContain("Price");
+      expect(planString).not.toContain("cost");
+      expect(planString).not.toContain("Cost");
+      expect(planString).not.toMatch(/"[0-9]+\.[0-9]{2}"/);
+    }
+  });
+
+  it("entitlements module exports no price-related fields", async () => {
+    const entitlements = await import("~/lib/entitlements");
+    const exportNames = Object.keys(entitlements);
+    
+    const priceRelatedPatterns = ["price", "Price", "cost", "Cost", "fee", "Fee"];
+    for (const pattern of priceRelatedPatterns) {
+      const matches = exportNames.filter(name => name.includes(pattern));
+      expect(matches).toHaveLength(0);
+    }
+  });
+
+  it("over-limit banner helper contains no currency symbols", async () => {
+    const { buildOverLimitBannerState, buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    
+    const shopState = buildOverLimitBannerState(5, true);
+    const accountState = buildAccountOverLimitBannerState(true, true);
+    
+    for (const state of [shopState, accountState]) {
+      expect(state.heading).not.toContain("$");
+      expect(state.heading).not.toContain("₹");
+      expect(state.bodyText).not.toContain("$");
+      expect(state.bodyText).not.toContain("₹");
+    }
+  });
+});

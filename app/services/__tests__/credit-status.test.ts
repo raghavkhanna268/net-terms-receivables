@@ -1101,3 +1101,466 @@ describe("credit-status.server", () => {
 
 // DB-backed integration tests moved to credit-status-db.test.ts
 // to avoid vitest mock hoisting issues
+
+describe("getOwnerGid", () => {
+  it("returns CompanyLocation GID for COMPANY with companyLocationId", async () => {
+    const { getOwnerGid } = await import("../credit-status.server");
+
+    const result = getOwnerGid({
+      kind: "COMPANY",
+      companyLocationId: "gid://shopify/CompanyLocation/123",
+      customerId: null,
+    });
+
+    expect(result).toEqual({
+      gid: "gid://shopify/CompanyLocation/123",
+      type: "CompanyLocation",
+    });
+  });
+
+  it("returns Customer GID for TAGGED_CUSTOMER with customerId", async () => {
+    const { getOwnerGid } = await import("../credit-status.server");
+
+    const result = getOwnerGid({
+      kind: "TAGGED_CUSTOMER",
+      companyLocationId: null,
+      customerId: "gid://shopify/Customer/456",
+    });
+
+    expect(result).toEqual({
+      gid: "gid://shopify/Customer/456",
+      type: "Customer",
+    });
+  });
+
+  it("returns null for COMPANY with null companyLocationId (no-owner)", async () => {
+    const { getOwnerGid } = await import("../credit-status.server");
+
+    const result = getOwnerGid({
+      kind: "COMPANY",
+      companyLocationId: null,
+      customerId: null,
+    });
+
+    expect(result).toBeNull();
+  });
+
+  it("returns null for TAGGED_CUSTOMER with null customerId (no-owner)", async () => {
+    const { getOwnerGid } = await import("../credit-status.server");
+
+    const result = getOwnerGid({
+      kind: "TAGGED_CUSTOMER",
+      companyLocationId: null,
+      customerId: null,
+    });
+
+    expect(result).toBeNull();
+  });
+
+  it("returns null for COMPANY with customerId but no companyLocationId (kind/owner mismatch)", async () => {
+    const { getOwnerGid } = await import("../credit-status.server");
+
+    const result = getOwnerGid({
+      kind: "COMPANY",
+      companyLocationId: null,
+      customerId: "gid://shopify/Customer/789",
+    });
+
+    expect(result).toBeNull();
+  });
+
+  it("returns null for TAGGED_CUSTOMER with companyLocationId but no customerId (kind/owner mismatch)", async () => {
+    const { getOwnerGid } = await import("../credit-status.server");
+
+    const result = getOwnerGid({
+      kind: "TAGGED_CUSTOMER",
+      companyLocationId: "gid://shopify/CompanyLocation/101",
+      customerId: null,
+    });
+
+    expect(result).toBeNull();
+  });
+});
+
+describe("syncCreditStatusMetafield no-owner branch", () => {
+  let consoleSpy: ReturnType<typeof vi.spyOn>;
+  let txCalls: Array<{ query: string; values: unknown[] }>;
+  let mockSql: Sql & {
+    setMockResult: (key: string, value: unknown) => void;
+    clearMockResults: () => void;
+    begin: <T>(fn: (tx: Sql) => Promise<T>) => Promise<T>;
+  };
+
+  const NO_OWNER_ACCOUNT_ID = "acc-noowner-unit-test";
+  const NO_OWNER_SHOP_ID = "shop-noowner-unit-test";
+
+  beforeEach(() => {
+    consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockShopifyGraphQLRequest.mockClear();
+    mockShopifyGraphQLRequest.mockResolvedValue({
+      success: true,
+      data: { metafieldsSet: { metafields: [{ id: "mf-1" }], userErrors: [] } },
+    });
+
+    txCalls = [];
+    const mockResults: Map<string, unknown[]> = new Map();
+
+    const queryHandler = async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const query = strings.join("?");
+      txCalls.push({ query, values });
+
+      if (query.includes('FROM "Shop"') && query.includes("domain")) {
+        return mockResults.get("shop") ?? [];
+      }
+
+      if (query.includes('FROM "BuyerAccount"')) {
+        return mockResults.get("account") ?? [];
+      }
+
+      if (query.includes('UPDATE "BuyerAccount"') && query.includes("RETURNING")) {
+        return mockResults.get("update_account_returning") ?? [{ syncVersion: 1 }];
+      }
+
+      if (query.includes('INSERT INTO "AuditEvent"')) {
+        return [];
+      }
+
+      if (query.includes('FROM "Invoice"') && query.includes("SUM")) {
+        return mockResults.get("invoice_exposure") ?? [{ total_paise: "0" }];
+      }
+
+      if (query.includes("s8_draft_orders") && query.includes("SUM")) {
+        return mockResults.get("draft_exposure") ?? [{ total_paise: "0" }];
+      }
+
+      if (query.includes("EXISTS") && query.includes("dueAt")) {
+        return mockResults.get("overdue_check") ?? [{ has_overdue: false }];
+      }
+
+      return [];
+    };
+
+    const createTxMock = () => {
+      const tx = Object.assign(vi.fn(queryHandler), {
+        json: vi.fn((v) => v),
+        array: vi.fn((arr: unknown[]) => arr),
+      });
+      return tx;
+    };
+
+    mockSql = Object.assign(vi.fn(queryHandler), {
+      json: vi.fn((v) => v),
+      array: vi.fn((arr: unknown[]) => arr),
+      begin: vi.fn(async <T>(fn: (tx: typeof mockSql) => Promise<T>): Promise<T> => {
+        const tx = createTxMock();
+        return fn(tx as unknown as typeof mockSql);
+      }),
+      setMockResult: (key: string, value: unknown) => mockResults.set(key, value as unknown[]),
+      clearMockResults: () => mockResults.clear(),
+    }) as unknown as typeof mockSql;
+  });
+
+  afterEach(() => {
+    consoleSpy.mockRestore();
+  });
+
+  it("no-owner account: UPDATE sets holdState HELD, syncPending=false, bumps syncVersion; does NOT set metafieldSyncedAt; no Shopify write", async () => {
+    const { syncCreditStatusMetafield } = await import("../credit-status.server");
+
+    mockSql.setMockResult("account", [{
+      id: NO_OWNER_ACCOUNT_ID,
+      shopId: NO_OWNER_SHOP_ID,
+      kind: "COMPANY",
+      companyLocationId: null,
+      customerId: null,
+      creditLimit: "100000",
+      holdState: "OK",
+      bypass: false,
+      manualHold: false,
+      holdReasonCode: null,
+      holdNote: null,
+      syncPending: true,
+      gatedAt: null,
+    }]);
+    mockSql.setMockResult("shop", [{ domain: "test-noowner.myshopify.com", currency: "INR" }]);
+    mockSql.setMockResult("invoice_exposure", [{ total_paise: "0" }]);
+    mockSql.setMockResult("draft_exposure", [{ total_paise: "0" }]);
+    mockSql.setMockResult("overdue_check", [{ has_overdue: true }]);
+    mockSql.setMockResult("update_account_returning", [{ syncVersion: 1 }]);
+
+    const result = await syncCreditStatusMetafield(mockSql, NO_OWNER_ACCOUNT_ID, "daily_sweep");
+
+    expect(result.success).toBe(true);
+    expect(result.metafieldSyncPending).toBe(false);
+    expect(result.noOwner).toBe(true);
+    expect(mockShopifyGraphQLRequest).toHaveBeenCalledTimes(0);
+
+    const updateCalls = txCalls.filter(c => c.query.includes('UPDATE "BuyerAccount"'));
+    expect(updateCalls.length).toBe(1);
+    const updateCall = updateCalls[0];
+    expect(updateCall.query).toContain('"holdState"');
+    expect(updateCall.query).toContain('"syncPending" = false');
+    expect(updateCall.query).toContain('"syncVersion" = "syncVersion" + 1');
+    expect(updateCall.query).not.toContain('metafieldSyncedAt');
+    expect(updateCall.values).toContain("HELD");
+  });
+
+  it("no-owner effective hold change: exactly ONE audit insert (hold_unenforceable) and ONE warn log", async () => {
+    const { syncCreditStatusMetafield } = await import("../credit-status.server");
+
+    mockSql.setMockResult("account", [{
+      id: NO_OWNER_ACCOUNT_ID,
+      shopId: NO_OWNER_SHOP_ID,
+      kind: "COMPANY",
+      companyLocationId: null,
+      customerId: null,
+      creditLimit: "100000",
+      holdState: "OK",
+      bypass: false,
+      manualHold: false,
+      holdReasonCode: null,
+      holdNote: null,
+      syncPending: true,
+      gatedAt: null,
+    }]);
+    mockSql.setMockResult("shop", [{ domain: "test-noowner.myshopify.com", currency: "INR" }]);
+    mockSql.setMockResult("invoice_exposure", [{ total_paise: "0" }]);
+    mockSql.setMockResult("draft_exposure", [{ total_paise: "0" }]);
+    mockSql.setMockResult("overdue_check", [{ has_overdue: true }]);
+    mockSql.setMockResult("update_account_returning", [{ syncVersion: 1 }]);
+
+    await syncCreditStatusMetafield(mockSql, NO_OWNER_ACCOUNT_ID, "daily_sweep");
+
+    const auditInserts = txCalls.filter(c => c.query.includes('INSERT INTO "AuditEvent"'));
+    expect(auditInserts.length).toBe(1);
+    expect(auditInserts[0].query).toContain('credit_status.hold_unenforceable');
+
+    const holdAppliedInserts = txCalls.filter(c => c.query.includes('hold_applied'));
+    expect(holdAppliedInserts.length).toBe(0);
+
+    const warnCalls = consoleSpy.mock.calls.filter(
+      (call: unknown[]) => typeof call[0] === "string" && call[0].includes("credit_status_no_owner")
+    );
+    expect(warnCalls.length).toBe(1);
+
+    const logPayload = JSON.parse(warnCalls[0][0] as string);
+    expect(logPayload).toEqual({
+      event: "credit_status_no_owner",
+      buyerAccountId: NO_OWNER_ACCOUNT_ID,
+      ownerType: "CompanyLocation",
+    });
+  });
+
+  it("no-owner no effective hold change (no-op): ZERO audit inserts and ZERO warn logs", async () => {
+    const { syncCreditStatusMetafield } = await import("../credit-status.server");
+
+    mockSql.setMockResult("account", [{
+      id: NO_OWNER_ACCOUNT_ID,
+      shopId: NO_OWNER_SHOP_ID,
+      kind: "COMPANY",
+      companyLocationId: null,
+      customerId: null,
+      creditLimit: "100000",
+      holdState: "OK",
+      bypass: false,
+      manualHold: false,
+      holdReasonCode: null,
+      holdNote: null,
+      syncPending: true,
+      gatedAt: null,
+    }]);
+    mockSql.setMockResult("shop", [{ domain: "test-noowner.myshopify.com", currency: "INR" }]);
+    mockSql.setMockResult("invoice_exposure", [{ total_paise: "0" }]);
+    mockSql.setMockResult("draft_exposure", [{ total_paise: "0" }]);
+    mockSql.setMockResult("overdue_check", [{ has_overdue: false }]);
+    mockSql.setMockResult("update_account_returning", [{ syncVersion: 1 }]);
+
+    await syncCreditStatusMetafield(mockSql, NO_OWNER_ACCOUNT_ID, "daily_sweep");
+
+    const auditInserts = txCalls.filter(c => c.query.includes('INSERT INTO "AuditEvent"'));
+    expect(auditInserts.length).toBe(0);
+
+    const warnCalls = consoleSpy.mock.calls.filter(
+      (call: unknown[]) => typeof call[0] === "string" && call[0].includes("credit_status_no_owner")
+    );
+    expect(warnCalls.length).toBe(0);
+  });
+
+  it("no-owner TAGGED_CUSTOMER: ownerType is Customer in log", async () => {
+    const { syncCreditStatusMetafield } = await import("../credit-status.server");
+
+    mockSql.setMockResult("account", [{
+      id: NO_OWNER_ACCOUNT_ID,
+      shopId: NO_OWNER_SHOP_ID,
+      kind: "TAGGED_CUSTOMER",
+      companyLocationId: null,
+      customerId: null,
+      creditLimit: "100000",
+      holdState: "OK",
+      bypass: false,
+      manualHold: false,
+      holdReasonCode: null,
+      holdNote: null,
+      syncPending: true,
+      gatedAt: null,
+    }]);
+    mockSql.setMockResult("shop", [{ domain: "test-noowner.myshopify.com", currency: "INR" }]);
+    mockSql.setMockResult("invoice_exposure", [{ total_paise: "0" }]);
+    mockSql.setMockResult("draft_exposure", [{ total_paise: "0" }]);
+    mockSql.setMockResult("overdue_check", [{ has_overdue: true }]);
+    mockSql.setMockResult("update_account_returning", [{ syncVersion: 1 }]);
+
+    await syncCreditStatusMetafield(mockSql, NO_OWNER_ACCOUNT_ID, "daily_sweep");
+
+    const warnCalls = consoleSpy.mock.calls.filter(
+      (call: unknown[]) => typeof call[0] === "string" && call[0].includes("credit_status_no_owner")
+    );
+    expect(warnCalls.length).toBe(1);
+
+    const logPayload = JSON.parse(warnCalls[0][0] as string);
+    expect(logPayload.ownerType).toBe("Customer");
+  });
+});
+
+describe("recomputeCreditStatus no-owner branch", () => {
+  let consoleSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockShopifyGraphQLRequest.mockClear();
+    mockShopifyGraphQLRequest.mockResolvedValue({
+      success: true,
+      data: { metafieldsSet: { metafields: [{ id: "mf-1" }], userErrors: [] } },
+    });
+  });
+
+  afterEach(() => {
+    consoleSpy.mockRestore();
+  });
+
+  it("no-owner account returns metafieldWritten:false and noOwner:true", async () => {
+    const { recomputeCreditStatus } = await import("../credit-status-recompute.server");
+
+    const mockResults: Map<string, unknown[]> = new Map();
+    const queryHandler = async (strings: TemplateStringsArray, ..._values: unknown[]) => {
+      const query = strings.join("?");
+      if (query.includes('FROM "BuyerAccount"')) return mockResults.get("account") ?? [];
+      if (query.includes('FROM "Shop"')) return mockResults.get("shop") ?? [];
+      if (query.includes('FROM "Invoice"') && query.includes("SUM")) return mockResults.get("invoice_exposure") ?? [{ total_paise: "0" }];
+      if (query.includes("s8_draft_orders") && query.includes("SUM")) return mockResults.get("draft_exposure") ?? [{ total_paise: "0" }];
+      if (query.includes("EXISTS") && query.includes("dueAt")) return mockResults.get("overdue_check") ?? [{ has_overdue: false }];
+      if (query.includes('UPDATE "BuyerAccount"') && query.includes("RETURNING")) return [{ syncVersion: 1 }];
+      if (query.includes('INSERT INTO "AuditEvent"')) return [];
+      return [];
+    };
+    const createTxMock = () => Object.assign(vi.fn(queryHandler), { json: vi.fn((v) => v), array: vi.fn((arr: unknown[]) => arr) });
+    const mockSql = Object.assign(vi.fn(queryHandler), {
+      json: vi.fn((v) => v),
+      array: vi.fn((arr: unknown[]) => arr),
+      begin: vi.fn(async <T>(fn: (tx: Sql) => Promise<T>): Promise<T> => fn(createTxMock() as unknown as Sql)),
+    }) as unknown as Sql;
+
+    mockResults.set("account", [{
+      id: "acc-noowner-recompute",
+      shopId: "shop-noowner-recompute",
+      kind: "COMPANY",
+      companyLocationId: null,
+      customerId: null,
+      creditLimit: "100000",
+      holdState: "OK",
+      bypass: false,
+      manualHold: false,
+      holdReasonCode: null,
+      holdNote: null,
+      syncPending: true,
+      gatedAt: null,
+    }]);
+    mockResults.set("shop", [{ domain: "test-noowner-recompute.myshopify.com", currency: "INR" }]);
+    mockResults.set("overdue_check", [{ has_overdue: true }]);
+
+    const result = await recomputeCreditStatus(mockSql, "acc-noowner-recompute");
+
+    expect(result.success).toBe(true);
+    expect(result.metafieldWritten).toBe(false);
+    expect(result.noOwner).toBe(true);
+    expect(mockShopifyGraphQLRequest).not.toHaveBeenCalled();
+  });
+});
+
+describe("CREDIT_STATUS_RECOMPUTE drain handler no-owner branch", () => {
+  let consoleSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockShopifyGraphQLRequest.mockClear();
+    mockShopifyGraphQLRequest.mockResolvedValue({
+      success: true,
+      data: { metafieldsSet: { metafields: [{ id: "mf-1" }], userErrors: [] } },
+    });
+  });
+
+  afterEach(() => {
+    consoleSpy.mockRestore();
+  });
+
+  it("no-owner account returns action:skipped with no-owner skipReason", async () => {
+    const { getSyncHandler } = await import("../drain/processor.server");
+    const handler = getSyncHandler("CREDIT_STATUS_RECOMPUTE");
+    expect(handler).toBeDefined();
+
+    const mockResults: Map<string, unknown[]> = new Map();
+    const queryHandler = async (strings: TemplateStringsArray, ..._values: unknown[]) => {
+      const query = strings.join("?");
+      if (query.includes('FROM "BuyerAccount"')) return mockResults.get("account") ?? [];
+      if (query.includes('FROM "Shop"')) return mockResults.get("shop") ?? [];
+      if (query.includes('FROM "Invoice"') && query.includes("SUM")) return mockResults.get("invoice_exposure") ?? [{ total_paise: "0" }];
+      if (query.includes("s8_draft_orders") && query.includes("SUM")) return mockResults.get("draft_exposure") ?? [{ total_paise: "0" }];
+      if (query.includes("EXISTS") && query.includes("dueAt")) return mockResults.get("overdue_check") ?? [{ has_overdue: false }];
+      if (query.includes('UPDATE "BuyerAccount"') && query.includes("RETURNING")) return [{ syncVersion: 1 }];
+      if (query.includes('INSERT INTO "AuditEvent"')) return [];
+      if (query.includes("s6_processed_webhooks")) return [];
+      return [];
+    };
+    const createTxMock = () => Object.assign(vi.fn(queryHandler), { json: vi.fn((v) => v), array: vi.fn((arr: unknown[]) => arr) });
+    const mockSql = Object.assign(vi.fn(queryHandler), {
+      json: vi.fn((v) => v),
+      array: vi.fn((arr: unknown[]) => arr),
+      begin: vi.fn(async <T>(fn: (tx: Sql) => Promise<T>): Promise<T> => fn(createTxMock() as unknown as Sql)),
+    }) as unknown as Sql;
+
+    mockResults.set("account", [{
+      id: "acc-noowner-drain",
+      shopId: "shop-noowner-drain",
+      kind: "COMPANY",
+      companyLocationId: null,
+      customerId: null,
+      creditLimit: "100000",
+      holdState: "OK",
+      bypass: false,
+      manualHold: false,
+      holdReasonCode: null,
+      holdNote: null,
+      syncPending: true,
+      gatedAt: null,
+    }]);
+    mockResults.set("shop", [{ domain: "test-noowner-drain.myshopify.com", currency: "INR" }]);
+    mockResults.set("overdue_check", [{ has_overdue: true }]);
+
+    const message = {
+      topic: "CREDIT_STATUS_RECOMPUTE",
+      shop: "test-noowner-drain.myshopify.com",
+      buyerAccountId: "acc-noowner-drain",
+      source: "daily_sweep",
+      webhookId: `credit_recompute:acc-noowner-drain:${Date.now()}`,
+      resourceGid: "acc-noowner-drain",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql, message);
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("skipped");
+    expect(result.skipReason).toContain("No owner GID");
+    expect(mockShopifyGraphQLRequest).not.toHaveBeenCalled();
+  });
+});
