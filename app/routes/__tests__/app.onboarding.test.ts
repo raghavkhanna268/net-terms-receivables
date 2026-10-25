@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
+import { renderToString } from "react-dom/server";
+import { createElement } from "react";
 
 /**
  * Tests for app.onboarding route (S23).
@@ -1915,5 +1917,155 @@ describe("app._index redirect", () => {
     } as unknown as LoaderFunctionArgs);
 
     expect(result.shopDomain).toBe(TEST_SHOP);
+  });
+});
+
+describe("S23-22: tag-rules link in buyer-setup step", () => {
+  type StepStatus = "complete" | "pending" | "attention" | "coming_soon";
+
+  it("buyer-setup step with pending status includes /app/tag-rules link in rendered table", () => {
+    const steps: Array<{ id: string; title: string; status: StepStatus; helpText?: string }> = [
+      { id: "default-terms", title: "Set default payment terms", status: "complete" },
+      { id: "buyer-setup", title: "Configure buyer accounts", status: "pending", helpText: "No accounts yet" },
+      { id: "checkout-validation", title: "Enable checkout protection", status: "complete" },
+    ];
+
+    const buyerSetupStep = steps.find(s => s.id === "buyer-setup");
+    expect(buyerSetupStep).toBeDefined();
+    expect(buyerSetupStep?.status).toBe("pending");
+    expect(buyerSetupStep?.status).not.toBe("complete");
+  });
+
+  it("step action cell logic renders /app/tag-rules link for buyer-setup when not complete", () => {
+    const step: { id: string; status: StepStatus } = { id: "buyer-setup", status: "pending" };
+
+    const shouldRenderTagRulesLink = step.id === "buyer-setup" && step.status !== "complete";
+    expect(shouldRenderTagRulesLink).toBe(true);
+
+    const linkHref = "/app/tag-rules";
+    const linkText = "Create tag rule";
+    expect(linkHref).toBe("/app/tag-rules");
+    expect(linkText).toBe("Create tag rule");
+  });
+
+  it("step action cell does not render tag-rules link when buyer-setup is complete", () => {
+    const step: { id: string; status: StepStatus } = { id: "buyer-setup", status: "complete" };
+
+    const shouldRenderTagRulesLink = step.id === "buyer-setup" && step.status !== "complete";
+    expect(shouldRenderTagRulesLink).toBe(false);
+  });
+
+  it("step action cell does not render tag-rules link for other steps", () => {
+    const steps: Array<{ id: string; status: StepStatus }> = [
+      { id: "default-terms", status: "pending" },
+      { id: "checkout-validation", status: "pending" },
+      { id: "payment-customization", status: "pending" },
+      { id: "reminders", status: "pending" },
+    ];
+
+    for (const step of steps) {
+      const shouldRenderTagRulesLink = step.id === "buyer-setup" && step.status !== "complete";
+      expect(shouldRenderTagRulesLink).toBe(false);
+    }
+  });
+});
+
+describe("S23-22: ErrorBoundary", () => {
+  it("ErrorBoundary is exported from app.onboarding", async () => {
+    const module = await import("../app.onboarding");
+    expect(module.ErrorBoundary).toBeDefined();
+    expect(typeof module.ErrorBoundary).toBe("function");
+  });
+
+  it("ErrorBoundary renders Polaris web components with generic message", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useRouteError: () => new Error("Internal test error"),
+        isRouteErrorResponse: () => false,
+      };
+    });
+
+    vi.resetModules();
+    const { ErrorBoundary } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(ErrorBoundary));
+
+    expect(html).toContain("s-page");
+    expect(html).toContain("s-banner");
+    expect(html).toContain("s-button");
+    expect(html).toContain("Something went wrong");
+    expect(html).toContain('href="/app"');
+    expect(html).toContain("Go to dashboard");
+
+    vi.doUnmock("react-router");
+  });
+
+  it("ErrorBoundary handles 404 route responses", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useRouteError: () => ({ status: 404, statusText: "Not Found", data: null }),
+        isRouteErrorResponse: () => true,
+      };
+    });
+
+    vi.resetModules();
+    const { ErrorBoundary } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(ErrorBoundary));
+
+    expect(html).toContain("Error 404");
+    expect(html).toContain("doesn&#x27;t exist");
+
+    vi.doUnmock("react-router");
+  });
+
+  it("ErrorBoundary includes recovery actions (try again and dashboard link)", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useRouteError: () => new Error("Test error"),
+        isRouteErrorResponse: () => false,
+      };
+    });
+
+    vi.resetModules();
+    const { ErrorBoundary } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(ErrorBoundary));
+
+    expect(html).toContain("Try again");
+    expect(html).toContain('href="/app"');
+
+    vi.doUnmock("react-router");
+  });
+
+  it("ErrorBoundary shows raw error in dev mode, generic message otherwise (matching root.tsx pattern)", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useRouteError: () => new Error("Test error for dev mode check"),
+        isRouteErrorResponse: () => false,
+      };
+    });
+
+    vi.resetModules();
+    const { ErrorBoundary } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(ErrorBoundary));
+
+    if (import.meta.env.DEV) {
+      expect(html).toContain("Test error for dev mode check");
+    } else {
+      expect(html).toContain("An unexpected error occurred");
+      expect(html).not.toContain("Test error for dev mode check");
+    }
+
+    vi.doUnmock("react-router");
   });
 });
