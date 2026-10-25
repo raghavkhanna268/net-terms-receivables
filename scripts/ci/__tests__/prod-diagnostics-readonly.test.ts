@@ -1303,3 +1303,96 @@ describe("Active subscriptions probe (counts/booleans only)", () => {
     expect(probe("not json")).toContain("active_subscriptions=error parse_failed");
   });
 });
+
+describe("Allowed dev store Admin checks", () => {
+  let step: WorkflowStep | undefined;
+  let run: string;
+
+  beforeAll(() => {
+    const workflow = parseYaml(readFileSync(WORKFLOW_PATH, "utf-8")) as Workflow;
+    const steps = Object.values(workflow.jobs ?? {}).flatMap((j) => j.steps ?? []);
+    step = steps.find((s) => s.id === "allowed_admin");
+    run = step?.run ?? "";
+    expect(run).not.toBe("");
+  });
+
+  it("is read-only and skips gracefully on token expired", () => {
+    expect(step?.env?.PGOPTIONS).toContain("default_transaction_read_only=on");
+    expect(run).toContain("allowed_admin=skipped_token_expired");
+    expect(run).toContain("allowed_admin=skipped_no_allowed_dev_store");
+    expect(run).toContain("allowed_admin=skipped_no_offline_session");
+  });
+
+  it("queries paymentCustomizations and webhookSubscriptions", () => {
+    expect(run).toContain("paymentCustomizations(first: 50)");
+    expect(run).toContain("webhookSubscriptions(first: 100)");
+  });
+
+  it("outputs hide-terms-payment as booleans only", () => {
+    expect(run).toContain("hide_terms_payment_present=");
+    expect(run).toContain("hide_terms_payment_enabled=");
+    expect(run).toContain('select(.shopifyFunction.handle == "hide-terms-payment")');
+  });
+
+  it("outputs webhook diff as counts and topic enums only, never URLs", () => {
+    expect(run).toContain("webhook_expected_count=");
+    expect(run).toContain("webhook_present_count=");
+    expect(run).toContain("webhook_missing_count=");
+    expect(run).toContain("webhook_extra_count=");
+    expect(run).toContain("webhook_missing_topics=");
+    expect(run).toContain("webhook_extra_topics=");
+    expect(run).not.toContain(".endpoint");
+    expect(run).not.toContain(".callbackUrl");
+  });
+});
+
+describe("Cron sweep diagnostics", () => {
+  let step: WorkflowStep | undefined;
+  let run: string;
+
+  beforeAll(() => {
+    const workflow = parseYaml(readFileSync(WORKFLOW_PATH, "utf-8")) as Workflow;
+    const steps = Object.values(workflow.jobs ?? {}).flatMap((j) => j.steps ?? []);
+    step = steps.find((s) => s.id === "cron_sweep");
+    run = step?.run ?? "";
+    expect(run).not.toBe("");
+  });
+
+  it("is read-only", () => {
+    expect(step?.env?.PGOPTIONS).toContain("default_transaction_read_only=on");
+  });
+
+  it("looks up credit_status_daily_sweep by jobname, not id", () => {
+    expect(run).toContain("credit_status_daily_sweep");
+    expect(run).toContain("j.jobname = 'credit_status_daily_sweep'");
+    expect(run).not.toMatch(/jobid\s*=\s*\d+/);
+  });
+
+  it("outputs cron job last run as timestamp, status enum and duration", () => {
+    expect(run).toContain("start_time AT TIME ZONE 'UTC'");
+    expect(run).toContain("jrd.status");
+    expect(run).toContain("duration_sec");
+    expect(run).toContain("start_time_utc");
+  });
+
+  it("outputs sweep effect counts (syncPending, holds applied/released)", () => {
+    expect(run).toContain("sync_pending_current");
+    expect(run).toContain("holds_applied_since_sweep");
+    expect(run).toContain("holds_released_since_sweep");
+    expect(run).toContain("credit_status.hold_applied");
+    expect(run).toContain("credit_status.hold_released");
+  });
+
+  it("skips gracefully when cron schema or job_run_details is missing", () => {
+    expect(run).toContain("cron_sweep=skipped_no_cron_schema");
+    expect(run).toContain("cron_sweep=skipped_no_job_run_details");
+    expect(run).toContain("cron_sweep=skipped_no_db");
+  });
+
+  it("never prints shop domains, buyer ids, or free text", () => {
+    expect(run).not.toContain(".domain");
+    expect(run).not.toContain("buyerAccountId");
+    expect(run).not.toContain(".command");
+    expect(run).not.toContain("return_message");
+  });
+});
