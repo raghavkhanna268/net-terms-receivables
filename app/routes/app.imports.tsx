@@ -61,8 +61,8 @@ export function computeDateBounds(now: Date = new Date()): { minDateIso: string;
 /**
  * Valid payment rails for Indian bank transfers.
  */
-const VALID_RAILS = new Set(["NEFT", "RTGS", "IMPS", "UPI", "ACH", "CHEQUE", "OTHER"]);
-type ValidRail = "NEFT" | "RTGS" | "IMPS" | "UPI" | "ACH" | "CHEQUE" | "OTHER";
+const VALID_RAILS = new Set(["NEFT", "RTGS", "IMPS", "UPI", "ACH", "CMS", "CHEQUE", "OTHER"]);
+type ValidRail = "NEFT" | "RTGS" | "IMPS" | "UPI" | "ACH" | "CMS" | "CHEQUE" | "OTHER";
 
 /**
  * Valid bank types.
@@ -1166,7 +1166,7 @@ export default function ImportsPage() {
         </s-paragraph>
         <s-unordered-list>
           <s-list-item>Transaction date and amount</s-list-item>
-          <s-list-item>Payment rail (NEFT/RTGS/IMPS/UPI)</s-list-item>
+          <s-list-item>Payment rail (NEFT/RTGS/IMPS/UPI/CMS)</s-list-item>
           <s-list-item>UTR or reference number</s-list-item>
           <s-list-item>Remitter name and narration (for matching)</s-list-item>
         </s-unordered-list>

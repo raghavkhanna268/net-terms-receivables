@@ -69,6 +69,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
 const DB_TEST_PATTERNS = [
   // Integration tests (all use real DB)
   "app/__tests__/integration/s6-pgmq.test.ts",
+  "app/__tests__/integration/s8-draft-delete-id-only-db.test.ts",
   "app/__tests__/integration/s10-drain.test.ts",
   "app/__tests__/integration/s10b-bulk-queue.test.ts",
   "app/__tests__/integration/s20-idempotency.test.ts",
