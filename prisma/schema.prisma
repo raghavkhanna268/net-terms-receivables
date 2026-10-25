@@ -85,6 +85,13 @@ enum ReminderChannel {
   email
 }
 
+/// Status of a reminder log entry (S18 catch-up)
+enum ReminderLogStatus {
+  sent
+  delayed
+  skipped_daily_limit
+}
+
 // =============================================================================
 // SESSION STORAGE (existing, DO NOT MODIFY)
 // =============================================================================
@@ -268,7 +275,11 @@ model BuyerAccount {
   /// NULL means no permanent error. Set on permanent failure, cleared on success.
   /// Only stores fixed codes from PERMANENT_SYNC_ERROR_CODES allowlist; never raw error text.
   metafieldSyncErrorCode String?
-  /// When the permanent metafield sync error occurred. NULL when metafieldSyncErrorCode is NULL.
+  /// When the metafield sync error occurred. Has two semantic modes:
+  /// 1. Permanent failure: set alongside metafieldSyncErrorCode (both non-NULL).
+  /// 2. Retryable failure streak: set while metafieldSyncErrorCode is NULL, marking the
+  ///    streak start for backoff calculation. Cleared on success.
+  /// NULL only when no error has occurred or after a successful sync clears both fields.
   metafieldSyncErrorAt   DateTime?        @db.Timestamptz(3)
 
   // Relations (onDelete: CASCADE - accounts are shop-specific)
@@ -555,14 +566,19 @@ model ReminderRule {
   @@index([shopId, enabled])
 }
 
-/// Reminder log: tracks sent reminders to prevent duplicates
+/// Reminder log: tracks sent and delayed reminders
+/// S18 catch-up: delayed reminders are retried within D+1..D+3 window
 model ReminderLog {
-  id        String   @id @default(dbgenerated("(gen_random_uuid())::text"))
-  shopId    String
-  ruleId    String
-  invoiceId String
-  /// When the reminder was sent
-  sentAt    DateTime @default(now()) @db.Timestamptz(3)
+  id           String             @id @default(dbgenerated("(gen_random_uuid())::text"))
+  shopId       String
+  ruleId       String
+  invoiceId    String
+  /// Status of this reminder: sent, delayed (capped), or skipped_daily_limit (expired)
+  status       ReminderLogStatus  @default(sent)
+  /// When the reminder was sent (NULL for delayed/skipped)
+  sentAt       DateTime?          @db.Timestamptz(3)
+  /// When the reminder was first capped (NULL for sent, set on first cap for delayed)
+  firstCappedAt DateTime?         @db.Timestamptz(3)
 
   // Relations
   // Direct Shop FK with CASCADE enables Shop delete to work
@@ -576,6 +592,10 @@ model ReminderLog {
   @@unique([ruleId, invoiceId])
   @@index([invoiceId])
   @@index([shopId])
+  // Partial index on delayed rows for efficient catch-up queries.
+  // This is a placeholder: the actual index is defined in migration with WHERE clause.
+  // See: prisma/migrations/20261112000000_s18_reminder_catchup/migration.sql
+  @@index([shopId, invoiceId, ruleId], map: "idx_reminder_log_delayed")
 }
 
 // =============================================================================

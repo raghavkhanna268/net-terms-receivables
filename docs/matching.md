@@ -141,12 +141,23 @@ This ensures accurate cap calculations when:
 1. Multiple payments target the same invoice
 2. Some matches are pushed while others are still confirmed
 
-## Gated Account Exclusion
+## Gated Account Handling
 
-When `PLAN_GATING_ENFORCED=true`:
-- Invoices for gated buyer accounts are excluded from matching
-- Gated buyers are excluded from `getBuyersWithAliases`
-- Uses `activeAccountFragment(sql)` consistently
+Gated accounts (`gated_at IS NOT NULL`) are **not excluded** from matching, confirm, apply, or unmatch.
+The `activeAccountFragment` helper must NOT be used in matching or apply queries.
+
+Per `gating.server.ts:57-60`, gating applies only to these 4 actions:
+
+| Action | File:Line | Effect |
+|--------|-----------|--------|
+| Reminders | `reminders.server.ts:528` | `isAccountActive()` skips gated accounts |
+| Credit-limit edits | `app.accounts.$id.tsx:299` | Rejects non-hold edits on gated accounts |
+| Account editing | `app.accounts.$id.tsx:299` | Same guard as credit-limit |
+| Bulk import | `app.imports.tsx:356` | `enforceImportLimit()` blocks over-limit |
+
+New accounts exceeding the plan limit are created with `gated_at` set:
+- `sync/company-location.server.ts:255-259`
+- `sync/customer.server.ts:412-414`
 
 ## Payer Aliases
 

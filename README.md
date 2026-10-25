@@ -91,7 +91,7 @@ npx wrangler secret put SHOPIFY_APP_URL
 # Enter: https://net-terms-receivables.<your-subdomain>.workers.dev
 
 npx wrangler secret put SCOPES
-# Enter: read_orders,read_customers
+# Scopes are set in shopify.app.toml and wrangler.jsonc
 ```
 
 ### 7. Local Development
@@ -173,10 +173,10 @@ The seed script requires an Admin API access token with the **same 11 production
 
 | Scope | Purpose |
 |-------|---------|
-| `read_companies`, `write_companies` | Create B2B companies and locations, set payment terms templates |
-| `read_customers`, `write_customers` | Create net-terms customers, set credit metafields |
-| `read_draft_orders` | Pre-granted for S8 draft order payment terms |
-| `read_orders`, `write_orders` | Create orders with custom line items and backdate with `processedAt` |
+| `write_companies` | Create B2B companies and locations, set payment terms templates (implies read_companies) |
+| `write_customers` | Create net-terms customers, set credit metafields (implies read_customers) |
+| `read_draft_orders` | Draft order payment terms (S8) |
+| `write_orders` | Create orders with custom line items and backdate with `processedAt` (implies read_orders) |
 | `read_payment_terms` | Read payment terms on orders and company locations |
 | `write_validations` | Pre-granted for S12 checkout validation function |
 | `write_payment_customizations` | Pre-granted for S13 payment method customization |
@@ -327,7 +327,7 @@ If requests exceed 10ms, you'll see errors in logs. The Worker will return error
 
 Currently configured minimal scopes in `shopify.app.toml`:
 ```toml
-scopes = "read_orders,read_customers"
+scopes = "read_draft_orders,read_payment_terms,write_companies,..."
 ```
 
 **To add more scopes:**

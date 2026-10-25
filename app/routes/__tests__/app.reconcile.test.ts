@@ -25,21 +25,19 @@ vi.mock("~/services/matcher.server", () => ({
   MAX_PAYMENTS_PER_REQUEST: 50,
 }));
 
-vi.mock("~/services/apply.server", () => ({
-  applyMatch: vi.fn(),
-  unmatchMatch: vi.fn(),
-}));
+vi.mock("~/services/apply.server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/services/apply.server")>();
+  return {
+    applyMatch: vi.fn(),
+    unmatchMatch: vi.fn(),
+    RECONCILE_HUMAN_MESSAGES: actual.RECONCILE_HUMAN_MESSAGES,
+  };
+});
 
-vi.mock("~/services/plan.server", () => ({
-  resolvePlan: vi.fn(),
-}));
-
-vi.mock("~/services/gating.server", () => ({
-  isGatingEnforced: vi.fn().mockReturnValue(false),
-}));
 
 vi.mock("@shopify/shopify-app-react-router/server", () => ({
   boundary: { headers: vi.fn(() => ({})) },
+  ApiVersion: { October26: "2026-10" },
 }));
 
 describe("Reconcile Route (M5)", () => {
@@ -76,16 +74,12 @@ describe("Reconcile Route (M5)", () => {
   describe("loader error logging (M5)", () => {
     it("logs error code via real safeLog, not raw error with domain", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
-      const { resolvePlan } = await import("~/services/plan.server");
 
       mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       const sensitiveError = new Error(
         "Database error for test-sensitive-store.myshopify.com: user@example.com owes 125000"
-      );
-      (resolvePlan as ReturnType<typeof vi.fn>).mockRejectedValue(
-        sensitiveError
       );
       mockSql
         .mockRejectedValueOnce(sensitiveError)
@@ -117,13 +111,11 @@ describe("Reconcile Route (M5)", () => {
 
     it("logs shopId and errorCode for tab counts error", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
-      const { resolvePlan } = await import("~/services/plan.server");
 
       mockSql.mockResolvedValueOnce([{ id: "shop-456", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       const dbError = new TypeError("Connection failed");
-      (resolvePlan as ReturnType<typeof vi.fn>).mockRejectedValue(dbError);
       mockSql
         .mockRejectedValueOnce(dbError)
         .mockRejectedValueOnce(dbError)
@@ -147,16 +139,12 @@ describe("Reconcile Route (M5)", () => {
 
     it("logs shopId, stage, and errorCode for loader data error", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
-      const { resolvePlan } = await import("~/services/plan.server");
       const { getSuggestedMatches } = await import(
         "~/lib/matching/queries.server"
       );
 
       mockSql.mockResolvedValueOnce([{ id: "shop-789", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-      (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-        plan: { key: "starter" },
-      });
 
       mockSql
         .mockResolvedValueOnce([{ count: "5" }])
@@ -196,16 +184,12 @@ describe("Reconcile Route (M5)", () => {
 
     it("maps unknown view values to 'other' in stage field", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
-      const { resolvePlan } = await import("~/services/plan.server");
       const { getSuggestedMatches } = await import(
         "~/lib/matching/queries.server"
       );
 
       mockSql.mockResolvedValueOnce([{ id: "shop-unknown", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-      (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-        plan: { key: "starter" },
-      });
 
       mockSql
         .mockResolvedValueOnce([{ count: "0" }])
@@ -573,21 +557,103 @@ describe("Reconcile Route (M5)", () => {
       expect(result.error).not.toContain("permanent:");
       expect(result.error).not.toContain("shopify");
     });
+
+    it("passes RECONCILE_ERROR_MESSAGES values through unchanged (#190)", async () => {
+      const { RECONCILE_HUMAN_MESSAGES } = await vi.importActual<
+        typeof import("~/services/apply.server")
+      >("~/services/apply.server");
+
+      for (const humanMessage of RECONCILE_HUMAN_MESSAGES) {
+        vi.resetModules();
+        const freshApplyMatch = (await import("~/services/apply.server"))
+          .applyMatch;
+        const freshGetRequestSql = (
+          await import("~/lib/request-context.server")
+        ).getRequestSql;
+
+        const freshMockSql = vi.fn();
+        freshMockSql.mockResolvedValueOnce([
+          { id: `shop-reconcile-msg-${humanMessage.slice(0, 10)}` },
+        ]);
+        (freshGetRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(
+          freshMockSql
+        );
+
+        (freshApplyMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
+          success: false,
+          error: humanMessage,
+        });
+
+        const formData = new FormData();
+        formData.append("intent", "apply");
+        formData.append("matchId", "match-reconcile-human");
+
+        const postRequest = new Request("https://example.com/app/reconcile", {
+          method: "POST",
+          body: formData,
+        });
+
+        const { action } = await import("../app.reconcile");
+        const result = await action({
+          request: postRequest,
+          context: mockContext as never,
+          params: {},
+          url: mockUrl,
+          pattern: mockPattern,
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBe(humanMessage);
+      }
+    });
+
+    it("maps strings with domain to generic message (fail-closed)", async () => {
+      const { applyMatch } = await import("~/services/apply.server");
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-domain-test" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      const errorWithDomain = "Error for test-store.myshopify.com";
+      (applyMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+        error: errorWithDomain,
+      });
+
+      const formData = new FormData();
+      formData.append("intent", "apply");
+      formData.append("matchId", "match-domain");
+
+      const postRequest = new Request("https://example.com/app/reconcile", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.reconcile");
+      const result = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("An error occurred. Please try again.");
+      expect(result.error).not.toContain("myshopify");
+      expect(result.error).not.toContain("test-store");
+    });
   });
 
   describe("loader success paths (no errors)", () => {
     it("does not call console.error when no errors occur", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
-      const { resolvePlan } = await import("~/services/plan.server");
       const { getSuggestedMatches } = await import(
         "~/lib/matching/queries.server"
       );
 
       mockSql.mockResolvedValueOnce([{ id: "shop-ok", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-      (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-        plan: { key: "starter" },
-      });
 
       mockSql
         .mockResolvedValueOnce([{ count: "0" }])
@@ -610,6 +676,41 @@ describe("Reconcile Route (M5)", () => {
       });
 
       expect(consoleErrorSpy).not.toHaveBeenCalled();
+    });
+
+    it("does not return plan-related fields (matching is on all plans)", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      const { getSuggestedMatches } = await import(
+        "~/lib/matching/queries.server"
+      );
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-free", currency: "INR" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      mockSql
+        .mockResolvedValueOnce([{ count: "0" }])
+        .mockResolvedValueOnce([{ count: "0" }])
+        .mockResolvedValueOnce([{ count: "0" }])
+        .mockResolvedValueOnce([{ count: "0" }]);
+
+      (getSuggestedMatches as ReturnType<typeof vi.fn>).mockResolvedValue({
+        matches: [],
+        totalCount: 0,
+      });
+
+      const { loader } = await import("../app.reconcile");
+      const result = await loader({
+        request: mockRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result).not.toHaveProperty("planKey");
+      expect(result).not.toHaveProperty("gatingEnforced");
+      expect(result).not.toHaveProperty("storeHandle");
+      expect(result).not.toHaveProperty("appHandle");
     });
   });
 });

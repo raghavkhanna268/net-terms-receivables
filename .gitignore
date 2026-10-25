@@ -66,3 +66,7 @@ app/types/admin-*.schema.json
 *.swo
 
 __pycache__/
+
+# Playwright
+playwright-report/
+test-results/

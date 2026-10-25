@@ -24,8 +24,11 @@ import re
 import sys
 
 APPROVED_SCOPES = {
-    "read_companies", "read_customers", "read_draft_orders", "read_orders",
-    "read_payment_terms", "write_companies", "write_customers",
+    # S24: Dropped read_companies, read_customers, read_orders (implied by write_* scopes).
+    # See https://shopify.dev/docs/api/usage/access-scopes 'How it works':
+    # "Any scope that writes a resource also grants read access to it."
+    "read_draft_orders", "read_payment_terms",
+    "write_companies", "write_customers",
     "write_merchant_managed_fulfillment_orders", "write_orders",
     "write_payment_customizations", "write_validations",
 }
@@ -145,7 +148,7 @@ def main(root):
         print("scope_guard: FAIL")
         ok = False
     else:
-        print("scope_guard: PASS (toml == wrangler SCOPES == approved 11)")
+        print(f"scope_guard: PASS (toml == wrangler SCOPES == approved {len(APPROVED_SCOPES)})")
 
     cid = parse_toml_client_id(app_toml)
     others = [os.path.basename(p) for p in glob.glob(os.path.join(root, "shopify.app.*.toml"))]

@@ -1270,17 +1270,48 @@ jobs:
           VALIDATION_ENABLED=false
           VALIDATION_BLOCK_ON_FAILURE=false
           DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS=false
+          # Shape-only metrics for the deployed inputQuery: booleans + one integer.
+          # NEVER print the query text or any part of it (public Actions logs).
+          # "Missing node" counts as null (the API gave us no inputQuery string).
+          INPUT_QUERY_NULL=true
+          INPUT_QUERY_LENGTH=0
+          IQ_HAS_CREDIT_STATUS=false
+          IQ_HAS_DOLLAR_APP=false
+          IQ_HAS_APP_PREFIX=false
+          IQ_HAS_METAFIELD=false
+          # metafield(... namespace: "$app" | "app--<digits>" ... key: "credit_status" ...),
+          # either argument order, matched on the query flattened to one line.
+          # shellcheck disable=SC2016
+          IQ_NS='namespace[[:space:]]*:[[:space:]]*"(\$app|app--[0-9]+)"'
+          IQ_KEY='key[[:space:]]*:[[:space:]]*"credit_status"'
+          IQ_CREDIT_STATUS_RE="metafield[[:space:]]*\\([^)]*(${IQ_NS}[^)]*${IQ_KEY}|${IQ_KEY}[^)]*${IQ_NS})"
 
           if [ -n "$VALIDATION_NODE" ] && [ "$VALIDATION_NODE" != "null" ]; then
             VALIDATION_EXISTS=true
             VALIDATION_ENABLED=$(echo "$VALIDATION_NODE" | jq -r '.enabled')
             VALIDATION_BLOCK_ON_FAILURE=$(echo "$VALIDATION_NODE" | jq -r '.blockOnFailure')
-            # Check if deployed function's inputQuery references $app:credit_status metafield
-            INPUT_QUERY=$(echo "$VALIDATION_NODE" | jq -r '.shopifyFunction.inputQuery // ""')
-            # shellcheck disable=SC2016
-            if echo "$INPUT_QUERY" | grep -qE 'metafield.*namespace.*\$app.*key.*credit_status'; then
-              DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS=true
+            # Null/missing is tested on the raw JSON value (no `// ""` default), so an
+            # empty string ("" => null=false, length=0) is distinguishable from null.
+            INPUT_QUERY_NULL=$(echo "$VALIDATION_NODE" | jq '(.shopifyFunction.inputQuery | type) != "string"')
+            INPUT_QUERY_LENGTH=$(echo "$VALIDATION_NODE" | jq '.shopifyFunction.inputQuery | if type == "string" then length else 0 end')
+            if [ "$INPUT_QUERY_NULL" = "false" ]; then
+              # Flatten to one line so multiline queries match; held in memory only.
+              IQ_FLAT=$(echo "$VALIDATION_NODE" | jq -r '.shopifyFunction.inputQuery' | tr '\n' ' ')
+              # Bash pattern tests (no pipes into grep -q, so no SIGPIPE/pipefail false negatives)
+              # shellcheck disable=SC2016
+              if [[ "$IQ_FLAT" == *'$app'* ]]; then IQ_HAS_DOLLAR_APP=true; fi
+              if [[ "$IQ_FLAT" =~ app--[0-9]+ ]]; then IQ_HAS_APP_PREFIX=true; fi
+              if [[ "$IQ_FLAT" == *metafield* ]]; then IQ_HAS_METAFIELD=true; fi
+              if [[ "$IQ_FLAT" == *credit_status* ]]; then IQ_HAS_CREDIT_STATUS=true; fi
+              if [[ "$IQ_FLAT" =~ $IQ_CREDIT_STATUS_RE ]]; then DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS=true; fi
+              unset IQ_FLAT
             fi
+          fi
+          # A null/missing inputQuery tells us nothing about credit_status, so report
+          # the JSON string "unknown" rather than false. A non-null query (including the
+          # empty string "", which is non-null with length 0) keeps a true/false verdict.
+          if [ "$INPUT_QUERY_NULL" = "true" ]; then
+            DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS='"unknown"'
           fi
 
           echo "S12 Validation status (read-only):"
@@ -1290,7 +1321,50 @@ jobs:
             --argjson block_on_failure "$VALIDATION_BLOCK_ON_FAILURE" \
             --argjson repo_input_query_has_credit_status "$REPO_INPUT_QUERY_HAS_CREDIT_STATUS" \
             --argjson deployed_input_query_has_credit_status "$DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS" \
-            '{exists: $exists, enabled: $enabled, blockOnFailure: $block_on_failure, repo_input_query_has_credit_status: $repo_input_query_has_credit_status, deployed_input_query_has_credit_status: $deployed_input_query_has_credit_status}'
+            --argjson input_query_null "$INPUT_QUERY_NULL" \
+            --argjson input_query_length "$INPUT_QUERY_LENGTH" \
+            --argjson iq_has_credit_status "$IQ_HAS_CREDIT_STATUS" \
+            --argjson iq_has_dollar_app "$IQ_HAS_DOLLAR_APP" \
+            --argjson iq_has_app_prefix "$IQ_HAS_APP_PREFIX" \
+            --argjson iq_has_metafield "$IQ_HAS_METAFIELD" \
+            '{exists: $exists, enabled: $enabled, blockOnFailure: $block_on_failure, repo_input_query_has_credit_status: $repo_input_query_has_credit_status, deployed_input_query_has_credit_status: $deployed_input_query_has_credit_status, input_query_null: $input_query_null, input_query_length: $input_query_length, iq_has_credit_status: $iq_has_credit_status, iq_has_dollar_app: $iq_has_dollar_app, iq_has_app_prefix: $iq_has_app_prefix, iq_has_metafield: $iq_has_metafield}'
+
+          # Cross-check via shopifyFunctions(apiType: cart_checkout_validation), read-only.
+          # Prints a count, function ids and per-function booleans/integers only; never
+          # titles or query text. has_credit_status is "unknown" when inputQuery is null.
+          # Soft-fails (warning) so it can't break the step.
+          echo ""
+          echo "S12 shopifyFunctions cross-check (read-only):"
+          FN_QUERY='{"query":"{ shopifyFunctions(first: 25, apiType: \"cart_checkout_validation\") { nodes { id handle inputQuery } } }"}'
+          FN_RESPONSE=$(mktemp)
+          FN_STATUS=$(curl -s -w "%{http_code}" -o "$FN_RESPONSE" \
+            -X POST \
+            --config "$CURL_CONFIG" \
+            --data-binary "$FN_QUERY" \
+            "https://${SHOP_DOMAIN}/admin/api/2026-10/graphql.json" || echo "000")
+          if [ "$FN_STATUS" != "200" ]; then
+            echo "::warning::shopifyFunctions cross-check failed with HTTP $FN_STATUS"
+            jq -n --arg http_status "$FN_STATUS" '{cross_check: "error", http_status: $http_status}'
+          elif jq -e '(.errors | length) > 0' "$FN_RESPONSE" >/dev/null 2>&1; then
+            echo "::warning::shopifyFunctions cross-check returned GraphQL errors"
+            jq '{cross_check: "error", error_codes: [.errors[] | .extensions.code // "UNKNOWN"]}' "$FN_RESPONSE"
+          else
+            jq --arg ns_re '(\$app|app--[0-9]+)' '
+              [.data.shopifyFunctions.nodes[]?] as $fns
+              | ("namespace\\s*:\\s*\"" + $ns_re + "\"") as $ns
+              | "key\\s*:\\s*\"credit_status\"" as $key
+              | ("metafield\\s*\\([^)]*(" + $ns + "[^)]*" + $key + "|" + $key + "[^)]*" + $ns + ")") as $re
+              | {cross_check: "ok",
+                 function_count: ($fns | length),
+                 functions: [$fns[] | {
+                   id: .id,
+                   handle_is_credit_check_validation: (.handle == "credit-check-validation"),
+                   input_query_null: ((.inputQuery | type) != "string"),
+                   input_query_length: (.inputQuery | if type == "string" then length else 0 end),
+                   has_credit_status: (.inputQuery | if type == "string" then (gsub("\n"; " ") | test($re)) else "unknown" end)
+                 }]}' "$FN_RESPONSE"
+          fi
+          rm -f "$FN_RESPONSE"
 
           # S12 checkout fixtures (read-only). Prints ids, enums, booleans and the
           # whitelisted credit_status fields only. Never names, emails, phones or addresses.
