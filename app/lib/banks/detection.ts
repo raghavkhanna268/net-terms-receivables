@@ -54,6 +54,22 @@ const ICICI_CORPORATE_HEADERS = [
 const ICICI_DETAILED_HEADERS = ["Date", "Particulars", "Chq. No.", "Withdrawals", "Deposits", "Balance"];
 
 /**
+ * ICICI real .xls layout: Value-Date-first header with blank columns A and J.
+ * Header row has: blank | S No. | Value Date | Transaction Date | Cheque Number | 
+ *                 Transaction Remarks | Withdrawal Amount(INR) | Deposit Amount(INR) | Balance(INR) | blank
+ */
+const ICICI_REAL_XLS_HEADERS = [
+  "S No.",
+  "Value Date",
+  "Transaction Date",
+  "Cheque Number",
+  "Transaction Remarks",
+  "Withdrawal Amount(INR)",
+  "Deposit Amount(INR)",
+  "Balance(INR)",
+];
+
+/**
  * SBI Header patterns (SYNTHETIC / UNVERIFIED)
  * Sources:
  * - https://www.tieout.in/banks/sbi/
@@ -333,6 +349,10 @@ export function detectHeaderRow(
     if (matchesHeaderPattern(cells, ICICI_DETAILED_HEADERS)) {
       return { bank: "ICICI", row: i, columns: cells };
     }
+    // ICICI real .xls layout: Value-Date-first with blank columns A/J
+    if (matchesHeaderPattern(cells, ICICI_REAL_XLS_HEADERS)) {
+      return { bank: "ICICI", row: i, columns: cells };
+    }
 
     // Check SBI patterns (UNVERIFIED)
     if (matchesHeaderPattern(cells, SBI_HEADERS)) {
@@ -411,7 +431,9 @@ export function detectFooterRows(sheet: SheetData, dataStartRow: number): Set<nu
     /^Registered\s*Office/i,
     /^Page\s*\d+\s*of\s*\d+$/i,
     /^Generated\s*on/i,
-    /^\s*\*{3,}/,
+    /^\s*\*{3,}/, // HDFC asterisk separator rows
+    /^Legends\b/i, // ICICI Legends block footer
+    /^---\s*End\s*Of\s*Statement/i, // HDFC end marker
   ];
 
   for (let i = dataStartRow; i < sheet.rows.length; i++) {
@@ -422,16 +444,51 @@ export function detectFooterRows(sheet: SheetData, dataStartRow: number): Set<nu
     const rowText = row.map((c) => String(c ?? "")).join(" ");
 
     // Check against footer patterns
+    let isFooter = false;
     for (const pattern of footerPatterns) {
       if (pattern.test(firstCell) || pattern.test(rowText)) {
         footerIndices.add(i);
+        isFooter = true;
         break;
       }
     }
+    
+    // HDFC summary-values row: numeric values only, no text labels
+    // This row follows "Opening Balance" label row and has numbers in A, E, F, G
+    // but no text label. Detect it by checking if it's all numbers after a footer row.
+    if (!isFooter && i > 0 && footerIndices.has(i - 1)) {
+      // Previous row was a footer row - check if this is a values-only row
+      const allNumeric = row.every((c) => {
+        if (c === null || c === undefined) return true;
+        const s = String(c).trim();
+        if (s === "") return true;
+        // Check if it's a number (with optional commas and decimal)
+        return /^-?[\d,]+\.?\d*$/.test(s.replace(/[,\s]/g, ""));
+      });
+      const hasNumbers = row.some((c) => {
+        if (c === null || c === undefined) return false;
+        const s = String(c).trim();
+        return s !== "" && /\d/.test(s);
+      });
+      if (allNumeric && hasNumbers) {
+        footerIndices.add(i);
+        isFooter = true;
+      }
+    }
 
-    // Empty row often indicates end of data
+    // Empty row often indicates end of data, but be careful not to mark
+    // narration continuation rows (which have only 1-2 non-empty cells)
     const nonEmptyCells = row.filter((c) => c !== null && c !== undefined && String(c).trim());
-    if (nonEmptyCells.length <= 1) {
+    
+    // Skip the empty-row heuristic if this looks like a narration continuation row
+    // (has text in middle columns but empty first column - typical of overflow rows)
+    const looksLikeContinuation = nonEmptyCells.length >= 1 && 
+      nonEmptyCells.length <= 2 &&
+      firstCell === "" &&
+      row.some((c, idx) => idx > 0 && idx < row.length - 1 && 
+        c !== null && c !== undefined && String(c).trim().length > 3);
+    
+    if (nonEmptyCells.length <= 1 && !looksLikeContinuation) {
       // Check if subsequent rows are also empty or footer-like
       let allEmpty = true;
       for (let j = i + 1; j < Math.min(i + 5, sheet.rows.length); j++) {

@@ -33,7 +33,7 @@ function isFullyBlankRow(row: (string | number | Date | boolean | null)[]): bool
   }
   return true;
 }
-import { parseIndianDate, parseIndianAmount, isBlankOrZero } from "../normalisers.js";
+import { parseIndianDate, parseIndianAmount, isBlankOrZero, normalizeIciciRef } from "../normalisers.js";
 import { parseNarration, extractUtrForDedupe } from "../narration-parser.js";
 import { generateDedupeKey, dedupeTransactions } from "../dedupe.js";
 
@@ -224,6 +224,7 @@ export async function parseIciciStatement(
 
 /**
  * Map column indices from header row.
+ * Handles both standard ICICI layout and real .xls Value-Date-first layout.
  */
 function mapIciciColumns(headers: string[]): IciciColumnMap | null {
   const lower = headers.map((h) => h.toLowerCase().replace(/[./]/g, "").replace(/\s+/g, " "));
@@ -247,6 +248,10 @@ function mapIciciColumns(headers: string[]): IciciColumnMap | null {
     } else if (h.includes("transaction date") || h === "date" || h === "txn date") {
       dateCol = i;
     } else if (h.includes("value date") || h === "value dt") {
+      // If we haven't found a transaction date yet, use value date as the primary date
+      if (dateCol === -1) {
+        dateCol = i;
+      }
       valueDateCol = i;
     } else if (
       h.includes("cheque") ||
@@ -262,9 +267,19 @@ function mapIciciColumns(headers: string[]): IciciColumnMap | null {
       h === "narration"
     ) {
       narrationCol = i;
-    } else if (h.includes("withdrawal") || h.includes("debit") || h === "dr") {
+    } else if (
+      h.includes("withdrawal") ||
+      h.includes("debit") ||
+      h === "dr" ||
+      h.includes("withdrawal amount")
+    ) {
       withdrawalCol = i;
-    } else if (h.includes("deposit") || h.includes("credit") || h === "cr") {
+    } else if (
+      h.includes("deposit") ||
+      h.includes("credit") ||
+      h === "cr" ||
+      h.includes("deposit amount")
+    ) {
       depositCol = i;
     } else if (h.includes("balance")) {
       // Skip autosweep/reverse sweep columns
@@ -327,11 +342,15 @@ function extractIciciRow(
         : String(valueDateCell)
       : undefined;
 
+  // Normalize ICICI ref
+  const rawRef = row[columns.refCol] ? String(row[columns.refCol]).trim() : undefined;
+  const normalizedRef = normalizeIciciRef(rawRef);
+
   return {
     dateRaw: dateRaw instanceof Date ? dateRaw : dateStr,
     valueDateRaw,
     narration,
-    refNo: row[columns.refCol] ? String(row[columns.refCol]).trim() : undefined,
+    refNo: normalizedRef,
     debitRaw: row[columns.withdrawalCol] ? String(row[columns.withdrawalCol]) : undefined,
     creditRaw: row[columns.depositCol] ? String(row[columns.depositCol]) : undefined,
     balanceRaw: row[columns.balanceCol] ? String(row[columns.balanceCol]) : undefined,

@@ -109,7 +109,7 @@ function parseComponents(dayStr: string, monthStr: string, yearStr: string): str
   const month = parseInt(monthStr, 10);
   let year = parseInt(yearStr, 10);
 
-  // Handle 2-digit year (assume 2000s for 00-99)
+  // Handle 2-digit year: 00-49 → 2000-2049, 50-99 → 1950-1999
   if (year < 100) {
     year = year < 50 ? 2000 + year : 1900 + year;
   }
@@ -288,4 +288,49 @@ export function formatPaiseToDisplay(paise: number): string {
   }
 
   return `₹${groups.reverse().join("")}.${decimal}`;
+}
+
+/**
+ * Normalize HDFC reference number.
+ * HDFC refs are often 16-digit zero-padded: for UPI, it's the 12-digit RRN
+ * left-padded with "0000". Strips leading zeros to get the actual ref.
+ * 
+ * @param refNo Raw reference number from HDFC statement
+ * @returns Normalized reference (leading zeros stripped) or original if not applicable
+ */
+export function normalizeHdfcRef(refNo: string | undefined): string | undefined {
+  if (!refNo) return undefined;
+  const trimmed = refNo.trim();
+  if (!trimmed) return undefined;
+  
+  // If it's all digits and starts with zeros, strip leading zeros
+  if (/^\d+$/.test(trimmed) && trimmed.startsWith("0")) {
+    const stripped = trimmed.replace(/^0+/, "");
+    // Return at least 1 digit
+    return stripped || "0";
+  }
+  
+  return trimmed;
+}
+
+/**
+ * Normalize ICICI reference number.
+ * ICICI refs are typically 3-6 uppercase letters followed by digits.
+ * This function trims and validates the format.
+ * 
+ * @param refNo Raw reference number from ICICI statement
+ * @returns Normalized reference or original if not matching expected pattern
+ */
+export function normalizeIciciRef(refNo: string | undefined): string | undefined {
+  if (!refNo) return undefined;
+  const trimmed = refNo.trim();
+  if (!trimmed) return undefined;
+  
+  // ICICI ref pattern: 3-6 uppercase letters followed by digits
+  // Also accept cheque numbers (pure digits)
+  if (/^[A-Z]{3,6}\d+$/i.test(trimmed) || /^\d+$/.test(trimmed)) {
+    return trimmed.toUpperCase();
+  }
+  
+  return trimmed;
 }

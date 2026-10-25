@@ -34,7 +34,7 @@ function isFullyBlankRow(row: (string | number | Date | boolean | null)[]): bool
   }
   return true;
 }
-import { parseIndianDate, parseIndianAmount, isBlankOrZero } from "../normalisers.js";
+import { parseIndianDate, parseIndianAmount, isBlankOrZero, normalizeHdfcRef } from "../normalisers.js";
 import { parseNarration, extractUtrForDedupe } from "../narration-parser.js";
 import { generateDedupeKey, dedupeTransactions } from "../dedupe.js";
 
@@ -317,11 +317,15 @@ function extractHdfcRow(
         : String(valueDateCell)
       : undefined;
 
+  // Normalize HDFC ref (strip leading zeros from zero-padded refs)
+  const rawRef = row[columns.refCol] ? String(row[columns.refCol]).trim() : undefined;
+  const normalizedRef = normalizeHdfcRef(rawRef);
+
   return {
     dateRaw: dateRaw instanceof Date ? dateRaw : dateStr,
     valueDateRaw,
     narration,
-    refNo: row[columns.refCol] ? String(row[columns.refCol]).trim() : undefined,
+    refNo: normalizedRef,
     debitRaw: row[columns.withdrawalCol] ? String(row[columns.withdrawalCol]) : undefined,
     creditRaw: row[columns.depositCol] ? String(row[columns.depositCol]) : undefined,
     balanceRaw: row[columns.balanceCol] ? String(row[columns.balanceCol]) : undefined,
