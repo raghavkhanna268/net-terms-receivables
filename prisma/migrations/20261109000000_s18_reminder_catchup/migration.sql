@@ -59,8 +59,24 @@ CREATE INDEX IF NOT EXISTS "idx_reminder_log_delayed"
     ON "ReminderLog" ("shopId", "invoiceId", "ruleId")
     WHERE status = 'delayed';
 
+-- Step 6.5: App settings table for runtime configuration shared between SQL and TS
+-- Both s18_enqueue_reminders() and reminders.server.ts read from this table.
+-- The app writes to this table on startup, syncing from environment variables.
+CREATE TABLE IF NOT EXISTS public.s18_app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TIMESTAMPTZ(3) NOT NULL DEFAULT NOW()
+);
+
+-- Initialize default: gating enforced (matches env var default behavior)
+INSERT INTO public.s18_app_settings (key, value)
+VALUES ('plan_gating_enforced', 'true')
+ON CONFLICT (key) DO NOTHING;
+
 -- Step 7: Replace s18_enqueue_reminders() with catch-up logic
--- Keeps the gated-account skip from 20261106 migration
+-- Reads plan_gating_enforced from s18_app_settings table.
+-- When 'true' or '1': skip gated accounts (ba.gated_at IS NOT NULL)
+-- When 'false' or '0': allow gated accounts (no gating check)
 CREATE OR REPLACE FUNCTION public.s18_enqueue_reminders()
 RETURNS void
 LANGUAGE plpgsql
@@ -74,7 +90,18 @@ DECLARE
     catchup_count INT := 0;
     expired_count INT := 0;
     skipped_older_stages INT := 0;
+    skipped_newer_due_today INT := 0;
+    v_gating_enforced BOOLEAN := TRUE;
+    v_gating_value TEXT;
 BEGIN
+    -- Read gating setting from config table (shared with TS)
+    SELECT value INTO v_gating_value
+    FROM public.s18_app_settings
+    WHERE key = 'plan_gating_enforced';
+    
+    IF v_gating_value IS NOT NULL THEN
+        v_gating_enforced := (v_gating_value = 'true' OR v_gating_value = '1');
+    END IF;
     -- ==========================================================================
     -- PART 1: Expire delayed reminders past the catch-up window (D+3)
     -- Mark them as skipped_daily_limit
@@ -102,19 +129,21 @@ BEGIN
     -- For each invoice, only the LATEST stage should be sent.
     -- A "newer" stage is one with higher offsetDays that has ANY status
     -- (sent, delayed, or skipped_daily_limit).
+    -- Groups by (shopId, invoiceId) to ensure shop isolation.
     -- ==========================================================================
     WITH latest_stage_per_invoice AS (
-        -- Find the highest offsetDays for each invoice that has ANY ReminderLog row
-        SELECT rl."invoiceId", MAX(r."offsetDays") AS max_offset
+        -- Find the highest offsetDays for each (shop, invoice) that has ANY ReminderLog row
+        SELECT rl."shopId", rl."invoiceId", MAX(r."offsetDays") AS max_offset
         FROM public."ReminderLog" rl
         INNER JOIN public."ReminderRule" r ON r.id = rl."ruleId"
-        GROUP BY rl."invoiceId"
+        GROUP BY rl."shopId", rl."invoiceId"
     )
     UPDATE public."ReminderLog" rl
     SET status = 'skipped_daily_limit'::public."ReminderLogStatus"
     FROM public."ReminderRule" r,
          latest_stage_per_invoice lsp
     WHERE rl.status = 'delayed'::public."ReminderLogStatus"
+      AND rl."shopId" = lsp."shopId"
       AND rl."invoiceId" = lsp."invoiceId"
       AND rl."ruleId" = r.id
       AND r."offsetDays" < lsp.max_offset;
@@ -150,6 +179,8 @@ BEGIN
                 = (NOW() AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE
       );
 
+    GET DIAGNOSTICS skipped_newer_due_today = ROW_COUNT;
+
     -- ==========================================================================
     -- PART 3: Enqueue NEW reminders (due today, no existing log entry)
     -- Keeps the gated-account skip from 20261106 migration
@@ -179,7 +210,8 @@ BEGIN
         INNER JOIN public."BuyerAccount" ba
             ON ba.id = i."buyerAccountId"
             AND ba."shopId" = i."shopId"
-            AND ba.gated_at IS NULL
+            -- Gating check: when enforced, skip gated accounts; otherwise allow all
+            AND (NOT v_gating_enforced OR ba.gated_at IS NULL)
         WHERE r.enabled = true
           AND r.channel = 'email'::public."ReminderChannel"
           -- Check send window: shop's local hour must be 09-18
@@ -243,7 +275,8 @@ BEGIN
         INNER JOIN public."BuyerAccount" ba
             ON ba.id = i."buyerAccountId"
             AND ba."shopId" = i."shopId"
-            AND ba.gated_at IS NULL
+            -- Gating check: when enforced, skip gated accounts; otherwise allow all
+            AND (NOT v_gating_enforced OR ba.gated_at IS NULL)
         WHERE rl.status = 'delayed'::public."ReminderLogStatus"
           AND r.channel = 'email'::public."ReminderChannel"
           -- Check send window
@@ -285,9 +318,9 @@ BEGIN
         catchup_count := catchup_count + 1;
     END LOOP;
     
-    IF enqueued_count > 0 OR catchup_count > 0 OR expired_count > 0 OR skipped_older_stages > 0 THEN
-        RAISE LOG 's18_enqueue_reminders: enqueued=%, catchup=%, expired=%, skipped_older=%', 
-            enqueued_count, catchup_count, expired_count, skipped_older_stages;
+    IF enqueued_count > 0 OR catchup_count > 0 OR expired_count > 0 OR skipped_older_stages > 0 OR skipped_newer_due_today > 0 THEN
+        RAISE LOG 's18_enqueue_reminders: enqueued=%, catchup=%, expired=%, skipped_older=%, skipped_newer_today=%', 
+            enqueued_count, catchup_count, expired_count, skipped_older_stages, skipped_newer_due_today;
     END IF;
 END;
 $func$;

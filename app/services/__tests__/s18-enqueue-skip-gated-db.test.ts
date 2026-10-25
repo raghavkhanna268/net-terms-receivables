@@ -10,7 +10,7 @@
  * The shop timezone is computed from DB's UTC hour so the business-hour check
  * in s18_enqueue_reminders() (which uses NOW()) sees a local hour of ~12.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 
@@ -231,6 +231,181 @@ describeWithDb("s18_enqueue_reminders gated account filtering (DB)", () => {
           SET gated_at = NOW()
           WHERE id = ${TEST_GATED_ACCOUNT_ID}
         `;
+      }
+    });
+  });
+
+  describe("PLAN_GATING_ENFORCED flag consistency (SQL + TS)", () => {
+    /**
+     * These tests verify SQL and TS agree on gating behavior.
+     * The gating flag is stored in s18_app_settings table and read by both.
+     */
+
+    it("flag=false: gated account IS enqueued (no gating)", async () => {
+      // Set gating flag to false in the shared config table
+      await sql`
+        INSERT INTO s18_app_settings (key, value, updated_at)
+        VALUES ('plan_gating_enforced', 'false', NOW())
+        ON CONFLICT (key) DO UPDATE SET value = 'false', updated_at = NOW()
+      `;
+
+      try {
+        await createInvoiceDueToday(
+          TEST_GATED_ACCOUNT_ID,
+          TEST_GATED_INVOICE_ID,
+          "#GATED-FLAG-FALSE"
+        );
+
+        const enqueuedIds = await callEnqueueAndGetInvoiceIds();
+
+        // With gating=false, gated accounts SHOULD be enqueued
+        expect(enqueuedIds).toContain(TEST_GATED_INVOICE_ID);
+      } finally {
+        // Restore default (gating enforced)
+        await sql`
+          INSERT INTO s18_app_settings (key, value, updated_at)
+          VALUES ('plan_gating_enforced', 'true', NOW())
+          ON CONFLICT (key) DO UPDATE SET value = 'true', updated_at = NOW()
+        `;
+      }
+    });
+
+    it("flag=true: gated account is NOT enqueued (gating enforced)", async () => {
+      // Set gating flag to true in the shared config table
+      await sql`
+        INSERT INTO s18_app_settings (key, value, updated_at)
+        VALUES ('plan_gating_enforced', 'true', NOW())
+        ON CONFLICT (key) DO UPDATE SET value = 'true', updated_at = NOW()
+      `;
+
+      await createInvoiceDueToday(
+        TEST_GATED_ACCOUNT_ID,
+        TEST_GATED_INVOICE_ID,
+        "#GATED-FLAG-TRUE"
+      );
+
+      const enqueuedIds = await callEnqueueAndGetInvoiceIds();
+
+      // With gating=true, gated accounts should NOT be enqueued
+      expect(enqueuedIds).not.toContain(TEST_GATED_INVOICE_ID);
+    });
+
+    it("flag=false: TS sendPaymentReminder sends to gated account", async () => {
+      const { sendPaymentReminder, setGatingEnforced } = await import("../reminders.server");
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example" };
+
+      // Set gating flag to false
+      await setGatingEnforced(sql, false);
+
+      const invoiceId = `inv-ts-gated-send-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/ts-gated-send-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_GATED_ACCOUNT_ID}, ${orderId},
+          '#TS-GATED-SEND', 10000.00, 10000.00, 'open',
+          NOW() - INTERVAL '5 days',
+          ((NOW() AT TIME ZONE ${testTimezone})::DATE)::timestamp AT TIME ZONE ${testTimezone},
+          NOW(), NOW()
+        )
+      `;
+
+      await sql`
+        INSERT INTO s8_tagged_customers (shop_id, customer_id, email, display_name, updated_at)
+        VALUES (${TEST_SHOP_ID}, ${'gid://shopify/Customer/gated-' + TEST_SUFFIX}, 'gated-buyer@test-reminders.example', 'Gated Buyer', NOW())
+        ON CONFLICT (shop_id, customer_id) DO UPDATE SET email = 'gated-buyer@test-reminders.example'
+      `;
+
+      const luxon = await import("luxon");
+      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: testTimezone });
+      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id: "email-gated-send" }) });
+      vi.stubGlobal("fetch", mockFetch);
+
+      try {
+        const result = await sendPaymentReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID,
+          0,
+          testTimezone,
+          validEnv
+        );
+
+        // With gating=false, gated account should receive the reminder
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("sent");
+        expect(mockFetch).toHaveBeenCalled();
+      } finally {
+        luxonSpy.mockRestore();
+        vi.unstubAllGlobals();
+        // Restore gating
+        await setGatingEnforced(sql, true);
+      }
+    });
+
+    it("flag=true: TS sendPaymentReminder skips gated account", async () => {
+      const { sendPaymentReminder, setGatingEnforced } = await import("../reminders.server");
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example" };
+
+      // Set gating flag to true
+      await setGatingEnforced(sql, true);
+
+      const invoiceId = `inv-ts-gated-skip-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/ts-gated-skip-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_GATED_ACCOUNT_ID}, ${orderId},
+          '#TS-GATED-SKIP', 10000.00, 10000.00, 'open',
+          NOW() - INTERVAL '5 days',
+          ((NOW() AT TIME ZONE ${testTimezone})::DATE)::timestamp AT TIME ZONE ${testTimezone},
+          NOW(), NOW()
+        )
+      `;
+
+      await sql`
+        INSERT INTO s8_tagged_customers (shop_id, customer_id, email, display_name, updated_at)
+        VALUES (${TEST_SHOP_ID}, ${'gid://shopify/Customer/gated-' + TEST_SUFFIX}, 'gated-buyer@test-reminders.example', 'Gated Buyer', NOW())
+        ON CONFLICT (shop_id, customer_id) DO UPDATE SET email = 'gated-buyer@test-reminders.example'
+      `;
+
+      const luxon = await import("luxon");
+      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: testTimezone });
+      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id: "should-not-send" }) });
+      vi.stubGlobal("fetch", mockFetch);
+
+      try {
+        const result = await sendPaymentReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID,
+          0,
+          testTimezone,
+          validEnv
+        );
+
+        // With gating=true, gated account should be skipped
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("skipped");
+        expect(result.skipReason).toContain("gated");
+        expect(mockFetch).not.toHaveBeenCalled();
+      } finally {
+        luxonSpy.mockRestore();
+        vi.unstubAllGlobals();
       }
     });
   });
