@@ -25,15 +25,14 @@ vi.mock("~/services/matcher.server", () => ({
   MAX_PAYMENTS_PER_REQUEST: 50,
 }));
 
-vi.mock("~/services/apply.server", () => ({
-  applyMatch: vi.fn(),
-  unmatchMatch: vi.fn(),
-  RECONCILE_HUMAN_MESSAGES: [
-    "Couldn't update the order in Shopify. Please retry.",
-    "Couldn't update the order in Shopify. Please check permissions.",
-    "Shopify is busy. Please try again in a moment.",
-  ],
-}));
+vi.mock("~/services/apply.server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/services/apply.server")>();
+  return {
+    applyMatch: vi.fn(),
+    unmatchMatch: vi.fn(),
+    RECONCILE_HUMAN_MESSAGES: actual.RECONCILE_HUMAN_MESSAGES,
+  };
+});
 
 vi.mock("~/services/plan.server", () => ({
   resolvePlan: vi.fn(),
@@ -45,6 +44,7 @@ vi.mock("~/services/gating.server", () => ({
 
 vi.mock("@shopify/shopify-app-react-router/server", () => ({
   boundary: { headers: vi.fn(() => ({})) },
+  ApiVersion: { October26: "2026-10" },
 }));
 
 describe("Reconcile Route (M5)", () => {
@@ -579,17 +579,10 @@ describe("Reconcile Route (M5)", () => {
       expect(result.error).not.toContain("shopify");
     });
 
-    it("mock RECONCILE_HUMAN_MESSAGES matches actual export (#190)", async () => {
-      const { RECONCILE_HUMAN_MESSAGES } = await import("~/services/apply.server");
-      expect(RECONCILE_HUMAN_MESSAGES).toEqual([
-        "Couldn't update the order in Shopify. Please retry.",
-        "Couldn't update the order in Shopify. Please check permissions.",
-        "Shopify is busy. Please try again in a moment.",
-      ]);
-    });
-
     it("passes RECONCILE_ERROR_MESSAGES values through unchanged (#190)", async () => {
-      const { RECONCILE_HUMAN_MESSAGES } = await import("~/services/apply.server");
+      const { RECONCILE_HUMAN_MESSAGES } = await vi.importActual<
+        typeof import("~/services/apply.server")
+      >("~/services/apply.server");
 
       for (const humanMessage of RECONCILE_HUMAN_MESSAGES) {
         vi.resetModules();
