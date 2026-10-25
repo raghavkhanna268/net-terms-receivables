@@ -2,27 +2,20 @@
 
 This document lists all OAuth scopes requested by the Net Terms Receivables app, the features that use them, and the exact API calls that require them.
 
-**Scope bar policy**: Production config (`shopify.app.toml` and `wrangler.jsonc` SCOPES) may only include scopes that merged code uses or that are pre-granted for imminent features. Before S24: audit and drop any unused scopes.
+**Scope bar policy**: Production config (`shopify.app.toml` and `wrangler.jsonc` SCOPES) may only include scopes that merged code uses or that are pre-granted for imminent features.
 
-## Production Scopes (11 total)
+**S24 scope reduction**: Dropped `read_companies`, `read_customers`, `read_orders` because write scopes imply read access. Per [Shopify Access Scopes documentation](https://shopify.dev/docs/api/usage/access-scopes) 'How it works' section: "Any scope that writes a resource also grants read access to it, so request the write scope only when your app needs both."
 
-### Read Scopes (5)
+## Production Scopes (8 total)
 
-#### read_companies
+### Read Scopes (2)
 
-| Feature | Step | API Call | Reference |
-|---------|------|----------|-----------|
-| Company/location sync | S6 | `companies` query | [companies query](https://shopify.dev/docs/api/admin-graphql/2026-10/queries/companies) |
-| Company/location sync | S6 | `companyLocations` query | [companyLocations query](https://shopify.dev/docs/api/admin-graphql/2026-10/queries/companyLocations) |
-| Bulk companies export | S6 | `bulkOperationRunQuery` with companies | [bulkOperationRunQuery](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/bulkOperationRunQuery) |
-
-#### read_orders
+#### read_draft_orders
 
 | Feature | Step | API Call | Reference |
 |---------|------|----------|-----------|
-| Order sync | S6 | `orders` query | [orders query](https://shopify.dev/docs/api/admin-graphql/2026-10/queries/orders) |
-| Bulk orders export | S6 | `bulkOperationRunQuery` with orders | [bulkOperationRunQuery](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/bulkOperationRunQuery) |
-| Order webhooks | S6 | orders/create, orders/updated, orders/cancelled, orders/paid | [Webhook topics](https://shopify.dev/docs/api/admin-rest/2026-10/resources/webhook) |
+| Draft order payment terms | S8 | `draftOrders` query | [draftOrders query](https://shopify.dev/docs/api/admin-graphql/2026-10/queries/draftOrders) |
+| Draft order webhooks | S8 | `draft_orders/create`, `draft_orders/update`, `draft_orders/delete` | [Webhook topics](https://shopify.dev/docs/api/admin-rest/2026-10/resources/webhook) |
 
 #### read_payment_terms
 
@@ -31,50 +24,46 @@ This document lists all OAuth scopes requested by the Net Terms Receivables app,
 | Order payment terms | S6 | `Order.paymentTerms` field | [Order.paymentTerms](https://shopify.dev/docs/api/admin-graphql/2026-10/objects/Order#field-order-paymentterms) |
 | Company location payment terms | S6 | `CompanyLocation.buyerExperienceConfiguration.paymentTermsTemplate` | [buyerExperienceConfiguration](https://shopify.dev/docs/api/admin-graphql/2026-10/objects/CompanyLocation#field-companylocation-buyerexperienceconfiguration) |
 
-#### read_customers
-
-| Feature | Step | API Call | Reference |
-|---------|------|----------|-----------|
-| Tagged customer sync | S8 | `customers` query with tag filter (id, tags, email, displayName) | [customers query](https://shopify.dev/docs/api/admin-graphql/2026-10/queries/customers) |
-| Bulk customer export | S8 | `bulkOperationRunQuery` with customers | [bulkOperationRunQuery](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/bulkOperationRunQuery) |
-
-> **Protected Customer Data (2026-10-23):** Level 1 + Name + Email approved. Fields fetched: `id`, `tags`, `email`, `displayName`. Fields NEVER fetched: `phone`, `addresses`, `firstName`, `lastName`, `defaultAddress`. See "Protected Customer Data" section below.
-
-#### read_draft_orders
-
-| Feature | Step | API Call | Reference |
-|---------|------|----------|-----------|
-| Draft order payment terms | S8 | `draftOrders` query | [draftOrders query](https://shopify.dev/docs/api/admin-graphql/2026-10/queries/draftOrders) |
-
-> **Pre-granted for S8**: This scope is not used by S6 but is included now to avoid a second OAuth re-approval when S8 ships.
-
 ### Write Scopes (6)
 
 #### write_companies
 
-| Feature | Step | Mutation | Reference |
-|---------|------|----------|-----------|
+Implies `read_companies` per [Access Scopes](https://shopify.dev/docs/api/usage/access-scopes).
+
+| Feature | Step | Mutation/Query | Reference |
+|---------|------|----------------|-----------|
 | Credit/hold metafields on Company | S11 | `metafieldsSet` with Company ownerId | [metafieldsSet](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/metafieldsSet) |
 | Credit/hold metafields on CompanyLocation | S11 | `metafieldsSet` with CompanyLocation ownerId | [metafieldsSet](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/metafieldsSet) |
 | Dev seed: set payment terms on location | S4 | `companyLocationUpdate` with `buyerExperienceConfiguration.paymentTermsTemplateId` | [companyLocationUpdate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/companyLocationUpdate) |
-
-> **Note**: `metafieldsSet` requires write access to the owner resource. For Company/CompanyLocation metafields, this requires `write_companies`.
+| Company/location sync | S6 | `companies` query, `companyLocations` query | [companies query](https://shopify.dev/docs/api/admin-graphql/2026-10/queries/companies) |
+| Bulk companies export | S6 | `bulkOperationRunQuery` with companies | [bulkOperationRunQuery](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/bulkOperationRunQuery) |
+| Company webhooks | S6 | `companies/create`, `companies/update`, `companies/delete` | [Webhook topics](https://shopify.dev/docs/api/admin-rest/2026-10/resources/webhook) |
 
 #### write_customers
 
-| Feature | Step | Mutation | Reference |
-|---------|------|----------|-----------|
-| Credit/hold metafields on Customer | S11 | `metafieldsSet` with Customer ownerId | [metafieldsSet](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/metafieldsSet) |
+Implies `read_customers` per [Access Scopes](https://shopify.dev/docs/api/usage/access-scopes).
 
-> **Note**: `metafieldsSet` requires write access to the owner resource. For Customer metafields, this requires `write_customers`.
+| Feature | Step | Mutation/Query | Reference |
+|---------|------|----------------|-----------|
+| Credit/hold metafields on Customer | S11 | `metafieldsSet` with Customer ownerId | [metafieldsSet](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/metafieldsSet) |
+| Tagged customer sync | S8 | `customers` query with tag filter (id, tags, email, displayName) | [customers query](https://shopify.dev/docs/api/admin-graphql/2026-10/queries/customers) |
+| Bulk customer export | S8 | `bulkOperationRunQuery` with customers | [bulkOperationRunQuery](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/bulkOperationRunQuery) |
+| Customer webhooks | S8 | `customers/create`, `customers/update`, `customers/delete` | [Webhook topics](https://shopify.dev/docs/api/admin-rest/2026-10/resources/webhook) |
+
+> **Protected Customer Data (2026-10-23):** Level 1 + Name + Email approved. Fields fetched: `id`, `tags`, `email`, `displayName`. Fields NEVER fetched: `phone`, `addresses`, `firstName`, `lastName`, `defaultAddress`. See "Protected Customer Data" section below.
 
 #### write_orders
 
-| Feature | Step | Mutation | Reference |
-|---------|------|----------|-----------|
+Implies `read_orders` per [Access Scopes](https://shopify.dev/docs/api/usage/access-scopes).
+
+| Feature | Step | Mutation/Query | Reference |
+|---------|------|----------------|-----------|
 | Mark order as paid after bank match | S17 | `orderMarkAsPaid` | [orderMarkAsPaid](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/orderMarkAsPaid) |
 | Add tags to orders (overdue, hold, etc.) | S17 | `tagsAdd` with Order gid | [tagsAdd](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/tagsAdd) |
 | Remove tags from orders | S17 | `tagsRemove` with Order gid | [tagsRemove](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/tagsRemove) |
+| Order sync | S6 | `orders` query | [orders query](https://shopify.dev/docs/api/admin-graphql/2026-10/queries/orders) |
+| Bulk orders export | S6 | `bulkOperationRunQuery` with orders | [bulkOperationRunQuery](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/bulkOperationRunQuery) |
+| Order webhooks | S6 | `orders/create`, `orders/updated`, `orders/cancelled`, `orders/paid` | [Webhook topics](https://shopify.dev/docs/api/admin-rest/2026-10/resources/webhook) |
 
 #### write_validations
 
@@ -83,8 +72,6 @@ This document lists all OAuth scopes requested by the Net Terms Receivables app,
 | Cart/checkout validation function | S12 | `validationCreate` | [validationCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/validationCreate) |
 | Update validation function | S12 | `validationUpdate` | [validationUpdate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/validationUpdate) |
 | Delete validation function | S12 | `validationDelete` | [validationDelete](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/validationDelete) |
-
-> **Pre-granted for S12**: Shopify Functions validation to block checkout for accounts on hold or over credit limit.
 
 #### write_payment_customizations
 
@@ -107,7 +94,7 @@ This document lists all OAuth scopes requested by the Net Terms Receivables app,
 
 ## Dev Seed Script
 
-The seed script (`scripts/seed.ts`) runs with **the same 11 production scopes** — no separate dev app needed. It uses **only the dev-store token** (`SHOPIFY_ADMIN_TOKEN` env var) and refuses to run on any shop other than the one in the `ALLOWED_DEV_STORE` env var (a GitHub Actions secret in CI), and refuses to run at all if it is unset.
+The seed script (`scripts/seed.ts`) runs with **the same 8 production scopes** — no separate dev app needed. It uses **only the dev-store token** (`SHOPIFY_ADMIN_TOKEN` env var) and refuses to run on any shop other than the one in the `ALLOWED_DEV_STORE` env var (a GitHub Actions secret in CI), and refuses to run at all if it is unset.
 
 ### How the Seed Uses Production Scopes
 
@@ -140,10 +127,18 @@ Orders are backdated using `processedAt` from [OrderCreateOrderInput](https://sh
 - S9 inference computes due dates from DB defaults seeded by this script
 - **No `write_payment_terms` scope is added** (Team Lead scope decision)
 
-## Final Production Scope List (11)
+## Scopes NOT in Production
+
+- **`read_companies`**, **`read_customers`**, **`read_orders`**: Dropped in S24. Implied by their write counterparts.
+- **`write_payment_terms`**: Not needed. Payment terms are configured via `companyLocationUpdate` (requires `write_companies`).
+- **`write_draft_orders`**: Not in production. For local dev, create `shopify.app.dev.toml`.
+- **`read_locations`**: Not requested. Not needed for app functionality.
+- **`read_all_orders`**: Protected scope. Requires separate Partner Dashboard approval. See `docs/launch-checklist/read-all-orders-request.md`.
+
+## Final Production Scope List (8)
 
 ```
-read_companies,read_customers,read_draft_orders,read_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations
+read_draft_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations
 ```
 
 ## Protected Customer Data
@@ -170,7 +165,3 @@ read_companies,read_customers,read_draft_orders,read_orders,read_payment_terms,w
 - `CUSTOMER_FORBIDDEN_FIELDS` in `app/services/sync/customer-fields.server.ts` blocks phone/address fields
 - `validateNoForbiddenFields()` throws on any query containing forbidden fields
 - Tests verify forbidden fields are never included, even with `CUSTOMER_PII_FIELDS=1`
-
-## Audit Reminder
-
-**Before S24**: Audit requested scopes and drop any that no merged code uses.
