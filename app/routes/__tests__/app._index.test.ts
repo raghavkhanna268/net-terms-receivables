@@ -886,22 +886,35 @@ describeWithDb("app._index over-limit queries (DB integration)", () => {
 });
 
 /**
- * S21 UI Tests: Over-limit banner shown/hidden, badge on accounts, flag-off behavior.
+ * S21 UI Tests: Over-limit banner using the actual helper imported by app._index.tsx.
  */
-describe("S21 over-limit banner and badge UI logic", () => {
-  it("banner is shown when overLimitCount > 0", () => {
-    const overLimitCount = 3;
-    const showBanner = overLimitCount > 0;
-    expect(showBanner).toBe(true);
+describe("S21 over-limit banner using buildOverLimitBannerState helper", () => {
+  it("banner is shown when overLimitCount > 0", async () => {
+    const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildOverLimitBannerState(3, true);
+    expect(state.show).toBe(true);
   });
 
-  it("banner is hidden when overLimitCount === 0", () => {
-    const overLimitCount = 0;
-    const showBanner = overLimitCount > 0;
-    expect(showBanner).toBe(false);
+  it("banner is hidden when overLimitCount === 0", async () => {
+    const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildOverLimitBannerState(0, true);
+    expect(state.show).toBe(false);
   });
 
-  it("badge appears on gated accounts only (is_gated === true)", () => {
+  it("banner shows enforcement note when gatingEnforced is false", async () => {
+    const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildOverLimitBannerState(2, false);
+    expect(state.show).toBe(true);
+    expect(state.enforcementNote).toBe("(Limits are not currently enforced.)");
+  });
+
+  it("banner does not show enforcement note when gatingEnforced is true", async () => {
+    const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildOverLimitBannerState(2, true);
+    expect(state.enforcementNote).toBeNull();
+  });
+
+  it("badge visibility based on is_gated field in ledger rows", () => {
     const rows = [
       { buyer_account_id: "1", is_gated: false },
       { buyer_account_id: "2", is_gated: true },
@@ -914,30 +927,6 @@ describe("S21 over-limit banner and badge UI logic", () => {
 
     expect(withBadge.length).toBe(2);
     expect(withoutBadge.length).toBe(2);
-  });
-
-  it("totals include all accounts (gated + active)", () => {
-    const allRows = [
-      { outstanding_paise: "100000", is_gated: false },
-      { outstanding_paise: "200000", is_gated: false },
-      { outstanding_paise: "300000", is_gated: true },
-      { outstanding_paise: "400000", is_gated: true },
-    ];
-
-    const totalOutstanding = allRows.reduce(
-      (sum, r) => sum + BigInt(r.outstanding_paise), 0n
-    );
-
-    expect(totalOutstanding).toBe(1000000n);
-  });
-
-  it("gatingEnforced false does not hide the banner (flag-off behavior)", () => {
-    const overLimitCount = 2;
-    const gatingEnforced = false;
-
-    const showBanner = overLimitCount > 0;
-
-    expect(showBanner).toBe(true);
-    expect(gatingEnforced).toBe(false);
+    expect(withBadge.map(r => r.buyer_account_id)).toEqual(["2", "4"]);
   });
 });

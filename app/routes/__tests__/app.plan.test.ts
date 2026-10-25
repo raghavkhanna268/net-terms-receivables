@@ -390,45 +390,84 @@ describe("FeatureComparisonTable logic", () => {
 });
 
 /**
- * S21 UI Tests: Over-limit banner and pricing assertions.
+ * S21 UI Tests: Over-limit banner using the actual helper imported by routes.
  *
- * These tests verify:
- * 1. Banner is shown when gatedCount > 0 (over-limit state)
- * 2. Banner is hidden when gatedCount === 0
- * 3. No price strings are rendered (no currency symbols)
- * 4. Flag-off behavior
+ * These tests verify the buildOverLimitBannerState helper that is used by:
+ * - app/routes/app.plan.tsx
+ * - app/routes/app._index.tsx
  */
-describe("S21 Over-limit banner logic", () => {
-  it("shows over-limit banner when gatedCount > 0", () => {
-    const gatedCount = 5;
-    const showBanner = gatedCount > 0;
-    expect(showBanner).toBe(true);
+describe("S21 Over-limit banner using buildOverLimitBannerState helper", () => {
+  it("shows banner when gatedCount > 0 (gatingEnforced=true)", async () => {
+    const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildOverLimitBannerState(5, true);
+    expect(state.show).toBe(true);
+    expect(state.heading).toBe("5 accounts over your plan limit");
   });
 
-  it("hides over-limit banner when gatedCount === 0", () => {
-    const gatedCount = 0;
-    const showBanner = gatedCount > 0;
-    expect(showBanner).toBe(false);
+  it("hides banner when gatedCount === 0", async () => {
+    const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildOverLimitBannerState(0, true);
+    expect(state.show).toBe(false);
   });
 
-  it("banner heading includes account count singular", () => {
-    const gatedCount = 1;
-    const heading = `${gatedCount} account${gatedCount !== 1 ? "s" : ""} over your plan limit`;
-    expect(heading).toBe("1 account over your plan limit");
+  it("shows banner when gatingEnforced is false (flag-off behavior)", async () => {
+    const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildOverLimitBannerState(3, false);
+    expect(state.show).toBe(true);
+    expect(state.enforcementNote).toBe("(Limits are not currently enforced.)");
   });
 
-  it("banner heading includes account count plural", () => {
-    const gatedCount = 5;
-    const heading = `${gatedCount} account${gatedCount !== 1 ? "s" : ""} over your plan limit`;
-    expect(heading).toBe("5 accounts over your plan limit");
+  it("no enforcement note when gatingEnforced is true", async () => {
+    const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildOverLimitBannerState(3, true);
+    expect(state.enforcementNote).toBeNull();
   });
 
-  it("banner shows even when gatingEnforced is false (flag-off behavior)", () => {
-    const gatedCount = 3;
-    const gatingEnforced = false;
-    const showBanner = gatedCount > 0;
-    expect(showBanner).toBe(true);
-    expect(gatingEnforced).toBe(false);
+  it("singular heading for gatedCount === 1", async () => {
+    const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildOverLimitBannerState(1, true);
+    expect(state.heading).toBe("1 account over your plan limit");
+  });
+
+  it("banner body text includes required product rule content", async () => {
+    const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildOverLimitBannerState(1, true);
+    expect(state.bodyText).toContain("Nothing is hidden");
+    expect(state.bodyText).toContain("totals include all accounts");
+    expect(state.bodyText).toContain("reminders");
+    expect(state.bodyText).toContain("credit-limit edits");
+    expect(state.bodyText).toContain("Matching");
+    expect(state.bodyText).toContain("never gated");
+    expect(state.bodyText).toContain("Credit holds");
+    expect(state.bodyText).toContain("checkout block");
+  });
+});
+
+describe("S21 Account page banner using buildAccountOverLimitBannerState helper", () => {
+  it("shows banner when isGated is true", async () => {
+    const { buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildAccountOverLimitBannerState(true, true);
+    expect(state.show).toBe(true);
+    expect(state.heading).toBe("This account is over your plan limit");
+  });
+
+  it("hides banner when isGated is false", async () => {
+    const { buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildAccountOverLimitBannerState(false, true);
+    expect(state.show).toBe(false);
+  });
+
+  it("shows banner when gatingEnforced is false (flag-off behavior)", async () => {
+    const { buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildAccountOverLimitBannerState(true, false);
+    expect(state.show).toBe(true);
+    expect(state.enforcementNote).toBe("(Limits are not currently enforced.)");
+  });
+
+  it("hides banner when account not gated even if gatingEnforced is false", async () => {
+    const { buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    const state = buildAccountOverLimitBannerState(false, false);
+    expect(state.show).toBe(false);
   });
 });
 
@@ -486,32 +525,18 @@ describe("S21 No price strings in plan output", () => {
       expect(matches).toHaveLength(0);
     }
   });
-});
 
-describe("S21 Badge on over-limit accounts", () => {
-  it("is_gated flag determines badge visibility", () => {
-    const activeAccount = { is_gated: false };
-    const gatedAccount = { is_gated: true };
-
-    expect(activeAccount.is_gated).toBe(false);
-    expect(gatedAccount.is_gated).toBe(true);
-  });
-
-  it("totals include all accounts regardless of gated state", async () => {
-    const allAccounts = [
-      { id: "1", is_gated: false, outstanding: 100 },
-      { id: "2", is_gated: false, outstanding: 200 },
-      { id: "3", is_gated: true, outstanding: 300 },
-      { id: "4", is_gated: true, outstanding: 400 },
-    ];
-
-    const total = allAccounts.reduce((sum, acc) => sum + acc.outstanding, 0);
-    const activeOnly = allAccounts.filter(a => !a.is_gated).reduce((sum, acc) => sum + acc.outstanding, 0);
-    const gatedOnly = allAccounts.filter(a => a.is_gated).reduce((sum, acc) => sum + acc.outstanding, 0);
-
-    expect(total).toBe(1000);
-    expect(activeOnly).toBe(300);
-    expect(gatedOnly).toBe(700);
-    expect(total).toBe(activeOnly + gatedOnly);
+  it("over-limit banner helper contains no currency symbols", async () => {
+    const { buildOverLimitBannerState, buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    
+    const shopState = buildOverLimitBannerState(5, true);
+    const accountState = buildAccountOverLimitBannerState(true, true);
+    
+    for (const state of [shopState, accountState]) {
+      expect(state.heading).not.toContain("$");
+      expect(state.heading).not.toContain("₹");
+      expect(state.bodyText).not.toContain("$");
+      expect(state.bodyText).not.toContain("₹");
+    }
   });
 });

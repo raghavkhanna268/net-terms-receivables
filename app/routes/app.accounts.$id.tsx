@@ -26,7 +26,7 @@ import type {
 import { useLoaderData, useActionData, Form, useNavigation } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
-import { isAccountActive } from "~/services/gating.server";
+import { isAccountActive, isGatingEnforced } from "~/services/gating.server";
 import {
   getCreditStatusDisplay,
   getCompanyTotals,
@@ -38,6 +38,7 @@ import {
   formatPaiseAmount,
   buildOrderAdminUrl,
 } from "~/lib/aging";
+import { buildAccountOverLimitBannerState } from "~/lib/over-limit-banner";
 import type { HoldReasonCode } from "~/lib/metafields-contract";
 
 const HOLD_REASON_OPTIONS: Array<{ value: HoldReasonCode; label: string }> = [
@@ -98,6 +99,7 @@ interface LoaderData {
     }>;
     totalCount: number;
   };
+  gatingEnforced: boolean;
   error: string | null;
 }
 
@@ -120,6 +122,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       creditStatus: null,
       companyTotals: null,
       invoices: { rows: [], totalCount: 0 },
+      gatingEnforced: isGatingEnforced(),
       error: "Account ID is required",
     } satisfies LoaderData;
   }
@@ -134,6 +137,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       creditStatus: null,
       companyTotals: null,
       invoices: { rows: [], totalCount: 0 },
+      gatingEnforced: isGatingEnforced(),
       error: "Shop not found",
     } satisfies LoaderData;
   }
@@ -165,6 +169,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       creditStatus: null,
       companyTotals: null,
       invoices: { rows: [], totalCount: 0 },
+      gatingEnforced: isGatingEnforced(),
       error: "Account not found",
     } satisfies LoaderData;
   }
@@ -245,6 +250,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
     creditStatus,
     companyTotals,
     invoices,
+    gatingEnforced: isGatingEnforced(),
     error: null,
   } satisfies LoaderData;
 };
@@ -439,7 +445,7 @@ function InvoiceTable({
 }
 
 export default function AccountPage() {
-  const { account, creditStatus, companyTotals, invoices, error } = useLoaderData<typeof loader>();
+  const { account, creditStatus, companyTotals, invoices, gatingEnforced, error } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
@@ -490,18 +496,19 @@ export default function AccountPage() {
         </s-section>
       )}
 
-      {account.isGated && (
-        <s-section>
-          <s-banner tone="warning" heading="This account is over your plan limit">
-            <s-text>
-              Nothing is hidden. Only these actions are limited: reminders, credit-limit
-              edits, account-detail edits and bulk statement import. Matching, confirming
-              a match and mark-paid are never gated. Credit holds and the checkout block
-              work on every plan.
-            </s-text>
-          </s-banner>
-        </s-section>
-      )}
+      {(() => {
+        const bannerState = buildAccountOverLimitBannerState(account.isGated, gatingEnforced);
+        return bannerState.show && (
+          <s-section>
+            <s-banner tone="warning" heading={bannerState.heading}>
+              <s-text>
+                {bannerState.bodyText}
+                {bannerState.enforcementNote && ` ${bannerState.enforcementNote}`}
+              </s-text>
+            </s-banner>
+          </s-section>
+        );
+      })()}
 
       <s-section heading="Account Details">
         <s-stack>

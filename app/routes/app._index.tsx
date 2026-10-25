@@ -22,6 +22,7 @@ import {
 } from "~/lib/aging";
 import type { Sql } from "~/lib/db-light.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
+import { buildOverLimitBannerState } from "~/lib/over-limit-banner";
 
 const PAGE_SIZE = 20;
 
@@ -736,21 +737,23 @@ export default function Index() {
             <s-section heading="Buyer Ledger">
               <s-stack>
                 {/* Over plan limit banner */}
-                {overLimitCount > 0 && (
-                  <s-banner tone="warning" heading={`${overLimitCount} account${overLimitCount > 1 ? "s" : ""} over your plan limit`}>
-                    <s-text>
-                      Nothing is hidden and totals include all accounts. Only these actions
-                      are limited: reminders, credit-limit edits, account-detail edits and
-                      bulk statement import. Matching, confirming a match and mark-paid are
-                      never gated. Credit holds and the checkout block work on every plan.{" "}
-                      {!onlyOverLimit && (
-                        <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}&overlimit=true`}>
-                          Show only over-limit accounts
-                        </s-link>
-                      )}
-                    </s-text>
-                  </s-banner>
-                )}
+                {(() => {
+                  const bannerState = buildOverLimitBannerState(overLimitCount, gatingEnforced);
+                  return bannerState.show && (
+                    <s-banner tone="warning" heading={bannerState.heading}>
+                      <s-text>
+                        {bannerState.bodyText}
+                        {bannerState.enforcementNote && ` ${bannerState.enforcementNote}`}
+                        {" "}
+                        {!onlyOverLimit && (
+                          <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}&overlimit=true`}>
+                            Show only over-limit accounts
+                          </s-link>
+                        )}
+                      </s-text>
+                    </s-banner>
+                  );
+                })()}
                 {/* Filter UI */}
                 <s-paragraph>
                   <s-text type="strong">Show: </s-text>

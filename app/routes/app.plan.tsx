@@ -29,6 +29,7 @@ import {
   PLAN_DISPLAY_NAMES,
   FEATURE_DISPLAY_NAMES,
 } from "~/components/UpgradePrompt";
+import { buildOverLimitBannerState } from "~/lib/over-limit-banner";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 
 const FEATURE_DESCRIPTIONS: Record<FeatureKey, string> = {
@@ -267,17 +268,17 @@ export default function PlanPage() {
                 label="Bank Imports This Month"
               />
 
-              {gatedCount > 0 && (
-                <s-banner tone="warning" heading={`${gatedCount} account${gatedCount !== 1 ? "s" : ""} over your plan limit`}>
-                  <s-text>
-                    Nothing is hidden and totals include all accounts. Only these actions
-                    are limited: reminders, credit-limit edits, account-detail edits and
-                    bulk statement import. Matching, confirming a match and mark-paid are
-                    never gated. Credit holds and the checkout block work on every plan.
-                    {!gatingEnforced && " (Limits are not currently enforced.)"}
-                  </s-text>
-                </s-banner>
-              )}
+              {(() => {
+                const bannerState = buildOverLimitBannerState(gatedCount, gatingEnforced);
+                return bannerState.show && (
+                  <s-banner tone="warning" heading={bannerState.heading}>
+                    <s-text>
+                      {bannerState.bodyText}
+                      {bannerState.enforcementNote && ` ${bannerState.enforcementNote}`}
+                    </s-text>
+                  </s-banner>
+                );
+              })()}
             </s-stack>
           </s-section>
 
