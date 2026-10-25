@@ -61,42 +61,25 @@ export type PhaseStage =
   | "loader_total_cold";
 
 /**
- * Track cold start (first request in this isolate).
+ * Track cold start (first request in this isolate) per Request object.
+ * Using WeakMap ensures concurrent requests don't interfere with each other.
  */
-let isolateRequestCount = 0;
+const coldByRequest = new WeakMap<Request, boolean>();
+let served = 0;
 
 /**
- * Cached cold value for current request (ensures layout and index get same value).
+ * Read cold flag once per request. Both layout and index get the same value
+ * when passed the same Request object. The first request in the isolate is cold.
+ *
+ * @param request - The Request object (must be the same instance for layout and index)
  */
-let cachedColdForRequest: boolean | null = null;
-
-/**
- * Check if this is the first request in the isolate.
- * Used internally; prefer readColdOnce() for request-scoped cold reading.
- */
-export function isFirstRequestInIsolate(): boolean {
-  return isolateRequestCount === 0;
-}
-
-/**
- * Read cold flag once per request. Both layout and index will get the same value.
- * The first call caches the result; subsequent calls return the cached value.
- * markRequestServed() clears the cache for the next request.
- */
-export function readColdOnce(): boolean {
-  if (cachedColdForRequest === null) {
-    cachedColdForRequest = isFirstRequestInIsolate();
+export function readColdOnce(request: Request): boolean {
+  let v = coldByRequest.get(request);
+  if (v === undefined) {
+    v = served++ === 0;
+    coldByRequest.set(request, v);
   }
-  return cachedColdForRequest;
-}
-
-/**
- * Increment the isolate request counter and clear cold cache.
- * Call this once per request after timing is complete.
- */
-export function markRequestServed(): void {
-  cachedColdForRequest = null;
-  isolateRequestCount++;
+  return v;
 }
 
 /**
@@ -104,8 +87,7 @@ export function markRequestServed(): void {
  * @internal
  */
 export function _resetIsolateStateForTesting(): void {
-  isolateRequestCount = 0;
-  cachedColdForRequest = null;
+  served = 0;
 }
 
 /**
@@ -125,12 +107,12 @@ export class ServerTiming {
   private cold: boolean;
 
   /**
-   * @param cold - Override cold flag (pass from layout to index for same request).
-   *               If not provided, reads from isolate state.
+   * @param cold - Whether this is a cold start request. Use readColdOnce(request)
+   *               to get the correct value for both layout and index loaders.
    */
-  constructor(cold?: boolean) {
+  constructor(cold: boolean = false) {
     this.requestStart = performance.now();
-    this.cold = cold ?? isFirstRequestInIsolate();
+    this.cold = cold;
   }
 
   /**

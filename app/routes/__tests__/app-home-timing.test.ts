@@ -297,20 +297,21 @@ describe("app home timing instrumentation", () => {
     });
 
     it("cold flag encoded in stage name reflects isolate state", async () => {
-      // Layout controls cold marking, so we need both loaders
-      // Run them concurrently like React Router does
+      // Both layout and index must receive the same Request object to share cold state
       const { loader: layoutLoader } = await import("../app");
       const { loader: indexLoader } = await import("../app._index");
 
-      // Helper to create context for layout
-      const createLayoutArgs = () => ({
-        request: new Request("https://example.com/app"),
+      // Create a shared request for first request
+      const request1 = new Request("https://example.com/app");
+      const createArgs = (req: Request) => ({
+        request: req,
         context: {
           shopify: {
             authenticate: {
               admin: vi.fn().mockResolvedValue({
                 admin: {},
                 session: { shop: TEST_SHOP },
+                redirect: vi.fn(),
               }),
             },
           },
@@ -322,10 +323,10 @@ describe("app home timing instrumentation", () => {
         params: {},
       } as never);
 
-      // First request - run concurrently to simulate real React Router behavior
+      // First request - both loaders get the same Request object
       await Promise.all([
-        layoutLoader(createLayoutArgs()),
-        indexLoader(createLoaderArgs()),
+        layoutLoader(createArgs(request1)),
+        indexLoader(createArgs(request1)),
       ]);
 
       let allLogs = consoleLogSpy.mock.calls
@@ -338,11 +339,12 @@ describe("app home timing instrumentation", () => {
         expect(log.stage).toMatch(/_cold$/);
       }
 
-      // Clear and make second request (layout already marked served, so second is warm)
+      // Clear and make second request with a new Request object
       consoleLogSpy.mockClear();
+      const request2 = new Request("https://example.com/app");
       await Promise.all([
-        layoutLoader(createLayoutArgs()),
-        indexLoader(createLoaderArgs()),
+        layoutLoader(createArgs(request2)),
+        indexLoader(createArgs(request2)),
       ]);
 
       allLogs = consoleLogSpy.mock.calls
@@ -472,6 +474,46 @@ describe("Server-Timing format compliance", () => {
 });
 
 /**
+ * Tests that index headers() merges parent (layout) and loader Server-Timing values.
+ */
+describe("index headers() merges parent and loader Server-Timing", () => {
+  it("merged Server-Timing contains both layout auth_layout and index phases", async () => {
+    // Import the headers function from app._index
+    const { headers } = await import("../app._index");
+    const { mergeServerTimingHeaders } = await import("~/lib/server-timing.server");
+
+    // Simulate layout Server-Timing (from parent)
+    const layoutTiming = "auth_layout;dur=50.0";
+    // Simulate index Server-Timing (from loader)
+    const indexTiming = "auth_index;dur=10.0, loader_total;dur=100.0";
+
+    // Create mock headersArgs
+    const mockHeadersArgs = {
+      loaderHeaders: new Headers({ "Server-Timing": indexTiming }),
+      parentHeaders: new Headers({ "Server-Timing": layoutTiming }),
+      actionHeaders: new Headers(),
+      errorHeaders: undefined,
+    };
+
+    // Call the headers function
+    const result = headers(mockHeadersArgs as never);
+    // Convert to Headers if needed (headers function may return Headers or HeadersInit)
+    const resultHeaders = result instanceof Headers ? result : new Headers(result);
+
+    // The Server-Timing should contain both parent and loader timings
+    const mergedTiming = resultHeaders.get("Server-Timing");
+    expect(mergedTiming).toBeTruthy();
+    expect(mergedTiming).toContain("auth_layout");
+    expect(mergedTiming).toContain("auth_index");
+    expect(mergedTiming).toContain("loader_total");
+
+    // Should match our merge function's expected output
+    const expected = mergeServerTimingHeaders(layoutTiming, indexTiming);
+    expect(mergedTiming).toBe(expected);
+  });
+});
+
+/**
  * Tests for cold flag behavior across layout and index.
  * Uses the existing test infrastructure.
  */
@@ -516,28 +558,6 @@ describe("cold flag across layout and index", () => {
     consoleLogSpy.mockRestore();
   });
 
-  function createLoaderArgs(): LoaderFunctionArgs {
-    const url = new URL("https://example.com/app");
-    return {
-      request: new Request(url.toString()),
-      context: {
-        shopify: {
-          authenticate: {
-            admin: vi.fn().mockResolvedValue({
-              session: { shop: TEST_SHOP },
-              redirect: vi.fn(),
-            }),
-          },
-        },
-        cloudflare: {
-          env: {},
-          ctx: { waitUntil: vi.fn() },
-        },
-      },
-      params: {},
-    } as unknown as LoaderFunctionArgs;
-  }
-
   function createContextForColdTest() {
     return {
       shopify: {
@@ -556,46 +576,90 @@ describe("cold flag across layout and index", () => {
     };
   }
 
-  it("request 1: both layout and index stages end in _cold; request 2: none have _cold", async () => {
+  it("same Request object gives same cold value to layout and index", async () => {
     const { loader: layoutLoader } = await import("../app");
     const { loader: indexLoader } = await import("../app._index");
 
+    // Both loaders must receive the same Request object to share cold state
     const request = new Request("https://example.com/app");
-    const layoutArgs = { request, context: createContextForColdTest(), params: {} } as never;
-    const indexArgs = createLoaderArgs();
+    const args = { request, context: createContextForColdTest(), params: {} } as never;
 
-    // Request 1: both layout and index run concurrently (like React Router)
+    // Both loaders get the same Request object
     await Promise.all([
-      layoutLoader(layoutArgs),
-      indexLoader(indexArgs),
+      layoutLoader(args),
+      indexLoader(args),
     ]);
 
-    const request1Logs = consoleLogSpy.mock.calls
+    const allLogs = consoleLogSpy.mock.calls
       .map((c: unknown[]) => c[0])
       .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"))
       .map((logStr: unknown) => JSON.parse(logStr as string));
 
-    // All stages from request 1 should have _cold suffix
-    expect(request1Logs.length).toBeGreaterThan(0);
-    for (const log of request1Logs) {
+    // All stages should have _cold suffix since same request
+    expect(allLogs.length).toBeGreaterThan(0);
+    for (const log of allLogs) {
       expect(log.stage).toMatch(/_cold$/);
     }
+  });
 
-    // Request 2: clear and run again
-    consoleLogSpy.mockClear();
-    await Promise.all([
-      layoutLoader(layoutArgs),
-      indexLoader(indexArgs),
-    ]);
+  it("overlapping requests A and B: only A is cold", async () => {
+    const { loader: layoutLoader } = await import("../app");
+    const { loader: indexLoader } = await import("../app._index");
 
-    const request2Logs = consoleLogSpy.mock.calls
+    const requestA = new Request("https://example.com/app");
+    const requestB = new Request("https://example.com/app");
+    const argsA = { request: requestA, context: createContextForColdTest(), params: {} } as never;
+    const argsB = { request: requestB, context: createContextForColdTest(), params: {} } as never;
+
+    // Start both requests before awaiting either (overlapping)
+    const promiseA = Promise.all([layoutLoader(argsA), indexLoader(argsA)]);
+    const promiseB = Promise.all([layoutLoader(argsB), indexLoader(argsB)]);
+
+    await Promise.all([promiseA, promiseB]);
+
+    const allLogs = consoleLogSpy.mock.calls
       .map((c: unknown[]) => c[0])
       .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"))
       .map((logStr: unknown) => JSON.parse(logStr as string));
 
-    // No stages from request 2 should have _cold suffix
-    expect(request2Logs.length).toBeGreaterThan(0);
-    for (const log of request2Logs) {
+    // Count cold and warm logs
+    const coldLogs = allLogs.filter((log: { stage: string }) => log.stage.endsWith("_cold"));
+    const warmLogs = allLogs.filter((log: { stage: string }) => !log.stage.endsWith("_cold"));
+
+    // Only request A's logs should be cold (layout + index phases)
+    expect(coldLogs.length).toBeGreaterThan(0);
+    expect(warmLogs.length).toBeGreaterThan(0);
+  });
+
+  it("third sequential request is warm", async () => {
+    const { loader: layoutLoader } = await import("../app");
+    const { loader: indexLoader } = await import("../app._index");
+
+    // Request 1 (cold)
+    const request1 = new Request("https://example.com/app");
+    const args1 = { request: request1, context: createContextForColdTest(), params: {} } as never;
+    await Promise.all([layoutLoader(args1), indexLoader(args1)]);
+
+    // Request 2 (warm)
+    const request2 = new Request("https://example.com/app");
+    const args2 = { request: request2, context: createContextForColdTest(), params: {} } as never;
+    await Promise.all([layoutLoader(args2), indexLoader(args2)]);
+
+    consoleLogSpy.mockClear();
+
+    // Request 3 (should still be warm)
+    const request3 = new Request("https://example.com/app");
+    const args3 = { request: request3, context: createContextForColdTest(), params: {} } as never;
+    await Promise.all([layoutLoader(args3), indexLoader(args3)]);
+
+    const logs = consoleLogSpy.mock.calls
+      .map((c: unknown[]) => c[0])
+      .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"))
+      .map((logStr: unknown) => JSON.parse(logStr as string));
+
+    // All third request stages should NOT have _cold suffix
+    expect(logs.length).toBeGreaterThan(0);
+    for (const log of logs) {
       expect(log.stage).not.toMatch(/_cold$/);
     }
   });
@@ -640,7 +704,7 @@ describe("redirect and throw paths", () => {
     );
   });
 
-  it("onboarding redirect throws the same redirect without timing affecting it", async () => {
+  it("onboarding redirect throws a 302 Response with Location /app/onboarding", async () => {
     const { loader } = await import("../app._index");
 
     const mockRedirect = vi.fn().mockImplementation((path: string) => {
@@ -670,10 +734,24 @@ describe("redirect and throw paths", () => {
     const request = new Request("https://example.com/app");
     const args = { request, context: mockContext, params: {} } as never;
 
-    // The loader should throw the redirect
-    await expect(loader(args)).rejects.toThrow();
+    // The loader should throw a 302 redirect
+    let thrownResponse: Response | null = null;
+    try {
+      await loader(args);
+    } catch (err) {
+      if (err instanceof Response) {
+        thrownResponse = err;
+      } else {
+        throw err;
+      }
+    }
 
     // Verify redirect was called with /app/onboarding
     expect(mockRedirect).toHaveBeenCalledWith("/app/onboarding");
+
+    // Verify the thrown Response is a 302 with correct Location
+    expect(thrownResponse).toBeInstanceOf(Response);
+    expect(thrownResponse!.status).toBe(302);
+    expect(thrownResponse!.headers.get("Location")).toBe("/app/onboarding");
   });
 });

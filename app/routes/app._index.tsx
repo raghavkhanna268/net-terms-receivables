@@ -204,8 +204,8 @@ async function checkOnboardingRedirect(
 }
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
-  // Read cold once - layout and index get same cached value for this request
-  const cold = readColdOnce();
+  // Read cold once - layout and index get same value with same Request object
+  const cold = readColdOnce(request);
   const timing = new ServerTiming(cold);
   timing.startPhase("loader_total");
 
@@ -271,31 +271,20 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         sortOrder,
       };
 
-      // Time plan_resolve phase
-      timing.startPhase("plan_resolve");
-      const planResult = await resolvePlan(sql, shopDomain);
-      timing.endPhase("plan_resolve");
-
-      // Run usage and aging queries concurrently (not individually timed)
-      const [usageResult, agingResult] = await Promise.all([
+      // Run all main queries in parallel with timing
+      const [planResult, usageResult, agingResult, ledgerResult, countResult] = await Promise.all([
+        timing.time("plan_resolve", () => resolvePlan(sql, shopDomain)),
         getUsageStats(sql, shop.id),
         getShopAgingTotals(sql, shop.id, asOf),
+        timing.time("ledger_rows", () =>
+          onlyOverLimit
+            ? getOverLimitBuyerLedger(sql, shop.id, asOf, ledgerOptions)
+            : getBuyerLedger(sql, shop.id, asOf, ledgerOptions)
+        ),
+        onlyOverLimit
+          ? Promise.resolve(null)
+          : timing.time("ledger_count", () => getOverLimitCount(sql, shop.id)),
       ]);
-
-      // Time ledger_rows phase
-      timing.startPhase("ledger_rows");
-      const ledgerResult = onlyOverLimit
-        ? await getOverLimitBuyerLedger(sql, shop.id, asOf, ledgerOptions)
-        : await getBuyerLedger(sql, shop.id, asOf, ledgerOptions);
-      timing.endPhase("ledger_rows");
-
-      // Time ledger_count phase (only when not filtering over-limit)
-      let countResult: number | null = null;
-      if (!onlyOverLimit) {
-        timing.startPhase("ledger_count");
-        countResult = await getOverLimitCount(sql, shop.id);
-        timing.endPhase("ledger_count");
-      }
 
       planData = planResult;
       usage = usageResult;

@@ -4,8 +4,7 @@ import {
   isValidServerTimingHeader,
   mergeServerTimingHeaders,
   getAllowedPhases,
-  isFirstRequestInIsolate,
-  markRequestServed,
+  readColdOnce,
   _resetIsolateStateForTesting,
 } from "../server-timing.server";
 
@@ -191,27 +190,58 @@ describe("server-timing.server", () => {
     });
   });
 
-  describe("cold start tracking", () => {
+  describe("cold start tracking with readColdOnce", () => {
     beforeEach(() => {
       _resetIsolateStateForTesting();
     });
 
-    it("isFirstRequestInIsolate returns true initially", () => {
-      expect(isFirstRequestInIsolate()).toBe(true);
+    it("same Request object returns same cold value for layout and index", () => {
+      const request = new Request("https://example.com/app");
+      
+      // Simulate layout reading cold
+      const layoutCold = readColdOnce(request);
+      // Simulate index reading cold with same request
+      const indexCold = readColdOnce(request);
+      
+      expect(layoutCold).toBe(true);
+      expect(indexCold).toBe(true);
     });
 
-    it("isFirstRequestInIsolate returns false after markRequestServed", () => {
-      markRequestServed();
-      expect(isFirstRequestInIsolate()).toBe(false);
+    it("overlapping requests A and B: only A is cold", () => {
+      const requestA = new Request("https://example.com/app");
+      const requestB = new Request("https://example.com/app");
+      
+      // Start both requests before awaiting either (overlapping)
+      const coldA = readColdOnce(requestA);
+      const coldB = readColdOnce(requestB);
+      
+      expect(coldA).toBe(true);
+      expect(coldB).toBe(false);
     });
 
-    it("ServerTiming captures cold state at construction", () => {
-      const timing1 = new ServerTiming();
+    it("third sequential request is warm", () => {
+      const request1 = new Request("https://example.com/app");
+      const request2 = new Request("https://example.com/app");
+      const request3 = new Request("https://example.com/app");
+      
+      const cold1 = readColdOnce(request1);
+      const cold2 = readColdOnce(request2);
+      const cold3 = readColdOnce(request3);
+      
+      expect(cold1).toBe(true);
+      expect(cold2).toBe(false);
+      expect(cold3).toBe(false);
+    });
+
+    it("ServerTiming captures cold state from readColdOnce", () => {
+      const request1 = new Request("https://example.com/app");
+      const cold1 = readColdOnce(request1);
+      const timing1 = new ServerTiming(cold1);
       expect(timing1.isCold()).toBe(true);
 
-      markRequestServed();
-
-      const timing2 = new ServerTiming();
+      const request2 = new Request("https://example.com/app");
+      const cold2 = readColdOnce(request2);
+      const timing2 = new ServerTiming(cold2);
       expect(timing2.isCold()).toBe(false);
     });
   });
@@ -251,7 +281,7 @@ describe("server-timing.server", () => {
     });
 
     it("emits one safeLog line per completed phase", async () => {
-      const timing = new ServerTiming();
+      const timing = new ServerTiming(true); // cold request
       await timing.time("auth_layout", async () => {});
       await timing.time("shop_lookup", async () => {});
       await timing.time("loader_total", async () => {});
@@ -272,7 +302,7 @@ describe("server-timing.server", () => {
     });
 
     it("each log line has exactly event, route, stage, durationMs", async () => {
-      const timing = new ServerTiming();
+      const timing = new ServerTiming(true); // cold request
       await timing.time("auth_layout", async () => {});
 
       timing.logAllPhases();
@@ -293,7 +323,7 @@ describe("server-timing.server", () => {
     });
 
     it("cold flag encoded in stage name (cold request)", async () => {
-      const timing = new ServerTiming();
+      const timing = new ServerTiming(true); // cold request
       await timing.time("loader_total", async () => {});
 
       timing.logAllPhases();
@@ -307,9 +337,14 @@ describe("server-timing.server", () => {
     });
 
     it("cold flag NOT in stage name for warm request", async () => {
-      markRequestServed(); // Make it warm
+      // Make it warm by consuming the first request's cold
+      const warmupRequest = new Request("https://example.com/warmup");
+      readColdOnce(warmupRequest);
 
-      const timing = new ServerTiming();
+      // Second request is warm
+      const warmRequest = new Request("https://example.com/warm");
+      const cold = readColdOnce(warmRequest);
+      const timing = new ServerTiming(cold);
       await timing.time("loader_total", async () => {});
 
       timing.logAllPhases();

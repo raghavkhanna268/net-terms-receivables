@@ -81,25 +81,6 @@ function extractLoaderData(result: unknown): LoaderResult {
   return result as LoaderResult;
 }
 
-/**
- * Helper to extract headers from result.
- */
-function extractHeaders(result: unknown): Headers | undefined {
-  if (
-    typeof result === "object" &&
-    result !== null &&
-    "type" in result &&
-    (result as { type: string }).type === "DataWithResponseInit" &&
-    "init" in result
-  ) {
-    const init = (result as { init: { headers?: HeadersInit } | null }).init;
-    if (init?.headers) {
-      return new Headers(init.headers);
-    }
-  }
-  return undefined;
-}
-
 // Mock SQL client
 const mockSql = Object.assign(vi.fn(), { unsafe: vi.fn((s) => s) });
 
