@@ -410,5 +410,37 @@ describeWithDb("reconcile manual key propagation (DB-backed)", () => {
       expect(queuedMsg.message.webhookId).toBe(`reconcile:${TEST_SHOP_DOMAIN}:${today}:orders`);
       expect(queuedMsg.message.manualKey).toBeUndefined();
     });
+
+    it("manual customers completion enqueues orders with same manual key", async () => {
+      const { getManualKeyForBulkOp, enqueueReconcileStage } = await import(
+        "../reconcile-handlers.server"
+      );
+
+      const manualKey = `manual:${Date.now()}`;
+      const bulkOpId = `gid://shopify/BulkOperation/cust-e2e-${TEST_SUFFIX}-${Date.now()}`;
+      const manualWebhookId = `reconcile:${TEST_SHOP_DOMAIN}:${manualKey}:customers`;
+
+      await sql`
+        INSERT INTO s6_processed_webhooks (webhook_id, topic, resource_gid, processed_at)
+        VALUES (${manualWebhookId}, 'RECONCILE_CUSTOMERS', ${bulkOpId}, NOW())
+      `;
+
+      const lookupKey = await getManualKeyForBulkOp(sql, bulkOpId, TEST_SHOP_DOMAIN);
+      expect(lookupKey).toBe(manualKey);
+
+      await enqueueReconcileStage(sql, TEST_SHOP_DOMAIN, "orders", lookupKey);
+
+      const [queuedMsg] = await sql<{ message: { webhookId: string; manualKey?: string } }[]>`
+        SELECT message FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
+          AND message->>'topic' = 'RECONCILE_ORDERS'
+        ORDER BY enqueued_at DESC
+        LIMIT 1
+      `;
+
+      expect(queuedMsg).toBeDefined();
+      expect(queuedMsg.message.webhookId).toBe(`reconcile:${TEST_SHOP_DOMAIN}:${manualKey}:orders`);
+      expect(queuedMsg.message.manualKey).toBe(manualKey);
+    });
   });
 });

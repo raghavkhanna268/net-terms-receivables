@@ -369,16 +369,14 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     const ruleCount = parseInt(ruleCountResult?.count ?? "0", 10);
 
     if (ruleCount === 1) {
-      const manualKey = `first-tag-rule:${Date.now()}`;
-      const webhookId = `reconcile:${shop.domain}:${manualKey}:customers`;
       const [alreadyQueued] = await sql<{ msg_id: string }[]>`
         SELECT msg_id::text FROM pgmq.q_s6_sync
         WHERE message->>'shop' = ${shop.domain}
           AND message->>'topic' = 'RECONCILE_CUSTOMERS'
-          AND message->>'webhookId' = ${webhookId}
         LIMIT 1
       `;
       if (!alreadyQueued) {
+        const manualKey = `manual:${Date.now()}`;
         await enqueueReconcileStage(sql, shop.domain, "customers", manualKey);
         safeLog("info", "first_tag_rule_customers_enqueued", {
           shopHash: await shopHash(shop.domain),

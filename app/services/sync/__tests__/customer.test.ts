@@ -1199,7 +1199,7 @@ describeWithDb("Customer Sync", () => {
 
     it("skips customer when shop has no tag rules", async () => {
       const noRulesShopId = `shop-bulk-norules-${TEST_SUFFIX}`;
-      const noRulesShopDomain = `fake-bulk-norules-${TEST_SUFFIX}.myshopify.com`;
+      const noRulesShopDomain = `test-s8-norules-${TEST_SUFFIX}.myshopify.com`;
 
       await sql`
         INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")

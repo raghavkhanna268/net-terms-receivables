@@ -99,8 +99,8 @@ describeWithDb("S8 reconcile_customers_drafts migration CHECK constraints", () =
     it("accepts reconcile_stage 'companies'", async () => {
       await expect(
         sql`
-          INSERT INTO s6_bulk_operations (shop, bulk_operation_id, bulk_type, origin, reconcile_stage, status)
-          VALUES (${TEST_SHOP_DOMAIN}, 'gid://shopify/BulkOperation/companies-1', 'companies', 'reconcile', 'companies', 'CREATED')
+          INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage)
+          VALUES ('gid://shopify/BulkOperation/companies-1', ${TEST_SHOP_DOMAIN}, 'companies', 'reconcile', 'companies')
         `
       ).resolves.not.toThrow();
     });
@@ -108,8 +108,8 @@ describeWithDb("S8 reconcile_customers_drafts migration CHECK constraints", () =
     it("accepts reconcile_stage 'orders'", async () => {
       await expect(
         sql`
-          INSERT INTO s6_bulk_operations (shop, bulk_operation_id, bulk_type, origin, reconcile_stage, status)
-          VALUES (${TEST_SHOP_DOMAIN}, 'gid://shopify/BulkOperation/orders-1', 'orders', 'reconcile', 'orders', 'CREATED')
+          INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage)
+          VALUES ('gid://shopify/BulkOperation/orders-1', ${TEST_SHOP_DOMAIN}, 'orders', 'reconcile', 'orders')
         `
       ).resolves.not.toThrow();
     });
@@ -117,8 +117,8 @@ describeWithDb("S8 reconcile_customers_drafts migration CHECK constraints", () =
     it("accepts reconcile_stage 'customers'", async () => {
       await expect(
         sql`
-          INSERT INTO s6_bulk_operations (shop, bulk_operation_id, bulk_type, origin, reconcile_stage, status)
-          VALUES (${TEST_SHOP_DOMAIN}, 'gid://shopify/BulkOperation/customers-1', 'customers', 'reconcile', 'customers', 'CREATED')
+          INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage)
+          VALUES ('gid://shopify/BulkOperation/customers-1', ${TEST_SHOP_DOMAIN}, 'customers', 'reconcile', 'customers')
         `
       ).resolves.not.toThrow();
     });
@@ -126,8 +126,8 @@ describeWithDb("S8 reconcile_customers_drafts migration CHECK constraints", () =
     it("accepts reconcile_stage 'draft_orders'", async () => {
       await expect(
         sql`
-          INSERT INTO s6_bulk_operations (shop, bulk_operation_id, bulk_type, origin, reconcile_stage, status)
-          VALUES (${TEST_SHOP_DOMAIN}, 'gid://shopify/BulkOperation/drafts-1', 'draft_orders', 'reconcile', 'draft_orders', 'CREATED')
+          INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage)
+          VALUES ('gid://shopify/BulkOperation/drafts-1', ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders')
         `
       ).resolves.not.toThrow();
     });
@@ -135,8 +135,8 @@ describeWithDb("S8 reconcile_customers_drafts migration CHECK constraints", () =
     it("accepts reconcile_stage NULL", async () => {
       await expect(
         sql`
-          INSERT INTO s6_bulk_operations (shop, bulk_operation_id, bulk_type, origin, reconcile_stage, status)
-          VALUES (${TEST_SHOP_DOMAIN}, 'gid://shopify/BulkOperation/null-stage', 'companies', 'initial', NULL, 'CREATED')
+          INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage)
+          VALUES ('gid://shopify/BulkOperation/null-stage', ${TEST_SHOP_DOMAIN}, 'companies', 'webhook', NULL)
         `
       ).resolves.not.toThrow();
     });
@@ -144,8 +144,8 @@ describeWithDb("S8 reconcile_customers_drafts migration CHECK constraints", () =
     it("rejects unknown reconcile_stage value", async () => {
       await expect(
         sql`
-          INSERT INTO s6_bulk_operations (shop, bulk_operation_id, bulk_type, origin, reconcile_stage, status)
-          VALUES (${TEST_SHOP_DOMAIN}, 'gid://shopify/BulkOperation/unknown-1', 'companies', 'reconcile', 'unknown_stage', 'CREATED')
+          INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage)
+          VALUES ('gid://shopify/BulkOperation/unknown-1', ${TEST_SHOP_DOMAIN}, 'companies', 'reconcile', 'unknown_stage')
         `
       ).rejects.toThrow(/violates check constraint/i);
     });
@@ -155,8 +155,8 @@ describeWithDb("S8 reconcile_customers_drafts migration CHECK constraints", () =
     it("accepts bulk_type 'companies'", async () => {
       await expect(
         sql`
-          INSERT INTO s6_bulk_operations (shop, bulk_operation_id, bulk_type, origin, status)
-          VALUES (${TEST_SHOP_DOMAIN}, 'gid://shopify/BulkOperation/bt-companies', 'companies', 'initial', 'CREATED')
+          INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin)
+          VALUES ('gid://shopify/BulkOperation/bt-companies', ${TEST_SHOP_DOMAIN}, 'companies', 'webhook')
         `
       ).resolves.not.toThrow();
     });
@@ -164,8 +164,8 @@ describeWithDb("S8 reconcile_customers_drafts migration CHECK constraints", () =
     it("accepts bulk_type 'orders'", async () => {
       await expect(
         sql`
-          INSERT INTO s6_bulk_operations (shop, bulk_operation_id, bulk_type, origin, status)
-          VALUES (${TEST_SHOP_DOMAIN}, 'gid://shopify/BulkOperation/bt-orders', 'orders', 'initial', 'CREATED')
+          INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin)
+          VALUES ('gid://shopify/BulkOperation/bt-orders', ${TEST_SHOP_DOMAIN}, 'orders', 'webhook')
         `
       ).resolves.not.toThrow();
     });
@@ -173,8 +173,8 @@ describeWithDb("S8 reconcile_customers_drafts migration CHECK constraints", () =
     it("accepts bulk_type 'customers'", async () => {
       await expect(
         sql`
-          INSERT INTO s6_bulk_operations (shop, bulk_operation_id, bulk_type, origin, status)
-          VALUES (${TEST_SHOP_DOMAIN}, 'gid://shopify/BulkOperation/bt-customers', 'customers', 'initial', 'CREATED')
+          INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin)
+          VALUES ('gid://shopify/BulkOperation/bt-customers', ${TEST_SHOP_DOMAIN}, 'customers', 'webhook')
         `
       ).resolves.not.toThrow();
     });
@@ -182,8 +182,8 @@ describeWithDb("S8 reconcile_customers_drafts migration CHECK constraints", () =
     it("accepts bulk_type 'draft_orders'", async () => {
       await expect(
         sql`
-          INSERT INTO s6_bulk_operations (shop, bulk_operation_id, bulk_type, origin, status)
-          VALUES (${TEST_SHOP_DOMAIN}, 'gid://shopify/BulkOperation/bt-drafts', 'draft_orders', 'initial', 'CREATED')
+          INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin)
+          VALUES ('gid://shopify/BulkOperation/bt-drafts', ${TEST_SHOP_DOMAIN}, 'draft_orders', 'webhook')
         `
       ).resolves.not.toThrow();
     });
@@ -191,8 +191,8 @@ describeWithDb("S8 reconcile_customers_drafts migration CHECK constraints", () =
     it("rejects unknown bulk_type value", async () => {
       await expect(
         sql`
-          INSERT INTO s6_bulk_operations (shop, bulk_operation_id, bulk_type, origin, status)
-          VALUES (${TEST_SHOP_DOMAIN}, 'gid://shopify/BulkOperation/bt-unknown', 'unknown_type', 'initial', 'CREATED')
+          INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin)
+          VALUES ('gid://shopify/BulkOperation/bt-unknown', ${TEST_SHOP_DOMAIN}, 'unknown_type', 'webhook')
         `
       ).rejects.toThrow(/violates check constraint/i);
     });

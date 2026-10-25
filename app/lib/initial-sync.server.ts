@@ -12,13 +12,17 @@
  * Status states:
  * - not_started: No bulk operations with origin='reconcile' exist for the shop
  * - in_progress: Latest run exists but not all stages have completed
- * - done: All stages complete (companies, customers if has tag rules, orders)
+ * - done: All stages complete (companies, customers if applicable, orders)
  * - failed: Any stage has failure_count >= 5 or entries exist in DLQ for that run
  *
- * Customers stage skip:
- * When a shop has no tag rules, the customers stage is skipped entirely (no bulk
- * op created). The skip is detected at read time by checking if tag rules exist
- * for the shop. NO sentinel row is stored for a skipped customers stage.
+ * Customers stage detection:
+ * The customers stage is only required if it was planned for the current run:
+ * - If a customersOp exists for this run, the stage was planned
+ * - If a RECONCILE_CUSTOMERS message is queued for this shop, the stage is planned
+ * - Otherwise, the stage was skipped (no tag rules at run start, or pre-S8 run)
+ *
+ * This avoids marking old runs (pre-S8) as "in_progress" just because tag rules
+ * exist now, and handles runs that started before tag rules were created.
  *
  * @module
  */
@@ -27,7 +31,6 @@ import type { Sql } from "./db-light.server";
 import { safeLog, shopHash } from "./log.server";
 import { S6_QUEUES } from "./pgmq.server";
 import type { ReconcileMessage } from "~/services/drain/reconcile.server";
-import { getTagRules } from "~/services/sync/customer.server";
 
 /**
  * Maximum failure count before considering an operation failed.
@@ -71,11 +74,12 @@ interface BulkOperation {
  * companies op's started_at (to avoid mixing old failed ops with new runs).
  * DLQ lookups are scoped to the current run's bulk_op_ids.
  *
- * Customers stage skip detection:
- * If no customers bulk op exists for the current run, we check if the shop has
- * tag rules. If no tag rules exist, the customers stage was legitimately skipped.
- * If tag rules exist but no customers op, the stage is still in progress (queued
- * but not yet started).
+ * Customers stage detection:
+ * The customers stage is only required if it was planned for the current run:
+ * - If a customersOp exists for this run, the stage was planned
+ * - If a RECONCILE_CUSTOMERS message is queued for this shop, the stage is planned
+ * - Otherwise, the stage was not planned (skipped because no tag rules at start,
+ *   or a pre-S8 run that predates the customers stage)
  *
  * @param sql - postgres.js SQL client
  * @param shopDomain - Shop domain
@@ -151,15 +155,14 @@ export async function getInitialSyncState(
   if (customersOp) {
     customersComplete = customersOp.completed_at !== null;
   } else {
-    const [shopRow] = await sql<{ id: string }[]>`
-      SELECT id FROM "Shop" WHERE domain = ${shopDomain}
+    const [queuedCustomers] = await sql<{ msg_id: string }[]>`
+      SELECT msg_id::text
+      FROM pgmq.q_s6_sync
+      WHERE message->>'shop' = ${shopDomain}
+        AND message->>'topic' = 'RECONCILE_CUSTOMERS'
+      LIMIT 1
     `;
-    if (shopRow) {
-      const tagRules = await getTagRules(sql, shopRow.id);
-      customersComplete = tagRules.length === 0;
-    } else {
-      customersComplete = true;
-    }
+    customersComplete = queuedCustomers == null;
   }
 
   if (companiesComplete && customersComplete && ordersComplete) {

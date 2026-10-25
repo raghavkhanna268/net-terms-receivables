@@ -683,7 +683,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup (action uses SELECT id, domain FROM "Shop")
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", domain: "test.myshopify.com" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", domain: "test-s8-tagrules.myshopify.com" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check for case-insensitive duplicate - none found
@@ -735,7 +735,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup (action uses SELECT id, domain FROM "Shop")
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", domain: "test.myshopify.com" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", domain: "test-s8-tagrules.myshopify.com" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check - none found
@@ -778,7 +778,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup (action uses SELECT id, domain FROM "Shop")
-      mockSql.mockResolvedValueOnce([{ id: "shop-first", domain: "mock-first.myshopify.com" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-first", domain: "test-s8-first.myshopify.com" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check - none found
@@ -816,9 +816,9 @@ describe("Tag Rules Route", () => {
       // Verify enqueueReconcileStage was called with "customers"
       expect(enqueueReconcileStage).toHaveBeenCalledWith(
         expect.anything(),
-        "mock-first.myshopify.com",
+        "test-s8-first.myshopify.com",
         "customers",
-        expect.stringContaining("first-tag-rule:")
+        expect.stringContaining("manual:")
       );
     });
 
@@ -831,7 +831,7 @@ describe("Tag Rules Route", () => {
       (enqueueReconcileStage as ReturnType<typeof vi.fn>).mockClear();
 
       // Shop lookup (action uses SELECT id, domain FROM "Shop")
-      mockSql.mockResolvedValueOnce([{ id: "shop-second", domain: "mock-second.myshopify.com" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-second", domain: "test-s8-second.myshopify.com" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check - none found
@@ -877,7 +877,7 @@ describe("Tag Rules Route", () => {
       (enqueueReconcileStage as ReturnType<typeof vi.fn>).mockClear();
 
       // Shop lookup (action uses SELECT id, domain FROM "Shop")
-      mockSql.mockResolvedValueOnce([{ id: "shop-idem", domain: "mock-idem.myshopify.com" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-idem", domain: "test-s8-idem.myshopify.com" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check - none found
