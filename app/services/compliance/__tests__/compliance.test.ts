@@ -40,19 +40,17 @@ const mockFetch = vi.fn();
 const originalFetch = globalThis.fetch;
 
 describe("compliance.server", () => {
-  const originalEnv = process.env;
-
   beforeEach(() => {
     vi.clearAllMocks();
     mockSql.mockResolvedValue(mockSqlResult);
     mockTx.mockResolvedValue(mockSqlResult);
     globalThis.fetch = mockFetch;
-    process.env = { ...originalEnv };
+    vi.unstubAllEnvs();
   });
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
-    process.env = originalEnv;
+    vi.unstubAllEnvs();
   });
 
   describe("deleteShop", () => {
@@ -764,7 +762,7 @@ describe("compliance.server", () => {
     });
 
     it("skips email when RESEND_API_KEY is not set and logs correctly", async () => {
-      delete process.env.RESEND_API_KEY;
+      vi.stubEnv("RESEND_API_KEY", "");
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
       const result = await sendDataRequestNotification(
@@ -791,8 +789,8 @@ describe("compliance.server", () => {
     });
 
     it("skips email when RESEND_FROM is not set", async () => {
-      process.env.RESEND_API_KEY = "re_test_key";
-      delete process.env.RESEND_FROM;
+      vi.stubEnv("RESEND_API_KEY", "re_test_key");
+      vi.stubEnv("RESEND_FROM", "");
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
       const result = await sendDataRequestNotification(
@@ -808,8 +806,9 @@ describe("compliance.server", () => {
     });
 
     it("sends email with NO customer PII in request body", async () => {
-      process.env.RESEND_API_KEY = "re_test_key";
-      process.env.RESEND_FROM = "noreply@example.com";
+      vi.stubEnv("RESEND_API_KEY", "re_test_key");
+      vi.stubEnv("RESEND_FROM", "noreply@test-example.com");
+      vi.stubEnv("RESEND_TEST_RECIPIENTS", "owner@test-shop.com");
 
       // Mock Resend API call
       mockFetch.mockResolvedValueOnce({
@@ -819,7 +818,7 @@ describe("compliance.server", () => {
 
       const result = await sendDataRequestNotification(
         "test-shop.myshopify.com",
-        "owner@shop.com",
+        "owner@test-shop.com",
         "req-123"
       );
 
@@ -847,8 +846,9 @@ describe("compliance.server", () => {
     });
 
     it("returns error when Resend API fails but does not throw", async () => {
-      process.env.RESEND_API_KEY = "re_test_key";
-      process.env.RESEND_FROM = "noreply@example.com";
+      vi.stubEnv("RESEND_API_KEY", "re_test_key");
+      vi.stubEnv("RESEND_FROM", "noreply@test-example.com");
+      vi.stubEnv("RESEND_TEST_RECIPIENTS", "owner@test-shop.com");
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
       // Mock Resend API failure
@@ -860,7 +860,7 @@ describe("compliance.server", () => {
 
       const result = await sendDataRequestNotification(
         "test-shop.myshopify.com",
-        "owner@shop.com",
+        "owner@test-shop.com",
         "req-123"
       );
 
@@ -873,21 +873,22 @@ describe("compliance.server", () => {
     });
 
     it("handles fetch network errors gracefully", async () => {
-      process.env.RESEND_API_KEY = "re_test_key";
-      process.env.RESEND_FROM = "noreply@example.com";
+      vi.stubEnv("RESEND_API_KEY", "re_test_key");
+      vi.stubEnv("RESEND_FROM", "noreply@test-example.com");
+      vi.stubEnv("RESEND_TEST_RECIPIENTS", "owner@test-shop.com");
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
-      // Mock network error
+      // Mock network error (generic error message maps to "error" via toErrorCode)
       mockFetch.mockRejectedValueOnce(new Error("Network error"));
 
       const result = await sendDataRequestNotification(
         "test-shop.myshopify.com",
-        "owner@shop.com",
+        "owner@test-shop.com",
         "req-123"
       );
 
       expect(result.sent).toBe(false);
-      // Error code is returned, not raw message (per security rule)
+      // toErrorCode maps generic errors to "error", preserving main's behavior
       expect(result.error).toBe("error");
       consoleSpy.mockRestore();
     });
@@ -896,6 +897,7 @@ describe("compliance.server", () => {
       (process.env as Record<string, string | undefined>).APP_HANDLE = undefined;
       process.env.RESEND_API_KEY = "re_test_key";
       process.env.RESEND_FROM = "noreply@example.com";
+      vi.stubEnv("RESEND_TEST_RECIPIENTS", "owner@shop.com");
       const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
       mockFetch.mockResolvedValueOnce({

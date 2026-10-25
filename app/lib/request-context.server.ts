@@ -18,6 +18,8 @@ export interface WorkerEnv {
   REMINDER_UNSUBSCRIBE_SECRET?: string;
   /** S18: Previous secret for key rotation (optional, wrangler secret) */
   REMINDER_UNSUBSCRIBE_SECRET_PREVIOUS?: string;
+  /** Pre-launch: Comma-separated allowlist of recipient emails for testing (wrangler secret) */
+  RESEND_TEST_RECIPIENTS?: string;
 }
 
 export interface RequestStore {
