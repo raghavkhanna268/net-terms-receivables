@@ -48,14 +48,29 @@ describe("entitlements configuration", () => {
     );
   });
 
-  describe("tier-gated features", () => {
-    it("matching requires starter or higher", () => {
-      expect(planHasFeature(getPlanConfig("free"), "matching")).toBe(false);
-      expect(planHasFeature(getPlanConfig("starter"), "matching")).toBe(true);
-      expect(planHasFeature(getPlanConfig("growth"), "matching")).toBe(true);
-      expect(planHasFeature(getPlanConfig("scale"), "matching")).toBe(true);
-    });
+  describe("matching is available on ALL plans", () => {
+    it.each(ALL_PLAN_KEYS)(
+      "plan '%s' includes matching feature",
+      (planKey: PlanKey) => {
+        const plan = getPlanConfig(planKey);
+        const hasMatching = planHasFeature(plan, "matching");
 
+        expect(hasMatching).toBe(true);
+      }
+    );
+
+    it("all four plans include matching (guard against re-gating)", () => {
+      const plansWithMatching = ALL_PLAN_KEYS.filter((planKey) => {
+        const plan = getPlanConfig(planKey);
+        return planHasFeature(plan, "matching");
+      });
+
+      expect(plansWithMatching).toEqual(["free", "starter", "growth", "scale"]);
+      expect(plansWithMatching).toHaveLength(4);
+    });
+  });
+
+  describe("tier-gated features", () => {
     it("pdf_statements requires growth or higher", () => {
       expect(planHasFeature(getPlanConfig("free"), "pdf_statements")).toBe(false);
       expect(planHasFeature(getPlanConfig("starter"), "pdf_statements")).toBe(false);

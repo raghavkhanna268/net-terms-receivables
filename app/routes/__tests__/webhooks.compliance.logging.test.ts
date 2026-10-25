@@ -137,6 +137,8 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
   it("shop/redact deleted logs shop_redact_deleted with shopHash and counts, no raw domain", async () => {
     // Setup mocks for successful deletion
     // Transaction operations:
+    // 0. SELECT FOR UPDATE (serializes with drain's FOR SHARE guards, #239)
+    mockTx.mockResolvedValueOnce([{ id: "shop-logging-test" }]);
     // 1. DELETE s10b_order_refetch_null
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
     // 2. DELETE s6_bulk_operations
@@ -197,6 +199,7 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
   it("shop/redact not found logs shop_redact_not_found with shopHash, no raw domain", async () => {
     // Setup mocks for shop not found (all deletes return 0, shop delete returns empty)
     // Transaction operations:
+    mockTx.mockResolvedValueOnce([]); // SELECT FOR UPDATE (serializes with drain's FOR SHARE guards, #239)
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // s10b_order_refetch_null
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // s6_bulk_operations
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // order_outstanding_missing

@@ -128,6 +128,9 @@ export async function deleteShop(
   shopDomain: string
 ): Promise<DeleteShopResult> {
   return sql.begin(async (tx) => {
+    // Serializes with drain's FOR SHARE Shop guards (#239)
+    await tx`SELECT id FROM "Shop" WHERE domain = ${shopDomain} FOR UPDATE`;
+
     // Delete non-FK-linked tables first (shop text column or shop in JSON)
 
     // s10b_order_refetch_null (aggregate counter, shop text column)
