@@ -6,10 +6,12 @@
  * - Tampered tokens rejected (constant-time comparison)
  * - Missing/invalid secret handling
  * - URL building
+ * - Wrong-purpose token rejected
  *
  * Uses obviously fake secret values for testing.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { createHmac } from "node:crypto";
 
 vi.mock("~/lib/log.server", () => ({
   safeLog: vi.fn(),
@@ -25,6 +27,29 @@ import {
 import { safeLog } from "~/lib/log.server";
 
 const mockSafeLog = vi.mocked(safeLog);
+
+/**
+ * Create a token with a different purpose to test purpose validation.
+ * This mimics an attacker trying to reuse a token from another context.
+ */
+function createWrongPurposeToken(
+  shopId: string,
+  buyerAccountId: string,
+  secret: string
+): string {
+  const payload = {
+    v: 1,
+    p: "wrong-purpose-v1", // Wrong purpose
+    s: shopId,
+    b: buyerAccountId,
+  };
+  const payloadJson = JSON.stringify(payload);
+  const payloadBase64 = Buffer.from(payloadJson, "utf8").toString("base64url");
+  const signature = createHmac("sha256", secret)
+    .update(payloadBase64)
+    .digest("base64url");
+  return `${payloadBase64}.${signature}`;
+}
 
 const FAKE_SECRET = "test-secret-obviously-fake-for-testing-only";
 const TEST_SHOP_ID = "shop-token-test";
@@ -149,6 +174,34 @@ describe("reminder unsubscribe token module", () => {
 
       const payload = verifyUnsubscribeToken(truncated, FAKE_SECRET);
       expect(payload).toBeNull();
+    });
+
+    it("rejects token with wrong purpose (prevents cross-context reuse)", () => {
+      const wrongPurposeToken = createWrongPurposeToken(
+        TEST_SHOP_ID,
+        TEST_BUYER_ID,
+        FAKE_SECRET
+      );
+
+      const payload = verifyUnsubscribeToken(wrongPurposeToken, FAKE_SECRET);
+      expect(payload).toBeNull();
+    });
+
+    it("rejects token with wrong version", () => {
+      const payload = {
+        v: 999, // Wrong version
+        p: "reminder-unsubscribe-v1",
+        s: TEST_SHOP_ID,
+        b: TEST_BUYER_ID,
+      };
+      const payloadBase64 = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+      const signature = createHmac("sha256", FAKE_SECRET)
+        .update(payloadBase64)
+        .digest("base64url");
+      const wrongVersionToken = `${payloadBase64}.${signature}`;
+
+      const result = verifyUnsubscribeToken(wrongVersionToken, FAKE_SECRET);
+      expect(result).toBeNull();
     });
   });
 

@@ -38,7 +38,7 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | Invoice | Receivables tracking (invoice name, amounts, due date, status) | Synced from Shopify orders |
 | Payer Alias | Payment matching (normalized payer key) | Derived from bank statements |
 
-**Note on Reminder Opt-Out:** When a buyer opts out of payment reminders (via unsubscribe link in email or merchant toggle), only the timestamp and source ('link' or 'merchant') are stored. No email addresses or other PII are stored with the opt-out record. Opted-out buyers receive no reminder emails until a merchant re-enables reminders.
+**Note on Reminder Opt-Out:** When a buyer opts out of payment reminders (via unsubscribe link in email or merchant toggle), the opt-out record stores only a timestamp and a source ('link' or 'merchant'), linked to the buyer account. Opted-out buyers receive no reminder emails until a merchant re-enables reminders.
 
 ### 2.3 Tagged Customer Data
 

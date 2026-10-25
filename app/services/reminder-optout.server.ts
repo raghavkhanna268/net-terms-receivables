@@ -22,7 +22,7 @@ import { safeLog } from "~/lib/log.server";
  * @param sql - Database connection (transaction or root)
  * @param shopId - Shop ID (required for shop-scoped query)
  * @param buyerAccountId - Buyer account ID
- * @returns true if buyer has opted out (reminder_opt_out_at IS NOT NULL)
+ * @returns true if buyer has opted out ("reminderOptOutAt" IS NOT NULL)
  */
 export async function isBuyerOptedOut(
   sql: Sql,
@@ -117,7 +117,7 @@ export async function transitionDelayedToOptedOut(
 /**
  * Set buyer opt-out status (for unsubscribe link handler).
  *
- * Sets reminder_opt_out_at and reminder_opt_out_source on the buyer account.
+ * Sets "reminderOptOutAt" and "reminderOptOutSource" on the buyer account.
  * Shop-scoped WHERE clause ensures cross-shop safety.
  * Idempotent: if already opted out, no change is made.
  *
@@ -151,7 +151,6 @@ export async function setBuyerOptOut(
     safeLog("info", "buyer_reminder_opt_out_set", {
       shopId,
       buyerAccountId,
-      source,
     });
   }
 
@@ -161,7 +160,7 @@ export async function setBuyerOptOut(
 /**
  * Clear buyer opt-out status (for merchant toggle re-enable).
  *
- * Clears reminder_opt_out_at and reminder_opt_out_source on the buyer account.
+ * Clears "reminderOptOutAt" and "reminderOptOutSource" on the buyer account.
  * Shop-scoped WHERE clause ensures cross-shop safety.
  * Only merchants can re-enable; the unsubscribe link cannot clear opt-out.
  *
@@ -193,7 +192,6 @@ export async function clearBuyerOptOut(
     safeLog("info", "buyer_reminder_opt_out_cleared", {
       shopId,
       buyerAccountId,
-      source: "merchant",
     });
   }
 

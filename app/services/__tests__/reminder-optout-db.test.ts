@@ -49,7 +49,7 @@ describeWithDb("S18 buyer reminder opt-out helpers (DB)", () => {
       VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'free', NOW(), NOW())
     `;
 
-    // Create buyer account (initially opted IN, reminder_opt_out_at = NULL)
+    // Create buyer account (initially opted IN, "reminderOptOutAt" = NULL)
     await sql`
       INSERT INTO "BuyerAccount" (
         id, "shopId", kind, "customerId", name,
@@ -414,6 +414,62 @@ describeWithDb("S18 buyer reminder opt-out helpers (DB)", () => {
           VALUES (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID}, ${TEST_INVOICE_ID}, 'skipped_opted_out'::"ReminderLogStatus", NOW())
         `
       ).rejects.toThrow(/ReminderLog_status_skipped_opted_out_check/);
+    });
+  });
+
+  describe("CHECK constraint: opt-out columns consistency", () => {
+    it("rejects setting reminderOptOutAt without reminderOptOutSource", async () => {
+      await expect(
+        sql`
+          UPDATE "BuyerAccount"
+          SET "reminderOptOutAt" = NOW(), "reminderOptOutSource" = NULL
+          WHERE id = ${TEST_ACCOUNT_ID} AND "shopId" = ${TEST_SHOP_ID}
+        `
+      ).rejects.toThrow(/BuyerAccount_reminder_opt_out_consistency/);
+    });
+
+    it("rejects setting reminderOptOutSource without reminderOptOutAt", async () => {
+      await expect(
+        sql`
+          UPDATE "BuyerAccount"
+          SET "reminderOptOutAt" = NULL, "reminderOptOutSource" = 'link'::"ReminderOptOutSource"
+          WHERE id = ${TEST_ACCOUNT_ID} AND "shopId" = ${TEST_SHOP_ID}
+        `
+      ).rejects.toThrow(/BuyerAccount_reminder_opt_out_consistency/);
+    });
+
+    it("allows both columns NULL (opted in)", async () => {
+      await sql`
+        UPDATE "BuyerAccount"
+        SET "reminderOptOutAt" = NULL, "reminderOptOutSource" = NULL
+        WHERE id = ${TEST_ACCOUNT_ID} AND "shopId" = ${TEST_SHOP_ID}
+      `;
+
+      const [account] = await sql<{ optOutAt: Date | null; optOutSource: string | null }[]>`
+        SELECT "reminderOptOutAt" AS "optOutAt", "reminderOptOutSource" AS "optOutSource"
+        FROM "BuyerAccount"
+        WHERE id = ${TEST_ACCOUNT_ID} AND "shopId" = ${TEST_SHOP_ID}
+      `;
+
+      expect(account.optOutAt).toBeNull();
+      expect(account.optOutSource).toBeNull();
+    });
+
+    it("allows both columns set (opted out)", async () => {
+      await sql`
+        UPDATE "BuyerAccount"
+        SET "reminderOptOutAt" = NOW(), "reminderOptOutSource" = 'merchant'::"ReminderOptOutSource"
+        WHERE id = ${TEST_ACCOUNT_ID} AND "shopId" = ${TEST_SHOP_ID}
+      `;
+
+      const [account] = await sql<{ optOutAt: Date | null; optOutSource: string | null }[]>`
+        SELECT "reminderOptOutAt" AS "optOutAt", "reminderOptOutSource" AS "optOutSource"
+        FROM "BuyerAccount"
+        WHERE id = ${TEST_ACCOUNT_ID} AND "shopId" = ${TEST_SHOP_ID}
+      `;
+
+      expect(account.optOutAt).toBeInstanceOf(Date);
+      expect(account.optOutSource).toBe("merchant");
     });
   });
 

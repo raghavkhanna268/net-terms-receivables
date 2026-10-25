@@ -556,17 +556,16 @@ describe("app.accounts.$id loader syncState", () => {
 
     it("includes original_queue filter in dead-letter query", async () => {
       setupBaseMocks({ syncPending: true, syncErrorCode: null, hasDeadLetteredSync: false });
-      let capturedQuery = "";
+      let capturedDeadLetterQuery = "";
 
       mockSql.mockImplementation((strings: TemplateStringsArray, ..._values: unknown[]) => {
         const query = strings.join("?");
-        capturedQuery = query;
 
         if (query.includes("SELECT id FROM \"Shop\"")) {
           return Promise.resolve([{ id: TEST_SHOP_ID }]);
         }
 
-        if (query.includes("FROM \"BuyerAccount\"")) {
+        if (query.includes("FROM \"BuyerAccount\"") && !query.includes("reminderOptOutAt")) {
           return Promise.resolve([{
             id: TEST_ACCOUNT_ID,
             name: "Test Account",
@@ -581,7 +580,13 @@ describe("app.accounts.$id loader syncState", () => {
         }
 
         if (query.includes("s6_dead_letter")) {
+          capturedDeadLetterQuery = query;
           return Promise.resolve([{ exists: false }]);
+        }
+
+        // Handle opt-out status query
+        if (query.includes("reminderOptOutAt")) {
+          return Promise.resolve([{ optOutAt: null, optOutSource: null }]);
         }
 
         return Promise.resolve([]);
@@ -590,7 +595,7 @@ describe("app.accounts.$id loader syncState", () => {
       const { loader } = await import("../app.accounts.$id");
       await loader(createLoaderArgs());
 
-      expect(capturedQuery).toContain("original_queue = ");
+      expect(capturedDeadLetterQuery).toContain("original_queue = ");
     });
   });
 

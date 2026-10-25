@@ -125,7 +125,6 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       shopId: payload.shopId,
       buyerAccountId: payload.buyerAccountId,
       updated,
-      source: "link",
     });
 
     return { success: true, alreadyOptedOut: !updated };

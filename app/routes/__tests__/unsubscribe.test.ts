@@ -252,8 +252,98 @@ describe("unsubscribe route", () => {
         shopId: TEST_SHOP_ID,
         buyerAccountId: TEST_BUYER_ID,
         updated: true,
-        source: "link",
       });
+    });
+
+    it("opts out without List-Unsubscribe field (confirm page button)", async () => {
+      mockVerifyUnsubscribeToken.mockReturnValue({
+        shopId: TEST_SHOP_ID,
+        buyerAccountId: TEST_BUYER_ID,
+      });
+      mockSetBuyerOptOut.mockResolvedValue(true);
+
+      // POST without List-Unsubscribe field (just empty form or other form data)
+      const result = await action(createActionArgs(VALID_TOKEN, "confirm=true"));
+
+      expect(result).toEqual({ success: true, alreadyOptedOut: false });
+      expect(mockSetBuyerOptOut).toHaveBeenCalledWith(
+        expect.anything(),
+        TEST_SHOP_ID,
+        TEST_BUYER_ID,
+        "link"
+      );
+    });
+
+    it("POST without List-Unsubscribe is idempotent", async () => {
+      mockVerifyUnsubscribeToken.mockReturnValue({
+        shopId: TEST_SHOP_ID,
+        buyerAccountId: TEST_BUYER_ID,
+      });
+      // First POST succeeds
+      mockSetBuyerOptOut.mockResolvedValueOnce(true);
+      
+      const result1 = await action(createActionArgs(VALID_TOKEN, "confirm=true"));
+      expect(result1).toEqual({ success: true, alreadyOptedOut: false });
+
+      // Second POST returns already opted out
+      mockSetBuyerOptOut.mockResolvedValueOnce(false);
+      
+      const result2 = await action(createActionArgs(VALID_TOKEN, "confirm=true"));
+      expect(result2).toEqual({ success: true, alreadyOptedOut: true });
+    });
+
+    it("does not log RFC 8058 oneclick when field is missing", async () => {
+      mockVerifyUnsubscribeToken.mockReturnValue({
+        shopId: TEST_SHOP_ID,
+        buyerAccountId: TEST_BUYER_ID,
+      });
+      mockSetBuyerOptOut.mockResolvedValue(true);
+
+      await action(createActionArgs(VALID_TOKEN, "confirm=true"));
+
+      // Should NOT have logged unsubscribe_rfc8058_oneclick
+      const oneClickCalls = mockSafeLog.mock.calls.filter(
+        (call) => call[1] === "unsubscribe_rfc8058_oneclick"
+      );
+      expect(oneClickCalls).toHaveLength(0);
+    });
+  });
+
+  describe("missing secret handling", () => {
+    it("returns generic success for POST when secret is missing (no info leakage)", async () => {
+      // When secret is missing, verifyUnsubscribeToken returns null
+      mockVerifyUnsubscribeToken.mockReturnValue(null);
+
+      const result = await action(
+        createActionArgs(VALID_TOKEN, "List-Unsubscribe=One-Click")
+      );
+
+      // Returns generic success, not an error
+      expect(result).toEqual({ success: true, alreadyOptedOut: true });
+      // Does not attempt to opt out
+      expect(mockSetBuyerOptOut).not.toHaveBeenCalled();
+    });
+
+    it("logs only count-style fields when secret missing (no token logged)", async () => {
+      mockVerifyUnsubscribeToken.mockReturnValue(null);
+
+      await action(
+        createActionArgs(VALID_TOKEN, "List-Unsubscribe=One-Click")
+      );
+
+      // Should have logged the invalid token warning
+      expect(mockSafeLog).toHaveBeenCalledWith(
+        "warn",
+        "unsubscribe_invalid_token_post",
+        { valid: false }
+      );
+
+      // Verify no call contains the token
+      for (const call of mockSafeLog.mock.calls) {
+        const fields = call[2] as Record<string, unknown>;
+        expect(fields).not.toHaveProperty("token");
+        expect(fields).not.toHaveProperty("secret");
+      }
     });
   });
 });
