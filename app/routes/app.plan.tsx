@@ -267,21 +267,16 @@ export default function PlanPage() {
                 label="Bank Imports This Month"
               />
 
-              {gatingEnforced && gatedCount > 0 && (
-                <s-banner tone="warning" heading="Gated Accounts">
+              {gatedCount > 0 && (
+                <s-banner tone="warning" heading={`${gatedCount} account${gatedCount !== 1 ? "s" : ""} over your plan limit`}>
                   <s-text>
-                    {gatedCount} buyer account{gatedCount !== 1 ? "s are" : " is"} currently
-                    gated due to plan limits. Upgrade to reactivate them.
+                    Nothing is hidden and totals include all accounts. Only these actions
+                    are limited: reminders, credit-limit edits, account-detail edits and
+                    bulk statement import. Matching, confirming a match and mark-paid are
+                    never gated. Credit holds and the checkout block work on every plan.
+                    {!gatingEnforced && " (Limits are not currently enforced.)"}
                   </s-text>
                 </s-banner>
-              )}
-
-              {!gatingEnforced && gatedCount > 0 && (
-                <s-paragraph>
-                  <s-text>
-                    {gatedCount} account{gatedCount !== 1 ? "s" : ""} pending (gating not enforced)
-                  </s-text>
-                </s-paragraph>
               )}
             </s-stack>
           </s-section>

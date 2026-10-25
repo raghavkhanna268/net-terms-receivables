@@ -739,7 +739,10 @@ export default function Index() {
                 {overLimitCount > 0 && (
                   <s-banner tone="warning" heading={`${overLimitCount} account${overLimitCount > 1 ? "s" : ""} over your plan limit`}>
                     <s-text>
-                      These accounts are included in totals but some features may be limited.{" "}
+                      Nothing is hidden and totals include all accounts. Only these actions
+                      are limited: reminders, credit-limit edits, account-detail edits and
+                      bulk statement import. Matching, confirming a match and mark-paid are
+                      never gated. Credit holds and the checkout block work on every plan.{" "}
                       {!onlyOverLimit && (
                         <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}&overlimit=true`}>
                           Show only over-limit accounts

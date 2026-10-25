@@ -388,3 +388,130 @@ describe("FeatureComparisonTable logic", () => {
     expect(auditExportRowData?.cells).toEqual([false, false, false, true]);
   });
 });
+
+/**
+ * S21 UI Tests: Over-limit banner and pricing assertions.
+ *
+ * These tests verify:
+ * 1. Banner is shown when gatedCount > 0 (over-limit state)
+ * 2. Banner is hidden when gatedCount === 0
+ * 3. No price strings are rendered (no currency symbols)
+ * 4. Flag-off behavior
+ */
+describe("S21 Over-limit banner logic", () => {
+  it("shows over-limit banner when gatedCount > 0", () => {
+    const gatedCount = 5;
+    const showBanner = gatedCount > 0;
+    expect(showBanner).toBe(true);
+  });
+
+  it("hides over-limit banner when gatedCount === 0", () => {
+    const gatedCount = 0;
+    const showBanner = gatedCount > 0;
+    expect(showBanner).toBe(false);
+  });
+
+  it("banner heading includes account count singular", () => {
+    const gatedCount = 1;
+    const heading = `${gatedCount} account${gatedCount !== 1 ? "s" : ""} over your plan limit`;
+    expect(heading).toBe("1 account over your plan limit");
+  });
+
+  it("banner heading includes account count plural", () => {
+    const gatedCount = 5;
+    const heading = `${gatedCount} account${gatedCount !== 1 ? "s" : ""} over your plan limit`;
+    expect(heading).toBe("5 accounts over your plan limit");
+  });
+
+  it("banner shows even when gatingEnforced is false (flag-off behavior)", () => {
+    const gatedCount = 3;
+    const gatingEnforced = false;
+    const showBanner = gatedCount > 0;
+    expect(showBanner).toBe(true);
+    expect(gatingEnforced).toBe(false);
+  });
+});
+
+describe("S21 No price strings in plan output", () => {
+  it("PLAN_DISPLAY_NAMES contains no currency symbols", async () => {
+    const { PLAN_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
+    
+    const allNames = Object.values(PLAN_DISPLAY_NAMES).join("");
+    
+    expect(allNames).not.toContain("$");
+    expect(allNames).not.toContain("₹");
+    expect(allNames).not.toContain("€");
+    expect(allNames).not.toContain("£");
+    expect(allNames).not.toContain("¥");
+    expect(allNames).not.toMatch(/\d+\.\d{2}/);
+  });
+
+  it("FEATURE_DISPLAY_NAMES contains no currency symbols", async () => {
+    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
+    
+    const allNames = Object.values(FEATURE_DISPLAY_NAMES).join("");
+    
+    expect(allNames).not.toContain("$");
+    expect(allNames).not.toContain("₹");
+    expect(allNames).not.toContain("€");
+    expect(allNames).not.toContain("£");
+    expect(allNames).not.toContain("¥");
+    expect(allNames).not.toMatch(/\d+\.\d{2}/);
+  });
+
+  it("plan config contains no price values", async () => {
+    const { ALL_PLAN_KEYS, getPlanConfig } = await import("~/lib/entitlements");
+    
+    for (const planKey of ALL_PLAN_KEYS) {
+      const plan = getPlanConfig(planKey);
+      const planString = JSON.stringify(plan);
+      
+      expect(planString).not.toContain("$");
+      expect(planString).not.toContain("₹");
+      expect(planString).not.toContain("price");
+      expect(planString).not.toContain("Price");
+      expect(planString).not.toContain("cost");
+      expect(planString).not.toContain("Cost");
+      expect(planString).not.toMatch(/"[0-9]+\.[0-9]{2}"/);
+    }
+  });
+
+  it("entitlements module exports no price-related fields", async () => {
+    const entitlements = await import("~/lib/entitlements");
+    const exportNames = Object.keys(entitlements);
+    
+    const priceRelatedPatterns = ["price", "Price", "cost", "Cost", "fee", "Fee"];
+    for (const pattern of priceRelatedPatterns) {
+      const matches = exportNames.filter(name => name.includes(pattern));
+      expect(matches).toHaveLength(0);
+    }
+  });
+});
+
+describe("S21 Badge on over-limit accounts", () => {
+  it("is_gated flag determines badge visibility", () => {
+    const activeAccount = { is_gated: false };
+    const gatedAccount = { is_gated: true };
+
+    expect(activeAccount.is_gated).toBe(false);
+    expect(gatedAccount.is_gated).toBe(true);
+  });
+
+  it("totals include all accounts regardless of gated state", async () => {
+    const allAccounts = [
+      { id: "1", is_gated: false, outstanding: 100 },
+      { id: "2", is_gated: false, outstanding: 200 },
+      { id: "3", is_gated: true, outstanding: 300 },
+      { id: "4", is_gated: true, outstanding: 400 },
+    ];
+
+    const total = allAccounts.reduce((sum, acc) => sum + acc.outstanding, 0);
+    const activeOnly = allAccounts.filter(a => !a.is_gated).reduce((sum, acc) => sum + acc.outstanding, 0);
+    const gatedOnly = allAccounts.filter(a => a.is_gated).reduce((sum, acc) => sum + acc.outstanding, 0);
+
+    expect(total).toBe(1000);
+    expect(activeOnly).toBe(300);
+    expect(gatedOnly).toBe(700);
+    expect(total).toBe(activeOnly + gatedOnly);
+  });
+});

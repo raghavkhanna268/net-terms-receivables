@@ -492,8 +492,13 @@ export default function AccountPage() {
 
       {account.isGated && (
         <s-section>
-          <s-banner tone="warning" heading="Credit limit and account details are read-only on your current plan">
-            Holds still work. Upgrade to edit credit settings.
+          <s-banner tone="warning" heading="This account is over your plan limit">
+            <s-text>
+              Nothing is hidden. Only these actions are limited: reminders, credit-limit
+              edits, account-detail edits and bulk statement import. Matching, confirming
+              a match and mark-paid are never gated. Credit holds and the checkout block
+              work on every plan.
+            </s-text>
           </s-banner>
         </s-section>
       )}
@@ -709,8 +714,8 @@ export default function AccountPage() {
               </s-text>
             </s-paragraph>
             <s-banner tone="info" heading="Upgrade to edit credit settings">
-              Credit limit and account detail editing is only available on paid plans.
-              Holds still work on all plans.
+              Credit limit and account detail editing requires an upgrade. Holds still
+              work on all plans.
             </s-banner>
             <Form method="post">
               <input type="hidden" name="_action" value="updateCredit" />

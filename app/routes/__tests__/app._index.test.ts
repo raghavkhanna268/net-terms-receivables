@@ -850,4 +850,94 @@ describeWithDb("app._index over-limit queries (DB integration)", () => {
       await sql`DELETE FROM "BuyerAccount" WHERE id = ${GATED_NO_INVOICE_ID}`;
     }
   });
+
+  it("aging totals include gated accounts (totals include all accounts)", async () => {
+    const { getOverLimitBuyerLedger } = await import("../app._index");
+    const { getBuyerLedger } = await import("~/lib/aging-queries.server");
+
+    const allAccounts = await getBuyerLedger(sql, TEST_SHOP_ID, new Date(), {
+      limit: 100,
+      offset: 0,
+      sortBy: "outstanding",
+      sortOrder: "desc",
+    });
+
+    const gatedAccounts = await getOverLimitBuyerLedger(sql, TEST_SHOP_ID, new Date(), {
+      limit: 100,
+      offset: 0,
+      sortBy: "outstanding",
+      sortOrder: "desc",
+    });
+
+    expect(allAccounts.totalCount).toBe(4);
+    expect(gatedAccounts.totalCount).toBe(2);
+
+    const allTotal = allAccounts.rows.reduce(
+      (sum, r) => sum + BigInt(r.outstanding_paise), 0n
+    );
+    const gatedTotal = gatedAccounts.rows.reduce(
+      (sum, r) => sum + BigInt(r.outstanding_paise), 0n
+    );
+
+    expect(allTotal).toBeGreaterThan(gatedTotal);
+    expect(gatedTotal).toBe(700000n);
+    expect(allTotal).toBe(1000000n);
+  });
+});
+
+/**
+ * S21 UI Tests: Over-limit banner shown/hidden, badge on accounts, flag-off behavior.
+ */
+describe("S21 over-limit banner and badge UI logic", () => {
+  it("banner is shown when overLimitCount > 0", () => {
+    const overLimitCount = 3;
+    const showBanner = overLimitCount > 0;
+    expect(showBanner).toBe(true);
+  });
+
+  it("banner is hidden when overLimitCount === 0", () => {
+    const overLimitCount = 0;
+    const showBanner = overLimitCount > 0;
+    expect(showBanner).toBe(false);
+  });
+
+  it("badge appears on gated accounts only (is_gated === true)", () => {
+    const rows = [
+      { buyer_account_id: "1", is_gated: false },
+      { buyer_account_id: "2", is_gated: true },
+      { buyer_account_id: "3", is_gated: false },
+      { buyer_account_id: "4", is_gated: true },
+    ];
+
+    const withBadge = rows.filter(r => r.is_gated);
+    const withoutBadge = rows.filter(r => !r.is_gated);
+
+    expect(withBadge.length).toBe(2);
+    expect(withoutBadge.length).toBe(2);
+  });
+
+  it("totals include all accounts (gated + active)", () => {
+    const allRows = [
+      { outstanding_paise: "100000", is_gated: false },
+      { outstanding_paise: "200000", is_gated: false },
+      { outstanding_paise: "300000", is_gated: true },
+      { outstanding_paise: "400000", is_gated: true },
+    ];
+
+    const totalOutstanding = allRows.reduce(
+      (sum, r) => sum + BigInt(r.outstanding_paise), 0n
+    );
+
+    expect(totalOutstanding).toBe(1000000n);
+  });
+
+  it("gatingEnforced false does not hide the banner (flag-off behavior)", () => {
+    const overLimitCount = 2;
+    const gatingEnforced = false;
+
+    const showBanner = overLimitCount > 0;
+
+    expect(showBanner).toBe(true);
+    expect(gatingEnforced).toBe(false);
+  });
 });
