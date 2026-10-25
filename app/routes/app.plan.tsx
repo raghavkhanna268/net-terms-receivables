@@ -103,23 +103,29 @@ function UsageDisplay({
   current,
   limit,
   label,
+  gatingEnforced,
 }: {
   current: number;
   limit: number;
   label: string;
+  gatingEnforced: boolean;
 }) {
   const isUnlimited = limit === -1;
   const isAtLimit = !isUnlimited && current >= limit;
   const isNearLimit = !isUnlimited && current >= limit * 0.8 && current < limit;
 
+  // When gating is off, just show the count without limit comparison
+  // This avoids showing confusing '0 / 0' for no-plan shops
+  const usageText = gatingEnforced
+    ? `${current} / ${formatLimit(limit)}`
+    : `${current}`;
+
   return (
     <s-paragraph>
       <s-text type="strong">{label}: </s-text>
-      <s-text>
-        {current} / {formatLimit(limit)}
-      </s-text>
-      {isAtLimit && <s-badge tone="critical">At Limit</s-badge>}
-      {!isAtLimit && isNearLimit && <s-badge tone="warning">Near Limit</s-badge>}
+      <s-text>{usageText}</s-text>
+      {gatingEnforced && isAtLimit && <s-badge tone="critical">At Limit</s-badge>}
+      {gatingEnforced && !isAtLimit && isNearLimit && <s-badge tone="warning">Near Limit</s-badge>}
     </s-paragraph>
   );
 }
@@ -258,11 +264,13 @@ export default function PlanPage() {
                 current={companiesUsed}
                 limit={companiesLimit}
                 label="Buyer Accounts"
+                gatingEnforced={gatingEnforced}
               />
               <UsageDisplay
                 current={importsUsed}
                 limit={importsLimit}
                 label="Bank Imports This Month"
+                gatingEnforced={gatingEnforced}
               />
 
               {(() => {
@@ -290,13 +298,6 @@ export default function PlanPage() {
                       {companiesAtLimit ? " buyer accounts" : ""}
                       {companiesAtLimit && importsAtLimit ? " and" : ""}
                       {importsAtLimit ? " importing bank statements" : ""}.
-                    </s-text>
-                  </s-banner>
-                ) : hasLimitReached && !gatingEnforced ? (
-                  <s-banner tone="info" heading="Usage Note">
-                    <s-text>
-                      You&apos;ve reached the plan limit, but limits are not currently
-                      enforced.
                     </s-text>
                   </s-banner>
                 ) : (

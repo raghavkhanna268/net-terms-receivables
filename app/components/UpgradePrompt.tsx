@@ -75,13 +75,15 @@ export function UpgradePrompt({
   const suggestedPlan = needsUpgrade ? requiredPlan : null;
 
   if (compact) {
+    // Don't show limit-based prompts when gating is off
     if (limitType) {
+      if (!gatingEnforced) {
+        return null;
+      }
       return (
         <s-stack direction="inline">
-          <s-text tone={gatingEnforced ? "critical" : "warning"}>
-            {gatingEnforced
-              ? `${limitType === "companies" ? "Company" : "Import"} limit reached`
-              : `At ${limitType === "companies" ? "company" : "import"} limit`}
+          <s-text tone="critical">
+            {limitType === "companies" ? "Company" : "Import"} limit reached
           </s-text>
           <s-link href={upgradeUrl} target="_top">
             Upgrade
@@ -107,32 +109,21 @@ export function UpgradePrompt({
   }
 
   if (limitType) {
-    const limitLabel = limitType === "companies" ? "buyer accounts" : "bank imports";
-
-    if (gatingEnforced) {
-      return (
-        <s-banner tone="warning" heading={`${limitType === "companies" ? "Company" : "Import"} Limit Reached`}>
-          <s-stack>
-            <s-text>
-              You&apos;ve reached your plan limit for {limitLabel}. Upgrade to add more.
-            </s-text>
-            <s-button href={upgradeUrl} target="_top">
-              Upgrade Plan
-            </s-button>
-          </s-stack>
-        </s-banner>
-      );
+    // Don't show limit-based prompts when gating is off
+    if (!gatingEnforced) {
+      return null;
     }
 
+    const limitLabel = limitType === "companies" ? "buyer accounts" : "bank imports";
+
     return (
-      <s-banner tone="info" heading="Plan Limit Note">
+      <s-banner tone="warning" heading={`${limitType === "companies" ? "Company" : "Import"} Limit Reached`}>
         <s-stack>
           <s-text>
-            You&apos;ve reached the {limitLabel} limit for your plan tier, but limits
-            are not currently enforced.
+            You&apos;ve reached your plan limit for {limitLabel}. Upgrade to add more.
           </s-text>
-          <s-button href={upgradeUrl} target="_top" variant="secondary">
-            View Plans
+          <s-button href={upgradeUrl} target="_top">
+            Upgrade Plan
           </s-button>
         </s-stack>
       </s-banner>
@@ -198,10 +189,17 @@ export function PlanBanner({
   const companiesAtLimit = companiesLimit !== -1 && companiesUsed >= companiesLimit;
   const canUpgrade = planKey !== "unlimited";
 
-  const companiesText =
-    companiesLimit === -1
+  // When gating is off, just show the count without limit comparison
+  // This avoids showing confusing 'N / 0' for no-plan shops
+  const companiesText = gatingEnforced
+    ? companiesLimit === -1
       ? `${companiesUsed} companies`
-      : `${companiesUsed} / ${companiesLimit} companies`;
+      : `${companiesUsed} / ${companiesLimit} companies`
+    : `${companiesUsed} companies`;
+
+  // When gating is off, always show secondary 'View Plans' button
+  // Never show 'Upgrade to Add More' when gating is off
+  const showUpgradeCta = gatingEnforced && companiesAtLimit;
 
   return (
     <s-stack>
@@ -220,8 +218,8 @@ export function PlanBanner({
         )}
       </s-paragraph>
       {canUpgrade && (
-        <s-button href={upgradeUrl} target="_top" variant={companiesAtLimit ? "primary" : "secondary"}>
-          {companiesAtLimit ? "Upgrade to Add More" : "View Plans"}
+        <s-button href={upgradeUrl} target="_top" variant={showUpgradeCta ? "primary" : "secondary"}>
+          {showUpgradeCta ? "Upgrade to Add More" : "View Plans"}
         </s-button>
       )}
     </s-stack>
