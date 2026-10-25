@@ -146,7 +146,7 @@ This ensures accurate cap calculations when:
 Gated accounts (`gated_at IS NOT NULL`) are **not excluded** from matching, confirm, apply, or unmatch.
 The `activeAccountFragment` helper must NOT be used in matching or apply queries.
 
-Per `gating.server.ts:57-60`, gating applies only to these 4 actions:
+Per `gating.server.ts:51-56`, gating applies only to these 3 actions:
 
 | Action | File:Line | Effect |
 |--------|-----------|--------|

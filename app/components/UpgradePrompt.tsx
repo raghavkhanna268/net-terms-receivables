@@ -19,8 +19,7 @@ export const PLAN_DISPLAY_NAMES: Record<PlanKey, string> = {
 };
 
 interface UpgradePromptProps {
-  currentPlan: PlanKey;
-  limitType?: "companies" | "imports";
+  limitType?: "companies";
   gatingEnforced: boolean;
   upgradeUrl: string;
   compact?: boolean;
@@ -40,9 +39,7 @@ export function UpgradePrompt({
       }
       return (
         <s-stack direction="inline">
-          <s-text tone="critical">
-            {limitType === "companies" ? "Company" : "Import"} limit reached
-          </s-text>
+          <s-text tone="critical">Company limit reached</s-text>
           <s-link href={upgradeUrl} target="_top">
             Upgrade
           </s-link>
@@ -59,13 +56,11 @@ export function UpgradePrompt({
       return null;
     }
 
-    const limitLabel = limitType === "companies" ? "buyer accounts" : "bank imports";
-
     return (
-      <s-banner tone="warning" heading={`${limitType === "companies" ? "Company" : "Import"} Limit Reached`}>
+      <s-banner tone="warning" heading="Company Limit Reached">
         <s-stack>
           <s-text>
-            You&apos;ve reached your plan limit for {limitLabel}. Upgrade to add more.
+            You&apos;ve reached your plan limit for buyer accounts. Upgrade to add more.
           </s-text>
           <s-button href={upgradeUrl} target="_top">
             Upgrade Plan

@@ -115,7 +115,7 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
       expect(html).toContain("Save Credit Settings");
 
       // Over-limit banner heading is ABSENT
-      expect(html).not.toContain("This account is over your plan limit");
+      expect(html).not.toContain("This account was added after you reached your plan limit");
       // No Limit Reached badge
       expect(html).not.toContain("Limit Reached");
       // The upgrade restriction banner is ABSENT
@@ -143,7 +143,7 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
       expect(html).toContain("Save Credit Settings");
 
       // Over-limit banner is ABSENT
-      expect(html).not.toContain("This account is over your plan limit");
+      expect(html).not.toContain("This account was added after you reached your plan limit");
       expect(html).not.toContain("Limit Reached");
       expect(html).not.toContain("Upgrade to edit credit settings");
     });
@@ -165,7 +165,7 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
       expect(html).toContain("Save Credit Settings");
 
       // No limit-related UI
-      expect(html).not.toContain("over your plan limit");
+      expect(html).not.toContain("after you reached your plan limit");
       expect(html).not.toContain("Limit Reached");
       expect(html).not.toContain("Upgrade");
     });
@@ -206,7 +206,7 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
       expect(html).toContain("Save Credit Settings");
 
       // No over-limit banner
-      expect(html).not.toContain("This account is over your plan limit");
+      expect(html).not.toContain("This account was added after you reached your plan limit");
       expect(html).not.toContain("Upgrade to edit credit settings");
     });
   });

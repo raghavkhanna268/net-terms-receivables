@@ -24,7 +24,6 @@ describe("PLAN_DISPLAY_NAMES", () => {
 
 describe("UpgradePrompt component", () => {
   const baseProps = {
-    currentPlan: "none" as const,
     upgradeUrl: "https://admin.shopify.com/store/test/charges/app/pricing_plans",
   };
 

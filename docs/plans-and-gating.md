@@ -12,19 +12,10 @@ The app uses Shopify App Pricing (managed pricing) where plans are configured in
 
 | Plan | Companies | Imports/Month | Features |
 |------|-----------|---------------|----------|
-| **Free** | 3 | Unlimited | All features |
-| **Starter** | 25 | Unlimited | All features |
-| **Growth** | 100 | Unlimited | All features |
-| **Scale** | Unlimited | Unlimited | All features |
-
-**All features available on every plan:**
-- Aging dashboard
-- Payment matching (suggestions, confirm-match, mark-paid)
-- Credit holds and checkout validation
-- Payment reminders (for active accounts)
-- PDF statements
-- Payer memory
-- Audit export
+| **none** | 0 | Unlimited | All features |
+| **starter** | 25 | Unlimited | All features |
+| **growth** | 100 | Unlimited | All features |
+| **unlimited** | Unlimited | Unlimited | All features |
 
 The only difference between plans is the number of buyer accounts (companies) allowed.
 
@@ -281,7 +272,6 @@ Tests proving over-limit (gated) accounts stay visible and only gated actions ar
 | Active fragment | `gating.test.ts` | "returns TRUE fragment when gating is OFF" |
 | isAccountActive | `gating.test.ts` | "returns true for all accounts when gating is OFF" |
 | Bulk gating | `company-location.test.ts` | "does not gate new accounts when PLAN_GATING_ENFORCED=false" |
-| Bank imports | `app.imports.test.ts` | "imports allowed with gating on and limit exceeded" |
 
 ## Testing
 
