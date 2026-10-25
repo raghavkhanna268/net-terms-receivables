@@ -840,9 +840,9 @@ export default function OnboardingPage() {
       {!currencySupported && (
         <s-section>
           <s-banner tone="critical" heading="Currency Not Supported">
-            Net Terms currently supports INR stores only. Your store uses a
-            different currency, so the initial sync and net terms payment methods
-            are not available.
+            Termwise is built for Indian merchants and currently supports INR only.
+            To use it, change your store currency to Indian Rupee (INR) in Shopify
+            admin → Settings → Store details / Markets, then reload this page.
           </s-banner>
         </s-section>
       )}
