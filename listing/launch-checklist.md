@@ -34,7 +34,7 @@
 - [ ] Verify database is in Mumbai region (ap-south-1)
   - **Current:** Confirmed in wrangler.jsonc and README
 
-- [ ] **Delete the old Seoul Supabase project and the old Hyperdrive config `dd3bb958`**
+- [ ] **Delete the old Seoul Supabase project and the old Hyperdrive config that points at the Seoul project**
   - **Status:** Pending Raghav's decision; nothing is deleted without his explicit OK
   - **Owner:** Raghav (decision), then DevOps
 
@@ -63,7 +63,7 @@
 
 - [ ] **⚠️ Protected Customer Data (PCD) Access Request**
   - Required for: `read_customers`, `read_orders` scopes (after PR #28)
-  - **Status:** Level 1 plus Name and Email fields already requested in the Partner Dashboard (see [docs/privacy.md](../docs/privacy.md), Protected Customer Data note); Shopify's formal review happens at App Store submission
+  - **Status:** Level 1 plus Name and Email fields already requested in the Partner Dashboard (see [docs/privacy.md](../docs/privacy.md), Protected Customer Data note)
   - **Owner:** Raghav (Partner Dashboard)
   - [ ] **PCD Level 1** — Customer data excluding name, address, phone, and email fields
     - [ ] File PCD access request form in Partner Dashboard
