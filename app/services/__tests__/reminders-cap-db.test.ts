@@ -6,6 +6,8 @@
  *
  * These tests hit real Postgres and use the sequential DB project from vitest config.
  * They scope their own rows and do not truncate globally.
+ *
+ * Uses a FIXED date (2026-10-15) to avoid edge cases when running on the 1st of month.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import postgres from "postgres";
@@ -21,25 +23,26 @@ describeWithDb("S18 reminder cap enforcement (DB)", () => {
   let sql: ReturnType<typeof postgres>;
   const TEST_SUFFIX = Date.now().toString(36) + "-cap-db";
   const TEST_SHOP_ID = `shop-cap-${TEST_SUFFIX}`;
-  const TEST_SHOP_DOMAIN = `cap-test-${TEST_SUFFIX}.myshopify.com`;
+  const TEST_SHOP_DOMAIN = `test-s18-cap-${TEST_SUFFIX}.myshopify.com`;
   const TEST_ACCOUNT_ID = `acc-cap-${TEST_SUFFIX}`;
   const TEST_CUSTOMER_ID = `gid://shopify/Customer/cap-${TEST_SUFFIX}`;
   const TEST_RULE_ID = `rule-cap-${TEST_SUFFIX}`;
 
-  let globalSendsSnapshot: { daily_count: number; send_date: string } | null = null;
-  const todayStr = new Date().toISOString().split("T")[0];
-  const monthStr = todayStr.substring(0, 7);
+  // Use a FIXED date (Oct 15, 2026) to avoid issues when running on the 1st of month
+  const FIXED_DATE = new Date("2026-10-15T12:00:00Z");
+  const FIXED_DATE_STR = "2026-10-15";
+  const FIXED_MONTH_STR = "2026-10";
+  // Earlier day in the same month for monthly volume
+  const EARLIER_DATE_STR = "2026-10-01";
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
 
-    const [existing] = await sql<{ daily_count: number; send_date: string }[]>`
-      SELECT daily_count, send_date::TEXT FROM s18_global_sends 
-      WHERE send_key = 'global' AND send_date = ${todayStr}::DATE
+    // Clean up any existing rows for the fixed month before tests
+    await sql`
+      DELETE FROM s18_global_sends 
+      WHERE send_key = 'global' AND send_month = ${FIXED_MONTH_STR}
     `;
-    if (existing) {
-      globalSendsSnapshot = existing;
-    }
 
     await sql`
       INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
@@ -80,18 +83,11 @@ describeWithDb("S18 reminder cap enforcement (DB)", () => {
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
 
-    if (globalSendsSnapshot) {
-      await sql`
-        UPDATE s18_global_sends 
-        SET daily_count = ${globalSendsSnapshot.daily_count}
-        WHERE send_key = 'global' AND send_date = ${todayStr}::DATE
-      `;
-    } else {
-      await sql`
-        DELETE FROM s18_global_sends 
-        WHERE send_key = 'global' AND send_date = ${todayStr}::DATE
-      `;
-    }
+    // Clean up all rows for the fixed month
+    await sql`
+      DELETE FROM s18_global_sends 
+      WHERE send_key = 'global' AND send_month = ${FIXED_MONTH_STR}
+    `;
 
     await sql.end();
   });
@@ -101,9 +97,10 @@ describeWithDb("S18 reminder cap enforcement (DB)", () => {
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
     mockFetch.mockReset();
 
+    // Clean up ALL rows for the fixed month to ensure test isolation
     await sql`
       DELETE FROM s18_global_sends 
-      WHERE send_key = 'global' AND send_date = ${todayStr}::DATE
+      WHERE send_key = 'global' AND send_month = ${FIXED_MONTH_STR}
     `;
   });
 
@@ -118,14 +115,14 @@ describeWithDb("S18 reminder cap enforcement (DB)", () => {
       expect(DAILY_SEND_CAP).toBe(100);
 
       for (let i = 1; i <= 100; i++) {
-        const result = await reserveGlobalSendSlot(sql);
+        const result = await reserveGlobalSendSlot(sql, FIXED_DATE);
         expect(result.reserved).toBe(true);
         if (result.reserved) {
           expect(result.daily).toBe(i);
         }
       }
 
-      const result101 = await reserveGlobalSendSlot(sql);
+      const result101 = await reserveGlobalSendSlot(sql, FIXED_DATE);
       expect(result101.reserved).toBe(false);
       if (!result101.reserved) {
         expect(result101.reason).toBe("daily_cap");
@@ -137,12 +134,12 @@ describeWithDb("S18 reminder cap enforcement (DB)", () => {
 
       await sql`
         INSERT INTO s18_global_sends (send_key, send_date, send_month, daily_count, monthly_count, updated_at)
-        VALUES ('global', ${todayStr}::DATE, ${monthStr}, 99, 0, NOW())
+        VALUES ('global', ${FIXED_DATE_STR}::DATE, ${FIXED_MONTH_STR}, 99, 0, NOW())
       `;
 
       const N = 20;
       const results = await Promise.all(
-        Array.from({ length: N }, () => reserveGlobalSendSlot(sql))
+        Array.from({ length: N }, () => reserveGlobalSendSlot(sql, FIXED_DATE))
       );
 
       const reserved = results.filter((r) => r.reserved);
@@ -159,69 +156,50 @@ describeWithDb("S18 reminder cap enforcement (DB)", () => {
   });
 
   describe("reserveGlobalSendSlot - monthly cap", () => {
-    it("concurrent reservations at the monthly boundary give exactly the remaining count", async () => {
-      const { reserveGlobalSendSlot, MONTHLY_SEND_CAP, DAILY_SEND_CAP } = await import("../reminders.server");
+    it("reservations 2996..3000 succeed and 3001 returns monthly_cap", async () => {
+      const { reserveGlobalSendSlot, MONTHLY_SEND_CAP } = await import("../reminders.server");
       expect(MONTHLY_SEND_CAP).toBe(3000);
-      expect(DAILY_SEND_CAP).toBe(100);
 
-      const remainingSlots = 5;
-      const monthlyTotalNeeded = MONTHLY_SEND_CAP - remainingSlots; // 2995
-
-      // Insert data for previous days in this month to get monthly total near cap
-      // We need 2995 emails across previous days (not today)
-      // Use 30 previous days with 100 emails each = 3000, but we need 2995
-      // So: 29 days * 100 = 2900, then 1 day with 95 = 2995
-      const year = parseInt(monthStr.substring(0, 4));
-      const month = parseInt(monthStr.substring(5, 7));
-
-      // Insert 29 previous days at 100 each
-      for (let day = 1; day <= 29; day++) {
-        const previousDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-        // Skip if this is today
-        if (previousDate === todayStr) continue;
-        await sql`
-          INSERT INTO s18_global_sends (send_key, send_date, send_month, daily_count, monthly_count, updated_at)
-          VALUES ('global', ${previousDate}::DATE, ${monthStr}, 100, 0, NOW())
-          ON CONFLICT (send_key, send_date) DO NOTHING
-        `;
-      }
-
-      // Check current monthly total
-      const [countRow] = await sql<{ total: number }[]>`
-        SELECT COALESCE(SUM(daily_count), 0)::INT AS total 
-        FROM s18_global_sends 
-        WHERE send_key = 'global' AND send_month = ${monthStr}
+      // Put 2995 emails on an EARLIER day in the same month
+      // This keeps today's daily_count at 0, so daily cap (100) isn't hit
+      await sql`
+        INSERT INTO s18_global_sends (send_key, send_date, send_month, daily_count, monthly_count, updated_at)
+        VALUES ('global', ${EARLIER_DATE_STR}::DATE, ${FIXED_MONTH_STR}, 2995, 0, NOW())
       `;
 
-      // If we have less than 2995, add a row to make it 2995
-      // But we must keep today at 0 for the test
-      const currentTotal = countRow?.total ?? 0;
-      if (currentTotal < monthlyTotalNeeded) {
-        // Find a day that isn't today and add the difference
-        const extraNeeded = monthlyTotalNeeded - currentTotal;
-        const extraDate = `${year}-${String(month).padStart(2, '0')}-01`;
-        if (extraDate !== todayStr) {
-          await sql`
-            UPDATE s18_global_sends
-            SET daily_count = daily_count + ${extraNeeded}
-            WHERE send_key = 'global' AND send_date = ${extraDate}::DATE
-          `;
+      // Reservations 2996, 2997, 2998, 2999, 3000 should succeed (5 total)
+      for (let i = 2996; i <= 3000; i++) {
+        const result = await reserveGlobalSendSlot(sql, FIXED_DATE);
+        expect(result.reserved).toBe(true);
+        if (result.reserved) {
+          expect(result.monthly).toBe(i);
         }
       }
 
-      // Verify the setup: monthly total should be 2995, today should be 0
-      const [verifyRow] = await sql<{ monthlyTotal: number; todayCount: number }[]>`
-        SELECT 
-          COALESCE((SELECT SUM(daily_count)::INT FROM s18_global_sends 
-                    WHERE send_key = 'global' AND send_month = ${monthStr}), 0) AS "monthlyTotal",
-          COALESCE((SELECT daily_count FROM s18_global_sends 
-                    WHERE send_key = 'global' AND send_date = ${todayStr}::DATE), 0) AS "todayCount"
+      // Reservation 3001 should fail with monthly_cap
+      const result3001 = await reserveGlobalSendSlot(sql, FIXED_DATE);
+      expect(result3001.reserved).toBe(false);
+      if (!result3001.reserved) {
+        expect(result3001.reason).toBe("monthly_cap");
+      }
+    });
+
+    it("concurrent reservations at monthly boundary give exactly the remaining count", async () => {
+      const { reserveGlobalSendSlot, MONTHLY_SEND_CAP } = await import("../reminders.server");
+      expect(MONTHLY_SEND_CAP).toBe(3000);
+
+      const remainingSlots = 5;
+      const monthlyVolumeOnEarlierDay = MONTHLY_SEND_CAP - remainingSlots; // 2995
+
+      // Put monthly volume on EARLIER day, keeping today's daily_count at 0
+      await sql`
+        INSERT INTO s18_global_sends (send_key, send_date, send_month, daily_count, monthly_count, updated_at)
+        VALUES ('global', ${EARLIER_DATE_STR}::DATE, ${FIXED_MONTH_STR}, ${monthlyVolumeOnEarlierDay}, 0, NOW())
       `;
-      expect(verifyRow?.todayCount ?? 0).toBe(0); // Today starts at 0
 
       const N = 10;
       const results = await Promise.all(
-        Array.from({ length: N }, () => reserveGlobalSendSlot(sql))
+        Array.from({ length: N }, () => reserveGlobalSendSlot(sql, FIXED_DATE))
       );
 
       const reserved = results.filter((r) => r.reserved);
@@ -234,14 +212,6 @@ describeWithDb("S18 reminder cap enforcement (DB)", () => {
           expect(r.reason).toBe("monthly_cap");
         }
       });
-
-      // Clean up the extra rows we inserted
-      await sql`
-        DELETE FROM s18_global_sends 
-        WHERE send_key = 'global' 
-          AND send_month = ${monthStr}
-          AND send_date != ${todayStr}::DATE
-      `;
     });
   });
 
