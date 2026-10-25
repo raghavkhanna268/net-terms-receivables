@@ -125,8 +125,8 @@ describe("Plan Page Loader", () => {
 
     expect(result.plan).toBeNull();
     expect(result.usage).toEqual({
-      companies: { current: 0, limit: 3 },
-      importsThisMonth: { current: 0, limit: 1 },
+      companies: { current: 0, limit: 0 },
+      importsThisMonth: { current: 0, limit: -1 },
     });
     expect(result.gatedCount).toBe(0);
     expect(result.error).toBeNull();
@@ -147,8 +147,8 @@ describe("Plan Page Loader", () => {
       new Error("Database error")
     );
     (getUsageStats as ReturnType<typeof vi.fn>).mockResolvedValue({
-      companies: { current: 0, limit: 3 },
-      importsThisMonth: { current: 0, limit: 1 },
+      companies: { current: 0, limit: 0 },
+      importsThisMonth: { current: 0, limit: -1 },
     });
     (getGatedAccountCount as ReturnType<typeof vi.fn>).mockResolvedValue(0);
 
@@ -181,8 +181,8 @@ describe("Plan Page Loader", () => {
       new Error("Database connection timed out")
     );
     (getUsageStats as ReturnType<typeof vi.fn>).mockResolvedValue({
-      companies: { current: 0, limit: 3 },
-      importsThisMonth: { current: 0, limit: 1 },
+      companies: { current: 0, limit: 0 },
+      importsThisMonth: { current: 0, limit: -1 },
     });
     (getGatedAccountCount as ReturnType<typeof vi.fn>).mockResolvedValue(0);
 
@@ -216,7 +216,7 @@ describe("Plan Page Loader", () => {
     (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
     (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-      plan: { key: "free", limits: { companies: 3, importsPerMonth: 1 } },
+      plan: { key: "none", limits: { companies: 0, importsPerMonth: -1 } },
       subscriptionId: null,
       subscriptionName: null,
       isTest: false,
@@ -224,8 +224,8 @@ describe("Plan Page Loader", () => {
     });
 
     (getUsageStats as ReturnType<typeof vi.fn>).mockResolvedValue({
-      companies: { current: 3, limit: 3 },
-      importsThisMonth: { current: 1, limit: 1 },
+      companies: { current: 0, limit: 0 },
+      importsThisMonth: { current: 0, limit: -1 },
     });
 
     (getGatedAccountCount as ReturnType<typeof vi.fn>).mockResolvedValue(2);
@@ -290,15 +290,15 @@ describe("Plan Page Loader", () => {
 });
 
 describe("Plan Page Component Logic", () => {
-  it("shows upgrade section for non-scale plans", () => {
+  it("shows upgrade section for non-unlimited plans", () => {
     const planKey = "growth" as string;
-    const canUpgrade = planKey !== "scale";
+    const canUpgrade = planKey !== "unlimited";
     expect(canUpgrade).toBe(true);
   });
 
-  it("hides upgrade section for scale plan", () => {
-    const planKey = "scale" as string;
-    const canUpgrade = planKey !== "scale";
+  it("hides upgrade section for unlimited plan", () => {
+    const planKey = "unlimited" as string;
+    const canUpgrade = planKey !== "unlimited";
     expect(canUpgrade).toBe(false);
   });
 
@@ -309,11 +309,14 @@ describe("Plan Page Component Logic", () => {
     expect(bannerTone).toBe("warning");
   });
 
-  it("uses info banner tone when gating is OFF and limit reached", () => {
+  it("shows no Usage Note banner when gating is OFF (T1: removed)", () => {
+    // The Usage Note banner was removed in T1 - when gating is OFF,
+    // no limit-related banners are shown at all
     const gatingEnforced = false;
     const hasLimitReached = true;
-    const bannerTone = hasLimitReached && !gatingEnforced ? "info" : "warning";
-    expect(bannerTone).toBe("info");
+    // With gating off, neither warning nor info banner is shown
+    const showBanner = hasLimitReached && gatingEnforced;
+    expect(showBanner).toBe(false);
   });
 });
 
@@ -339,10 +342,10 @@ describe("FeatureComparisonTable logic", () => {
     });
 
     expect(creditHoldsRow).toEqual([
-      { planKey: "free", hasFeature: true },
+      { planKey: "none", hasFeature: true },
       { planKey: "starter", hasFeature: true },
       { planKey: "growth", hasFeature: true },
-      { planKey: "scale", hasFeature: true },
+      { planKey: "unlimited", hasFeature: true },
     ]);
   });
 
@@ -368,23 +371,24 @@ describe("FeatureComparisonTable logic", () => {
     });
 
     expect(matchingRow).toEqual([
-      { planKey: "free", hasFeature: true },
+      { planKey: "none", hasFeature: true },
       { planKey: "starter", hasFeature: true },
       { planKey: "growth", hasFeature: true },
-      { planKey: "scale", hasFeature: true },
+      { planKey: "unlimited", hasFeature: true },
     ]);
   });
 
-  it("pdf_statements shows as NOT included for free and starter", async () => {
+  it("reminders shows as included for all four tiers (all features on all plans)", async () => {
     const { getPlanConfig, planHasFeature } = await import("~/lib/entitlements");
 
-    expect(planHasFeature(getPlanConfig("free"), "pdf_statements")).toBe(false);
-    expect(planHasFeature(getPlanConfig("starter"), "pdf_statements")).toBe(false);
-    expect(planHasFeature(getPlanConfig("growth"), "pdf_statements")).toBe(true);
-    expect(planHasFeature(getPlanConfig("scale"), "pdf_statements")).toBe(true);
+    // All features are now on all plans
+    expect(planHasFeature(getPlanConfig("none"), "reminders")).toBe(true);
+    expect(planHasFeature(getPlanConfig("starter"), "reminders")).toBe(true);
+    expect(planHasFeature(getPlanConfig("growth"), "reminders")).toBe(true);
+    expect(planHasFeature(getPlanConfig("unlimited"), "reminders")).toBe(true);
   });
 
-  it("generates correct table data for all features", async () => {
+  it("generates correct table data for all features (all true on all plans)", async () => {
     const { ALL_PLAN_KEYS, ALL_FEATURE_KEYS, getPlanConfig, planHasFeature } =
       await import("~/lib/entitlements");
 
@@ -396,6 +400,7 @@ describe("FeatureComparisonTable logic", () => {
       return { feature, cells };
     });
 
+    // All features are true on all plans (5 features now, not 8)
     const creditHoldsRowData = tableRows.find((row) => row.feature === "credit_holds");
     expect(creditHoldsRowData?.cells).toEqual([true, true, true, true]);
 
@@ -405,8 +410,65 @@ describe("FeatureComparisonTable logic", () => {
     const matchingRowData = tableRows.find((row) => row.feature === "matching");
     expect(matchingRowData?.cells).toEqual([true, true, true, true]);
 
-    const auditExportRowData = tableRows.find((row) => row.feature === "audit_export");
-    expect(auditExportRowData?.cells).toEqual([false, false, false, true]);
+    const remindersRowData = tableRows.find((row) => row.feature === "reminders");
+    expect(remindersRowData?.cells).toEqual([true, true, true, true]);
+  });
+});
+
+/**
+ * Issue #286: Hidden features must not appear in plan page (App Store rule 1.1.4).
+ * pdf_statements, payer_memory, audit_export are not built and must not be listed.
+ */
+describe("Issue #286: Hidden features not displayed", () => {
+  it("FEATURE_DESCRIPTIONS does not contain PDF statements", async () => {
+    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
+    const allDescriptions = Object.values(FEATURE_DISPLAY_NAMES).join(" ");
+    
+    expect(allDescriptions).not.toContain("PDF");
+    expect(allDescriptions).not.toContain("pdf");
+    expect(allDescriptions).not.toContain("Statements");
+  });
+
+  it("FEATURE_DESCRIPTIONS does not contain payer memory", async () => {
+    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
+    const allDescriptions = Object.values(FEATURE_DISPLAY_NAMES).join(" ");
+    
+    expect(allDescriptions.toLowerCase()).not.toContain("payer");
+    expect(allDescriptions.toLowerCase()).not.toContain("memory");
+  });
+
+  it("FEATURE_DESCRIPTIONS does not contain audit export", async () => {
+    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
+    const allDescriptions = Object.values(FEATURE_DISPLAY_NAMES).join(" ");
+    
+    expect(allDescriptions.toLowerCase()).not.toContain("audit");
+    expect(allDescriptions.toLowerCase()).not.toContain("export");
+  });
+
+  it("ALL_FEATURE_KEYS does not include hidden features", async () => {
+    const { ALL_FEATURE_KEYS } = await import("~/lib/entitlements");
+    
+    expect(ALL_FEATURE_KEYS).not.toContain("pdf_statements");
+    expect(ALL_FEATURE_KEYS).not.toContain("payer_memory");
+    expect(ALL_FEATURE_KEYS).not.toContain("audit_export");
+  });
+
+  it("plan page feature list excludes hidden features", async () => {
+    const { ALL_FEATURE_KEYS } = await import("~/lib/entitlements");
+    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
+    
+    // Verify that ALL_FEATURE_KEYS used for rendering only has visible features
+    expect(ALL_FEATURE_KEYS).toHaveLength(5);
+    expect(ALL_FEATURE_KEYS).toEqual([
+      "aging_dashboard",
+      "unlimited_imports",
+      "matching",
+      "reminders",
+      "credit_holds",
+    ]);
+    
+    // Verify FEATURE_DISPLAY_NAMES only has entries for visible features
+    expect(Object.keys(FEATURE_DISPLAY_NAMES)).toHaveLength(5);
   });
 });
 
@@ -431,11 +493,10 @@ describe("S21 Over-limit banner using buildOverLimitBannerState helper", () => {
     expect(state.show).toBe(false);
   });
 
-  it("shows banner when gatingEnforced is false (flag-off behavior)", async () => {
+  it("hides banner when gatingEnforced is false (T1: no banner when gating off)", async () => {
     const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
     const state = buildOverLimitBannerState(3, false);
-    expect(state.show).toBe(true);
-    expect(state.enforcementNote).toBe("(Limits are not currently enforced.)");
+    expect(state.show).toBe(false);
   });
 
   it("no enforcement note when gatingEnforced is true", async () => {
@@ -478,11 +539,10 @@ describe("S21 Account page banner using buildAccountOverLimitBannerState helper"
     expect(state.show).toBe(false);
   });
 
-  it("shows banner when gatingEnforced is false (flag-off behavior)", async () => {
+  it("hides banner when gatingEnforced is false (T1: no banner when gating off)", async () => {
     const { buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
     const state = buildAccountOverLimitBannerState(true, false);
-    expect(state.show).toBe(true);
-    expect(state.enforcementNote).toBe("(Limits are not currently enforced.)");
+    expect(state.show).toBe(false);
   });
 
   it("hides banner when account not gated even if gatingEnforced is false", async () => {
@@ -559,5 +619,124 @@ describe("S21 No price strings in plan output", () => {
       expect(state.bodyText).not.toContain("$");
       expect(state.bodyText).not.toContain("₹");
     }
+  });
+});
+
+/**
+ * UsageDisplay component render tests (T1 QA2).
+ *
+ * Tests that UsageDisplay renders correctly with gating ON and OFF:
+ * - gatingEnforced=false: no 'At Limit', 'Near Limit' badges
+ * - gatingEnforced=true at limit: shows 'At Limit' badge
+ * - gatingEnforced=true near limit: shows 'Near Limit' badge
+ */
+describe("UsageDisplay component render tests", () => {
+  it("shows no badges when gatingEnforced is false (at limit)", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { UsageDisplay } = await import("../app.plan");
+
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 25,
+        limit: 25,
+        label: "Buyer Accounts",
+        gatingEnforced: false,
+      })
+    );
+
+    expect(html).not.toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+    expect(html).not.toContain("Usage Note");
+  });
+
+  it("shows no badges when gatingEnforced is false (near limit)", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { UsageDisplay } = await import("../app.plan");
+
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 20, // 80% of 25
+        limit: 25,
+        label: "Buyer Accounts",
+        gatingEnforced: false,
+      })
+    );
+
+    expect(html).not.toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+    expect(html).not.toContain("Usage Note");
+  });
+
+  it("shows At Limit badge when gatingEnforced is true and at limit", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { UsageDisplay } = await import("../app.plan");
+
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 25,
+        limit: 25,
+        label: "Buyer Accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+  });
+
+  it("shows Near Limit badge when gatingEnforced is true and near limit", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { UsageDisplay } = await import("../app.plan");
+
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 20, // 80% of 25
+        limit: 25,
+        label: "Buyer Accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).not.toContain("At Limit");
+    expect(html).toContain("Near Limit");
+  });
+
+  it("shows usage with limit format when gatingEnforced is true", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { UsageDisplay } = await import("../app.plan");
+
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 10,
+        limit: 25,
+        label: "Buyer Accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).toContain("10 / 25");
+  });
+
+  it("shows usage count only when gatingEnforced is false", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { UsageDisplay } = await import("../app.plan");
+
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 10,
+        limit: 25,
+        label: "Buyer Accounts",
+        gatingEnforced: false,
+      })
+    );
+
+    expect(html).toContain(">10<");
+    expect(html).not.toContain("/ 25");
   });
 });

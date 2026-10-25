@@ -28,9 +28,14 @@
  */
 
 import type { Sql } from "./db-light.server";
-import { safeLog, shopHash } from "./log.server";
+import { safeLog, shopHash, toErrorCode } from "./log.server";
 import { S6_QUEUES } from "./pgmq.server";
 import type { ReconcileMessage } from "~/services/drain/reconcile.server";
+import {
+  recoverStaleBulkOperationsForShop,
+  STALE_THRESHOLD_MINUTES,
+  PAGE_LOAD_RECOVERY_LIMIT,
+} from "~/services/drain/bulk-op-recovery.server";
 
 /**
  * Maximum failure count before considering an operation failed.
@@ -272,4 +277,65 @@ export async function enqueueInitialSync(
  */
 export function canStartSync(status: InitialSyncStatus): boolean {
   return status === "not_started" || status === "failed";
+}
+
+/**
+ * Get the initial sync state with automatic recovery for stale operations.
+ *
+ * If the state is "in_progress" and the latest companies operation is older
+ * than STALE_THRESHOLD_MINUTES, this function attempts to recover any stale
+ * operations before returning the (potentially updated) state.
+ *
+ * Use this variant in user-facing contexts (e.g., onboarding page) where
+ * automatic recovery is desirable. For internal checks where you just want
+ * the raw state, use getInitialSyncState directly.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopDomain - Shop domain
+ * @returns Initial sync state (potentially updated after recovery)
+ */
+export async function getInitialSyncStateWithRecovery(
+  sql: Sql,
+  shopDomain: string
+): Promise<InitialSyncState> {
+  const state = await getInitialSyncState(sql, shopDomain);
+
+  if (state.status !== "in_progress") {
+    return state;
+  }
+
+  const [companiesOp] = await sql<{ started_at: Date | null }[]>`
+    SELECT started_at
+    FROM s6_bulk_operations
+    WHERE shop = ${shopDomain} AND origin = 'reconcile' AND reconcile_stage = 'companies'
+    ORDER BY started_at DESC
+    LIMIT 1
+  `;
+
+  if (!companiesOp || !companiesOp.started_at) {
+    return state;
+  }
+
+  const ageMinutes = (Date.now() - companiesOp.started_at.getTime()) / (1000 * 60);
+
+  if (ageMinutes < STALE_THRESHOLD_MINUTES) {
+    return state;
+  }
+
+  try {
+    const hash = await shopHash(shopDomain);
+    safeLog("info", "bulk_op_recovery_triggered", {
+      shopHash: hash,
+    });
+
+    await recoverStaleBulkOperationsForShop(sql, shopDomain, STALE_THRESHOLD_MINUTES, PAGE_LOAD_RECOVERY_LIMIT);
+  } catch (err) {
+    const hash = await shopHash(shopDomain);
+    safeLog("error", "bulk_op_recovery_triggered_error", {
+      shopHash: hash,
+      err: toErrorCode(err),
+    });
+  }
+
+  return getInitialSyncState(sql, shopDomain);
 }
