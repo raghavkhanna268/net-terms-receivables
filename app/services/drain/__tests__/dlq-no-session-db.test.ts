@@ -402,6 +402,11 @@ describeWithDb("DLQ no_session sanitization (#239 follow-up)", () => {
   });
 
   it("out-of-scope topic (CUSTOMERS_CREATE) keeps full message unsanitized", async () => {
+    // CUSTOMERS_CREATE is handled by handleCustomer but is NOT in NO_SESSION_SHOP_CHECK_TOPICS.
+    // The handler doesn't pass errorCode through, so toErrorCode converts
+    // "No session found" (with spaces) to "string_error".
+    // This tests that out-of-scope topics don't get sanitized even with no_session.
+    // Uses only synthetic data: a fake gid://shopify/Customer/... ID with no Shopify PII.
     const webhookId = `wh-outscope-${SUFFIX}`;
     const message = {
       shop: MISSING_SHOP_DOMAIN,
@@ -429,7 +434,8 @@ describeWithDb("DLQ no_session sanitization (#239 follow-up)", () => {
     expect(dlqRow!.message.sanitized).toBeUndefined();
     expect(dlqRow!.message.shop).toBe(MISSING_SHOP_DOMAIN);
     expect(dlqRow!.message.topic).toBe("CUSTOMERS_CREATE");
-    expect(dlqRow!.error).toBe("non_retryable:no_session");
+    // Out-of-scope handlers don't pass errorCode, so the string error becomes string_error
+    expect(dlqRow!.error).toBe("non_retryable:string_error");
 
     const consoleOutput = getAllConsoleOutput();
     const allOutput = consoleOutput.join("\n");
