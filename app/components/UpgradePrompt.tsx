@@ -186,20 +186,21 @@ export function PlanBanner({
   upgradeUrl,
 }: PlanBannerProps) {
   const displayPlanName = PLAN_DISPLAY_NAMES[planKey] || planName;
-  const companiesAtLimit = companiesLimit !== -1 && companiesUsed >= companiesLimit;
+  // Plan-limit check only applies when gating is enforced
+  // With none=0, every shop would show "at limit" if we didn't gate this
+  const companiesAtLimit = gatingEnforced && companiesLimit !== -1 && companiesUsed >= companiesLimit;
   const canUpgrade = planKey !== "unlimited";
 
   // When gating is off, just show the count without limit comparison
   // This avoids showing confusing 'N / 0' for no-plan shops
   const companiesText = gatingEnforced
     ? companiesLimit === -1
-      ? `${companiesUsed} companies`
-      : `${companiesUsed} / ${companiesLimit} companies`
-    : `${companiesUsed} companies`;
+      ? `${companiesUsed} buyer accounts`
+      : `${companiesUsed} / ${companiesLimit} buyer accounts`
+    : `${companiesUsed} buyer accounts`;
 
-  // When gating is off, always show secondary 'View Plans' button
-  // Never show 'Upgrade to Add More' when gating is off
-  const showUpgradeCta = gatingEnforced && companiesAtLimit;
+  // 'Upgrade to Add More' only shows when at limit (which already includes gatingEnforced check)
+  const showUpgradeCta = companiesAtLimit;
 
   return (
     <s-stack>
@@ -213,7 +214,7 @@ export function PlanBanner({
       <s-paragraph>
         <s-text type="strong">Usage: </s-text>
         <s-text>{companiesText}</s-text>
-        {companiesAtLimit && gatingEnforced && (
+        {companiesAtLimit && (
           <s-badge tone="critical">Limit Reached</s-badge>
         )}
       </s-paragraph>

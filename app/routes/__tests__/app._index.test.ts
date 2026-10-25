@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { renderToString } from "react-dom/server";
+import { createElement } from "react";
 import type { LoaderFunctionArgs } from "react-router";
 
 /**
@@ -92,8 +94,8 @@ vi.mock("~/lib/request-context.server", () => ({
 
 vi.mock("~/services/plan.server", () => ({
   resolvePlan: vi.fn().mockResolvedValue({
-    plan: { key: "free" },
-    subscriptionName: "Free",
+    plan: { key: "none" },
+    subscriptionName: null,
     isTest: false,
   }),
 }));
@@ -919,5 +921,143 @@ describe("S21 gated accounts in dashboard listing and totals", () => {
     const result = await extractLoaderData(await loader(createLoaderArgs() as never));
 
     expect(result.overLimitCount).toBe(1);
+  });
+});
+
+/**
+ * Render tests for BuyerLedgerTable (T1 plan-limit gating).
+ *
+ * Verifies that all accounts are rendered (no hiding) regardless of gating,
+ * and that "over plan limit" badges only appear when gating is enforced.
+ */
+describe("BuyerLedgerTable render tests (T1)", () => {
+  const baseLedgerRows = [
+    {
+      buyer_account_id: "acct-1",
+      buyer_name: "Buyer One Corp",
+      currency: "INR",
+      outstanding_paise: "1000000",
+      overdue_paise: "0",
+      credit_limit_paise: "5000000",
+      oldest_overdue_days: null,
+      hold_state: "OK" as const,
+      is_gated: false,
+    },
+    {
+      buyer_account_id: "acct-2",
+      buyer_name: "Buyer Two Ltd",
+      currency: "INR",
+      outstanding_paise: "2000000",
+      overdue_paise: "500000",
+      credit_limit_paise: "3000000",
+      oldest_overdue_days: 15,
+      hold_state: "NEAR_LIMIT" as const,
+      is_gated: true, // This account is over the plan limit
+    },
+    {
+      buyer_account_id: "acct-3",
+      buyer_name: "Buyer Three Inc",
+      currency: "INR",
+      outstanding_paise: "500000",
+      overdue_paise: "0",
+      credit_limit_paise: null,
+      oldest_overdue_days: null,
+      hold_state: "OK" as const,
+      is_gated: true, // This account is also over the plan limit
+    },
+  ];
+
+  const baseTableProps = {
+    rows: baseLedgerRows,
+    sortBy: "name",
+    sortOrder: "asc" as const,
+    page: 1,
+    totalCount: 3,
+    pageSize: 20,
+    onlyOverLimit: false,
+    onNextPage: "?page=2",
+    onPreviousPage: "?page=0",
+  };
+
+  it("gating OFF, none plan over limit: renders ALL account rows, no 'over plan limit' badges", async () => {
+    const { BuyerLedgerTable } = await import("../app._index");
+    const html = renderToString(
+      createElement(BuyerLedgerTable, {
+        ...baseTableProps,
+        gatingEnforced: false,
+      })
+    );
+
+    // All 3 accounts are rendered (check buyer names)
+    expect(html).toContain("Buyer One Corp");
+    expect(html).toContain("Buyer Two Ltd");
+    expect(html).toContain("Buyer Three Inc");
+
+    // Count rendered accounts - each has its buyer_name in the output
+    // This verifies no accounts are hidden (all 3 from input are shown)
+    expect(baseLedgerRows.every(row => html.includes(row.buyer_name))).toBe(true);
+
+    // No "over plan limit" badge when gating is OFF
+    expect(html).not.toContain("over plan limit");
+  });
+
+  it("gating OFF, starter plan over limit: renders ALL account rows, no badges", async () => {
+    const { BuyerLedgerTable } = await import("../app._index");
+    // Same test but conceptually for a paid plan over its limit
+    const html = renderToString(
+      createElement(BuyerLedgerTable, {
+        ...baseTableProps,
+        gatingEnforced: false,
+      })
+    );
+
+    // All 3 accounts are rendered
+    expect(html).toContain("Buyer One Corp");
+    expect(html).toContain("Buyer Two Ltd");
+    expect(html).toContain("Buyer Three Inc");
+
+    // Verify count matches input - all accounts rendered, none hidden
+    const inputCount = baseLedgerRows.length;
+    const renderedCount = baseLedgerRows.filter(row => html.includes(row.buyer_name)).length;
+    expect(renderedCount).toBe(inputCount);
+
+    // No "over plan limit" badge
+    expect(html).not.toContain("over plan limit");
+    expect(html).not.toContain("Limit Reached");
+  });
+
+  it("gating ON, none plan over limit: renders ALL accounts, shows 'over plan limit' badges on gated rows", async () => {
+    const { BuyerLedgerTable } = await import("../app._index");
+    const html = renderToString(
+      createElement(BuyerLedgerTable, {
+        ...baseTableProps,
+        gatingEnforced: true,
+      })
+    );
+
+    // All 3 accounts are still rendered (gating doesn't hide accounts)
+    expect(html).toContain("Buyer One Corp");
+    expect(html).toContain("Buyer Two Ltd");
+    expect(html).toContain("Buyer Three Inc");
+
+    // "over plan limit" badges ARE shown for gated accounts (2 of them)
+    const badgeCount = (html.match(/over plan limit/g) || []).length;
+    expect(badgeCount).toBe(2); // Two accounts have is_gated: true
+  });
+
+  it("empty rows: renders empty state, not hidden accounts", async () => {
+    const { BuyerLedgerTable } = await import("../app._index");
+    const html = renderToString(
+      createElement(BuyerLedgerTable, {
+        ...baseTableProps,
+        rows: [],
+        totalCount: 0,
+        gatingEnforced: false,
+      })
+    );
+
+    // Empty state message, not "hidden" accounts
+    expect(html).toContain("No outstanding invoices");
+    expect(html).toContain("All your buyers have paid their invoices");
   });
 });

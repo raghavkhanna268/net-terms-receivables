@@ -231,11 +231,13 @@ export default function PlanPage() {
 
   const companiesUsed = usage.companies.current;
   const companiesLimit = usage.companies.limit;
-  const companiesAtLimit = companiesLimit !== -1 && companiesUsed >= companiesLimit;
+  // Plan-limit checks only apply when gating is enforced
+  // With none=0, every shop would show "at limit" if we didn't gate this
+  const companiesAtLimit = gatingEnforced && companiesLimit !== -1 && companiesUsed >= companiesLimit;
 
   const importsUsed = usage.importsThisMonth.current;
   const importsLimit = usage.importsThisMonth.limit;
-  const importsAtLimit = importsLimit !== -1 && importsUsed >= importsLimit;
+  const importsAtLimit = gatingEnforced && importsLimit !== -1 && importsUsed >= importsLimit;
 
   const canUpgrade = planKey !== "unlimited";
   const hasLimitReached = companiesAtLimit || importsAtLimit;
