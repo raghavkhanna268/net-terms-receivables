@@ -164,6 +164,40 @@ jobs:
           echo "::add-mask::$SHOP"
           echo "SHOP_DOMAIN=$SHOP" >> "$GITHUB_ENV"
 
+      # Public boolean only: true iff exactly one shop is installed and its
+      # domain equals the ALLOWED_DEV_STORE secret. The comparison runs inside
+      # SQL via a psql variable; neither domain is ever printed. 'unknown' if
+      # the secret is unset.
+      - name: Installed shop vs allowed dev store
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          # Secret, so the env header prints *** (#190 F1).
+          ALLOWED_DEV_STORE: ${{ secrets.ALLOWED_DEV_STORE }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
+        run: |
+          set -euo pipefail
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
+          if [ -z "${ALLOWED_DEV_STORE:-}" ]; then
+            echo "installed_shop_is_allowed_dev_store=unknown"
+            exit 0
+          fi
+          # Validate before masking (never printed), as in seed-dev-store.yml.
+          if [[ ! "$ALLOWED_DEV_STORE" =~ ^[a-z0-9-]+\.myshopify\.com$ ]]; then
+            echo "installed_shop_is_allowed_dev_store=false"
+            exit 0
+          fi
+          echo "::add-mask::$ALLOWED_DEV_STORE"
+          RESULT=$(psql -X -v ON_ERROR_STOP=1 -t -A -v allowed="$ALLOWED_DEV_STORE" "$DATABASE_URL" <<'EOSQL'
+          SELECT CASE WHEN COUNT(*) = 1 AND bool_and(domain = :'allowed')
+                      THEN 'true' ELSE 'false' END
+          FROM "Shop" WHERE "uninstalledAt" IS NULL;
+          EOSQL
+          )
+          if [ "$RESULT" != "true" ]; then
+            RESULT=false
+          fi
+          echo "installed_shop_is_allowed_dev_store=$RESULT"
+
       - name: Validate inputs
         env:
           REDRIVE_STARTED_AT: ${{ inputs.redrive_started_at }}
