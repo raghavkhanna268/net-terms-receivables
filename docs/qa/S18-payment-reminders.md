@@ -121,7 +121,7 @@ The code constants (`DAILY_SEND_CAP=100`, `MONTHLY_SEND_CAP=3000` in `app/servic
 | S18-38 | Rule disabled mid-window. | Delayed row deleted silently on eligibility re-check. |
 | S18-39 | Account gated mid-window. | Delayed row deleted silently on eligibility re-check. |
 
-### 8.2 Migration `20261109000000_s18_reminder_catchup`
+### 8.2 Migration `20261112000000_s18_reminder_catchup`
 - Purely additive: no drops, no destructive UPDATE/DELETE
 - Adds enum `ReminderLogStatus` (sent, delayed, skipped_daily_limit)
 - Adds `ReminderLog.status` NOT NULL DEFAULT 'sent'

@@ -594,7 +594,7 @@ model ReminderLog {
   @@index([shopId])
   // Partial index on delayed rows for efficient catch-up queries.
   // This is a placeholder: the actual index is defined in migration with WHERE clause.
-  // See: prisma/migrations/20261109000000_s18_reminder_catchup/migration.sql
+  // See: prisma/migrations/20261112000000_s18_reminder_catchup/migration.sql
   @@index([shopId, invoiceId, ruleId], map: "idx_reminder_log_delayed")
 }
 
