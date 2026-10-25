@@ -46,6 +46,9 @@ export const UNMATCHED_NARRATION_RETENTION_DAYS = 180;
 export interface DeleteShopResult {
   deleted: boolean;
   shopId: string | null;
+  /** True when the shop row exists but was skipped because it reinstalled (uninstalledAt IS NULL) */
+  skippedReinstalled: boolean;
+  sessionsDeleted: number;
   refetchNullPurged: number;
   bulkOperationsPurged: number;
   orderGapPurged: number;
@@ -129,10 +132,45 @@ export async function deleteShop(
   shopDomain: string
 ): Promise<DeleteShopResult> {
   return sql.begin(async (tx) => {
-    // Serializes with drain's FOR SHARE Shop guards (#239)
-    await tx`SELECT id FROM "Shop" WHERE domain = ${shopDomain} FOR UPDATE`;
+    // Lock the Shop row to serialize with drain's FOR SHARE guards (#239) and
+    // concurrent reinstalls. Fetch uninstalledAt to check if the shop reinstalled
+    // within the 48h window before shop/redact arrived.
+    const [lockedShop] = await tx<{ id: string; uninstalledAt: Date | null }[]>`
+      SELECT id, "uninstalledAt" FROM "Shop" WHERE domain = ${shopDomain} FOR UPDATE
+    `;
+
+    // If the shop exists but uninstalledAt is NULL, the shop reinstalled after
+    // the uninstall that triggered this shop/redact. Skip deletion to preserve
+    // the reinstalled shop's data. See issue #291.
+    if (lockedShop && lockedShop.uninstalledAt === null) {
+      return {
+        deleted: false,
+        shopId: lockedShop.id,
+        skippedReinstalled: true,
+        sessionsDeleted: 0,
+        refetchNullPurged: 0,
+        bulkOperationsPurged: 0,
+        orderGapPurged: 0,
+        piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
+        deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
+      };
+    }
 
     // Delete non-FK-linked tables first (shop text column or shop in JSON)
+
+    // Session table: delete all OAuth sessions for this shop.
+    // Moved here from webhooks.compliance.tsx to ensure sessions are only deleted
+    // when the shop is actually being erased (not skipped by reinstall guard).
+    // See issue #291.
+    const sessionsResult = await tx`
+      DELETE FROM "Session" WHERE shop = ${shopDomain}
+    `;
 
     // s10b_order_refetch_null (aggregate counter, shop text column)
     const refetchResult = await tx`
@@ -236,6 +274,8 @@ export async function deleteShop(
     return {
       deleted: result !== undefined,
       shopId: result?.id ?? null,
+      skippedReinstalled: false,
+      sessionsDeleted: sessionsResult.count,
       refetchNullPurged: refetchResult.count,
       bulkOperationsPurged: bulkOpsResult.count,
       orderGapPurged: outstandingResult.count,
