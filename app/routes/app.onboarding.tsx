@@ -40,7 +40,8 @@ import {
   type InitialSyncStatus,
   type InitialSyncState,
 } from "~/lib/initial-sync.server";
-import { isShopCurrencySupported, CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency.server";
+import { isShopCurrencySupported } from "~/lib/shop-currency.server";
+import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
 
 /**
  * Client-side version of canStartSync to avoid importing server-only module in client code.

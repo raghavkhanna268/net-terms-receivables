@@ -27,8 +27,8 @@ import {
   isShopCurrencySupported,
   NO_CURRENCY_SENTINEL,
   validateCurrencyCode,
-  CURRENCY_NOT_SUPPORTED_BANNER_COPY,
 } from "~/lib/shop-currency.server";
+import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
 
 const PAGE_SIZE = 20;
 

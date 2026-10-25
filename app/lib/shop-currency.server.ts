@@ -49,15 +49,3 @@ export function validateCurrencyCode(code: unknown): string | null {
   return code;
 }
 
-/**
- * #292: Banner copy for currency not supported state.
- * Used by app._index.tsx and app.onboarding.tsx.
- *
- * Admin path source: https://help.shopify.com/en/manual/intro-to-shopify/initial-setup/setup-business-settings
- * Section: "Select a store currency" → Settings > General > Store defaults > Change store currency
- */
-export const CURRENCY_NOT_SUPPORTED_BANNER_COPY =
-  "Termwise is built for Indian merchants and currently supports INR only. " +
-  "To use it, the store owner must change the store currency to Indian Rupee (INR) in " +
-  "Shopify admin → Settings → General → Store defaults → Currency display → ⋯ → Change store currency, " +
-  "then reload this page. If your store already has orders, Shopify asks you to confirm the change.";

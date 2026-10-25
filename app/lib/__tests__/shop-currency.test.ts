@@ -2,10 +2,10 @@ import { describe, it, expect } from "vitest";
 import {
   SUPPORTED_SHOP_CURRENCY,
   NO_CURRENCY_SENTINEL,
-  CURRENCY_NOT_SUPPORTED_BANNER_COPY,
   isShopCurrencySupported,
   validateCurrencyCode,
 } from "../shop-currency.server";
+import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "../shop-currency-copy";
 
 describe("shop-currency constants", () => {
   it("SUPPORTED_SHOP_CURRENCY is INR", () => {
