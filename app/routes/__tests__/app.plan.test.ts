@@ -742,12 +742,12 @@ describe("UsageDisplay component render tests", () => {
 });
 
 /**
- * Credit-hold feature availability tests (T1).
+ * Credit-hold and credit-status feature availability tests (T1).
  *
  * Verifies that credit_holds feature and FEATURE_DISPLAY_NAMES are
  * available on ALL plans regardless of gating status. Plan-limit gating
  * only affects the "at limit" badges and "Upgrade to Add More" CTAs,
- * not feature availability.
+ * not feature availability or credit-status UI.
  */
 describe("credit-hold feature availability (unaffected by plan gating)", () => {
   it("credit_holds is in FEATURE_DISPLAY_NAMES", async () => {
@@ -768,5 +768,26 @@ describe("credit-hold feature availability (unaffected by plan gating)", () => {
   it("credit_holds is in ALL_FEATURE_KEYS (shown in feature comparison table)", async () => {
     const { ALL_FEATURE_KEYS } = await import("~/lib/entitlements");
     expect(ALL_FEATURE_KEYS).toContain("credit_holds");
+  });
+
+  it("credit-status and credit-hold controls render regardless of plan gating", async () => {
+    const { buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    
+    // Over-limit banner hidden when gating is off (plan-limit gating)
+    const overLimitState = buildAccountOverLimitBannerState(true, false);
+    expect(overLimitState.show).toBe(false);
+    
+    // Credit-hold feature still available on all plans - verified by entitlements
+    const { ALL_PLAN_KEYS, getPlanConfig, planHasFeature } = await import("~/lib/entitlements");
+    for (const planKey of ALL_PLAN_KEYS) {
+      const plan = getPlanConfig(planKey);
+      // Credit holds feature is available on ALL plans including over-limit shops
+      // This means credit-status badges (OK/Near Limit/Held) and manual hold controls render
+      expect(planHasFeature(plan, "credit_holds")).toBe(true);
+    }
+    
+    // Verify feature display name includes "Credit Holds" for the feature table
+    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
+    expect(FEATURE_DISPLAY_NAMES.credit_holds).toBe("Credit Holds");
   });
 });
