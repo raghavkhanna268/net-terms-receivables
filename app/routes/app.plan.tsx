@@ -31,6 +31,7 @@ import {
 } from "~/components/UpgradePrompt";
 import { buildOverLimitBannerState } from "~/lib/over-limit-banner";
 import { safeLog, toErrorCode } from "~/lib/log.server";
+import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 
 const FEATURE_DESCRIPTIONS: Record<FeatureKey, string> = {
   aging_dashboard: "Track outstanding receivables with aging buckets",
@@ -90,7 +91,14 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     },
     gatedCount,
     gatingEnforced,
-    appHandle: process.env.APP_HANDLE ?? "net-terms-receivables",
+    upgradeUrl: (() => {
+      const handle = getAppHandle();
+      if (handle === null) {
+        safeLog("warn", "plan_url_app_handle_missing", {});
+        return null;
+      }
+      return buildPlanSelectionUrl(shopDomain, handle);
+    })(),
     error,
   };
 };
@@ -208,12 +216,11 @@ function FeatureComparisonTable({ currentPlanKey }: { currentPlanKey: PlanKey })
 
 export default function PlanPage() {
   const {
-    storeHandle,
     plan,
     usage,
     gatedCount,
     gatingEnforced,
-    appHandle,
+    upgradeUrl,
     error,
   } = useLoaderData<typeof loader>();
 
@@ -221,8 +228,6 @@ export default function PlanPage() {
   const planName = plan?.name ?? "No Plan";
   const isTest = plan?.isTest ?? false;
   const displayPlanName = PLAN_DISPLAY_NAMES[planKey] || planName;
-
-  const upgradeUrl = `https://admin.shopify.com/store/${storeHandle}/charges/${appHandle}/pricing_plans`;
 
   const companiesUsed = usage.companies.current;
   const companiesLimit = usage.companies.limit;
@@ -312,9 +317,11 @@ export default function PlanPage() {
                   </s-paragraph>
                 )}
 
-                <s-button href={upgradeUrl} target="_top" variant="primary">
-                  View Plans & Upgrade
-                </s-button>
+                {upgradeUrl && (
+                  <s-button href={upgradeUrl} target="_top" variant="primary">
+                    View Plans & Upgrade
+                  </s-button>
+                )}
               </s-stack>
             </s-section>
           )}
