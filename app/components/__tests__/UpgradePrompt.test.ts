@@ -251,6 +251,24 @@ describe("PlanBanner component", () => {
       expect(html).not.toContain("/ 0");
       expect(html).not.toContain("Limit Reached");
     });
+
+    it("none plan with 3 accounts, gating OFF = no badge, no banner, no Upgrade CTA", () => {
+      const html = renderToString(
+        createElement(PlanBanner, {
+          ...baseProps,
+          planKey: "none",
+          planName: "No Plan",
+          companiesUsed: 3,
+          companiesLimit: 0,
+          gatingEnforced: false,
+        })
+      );
+      expect(html).toContain("3 companies");
+      expect(html).not.toContain("Limit Reached");
+      expect(html).not.toContain("At Limit");
+      expect(html).not.toContain("Upgrade to Add More");
+      expect(html).not.toContain("/ 0");
+    });
   });
 
   describe("gating ON", () => {
@@ -284,6 +302,23 @@ describe("PlanBanner component", () => {
         })
       );
       expect(html).toContain('variant="primary"');
+      expect(html).toContain("Upgrade to Add More");
+    });
+
+    it("none plan with 1 account, gating ON = shows Limit Reached badge", () => {
+      const html = renderToString(
+        createElement(PlanBanner, {
+          ...baseProps,
+          planKey: "none",
+          planName: "No Plan",
+          companiesUsed: 1,
+          companiesLimit: 0,
+          gatingEnforced: true,
+        })
+      );
+      expect(html).toContain("1 / 0 companies");
+      expect(html).toContain('tone="critical"');
+      expect(html).toContain("Limit Reached");
       expect(html).toContain("Upgrade to Add More");
     });
   });
