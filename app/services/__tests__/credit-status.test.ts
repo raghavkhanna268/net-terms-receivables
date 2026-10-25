@@ -1297,11 +1297,12 @@ describe("syncCreditStatusMetafield no-owner branch", () => {
 
     const updateCalls = txCalls.filter(c => c.query.includes('UPDATE "BuyerAccount"'));
     expect(updateCalls.length).toBe(1);
-    const updateQuery = updateCalls[0].query;
-    expect(updateQuery).toContain('"holdState"');
-    expect(updateQuery).toContain('"syncPending" = false');
-    expect(updateQuery).toContain('"syncVersion" = "syncVersion" + 1');
-    expect(updateQuery).not.toContain('metafieldSyncedAt');
+    const updateCall = updateCalls[0];
+    expect(updateCall.query).toContain('"holdState"');
+    expect(updateCall.query).toContain('"syncPending" = false');
+    expect(updateCall.query).toContain('"syncVersion" = "syncVersion" + 1');
+    expect(updateCall.query).not.toContain('metafieldSyncedAt');
+    expect(updateCall.values).toContain("HELD");
   });
 
   it("no-owner effective hold change: exactly ONE audit insert (hold_unenforceable) and ONE warn log", async () => {
