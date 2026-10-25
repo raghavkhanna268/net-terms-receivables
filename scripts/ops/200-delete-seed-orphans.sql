@@ -25,8 +25,13 @@
 --     email, money or free text. The shop domain only enters via set_config
 --     and is compared, never selected.
 --
--- Seed row definition (scripts/seed.ts:3558,3664):
---   id = 'seed-account-' || "shopId" || '-' || "companyLocationId", kind = COMPANY.
+-- Seed row definition, kind = COMPANY, id matched EXACTLY against the row's own
+-- columns (no prefix/LIKE match). scripts/seed.ts has written two formats:
+--   legacy  id = 'seed-account-' || "companyLocationId"
+--           (seed.ts from #48 90f4d69 until #163 e04a908 / #170 3c22fef;
+--            the 3 orphans were created by this version, see dry run 40171618161)
+--   current id = 'seed-account-' || "shopId" || '-' || "companyLocationId"
+--           (scripts/seed.ts:3558 and :3664 on main)
 -- Dependents checked (must all be 0):
 --   FK: "Invoice" (NO ACTION, composite buyerAccountId+shopId), "PayerAlias" (CASCADE)
 --   via Invoice: "Match", rejected_matches, "ReminderLog"
@@ -66,7 +71,7 @@ SELECT g.company_location_gid,
        ba.id AS buyer_account_id,
        ba.id IS NOT NULL AS matched,
        ba.kind,
-       ba.id = 'seed-account-' || ba."shopId" || '-' || ba."companyLocationId" AS is_seed,
+       (ba.id = 'seed-account-' || ba."companyLocationId" OR ba.id = 'seed-account-' || ba."shopId" || '-' || ba."companyLocationId") AS is_seed,
        (SELECT COUNT(*) FROM "Invoice" i WHERE i."buyerAccountId" = ba.id) AS invoices,
        (SELECT COUNT(*) FROM "Match" m JOIN "Invoice" i ON i.id = m."invoiceId" WHERE i."buyerAccountId" = ba.id) AS matches,
        (SELECT COUNT(*) FROM rejected_matches r JOIN "Invoice" i ON i.id = r."invoiceId" WHERE i."buyerAccountId" = ba.id) AS rejected_matches,
@@ -154,11 +159,11 @@ BEGIN
     RAISE EXCEPTION 'refuse_200:matched_rows_%', COALESCE(cardinality(v_ids), 0);
   END IF;
 
-  SELECT COUNT(*) INTO v_n FROM "BuyerAccount"
-  WHERE id = ANY(v_ids)
-    AND id = 'seed-account-' || "shopId" || '-' || "companyLocationId"
-    AND id LIKE 'seed-account-%'
-    AND kind = 'COMPANY';
+  SELECT COUNT(*) INTO v_n FROM "BuyerAccount" ba
+  WHERE ba.id = ANY(v_ids)
+    AND (ba.id = 'seed-account-' || ba."companyLocationId" OR ba.id = 'seed-account-' || ba."shopId" || '-' || ba."companyLocationId")
+    AND ba.id LIKE 'seed-account-%'
+    AND ba.kind = 'COMPANY';
   IF v_n <> 3 THEN RAISE EXCEPTION 'refuse_200:seed_rows_%', v_n; END IF;
 
   -- Explicit dependents (schema.prisma + #200 impact analysis).

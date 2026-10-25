@@ -704,19 +704,22 @@ describeWithDb("shop/redact complete DB deletion", () => {
     const bulkMsgId = bulkMsg.send;
 
     // 2. Simulate drain workers reading messages with VT (visibility timeout)
-    // pgmq.read(queue, vt_seconds, limit) returns the message and makes it invisible for vt seconds
-    // Note: pgmq.read returns a set of rows directly, we query for specific msg_id after to simulate the read
-    const readSync = await sql<{ msg_id: string }[]>`
-      SELECT msg_id::text FROM pgmq.read('s6_sync', 30, 1) WHERE msg_id = ${syncMsgId}::bigint
+    // pgmq.read(queue, vt_seconds, limit) returns up to `limit` messages and makes them invisible for vt seconds.
+    // We read with a limit high enough to include our test messages, then verify they were returned.
+    // Using pgmq.read_with_poll would be more accurate but read() is simpler for test purposes.
+    const readSyncResults = await sql<{ msg_id: string; message: unknown }[]>`
+      SELECT msg_id::text, message FROM pgmq.read('s6_sync', 30, 100)
     `;
-    const readBulk = await sql<{ msg_id: string }[]>`
-      SELECT msg_id::text FROM pgmq.read('s6_bulk', 30, 1) WHERE msg_id = ${bulkMsgId}::bigint
+    const readBulkResults = await sql<{ msg_id: string; message: unknown }[]>`
+      SELECT msg_id::text, message FROM pgmq.read('s6_bulk', 30, 100)
     `;
 
-    expect(readSync.length).toBe(1);
-    expect(readBulk.length).toBe(1);
-    expect(readSync[0].msg_id).toBe(syncMsgId);
-    expect(readBulk[0].msg_id).toBe(bulkMsgId);
+    // Find our specific messages in the results
+    const readSync = readSyncResults.find(r => r.msg_id === syncMsgId);
+    const readBulk = readBulkResults.find(r => r.msg_id === bulkMsgId);
+
+    expect(readSync, `Message ${syncMsgId} should be in s6_sync read results`).toBeDefined();
+    expect(readBulk, `Message ${bulkMsgId} should be in s6_bulk read results`).toBeDefined();
 
     // 3. Run shop/redact to delete the messages from the queue
     const sessionStorage = new LightSessionStorage(sql);

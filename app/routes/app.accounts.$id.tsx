@@ -40,6 +40,7 @@ import {
 } from "~/lib/aging";
 import { buildAccountOverLimitBannerState } from "~/lib/over-limit-banner";
 import type { HoldReasonCode } from "~/lib/metafields-contract";
+import { getSyncErrorInfo, type SyncErrorInfo } from "~/lib/sync-error-info";
 
 const HOLD_REASON_OPTIONS: Array<{ value: HoldReasonCode; label: string }> = [
   { value: "MANUAL_HOLD", label: "Manual hold" },
@@ -48,6 +49,14 @@ const HOLD_REASON_OPTIONS: Array<{ value: HoldReasonCode; label: string }> = [
   { value: "NEW_ACCOUNT", label: "New account review" },
   { value: "FRAUD_SUSPECTED", label: "Fraud suspected" },
 ];
+
+/**
+ * Sync state enum for banner display:
+ * - pending_retry: syncPending=true, no permanent error, no dead-letter → auto-retries
+ * - needs_attention: syncPending=true with permanent error OR dead-lettered → manual action needed
+ * - synced: not syncPending → no banner
+ */
+type SyncState = "pending_retry" | "needs_attention" | "synced";
 
 interface LoaderData {
   account: {
@@ -76,6 +85,10 @@ interface LoaderData {
     isOverdue: boolean;
     utilizationPercent: number | null;
     syncPending: boolean;
+    syncErrorCode: string | null;
+    syncState: SyncState;
+    hasDeadLetteredSync: boolean;
+    syncErrorInfo: SyncErrorInfo | null;
   } | null;
   companyTotals: {
     locationCount: number;
@@ -188,26 +201,60 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
 
   const creditStatusDisplay = await getCreditStatusDisplay(sql, accountId);
 
-  const creditStatus = creditStatusDisplay
-    ? {
-        creditLimitAmount: creditStatusDisplay.creditLimitAmount,
-        creditLimitPaise: creditStatusDisplay.creditLimitPaise?.toString() ?? null,
-        exposurePaise: creditStatusDisplay.exposurePaise.toString(),
-        draftExposurePaise: creditStatusDisplay.draftExposurePaise.toString(),
-        availableCreditPaise: creditStatusDisplay.availableCreditPaise?.toString() ?? null,
-        currency: creditStatusDisplay.currency,
-        holdState: creditStatusDisplay.holdState,
-        manualHold: creditStatusDisplay.manualHold,
-        holdReasonCode: creditStatusDisplay.holdReasonCode,
-        holdNote: creditStatusDisplay.holdNote,
-        isOnHold: creditStatusDisplay.isOnHold,
-        holdReasonDisplay: creditStatusDisplay.holdReasonDisplay,
-        isOverLimit: creditStatusDisplay.isOverLimit,
-        isOverdue: creditStatusDisplay.isOverdue,
-        utilizationPercent: creditStatusDisplay.utilizationPercent,
-        syncPending: creditStatusDisplay.syncPending,
+  let creditStatus: LoaderData["creditStatus"] = null;
+  if (creditStatusDisplay) {
+    const metafieldSyncedAt = creditStatusDisplay.metafieldSyncedAt;
+    const [deadLetterRow] = await sql<{ exists: boolean }[]>`
+      SELECT EXISTS (
+        SELECT 1 FROM s6_dead_letter
+        WHERE original_queue = 's6_sync'
+          AND message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+          AND message->>'buyerAccountId' = ${accountId}
+          AND message->>'shop' = ${shopDomain}
+          AND dead_lettered_at > COALESCE(${metafieldSyncedAt}, '-infinity'::timestamptz)
+      ) AS exists
+    `;
+    const hasDeadLetteredSync = deadLetterRow?.exists ?? false;
+
+    const syncErrorCode = creditStatusDisplay.syncErrorCode;
+    const syncPending = creditStatusDisplay.syncPending;
+
+    let syncState: SyncState = "synced";
+    if (syncPending) {
+      if (hasDeadLetteredSync || syncErrorCode !== null) {
+        syncState = "needs_attention";
+      } else {
+        syncState = "pending_retry";
       }
-    : null;
+    }
+
+    const syncErrorInfo = syncState === "needs_attention"
+      ? getSyncErrorInfo(hasDeadLetteredSync && !syncErrorCode ? null : syncErrorCode)
+      : null;
+
+    creditStatus = {
+      creditLimitAmount: creditStatusDisplay.creditLimitAmount,
+      creditLimitPaise: creditStatusDisplay.creditLimitPaise?.toString() ?? null,
+      exposurePaise: creditStatusDisplay.exposurePaise.toString(),
+      draftExposurePaise: creditStatusDisplay.draftExposurePaise.toString(),
+      availableCreditPaise: creditStatusDisplay.availableCreditPaise?.toString() ?? null,
+      currency: creditStatusDisplay.currency,
+      holdState: creditStatusDisplay.holdState,
+      manualHold: creditStatusDisplay.manualHold,
+      holdReasonCode: creditStatusDisplay.holdReasonCode,
+      holdNote: creditStatusDisplay.holdNote,
+      isOnHold: creditStatusDisplay.isOnHold,
+      holdReasonDisplay: creditStatusDisplay.holdReasonDisplay,
+      isOverLimit: creditStatusDisplay.isOverLimit,
+      isOverdue: creditStatusDisplay.isOverdue,
+      utilizationPercent: creditStatusDisplay.utilizationPercent,
+      syncPending,
+      syncErrorCode,
+      syncState,
+      hasDeadLetteredSync,
+      syncErrorInfo,
+    };
+  }
 
   const companyTotalsData = accountRow.kind === "COMPANY" && accountRow.companyId
     ? await getCompanyTotals(sql, accountRow.companyId, shop.id)
@@ -532,7 +579,12 @@ export default function AccountPage() {
 
       {creditStatus && (
         <s-section heading="Credit Status">
-          {creditStatus.syncPending && (
+          {creditStatus.syncState === "needs_attention" && creditStatus.syncErrorInfo && (
+            <s-banner tone="critical" heading="Sync Requires Attention">
+              {creditStatus.syncErrorInfo.message}
+            </s-banner>
+          )}
+          {creditStatus.syncState === "pending_retry" && (
             <s-banner tone="warning" heading="Sync Pending">
               Shopify metafield sync is pending. Changes will be retried automatically.
             </s-banner>
