@@ -1631,13 +1631,8 @@ jobs:
                                       else ((.exposurePaise | tonumber) > (.limitPaise | tonumber)) end),
                          updatedAt}) end)}]
                   | from_entries' "$HTTP_RESPONSE")
-                echo "fixtures (one per line):"
-                printf '%s\n' "$FIXTURES" | jq -c --argjson mf "$MF_MAP" '
-                  . as $a | ($a.company_location_id // $a.customer_id) as $owner
-                  | {buyer_account_id, kind, company_id, company_location_id, customer_id,
-                     hold_state, manual_hold, bypass, manual_hold_reason_code, overdue,
-                     owner_found: ($owner != null and ($mf | has($owner))),
-                     credit_status: (if $owner == null then null else $mf[$owner] end)}'
+                # QA 2 audit: individual fixture IDs removed (buyer_account_id, company_id,
+                # company_location_id, customer_id). Only aggregated counts are printed.
                 printf '%s\n' "$FIXTURES" | jq -s -c --argjson mf "$MF_MAP" '
                   {fixtures_total: length,
                    db_held: (map(select(.hold_state == "HELD" or .manual_hold)) | length),
