@@ -75,14 +75,6 @@ function getAllowlist(env: ResendEnv): RecipientAllowlist {
 }
 
 /**
- * Check if the allowlist guard is enforced.
- * Reads from env param first, then falls back to process.env.
- */
-function getEnforced(env: ResendEnv): boolean {
-  return isAllowlistEnforced(env);
-}
-
-/**
  * Filter all recipient fields (to, cc, bcc) through the allowlist.
  * Returns the filtered params and counts.
  *
@@ -152,7 +144,7 @@ export async function sendViaResend(
   }
 
   const allowlist = getAllowlist(env);
-  const enforced = getEnforced(env);
+  const enforced = isAllowlistEnforced(env);
 
   if (enforced && allowlist.size === 0) {
     const totalOriginal = params.to.length + (params.cc?.length ?? 0) + (params.bcc?.length ?? 0);

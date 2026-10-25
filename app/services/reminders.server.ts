@@ -45,6 +45,7 @@ import {
 import {
   parseRecipientAllowlist,
   isRecipientAllowed,
+  isAllowlistEnforced,
 } from "./recipient-allowlist.server";
 import { sendViaResend } from "./resend-client.server";
 
@@ -751,7 +752,7 @@ export async function sendPaymentReminder(
   ruleId: string,
   offsetDays: number,
   timezone: string,
-  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string } = {},
+  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string; RESEND_RECIPIENT_ALLOWLIST_ENFORCED?: string } = {},
   deps: { reserveGlobalSendSlot?: typeof reserveGlobalSendSlot } = {}
 ): Promise<ReminderSendResult> {
   const resendKey = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
@@ -899,10 +900,12 @@ export async function sendPaymentReminder(
 
   // Gate 10d: Pre-launch recipient allowlist check (fail closed)
   // Check BEFORE claiming slot/cap so skipped sends don't consume resources
+  // When RESEND_RECIPIENT_ALLOWLIST_ENFORCED is exactly "false", skip this gate.
   const allowlist = parseRecipientAllowlist(
     env.RESEND_TEST_RECIPIENTS ?? process.env.RESEND_TEST_RECIPIENTS
   );
-  if (allowlist.size === 0) {
+  const enforced = isAllowlistEnforced(env);
+  if (enforced && allowlist.size === 0) {
     safeLog("info", "reminder_send_skipped", { shopId, reason: "recipient_allowlist_empty", skippedCount: 1, allowedCount: 0 });
     return {
       success: true,
@@ -910,7 +913,7 @@ export async function sendPaymentReminder(
       skipReason: "Recipient allowlist is empty or not configured",
     };
   }
-  if (!isRecipientAllowed(invoice.buyerEmail, allowlist)) {
+  if (enforced && !isRecipientAllowed(invoice.buyerEmail, allowlist)) {
     safeLog("info", "reminder_send_skipped", { shopId, reason: "recipient_not_allowlisted", skippedCount: 1, allowedCount: 0 });
     return {
       success: true,
@@ -1020,7 +1023,11 @@ export async function sendPaymentReminder(
         headers: unsubscribeHeaders ?? undefined,
         idempotencyKey,
       },
-      { RESEND_API_KEY: resendKey, RESEND_TEST_RECIPIENTS: env.RESEND_TEST_RECIPIENTS ?? process.env.RESEND_TEST_RECIPIENTS }
+      {
+        RESEND_API_KEY: resendKey,
+        RESEND_TEST_RECIPIENTS: env.RESEND_TEST_RECIPIENTS ?? process.env.RESEND_TEST_RECIPIENTS,
+        RESEND_RECIPIENT_ALLOWLIST_ENFORCED: env.RESEND_RECIPIENT_ALLOWLIST_ENFORCED ?? process.env.RESEND_RECIPIENT_ALLOWLIST_ENFORCED,
+      }
     );
 
     if (sendResult.sent) {
@@ -1115,7 +1122,7 @@ export async function sendCatchupReminder(
   _logId: string,
   offsetDays: number,
   timezone: string,
-  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string } = {}
+  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string; RESEND_RECIPIENT_ALLOWLIST_ENFORCED?: string } = {}
 ): Promise<ReminderSendResult> {
   const resendKey = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
   const fromEmail = getResendFrom(env);
@@ -1345,10 +1352,12 @@ export async function sendCatchupReminder(
   // Check AFTER gates 9/10/11/11b so we skip for valid business reasons first,
   // but BEFORE claiming slot/cap so skipped sends don't consume resources.
   // Don't delete the delayed row - wait for allowlist to be configured or recipient added.
+  // When RESEND_RECIPIENT_ALLOWLIST_ENFORCED is exactly "false", skip this gate.
   const allowlist = parseRecipientAllowlist(
     env.RESEND_TEST_RECIPIENTS ?? process.env.RESEND_TEST_RECIPIENTS
   );
-  if (allowlist.size === 0) {
+  const enforced = isAllowlistEnforced(env);
+  if (enforced && allowlist.size === 0) {
     safeLog("info", "reminder_send_skipped", { shopId, reason: "recipient_allowlist_empty", skippedCount: 1, allowedCount: 0 });
     return {
       success: true,
@@ -1356,7 +1365,7 @@ export async function sendCatchupReminder(
       skipReason: "Recipient allowlist is empty or not configured",
     };
   }
-  if (!isRecipientAllowed(invoice.buyerEmail, allowlist)) {
+  if (enforced && !isRecipientAllowed(invoice.buyerEmail, allowlist)) {
     safeLog("info", "reminder_send_skipped", { shopId, reason: "recipient_not_allowlisted", skippedCount: 1, allowedCount: 0 });
     return {
       success: true,
@@ -1485,7 +1494,11 @@ export async function sendCatchupReminder(
         headers: unsubscribeHeaders ?? undefined,
         idempotencyKey,
       },
-      { RESEND_API_KEY: resendKey, RESEND_TEST_RECIPIENTS: env.RESEND_TEST_RECIPIENTS ?? process.env.RESEND_TEST_RECIPIENTS }
+      {
+        RESEND_API_KEY: resendKey,
+        RESEND_TEST_RECIPIENTS: env.RESEND_TEST_RECIPIENTS ?? process.env.RESEND_TEST_RECIPIENTS,
+        RESEND_RECIPIENT_ALLOWLIST_ENFORCED: env.RESEND_RECIPIENT_ALLOWLIST_ENFORCED ?? process.env.RESEND_RECIPIENT_ALLOWLIST_ENFORCED,
+      }
     );
 
     if (sendResult.sent) {
