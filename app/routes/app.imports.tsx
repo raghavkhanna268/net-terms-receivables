@@ -857,9 +857,8 @@ export default function ImportsPage() {
         // Log error class only - client-side, no raw error details (M8)
         const errName = err instanceof Error ? err.name : "unknown";
         console.error(`[app.imports] Parse error: ${errName}`);
-        setErrorMessage(
-          err instanceof Error ? err.message : "Failed to parse bank statement"
-        );
+        // Never render raw error messages - use fixed user-friendly message
+        setErrorMessage("Failed to parse bank statement. Please ensure the file is a valid CSV, XLS, or XLSX export from a supported bank.");
         setStatus("error");
       }
     },

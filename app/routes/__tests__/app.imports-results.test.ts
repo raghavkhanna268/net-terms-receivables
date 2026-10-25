@@ -370,6 +370,47 @@ describe("mapCreditsForImport", () => {
   });
 });
 
+describe("Error message safety - no raw messages to merchants", () => {
+  it("all ERROR_CODE_MESSAGES are fixed strings without dynamic content", () => {
+    const fixedMessages = Object.values(ERROR_CODE_MESSAGES);
+    for (const msg of fixedMessages) {
+      expect(typeof msg).toBe("string");
+      expect(msg.length).toBeGreaterThan(0);
+      expect(msg.length).toBeLessThan(100);
+      expect(msg).not.toContain("undefined");
+      expect(msg).not.toContain("null");
+      expect(msg).not.toContain("[object");
+    }
+  });
+
+  it("getErrorDisplayMessage always returns a safe fixed string", () => {
+    const testCodes = [
+      "ROW_PARSE_FAILED",
+      "NORMALIZE_FAILED",
+      "NO_HEADER_ROW",
+      "COLUMN_MAP_FAILED",
+      "UNKNOWN_BANK_FORMAT",
+      "SOME_UNKNOWN_CODE",
+      "",
+      "undefined",
+    ];
+    for (const code of testCodes) {
+      const msg = getErrorDisplayMessage(code);
+      expect(typeof msg).toBe("string");
+      expect(msg.length).toBeGreaterThan(0);
+      expect(msg).not.toContain("SYNTHETIC");
+      expect(msg).not.toContain("narration");
+      expect(msg).not.toContain("@");
+    }
+  });
+
+  it("formatErrorRowLabel formats row 0 as file-level, not Row 0", () => {
+    expect(formatErrorRowLabel(0)).toBe("File-level");
+    expect(formatErrorRowLabel(0)).not.toContain("Row");
+    expect(formatErrorRowLabel(0)).not.toContain("0");
+  });
+});
+
 // ============================================================================
 // Integration Tests per Bank
 // ============================================================================
