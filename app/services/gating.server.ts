@@ -1,17 +1,15 @@
 /**
  * Gating service for S21 plan enforcement (T4: account-count gating).
  *
- * Provides server-side limit checking and feature gating.
+ * Provides server-side limit checking for company limits.
  * Called before creating resources that have plan-based limits.
  *
  * What is enforced (when PLAN_GATING_ENFORCED=true):
  * - Company limit: new BuyerAccounts over limit are created with gated_at set
- * - Import limit: enforceImportLimit() blocks imports over monthly allowance
- *   (wired in app/routes/app.imports.tsx)
  *
  * What is NOT enforced:
+ * - Bank statement imports: unlimited on all plans
  * - credit_holds: runs on all plans (holds, recompute, sweep, Validation Function)
- * - Feature checks via checkFeature/hasFeature are exported but currently unused
  *
  * Design decisions:
  * - Downgrades NEVER delete data: over-limit shops keep read access
@@ -32,13 +30,10 @@
  */
 
 import type { Sql } from "~/lib/db-light.server";
-import { DateTime } from "luxon";
 import { getPlanByShopId } from "./plan.server";
 import {
-  type FeatureKey,
   type PlanKey,
   getPlanConfig,
-  planHasFeature,
   planLimit,
   isLimitExceeded,
 } from "~/lib/entitlements";
@@ -64,7 +59,7 @@ export type SqlFragment = ReturnType<Sql>;
  * IMPORTANT: This helper must NOT be used for sync, hold, recompute, metafield,
  * sweep, matching, aging, or totals queries. Gated accounts participate fully
  * in those paths - gating applies only to value-add actions (reminders,
- * credit-limit edits, account editing, bulk statement import).
+ * credit-limit edits, account editing).
  *
  * When PLAN_GATING_ENFORCED is OFF, returns a tautology (TRUE) so all accounts are included.
  * When PLAN_GATING_ENFORCED is ON, returns "gated_at IS NULL" to exclude gated accounts.
@@ -277,118 +272,13 @@ export async function enforceCompanyLimit(
 }
 
 /**
- * Check if a shop can perform another bank statement import this month.
- * Calendar month is calculated in IST (Asia/Kolkata) timezone.
- *
- * NOTE: Import limit enforcement is wired here but actual BankImport creation
- * is not yet implemented. See docs/plans-and-gating.md TODO for S15.
- *
- * @param sql - postgres.js SQL client
- * @param shopId - Internal shop ID
- * @returns GatingCheckResult with allowed status and usage info
- */
-export async function checkImportLimit(
-  sql: Sql,
-  shopId: string
-): Promise<GatingCheckResult> {
-  // If gating is not enforced, always allow
-  if (!isGatingEnforced()) {
-    return {
-      allowed: true,
-      currentUsage: 0,
-      limit: -1,
-      reason: "Gating not enforced (PLAN_GATING_ENFORCED is off)",
-    };
-  }
-
-  const plan = await getPlanByShopId(sql, shopId);
-  const limit = planLimit(plan, "importsPerMonth");
-
-  // Unlimited
-  if (limit === -1) {
-    return {
-      allowed: true,
-      currentUsage: 0,
-      limit: -1,
-    };
-  }
-
-  // Get start of current calendar month in IST
-  const now = DateTime.now().setZone("Asia/Kolkata");
-  const monthStart = now.startOf("month");
-  const monthEnd = now.endOf("month");
-
-  // Count imports in current month
-  const [result] = await sql<{ count: string }[]>`
-    SELECT COUNT(*)::text as count
-    FROM "BankImport"
-    WHERE "shopId" = ${shopId}
-      AND "createdAt" >= ${monthStart.toJSDate()}
-      AND "createdAt" <= ${monthEnd.toJSDate()}
-  `;
-
-  const currentCount = parseInt(result?.count ?? "0", 10);
-
-  if (isLimitExceeded(plan, "importsPerMonth", currentCount)) {
-    return {
-      allowed: false,
-      currentUsage: currentCount,
-      limit,
-      reason: `Import limit reached (${currentCount}/${limit} this month). Upgrade for unlimited imports.`,
-    };
-  }
-
-  return {
-    allowed: true,
-    currentUsage: currentCount,
-    limit,
-  };
-}
-
-/**
- * Enforce the import limit - throws UpgradeRequiredError if exceeded.
- *
- * @param sql - postgres.js SQL client
- * @param shopId - Internal shop ID
- * @throws UpgradeRequiredError if limit exceeded
- */
-export async function enforceImportLimit(
-  sql: Sql,
-  shopId: string
-): Promise<void> {
-  const check = await checkImportLimit(sql, shopId);
-  if (!check.allowed) {
-    throw new UpgradeRequiredError(
-      "importsPerMonth",
-      check.currentUsage,
-      check.limit
-    );
-  }
-}
-
-/**
- * Check if a shop has a specific feature enabled.
- *
- * @param sql - postgres.js SQL client
- * @param shopId - Internal shop ID
- * @param feature - Feature key to check
- * @returns true if the feature is available
- */
-export async function checkFeature(
-  sql: Sql,
-  shopId: string,
-  feature: FeatureKey
-): Promise<boolean> {
-  const plan = await getPlanByShopId(sql, shopId);
-  return planHasFeature(plan, feature);
-}
-
-/**
  * Get usage statistics for a shop's plan.
  * Useful for UI display of current usage.
  *
  * When PLAN_GATING_ENFORCED is ON, excludes gated accounts from the company count.
  * This reflects the "active" usage that counts toward the plan limit.
+ *
+ * Note: importsThisMonth is always unlimited (-1) because imports are not gated.
  *
  * @param sql - postgres.js SQL client
  * @param shopId - Internal shop ID
@@ -415,27 +305,14 @@ export async function getUsageStats(
         10
       );
 
-  const now = DateTime.now().setZone("Asia/Kolkata");
-  const monthStart = now.startOf("month");
-  const monthEnd = now.endOf("month");
-
-  const [importResult] = await sql<{ count: string }[]>`
-    SELECT COUNT(*)::text as count
-    FROM "BankImport"
-    WHERE "shopId" = ${shopId}
-      AND "createdAt" >= ${monthStart.toJSDate()}
-      AND "createdAt" <= ${monthEnd.toJSDate()}
-  `;
-  const importCount = parseInt(importResult?.count ?? "0", 10);
-
   return {
     companies: {
       current: companyCount,
       limit: planLimit(plan, "companies"),
     },
     importsThisMonth: {
-      current: importCount,
-      limit: planLimit(plan, "importsPerMonth"),
+      current: 0,
+      limit: -1,
     },
   };
 }
