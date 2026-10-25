@@ -164,13 +164,13 @@ describeWithDb("S18 reminder status queries (DB)", () => {
           status, "issuedAt", "dueAt", "createdAt", "updatedAt"
         )
         VALUES 
-          ('inv-sent-1-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, 'gid://shopify/Order/sent1-${TEST_SUFFIX}',
+          (${`inv-sent-1-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${`gid://shopify/Order/sent1-${TEST_SUFFIX}`},
            '#SENT-1', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW(), NOW()),
-          ('inv-sent-2-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, 'gid://shopify/Order/sent2-${TEST_SUFFIX}',
+          (${`inv-sent-2-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${`gid://shopify/Order/sent2-${TEST_SUFFIX}`},
            '#SENT-2', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW(), NOW()),
-          ('inv-delayed-1-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, 'gid://shopify/Order/delayed1-${TEST_SUFFIX}',
+          (${`inv-delayed-1-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${`gid://shopify/Order/delayed1-${TEST_SUFFIX}`},
            '#DELAYED-1', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW(), NOW()),
-          ('inv-skipped-1-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, 'gid://shopify/Order/skipped1-${TEST_SUFFIX}',
+          (${`inv-skipped-1-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${`gid://shopify/Order/skipped1-${TEST_SUFFIX}`},
            '#SKIPPED-1', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW(), NOW())
       `;
 
@@ -178,10 +178,10 @@ describeWithDb("S18 reminder status queries (DB)", () => {
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "sentAt", "firstCappedAt")
         VALUES 
-          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, 'inv-sent-1-${TEST_SUFFIX}', 'sent'::"ReminderLogStatus", NOW(), NULL),
-          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, 'inv-sent-2-${TEST_SUFFIX}', 'sent'::"ReminderLogStatus", NOW(), NULL),
-          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, 'inv-delayed-1-${TEST_SUFFIX}', 'delayed'::"ReminderLogStatus", NULL, NOW()),
-          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, 'inv-skipped-1-${TEST_SUFFIX}', 'skipped_daily_limit'::"ReminderLogStatus", NULL, NOW())
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, ${`inv-sent-1-${TEST_SUFFIX}`}, 'sent'::"ReminderLogStatus", NOW(), NULL),
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, ${`inv-sent-2-${TEST_SUFFIX}`}, 'sent'::"ReminderLogStatus", NOW(), NULL),
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, ${`inv-delayed-1-${TEST_SUFFIX}`}, 'delayed'::"ReminderLogStatus", NULL, NOW()),
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, ${`inv-skipped-1-${TEST_SUFFIX}`}, 'skipped_daily_limit'::"ReminderLogStatus", NULL, NOW())
       `;
 
       const counts = await getReminderStatusCounts(sql, TEST_SHOP_ID);
@@ -200,14 +200,14 @@ describeWithDb("S18 reminder status queries (DB)", () => {
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
           status, "issuedAt", "dueAt", "createdAt", "updatedAt"
         )
-        VALUES ('inv-other-${TEST_SUFFIX}', ${OTHER_SHOP_ID}, ${OTHER_ACCOUNT_ID}, 'gid://shopify/Order/other-${TEST_SUFFIX}',
+        VALUES (${`inv-other-${TEST_SUFFIX}`}, ${OTHER_SHOP_ID}, ${OTHER_ACCOUNT_ID}, ${`gid://shopify/Order/other-${TEST_SUFFIX}`},
                 '#OTHER', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW(), NOW())
       `;
 
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "sentAt")
         VALUES 
-          (gen_random_uuid()::TEXT, ${OTHER_SHOP_ID}, ${OTHER_RULE_ID}, 'inv-other-${TEST_SUFFIX}', 'sent'::"ReminderLogStatus", NOW())
+          (gen_random_uuid()::TEXT, ${OTHER_SHOP_ID}, ${OTHER_RULE_ID}, ${`inv-other-${TEST_SUFFIX}`}, 'sent'::"ReminderLogStatus", NOW())
       `;
 
       // Query main shop - should not see other shop's rows
@@ -231,14 +231,14 @@ describeWithDb("S18 reminder status queries (DB)", () => {
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
           status, "issuedAt", "dueAt", "createdAt", "updatedAt"
         )
-        VALUES ('inv-catchup-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, 'gid://shopify/Order/catchup-${TEST_SUFFIX}',
+        VALUES (${`inv-catchup-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${`gid://shopify/Order/catchup-${TEST_SUFFIX}`},
                 '#CATCHUP-TEST', 10000.00, 10000.00, 'open', 
                 '2026-10-20'::TIMESTAMPTZ, '2026-10-25 00:00:00+05:30'::TIMESTAMPTZ, NOW(), NOW())
       `;
 
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES ('log-catchup-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, 'inv-catchup-${TEST_SUFFIX}', 'delayed'::"ReminderLogStatus", NOW())
+        VALUES (${`log-catchup-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, ${`inv-catchup-${TEST_SUFFIX}`}, 'delayed'::"ReminderLogStatus", NOW())
       `;
 
       const reminders = await getDelayedReminders(sql, TEST_SHOP_ID);
@@ -266,14 +266,14 @@ describeWithDb("S18 reminder status queries (DB)", () => {
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
           status, "issuedAt", "dueAt", "createdAt", "updatedAt"
         )
-        VALUES ('inv-offset7-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, 'gid://shopify/Order/offset7-${TEST_SUFFIX}',
+        VALUES (${`inv-offset7-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${`gid://shopify/Order/offset7-${TEST_SUFFIX}`},
                 '#OFFSET7-TEST', 10000.00, 10000.00, 'open', 
                 '2026-10-15'::TIMESTAMPTZ, '2026-10-20 00:00:00+05:30'::TIMESTAMPTZ, NOW(), NOW())
       `;
 
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES ('log-offset7-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_RULE_ID_7}, 'inv-offset7-${TEST_SUFFIX}', 'delayed'::"ReminderLogStatus", NOW())
+        VALUES (${`log-offset7-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_7}, ${`inv-offset7-${TEST_SUFFIX}`}, 'delayed'::"ReminderLogStatus", NOW())
       `;
 
       const reminders = await getDelayedReminders(sql, TEST_SHOP_ID);
@@ -299,14 +299,14 @@ describeWithDb("S18 reminder status queries (DB)", () => {
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
           status, "issuedAt", "dueAt", "createdAt", "updatedAt"
         )
-        VALUES ('inv-tz-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, 'gid://shopify/Order/tz-${TEST_SUFFIX}',
+        VALUES (${`inv-tz-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${`gid://shopify/Order/tz-${TEST_SUFFIX}`},
                 '#TZ-TEST', 10000.00, 10000.00, 'open', 
                 '2026-10-20'::TIMESTAMPTZ, '2026-10-25 23:00:00+00'::TIMESTAMPTZ, NOW(), NOW())
       `;
 
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES ('log-tz-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, 'inv-tz-${TEST_SUFFIX}', 'delayed'::"ReminderLogStatus", NOW())
+        VALUES (${`log-tz-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, ${`inv-tz-${TEST_SUFFIX}`}, 'delayed'::"ReminderLogStatus", NOW())
       `;
 
       const reminders = await getDelayedReminders(sql, TEST_SHOP_ID);
@@ -331,13 +331,13 @@ describeWithDb("S18 reminder status queries (DB)", () => {
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
           status, "issuedAt", "dueAt", "createdAt", "updatedAt"
         )
-        VALUES ('inv-other-delayed-${TEST_SUFFIX}', ${OTHER_SHOP_ID}, ${OTHER_ACCOUNT_ID}, 'gid://shopify/Order/other-delayed-${TEST_SUFFIX}',
+        VALUES (${`inv-other-delayed-${TEST_SUFFIX}`}, ${OTHER_SHOP_ID}, ${OTHER_ACCOUNT_ID}, ${`gid://shopify/Order/other-delayed-${TEST_SUFFIX}`},
                 '#OTHER-DELAYED', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW(), NOW())
       `;
 
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES (gen_random_uuid()::TEXT, ${OTHER_SHOP_ID}, ${OTHER_RULE_ID}, 'inv-other-delayed-${TEST_SUFFIX}', 'delayed'::"ReminderLogStatus", NOW())
+        VALUES (gen_random_uuid()::TEXT, ${OTHER_SHOP_ID}, ${OTHER_RULE_ID}, ${`inv-other-delayed-${TEST_SUFFIX}`}, 'delayed'::"ReminderLogStatus", NOW())
       `;
 
       // Query main shop - should not see other shop's delayed rows
@@ -356,17 +356,17 @@ describeWithDb("S18 reminder status queries (DB)", () => {
           status, "issuedAt", "dueAt", "createdAt", "updatedAt"
         )
         VALUES 
-          ('inv-order-later-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, 'gid://shopify/Order/order-later-${TEST_SUFFIX}',
+          (${`inv-order-later-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${`gid://shopify/Order/order-later-${TEST_SUFFIX}`},
            '#ORDER-LATER', 10000.00, 10000.00, 'open', NOW(), '2026-10-30 00:00:00+05:30'::TIMESTAMPTZ, NOW(), NOW()),
-          ('inv-order-earlier-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, 'gid://shopify/Order/order-earlier-${TEST_SUFFIX}',
+          (${`inv-order-earlier-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${`gid://shopify/Order/order-earlier-${TEST_SUFFIX}`},
            '#ORDER-EARLIER', 10000.00, 10000.00, 'open', NOW(), '2026-10-20 00:00:00+05:30'::TIMESTAMPTZ, NOW(), NOW())
       `;
 
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
         VALUES 
-          ('log-order-later-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, 'inv-order-later-${TEST_SUFFIX}', 'delayed'::"ReminderLogStatus", NOW()),
-          ('log-order-earlier-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, 'inv-order-earlier-${TEST_SUFFIX}', 'delayed'::"ReminderLogStatus", NOW())
+          (${`log-order-later-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, ${`inv-order-later-${TEST_SUFFIX}`}, 'delayed'::"ReminderLogStatus", NOW()),
+          (${`log-order-earlier-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, ${`inv-order-earlier-${TEST_SUFFIX}`}, 'delayed'::"ReminderLogStatus", NOW())
       `;
 
       const reminders = await getDelayedReminders(sql, TEST_SHOP_ID);
@@ -386,17 +386,17 @@ describeWithDb("S18 reminder status queries (DB)", () => {
           status, "issuedAt", "dueAt", "createdAt", "updatedAt"
         )
         VALUES 
-          ('inv-sent-filter-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, 'gid://shopify/Order/sent-filter-${TEST_SUFFIX}',
+          (${`inv-sent-filter-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${`gid://shopify/Order/sent-filter-${TEST_SUFFIX}`},
            '#SENT-FILTER', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW(), NOW()),
-          ('inv-skipped-filter-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, 'gid://shopify/Order/skipped-filter-${TEST_SUFFIX}',
+          (${`inv-skipped-filter-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${`gid://shopify/Order/skipped-filter-${TEST_SUFFIX}`},
            '#SKIPPED-FILTER', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW(), NOW())
       `;
 
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "sentAt", "firstCappedAt")
         VALUES 
-          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, 'inv-sent-filter-${TEST_SUFFIX}', 'sent'::"ReminderLogStatus", NOW(), NULL),
-          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, 'inv-skipped-filter-${TEST_SUFFIX}', 'skipped_daily_limit'::"ReminderLogStatus", NULL, NOW())
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, ${`inv-sent-filter-${TEST_SUFFIX}`}, 'sent'::"ReminderLogStatus", NOW(), NULL),
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, ${`inv-skipped-filter-${TEST_SUFFIX}`}, 'skipped_daily_limit'::"ReminderLogStatus", NULL, NOW())
       `;
 
       const reminders = await getDelayedReminders(sql, TEST_SHOP_ID);
@@ -448,11 +448,11 @@ describeWithDb("S18 reminder status queries (DB)", () => {
           status, "issuedAt", "dueAt", "createdAt", "updatedAt"
         )
         VALUES 
-          ('inv-today-1-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, 'gid://shopify/Order/today1-${TEST_SUFFIX}',
+          (${`inv-today-1-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${`gid://shopify/Order/today1-${TEST_SUFFIX}`},
            '#TODAY-1', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW(), NOW()),
-          ('inv-today-2-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, 'gid://shopify/Order/today2-${TEST_SUFFIX}',
+          (${`inv-today-2-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${`gid://shopify/Order/today2-${TEST_SUFFIX}`},
            '#TODAY-2', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW(), NOW()),
-          ('inv-yesterday-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, 'gid://shopify/Order/yesterday-${TEST_SUFFIX}',
+          (${`inv-yesterday-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${`gid://shopify/Order/yesterday-${TEST_SUFFIX}`},
            '#YESTERDAY', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW(), NOW())
       `;
 
@@ -460,9 +460,9 @@ describeWithDb("S18 reminder status queries (DB)", () => {
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "sentAt")
         VALUES 
-          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, 'inv-today-1-${TEST_SUFFIX}', 'sent'::"ReminderLogStatus", NOW()),
-          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, 'inv-today-2-${TEST_SUFFIX}', 'sent'::"ReminderLogStatus", NOW()),
-          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_7}, 'inv-yesterday-${TEST_SUFFIX}', 'sent'::"ReminderLogStatus", NOW() - INTERVAL '1 day')
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, ${`inv-today-1-${TEST_SUFFIX}`}, 'sent'::"ReminderLogStatus", NOW()),
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, ${`inv-today-2-${TEST_SUFFIX}`}, 'sent'::"ReminderLogStatus", NOW()),
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_7}, ${`inv-yesterday-${TEST_SUFFIX}`}, 'sent'::"ReminderLogStatus", NOW() - INTERVAL '1 day')
       `;
 
       const count = await getShopSentTodayCount(sql, TEST_SHOP_ID);
@@ -480,20 +480,20 @@ describeWithDb("S18 reminder status queries (DB)", () => {
           status, "issuedAt", "dueAt", "createdAt", "updatedAt"
         )
         VALUES 
-          ('inv-status-sent-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, 'gid://shopify/Order/status-sent-${TEST_SUFFIX}',
+          (${`inv-status-sent-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${`gid://shopify/Order/status-sent-${TEST_SUFFIX}`},
            '#STATUS-SENT', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW(), NOW()),
-          ('inv-status-delayed-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, 'gid://shopify/Order/status-delayed-${TEST_SUFFIX}',
+          (${`inv-status-delayed-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${`gid://shopify/Order/status-delayed-${TEST_SUFFIX}`},
            '#STATUS-DELAYED', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW(), NOW()),
-          ('inv-status-skipped-${TEST_SUFFIX}', ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, 'gid://shopify/Order/status-skipped-${TEST_SUFFIX}',
+          (${`inv-status-skipped-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${`gid://shopify/Order/status-skipped-${TEST_SUFFIX}`},
            '#STATUS-SKIPPED', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW(), NOW())
       `;
 
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "sentAt", "firstCappedAt")
         VALUES 
-          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, 'inv-status-sent-${TEST_SUFFIX}', 'sent'::"ReminderLogStatus", NOW(), NULL),
-          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, 'inv-status-delayed-${TEST_SUFFIX}', 'delayed'::"ReminderLogStatus", NULL, NOW()),
-          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, 'inv-status-skipped-${TEST_SUFFIX}', 'skipped_daily_limit'::"ReminderLogStatus", NULL, NOW())
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, ${`inv-status-sent-${TEST_SUFFIX}`}, 'sent'::"ReminderLogStatus", NOW(), NULL),
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, ${`inv-status-delayed-${TEST_SUFFIX}`}, 'delayed'::"ReminderLogStatus", NULL, NOW()),
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, ${`inv-status-skipped-${TEST_SUFFIX}`}, 'skipped_daily_limit'::"ReminderLogStatus", NULL, NOW())
       `;
 
       const count = await getShopSentTodayCount(sql, TEST_SHOP_ID);
@@ -511,13 +511,13 @@ describeWithDb("S18 reminder status queries (DB)", () => {
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
           status, "issuedAt", "dueAt", "createdAt", "updatedAt"
         )
-        VALUES ('inv-other-sent-${TEST_SUFFIX}', ${OTHER_SHOP_ID}, ${OTHER_ACCOUNT_ID}, 'gid://shopify/Order/other-sent-${TEST_SUFFIX}',
+        VALUES (${`inv-other-sent-${TEST_SUFFIX}`}, ${OTHER_SHOP_ID}, ${OTHER_ACCOUNT_ID}, ${`gid://shopify/Order/other-sent-${TEST_SUFFIX}`},
                 '#OTHER-SENT', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW(), NOW())
       `;
 
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "sentAt")
-        VALUES (gen_random_uuid()::TEXT, ${OTHER_SHOP_ID}, ${OTHER_RULE_ID}, 'inv-other-sent-${TEST_SUFFIX}', 'sent'::"ReminderLogStatus", NOW())
+        VALUES (gen_random_uuid()::TEXT, ${OTHER_SHOP_ID}, ${OTHER_RULE_ID}, ${`inv-other-sent-${TEST_SUFFIX}`}, 'sent'::"ReminderLogStatus", NOW())
       `;
 
       // Query main shop - should not see other shop's sent rows
