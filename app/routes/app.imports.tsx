@@ -86,67 +86,6 @@ interface CreditRow {
 }
 
 /**
- * Parsed credit from client-side bank statement parsing.
- * Contains additional fields (direction, dedupeKey, sourceRow) that are
- * NOT sent to the server.
- * 
- * Note: `rail` is typed as `string` because parseBankStatement returns string.
- * The server-side validation will verify it's a valid rail type.
- */
-export interface ParsedCredit {
-  date: string;
-  amountPaise: number;
-  direction: "CR" | "DR";
-  narration: string;
-  refNo?: string;
-  balancePaise?: number;
-  rail: string;
-  utr?: string;
-  payerName?: string;
-  dedupeKey?: string;
-  sourceRow?: number;
-}
-
-/**
- * Build the import payload from parsed credits.
- * Exported pure function for testing - ensures only normalised credit data is sent.
- * 
- * PRIVACY: This function deliberately excludes:
- * - direction (server should only receive credits, not know about debits)
- * - dedupeKey (client-side only)
- * - sourceRow (client-side only)
- * - any file bytes, base64, File/Blob references
- * 
- * @param bank - The detected bank code
- * @param fileName - The original file name (string only, not File object)
- * @param credits - Array of parsed credit transactions
- * @returns Import payload ready for submission
- */
-export function buildImportPayload(
-  bank: string,
-  fileName: string,
-  credits: ParsedCredit[]
-): { bank: string; fileName: string; credits: Array<Record<string, string | number>> } {
-  return {
-    bank,
-    fileName,
-    credits: credits.map((c) => {
-      const credit: Record<string, string | number> = {
-        date: c.date,
-        amountPaise: c.amountPaise,
-        rail: c.rail,
-        narration: c.narration,
-      };
-      if (c.balancePaise !== undefined) credit.balancePaise = c.balancePaise;
-      if (c.utr) credit.utr = c.utr;
-      if (c.payerName) credit.payerName = c.payerName;
-      if (c.refNo) credit.refNo = c.refNo;
-      return credit;
-    }),
-  };
-}
-
-/**
  * Import request type.
  */
 interface ImportRequest {
