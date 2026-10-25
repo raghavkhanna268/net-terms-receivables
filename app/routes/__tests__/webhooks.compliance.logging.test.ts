@@ -197,6 +197,10 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     // Assert NO raw shop domain appears in any output
     expect(outputStr).not.toContain(".myshopify.com");
     expect(outputStr).not.toContain(TEST_SHOP);
+
+    // Assert webhookId is NOT logged (removed per privacy requirements)
+    expect(outputStr).not.toContain("webhookId");
+    expect(outputStr).not.toContain("wh=");
   });
 
   it("shop/redact skipped reinstall logs shop_redact_skipped_reinstalled with shopHash only, no raw domain", async () => {
@@ -224,8 +228,9 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     expect(outputStr).not.toContain(".myshopify.com");
     expect(outputStr).not.toContain(TEST_SHOP);
 
-    // Assert no other fields are logged (only shopHash)
+    // Assert webhookId is NOT logged (removed per privacy requirements)
     expect(outputStr).not.toContain("webhookId");
+    expect(outputStr).not.toContain("wh=");
     expect(outputStr).not.toContain("refetchNullPurged");
   });
 
@@ -267,5 +272,9 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     // Assert NO raw shop domain appears in any output
     expect(outputStr).not.toContain(".myshopify.com");
     expect(outputStr).not.toContain(TEST_SHOP);
+
+    // Assert webhookId is NOT logged (removed per privacy requirements)
+    expect(outputStr).not.toContain("webhookId");
+    expect(outputStr).not.toContain("wh=");
   });
 });
