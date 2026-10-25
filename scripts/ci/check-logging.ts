@@ -153,14 +153,48 @@ const SENSITIVE_TEMPLATE_LAST_PROP = /(?:^|\.)(shop|shopDomain|domain|myshopifyD
 const DOMAIN_LITERAL_PATTERN = /myshopify\.com/i;
 
 /**
- * Validation regex patterns that are safe (these test strings, not log them).
- * P1: Removed `/\.test\(/` - line-wide skip was too broad.
- * Keep only: escaped-regex pattern and isValidShopDomain helper.
+ * Check if a specific myshopify.com occurrence is protected by a validation pattern.
+ * For NON-TEST paths (script scan, log args, Sentry args), only ONE exemption:
+ * - The escaped-regex form: `\.myshopify\.com` (backslash immediately before the dot)
+ *
+ * NO fake subdomain exemptions in non-test paths - those are test-file only.
+ * NO isValidShopDomain exemption - string literal values don't have that context.
+ *
+ * @param text The full line/text being checked
+ * @param matchIndex The position where `myshopify.com` starts in the text
+ * @returns true if this specific occurrence is protected (exempt from flagging)
  */
-const VALIDATION_PATTERNS = [
-  /isValidShopDomain/,
-  /\\\.myshopify\\\.com/,
-];
+function isMyshopifyComProtected(text: string, matchIndex: number): boolean {
+  if (matchIndex > 0 && text[matchIndex - 1] === "\\") {
+    const lookback = text.slice(Math.max(0, matchIndex - 20), matchIndex);
+    if (!/[a-z0-9][-_a-z0-9]*\\$/i.test(lookback)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Check if a line/text has any unprotected myshopify.com occurrences.
+ * Iterates EVERY /myshopify\.com/gi occurrence, not just <sub>.myshopify.com.
+ * For non-test paths: no FAKE_SUBDOMAINS, no fake prefixes, no UPPER_SNAKE exemptions.
+ *
+ * @param text The line or argument text to check
+ * @returns true if there are unprotected occurrences (should be flagged)
+ */
+function hasUnprotectedMyshopifyCom(text: string): boolean {
+  const allOccurrences = /myshopify\.com/gi;
+  let match;
+
+  while ((match = allOccurrences.exec(text)) !== null) {
+    if (!isMyshopifyComProtected(text, match.index)) {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 const CONSOLE_METHODS = new Set([
   "console.log",
@@ -294,12 +328,13 @@ function analyzeScriptFile(filePath: string): Violation[] {
     // Skip comments
     if (line.trim().startsWith("#") || line.trim().startsWith("//")) continue;
 
-    // Check for myshopify.com domain literal
+    // Check for myshopify.com domain literal (per-match, not line-wide)
     if (DOMAIN_LITERAL_PATTERN.test(line)) {
-      // Skip validation patterns
-      if (!VALIDATION_PATTERNS.some((p) => p.test(line))) {
-        // Skip if it's in a help/usage message context
-        if (!line.includes("e.g.") && !line.includes("example") && !line.includes("placeholder")) {
+      // Skip if it's in a help/usage message context
+      if (!line.includes("e.g.") && !line.includes("example") && !line.includes("placeholder")) {
+        // Per-match check: only exempt escaped-regex and isValidShopDomain(identifier)
+        // NO fake subdomain exemptions in script files
+        if (hasUnprotectedMyshopifyCom(line)) {
           violations.push({
             file: relPath,
             line: lineNum,
@@ -1453,8 +1488,18 @@ function checkTemplateLiteral(
   return violations;
 }
 
+/**
+ * Check if a text is ENTIRELY a validation pattern with no real domains.
+ * For non-test paths: only exempt escaped-regex and isValidShopDomain(identifier).
+ * NO fake subdomain exemptions - those are test-file only.
+ * Returns true only if text contains myshopify.com AND all occurrences are protected.
+ */
 function isValidationPattern(text: string): boolean {
-  return VALIDATION_PATTERNS.some((pattern) => pattern.test(text));
+  if (!DOMAIN_LITERAL_PATTERN.test(text)) {
+    return false;
+  }
+
+  return !hasUnprotectedMyshopifyCom(text);
 }
 
 function truncate(text: string, maxLen: number): string {
