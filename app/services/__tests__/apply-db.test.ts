@@ -33,6 +33,9 @@ let mockEnqueueShouldThrow = false;
 // M7: Custom userErrors to inject for testing error code mapping
 let mockUserErrors: Array<{ field: string[]; message: string }> | null = null;
 
+// Delay in ms before Shopify mock returns (for race condition testing)
+let mockShopifyDelayMs = 0;
+
 vi.mock("../shopify-client.server", async (importOriginal) => {
   const actual = await importOriginal() as Record<string, unknown>;
   return {
@@ -60,6 +63,11 @@ vi.mock("../shopify-client.server", async (importOriginal) => {
       // Execute callback DURING the Shopify call (for race condition testing)
       if (onOrderMarkAsPaidCallback) {
         await onOrderMarkAsPaidCallback();
+      }
+
+      // Apply delay for race condition testing (simulates slow Shopify response)
+      if (mockShopifyDelayMs > 0) {
+        await new Promise(resolve => setTimeout(resolve, mockShopifyDelayMs));
       }
 
       if (mockAlreadyPaid) {
@@ -177,6 +185,7 @@ describeWithDb("S17 apply service DB integration", () => {
     mockAlreadyPaid = false;
     mockEnqueueShouldThrow = false;
     mockUserErrors = null;
+    mockShopifyDelayMs = 0;
     shopifyCallCount = 0;
     verifyOrderIsPaidCallCount = 0;
     orderMarkAsPaidCallCount = 0;
@@ -542,15 +551,88 @@ describeWithDb("S17 apply service DB integration", () => {
       expect(parseFloat(invoice.outstanding)).toBe(3000);
     });
 
-    it("apply vs unmatch race: concurrent calls on same confirmed match", async () => {
+    it("apply vs unmatch race: concurrent calls on same confirmed match (20 iterations)", async () => {
+      const ITERATIONS = 20;
+
+      for (let i = 0; i < ITERATIONS; i++) {
+        const paymentId = await createPayment(1000000n);
+        const invoiceId = await createInvoice(1000000n);
+        const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
+
+        orderMarkAsPaidCallCount = 0;
+
+        const [applyResult, unmatchResult] = await Promise.all([
+          applyMatch(sql, TEST_SHOP_ID, matchId, "test-user"),
+          unmatchMatch(sql, TEST_SHOP_ID, matchId, "test-user"),
+        ]);
+
+        const [finalMatch] = await sql<{ state: string }[]>`
+          SELECT state FROM "Match" WHERE id = ${matchId}
+        `;
+
+        const [finalInvoice] = await sql<{ outstanding: string; status: string }[]>`
+          SELECT outstanding::text, status FROM "Invoice" WHERE id = ${invoiceId}
+        `;
+
+        const appliedAudits = await sql<{ id: string }[]>`
+          SELECT id FROM "AuditEvent"
+          WHERE "shopId" = ${TEST_SHOP_ID}
+            AND type = 'match.applied'
+            AND data->>'matchId' = ${matchId}
+        `;
+
+        const unmatchedAudits = await sql<{ id: string }[]>`
+          SELECT id FROM "AuditEvent"
+          WHERE "shopId" = ${TEST_SHOP_ID}
+            AND type = 'match.unmatched'
+            AND data->>'matchId' = ${matchId}
+        `;
+
+        const applyWon = applyResult.success;
+        const unmatchWon = unmatchResult.success;
+
+        expect(applyWon !== unmatchWon).toBe(true);
+
+        if (applyWon) {
+          expect(applyResult.invoicePaid).toBe(true);
+          expect(finalMatch.state).toBe("pushed");
+          expect(finalInvoice.status).toBe("paid");
+          expect(parseFloat(finalInvoice.outstanding)).toBe(0);
+          expect(appliedAudits.length).toBe(1);
+          expect(unmatchedAudits.length).toBe(0);
+          expect(orderMarkAsPaidCallCount).toBe(1);
+          expect(unmatchResult.error).toMatch(/Cannot unmatch: push is in progress|Cannot unmatch: order already marked as paid/);
+        } else {
+          expect(finalMatch.state).toBe("unmatched");
+          expect(finalInvoice.status).toBe("open");
+          expect(parseFloat(finalInvoice.outstanding)).toBe(10000);
+          expect(appliedAudits.length).toBe(0);
+          expect(unmatchedAudits.length).toBe(1);
+          expect(orderMarkAsPaidCallCount).toBe(0);
+          expect(applyResult.error).toMatch(/Match state is 'unmatched'/);
+        }
+
+        await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${TEST_SHOP_ID}`;
+        await sql`DELETE FROM "Match" WHERE "shopId" = ${TEST_SHOP_ID}`;
+        await sql`DELETE FROM "Payment" WHERE "shopId" = ${TEST_SHOP_ID}`;
+        await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
+      }
+    });
+
+    it("apply vs unmatch race with delay: unmatch refused during 'pushing' state", async () => {
+      mockShopifyDelayMs = 50;
+
       const paymentId = await createPayment(1000000n);
       const invoiceId = await createInvoice(1000000n);
       const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
 
-      const [applyResult, unmatchResult] = await Promise.all([
-        applyMatch(sql, TEST_SHOP_ID, matchId, "test-user"),
-        unmatchMatch(sql, TEST_SHOP_ID, matchId, "test-user"),
-      ]);
+      orderMarkAsPaidCallCount = 0;
+
+      const applyPromise = applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const unmatchPromise = unmatchMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      const [applyResult, unmatchResult] = await Promise.all([applyPromise, unmatchPromise]);
 
       const [finalMatch] = await sql<{ state: string }[]>`
         SELECT state FROM "Match" WHERE id = ${matchId}
@@ -560,21 +642,15 @@ describeWithDb("S17 apply service DB integration", () => {
         SELECT outstanding::text, status FROM "Invoice" WHERE id = ${invoiceId}
       `;
 
-      if (applyResult.success && applyResult.invoicePaid) {
-        expect(finalMatch.state).toBe("pushed");
-        expect(finalInvoice.status).toBe("paid");
-        expect(parseFloat(finalInvoice.outstanding)).toBe(0);
-        expect(unmatchResult.success).toBe(false);
-      } else if (unmatchResult.success) {
-        expect(finalMatch.state).toBe("unmatched");
-        expect(finalInvoice.status).toBe("open");
-        expect(parseFloat(finalInvoice.outstanding)).toBe(10000);
-        expect(applyResult.success).toBe(false);
-      } else if (applyResult.reasonCode === "PUSH_IN_PROGRESS" || unmatchResult.error?.includes("push is in progress")) {
-        expect(["confirmed", "pushing", "pushed"]).toContain(finalMatch.state);
-      } else {
-        expect(applyResult.success || unmatchResult.success).toBe(true);
-      }
+      expect(applyResult.success).toBe(true);
+      expect(applyResult.invoicePaid).toBe(true);
+      expect(finalMatch.state).toBe("pushed");
+      expect(finalInvoice.status).toBe("paid");
+      expect(parseFloat(finalInvoice.outstanding)).toBe(0);
+      expect(orderMarkAsPaidCallCount).toBe(1);
+
+      expect(unmatchResult.success).toBe(false);
+      expect(unmatchResult.error).toMatch(/Cannot unmatch: push is in progress|Cannot unmatch: order already marked as paid/);
 
       const appliedAudits = await sql<{ id: string }[]>`
         SELECT id FROM "AuditEvent"
@@ -590,7 +666,10 @@ describeWithDb("S17 apply service DB integration", () => {
           AND data->>'matchId' = ${matchId}
       `;
 
-      expect(appliedAudits.length + unmatchedAudits.length).toBeLessThanOrEqual(1);
+      expect(appliedAudits.length).toBe(1);
+      expect(unmatchedAudits.length).toBe(0);
+
+      mockShopifyDelayMs = 0;
     });
   });
 

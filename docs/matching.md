@@ -141,12 +141,13 @@ This ensures accurate cap calculations when:
 1. Multiple payments target the same invoice
 2. Some matches are pushed while others are still confirmed
 
-## Gated Account Exclusion
+## Gated Account Handling
 
-When `PLAN_GATING_ENFORCED=true`:
-- Invoices for gated buyer accounts are excluded from matching
-- Gated buyers are excluded from `getBuyersWithAliases`
-- Uses `activeAccountFragment(sql)` consistently
+Gated buyer accounts (`isGated = true` from plan enforcement) are **not excluded** from matching:
+- Matching is read-only discovery; excluding gated buyers would hide valid matches
+- Gating applies only to value-add actions (apply, confirm), not to match suggestions
+- `getBuyersWithAliases` returns all buyers regardless of gating status
+- Gate checks occur at action time (apply/confirm) via `activeAccountFragment`
 
 ## Payer Aliases
 

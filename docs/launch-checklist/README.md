@@ -10,7 +10,7 @@ Step-by-step checklists for launch prerequisites. Complete these before Shopify 
 | [Workers Paid Upgrade](./workers-paid-upgrade.md) | Raghav | Pending |
 | [Request `read_all_orders` Scope](./read-all-orders-request.md) | Raghav | Pending |
 | [Privacy Policy](/privacy) — Fill in `[TBD: ...]` placeholders in [docs/privacy.md](../privacy.md) and verify route is accessible | Raghav | Pending |
-| `PLAN_GATING_ENFORCED` stays `"false"` in every environment until Raghav decides pricing, the Shopify plans are created, and the lead Developer's `activeAccountFragment` fix lands. The go comes from Raghav via Wholesale Terms Builder. Enabling it earlier silently stops holds for gated accounts. | Raghav (decision), then DevOps | Holding |
+| `PLAN_GATING_ENFORCED` stays `"false"` in every environment until Raghav decides pricing and the Shopify plans are created. (`activeAccountFragment` fix landed in #127.) The go comes from Raghav via Wholesale Terms Builder. Enabling it earlier silently stops holds for gated accounts. | Raghav (decision), then DevOps | Holding |
 | `RESEND_API_KEY` + `RESEND_FROM` set as Worker secrets and Resend DPA accepted, before any shop enables reminders | Raghav | Pending |
 
 ## Order of Operations
@@ -20,7 +20,7 @@ Step-by-step checklists for launch prerequisites. Complete these before Shopify 
 3. **`read_all_orders` Request** — Submit in Partner Dashboard. After approval, a separate PR adds the scope.
 4. **Resend (S18 reminders)** — Raghav accepts the Resend DPA and supplies `RESEND_API_KEY` / `RESEND_FROM` via secure channel; DevOps sets them as Worker secrets. Only then may any shop enable reminders.
 
-**Standing gate:** `PLAN_GATING_ENFORCED` remains `"false"` everywhere until Raghav decides pricing, the Shopify plans are created, and the lead Developer's `activeAccountFragment` fix lands. The go comes from Raghav via Wholesale Terms Builder. Enabling it earlier silently stops holds for gated accounts.
+**Standing gate:** `PLAN_GATING_ENFORCED` remains `"false"` everywhere until Raghav decides pricing and the Shopify plans are created. (`activeAccountFragment` fix landed in #127.) The go comes from Raghav via Wholesale Terms Builder. Enabling it earlier silently stops holds for gated accounts.
 
 ## Related Documentation
 

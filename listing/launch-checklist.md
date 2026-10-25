@@ -127,7 +127,7 @@
 ## Feature Gates (must hold until conditions are met)
 
 - [ ] **⚠️ `PLAN_GATING_ENFORCED` stays `"false"` in every environment** (`wrangler.jsonc` `[vars]` and any env sections)
-  - **Until:** Raghav decides pricing, the Shopify plans are created, **and** the lead Developer's `activeAccountFragment` fix lands
+  - **Until:** Raghav decides pricing, the Shopify plans are created ~~**and** the lead Developer's `activeAccountFragment` fix lands~~ (done in #127)
   - **Go:** comes from Raghav via Wholesale Terms Builder
   - **Owner:** Raghav (decision), then DevOps flips it
   - **Why:** enabling it earlier silently stops holds for gated accounts
