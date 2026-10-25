@@ -117,6 +117,7 @@ vi.mock("../reconcile-handlers.server", () => ({
     entityId: "gid://shopify/BulkOperation/123",
   }),
   incrementOrderRefetchNull: vi.fn().mockResolvedValue(undefined),
+  enqueueReconcileStage: vi.fn().mockResolvedValue(true),
   enqueueReconcileOrders: vi.fn().mockResolvedValue(true),
   getManualKeyForBulkOp: vi.fn().mockResolvedValue(undefined),
 }));
@@ -189,6 +190,7 @@ describe("Drain Processor", () => {
 
       // S10b: RECONCILE_* handlers are registered
       expect(getSyncHandler("RECONCILE_COMPANIES")).toBeDefined();
+      expect(getSyncHandler("RECONCILE_CUSTOMERS")).toBeDefined();
       expect(getSyncHandler("RECONCILE_ORDERS")).toBeDefined();
     });
   });
@@ -752,6 +754,11 @@ describe("S10b RECONCILE handlers", () => {
     expect(getSyncHandler("RECONCILE_COMPANIES")).toBeDefined();
   });
 
+  it("RECONCILE_CUSTOMERS handler is registered", async () => {
+    const { getSyncHandler } = await import("../processor.server");
+    expect(getSyncHandler("RECONCILE_CUSTOMERS")).toBeDefined();
+  });
+
   it("RECONCILE_ORDERS handler is registered", async () => {
     const { getSyncHandler } = await import("../processor.server");
     expect(getSyncHandler("RECONCILE_ORDERS")).toBeDefined();
@@ -769,28 +776,28 @@ describe("S10b BULK_OPERATIONS_FINISH handler", () => {
     expect(getBulkHandler("BULK_OPERATIONS_FINISH")).toBeDefined();
   });
 
-  it("chains to orders when chainToOrders flag is set (based on origin/stage, not webhookId)", async () => {
+  it("chains to next stage when nextStage is set (based on origin/stage, not webhookId)", async () => {
     const { processBulkOperation } = await import(
       "~/services/sync/bulk-jsonl-processor.server"
     );
-    const { enqueueReconcileOrders } = await import(
+    const { enqueueReconcileStage } = await import(
       "../reconcile-handlers.server"
     );
 
     const mockProcessBulkOperation = processBulkOperation as ReturnType<
       typeof vi.fn
     >;
-    const mockEnqueueReconcileOrders = enqueueReconcileOrders as ReturnType<
+    const mockEnqueueReconcileStage = enqueueReconcileStage as ReturnType<
       typeof vi.fn
     >;
 
-    // Simulate a completed companies reconcile - chainToOrders=true
+    // Simulate a completed companies reconcile - nextStage='customers'
     mockProcessBulkOperation.mockResolvedValue({
       success: true,
       action: "updated",
       entityId: "gid://shopify/BulkOperation/123",
       status: "complete",
-      chainToOrders: true, // Set based on origin/stage, not webhookId
+      nextStage: "customers", // Set based on origin/stage
     });
 
     const { getBulkHandler } = await import("../processor.server");
@@ -800,7 +807,7 @@ describe("S10b BULK_OPERATIONS_FINISH handler", () => {
       json: vi.fn((v: unknown) => v),
     });
 
-    // Use a non-reconcile webhookId to prove we're using chainToOrders, not webhookId
+    // Use a non-reconcile webhookId to prove we're using nextStage, not webhookId
     const message = {
       topic: "BULK_OPERATIONS_FINISH",
       shop: "test.myshopify.com",
@@ -814,27 +821,28 @@ describe("S10b BULK_OPERATIONS_FINISH handler", () => {
 
     expect(result.success).toBe(true);
     expect(result.status).toBe("complete");
-    // Should chain because chainToOrders=true, not because of webhookId
-    // Third arg is manualKey (undefined for cron path since mock returns undefined)
-    expect(mockEnqueueReconcileOrders).toHaveBeenCalledWith(
+    // Should chain because nextStage='customers', not because of webhookId
+    // Fourth arg is manualKey (undefined for cron path since mock returns undefined)
+    expect(mockEnqueueReconcileStage).toHaveBeenCalledWith(
       mockSql,
       "test.myshopify.com",
+      "customers",
       undefined
     );
   });
 
-  it("does NOT chain to orders when chainToOrders is false (even if bulkType is companies)", async () => {
+  it("does NOT chain when nextStage is undefined (even if bulkType is companies)", async () => {
     const { processBulkOperation } = await import(
       "~/services/sync/bulk-jsonl-processor.server"
     );
-    const { enqueueReconcileOrders } = await import(
+    const { enqueueReconcileStage } = await import(
       "../reconcile-handlers.server"
     );
 
     const mockProcessBulkOperation = processBulkOperation as ReturnType<
       typeof vi.fn
     >;
-    const mockEnqueueReconcileOrders = enqueueReconcileOrders as ReturnType<
+    const mockEnqueueReconcileStage = enqueueReconcileStage as ReturnType<
       typeof vi.fn
     >;
 
@@ -844,7 +852,7 @@ describe("S10b BULK_OPERATIONS_FINISH handler", () => {
       action: "updated",
       entityId: "gid://shopify/BulkOperation/123",
       status: "complete",
-      chainToOrders: false, // Not a reconcile operation
+      nextStage: undefined, // Not a reconcile operation - no next stage
     });
 
     const { getBulkHandler } = await import("../processor.server");
@@ -866,8 +874,8 @@ describe("S10b BULK_OPERATIONS_FINISH handler", () => {
     const result = await handler!(mockSql as never, message);
 
     expect(result.success).toBe(true);
-    // Should NOT chain because chainToOrders=false
-    expect(mockEnqueueReconcileOrders).not.toHaveBeenCalled();
+    // Should NOT chain because nextStage is undefined
+    expect(mockEnqueueReconcileStage).not.toHaveBeenCalled();
   });
 });
 
@@ -978,14 +986,14 @@ describe("S10b MUST-FIX #1: Error classification", () => {
     const { processBulkOperation } = await import(
       "~/services/sync/bulk-jsonl-processor.server"
     );
-    const { enqueueReconcileOrders } = await import(
+    const { enqueueReconcileStage } = await import(
       "../reconcile-handlers.server"
     );
 
     const mockProcessBulkOperation = processBulkOperation as ReturnType<
       typeof vi.fn
     >;
-    const mockEnqueueReconcileOrders = enqueueReconcileOrders as ReturnType<
+    const mockEnqueueReconcileStage = enqueueReconcileStage as ReturnType<
       typeof vi.fn
     >;
 
@@ -1004,7 +1012,7 @@ describe("S10b MUST-FIX #1: Error classification", () => {
       action: "updated",
       entityId: "gid://shopify/BulkOperation/123",
       status: "complete",
-      chainToOrders: true,
+      nextStage: "customers",
     });
 
     const { getBulkHandler } = await import("../processor.server");
@@ -1031,7 +1039,7 @@ describe("S10b MUST-FIX #1: Error classification", () => {
     // Second call - success
     const result2 = await handler!(mockSql as never, message);
     expect(result2.success).toBe(true);
-    expect(mockEnqueueReconcileOrders).toHaveBeenCalled();
+    expect(mockEnqueueReconcileStage).toHaveBeenCalled();
   });
 
   it("5 retryable failures result in permanent error for DLQ", async () => {
@@ -1229,7 +1237,7 @@ describe("Handler registration completeness", () => {
     );
 
     // Internal reconcile topics (generated by cron, not webhook)
-    const reconcileTopics = ["RECONCILE_COMPANIES", "RECONCILE_ORDERS"];
+    const reconcileTopics = ["RECONCILE_COMPANIES", "RECONCILE_CUSTOMERS", "RECONCILE_ORDERS"];
 
     // Check sync handlers
     const missingHandlers: string[] = [];

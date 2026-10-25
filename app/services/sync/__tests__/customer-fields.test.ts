@@ -492,3 +492,59 @@ describe("getBulkCustomersQuery", () => {
     expect(query).toContain("userErrors {");
   });
 });
+
+describe("getBulkCustomersQuery schema validation", () => {
+  it("validates bulk customers query against Admin API schema", async () => {
+    const fs = await import("fs");
+    const path = await import("path");
+    const { buildClientSchema, parse, validate } = await import("graphql");
+
+    const SCHEMA_PATH = path.join(__dirname, "../../../../test/fixtures/admin-2026-10.schema.json");
+    const schemaJson = JSON.parse(fs.readFileSync(SCHEMA_PATH, "utf-8"));
+    const schema = buildClientSchema(schemaJson.data);
+
+    const query = getBulkCustomersQuery([{ tag: "net-terms" }], { CUSTOMER_PII_FIELDS: "1" });
+    expect(query).not.toBeNull();
+
+    const parsed = parse(query!);
+    const errors = validate(schema, parsed);
+
+    expect(errors).toHaveLength(0);
+  });
+
+  it("validates bulk customers query without PII fields against Admin API schema", async () => {
+    const fs = await import("fs");
+    const path = await import("path");
+    const { buildClientSchema, parse, validate } = await import("graphql");
+
+    const SCHEMA_PATH = path.join(__dirname, "../../../../test/fixtures/admin-2026-10.schema.json");
+    const schemaJson = JSON.parse(fs.readFileSync(SCHEMA_PATH, "utf-8"));
+    const schema = buildClientSchema(schemaJson.data);
+
+    const query = getBulkCustomersQuery([{ tag: "wholesale" }], {});
+    expect(query).not.toBeNull();
+
+    const parsed = parse(query!);
+    const errors = validate(schema, parsed);
+
+    expect(errors).toHaveLength(0);
+  });
+
+  it("validates bulk customers query with escaped tag values against Admin API schema", async () => {
+    const fs = await import("fs");
+    const path = await import("path");
+    const { buildClientSchema, parse, validate } = await import("graphql");
+
+    const SCHEMA_PATH = path.join(__dirname, "../../../../test/fixtures/admin-2026-10.schema.json");
+    const schemaJson = JSON.parse(fs.readFileSync(SCHEMA_PATH, "utf-8"));
+    const schema = buildClientSchema(schemaJson.data);
+
+    const query = getBulkCustomersQuery([{ tag: "buyer's-tag" }, { tag: "gold tier" }], { CUSTOMER_PII_FIELDS: "1" });
+    expect(query).not.toBeNull();
+
+    const parsed = parse(query!);
+    const errors = validate(schema, parsed);
+
+    expect(errors).toHaveLength(0);
+  });
+});
