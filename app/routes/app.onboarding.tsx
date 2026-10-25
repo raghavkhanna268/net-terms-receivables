@@ -745,9 +745,6 @@ function OnboardingChecklist({
                 {step.actionUrl && step.status !== "coming_soon" && (
                   <s-link href={step.actionUrl}>{step.actionLabel}</s-link>
                 )}
-                {step.id === "buyer-setup" && step.status !== "complete" && (
-                  <s-link href="/app/tag-rules">Create tag rule</s-link>
-                )}
               </s-table-cell>
             </s-table-row>
           ))}
@@ -949,6 +946,10 @@ export default function OnboardingPage() {
 
 export function ErrorBoundary() {
   const error = useRouteError();
+
+  if (isRouteErrorResponse(error) && error.status !== 404) {
+    return boundary.error(error);
+  }
 
   let heading = "Something went wrong";
   let message = "An unexpected error occurred while loading the setup guide.";
