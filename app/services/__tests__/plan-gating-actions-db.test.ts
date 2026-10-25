@@ -445,38 +445,19 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
   });
 
   describe("4. Bulk import - checkImportLimit with real DB", () => {
-    it("blocks import when at limit with gating ON (free plan)", async () => {
+    // T1 pricing: All plans have unlimited imports (-1), including 'none' (formerly 'free')
+    it("allows unlimited imports for all plans with gating ON (T1 pricing)", async () => {
       vi.stubEnv("PLAN_GATING_ENFORCED", "1");
-
-      // Create one import this month (free plan limit is 1)
-      const importId = `import-limit-test-${TEST_SUFFIX}`;
-      await sql`
-        INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
-        VALUES (${importId}, ${TEST_SHOP_ID}, 'hdfc', 'test.xlsx', 10, NOW())
-      `;
 
       const { checkImportLimit } = await import("../gating.server");
       const result = await checkImportLimit(sql, TEST_SHOP_ID);
 
-      expect(result.allowed).toBe(false);
-      expect(result.currentUsage).toBe(1);
-      expect(result.limit).toBe(1);
-      expect(result.reason).toContain("Import limit reached");
-    });
-
-    it("allows import when under limit with gating ON (free plan)", async () => {
-      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
-
-      // No imports this month
-      const { checkImportLimit } = await import("../gating.server");
-      const result = await checkImportLimit(sql, TEST_SHOP_ID);
-
+      // T1: All plans have unlimited imports, so always allowed
       expect(result.allowed).toBe(true);
-      expect(result.currentUsage).toBe(0);
-      expect(result.limit).toBe(1);
+      expect(result.limit).toBe(-1); // Unlimited
     });
 
-    it("allows import when gating OFF regardless of limit", async () => {
+    it("allows import when gating OFF regardless of usage", async () => {
       vi.stubEnv("PLAN_GATING_ENFORCED", "0");
 
       // Create one import this month
@@ -493,7 +474,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
       expect(result.reason).toContain("Gating not enforced");
     });
 
-    it("allows unlimited imports for starter+ plans with gating ON", async () => {
+    it("allows unlimited imports for starter plan with gating ON", async () => {
       vi.stubEnv("PLAN_GATING_ENFORCED", "1");
 
       // Upgrade shop to starter
@@ -506,8 +487,8 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
         expect(result.allowed).toBe(true);
         expect(result.limit).toBe(-1); // Unlimited
       } finally {
-        // Restore to free plan
-        await sql`UPDATE "Shop" SET plan_key = 'free' WHERE id = ${TEST_SHOP_ID}`;
+        // Restore to none plan (legacy 'free' maps to 'none')
+        await sql`UPDATE "Shop" SET plan_key = 'none' WHERE id = ${TEST_SHOP_ID}`;
       }
     });
   });
