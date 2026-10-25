@@ -1149,7 +1149,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   describe("auth error logging", () => {
     it("logs reminders_catchup_auth_error on 401 response", async () => {
       const { sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_invalid", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+      const validEnv = { RESEND_API_KEY: "re_test_invalid", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "catchup-buyer@test-reminders.example" };
 
       const invoiceId = `inv-auth-error-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/auth-error-${TEST_SUFFIX}`;
@@ -1360,6 +1360,142 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
       } finally {
         luxonSpy.mockRestore();
         (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = originalEnv;
+      }
+    });
+  });
+
+  describe("recipient allowlist enforcement on catch-up", () => {
+    it("skips with success=true when recipient not in allowlist, keeps delayed row, no cap consumed", async () => {
+      const { sendCatchupReminder, getGlobalSendCounts } = await import("../reminders.server");
+      const envWithAllowlist = {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@test-reminders.example",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
+        SHOPIFY_APP_URL: "https://app.example.com",
+        RESEND_TEST_RECIPIENTS: "other-buyer@test-reminders.example",
+      };
+
+      const invoiceId = `inv-allowlist-skip-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/allowlist-skip-${TEST_SUFFIX}`;
+      const logId = `log-allowlist-skip-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+          '#ALLOWLIST-SKIP', 10000.00, 10000.00, 'open',
+          NOW() - INTERVAL '5 days', NOW() - INTERVAL '1 day', NOW(), NOW()
+        )
+      `;
+
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
+        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '1 day')
+      `;
+
+      const luxon = await import("luxon");
+      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: testTimezone });
+      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+
+      const countsBefore = await getGlobalSendCounts(sql);
+
+      try {
+        const result = await sendCatchupReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID_1,
+          logId,
+          0,
+          testTimezone,
+          envWithAllowlist
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("skipped");
+        expect(result.skipReason).toContain("allowlist");
+        expect(mockFetch).not.toHaveBeenCalled();
+
+        const [log] = await sql<{ status: string }[]>`
+          SELECT status FROM "ReminderLog" WHERE id = ${logId}
+        `;
+        expect(log.status).toBe("delayed");
+
+        const countsAfter = await getGlobalSendCounts(sql);
+        expect(countsAfter.daily).toBe(countsBefore.daily);
+        expect(countsAfter.monthly).toBe(countsBefore.monthly);
+      } finally {
+        luxonSpy.mockRestore();
+      }
+    });
+
+    it("skips with success=true when allowlist is empty, keeps delayed row, no cap consumed", async () => {
+      const { sendCatchupReminder, getGlobalSendCounts } = await import("../reminders.server");
+      const envEmptyAllowlist = {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@test-reminders.example",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
+        SHOPIFY_APP_URL: "https://app.example.com",
+        RESEND_TEST_RECIPIENTS: "",
+      };
+
+      const invoiceId = `inv-empty-allowlist-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/empty-allowlist-${TEST_SUFFIX}`;
+      const logId = `log-empty-allowlist-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+          '#EMPTY-ALLOWLIST', 10000.00, 10000.00, 'open',
+          NOW() - INTERVAL '5 days', NOW() - INTERVAL '1 day', NOW(), NOW()
+        )
+      `;
+
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
+        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '1 day')
+      `;
+
+      const luxon = await import("luxon");
+      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: testTimezone });
+      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+
+      const countsBefore = await getGlobalSendCounts(sql);
+
+      try {
+        const result = await sendCatchupReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID_1,
+          logId,
+          0,
+          testTimezone,
+          envEmptyAllowlist
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("skipped");
+        expect(result.skipReason).toContain("allowlist");
+        expect(mockFetch).not.toHaveBeenCalled();
+
+        const [log] = await sql<{ status: string }[]>`
+          SELECT status FROM "ReminderLog" WHERE id = ${logId}
+        `;
+        expect(log.status).toBe("delayed");
+
+        const countsAfter = await getGlobalSendCounts(sql);
+        expect(countsAfter.daily).toBe(countsBefore.daily);
+        expect(countsAfter.monthly).toBe(countsBefore.monthly);
+      } finally {
+        luxonSpy.mockRestore();
       }
     });
   });
