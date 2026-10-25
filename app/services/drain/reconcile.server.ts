@@ -19,7 +19,9 @@
  */
 
 import type { Sql } from "~/lib/db-light.server";
+import { safeLog, toErrorCode } from "~/lib/log.server";
 import { S6_QUEUES } from "~/lib/pgmq.server";
+import { recoverStaleBulkOperations } from "./bulk-op-recovery.server";
 
 /**
  * Reconcile message for triggering bulk exports.
@@ -80,6 +82,26 @@ export function makeReconcileWebhookId(
  * @returns Number of messages enqueued
  */
 export async function enqueueReconcileForAllShops(sql: Sql): Promise<number> {
+  // Recover any stale bulk operations before starting new reconciles.
+  // This ensures missed finish webhooks don't leave shops stuck in in_progress
+  // state indefinitely. Recovery is idempotent and safe to run repeatedly.
+  try {
+    const recoveryResult = await recoverStaleBulkOperations(sql);
+    if (recoveryResult.foundCount > 0) {
+      safeLog("info", "reconcile_recovery_completed", {
+        foundCount: recoveryResult.foundCount,
+        enqueuedCount: recoveryResult.enqueuedCount,
+        markedFailedCount: recoveryResult.markedFailedCount,
+        skippedCount: recoveryResult.skippedCount,
+        errorCount: recoveryResult.errorCount,
+      });
+    }
+  } catch (err) {
+    safeLog("error", "reconcile_recovery_error", {
+      err: toErrorCode(err),
+    });
+  }
+
   // #292: Get all installed INR shops only (exclude uninstalled and non-INR)
   const shops = await sql<{ domain: string }[]>`
     SELECT domain FROM "Shop" WHERE "uninstalledAt" IS NULL AND currency = 'INR'

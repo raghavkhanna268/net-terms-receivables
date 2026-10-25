@@ -94,8 +94,8 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     await sql`
       INSERT INTO s8_tagged_customers (shop_id, customer_id, email, display_name, updated_at)
       VALUES 
-        (${TEST_SHOP_ID}, ${TEST_CUSTOMER_ID}, 'gated-buyer@test.com', 'Gated Buyer', NOW()),
-        (${TEST_SHOP_ID}, ${TEST_NONGATED_CUSTOMER_ID}, 'nongated-buyer@test.com', 'Non-Gated Buyer', NOW())
+        (${TEST_SHOP_ID}, ${TEST_CUSTOMER_ID}, 'gated-buyer@test-example.com', 'Gated Buyer', NOW()),
+        (${TEST_SHOP_ID}, ${TEST_NONGATED_CUSTOMER_ID}, 'nongated-buyer@test-example.com', 'Non-Gated Buyer', NOW())
       ON CONFLICT (shop_id, customer_id) DO NOTHING
     `;
 
@@ -208,7 +208,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
   });
 
   describe("2. sendPaymentReminder - real DB with gating", () => {
-    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "gated-buyer@test-example.com,nongated-buyer@test-example.com" };
 
     it("skips gated account with gating ON - NO ReminderLog, NO cap consumed", async () => {
       vi.stubEnv("PLAN_GATING_ENFORCED", "1");

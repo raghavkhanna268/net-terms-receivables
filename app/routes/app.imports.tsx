@@ -27,6 +27,7 @@ import { generateDedupeKey, isValidUtrForRail } from "~/lib/banks/dedupe";
 import type { PaymentRail } from "~/lib/banks/types";
 import { checkImportLimit, enforceImportLimit, UpgradeRequiredError } from "~/services/gating.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
+import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 
 /**
  * Maximum rows per import request.
@@ -61,8 +62,8 @@ export function computeDateBounds(now: Date = new Date()): { minDateIso: string;
 /**
  * Valid payment rails for Indian bank transfers.
  */
-const VALID_RAILS = new Set(["NEFT", "RTGS", "IMPS", "UPI", "ACH", "CHEQUE", "OTHER"]);
-type ValidRail = "NEFT" | "RTGS" | "IMPS" | "UPI" | "ACH" | "CHEQUE" | "OTHER";
+const VALID_RAILS = new Set(["NEFT", "RTGS", "IMPS", "UPI", "ACH", "CMS", "CHEQUE", "OTHER"]);
+type ValidRail = "NEFT" | "RTGS" | "IMPS" | "UPI" | "ACH" | "CMS" | "CHEQUE" | "OTHER";
 
 /**
  * Valid bank types.
@@ -243,7 +244,7 @@ export function validateImportRequest(body: unknown): { valid: ImportRequest | n
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { shopify } = context;
-  const { session } = await shopify.authenticate.admin(request);
+  const { session, sessionToken } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
@@ -262,6 +263,13 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   // Get import usage for the current month (IST calendar month)
   const importCheck = await checkImportLimit(sql, shop.id);
+
+  recordAccess(sql, {
+    shopId: shop.id,
+    actor: getActorFromSessionToken(sessionToken, session),
+    action: "imports",
+    recordType: "BankImport",
+  });
 
   return {
     shopDomain,
@@ -1206,7 +1214,7 @@ export default function ImportsPage() {
         </s-paragraph>
         <s-unordered-list>
           <s-list-item>Transaction date and amount</s-list-item>
-          <s-list-item>Payment rail (NEFT/RTGS/IMPS/UPI)</s-list-item>
+          <s-list-item>Payment rail (NEFT/RTGS/IMPS/UPI/CMS)</s-list-item>
           <s-list-item>UTR or reference number</s-list-item>
           <s-list-item>Remitter name and narration (for matching)</s-list-item>
         </s-unordered-list>

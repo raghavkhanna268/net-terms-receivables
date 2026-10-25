@@ -16,6 +16,23 @@ import { createElement } from "react";
  * 7. S23-02: safeLog with no PII
  */
 
+/**
+ * Helper to extract loader data from data() result.
+ * Handles both data() wrapper and plain objects.
+ */
+function extractLoaderData<T>(result: unknown): T {
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    "type" in result &&
+    (result as { type: string }).type === "DataWithResponseInit" &&
+    "data" in result
+  ) {
+    return (result as { data: T }).data;
+  }
+  return result as T;
+}
+
 const mockSql = Object.assign(vi.fn(), {
   unsafe: vi.fn((s) => s),
   json: vi.fn((obj) => JSON.stringify(obj)),
@@ -37,6 +54,7 @@ function wrapWithCurrencyCheck(
 
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
+  getRequestWaitUntil: vi.fn(() => undefined),
 }));
 
 const mockEnsureValidation = vi.fn();
@@ -1783,7 +1801,7 @@ describe("app._index redirect", () => {
 
     const { loader } = await import("../app._index");
 
-    const result = await loader({
+    const response = await loader({
       request: new Request("https://example.com/app?skipOnboarding=true"),
       context: {
         shopify: {
@@ -1800,6 +1818,7 @@ describe("app._index redirect", () => {
       params: {},
     } as unknown as LoaderFunctionArgs);
 
+    const result = extractLoaderData<{ shopDomain: string }>(response);
     expect(result.shopDomain).toBe(TEST_SHOP);
   });
 
@@ -1871,7 +1890,7 @@ describe("app._index redirect", () => {
 
     const { loader } = await import("../app._index");
 
-    const result = await loader({
+    const response = await loader({
       request: new Request("https://example.com/app"),
       context: {
         shopify: {
@@ -1888,6 +1907,7 @@ describe("app._index redirect", () => {
       params: {},
     } as unknown as LoaderFunctionArgs);
 
+    const result = extractLoaderData<{ shopDomain: string }>(response);
     expect(result.shopDomain).toBe(TEST_SHOP);
   });
 
@@ -1913,7 +1933,7 @@ describe("app._index redirect", () => {
 
     const { loader } = await import("../app._index");
 
-    const result = await loader({
+    const response = await loader({
       request: new Request("https://example.com/app"),
       context: {
         shopify: {
@@ -1930,6 +1950,7 @@ describe("app._index redirect", () => {
       params: {},
     } as unknown as LoaderFunctionArgs);
 
+    const result = extractLoaderData<{ shopDomain: string }>(response);
     expect(result.shopDomain).toBe(TEST_SHOP);
   });
 });

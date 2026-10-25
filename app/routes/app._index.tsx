@@ -1,10 +1,10 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useLoaderData } from "react-router";
+import { useLoaderData, data } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { resolvePlan, type ResolvedPlan } from "~/services/plan.server";
 import { getUsageStats, isGatingEnforced } from "~/services/gating.server";
-import type { PlanKey } from "~/lib/entitlements";
+import { resolvePlanKey, type PlanKey } from "~/lib/entitlements";
 import { PlanBanner, PLAN_DISPLAY_NAMES } from "~/components/UpgradePrompt";
 import {
   getShopAgingTotals,
@@ -29,6 +29,9 @@ import {
   validateCurrencyCode,
 } from "~/lib/shop-currency.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
+import { ServerTiming, mergeServerTimingHeaders, readColdOnce } from "~/lib/server-timing.server";
+import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
+import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 
 const PAGE_SIZE = 20;
 
@@ -340,8 +343,18 @@ async function checkAndRecoverCurrency(
 }
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
+  // Read cold once - layout and index get same value with same context object
+  const cold = readColdOnce(context);
+  const timing = new ServerTiming(cold);
+  timing.startPhase("loader_total");
+
   const { shopify } = context;
-  const { session, redirect: shopifyRedirect, admin } = await shopify.authenticate.admin(request);
+
+  // Time auth_index phase
+  timing.startPhase("auth_index");
+  const { session, sessionToken, redirect: shopifyRedirect, admin } = await shopify.authenticate.admin(request);
+  timing.endPhase("auth_index");
+
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
@@ -353,17 +366,23 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const skipOnboarding = url.searchParams.get("skipOnboarding") === "true";
   const onlyOverLimit = url.searchParams.get("overlimit") === "true";
 
+  // Time shop_lookup phase
+  timing.startPhase("shop_lookup");
   const [shop] = await sql<{ id: string; currency: string; timezone: string }[]>`
     SELECT id, currency, timezone FROM "Shop" WHERE domain = ${shopDomain}
   `;
+  timing.endPhase("shop_lookup");
 
   // #292: Re-read currency for non-INR shops to enable recovery when shop changes to INR
   const shopCurrency = shop
     ? await checkAndRecoverCurrency(sql, shopDomain, shop.currency, admin)
-    : "INR";
+    : NO_CURRENCY_SENTINEL;
 
+  // Time onboarding_checks phase
   if (shop && !skipOnboarding) {
+    timing.startPhase("onboarding_checks");
     const shouldRedirect = await checkOnboardingRedirect(sql, shop.id);
+    timing.endPhase("onboarding_checks");
     if (shouldRedirect) {
       throw shopifyRedirect("/app/onboarding");
     }
@@ -396,23 +415,19 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         sortOrder,
       };
 
-      // Choose ledger function BEFORE Promise.all - never run both
-      const ledgerFn = onlyOverLimit
-        ? getOverLimitBuyerLedger(sql, shop.id, asOf, ledgerOptions)
-        : getBuyerLedger(sql, shop.id, asOf, ledgerOptions);
-
-      // When filtering over-limit, reuse buyerLedger.totalCount as overLimitCount
-      // Otherwise, run getOverLimitCount separately
-      const overLimitCountFn = onlyOverLimit
-        ? Promise.resolve(null) // will use buyerLedger.totalCount
-        : getOverLimitCount(sql, shop.id);
-
+      // Run all main queries in parallel with timing
       const [planResult, usageResult, agingResult, ledgerResult, countResult] = await Promise.all([
-        resolvePlan(sql, shopDomain),
+        timing.time("plan_resolve", () => resolvePlan(sql, shopDomain)),
         getUsageStats(sql, shop.id),
         getShopAgingTotals(sql, shop.id, asOf),
-        ledgerFn,
-        overLimitCountFn,
+        timing.time("ledger_rows", () =>
+          onlyOverLimit
+            ? getOverLimitBuyerLedger(sql, shop.id, asOf, ledgerOptions)
+            : getBuyerLedger(sql, shop.id, asOf, ledgerOptions)
+        ),
+        onlyOverLimit
+          ? Promise.resolve(null)
+          : timing.time("ledger_count", () => getOverLimitCount(sql, shop.id)),
       ]);
 
       planData = planResult;
@@ -463,7 +478,29 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   // Uses shopCurrency which may have been retried if it was 'XXX'
   const currencySupported = isShopCurrencySupported(shopCurrency);
 
-  return {
+  if (shop && !error) {
+    const accessParams: Parameters<typeof recordAccess>[1] = {
+      shopId: shop.id,
+      actor: getActorFromSessionToken(sessionToken, session),
+      action: "dashboard",
+      recordType: "BuyerAccount",
+      count: buyerLedger?.totalCount ?? 0,
+    };
+    if (selectedBuyerId) {
+      accessParams.recordId = selectedBuyerId;
+    }
+    recordAccess(sql, accessParams);
+  }
+
+  // End loader_total timing and log all phases
+  timing.endPhase("loader_total");
+
+  // Log timing: one line per phase with { route, stage, durationMs }
+  timing.logAllPhases();
+
+  const serverTiming = timing.toHeaderValue();
+
+  const responseData = {
     shopName: storeHandle,
     shopDomain,
     storeHandle,
@@ -471,8 +508,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     currencySupported,
     plan: planData
       ? {
-          key: planData.plan.key,
-          name: planData.subscriptionName ?? planData.plan.key,
+          key: resolvePlanKey(planData.plan.key),
+          name: PLAN_DISPLAY_NAMES[resolvePlanKey(planData.plan.key) as PlanKey],
           isTest: planData.isTest,
         }
       : null,
@@ -480,7 +517,14 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       companies: { current: 0, limit: 0 },
       importsThisMonth: { current: 0, limit: -1 },
     },
-    appHandle: process.env.APP_HANDLE ?? "net-terms-receivables",
+    upgradeUrl: (() => {
+      const handle = getAppHandle();
+      if (handle === null) {
+        safeLog("warn", "plan_url_app_handle_missing", {});
+        return null;
+      }
+      return buildPlanSelectionUrl(shopDomain, handle);
+    })(),
     gatingEnforced,
     agingTotals,
     buyerLedger,
@@ -497,6 +541,13 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     overLimitCount,
     error,
   };
+
+  const headers: HeadersInit = {};
+  if (serverTiming) {
+    headers["Server-Timing"] = serverTiming;
+  }
+
+  return data(responseData, { headers });
 };
 
 const BUCKET_LABELS: Record<AgingBucketKey, string> = {
@@ -574,7 +625,11 @@ function AgingBucketSummary({
   );
 }
 
-function BuyerLedgerTable({
+/**
+ * BuyerLedgerTable: Renders the buyer accounts table.
+ * Exported for render testing.
+ */
+export function BuyerLedgerTable({
   rows,
   sortBy,
   sortOrder,
@@ -584,6 +639,7 @@ function BuyerLedgerTable({
   onlyOverLimit,
   onNextPage,
   onPreviousPage,
+  gatingEnforced,
 }: {
   rows: BuyerLedgerRow[];
   sortBy: string;
@@ -594,6 +650,7 @@ function BuyerLedgerTable({
   onlyOverLimit: boolean;
   onNextPage: string;
   onPreviousPage: string;
+  gatingEnforced: boolean;
 }) {
   const totalPages = Math.ceil(totalCount / pageSize);
   const fp = onlyOverLimit ? "&overlimit=true" : "";
@@ -649,7 +706,7 @@ function BuyerLedgerTable({
                   <s-link href={`?buyer=${row.buyer_account_id}&sortBy=${sortBy}&sortOrder=${sortOrder}&page=${page}${fp}`}>
                     {row.buyer_name}
                   </s-link>
-                  {row.is_gated && <s-badge tone="warning">over plan limit</s-badge>}
+                  {gatingEnforced && row.is_gated && <s-badge tone="warning">over plan limit</s-badge>}
                 </s-table-cell>
                 <s-table-cell>
                   {creditLimit !== null
@@ -781,10 +838,9 @@ function BuyerInvoiceList({
 
 export default function Index() {
   const {
-    storeHandle,
     plan,
     usage,
-    appHandle,
+    upgradeUrl,
     gatingEnforced,
     agingTotals,
     buyerLedger,
@@ -801,8 +857,6 @@ export default function Index() {
   const planKey = (plan?.key ?? "none") as PlanKey;
   const planName = plan?.name ?? PLAN_DISPLAY_NAMES.none;
   const isTest = plan?.isTest ?? false;
-
-  const upgradeUrl = `https://admin.shopify.com/store/${storeHandle}/charges/${appHandle}/pricing_plans`;
 
   const companiesUsed = usage.companies.current;
   const companiesLimit = usage.companies.limit;
@@ -915,7 +969,7 @@ export default function Index() {
                 <s-paragraph>
                   <s-text type="strong">Show: </s-text>
                   {!onlyOverLimit ? "All" : <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}`}>All</s-link>}
-                  {overLimitCount > 0 && (
+                  {gatingEnforced && overLimitCount > 0 && (
                     <>
                       {" | "}
                       {onlyOverLimit ? "Over limit only" : <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}&overlimit=true`}>Over limit only</s-link>}
@@ -933,6 +987,7 @@ export default function Index() {
                     onlyOverLimit={onlyOverLimit}
                     onNextPage={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page + 1}${onlyOverLimit ? "&overlimit=true" : ""}`}
                     onPreviousPage={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page - 1}${onlyOverLimit ? "&overlimit=true" : ""}`}
+                    gatingEnforced={gatingEnforced}
                   />
                 ) : (
                   <s-empty-state heading="No buyer accounts">
@@ -958,7 +1013,7 @@ export default function Index() {
           </s-list-item>
           <s-list-item>Send payment reminders</s-list-item>
           <s-list-item>
-            Match Indian bank transfer payments (NEFT/RTGS/IMPS/UPI) to orders
+            Match Indian bank transfer payments (NEFT/RTGS/IMPS/UPI/CMS) to orders
           </s-list-item>
         </s-unordered-list>
       </s-section>
@@ -994,5 +1049,16 @@ export default function Index() {
 }
 
 export const headers: HeadersFunction = (headersArgs) => {
-  return boundary.headers(headersArgs);
+  const boundaryHeaders = boundary.headers(headersArgs);
+  const resultHeaders = new Headers(boundaryHeaders);
+
+  // Merge Server-Timing from layout (parent) and index (this loader)
+  const parentTiming = headersArgs.parentHeaders?.get("Server-Timing");
+  const loaderTiming = headersArgs.loaderHeaders?.get("Server-Timing");
+  const mergedTiming = mergeServerTimingHeaders(parentTiming, loaderTiming);
+  if (mergedTiming) {
+    resultHeaders.set("Server-Timing", mergedTiming);
+  }
+
+  return resultHeaders;
 };

@@ -35,6 +35,7 @@ import { ensureMetafieldDefinitions, getMetafieldDefinitionSpecs } from "~/lib/m
 import { METAFIELD } from "~/lib/metafields-contract";
 import {
   getInitialSyncState,
+  getInitialSyncStateWithRecovery,
   enqueueInitialSync,
   canStartSync as canStartSyncServer,
   type InitialSyncStatus,
@@ -368,7 +369,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     fetchValidationInfo(admin),
     fetchPaymentCustomizationInfo(admin),
     checkMetafieldDefinitionsStatus(admin),
-    getInitialSyncState(sql, shopDomain),
+    getInitialSyncStateWithRecovery(sql, shopDomain),
   ]);
 
   const validation = validationResult.info;

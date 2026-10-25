@@ -43,6 +43,11 @@ import {
   buildUnsubscribeHeaders,
   canGenerateUnsubscribeHeaders,
 } from "./reminder-headers.server";
+import {
+  parseRecipientAllowlist,
+  isRecipientAllowed,
+} from "./recipient-allowlist.server";
+import { sendViaResend } from "./resend-client.server";
 
 /**
  * Check if plan gating enforcement is enabled.
@@ -511,9 +516,9 @@ export async function releaseReminderSlot(
 
 /**
  * Get current GLOBAL daily and monthly send counts.
- * Uses UTC for date boundaries. Monthly count is computed as SUM of daily_count
- * for all days in the current month (not stored in monthly_count column for
- * consistency - that column is deprecated).
+ * Uses UTC day by design (resets at 05:30 IST). Monthly count is computed
+ * as SUM of daily_count for all days in the current month (not stored in
+ * monthly_count column for consistency - that column is deprecated).
  */
 export async function getGlobalSendCounts(
   sql: Sql,
@@ -576,6 +581,8 @@ export const CATCHUP_WINDOW_DAYS = 3;
  * Atomically reserve a send slot (increment count) with cap enforcement.
  * Returns { reserved: true, daily, monthly } if reservation succeeded.
  * Returns { reserved: false, reason } if caps would be exceeded.
+ *
+ * Uses UTC day by design (resets at 05:30 IST).
  *
  * Uses pg_advisory_xact_lock inside a transaction to serialize concurrent
  * reservations. The lock and all reads/writes happen on the same connection,
@@ -661,6 +668,7 @@ export async function reserveGlobalSendSlot(
 /**
  * Release a previously reserved send slot (decrement count).
  * Used when send fails with non-retryable error to avoid wasting cap.
+ * Uses UTC day by design (resets at 05:30 IST).
  */
 export async function releaseGlobalSendSlot(
   sql: Sql,
@@ -744,7 +752,7 @@ export async function sendPaymentReminder(
   ruleId: string,
   offsetDays: number,
   timezone: string,
-  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string } = {},
+  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string } = {},
   deps: { reserveGlobalSendSlot?: typeof reserveGlobalSendSlot } = {}
 ): Promise<ReminderSendResult> {
   const resendKey = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
@@ -902,6 +910,28 @@ export async function sendPaymentReminder(
     };
   }
 
+  // Gate 10d: Pre-launch recipient allowlist check (fail closed)
+  // Check BEFORE claiming slot/cap so skipped sends don't consume resources
+  const allowlist = parseRecipientAllowlist(
+    env.RESEND_TEST_RECIPIENTS ?? process.env.RESEND_TEST_RECIPIENTS
+  );
+  if (allowlist.size === 0) {
+    safeLog("info", "reminder_send_skipped", { shopId, reason: "recipient_allowlist_empty", skippedCount: 1, allowedCount: 0 });
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Recipient allowlist is empty or not configured",
+    };
+  }
+  if (!isRecipientAllowed(invoice.buyerEmail, allowlist)) {
+    safeLog("info", "reminder_send_skipped", { shopId, reason: "recipient_not_allowlisted", skippedCount: 1, allowedCount: 0 });
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Recipient not in pre-launch allowlist",
+    };
+  }
+
   // Phase A: Short transaction to claim slot with per-invoice lock
   // This ensures at most one reminder per invoice per day
   const claimResult = await sql.begin(async (tx) => {
@@ -979,58 +1009,74 @@ export async function sendPaymentReminder(
       unsubscribeSecret
     );
 
-    const response = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${resendKey}`,
-        "Content-Type": "application/json",
-        "Idempotency-Key": idempotencyKey,
-      },
-      body: JSON.stringify({
-        from: fromEmail,
-        to: [invoice.buyerEmail],
-        subject,
-        html: emailHtml,
-        headers: unsubscribeHeaders,
-      }),
-    });
-
-    if (!response.ok) {
-      const _errorText = await response.text();
-      const isAuthError = response.status === 401;
-      const isRateLimited = response.status === 429;
-      const isServerError = response.status >= 500;
-      const isRetryable = isRateLimited || isServerError;
-
-      if (isAuthError) {
-        safeLog("error", "reminders_auth_error", { shopId, httpStatus: response.status });
-      }
-
-      // Phase D failure: Release slots in one transaction
+    // Gate 10e: Defensive check for fromEmail (should be guaranteed by Gate 1)
+    if (!fromEmail) {
+      safeLog("error", "reminders_no_from_address", { shopId });
       await sql.begin(async (tx) => {
         await releaseReminderSlot(tx, shopId, ruleId, invoiceId);
         await releaseGlobalSendSlot(tx);
       });
-
-      const errorCode = isAuthError ? "resend_auth_error"
-        : isRateLimited ? "resend_rate_limited"
-        : isServerError ? "resend_server_error"
-        : "resend_error";
       return {
         success: false,
         action: "skipped",
-        errorCode,
-        retryable: isRetryable,
+        errorCode: "resend_from_not_configured",
+        retryable: false,
       };
     }
 
-    // Phase D success: Row already marked 'sent' by claimReminderSlot
-    const result = (await response.json()) as { id?: string };
+    const sendResult = await sendViaResend(
+      {
+        from: fromEmail,
+        to: [invoice.buyerEmail],
+        subject,
+        html: emailHtml,
+        headers: unsubscribeHeaders ?? undefined,
+        idempotencyKey,
+      },
+      { RESEND_API_KEY: resendKey, RESEND_TEST_RECIPIENTS: env.RESEND_TEST_RECIPIENTS ?? process.env.RESEND_TEST_RECIPIENTS }
+    );
+
+    if (sendResult.sent) {
+      return {
+        success: true,
+        action: "sent",
+        resendId: sendResult.id,
+      };
+    }
+
+    if (sendResult.skipped) {
+      // This shouldn't happen as we already checked the allowlist, but handle defensively
+      // Release slots since send was skipped
+      await sql.begin(async (tx) => {
+        await releaseReminderSlot(tx, shopId, ruleId, invoiceId);
+        await releaseGlobalSendSlot(tx);
+      });
+      safeLog("info", "reminder_send_skipped", { shopId, reason: sendResult.reason, skippedCount: sendResult.skippedCount, allowedCount: sendResult.allowedCount });
+      return {
+        success: true,
+        action: "skipped",
+        skipReason: sendResult.reason === "recipient_allowlist_empty"
+          ? "Recipient allowlist is empty or not configured"
+          : "Recipient not in pre-launch allowlist",
+      };
+    }
+
+    // Send failed with error
+    if (sendResult.httpStatus === 401) {
+      safeLog("error", "reminders_auth_error", { shopId, httpStatus: sendResult.httpStatus });
+    }
+
+    // Phase D failure: Release slots in one transaction
+    await sql.begin(async (tx) => {
+      await releaseReminderSlot(tx, shopId, ruleId, invoiceId);
+      await releaseGlobalSendSlot(tx);
+    });
 
     return {
-      success: true,
-      action: "sent",
-      resendId: result.id,
+      success: false,
+      action: "skipped",
+      errorCode: sendResult.error,
+      retryable: sendResult.retryable,
     };
   } catch (err) {
     // Phase D failure: Release slots in one transaction
@@ -1082,7 +1128,7 @@ export async function sendCatchupReminder(
   _logId: string,
   offsetDays: number,
   timezone: string,
-  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string } = {}
+  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string } = {}
 ): Promise<ReminderSendResult> {
   const resendKey = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
   const fromEmail = getResendFrom(env);
@@ -1321,6 +1367,30 @@ export async function sendCatchupReminder(
     };
   }
 
+  // Gate 11c: Pre-launch recipient allowlist check (fail closed)
+  // Check AFTER gates 9/10/11/11b so we skip for valid business reasons first,
+  // but BEFORE claiming slot/cap so skipped sends don't consume resources.
+  // Don't delete the delayed row - wait for allowlist to be configured or recipient added.
+  const allowlist = parseRecipientAllowlist(
+    env.RESEND_TEST_RECIPIENTS ?? process.env.RESEND_TEST_RECIPIENTS
+  );
+  if (allowlist.size === 0) {
+    safeLog("info", "reminder_send_skipped", { shopId, reason: "recipient_allowlist_empty", skippedCount: 1, allowedCount: 0 });
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Recipient allowlist is empty or not configured",
+    };
+  }
+  if (!isRecipientAllowed(invoice.buyerEmail, allowlist)) {
+    safeLog("info", "reminder_send_skipped", { shopId, reason: "recipient_not_allowlisted", skippedCount: 1, allowedCount: 0 });
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Recipient not in pre-launch allowlist",
+    };
+  }
+
   // Phase A: Claim under per-invoice lock (same-day check + claim in one tx)
   // This prevents a same-day new-stage send and catch-up from both going out.
   // On send failure, we revert the claim.
@@ -1412,34 +1482,9 @@ export async function sendCatchupReminder(
       unsubscribeSecret
     );
 
-    const response = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${resendKey}`,
-        "Content-Type": "application/json",
-        "Idempotency-Key": idempotencyKey,
-      },
-      body: JSON.stringify({
-        from: fromEmail,
-        to: [invoice.buyerEmail],
-        subject,
-        html: emailHtml,
-        headers: unsubscribeHeaders,
-      }),
-    });
-
-    if (!response.ok) {
-      const _errorText = await response.text();
-      const isAuthError = response.status === 401;
-      const isRateLimited = response.status === 429;
-      const isServerError = response.status >= 500;
-      const isRetryable = isRateLimited || isServerError;
-
-      if (isAuthError) {
-        safeLog("error", "reminders_catchup_auth_error", { shopId, httpStatus: response.status });
-      }
-
-      // Phase D failure: Revert claim and release cap in one transaction
+    // Gate 8f: Defensive check for fromEmail (should be guaranteed by Gate 1)
+    if (!fromEmail) {
+      safeLog("error", "reminders_catchup_no_from_address", { shopId });
       await sql.begin(async (tx) => {
         await tx`
           UPDATE "ReminderLog"
@@ -1449,25 +1494,77 @@ export async function sendCatchupReminder(
         `;
         await releaseGlobalSendSlot(tx);
       });
-
-      const errorCode = isAuthError ? "resend_auth_error"
-        : isRateLimited ? "resend_rate_limited"
-        : isServerError ? "resend_server_error"
-        : "resend_error";
       return {
         success: false,
         action: "skipped",
-        errorCode,
-        retryable: isRetryable,
+        errorCode: "resend_from_not_configured",
+        retryable: false,
       };
     }
 
-    // Phase D success: Row already marked 'sent' in Phase A claim
-    const result = (await response.json()) as { id?: string };
+    const sendResult = await sendViaResend(
+      {
+        from: fromEmail,
+        to: [invoice.buyerEmail],
+        subject,
+        html: emailHtml,
+        headers: unsubscribeHeaders ?? undefined,
+        idempotencyKey,
+      },
+      { RESEND_API_KEY: resendKey, RESEND_TEST_RECIPIENTS: env.RESEND_TEST_RECIPIENTS ?? process.env.RESEND_TEST_RECIPIENTS }
+    );
+
+    if (sendResult.sent) {
+      return {
+        success: true,
+        action: "sent",
+        resendId: sendResult.id,
+      };
+    }
+
+    if (sendResult.skipped) {
+      // This shouldn't happen as we already checked the allowlist, but handle defensively
+      // Revert claim and release cap since send was skipped
+      await sql.begin(async (tx) => {
+        await tx`
+          UPDATE "ReminderLog"
+          SET status = 'delayed'::"ReminderLogStatus", "sentAt" = NULL
+          WHERE "shopId" = ${shopId} AND "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId}
+            AND status = 'sent'::"ReminderLogStatus"
+        `;
+        await releaseGlobalSendSlot(tx);
+      });
+      safeLog("info", "reminder_send_skipped", { shopId, reason: sendResult.reason, skippedCount: sendResult.skippedCount, allowedCount: sendResult.allowedCount });
+      return {
+        success: true,
+        action: "skipped",
+        skipReason: sendResult.reason === "recipient_allowlist_empty"
+          ? "Recipient allowlist is empty or not configured"
+          : "Recipient not in pre-launch allowlist",
+      };
+    }
+
+    // Send failed with error
+    if (sendResult.httpStatus === 401) {
+      safeLog("error", "reminders_catchup_auth_error", { shopId, httpStatus: sendResult.httpStatus });
+    }
+
+    // Phase D failure: Revert claim and release cap in one transaction
+    await sql.begin(async (tx) => {
+      await tx`
+        UPDATE "ReminderLog"
+        SET status = 'delayed'::"ReminderLogStatus", "sentAt" = NULL
+        WHERE "shopId" = ${shopId} AND "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId}
+          AND status = 'sent'::"ReminderLogStatus"
+      `;
+      await releaseGlobalSendSlot(tx);
+    });
+
     return {
-      success: true,
-      action: "sent",
-      resendId: result.id,
+      success: false,
+      action: "skipped",
+      errorCode: sendResult.error,
+      retryable: sendResult.retryable,
     };
   } catch (err) {
     // Phase D failure: Revert claim and release cap in one transaction

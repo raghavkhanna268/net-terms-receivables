@@ -97,6 +97,8 @@ Implementation details for data export:
 - **NO customer PII** is included in the email (no GID, email, name, or tags)
 - Shop owner email is fetched via Admin API (`shop { email contactEmail }`) using the app's offline session at send time and **never stored or logged**
 - If `RESEND_API_KEY` or `RESEND_FROM` is not set, email is skipped and logged as `data_request_email_skipped`
+- If `RESEND_TEST_RECIPIENTS` is empty/unset (pre-launch guard), email is skipped with reason `recipient_allowlist_empty`
+- If recipient is not in `RESEND_TEST_RECIPIENTS` allowlist, email is skipped with reason `recipient_not_allowlisted`
 - Resend API failures do not fail the webhook (still returns 200, logs status code only, export still available)
 
 ### `customers/redact` Handler
