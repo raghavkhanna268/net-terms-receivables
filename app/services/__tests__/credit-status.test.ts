@@ -1184,6 +1184,7 @@ describe("getOwnerGid", () => {
 
 describe("syncCreditStatusMetafield no-owner branch", () => {
   let consoleSpy: ReturnType<typeof vi.spyOn>;
+  let txCalls: Array<{ query: string; values: unknown[] }>;
   let mockSql: Sql & {
     setMockResult: (key: string, value: unknown) => void;
     clearMockResults: () => void;
@@ -1201,10 +1202,12 @@ describe("syncCreditStatusMetafield no-owner branch", () => {
       data: { metafieldsSet: { metafields: [{ id: "mf-1" }], userErrors: [] } },
     });
 
+    txCalls = [];
     const mockResults: Map<string, unknown[]> = new Map();
 
-    const queryHandler = async (strings: TemplateStringsArray, ..._values: unknown[]) => {
+    const queryHandler = async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
+      txCalls.push({ query, values });
 
       if (query.includes('FROM "Shop"') && query.includes("domain")) {
         return mockResults.get("shop") ?? [];
@@ -1261,7 +1264,7 @@ describe("syncCreditStatusMetafield no-owner branch", () => {
     consoleSpy.mockRestore();
   });
 
-  it("no-owner account: holdState persisted, syncVersion bumped, metafieldSyncedAt untouched, no Shopify write", async () => {
+  it("no-owner account: UPDATE sets holdState HELD, syncPending=false, bumps syncVersion; does NOT set metafieldSyncedAt; no Shopify write", async () => {
     const { syncCreditStatusMetafield } = await import("../credit-status.server");
 
     mockSql.setMockResult("account", [{
@@ -1279,7 +1282,7 @@ describe("syncCreditStatusMetafield no-owner branch", () => {
       syncPending: true,
       gatedAt: null,
     }]);
-    mockSql.setMockResult("shop", [{ domain: "noowner.myshopify.com", currency: "INR" }]);
+    mockSql.setMockResult("shop", [{ domain: "test-noowner.myshopify.com", currency: "INR" }]);
     mockSql.setMockResult("invoice_exposure", [{ total_paise: "0" }]);
     mockSql.setMockResult("draft_exposure", [{ total_paise: "0" }]);
     mockSql.setMockResult("overdue_check", [{ has_overdue: true }]);
@@ -1290,10 +1293,18 @@ describe("syncCreditStatusMetafield no-owner branch", () => {
     expect(result.success).toBe(true);
     expect(result.metafieldSyncPending).toBe(false);
     expect(result.noOwner).toBe(true);
-    expect(mockShopifyGraphQLRequest).not.toHaveBeenCalled();
+    expect(mockShopifyGraphQLRequest).toHaveBeenCalledTimes(0);
+
+    const updateCalls = txCalls.filter(c => c.query.includes('UPDATE "BuyerAccount"'));
+    expect(updateCalls.length).toBe(1);
+    const updateQuery = updateCalls[0].query;
+    expect(updateQuery).toContain('"holdState"');
+    expect(updateQuery).toContain('"syncPending" = false');
+    expect(updateQuery).toContain('"syncVersion" = "syncVersion" + 1');
+    expect(updateQuery).not.toContain('metafieldSyncedAt');
   });
 
-  it("no-owner effective hold change: exactly ONE warn log with correct payload", async () => {
+  it("no-owner effective hold change: exactly ONE audit insert (hold_unenforceable) and ONE warn log", async () => {
     const { syncCreditStatusMetafield } = await import("../credit-status.server");
 
     mockSql.setMockResult("account", [{
@@ -1311,13 +1322,20 @@ describe("syncCreditStatusMetafield no-owner branch", () => {
       syncPending: true,
       gatedAt: null,
     }]);
-    mockSql.setMockResult("shop", [{ domain: "noowner.myshopify.com", currency: "INR" }]);
+    mockSql.setMockResult("shop", [{ domain: "test-noowner.myshopify.com", currency: "INR" }]);
     mockSql.setMockResult("invoice_exposure", [{ total_paise: "0" }]);
     mockSql.setMockResult("draft_exposure", [{ total_paise: "0" }]);
     mockSql.setMockResult("overdue_check", [{ has_overdue: true }]);
     mockSql.setMockResult("update_account_returning", [{ syncVersion: 1 }]);
 
     await syncCreditStatusMetafield(mockSql, NO_OWNER_ACCOUNT_ID, "daily_sweep");
+
+    const auditInserts = txCalls.filter(c => c.query.includes('INSERT INTO "AuditEvent"'));
+    expect(auditInserts.length).toBe(1);
+    expect(auditInserts[0].query).toContain('credit_status.hold_unenforceable');
+
+    const holdAppliedInserts = txCalls.filter(c => c.query.includes('hold_applied'));
+    expect(holdAppliedInserts.length).toBe(0);
 
     const warnCalls = consoleSpy.mock.calls.filter(
       (call: unknown[]) => typeof call[0] === "string" && call[0].includes("credit_status_no_owner")
@@ -1332,7 +1350,7 @@ describe("syncCreditStatusMetafield no-owner branch", () => {
     });
   });
 
-  it("no-owner no effective hold change (no-op): ZERO warn logs", async () => {
+  it("no-owner no effective hold change (no-op): ZERO audit inserts and ZERO warn logs", async () => {
     const { syncCreditStatusMetafield } = await import("../credit-status.server");
 
     mockSql.setMockResult("account", [{
@@ -1350,13 +1368,16 @@ describe("syncCreditStatusMetafield no-owner branch", () => {
       syncPending: true,
       gatedAt: null,
     }]);
-    mockSql.setMockResult("shop", [{ domain: "noowner.myshopify.com", currency: "INR" }]);
+    mockSql.setMockResult("shop", [{ domain: "test-noowner.myshopify.com", currency: "INR" }]);
     mockSql.setMockResult("invoice_exposure", [{ total_paise: "0" }]);
     mockSql.setMockResult("draft_exposure", [{ total_paise: "0" }]);
     mockSql.setMockResult("overdue_check", [{ has_overdue: false }]);
     mockSql.setMockResult("update_account_returning", [{ syncVersion: 1 }]);
 
     await syncCreditStatusMetafield(mockSql, NO_OWNER_ACCOUNT_ID, "daily_sweep");
+
+    const auditInserts = txCalls.filter(c => c.query.includes('INSERT INTO "AuditEvent"'));
+    expect(auditInserts.length).toBe(0);
 
     const warnCalls = consoleSpy.mock.calls.filter(
       (call: unknown[]) => typeof call[0] === "string" && call[0].includes("credit_status_no_owner")
@@ -1382,7 +1403,7 @@ describe("syncCreditStatusMetafield no-owner branch", () => {
       syncPending: true,
       gatedAt: null,
     }]);
-    mockSql.setMockResult("shop", [{ domain: "noowner.myshopify.com", currency: "INR" }]);
+    mockSql.setMockResult("shop", [{ domain: "test-noowner.myshopify.com", currency: "INR" }]);
     mockSql.setMockResult("invoice_exposure", [{ total_paise: "0" }]);
     mockSql.setMockResult("draft_exposure", [{ total_paise: "0" }]);
     mockSql.setMockResult("overdue_check", [{ has_overdue: true }]);
@@ -1453,7 +1474,7 @@ describe("recomputeCreditStatus no-owner branch", () => {
       syncPending: true,
       gatedAt: null,
     }]);
-    mockResults.set("shop", [{ domain: "noowner-recompute.myshopify.com", currency: "INR" }]);
+    mockResults.set("shop", [{ domain: "test-noowner-recompute.myshopify.com", currency: "INR" }]);
     mockResults.set("overdue_check", [{ has_overdue: true }]);
 
     const result = await recomputeCreditStatus(mockSql, "acc-noowner-recompute");
@@ -1521,12 +1542,12 @@ describe("CREDIT_STATUS_RECOMPUTE drain handler no-owner branch", () => {
       syncPending: true,
       gatedAt: null,
     }]);
-    mockResults.set("shop", [{ domain: "noowner-drain.myshopify.com", currency: "INR" }]);
+    mockResults.set("shop", [{ domain: "test-noowner-drain.myshopify.com", currency: "INR" }]);
     mockResults.set("overdue_check", [{ has_overdue: true }]);
 
     const message = {
       topic: "CREDIT_STATUS_RECOMPUTE",
-      shop: "noowner-drain.myshopify.com",
+      shop: "test-noowner-drain.myshopify.com",
       buyerAccountId: "acc-noowner-drain",
       source: "daily_sweep",
       webhookId: `credit_recompute:acc-noowner-drain:${Date.now()}`,
