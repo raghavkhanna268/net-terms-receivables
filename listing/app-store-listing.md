@@ -80,6 +80,8 @@ Ref: https://shopify.dev/docs/apps/launch/billing
 
 ## App Icon
 
+**Icon:** `listing/icon.png` *(draft, pending Raghav's approval)*
+
 **[OWNER]** Upload a 1200×1200 px square JPEG or PNG.
 
 Spec: Bold colors, simple pattern, no text or Shopify trademarks. Corners are rounded automatically.
