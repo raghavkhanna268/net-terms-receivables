@@ -150,7 +150,7 @@ export function normalizeNarrationForLookup(narration: string): string {
   let text = narration.toUpperCase();
 
   // Remove rail prefixes and common patterns
-  text = text.replace(/^(NEFT|RTGS|IMPS|UPI|ACH|NACH|CHQ|CHEQUE|CLG)[\s\-/]*/gi, "");
+  text = text.replace(/^(NEFT|RTGS|IMPS|UPI|ACH|NACH|CMS|CHQ|CHEQUE|CLG)[\s\-/]*/gi, "");
 
   // Remove CR/DR indicators
   text = text.replace(/\b(CR|DR)\b/gi, "");

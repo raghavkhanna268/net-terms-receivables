@@ -875,7 +875,7 @@ describeWithDb("Bank Import Action Integration Tests", () => {
 });
 
 describe("Import validation (unit tests)", () => {
-  const VALID_RAILS = ["NEFT", "RTGS", "IMPS", "UPI", "ACH", "CHEQUE", "OTHER"];
+  const VALID_RAILS = ["NEFT", "RTGS", "IMPS", "UPI", "ACH", "CMS", "CHEQUE", "OTHER"];
 
   it("accepts valid import payload", () => {
     const payload = {

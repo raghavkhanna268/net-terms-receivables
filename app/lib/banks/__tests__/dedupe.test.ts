@@ -527,3 +527,99 @@ async function createMockTxnAsync(
     balancePaise,
   };
 }
+
+describe("HDFC dedupe-key stability with leading zeros", () => {
+  it("refNo keeps leading zeros and dedupe hash is stable", async () => {
+    const { generateDedupeKey } = await import("../dedupe.js");
+
+    const testCases = [
+      {
+        date: "2026-10-15",
+        amountPaise: 5000000,
+        direction: "CR" as const,
+        narration: "UPI-SYNTHETIC VENDOR-vendor@synth-SYNT0001234-600000000001-UPI",
+        rail: "UPI" as const,
+        refNo: "0000600000000001",
+        expectedRefNo: "0000600000000001",
+        expectedKeyPrefix: "utr:UPI:CR:600000000001",
+      },
+      {
+        date: "2026-10-16",
+        amountPaise: 7500000,
+        direction: "CR" as const,
+        narration: "CHQ DEP-SYNTHETIC RETAILER-000654",
+        rail: "CHEQUE" as const,
+        refNo: "000654",
+        expectedRefNo: "000654",
+        expectedKeyPrefix: "sha256:",
+      },
+      {
+        date: "2026-10-17",
+        amountPaise: 10000000,
+        direction: "CR" as const,
+        narration: "NEFT CR-SYNTHETIC CORP-PAYMENT",
+        rail: "NEFT" as const,
+        refNo: "000123",
+        expectedRefNo: "000123",
+        expectedKeyPrefix: "sha256:",
+      },
+    ];
+
+    for (const tc of testCases) {
+      expect(tc.refNo).toBe(tc.expectedRefNo);
+
+      const key = await generateDedupeKey(
+        tc.date,
+        tc.amountPaise,
+        tc.direction,
+        tc.narration,
+        tc.rail,
+        tc.rail === "UPI" ? "600000000001" : undefined,
+        undefined,
+        undefined,
+        tc.refNo
+      );
+
+      expect(key.startsWith(tc.expectedKeyPrefix)).toBe(true);
+    }
+  });
+
+  it("HDFC zero-padded ref (0000600000000001) produces stable UPI dedupe key", async () => {
+    const { generateDedupeKey } = await import("../dedupe.js");
+
+    const key = await generateDedupeKey(
+      "2026-10-15",
+      5000000,
+      "CR",
+      "UPI-SYNTHETIC VENDOR-vendor@synth-SYNT0001234-600000000001-UPI",
+      "UPI",
+      "600000000001",
+      undefined,
+      undefined,
+      "0000600000000001"
+    );
+
+    expect(key).toBe("utr:UPI:CR:600000000001");
+  });
+
+  it("HDFC cheque ref with leading zeros produces stable sha256 key", async () => {
+    const { generateDedupeKey } = await import("../dedupe.js");
+
+    const key = await generateDedupeKey(
+      "2026-10-16",
+      7500000,
+      "CR",
+      "CHQ DEP-SYNTHETIC RETAILER-000654",
+      "CHEQUE",
+      undefined,
+      1507500000,
+      undefined,
+      "000654"
+    );
+
+    expect(key.startsWith("sha256:")).toBe(true);
+    expect(key).toBe(
+      "sha256:6be8d18f86be22fdfb51124b5592e538b7121216d340015e7cee684e86c33d8c"
+    );
+  });
+});

@@ -343,4 +343,37 @@ describeWithDb("Server-side rejection with no DB writes", () => {
     expect(serialized).not.toContain("SGVsbG8gV29ybGQ"); // base64 data
     expect(serialized).not.toContain("TOP_LEVEL_SECRET");
   });
+
+  it("CMS rail upload returns 200 and stores rail = 'CMS'", async () => {
+    const payload = {
+      bank: "ICICI",
+      fileName: "cms-test-statement.xls",
+      credits: [
+        {
+          date: yesterday(),
+          amountPaise: 2500000,
+          rail: "CMS",
+          narration: "CMS/ SYNT12345/SYNTHETIC TEST TRADERS",
+          payerName: "SYNTHETIC TEST TRADERS",
+        },
+      ],
+    };
+
+    const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+    expect(response.status).toBe(200);
+
+    const data = (await response.json()) as { 
+      success: boolean; 
+      counts: { inserted: number; duplicates: number; total: number } 
+    };
+    expect(data.success).toBe(true);
+    expect(data.counts.inserted).toBe(1);
+
+    const payments = await sql<Array<{ rail: string; narration: string }>>`
+      SELECT rail, narration FROM "Payment" WHERE "shopId" = ${testShopId}
+    `;
+    expect(payments.length).toBe(1);
+    expect(payments[0].rail).toBe("CMS");
+    expect(payments[0].narration).toBe("CMS/ SYNT12345/SYNTHETIC TEST TRADERS");
+  });
 });
