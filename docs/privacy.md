@@ -292,11 +292,12 @@ The app requests the following scopes to provide its core features.
 
 Per [Shopify Access Scopes documentation](https://shopify.dev/docs/api/usage/access-scopes) 'How it works' section: "Any scope that writes a resource also grants read access to it, so request the write scope only when your app needs both." We request only `write_*` scopes for resources we both read and write.
 
-### Read Scopes (2)
+### Read Scopes (3)
 
 | Scope | Purpose |
 |-------|---------|
 | `read_draft_orders` | View draft orders to calculate pending credit exposure |
+| `read_all_orders` | Access orders older than 60 days for historical invoice reconciliation |
 | `read_payment_terms` | View payment terms on orders and company locations |
 
 ### Write Scopes (6)
