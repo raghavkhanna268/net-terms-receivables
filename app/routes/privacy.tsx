@@ -257,12 +257,18 @@ const CSS = `
 
 export const loader = async (_args: LoaderFunctionArgs) => {
   const htmlContent = markdownToHtml(privacyMarkdown);
+  const apiKey = process.env.SHOPIFY_API_KEY || "";
+  const debugMeta = import.meta.env.DEV
+    ? '<meta name="shopify-debug" content="web-vitals" />'
+    : "";
 
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  ${debugMeta}
+  <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js" data-api-key="${apiKey}"></script>
   <title>Privacy Policy — Net Terms Receivables</title>
   <style>${CSS}</style>
 </head>
