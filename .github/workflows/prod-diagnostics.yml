@@ -1509,8 +1509,14 @@ jobs:
           # A null/missing inputQuery tells us nothing about credit_status, so report
           # the JSON string "unknown" rather than false. A non-null query (including the
           # empty string "", which is non-null with length 0) keeps a true/false verdict.
+          # deployed_input_query_check: unavailable_api_null (null, not a failure),
+          # has_credit_status (non-null with credit_status), or missing_credit_status.
+          DEPLOYED_INPUT_QUERY_CHECK="missing_credit_status"
           if [ "$INPUT_QUERY_NULL" = "true" ]; then
             DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS='"unknown"'
+            DEPLOYED_INPUT_QUERY_CHECK="unavailable_api_null"
+          elif [ "$DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS" = "true" ]; then
+            DEPLOYED_INPUT_QUERY_CHECK="has_credit_status"
           fi
 
           echo "S12 Validation status (read-only):"
@@ -1520,13 +1526,15 @@ jobs:
             --argjson block_on_failure "$VALIDATION_BLOCK_ON_FAILURE" \
             --argjson repo_input_query_has_credit_status "$REPO_INPUT_QUERY_HAS_CREDIT_STATUS" \
             --argjson deployed_input_query_has_credit_status "$DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS" \
+            --arg deployed_input_query_check "$DEPLOYED_INPUT_QUERY_CHECK" \
             --argjson input_query_null "$INPUT_QUERY_NULL" \
             --argjson input_query_length "$INPUT_QUERY_LENGTH" \
             --argjson iq_has_credit_status "$IQ_HAS_CREDIT_STATUS" \
             --argjson iq_has_dollar_app "$IQ_HAS_DOLLAR_APP" \
             --argjson iq_has_app_prefix "$IQ_HAS_APP_PREFIX" \
             --argjson iq_has_metafield "$IQ_HAS_METAFIELD" \
-            '{exists: $exists, enabled: $enabled, blockOnFailure: $block_on_failure, repo_input_query_has_credit_status: $repo_input_query_has_credit_status, deployed_input_query_has_credit_status: $deployed_input_query_has_credit_status, input_query_null: $input_query_null, input_query_length: $input_query_length, iq_has_credit_status: $iq_has_credit_status, iq_has_dollar_app: $iq_has_dollar_app, iq_has_app_prefix: $iq_has_app_prefix, iq_has_metafield: $iq_has_metafield}'
+            '{exists: $exists, enabled: $enabled, blockOnFailure: $block_on_failure, repo_input_query_has_credit_status: $repo_input_query_has_credit_status, deployed_input_query_has_credit_status: $deployed_input_query_has_credit_status, deployed_input_query_check: $deployed_input_query_check, input_query_null: $input_query_null, input_query_length: $input_query_length, iq_has_credit_status: $iq_has_credit_status, iq_has_dollar_app: $iq_has_dollar_app, iq_has_app_prefix: $iq_has_app_prefix, iq_has_metafield: $iq_has_metafield}'
+          echo "deployed_input_query_check=$DEPLOYED_INPUT_QUERY_CHECK"
 
           # Cross-check via shopifyFunctions(apiType: cart_checkout_validation), read-only.
           # Prints a count, function ids and per-function booleans/integers only; never
@@ -1555,12 +1563,16 @@ jobs:
               | ("metafield\\s*\\([^)]*(" + $ns + "[^)]*" + $key + "|" + $key + "[^)]*" + $ns + ")") as $re
               | {cross_check: "ok",
                  function_count: ($fns | length),
-                 functions: [$fns[] | {
+                 functions: [$fns[] |
+                   ((.inputQuery | type) != "string") as $null
+                   | (.inputQuery | if type == "string" then (gsub("\n"; " ") | test($re)) else false end) as $has_cs
+                   | {
                    id: .id,
                    handle_is_credit_check_validation: (.handle == "credit-check-validation"),
-                   input_query_null: ((.inputQuery | type) != "string"),
+                   input_query_null: $null,
                    input_query_length: (.inputQuery | if type == "string" then length else 0 end),
-                   has_credit_status: (.inputQuery | if type == "string" then (gsub("\n"; " ") | test($re)) else "unknown" end)
+                   has_credit_status: (if $null then "unknown" elif $has_cs then true else false end),
+                   input_query_check: (if $null then "unavailable_api_null" elif $has_cs then "has_credit_status" else "missing_credit_status" end)
                  }]}' "$FN_RESPONSE"
           fi
           rm -f "$FN_RESPONSE"

@@ -125,6 +125,57 @@ FORBIDDEN_DEPLOY_FLAGS = ("--allow-deletes", "SHOPIFY_FLAG_ALLOW_DELETES", "--fo
 FORBIDDEN_CLI_SOURCES = ("npx -y", "npx --yes", "@shopify/cli@")
 PINNED_CLI_VERSION = "4.9.4"
 
+CREDIT_STATUS_RE = re.compile(
+    r'metafield\s*\([^)]*'
+    r'(namespace\s*:\s*"(\$app|app--\d+)"[^)]*key\s*:\s*"credit_status"'
+    r'|key\s*:\s*"credit_status"[^)]*namespace\s*:\s*"(\$app|app--\d+)")'
+)
+
+
+def check_credit_status_guard(root):
+    """Verifies credit-check-validation input queries exist and select credit_status.
+    
+    Returns True if PASS, False if FAIL. Prints only counts and booleans, plus PASS/FAIL.
+    """
+    toml_path = os.path.join(root, "extensions", "credit-check-validation", "shopify.extension.toml")
+    if not os.path.exists(toml_path):
+        print("credit_status_guard: toml_found=false targeting_count=0 files_found=0 has_credit_status=0")
+        print("credit_status_guard: FAIL (credit-check-validation toml not found)")
+        return False
+
+    toml_content = open(toml_path).read()
+    toml_dir = os.path.dirname(toml_path)
+    input_queries = re.findall(r'input_query\s*=\s*"([^"]+)"', toml_content)
+    targeting_count = len(input_queries)
+
+    if targeting_count == 0:
+        print(f"credit_status_guard: toml_found=true targeting_count=0 files_found=0 has_credit_status=0")
+        print("credit_status_guard: FAIL (no targeting input_query entries)")
+        return False
+
+    files_found = 0
+    has_credit_status = 0
+    for iq in input_queries:
+        iq_path = os.path.normpath(os.path.join(toml_dir, iq))
+        if os.path.exists(iq_path):
+            files_found += 1
+            content = open(iq_path).read()
+            flat = re.sub(r'\s+', ' ', content)
+            if CREDIT_STATUS_RE.search(flat):
+                has_credit_status += 1
+
+    print(f"credit_status_guard: toml_found=true targeting_count={targeting_count} "
+          f"files_found={files_found} has_credit_status={has_credit_status}")
+
+    if files_found < targeting_count:
+        print("credit_status_guard: FAIL (input_query file missing)")
+        return False
+    if has_credit_status < targeting_count:
+        print("credit_status_guard: FAIL (input_query missing credit_status)")
+        return False
+    print("credit_status_guard: PASS")
+    return True
+
 
 def main(root):
     ok = True
@@ -162,20 +213,33 @@ def main(root):
 
     files = input_query_files(root)
     total = 0
+    missing = 0
     for f in files:
+        if not os.path.exists(f):
+            print(f"pii_guard: missing file={os.path.relpath(f, root)}")
+            missing += 1
+            continue
         v = check_input_query(open(f).read())
         total += len(v)
         for field, ctx in v:
             print(f"pii_guard: violation file={os.path.relpath(f, root)} field={field} path={ctx}")
-    print(f"pii_guard: files_checked={len(files)} violations={total}")
+    print(f"pii_guard: files_checked={len(files)} files_missing={missing} violations={total}")
     if not files:
         print("pii_guard: FAIL (no input queries found)")
+        ok = False
+    elif missing:
+        print("pii_guard: FAIL (input query files missing)")
         ok = False
     elif total:
         print("pii_guard: FAIL")
         ok = False
     else:
         print("pii_guard: PASS")
+
+    credit_status_ok = check_credit_status_guard(root)
+    if not credit_status_ok:
+        ok = False
+
     repo_h, exp_h = repo_extension_handles(root), expected_extension_handles(root)
     if exp_h is None:
         print("extension_guard: FAIL (scripts/ci/expected-extensions.txt missing)")
