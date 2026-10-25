@@ -130,18 +130,25 @@ Ref: https://shopify.dev/docs/apps/launch/app-requirements-checklist (section 5,
 
 ### OAuth Scopes (8 total)
 
-Write scopes include read access to the same resource type. See [Access scopes](https://shopify.dev/docs/api/usage/access-scopes).
+Write scopes imply read access per [Shopify Access Scopes](https://shopify.dev/docs/api/usage/access-scopes).
 
-| Scope | Why the app needs it |
-|-------|----------------------|
-| `read_draft_orders` | Track pending draft orders with payment terms to calculate credit exposure before orders are finalized. |
-| `read_payment_terms` | Read payment terms on orders and company locations to compute invoice due dates. |
-| `write_companies` | Write credit-status metafields to Company and CompanyLocation; also reads B2B company data for buyer account sync. |
-| `write_customers` | Write credit-status metafields to Customer; also reads customer tags and email/name for buyer account sync and reminders. |
-| `write_merchant_managed_fulfillment_orders` | Place and release fulfillment holds on orders from accounts that are overdue or on credit hold. |
-| `write_orders` | Mark orders as paid after the merchant confirms a bank payment match, add/remove tags (e.g., overdue); also reads orders to sync invoices. |
-| `write_payment_customizations` | Register and update the Payment Customization Function that hides the terms payment method for held accounts. |
-| `write_validations` | Register and update the Cart Validation Function that blocks checkout for accounts on hold or over their credit limit. |
+#### Read Scopes (2)
+
+| Scope | Purpose |
+|-------|---------|
+| `read_draft_orders` | View draft orders to calculate pending credit exposure |
+| `read_payment_terms` | View payment terms on orders and company locations |
+
+#### Write Scopes (6)
+
+| Scope | Purpose |
+|-------|---------|
+| `write_companies` | View and update B2B companies and locations for buyer account sync and credit status |
+| `write_customers` | View and update customers for net-terms eligibility and credit status |
+| `write_merchant_managed_fulfillment_orders` | Place fulfillment holds on orders from accounts that are overdue or on credit hold |
+| `write_orders` | View orders for invoice tracking, mark as paid after bank payment matching, and add status tags |
+| `write_payment_customizations` | Configure payment method visibility based on account status |
+| `write_validations` | Configure checkout validation to enforce credit limits and holds |
 
 ### Protected Customer Data
 
