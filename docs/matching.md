@@ -143,11 +143,21 @@ This ensures accurate cap calculations when:
 
 ## Gated Account Handling
 
-Gated buyer accounts (`isGated = true` from plan enforcement) are **not excluded** from matching:
-- Matching is read-only discovery; excluding gated buyers would hide valid matches
-- Gating applies only to value-add actions (apply, confirm), not to match suggestions
-- `getBuyersWithAliases` returns all buyers regardless of gating status
-- Gate checks occur at action time (apply/confirm) via `activeAccountFragment`
+Gated accounts (`gated_at IS NOT NULL`) are **not excluded** from matching, confirm, apply, or unmatch.
+The `activeAccountFragment` helper must NOT be used in matching or apply queries.
+
+Per `gating.server.ts:57-60`, gating applies only to these 4 actions:
+
+| Action | File:Line | Effect |
+|--------|-----------|--------|
+| Reminders | `reminders.server.ts:528` | `isAccountActive()` skips gated accounts |
+| Credit-limit edits | `app.accounts.$id.tsx:299` | Rejects non-hold edits on gated accounts |
+| Account editing | `app.accounts.$id.tsx:299` | Same guard as credit-limit |
+| Bulk import | `app.imports.tsx:356` | `enforceImportLimit()` blocks over-limit |
+
+New accounts exceeding the plan limit are created with `gated_at` set:
+- `sync/company-location.server.ts:255-259`
+- `sync/customer.server.ts:412-414`
 
 ## Payer Aliases
 

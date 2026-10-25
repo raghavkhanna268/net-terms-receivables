@@ -33,8 +33,26 @@ let mockEnqueueShouldThrow = false;
 // M7: Custom userErrors to inject for testing error code mapping
 let mockUserErrors: Array<{ field: string[]; message: string }> | null = null;
 
-// Delay in ms before Shopify mock returns (for race condition testing)
-let mockShopifyDelayMs = 0;
+// Deferred promise for deterministic race testing
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+}
+function createDeferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+// Signal when Shopify mock is invoked (for deterministic race testing)
+let shopifyCalledDeferred: Deferred<void> | null = null;
+// Signal to release the Shopify mock (for deterministic race testing)
+let shopifyReleaseDeferred: Deferred<void> | null = null;
 
 vi.mock("../shopify-client.server", async (importOriginal) => {
   const actual = await importOriginal() as Record<string, unknown>;
@@ -60,14 +78,20 @@ vi.mock("../shopify-client.server", async (importOriginal) => {
 
       // Handle OrderMarkAsPaid mutation
       orderMarkAsPaidCallCount++;
+
+      // Signal that Shopify mock was called (for deterministic race testing)
+      if (shopifyCalledDeferred) {
+        shopifyCalledDeferred.resolve();
+      }
+
+      // Wait for release signal if set (for deterministic race testing)
+      if (shopifyReleaseDeferred) {
+        await shopifyReleaseDeferred.promise;
+      }
+
       // Execute callback DURING the Shopify call (for race condition testing)
       if (onOrderMarkAsPaidCallback) {
         await onOrderMarkAsPaidCallback();
-      }
-
-      // Apply delay for race condition testing (simulates slow Shopify response)
-      if (mockShopifyDelayMs > 0) {
-        await new Promise(resolve => setTimeout(resolve, mockShopifyDelayMs));
       }
 
       if (mockAlreadyPaid) {
@@ -185,11 +209,12 @@ describeWithDb("S17 apply service DB integration", () => {
     mockAlreadyPaid = false;
     mockEnqueueShouldThrow = false;
     mockUserErrors = null;
-    mockShopifyDelayMs = 0;
     shopifyCallCount = 0;
     verifyOrderIsPaidCallCount = 0;
     orderMarkAsPaidCallCount = 0;
     onOrderMarkAsPaidCallback = null;
+    shopifyCalledDeferred = null;
+    shopifyReleaseDeferred = null;
 
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${TEST_SHOP_ID}`;
@@ -553,11 +578,13 @@ describeWithDb("S17 apply service DB integration", () => {
 
     it("apply vs unmatch race: concurrent calls on same confirmed match (20 iterations)", async () => {
       const ITERATIONS = 20;
+      const AMOUNT_PAISE = 1000000n;
+      const AMOUNT_RUPEES = Number(AMOUNT_PAISE) / 100;
 
       for (let i = 0; i < ITERATIONS; i++) {
-        const paymentId = await createPayment(1000000n);
-        const invoiceId = await createInvoice(1000000n);
-        const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
+        const paymentId = await createPayment(AMOUNT_PAISE);
+        const invoiceId = await createInvoice(AMOUNT_PAISE);
+        const matchId = await createConfirmedMatch(paymentId, invoiceId, AMOUNT_PAISE);
 
         orderMarkAsPaidCallCount = 0;
 
@@ -605,7 +632,7 @@ describeWithDb("S17 apply service DB integration", () => {
         } else {
           expect(finalMatch.state).toBe("unmatched");
           expect(finalInvoice.status).toBe("open");
-          expect(parseFloat(finalInvoice.outstanding)).toBe(10000);
+          expect(parseFloat(finalInvoice.outstanding)).toBe(AMOUNT_RUPEES);
           expect(appliedAudits.length).toBe(0);
           expect(unmatchedAudits.length).toBe(1);
           expect(orderMarkAsPaidCallCount).toBe(0);
@@ -619,38 +646,63 @@ describeWithDb("S17 apply service DB integration", () => {
       }
     });
 
-    it("apply vs unmatch race with delay: unmatch refused during 'pushing' state", async () => {
-      mockShopifyDelayMs = 50;
+    it("apply vs unmatch race with signal: unmatch refused during 'pushing' state", async () => {
+      const AMOUNT_PAISE = 1000000n;
 
-      const paymentId = await createPayment(1000000n);
-      const invoiceId = await createInvoice(1000000n);
-      const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
+      const paymentId = await createPayment(AMOUNT_PAISE);
+      const invoiceId = await createInvoice(AMOUNT_PAISE);
+      const matchId = await createConfirmedMatch(paymentId, invoiceId, AMOUNT_PAISE);
 
       orderMarkAsPaidCallCount = 0;
 
-      const applyPromise = applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
-      await new Promise(resolve => setTimeout(resolve, 10));
-      const unmatchPromise = unmatchMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+      // Set up deferred signals for deterministic test
+      shopifyCalledDeferred = createDeferred<void>();
+      shopifyReleaseDeferred = createDeferred<void>();
 
-      const [applyResult, unmatchResult] = await Promise.all([applyPromise, unmatchPromise]);
+      // Start apply - it will signal when Shopify mock is called, then wait for release
+      const applyPromise = applyMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+
+      // Wait for Shopify mock to be called - this guarantees match is in 'pushing' state
+      await shopifyCalledDeferred.promise;
+
+      // Verify match is in 'pushing' state
+      const [pushingMatch] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId}
+      `;
+      expect(pushingMatch.state).toBe("pushing");
+
+      // Now call unmatch - should be refused because push is in progress
+      const unmatchResult = await unmatchMatch(sql, TEST_SHOP_ID, matchId, "test-user");
+      expect(unmatchResult.success).toBe(false);
+      expect(unmatchResult.error).toBe("Cannot unmatch: push is in progress");
+
+      // Verify match is still 'pushing'
+      const [stillPushingMatch] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId}
+      `;
+      expect(stillPushingMatch.state).toBe("pushing");
+
+      // Release the Shopify mock to complete
+      shopifyReleaseDeferred.resolve();
+
+      // Wait for apply to complete
+      const applyResult = await applyPromise;
+
+      // Assert final state
+      expect(applyResult.success).toBe(true);
+      expect(applyResult.invoicePaid).toBe(true);
 
       const [finalMatch] = await sql<{ state: string }[]>`
         SELECT state FROM "Match" WHERE id = ${matchId}
       `;
+      expect(finalMatch.state).toBe("pushed");
 
       const [finalInvoice] = await sql<{ outstanding: string; status: string }[]>`
         SELECT outstanding::text, status FROM "Invoice" WHERE id = ${invoiceId}
       `;
-
-      expect(applyResult.success).toBe(true);
-      expect(applyResult.invoicePaid).toBe(true);
-      expect(finalMatch.state).toBe("pushed");
       expect(finalInvoice.status).toBe("paid");
       expect(parseFloat(finalInvoice.outstanding)).toBe(0);
       expect(orderMarkAsPaidCallCount).toBe(1);
-
-      expect(unmatchResult.success).toBe(false);
-      expect(unmatchResult.error).toMatch(/Cannot unmatch: push is in progress|Cannot unmatch: order already marked as paid/);
 
       const appliedAudits = await sql<{ id: string }[]>`
         SELECT id FROM "AuditEvent"
@@ -658,6 +710,7 @@ describeWithDb("S17 apply service DB integration", () => {
           AND type = 'match.applied'
           AND data->>'matchId' = ${matchId}
       `;
+      expect(appliedAudits.length).toBe(1);
 
       const unmatchedAudits = await sql<{ id: string }[]>`
         SELECT id FROM "AuditEvent"
@@ -665,11 +718,7 @@ describeWithDb("S17 apply service DB integration", () => {
           AND type = 'match.unmatched'
           AND data->>'matchId' = ${matchId}
       `;
-
-      expect(appliedAudits.length).toBe(1);
       expect(unmatchedAudits.length).toBe(0);
-
-      mockShopifyDelayMs = 0;
     });
   });
 
