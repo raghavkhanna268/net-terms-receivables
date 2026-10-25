@@ -1,6 +1,6 @@
 # S18 Acceptance Test Plan: Payment reminders (gated on the Resend API key)
 
-**Status:** Built and tested (see PR #234). Full implementation in `app/services/reminders.server.ts` with:
+**Status:** Built and tested in [PR #234](https://github.com/raghavkhanna268/net-terms-receivables/pull/234). Full implementation in `app/services/reminders.server.ts` with:
 - Atomic cap enforcement via `pg_advisory_xact_lock` (fixes race condition from original CTE approach)
 - Daily cap: 100/day, Monthly cap: 3,000/month (per Resend free tier)
 - Idempotency via `ReminderLog` unique index on `(ruleId, invoiceId)`
@@ -76,20 +76,20 @@ This plan verifies that:
   - S18-02: `app/services/__tests__/reminders.test.ts:167-177` - empty/whitespace treated as unset
   - S18-05: `app/services/__tests__/reminders.test.ts:252-256` - logs "reminders_disabled"
 - [x] S18-10 through S18-17 pass with a mocked provider.
-  - S18-10: `app/services/__tests__/reminders-cap-db.test.ts:219-269` - two different invoices both send
-  - S18-11: `app/services/__tests__/reminders-cap-db.test.ts:276-321` - concurrent calls give exactly 1 send
-  - S18-12: `app/services/__tests__/reminders.test.ts:399-439` - skips paid/cancelled invoices
+  - S18-10: `app/services/__tests__/reminders-cap-db.test.ts:218-273` - two different invoices both send
+  - S18-11: `app/services/__tests__/reminders-cap-db.test.ts:275-326` - concurrent calls give exactly 1 send
+  - S18-12: `app/services/__tests__/reminders.test.ts:399-419` - skips paid/cancelled invoices
   - S18-14: `app/services/__tests__/reminders.test.ts:562-589` - 429/5xx retryable
   - S18-15: `app/services/__tests__/reminders.test.ts:592-627` - 401 non-retryable, releases cap
-  - S18-16: `app/services/__tests__/reminders.test.ts:999-1030` - timezone day boundary handling
+  - S18-16: `app/services/__tests__/reminders.test.ts:999-1008` - timezone day boundary handling
 - [x] S18-20 passes. Prod `PLAN_GATING_ENFORCED` is still `"false"`.
   - `app/services/__tests__/plan-gating-actions-db.test.ts:342-403` - gated account sends when gating OFF
 - [x] PCD-1/2, SCOPE-1 and DPDP-1 through DPDP-3 pass.
-  - PCD-1: `app/services/__tests__/reminders.test.ts:445-488` - skips when no email
+  - PCD-1: `app/services/__tests__/reminders.test.ts:445-466` - skips when no email
 - [x] CI is green on PR #234. No real network in tests. No placebo assertions.
 - [x] **Cap enforcement is atomic.** 
-  - Daily cap: `app/services/__tests__/reminders-cap-db.test.ts:113-156` - 100 sequential succeed, 101st returns daily_cap; concurrent at 99 gives exactly 1
-  - Monthly cap: `app/services/__tests__/reminders-cap-db.test.ts:159-216` - reservations 2996..3000 succeed, 3001 returns monthly_cap; concurrent at boundary gives exactly remaining count
+  - Daily cap: `app/services/__tests__/reminders-cap-db.test.ts:112-156` - 100 sequential succeed, 101st returns daily_cap; concurrent at 99 gives exactly 1
+  - Monthly cap: `app/services/__tests__/reminders-cap-db.test.ts:158-216` - reservations 2996..3000 succeed, 3001 returns monthly_cap; concurrent at boundary gives exactly remaining count
 - [ ] DevOps confirms the `RESEND_API_KEY` secret is **absent** in the prod Worker (`wrangler secret list`) until Raghav confirms the DPA.
 
 ## 7. Resend Free Tier Limits
