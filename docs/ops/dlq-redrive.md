@@ -7,6 +7,30 @@ retries or encountered non-retryable errors (schema mismatches, auth failures).
 
 This runbook describes how to investigate and redrive DLQ messages.
 
+## Sanitized Rows
+
+Some DLQ rows are **sanitized** (contain only allowlisted metadata, no payload).
+These rows have `message->>'sanitized' = 'true'` and cannot be redriven because
+there is no message payload to re-process.
+
+### When are rows sanitized?
+
+Rows are sanitized for `shop_not_found` errors on topics with reconcile coverage:
+- Companies, company locations (re-fetched via RECONCILE_COMPANIES)
+- Orders (re-fetched via RECONCILE_ORDERS)
+- Bulk JSONL with bulkType 'companies' or 'orders'
+
+Sanitized rows preserve audit metadata (topic, webhookId, resourceGid, attemptCount)
+but remove PII (shop domain, payload, customer data).
+
+### Known gap: draft orders and customers
+
+Draft order and customer `shop_not_found` rows **are NOT sanitized** because nothing
+re-fetches those topics after install. They keep their full message unchanged.
+
+A follow-up (S8 customers/draft-orders reconcile) will enable sanitization for those
+topics once reconcile coverage exists.
+
 ## Diagnosing DLQ Issues
 
 ### Check DLQ Contents
@@ -58,26 +82,32 @@ messages that haven't been redriven yet.
 For emergencies when GitHub Actions is unavailable:
 
 ```sql
--- Preview: Count messages by topic
-SELECT message->>'topic' AS topic, COUNT(*)
+-- Preview: Count messages by topic (separating redrivable vs sanitized)
+SELECT
+  message->>'topic' AS topic,
+  COUNT(*) FILTER (WHERE NOT (message ? 'sanitized')) AS redrivable,
+  COUNT(*) FILTER (WHERE message ? 'sanitized') AS sanitized
 FROM s6_dead_letter
 GROUP BY message->>'topic';
 
--- Preview: Show messages for a topic (no payloads)
+-- Preview: Show redrivable messages for a topic (no payloads)
 SELECT id, original_queue, dead_lettered_at,
        LEFT(REGEXP_REPLACE(error, ':.*$', ''), 80) AS error_class
 FROM s6_dead_letter
 WHERE message->>'topic' = 'ORDERS_UPDATED'
+  AND NOT (message ? 'sanitized')
 ORDER BY dead_lettered_at
 LIMIT 20;
 
 -- Redrive (in a transaction for safety)
+-- NOTE: Excludes sanitized rows - they have no payload to re-process
 BEGIN;
 
 WITH to_redrive AS (
   SELECT id, original_queue, message
   FROM s6_dead_letter
   WHERE message->>'topic' = 'ORDERS_UPDATED'
+    AND NOT (message ? 'sanitized')
   ORDER BY dead_lettered_at ASC
   LIMIT 50
 ),

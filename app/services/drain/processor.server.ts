@@ -57,6 +57,12 @@ import {
   getManualKeyForBulkOp,
 } from "./reconcile-handlers.server";
 import { toErrorCode, safeLog, shopHash } from "~/lib/log.server";
+import {
+  isShopNotFoundReason,
+  sanitizeSyncMessage,
+  sanitizeBulkMessage,
+  type SanitizedDeadLetterMessage,
+} from "./dead-letter-sanitize.server";
 
 /**
  * Configuration for drain processing.
@@ -978,6 +984,18 @@ async function extendVisibility(sql: Sql, queue: string, msgId: string, seconds:
  * returns false and we skip the s6_dead_letter INSERT. This prevents the
  * DLQ write from re-creating data that the redact just cleaned up.
  *
+ * Shop-not-found sanitization (#239 part a):
+ * When the error is shop_not_found and the topic has reconcile coverage
+ * (companies, company_locations, orders, bulk companies/orders), the message
+ * is sanitized to an allowlisted object without PII. Draft orders and customers
+ * keep their full message because nothing re-fetches those after install.
+ *
+ * @param sql - postgres.js SQL client
+ * @param queue - Queue name (s6_sync or s6_bulk)
+ * @param msgId - Message ID from the queue
+ * @param message - Original message (sync or bulk)
+ * @param error - Error reason (e.g., 'shop_not_found', 'permanent:shop_not_found')
+ * @param readCt - Read count for attempt tracking (required for sanitization)
  * @returns true if the message was successfully dead-lettered, false if
  *          the message was already deleted (e.g., by shop/redact)
  */
@@ -986,8 +1004,34 @@ async function moveToDeadLetter(
   queue: string,
   msgId: string,
   message: SyncMessage | BulkMessage,
-  error: string
+  error: string,
+  readCt: number
 ): Promise<boolean> {
+  let messageToStore: SyncMessage | BulkMessage | SanitizedDeadLetterMessage = message;
+
+  if (isShopNotFoundReason(error)) {
+    if (queue === S6_QUEUES.SYNC) {
+      const sanitized = sanitizeSyncMessage(message as SyncMessage, msgId, readCt);
+      if (sanitized) {
+        messageToStore = sanitized;
+        safeLog("info", "dlq_sanitized_shop_not_found", {
+          topic: message.topic,
+          originalMsgId: msgId,
+        });
+      }
+    } else if (queue === S6_QUEUES.BULK) {
+      const sanitized = sanitizeBulkMessage(message as BulkMessage, msgId, readCt);
+      if (sanitized) {
+        messageToStore = sanitized;
+        safeLog("info", "dlq_sanitized_shop_not_found", {
+          topic: message.topic,
+          bulkType: (message as BulkMessage).bulkType,
+          originalMsgId: msgId,
+        });
+      }
+    }
+  }
+
   return sql.begin(async (tx) => {
     const [result] = await tx<[{ delete: boolean }]>`
       SELECT pgmq.delete(${queue}, ${msgId}::bigint)
@@ -1007,7 +1051,7 @@ async function moveToDeadLetter(
       ) VALUES (
         ${queue},
         ${msgId},
-        ${tx.json(message)},
+        ${tx.json(messageToStore)},
         ${error},
         NOW()
       )
@@ -1055,7 +1099,8 @@ async function processSyncQueue(
           S6_QUEUES.SYNC,
           msg.msg_id,
           msg.message,
-          `permanent:no_handler`
+          `permanent:no_handler`,
+          msg.read_ct
         );
         if (dlqd) {
           result.deadLettered++;
@@ -1119,7 +1164,8 @@ async function processSyncQueue(
             S6_QUEUES.SYNC,
             msg.msg_id,
             msg.message,
-            dlqReason
+            dlqReason,
+            msg.read_ct
           );
           if (dlqd) {
             result.deadLettered++;
@@ -1162,7 +1208,7 @@ async function processSyncQueue(
           }
         }
 
-        const dlqd = await moveToDeadLetter(sql, S6_QUEUES.SYNC, msg.msg_id, msg.message, errorCode);
+        const dlqd = await moveToDeadLetter(sql, S6_QUEUES.SYNC, msg.msg_id, msg.message, errorCode, msg.read_ct);
         if (dlqd) {
           result.deadLettered++;
         } else {
@@ -1221,7 +1267,8 @@ async function processBulkQueue(
           S6_QUEUES.BULK,
           msg.msg_id,
           msg.message,
-          `permanent:no_handler`
+          `permanent:no_handler`,
+          msg.read_ct
         );
         if (dlqd) {
           result.deadLettered++;
@@ -1278,7 +1325,8 @@ async function processBulkQueue(
             S6_QUEUES.BULK,
             msg.msg_id,
             msg.message,
-            `permanent:${errorCode}`
+            `permanent:${errorCode}`,
+            msg.read_ct
           );
           if (dlqd) {
             result.deadLettered++;
@@ -1298,7 +1346,8 @@ async function processBulkQueue(
               S6_QUEUES.BULK,
               msg.msg_id,
               msg.message,
-              errorCode
+              errorCode,
+              msg.read_ct
             );
             if (dlqd) {
               result.deadLettered++;
@@ -1318,7 +1367,7 @@ async function processBulkQueue(
     } catch (err) {
       const errorCode = toErrorCode(err);
       if (msg.read_ct >= config.maxRetries) {
-        const dlqd = await moveToDeadLetter(sql, S6_QUEUES.BULK, msg.msg_id, msg.message, errorCode);
+        const dlqd = await moveToDeadLetter(sql, S6_QUEUES.BULK, msg.msg_id, msg.message, errorCode, msg.read_ct);
         if (dlqd) {
           result.deadLettered++;
         } else {
