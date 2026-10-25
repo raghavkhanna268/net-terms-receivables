@@ -1133,7 +1133,7 @@ describeWithDb("shop/redact complete DB deletion", () => {
     const [afterReinstall] = await sql<[{ receipts: string; processed: string }]>`
       SELECT
         (SELECT COUNT(*)::text FROM webhook_receipts WHERE shop = ${REINST_DOMAIN}) as receipts,
-        (SELECT COUNT(*)::text FROM s6_processed_webhooks WHERE webhook_id IN (${newWhId1}, ${newWhId2}, ${redeliveredWhId}}) as processed
+        (SELECT COUNT(*)::text FROM s6_processed_webhooks WHERE webhook_id IN (${newWhId1}, ${newWhId2}, ${redeliveredWhId})) as processed
     `;
     expect(parseInt(afterReinstall.receipts, 10)).toBe(3);
     expect(parseInt(afterReinstall.processed, 10)).toBe(3);
