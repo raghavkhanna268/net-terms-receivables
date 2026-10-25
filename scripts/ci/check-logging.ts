@@ -153,51 +153,21 @@ const SENSITIVE_TEMPLATE_LAST_PROP = /(?:^|\.)(shop|shopDomain|domain|myshopifyD
 const DOMAIN_LITERAL_PATTERN = /myshopify\.com/i;
 
 /**
- * Validation regex patterns that are safe (these test strings, not log them).
- * P1: Removed `/\.test\(/` - line-wide skip was too broad.
- * Keep only: escaped-regex pattern and isValidShopDomain helper.
- * NOTE: These are now used for per-match checking in isDomainProtectedByValidationPattern,
- * not line-wide skipping. The patterns are checked inline in that function.
- */
-const _VALIDATION_PATTERNS_DOC = [
-  /isValidShopDomain/,
-  /\\\.myshopify\\\.com/,
-];
-
-/**
- * Check if a specific domain occurrence is protected by a validation pattern.
- * Returns true if the domain is part of:
- * 1. An escaped-regex form (\.myshopify\.com with no literal subdomain before the backslash)
- * 2. An isValidShopDomain call whose argument has no literal real domain
+ * Check if a specific myshopify.com occurrence is protected by a validation pattern.
+ * For NON-TEST paths (script scan, log args, Sentry args), only ONE exemption:
+ * - The escaped-regex form: `\.myshopify\.com` (backslash immediately before the dot)
  *
- * @param line The full line/text being checked
- * @param domainMatch The regex match result for the domain
+ * NO fake subdomain exemptions in non-test paths - those are test-file only.
+ * NO isValidShopDomain exemption - string literal values don't have that context.
+ *
+ * @param text The full line/text being checked
+ * @param matchIndex The position where `myshopify.com` starts in the text
  * @returns true if this specific occurrence is protected (exempt from flagging)
  */
-function isDomainProtectedByValidationPattern(
-  line: string,
-  domainMatch: RegExpExecArray
-): boolean {
-  const matchStart = domainMatch.index;
-  const subdomain = domainMatch[1];
-
-  if (matchStart > 0) {
-    const charBeforeMatch = line[matchStart - 1];
-    if (charBeforeMatch === "\\") {
-      const lookback = line.slice(Math.max(0, matchStart - 10), matchStart);
-      if (!lookback.match(/[a-z0-9][-_a-z0-9]*\\/i)) {
-        return true;
-      }
-    }
-  }
-
-  const beforeMatch = line.slice(0, matchStart);
-  const isValidShopDomainMatch = beforeMatch.match(/isValidShopDomain\s*\(\s*$/);
-  if (isValidShopDomainMatch) {
-    if (FAKE_SUBDOMAINS.has(subdomain.toLowerCase()) || matchesFakePrefix(subdomain)) {
-      return true;
-    }
-    if (/^\$\{/.test(subdomain) || /^[a-zA-Z_$][\w$]*$/.test(subdomain)) {
+function isMyshopifyComProtected(text: string, matchIndex: number): boolean {
+  if (matchIndex > 0 && text[matchIndex - 1] === "\\") {
+    const lookback = text.slice(Math.max(0, matchIndex - 20), matchIndex);
+    if (!/[a-z0-9][-_a-z0-9]*\\$/i.test(lookback)) {
       return true;
     }
   }
@@ -206,36 +176,24 @@ function isDomainProtectedByValidationPattern(
 }
 
 /**
- * Check if a line/text has any real (non-protected) domain occurrences.
- * Per-match version of the validation pattern check.
+ * Check if a line/text has any unprotected myshopify.com occurrences.
+ * Iterates EVERY /myshopify\.com/gi occurrence, not just <sub>.myshopify.com.
+ * For non-test paths: no FAKE_SUBDOMAINS, no fake prefixes, no UPPER_SNAKE exemptions.
  *
  * @param text The line or argument text to check
- * @returns Array of violations (domain matches that are NOT protected)
+ * @returns true if there are unprotected occurrences (should be flagged)
  */
-function findUnprotectedDomains(text: string): Array<{ subdomain: string; position: number }> {
-  const domainRegex = /([a-z0-9][-_a-z0-9]*)\.(myshopify\.com)/gi;
-  const unprotected: Array<{ subdomain: string; position: number }> = [];
+function hasUnprotectedMyshopifyCom(text: string): boolean {
+  const allOccurrences = /myshopify\.com/gi;
   let match;
 
-  while ((match = domainRegex.exec(text)) !== null) {
-    const subdomain = match[1].toLowerCase();
-
-    if (FAKE_SUBDOMAINS.has(subdomain) || matchesFakePrefix(subdomain)) {
-      continue;
+  while ((match = allOccurrences.exec(text)) !== null) {
+    if (!isMyshopifyComProtected(text, match.index)) {
+      return true;
     }
-
-    if (/^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(match[1])) {
-      continue;
-    }
-
-    if (isDomainProtectedByValidationPattern(text, match)) {
-      continue;
-    }
-
-    unprotected.push({ subdomain: match[1], position: match.index });
   }
 
-  return unprotected;
+  return false;
 }
 
 const CONSOLE_METHODS = new Set([
@@ -374,9 +332,9 @@ function analyzeScriptFile(filePath: string): Violation[] {
     if (DOMAIN_LITERAL_PATTERN.test(line)) {
       // Skip if it's in a help/usage message context
       if (!line.includes("e.g.") && !line.includes("example") && !line.includes("placeholder")) {
-        // Per-match check: only flag domains that are NOT protected by validation patterns
-        const unprotectedDomains = findUnprotectedDomains(line);
-        if (unprotectedDomains.length > 0) {
+        // Per-match check: only exempt escaped-regex and isValidShopDomain(identifier)
+        // NO fake subdomain exemptions in script files
+        if (hasUnprotectedMyshopifyCom(line)) {
           violations.push({
             file: relPath,
             line: lineNum,
@@ -1532,16 +1490,16 @@ function checkTemplateLiteral(
 
 /**
  * Check if a text is ENTIRELY a validation pattern with no real domains.
- * Per-match version: returns true only if ALL domain occurrences are protected.
- * This ensures fail-closed behavior: if ANY real domain is present, return false.
+ * For non-test paths: only exempt escaped-regex and isValidShopDomain(identifier).
+ * NO fake subdomain exemptions - those are test-file only.
+ * Returns true only if text contains myshopify.com AND all occurrences are protected.
  */
 function isValidationPattern(text: string): boolean {
   if (!DOMAIN_LITERAL_PATTERN.test(text)) {
     return false;
   }
 
-  const unprotectedDomains = findUnprotectedDomains(text);
-  return unprotectedDomains.length === 0;
+  return !hasUnprotectedMyshopifyCom(text);
 }
 
 function truncate(text: string, maxLen: number): string {

@@ -579,10 +579,17 @@ describe("Reconcile Route (M5)", () => {
       expect(result.error).not.toContain("shopify");
     });
 
+    it("mock RECONCILE_HUMAN_MESSAGES matches actual export (#190)", async () => {
+      const { RECONCILE_HUMAN_MESSAGES } = await import("~/services/apply.server");
+      expect(RECONCILE_HUMAN_MESSAGES).toEqual([
+        "Couldn't update the order in Shopify. Please retry.",
+        "Couldn't update the order in Shopify. Please check permissions.",
+        "Shopify is busy. Please try again in a moment.",
+      ]);
+    });
+
     it("passes RECONCILE_ERROR_MESSAGES values through unchanged (#190)", async () => {
-      const { RECONCILE_HUMAN_MESSAGES } = await import(
-        "~/services/apply.server"
-      );
+      const { RECONCILE_HUMAN_MESSAGES } = await import("~/services/apply.server");
 
       for (const humanMessage of RECONCILE_HUMAN_MESSAGES) {
         vi.resetModules();

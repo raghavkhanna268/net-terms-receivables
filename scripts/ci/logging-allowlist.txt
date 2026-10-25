@@ -20,7 +20,8 @@ app/routes/app.imports.tsx:shop-interpolation:1
 # =============================================================================
 # Scripts - shop interpolation and domain literals
 # =============================================================================
-# refresh-offline-token.ts: Uses example.myshopify.com (fake domain, now passes)
+# refresh-offline-token.ts: 1 help text with myshopify.com example
+scripts/lib/refresh-offline-token.ts:domain-literal:1
 
 # credit-status-metafield-backfill.ts:
 # - 2 ${grandTotal} interpolations (count but ends with 'total')
@@ -28,13 +29,15 @@ scripts/credit-status-metafield-backfill.ts:shop-interpolation:2
 
 # seed.ts:
 # - ${shopDomain} placeholder, ${accountName}, code-controlled .name endings
-# - Uses my-store.myshopify.com (fake domain, now passes)
 scripts/seed.ts:shop-interpolation:10
+scripts/seed.ts:domain-literal:1
 
 # validate-graphql-schema.ts:
 # - 2 ${errName} + 17 ${...message} validation errors
 scripts/validate-graphql-schema.ts:shop-interpolation:19
 
 # =============================================================================
-# Benchmark scripts - Uses nonexistent.myshopify.com (fake domain, now passes)
+# Benchmark scripts - intentionally fake domains for testing
 # =============================================================================
+scripts/benchmark-cpu-breakdown.mjs:script-domain:1
+scripts/benchmark-db-cpu.mjs:script-domain:1
