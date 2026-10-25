@@ -23,6 +23,7 @@ import type {
   LoaderFunctionArgs,
   ActionFunctionArgs,
 } from "react-router";
+import { data } from "react-router";
 import { useLoaderData, useActionData, Form, useNavigation } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
@@ -68,6 +69,7 @@ interface LoaderData {
     defaultTermsSource: "explicit" | "tag" | null;
     isGated: boolean;
   } | null;
+  upgradeUrl: string;
   creditStatus: {
     creditLimitAmount: number | null;
     creditLimitPaise: string | null;
@@ -117,9 +119,12 @@ interface LoaderData {
 }
 
 interface ActionData {
+  ok?: boolean;
   success: boolean;
   error?: string;
   metafieldSyncPending?: boolean;
+  upgradeRequired?: boolean;
+  code?: string;
 }
 
 export const loader = async ({ request, context, params }: LoaderFunctionArgs) => {
@@ -129,6 +134,10 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
   const shopDomain = session.shop;
   const accountId = params.id;
 
+  const storeHandle = shopDomain.replace(".myshopify.com", "");
+  const appHandle = process.env.APP_HANDLE ?? "net-terms-receivables";
+  const upgradeUrl = `https://admin.shopify.com/store/${storeHandle}/charges/${appHandle}/pricing_plans`;
+
   if (!accountId) {
     return {
       account: null,
@@ -136,6 +145,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       companyTotals: null,
       invoices: { rows: [], totalCount: 0 },
       gatingEnforced: isGatingEnforced(),
+      upgradeUrl,
       error: "Account ID is required",
     } satisfies LoaderData;
   }
@@ -151,6 +161,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       companyTotals: null,
       invoices: { rows: [], totalCount: 0 },
       gatingEnforced: isGatingEnforced(),
+      upgradeUrl,
       error: "Shop not found",
     } satisfies LoaderData;
   }
@@ -183,6 +194,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       companyTotals: null,
       invoices: { rows: [], totalCount: 0 },
       gatingEnforced: isGatingEnforced(),
+      upgradeUrl,
       error: "Account not found",
     } satisfies LoaderData;
   }
@@ -298,6 +310,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
     companyTotals,
     invoices,
     gatingEnforced: isGatingEnforced(),
+    upgradeUrl,
     error: null,
   } satisfies LoaderData;
 };
@@ -344,7 +357,16 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
     // Only gate credit-limit and account-details edits.
     const isGated = !isAccountActive(accountRow.gatedAt);
     if (!holdOnly && isGated) {
-      return { success: false, error: "Cannot edit gated accounts" } satisfies ActionData;
+      return data(
+        {
+          ok: false,
+          success: false,
+          upgradeRequired: true,
+          code: "plan_limit_account_gated",
+          error: "This account is over your plan limit. Upgrade to edit credit limits.",
+        } satisfies ActionData,
+        { status: 403 }
+      );
     }
     const holdReasonCodeRaw = formData.get("holdReasonCode") as string | null;
     const holdReasonCode = (holdReasonCodeRaw && holdReasonCodeRaw.trim() !== "") 
@@ -492,7 +514,7 @@ function InvoiceTable({
 }
 
 export default function AccountPage() {
-  const { account, creditStatus, companyTotals, invoices, gatingEnforced, error } = useLoaderData<typeof loader>();
+  const { account, creditStatus, companyTotals, invoices, gatingEnforced, upgradeUrl, error } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
@@ -548,10 +570,15 @@ export default function AccountPage() {
         return bannerState.show && (
           <s-section>
             <s-banner tone="warning" heading={bannerState.heading}>
-              <s-text>
-                {bannerState.bodyText}
-                {bannerState.enforcementNote && ` ${bannerState.enforcementNote}`}
-              </s-text>
+              <s-stack>
+                <s-text>
+                  {bannerState.bodyText}
+                  {bannerState.enforcementNote && ` ${bannerState.enforcementNote}`}
+                </s-text>
+                <s-button href={upgradeUrl} target="_top" variant="secondary">
+                  Upgrade
+                </s-button>
+              </s-stack>
             </s-banner>
           </s-section>
         );
@@ -773,8 +800,15 @@ export default function AccountPage() {
               </s-text>
             </s-paragraph>
             <s-banner tone="info" heading="Upgrade to edit credit settings">
-              Credit limit and account detail editing requires an upgrade. Holds still
-              work on all plans.
+              <s-stack>
+                <s-text>
+                  Credit limit and account detail editing requires an upgrade. Holds still
+                  work on all plans.
+                </s-text>
+                <s-button href={upgradeUrl} target="_top" variant="secondary">
+                  Upgrade
+                </s-button>
+              </s-stack>
             </s-banner>
             <Form method="post">
               <input type="hidden" name="_action" value="updateCredit" />
