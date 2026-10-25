@@ -1595,4 +1595,148 @@ const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});`
       expect(exitCode).toBe(0);
     });
   });
+
+  // =========================================================================
+  // #332: webhookId ban in logging contexts
+  // =========================================================================
+  describe("#332: webhookId ban", () => {
+    it("fails for safeLog with webhookId key (shorthand)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `import { safeLog } from "~/lib/log.server";
+export function test(webhookId: string) { safeLog("info", "event", { webhookId }); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("banned-log-key");
+      expect(output).toContain("webhookId");
+    });
+
+    it("fails for safeLog with webhookId key (property assignment)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `import { safeLog } from "~/lib/log.server";
+export function test(wh: string) { safeLog("info", "event", { webhookId: wh }); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("banned-log-key");
+    });
+
+    it("fails for console.log with webhookId key", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(webhookId: string) { console.log("Event", { webhookId }); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("banned-log-key");
+    });
+
+    it("fails for console.error with wh= template", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        "export function test(webhookId: string) { console.error(`Processing wh=${webhookId}`); }"
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("banned-wh-prefix");
+    });
+
+    it("fails for Sentry.setExtra with webhookId key", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `import * as Sentry from "@sentry/cloudflare";
+export function test(wh: string) { Sentry.setExtra("webhookId", wh); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("banned-log-key");
+    });
+
+    it("fails for Sentry.setContext with webhookId in object", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `import * as Sentry from "@sentry/cloudflare";
+export function test(webhookId: string) { Sentry.setContext("hook", { webhookId }); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("banned-log-key");
+    });
+
+    it("fails for template literal with ${webhookId}", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        "export function test(webhookId: string) { console.log(`Received: ${webhookId}`); }"
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("banned-log-key");
+    });
+
+    it("fails for template literal with ${data.webhookId}", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        "export function test(data: { webhookId: string }) { console.log(`Received: ${data.webhookId}`); }"
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("banned-log-key");
+    });
+
+    it("fails for string literal with wh= prefix", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test() { console.log("wh=abc123"); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("banned-wh-prefix");
+    });
+
+    it("passes for destructuring webhookId (not a log context)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(data: { webhookId: string }) {
+  const { webhookId } = data;
+  return webhookId;
+}`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("passes for webhookId in non-log function call", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export async function test(webhookId: string) {
+  await recordWebhookReceipt(tx, shop, webhookId, topic, timestamp);
+}`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("passes for webhookId in queue message object (not a log call)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(webhookId: string) {
+  const msg = { webhookId, payload: {} };
+  sendBulkMessage(msg);
+}`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("passes for type definition with webhookId", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `interface WebhookMessage { webhookId: string; topic: string; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+  });
 });

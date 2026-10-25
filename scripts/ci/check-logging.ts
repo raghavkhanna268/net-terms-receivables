@@ -57,6 +57,30 @@ const TOKEN_KEY_PATTERNS = [
 const TOKEN_PREFIX_PATTERN = /shpat_|shpua_|shpss_|shpca_|shppa_/;
 
 /**
+ * Explicitly banned keys in logging contexts (#332).
+ * These keys must NEVER appear in safeLog, console.*, Sentry.*, or AuditEvent metadata.
+ * Unlike SENSITIVE_PATTERN which uses substring matching, these are exact matches.
+ */
+const BANNED_LOG_KEYS = new Set([
+  "webhookId",
+  "webhook_id",
+]);
+
+/**
+ * Pattern to detect `wh=` prefix in template literals and strings.
+ * Matches: `wh=${webhookId}`, "wh=" + webhookId, etc.
+ * This is a common abbreviation for webhookId that should also be banned.
+ */
+const WH_EQUALS_PATTERN = /\bwh=/i;
+
+/**
+ * Check if a key is explicitly banned in logging contexts.
+ */
+function isBannedLogKey(key: string): boolean {
+  return BANNED_LOG_KEYS.has(key);
+}
+
+/**
  * Normalize a key for matching: convert snake_case to camelCase equivalent
  * for consistent pattern matching.
  */
@@ -508,7 +532,7 @@ function checkArgument(
     checkStringConcatenation(arg, sourceFile, relPath, violations);
   }
 
-  // Check for literal domain strings
+  // Check for literal domain strings and wh= pattern
   if (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) {
     const text = arg.text;
     if (DOMAIN_LITERAL_PATTERN.test(text) && !isValidationPattern(text)) {
@@ -519,6 +543,18 @@ function checkArgument(
         column: character + 1,
         rule: "domain-literal",
         message: "Literal myshopify.com domain in log statement",
+        snippet: truncate(arg.getText(), 100),
+      });
+    }
+    // Check for wh= pattern (#332)
+    if (WH_EQUALS_PATTERN.test(text)) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "banned-wh-prefix",
+        message: "Banned wh= prefix in log string (webhookId abbreviation, removed per #332)",
         snippet: truncate(arg.getText(), 100),
       });
     }
@@ -880,9 +916,20 @@ function checkSentryCall(
     const keyArg = call.arguments[0];
     const valueArg = call.arguments[1];
 
-    // Check key
+    // Check key for banned keys (#332)
     if (ts.isStringLiteral(keyArg)) {
       const keyName = keyArg.text;
+      if (isBannedLogKey(keyName)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(keyArg.getStart());
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          column: character + 1,
+          rule: "banned-log-key",
+          message: `Banned key in Sentry ${methodName}: ${keyName} (removed per #332)`,
+          snippet: truncate(call.getText(sourceFile), 100),
+        });
+      }
       if (isSensitiveKey(keyName) && !SAFE_KEY_ALLOWLIST[keyName]) {
         const { line, character } = sourceFile.getLineAndCharacterOfPosition(keyArg.getStart());
         violations.push({
@@ -948,6 +995,18 @@ function checkSentryCall(
           column: character + 1,
           rule: "domain-literal",
           message: "Literal myshopify.com domain in Sentry call",
+          snippet: truncate(arg.getText(), 100),
+        });
+      }
+      // Check for wh= pattern (#332)
+      if (WH_EQUALS_PATTERN.test(arg.text)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          column: character + 1,
+          rule: "banned-wh-prefix",
+          message: "Banned wh= prefix in Sentry string (webhookId abbreviation, removed per #332)",
           snippet: truncate(arg.getText(), 100),
         });
       }
@@ -1202,6 +1261,19 @@ function checkObjectLiteral(
       }
     }
 
+    // Check if key is explicitly banned (#332)
+    if (keyName && isBannedLogKey(keyName)) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(prop.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "banned-log-key",
+        message: `Banned key in log argument: ${keyName} (removed per #332)`,
+        snippet: truncate(prop.getText(), 100),
+      });
+    }
+
     // Check if key is sensitive
     if (keyName && isSensitiveKey(keyName) && !SAFE_KEY_ALLOWLIST[keyName]) {
       const { line, character } = sourceFile.getLineAndCharacterOfPosition(prop.getStart());
@@ -1397,6 +1469,40 @@ function checkTemplateLiteral(
     const expr = span.expression;
     const exprText = expr.getText(sourceFile);
 
+    // Check for banned webhookId identifier (#332)
+    if (ts.isIdentifier(expr)) {
+      const name = expr.text;
+      if (isBannedLogKey(name)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(expr.getStart());
+        violations.push({
+          line: line + 1,
+          column: character + 1,
+          expr: name,
+          snippet: truncate(span.getText(sourceFile), 80),
+          rule: "banned-log-key",
+          message: `Banned identifier in template literal: \${${name}} (removed per #332)`,
+        });
+        return;
+      }
+    }
+
+    // Check for banned property access like ${x.webhookId} (#332)
+    if (ts.isPropertyAccessExpression(expr)) {
+      const propName = expr.name.text;
+      if (isBannedLogKey(propName)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(expr.getStart());
+        violations.push({
+          line: line + 1,
+          column: character + 1,
+          expr: exprText.trim(),
+          snippet: truncate(span.getText(sourceFile), 80),
+          rule: "banned-log-key",
+          message: `Banned property in template literal: .${propName} (removed per #332)`,
+        });
+        return;
+      }
+    }
+
     // Gap 3: Check for bare error-like identifiers (${err}, ${error}, etc.)
     // These should be flagged unless wrapped in a safe call like toErrorCode(err)
     if (ts.isIdentifier(expr)) {
@@ -1471,16 +1577,70 @@ function checkTemplateLiteral(
   }
 
   if (ts.isTemplateExpression(node)) {
+    // Check template head for wh= pattern
+    const headText = node.head.text;
+    if (WH_EQUALS_PATTERN.test(headText)) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(node.head.getStart());
+      violations.push({
+        line: line + 1,
+        column: character + 1,
+        expr: "wh=",
+        snippet: truncate(node.getText(sourceFile), 80),
+        rule: "banned-wh-prefix",
+        message: `Banned wh= prefix in template literal (webhookId abbreviation, removed per #332)`,
+      });
+    }
+
     for (const span of node.templateSpans) {
       checkTemplateSpan(span);
+      // Check span literal text for wh= pattern
+      const literalText = span.literal.text;
+      if (WH_EQUALS_PATTERN.test(literalText)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(span.literal.getStart());
+        violations.push({
+          line: line + 1,
+          column: character + 1,
+          expr: "wh=",
+          snippet: truncate(node.getText(sourceFile), 80),
+          rule: "banned-wh-prefix",
+          message: `Banned wh= prefix in template literal (webhookId abbreviation, removed per #332)`,
+        });
+      }
     }
   }
 
   if (ts.isTaggedTemplateExpression(node)) {
     const template = node.template;
     if (ts.isTemplateExpression(template)) {
+      // Check template head for wh= pattern
+      const headText = template.head.text;
+      if (WH_EQUALS_PATTERN.test(headText)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(template.head.getStart());
+        violations.push({
+          line: line + 1,
+          column: character + 1,
+          expr: "wh=",
+          snippet: truncate(template.getText(sourceFile), 80),
+          rule: "banned-wh-prefix",
+          message: `Banned wh= prefix in template literal (webhookId abbreviation, removed per #332)`,
+        });
+      }
+
       for (const span of template.templateSpans) {
         checkTemplateSpan(span);
+        // Check span literal text for wh= pattern
+        const literalText = span.literal.text;
+        if (WH_EQUALS_PATTERN.test(literalText)) {
+          const { line, character } = sourceFile.getLineAndCharacterOfPosition(span.literal.getStart());
+          violations.push({
+            line: line + 1,
+            column: character + 1,
+            expr: "wh=",
+            snippet: truncate(template.getText(sourceFile), 80),
+            rule: "banned-wh-prefix",
+            message: `Banned wh= prefix in template literal (webhookId abbreviation, removed per #332)`,
+          });
+        }
       }
     }
   }

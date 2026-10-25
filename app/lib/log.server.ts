@@ -21,7 +21,6 @@ const ALLOWED_KEY_PATTERNS: RegExp[] = [
   /^shopId$/,
   /^shopHash$/,
   /^requestId$/,
-  /^webhookId$/,
   /^jobId$/,
   /^matchId$/,
   /^buyerAccountId$/,
@@ -140,9 +139,18 @@ const WEB_VITALS_VALUE_BOUNDS = { min: 0, maxMs: 60000, maxCls: 10 };
 const SAFE_CODE_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 
 /**
+ * Keys that are explicitly banned from logging (#332).
+ * These are excluded even if they match a generic pattern like /Id$/.
+ */
+const BANNED_KEYS = new Set(["webhookId", "webhook_id"]);
+
+/**
  * Check if a field key is allowlisted.
  */
 function isAllowedKey(key: string): boolean {
+  if (BANNED_KEYS.has(key)) {
+    return false;
+  }
   return ALLOWED_KEY_PATTERNS.some((pattern) => pattern.test(key));
 }
 
