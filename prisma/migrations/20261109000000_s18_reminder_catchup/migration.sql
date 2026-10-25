@@ -59,24 +59,15 @@ CREATE INDEX IF NOT EXISTS "idx_reminder_log_delayed"
     ON "ReminderLog" ("shopId", "invoiceId", "ruleId")
     WHERE status = 'delayed';
 
--- Step 6.5: App settings table for runtime configuration shared between SQL and TS
--- Both s18_enqueue_reminders() and reminders.server.ts read from this table.
--- The app writes to this table on startup, syncing from environment variables.
-CREATE TABLE IF NOT EXISTS public.s18_app_settings (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL,
-    updated_at TIMESTAMPTZ(3) NOT NULL DEFAULT NOW()
-);
-
--- Initialize default: gating enforced (matches env var default behavior)
-INSERT INTO public.s18_app_settings (key, value)
-VALUES ('plan_gating_enforced', 'true')
-ON CONFLICT (key) DO NOTHING;
-
 -- Step 7: Replace s18_enqueue_reminders() with catch-up logic
--- Reads plan_gating_enforced from s18_app_settings table.
--- When 'true' or '1': skip gated accounts (ba.gated_at IS NOT NULL)
--- When 'false' or '0': allow gated accounts (no gating check)
+--
+-- GATING DECISION: SQL does NOT filter gated accounts. The TS send/catch-up
+-- paths are the sole gating point (checking PLAN_GATING_ENFORCED env var).
+-- This prevents SQL and TS from disagreeing on gating policy.
+--
+-- Trade-off: A gated invoice may be re-enqueued on its due day (Part 3) or
+-- within D+1..D+3 (Part 4), but TS drops it before any Resend call.
+-- The re-enqueue is bounded by the catch-up window.
 CREATE OR REPLACE FUNCTION public.s18_enqueue_reminders()
 RETURNS void
 LANGUAGE plpgsql
@@ -91,17 +82,7 @@ DECLARE
     expired_count INT := 0;
     skipped_older_stages INT := 0;
     skipped_newer_due_today INT := 0;
-    v_gating_enforced BOOLEAN := TRUE;
-    v_gating_value TEXT;
 BEGIN
-    -- Read gating setting from config table (shared with TS)
-    SELECT value INTO v_gating_value
-    FROM public.s18_app_settings
-    WHERE key = 'plan_gating_enforced';
-    
-    IF v_gating_value IS NOT NULL THEN
-        v_gating_enforced := (v_gating_value = 'true' OR v_gating_value = '1');
-    END IF;
     -- ==========================================================================
     -- PART 1: Expire delayed reminders past the catch-up window (D+3)
     -- Mark them as skipped_daily_limit
@@ -210,8 +191,8 @@ BEGIN
         INNER JOIN public."BuyerAccount" ba
             ON ba.id = i."buyerAccountId"
             AND ba."shopId" = i."shopId"
-            -- Gating check: when enforced, skip gated accounts; otherwise allow all
-            AND (NOT v_gating_enforced OR ba.gated_at IS NULL)
+            -- NOTE: No gating filter here. TS send path handles PLAN_GATING_ENFORCED.
+            -- This allows SQL and TS to use different gating policies without conflict.
         WHERE r.enabled = true
           AND r.channel = 'email'::public."ReminderChannel"
           -- Check send window: shop's local hour must be 09-18
@@ -275,8 +256,7 @@ BEGIN
         INNER JOIN public."BuyerAccount" ba
             ON ba.id = i."buyerAccountId"
             AND ba."shopId" = i."shopId"
-            -- Gating check: when enforced, skip gated accounts; otherwise allow all
-            AND (NOT v_gating_enforced OR ba.gated_at IS NULL)
+            -- NOTE: No gating filter here. TS catch-up path handles PLAN_GATING_ENFORCED.
         WHERE rl.status = 'delayed'::public."ReminderLogStatus"
           AND r.channel = 'email'::public."ReminderChannel"
           -- Check send window

@@ -1219,11 +1219,12 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
     });
 
     it("flag=false: catch-up sends to gated account", async () => {
-      const { sendCatchupReminder, setGatingEnforced } = await import("../reminders.server");
+      const { sendCatchupReminder } = await import("../reminders.server");
       const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example" };
+      const originalEnv = process.env.PLAN_GATING_ENFORCED;
 
-      // Set gating flag to false
-      await setGatingEnforced(sql, false);
+      // Set gating flag to false via env var
+      (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "false";
 
       const invoiceId = `inv-catchup-gated-send-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/catchup-gated-send-${TEST_SUFFIX}`;
@@ -1269,16 +1270,17 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         expect(mockFetch).toHaveBeenCalled();
       } finally {
         luxonSpy.mockRestore();
-        await setGatingEnforced(sql, true);
+        (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = originalEnv;
       }
     });
 
     it("flag=true: catch-up skips gated account", async () => {
-      const { sendCatchupReminder, setGatingEnforced } = await import("../reminders.server");
+      const { sendCatchupReminder } = await import("../reminders.server");
       const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example" };
+      const originalEnv = process.env.PLAN_GATING_ENFORCED;
 
-      // Set gating flag to true
-      await setGatingEnforced(sql, true);
+      // Set gating flag to true via env var
+      (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "true";
 
       const invoiceId = `inv-catchup-gated-skip-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/catchup-gated-skip-${TEST_SUFFIX}`;
@@ -1331,6 +1333,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         expect(log).toBeUndefined();
       } finally {
         luxonSpy.mockRestore();
+        (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = originalEnv;
       }
     });
   });

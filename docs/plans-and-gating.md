@@ -251,9 +251,15 @@ Items 1-5 from issue #57 are done on main; item 6 is deferred (acceptable). Stat
 | 5 | Migration hygiene (index drift) | Done on main | Migration `20261025000001_s21_fix_gated_at_index` creates regular index; `schema.prisma:286` uses `@@index([gatedAt], map: "BuyerAccount_gated_at_idx")`. No drift (`prisma migrate diff` shows "No difference detected"). PR #67. |
 | 6 | Count-then-insert concurrency | Deferred (acceptable) | See "Concurrent webhook note" in Company Limit section above. Reason: Slight overshoot is acceptable; gated accounts don't consume functional capacity; proper locking would add latency to every webhook. |
 
-**Scheduled reminders path**: The `s18_enqueue_reminders()` PL/pgSQL function includes
-`ba.gated_at IS NULL` in its WHERE clause (migration `20261106000000_s18_enqueue_skip_gated`),
-so gated accounts are skipped at enqueue time, not just at send time.
+**Scheduled reminders path**: The `s18_enqueue_reminders()` PL/pgSQL function does NOT
+filter gated accounts. SQL enqueues all open due invoices regardless of `ba.gated_at`.
+The TS send and catch-up paths (`sendPaymentReminder`, `sendCatchupReminder`) are the
+sole gating point, checking `PLAN_GATING_ENFORCED` env var via `isAccountActive()`.
+
+This design prevents SQL and TS from disagreeing on gating policy. The trade-off:
+a gated invoice may be re-enqueued on its due day (Part 3) or within D+1..D+3 (Part 4),
+but TS drops it before any Resend call, claim, or cap reservation. The re-enqueue is
+bounded by the catch-up window.
 Tests: `s18-enqueue-skip-gated-db.test.ts`.
 
 ## Test Coverage for Gated Account Behavior
@@ -280,8 +286,9 @@ Tests proving over-limit (gated) accounts stay visible and only gated actions ar
 
 | Action | Test File | Test Name |
 |--------|-----------|-----------|
-| Reminders (send) | `plan-gating-actions-db.test.ts` | "skips gated account with gating ON - NO ReminderLog, NO cap consumed" |
-| Reminders (enqueue) | `s18-enqueue-skip-gated-db.test.ts` | "does NOT enqueue reminder for gated account's due invoice" |
+| Reminders (send) | `s18-enqueue-skip-gated-db.test.ts` | "flag true skips gated account on send path with no claim/cap" |
+| Reminders (catch-up) | `s18-enqueue-skip-gated-db.test.ts` | "flag true skips gated account on catch-up path with no claim/cap" |
+| SQL enqueues | `s18-enqueue-skip-gated-db.test.ts` | "SQL enqueues gated account (TS gates)" |
 | Credit-limit edit | `plan-gating-actions-db.test.ts` | "rejects credit-limit edit on gated account when gating ON" |
 | Hold-only allowed | `plan-gating-actions-db.test.ts` | "allows hold-only update on gated account when gating ON (holds work on all plans)" |
 
@@ -289,7 +296,8 @@ Tests proving over-limit (gated) accounts stay visible and only gated actions ar
 
 | Area | Test File | Test Name |
 |------|-----------|-----------|
-| Reminders | `plan-gating-actions-db.test.ts` | "sends reminder for gated account with gating OFF (passes Gate 3)" |
+| Reminders (send) | `s18-enqueue-skip-gated-db.test.ts` | "flag false sends to gated account on send path" |
+| Reminders (catch-up) | `s18-enqueue-skip-gated-db.test.ts` | "flag false sends to gated account on catch-up path" |
 | Credit-limit edit | `plan-gating-actions-db.test.ts` | "allows credit-limit edit on gated account when gating OFF" |
 | Company limit | `gating.test.ts` | "checkCompanyLimit with gating OFF" (allows all) |
 | Import limit | `gating.test.ts` | "checkImportLimit with gating OFF" (allows all) |
