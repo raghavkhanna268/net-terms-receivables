@@ -12,6 +12,7 @@ Step-by-step checklists for launch prerequisites. Complete these before Shopify 
 | [Privacy Policy](/privacy) — Fill in `[TBD: ...]` placeholders in [docs/privacy.md](../privacy.md) and verify route is accessible | Raghav | Pending |
 | `PLAN_GATING_ENFORCED` stays `"false"` in every environment until Raghav decides pricing and the Shopify plans are created. The go comes from Raghav via Wholesale Terms Builder. Enabling it gates new over-limit accounts and skips reminders for gated accounts (holds and aging are unaffected). | Raghav (decision), then DevOps | Holding |
 | `RESEND_API_KEY` + `RESEND_FROM` set as Worker secrets and Resend DPA accepted, before any shop enables reminders | Raghav | Pending |
+| Remove or empty `RESEND_TEST_RECIPIENTS` guard before launch (fail-closed allowlist blocks all sends when set) | DevOps | Pending |
 
 ## Order of Operations
 

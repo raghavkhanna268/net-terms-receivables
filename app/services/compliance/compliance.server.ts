@@ -15,8 +15,11 @@
  */
 
 import type { Sql } from "~/lib/db-light.server";
-import { safeLog, shopHash } from "~/lib/log.server";
-import { sendViaResend } from "~/services/resend-client.server";
+import { safeLog, shopHash, toErrorCode } from "~/lib/log.server";
+import {
+  parseRecipientAllowlist,
+  isRecipientAllowed,
+} from "~/services/recipient-allowlist.server";
 
 // ============================================================================
 // RETENTION CONSTANTS
@@ -884,43 +887,65 @@ The export will be available for 30 days.
 
 — Net Terms Receivables`;
 
-  const sendResult = await sendViaResend(
-    {
-      from: resendFrom,
-      to: [shopOwnerEmail],
-      subject: "Customer Data Request Ready for Download",
-      html: htmlContent,
-      text: textContent,
-    },
-    { RESEND_API_KEY: resendApiKey }
-  );
+  // Pre-launch recipient allowlist check (fail closed)
+  const allowlist = parseRecipientAllowlist(process.env.RESEND_TEST_RECIPIENTS);
+  if (allowlist.size === 0) {
+    safeLog("info", "data_request_email_skipped", {
+      shopHash: hash,
+      requestId,
+      reason: "recipient_allowlist_empty",
+    });
+    return { sent: false, skippedReason: "recipient_allowlist_empty" };
+  }
+  if (!isRecipientAllowed(shopOwnerEmail, allowlist)) {
+    safeLog("info", "data_request_email_skipped", {
+      shopHash: hash,
+      requestId,
+      reason: "recipient_not_allowlisted",
+    });
+    return { sent: false, skippedReason: "recipient_not_allowlisted" };
+  }
 
-  if (sendResult.sent) {
+  const emailBody = {
+    from: resendFrom,
+    to: shopOwnerEmail,
+    subject: "Customer Data Request Ready for Download",
+    html: htmlContent,
+    text: textContent,
+  };
+
+  try {
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${resendApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(emailBody),
+    });
+
+    if (!response.ok) {
+      safeLog("info", "data_request_email_failed", {
+        shopHash: hash,
+        requestId,
+        httpStatus: response.status,
+      });
+      return { sent: false, error: `resend_api_error_${response.status}` };
+    }
+
     safeLog("info", "data_request_email_sent", {
       shopHash: hash,
       requestId,
     });
     return { sent: true };
-  }
-
-  if (sendResult.skipped) {
-    safeLog("info", "data_request_email_skipped", {
+  } catch (err) {
+    safeLog("info", "data_request_email_failed", {
       shopHash: hash,
       requestId,
-      reason: sendResult.reason,
-      skippedCount: sendResult.skippedCount,
-      allowedCount: sendResult.allowedCount,
+      err: toErrorCode(err),
     });
-    return { sent: false, skippedReason: sendResult.reason };
+    return { sent: false, error: toErrorCode(err) };
   }
-
-  safeLog("info", "data_request_email_failed", {
-    shopHash: hash,
-    requestId,
-    httpStatus: sendResult.httpStatus,
-    errorCode: sendResult.error,
-  });
-  return { sent: false, error: sendResult.error };
 }
 
 // ============================================================================

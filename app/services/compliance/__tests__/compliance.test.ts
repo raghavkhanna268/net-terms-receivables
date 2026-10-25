@@ -818,7 +818,7 @@ describe("compliance.server", () => {
       );
 
       expect(result.sent).toBe(false);
-      expect(result.error).toBe("resend_server_error");
+      expect(result.error).toBe("resend_api_error_500");
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining("data_request_email_failed")
       );
@@ -831,7 +831,7 @@ describe("compliance.server", () => {
       vi.stubEnv("RESEND_TEST_RECIPIENTS", "owner@test-shop.com");
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
-      // Mock network error
+      // Mock network error (generic error message maps to "error" via toErrorCode)
       mockFetch.mockRejectedValueOnce(new Error("Network error"));
 
       const result = await sendDataRequestNotification(
@@ -841,8 +841,8 @@ describe("compliance.server", () => {
       );
 
       expect(result.sent).toBe(false);
-      // Error code is returned, not raw message (per security rule)
-      expect(result.error).toBe("fetch_error");
+      // toErrorCode maps generic errors to "error", preserving main's behavior
+      expect(result.error).toBe("error");
       consoleSpy.mockRestore();
     });
   });

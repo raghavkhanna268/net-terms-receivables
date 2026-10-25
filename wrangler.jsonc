@@ -48,9 +48,7 @@
     // When OFF (default): Plan resolution, banner, usage work but limits are not enforced.
     // When ON: Over-limit accounts are gated (gated_at set) and blocked from operations.
     // Expected Partner Dashboard plan names: Free, Starter, Growth, Scale (case-insensitive)
-    "PLAN_GATING_ENFORCED": "false",
-    // S18: Sender email address for payment reminders
-    "RESEND_FROM": "reminders@mail.termwiseapp.com"
+    "PLAN_GATING_ENFORCED": "false"
   },
 
   "observability": {

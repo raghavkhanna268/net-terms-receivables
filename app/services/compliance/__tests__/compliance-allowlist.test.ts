@@ -117,7 +117,7 @@ describe("sendDataRequestNotification - allowlist", () => {
     expect(allLogs).toContain("recipient_allowlist_empty");
   });
 
-  it("logs reason enum and counts only, not addresses", async () => {
+  it("logs reason enum only, not addresses", async () => {
     vi.stubEnv("RESEND_API_KEY", "re_test_1234");
     vi.stubEnv("RESEND_FROM", "noreply@test-example.com");
     vi.stubEnv("RESEND_TEST_RECIPIENTS", "allowed@test-example.com");
@@ -134,8 +134,6 @@ describe("sendDataRequestNotification - allowlist", () => {
 
     expect(allLogs).toContain("data_request_email_skipped");
     expect(allLogs).toContain("recipient_not_allowlisted");
-    expect(allLogs).toContain("skippedCount");
-    expect(allLogs).toContain("allowedCount");
 
     expect(allLogs).not.toContain("notallowed@test-some-domain.com");
     expect(allLogs).not.toContain("test-some-domain.com");
