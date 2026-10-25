@@ -6,10 +6,10 @@ import { requestContext } from "~/lib/request-context.server";
  * S8 Draft Order Delete with id-only payload - DB Integration Tests (#272)
  *
  * Tests verify:
- * 1. Delete with only numeric `id` (no admin_graphql_api_id) processes correctly
- * 2. Payload with neither field returns 200, logs warning, changes nothing
- * 3. Idempotent repeat delete is a no-op and exposure stays lowered
- * 4. Exposure is correctly reduced after delete
+ * 1. Delete with only numeric `id` (no admin_graphql_api_id) enqueues correctly
+ * 2. End-to-end: id-only webhook -> enqueue -> process -> row removed, exposure drops
+ * 3. Payload with neither field returns 200, logs warning, changes nothing
+ * 4. End-to-end idempotent: second id-only delete is no-op, exposure stays lowered
  */
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -145,55 +145,66 @@ describeWithDb("S8 Draft Order Delete: id-only payload (#272)", () => {
     expect(messages[0].message.resourceGid).toBe(`gid://shopify/DraftOrder/${numericId}`);
   });
 
-  it("delete with id-only: removes row and reduces exposure to 0", async () => {
+  it("end-to-end id-only: webhook enqueues, processor deletes, exposure drops", async () => {
+    const { action } = await import("~/routes/webhooks.draft_orders");
+    const { processDraftOrderWebhook, getPendingExposure } = await import("~/services/sync/draft-order.server");
+
     const numericId = 987654321;
-    const draftGid = `gid://shopify/DraftOrder/${numericId}`;
+    const expectedGid = `gid://shopify/DraftOrder/${numericId}`;
+    const webhookId = `wh-del-e2e-${TEST_SUFFIX}`;
 
     await sql`
       INSERT INTO s8_draft_orders (
         shop_id, draft_order_id, buyer_account_id, name, total,
         has_payment_terms, status, created_at, updated_at
       ) VALUES (
-        ${TEST_SHOP_ID}, ${draftGid}, ${TEST_ACCOUNT_ID}, '#D1', '25000.00',
+        ${TEST_SHOP_ID}, ${expectedGid}, ${TEST_ACCOUNT_ID}, '#D1', '25000.00',
         true, 'open', NOW(), NOW()
       )
     `;
 
-    const [beforeExposure] = await sql<{ total: string }[]>`
-      SELECT COALESCE(SUM(total), '0.00')::text as total
-      FROM s8_draft_orders
-      WHERE buyer_account_id = ${TEST_ACCOUNT_ID}
-        AND has_payment_terms = true
-        AND status != 'completed'
-    `;
-    expect(beforeExposure.total).toBe("25000.00");
+    const beforeExposure = await getPendingExposure(sql, TEST_ACCOUNT_ID);
+    expect(beforeExposure).toBe("25000.00");
 
-    const { processDraftOrderWebhook } = await import("~/services/sync/draft-order.server");
+    const request = await createSignedWebhookRequest(TEST_SECRET, {
+      shop: TEST_SHOP_DOMAIN,
+      topic: "draft_orders/delete",
+      webhookId,
+      payload: { id: numericId },
+    });
+
+    const url = new URL(request.url);
+    const response = await requestContext.run({ getSql: () => sql }, () =>
+      action({ request, params: {}, context: {} as never, url, pattern: "/webhooks/draft_orders" })
+    );
+    expect(response.status).toBe(200);
+
+    const messages = await sql<Array<{ message: { resourceGid: string; topic: string } }>>`
+      SELECT message FROM pgmq.q_s6_sync 
+      WHERE message->>'webhookId' = ${webhookId}
+    `;
+    expect(messages.length).toBe(1);
+    const enqueuedGid = messages[0].message.resourceGid;
+    expect(enqueuedGid).toBe(expectedGid);
 
     const result = await processDraftOrderWebhook(
       sql,
       TEST_SHOP_DOMAIN,
       "DRAFT_ORDERS_DELETE",
-      { id: draftGid, name: "#D1", createdAt: new Date().toISOString() },
-      `wh-del-exp-${TEST_SUFFIX}`
+      { id: enqueuedGid, name: "#D1", createdAt: new Date().toISOString() },
+      `wh-del-proc-${TEST_SUFFIX}`
     );
 
     expect(result.success).toBe(true);
     expect(result.action).toBe("deleted");
 
     const rows = await sql`
-      SELECT * FROM s8_draft_orders WHERE draft_order_id = ${draftGid}
+      SELECT * FROM s8_draft_orders WHERE draft_order_id = ${enqueuedGid}
     `;
     expect(rows.length).toBe(0);
 
-    const [afterExposure] = await sql<{ total: string }[]>`
-      SELECT COALESCE(SUM(total), '0.00')::text as total
-      FROM s8_draft_orders
-      WHERE buyer_account_id = ${TEST_ACCOUNT_ID}
-        AND has_payment_terms = true
-        AND status != 'completed'
-    `;
-    expect(afterExposure.total).toBe("0.00");
+    const afterExposure = await getPendingExposure(sql, TEST_ACCOUNT_ID);
+    expect(afterExposure).toBe("0.00");
   });
 
   it("payload with neither field: returns 200, logs warning, changes nothing", async () => {
@@ -241,59 +252,95 @@ describeWithDb("S8 Draft Order Delete: id-only payload (#272)", () => {
     expect(Number(countAfter[0].count)).toBe(1);
   });
 
-  it("idempotent repeat delete: second delete is no-op, exposure stays lowered", async () => {
+  it("end-to-end idempotent: second id-only delete is no-op, exposure stays lowered", async () => {
+    const { action } = await import("~/routes/webhooks.draft_orders");
+    const { processDraftOrderWebhook, getPendingExposure } = await import("~/services/sync/draft-order.server");
+
     const numericId = 111222333;
-    const draftGid = `gid://shopify/DraftOrder/${numericId}`;
+    const expectedGid = `gid://shopify/DraftOrder/${numericId}`;
+    const webhookId1 = `wh-del-idem1-${TEST_SUFFIX}`;
+    const webhookId2 = `wh-del-idem2-${TEST_SUFFIX}`;
 
     await sql`
       INSERT INTO s8_draft_orders (
         shop_id, draft_order_id, buyer_account_id, name, total,
         has_payment_terms, status, created_at, updated_at
       ) VALUES (
-        ${TEST_SHOP_ID}, ${draftGid}, ${TEST_ACCOUNT_ID}, '#D2', '30000.00',
+        ${TEST_SHOP_ID}, ${expectedGid}, ${TEST_ACCOUNT_ID}, '#D2', '30000.00',
         true, 'open', NOW(), NOW()
       )
     `;
 
-    const { processDraftOrderWebhook } = await import("~/services/sync/draft-order.server");
+    const beforeExposure = await getPendingExposure(sql, TEST_ACCOUNT_ID);
+    expect(beforeExposure).toBe("30000.00");
+
+    const request1 = await createSignedWebhookRequest(TEST_SECRET, {
+      shop: TEST_SHOP_DOMAIN,
+      topic: "draft_orders/delete",
+      webhookId: webhookId1,
+      payload: { id: numericId },
+    });
+
+    const url1 = new URL(request1.url);
+    const response1 = await requestContext.run({ getSql: () => sql }, () =>
+      action({ request: request1, params: {}, context: {} as never, url: url1, pattern: "/webhooks/draft_orders" })
+    );
+    expect(response1.status).toBe(200);
+
+    const messages1 = await sql<Array<{ message: { resourceGid: string } }>>`
+      SELECT message FROM pgmq.q_s6_sync 
+      WHERE message->>'webhookId' = ${webhookId1}
+    `;
+    expect(messages1.length).toBe(1);
+    const enqueuedGid = messages1[0].message.resourceGid;
+    expect(enqueuedGid).toBe(expectedGid);
 
     const result1 = await processDraftOrderWebhook(
       sql,
       TEST_SHOP_DOMAIN,
       "DRAFT_ORDERS_DELETE",
-      { id: draftGid, name: "#D2", createdAt: new Date().toISOString() },
-      `wh-del-idem1-${TEST_SUFFIX}`
+      { id: enqueuedGid, name: "#D2", createdAt: new Date().toISOString() },
+      `wh-del-proc1-${TEST_SUFFIX}`
     );
     expect(result1.success).toBe(true);
     expect(result1.action).toBe("deleted");
 
-    const [afterFirst] = await sql<{ total: string }[]>`
-      SELECT COALESCE(SUM(total), '0.00')::text as total
-      FROM s8_draft_orders
-      WHERE buyer_account_id = ${TEST_ACCOUNT_ID}
-        AND has_payment_terms = true
-        AND status != 'completed'
+    const afterFirst = await getPendingExposure(sql, TEST_ACCOUNT_ID);
+    expect(afterFirst).toBe("0.00");
+
+    const request2 = await createSignedWebhookRequest(TEST_SECRET, {
+      shop: TEST_SHOP_DOMAIN,
+      topic: "draft_orders/delete",
+      webhookId: webhookId2,
+      payload: { id: numericId },
+    });
+
+    const url2 = new URL(request2.url);
+    const response2 = await requestContext.run({ getSql: () => sql }, () =>
+      action({ request: request2, params: {}, context: {} as never, url: url2, pattern: "/webhooks/draft_orders" })
+    );
+    expect(response2.status).toBe(200);
+
+    const messages2 = await sql<Array<{ message: { resourceGid: string } }>>`
+      SELECT message FROM pgmq.q_s6_sync 
+      WHERE message->>'webhookId' = ${webhookId2}
     `;
-    expect(afterFirst.total).toBe("0.00");
+    expect(messages2.length).toBe(1);
+    const enqueuedGid2 = messages2[0].message.resourceGid;
+    expect(enqueuedGid2).toBe(expectedGid);
 
     const result2 = await processDraftOrderWebhook(
       sql,
       TEST_SHOP_DOMAIN,
       "DRAFT_ORDERS_DELETE",
-      { id: draftGid, name: "#D2", createdAt: new Date().toISOString() },
-      `wh-del-idem2-${TEST_SUFFIX}`
+      { id: enqueuedGid2, name: "#D2", createdAt: new Date().toISOString() },
+      `wh-del-proc2-${TEST_SUFFIX}`
     );
     expect(result2.success).toBe(true);
     expect(result2.action).toBe("skipped");
     expect(result2.skipReason).toContain("not found");
 
-    const [afterSecond] = await sql<{ total: string }[]>`
-      SELECT COALESCE(SUM(total), '0.00')::text as total
-      FROM s8_draft_orders
-      WHERE buyer_account_id = ${TEST_ACCOUNT_ID}
-        AND has_payment_terms = true
-        AND status != 'completed'
-    `;
-    expect(afterSecond.total).toBe("0.00");
+    const afterSecond = await getPendingExposure(sql, TEST_ACCOUNT_ID);
+    expect(afterSecond).toBe("0.00");
   });
 });
