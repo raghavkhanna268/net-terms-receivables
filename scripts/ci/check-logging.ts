@@ -315,11 +315,11 @@ function walkDirectory(
 // Text-based Script Analysis (P1.2 regression fix)
 // ============================================================================
 
-function analyzeScriptFile(filePath: string): Violation[] {
+function analyzeScriptFile(filePath: string, rootDir: string): Violation[] {
   const violations: Violation[] = [];
   const content = fs.readFileSync(filePath, "utf-8");
   const lines = content.split("\n");
-  const relPath = path.relative(REPO_ROOT, filePath);
+  const relPath = path.relative(rootDir, filePath);
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -380,7 +380,7 @@ function analyzeScriptFile(filePath: string): Violation[] {
 // AST Analysis
 // ============================================================================
 
-function analyzeFile(filePath: string): Violation[] {
+function analyzeFile(filePath: string, rootDir: string): Violation[] {
   const violations: Violation[] = [];
   const sourceText = fs.readFileSync(filePath, "utf-8");
   const sourceFile = ts.createSourceFile(
@@ -391,7 +391,7 @@ function analyzeFile(filePath: string): Violation[] {
     filePath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS
   );
 
-  const relPath = path.relative(REPO_ROOT, filePath);
+  const relPath = path.relative(rootDir, filePath);
 
   // Also check for token prefixes in TS files (but not in safeLog helper or regex patterns)
   const lines = sourceText.split("\n");
@@ -1998,6 +1998,165 @@ function groupViolations(violations: Violation[]): Map<string, Violation[]> {
 // Main
 // ============================================================================
 
+/**
+ * Result of running the logging guard analysis.
+ */
+export interface AnalysisResult {
+  exitCode: number;
+  output: string;
+}
+
+/**
+ * Run the logging guard analysis on a directory.
+ * Exported for direct testing without subprocess spawning.
+ *
+ * @param rootDir - Root directory to scan
+ * @param allowlistFile - Path to logging allowlist file
+ * @param loggerMockAllowlistFile - Path to logger mock allowlist file
+ * @returns Analysis result with exit code and output
+ */
+export function runAnalysis(
+  rootDir: string,
+  allowlistFile: string,
+  loggerMockAllowlistFile?: string
+): AnalysisResult {
+  const outputLines: string[] = [];
+  const log = (msg: string) => outputLines.push(msg);
+
+  const { tsFiles, scriptFiles, testFiles } = findSourceFiles(rootDir);
+
+  const allViolations: Violation[] = [];
+  const loggerMockViolations: Violation[] = [];
+
+  for (const file of tsFiles) {
+    const violations = analyzeFile(file, rootDir);
+    allViolations.push(...violations);
+  }
+
+  for (const file of scriptFiles) {
+    const violations = analyzeScriptFile(file, rootDir);
+    allViolations.push(...violations);
+  }
+
+  for (const testFile of testFiles) {
+    const violations = analyzeTestFile(testFile);
+    allViolations.push(...violations);
+  }
+
+  if (loggerMockAllowlistFile) {
+    for (const testFile of testFiles) {
+      const violations = analyzeTestFileForLoggerMocks(testFile);
+      loggerMockViolations.push(...violations);
+    }
+  }
+
+  const grouped = groupViolations(allViolations);
+  const allowlist = loadAllowlist(allowlistFile);
+
+  const { entries: loggerMockAllowlist, invalidEntries: invalidLoggerMockEntries } =
+    loggerMockAllowlistFile
+      ? loadLoggerMockAllowlist(loggerMockAllowlistFile)
+      : { entries: new Map<string, string>(), invalidEntries: [] };
+
+  let newViolations = 0;
+  const overAllowlist: Array<{
+    key: string;
+    found: number;
+    allowed: number;
+    violations: Violation[];
+  }> = [];
+  const staleEntries: Array<{ key: string; allowed: number; found: number }> = [];
+
+  for (const [key, violations] of grouped) {
+    const found = violations.length;
+    const allowed = allowlist.get(key) ?? 0;
+
+    if (found > allowed) {
+      newViolations += found - allowed;
+      overAllowlist.push({ key, found, allowed, violations });
+    }
+  }
+
+  for (const [key, allowed] of allowlist) {
+    const found = grouped.get(key)?.length ?? 0;
+    if (found < allowed) {
+      staleEntries.push({ key, allowed, found });
+    }
+  }
+
+  const newLoggerMockViolations: Violation[] = [];
+  const loggerMockFilesWithViolations = new Set<string>();
+  for (const v of loggerMockViolations) {
+    loggerMockFilesWithViolations.add(v.file);
+    if (!loggerMockAllowlist.has(v.file)) {
+      newLoggerMockViolations.push(v);
+    }
+  }
+
+  const staleLoggerMockEntries: Array<{ path: string; reason: string }> = [];
+  for (const [pathKey, reason] of loggerMockAllowlist) {
+    if (!loggerMockFilesWithViolations.has(pathKey)) {
+      staleLoggerMockEntries.push({ path: pathKey, reason });
+    }
+  }
+
+  let shouldFail = false;
+
+  if (newViolations === 0 && staleEntries.length === 0 &&
+      newLoggerMockViolations.length === 0 && staleLoggerMockEntries.length === 0 &&
+      invalidLoggerMockEntries.length === 0) {
+    return { exitCode: 0, output: outputLines.join("\n") };
+  }
+
+  if (newViolations > 0) {
+    shouldFail = true;
+    for (const { key, found, allowed, violations } of overAllowlist) {
+      log(`${key}: found ${found}, allowed ${allowed}`);
+      for (const v of violations.slice(0, 5)) {
+        log(`  ${v.file}:${v.line}:${v.column} [${v.rule}] ${v.message}`);
+        log(`    ${v.snippet}`);
+      }
+      if (violations.length > 5) {
+        log(`  ... and ${violations.length - 5} more`);
+      }
+    }
+  }
+
+  if (staleEntries.length > 0) {
+    shouldFail = true;
+    log("stale allowlist entries:");
+    for (const { key, allowed, found } of staleEntries) {
+      log(`  ${key}: allowed ${allowed}, found only ${found}`);
+    }
+  }
+
+  if (newLoggerMockViolations.length > 0) {
+    shouldFail = true;
+    log("logger mock violation(s):");
+    for (const v of newLoggerMockViolations) {
+      log(`  ${v.file}:${v.line} ${v.message}`);
+    }
+  }
+
+  if (staleLoggerMockEntries.length > 0) {
+    shouldFail = true;
+    log("stale logger-mock-allowlist entries:");
+    for (const { path: entryPath, reason } of staleLoggerMockEntries) {
+      log(`  ${entryPath}: ${reason}`);
+    }
+  }
+
+  if (invalidLoggerMockEntries.length > 0) {
+    shouldFail = true;
+    log("invalid logger-mock-allowlist entries:");
+    for (const { line, text, issue } of invalidLoggerMockEntries) {
+      log(`  Line ${line}: ${text} (${issue})`);
+    }
+  }
+
+  return { exitCode: shouldFail ? 1 : 0, output: outputLines.join("\n") };
+}
+
 function main(): void {
   console.log("=== AST-based Logging Guard Check ===\n");
 
@@ -2009,13 +2168,13 @@ function main(): void {
 
   // Analyze TypeScript files (full logging check)
   for (const file of tsFiles) {
-    const violations = analyzeFile(file);
+    const violations = analyzeFile(file, REPO_ROOT);
     allViolations.push(...violations);
   }
 
   // Analyze script files (text-based)
   for (const file of scriptFiles) {
-    const violations = analyzeScriptFile(file);
+    const violations = analyzeScriptFile(file, REPO_ROOT);
     allViolations.push(...violations);
   }
 
@@ -2172,4 +2331,9 @@ function main(): void {
   process.exit(shouldFail ? 1 : 0);
 }
 
-main();
+if (process.argv[1] && (
+  process.argv[1].endsWith("check-logging.ts") ||
+  process.argv[1].includes("check-logging")
+)) {
+  main();
+}

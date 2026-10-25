@@ -17,9 +17,15 @@ import { sqlOptions } from "~/lib/db-light.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
-const SUFFIX = Date.now().toString(36) + "-dlqsan";
 
-const MISSING_SHOP_DOMAIN = `test-sanitize-missing-${SUFFIX}.myshopify.com`;
+function makeTestId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}-dlqsan`;
+}
+
+const testContext = {
+  suffix: "",
+  missingShopDomain: "",
+};
 
 let sqlRef: ReturnType<typeof postgres>;
 
@@ -84,7 +90,7 @@ vi.mock("~/services/sync/company-location.server", async (importOriginal) => {
     ...actual,
     processCompanyLocationWebhook: vi.fn().mockImplementation(
       async (_sql: unknown, shopDomain: string) => {
-        if (shopDomain === MISSING_SHOP_DOMAIN) {
+        if (shopDomain === testContext.missingShopDomain) {
           return {
             success: false,
             action: "skipped",
@@ -104,7 +110,7 @@ vi.mock("~/services/sync/order.server", async (importOriginal) => {
     ...actual,
     processOrderWebhook: vi.fn().mockImplementation(
       async (_sql: unknown, shopDomain: string) => {
-        if (shopDomain === MISSING_SHOP_DOMAIN) {
+        if (shopDomain === testContext.missingShopDomain) {
           return {
             success: false,
             action: "skipped",
@@ -124,7 +130,7 @@ vi.mock("~/services/sync/draft-order.server", async (importOriginal) => {
     ...actual,
     processDraftOrderWebhook: vi.fn().mockImplementation(
       async (_sql: unknown, shopDomain: string) => {
-        if (shopDomain === MISSING_SHOP_DOMAIN) {
+        if (shopDomain === testContext.missingShopDomain) {
           return {
             success: false,
             action: "skipped",
@@ -144,7 +150,7 @@ vi.mock("~/services/sync/customer.server", async (importOriginal) => {
     ...actual,
     processCustomerWebhook: vi.fn().mockImplementation(
       async (_sql: unknown, shopDomain: string) => {
-        if (shopDomain === MISSING_SHOP_DOMAIN) {
+        if (shopDomain === testContext.missingShopDomain) {
           return {
             success: false,
             action: "skipped",
@@ -170,19 +176,21 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
   });
 
   afterAll(async () => {
-    await sqlRef`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${MISSING_SHOP_DOMAIN}`;
-    await sqlRef`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${MISSING_SHOP_DOMAIN}`;
-    await sqlRef`DELETE FROM pgmq.q_s6_bulk WHERE message->>'shop' = ${MISSING_SHOP_DOMAIN}`;
-    await sqlRef`DELETE FROM pgmq.a_s6_bulk WHERE message->>'shop' = ${MISSING_SHOP_DOMAIN}`;
-    await sqlRef`DELETE FROM s6_dead_letter WHERE message->>'webhookId' LIKE ${`%${SUFFIX}%`}`;
-    await sqlRef`DELETE FROM s6_dead_letter WHERE message->>'bulkOperationId' LIKE ${`%${SUFFIX}%`}`;
-    await sqlRef`DELETE FROM s6_bulk_operations WHERE bulk_operation_id LIKE ${`%${SUFFIX}%`}`;
-    await sqlRef`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${`%${SUFFIX}%`}`;
     await sqlRef.end();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    testContext.suffix = makeTestId();
+    testContext.missingShopDomain = `test-sanitize-missing-${testContext.suffix}.myshopify.com`;
+    await sqlRef`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${testContext.missingShopDomain}`;
+    await sqlRef`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${testContext.missingShopDomain}`;
+    await sqlRef`DELETE FROM pgmq.q_s6_bulk WHERE message->>'shop' = ${testContext.missingShopDomain}`;
+    await sqlRef`DELETE FROM pgmq.a_s6_bulk WHERE message->>'shop' = ${testContext.missingShopDomain}`;
+    await sqlRef`DELETE FROM s6_dead_letter WHERE message->>'webhookId' LIKE ${`%${testContext.suffix}%`}`;
+    await sqlRef`DELETE FROM s6_dead_letter WHERE message->>'bulkOperationId' LIKE ${`%${testContext.suffix}%`}`;
+    await sqlRef`DELETE FROM s6_bulk_operations WHERE bulk_operation_id LIKE ${`%${testContext.suffix}%`}`;
+    await sqlRef`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${`%${testContext.suffix}%`}`;
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     consoleInfoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
     consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -190,12 +198,20 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     consoleDebugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     consoleLogSpy.mockRestore();
     consoleInfoSpy.mockRestore();
     consoleWarnSpy.mockRestore();
     consoleErrorSpy.mockRestore();
     consoleDebugSpy.mockRestore();
+    await sqlRef`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${testContext.missingShopDomain}`;
+    await sqlRef`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${testContext.missingShopDomain}`;
+    await sqlRef`DELETE FROM pgmq.q_s6_bulk WHERE message->>'shop' = ${testContext.missingShopDomain}`;
+    await sqlRef`DELETE FROM pgmq.a_s6_bulk WHERE message->>'shop' = ${testContext.missingShopDomain}`;
+    await sqlRef`DELETE FROM s6_dead_letter WHERE message->>'webhookId' LIKE ${`%${testContext.suffix}%`}`;
+    await sqlRef`DELETE FROM s6_dead_letter WHERE message->>'bulkOperationId' LIKE ${`%${testContext.suffix}%`}`;
+    await sqlRef`DELETE FROM s6_bulk_operations WHERE bulk_operation_id LIKE ${`%${testContext.suffix}%`}`;
+    await sqlRef`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${`%${testContext.suffix}%`}`;
   });
 
   function getAllConsoleOutput(): string[] {
@@ -227,12 +243,12 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
 
   // Mock returns retryable (no retryable:false), matching real handlers, so message must reach maxRetries.
   it("company_locations shop_not_found stores sanitized message in DLQ after maxRetries", async () => {
-    const webhookId = `wh-loc-${SUFFIX}`;
+    const webhookId = `wh-loc-${testContext.suffix}`;
     const message = {
-      shop: MISSING_SHOP_DOMAIN,
+      shop: testContext.missingShopDomain,
       topic: "COMPANY_LOCATIONS_CREATE",
       webhookId,
-      resourceGid: `gid://shopify/CompanyLocation/loc-${SUFFIX}`,
+      resourceGid: `gid://shopify/CompanyLocation/loc-${testContext.suffix}`,
       enqueuedAt: new Date().toISOString(),
     };
 
@@ -255,7 +271,7 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     expect(dlqRow!.message.topic).toBe("COMPANY_LOCATIONS_CREATE");
     expect(dlqRow!.message.originalMsgId).toBeDefined();
     expect(dlqRow!.message.webhookId).toBe(webhookId);
-    expect(dlqRow!.message.resourceGid).toBe(`gid://shopify/CompanyLocation/loc-${SUFFIX}`);
+    expect(dlqRow!.message.resourceGid).toBe(`gid://shopify/CompanyLocation/loc-${testContext.suffix}`);
     expect(dlqRow!.message.attemptCount).toBeGreaterThanOrEqual(3);
 
     expect(dlqRow!.message).not.toHaveProperty("shop");
@@ -263,23 +279,23 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     expect(dlqRow!.message).not.toHaveProperty("payload");
 
     const storedJson = JSON.stringify(dlqRow!.message);
-    expect(storedJson).not.toContain(MISSING_SHOP_DOMAIN);
+    expect(storedJson).not.toContain(testContext.missingShopDomain);
     expect(storedJson).not.toContain("myshopify.com");
 
     const consoleOutput = getAllConsoleOutput();
     const allOutput = consoleOutput.join("\n");
-    expect(allOutput).not.toContain(MISSING_SHOP_DOMAIN);
+    expect(allOutput).not.toContain(testContext.missingShopDomain);
     expect(allOutput).toContain("dlq_sanitized_shop_not_found");
   });
 
   // Mock returns retryable (no retryable:false), matching real handlers, so message must reach maxRetries.
   it("orders shop_not_found stores sanitized message in DLQ after maxRetries", async () => {
-    const webhookId = `wh-order-${SUFFIX}`;
+    const webhookId = `wh-order-${testContext.suffix}`;
     const message = {
-      shop: MISSING_SHOP_DOMAIN,
+      shop: testContext.missingShopDomain,
       topic: "ORDERS_CREATE",
       webhookId,
-      resourceGid: `gid://shopify/Order/order-${SUFFIX}`,
+      resourceGid: `gid://shopify/Order/order-${testContext.suffix}`,
       enqueuedAt: new Date().toISOString(),
     };
 
@@ -304,22 +320,22 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     expect(dlqRow!.message).not.toHaveProperty("shopHash");
 
     const storedJson = JSON.stringify(dlqRow!.message);
-    expect(storedJson).not.toContain(MISSING_SHOP_DOMAIN);
+    expect(storedJson).not.toContain(testContext.missingShopDomain);
     expect(storedJson).not.toContain("myshopify.com");
 
     const consoleOutput = getAllConsoleOutput();
     const allOutput = consoleOutput.join("\n");
-    expect(allOutput).not.toContain(MISSING_SHOP_DOMAIN);
+    expect(allOutput).not.toContain(testContext.missingShopDomain);
     expect(allOutput).toContain("dlq_sanitized_shop_not_found");
   });
 
   it("draft_orders shop_not_found keeps FULL message in DLQ (uncovered topic)", async () => {
-    const webhookId = `wh-draft-${SUFFIX}`;
+    const webhookId = `wh-draft-${testContext.suffix}`;
     const message = {
-      shop: MISSING_SHOP_DOMAIN,
+      shop: testContext.missingShopDomain,
       topic: "DRAFT_ORDERS_CREATE",
       webhookId,
-      resourceGid: `gid://shopify/DraftOrder/draft-${SUFFIX}`,
+      resourceGid: `gid://shopify/DraftOrder/draft-${testContext.suffix}`,
       enqueuedAt: new Date().toISOString(),
     };
 
@@ -339,18 +355,18 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
 
     expect(dlqRow).toBeDefined();
     expect(dlqRow!.message.sanitized).toBeUndefined();
-    expect(dlqRow!.message.shop).toBe(MISSING_SHOP_DOMAIN);
+    expect(dlqRow!.message.shop).toBe(testContext.missingShopDomain);
     expect(dlqRow!.message.topic).toBe("DRAFT_ORDERS_CREATE");
     expect(dlqRow!.message.webhookId).toBe(webhookId);
   });
 
   it("customers shop_not_found keeps FULL message in DLQ (uncovered topic)", async () => {
-    const webhookId = `wh-cust-${SUFFIX}`;
+    const webhookId = `wh-cust-${testContext.suffix}`;
     const message = {
-      shop: MISSING_SHOP_DOMAIN,
+      shop: testContext.missingShopDomain,
       topic: "CUSTOMERS_CREATE",
       webhookId,
-      resourceGid: `gid://shopify/Customer/cust-${SUFFIX}`,
+      resourceGid: `gid://shopify/Customer/cust-${testContext.suffix}`,
       enqueuedAt: new Date().toISOString(),
     };
 
@@ -370,7 +386,7 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
 
     expect(dlqRow).toBeDefined();
     expect(dlqRow!.message.sanitized).toBeUndefined();
-    expect(dlqRow!.message.shop).toBe(MISSING_SHOP_DOMAIN);
+    expect(dlqRow!.message.shop).toBe(testContext.missingShopDomain);
     expect(dlqRow!.message.topic).toBe("CUSTOMERS_CREATE");
   });
 
@@ -384,12 +400,12 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
         retryable: false,
       });
 
-    const webhookId = `wh-graphql-${SUFFIX}`;
+    const webhookId = `wh-graphql-${testContext.suffix}`;
     const message = {
-      shop: MISSING_SHOP_DOMAIN,
+      shop: testContext.missingShopDomain,
       topic: "COMPANY_LOCATIONS_UPDATE",
       webhookId,
-      resourceGid: `gid://shopify/CompanyLocation/graphql-${SUFFIX}`,
+      resourceGid: `gid://shopify/CompanyLocation/graphql-${testContext.suffix}`,
       enqueuedAt: new Date().toISOString(),
     };
 
@@ -409,17 +425,17 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
 
     expect(dlqRow).toBeDefined();
     expect(dlqRow!.message.sanitized).toBeUndefined();
-    expect(dlqRow!.message.shop).toBe(MISSING_SHOP_DOMAIN);
+    expect(dlqRow!.message.shop).toBe(testContext.missingShopDomain);
     expect(dlqRow!.error).toContain("graphql_schema_error");
   });
 
   it("counts DLQ rows by original_msg_id, never by message->>shop", async () => {
-    const webhookId = `wh-count-${SUFFIX}`;
+    const webhookId = `wh-count-${testContext.suffix}`;
     const message = {
-      shop: MISSING_SHOP_DOMAIN,
+      shop: testContext.missingShopDomain,
       topic: "ORDERS_UPDATED",
       webhookId,
-      resourceGid: `gid://shopify/Order/count-${SUFFIX}`,
+      resourceGid: `gid://shopify/Order/count-${testContext.suffix}`,
       enqueuedAt: new Date().toISOString(),
     };
 
@@ -453,12 +469,12 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
   });
 
   it("retryable shop_not_found is re-queued before maxRetries, then dead-lettered sanitized", async () => {
-    const webhookId = `wh-retry-${SUFFIX}`;
+    const webhookId = `wh-retry-${testContext.suffix}`;
     const message = {
-      shop: MISSING_SHOP_DOMAIN,
+      shop: testContext.missingShopDomain,
       topic: "COMPANY_LOCATIONS_UPDATE",
       webhookId,
-      resourceGid: `gid://shopify/CompanyLocation/retry-${SUFFIX}`,
+      resourceGid: `gid://shopify/CompanyLocation/retry-${testContext.suffix}`,
       enqueuedAt: new Date().toISOString(),
     };
 
@@ -504,13 +520,13 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
 
     const consoleOutput = getAllConsoleOutput();
     const allOutput = consoleOutput.join("\n");
-    expect(allOutput).not.toContain(MISSING_SHOP_DOMAIN);
+    expect(allOutput).not.toContain(testContext.missingShopDomain);
   });
 
   it("bulk queue permanent:shop_not_found stores sanitized message in DLQ", async () => {
-    const bulkOpId = `bulk-${SUFFIX}`;
+    const bulkOpId = `bulk-${testContext.suffix}`;
     const message = {
-      shop: MISSING_SHOP_DOMAIN,
+      shop: testContext.missingShopDomain,
       topic: "BULK_OPERATIONS_FINISH",
       bulkOperationId: bulkOpId,
       bulkType: "companies",
@@ -521,7 +537,7 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
       INSERT INTO s6_bulk_operations (
         bulk_operation_id, shop, bulk_type, started_at, origin, failure_count, chunk_size
       ) VALUES (
-        ${bulkOpId}, ${MISSING_SHOP_DOMAIN}, 'companies', NOW(), 'webhook', 0, 524288
+        ${bulkOpId}, ${testContext.missingShopDomain}, 'companies', NOW(), 'webhook', 0, 524288
       )
       ON CONFLICT (bulk_operation_id) DO NOTHING
     `;
@@ -558,24 +574,24 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     expect(dlqRow!.message).not.toHaveProperty("payload");
 
     const storedJson = JSON.stringify(dlqRow!.message);
-    expect(storedJson).not.toContain(MISSING_SHOP_DOMAIN);
+    expect(storedJson).not.toContain(testContext.missingShopDomain);
     expect(storedJson).not.toContain("myshopify.com");
 
     const consoleOutput = getAllConsoleOutput();
     const allOutput = consoleOutput.join("\n");
-    expect(allOutput).not.toContain(MISSING_SHOP_DOMAIN);
+    expect(allOutput).not.toContain(testContext.missingShopDomain);
     expect(allOutput).toContain("dlq_sanitized_shop_not_found");
   });
 
   it("already-sanitized message is skipped and archived, not re-processed", async () => {
-    const webhookId = `wh-skip-${SUFFIX}`;
+    const webhookId = `wh-skip-${testContext.suffix}`;
     const sanitizedMessage = {
       sanitized: true,
       reason: "shop_not_found",
       topic: "COMPANY_LOCATIONS_CREATE",
       originalMsgId: "old-msg-123",
       webhookId,
-      resourceGid: `gid://shopify/CompanyLocation/skip-${SUFFIX}`,
+      resourceGid: `gid://shopify/CompanyLocation/skip-${testContext.suffix}`,
       attemptCount: 5,
       failedAt: new Date().toISOString(),
     };
