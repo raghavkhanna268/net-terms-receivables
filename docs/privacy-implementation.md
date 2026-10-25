@@ -137,6 +137,44 @@ Implementation details for shop data deletion:
 
 ---
 
+## Data Retention After Deletion — Known Limitations
+
+### pgmq Message Queue
+
+pgmq does not support per-shop message deletion. The `purgePgmqMessages` function in `app/services/compliance/compliance.server.ts` (lines 85–113) documents this limitation and returns a no-op:
+
+```typescript
+return {
+  purged: false,
+  reason:
+    "pgmq does not support per-shop message deletion. Messages for deleted shops " +
+    "are safely ignored by the drain processor which checks shop existence. " +
+    "Messages expire naturally based on queue visibility timeout.",
+};
+```
+
+Messages for deleted shops are safely ignored by the drain processor (which verifies shop existence before processing) and expire naturally based on queue visibility timeout.
+
+### Supabase Database Backups
+
+Supabase-managed database backups may retain deleted data for the provider's backup retention window:
+- Pro Plan: 7 days of daily backups
+- Team Plan: 14 days of daily backups
+- Enterprise Plan: up to 30 days of daily backups
+
+See [Supabase Backups documentation](https://supabase.com/docs/guides/platform/backups).
+
+### Shopify App-Owned Metafields
+
+The app's `credit_status` metafield (namespace `$app`, key `credit_status`) on Shopify Company records is not explicitly cleared by the app on uninstall or shop/redact.
+
+Per [Shopify metafield documentation](https://shopify.dev/docs/apps/build/metafields/definitions):
+> "When a user uninstalls your app, Shopify deletes its app-owned metafield definitions and temporarily retains the metafields and their values without a definition. This applies to any app-owned definition, whether declared in `shopify.app.toml` or created with the GraphQL Admin API. Cleanup of the retained data runs asynchronously."
+
+**Impact:** Uninstalling the app removes the app's Shopify Functions (payment customization, checkout validation), so the `credit_status` metafield value cannot affect checkout behaviour even if it persists temporarily before Shopify's asynchronous cleanup removes it.
+
+---
+
 ## S10b Nightly Reconcile (Operational)
 
 The app performs nightly reconciliation to ensure local ledger consistency with Shopify:

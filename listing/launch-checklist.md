@@ -63,8 +63,8 @@
 
 - [ ] **⚠️ Protected Customer Data (PCD) Access Request**
   - Required for: `read_customers`, `read_orders` scopes (after PR #28)
-  - **Status:** Level 1 plus Name and Email fields already requested in the Partner Dashboard (see [docs/privacy.md](../docs/privacy.md), Protected Customer Data note)
-  - **Owner:** Raghav (Partner Dashboard)
+  - **Status:** Level 1 plus Name and Email fields already requested in the Partner Dashboard
+  - **Owner:** Raghav (Partner Dashboard) — submit the PCD request for Level 1 + name/email, `read_customers`; cite [docs/privacy.md Section 2.3](../docs/privacy.md#23-tagged-customer-data) and [Appendix A](../docs/privacy.md#appendix-a-shopify-oauth-scopes)
   - [ ] **PCD Level 1** — Customer data excluding name, address, phone, and email fields
     - [ ] File PCD access request form in Partner Dashboard
     - [ ] Justify data access requirements
@@ -79,7 +79,7 @@
 - [ ] **⚠️ Privacy policy URL hosted and accessible**
   - Draft: `docs/privacy.md`
   - [ ] **TBD:** Host on public URL (e.g., /privacy route in app, or external URL)
-  - [ ] Fill in all **TBD** items in privacy policy
+  - [ ] **Raghav: fill privacy.md TBDs** (legal entity, contact email, DPO, effective date, DPA links for Cloudflare and Supabase)
   - [ ] Legal review of privacy policy
 
 ### GDPR Webhooks
