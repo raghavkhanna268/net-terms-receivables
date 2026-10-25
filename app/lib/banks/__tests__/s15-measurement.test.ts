@@ -37,7 +37,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync, readdirSync } from "fs";
 import { join, basename } from "path";
 import { parseBankStatement } from "../index.js";
-import type { BankId, PaymentRail, NormalisedTxn } from "../types.js";
+import type { BankId, PaymentRail, NormalisedTxn, ParsedNarration } from "../types.js";
 
 const SYNTHETIC_FIXTURES_DIR = join(process.cwd(), "tests/fixtures/banks/synthetic");
 const REDACTED_FIXTURES_DIR = join(process.cwd(), "tests/fixtures/redacted");
@@ -45,6 +45,7 @@ const REDACTED_FIXTURES_DIR = join(process.cwd(), "tests/fixtures/redacted");
 const S15_THRESHOLD = 95;
 
 const S15_RAILS: PaymentRail[] = ["NEFT", "RTGS", "IMPS", "UPI"];
+const EXCLUDED_RAILS: PaymentRail[] = ["CHEQUE", "ACH"];
 
 type BankKey = "hdfc" | "icici" | "sbi" | "axis";
 
@@ -55,15 +56,25 @@ const BANK_IDS: Record<BankKey, BankId> = {
   axis: "AXIS",
 };
 
+interface ExcludedCounts {
+  cheque: number;
+  ach: number;
+}
+
 interface MeasurementResult {
   bank: BankId;
   fixture: string;
   credits: number;
-  s15Eligible: number;
-  withRef: number;
+  excluded: ExcludedCounts;
+  measurable: number;
+  withBoth: number;
   pct: number;
   threshold: number;
   isClean: boolean;
+}
+
+function isExcludedRail(rail: PaymentRail): boolean {
+  return EXCLUDED_RAILS.includes(rail);
 }
 
 function isS15Rail(rail: PaymentRail): boolean {
@@ -74,24 +85,43 @@ function hasValidReference(txn: NormalisedTxn): boolean {
   return typeof txn.parsed.utr === "string" && txn.parsed.utr.length > 0;
 }
 
-function measureExtraction(
+/**
+ * Measures extraction rate for S15 criterion.
+ *
+ * Denominator: All credits EXCEPT CHEQUE and ACH (which genuinely have no UTR/RRN).
+ * Numerator: Credits with BOTH an S15 rail (NEFT/RTGS/IMPS/UPI) AND a valid reference.
+ *
+ * Credits with rail=OTHER are counted as misses (they're in the denominator but
+ * won't contribute to the numerator since OTHER is not an S15 rail).
+ */
+export function measureExtraction(
   transactions: NormalisedTxn[],
   bank: BankId,
   fixture: string,
   isClean: boolean
 ): MeasurementResult {
   const credits = transactions.filter((t) => t.direction === "CR");
-  const s15Eligible = credits.filter((t) => isS15Rail(t.parsed.rail));
-  const withRef = s15Eligible.filter((t) => hasValidReference(t));
 
-  const pct = s15Eligible.length > 0 ? (withRef.length / s15Eligible.length) * 100 : 0;
+  const excluded: ExcludedCounts = {
+    cheque: credits.filter((t) => t.parsed.rail === "CHEQUE").length,
+    ach: credits.filter((t) => t.parsed.rail === "ACH").length,
+  };
+
+  const measurable = credits.filter((t) => !isExcludedRail(t.parsed.rail));
+
+  const withBoth = measurable.filter(
+    (t) => isS15Rail(t.parsed.rail) && hasValidReference(t)
+  );
+
+  const pct = measurable.length > 0 ? (withBoth.length / measurable.length) * 100 : 0;
 
   return {
     bank,
     fixture,
     credits: credits.length,
-    s15Eligible: s15Eligible.length,
-    withRef: withRef.length,
+    excluded,
+    measurable: measurable.length,
+    withBoth: withBoth.length,
     pct: Math.round(pct * 100) / 100,
     threshold: S15_THRESHOLD,
     isClean,
@@ -106,14 +136,15 @@ function printResult(result: MeasurementResult): void {
     : "REPORT";
 
   console.log(
-    `[${result.bank}] ${result.fixture}: credits=${result.credits}, s15_eligible=${result.s15Eligible}, with_ref=${result.withRef}, pct=${result.pct}%, threshold=${result.threshold}% [${status}]`
+    `[${result.bank}] ${result.fixture}: credits=${result.credits}, excluded=[cheque=${result.excluded.cheque},ach=${result.excluded.ach}], measurable=${result.measurable}, with_both=${result.withBoth}, pct=${result.pct}%, threshold=${result.threshold}% [${status}]`
   );
 }
 
 async function loadAndMeasure(
   filePath: string,
   expectedBank: BankId,
-  isClean: boolean
+  isClean: boolean,
+  displayName?: string
 ): Promise<MeasurementResult | null> {
   if (!existsSync(filePath)) {
     return null;
@@ -132,7 +163,7 @@ async function loadAndMeasure(
     return null;
   }
 
-  return measureExtraction(result.transactions, expectedBank, fileName, isClean);
+  return measureExtraction(result.transactions, expectedBank, displayName ?? fileName, isClean);
 }
 
 function getRedactedFiles(bank: BankKey): string[] {
@@ -151,7 +182,124 @@ function isCleanFixture(fileName: string): boolean {
   return !lower.includes("malformed") && !lower.includes("edgecase") && !lower.includes("debitonly");
 }
 
+function makeTestTxn(
+  direction: "CR" | "DR",
+  rail: PaymentRail,
+  utr?: string
+): NormalisedTxn {
+  const parsed: ParsedNarration = { rail };
+  if (utr) {
+    parsed.utr = utr;
+  }
+  return {
+    date: "2026-10-01",
+    amountPaise: 100000,
+    direction,
+    narration: "TEST",
+    parsed,
+    dedupeKey: `test-${Math.random()}`,
+    sourceRow: 1,
+  };
+}
+
 describe("S15 Rail & Reference Extraction Measurement", () => {
+  describe("measureExtraction unit tests", () => {
+    it("returns 100% when all measurable credits have S15 rail and reference", () => {
+      const txns: NormalisedTxn[] = [
+        makeTestTxn("CR", "NEFT", "SYNTN26296000001"),
+        makeTestTxn("CR", "UPI", "123456789012"),
+        makeTestTxn("DR", "NEFT", "SYNTN26296000002"),
+      ];
+
+      const result = measureExtraction(txns, "HDFC", "unit-test", true);
+
+      expect(result.credits).toBe(2);
+      expect(result.excluded.cheque).toBe(0);
+      expect(result.excluded.ach).toBe(0);
+      expect(result.measurable).toBe(2);
+      expect(result.withBoth).toBe(2);
+      expect(result.pct).toBe(100);
+    });
+
+    it("excludes CHEQUE and ACH credits from denominator", () => {
+      const txns: NormalisedTxn[] = [
+        makeTestTxn("CR", "NEFT", "SYNTN26296000001"),
+        makeTestTxn("CR", "CHEQUE"),
+        makeTestTxn("CR", "ACH"),
+      ];
+
+      const result = measureExtraction(txns, "HDFC", "unit-test", true);
+
+      expect(result.credits).toBe(3);
+      expect(result.excluded.cheque).toBe(1);
+      expect(result.excluded.ach).toBe(1);
+      expect(result.measurable).toBe(1);
+      expect(result.withBoth).toBe(1);
+      expect(result.pct).toBe(100);
+    });
+
+    it("counts OTHER rail credits as misses (pct drops)", () => {
+      const txns: NormalisedTxn[] = [
+        makeTestTxn("CR", "NEFT", "SYNTN26296000001"),
+        makeTestTxn("CR", "OTHER"),
+      ];
+
+      const result = measureExtraction(txns, "HDFC", "unit-test", true);
+
+      expect(result.credits).toBe(2);
+      expect(result.excluded.cheque).toBe(0);
+      expect(result.excluded.ach).toBe(0);
+      expect(result.measurable).toBe(2);
+      expect(result.withBoth).toBe(1);
+      expect(result.pct).toBe(50);
+    });
+
+    it("counts S15 rail credits without reference as misses (pct drops)", () => {
+      const txns: NormalisedTxn[] = [
+        makeTestTxn("CR", "NEFT", "SYNTN26296000001"),
+        makeTestTxn("CR", "IMPS"),
+      ];
+
+      const result = measureExtraction(txns, "HDFC", "unit-test", true);
+
+      expect(result.credits).toBe(2);
+      expect(result.measurable).toBe(2);
+      expect(result.withBoth).toBe(1);
+      expect(result.pct).toBe(50);
+    });
+
+    it("returns 0% when all measurable credits are OTHER or missing reference", () => {
+      const txns: NormalisedTxn[] = [
+        makeTestTxn("CR", "OTHER"),
+        makeTestTxn("CR", "NEFT"),
+        makeTestTxn("CR", "CHEQUE"),
+      ];
+
+      const result = measureExtraction(txns, "HDFC", "unit-test", true);
+
+      expect(result.credits).toBe(3);
+      expect(result.excluded.cheque).toBe(1);
+      expect(result.measurable).toBe(2);
+      expect(result.withBoth).toBe(0);
+      expect(result.pct).toBe(0);
+    });
+
+    it("returns 0% with empty measurable set (all excluded)", () => {
+      const txns: NormalisedTxn[] = [
+        makeTestTxn("CR", "CHEQUE"),
+        makeTestTxn("CR", "ACH"),
+      ];
+
+      const result = measureExtraction(txns, "HDFC", "unit-test", true);
+
+      expect(result.credits).toBe(2);
+      expect(result.excluded.cheque).toBe(1);
+      expect(result.excluded.ach).toBe(1);
+      expect(result.measurable).toBe(0);
+      expect(result.pct).toBe(0);
+    });
+  });
+
   describe("Synthetic fixtures", () => {
     const banks: BankKey[] = ["hdfc", "icici", "sbi", "axis"];
 
@@ -227,13 +375,16 @@ describe("S15 Rail & Reference Extraction Measurement", () => {
         });
       } else {
         describe(`${expectedBank}`, () => {
-          for (const filePath of files) {
+          for (let i = 0; i < files.length; i++) {
+            const filePath = files[i];
             const fileName = basename(filePath);
             const isClean = isCleanFixture(fileName);
+            const displayName = `redacted#${i + 1}`;
 
-            it(`measures ${fileName}${isClean ? "" : " (report only)"}`, async () => {
-              const result = await loadAndMeasure(filePath, expectedBank, isClean);
+            it(`measures ${displayName}${isClean ? "" : " (report only)"}`, async () => {
+              const result = await loadAndMeasure(filePath, expectedBank, isClean, displayName);
 
+              expect(result).not.toBeNull();
               if (result) {
                 printResult(result);
                 if (isClean) {
@@ -263,9 +414,12 @@ describe("S15 Rail & Reference Extraction Measurement", () => {
         const xlsxResult = await loadAndMeasure(xlsxPath, expectedBank, true);
         if (xlsxResult) results.push(xlsxResult);
 
-        for (const redactedPath of getRedactedFiles(bank)) {
+        const redactedFiles = getRedactedFiles(bank);
+        for (let i = 0; i < redactedFiles.length; i++) {
+          const redactedPath = redactedFiles[i];
           const isClean = isCleanFixture(basename(redactedPath));
-          const redactedResult = await loadAndMeasure(redactedPath, expectedBank, isClean);
+          const displayName = `redacted#${i + 1}`;
+          const redactedResult = await loadAndMeasure(redactedPath, expectedBank, isClean, displayName);
           if (redactedResult) results.push(redactedResult);
         }
       }
@@ -282,12 +436,14 @@ describe("S15 Rail & Reference Extraction Measurement", () => {
       for (const [bankId, group] of bankGroups) {
         const cleanResults = group.filter((r) => r.isClean);
         const totalCredits = cleanResults.reduce((sum, r) => sum + r.credits, 0);
-        const totalEligible = cleanResults.reduce((sum, r) => sum + r.s15Eligible, 0);
-        const totalWithRef = cleanResults.reduce((sum, r) => sum + r.withRef, 0);
-        const avgPct = totalEligible > 0 ? (totalWithRef / totalEligible) * 100 : 0;
+        const totalExcludedCheque = cleanResults.reduce((sum, r) => sum + r.excluded.cheque, 0);
+        const totalExcludedAch = cleanResults.reduce((sum, r) => sum + r.excluded.ach, 0);
+        const totalMeasurable = cleanResults.reduce((sum, r) => sum + r.measurable, 0);
+        const totalWithBoth = cleanResults.reduce((sum, r) => sum + r.withBoth, 0);
+        const avgPct = totalMeasurable > 0 ? (totalWithBoth / totalMeasurable) * 100 : 0;
 
         console.log(
-          `${bankId}: credits=${totalCredits}, s15_eligible=${totalEligible}, with_ref=${totalWithRef}, pct=${Math.round(avgPct * 100) / 100}%, threshold=${S15_THRESHOLD}%`
+          `${bankId}: credits=${totalCredits}, excluded=[cheque=${totalExcludedCheque},ach=${totalExcludedAch}], measurable=${totalMeasurable}, with_both=${totalWithBoth}, pct=${Math.round(avgPct * 100) / 100}%, threshold=${S15_THRESHOLD}%`
         );
       }
 
