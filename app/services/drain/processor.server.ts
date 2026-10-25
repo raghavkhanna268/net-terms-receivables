@@ -61,8 +61,26 @@ import {
   isShopNotFoundReason,
   sanitizeSyncMessage,
   sanitizeBulkMessage,
+  isCoveredSyncTopic,
   type SanitizedDeadLetterMessage,
 } from "./dead-letter-sanitize.server";
+
+/**
+ * Topics that trigger Shop-row check on no_session failures (#239 follow-up).
+ * These topics hit adminGraphQL before any Shop lookup, so after uninstall
+ * they fail with no_session. When the Shop is missing or uninstalledAt is set,
+ * we sanitize the message. DELETE topics skip the fetch and cannot hit no_session.
+ */
+const NO_SESSION_SHOP_CHECK_TOPICS = new Set([
+  "COMPANIES_CREATE",
+  "COMPANIES_UPDATE",
+  "COMPANY_LOCATIONS_CREATE",
+  "COMPANY_LOCATIONS_UPDATE",
+  "ORDERS_CREATE",
+  "ORDERS_UPDATED",
+  "ORDERS_CANCELLED",
+  "ORDERS_PAID",
+]);
 
 /**
  * Configuration for drain processing.
@@ -180,6 +198,7 @@ async function handleCompany(sql: Sql, message: SyncMessage): Promise<SyncResult
       success: false,
       action: "skipped",
       error: result.error,
+      errorCode: result.errorCode,
       retryable: result.retryable,
     };
   }
@@ -237,6 +256,7 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
       success: false,
       action: "skipped",
       error: result.error,
+      errorCode: result.errorCode,
       retryable: result.retryable,
     };
   }
@@ -405,6 +425,7 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
       success: false,
       action: "skipped",
       error: result.error,
+      errorCode: result.errorCode,
       retryable: result.retryable,
     };
   }
@@ -1001,6 +1022,18 @@ async function extendVisibility(sql: Sql, queue: string, msgId: string, seconds:
 }
 
 /**
+ * Options for moveToDeadLetter.
+ */
+interface MoveToDeadLetterOpts {
+  /**
+   * When true, check the Shop row inside the tx before deciding whether to sanitize.
+   * If the Shop is missing or uninstalledAt is set, sanitize the message.
+   * Used for no_session failures on topics that hit adminGraphQL before Shop lookup.
+   */
+  sanitizeIfShopGone?: boolean;
+}
+
+/**
  * Move a message to the dead-letter queue.
  *
  * Delete-first design for shop/redact safety (#239):
@@ -1014,12 +1047,19 @@ async function extendVisibility(sql: Sql, queue: string, msgId: string, seconds:
  * is sanitized to an allowlisted object without PII. Draft orders and customers
  * keep their full message because nothing re-fetches those after install.
  *
+ * No-session Shop check (#239 follow-up):
+ * When opts.sanitizeIfShopGone is set, the FIRST statement inside the tx is a
+ * Shop lookup with FOR SHARE. This lock order (Shop → queue row) matches
+ * deleteShop's FOR UPDATE, preventing deadlocks. If the Shop is missing or
+ * uninstalledAt is set, the message is sanitized.
+ *
  * @param sql - postgres.js SQL client
  * @param queue - Queue name (s6_sync or s6_bulk)
  * @param msgId - Message ID from the queue
  * @param message - Original message (sync or bulk)
  * @param error - Error reason (e.g., 'shop_not_found', 'permanent:shop_not_found')
  * @param readCt - Read count for attempt tracking (required for sanitization)
+ * @param opts - Optional settings (sanitizeIfShopGone for no_session path)
  * @returns true if the message was successfully dead-lettered, false if
  *          the message was already deleted (e.g., by shop/redact)
  */
@@ -1029,7 +1069,8 @@ async function moveToDeadLetter(
   msgId: string,
   message: SyncMessage | BulkMessage,
   error: string,
-  readCt: number
+  readCt: number,
+  opts?: MoveToDeadLetterOpts
 ): Promise<boolean> {
   let messageToStore: SyncMessage | BulkMessage | SanitizedDeadLetterMessage = message;
 
@@ -1057,6 +1098,31 @@ async function moveToDeadLetter(
   }
 
   return sql.begin(async (tx) => {
+    // #239 follow-up: Shop-row check on no_session path.
+    // MUST run FIRST to match deleteShop's lock order (Shop FOR UPDATE → queue rows).
+    if (opts?.sanitizeIfShopGone && queue === S6_QUEUES.SYNC && isCoveredSyncTopic(message.topic)) {
+      const [shopRow] = await tx<[{ id: string; uninstalledAt: Date | null }?]>`
+        SELECT id, "uninstalledAt" FROM "Shop"
+        WHERE domain = ${message.shop}
+        FOR SHARE
+      `;
+
+      // Missing row or uninstalledAt set → sanitize
+      if (!shopRow || shopRow.uninstalledAt !== null) {
+        const sanitized = sanitizeSyncMessage(message as SyncMessage, msgId, readCt);
+        if (sanitized) {
+          messageToStore = sanitized;
+          const reasonCode = shopRow ? "no_session_uninstalled" : "no_session_missing";
+          safeLog("info", "dlq_sanitized_shop_not_found", {
+            topic: message.topic,
+            originalMsgId: msgId,
+            reasonCode,
+          });
+        }
+      }
+      // Installed shop: messageToStore stays as full message
+    }
+
     const [result] = await tx<[{ delete: boolean }]>`
       SELECT pgmq.delete(${queue}, ${msgId}::bigint)
     `;
@@ -1195,13 +1261,20 @@ async function processSyncQueue(
             }
           }
 
+          // #239 follow-up: Check Shop row for no_session on in-scope topics
+          const noSessionShopCheck =
+            syncResult.retryable === false &&
+            errorCode === "no_session" &&
+            NO_SESSION_SHOP_CHECK_TOPICS.has(msg.message.topic);
+
           const dlqd = await moveToDeadLetter(
             sql,
             S6_QUEUES.SYNC,
             msg.msg_id,
             msg.message,
             dlqReason,
-            msg.read_ct
+            msg.read_ct,
+            noSessionShopCheck ? { sanitizeIfShopGone: true } : undefined
           );
           if (dlqd) {
             result.deadLettered++;

@@ -633,6 +633,66 @@ describe("Deleted shop handling", () => {
     expect(result.retryable).toBe(false);
     expect(result.error).toContain("403");
   });
+
+  it("handlers pass through errorCode:no_session for DLQ sanitization (#239 follow-up)", async () => {
+    // When adminGraphQL returns errorCode, handlers must pass it through
+    // so processSyncQueue can use it for the no_session Shop check.
+    mockAdminGraphQL.mockResolvedValue({
+      success: false,
+      error: "No session found",
+      errorCode: "no_session",
+      retryable: false,
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    // Test ORDERS_CREATE
+    const orderHandler = getSyncHandler("ORDERS_CREATE");
+    const orderResult = await orderHandler!(mockSql as never, {
+      topic: "ORDERS_CREATE",
+      shop: "test-nosession.myshopify.com",
+      webhookId: "wh-nosession-order",
+      resourceGid: "gid://shopify/Order/123",
+      enqueuedAt: new Date().toISOString(),
+    });
+
+    expect(orderResult.success).toBe(false);
+    expect(orderResult.errorCode).toBe("no_session");
+    expect(orderResult.retryable).toBe(false);
+
+    // Test COMPANY_LOCATIONS_CREATE
+    const locationHandler = getSyncHandler("COMPANY_LOCATIONS_CREATE");
+    const locationResult = await locationHandler!(mockSql as never, {
+      topic: "COMPANY_LOCATIONS_CREATE",
+      shop: "test-nosession.myshopify.com",
+      webhookId: "wh-nosession-loc",
+      resourceGid: "gid://shopify/CompanyLocation/456",
+      enqueuedAt: new Date().toISOString(),
+    });
+
+    expect(locationResult.success).toBe(false);
+    expect(locationResult.errorCode).toBe("no_session");
+    expect(locationResult.retryable).toBe(false);
+
+    // Test COMPANIES_CREATE
+    const companyHandler = getSyncHandler("COMPANIES_CREATE");
+    const companyResult = await companyHandler!(mockSql as never, {
+      topic: "COMPANIES_CREATE",
+      shop: "test-nosession.myshopify.com",
+      webhookId: "wh-nosession-company",
+      resourceGid: "gid://shopify/Company/789",
+      enqueuedAt: new Date().toISOString(),
+    });
+
+    expect(companyResult.success).toBe(false);
+    expect(companyResult.errorCode).toBe("no_session");
+    expect(companyResult.retryable).toBe(false);
+  });
 });
 
 describe("Order processedAt in drain path", () => {

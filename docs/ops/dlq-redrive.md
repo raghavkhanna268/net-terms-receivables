@@ -34,21 +34,31 @@ topics once reconcile coverage exists.
 ### Coverage nuances
 
 **COMPANIES_\* topics:** The company handler has no Shop lookup, so companies
-never produce `shop_not_found`. They are listed as covered but cannot be sanitized.
+never produce `shop_not_found`. They are listed as covered but cannot be sanitized
+via the `shop_not_found` path. However, they ARE sanitized via the `no_session`
+path when the Shop is missing or uninstalled (see below).
 
-**ORDER/LOCATION CREATE/UPDATE after uninstall:** These run `adminGraphQL` before
-the Shop lookup. After uninstall or redact, sessions are gone, so these fail with
-`No session found` (`retryable: false`). The DLQ reason becomes `non_retryable:...`,
-which is not sanitized. This PR does NOT relabel `no_session` as `shop_not_found`.
+**ORDER/LOCATION/COMPANY CREATE/UPDATE after uninstall (no_session path):**
+These topics run `adminGraphQL` before any Shop lookup. After uninstall or redact,
+sessions are gone, so these fail with `No session found` (`retryable: false`).
+The DLQ reason is `non_retryable:no_session`. When the Shop row is missing or
+`uninstalledAt` is set, the message is sanitized (same allowlist as `shop_not_found`).
+When the Shop is installed, the full message is stored for debugging.
 
-A follow-up (Part of #239) will add a Shop-row check on the no-session
-CREATE/UPDATE-after-uninstall path that sanitizes only when the Shop row is missing
-or `uninstalledAt` is set. This ships in the same pre-launch batch as the
-customers/draft-orders sanitize, after S8 PR-B.
+**Uninstall race window:** The `app/uninstalled` webhook handler deletes sessions
+before setting `uninstalledAt`. A `no_session` failure during that brief window
+sees an installed Shop and stores the full message. That row is purged by
+`deleteShop` at the redact deadline (`compliance.server.ts:193-196`), so no
+action is needed.
+
+A follow-up (S8 customers/draft-orders reconcile) will enable sanitization for
+customers and draft orders once reconcile coverage exists.
 
 **What actually gets sanitized:**
-- `COMPANY_LOCATIONS_DELETE` when the Shop row is missing
-- `ORDERS_*` or location updates if a session still exists while the Shop row is missing
+- `ORDERS_*`, `COMPANY_LOCATIONS_*`, `COMPANIES_*` (CREATE/UPDATE) with
+  `no_session` when the Shop row is missing or `uninstalledAt` is set
+- `COMPANY_LOCATIONS_DELETE` when the Shop row is missing (handler-level
+  `shop_not_found`)
 - Bulk `companies`/`orders` (Shop check runs first, gives `permanent:shop_not_found`)
 
 ## Diagnosing DLQ Issues
@@ -67,7 +77,7 @@ The workflow outputs DLQ summary in the "Queue and webhook counts" step.
 | Error Pattern | Cause | Action |
 |---------------|-------|--------|
 | `GraphQL query error: Cannot query field` | Schema mismatch (API version changed) | Fix query, redeploy, then redrive |
-| `No offline session found` | Shop uninstalled | Do not redrive (permanent) |
+| `non_retryable:no_session` | Shop uninstalled | Sanitized when shop gone; do not redrive |
 | `Authentication failed (401)` | Token revoked/expired | Check token refresh, may need reinstall |
 | `HTTP 5xx` | Transient Shopify error | Redrive if recent; investigate if persistent |
 | `Max retries exceeded` | Repeated transient failures | Check Shopify status, then redrive |
