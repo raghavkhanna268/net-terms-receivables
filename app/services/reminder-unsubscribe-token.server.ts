@@ -18,6 +18,16 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { safeLog } from "~/lib/log.server";
 
 /**
+ * Verify HMAC signature with constant-time comparison.
+ */
+function verifySignature(payloadBase64: string, sig: string, secret: string): boolean {
+  const expected = createHmac("sha256", secret).update(payloadBase64).digest("base64url");
+  const pBuf = Buffer.from(sig, "utf8");
+  const eBuf = Buffer.from(expected, "utf8");
+  return pBuf.length === eBuf.length && timingSafeEqual(pBuf, eBuf);
+}
+
+/**
  * Purpose string included in the token payload.
  * Prevents tokens from being reused in other contexts.
  */
@@ -104,15 +114,18 @@ export function generateUnsubscribeToken(
  * Verify and decode an unsubscribe token.
  *
  * Uses constant-time comparison for the signature to prevent timing attacks.
- * Returns null for any invalid token (wrong format, bad signature, wrong purpose).
+ * Supports dual-key verification for secret rotation: tries current secret first,
+ * then optional previous secret if configured.
  *
  * @param token - The token to verify
  * @param secret - HMAC secret (from REMINDER_UNSUBSCRIBE_SECRET env)
+ * @param previousSecret - Previous HMAC secret for key rotation (optional)
  * @returns Decoded payload with shopId and buyerAccountId, or null if invalid
  */
 export function verifyUnsubscribeToken(
   token: string,
-  secret: string | undefined
+  secret: string | undefined,
+  previousSecret?: string | undefined
 ): { shopId: string; buyerAccountId: string } | null {
   if (!secret || secret.trim().length === 0) {
     return null;
@@ -125,21 +138,12 @@ export function verifyUnsubscribeToken(
 
   const [payloadBase64, providedSignature] = parts;
 
-  // Verify signature with constant-time comparison
-  const expectedSignature = createHmac("sha256", secret)
-    .update(payloadBase64)
-    .digest("base64url");
-
-  // Convert to buffers for constant-time comparison
-  const providedBuffer = Buffer.from(providedSignature, "utf8");
-  const expectedBuffer = Buffer.from(expectedSignature, "utf8");
-
-  // Signatures must be same length for timingSafeEqual
-  if (providedBuffer.length !== expectedBuffer.length) {
-    return null;
+  // Verify signature: try current secret, then previous if configured
+  let sigValid = verifySignature(payloadBase64, providedSignature, secret);
+  if (!sigValid && previousSecret && previousSecret.trim().length > 0) {
+    sigValid = verifySignature(payloadBase64, providedSignature, previousSecret);
   }
-
-  if (!timingSafeEqual(providedBuffer, expectedBuffer)) {
+  if (!sigValid) {
     return null;
   }
 

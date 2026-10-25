@@ -51,10 +51,11 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     return { valid: false, alreadyOptedOut: false };
   }
 
-  const secret = (context?.cloudflare?.env as { REMINDER_UNSUBSCRIBE_SECRET?: string })?.REMINDER_UNSUBSCRIBE_SECRET
-    ?? process.env.REMINDER_UNSUBSCRIBE_SECRET;
+  const cfEnv = context?.cloudflare?.env as { REMINDER_UNSUBSCRIBE_SECRET?: string; REMINDER_UNSUBSCRIBE_SECRET_PREVIOUS?: string } | undefined;
+  const secret = cfEnv?.REMINDER_UNSUBSCRIBE_SECRET ?? process.env.REMINDER_UNSUBSCRIBE_SECRET;
+  const previousSecret = cfEnv?.REMINDER_UNSUBSCRIBE_SECRET_PREVIOUS ?? process.env.REMINDER_UNSUBSCRIBE_SECRET_PREVIOUS;
 
-  const payload = verifyUnsubscribeToken(token, secret);
+  const payload = verifyUnsubscribeToken(token, secret, previousSecret);
 
   if (!payload) {
     // Log invalid token attempt (no PII, just the fact it happened)
@@ -88,10 +89,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     return { success: false, error: "missing_token" };
   }
 
-  const secret = (context?.cloudflare?.env as { REMINDER_UNSUBSCRIBE_SECRET?: string })?.REMINDER_UNSUBSCRIBE_SECRET
-    ?? process.env.REMINDER_UNSUBSCRIBE_SECRET;
+  const cfEnv = context?.cloudflare?.env as { REMINDER_UNSUBSCRIBE_SECRET?: string; REMINDER_UNSUBSCRIBE_SECRET_PREVIOUS?: string } | undefined;
+  const secret = cfEnv?.REMINDER_UNSUBSCRIBE_SECRET ?? process.env.REMINDER_UNSUBSCRIBE_SECRET;
+  const previousSecret = cfEnv?.REMINDER_UNSUBSCRIBE_SECRET_PREVIOUS ?? process.env.REMINDER_UNSUBSCRIBE_SECRET_PREVIOUS;
 
-  const payload = verifyUnsubscribeToken(token, secret);
+  const payload = verifyUnsubscribeToken(token, secret, previousSecret);
 
   if (!payload) {
     // Log invalid token attempt (no PII)
