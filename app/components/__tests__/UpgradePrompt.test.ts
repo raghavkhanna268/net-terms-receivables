@@ -243,7 +243,7 @@ describe("PlanBanner component", () => {
     expect(html).toContain("Limit Reached");
   });
 
-  it("shows warning badge when at limit and gating not enforced", () => {
+  it("shows no badge when at limit but gating not enforced (T1)", () => {
     const html = renderToString(
       createElement(PlanBanner, {
         ...baseProps,
@@ -252,8 +252,9 @@ describe("PlanBanner component", () => {
         gatingEnforced: false,
       })
     );
-    expect(html).toContain('tone="warning"');
-    expect(html).toContain("At Limit");
+    // No badge shown when gating is off
+    expect(html).not.toContain("At Limit");
+    expect(html).not.toContain("Limit Reached");
   });
 
   it("shows primary upgrade button when at limit", () => {

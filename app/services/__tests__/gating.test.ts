@@ -514,7 +514,7 @@ describe("Gating Service", () => {
       vi.resetModules();
       const { checkCompanyLimit, reactivateGatedAccounts } = await import("../gating.server");
       
-      // Free plan, 3 active accounts (at limit)
+      // T1: none plan has limit 0, so any accounts are over limit
       mockSql.setMockResult("shop_plan", [{
         plan_key: "none",
         subscription_id: null,
@@ -522,9 +522,9 @@ describe("Gating Service", () => {
         is_test: false,
         plan_cached_at: new Date(),
       }]);
-      mockSql.setMockResult("active_account_count", [{ count: "3" }]);
+      mockSql.setMockResult("active_account_count", [{ count: "1" }]);
       
-      // Creating 4th account should be blocked
+      // Creating any account on none plan should be blocked (limit is 0)
       const beforeUpgrade = await checkCompanyLimit(mockSql as unknown as Sql, TEST_SHOP_ID);
       expect(beforeUpgrade.allowed).toBe(false);
       

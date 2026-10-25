@@ -330,8 +330,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         }
       : null,
     usage: usage ?? {
-      companies: { current: 0, limit: 3 },
-      importsThisMonth: { current: 0, limit: 1 },
+      companies: { current: 0, limit: 0 },
+      importsThisMonth: { current: 0, limit: -1 },
     },
     appHandle: process.env.APP_HANDLE ?? "net-terms-receivables",
     gatingEnforced,

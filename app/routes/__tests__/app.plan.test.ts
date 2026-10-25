@@ -125,8 +125,8 @@ describe("Plan Page Loader", () => {
 
     expect(result.plan).toBeNull();
     expect(result.usage).toEqual({
-      companies: { current: 0, limit: 3 },
-      importsThisMonth: { current: 0, limit: 1 },
+      companies: { current: 0, limit: 0 },
+      importsThisMonth: { current: 0, limit: -1 },
     });
     expect(result.gatedCount).toBe(0);
     expect(result.error).toBeNull();
@@ -147,8 +147,8 @@ describe("Plan Page Loader", () => {
       new Error("Database error")
     );
     (getUsageStats as ReturnType<typeof vi.fn>).mockResolvedValue({
-      companies: { current: 0, limit: 3 },
-      importsThisMonth: { current: 0, limit: 1 },
+      companies: { current: 0, limit: 0 },
+      importsThisMonth: { current: 0, limit: -1 },
     });
     (getGatedAccountCount as ReturnType<typeof vi.fn>).mockResolvedValue(0);
 
@@ -181,8 +181,8 @@ describe("Plan Page Loader", () => {
       new Error("Database connection timed out")
     );
     (getUsageStats as ReturnType<typeof vi.fn>).mockResolvedValue({
-      companies: { current: 0, limit: 3 },
-      importsThisMonth: { current: 0, limit: 1 },
+      companies: { current: 0, limit: 0 },
+      importsThisMonth: { current: 0, limit: -1 },
     });
     (getGatedAccountCount as ReturnType<typeof vi.fn>).mockResolvedValue(0);
 
@@ -216,7 +216,7 @@ describe("Plan Page Loader", () => {
     (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
     (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-      plan: { key: "free", limits: { companies: 3, importsPerMonth: 1 } },
+      plan: { key: "none", limits: { companies: 0, importsPerMonth: -1 } },
       subscriptionId: null,
       subscriptionName: null,
       isTest: false,
@@ -224,8 +224,8 @@ describe("Plan Page Loader", () => {
     });
 
     (getUsageStats as ReturnType<typeof vi.fn>).mockResolvedValue({
-      companies: { current: 3, limit: 3 },
-      importsThisMonth: { current: 1, limit: 1 },
+      companies: { current: 0, limit: 0 },
+      importsThisMonth: { current: 0, limit: -1 },
     });
 
     (getGatedAccountCount as ReturnType<typeof vi.fn>).mockResolvedValue(2);
@@ -490,11 +490,10 @@ describe("S21 Over-limit banner using buildOverLimitBannerState helper", () => {
     expect(state.show).toBe(false);
   });
 
-  it("shows banner when gatingEnforced is false (flag-off behavior)", async () => {
+  it("hides banner when gatingEnforced is false (T1: no banner when gating off)", async () => {
     const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
     const state = buildOverLimitBannerState(3, false);
-    expect(state.show).toBe(true);
-    expect(state.enforcementNote).toBe("(Limits are not currently enforced.)");
+    expect(state.show).toBe(false);
   });
 
   it("no enforcement note when gatingEnforced is true", async () => {
@@ -537,11 +536,10 @@ describe("S21 Account page banner using buildAccountOverLimitBannerState helper"
     expect(state.show).toBe(false);
   });
 
-  it("shows banner when gatingEnforced is false (flag-off behavior)", async () => {
+  it("hides banner when gatingEnforced is false (T1: no banner when gating off)", async () => {
     const { buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
     const state = buildAccountOverLimitBannerState(true, false);
-    expect(state.show).toBe(true);
-    expect(state.enforcementNote).toBe("(Limits are not currently enforced.)");
+    expect(state.show).toBe(false);
   });
 
   it("hides banner when account not gated even if gatingEnforced is false", async () => {

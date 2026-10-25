@@ -218,9 +218,6 @@ export function PlanBanner({
         {companiesAtLimit && gatingEnforced && (
           <s-badge tone="critical">Limit Reached</s-badge>
         )}
-        {companiesAtLimit && !gatingEnforced && (
-          <s-badge tone="warning">At Limit</s-badge>
-        )}
       </s-paragraph>
       {canUpgrade && (
         <s-button href={upgradeUrl} target="_top" variant={companiesAtLimit ? "primary" : "secondary"}>
