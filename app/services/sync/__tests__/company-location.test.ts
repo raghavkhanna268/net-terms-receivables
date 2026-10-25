@@ -672,6 +672,10 @@ describeWithDb("CompanyLocation Sync", () => {
       const redactDomain = `redact-test-${TEST_SUFFIX}.myshopify.com`;
       const locationId = `gid://shopify/CompanyLocation/redact-${TEST_SUFFIX}`;
 
+      // Cleanup any leftover data from previous failed runs (belt and suspenders)
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${redactShopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${redactShopId}`;
+
       await sql`
         INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
         VALUES (${redactShopId}, ${redactDomain}, NOW(), NOW())
@@ -695,7 +699,8 @@ describeWithDb("CompanyLocation Sync", () => {
       `;
       expect(before).toBeDefined();
 
-      await deleteShop(sql, redactDomain);
+      const result = await deleteShop(sql, redactDomain);
+      expect(result.deleted).toBe(true);
 
       const after = await sql`
         SELECT id FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
