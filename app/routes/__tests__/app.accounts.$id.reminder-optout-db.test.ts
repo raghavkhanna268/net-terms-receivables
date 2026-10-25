@@ -146,7 +146,7 @@ describeWithDb("app.accounts.$id reminder opt-out toggle (DB)", () => {
     const { action } = await import("../app.accounts.$id");
     const result = await action(
       createActionArgs(TEST_SHOP_DOMAIN, TEST_ACCOUNT_ID, false) as never
-    );
+    ) as { success: boolean; action?: string };
 
     expect(result.success).toBe(true);
     expect(result.action).toBe("updateReminderOptOut");
@@ -176,7 +176,7 @@ describeWithDb("app.accounts.$id reminder opt-out toggle (DB)", () => {
     const { action } = await import("../app.accounts.$id");
     const result = await action(
       createActionArgs(TEST_SHOP_DOMAIN, TEST_ACCOUNT_ID, true) as never
-    );
+    ) as { success: boolean };
 
     expect(result.success).toBe(true);
 
@@ -271,7 +271,7 @@ describeWithDb("app.accounts.$id reminder opt-out toggle (DB)", () => {
     const { action } = await import("../app.accounts.$id");
     const result = await action(
       createActionArgs(TEST_SHOP_DOMAIN, "nonexistent-account", true) as never
-    );
+    ) as { success: boolean; error?: string };
 
     expect(result.success).toBe(false);
     expect(result.error).toBe("Account not found");
@@ -286,7 +286,7 @@ describeWithDb("app.accounts.$id reminder opt-out toggle (DB)", () => {
     const { action } = await import("../app.accounts.$id");
     const result = await action(
       createActionArgs(OTHER_SHOP_DOMAIN, TEST_ACCOUNT_ID, false) as never
-    );
+    ) as { success: boolean; error?: string };
 
     expect(result.success).toBe(false);
     expect(result.error).toBe("Account not found");

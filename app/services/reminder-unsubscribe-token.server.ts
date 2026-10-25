@@ -207,6 +207,6 @@ export function logUnsubscribeSecretMissing(
   safeLog("warn", "reminder_unsubscribe_secret_missing", {
     shopId,
     invoiceCount,
-    secretConfigured: false,
+    reason: "secret_missing",
   });
 }

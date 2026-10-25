@@ -208,7 +208,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
   });
 
   describe("2. sendPaymentReminder - real DB with gating", () => {
-    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake" };
+    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
     it("skips gated account with gating ON - NO ReminderLog, NO cap consumed", async () => {
       vi.stubEnv("PLAN_GATING_ENFORCED", "1");

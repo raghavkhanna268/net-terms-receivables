@@ -852,21 +852,41 @@ export async function sendPaymentReminder(
     };
   }
 
-  // Gate 10: Check if buyer has opted out of payment reminders
-  // This check runs BEFORE any slot claim or cap reservation
-  // Get buyerAccountId from the invoice query result
+  // Gate 10: Get buyerAccountId - required for opt-out check and unsubscribe headers
+  // If null, skip send entirely (count-only log, no slot claim or reservation)
   const buyerAccountId = await getBuyerAccountId(sql, shopId, invoiceId);
-  if (buyerAccountId) {
-    const optedOut = await isBuyerOptedOut(sql, shopId, buyerAccountId);
-    if (optedOut) {
-      // Record skipped_opted_out status (prevents re-enqueue, no slot consumed)
-      await recordSkippedOptedOut(sql, shopId, ruleId, invoiceId);
-      return {
-        success: true,
-        action: "skipped",
-        skipReason: "Buyer opted out of reminders",
-      };
-    }
+  if (!buyerAccountId) {
+    safeLog("warn", "reminders_no_buyer_account", { shopId, invoiceId, ruleId, skipped: true });
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Buyer account ID not found for invoice",
+    };
+  }
+
+  // Gate 10b: Check if buyer has opted out of payment reminders
+  // This check runs BEFORE any slot claim or cap reservation
+  const optedOut = await isBuyerOptedOut(sql, shopId, buyerAccountId);
+  if (optedOut) {
+    // Record skipped_opted_out status (prevents re-enqueue, no slot consumed)
+    await recordSkippedOptedOut(sql, shopId, ruleId, invoiceId);
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Buyer opted out of reminders",
+    };
+  }
+
+  // Gate 10c: Check SHOPIFY_APP_URL is configured (fail closed)
+  // Without it, we cannot build absolute unsubscribe URLs
+  const appUrl = env.SHOPIFY_APP_URL ?? process.env.SHOPIFY_APP_URL;
+  if (!appUrl || appUrl.trim().length === 0) {
+    safeLog("warn", "reminders_no_app_url", { shopId, invoiceCount: 1 });
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "SHOPIFY_APP_URL not configured",
+    };
   }
 
   // Phase A: Short transaction to claim slot with per-invoice lock
@@ -874,13 +894,13 @@ export async function sendPaymentReminder(
   const claimResult = await sql.begin(async (tx) => {
     await acquireInvoiceLock(tx, invoiceId);
 
-    // Gate 9: Check if already sent today (under the lock)
+    // Gate 11: Check if already sent today (under the lock)
     const alreadySentToday = await hasReminderSentToday(tx, shopId, invoiceId, validTz);
     if (alreadySentToday) {
       return { claimed: false, reason: "already_sent" } as const;
     }
 
-    // Gate 10: Claim the reminder slot (idempotency via unique index)
+    // Gate 12: Claim the reminder slot (idempotency via unique index)
     const claimed = await claimReminderSlot(tx, shopId, ruleId, invoiceId);
     if (!claimed) {
       return { claimed: false, reason: "idempotent" } as const;
@@ -938,12 +958,11 @@ export async function sendPaymentReminder(
     const subject = `${getReminderLabel(offsetDays)} - Invoice ${invoice.invoiceName}`;
     const idempotencyKey = `s18_${invoiceId}_${ruleId}`;
 
-    // Build RFC 8058 unsubscribe headers
-    const appUrl = env.SHOPIFY_APP_URL ?? process.env.SHOPIFY_APP_URL ?? "";
+    // Build RFC 8058 unsubscribe headers (appUrl validated in Gate 10c)
     const unsubscribeHeaders = buildUnsubscribeHeaders(
       appUrl,
       shopId,
-      buyerAccountId!,
+      buyerAccountId,
       unsubscribeSecret
     );
 
@@ -1184,20 +1203,43 @@ export async function sendCatchupReminder(
     };
   }
 
-  // Gate 8c: Check if buyer has opted out of payment reminders
-  // For catch-up, transition delayed row to skipped_opted_out
+  // Gate 8c: Get buyerAccountId - required for opt-out check and unsubscribe headers
+  // If null, skip send entirely (count-only log)
   const buyerAccountId = await getBuyerAccountId(sql, shopId, invoiceId);
-  if (buyerAccountId) {
-    const optedOut = await isBuyerOptedOut(sql, shopId, buyerAccountId);
-    if (optedOut) {
-      // Transition delayed row to skipped_opted_out (prevents resend after re-enable)
-      await transitionDelayedToOptedOut(sql, shopId, ruleId, invoiceId);
-      return {
-        success: true,
-        action: "skipped",
-        skipReason: "Buyer opted out of reminders",
-      };
-    }
+  if (!buyerAccountId) {
+    await deleteDelayedReminder(sql, shopId, ruleId, invoiceId);
+    safeLog("warn", "reminders_catchup_no_buyer_account", { shopId, invoiceId, ruleId, skipped: true });
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Buyer account ID not found for invoice",
+    };
+  }
+
+  // Gate 8d: Check if buyer has opted out of payment reminders
+  // For catch-up, transition delayed row to skipped_opted_out
+  const optedOut = await isBuyerOptedOut(sql, shopId, buyerAccountId);
+  if (optedOut) {
+    // Transition delayed row to skipped_opted_out (prevents resend after re-enable)
+    await transitionDelayedToOptedOut(sql, shopId, ruleId, invoiceId);
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Buyer opted out of reminders",
+    };
+  }
+
+  // Gate 8e: Check SHOPIFY_APP_URL is configured (fail closed)
+  // Without it, we cannot build absolute unsubscribe URLs
+  const appUrl = env.SHOPIFY_APP_URL ?? process.env.SHOPIFY_APP_URL;
+  if (!appUrl || appUrl.trim().length === 0) {
+    // Don't delete the delayed row - wait for URL to be configured
+    safeLog("warn", "reminders_catchup_no_app_url", { shopId, invoiceCount: 1 });
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "SHOPIFY_APP_URL not configured",
+    };
   }
 
   // Gate 9: Check shop reminders are enabled
@@ -1336,12 +1378,11 @@ export async function sendCatchupReminder(
     const subject = `${getReminderLabel(offsetDays)} - Invoice ${invoice.invoiceName}`;
     const idempotencyKey = `s18_catchup_${invoiceId}_${ruleId}`;
 
-    // Build RFC 8058 unsubscribe headers
-    const appUrl = env.SHOPIFY_APP_URL ?? process.env.SHOPIFY_APP_URL ?? "";
+    // Build RFC 8058 unsubscribe headers (appUrl validated in Gate 8e)
     const unsubscribeHeaders = buildUnsubscribeHeaders(
       appUrl,
       shopId,
-      buyerAccountId!,
+      buyerAccountId,
       unsubscribeSecret
     );
 

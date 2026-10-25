@@ -145,6 +145,7 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
         RESEND_API_KEY: "re_test_1234",
         RESEND_FROM: "noreply@test-reminders.example",
         REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
+        SHOPIFY_APP_URL: "https://app.example.com",
       };
 
       const invoiceId = `inv-optout-send-${TEST_SUFFIX}`;
@@ -274,6 +275,7 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
         RESEND_API_KEY: "re_test_1234",
         RESEND_FROM: "noreply@test-reminders.example",
         REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
+        SHOPIFY_APP_URL: "https://app.example.com",
       };
 
       const invoiceId = `inv-catchup-optout-${TEST_SUFFIX}`;
@@ -345,6 +347,7 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
         RESEND_API_KEY: "re_test_1234",
         RESEND_FROM: "noreply@test-reminders.example",
         REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
+        SHOPIFY_APP_URL: "https://app.example.com",
       };
 
       const invoiceId = `inv-reenable-${TEST_SUFFIX}`;

@@ -20,20 +20,7 @@ import { useLoaderData, Form } from "react-router";
 import { verifyUnsubscribeToken } from "~/services/reminder-unsubscribe-token.server";
 import { setBuyerOptOut, isBuyerOptedOut } from "~/services/reminder-optout.server";
 import { safeLog } from "~/lib/log.server";
-import postgres from "postgres";
-import { sqlOptions } from "~/lib/db-light.server";
-
-/**
- * Get the database connection.
- * Uses direct postgres connection since this is a public route (no Shopify auth).
- */
-function getDb() {
-  const url = process.env.DATABASE_URL;
-  if (!url) {
-    throw new Error("DATABASE_URL not configured");
-  }
-  return postgres(url, sqlOptions);
-}
+import { getRequestSql } from "~/lib/request-context.server";
 
 /**
  * GET handler: Show confirmation page.
@@ -59,18 +46,14 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   if (!payload) {
     // Log invalid token attempt (no PII, just the fact it happened)
-    safeLog("warn", "unsubscribe_invalid_token", { valid: false });
+    safeLog("warn", "unsubscribe_invalid_token", { reason: "invalid_token" });
     return { valid: false, alreadyOptedOut: false };
   }
 
   // Check if already opted out
-  const sql = getDb();
-  try {
-    const alreadyOptedOut = await isBuyerOptedOut(sql, payload.shopId, payload.buyerAccountId);
-    return { valid: true, alreadyOptedOut };
-  } finally {
-    await sql.end();
-  }
+  const sql = getRequestSql();
+  const alreadyOptedOut = await isBuyerOptedOut(sql, payload.shopId, payload.buyerAccountId);
+  return { valid: true, alreadyOptedOut };
 };
 
 /**
@@ -97,7 +80,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   if (!payload) {
     // Log invalid token attempt (no PII)
-    safeLog("warn", "unsubscribe_invalid_token_post", { valid: false });
+    safeLog("warn", "unsubscribe_invalid_token_post", { reason: "invalid_token" });
     // Return generic success to not leak token validity
     return { success: true, alreadyOptedOut: true };
   }
@@ -118,21 +101,17 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     }
   }
 
-  const sql = getDb();
-  try {
-    // Set opt-out with source='link' (idempotent)
-    const updated = await setBuyerOptOut(sql, payload.shopId, payload.buyerAccountId, "link");
+  const sql = getRequestSql();
+  // Set opt-out with source='link' (idempotent)
+  const applied = await setBuyerOptOut(sql, payload.shopId, payload.buyerAccountId, "link");
 
-    safeLog("info", "unsubscribe_completed", {
-      shopId: payload.shopId,
-      buyerAccountId: payload.buyerAccountId,
-      updated,
-    });
+  safeLog("info", "unsubscribe_completed", {
+    shopId: payload.shopId,
+    buyerAccountId: payload.buyerAccountId,
+    applied,
+  });
 
-    return { success: true, alreadyOptedOut: !updated };
-  } finally {
-    await sql.end();
-  }
+  return { success: true, alreadyOptedOut: !applied };
 };
 
 /**
@@ -149,84 +128,77 @@ export default function UnsubscribePage() {
   const data = useLoaderData<typeof loader>();
 
   return (
-    <html lang="en">
-      <head>
-        <meta charSet="UTF-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>Unsubscribe from Payment Reminders</title>
-        <style>{`
-          * { box-sizing: border-box; }
-          body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            line-height: 1.6;
-            color: #1a1a1a;
-            max-width: 500px;
-            margin: 0 auto;
-            padding: 2rem 1rem;
-            background: #f5f5f5;
-            min-height: 100vh;
-          }
-          .card {
-            background: #fff;
-            border-radius: 8px;
-            padding: 2rem;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-          }
-          h1 { margin: 0 0 1rem; font-size: 1.5rem; color: #111; }
-          p { margin: 0 0 1rem; color: #444; }
-          .button {
-            display: inline-block;
-            background: #dc2626;
-            color: #fff;
-            padding: 0.75rem 1.5rem;
-            border: none;
-            border-radius: 6px;
-            font-size: 1rem;
-            cursor: pointer;
-            text-decoration: none;
-          }
-          .button:hover { background: #b91c1c; }
-          .success { color: #059669; }
-          .muted { color: #6b7280; font-size: 0.875rem; }
-        `}</style>
-      </head>
-      <body>
-        <div className="card">
-          {!data.valid ? (
-            <>
-              <h1>Unsubscribe</h1>
-              <p>This unsubscribe link is invalid or has expired.</p>
-              <p className="muted">
-                If you want to manage your reminder preferences, please contact the merchant directly.
-              </p>
-            </>
-          ) : data.alreadyOptedOut ? (
-            <>
-              <h1 className="success">Already Unsubscribed</h1>
-              <p>You have already been unsubscribed from payment reminder emails.</p>
-              <p className="muted">
-                Only the merchant can re-enable reminders for your account.
-              </p>
-            </>
-          ) : (
-            <>
-              <h1>Unsubscribe from Payment Reminders</h1>
-              <p>
-                Click the button below to stop receiving payment reminder emails.
-              </p>
-              <p className="muted">
-                After unsubscribing, only the merchant can re-enable reminders for your account.
-              </p>
-              <Form method="post">
-                <input type="hidden" name="List-Unsubscribe" value="One-Click" />
-                <button type="submit" className="button">
-                  Unsubscribe
-                </button>
-              </Form>
-            </>
-          )}
-        </div>
-      </body>
-    </html>
+    <div style={{
+      fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+      lineHeight: 1.6,
+      color: "#1a1a1a",
+      maxWidth: "500px",
+      margin: "0 auto",
+      padding: "2rem 1rem",
+      minHeight: "100vh",
+    }}>
+      <div style={{
+        background: "#fff",
+        borderRadius: "8px",
+        padding: "2rem",
+        boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
+      }}>
+        {!data.valid ? (
+          <>
+            <h1 style={{ margin: "0 0 1rem", fontSize: "1.5rem", color: "#111" }}>
+              Unsubscribe
+            </h1>
+            <p style={{ margin: "0 0 1rem", color: "#444" }}>
+              This unsubscribe link is invalid or has expired.
+            </p>
+            <p style={{ color: "#6b7280", fontSize: "0.875rem" }}>
+              If you want to manage your reminder preferences, please contact the merchant directly.
+            </p>
+          </>
+        ) : data.alreadyOptedOut ? (
+          <>
+            <h1 style={{ margin: "0 0 1rem", fontSize: "1.5rem", color: "#059669" }}>
+              Already Unsubscribed
+            </h1>
+            <p style={{ margin: "0 0 1rem", color: "#444" }}>
+              You have already been unsubscribed from payment reminder emails.
+            </p>
+            <p style={{ color: "#6b7280", fontSize: "0.875rem" }}>
+              Only the merchant can re-enable reminders for your account.
+            </p>
+          </>
+        ) : (
+          <>
+            <h1 style={{ margin: "0 0 1rem", fontSize: "1.5rem", color: "#111" }}>
+              Unsubscribe from Payment Reminders
+            </h1>
+            <p style={{ margin: "0 0 1rem", color: "#444" }}>
+              Click the button below to stop receiving payment reminder emails.
+            </p>
+            <p style={{ margin: "0 0 1rem", color: "#6b7280", fontSize: "0.875rem" }}>
+              After unsubscribing, only the merchant can re-enable reminders for your account.
+            </p>
+            <Form method="post">
+              <input type="hidden" name="List-Unsubscribe" value="One-Click" />
+              <button
+                type="submit"
+                style={{
+                  display: "inline-block",
+                  background: "#dc2626",
+                  color: "#fff",
+                  padding: "0.75rem 1.5rem",
+                  border: "none",
+                  borderRadius: "6px",
+                  fontSize: "1rem",
+                  cursor: "pointer",
+                }}
+              >
+                Unsubscribe
+              </button>
+            </Form>
+          </>
+        )}
+      </div>
+    </div>
   );
 }

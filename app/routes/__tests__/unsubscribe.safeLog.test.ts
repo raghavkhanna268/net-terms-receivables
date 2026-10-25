@@ -20,15 +20,8 @@ vi.mock("~/services/reminder-optout.server", () => ({
   isBuyerOptedOut: vi.fn(),
 }));
 
-vi.mock("postgres", () => {
-  const mockEnd = vi.fn();
-  const mockSql = vi.fn();
-  (mockSql as typeof mockSql & { end: typeof mockEnd }).end = mockEnd;
-  return { default: vi.fn(() => mockSql) };
-});
-
-vi.mock("~/lib/db-light.server", () => ({
-  sqlOptions: {},
+vi.mock("~/lib/request-context.server", () => ({
+  getRequestSql: vi.fn(() => vi.fn()),
 }));
 
 import { verifyUnsubscribeToken } from "~/services/reminder-unsubscribe-token.server";
@@ -110,13 +103,13 @@ describe("unsubscribe route safeLog PII test", () => {
       const parsed = JSON.parse(loggedString);
       expect(parsed.event).toBe("unsubscribe_invalid_token_post");
 
-      // Verify only safe fields are present
-      expect(parsed).toHaveProperty("valid", false);
-      expect(Object.keys(parsed)).toEqual(["event", "valid"]);
+      // Verify only safe fields are present (reason is allowlisted)
+      expect(parsed).toHaveProperty("reason", "invalid_token");
+      expect(Object.keys(parsed)).toEqual(["event", "reason"]);
     }
   });
 
-  it("logs contain only allowlisted keys (valid boolean)", async () => {
+  it("logs contain only allowlisted keys (reason string)", async () => {
     mockVerifyUnsubscribeToken.mockReturnValue(null);
 
     await action(createActionArgs("tampered-token-attempt"));
@@ -126,8 +119,8 @@ describe("unsubscribe route safeLog PII test", () => {
 
     const loggedJson = JSON.parse(warnCalls[0][0] as string);
 
-    // Only 'event' and 'valid' should be present
-    expect(Object.keys(loggedJson).sort()).toEqual(["event", "valid"]);
-    expect(loggedJson.valid).toBe(false);
+    // Only 'event' and 'reason' should be present
+    expect(Object.keys(loggedJson).sort()).toEqual(["event", "reason"]);
+    expect(loggedJson.reason).toBe("invalid_token");
   });
 });

@@ -9,13 +9,10 @@
  * - Wrong-purpose token rejected
  *
  * Uses obviously fake secret values for testing.
+ * Uses console spies for safeLog assertions.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createHmac } from "node:crypto";
-
-vi.mock("~/lib/log.server", () => ({
-  safeLog: vi.fn(),
-}));
 
 import {
   generateUnsubscribeToken,
@@ -24,9 +21,8 @@ import {
   buildUnsubscribeUrl,
   logUnsubscribeSecretMissing,
 } from "../reminder-unsubscribe-token.server";
-import { safeLog } from "~/lib/log.server";
 
-const mockSafeLog = vi.mocked(safeLog);
+let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
 
 /**
  * Create a token with a different purpose to test purpose validation.
@@ -58,6 +54,11 @@ const TEST_BUYER_ID = "buyer-token-test";
 describe("reminder unsubscribe token module", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleWarnSpy.mockRestore();
   });
 
   describe("generateUnsubscribeToken", () => {
@@ -243,16 +244,15 @@ describe("reminder unsubscribe token module", () => {
     it("logs warning with shopId and invoiceCount only (no PII)", () => {
       logUnsubscribeSecretMissing(TEST_SHOP_ID, 5);
 
-      expect(mockSafeLog).toHaveBeenCalledWith(
-        "warn",
-        "reminder_unsubscribe_secret_missing",
-        { shopId: TEST_SHOP_ID, invoiceCount: 5, secretConfigured: false }
-      );
-      
-      const logCall = mockSafeLog.mock.calls[0];
-      expect(logCall[2]).not.toHaveProperty("buyerAccountId");
-      expect(logCall[2]).not.toHaveProperty("token");
-      expect(logCall[2]).not.toHaveProperty("email");
+      expect(consoleWarnSpy).toHaveBeenCalledTimes(1);
+      const logCall = JSON.parse(consoleWarnSpy.mock.calls[0][0] as string);
+      expect(logCall.event).toBe("reminder_unsubscribe_secret_missing");
+      expect(logCall.shopId).toBe(TEST_SHOP_ID);
+      expect(logCall.invoiceCount).toBe(5);
+      expect(logCall.reason).toBe("secret_missing");
+      expect(logCall).not.toHaveProperty("buyerAccountId");
+      expect(logCall).not.toHaveProperty("token");
+      expect(logCall).not.toHaveProperty("email");
     });
   });
 

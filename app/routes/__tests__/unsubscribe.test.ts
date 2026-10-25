@@ -8,8 +8,9 @@
  * - Invalid tokens get generic response (no info leakage)
  *
  * Uses mocks for database and token verification.
+ * Uses console spies for safeLog assertions.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // Mock dependencies before importing the route
 vi.mock("~/services/reminder-unsubscribe-token.server", () => ({
@@ -21,30 +22,20 @@ vi.mock("~/services/reminder-optout.server", () => ({
   isBuyerOptedOut: vi.fn(),
 }));
 
-vi.mock("~/lib/log.server", () => ({
-  safeLog: vi.fn(),
-}));
-
-vi.mock("postgres", () => {
-  const mockEnd = vi.fn();
-  const mockSql = vi.fn();
-  (mockSql as typeof mockSql & { end: typeof mockEnd }).end = mockEnd;
-  return { default: vi.fn(() => mockSql) };
-});
-
-vi.mock("~/lib/db-light.server", () => ({
-  sqlOptions: {},
+vi.mock("~/lib/request-context.server", () => ({
+  getRequestSql: vi.fn(() => vi.fn()),
 }));
 
 import { verifyUnsubscribeToken } from "~/services/reminder-unsubscribe-token.server";
 import { setBuyerOptOut, isBuyerOptedOut } from "~/services/reminder-optout.server";
-import { safeLog } from "~/lib/log.server";
 import { loader, action } from "../unsubscribe";
 
 const mockVerifyUnsubscribeToken = vi.mocked(verifyUnsubscribeToken);
 const mockSetBuyerOptOut = vi.mocked(setBuyerOptOut);
 const mockIsBuyerOptedOut = vi.mocked(isBuyerOptedOut);
-const mockSafeLog = vi.mocked(safeLog);
+
+let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
+let consoleLogSpy: ReturnType<typeof vi.spyOn>;
 
 const TEST_SHOP_ID = "shop-unsub-test";
 const TEST_BUYER_ID = "buyer-unsub-test";
@@ -100,6 +91,13 @@ describe("unsubscribe route", () => {
     vi.clearAllMocks();
     mockIsBuyerOptedOut.mockResolvedValue(false);
     mockSetBuyerOptOut.mockResolvedValue(true);
+    consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleWarnSpy.mockRestore();
+    consoleLogSpy.mockRestore();
   });
 
   describe("GET (loader)", () => {
@@ -114,11 +112,10 @@ describe("unsubscribe route", () => {
       const result = await loader(createLoaderArgs(INVALID_TOKEN));
 
       expect(result).toEqual({ valid: false, alreadyOptedOut: false });
-      expect(mockSafeLog).toHaveBeenCalledWith(
-        "warn",
-        "unsubscribe_invalid_token",
-        { valid: false }
-      );
+      expect(consoleWarnSpy).toHaveBeenCalledTimes(1);
+      const logCall = JSON.parse(consoleWarnSpy.mock.calls[0][0] as string);
+      expect(logCall.event).toBe("unsubscribe_invalid_token");
+      expect(logCall.reason).toBe("invalid_token");
     });
 
     it("does NOT call setBuyerOptOut (GET never writes)", async () => {
@@ -177,11 +174,10 @@ describe("unsubscribe route", () => {
       );
 
       expect(result).toEqual({ success: true, alreadyOptedOut: true });
-      expect(mockSafeLog).toHaveBeenCalledWith(
-        "warn",
-        "unsubscribe_invalid_token_post",
-        { valid: false }
-      );
+      expect(consoleWarnSpy).toHaveBeenCalledTimes(1);
+      const logCall = JSON.parse(consoleWarnSpy.mock.calls[0][0] as string);
+      expect(logCall.event).toBe("unsubscribe_invalid_token_post");
+      expect(logCall.reason).toBe("invalid_token");
       expect(mockSetBuyerOptOut).not.toHaveBeenCalled();
     });
 
@@ -230,11 +226,15 @@ describe("unsubscribe route", () => {
         createActionArgs(VALID_TOKEN, "List-Unsubscribe=One-Click")
       );
 
-      expect(mockSafeLog).toHaveBeenCalledWith(
-        "info",
-        "unsubscribe_rfc8058_oneclick",
-        { shopId: TEST_SHOP_ID, buyerAccountId: TEST_BUYER_ID }
-      );
+      // Find the RFC 8058 one-click log call (console.log for info level)
+      const oneClickCalls = consoleLogSpy.mock.calls.filter((call: unknown[]) => {
+        const parsed = JSON.parse(call[0] as string);
+        return parsed.event === "unsubscribe_rfc8058_oneclick";
+      });
+      expect(oneClickCalls).toHaveLength(1);
+      const logCall = JSON.parse(oneClickCalls[0][0] as string);
+      expect(logCall.shopId).toBe(TEST_SHOP_ID);
+      expect(logCall.buyerAccountId).toBe(TEST_BUYER_ID);
     });
 
     it("logs completion with IDs only (no PII)", async () => {
@@ -248,11 +248,16 @@ describe("unsubscribe route", () => {
         createActionArgs(VALID_TOKEN, "List-Unsubscribe=One-Click")
       );
 
-      expect(mockSafeLog).toHaveBeenCalledWith("info", "unsubscribe_completed", {
-        shopId: TEST_SHOP_ID,
-        buyerAccountId: TEST_BUYER_ID,
-        updated: true,
+      // Find the completion log call (console.log for info level)
+      const completedCalls = consoleLogSpy.mock.calls.filter((call: unknown[]) => {
+        const parsed = JSON.parse(call[0] as string);
+        return parsed.event === "unsubscribe_completed";
       });
+      expect(completedCalls).toHaveLength(1);
+      const logCall = JSON.parse(completedCalls[0][0] as string);
+      expect(logCall.shopId).toBe(TEST_SHOP_ID);
+      expect(logCall.buyerAccountId).toBe(TEST_BUYER_ID);
+      expect(logCall.applied).toBe(true);
     });
 
     it("opts out without List-Unsubscribe field (confirm page button)", async () => {
@@ -302,9 +307,10 @@ describe("unsubscribe route", () => {
       await action(createActionArgs(VALID_TOKEN, "confirm=true"));
 
       // Should NOT have logged unsubscribe_rfc8058_oneclick
-      const oneClickCalls = mockSafeLog.mock.calls.filter(
-        (call) => call[1] === "unsubscribe_rfc8058_oneclick"
-      );
+      const oneClickCalls = consoleLogSpy.mock.calls.filter((call: unknown[]) => {
+        const parsed = JSON.parse(call[0] as string);
+        return parsed.event === "unsubscribe_rfc8058_oneclick";
+      });
       expect(oneClickCalls).toHaveLength(0);
     });
   });
@@ -332,15 +338,19 @@ describe("unsubscribe route", () => {
       );
 
       // Should have logged the invalid token warning
-      expect(mockSafeLog).toHaveBeenCalledWith(
-        "warn",
-        "unsubscribe_invalid_token_post",
-        { valid: false }
-      );
+      expect(consoleWarnSpy).toHaveBeenCalledTimes(1);
+      const logCall = JSON.parse(consoleWarnSpy.mock.calls[0][0] as string);
+      expect(logCall.event).toBe("unsubscribe_invalid_token_post");
+      expect(logCall.reason).toBe("invalid_token");
 
-      // Verify no call contains the token
-      for (const call of mockSafeLog.mock.calls) {
-        const fields = call[2] as Record<string, unknown>;
+      // Verify no call contains the token or secret
+      for (const call of consoleWarnSpy.mock.calls) {
+        const fields = JSON.parse(call[0] as string);
+        expect(fields).not.toHaveProperty("token");
+        expect(fields).not.toHaveProperty("secret");
+      }
+      for (const call of consoleLogSpy.mock.calls) {
+        const fields = JSON.parse(call[0] as string);
         expect(fields).not.toHaveProperty("token");
         expect(fields).not.toHaveProperty("secret");
       }
