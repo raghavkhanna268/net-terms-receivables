@@ -770,7 +770,7 @@ describe("credit-hold feature availability (unaffected by plan gating)", () => {
     expect(ALL_FEATURE_KEYS).toContain("credit_holds");
   });
 
-  it("credit-status and credit-hold controls render regardless of plan gating", async () => {
+  it("banner-state builder: no over-limit banner when gating off, credit_holds on all plans", async () => {
     const { buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
     
     // Over-limit banner hidden when gating is off (plan-limit gating)

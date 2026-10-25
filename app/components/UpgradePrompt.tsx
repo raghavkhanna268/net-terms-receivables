@@ -195,9 +195,9 @@ export function PlanBanner({
   // This avoids showing confusing 'N / 0' for no-plan shops
   const companiesText = gatingEnforced
     ? companiesLimit === -1
-      ? `${companiesUsed} companies`
-      : `${companiesUsed} / ${companiesLimit} companies`
-    : `${companiesUsed} companies`;
+      ? `${companiesUsed} buyer accounts`
+      : `${companiesUsed} / ${companiesLimit} buyer accounts`
+    : `${companiesUsed} buyer accounts`;
 
   // 'Upgrade to Add More' only shows when at limit (which already includes gatingEnforced check)
   const showUpgradeCta = companiesAtLimit;

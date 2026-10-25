@@ -21,8 +21,8 @@ vi.mock("~/lib/request-context.server", () => ({
 
 vi.mock("~/services/plan.server", () => ({
   resolvePlan: vi.fn().mockResolvedValue({
-    plan: { key: "free" },
-    subscriptionName: "Free",
+    plan: { key: "none" },
+    subscriptionName: null,
     isTest: false,
   }),
 }));

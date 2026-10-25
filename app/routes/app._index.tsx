@@ -4,7 +4,7 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { resolvePlan, type ResolvedPlan } from "~/services/plan.server";
 import { getUsageStats, isGatingEnforced } from "~/services/gating.server";
-import type { PlanKey } from "~/lib/entitlements";
+import { resolvePlanKey, type PlanKey } from "~/lib/entitlements";
 import { PlanBanner, PLAN_DISPLAY_NAMES } from "~/components/UpgradePrompt";
 import {
   getShopAgingTotals,
@@ -324,8 +324,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     shopCurrency: shop?.currency ?? "INR",
     plan: planData
       ? {
-          key: planData.plan.key,
-          name: planData.subscriptionName ?? planData.plan.key,
+          key: resolvePlanKey(planData.plan.key),
+          name: PLAN_DISPLAY_NAMES[resolvePlanKey(planData.plan.key) as PlanKey],
           isTest: planData.isTest,
         }
       : null,
