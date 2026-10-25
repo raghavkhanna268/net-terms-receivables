@@ -893,7 +893,7 @@ describeWithDb("reinstall clears metafieldSyncErrorCode and metafieldSyncErrorAt
   });
 
   describe("reinstall clears both error fields", () => {
-    it("clearUninstalledAtIfSet + clearMetafieldSyncErrorsOnReinstall clears both fields for reinstalled shop", async () => {
+    it("clearUninstalledAtAndMetafieldErrors clears both fields atomically for reinstalled shop", async () => {
       const TEST_SHOP = `test-reinstall-metafield-${TEST_SUFFIX}.myshopify.com`;
       const errorDate = new Date("2026-10-15T12:00:00Z");
 
@@ -1041,7 +1041,7 @@ describeWithDb("reinstall clears metafieldSyncErrorCode and metafieldSyncErrorAt
   });
 
   describe("other shop's accounts are unchanged", () => {
-    it("clearMetafieldSyncErrorsOnReinstall only affects the specified shop's accounts", async () => {
+    it("clearUninstalledAtAndMetafieldErrors only affects the specified shop's accounts", async () => {
       const TEST_SHOP_A = `test-shop-a-${TEST_SUFFIX}.myshopify.com`;
       const TEST_SHOP_B = `test-shop-b-${TEST_SUFFIX}.myshopify.com`;
       const errorDate = new Date("2026-10-15T12:00:00Z");
@@ -1102,7 +1102,7 @@ describeWithDb("reinstall clears metafieldSyncErrorCode and metafieldSyncErrorAt
   });
 
   describe("preserves other BuyerAccount columns", () => {
-    it("clearMetafieldSyncErrorsOnReinstall only clears error fields, preserves all other columns", async () => {
+    it("clearUninstalledAtAndMetafieldErrors only clears error fields, preserves all other columns", async () => {
       const TEST_SHOP = `test-preserve-cols-${TEST_SUFFIX}.myshopify.com`;
       const errorDate = new Date("2026-10-15T12:00:00Z");
       const syncedAt = new Date("2026-10-14T10:00:00Z");
@@ -1526,6 +1526,172 @@ describeWithDb("full after-auth flow clears metafield errors on reinstall (DB)",
       `;
 
       expect(account.metafieldSyncErrorCode).toBe("no_session");
+      expect(account.metafieldSyncErrorAt?.getTime()).toBe(errorDate.getTime());
+    });
+  });
+
+  describe("shop already in setup cache (only clearAndMaybeSetup path)", () => {
+    it("reinstall with cached shop: clears metafield errors via clearAndMaybeSetup only", async () => {
+      const TEST_SHOP = `test-cached-reinstall-${TEST_SUFFIX}.myshopify.com`;
+      const errorDate = new Date("2026-10-15T12:00:00Z");
+
+      const [{ id: shopId }] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW())
+        RETURNING id
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${shopId}, 'COMPANY'::"AccountKind",
+          'gid://shopify/Company/test-cached', 'gid://shopify/CompanyLocation/test-cached',
+          'Cached Test Account', 'OK', 'no_session', ${errorDate},
+          NOW(), NOW()
+        )
+      `;
+
+      vi.doMock("../request-context.server", () => ({
+        getRequestSql: vi.fn(() => sql),
+      }));
+
+      vi.doMock("../metafield-definitions.server", () => ({
+        ensureMetafieldDefinitions: vi.fn().mockResolvedValue([]),
+      }));
+      vi.doMock("../validation-registration.server", () => ({
+        ensureValidation: vi.fn().mockResolvedValue({ id: "test", created: false }),
+      }));
+      vi.doMock("../payment-customization-registration.server", () => ({
+        ensurePaymentCustomization: vi.fn().mockResolvedValue({ id: "pc-test", created: false }),
+      }));
+
+      const { runAfterAuth, _resetSetupCacheForTesting, _isShopSetupComplete } =
+        await import("../after-auth.server");
+
+      _resetSetupCacheForTesting();
+
+      const mockAdmin = {
+        graphql: vi.fn().mockResolvedValue({
+          json: () => Promise.resolve({ data: { shop: { ianaTimezone: "America/New_York" } } }),
+        }),
+      };
+
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = (p: Promise<unknown>) => waitUntilPromises.push(p);
+
+      runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
+
+      await Promise.all(waitUntilPromises);
+      await vi.waitFor(() => expect(_isShopSetupComplete(TEST_SHOP)).toBe(true));
+
+      await sql`
+        UPDATE "Shop"
+        SET "uninstalledAt" = NOW()
+        WHERE domain = ${TEST_SHOP}
+      `;
+
+      const [afterUninstall] = await sql<{ uninstalledAt: Date | null }[]>`
+        SELECT "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(afterUninstall.uninstalledAt).not.toBeNull();
+
+      waitUntilPromises.length = 0;
+
+      runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
+
+      await Promise.all(waitUntilPromises);
+
+      const [shop] = await sql<{ uninstalledAt: Date | null }[]>`
+        SELECT "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(shop.uninstalledAt).toBeNull();
+
+      const [account] = await sql<{
+        metafieldSyncErrorCode: string | null;
+        metafieldSyncErrorAt: Date | null;
+      }[]>`
+        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+      `;
+      expect(account.metafieldSyncErrorCode).toBeNull();
+      expect(account.metafieldSyncErrorAt).toBeNull();
+    });
+
+    it("normal re-auth with cached shop: preserves metafield errors", async () => {
+      const TEST_SHOP = `test-cached-reauth-${TEST_SUFFIX}.myshopify.com`;
+      const errorDate = new Date("2026-10-15T12:00:00Z");
+
+      const [{ id: shopId }] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW())
+        RETURNING id
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${shopId}, 'COMPANY'::"AccountKind",
+          'gid://shopify/Company/test-cached-reauth', 'gid://shopify/CompanyLocation/test-cached-reauth',
+          'Cached Reauth Account', 'OK', 'access_denied', ${errorDate},
+          NOW(), NOW()
+        )
+      `;
+
+      vi.doMock("../request-context.server", () => ({
+        getRequestSql: vi.fn(() => sql),
+      }));
+
+      vi.doMock("../metafield-definitions.server", () => ({
+        ensureMetafieldDefinitions: vi.fn().mockResolvedValue([]),
+      }));
+      vi.doMock("../validation-registration.server", () => ({
+        ensureValidation: vi.fn().mockResolvedValue({ id: "test", created: false }),
+      }));
+      vi.doMock("../payment-customization-registration.server", () => ({
+        ensurePaymentCustomization: vi.fn().mockResolvedValue({ id: "pc-test", created: false }),
+      }));
+
+      const { runAfterAuth, _resetSetupCacheForTesting, _isShopSetupComplete } =
+        await import("../after-auth.server");
+
+      _resetSetupCacheForTesting();
+
+      const mockAdmin = {
+        graphql: vi.fn().mockResolvedValue({
+          json: () => Promise.resolve({ data: { shop: { ianaTimezone: "America/New_York" } } }),
+        }),
+      };
+
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = (p: Promise<unknown>) => waitUntilPromises.push(p);
+
+      runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
+
+      await Promise.all(waitUntilPromises);
+      await vi.waitFor(() => expect(_isShopSetupComplete(TEST_SHOP)).toBe(true));
+
+      waitUntilPromises.length = 0;
+
+      runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
+
+      await Promise.all(waitUntilPromises);
+
+      const [account] = await sql<{
+        metafieldSyncErrorCode: string | null;
+        metafieldSyncErrorAt: Date | null;
+      }[]>`
+        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+      `;
+      expect(account.metafieldSyncErrorCode).toBe("access_denied");
       expect(account.metafieldSyncErrorAt?.getTime()).toBe(errorDate.getTime());
     });
   });
