@@ -40,11 +40,11 @@ ALTER TABLE "ReminderLog" ALTER COLUMN "sentAt" DROP NOT NULL;
 -- - After adding status='sent' default, existing rows satisfy the 'sent' constraint
 --
 -- Constraint rules:
--- - 'sent': sentAt IS NOT NULL, firstCappedAt IS NULL
+-- - 'sent': sentAt IS NOT NULL (firstCappedAt MAY be set for "sent late" tracking)
 -- - 'delayed': sentAt IS NULL (firstCappedAt can be set when first capped)
 -- - 'skipped_daily_limit': sentAt IS NULL (firstCappedAt preserved from delayed state)
 ALTER TABLE "ReminderLog" ADD CONSTRAINT "ReminderLog_status_sent_check"
-    CHECK (status != 'sent' OR (status = 'sent' AND "sentAt" IS NOT NULL AND "firstCappedAt" IS NULL));
+    CHECK (status <> 'sent' OR "sentAt" IS NOT NULL);
 
 ALTER TABLE "ReminderLog" ADD CONSTRAINT "ReminderLog_status_delayed_check"
     CHECK (status != 'delayed' OR (status = 'delayed' AND "sentAt" IS NULL));
@@ -122,6 +122,35 @@ BEGIN
     GET DIAGNOSTICS skipped_older_stages = ROW_COUNT;
 
     -- ==========================================================================
+    -- PART 2.5: Mark delayed stages as skipped when a NEWER stage is DUE TODAY
+    -- This prevents Part 4 from enqueuing a delayed stage when Part 3 will
+    -- enqueue a newer stage for the same invoice on the same day.
+    -- One reminder per invoice per day: newer stage wins.
+    -- ==========================================================================
+    UPDATE public."ReminderLog" rl
+    SET status = 'skipped_daily_limit'::public."ReminderLogStatus"
+    FROM public."ReminderRule" r_delayed,
+         public."Invoice" i,
+         public."Shop" s
+    WHERE rl.status = 'delayed'::public."ReminderLogStatus"
+      AND rl."ruleId" = r_delayed.id
+      AND rl."invoiceId" = i.id
+      AND i."shopId" = s.id
+      AND i."dueAt" IS NOT NULL
+      -- A newer enabled email rule for the same invoice exists AND is due today
+      AND EXISTS (
+          SELECT 1 FROM public."ReminderRule" r_newer
+          INNER JOIN public.s18_shop_reminder_settings srs ON srs.shop_id = r_newer."shopId" AND srs.enabled = true
+          WHERE r_newer."shopId" = rl."shopId"
+            AND r_newer.enabled = true
+            AND r_newer.channel = 'email'::public."ReminderChannel"
+            AND r_newer."offsetDays" > r_delayed."offsetDays"
+            -- r_newer is due today in shop's timezone
+            AND (i."dueAt" AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE + r_newer."offsetDays"
+                = (NOW() AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE
+      );
+
+    -- ==========================================================================
     -- PART 3: Enqueue NEW reminders (due today, no existing log entry)
     -- Keeps the gated-account skip from 20261106 migration
     -- ==========================================================================
@@ -187,6 +216,7 @@ BEGIN
     -- PART 4: Enqueue CATCH-UP reminders (delayed, within D+1..D+3 window)
     -- Only the latest stage per invoice (older stages already marked skipped above)
     -- Re-checks eligibility: invoice open, shop enabled, rule enabled, not gated
+    -- Excludes invoices that have ANY stage due today (Part 3 handles those)
     -- ==========================================================================
     FOR catchup_row IN
         SELECT
@@ -222,6 +252,16 @@ BEGIN
           AND (NOW() AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE 
               BETWEEN ((i."dueAt" AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE + r."offsetDays" + 1)
               AND ((i."dueAt" AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE + r."offsetDays" + 3)
+          -- Exclude invoices that have any enabled email rule due today
+          -- (Part 3 will handle those; one reminder per invoice per day)
+          AND NOT EXISTS (
+              SELECT 1 FROM public."ReminderRule" r_today
+              WHERE r_today."shopId" = rl."shopId"
+                AND r_today.enabled = true
+                AND r_today.channel = 'email'::public."ReminderChannel"
+                AND (i."dueAt" AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE + r_today."offsetDays"
+                    = (NOW() AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE
+          )
         -- Order by oldest reminder date first within each batch
         ORDER BY reminder_date ASC, rl."invoiceId" ASC
     LOOP

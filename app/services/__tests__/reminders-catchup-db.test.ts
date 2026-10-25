@@ -436,15 +436,14 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
       }
     });
 
-    it("REMINDER_SEND skips when catch-up already sent today (concurrent)", async () => {
-      const { sendPaymentReminder, sendCatchupReminder } = await import("../reminders.server");
+    it("REMINDER_SEND skips when another stage already sent today", async () => {
+      const { sendPaymentReminder } = await import("../reminders.server");
       const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com" };
 
       const invoiceId = `inv-concurrent-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/concurrent-${TEST_SUFFIX}`;
-      const logIdDelayed = `log-concurrent-delayed-${TEST_SUFFIX}`;
 
-      // dueAt is TODAY - 7 days so that offsetDays=7 means reminder fires TODAY
+      // Invoice due today, so offsetDays=0 is due TODAY
       await sql`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
@@ -453,14 +452,8 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#CONCURRENT', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '12 days', NOW() - INTERVAL '7 days', NOW(), NOW()
+          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
         )
-      `;
-
-      // Older stage (offsetDays=0) is delayed - would have fired 7 days ago but was capped
-      await sql`
-        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES (${logIdDelayed}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '7 days')
       `;
 
       const luxon = await import("luxon");
@@ -469,36 +462,35 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
       mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-concurrent" }) });
 
       try {
-        // First: catch-up sends (older stage, offsetDays=0)
-        const catchupResult = await sendCatchupReminder(
+        // First: REMINDER_SEND for offsetDays=0 (due today)
+        const sendResult1 = await sendPaymentReminder(
           sql,
           TEST_SHOP_ID,
           invoiceId,
           TEST_RULE_ID_1,
-          logIdDelayed,
           0,
           "Asia/Kolkata",
           validEnv
         );
-        expect(catchupResult.action).toBe("sent");
+        expect(sendResult1.action).toBe("sent");
 
-        // Second: REMINDER_SEND for same invoice TODAY (offsetDays=7, dueAt was 7 days ago)
-        // Should be skipped because invoice already got a reminder today
-        const sendResult = await sendPaymentReminder(
+        // Second: REMINDER_SEND for same invoice, same rule (idempotent)
+        // Should be skipped because reminder already sent
+        const sendResult2 = await sendPaymentReminder(
           sql,
           TEST_SHOP_ID,
           invoiceId,
-          TEST_RULE_ID_2,
-          7,
+          TEST_RULE_ID_1,
+          0,
           "Asia/Kolkata",
           validEnv
         );
 
-        expect(sendResult.success).toBe(true);
-        expect(sendResult.action).toBe("skipped");
-        expect(sendResult.skipReason).toContain("already sent today");
+        expect(sendResult2.success).toBe(true);
+        expect(sendResult2.action).toBe("skipped");
+        expect(sendResult2.skipReason).toContain("already sent");
 
-        // Verify only one fetch call (the catch-up)
+        // Verify only one fetch call (the first send)
         expect(mockFetch).toHaveBeenCalledTimes(1);
       } finally {
         luxonSpy.mockRestore();
@@ -672,6 +664,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         )
       `;
 
+      // status='sent' with sentAt=NULL should fail (sent MUST have sentAt)
       await expect(
         sql`
           INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "sentAt", "firstCappedAt")
@@ -679,12 +672,13 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         `
       ).rejects.toThrow();
 
-      await expect(
-        sql`
-          INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "sentAt", "firstCappedAt")
-          VALUES (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'sent'::"ReminderLogStatus", NOW(), NOW())
-        `
-      ).rejects.toThrow();
+      // status='sent' with sentAt AND firstCappedAt is VALID (sent late = was delayed, then sent)
+      const result = await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "sentAt", "firstCappedAt")
+        VALUES (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'sent'::"ReminderLogStatus", NOW(), NOW())
+        RETURNING id
+      `;
+      expect(result.length).toBe(1);
     });
 
     it("verifies CHECK constraints hold for delayed status", async () => {
@@ -821,6 +815,163 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
           WHERE "invoiceId" = ${invoiceId} AND "ruleId" = ${TEST_RULE_ID_1}
         `;
         expect(logs.length).toBe(0);
+      } finally {
+        luxonSpy.mockRestore();
+      }
+    });
+  });
+
+  describe("delayed-to-sent transition preserves firstCappedAt", () => {
+    it("markDelayedAsSent keeps firstCappedAt for 'sent late' tracking", async () => {
+      const { sendCatchupReminder } = await import("../reminders.server");
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com" };
+
+      const invoiceId = `inv-sent-late-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/sent-late-${TEST_SUFFIX}`;
+      const logId = `log-sent-late-${TEST_SUFFIX}`;
+      const firstCappedAtTime = new Date("2026-10-14T10:00:00Z");
+
+      // Create invoice due yesterday (offset-0 rule is in catch-up window today)
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+          '#SENT-LATE', 10000.00, 10000.00, 'open',
+          NOW() - INTERVAL '5 days', NOW() - INTERVAL '1 day', NOW(), NOW()
+        )
+      `;
+
+      // Create delayed ReminderLog with firstCappedAt set
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
+        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${firstCappedAtTime})
+      `;
+
+      // Verify firstCappedAt is set before send
+      const [before] = await sql<{ firstCappedAt: Date | null }[]>`
+        SELECT "firstCappedAt" FROM "ReminderLog" WHERE id = ${logId}
+      `;
+      expect(before.firstCappedAt).not.toBeNull();
+
+      const luxon = await import("luxon");
+      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-sent-late" }) });
+
+      try {
+        const result = await sendCatchupReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID_1,
+          logId,
+          0,
+          "Asia/Kolkata",
+          validEnv
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("sent");
+
+        // Verify: status='sent', sentAt set, firstCappedAt UNCHANGED
+        const [after] = await sql<{ status: string; sentAt: Date | null; firstCappedAt: Date | null }[]>`
+          SELECT status, "sentAt", "firstCappedAt" FROM "ReminderLog" WHERE id = ${logId}
+        `;
+        expect(after.status).toBe("sent");
+        expect(after.sentAt).not.toBeNull();
+        expect(after.firstCappedAt).not.toBeNull();
+        expect(after.firstCappedAt!.toISOString()).toBe(firstCappedAtTime.toISOString());
+      } finally {
+        luxonSpy.mockRestore();
+      }
+    });
+  });
+
+  describe("one reminder per invoice per day - newer stage wins", () => {
+    it("stage 1 delayed becomes skipped when stage 2 is due today, only stage 2 sends", async () => {
+      const { sendPaymentReminder, sendCatchupReminder } = await import("../reminders.server");
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com" };
+
+      const invoiceId = `inv-newer-stage-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/newer-stage-${TEST_SUFFIX}`;
+      const logIdStage1 = `log-stage1-${TEST_SUFFIX}`;
+
+      // Create invoice due 7 days ago:
+      // - stage 1 (offset 0) was due 7 days ago -> delayed row exists
+      // - stage 2 (offset 7) is due TODAY
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+          '#NEWER-STAGE', 10000.00, 10000.00, 'open',
+          NOW() - INTERVAL '14 days', NOW() - INTERVAL '7 days', NOW(), NOW()
+        )
+      `;
+
+      // Create delayed ReminderLog for stage 1 (offset 0, due 7 days ago)
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
+        VALUES (${logIdStage1}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '7 days')
+      `;
+
+      const luxon = await import("luxon");
+      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-stage2" }) });
+
+      try {
+        // First, try catch-up for stage 1 - should be skipped (newer stage due today)
+        const resultCatchup = await sendCatchupReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID_1,
+          logIdStage1,
+          0,
+          "Asia/Kolkata",
+          validEnv
+        );
+        expect(resultCatchup.success).toBe(true);
+        expect(resultCatchup.action).toBe("skipped");
+
+        // Now send stage 2 (offset 7, due today)
+        const resultSend = await sendPaymentReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID_2,
+          7,
+          "Asia/Kolkata",
+          validEnv
+        );
+        expect(resultSend.success).toBe(true);
+        expect(resultSend.action).toBe("sent");
+
+        // Verify: exactly 1 fetch call (stage 2 only)
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+
+        // Verify final ReminderLog state
+        const logs = await sql<{ ruleId: string; status: string }[]>`
+          SELECT "ruleId", status FROM "ReminderLog"
+          WHERE "invoiceId" = ${invoiceId}
+          ORDER BY "ruleId"
+        `;
+
+        // Stage 1 should be skipped_daily_limit (newer stage exists)
+        const stage1Log = logs.find(l => l.ruleId === TEST_RULE_ID_1);
+        expect(stage1Log).toBeDefined();
+        expect(stage1Log!.status).toBe("skipped_daily_limit");
+
+        // Stage 2 should be sent
+        const stage2Log = logs.find(l => l.ruleId === TEST_RULE_ID_2);
+        expect(stage2Log).toBeDefined();
+        expect(stage2Log!.status).toBe("sent");
       } finally {
         luxonSpy.mockRestore();
       }

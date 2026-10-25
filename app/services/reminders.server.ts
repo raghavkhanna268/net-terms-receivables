@@ -316,6 +316,7 @@ export async function upsertDelayedReminder(
 /**
  * Mark a delayed reminder as sent.
  * Updates status to 'sent' and sets sentAt.
+ * Preserves firstCappedAt for "sent late" tracking in the UI.
  * Returns true if the update succeeded.
  */
 export async function markDelayedAsSent(
@@ -325,7 +326,7 @@ export async function markDelayedAsSent(
 ): Promise<boolean> {
   const result = await sql`
     UPDATE "ReminderLog"
-    SET status = 'sent'::"ReminderLogStatus", "sentAt" = NOW(), "firstCappedAt" = NULL
+    SET status = 'sent'::"ReminderLogStatus", "sentAt" = NOW()
     WHERE "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId} AND status = 'delayed'::"ReminderLogStatus"
     RETURNING id
   `;
@@ -420,6 +421,38 @@ export async function hasNewerStageForInvoice(
       WHERE rl."invoiceId" = ${invoiceId}
         AND rl."ruleId" != ${ruleId}
         AND r."offsetDays" > ${offsetDays}
+    ) AS "hasNewer"
+  `;
+  return row?.hasNewer ?? false;
+}
+
+/**
+ * Check if a newer stage (higher offsetDays) is due TODAY for this invoice.
+ * This catches the case where a newer stage has no log row yet but will be
+ * enqueued by Part 3 of s18_enqueue_reminders() on the same day.
+ * One reminder per invoice per day: newer stage wins.
+ */
+export async function hasNewerStageDueToday(
+  sql: Sql,
+  shopId: string,
+  invoiceId: string,
+  offsetDays: number,
+  timezone: string
+): Promise<boolean> {
+  const validTz = validateTimezone(timezone);
+  const [row] = await sql<{ hasNewer: boolean }[]>`
+    SELECT EXISTS(
+      SELECT 1 FROM "ReminderRule" r
+      INNER JOIN "Invoice" i ON i."shopId" = r."shopId" AND i.id = ${invoiceId}
+      INNER JOIN s18_shop_reminder_settings srs ON srs.shop_id = r."shopId" AND srs.enabled = true
+      WHERE r."shopId" = ${shopId}
+        AND r.enabled = true
+        AND r.channel = 'email'::"ReminderChannel"
+        AND r."offsetDays" > ${offsetDays}
+        AND i."dueAt" IS NOT NULL
+        -- This rule is due today in shop's timezone
+        AND (i."dueAt" AT TIME ZONE ${validTz})::DATE + r."offsetDays"
+            = (NOW() AT TIME ZONE ${validTz})::DATE
     ) AS "hasNewer"
   `;
   return row?.hasNewer ?? false;
@@ -1053,6 +1086,22 @@ export async function sendCatchupReminder(
       success: true,
       action: "skipped",
       skipReason: "Newer stage exists for this invoice",
+    };
+  }
+
+  // Gate 11b: Check if a newer stage is due TODAY (no log row yet, but Part 3 will enqueue it)
+  // One reminder per invoice per day: newer stage wins
+  const newerStageDueToday = await hasNewerStageDueToday(sql, shopId, invoiceId, offsetDays, validTz);
+  if (newerStageDueToday) {
+    await sql`
+      UPDATE "ReminderLog"
+      SET status = 'skipped_daily_limit'::"ReminderLogStatus"
+      WHERE "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId} AND status = 'delayed'::"ReminderLogStatus"
+    `;
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Newer stage due today",
     };
   }
 
