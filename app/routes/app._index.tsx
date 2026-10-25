@@ -23,7 +23,7 @@ import {
 import type { Sql } from "~/lib/db-light.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { buildOverLimitBannerState } from "~/lib/over-limit-banner";
-import { isShopCurrencySupported } from "~/lib/shop-currency.server";
+import { isShopCurrencySupported, NO_CURRENCY_SENTINEL, validateCurrencyCode } from "~/lib/shop-currency.server";
 
 const PAGE_SIZE = 20;
 
@@ -203,9 +203,46 @@ async function checkOnboardingRedirect(
   }
 }
 
+/**
+ * #292: Retry currency fetch if current value is 'XXX' (failed read sentinel).
+ * Returns the potentially updated currency, or the original if retry fails/skipped.
+ */
+async function retryCurrencyIfNeeded(
+  sql: Sql,
+  shopDomain: string,
+  currentCurrency: string,
+  admin: { graphql: (q: string) => Promise<Response> },
+): Promise<string> {
+  if (currentCurrency !== NO_CURRENCY_SENTINEL) {
+    return currentCurrency;
+  }
+
+  try {
+    const response = await admin.graphql(`
+      query ShopCurrency { shop { currencyCode } }
+    `);
+    const data = await response.json() as {
+      data?: { shop?: { currencyCode?: string } };
+    };
+
+    const validatedCurrency = validateCurrencyCode(data.data?.shop?.currencyCode);
+    if (validatedCurrency && validatedCurrency !== NO_CURRENCY_SENTINEL) {
+      await sql`
+        UPDATE "Shop" SET currency = ${validatedCurrency}, "updatedAt" = NOW()
+        WHERE domain = ${shopDomain} AND currency = ${NO_CURRENCY_SENTINEL}
+      `;
+      console.log(`[app._index] currency_retry_success domain_hash=${shopDomain.slice(0, 8)} currency=${validatedCurrency}`);
+      return validatedCurrency;
+    }
+  } catch {
+    console.warn(`[app._index] currency_retry_failed domain_hash=${shopDomain.slice(0, 8)}`);
+  }
+  return currentCurrency;
+}
+
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { shopify } = context;
-  const { session, redirect: shopifyRedirect } = await shopify.authenticate.admin(request);
+  const { session, redirect: shopifyRedirect, admin } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
@@ -220,6 +257,11 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const [shop] = await sql<{ id: string; currency: string; timezone: string }[]>`
     SELECT id, currency, timezone FROM "Shop" WHERE domain = ${shopDomain}
   `;
+
+  // #292: Retry currency fetch if current value is 'XXX' (failed read)
+  const shopCurrency = shop
+    ? await retryCurrencyIfNeeded(sql, shopDomain, shop.currency, admin)
+    : "INR";
 
   if (shop && !skipOnboarding) {
     const shouldRedirect = await checkOnboardingRedirect(sql, shop.id);
@@ -319,13 +361,14 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const gatingEnforced = isGatingEnforced();
 
   // #292: Check if shop currency is supported (INR-only in v1)
-  const currencySupported = shop ? isShopCurrencySupported(shop.currency) : true;
+  // Uses shopCurrency which may have been retried if it was 'XXX'
+  const currencySupported = isShopCurrencySupported(shopCurrency);
 
   return {
     shopName: storeHandle,
     shopDomain,
     storeHandle,
-    shopCurrency: shop?.currency ?? "INR",
+    shopCurrency,
     currencySupported,
     plan: planData
       ? {

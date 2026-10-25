@@ -1047,4 +1047,34 @@ mod tests {
         let result = run_test(&input).unwrap();
         assert_eq!(result.operations.len(), 2, "Non-INR shop should hide deferred for customer path");
     }
+
+    #[test]
+    fn test_non_inr_shop_no_buyer_identity_hides_deferred() {
+        // #292: Non-INR shop should hide deferred payment even for guest checkout (no buyerIdentity)
+        let input = r#"
+        {
+            "cart": {
+                "cost": {
+                    "totalAmount": {
+                        "currencyCode": "USD"
+                    }
+                },
+                "buyerIdentity": null
+            },
+            "paymentMethods": [
+                { "id": "gid://shopify/PaymentCustomizationPaymentMethod/1", "name": "Credit Card" },
+                { "id": "gid://shopify/PaymentCustomizationPaymentMethod/2", "name": "Deferred Payment" },
+                { "id": "gid://shopify/PaymentCustomizationPaymentMethod/3", "name": "Net Terms" }
+            ],
+            "paymentCustomization": null,
+            "shop": {
+                "metafield": {
+                    "jsonValue": {"schemaVersion": 1, "currencyCode": "USD"}
+                }
+            }
+        }
+        "#;
+        let result = run_test(input).unwrap();
+        assert_eq!(result.operations.len(), 2, "Non-INR shop with no buyerIdentity must hide deferred methods");
+    }
 }

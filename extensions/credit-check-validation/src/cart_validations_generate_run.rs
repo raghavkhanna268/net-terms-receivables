@@ -454,11 +454,26 @@ mod tests {
     }
 
     #[test]
-    fn test_fixtures_invalid_wrong_schema_version_passes() {
+    fn test_fixtures_invalid_wrong_schema_version_held_blocks() {
+        // #292: HELD check runs FIRST, before schemaVersion - held buyer is always blocked
         let fixture = load_fixture("invalid.wrongSchemaVersion");
         let input = make_input("100.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "invalid.wrongSchemaVersion should fail-open");
+        assert_eq!(result.operations.len(), 1, "invalid.wrongSchemaVersion (held=true) should BLOCK due to HELD-first");
+        match &result.operations[0] {
+            schema::Operation::ValidationAdd(op) => {
+                assert!(op.errors[0].message.contains("on hold"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_fixtures_invalid_wrong_schema_version_not_held_passes() {
+        // Non-held buyer with wrong schemaVersion should fail-open (pass)
+        let fixture = load_fixture("invalid.wrongSchemaVersionNotHeld");
+        let input = make_input("100.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "invalid.wrongSchemaVersionNotHeld should fail-open");
     }
 
     #[test]
@@ -743,8 +758,8 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_schema_version_passes() {
-        // #292: HELD check comes first, so use hold:false to test schemaVersion fail-open
+    fn test_unknown_schema_version_not_held_passes() {
+        // #292: Non-held buyer with unknown schemaVersion should fail-open (pass)
         let input = make_input(
             "100.00",
             "INR",
@@ -753,7 +768,26 @@ mod tests {
             "CHECKOUT_COMPLETION"
         );
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "Unknown schema version should fail-open");
+        assert!(result.operations.is_empty(), "Unknown schema version (not held) should fail-open");
+    }
+
+    #[test]
+    fn test_unknown_schema_version_held_blocks() {
+        // #292: HELD check runs FIRST - held buyer with unknown schemaVersion should BLOCK
+        let input = make_input(
+            "100.00",
+            "INR",
+            Some(r#"{"schemaVersion": 999, "currencyCode": "INR", "hold": true, "holdReasonCode": "PAYMENT_OVERDUE", "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#),
+            false,
+            "CHECKOUT_COMPLETION"
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "Unknown schema version (held=true) should BLOCK due to HELD-first");
+        match &result.operations[0] {
+            schema::Operation::ValidationAdd(op) => {
+                assert!(op.errors[0].message.contains("on hold"));
+            }
+        }
     }
 
     #[test]

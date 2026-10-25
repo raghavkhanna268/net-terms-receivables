@@ -491,7 +491,10 @@ export async function upsertShopOnAuth(
       ON CONFLICT (domain)
       DO UPDATE SET
         timezone = COALESCE(${timezone}, "Shop".timezone),
-        currency = ${currency},
+        currency = CASE
+          WHEN ${currency} = 'XXX' THEN "Shop".currency
+          ELSE ${currency}
+        END,
         "uninstalledAt" = NULL,
         onboarding_dismissed_at = CASE
           WHEN "Shop"."uninstalledAt" IS NOT NULL THEN NULL

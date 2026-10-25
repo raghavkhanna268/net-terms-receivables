@@ -1122,7 +1122,7 @@ async function loadShopCurrencies(
 
   const uniqueDomains = [...new Set(shopDomains)];
   const rows = await sql<{ domain: string; currency: string | null }[]>`
-    SELECT domain, currency FROM "Shop" WHERE domain = ANY(${uniqueDomains})
+    SELECT domain, currency FROM "Shop" WHERE domain = ANY(${sql.array(uniqueDomains)})
   `;
 
   const result = new Map<string, string | undefined>();
@@ -1155,7 +1155,7 @@ async function processSyncQueue(
   const messages = await readSyncMessages(sql, config.batchSize, config.visibilityTimeoutSec);
 
   // #292: Batch lookup shop currencies for INR-only filtering
-  const shopDomains = messages.map((m) => m.message.shopDomain);
+  const shopDomains = messages.map((m) => m.message.shop);
   const shopCurrencies = await loadShopCurrencies(sql, shopDomains);
   const skippedNonInrCounts = new Map<string, number>();
 
@@ -1168,13 +1168,13 @@ async function processSyncQueue(
     }
 
     // #292: Skip non-INR shops
-    const shopCurrency = shopCurrencies.get(msg.message.shopDomain);
+    const shopCurrency = shopCurrencies.get(msg.message.shop);
     if (shopCurrency !== undefined && !isShopCurrencySupported(shopCurrency)) {
       await archiveMessage(sql, S6_QUEUES.SYNC, msg.msg_id);
       result.skipped++;
       skippedNonInrCounts.set(
-        msg.message.shopDomain,
-        (skippedNonInrCounts.get(msg.message.shopDomain) ?? 0) + 1
+        msg.message.shop,
+        (skippedNonInrCounts.get(msg.message.shop) ?? 0) + 1
       );
       continue;
     }
@@ -1361,7 +1361,7 @@ async function processBulkQueue(
   const messages = await readBulkMessages(sql, config.batchSize, config.visibilityTimeoutSec);
 
   // #292: Batch lookup shop currencies for INR-only filtering
-  const shopDomains = messages.map((m) => m.message.shopDomain);
+  const shopDomains = messages.map((m) => m.message.shop);
   const shopCurrencies = await loadShopCurrencies(sql, shopDomains);
   const skippedNonInrCounts = new Map<string, number>();
 
@@ -1374,13 +1374,13 @@ async function processBulkQueue(
     }
 
     // #292: Skip non-INR shops
-    const shopCurrency = shopCurrencies.get(msg.message.shopDomain);
+    const shopCurrency = shopCurrencies.get(msg.message.shop);
     if (shopCurrency !== undefined && !isShopCurrencySupported(shopCurrency)) {
       await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
       result.skipped++;
       skippedNonInrCounts.set(
-        msg.message.shopDomain,
-        (skippedNonInrCounts.get(msg.message.shopDomain) ?? 0) + 1
+        msg.message.shop,
+        (skippedNonInrCounts.get(msg.message.shop) ?? 0) + 1
       );
       continue;
     }
