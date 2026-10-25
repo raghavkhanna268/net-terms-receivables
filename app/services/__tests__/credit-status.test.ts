@@ -1564,3 +1564,152 @@ describe("CREDIT_STATUS_RECOMPUTE drain handler no-owner branch", () => {
     expect(mockShopifyGraphQLRequest).not.toHaveBeenCalled();
   });
 });
+
+describe("backoff schedule for retryable sync failures (#212)", () => {
+  describe("shouldSkipForBackoff", () => {
+    it("returns skip:false when metafieldSyncErrorAt is null (no failure)", async () => {
+      const { shouldSkipForBackoff } = await import("../credit-status.server");
+      expect(shouldSkipForBackoff(null).skip).toBe(false);
+    });
+
+    it("allows retry on day 0 (same day as failure)", async () => {
+      const { shouldSkipForBackoff } = await import("../credit-status.server");
+      const now = new Date();
+      expect(shouldSkipForBackoff(now).skip).toBe(false);
+    });
+
+    it("allows retry on day 1 after failure", async () => {
+      const { shouldSkipForBackoff } = await import("../credit-status.server");
+      const oneDayAgo = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000);
+      expect(shouldSkipForBackoff(oneDayAgo).skip).toBe(false);
+    });
+
+    it("allows retry on day 2 after failure", async () => {
+      const { shouldSkipForBackoff } = await import("../credit-status.server");
+      const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+      expect(shouldSkipForBackoff(twoDaysAgo).skip).toBe(false);
+    });
+
+    it("skips on day 3 after failure (between allowed days 2 and 4)", async () => {
+      const { shouldSkipForBackoff } = await import("../credit-status.server");
+      const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+      const result = shouldSkipForBackoff(threeDaysAgo);
+      expect(result.skip).toBe(true);
+      expect(result.errorAgeDays).toBe(3);
+      expect(result.nextRetryDay).toBe(4);
+    });
+
+    it("allows retry on day 4 after failure", async () => {
+      const { shouldSkipForBackoff } = await import("../credit-status.server");
+      const fourDaysAgo = new Date(Date.now() - 4 * 24 * 60 * 60 * 1000);
+      expect(shouldSkipForBackoff(fourDaysAgo).skip).toBe(false);
+    });
+
+    it("skips on days 5 and 6 after failure (between allowed days 4 and 7)", async () => {
+      const { shouldSkipForBackoff } = await import("../credit-status.server");
+      const fiveDaysAgo = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
+      const sixDaysAgo = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000);
+      expect(shouldSkipForBackoff(fiveDaysAgo).skip).toBe(true);
+      expect(shouldSkipForBackoff(sixDaysAgo).skip).toBe(true);
+    });
+
+    it("allows retry on day 7 after failure (cap)", async () => {
+      const { shouldSkipForBackoff } = await import("../credit-status.server");
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      expect(shouldSkipForBackoff(sevenDaysAgo).skip).toBe(false);
+    });
+
+    it("allows retry every 7 days after cap (day 14, 21, 28)", async () => {
+      const { shouldSkipForBackoff } = await import("../credit-status.server");
+      const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
+      const twentyOneDaysAgo = new Date(Date.now() - 21 * 24 * 60 * 60 * 1000);
+      const twentyEightDaysAgo = new Date(Date.now() - 28 * 24 * 60 * 60 * 1000);
+      expect(shouldSkipForBackoff(fourteenDaysAgo).skip).toBe(false);
+      expect(shouldSkipForBackoff(twentyOneDaysAgo).skip).toBe(false);
+      expect(shouldSkipForBackoff(twentyEightDaysAgo).skip).toBe(false);
+    });
+
+    it("skips on days between cap multiples (day 8, 10, 15, 20)", async () => {
+      const { shouldSkipForBackoff } = await import("../credit-status.server");
+      const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+      const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+      const fifteenDaysAgo = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000);
+      const twentyDaysAgo = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
+      expect(shouldSkipForBackoff(eightDaysAgo).skip).toBe(true);
+      expect(shouldSkipForBackoff(tenDaysAgo).skip).toBe(true);
+      expect(shouldSkipForBackoff(fifteenDaysAgo).skip).toBe(true);
+      expect(shouldSkipForBackoff(twentyDaysAgo).skip).toBe(true);
+    });
+
+    it("handles drift: allows retry just after day 4 (e.g., 4.5 days)", async () => {
+      const { shouldSkipForBackoff } = await import("../credit-status.server");
+      // 4.5 days ago - drift past day 4
+      const fourPointFiveDaysAgo = new Date(Date.now() - 4.5 * 24 * 60 * 60 * 1000);
+      expect(shouldSkipForBackoff(fourPointFiveDaysAgo).skip).toBe(false);
+    });
+
+    it("handles drift: skips just before day 4 (e.g., 3.99 days)", async () => {
+      const { shouldSkipForBackoff } = await import("../credit-status.server");
+      // 3.99 days ago - just before day 4
+      const justBeforeDay4 = new Date(Date.now() - 3.99 * 24 * 60 * 60 * 1000);
+      expect(shouldSkipForBackoff(justBeforeDay4).skip).toBe(true);
+    });
+
+    it("handles drift: allows retry just after day 7 (e.g., 7.5 days)", async () => {
+      const { shouldSkipForBackoff } = await import("../credit-status.server");
+      const sevenPointFiveDaysAgo = new Date(Date.now() - 7.5 * 24 * 60 * 60 * 1000);
+      expect(shouldSkipForBackoff(sevenPointFiveDaysAgo).skip).toBe(false);
+    });
+
+    it("handles drift: allows retry just after day 14 (e.g., 14.5 days)", async () => {
+      const { shouldSkipForBackoff } = await import("../credit-status.server");
+      const fourteenPointFiveDaysAgo = new Date(Date.now() - 14.5 * 24 * 60 * 60 * 1000);
+      expect(shouldSkipForBackoff(fourteenPointFiveDaysAgo).skip).toBe(false);
+    });
+
+    it("returns errorAgeDays and nextRetryDay when skipping", async () => {
+      const { shouldSkipForBackoff } = await import("../credit-status.server");
+      // Day 10 - between day 7 and day 14
+      const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+      const result = shouldSkipForBackoff(tenDaysAgo);
+      expect(result.skip).toBe(true);
+      expect(result.errorAgeDays).toBe(10);
+      expect(result.nextRetryDay).toBe(14);
+    });
+  });
+
+  describe("computeNextRetryDay", () => {
+    it("returns correct next retry day for each day age", async () => {
+      const { computeNextRetryDay } = await import("../credit-status.server");
+      
+      // Before day 1
+      expect(computeNextRetryDay(0)).toBe(1);
+      
+      // Between 1 and 2
+      expect(computeNextRetryDay(1)).toBe(2);
+      
+      // Between 2 and 4
+      expect(computeNextRetryDay(2)).toBe(4);
+      expect(computeNextRetryDay(3)).toBe(4);
+      
+      // Between 4 and 7
+      expect(computeNextRetryDay(4)).toBe(7);
+      expect(computeNextRetryDay(5)).toBe(7);
+      expect(computeNextRetryDay(6)).toBe(7);
+      
+      // After cap (7), next retry is at multiples of 7
+      expect(computeNextRetryDay(7)).toBe(14);
+      expect(computeNextRetryDay(10)).toBe(14);
+      expect(computeNextRetryDay(14)).toBe(21);
+      expect(computeNextRetryDay(20)).toBe(21);
+    });
+  });
+
+  describe("RETRYABLE_BACKOFF_DAYS and CAP constants", () => {
+    it("exports expected backoff schedule", async () => {
+      const { RETRYABLE_BACKOFF_DAYS, RETRYABLE_BACKOFF_CAP_DAYS } = await import("../credit-status.server");
+      expect(RETRYABLE_BACKOFF_DAYS).toEqual([0, 1, 2, 4, 7]);
+      expect(RETRYABLE_BACKOFF_CAP_DAYS).toBe(7);
+    });
+  });
+});

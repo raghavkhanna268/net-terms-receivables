@@ -263,27 +263,26 @@ For privacy inquiries:
 
 ## Appendix A: Shopify OAuth Scopes
 
-The app requests the following scopes to provide its core features:
+The app requests the following scopes to provide its core features.
 
-### Read Scopes (5)
+Per [Shopify Access Scopes documentation](https://shopify.dev/docs/api/usage/access-scopes) 'How it works' section: "Any scope that writes a resource also grants read access to it, so request the write scope only when your app needs both." We request only `write_*` scopes for resources we both read and write.
+
+### Read Scopes (2)
 
 | Scope | Purpose |
 |-------|---------|
-| `read_companies` | View B2B companies and locations for buyer account sync |
-| `read_customers` | View customers to identify those tagged for net-terms eligibility |
 | `read_draft_orders` | View draft orders to calculate pending credit exposure |
-| `read_orders` | View orders to track invoices and payment status |
 | `read_payment_terms` | View payment terms on orders and company locations |
 
 ### Write Scopes (6)
 
 | Scope | Purpose |
 |-------|---------|
-| `write_companies` | Update credit status and hold information on companies and locations |
-| `write_customers` | Update credit status and hold information on customers |
+| `write_companies` | View and update B2B companies and locations for buyer account sync and credit status |
+| `write_customers` | View and update customers for net-terms eligibility and credit status |
 | `write_merchant_managed_fulfillment_orders` | Place fulfillment holds on orders from accounts that are overdue or on credit hold |
-| `write_orders` | Mark orders as paid after bank payment matching, and add status tags |
+| `write_orders` | View orders for invoice tracking, mark as paid after bank payment matching, and add status tags |
 | `write_payment_customizations` | Configure payment method visibility based on account status |
 | `write_validations` | Configure checkout validation to enforce credit limits and holds |
 
-**Protected Customer Data:** The `read_customers` scope requires Shopify's Protected Customer Data (PCD) approval. Level 1 access plus Name and Email fields have been requested in the Partner Dashboard. Until approval is granted and the PCD feature is enabled, the email and display name fields in tagged customers remain empty.
+**Protected Customer Data:** The `write_customers` scope (which implies `read_customers`) requires Shopify's Protected Customer Data (PCD) approval. Level 1 access plus Name and Email fields have been approved. The email and display name fields are fetched for tagged customers.

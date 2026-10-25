@@ -28,11 +28,11 @@ import { parseTriggeredAt, recordAndEnqueueSync } from "~/lib/webhook-receipts.s
  * to avoid unnecessary session lookups. Saves ~5-10ms DB round-trip per webhook.
  *
  * Note on scopes:
- * - read_orders: Access orders from the last 60 days (default)
- * - read_all_orders: Access all historical orders (requires approval)
+ * - write_orders: Implies read_orders, access orders from the last 60 days (default)
+ * - read_all_orders: Access all historical orders (requires approval, extends write_orders)
  *
- * With read_orders, the backfill is limited to 60 days. Once read_all_orders
- * is approved, historical orders can be backfilled via bulk operations.
+ * With write_orders (which implies read_orders), the backfill is limited to 60 days.
+ * Once read_all_orders is approved, historical orders can be backfilled via bulk operations.
  */
 
 const ALLOWED_TOPICS = new Set([
