@@ -418,11 +418,21 @@ export function toErrorCode(err: unknown): string {
   return "unknown";
 }
 
-const keyCache = new Map<string, CryptoKey>();
+let cachedKey: { key: string; cryptoKey: CryptoKey } | undefined;
 
+/**
+ * Get or create the HMAC CryptoKey for the given key string.
+ *
+ * Caches a single key at a time. On key rotation (different key string),
+ * the old cached key is replaced. The HMAC key is the UTF-8 bytes of the
+ * LOG_HASH_KEY string exactly as set in the Worker secret (e.g., if DevOps
+ * sets 32 random bytes base64-encoded, the base64 text itself is the key;
+ * it is NOT base64-decoded).
+ */
 async function getHmacKey(keyString: string): Promise<CryptoKey> {
-  const cached = keyCache.get(keyString);
-  if (cached) return cached;
+  if (cachedKey && cachedKey.key === keyString) {
+    return cachedKey.cryptoKey;
+  }
 
   const encoder = new TextEncoder();
   const keyData = encoder.encode(keyString);
@@ -433,7 +443,7 @@ async function getHmacKey(keyString: string): Promise<CryptoKey> {
     false,
     ["sign"]
   );
-  keyCache.set(keyString, cryptoKey);
+  cachedKey = { key: keyString, cryptoKey };
   return cryptoKey;
 }
 
@@ -444,8 +454,11 @@ async function getHmacKey(keyString: string): Promise<CryptoKey> {
  * if the LOG_HASH_KEY secret is missing from the Worker env.
  *
  * The HMAC is keyed by LOG_HASH_KEY and is not reversible without the secret.
- * Used for compliance/redact paths where no shopId exists.
+ * The key is the UTF-8 bytes of the LOG_HASH_KEY string exactly as set
+ * (e.g., if DevOps sets 32 random bytes base64-encoded, the base64 text
+ * itself is the key; it is NOT base64-decoded).
  *
+ * Used for compliance/redact paths where no shopId exists.
  * Uses Web Crypto API for Cloudflare Workers compatibility.
  *
  * @param domain - Shop domain (e.g., "example.myshopify.com")

@@ -400,6 +400,36 @@ describe("log.server", () => {
 
         expect(hash).not.toBe(plainSha256);
       });
+
+      it("key rotation yields different hash matching new key oracle, old result not cached", async () => {
+        const domain = "test-rotation.myshopify.com";
+        const oldKey = "old-key-for-rotation-test";
+        const newKey = "new-key-for-rotation-test";
+
+        const hashWithOldKey = await withRequestContext(
+          { env: { LOG_HASH_KEY: oldKey } },
+          () => shopHash(domain)
+        );
+
+        const hashWithNewKey = await withRequestContext(
+          { env: { LOG_HASH_KEY: newKey } },
+          () => shopHash(domain)
+        );
+
+        expect(hashWithOldKey).not.toBe(hashWithNewKey);
+
+        const expectedOldHmac = createHmac("sha256", oldKey)
+          .update(domain.toLowerCase())
+          .digest("hex")
+          .slice(0, 12);
+        expect(hashWithOldKey).toBe(expectedOldHmac);
+
+        const expectedNewHmac = createHmac("sha256", newKey)
+          .update(domain.toLowerCase())
+          .digest("hex")
+          .slice(0, 12);
+        expect(hashWithNewKey).toBe(expectedNewHmac);
+      });
     });
 
     describe("with key missing (fail closed)", () => {
