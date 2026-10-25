@@ -233,7 +233,7 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           packageManager: npm
-          command: deploy --secrets-file ${{ steps.secrets.outputs.file }} --var SENTRY_RELEASE:${{ github.sha }}
+          command: deploy --secrets-file ${{ steps.secrets.outputs.file }} --var SENTRY_RELEASE:${{ steps.main-head.outputs.sha }}
 
       - name: Upload source maps to Sentry
         if: steps.gate.outputs.ready == 'true' && steps.verify-head.outputs.changed != 'true'
@@ -246,24 +246,26 @@ jobs:
             exit 0
           fi
 
-          npx --yes @sentry/cli@2.58.6 releases new "${{ github.sha }}" \
+          RELEASE="${{ steps.main-head.outputs.sha }}"
+
+          npx --yes @sentry/cli@2.58.6 releases new "$RELEASE" \
             --org termwise \
             --project net-terms-app \
-            --url https://sentry.io
+            --url https://de.sentry.io
 
           # shellcheck disable=SC2088 # tilde is literal URL prefix, not home dir
           npx --yes @sentry/cli@2.58.6 sourcemaps upload \
             --org termwise \
             --project net-terms-app \
-            --release "${{ github.sha }}" \
-            --url https://sentry.io \
+            --release "$RELEASE" \
+            --url https://de.sentry.io \
             --url-prefix '~/' \
             ./dist/server
 
-          npx --yes @sentry/cli@2.58.6 releases finalize "${{ github.sha }}" \
+          npx --yes @sentry/cli@2.58.6 releases finalize "$RELEASE" \
             --org termwise \
             --project net-terms-app \
-            --url https://sentry.io
+            --url https://de.sentry.io
 
       - name: Remove secrets file
         if: always()

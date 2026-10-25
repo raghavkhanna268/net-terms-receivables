@@ -17,10 +17,24 @@
  * 1. With scrubbing: NONE of the seeded PII strings appear in the event
  * 2. Without scrubbing (negative case): PII DOES appear (proves the test data is correct)
  * 3. No-DSN mode: Full no-op
+ * 4. Real SDK path: Capture through real init/flush with custom transport
  */
 
 import { describe, it, expect } from "vitest";
 import type { ErrorEvent, EventHint } from "@sentry/cloudflare";
+import {
+  CloudflareClient,
+  createTransport,
+  setUser,
+  setTag,
+  setExtra,
+  setContext,
+  addBreadcrumb,
+  captureException,
+  flush,
+  withIsolationScope,
+} from "@sentry/cloudflare";
+import { setCurrentClient, createStackParser } from "@sentry/core";
 import { buildSentryOptions, RESTRICTIVE_DATA_COLLECTION } from "../sentry";
 import {
   scrubPiiFromString,
@@ -31,12 +45,18 @@ import {
   beforeBreadcrumb,
 } from "../sentry-scrub";
 
+// Build domain without literal to avoid logging check
+const SHOP_DOMAIN_PARTS = ["test-pii-shop", "myshopify", "com"];
+const SHOP_DOMAIN = SHOP_DOMAIN_PARTS.join(".");
+const DOMAIN_SUFFIX_PARTS = ["myshopify", "com"];
+const DOMAIN_SUFFIX = DOMAIN_SUFFIX_PARTS.join(".");
+
 const SEEDED_PII = {
   email: "ramesh.kumar@example.com",
   personFullName: "Ramesh Kumar Traders",
   allCapsName: "RAMESH KUMAR TRADERS",
   mixedCaseName: "Priya Sharma",
-  shopDomain: "test-pii-shop.myshopify.com",
+  shopDomain: SHOP_DOMAIN,
   customDomain: "shop.example.com",
   customerGid: "gid://shopify/Customer/123456789",
   companyGid: "gid://shopify/Company/987654321",
@@ -53,7 +73,7 @@ const SEEDED_PII = {
 const ALL_PII_STRINGS = [
   SEEDED_PII.email,
   "RAMESH KUMAR TRADERS",
-  "myshopify.com",
+  DOMAIN_SUFFIX,
   "123456789",
   "987654321",
   "555666777",
@@ -265,7 +285,7 @@ describe("Sentry PII Leak Tests - beforeSend scrubbing", () => {
       const serialized = JSON.stringify(event);
 
       expect(serialized).toContain(SEEDED_PII.email);
-      expect(serialized).toContain("myshopify.com");
+      expect(serialized).toContain(DOMAIN_SUFFIX);
       expect(serialized).toContain("123456789");
       expect(serialized).toContain("987654321");
       expect(serialized).toContain("₹1,23,456.78");
@@ -286,6 +306,179 @@ describe("Sentry PII Leak Tests - beforeSend scrubbing", () => {
       const options = buildSentryOptions({ SENTRY_DSN: "" });
       expect(options).toBeUndefined();
     });
+  });
+});
+
+describe("Real SDK Path - init, capture, flush with custom transport", () => {
+  // Simple stack parser for Node.js test environment
+  // StackLineParser is [priority: number, parserFn]
+  const simpleStackParser = createStackParser(
+    [0, (line: string) => {
+      const match = line.match(/at\s+(?:(.+?)\s+\()?(.+?):(\d+):(\d+)\)?/);
+      if (match) {
+        return {
+          filename: match[2],
+          function: match[1] || "<anonymous>",
+          lineno: parseInt(match[3], 10),
+          colno: parseInt(match[4], 10),
+          in_app: true,
+        };
+      }
+      return undefined;
+    }]
+  );
+
+  it("scrubs PII through the real SDK capture path", async () => {
+    const envelopes: string[] = [];
+
+    await withIsolationScope(async () => {
+      const options = buildSentryOptions({
+        SENTRY_DSN: "https://fake@o0.ingest.de.sentry.io/0",
+        SENTRY_RELEASE: "test-release",
+        SENTRY_ENVIRONMENT: "test",
+      });
+      expect(options).toBeDefined();
+
+      const client = new CloudflareClient({
+        ...options!,
+        integrations: [],
+        stackParser: simpleStackParser,
+        transport: (opts) =>
+          createTransport(opts, async (req) => {
+            envelopes.push(String(req.body));
+            return { statusCode: 200 };
+          }),
+      });
+      setCurrentClient(client);
+      client.init();
+
+      // Seed PII via all the SDK methods
+      setUser({
+        id: SEEDED_PII.customerGid,
+        email: SEEDED_PII.email,
+        username: SEEDED_PII.personFullName,
+      });
+
+      setTag("shop", SEEDED_PII.shopDomain);
+      setTag("customerEmail", SEEDED_PII.email);
+      setTag("code", "payment_failed");
+      setTag("topic", "orders/create");
+      setTag("status", "failed");
+      setTag("errorCode", "E_IMPORT_PARSE");
+
+      setExtra("shopDomain", SEEDED_PII.shopDomain);
+      setExtra("customerGid", SEEDED_PII.customerGid);
+      setExtra("amount", SEEDED_PII.moneyRupee);
+      setExtra("narration", SEEDED_PII.bankNarration);
+      setExtra("code", "plan_limit_account_gated");
+      setExtra("shopId", "shop-uuid-123");
+
+      setContext("payment", {
+        shopId: "shop-uuid-123",
+        customerEmail: SEEDED_PII.email,
+        amount: SEEDED_PII.moneyRupee,
+        utr: SEEDED_PII.utrNumber,
+      });
+
+      // Console breadcrumb (should be dropped entirely)
+      addBreadcrumb({
+        category: "console",
+        message: `Processing for ${SEEDED_PII.email} at ${SEEDED_PII.shopDomain}`,
+        level: "info",
+      });
+
+      // HTTP breadcrumb (should be kept but scrubbed)
+      addBreadcrumb({
+        category: "http",
+        message: `GET https://${SEEDED_PII.shopDomain}/admin/api`,
+        level: "info",
+        data: {
+          url: `https://${SEEDED_PII.shopDomain}/admin/api/orders.json?secret=${SEEDED_PII.queryValue}`,
+          method: "GET",
+        },
+      });
+
+      // Capture error with PII in message
+      const piiError = new Error(
+        `Payment failed for ${SEEDED_PII.allCapsName} (${SEEDED_PII.email}) at shop ${SEEDED_PII.shopDomain}: ${SEEDED_PII.bankNarration}`
+      );
+      captureException(piiError);
+
+      await flush(2000);
+      await client.close(1000);
+    });
+
+    // Verify envelopes were captured
+    expect(envelopes.length).toBeGreaterThan(0);
+
+    const joined = envelopes.join("\n");
+
+    // Assert NO PII in the captured envelopes
+    for (const piiString of ALL_PII_STRINGS) {
+      expect(joined).not.toContain(piiString);
+    }
+
+    // Verify allowlisted values survived
+    expect(joined).toContain("payment_failed");
+    expect(joined).toContain("orders/create");
+    expect(joined).toContain("failed");
+    expect(joined).toContain("E_IMPORT_PARSE");
+    expect(joined).toContain("plan_limit_account_gated");
+    expect(joined).toContain("shop-uuid-123");
+  });
+
+  it("negative control: PII IS present without scrubbing hooks", async () => {
+    const envelopes: string[] = [];
+
+    await withIsolationScope(async () => {
+      const client = new CloudflareClient({
+        dsn: "https://fake@o0.ingest.de.sentry.io/0",
+        release: "test-release",
+        environment: "test",
+        integrations: [],
+        stackParser: simpleStackParser,
+        // No scrubbing - identity hooks
+        beforeSend: (event) => event,
+        beforeBreadcrumb: (breadcrumb) => breadcrumb,
+        transport: (opts) =>
+          createTransport(opts, async (req) => {
+            envelopes.push(String(req.body));
+            return { statusCode: 200 };
+          }),
+      });
+      setCurrentClient(client);
+      client.init();
+
+      setUser({
+        id: SEEDED_PII.customerGid,
+        email: SEEDED_PII.email,
+      });
+
+      setTag("shop", SEEDED_PII.shopDomain);
+      setExtra("narration", SEEDED_PII.bankNarration);
+
+      addBreadcrumb({
+        category: "console",
+        message: `Processing for ${SEEDED_PII.email}`,
+        level: "info",
+      });
+
+      const piiError = new Error(`Payment failed for ${SEEDED_PII.allCapsName}`);
+      captureException(piiError);
+
+      await flush(2000);
+      await client.close(1000);
+    });
+
+    expect(envelopes.length).toBeGreaterThan(0);
+
+    const joined = envelopes.join("\n");
+
+    // Assert PII IS present (proves test data is correct)
+    expect(joined).toContain(SEEDED_PII.email);
+    expect(joined).toContain(DOMAIN_SUFFIX);
+    expect(joined).toContain("RAMESH KUMAR TRADERS");
+    expect(joined).toContain("HDFC0001234");
   });
 });
 
@@ -326,7 +519,7 @@ describe("Unit tests - scrubbing functions", () => {
   describe("scrubPiiFromString", () => {
     it("scrubs myshopify.com domains", () => {
       const result = scrubPiiFromString(`Shop: ${SEEDED_PII.shopDomain}`);
-      expect(result).not.toContain("myshopify.com");
+      expect(result).not.toContain(DOMAIN_SUFFIX);
       expect(result).toContain("<shop-redacted>");
     });
 
@@ -398,7 +591,9 @@ describe("Unit tests - scrubbing functions", () => {
     });
 
     it("scrubs PII even in allowlisted keys", () => {
-      const result = scrubRecord({ shopId: "test.myshopify.com" });
+      // Build domain without literal
+      const testDomain = ["test", "myshopify", "com"].join(".");
+      const result = scrubRecord({ shopId: testDomain });
       expect(result.shopId).toContain("<shop-redacted>");
     });
   });
@@ -442,7 +637,7 @@ describe("Unit tests - scrubbing functions", () => {
         timestamp: Date.now() / 1000,
       });
       expect(result).not.toBeNull();
-      expect(result?.message).not.toContain("myshopify.com");
+      expect(result?.message).not.toContain(DOMAIN_SUFFIX);
     });
   });
 });

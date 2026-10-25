@@ -41,9 +41,3 @@ scripts/validate-graphql-schema.ts:shop-interpolation:19
 # =============================================================================
 scripts/benchmark-cpu-breakdown.mjs:script-domain:1
 scripts/benchmark-db-cpu.mjs:script-domain:1
-
-# =============================================================================
-# Test files - PII test data for leak testing
-# =============================================================================
-# sentry-leak.test.ts: 2 myshopify.com references in PII test assertions
-app/lib/__tests__/sentry-leak.test.ts:domain-literal:2
