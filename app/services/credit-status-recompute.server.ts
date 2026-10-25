@@ -47,6 +47,8 @@ export interface RecomputeResult {
   errorCode?: string;
   /** Whether the error is retryable */
   retryable?: boolean;
+  /** Whether the account has no owner (no metafield write attempted) */
+  noOwner?: boolean;
 }
 
 /**
@@ -173,8 +175,9 @@ export async function recomputeCreditStatus(
     };
   }
 
-  // Either metafield write succeeded, or a newer sync owns it (both are success)
-  const metafieldWritten = !syncResult.metafieldSyncPending;
+  // For no-owner accounts, metafield was NOT written (no Shopify call made)
+  // For normal accounts, metafieldWritten = !syncResult.metafieldSyncPending
+  const metafieldWritten = syncResult.noOwner ? false : !syncResult.metafieldSyncPending;
 
   // Re-read the account to get the actual post-sync hold state
   const [postSyncAccount] = await sql<{ holdState: string; bypass: boolean }[]>`
@@ -191,6 +194,7 @@ export async function recomputeCreditStatus(
     metafieldWritten,
     previousHold,
     newHold: finalHold,
+    noOwner: syncResult.noOwner,
   };
 }
 

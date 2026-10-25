@@ -1981,6 +1981,12 @@ const RECONCILE_ERROR_MESSAGES: Record<string, string> = {
 };
 
 /**
+ * Human-readable messages from RECONCILE_ERROR_MESSAGES for use in toHumanError.
+ * These are explicit, hand-written messages that are safe to pass through unchanged.
+ */
+export const RECONCILE_HUMAN_MESSAGES = Object.values(RECONCILE_ERROR_MESSAGES);
+
+/**
  * Call Shopify orderMarkAsPaid mutation.
  *
  * Issue #5: Better already-paid detection - we verify by querying the order's
