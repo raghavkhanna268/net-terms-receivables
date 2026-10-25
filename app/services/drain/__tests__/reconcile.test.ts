@@ -18,6 +18,10 @@ vi.mock("~/lib/pgmq.server", () => ({
   },
 }));
 
+vi.mock("../bulk-op-recovery.server", () => ({
+  recoverStaleBulkOperations: vi.fn(),
+}));
+
 describe("Reconcile", () => {
   let mockSql: ReturnType<typeof createMockSql>;
   let shopResults: Array<{ domain: string }>;
@@ -61,6 +65,16 @@ describe("Reconcile", () => {
 
   describe("enqueueReconcileForAllShops", () => {
     it("returns 0 when no shops installed", async () => {
+      const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
+      vi.mocked(recoverStaleBulkOperations).mockResolvedValue({
+        foundCount: 0,
+        enqueuedCount: 0,
+        markedFailedCount: 0,
+        skippedCount: 0,
+        errorCount: 0,
+        attempts: [],
+      });
+
       const { enqueueReconcileForAllShops } = await import("../reconcile.server");
       shopResults = [];
 
@@ -71,7 +85,32 @@ describe("Reconcile", () => {
       expect(count).toBe(0);
     });
 
+    it("continues processing if recovery throws an error", async () => {
+      const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
+      vi.mocked(recoverStaleBulkOperations).mockRejectedValue(new Error("Recovery failed"));
+
+      const { enqueueReconcileForAllShops } = await import("../reconcile.server");
+      shopResults = [{ domain: "test.myshopify.com" }];
+
+      const count = await enqueueReconcileForAllShops(
+        mockSql as unknown as Parameters<typeof enqueueReconcileForAllShops>[0]
+      );
+
+      expect(count).toBe(1);
+      expect(recoverStaleBulkOperations).toHaveBeenCalled();
+    });
+
     it("enqueues 1 RECONCILE_COMPANIES message per shop (orders enqueued after completion)", async () => {
+      const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
+      vi.mocked(recoverStaleBulkOperations).mockResolvedValue({
+        foundCount: 0,
+        enqueuedCount: 0,
+        markedFailedCount: 0,
+        skippedCount: 0,
+        errorCount: 0,
+        attempts: [],
+      });
+
       const { enqueueReconcileForAllShops } = await import("../reconcile.server");
       shopResults = [
         { domain: "shop1.myshopify.com" },
@@ -88,6 +127,16 @@ describe("Reconcile", () => {
     });
 
     it("creates messages with RECONCILE_COMPANIES topic only", async () => {
+      const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
+      vi.mocked(recoverStaleBulkOperations).mockResolvedValue({
+        foundCount: 0,
+        enqueuedCount: 0,
+        markedFailedCount: 0,
+        skippedCount: 0,
+        errorCount: 0,
+        attempts: [],
+      });
+
       const { enqueueReconcileForAllShops } = await import("../reconcile.server");
       shopResults = [{ domain: "test.myshopify.com" }];
       enqueuedMessages = [];
@@ -108,6 +157,16 @@ describe("Reconcile", () => {
     });
 
     it("creates unique webhookIds for each message", async () => {
+      const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
+      vi.mocked(recoverStaleBulkOperations).mockResolvedValue({
+        foundCount: 0,
+        enqueuedCount: 0,
+        markedFailedCount: 0,
+        skippedCount: 0,
+        errorCount: 0,
+        attempts: [],
+      });
+
       const { enqueueReconcileForAllShops } = await import("../reconcile.server");
       shopResults = [
         { domain: "shop1.myshopify.com" },
@@ -126,6 +185,27 @@ describe("Reconcile", () => {
       const webhookIds = messages.map((m) => m.webhookId);
       const uniqueIds = new Set(webhookIds);
       expect(uniqueIds.size).toBe(webhookIds.length);
+    });
+
+    it("logs recovery stats when operations are found", async () => {
+      const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
+      vi.mocked(recoverStaleBulkOperations).mockResolvedValue({
+        foundCount: 3,
+        enqueuedCount: 1,
+        markedFailedCount: 1,
+        skippedCount: 1,
+        errorCount: 0,
+        attempts: [],
+      });
+
+      const { enqueueReconcileForAllShops } = await import("../reconcile.server");
+      shopResults = [{ domain: "test.myshopify.com" }];
+
+      await enqueueReconcileForAllShops(
+        mockSql as unknown as Parameters<typeof enqueueReconcileForAllShops>[0]
+      );
+
+      expect(recoverStaleBulkOperations).toHaveBeenCalled();
     });
   });
 

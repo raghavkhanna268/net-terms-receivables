@@ -21,11 +21,13 @@ import { ALL_PLAN_KEYS, ALL_FEATURE_KEYS } from "~/lib/entitlements";
  */
 
 describe("getRequiredPlanForFeature", () => {
-  it("derives required plan from entitlements.ts", () => {
-    expect(getRequiredPlanForFeature("aging_dashboard")).toBe("free");
-    expect(getRequiredPlanForFeature("matching")).toBe("free");
-    expect(getRequiredPlanForFeature("pdf_statements")).toBe("growth");
-    expect(getRequiredPlanForFeature("audit_export")).toBe("scale");
+  it("derives required plan from entitlements.ts (all features on all plans)", () => {
+    // All features are now available on every plan, so they return 'none'
+    // HIDDEN (issue #286): pdf_statements, payer_memory, audit_export removed
+    expect(getRequiredPlanForFeature("aging_dashboard")).toBe("none");
+    expect(getRequiredPlanForFeature("matching")).toBe("none");
+    expect(getRequiredPlanForFeature("reminders")).toBe("none");
+    expect(getRequiredPlanForFeature("credit_holds")).toBe("none");
   });
 
   it("returns valid plan for all features", () => {
@@ -35,9 +37,9 @@ describe("getRequiredPlanForFeature", () => {
     }
   });
 
-  it("credit_holds is available on free plan (all-plans feature)", () => {
+  it("credit_holds is available on none plan (all-plans feature)", () => {
     // credit_holds must never be shown as requiring an upgrade
-    expect(getRequiredPlanForFeature("credit_holds")).toBe("free");
+    expect(getRequiredPlanForFeature("credit_holds")).toBe("none");
   });
 });
 
@@ -61,12 +63,12 @@ describe("FEATURE_DISPLAY_NAMES", () => {
 
 describe("UpgradePrompt component", () => {
   const baseProps = {
-    currentPlan: "free" as const,
+    currentPlan: "none" as const,
     upgradeUrl: "https://admin.shopify.com/store/test/charges/app/pricing_plans",
   };
 
   describe("feature-based prompts", () => {
-    it("renders nothing when feature is available on current plan", () => {
+    it("renders nothing for aging_dashboard (all features on all plans)", () => {
       const html = renderToString(
         createElement(UpgradePrompt, {
           ...baseProps,
@@ -77,7 +79,7 @@ describe("UpgradePrompt component", () => {
       expect(html).toBe("");
     });
 
-    it("renders nothing when matching feature is requested (matching is on all plans)", () => {
+    it("renders nothing for matching (all features on all plans)", () => {
       const html = renderToString(
         createElement(UpgradePrompt, {
           ...baseProps,
@@ -88,7 +90,8 @@ describe("UpgradePrompt component", () => {
       expect(html).toBe("");
     });
 
-    it("renders info banner when gating is OFF and feature needs upgrade", () => {
+    it("renders nothing for reminders (all features on all plans)", () => {
+      // All features are now available on every plan, including none
       const html = renderToString(
         createElement(UpgradePrompt, {
           ...baseProps,
@@ -96,13 +99,11 @@ describe("UpgradePrompt component", () => {
           gatingEnforced: false,
         })
       );
-      expect(html).toContain('tone="info"');
-      expect(html).toContain("Premium Feature");
-      expect(html).toContain("View Plans");
-      expect(html).toContain("Starter");
+      expect(html).toBe("");
     });
 
-    it("renders warning banner when gating is ON and feature needs upgrade", () => {
+    it("renders nothing for reminders even with gating ON (all features on all plans)", () => {
+      // All features are now available on every plan
       const html = renderToString(
         createElement(UpgradePrompt, {
           ...baseProps,
@@ -110,15 +111,12 @@ describe("UpgradePrompt component", () => {
           gatingEnforced: true,
         })
       );
-      expect(html).toContain('tone="warning"');
-      expect(html).toContain("Feature Unavailable");
-      expect(html).toContain("Upgrade to");
-      expect(html).toContain("Starter");
+      expect(html).toBe("");
     });
   });
 
   describe("limit-based prompts", () => {
-    it("renders info banner when gating is OFF and at limit", () => {
+    it("renders nothing when gating is OFF (T1: no limit prompts when gating off)", () => {
       const html = renderToString(
         createElement(UpgradePrompt, {
           ...baseProps,
@@ -126,9 +124,7 @@ describe("UpgradePrompt component", () => {
           gatingEnforced: false,
         })
       );
-      expect(html).toContain('tone="info"');
-      expect(html).toContain("Plan Limit Note");
-      expect(html).toContain("View Plans");
+      expect(html).toBe("");
     });
 
     it("renders warning banner when gating is ON and at limit", () => {
@@ -157,10 +153,11 @@ describe("UpgradePrompt component", () => {
       );
       expect(html).toContain('direction="inline"');
       expect(html).toContain('tone="critical"');
-      expect(html).toContain("Company limit reached");
+      expect(html).toContain("Company");
+      expect(html).toContain("limit reached");
     });
 
-    it("renders inline with warning tone when gating is OFF", () => {
+    it("renders nothing when gating is OFF (T1: no At company limit when gating off)", () => {
       const html = renderToString(
         createElement(UpgradePrompt, {
           ...baseProps,
@@ -169,18 +166,18 @@ describe("UpgradePrompt component", () => {
           compact: true,
         })
       );
-      expect(html).toContain('direction="inline"');
-      expect(html).toContain('tone="warning"');
-      expect(html).toContain("At company limit");
+      expect(html).toBe("");
     });
   });
 
   describe("upgrade URL", () => {
-    it("includes target _top for parent frame navigation", () => {
+    it("includes target _top for parent frame navigation (limit-based)", () => {
+      // Use limit-based prompt since feature-based prompts render nothing
+      // when all features are on all plans
       const html = renderToString(
         createElement(UpgradePrompt, {
           ...baseProps,
-          feature: "reminders",
+          limitType: "companies",
           gatingEnforced: true,
         })
       );
@@ -206,16 +203,96 @@ describe("PlanBanner component", () => {
     expect(html).toContain("Starter");
   });
 
-  it("renders usage count", () => {
-    const html = renderToString(createElement(PlanBanner, baseProps));
-    expect(html).toContain("10 / 25 companies");
+  describe("gating OFF (T1)", () => {
+    it("shows count without limit when gating is OFF", () => {
+      const html = renderToString(createElement(PlanBanner, baseProps));
+      expect(html).toContain("10 companies");
+      expect(html).not.toContain("/ 25");
+    });
+
+    it("shows View Plans button when at limit with gating OFF", () => {
+      const html = renderToString(
+        createElement(PlanBanner, {
+          ...baseProps,
+          companiesUsed: 25,
+          companiesLimit: 25,
+          gatingEnforced: false,
+        })
+      );
+      expect(html).toContain('variant="secondary"');
+      expect(html).toContain("View Plans");
+      expect(html).not.toContain("Upgrade to Add More");
+    });
+
+    it("shows no badge when at limit but gating not enforced", () => {
+      const html = renderToString(
+        createElement(PlanBanner, {
+          ...baseProps,
+          companiesUsed: 25,
+          companiesLimit: 25,
+          gatingEnforced: false,
+        })
+      );
+      expect(html).not.toContain("At Limit");
+      expect(html).not.toContain("Limit Reached");
+    });
+
+    it("no-plan shop (limit 0) shows just count, no / 0", () => {
+      const html = renderToString(
+        createElement(PlanBanner, {
+          ...baseProps,
+          planKey: "none",
+          companiesUsed: 5,
+          companiesLimit: 0,
+          gatingEnforced: false,
+        })
+      );
+      expect(html).toContain("5 companies");
+      expect(html).not.toContain("/ 0");
+      expect(html).not.toContain("Limit Reached");
+    });
+  });
+
+  describe("gating ON", () => {
+    it("shows count with limit when gating is ON", () => {
+      const html = renderToString(
+        createElement(PlanBanner, { ...baseProps, gatingEnforced: true })
+      );
+      expect(html).toContain("10 / 25 companies");
+    });
+
+    it("shows critical badge when at limit and gating enforced", () => {
+      const html = renderToString(
+        createElement(PlanBanner, {
+          ...baseProps,
+          companiesUsed: 25,
+          companiesLimit: 25,
+          gatingEnforced: true,
+        })
+      );
+      expect(html).toContain('tone="critical"');
+      expect(html).toContain("Limit Reached");
+    });
+
+    it("shows primary Upgrade to Add More button when at limit with gating ON", () => {
+      const html = renderToString(
+        createElement(PlanBanner, {
+          ...baseProps,
+          companiesUsed: 25,
+          companiesLimit: 25,
+          gatingEnforced: true,
+        })
+      );
+      expect(html).toContain('variant="primary"');
+      expect(html).toContain("Upgrade to Add More");
+    });
   });
 
   it("renders unlimited usage correctly", () => {
     const html = renderToString(
       createElement(PlanBanner, {
         ...baseProps,
-        planKey: "scale",
+        planKey: "unlimited",
         companiesLimit: -1,
         companiesUsed: 100,
       })
@@ -230,55 +307,17 @@ describe("PlanBanner component", () => {
     expect(html).toContain("(Test)");
   });
 
-  it("shows critical badge when at limit and gating enforced", () => {
-    const html = renderToString(
-      createElement(PlanBanner, {
-        ...baseProps,
-        companiesUsed: 25,
-        companiesLimit: 25,
-        gatingEnforced: true,
-      })
-    );
-    expect(html).toContain('tone="critical"');
-    expect(html).toContain("Limit Reached");
-  });
-
-  it("shows warning badge when at limit and gating not enforced", () => {
-    const html = renderToString(
-      createElement(PlanBanner, {
-        ...baseProps,
-        companiesUsed: 25,
-        companiesLimit: 25,
-        gatingEnforced: false,
-      })
-    );
-    expect(html).toContain('tone="warning"');
-    expect(html).toContain("At Limit");
-  });
-
-  it("shows primary upgrade button when at limit", () => {
-    const html = renderToString(
-      createElement(PlanBanner, {
-        ...baseProps,
-        companiesUsed: 25,
-        companiesLimit: 25,
-      })
-    );
-    expect(html).toContain('variant="primary"');
-    expect(html).toContain("Upgrade to Add More");
-  });
-
   it("shows secondary view plans button when not at limit", () => {
     const html = renderToString(createElement(PlanBanner, baseProps));
     expect(html).toContain('variant="secondary"');
     expect(html).toContain("View Plans");
   });
 
-  it("hides upgrade button for scale plan", () => {
+  it("hides upgrade button for unlimited plan", () => {
     const html = renderToString(
       createElement(PlanBanner, {
         ...baseProps,
-        planKey: "scale",
+        planKey: "unlimited",
         companiesLimit: -1,
       })
     );
