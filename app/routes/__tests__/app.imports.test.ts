@@ -1243,7 +1243,7 @@ describeWithDb("Monthly import limit enforcement", () => {
     }
   });
 
-  it("second import in same month is rejected when on free plan (1/month)", async () => {
+  it("multiple imports in same month allowed (T1: all plans have unlimited imports)", async () => {
     // Enable gating for this test
     vi.stubEnv("PLAN_GATING_ENFORCED", "true");
 
@@ -1268,19 +1268,19 @@ describeWithDb("Monthly import limit enforcement", () => {
         ],
       };
 
+      // T1 pricing: all plans have unlimited imports, so this should succeed
       const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
-      expect(response.status).toBe(403);
+      expect(response.status).toBe(200);
 
       const data = await parseResponse(response);
-      expect(data.success).toBe(false);
-      expect(data.error).toContain("Monthly import limit reached");
-      expect((data as { limitReached?: boolean }).limitReached).toBe(true);
+      expect(data.success).toBe(true);
+      expect(data.counts?.inserted).toBe(1);
 
-      // Verify no BankImport was created for the rejected request
+      // Verify both BankImport records exist
       const [count] = await sql<{ c: string }[]>`
         SELECT COUNT(*)::text AS c FROM "BankImport" WHERE "shopId" = ${testShopId}
       `;
-      expect(parseInt(count.c, 10)).toBe(1); // Only the original import
+      expect(parseInt(count.c, 10)).toBe(2); // Both imports
     } finally {
       vi.unstubAllEnvs();
     }
@@ -1368,15 +1368,15 @@ describeWithDb("Monthly import limit enforcement", () => {
     }
   });
 
-  it("monthly limit error message includes usage info", async () => {
+  it("T1 pricing: legacy 'free' plan maps to 'none' with unlimited imports", async () => {
     // Enable gating
     vi.stubEnv("PLAN_GATING_ENFORCED", "true");
 
     try {
-      // Ensure free plan
+      // Set legacy 'free' plan_key in DB (should map to 'none' with unlimited imports)
       await sql`UPDATE "Shop" SET plan_key = 'free', plan_cached_at = NOW() WHERE id = ${testShopId}`;
 
-      // Create a BankImport to hit the limit
+      // Create multiple BankImport records
       await sql`
         INSERT INTO "BankImport" ("shopId", bank, "fileName", "rowCount", "createdAt")
         VALUES (${testShopId}, 'hdfc', 'existing.csv', 10, NOW())
@@ -1384,23 +1384,23 @@ describeWithDb("Monthly import limit enforcement", () => {
 
       const payload = {
         bank: "HDFC",
-        fileName: "over-limit.csv",
+        fileName: "another-import.csv",
         credits: [
           {
             date: yesterday(),
             amountPaise: 5000000,
             rail: "NEFT",
-            narration: "NEFT CR-LIMIT MESSAGE TEST",
+            narration: "NEFT CR-UNLIMITED TEST",
           },
         ],
       };
 
+      // T1: 'free' maps to 'none' which has unlimited imports
       const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
-      const data = await parseResponse(response);
+      expect(response.status).toBe(200);
 
-      expect(data.success).toBe(false);
-      expect(data.error).toContain("1 of 1"); // "used 1 of 1 imports"
-      expect(data.error).toContain("Upgrade");
+      const data = await parseResponse(response);
+      expect(data.success).toBe(true);
     } finally {
       vi.unstubAllEnvs();
     }
