@@ -196,21 +196,21 @@ Per [Shopify metafield documentation](https://shopify.dev/docs/apps/build/metafi
 
 ### Sentry Error Events — Data Scrubbing
 
-When Sentry is enabled, error events are scrubbed by `beforeSend` and `beforeSendTransaction` hooks (`app/lib/sentry.ts:140-150`) before transmission:
+When Sentry is enabled, error events are scrubbed by `beforeSend` and `beforeSendTransaction` hooks (`app/lib/sentry-scrub.ts:208-216`) before transmission:
 
 **Removed entirely:**
-- `request.headers`, `request.cookies`, `request.query_string`, `request.data` (lines 85-95)
-- `event.breadcrumbs` (line 115)
+- `request.headers`, `request.cookies`, `request.query_string`, `request.data` (`sentry-scrub.ts:155-170`)
+- `event.breadcrumbs` (`sentry-scrub.ts:184`)
 
 **Transformed:**
-- `request.url` — query string stripped (lines 89-92)
-- `exception.value` — replaced with error code via `toErrorCode` (lines 99-106)
-- `event.message` — redacted via `redactString` (lines 110-112)
+- `request.url` — query string stripped (`sentry-scrub.ts:162-164`)
+- `exception.value` — replaced with error code via `toErrorCode` (`sentry-scrub.ts:174-176`)
+- `event.message` — redacted via `redactString` (`sentry-scrub.ts:181`)
 
 **Scrubbed to allowlist:**
-- `event.extra`, `event.tags`, `event.contexts` — only keys in `ALLOWED_SENTRY_KEYS` (lines 37-46) are retained: `shopId`, `code`, `requestId`, `webhookId`, `jobId`, `topic`, `status`, `errorCode`
+- `event.extra`, `event.tags`, `event.contexts` — only keys in `ALLOWED_SENTRY_KEYS` (`sentry-scrub.ts:33-46`) are retained: `shopId`, `code`, `requestId`, `webhookId`, `jobId`, `topic`, `status`, `errorCode`
 
-**Disabled via `dataCollection` config (lines 19-31):**
+**Disabled via `RESTRICTIVE_DATA_COLLECTION` config (`sentry-scrub.ts:16-31`):**
 - `userInfo`, `cookies`, `httpHeaders`, `httpBodies`, `urlQueryParams`, `graphQL`, `genAI`, `databaseQueryData`, `queues`, `stackFrameVariables`, `frameContextLines`
 
 ---

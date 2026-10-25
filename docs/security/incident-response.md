@@ -13,9 +13,9 @@
 Sentry is initialised in the Cloudflare Workers entry point via `wrapWithSentry()`:
 
 - **Initialisation:** `workers/app.ts:16` wraps the worker handler with Sentry
-- **Configuration:** `app/lib/sentry.ts:173-199` configures the Sentry SDK with:
-  - `dataCollection` set to restrictive mode (lines 19-31)
-  - `beforeSend` / `beforeSendTransaction` scrubbing hooks (lines 140-150)
+- **Configuration:** `app/lib/sentry.ts:54-70` (`buildSentryOptions`) configures the Sentry SDK with:
+  - `RESTRICTIVE_DATA_COLLECTION` mode (`app/lib/sentry-scrub.ts:16-31`)
+  - `beforeSend` / `beforeSendTransaction` scrubbing hooks (`app/lib/sentry-scrub.ts:208-216`)
 
 Sentry captures:
 - Uncaught exceptions from request handlers
