@@ -357,6 +357,24 @@ describe("FeatureComparisonTable logic", () => {
     }
   });
 
+  it("matching shows as included for all four tiers", async () => {
+    const { ALL_PLAN_KEYS, getPlanConfig, planHasFeature } = await import(
+      "~/lib/entitlements"
+    );
+
+    const matchingRow = ALL_PLAN_KEYS.map((planKey) => {
+      const plan = getPlanConfig(planKey);
+      return { planKey, hasFeature: planHasFeature(plan, "matching") };
+    });
+
+    expect(matchingRow).toEqual([
+      { planKey: "free", hasFeature: true },
+      { planKey: "starter", hasFeature: true },
+      { planKey: "growth", hasFeature: true },
+      { planKey: "scale", hasFeature: true },
+    ]);
+  });
+
   it("pdf_statements shows as NOT included for free and starter", async () => {
     const { getPlanConfig, planHasFeature } = await import("~/lib/entitlements");
 
@@ -383,6 +401,9 @@ describe("FeatureComparisonTable logic", () => {
 
     const agingRowData = tableRows.find((row) => row.feature === "aging_dashboard");
     expect(agingRowData?.cells).toEqual([true, true, true, true]);
+
+    const matchingRowData = tableRows.find((row) => row.feature === "matching");
+    expect(matchingRowData?.cells).toEqual([true, true, true, true]);
 
     const auditExportRowData = tableRows.find((row) => row.feature === "audit_export");
     expect(auditExportRowData?.cells).toEqual([false, false, false, true]);
