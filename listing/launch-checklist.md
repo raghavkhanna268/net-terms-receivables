@@ -53,18 +53,24 @@
 
 ### Scopes and Permissions
 
-- [ ] **Before S24:** Audit requested scopes and drop any that no merged code uses. See `docs/scopes.md` for the current scope list and justifications.
+Production scopes (8 total, post scope-reduction):
+
+```
+read_draft_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations
+```
+
+Write scopes include read access to the same resource type. See [Access scopes](https://shopify.dev/docs/api/usage/access-scopes).
 
 - [ ] **⚠️ Request `read_all_orders` scope (if needed)**
   - **Owner:** Raghav (Partner Dashboard). **Steps:** [docs/launch-checklist/read-all-orders-request.md](../docs/launch-checklist/read-all-orders-request.md)
-  - Current: `read_orders` limited to 60-day order window
+  - Current: `write_orders` limited to 60-day order window for reads
   - **Justification:** Historical invoice backfill for existing merchants
   - **Decision needed:** Is 60-day window sufficient for launch?
 
 - [ ] **⚠️ Protected Customer Data (PCD) Access Request**
-  - Required for: `read_customers`, `read_orders` scopes (after PR #28)
-  - **Status:** Level 1 plus Name and Email fields already requested in the Partner Dashboard
-  - **Owner:** Raghav (Partner Dashboard) — submit the PCD request for Level 1 + name/email, `read_customers`; cite [docs/privacy.md Section 2.3](../docs/privacy.md#23-tagged-customer-data) and [Appendix A](../docs/privacy.md#appendix-a-shopify-oauth-scopes)
+  - Required for: `write_customers`, `write_orders` scopes (write grants read)
+  - **Status:** Level 1 plus Name and Email fields already requested in the Partner Dashboard (see [docs/privacy.md](../docs/privacy.md), Protected Customer Data note)
+  - **Owner:** Raghav (Partner Dashboard) — cite [docs/privacy.md Section 2.3](../docs/privacy.md#23-tagged-customer-data) and [Appendix A](../docs/privacy.md#appendix-a-shopify-oauth-scopes)
   - [ ] **PCD Level 1** — Customer data excluding name, address, phone, and email fields
     - [ ] File PCD access request form in Partner Dashboard
     - [ ] Justify data access requirements
@@ -89,7 +95,7 @@
   - [ ] Verify `app/uninstalled` webhook works in test store
   - [ ] Verify `shop/redact` deletes all shop data (cascade)
   - [ ] Verify `customers/redact` returns 200 (no customer data stored yet)
-  - [ ] After PR #32: Verify `customers/redact` deletes s8_tagged_customers
+  - [ ] Verify `customers/redact` deletes tagged customer buyer accounts
 - [ ] **⚠️ Uninstall/reinstall test (including the `shop/redact` cascade)**
   - Runs only on a separate throwaway dev store, never on the main dev store, because it destroys data
   - Needs Raghav's explicit approval before it runs
@@ -108,7 +114,7 @@
   - [ ] Target: LCP ≤ 2.5s, INP ≤ 200ms, CLS ≤ 0.1
   - [ ] Run Lighthouse on embedded app pages
   - **Note:** INP (Interaction to Next Paint) replaced FID as a Core Web Vital in March 2024
-  - **Reference:** [Shopify App Performance Requirements](https://shopify.dev/docs/apps/store/requirements), [Core Web Vitals](https://web.dev/articles/vitals)
+  - **Reference:** [Shopify App Store Requirements](https://shopify.dev/docs/apps/launch/shopify-app-store/app-store-requirements), [Core Web Vitals](https://web.dev/articles/vitals)
 
 - [ ] Verify Worker CPU time stays under limits
   - Current estimates: 2-3ms per webhook (well under 10ms)
@@ -181,23 +187,6 @@
 
 ---
 
-## Dependencies on Unmerged PRs
-
-### PR #28 (S6 — Company & Order Sync)
-
-Must merge before:
-- [ ] Scope requests (read_companies, read_orders, etc.)
-- [ ] PCD access request
-- [ ] Invoice creation feature claims in listing
-
-### PR #32 (S8 — Tag Rules & Customer Sync)
-
-Must merge before:
-- [ ] Tag-based buyer account claims in listing
-- [ ] Customer sync feature claims
-
----
-
 ## Pre-Submission Checklist
 
 - [ ] All ⚠️ blocking items resolved
@@ -213,11 +202,11 @@ Must merge before:
 
 ## App Store Review Reference
 
-- [App Store listing requirements](https://shopify.dev/docs/apps/store/requirements)
-- [Protected Customer Data requirements](https://shopify.dev/docs/apps/store/data-protection/protected-customer-data)
-- [GDPR compliance requirements](https://shopify.dev/docs/apps/store/gdpr)
-- [App performance requirements](https://shopify.dev/docs/apps/store/requirements#performance)
-- [Billing API requirements](https://shopify.dev/docs/apps/billing) (if paid app)
+- [App Store listing requirements](https://shopify.dev/docs/apps/launch/shopify-app-store/app-store-requirements)
+- [Protected Customer Data requirements](https://shopify.dev/docs/apps/launch/protected-customer-data)
+- [Privacy law compliance (GDPR)](https://shopify.dev/docs/apps/build/privacy-law-compliance)
+- [App requirements checklist](https://shopify.dev/docs/apps/launch/app-requirements-checklist)
+- [App pricing / billing](https://shopify.dev/docs/apps/launch/billing)
 
 ---
 
