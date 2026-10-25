@@ -94,9 +94,9 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
   });
 
   describe("gating OFF: credit-status and credit-hold UI renders, no over-limit UI", () => {
-    it("none plan, gating OFF: shows credit status and hold controls, no over-limit banner", () => {
+    it("none plan over limit, gating OFF: shows credit status and hold controls, no over-limit banner", () => {
       const loaderData = buildLoaderData({
-        isGated: false, // Account is NOT gated when gating is off
+        isGated: false, // Account is NOT marked gated when gating is off
         gatingEnforced: false,
       });
       mockUseLoaderData.mockReturnValue(loaderData);
@@ -108,7 +108,7 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
       expect(html).toContain("Hold Status");
       expect(html).toContain(">OK<"); // OK badge
 
-      // Manual hold control renders (the checkbox label)
+      // Manual hold control renders (the checkbox label for place/release)
       expect(html).toContain("Place manual hold on this account");
 
       // Full credit edit form renders (not restricted)
@@ -122,7 +122,8 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
       expect(html).not.toContain("Upgrade to edit credit settings");
     });
 
-    it("starter plan, gating OFF: same assertions", () => {
+    it("starter plan over limit, gating OFF: credit-hold/credit-status UI renders, no limit UI", () => {
+      // Paid plan (starter) with companiesUsed > companiesLimit but gating OFF
       const loaderData = buildLoaderData({
         isGated: false, // Account is NOT gated when gating is off
         gatingEnforced: false,
@@ -135,7 +136,7 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
       expect(html).toContain("Credit Status");
       expect(html).toContain("Hold Status");
 
-      // Manual hold control renders
+      // Manual hold control renders (the place/release toggle)
       expect(html).toContain("Place manual hold on this account");
 
       // Full credit edit form renders
@@ -145,6 +146,28 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
       expect(html).not.toContain("This account is over your plan limit");
       expect(html).not.toContain("Limit Reached");
       expect(html).not.toContain("Upgrade to edit credit settings");
+    });
+
+    it("growth plan over limit, gating OFF: credit UI renders, no limit warnings", () => {
+      // Another paid plan over limit with gating OFF
+      const loaderData = buildLoaderData({
+        isGated: false,
+        gatingEnforced: false,
+      });
+      mockUseLoaderData.mockReturnValue(loaderData);
+
+      const html = renderToString(createElement(AccountPage));
+
+      // Credit status and hold controls render
+      expect(html).toContain("Credit Status");
+      expect(html).toContain("Hold Status");
+      expect(html).toContain("Place manual hold on this account");
+      expect(html).toContain("Save Credit Settings");
+
+      // No limit-related UI
+      expect(html).not.toContain("over your plan limit");
+      expect(html).not.toContain("Limit Reached");
+      expect(html).not.toContain("Upgrade");
     });
   });
 

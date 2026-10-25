@@ -427,7 +427,11 @@ function AgingBucketSummary({
   );
 }
 
-function BuyerLedgerTable({
+/**
+ * BuyerLedgerTable: Renders the buyer accounts table.
+ * Exported for render testing.
+ */
+export function BuyerLedgerTable({
   rows,
   sortBy,
   sortOrder,
