@@ -23,7 +23,7 @@ import { ALL_PLAN_KEYS, ALL_FEATURE_KEYS } from "~/lib/entitlements";
 describe("getRequiredPlanForFeature", () => {
   it("derives required plan from entitlements.ts", () => {
     expect(getRequiredPlanForFeature("aging_dashboard")).toBe("free");
-    expect(getRequiredPlanForFeature("matching")).toBe("starter");
+    expect(getRequiredPlanForFeature("matching")).toBe("free");
     expect(getRequiredPlanForFeature("pdf_statements")).toBe("growth");
     expect(getRequiredPlanForFeature("audit_export")).toBe("scale");
   });
@@ -77,11 +77,22 @@ describe("UpgradePrompt component", () => {
       expect(html).toBe("");
     });
 
-    it("renders info banner when gating is OFF and feature needs upgrade", () => {
+    it("renders nothing when matching feature is requested (matching is on all plans)", () => {
       const html = renderToString(
         createElement(UpgradePrompt, {
           ...baseProps,
           feature: "matching",
+          gatingEnforced: false,
+        })
+      );
+      expect(html).toBe("");
+    });
+
+    it("renders info banner when gating is OFF and feature needs upgrade", () => {
+      const html = renderToString(
+        createElement(UpgradePrompt, {
+          ...baseProps,
+          feature: "reminders",
           gatingEnforced: false,
         })
       );
@@ -95,7 +106,7 @@ describe("UpgradePrompt component", () => {
       const html = renderToString(
         createElement(UpgradePrompt, {
           ...baseProps,
-          feature: "matching",
+          feature: "reminders",
           gatingEnforced: true,
         })
       );
@@ -169,7 +180,7 @@ describe("UpgradePrompt component", () => {
       const html = renderToString(
         createElement(UpgradePrompt, {
           ...baseProps,
-          feature: "matching",
+          feature: "reminders",
           gatingEnforced: true,
         })
       );
