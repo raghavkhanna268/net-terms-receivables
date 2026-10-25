@@ -264,11 +264,14 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#SENT-NEWER', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '15 days', NOW() - INTERVAL '14 days', NOW(), NOW()
+          NOW() - INTERVAL '3 days', NOW() - INTERVAL '2 days', NOW(), NOW()
         )
       `;
 
-      // Older stage (offsetDays=0) is delayed
+      // Invoice due 2 days ago, offsetDays=0 means reminder was due 2 days ago
+      // D+2 is within catch-up window D+1..D+3
+
+      // Older stage (offsetDays=0) is delayed from 2 days ago
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
         VALUES (${logIdDelayed}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '2 days')
@@ -410,9 +413,17 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
 
       const invoiceId = `inv-one-per-day-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/one-per-day-${TEST_SUFFIX}`;
-      const logIdDelayed = `log-delayed-${TEST_SUFFIX}`;
-      const logIdSent = `log-sent-${TEST_SUFFIX}`;
+      const logIdDelayed = `log-delayed-opd-${TEST_SUFFIX}`;
+      const logIdSent = `log-sent-opd-${TEST_SUFFIX}`;
+      // Create a custom rule with higher offsetDays that we'll try to catch up
+      const ruleId3 = `rule-catch-opd-${TEST_SUFFIX}`;
 
+      await sql`
+        INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+        VALUES (${ruleId3}, ${TEST_SHOP_ID}, 14, 'email'::"ReminderChannel", true, NOW(), NOW())
+      `;
+
+      // Invoice due 15 days ago. With offsetDays=14, reminder was due 1 day ago (D+1 is in catch-up window).
       await sql`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
@@ -421,41 +432,48 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#ONE-PER-DAY', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '10 days', NOW() - INTERVAL '5 days', NOW(), NOW()
+          NOW() - INTERVAL '20 days', NOW() - INTERVAL '15 days', NOW(), NOW()
         )
       `;
 
+      // Create delayed log for rule 3 (offsetDays=14) - this has the highest offsetDays, so no "newer stage"
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
+        VALUES (${logIdDelayed}, ${TEST_SHOP_ID}, ${ruleId3}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '1 day')
+      `;
+
+      // Rule 1 (offsetDays=0) was sent TODAY - this should block the catch-up (one per invoice per day)
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "sentAt")
         VALUES (${logIdSent}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'sent'::"ReminderLogStatus", NOW())
       `;
 
-      await sql`
-        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES (${logIdDelayed}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_2}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '1 day')
-      `;
-
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: testTimezone });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       try {
+        // Try to catch-up rule 3 (offsetDays=14, highest), which puts us at D+1 from reminder date (within window)
+        // No "newer stage" check should skip since this IS the newest stage
         const result = await sendCatchupReminder(
           sql,
           TEST_SHOP_ID,
           invoiceId,
-          TEST_RULE_ID_2,
+          ruleId3,
           logIdDelayed,
-          7,
-          "Asia/Kolkata",
+          14, // offsetDays=14
+          testTimezone,
           validEnv
         );
 
+        // Expect skip because rule 1 was already sent today for this invoice
         expect(result.success).toBe(true);
         expect(result.action).toBe("skipped");
         expect(result.skipReason).toContain("already sent today");
       } finally {
         luxonSpy.mockRestore();
+        await sql`DELETE FROM "ReminderLog" WHERE "ruleId" = ${ruleId3}`;
+        await sql`DELETE FROM "ReminderRule" WHERE id = ${ruleId3}`;
       }
     });
 
@@ -1006,6 +1024,10 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
       const invoiceId = `inv-part25-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/part25-${TEST_SUFFIX}`;
 
+      // Invoice due 7 days ago in shop timezone:
+      // - Rule 1 (offsetDays=0): reminder date = 7 days ago (within D+3 catch-up window for now - wait, 7 > 3)
+      // - Rule 2 (offsetDays=7): reminder date = 7 days ago + 7 = today
+      // For Part 2.5 to trigger, rule 1 must be delayed and rule 2 (higher offset) must be due TODAY.
       await sql`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
@@ -1015,12 +1037,13 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#PART25', 10000.00, 10000.00, 'open',
           NOW() - INTERVAL '10 days',
-          -- dueAt set so offset-0 is in catchup window (yesterday) and offset-7 is due today
-          NOW() - INTERVAL '1 day',
+          -- dueAt = 7 days ago, so offsetDays=7 gives reminder date of today
+          ((NOW() AT TIME ZONE ${testTimezone})::DATE - INTERVAL '7 days')::timestamp AT TIME ZONE ${testTimezone},
           NOW(), NOW()
         )
       `;
 
+      // Rule 1 (offsetDays=0) is delayed from yesterday
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
         VALUES (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '1 day')
@@ -1215,6 +1238,9 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
     });
 
     afterAll(async () => {
+      await sql`DELETE FROM "ReminderLog" WHERE "shopId" = ${TEST_SHOP_ID}`;
+      await sql`DELETE FROM "Invoice" WHERE "buyerAccountId" = ${TEST_GATED_ACCOUNT_ID}`;
+      await sql`DELETE FROM s8_tagged_customers WHERE shop_id = ${TEST_SHOP_ID} AND customer_id = ${TEST_GATED_CUSTOMER_ID}`;
       await sql`DELETE FROM "BuyerAccount" WHERE id = ${TEST_GATED_ACCOUNT_ID}`;
     });
 
