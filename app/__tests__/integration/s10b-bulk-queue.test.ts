@@ -11,13 +11,6 @@ import {
 } from "~/services/drain/processor.server";
 
 /**
- * Advisory lock ID for drain-using DB tests.
- * All test files that call runDrain against the real database must acquire this lock
- * to prevent cross-file race conditions where one file's drain reads another file's messages.
- */
-const DRAIN_TEST_ADVISORY_LOCK_ID = 8675309;
-
-/**
  * Integration tests for processBulkQueue.
  *
  * These tests drive the REAL runDrain/processBulkQueue code by:
@@ -42,11 +35,6 @@ describeWithDb("S10b processBulkQueue Integration", () => {
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
-
-    // Acquire advisory lock to prevent cross-file drain race conditions.
-    // All test files that call runDrain against the shared Postgres must hold this lock.
-    await sql`SELECT pg_advisory_lock(${DRAIN_TEST_ADVISORY_LOCK_ID})`;
-
     originalHandler = getBulkHandler(TEST_TOPIC);
   });
 
@@ -64,19 +52,13 @@ describeWithDb("S10b processBulkQueue Integration", () => {
       }
     }
 
-    // Release advisory lock to allow other drain-using DB test files to run
-    await sql`SELECT pg_advisory_unlock(${DRAIN_TEST_ADVISORY_LOCK_ID})`;
     await sql.end();
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     if (originalHandler) {
       registerBulkHandler(TEST_TOPIC, originalHandler);
     }
-    // Clean up any remaining messages from this test's shop to prevent interference
-    // with subsequent iterations or tests
-    await sql`DELETE FROM pgmq.q_s6_bulk WHERE message->>'shop' = ${TEST_SHOP}`;
-    await sql`DELETE FROM pgmq.a_s6_bulk WHERE message->>'shop' = ${TEST_SHOP}`;
   });
 
   const drainConfig: Partial<DrainConfig> = {

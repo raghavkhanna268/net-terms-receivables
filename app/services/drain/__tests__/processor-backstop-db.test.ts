@@ -13,13 +13,6 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vites
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 
-/**
- * Advisory lock ID for drain-using DB tests.
- * All test files that call runDrain against the real database must acquire this lock
- * to prevent cross-file race conditions where one file's drain reads another file's messages.
- */
-const DRAIN_TEST_ADVISORY_LOCK_ID = 8675309;
-
 // Mock admin client for GraphQL calls
 vi.mock("../admin-client.server", () => ({
   adminGraphQL: vi.fn().mockResolvedValue({
@@ -47,10 +40,6 @@ describeWithDb("processor backstop integration (DB-backed)", () => {
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
-
-    // Acquire advisory lock to prevent cross-file drain race conditions.
-    // All test files that call runDrain against the shared Postgres must hold this lock.
-    await sql`SELECT pg_advisory_lock(${DRAIN_TEST_ADVISORY_LOCK_ID})`;
 
     // Create test shop
     await sql`
@@ -80,9 +69,6 @@ describeWithDb("processor backstop integration (DB-backed)", () => {
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${`proc-${TEST_SUFFIX}%`}`;
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
-
-    // Release advisory lock to allow other drain-using DB test files to run
-    await sql`SELECT pg_advisory_unlock(${DRAIN_TEST_ADVISORY_LOCK_ID})`;
     await sql.end();
   });
 
