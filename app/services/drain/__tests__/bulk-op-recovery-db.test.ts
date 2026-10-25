@@ -458,11 +458,11 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
       expect(result.attempts.find((a) => a.bulkOperationId === bulkOpId3)).toBeUndefined();
     });
 
-    it("skips enqueueing when message with same webhookId already in queue", async () => {
+    it("skips enqueueing when webhook-style message for same op already in queue", async () => {
       const { adminGraphQL } = await import("../admin-client.server");
 
-      const bulkOpId = `gid://shopify/BulkOperation/dedupe-test-${TEST_SUFFIX}`;
-      const recoveryWebhookId = `recovery:${bulkOpId}`;
+      const bulkOpId = `gid://shopify/BulkOperation/dedupe-webhook-${TEST_SUFFIX}`;
+      const webhookStyleId = `shopify-webhook-${Date.now()}`;
       const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
 
       vi.mocked(adminGraphQL).mockResolvedValue({
@@ -479,7 +479,7 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
       await sql`SELECT pgmq.send('s6_bulk', ${sql.json({
         topic: "BULK_OPERATIONS_FINISH",
         shop: TEST_SHOP_DOMAIN,
-        webhookId: recoveryWebhookId,
+        webhookId: webhookStyleId,
         bulkOperationId: bulkOpId,
         bulkType: "companies",
         enqueuedAt: new Date().toISOString(),
@@ -495,7 +495,7 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
 
       const queuedMsgs = await sql<{ msg_id: string }[]>`
         SELECT msg_id::text FROM pgmq.q_s6_bulk
-        WHERE message->>'webhookId' = ${recoveryWebhookId}
+        WHERE message->>'bulkOperationId' = ${bulkOpId}
       `;
       expect(queuedMsgs).toHaveLength(1);
     });

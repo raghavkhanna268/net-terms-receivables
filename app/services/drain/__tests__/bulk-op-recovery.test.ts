@@ -125,7 +125,7 @@ describe("bulk-op-recovery", () => {
       const mockBeginTx = vi.fn().mockImplementation(async (callback) => {
         const txSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
           const query = strings.join("");
-          if (query.includes("q_s6_bulk") && query.includes("webhookId")) {
+          if (query.includes("q_s6_bulk") && query.includes("bulkOperationId")) {
             return Promise.resolve([]);
           }
           return Promise.resolve([{ bulk_operation_id: "gid://shopify/BulkOperation/123" }]);
@@ -525,7 +525,7 @@ describe("bulk-op-recovery", () => {
       const mockBeginTx = vi.fn().mockImplementation(async (callback) => {
         const txSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
           const query = strings.join("");
-          if (query.includes("q_s6_bulk") && query.includes("webhookId")) {
+          if (query.includes("q_s6_bulk") && query.includes("bulkOperationId")) {
             return Promise.resolve([]);
           }
           return Promise.resolve([{ bulk_operation_id: "gid://shopify/BulkOperation/123" }]);

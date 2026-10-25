@@ -214,18 +214,20 @@ async function enqueueCompletedOperation(
       return false;
     }
 
-    const recoveryWebhookId = `recovery:${op.bulk_operation_id}`;
-
     const [existingMsg] = await tx<{ msg_id: string }[]>`
       SELECT msg_id::text
       FROM pgmq.q_s6_bulk
-      WHERE message->>'webhookId' = ${recoveryWebhookId}
+      WHERE message->>'topic' = ${BULK_OPERATIONS_FINISH_TOPIC}
+        AND message->>'shop' = ${op.shop}
+        AND message->>'bulkOperationId' = ${op.bulk_operation_id}
       LIMIT 1
     `;
 
     if (existingMsg) {
       return false;
     }
+
+    const recoveryWebhookId = `recovery:${op.bulk_operation_id}`;
 
     const message: BulkMessage = {
       topic: BULK_OPERATIONS_FINISH_TOPIC,
