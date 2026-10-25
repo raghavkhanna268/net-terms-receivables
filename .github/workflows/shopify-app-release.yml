@@ -180,6 +180,7 @@ jobs:
           fi
 
       - name: Deploy app version (shopify app deploy)
+        id: deploy
         env:
           # App Automation Token (Dev Dashboard), ENVIRONMENT secret of `shopify-release`.
           # CLI 4.9.4 reads SHOPIFY_APP_AUTOMATION_TOKEN first (legacy fallback:
@@ -258,6 +259,46 @@ jobs:
           fi
           rm -f "$LOG"
           exit "$rc"
+
+      - name: Print extension uids (handle + uid only)
+        # Runs only after a successful deploy step, on preview (release=false) AND release
+        # runs. CLI 4.9.4 writes `uid = "<id>"` right after the `handle = "..."` line of each
+        # UUID-strategy extension in extensions/*/shopify.extension.toml while it loads the
+        # linked app context (addUidToTomlsIfNecessary in app-context.ts), which `app deploy`
+        # does before the --no-release / --allow-updates branch. So the uid is already on
+        # disk for a preview run; it is deterministic (name-based from the handle), so the
+        # value is the same on preview and release. The CLI also sends this uid with the
+        # module on upload, so it is the id Shopify records for the extension.
+        # Public-logs rule: prints ONLY handle, uid (ids) and booleans; nothing else from
+        # the toml. Values that fail the strict id patterns print as `invalid`.
+        # Nothing is committed back from CI; a follow-up PR commits the uid.
+        if: success() && steps.deploy.outcome == 'success'
+        run: |
+          set -o pipefail
+          n=0
+          for f in extensions/*/shopify.extension.toml; do
+            [ -f "$f" ] || continue
+            n=$((n + 1))
+            # First handle/uid assignment in the file (one extension per toml in this repo).
+            h_line=$(grep -m1 -E '^[[:space:]]*handle[[:space:]]*=' "$f" || true)
+            u_line=$(grep -m1 -E '^[[:space:]]*uid[[:space:]]*=' "$f" || true)
+            handle=$(printf '%s\n' "$h_line" | sed -nE 's/^[[:space:]]*handle[[:space:]]*=[[:space:]]*"([a-z0-9][a-z0-9_-]{0,63})"[[:space:]]*$/\1/p')
+            uid=$(printf '%s\n' "$u_line" | sed -nE 's/^[[:space:]]*uid[[:space:]]*=[[:space:]]*"([0-9a-f][0-9a-f-]{7,63})"[[:space:]]*$/\1/p')
+            [ -n "$handle" ] || handle="invalid"
+            if [ -z "$u_line" ]; then uid="none"; elif [ -z "$uid" ]; then uid="invalid"; fi
+            # Was a uid already in the checked-out commit (vs. written by the CLI this run)?
+            # Captured first (no `git show | grep -q`, which can SIGPIPE under pipefail).
+            head_toml=$(git show "HEAD:$f" 2>/dev/null || true)
+            if grep -qE '^[[:space:]]*uid[[:space:]]*=' <<< "$head_toml"; then
+              committed=true
+            else
+              committed=false
+            fi
+            echo "extension handle=$handle uid=$uid uid_committed=$committed"
+            echo "- extension \`$handle\`: uid \`$uid\` (uid_committed: $committed)" >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo "extension_count=$n"
+          echo "- extension_count: $n" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Summary
         if: always()
