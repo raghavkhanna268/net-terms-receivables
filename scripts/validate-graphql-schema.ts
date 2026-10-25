@@ -76,9 +76,11 @@ const INTENTIONALLY_INVALID_DOCUMENTS = [
 /**
  * Files to skip when extracting documents.
  * Test files for the validation script itself contain invalid fixtures.
+ * Partner API files contain queries for a different API schema.
  */
 const SKIP_FILES = [
   "validate-graphql-schema.test.ts", // Contains test fixtures for this validator
+  "partner-api.server.ts", // Contains Partner API queries, not Admin API
 ];
 
 /**
