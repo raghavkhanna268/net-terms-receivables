@@ -9,14 +9,18 @@
  * - the SQL only deletes from "BuyerAccount", only inside the apply branch,
  *   asserts 3 deleted rows, and commits only under `\if :is_apply`
  * - the SQL never selects the shop domain or other sensitive columns
+ * - is_seed matches the two seed id formats scripts/seed.ts has written, each
+ *   EXACTLY against the row's own columns (legacy seed-account-<location gid>,
+ *   current seed-account-<shopId>-<location gid>); anything else is refused
  *
  * @see https://github.com/raghavkhanna268/net-terms-receivables/issues/200
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import postgres from "postgres";
 
 const ROOT = join(__dirname, "../../..");
 const WF_TEXT = readFileSync(
@@ -161,5 +165,133 @@ describe("ops-200 SQL", () => {
       const before = body.slice(Math.max(0, (m.index ?? 0) - 12), m.index);
       expect(before).toMatch(/=\s*$/);
     }
+  });
+});
+
+// is_seed: the two exact per-row formats written by scripts/seed.ts.
+//   legacy  (seed.ts #48 90f4d69 .. #163 e04a908): `seed-account-${locationId}`
+//   current (scripts/seed.ts:3558 and :3664):      `seed-account-${shopId}-${locationId}`
+const IS_SEED_EXPR = `(ba.id = 'seed-account-' || ba."companyLocationId" OR ba.id = 'seed-account-' || ba."shopId" || '-' || ba."companyLocationId")`;
+
+function guardSeedWhere(): string {
+  const m = SQL.match(
+    /SELECT COUNT\(\*\) INTO v_n FROM "BuyerAccount" ba\n\s+WHERE ba\.id = ANY\(v_ids\)\n\s+AND ([\s\S]*?);\n\s+IF v_n <> 3 THEN RAISE EXCEPTION 'refuse_200:seed_rows_%'/,
+  );
+  if (!m) throw new Error("seed_rows guard block not found");
+  return m[1];
+}
+
+describe("ops-200 SQL is_seed (static)", () => {
+  it("uses the exact per-row expression in both R1 and the seed_rows guard", () => {
+    expect(SQL).toContain(`       ${IS_SEED_EXPR} AS is_seed,`);
+    const where = guardSeedWhere();
+    expect(where).toBe(
+      `${IS_SEED_EXPR}\n    AND ba.id LIKE 'seed-account-%'\n    AND ba.kind = 'COMPANY'`,
+    );
+    // Exactly those 2 uses; the seed check is still enforced (count must be 3).
+    expect(SQL.split(IS_SEED_EXPR).length - 1).toBe(2);
+    expect(SQL).toContain(
+      "IF v_n <> 3 THEN RAISE EXCEPTION 'refuse_200:seed_rows_%', v_n; END IF;",
+    );
+  });
+
+  it("matches the formats scripts/seed.ts writes", () => {
+    const seedTs = readFileSync(join(ROOT, "scripts/seed.ts"), "utf8");
+    const formats = [...new Set(seedTs.match(/`seed-account-[^`]*`/g) ?? [])];
+    expect(formats).toEqual(["`seed-account-${shopId}-${locationId}`"]);
+  });
+});
+
+// Behavioural check: run the SQL file's own guard predicate in Postgres against
+// literal rows (no tables touched, nothing written).
+const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
+const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
+
+describeWithDb("ops-200 SQL seed_rows guard predicate (Postgres)", () => {
+  let sql: ReturnType<typeof postgres>;
+  beforeAll(() => {
+    sql = postgres(TEST_DATABASE_URL!, { max: 1 });
+  });
+  afterAll(async () => {
+    await sql?.end();
+  });
+
+  const SHOP = "shop-dev-1";
+  const OTHER_SHOP = "shop-other-2";
+
+  async function passes(
+    id: string,
+    shopId: string,
+    loc: string,
+    kind = "COMPANY",
+  ): Promise<boolean> {
+    const rows = await sql.unsafe(
+      `SELECT COUNT(*)::int AS n FROM (VALUES ($1::text, $2::text, $3::text, $4::text))
+         AS ba(id, "shopId", "companyLocationId", kind)
+       WHERE ${guardSeedWhere()}`,
+      [id, shopId, loc, kind],
+    );
+    return rows[0].n === 1;
+  }
+
+  it("passes the legacy format for each of the 3 allowlisted gids", async () => {
+    for (const gid of APPROVED) {
+      expect(await passes(`seed-account-${gid}`, SHOP, gid)).toBe(true);
+    }
+  });
+
+  it("passes the current shop-scoped format (scripts/seed.ts:3558) for the row's own shop and gid", async () => {
+    for (const gid of APPROVED) {
+      expect(await passes(`seed-account-${SHOP}-${gid}`, SHOP, gid)).toBe(true);
+    }
+  });
+
+  it("refuses non-seed / real-looking ids", async () => {
+    const gid = APPROVED[0];
+    for (const id of [
+      "cm2abc123def456ghi789jkl0",
+      gid,
+      `account-${gid}`,
+      `seed-account-`,
+      `seed-account-%`,
+      `SEED-ACCOUNT-${gid}`,
+      `seed-account-${gid}-x`,
+      ` seed-account-${gid}`,
+    ]) {
+      expect(await passes(id, SHOP, gid)).toBe(false);
+    }
+  });
+
+  it("refuses a seed-format id for another location (wrong gid)", async () => {
+    const [a, b] = APPROVED;
+    expect(await passes(`seed-account-${b}`, SHOP, a)).toBe(false);
+    expect(await passes(`seed-account-${SHOP}-${b}`, SHOP, a)).toBe(false);
+    expect(
+      await passes("seed-account-gid://shopify/CompanyLocation/1", SHOP, a),
+    ).toBe(false);
+  });
+
+  it("refuses a shop-scoped seed id from another shop", async () => {
+    const gid = APPROVED[0];
+    expect(await passes(`seed-account-${OTHER_SHOP}-${gid}`, SHOP, gid)).toBe(
+      false,
+    );
+    expect(await passes(`seed-account-${SHOP}-${gid}`, OTHER_SHOP, gid)).toBe(
+      false,
+    );
+  });
+
+  it("refuses non-COMPANY rows and rows with a null location", async () => {
+    const gid = APPROVED[0];
+    expect(
+      await passes(`seed-account-${gid}`, SHOP, gid, "TAGGED_CUSTOMER"),
+    ).toBe(false);
+    const rows = await sql.unsafe(
+      `SELECT COUNT(*)::int AS n FROM (VALUES ('seed-account-'::text, $1::text, NULL::text, 'COMPANY'::text))
+         AS ba(id, "shopId", "companyLocationId", kind)
+       WHERE ${guardSeedWhere()}`,
+      [SHOP],
+    );
+    expect(rows[0].n).toBe(0);
   });
 });
