@@ -3869,7 +3869,7 @@ describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
     // Hold changed: metafield write should be ATTEMPTED (not skipped by backoff)
     expect(result.success).toBe(true);
     expect(result.metafieldWritten).toBe(true); // Write was attempted and succeeded
-    expect(result.backoffSkipped).toBeUndefined(); // Not skipped
+    expect(result.backoffSkipped).toBe(false); // Not skipped because hold changed
     // Shopify API SHOULD have been called because hold changed
     expect(mockShopifyGraphQLRequest).toHaveBeenCalled();
     
@@ -3934,7 +3934,7 @@ describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
     // Hold changed: metafield write should be ATTEMPTED (not skipped by backoff)
     expect(result.success).toBe(true);
     expect(result.metafieldWritten).toBe(true); // Write was attempted and succeeded
-    expect(result.backoffSkipped).toBeUndefined(); // Not skipped
+    expect(result.backoffSkipped).toBe(false); // Not skipped because hold changed
     // Shopify API SHOULD have been called because hold changed
     expect(mockShopifyGraphQLRequest).toHaveBeenCalled();
     
@@ -4098,8 +4098,8 @@ describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
       WHERE id = ${TEST_ACCOUNT_ID}
     `;
     
-    // Capture console output
-    const consoleSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    // Capture console output - safeLog("info") uses console.log
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
     const result = await recomputeCreditStatus(sql, TEST_ACCOUNT_ID, "daily_sweep");
 
