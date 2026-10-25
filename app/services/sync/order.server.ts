@@ -35,7 +35,6 @@ import {
   type EligibilityResult,
 } from "~/lib/invoice-eligibility";
 import { incrementOrderOutstandingMissing } from "../drain/reconcile-handlers.server";
-import { enqueueRecomputeForInvoice } from "../credit-status-recompute.server";
 import { captureExceptionWithTags } from "~/lib/sentry";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 
@@ -140,6 +139,7 @@ export async function processOrderWebhook(
 
     if (result.entityId) {
       try {
+        const { enqueueRecomputeForInvoice } = await import("../credit-status-recompute.server");
         await enqueueRecomputeForInvoice(sql, result.entityId);
       } catch (err) {
         captureExceptionWithTags(err, { shopId });
@@ -191,6 +191,7 @@ export async function processOrderWebhook(
 
   if (result.entityId) {
     try {
+      const { enqueueRecomputeForInvoice } = await import("../credit-status-recompute.server");
       await enqueueRecomputeForInvoice(sql, result.entityId);
     } catch (err) {
       captureExceptionWithTags(err, { shopId });
@@ -568,6 +569,7 @@ async function cancelInvoice(
   }
 
   try {
+    const { enqueueRecomputeForInvoice } = await import("../credit-status-recompute.server");
     await enqueueRecomputeForInvoice(sql, result.id);
   } catch (err) {
     captureExceptionWithTags(err, { shopId });
@@ -607,6 +609,7 @@ async function markInvoicePaid(
   }
 
   try {
+    const { enqueueRecomputeForInvoice } = await import("../credit-status-recompute.server");
     await enqueueRecomputeForInvoice(sql, result.id);
   } catch (err) {
     captureExceptionWithTags(err, { shopId });
