@@ -26,7 +26,7 @@
 
 import type { Sql } from "~/lib/db-light.server";
 import { DateTime } from "luxon";
-import { getPlanByShopId, isPlanConfirmed } from "./plan.server";
+import { getPlanByShopId, getPlanWithConfirmedStatus } from "./plan.server";
 import {
   type FeatureKey,
   type PlanKey,
@@ -142,8 +142,10 @@ export async function checkCompanyLimit(
     };
   }
 
+  // Single query for both plan and confirmed status (ruling b optimization)
+  const { plan, confirmed } = await getPlanWithConfirmedStatus(sql, shopId);
+
   // Ruling (b): Unconfirmed plans are not gated
-  const confirmed = await isPlanConfirmed(sql, shopId);
   if (!confirmed) {
     return {
       allowed: true,
@@ -153,7 +155,6 @@ export async function checkCompanyLimit(
     };
   }
 
-  const plan = await getPlanByShopId(sql, shopId);
   const limit = planLimit(plan, "companies");
 
   // Unlimited
@@ -235,8 +236,10 @@ export async function checkImportLimit(
     };
   }
 
+  // Single query for both plan and confirmed status (ruling b optimization)
+  const { plan, confirmed } = await getPlanWithConfirmedStatus(sql, shopId);
+
   // Ruling (b): Unconfirmed plans are not gated
-  const confirmed = await isPlanConfirmed(sql, shopId);
   if (!confirmed) {
     return {
       allowed: true,
@@ -246,7 +249,6 @@ export async function checkImportLimit(
     };
   }
 
-  const plan = await getPlanByShopId(sql, shopId);
   const limit = planLimit(plan, "importsPerMonth");
 
   // Unlimited

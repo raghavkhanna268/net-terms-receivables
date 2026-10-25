@@ -648,6 +648,53 @@ export async function isPlanConfirmed(
 }
 
 /**
+ * Result of getPlanWithConfirmedStatus.
+ */
+export interface PlanWithConfirmedStatus {
+  plan: PlanConfig;
+  confirmed: boolean;
+}
+
+/**
+ * Get the shop's plan and confirmed status in a single query.
+ *
+ * Use this when you need both isPlanConfirmed and getPlanByShopId
+ * to avoid two separate database queries.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopId - Internal shop ID
+ * @returns Plan config and whether the plan is confirmed
+ */
+export async function getPlanWithConfirmedStatus(
+  sql: Sql,
+  shopId: string
+): Promise<PlanWithConfirmedStatus> {
+  const cached = await getCachedPlan(sql, shopId);
+
+  if (!cached) {
+    return {
+      plan: getDefaultPlan(),
+      confirmed: false,
+    };
+  }
+
+  if (cached.isStale && getRequestWaitUntil()) {
+    const [shopRow] = await sql<{ domain: string }[]>`
+      SELECT domain FROM "Shop" WHERE id = ${shopId}
+    `;
+
+    if (shopRow) {
+      triggerBackgroundRefresh(sql, shopId, shopRow.domain);
+    }
+  }
+
+  return {
+    plan: getPlanConfig(cached.planKey),
+    confirmed: true,
+  };
+}
+
+/**
  * Check if a shop is on a test subscription.
  * Useful for development/testing flows.
  */
