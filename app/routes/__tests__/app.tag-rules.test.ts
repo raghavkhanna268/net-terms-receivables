@@ -40,6 +40,7 @@ interface TestLoaderData {
   tagRules?: Array<{ id: string; tag: string; defaultTermsDays: number }>;
   shopId?: string | null;
   error?: string | null;
+  finishingSetup?: boolean;
 }
 
 /**
@@ -202,7 +203,7 @@ describe("Tag Rules Route", () => {
       expect(tagRules[1].tag).toBe("wholesale");
     });
 
-    it("returns error when shop not found", async () => {
+    it("returns 200 with finishingSetup flag when shop not found (S24 audit)", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
@@ -220,9 +221,37 @@ describe("Tag Rules Route", () => {
 
       const result = extractLoaderData(rawResult);
       const status = extractStatus(rawResult);
-      expect(status).toBe(404);
-      expect(result.error).toBe("Shop not found");
+      expect(status).toBeUndefined(); // 200 OK returns plain object
+      expect(result.finishingSetup).toBe(true);
+      expect(result.error).toBeNull();
       expect(result.shopId).toBeNull();
+      expect(result.tagRules).toEqual([]);
+    });
+
+    it("returns finishingSetup=false for normal shop lookup", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      // Shop lookup
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // COMPANY check - none found
+      mockSql.mockResolvedValueOnce([]);
+      // Tag rules fetch
+      mockSql.mockResolvedValueOnce([]);
+
+      const { loader } = await import("../app.tag-rules");
+      const rawResult = await loader({
+        request: mockRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const result = extractLoaderData(rawResult);
+      expect(result.finishingSetup).toBe(false);
+      expect(result.error).toBeNull();
+      expect(result.shopId).toBe("shop-123");
     });
   });
 
@@ -728,8 +757,8 @@ describe("Tag Rules Route", () => {
     });
   });
 
-  describe("action - shop not found", () => {
-    it("returns error when shop not found", async () => {
+  describe("action - shop not found (S24 audit)", () => {
+    it("returns 400 with user-friendly message when shop not found", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
@@ -757,9 +786,40 @@ describe("Tag Rules Route", () => {
 
       const result = extractActionData(rawResult);
       const status = extractStatus(rawResult);
-      expect(status).toBe(404);
+      expect(status).toBe(400);
       expect(result.success).toBe(false);
-      expect(result.error).toBe("Shop not found");
+      expect(result.error).toContain("still being set up");
+    });
+
+    it("does not return 404 or 500 when shop not found", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      // Shop lookup - not found
+      mockSql.mockResolvedValueOnce([]);
+
+      const formData = new FormData();
+      formData.append("intent", "create_tag_rule");
+      formData.append("tag", "net30");
+      formData.append("defaultTermsDays", "30");
+
+      const postRequest = new Request("https://example.com/app/tag-rules", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.tag-rules");
+      const rawResult = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const status = extractStatus(rawResult);
+      expect(status).not.toBe(404);
+      expect(status).not.toBe(500);
     });
   });
 
@@ -1213,5 +1273,144 @@ describe("Tag rules 401 on auth failure", () => {
         pattern: "/app/tag-rules",
       })
     ).rejects.toThrow("Unauthorized");
+  });
+});
+
+describe("S24: Finishing setup empty state (real render)", () => {
+  afterEach(() => {
+    vi.doUnmock("react-router");
+    vi.resetModules();
+  });
+
+  it("renders finishing setup banner and empty state when finishingSetup is true", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          storeMode: "tag_based",
+          tagRules: [],
+          shopId: null,
+          error: null,
+          finishingSetup: true,
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({ state: "idle" }),
+      };
+    });
+
+    vi.resetModules();
+    const { default: TagRulesPage } = await import("../app.tag-rules");
+
+    const html = renderToString(createElement(TagRulesPage));
+
+    expect(html).toContain("s-banner");
+    expect(html).toContain("Finishing setup");
+    expect(html).toContain("finishing setting up your store");
+    expect(html).toContain("s-empty-state");
+    expect(html).toContain("Setting up your store");
+    expect(html).toContain("s-button");
+    expect(html).toContain("Refresh");
+  });
+
+  it("does not render create form when finishingSetup is true", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          storeMode: "tag_based",
+          tagRules: [],
+          shopId: null,
+          error: null,
+          finishingSetup: true,
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({ state: "idle" }),
+      };
+    });
+
+    vi.resetModules();
+    const { default: TagRulesPage } = await import("../app.tag-rules");
+
+    const html = renderToString(createElement(TagRulesPage));
+
+    expect(html).not.toContain("Create Tag Rule");
+    expect(html).not.toContain('name="tag"');
+    expect(html).not.toContain('name="defaultTermsDays"');
+  });
+
+  it("renders normal UI with create form when finishingSetup is false", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          storeMode: "tag_based",
+          tagRules: [],
+          shopId: "shop-123",
+          error: null,
+          finishingSetup: false,
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({ state: "idle" }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: TagRulesPage } = await import("../app.tag-rules");
+
+    const html = renderToString(createElement(TagRulesPage));
+
+    expect(html).not.toContain("Finishing setup");
+    expect(html).toContain("Create Tag Rule");
+    expect(html).toContain('name="tag"');
+    expect(html).toContain('name="defaultTermsDays"');
+  });
+
+  it("renders existing tag rules when finishingSetup is false", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          storeMode: "tag_based",
+          tagRules: [
+            { id: "rule-1", tag: "mock-wholesale", defaultTermsDays: 30, createdAt: "2026-10-01T00:00:00Z" },
+          ],
+          shopId: "shop-123",
+          error: null,
+          finishingSetup: false,
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({ state: "idle" }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: TagRulesPage } = await import("../app.tag-rules");
+
+    const html = renderToString(createElement(TagRulesPage));
+
+    expect(html).toContain("mock-wholesale");
+    expect(html).toContain("Net");
+    expect(html).toContain("30");
+    expect(html).toContain("days");
   });
 });
