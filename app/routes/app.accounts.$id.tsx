@@ -520,11 +520,11 @@ function InvoiceTable({
   return (
     <s-table>
       <s-table-header-row>
-        <s-table-header>Invoice</s-table-header>
-        <s-table-header>Due Date</s-table-header>
-        <s-table-header format="currency">Outstanding</s-table-header>
-        <s-table-header>Status</s-table-header>
-        <s-table-header>Order</s-table-header>
+        <s-table-header listSlot="primary">Invoice</s-table-header>
+        <s-table-header listSlot="labeled">Due Date</s-table-header>
+        <s-table-header listSlot="labeled" format="currency">Outstanding</s-table-header>
+        <s-table-header listSlot="inline">Status</s-table-header>
+        <s-table-header listSlot="labeled">Order</s-table-header>
       </s-table-header-row>
       <s-table-body>
         {invoices.map((inv) => {
