@@ -4,7 +4,7 @@
  * Product rule: Gated accounts are never hidden from totals or lists.
  * Holds and the checkout block work on every plan.
  * Gating applies only to value-add actions (reminders, credit-limit edits,
- * account editing, bulk statement import).
+ * account editing).
  *
  * Tests verify that with PLAN_GATING_ENFORCED=true and a gated account:
  * 1. Orders still become Invoices through the normal eligibility/sync path

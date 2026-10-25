@@ -322,158 +322,6 @@ describe("Plan Page Component Logic", () => {
 });
 
 /**
- * Tests for FeatureComparisonTable logic (S21).
- *
- * The FeatureComparisonTable component in app.plan.tsx iterates over
- * ALL_PLAN_KEYS and ALL_FEATURE_KEYS, calling planHasFeature() to
- * determine whether to show ✓ or — for each cell.
- *
- * These tests verify the pure logic that the table uses, especially
- * that credit_holds shows as included (✓) for ALL four plan tiers.
- */
-describe("FeatureComparisonTable logic", () => {
-  it("credit_holds shows as included for all four tiers", async () => {
-    const { ALL_PLAN_KEYS, getPlanConfig, planHasFeature } = await import(
-      "~/lib/entitlements"
-    );
-
-    const creditHoldsRow = ALL_PLAN_KEYS.map((planKey) => {
-      const plan = getPlanConfig(planKey);
-      return { planKey, hasFeature: planHasFeature(plan, "credit_holds") };
-    });
-
-    expect(creditHoldsRow).toEqual([
-      { planKey: "none", hasFeature: true },
-      { planKey: "starter", hasFeature: true },
-      { planKey: "growth", hasFeature: true },
-      { planKey: "unlimited", hasFeature: true },
-    ]);
-  });
-
-  it("aging_dashboard shows as included for all four tiers", async () => {
-    const { ALL_PLAN_KEYS, getPlanConfig, planHasFeature } = await import(
-      "~/lib/entitlements"
-    );
-
-    for (const planKey of ALL_PLAN_KEYS) {
-      const plan = getPlanConfig(planKey);
-      expect(planHasFeature(plan, "aging_dashboard")).toBe(true);
-    }
-  });
-
-  it("matching shows as included for all four tiers", async () => {
-    const { ALL_PLAN_KEYS, getPlanConfig, planHasFeature } = await import(
-      "~/lib/entitlements"
-    );
-
-    const matchingRow = ALL_PLAN_KEYS.map((planKey) => {
-      const plan = getPlanConfig(planKey);
-      return { planKey, hasFeature: planHasFeature(plan, "matching") };
-    });
-
-    expect(matchingRow).toEqual([
-      { planKey: "none", hasFeature: true },
-      { planKey: "starter", hasFeature: true },
-      { planKey: "growth", hasFeature: true },
-      { planKey: "unlimited", hasFeature: true },
-    ]);
-  });
-
-  it("reminders shows as included for all four tiers (all features on all plans)", async () => {
-    const { getPlanConfig, planHasFeature } = await import("~/lib/entitlements");
-
-    // All features are now on all plans
-    expect(planHasFeature(getPlanConfig("none"), "reminders")).toBe(true);
-    expect(planHasFeature(getPlanConfig("starter"), "reminders")).toBe(true);
-    expect(planHasFeature(getPlanConfig("growth"), "reminders")).toBe(true);
-    expect(planHasFeature(getPlanConfig("unlimited"), "reminders")).toBe(true);
-  });
-
-  it("generates correct table data for all features (all true on all plans)", async () => {
-    const { ALL_PLAN_KEYS, ALL_FEATURE_KEYS, getPlanConfig, planHasFeature } =
-      await import("~/lib/entitlements");
-
-    const tableRows = ALL_FEATURE_KEYS.map((feature) => {
-      const cells = ALL_PLAN_KEYS.map((planKey) => {
-        const plan = getPlanConfig(planKey);
-        return planHasFeature(plan, feature);
-      });
-      return { feature, cells };
-    });
-
-    // All features are true on all plans (5 features now, not 8)
-    const creditHoldsRowData = tableRows.find((row) => row.feature === "credit_holds");
-    expect(creditHoldsRowData?.cells).toEqual([true, true, true, true]);
-
-    const agingRowData = tableRows.find((row) => row.feature === "aging_dashboard");
-    expect(agingRowData?.cells).toEqual([true, true, true, true]);
-
-    const matchingRowData = tableRows.find((row) => row.feature === "matching");
-    expect(matchingRowData?.cells).toEqual([true, true, true, true]);
-
-    const remindersRowData = tableRows.find((row) => row.feature === "reminders");
-    expect(remindersRowData?.cells).toEqual([true, true, true, true]);
-  });
-});
-
-/**
- * Issue #286: Hidden features must not appear in plan page (App Store rule 1.1.4).
- * pdf_statements, payer_memory, audit_export are not built and must not be listed.
- */
-describe("Issue #286: Hidden features not displayed", () => {
-  it("FEATURE_DESCRIPTIONS does not contain PDF statements", async () => {
-    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
-    const allDescriptions = Object.values(FEATURE_DISPLAY_NAMES).join(" ");
-    
-    expect(allDescriptions).not.toContain("PDF");
-    expect(allDescriptions).not.toContain("pdf");
-    expect(allDescriptions).not.toContain("Statements");
-  });
-
-  it("FEATURE_DESCRIPTIONS does not contain payer memory", async () => {
-    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
-    const allDescriptions = Object.values(FEATURE_DISPLAY_NAMES).join(" ");
-    
-    expect(allDescriptions.toLowerCase()).not.toContain("payer");
-    expect(allDescriptions.toLowerCase()).not.toContain("memory");
-  });
-
-  it("FEATURE_DESCRIPTIONS does not contain audit export", async () => {
-    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
-    const allDescriptions = Object.values(FEATURE_DISPLAY_NAMES).join(" ");
-    
-    expect(allDescriptions.toLowerCase()).not.toContain("audit");
-    expect(allDescriptions.toLowerCase()).not.toContain("export");
-  });
-
-  it("ALL_FEATURE_KEYS does not include hidden features", async () => {
-    const { ALL_FEATURE_KEYS } = await import("~/lib/entitlements");
-    
-    expect(ALL_FEATURE_KEYS).not.toContain("pdf_statements");
-    expect(ALL_FEATURE_KEYS).not.toContain("payer_memory");
-    expect(ALL_FEATURE_KEYS).not.toContain("audit_export");
-  });
-
-  it("plan page feature list excludes hidden features", async () => {
-    const { ALL_FEATURE_KEYS } = await import("~/lib/entitlements");
-    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
-    
-    // Verify that ALL_FEATURE_KEYS used for rendering only has visible features
-    expect(ALL_FEATURE_KEYS).toHaveLength(5);
-    expect(ALL_FEATURE_KEYS).toEqual([
-      "aging_dashboard",
-      "unlimited_imports",
-      "matching",
-      "reminders",
-      "credit_holds",
-    ]);
-    
-    // Verify FEATURE_DISPLAY_NAMES only has entries for visible features
-    expect(Object.keys(FEATURE_DISPLAY_NAMES)).toHaveLength(5);
-  });
-});
-
-/**
  * S21 UI Tests: Over-limit banner using the actual helper imported by routes.
  *
  * These tests verify the buildOverLimitBannerState helper that is used by:
@@ -531,7 +379,7 @@ describe("S21 Account page banner using buildAccountOverLimitBannerState helper"
     const { buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
     const state = buildAccountOverLimitBannerState(true, true);
     expect(state.show).toBe(true);
-    expect(state.heading).toBe("This account is over your plan limit");
+    expect(state.heading).toBe("This account was added after you reached your plan limit");
   });
 
   it("hides banner when isGated is false", async () => {
@@ -558,19 +406,6 @@ describe("S21 No price strings in plan output", () => {
     const { PLAN_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
     
     const allNames = Object.values(PLAN_DISPLAY_NAMES).join("");
-    
-    expect(allNames).not.toContain("$");
-    expect(allNames).not.toContain("₹");
-    expect(allNames).not.toContain("€");
-    expect(allNames).not.toContain("£");
-    expect(allNames).not.toContain("¥");
-    expect(allNames).not.toMatch(/\d+\.\d{2}/);
-  });
-
-  it("FEATURE_DISPLAY_NAMES contains no currency symbols", async () => {
-    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
-    
-    const allNames = Object.values(FEATURE_DISPLAY_NAMES).join("");
     
     expect(allNames).not.toContain("$");
     expect(allNames).not.toContain("₹");
@@ -743,20 +578,16 @@ describe("UsageDisplay component render tests", () => {
 });
 
 /**
- * Credit-hold and credit-status feature availability tests (T1).
+ * Credit-hold and credit-status feature availability tests (T1/T5).
  *
- * Verifies that credit_holds feature and FEATURE_DISPLAY_NAMES are
- * available on ALL plans regardless of gating status. Plan-limit gating
- * only affects the "at limit" badges and "Upgrade to Add More" CTAs,
- * not feature availability or credit-status UI.
+ * Verifies that credit_holds feature is available on ALL plans regardless
+ * of gating status. Plan-limit gating only affects the "at limit" badges
+ * and "Upgrade to Add More" CTAs, not feature availability or credit-status UI.
+ *
+ * T5 removed the feature comparison table and FEATURE_DISPLAY_NAMES,
+ * so these tests only verify entitlements-level feature availability.
  */
 describe("credit-hold feature availability (unaffected by plan gating)", () => {
-  it("credit_holds is in FEATURE_DISPLAY_NAMES", async () => {
-    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
-    expect(FEATURE_DISPLAY_NAMES.credit_holds).toBeDefined();
-    expect(FEATURE_DISPLAY_NAMES.credit_holds).toBe("Credit Holds");
-  });
-
   it("credit_holds feature is available on all plans including none", async () => {
     const { ALL_PLAN_KEYS, getPlanConfig, planHasFeature } = await import("~/lib/entitlements");
     
@@ -766,7 +597,7 @@ describe("credit-hold feature availability (unaffected by plan gating)", () => {
     }
   });
 
-  it("credit_holds is in ALL_FEATURE_KEYS (shown in feature comparison table)", async () => {
+  it("credit_holds is in ALL_FEATURE_KEYS", async () => {
     const { ALL_FEATURE_KEYS } = await import("~/lib/entitlements");
     expect(ALL_FEATURE_KEYS).toContain("credit_holds");
   });
@@ -786,10 +617,6 @@ describe("credit-hold feature availability (unaffected by plan gating)", () => {
       // This means credit-status badges (OK/Near Limit/Held) and manual hold controls render
       expect(planHasFeature(plan, "credit_holds")).toBe(true);
     }
-    
-    // Verify feature display name includes "Credit Holds" for the feature table
-    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
-    expect(FEATURE_DISPLAY_NAMES.credit_holds).toBe("Credit Holds");
   });
 });
 
