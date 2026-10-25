@@ -65,6 +65,7 @@ interface LoaderData {
   tagRules: TagRule[];
   shopId: string | null;
   error: string | null;
+  finishingSetup: boolean;
 }
 
 interface ActionData {
@@ -181,15 +182,13 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   `;
 
   if (!shop) {
-    return data(
-      {
-        storeMode: "tag_based" as StoreMode,
-        tagRules: [],
-        shopId: null,
-        error: "Shop not found",
-      } satisfies LoaderData,
-      { status: 404 }
-    );
+    return {
+      storeMode: "tag_based" as StoreMode,
+      tagRules: [],
+      shopId: null,
+      error: null,
+      finishingSetup: true,
+    } satisfies LoaderData;
   }
 
   try {
@@ -203,6 +202,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       tagRules,
       shopId: shop.id,
       error: null,
+      finishingSetup: false,
     } satisfies LoaderData;
   } catch (err) {
     safeLog("error", "tag_rules_load_error", {
@@ -215,6 +215,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       tagRules: [],
       shopId: shop.id,
       error: "Failed to load tag rules",
+      finishingSetup: false,
     } satisfies LoaderData;
   }
 };
@@ -231,8 +232,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   if (!shop) {
     return data(
-      { success: false, error: "Shop not found" } satisfies ActionData,
-      { status: 404 }
+      {
+        success: false,
+        error: "Your store is still being set up. Please refresh in a moment.",
+      } satisfies ActionData,
+      { status: 400 }
     );
   }
 
@@ -435,13 +439,45 @@ function TagRuleTable({ rules }: { rules: TagRule[] }) {
 }
 
 export default function TagRulesPage() {
-  const { storeMode, tagRules, error } = useLoaderData<typeof loader>();
+  const { storeMode, tagRules, error, finishingSetup } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
 
   const [tag, setTag] = useState("");
   const [termsDays, setTermsDays] = useState("");
+
+  if (finishingSetup) {
+    return (
+      <s-page heading="Tag Rules">
+        <s-link href="/" slot="breadcrumb-actions">
+          Back to Dashboard
+        </s-link>
+
+        <s-section>
+          <s-banner tone="info" heading="Finishing setup">
+            <s-text>
+              We&apos;re finishing setting up your store. Refresh in a moment.
+            </s-text>
+          </s-banner>
+        </s-section>
+
+        <s-section>
+          <s-empty-state heading="Setting up your store">
+            <s-text slot="subheading">
+              Tag rules will be available once setup is complete.
+            </s-text>
+            <s-button
+              slot="primary-action"
+              onClick={() => window.location.reload()}
+            >
+              Refresh
+            </s-button>
+          </s-empty-state>
+        </s-section>
+      </s-page>
+    );
+  }
 
   if (storeMode === "b2b") {
     return (

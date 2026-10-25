@@ -33,84 +33,107 @@ vi.stubGlobal("fetch", mockFetch);
 // Mock SQL client factory
 function createMockSql() {
   const mockResults = new Map<string, unknown>();
+  const allCalls: string[] = [];
+
+  const createQueryHandler = () => async (strings: TemplateStringsArray, ..._values: unknown[]) => {
+    const query = strings.join("?");
+    allCalls.push(query);
+
+    // Invoice lookup
+    if (query.includes("FROM \"Invoice\"") && query.includes("INNER JOIN")) {
+      return mockResults.get("invoice") ?? [];
+    }
+
+    // Customer PII lookup
+    if (query.includes("FROM s8_tagged_customers")) {
+      return mockResults.get("customer") ?? [];
+    }
+
+    // ReminderLog exists check
+    if (query.includes("EXISTS") && query.includes("ReminderLog")) {
+      return mockResults.get("reminder_exists") ?? [{ exists: false }];
+    }
+
+    // ReminderLog INSERT (claim slot)
+    if (query.includes("INSERT INTO \"ReminderLog\"")) {
+      const claimed = mockResults.get("claim_slot") ?? [{ id: "new-log-id" }];
+      return claimed;
+    }
+
+    // ReminderLog DELETE (release slot)
+    if (query.includes("DELETE FROM \"ReminderLog\"")) {
+      return [];
+    }
+
+    // Advisory lock for global send cap (new transaction-based approach)
+    if (query.includes("pg_advisory_xact_lock")) {
+      return [];
+    }
+
+    // Global sends count query (inside transaction for new approach)
+    if (query.includes("dailyCount") && query.includes("monthlyTotal") && query.includes("s18_global_sends")) {
+      const counts = mockResults.get("global_counts") ?? { dailyCount: 0, monthlyTotal: 0 };
+      return [counts];
+    }
+
+    // Global sends INSERT...ON CONFLICT (reservation increment)
+    if (query.includes("INSERT INTO s18_global_sends") && query.includes("ON CONFLICT")) {
+      const result = mockResults.get("global_increment") ?? [{ dailyCount: 1 }];
+      return result;
+    }
+
+    // Global sends release (decrement)
+    if (query.includes("GREATEST(0, daily_count - 1)")) {
+      return [];
+    }
+
+    // Global sends count query (legacy)
+    if (query.includes("FROM s18_global_sends") && query.includes("send_date =")) {
+      return mockResults.get("global_daily") ?? [];
+    }
+
+    // Global sends monthly sum
+    if (query.includes("SUM(daily_count)") && query.includes("s18_global_sends")) {
+      return mockResults.get("global_monthly") ?? [{ monthlyTotal: 0 }];
+    }
+
+    // ReminderRule lookup
+    if (query.includes("FROM \"ReminderRule\"") && query.includes("WHERE id")) {
+      return mockResults.get("rule") ?? [];
+    }
+
+    // ReminderRule UPDATE
+    if (query.includes("UPDATE \"ReminderRule\"") && query.includes("RETURNING id")) {
+      return mockResults.get("rule_update") ?? [{ id: "rule-123" }];
+    }
+
+    // Shop reminder settings
+    if (query.includes("FROM s18_shop_reminder_settings")) {
+      return mockResults.get("settings") ?? [];
+    }
+
+    return [];
+  };
+
+  const queryHandler = createQueryHandler();
+  const mockTx = Object.assign(vi.fn(queryHandler), {});
 
   const sql = Object.assign(
-    vi.fn(async (strings: TemplateStringsArray, ..._values: unknown[]) => {
-      const query = strings.join("?");
-
-      // Invoice lookup
-      if (query.includes("FROM \"Invoice\"") && query.includes("INNER JOIN")) {
-        return mockResults.get("invoice") ?? [];
-      }
-
-      // Customer PII lookup
-      if (query.includes("FROM s8_tagged_customers")) {
-        return mockResults.get("customer") ?? [];
-      }
-
-      // ReminderLog exists check
-      if (query.includes("EXISTS") && query.includes("ReminderLog")) {
-        return mockResults.get("reminder_exists") ?? [{ exists: false }];
-      }
-
-      // ReminderLog INSERT (claim slot)
-      if (query.includes("INSERT INTO \"ReminderLog\"")) {
-        const claimed = mockResults.get("claim_slot") ?? [{ id: "new-log-id" }];
-        return claimed;
-      }
-
-      // ReminderLog DELETE (release slot)
-      if (query.includes("DELETE FROM \"ReminderLog\"")) {
-        return [];
-      }
-
-      // Global sends CTE-based atomic reservation
-      if (query.includes("WITH monthly_sum AS") && query.includes("upserted AS")) {
-        const result = mockResults.get("global_increment") ?? [{ dailyCount: 1, monthlyTotal: 1 }];
-        return result;
-      }
-
-      // Global sends release (decrement)
-      if (query.includes("GREATEST(0, daily_count - 1)")) {
-        return [];
-      }
-
-      // Global sends count query
-      if (query.includes("FROM s18_global_sends") && query.includes("send_date =")) {
-        return mockResults.get("global_daily") ?? [];
-      }
-
-      // Global sends monthly sum
-      if (query.includes("SUM(daily_count)") && query.includes("s18_global_sends")) {
-        return mockResults.get("global_monthly") ?? [{ monthlyTotal: 0 }];
-      }
-
-      // ReminderRule lookup
-      if (query.includes("FROM \"ReminderRule\"") && query.includes("WHERE id")) {
-        return mockResults.get("rule") ?? [];
-      }
-
-      // ReminderRule UPDATE
-      if (query.includes("UPDATE \"ReminderRule\"") && query.includes("RETURNING id")) {
-        return mockResults.get("rule_update") ?? [{ id: "rule-123" }];
-      }
-
-      // Shop reminder settings
-      if (query.includes("FROM s18_shop_reminder_settings")) {
-        return mockResults.get("settings") ?? [];
-      }
-
-      return [];
-    }),
+    vi.fn(queryHandler),
     {
       json: vi.fn((v) => v),
       unsafe: vi.fn((s: string) => s),
       setMockResult: (key: string, value: unknown) => mockResults.set(key, value),
-      clearMockResults: () => mockResults.clear(),
+      clearMockResults: () => { mockResults.clear(); allCalls.length = 0; },
+      begin: vi.fn(async <T>(callback: (tx: typeof mockTx) => Promise<T>): Promise<T> => {
+        return callback(mockTx);
+      }),
+      getAllCalls: () => allCalls,
     }
   ) as unknown as Sql & {
     setMockResult: (key: string, value: unknown) => void;
     clearMockResults: () => void;
+    getAllCalls: () => string[];
   };
 
   return sql;
@@ -240,7 +263,7 @@ describe("Payment Reminders (S18)", () => {
       expect(mockFetch).not.toHaveBeenCalled();
 
       // Should NOT insert ReminderLog (no slot claim)
-      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const sqlCalls = mockSql.getAllCalls();
       const reminderLogInserts = sqlCalls.filter((q: string) => q.includes("INSERT INTO \"ReminderLog\""));
       expect(reminderLogInserts).toHaveLength(0);
     });
@@ -254,11 +277,13 @@ describe("Payment Reminders (S18)", () => {
       shopTimezone: "Asia/Kolkata",
       invoiceName: "#1001",
       total: "100000",
+      outstanding: "100000",
       currency: "INR",
       dueAt: new Date("2026-10-30"),
       status: "open",
       buyerAccountId: "buyer-123",
       customerId: "gid://shopify/Customer/456",
+      shopUninstalledAt: null,
     };
 
     it("returns capped when daily GLOBAL cap (100) is reached", async () => {
@@ -271,18 +296,21 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "1000.00",
+        outstanding: "1000.00",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
 
       mockSql.setMockResult("invoice", [mockInvoice]);
       mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
       mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
-      // Mock reservation failure due to daily cap - return 0 dailyCount
-      mockSql.setMockResult("global_increment", [{ dailyCount: 0, monthlyTotal: 50 }]);
+      // Mock cap check: daily count at cap (100), monthly under cap
+      // The new transaction-based approach reads counts first, then returns capped if at limit
+      mockSql.setMockResult("global_counts", { dailyCount: DAILY_SEND_CAP, monthlyTotal: 50 });
 
       const result = await sendPaymentReminder(
         mockSql,
@@ -296,7 +324,7 @@ describe("Payment Reminders (S18)", () => {
 
       expect(result.success).toBe(true);
       expect(result.action).toBe("capped");
-      expect(result.skipReason).toContain("send cap");
+      expect(result.skipReason).toContain("Daily send cap");
       expect(mockFetch).not.toHaveBeenCalled();
 
       // Verify DAILY_SEND_CAP constant
@@ -313,18 +341,21 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "1000.00",
+        outstanding: "1000.00",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
 
       mockSql.setMockResult("invoice", [mockInvoice]);
       mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
       mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
-      // Mock reservation failure - return 0 dailyCount but high monthly
-      mockSql.setMockResult("global_increment", [{ dailyCount: 0, monthlyTotal: MONTHLY_SEND_CAP }]);
+      // Mock cap check: monthly count at cap (3000), daily under cap
+      // The new transaction-based approach reads counts first, then returns capped if at limit
+      mockSql.setMockResult("global_counts", { dailyCount: 50, monthlyTotal: MONTHLY_SEND_CAP });
 
       const result = await sendPaymentReminder(
         mockSql,
@@ -338,7 +369,7 @@ describe("Payment Reminders (S18)", () => {
 
       expect(result.success).toBe(true);
       expect(result.action).toBe("capped");
-      expect(result.skipReason).toContain("send cap");
+      expect(result.skipReason).toContain("Monthly send cap");
       expect(mockFetch).not.toHaveBeenCalled();
 
       // Verify MONTHLY_SEND_CAP constant
@@ -354,10 +385,12 @@ describe("Payment Reminders (S18)", () => {
       shopTimezone: string;
       invoiceName: string;
       total: string;
+      outstanding: string;
       currency: string;
       dueAt: Date;
       buyerAccountId: string;
       customerId: string;
+      shopUninstalledAt: Date | null;
     };
 
     beforeEach(() => {
@@ -368,10 +401,12 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "100000",
+        outstanding: "100000",
         currency: "INR",
         dueAt: new Date(),
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
     });
 
@@ -431,11 +466,13 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "100000",
+        outstanding: "100000",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
 
       mockSql.setMockResult("global_daily", []);
@@ -460,7 +497,7 @@ describe("Payment Reminders (S18)", () => {
       expect(mockFetch).not.toHaveBeenCalled();
 
       // Should NOT insert ReminderLog (no slot consumed)
-      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const sqlCalls = mockSql.getAllCalls();
       const reminderLogInserts = sqlCalls.filter((q: string) => q.includes("INSERT INTO \"ReminderLog\""));
       expect(reminderLogInserts).toHaveLength(0);
     });
@@ -477,11 +514,13 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "1000.00",
+        outstanding: "1000.00",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
 
       mockSql.setMockResult("invoice", [mockInvoiceData]);
@@ -513,11 +552,13 @@ describe("Payment Reminders (S18)", () => {
       shopTimezone: string;
       invoiceName: string;
       total: string;
+      outstanding: string;
       currency: string;
       dueAt: Date;
       status: string;
       buyerAccountId: string;
       customerId: string;
+      shopUninstalledAt: Date | null;
     };
 
     const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" };
@@ -530,11 +571,13 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "1000.00",
+        outstanding: "1000.00",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
     });
 
@@ -600,7 +643,7 @@ describe("Payment Reminders (S18)", () => {
       );
 
       // Verify cap was released (UPDATE query with GREATEST(0, daily_count - 1))
-      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const sqlCalls = mockSql.getAllCalls();
       const capReleaseCalls = sqlCalls.filter((q: string) => q.includes("GREATEST(0, daily_count - 1)"));
       expect(capReleaseCalls.length).toBeGreaterThan(0);
     });
@@ -633,7 +676,7 @@ describe("Payment Reminders (S18)", () => {
       expect(result.retryable).toBe(true);
 
       // Verify cap WAS released - only successful sends count toward cap
-      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const sqlCalls = mockSql.getAllCalls();
       const capReleaseCalls = sqlCalls.filter((q: string) => q.includes("GREATEST(0, daily_count - 1)"));
       expect(capReleaseCalls.length).toBeGreaterThan(0);
     });
@@ -666,7 +709,7 @@ describe("Payment Reminders (S18)", () => {
       expect(result.retryable).toBe(true);
 
       // Verify cap WAS released - only successful sends count toward cap
-      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const sqlCalls = mockSql.getAllCalls();
       const capReleaseCalls = sqlCalls.filter((q: string) => q.includes("GREATEST(0, daily_count - 1)"));
       expect(capReleaseCalls.length).toBeGreaterThan(0);
     });
@@ -738,11 +781,13 @@ describe("Payment Reminders (S18)", () => {
       shopTimezone: string;
       invoiceName: string;
       total: string;
+      outstanding: string;
       currency: string;
       dueAt: Date;
       status: string;
       buyerAccountId: string;
       customerId: string;
+      shopUninstalledAt: Date | null;
     };
 
     const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" };
@@ -755,11 +800,13 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "1000.00",
+        outstanding: "1000.00",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
     });
 
@@ -790,7 +837,7 @@ describe("Payment Reminders (S18)", () => {
       expect(result.errorCode).toBe("timeout");
 
       // Verify cap WAS released - only successful sends count toward cap
-      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const sqlCalls = mockSql.getAllCalls();
       const capReleaseCalls = sqlCalls.filter((q: string) => q.includes("GREATEST(0, daily_count - 1)"));
       expect(capReleaseCalls.length).toBeGreaterThan(0);
     });
@@ -809,11 +856,13 @@ describe("Payment Reminders (S18)", () => {
         shopTimezone: "Asia/Kolkata",
         invoiceName: "#1001",
         total: "1000.00",
+        outstanding: "1000.00",
         currency: "INR",
         dueAt: new Date(),
         status: "open",
         buyerAccountId: "buyer-123",
         customerId: "gid://shopify/Customer/456",
+        shopUninstalledAt: null,
       };
 
       mockSql.setMockResult("invoice", [mockInvoiceData]);
@@ -834,7 +883,7 @@ describe("Payment Reminders (S18)", () => {
       expect(result.skipReason).toContain("Outside send window");
       expect(mockFetch).not.toHaveBeenCalled();
 
-      const sqlCalls = (mockSql as unknown as { mock: { calls: Array<[TemplateStringsArray]> } }).mock.calls.map((c: [TemplateStringsArray]) => c[0].join("?"));
+      const sqlCalls = mockSql.getAllCalls();
       const reminderLogInserts = sqlCalls.filter((q: string) => q.includes("INSERT INTO \"ReminderLog\""));
       expect(reminderLogInserts).toHaveLength(0);
       const globalIncrements = sqlCalls.filter((q: string) => q.includes("WITH monthly_sum AS") && q.includes("upserted AS"));
@@ -1119,6 +1168,26 @@ describe("formatAmount (rendered in email)", () => {
 
     expect(html).toContain("₹1,234.56");
     expect(html).not.toContain("₹12.35"); // Would be wrong if we divided by 100
+  });
+});
+
+describe("Partly paid invoice email", () => {
+  it("email shows outstanding balance, not original total", async () => {
+    const { renderPaymentReminderEmail } = await import("~/emails/PaymentReminderEmail");
+
+    // Invoice has total of 5000.00, but only 3000.00 outstanding
+    // The email should show the OUTSTANDING amount (3000.00), not the total
+    const html = renderPaymentReminderEmail({
+      invoiceName: "#1002",
+      buyerName: "Partly Paid Customer",
+      amount: "₹3,000.00", // Outstanding amount, not total
+      dueDate: "November 15, 2026",
+      merchantName: "Test Shop",
+      reminderType: "Payment 7 days overdue",
+    });
+
+    expect(html).toContain("₹3,000.00"); // Outstanding
+    expect(html).not.toContain("₹5,000.00"); // Total should NOT appear
   });
 });
 

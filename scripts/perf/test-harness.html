@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<!--
+  Web Vitals Test Harness (S23)
+  
+  Standalone HTML page for measuring Web Vitals on React components
+  with fixture data. This bypasses Shopify auth for lab testing.
+  
+  Uses Polaris CDN styles and App Bridge stubs.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Web Vitals Test Harness</title>
+  <link rel="preconnect" href="https://cdn.shopify.com/" />
+  <link rel="stylesheet" href="https://cdn.shopify.com/static/fonts/inter/v4/styles.css" />
+  <style>
+    body {
+      margin: 0;
+      font-family: Inter, system-ui, sans-serif;
+      background: #f6f6f7;
+    }
+    #loading {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      font-size: 1.2rem;
+      color: #6d7175;
+    }
+    #loading.hidden {
+      display: none;
+    }
+    #app {
+      display: none;
+    }
+    #app.loaded {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading">Loading test harness...</div>
+  <div id="app"></div>
+  
+  <!-- Mock App Bridge -->
+  <script>
+    window.shopify = {
+      webVitals: {
+        onReport: function() {}
+      },
+      environment: {
+        embedded: false,
+        mobile: false
+      },
+      config: {
+        apiKey: 'test-api-key',
+        shop: 'test-shop.myshopify.com',
+        locale: 'en'
+      },
+      toast: {
+        show: function() {}
+      },
+      modal: {
+        show: function() {}
+      },
+      idToken: function() {
+        return Promise.resolve('test-token');
+      }
+    };
+    
+    // Web Vitals results collector
+    window.__WEB_VITALS_RESULTS__ = [];
+  </script>
+  
+  <!-- Web Vitals Library -->
+  <script type="module">
+    import { onLCP, onCLS, onINP } from 'https://unpkg.com/web-vitals@4.2.4/dist/web-vitals.js';
+    
+    function report(metric) {
+      window.__WEB_VITALS_RESULTS__.push({
+        name: metric.name,
+        value: metric.value,
+        rating: metric.rating,
+        delta: metric.delta
+      });
+      console.log('[WebVital]', metric.name, '=', metric.value.toFixed(2), metric.rating);
+    }
+    
+    onLCP(report);
+    onCLS(report);
+    onINP(report, { reportAllChanges: true });
+    
+    // Expose for Playwright
+    window.__WEB_VITALS_READY__ = true;
+  </script>
+  
+  <!-- Harness script - loads after route param is parsed -->
+  <script type="module">
+    const params = new URLSearchParams(window.location.search);
+    const route = params.get('route') || 'dashboard';
+    
+    console.log('[Harness] Loading route:', route);
+    
+    // Import React and fixtures
+    const React = await import('https://esm.sh/react@18.3.1');
+    const ReactDOM = await import('https://esm.sh/react-dom@18.3.1/client');
+    
+    // Create mock useLoaderData
+    window.__FIXTURE_DATA__ = null;
+    
+    // Set fixture data based on route
+    switch (route) {
+      case 'dashboard':
+        window.__FIXTURE_DATA__ = {
+          shopName: "test-perf-store",
+          shopDomain: "test-perf-store.myshopify.com",
+          storeHandle: "test-perf-store",
+          shopCurrency: "INR",
+          plan: { key: "growth", name: "Growth", isTest: false },
+          usage: { companies: { current: 200, limit: 500 }, importsThisMonth: { current: 5, limit: 50 } },
+          appHandle: "test-net-terms-receivables",
+          gatingEnforced: true,
+          agingTotals: {
+            totalByCurrency: { INR: "312000000" },
+            buckets: {
+              current: { byCurrency: { INR: "150000000" } },
+              "1-30": { byCurrency: { INR: "80000000" } },
+              "31-60": { byCurrency: { INR: "45000000" } },
+              "61-90": { byCurrency: { INR: "25000000" } },
+              "90+": { byCurrency: { INR: "12000000" } }
+            },
+            overdueByCurrency: { INR: "162000000" },
+            oldestOverdueDays: 95
+          },
+          buyerLedger: {
+            rows: generateBuyerRows(20),
+            totalCount: 200
+          },
+          selectedBuyerInvoices: null,
+          selectedBuyerId: null,
+          pagination: { page: 1, pageSize: 20, totalCount: 200 },
+          sortBy: "outstanding",
+          sortOrder: "desc",
+          onlyOverLimit: false,
+          overLimitCount: 18,
+          error: null
+        };
+        break;
+        
+      case 'onboarding':
+        window.__FIXTURE_DATA__ = {
+          error: null,
+          state: {
+            steps: [
+              { id: "tag-rules", title: "Set up tag rules", description: "Configure which customers get net terms", status: "complete", actionUrl: "/app/tag-rules", actionLabel: "Configure" },
+              { id: "default-terms", title: "Set default payment terms", description: "Choose default net days", status: "complete", actionUrl: "/app/settings", actionLabel: "Configure" },
+              { id: "reminders", title: "Configure payment reminders", description: "Set up automated reminder emails", status: "incomplete", actionUrl: "/app/settings/reminders", actionLabel: "Configure" },
+              { id: "import", title: "Import bank statement", description: "Match payments to invoices", status: "incomplete", actionUrl: "/app/imports", actionLabel: "Import" }
+            ],
+            isComplete: false,
+            completedCount: 2,
+            totalCount: 4,
+            dismissedAt: null
+          },
+          shopId: "test-shop-123",
+          registrationStatus: {
+            validation: { name: "Validation Function", status: "ok" },
+            paymentCustomization: { name: "Payment Customization", status: "ok" },
+            metafieldDefinitions: { name: "Metafield Definitions", status: "ok" }
+          },
+          initialSyncState: { status: "done" }
+        };
+        break;
+        
+      case 'account':
+        window.__FIXTURE_DATA__ = {
+          account: {
+            id: "test-buyer-1",
+            name: "Test Industries Corp 1",
+            kind: "COMPANY",
+            companyId: "test-company-1",
+            defaultTermsDays: 30,
+            defaultTermsSource: "explicit",
+            isGated: false
+          },
+          creditStatus: {
+            creditLimitAmount: 500000,
+            creditLimitPaise: "50000000",
+            exposurePaise: "25000000",
+            draftExposurePaise: "2000000",
+            availableCreditPaise: "25000000",
+            currency: "INR",
+            holdState: "OK",
+            manualHold: false,
+            holdReasonCode: null,
+            holdNote: null,
+            isOnHold: false,
+            holdReasonDisplay: null,
+            isOverLimit: false,
+            isOverdue: true,
+            utilizationPercent: 50,
+            syncPending: false
+          },
+          companyTotals: null,
+          invoices: {
+            rows: generateInvoiceRows(8),
+            totalCount: 8
+          },
+          error: null
+        };
+        break;
+        
+      case 'imports':
+        window.__FIXTURE_DATA__ = {
+          shopDomain: "test-perf-store.myshopify.com",
+          shopCurrency: "INR",
+          maxImportRows: 1000,
+          importsThisMonth: { current: 5, limit: 50, allowed: true }
+        };
+        break;
+    }
+    
+    function generateBuyerRows(count) {
+      const prefixes = ["Test", "Mock", "Example", "Fake", "Demo", "Sample", "Fixture", "Sandbox", "Lab", "Trial"];
+      const suffixes = ["Industries", "Corp", "Ltd", "Trading", "Exports", "Enterprises", "Solutions", "Group", "Holdings", "Partners"];
+      const holdStates = ["OK", "OK", "OK", "OK", "OK", "OK", "OK", "NEAR_LIMIT", "NEAR_LIMIT", "HELD"];
+      
+      return Array.from({ length: count }, (_, i) => ({
+        buyer_account_id: `test-buyer-${i + 1}`,
+        buyer_name: `${prefixes[i % prefixes.length]} ${suffixes[Math.floor(i / prefixes.length) % suffixes.length]} ${i + 1}`,
+        credit_limit_paise: Math.random() > 0.3 ? String(Math.floor(Math.random() * 50000000) + 10000000) : null,
+        hold_state: holdStates[i % holdStates.length],
+        currency: "INR",
+        outstanding_paise: String(Math.floor(Math.random() * 50000000) + 100000),
+        overdue_paise: Math.random() > 0.4 ? String(Math.floor(Math.random() * 20000000)) : "0",
+        oldest_overdue_days: Math.random() > 0.4 ? Math.floor(Math.random() * 120) + 1 : null,
+        is_gated: i >= 18
+      }));
+    }
+    
+    function generateInvoiceRows(count) {
+      return Array.from({ length: count }, (_, i) => {
+        const daysOffset = (i - 3) * 15;
+        const dueDate = new Date();
+        dueDate.setDate(dueDate.getDate() + daysOffset);
+        return {
+          id: `test-inv-${i + 1}`,
+          name: `#INV-${1000 + i}`,
+          orderId: `gid://shopify/Order/${100000 + i}`,
+          dueAt: dueDate.toISOString(),
+          outstandingPaise: String(Math.floor(Math.random() * 5000000) + 100000),
+          currency: "INR",
+          daysPastDue: -daysOffset
+        };
+      });
+    }
+    
+    // Render placeholder UI to trigger LCP/CLS
+    const container = document.getElementById('app');
+    const loading = document.getElementById('loading');
+    
+    const { createElement: h } = React;
+    
+    // Create simple representations of the pages
+    function Dashboard({ data }) {
+      return h('div', { className: 'page' },
+        h('s-page', { heading: 'Net Terms Receivables' },
+          h('s-section', { heading: 'Your Plan' },
+            h('s-stack', null,
+              h('s-paragraph', null,
+                h('s-text', { type: 'strong' }, 'Plan: '),
+                h('s-text', null, data.plan.name)
+              ),
+              h('s-paragraph', null,
+                h('s-text', { type: 'strong' }, 'Usage: '),
+                h('s-text', null, `${data.usage.companies.current} / ${data.usage.companies.limit} companies`)
+              ),
+              data.overLimitCount > 0 && h('s-banner', { tone: 'warning', heading: `${data.overLimitCount} accounts over your plan limit` },
+                h('s-text', null, 'These accounts are included in totals but some features may be limited.')
+              )
+            )
+          ),
+          h('s-section', { heading: 'Receivables Summary' },
+            h('s-stack', null,
+              h('s-paragraph', null,
+                h('s-text', { type: 'strong' }, 'Total Outstanding: '),
+                h('s-text', null, formatPaise(data.agingTotals.totalByCurrency.INR))
+              ),
+              h('s-paragraph', null,
+                h('s-text', { type: 'strong' }, 'Total Overdue: '),
+                h('s-text', { tone: 'critical' }, formatPaise(data.agingTotals.overdueByCurrency.INR))
+              ),
+              h('s-table', null,
+                h('s-table-header-row', null,
+                  h('s-table-header', null, 'Bucket'),
+                  h('s-table-header', { format: 'currency' }, 'Amount')
+                ),
+                h('s-table-body', null,
+                  ['current', '1-30', '31-60', '61-90', '90+'].map(bucket =>
+                    h('s-table-row', { key: bucket },
+                      h('s-table-cell', null, bucket === 'current' ? 'Current' : `${bucket} days`),
+                      h('s-table-cell', null, formatPaise(data.agingTotals.buckets[bucket].byCurrency.INR))
+                    )
+                  )
+                )
+              )
+            )
+          ),
+          h('s-section', { heading: 'Buyer Ledger' },
+            h('s-stack', null,
+              h('s-table', null,
+                h('s-table-header-row', null,
+                  h('s-table-header', null, h('s-link', { href: '?sortBy=name' }, 'Buyer')),
+                  h('s-table-header', { format: 'currency' }, 'Credit Limit'),
+                  h('s-table-header', { format: 'currency' }, h('s-link', { href: '?sortBy=outstanding' }, 'Outstanding')),
+                  h('s-table-header', { format: 'currency' }, h('s-link', { href: '?sortBy=overdue' }, 'Overdue')),
+                  h('s-table-header', null, 'Oldest Overdue'),
+                  h('s-table-header', null, 'Hold Status')
+                ),
+                h('s-table-body', null,
+                  data.buyerLedger.rows.map(row =>
+                    h('s-table-row', { key: row.buyer_account_id },
+                      h('s-table-cell', null,
+                        h('s-link', { href: `?buyer=${row.buyer_account_id}` }, row.buyer_name),
+                        row.is_gated && h('s-badge', { tone: 'warning' }, 'over plan limit')
+                      ),
+                      h('s-table-cell', null, row.credit_limit_paise ? formatPaise(row.credit_limit_paise) : 'No limit'),
+                      h('s-table-cell', null, formatPaise(row.outstanding_paise)),
+                      h('s-table-cell', null,
+                        parseInt(row.overdue_paise) > 0
+                          ? h('s-text', { tone: 'critical' }, formatPaise(row.overdue_paise))
+                          : formatPaise('0')
+                      ),
+                      h('s-table-cell', null, row.oldest_overdue_days ? `${row.oldest_overdue_days} days` : '—'),
+                      h('s-table-cell', null,
+                        row.hold_state === 'HELD' ? h('s-badge', { tone: 'critical' }, 'Held')
+                          : row.hold_state === 'NEAR_LIMIT' ? h('s-badge', { tone: 'warning' }, 'Near Limit')
+                          : h('s-badge', null, 'OK')
+                      )
+                    )
+                  )
+                )
+              ),
+              h('s-stack', { direction: 'inline' },
+                h('s-text', null, `Page 1 of ${Math.ceil(data.pagination.totalCount / data.pagination.pageSize)} (${data.pagination.totalCount} buyers)`),
+                h('s-button', { href: '?page=2' }, 'Next')
+              )
+            )
+          )
+        )
+      );
+    }
+    
+    function Onboarding({ data }) {
+      return h('div', { className: 'page' },
+        h('s-page', { heading: 'Setup Guide' },
+          h('s-section', { heading: 'Get Started with Net Terms' },
+            h('s-stack', { gap: 'base' },
+              h('s-paragraph', null,
+                h('s-text', { type: 'strong' }, `${data.state.completedCount} of ${data.state.totalCount} steps completed`)
+              ),
+              h('s-table', null,
+                h('s-table-header-row', null,
+                  h('s-table-header', null, 'Status'),
+                  h('s-table-header', null, 'Step'),
+                  h('s-table-header', null, 'Details'),
+                  h('s-table-header', null, 'Action')
+                ),
+                h('s-table-body', null,
+                  data.state.steps.map(step =>
+                    h('s-table-row', { key: step.id },
+                      h('s-table-cell', null,
+                        step.status === 'complete'
+                          ? h('s-badge', { tone: 'success' }, 'Done')
+                          : h('s-badge', null, 'To do')
+                      ),
+                      h('s-table-cell', null, h('s-text', { type: 'strong' }, step.title)),
+                      h('s-table-cell', null, h('s-text', null, step.description)),
+                      h('s-table-cell', null, step.actionUrl && h('s-link', { href: step.actionUrl }, step.actionLabel))
+                    )
+                  )
+                )
+              ),
+              h('s-stack', { direction: 'inline', gap: 'base' },
+                h('s-button', { type: 'submit' }, 'Dismiss for now'),
+                h('s-button', { href: '/app?skipOnboarding=true' }, 'Go to Dashboard')
+              )
+            )
+          ),
+          h('s-section', { heading: 'Initial Sync' },
+            h('s-stack', { gap: 'base' },
+              h('s-stack', { direction: 'inline', gap: 'base' },
+                h('s-text', { type: 'strong' }, 'Status'),
+                h('s-badge', { tone: 'success' }, 'Complete')
+              ),
+              h('s-paragraph', null, 'B2B companies and orders have been synced.')
+            )
+          ),
+          h('s-section', { heading: 'App Registration & Metafield Definitions' },
+            h('s-stack', { gap: 'base' },
+              h('s-stack', { direction: 'inline', gap: 'base' },
+                h('s-text', { type: 'strong' }, 'Status'),
+                h('s-badge', { tone: 'success' }, 'Complete')
+              ),
+              h('s-table', null,
+                h('s-table-header-row', null,
+                  h('s-table-header', null, 'Item'),
+                  h('s-table-header', null, 'Status')
+                ),
+                h('s-table-body', null,
+                  Object.values(data.registrationStatus).map(item =>
+                    h('s-table-row', { key: item.name },
+                      h('s-table-cell', null, h('s-text', null, item.name)),
+                      h('s-table-cell', null, h('s-badge', { tone: 'success' }, 'OK'))
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
+      );
+    }
+    
+    function Account({ data }) {
+      return h('div', { className: 'page' },
+        h('s-page', { heading: data.account.name },
+          h('s-link', { href: '/', slot: 'breadcrumb-actions' }, 'Back to Dashboard'),
+          h('s-section', { heading: 'Account Details' },
+            h('s-stack', null,
+              h('s-paragraph', null,
+                h('s-text', { type: 'strong' }, 'Type: '),
+                h('s-text', null, data.account.kind === 'COMPANY' ? 'B2B Company' : 'Tagged Customer')
+              ),
+              data.account.defaultTermsDays && h('s-paragraph', null,
+                h('s-text', { type: 'strong' }, 'Default Terms: '),
+                h('s-text', null, `Net ${data.account.defaultTermsDays} days`)
+              )
+            )
+          ),
+          data.creditStatus && h('s-section', { heading: 'Credit Status' },
+            h('s-stack', null,
+              h('s-paragraph', null,
+                h('s-text', { type: 'strong' }, 'Credit Limit: '),
+                h('s-text', null, formatPaise(data.creditStatus.creditLimitPaise))
+              ),
+              h('s-paragraph', null,
+                h('s-text', { type: 'strong' }, 'Outstanding: '),
+                h('s-text', null, formatPaise(data.creditStatus.exposurePaise))
+              ),
+              h('s-paragraph', null,
+                h('s-text', { type: 'strong' }, 'Available Credit: '),
+                h('s-text', null, formatPaise(data.creditStatus.availableCreditPaise))
+              ),
+              h('s-paragraph', null,
+                h('s-text', { type: 'strong' }, 'Utilization: '),
+                h('s-text', null, `${data.creditStatus.utilizationPercent}%`)
+              ),
+              h('s-paragraph', null,
+                h('s-text', { type: 'strong' }, 'Hold Status: '),
+                h('s-badge', null, 'OK')
+              )
+            )
+          ),
+          h('s-section', { heading: 'Edit Credit Settings' },
+            h('s-stack', { gap: 'base' },
+              h('s-grid', { gridTemplateColumns: '1fr auto', gap: 'base', alignItems: 'end' },
+                h('s-money-field', { label: 'Credit Limit', name: 'creditLimit', min: 0, placeholder: 'e.g., 100000', value: String(data.creditStatus.creditLimitAmount || '') }),
+                h('s-text', null, 'INR')
+              ),
+              h('s-checkbox', { label: 'No credit limit', name: 'noLimit', value: 'true' }),
+              h('s-checkbox', { label: 'Place manual hold on this account', name: 'manualHold', value: 'true' }),
+              h('s-select', { label: 'Hold Reason (if held)', name: 'holdReasonCode', placeholder: 'Select reason...' },
+                h('s-option', { value: 'MANUAL_HOLD' }, 'Manual hold'),
+                h('s-option', { value: 'PAYMENT_OVERDUE' }, 'Payment overdue'),
+                h('s-option', { value: 'CREDIT_REVIEW' }, 'Credit review required')
+              ),
+              h('s-text-field', { label: 'Hold Note (optional)', name: 'holdNote', placeholder: 'Internal note about the hold' }),
+              h('s-button', { type: 'submit', variant: 'primary' }, 'Save Credit Settings')
+            )
+          ),
+          h('s-section', { heading: 'Recent Invoices' },
+            h('s-table', null,
+              h('s-table-header-row', null,
+                h('s-table-header', null, 'Invoice'),
+                h('s-table-header', null, 'Due Date'),
+                h('s-table-header', { format: 'currency' }, 'Outstanding'),
+                h('s-table-header', null, 'Status'),
+                h('s-table-header', null, 'Order')
+              ),
+              h('s-table-body', null,
+                data.invoices.rows.map(inv =>
+                  h('s-table-row', { key: inv.id },
+                    h('s-table-cell', null, inv.name),
+                    h('s-table-cell', null, inv.dueAt ? new Date(inv.dueAt).toLocaleDateString('en-IN') : '—'),
+                    h('s-table-cell', null, formatPaise(inv.outstandingPaise)),
+                    h('s-table-cell', null,
+                      inv.daysPastDue > 0
+                        ? h('s-badge', { tone: 'critical' }, `${inv.daysPastDue} days overdue`)
+                        : inv.daysPastDue === 0
+                        ? h('s-badge', { tone: 'warning' }, 'Due today')
+                        : h('s-badge', null, `${Math.abs(inv.daysPastDue)} days left`)
+                    ),
+                    h('s-table-cell', null, inv.orderId ? h('s-link', { href: '#' }, 'View') : '—')
+                  )
+                )
+              )
+            )
+          )
+        )
+      );
+    }
+    
+    function Imports({ data }) {
+      return h('div', { className: 'page' },
+        h('s-page', { heading: 'Import Bank Statement' },
+          h('s-section', { heading: 'Upload Statement' },
+            h('s-stack', null,
+              h('s-paragraph', { style: { fontSize: '16px', lineHeight: '1.5' } }, 
+                'Upload an HDFC or ICICI bank statement (CSV, XLS, or XLSX). The file is parsed entirely in your browser — no raw data is sent to our servers.'
+              ),
+              h('s-banner', { tone: 'info', heading: 'Monthly import allowance' },
+                h('s-stack', null,
+                  h('s-paragraph', null,
+                    'You have used ', h('s-text', { type: 'strong' }, data.importsThisMonth.current), ' of ',
+                    h('s-text', { type: 'strong' }, data.importsThisMonth.limit), ' imports this month.'
+                  )
+                )
+              ),
+              h('s-banner', { tone: 'info', heading: 'Per-import limit' },
+                h('s-stack', null,
+                  h('s-paragraph', null,
+                    'Each import can include up to ', h('s-text', { type: 'strong' }, data.maxImportRows.toLocaleString()), ' credit rows. For larger statements, split them into multiple files.'
+                  )
+                )
+              ),
+              h('div', { style: { marginTop: '16px', marginBottom: '16px', padding: '16px', border: '1px dashed #ccc', borderRadius: '8px', backgroundColor: '#fafafa' } },
+                h('input', { type: 'file', accept: '.csv,.xls,.xlsx', style: { display: 'block', width: '100%' } })
+              )
+            )
+          ),
+          h('s-section', { slot: 'aside', heading: 'Supported Banks' },
+            h('s-unordered-list', null,
+              h('s-list-item', null, h('s-text', { type: 'strong' }, 'HDFC Bank'), ' — Retail and corporate statement exports'),
+              h('s-list-item', null, h('s-text', { type: 'strong' }, 'ICICI Bank'), ' — Retail and corporate statement exports'),
+              h('s-list-item', null, h('s-text', { type: 'strong' }, 'SBI'), ' — Retail statement exports'),
+              h('s-list-item', null, h('s-text', { type: 'strong' }, 'Axis Bank'), ' — Retail and corporate statement exports')
+            )
+          ),
+          h('s-section', { slot: 'aside', heading: 'Payment Rails' },
+            h('s-paragraph', null, 'We detect and parse:'),
+            h('s-unordered-list', null,
+              h('s-list-item', null, h('s-text', { type: 'strong' }, 'NEFT'), ' — UTR format: BANKN + digits'),
+              h('s-list-item', null, h('s-text', { type: 'strong' }, 'RTGS'), ' — UTR format: BANKR + digits'),
+              h('s-list-item', null, h('s-text', { type: 'strong' }, 'IMPS'), ' — 12-digit RRN'),
+              h('s-list-item', null, h('s-text', { type: 'strong' }, 'UPI'), ' — 12-digit RRN')
+            )
+          ),
+          h('s-section', { slot: 'aside', heading: 'Privacy' },
+            h('s-banner', { tone: 'info', heading: 'Privacy-first import' },
+              h('s-stack', null,
+                h('s-paragraph', null,
+                  'Your bank statement file is parsed entirely in your browser. The raw file ', 
+                  h('s-text', { type: 'strong' }, 'never'), 
+                  ' leaves your device.'
+                )
+              )
+            ),
+            h('s-paragraph', null, 'When you import, only the normalised credit rows are sent to our server:'),
+            h('s-unordered-list', null,
+              h('s-list-item', null, 'Transaction date and amount'),
+              h('s-list-item', null, 'Payment rail (NEFT/RTGS/IMPS/UPI)'),
+              h('s-list-item', null, 'UTR or reference number'),
+              h('s-list-item', null, 'Remitter name and narration (for matching)')
+            )
+          )
+        )
+      );
+    }
+    
+    function formatPaise(paise) {
+      if (!paise) return '₹0.00';
+      const rupees = parseInt(paise) / 100;
+      return new Intl.NumberFormat('en-IN', {
+        style: 'currency',
+        currency: 'INR',
+        minimumFractionDigits: 2
+      }).format(rupees);
+    }
+    
+    // Render the appropriate page
+    const data = window.__FIXTURE_DATA__;
+    let Component;
+    
+    switch (route) {
+      case 'dashboard': Component = Dashboard; break;
+      case 'onboarding': Component = Onboarding; break;
+      case 'account': Component = Account; break;
+      case 'imports': Component = Imports; break;
+      default: Component = Dashboard;
+    }
+    
+    loading.classList.add('hidden');
+    container.classList.add('loaded');
+    
+    const root = ReactDOM.createRoot(container);
+    root.render(h(Component, { data }));
+    
+    console.log('[Harness] Page rendered:', route);
+  </script>
+</body>
+</html>

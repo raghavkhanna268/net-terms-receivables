@@ -68,6 +68,7 @@ const PLAN_CONFIGS: Record<PlanKey, PlanConfig> = {
     },
     features: new Set<FeatureKey>([
       "aging_dashboard",
+      "matching", // All-plans feature
       "credit_holds", // All-plans feature
     ]),
   },

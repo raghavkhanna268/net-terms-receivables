@@ -107,7 +107,7 @@ export function computeDefaultTermsStep(
 
 /**
  * Compute step 2: First buyer account or tag rule created.
- * No action link - buyers route doesn't exist yet.
+ * Links to /app/tag-rules when not complete (S23-03).
  */
 export function computeBuyerSetupStep(
   buyerAccountCount: number,
@@ -136,6 +136,8 @@ export function computeBuyerSetupStep(
       "Set up B2B company sync or create customer tag rules for net-terms eligibility",
     status: isComplete ? "complete" : "pending",
     helpText,
+    actionUrl: isComplete ? undefined : "/app/tag-rules",
+    actionLabel: isComplete ? undefined : "Create tag rule",
   };
 }
 

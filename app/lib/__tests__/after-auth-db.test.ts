@@ -13,7 +13,7 @@
  *    - CompanyLocation sync (processCompanyLocationWebhook)
  *    - Reconcile (enqueueReconcileForAllShops excludes uninstalled shops)
  *    - Compliance webhooks (customers/data_request, customers/redact)
- * 5. Cross-isolate reinstall: clearUninstalledAtIfSet clears uninstalledAt
+ * 5. Cross-isolate reinstall: clearUninstalledAtAndMetafieldErrors clears uninstalledAt
  *    even when shop is in setupCompletedShops cache
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
@@ -142,7 +142,7 @@ describeWithDb("after-auth Shop row upsert (DB)", () => {
   });
 });
 
-describeWithDb("clearUninstalledAtIfSet cross-isolate reinstall (DB)", () => {
+describeWithDb("clearUninstalledAtAndMetafieldErrors cross-isolate reinstall (DB)", () => {
   let sql: ReturnType<typeof postgres>;
   const TEST_SUFFIX = Date.now().toString(36) + "-clearuninstalled";
 
@@ -160,7 +160,7 @@ describeWithDb("clearUninstalledAtIfSet cross-isolate reinstall (DB)", () => {
   });
 
   describe("clears uninstalledAt even when shop is in cache", () => {
-    it("clearUninstalledAtIfSet clears uninstalledAt for shop marked uninstalled", async () => {
+    it("clearUninstalledAtAndMetafieldErrors clears uninstalledAt for shop marked uninstalled", async () => {
       const TEST_SHOP = `cached-reinstall-${TEST_SUFFIX}.myshopify.com`;
       
       await sql`
@@ -173,8 +173,8 @@ describeWithDb("clearUninstalledAtIfSet cross-isolate reinstall (DB)", () => {
       `;
       expect(before.uninstalledAt).not.toBeNull();
 
-      const { _clearUninstalledAtIfSetForTesting } = await import("../after-auth.server");
-      await _clearUninstalledAtIfSetForTesting(sql, TEST_SHOP);
+      const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("../after-auth.server");
+      await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP);
 
       const [after] = await sql<{ uninstalledAt: Date | null }[]>`
         SELECT "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP}
@@ -184,7 +184,7 @@ describeWithDb("clearUninstalledAtIfSet cross-isolate reinstall (DB)", () => {
   });
 
   describe("does not touch other columns", () => {
-    it("clearUninstalledAtIfSet only sets uninstalledAt, preserves plan/timezone/other columns", async () => {
+    it("clearUninstalledAtAndMetafieldErrors only clears uninstalledAt, preserves plan/timezone/other columns", async () => {
       const TEST_SHOP = `preserve-columns-${TEST_SUFFIX}.myshopify.com`;
       
       await sql`
@@ -209,8 +209,8 @@ describeWithDb("clearUninstalledAtIfSet cross-isolate reinstall (DB)", () => {
         FROM "Shop" WHERE domain = ${TEST_SHOP}
       `;
 
-      const { _clearUninstalledAtIfSetForTesting } = await import("../after-auth.server");
-      await _clearUninstalledAtIfSetForTesting(sql, TEST_SHOP);
+      const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("../after-auth.server");
+      await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP);
 
       const [after] = await sql<{
         timezone: string;
@@ -235,7 +235,7 @@ describeWithDb("clearUninstalledAtIfSet cross-isolate reinstall (DB)", () => {
   });
 
   describe("does not touch other shops", () => {
-    it("clearUninstalledAtIfSet does not affect another shop's uninstalledAt", async () => {
+    it("clearUninstalledAtAndMetafieldErrors does not affect another shop's uninstalledAt", async () => {
       const SHOP_A = `shop-a-${TEST_SUFFIX}.myshopify.com`;
       const SHOP_B = `shop-b-${TEST_SUFFIX}.myshopify.com`;
       
@@ -246,8 +246,8 @@ describeWithDb("clearUninstalledAtIfSet cross-isolate reinstall (DB)", () => {
           (${SHOP_B}, 'UTC', 'INR', 'free', NOW(), NOW(), NOW())
       `;
 
-      const { _clearUninstalledAtIfSetForTesting } = await import("../after-auth.server");
-      await _clearUninstalledAtIfSetForTesting(sql, SHOP_A);
+      const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("../after-auth.server");
+      await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, SHOP_A);
 
       const [shopA] = await sql<{ uninstalledAt: Date | null }[]>`
         SELECT "uninstalledAt" FROM "Shop" WHERE domain = ${SHOP_A}
@@ -262,7 +262,7 @@ describeWithDb("clearUninstalledAtIfSet cross-isolate reinstall (DB)", () => {
   });
 
   describe("is a no-op when uninstalledAt is already NULL", () => {
-    it("clearUninstalledAtIfSet does nothing when shop is not uninstalled", async () => {
+    it("clearUninstalledAtAndMetafieldErrors does nothing when shop is not uninstalled", async () => {
       const TEST_SHOP = `not-uninstalled-${TEST_SUFFIX}.myshopify.com`;
       
       await sql`
@@ -274,8 +274,8 @@ describeWithDb("clearUninstalledAtIfSet cross-isolate reinstall (DB)", () => {
         SELECT "updatedAt" FROM "Shop" WHERE domain = ${TEST_SHOP}
       `;
 
-      const { _clearUninstalledAtIfSetForTesting } = await import("../after-auth.server");
-      await _clearUninstalledAtIfSetForTesting(sql, TEST_SHOP);
+      const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("../after-auth.server");
+      await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP);
 
       const [after] = await sql<{ updatedAt: Date; uninstalledAt: Date | null }[]>`
         SELECT "updatedAt", "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP}
@@ -305,7 +305,7 @@ describeWithDb("S23-09: reinstall resets onboarding_dismissed_at (DB)", () => {
   });
 
   describe("reinstall clears onboarding_dismissed_at", () => {
-    it("clearUninstalledAtIfSet resets onboarding_dismissed_at when shop was uninstalled", async () => {
+    it("clearUninstalledAtAndMetafieldErrors resets onboarding_dismissed_at when shop was uninstalled", async () => {
       const TEST_SHOP = `reinstall-onboarding-${TEST_SUFFIX}.myshopify.com`;
       const dismissedDate = new Date("2026-10-01T00:00:00Z");
 
@@ -332,8 +332,8 @@ describeWithDb("S23-09: reinstall resets onboarding_dismissed_at (DB)", () => {
       expect(before.onboarding_dismissed_at).not.toBeNull();
       expect(before.uninstalledAt).not.toBeNull();
 
-      const { _clearUninstalledAtIfSetForTesting } = await import("../after-auth.server");
-      await _clearUninstalledAtIfSetForTesting(sql, TEST_SHOP);
+      const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("../after-auth.server");
+      await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP);
 
       const [after] = await sql<{
         onboarding_dismissed_at: Date | null;
@@ -386,8 +386,8 @@ describeWithDb("S23-09: reinstall resets onboarding_dismissed_at (DB)", () => {
       expect(before.subscription_id).toBe("gid://shopify/AppSubscription/123");
       expect(before.is_test).toBe(true);
 
-      const { _clearUninstalledAtIfSetForTesting } = await import("../after-auth.server");
-      await _clearUninstalledAtIfSetForTesting(sql, TEST_SHOP);
+      const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("../after-auth.server");
+      await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP);
 
       const [after] = await sql<{
         timezone: string;
@@ -486,18 +486,18 @@ describeWithDb("S23-09: reinstall resets onboarding_dismissed_at (DB)", () => {
       expect(shop.uninstalledAt).toBeNull();
     });
 
-    it("clearUninstalledAtIfSet is no-op on fresh install (no row exists)", async () => {
+    it("clearUninstalledAtAndMetafieldErrors is no-op on fresh install (no row exists)", async () => {
       const TEST_SHOP = `nonexistent-${TEST_SUFFIX}.myshopify.com`;
 
-      const { _clearUninstalledAtIfSetForTesting } = await import("../after-auth.server");
-      const wasReinstalled = await _clearUninstalledAtIfSetForTesting(sql, TEST_SHOP);
+      const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("../after-auth.server");
+      const result = await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP);
 
-      expect(wasReinstalled).toBe(false);
+      expect(result.wasReinstalled).toBe(false);
     });
   });
 
   describe("normal load does not reset dismissed onboarding", () => {
-    it("clearUninstalledAtIfSet does not touch onboarding when uninstalledAt is NULL", async () => {
+    it("clearUninstalledAtAndMetafieldErrors does not touch onboarding when uninstalledAt is NULL", async () => {
       const TEST_SHOP = `installed-dismissed-${TEST_SUFFIX}.myshopify.com`;
       const dismissedDate = new Date("2026-10-10T08:00:00Z");
 
@@ -525,10 +525,10 @@ describeWithDb("S23-09: reinstall resets onboarding_dismissed_at (DB)", () => {
       expect(before.onboarding_dismissed_at).not.toBeNull();
       expect(before.uninstalledAt).toBeNull();
 
-      const { _clearUninstalledAtIfSetForTesting } = await import("../after-auth.server");
-      const wasReinstalled = await _clearUninstalledAtIfSetForTesting(sql, TEST_SHOP);
+      const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("../after-auth.server");
+      const result = await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP);
 
-      expect(wasReinstalled).toBe(false);
+      expect(result.wasReinstalled).toBe(false);
 
       const [after] = await sql<{
         onboarding_dismissed_at: Date | null;
@@ -865,6 +865,834 @@ describeWithDb("Shop-dependent services after fresh install (DB)", () => {
       expect(result).toBeDefined();
       expect(result.taggedCustomersDeleted).toBe(0);
       expect(result.buyerAccountAnonymized).toBe(false);
+    });
+  });
+});
+
+describeWithDb("reinstall clears metafieldSyncErrorCode and metafieldSyncErrorAt (DB)", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-metafieldsyncerr";
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" IN (
+      SELECT id FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}
+    )`;
+    await sql`DELETE FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}`;
+    await sql.end();
+  });
+
+  beforeEach(async () => {
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" IN (
+      SELECT id FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}
+    )`;
+    await sql`DELETE FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}`;
+  });
+
+  describe("reinstall clears both error fields", () => {
+    it("clearUninstalledAtAndMetafieldErrors clears both fields atomically for reinstalled shop", async () => {
+      const TEST_SHOP = `test-reinstall-metafield-${TEST_SUFFIX}.myshopify.com`;
+      const errorDate = new Date("2026-10-15T12:00:00Z");
+
+      const [{ id: shopId }] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
+        RETURNING id
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${shopId}, 'COMPANY'::"AccountKind",
+          'gid://shopify/Company/test-123', 'gid://shopify/CompanyLocation/test-456',
+          'Test Account', 'OK', 'no_session', ${errorDate},
+          NOW(), NOW()
+        )
+      `;
+
+      const [beforeReinstall] = await sql<{
+        metafieldSyncErrorCode: string | null;
+        metafieldSyncErrorAt: Date | null;
+      }[]>`
+        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+      `;
+      expect(beforeReinstall.metafieldSyncErrorCode).toBe("no_session");
+      expect(beforeReinstall.metafieldSyncErrorAt).not.toBeNull();
+
+      const { _clearUninstalledAtAndMetafieldErrorsForTesting } =
+        await import("../after-auth.server");
+
+      const result = await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP);
+      expect(result.wasReinstalled).toBe(true);
+      expect(result.shopId).toBe(shopId);
+
+      const [afterReinstall] = await sql<{
+        metafieldSyncErrorCode: string | null;
+        metafieldSyncErrorAt: Date | null;
+      }[]>`
+        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+      `;
+      expect(afterReinstall.metafieldSyncErrorCode).toBeNull();
+      expect(afterReinstall.metafieldSyncErrorAt).toBeNull();
+    });
+
+    it("clears errors for all accounts belonging to the reinstalled shop", async () => {
+      const TEST_SHOP = `test-multi-accounts-${TEST_SUFFIX}.myshopify.com`;
+      const errorDate = new Date("2026-10-15T12:00:00Z");
+
+      const [{ id: shopId }] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
+        RETURNING id
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          (${shopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/test-a', 'gid://shopify/CompanyLocation/test-a1',
+           'Account A', 'OK', 'no_session', ${errorDate}, NOW(), NOW()),
+          (${shopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/test-b', 'gid://shopify/CompanyLocation/test-b1',
+           'Account B', 'OK', 'access_denied', ${errorDate}, NOW(), NOW()),
+          (${shopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/test-c', 'gid://shopify/CompanyLocation/test-c1',
+           'Account C (no error)', 'OK', NULL, NULL, NOW(), NOW())
+      `;
+
+      const { _clearUninstalledAtAndMetafieldErrorsForTesting } =
+        await import("../after-auth.server");
+
+      const result = await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP);
+      expect(result.wasReinstalled).toBe(true);
+
+      const accounts = await sql<{
+        name: string;
+        metafieldSyncErrorCode: string | null;
+        metafieldSyncErrorAt: Date | null;
+      }[]>`
+        SELECT name, "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+        ORDER BY name
+      `;
+
+      expect(accounts).toHaveLength(3);
+      for (const account of accounts) {
+        expect(account.metafieldSyncErrorCode).toBeNull();
+        expect(account.metafieldSyncErrorAt).toBeNull();
+      }
+    });
+  });
+
+  describe("normal re-auth preserves error fields", () => {
+    it("clearUninstalledAtAndMetafieldErrors is no-op when uninstalledAt is NULL, preserving error fields", async () => {
+      const TEST_SHOP = `test-reauth-preserve-${TEST_SUFFIX}.myshopify.com`;
+      const errorDate = new Date("2026-10-15T12:00:00Z");
+
+      const [{ id: shopId }] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW())
+        RETURNING id
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${shopId}, 'COMPANY'::"AccountKind",
+          'gid://shopify/Company/test-preserve', 'gid://shopify/CompanyLocation/test-preserve',
+          'Test Account', 'OK', 'no_session', ${errorDate},
+          NOW(), NOW()
+        )
+      `;
+
+      const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("../after-auth.server");
+
+      const result = await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP);
+      expect(result.wasReinstalled).toBe(false);
+      expect(result.shopId).toBeUndefined();
+
+      const [afterReauth] = await sql<{
+        metafieldSyncErrorCode: string | null;
+        metafieldSyncErrorAt: Date | null;
+      }[]>`
+        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+      `;
+      expect(afterReauth.metafieldSyncErrorCode).toBe("no_session");
+      expect(afterReauth.metafieldSyncErrorAt?.getTime()).toBe(errorDate.getTime());
+    });
+  });
+
+  describe("other shop's accounts are unchanged", () => {
+    it("clearUninstalledAtAndMetafieldErrors only affects the specified shop's accounts", async () => {
+      const TEST_SHOP_A = `test-shop-a-${TEST_SUFFIX}.myshopify.com`;
+      const TEST_SHOP_B = `test-shop-b-${TEST_SUFFIX}.myshopify.com`;
+      const errorDate = new Date("2026-10-15T12:00:00Z");
+
+      const [{ id: shopAId }] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP_A}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
+        RETURNING id
+      `;
+
+      const [{ id: shopBId }] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP_B}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
+        RETURNING id
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          (${shopAId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/shop-a', 'gid://shopify/CompanyLocation/shop-a',
+           'Shop A Account', 'OK', 'no_session', ${errorDate}, NOW(), NOW()),
+          (${shopBId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/shop-b', 'gid://shopify/CompanyLocation/shop-b',
+           'Shop B Account', 'OK', 'access_denied', ${errorDate}, NOW(), NOW())
+      `;
+
+      const { _clearUninstalledAtAndMetafieldErrorsForTesting } =
+        await import("../after-auth.server");
+
+      const result = await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP_A);
+      expect(result.wasReinstalled).toBe(true);
+
+      const [shopAAccount] = await sql<{
+        metafieldSyncErrorCode: string | null;
+        metafieldSyncErrorAt: Date | null;
+      }[]>`
+        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopAId}
+      `;
+      expect(shopAAccount.metafieldSyncErrorCode).toBeNull();
+      expect(shopAAccount.metafieldSyncErrorAt).toBeNull();
+
+      const [shopBAccount] = await sql<{
+        metafieldSyncErrorCode: string | null;
+        metafieldSyncErrorAt: Date | null;
+      }[]>`
+        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopBId}
+      `;
+      expect(shopBAccount.metafieldSyncErrorCode).toBe("access_denied");
+      expect(shopBAccount.metafieldSyncErrorAt?.getTime()).toBe(errorDate.getTime());
+    });
+  });
+
+  describe("preserves other BuyerAccount columns", () => {
+    it("clearUninstalledAtAndMetafieldErrors only clears error fields, preserves all other columns", async () => {
+      const TEST_SHOP = `test-preserve-cols-${TEST_SUFFIX}.myshopify.com`;
+      const errorDate = new Date("2026-10-15T12:00:00Z");
+      const syncedAt = new Date("2026-10-14T10:00:00Z");
+
+      const [{ id: shopId }] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
+        RETURNING id
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "creditLimit", "defaultTermsDays", "holdState", "holdReasonCode",
+          bypass, "manualHold", "syncPending", "syncVersion",
+          "metafieldSyncedAt", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${shopId}, 'COMPANY'::"AccountKind",
+          'gid://shopify/Company/test-cols', 'gid://shopify/CompanyLocation/test-cols',
+          'Preserve Columns Account', 50000.00, 45, 'HELD', 'MANUAL_HOLD',
+          true, true, true, 5,
+          ${syncedAt}, 'no_session', ${errorDate},
+          NOW(), NOW()
+        )
+      `;
+
+      const [before] = await sql<{
+        name: string;
+        creditLimit: string | null;
+        defaultTermsDays: number | null;
+        holdState: string;
+        holdReasonCode: string | null;
+        bypass: boolean;
+        manualHold: boolean;
+        syncPending: boolean;
+        syncVersion: number;
+        metafieldSyncedAt: Date | null;
+      }[]>`
+        SELECT name, "creditLimit", "defaultTermsDays", "holdState", "holdReasonCode",
+               bypass, "manualHold", "syncPending", "syncVersion", "metafieldSyncedAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+      `;
+
+      const { _clearUninstalledAtAndMetafieldErrorsForTesting } =
+        await import("../after-auth.server");
+
+      await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP);
+
+      const [after] = await sql<{
+        name: string;
+        creditLimit: string | null;
+        defaultTermsDays: number | null;
+        holdState: string;
+        holdReasonCode: string | null;
+        bypass: boolean;
+        manualHold: boolean;
+        syncPending: boolean;
+        syncVersion: number;
+        metafieldSyncedAt: Date | null;
+        metafieldSyncErrorCode: string | null;
+        metafieldSyncErrorAt: Date | null;
+      }[]>`
+        SELECT name, "creditLimit", "defaultTermsDays", "holdState", "holdReasonCode",
+               bypass, "manualHold", "syncPending", "syncVersion", "metafieldSyncedAt",
+               "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+      `;
+
+      expect(after.metafieldSyncErrorCode).toBeNull();
+      expect(after.metafieldSyncErrorAt).toBeNull();
+
+      expect(after.name).toBe(before.name);
+      expect(after.creditLimit).toBe(before.creditLimit);
+      expect(after.defaultTermsDays).toBe(before.defaultTermsDays);
+      expect(after.holdState).toBe(before.holdState);
+      expect(after.holdReasonCode).toBe(before.holdReasonCode);
+      expect(after.bypass).toBe(before.bypass);
+      expect(after.manualHold).toBe(before.manualHold);
+      expect(after.syncPending).toBe(before.syncPending);
+      expect(after.syncVersion).toBe(before.syncVersion);
+      expect(after.metafieldSyncedAt?.getTime()).toBe(before.metafieldSyncedAt?.getTime());
+    });
+  });
+
+  /**
+   * Atomicity note: The CTE-based implementation uses a single SQL statement to
+   * clear both Shop.uninstalledAt and BuyerAccount.metafieldSyncErrorCode/At.
+   * PostgreSQL executes CTEs atomically within a single statement - if any part
+   * fails, the entire statement is rolled back. This guarantees that either both
+   * updates succeed or neither does, preserving the reinstall signal if the marker
+   * clear fails. No explicit test is needed because PostgreSQL's transactional
+   * semantics guarantee this behavior for single statements with CTEs.
+   */
+});
+
+describeWithDb("upsertShopOnAuth clears metafield sync errors on reinstall (DB)", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-upsertmetafield";
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" IN (
+      SELECT id FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}
+    )`;
+    await sql`DELETE FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}`;
+    await sql.end();
+  });
+
+  beforeEach(async () => {
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" IN (
+      SELECT id FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}
+    )`;
+    await sql`DELETE FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}`;
+  });
+
+  describe("reinstall via upsertShopOnAuth clears metafield errors", () => {
+    it("upsertShopOnAuth clears metafield sync errors when uninstalledAt was set (reinstall)", async () => {
+      const TEST_SHOP = `test-upsert-reinstall-${TEST_SUFFIX}.myshopify.com`;
+      const errorDate = new Date("2026-10-15T12:00:00Z");
+
+      const [{ id: shopId }] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
+        RETURNING id
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${shopId}, 'COMPANY'::"AccountKind",
+          'gid://shopify/Company/test-upsert', 'gid://shopify/CompanyLocation/test-upsert',
+          'Test Account', 'OK', 'no_session', ${errorDate},
+          NOW(), NOW()
+        )
+      `;
+
+      const [beforeReinstall] = await sql<{
+        metafieldSyncErrorCode: string | null;
+        metafieldSyncErrorAt: Date | null;
+      }[]>`
+        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+      `;
+      expect(beforeReinstall.metafieldSyncErrorCode).toBe("no_session");
+      expect(beforeReinstall.metafieldSyncErrorAt).not.toBeNull();
+
+      const { upsertShopOnAuth } = await import("../after-auth.server");
+      await upsertShopOnAuth(sql, TEST_SHOP, "America/New_York");
+
+      const [afterReinstall] = await sql<{
+        metafieldSyncErrorCode: string | null;
+        metafieldSyncErrorAt: Date | null;
+      }[]>`
+        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+      `;
+      expect(afterReinstall.metafieldSyncErrorCode).toBeNull();
+      expect(afterReinstall.metafieldSyncErrorAt).toBeNull();
+    });
+
+    it("upsertShopOnAuth preserves metafield sync errors on normal re-auth (uninstalledAt was NULL)", async () => {
+      const TEST_SHOP = `test-upsert-reauth-${TEST_SUFFIX}.myshopify.com`;
+      const errorDate = new Date("2026-10-15T12:00:00Z");
+
+      const [{ id: shopId }] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW())
+        RETURNING id
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${shopId}, 'COMPANY'::"AccountKind",
+          'gid://shopify/Company/test-upsert-reauth', 'gid://shopify/CompanyLocation/test-upsert-reauth',
+          'Test Account', 'OK', 'no_session', ${errorDate},
+          NOW(), NOW()
+        )
+      `;
+
+      const { upsertShopOnAuth } = await import("../after-auth.server");
+      await upsertShopOnAuth(sql, TEST_SHOP, "America/Los_Angeles");
+
+      const [afterReauth] = await sql<{
+        metafieldSyncErrorCode: string | null;
+        metafieldSyncErrorAt: Date | null;
+      }[]>`
+        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+      `;
+      expect(afterReauth.metafieldSyncErrorCode).toBe("no_session");
+      expect(afterReauth.metafieldSyncErrorAt?.getTime()).toBe(errorDate.getTime());
+    });
+
+    it("upsertShopOnAuth on fresh install does not affect other shops' accounts", async () => {
+      const TEST_SHOP_NEW = `test-fresh-install-${TEST_SUFFIX}.myshopify.com`;
+      const TEST_SHOP_EXISTING = `test-existing-${TEST_SUFFIX}.myshopify.com`;
+      const errorDate = new Date("2026-10-15T12:00:00Z");
+
+      const [{ id: existingShopId }] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP_EXISTING}, 'America/New_York', 'INR', 'starter', NOW(), NOW())
+        RETURNING id
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${existingShopId}, 'COMPANY'::"AccountKind",
+          'gid://shopify/Company/test-existing', 'gid://shopify/CompanyLocation/test-existing',
+          'Existing Account', 'OK', 'no_session', ${errorDate},
+          NOW(), NOW()
+        )
+      `;
+
+      const { upsertShopOnAuth } = await import("../after-auth.server");
+      await upsertShopOnAuth(sql, TEST_SHOP_NEW, "America/Los_Angeles");
+
+      const [existingAccount] = await sql<{
+        metafieldSyncErrorCode: string | null;
+        metafieldSyncErrorAt: Date | null;
+      }[]>`
+        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${existingShopId}
+      `;
+      expect(existingAccount.metafieldSyncErrorCode).toBe("no_session");
+      expect(existingAccount.metafieldSyncErrorAt?.getTime()).toBe(errorDate.getTime());
+    });
+  });
+});
+
+describeWithDb("full after-auth flow clears metafield errors on reinstall (DB)", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-fullflow";
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" IN (
+      SELECT id FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}
+    )`;
+    await sql`DELETE FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}`;
+    await sql.end();
+  });
+
+  beforeEach(async () => {
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" IN (
+      SELECT id FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}
+    )`;
+    await sql`DELETE FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}`;
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.resetModules();
+  });
+
+  describe("clearAndMaybeSetup flow", () => {
+    it("reinstall: clearAndMaybeSetup clears metafield errors atomically with uninstalledAt", async () => {
+      const TEST_SHOP = `test-fullflow-reinstall-${TEST_SUFFIX}.myshopify.com`;
+      const errorDate = new Date("2026-10-15T12:00:00Z");
+
+      const [{ id: shopId }] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
+        RETURNING id
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          (${shopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/test-flow-a', 'gid://shopify/CompanyLocation/test-flow-a',
+           'Account A', 'OK', 'no_session', ${errorDate}, NOW(), NOW()),
+          (${shopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/test-flow-b', 'gid://shopify/CompanyLocation/test-flow-b',
+           'Account B', 'OK', 'access_denied', ${errorDate}, NOW(), NOW())
+      `;
+
+      vi.doMock("../request-context.server", () => ({
+        getRequestSql: vi.fn(() => sql),
+      }));
+
+      vi.doMock("../metafield-definitions.server", () => ({
+        ensureMetafieldDefinitions: vi.fn().mockResolvedValue([]),
+      }));
+      vi.doMock("../validation-registration.server", () => ({
+        ensureValidation: vi.fn().mockResolvedValue({ id: "test", created: false }),
+      }));
+      vi.doMock("../payment-customization-registration.server", () => ({
+        ensurePaymentCustomization: vi.fn().mockResolvedValue({ id: "pc-test", created: false }),
+      }));
+
+      const { runAfterAuth, _resetSetupCacheForTesting, _isShopSetupComplete } =
+        await import("../after-auth.server");
+
+      _resetSetupCacheForTesting();
+
+      const mockAdmin = {
+        graphql: vi.fn().mockResolvedValue({
+          json: () => Promise.resolve({ data: { shop: { ianaTimezone: "America/New_York" } } }),
+        }),
+      };
+
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = (p: Promise<unknown>) => waitUntilPromises.push(p);
+
+      runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
+
+      await Promise.all(waitUntilPromises);
+      await vi.waitFor(() => expect(_isShopSetupComplete(TEST_SHOP)).toBe(true));
+
+      const [shop] = await sql<{ uninstalledAt: Date | null }[]>`
+        SELECT "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(shop.uninstalledAt).toBeNull();
+
+      const accounts = await sql<{
+        name: string;
+        metafieldSyncErrorCode: string | null;
+        metafieldSyncErrorAt: Date | null;
+      }[]>`
+        SELECT name, "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+        ORDER BY name
+      `;
+
+      expect(accounts).toHaveLength(2);
+      for (const account of accounts) {
+        expect(account.metafieldSyncErrorCode).toBeNull();
+        expect(account.metafieldSyncErrorAt).toBeNull();
+      }
+    });
+
+    it("normal re-auth: clearAndMaybeSetup preserves metafield errors", async () => {
+      const TEST_SHOP = `test-fullflow-reauth-${TEST_SUFFIX}.myshopify.com`;
+      const errorDate = new Date("2026-10-15T12:00:00Z");
+
+      const [{ id: shopId }] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW())
+        RETURNING id
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${shopId}, 'COMPANY'::"AccountKind",
+          'gid://shopify/Company/test-flow-reauth', 'gid://shopify/CompanyLocation/test-flow-reauth',
+          'Account', 'OK', 'no_session', ${errorDate},
+          NOW(), NOW()
+        )
+      `;
+
+      vi.doMock("../request-context.server", () => ({
+        getRequestSql: vi.fn(() => sql),
+      }));
+
+      vi.doMock("../metafield-definitions.server", () => ({
+        ensureMetafieldDefinitions: vi.fn().mockResolvedValue([]),
+      }));
+      vi.doMock("../validation-registration.server", () => ({
+        ensureValidation: vi.fn().mockResolvedValue({ id: "test", created: false }),
+      }));
+      vi.doMock("../payment-customization-registration.server", () => ({
+        ensurePaymentCustomization: vi.fn().mockResolvedValue({ id: "pc-test", created: false }),
+      }));
+
+      const { runAfterAuth, _resetSetupCacheForTesting, _isShopSetupComplete } =
+        await import("../after-auth.server");
+
+      _resetSetupCacheForTesting();
+
+      const mockAdmin = {
+        graphql: vi.fn().mockResolvedValue({
+          json: () => Promise.resolve({ data: { shop: { ianaTimezone: "America/New_York" } } }),
+        }),
+      };
+
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = (p: Promise<unknown>) => waitUntilPromises.push(p);
+
+      runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
+
+      await Promise.all(waitUntilPromises);
+      await vi.waitFor(() => expect(_isShopSetupComplete(TEST_SHOP)).toBe(true));
+
+      const [account] = await sql<{
+        metafieldSyncErrorCode: string | null;
+        metafieldSyncErrorAt: Date | null;
+      }[]>`
+        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+      `;
+
+      expect(account.metafieldSyncErrorCode).toBe("no_session");
+      expect(account.metafieldSyncErrorAt?.getTime()).toBe(errorDate.getTime());
+    });
+  });
+
+  describe("shop already in setup cache (only clearAndMaybeSetup path)", () => {
+    it("reinstall with cached shop: clears metafield errors via clearAndMaybeSetup only", async () => {
+      const TEST_SHOP = `test-cached-reinstall-${TEST_SUFFIX}.myshopify.com`;
+      const errorDate = new Date("2026-10-15T12:00:00Z");
+
+      const [{ id: shopId }] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW())
+        RETURNING id
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${shopId}, 'COMPANY'::"AccountKind",
+          'gid://shopify/Company/test-cached', 'gid://shopify/CompanyLocation/test-cached',
+          'Cached Test Account', 'OK', 'no_session', ${errorDate},
+          NOW(), NOW()
+        )
+      `;
+
+      vi.doMock("../request-context.server", () => ({
+        getRequestSql: vi.fn(() => sql),
+      }));
+
+      vi.doMock("../metafield-definitions.server", () => ({
+        ensureMetafieldDefinitions: vi.fn().mockResolvedValue([]),
+      }));
+      vi.doMock("../validation-registration.server", () => ({
+        ensureValidation: vi.fn().mockResolvedValue({ id: "test", created: false }),
+      }));
+      vi.doMock("../payment-customization-registration.server", () => ({
+        ensurePaymentCustomization: vi.fn().mockResolvedValue({ id: "pc-test", created: false }),
+      }));
+
+      const { runAfterAuth, _resetSetupCacheForTesting, _isShopSetupComplete } =
+        await import("../after-auth.server");
+
+      _resetSetupCacheForTesting();
+
+      const mockAdmin = {
+        graphql: vi.fn().mockResolvedValue({
+          json: () => Promise.resolve({ data: { shop: { ianaTimezone: "America/New_York" } } }),
+        }),
+      };
+
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = (p: Promise<unknown>) => waitUntilPromises.push(p);
+
+      runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
+
+      await Promise.all(waitUntilPromises);
+      await vi.waitFor(() => expect(_isShopSetupComplete(TEST_SHOP)).toBe(true));
+
+      await sql`
+        UPDATE "Shop"
+        SET "uninstalledAt" = NOW()
+        WHERE domain = ${TEST_SHOP}
+      `;
+
+      const [afterUninstall] = await sql<{ uninstalledAt: Date | null }[]>`
+        SELECT "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(afterUninstall.uninstalledAt).not.toBeNull();
+
+      waitUntilPromises.length = 0;
+
+      runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
+
+      await Promise.all(waitUntilPromises);
+
+      const [shop] = await sql<{ uninstalledAt: Date | null }[]>`
+        SELECT "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(shop.uninstalledAt).toBeNull();
+
+      const [account] = await sql<{
+        metafieldSyncErrorCode: string | null;
+        metafieldSyncErrorAt: Date | null;
+      }[]>`
+        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+      `;
+      expect(account.metafieldSyncErrorCode).toBeNull();
+      expect(account.metafieldSyncErrorAt).toBeNull();
+    });
+
+    it("normal re-auth with cached shop: preserves metafield errors", async () => {
+      const TEST_SHOP = `test-cached-reauth-${TEST_SUFFIX}.myshopify.com`;
+      const errorDate = new Date("2026-10-15T12:00:00Z");
+
+      const [{ id: shopId }] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW())
+        RETURNING id
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${shopId}, 'COMPANY'::"AccountKind",
+          'gid://shopify/Company/test-cached-reauth', 'gid://shopify/CompanyLocation/test-cached-reauth',
+          'Cached Reauth Account', 'OK', 'access_denied', ${errorDate},
+          NOW(), NOW()
+        )
+      `;
+
+      vi.doMock("../request-context.server", () => ({
+        getRequestSql: vi.fn(() => sql),
+      }));
+
+      vi.doMock("../metafield-definitions.server", () => ({
+        ensureMetafieldDefinitions: vi.fn().mockResolvedValue([]),
+      }));
+      vi.doMock("../validation-registration.server", () => ({
+        ensureValidation: vi.fn().mockResolvedValue({ id: "test", created: false }),
+      }));
+      vi.doMock("../payment-customization-registration.server", () => ({
+        ensurePaymentCustomization: vi.fn().mockResolvedValue({ id: "pc-test", created: false }),
+      }));
+
+      const { runAfterAuth, _resetSetupCacheForTesting, _isShopSetupComplete } =
+        await import("../after-auth.server");
+
+      _resetSetupCacheForTesting();
+
+      const mockAdmin = {
+        graphql: vi.fn().mockResolvedValue({
+          json: () => Promise.resolve({ data: { shop: { ianaTimezone: "America/New_York" } } }),
+        }),
+      };
+
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = (p: Promise<unknown>) => waitUntilPromises.push(p);
+
+      runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
+
+      await Promise.all(waitUntilPromises);
+      await vi.waitFor(() => expect(_isShopSetupComplete(TEST_SHOP)).toBe(true));
+
+      waitUntilPromises.length = 0;
+
+      runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
+
+      await Promise.all(waitUntilPromises);
+
+      const [account] = await sql<{
+        metafieldSyncErrorCode: string | null;
+        metafieldSyncErrorAt: Date | null;
+      }[]>`
+        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+      `;
+      expect(account.metafieldSyncErrorCode).toBe("access_denied");
+      expect(account.metafieldSyncErrorAt?.getTime()).toBe(errorDate.getTime());
     });
   });
 });

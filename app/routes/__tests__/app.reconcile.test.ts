@@ -34,13 +34,6 @@ vi.mock("~/services/apply.server", async (importOriginal) => {
   };
 });
 
-vi.mock("~/services/plan.server", () => ({
-  resolvePlan: vi.fn(),
-}));
-
-vi.mock("~/services/gating.server", () => ({
-  isGatingEnforced: vi.fn().mockReturnValue(false),
-}));
 
 vi.mock("@shopify/shopify-app-react-router/server", () => ({
   boundary: { headers: vi.fn(() => ({})) },
@@ -81,16 +74,12 @@ describe("Reconcile Route (M5)", () => {
   describe("loader error logging (M5)", () => {
     it("logs error code via real safeLog, not raw error with domain", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
-      const { resolvePlan } = await import("~/services/plan.server");
 
       mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       const sensitiveError = new Error(
         "Database error for test-sensitive-store.myshopify.com: user@example.com owes 125000"
-      );
-      (resolvePlan as ReturnType<typeof vi.fn>).mockRejectedValue(
-        sensitiveError
       );
       mockSql
         .mockRejectedValueOnce(sensitiveError)
@@ -122,13 +111,11 @@ describe("Reconcile Route (M5)", () => {
 
     it("logs shopId and errorCode for tab counts error", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
-      const { resolvePlan } = await import("~/services/plan.server");
 
       mockSql.mockResolvedValueOnce([{ id: "shop-456", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       const dbError = new TypeError("Connection failed");
-      (resolvePlan as ReturnType<typeof vi.fn>).mockRejectedValue(dbError);
       mockSql
         .mockRejectedValueOnce(dbError)
         .mockRejectedValueOnce(dbError)
@@ -152,16 +139,12 @@ describe("Reconcile Route (M5)", () => {
 
     it("logs shopId, stage, and errorCode for loader data error", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
-      const { resolvePlan } = await import("~/services/plan.server");
       const { getSuggestedMatches } = await import(
         "~/lib/matching/queries.server"
       );
 
       mockSql.mockResolvedValueOnce([{ id: "shop-789", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-      (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-        plan: { key: "starter" },
-      });
 
       mockSql
         .mockResolvedValueOnce([{ count: "5" }])
@@ -201,16 +184,12 @@ describe("Reconcile Route (M5)", () => {
 
     it("maps unknown view values to 'other' in stage field", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
-      const { resolvePlan } = await import("~/services/plan.server");
       const { getSuggestedMatches } = await import(
         "~/lib/matching/queries.server"
       );
 
       mockSql.mockResolvedValueOnce([{ id: "shop-unknown", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-      (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-        plan: { key: "starter" },
-      });
 
       mockSql
         .mockResolvedValueOnce([{ count: "0" }])
@@ -669,16 +648,12 @@ describe("Reconcile Route (M5)", () => {
   describe("loader success paths (no errors)", () => {
     it("does not call console.error when no errors occur", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
-      const { resolvePlan } = await import("~/services/plan.server");
       const { getSuggestedMatches } = await import(
         "~/lib/matching/queries.server"
       );
 
       mockSql.mockResolvedValueOnce([{ id: "shop-ok", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-      (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-        plan: { key: "starter" },
-      });
 
       mockSql
         .mockResolvedValueOnce([{ count: "0" }])
@@ -701,6 +676,41 @@ describe("Reconcile Route (M5)", () => {
       });
 
       expect(consoleErrorSpy).not.toHaveBeenCalled();
+    });
+
+    it("does not return plan-related fields (matching is on all plans)", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      const { getSuggestedMatches } = await import(
+        "~/lib/matching/queries.server"
+      );
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-free", currency: "INR" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      mockSql
+        .mockResolvedValueOnce([{ count: "0" }])
+        .mockResolvedValueOnce([{ count: "0" }])
+        .mockResolvedValueOnce([{ count: "0" }])
+        .mockResolvedValueOnce([{ count: "0" }]);
+
+      (getSuggestedMatches as ReturnType<typeof vi.fn>).mockResolvedValue({
+        matches: [],
+        totalCount: 0,
+      });
+
+      const { loader } = await import("../app.reconcile");
+      const result = await loader({
+        request: mockRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result).not.toHaveProperty("planKey");
+      expect(result).not.toHaveProperty("gatingEnforced");
+      expect(result).not.toHaveProperty("storeHandle");
+      expect(result).not.toHaveProperty("appHandle");
     });
   });
 });

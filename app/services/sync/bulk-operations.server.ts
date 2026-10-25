@@ -3,7 +3,7 @@
  *
  * Provides functions to start bulkOperationRunQuery for:
  * - Companies and CompanyLocations
- * - Orders with payment terms (within 60-day read_orders window)
+ * - Orders with payment terms (within 60-day window via write_orders which implies read_orders)
  *
  * These are triggered:
  * - After app install (afterAuth hook)
