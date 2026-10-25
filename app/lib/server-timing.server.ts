@@ -61,23 +61,28 @@ export type PhaseStage =
   | "loader_total_cold";
 
 /**
- * Track cold start (first request in this isolate) per Request object.
+ * Track cold start (first request in this isolate) per loader context object.
  * Using WeakMap ensures concurrent requests don't interfere with each other.
+ *
+ * We key by loader context (not Request) because React Router 7.18.4 creates
+ * a new Request for each loader unless future.v8_passThroughRequests is set.
+ * The context object is created once per fetch in workers/app.ts (~:46) and
+ * passed unchanged to every loader.
  */
-const coldByRequest = new WeakMap<Request, boolean>();
+const coldByContext = new WeakMap<object, boolean>();
 let served = 0;
 
 /**
  * Read cold flag once per request. Both layout and index get the same value
- * when passed the same Request object. The first request in the isolate is cold.
+ * when passed the same context object. The first request in the isolate is cold.
  *
- * @param request - The Request object (must be the same instance for layout and index)
+ * @param key - The loader context object (must be the same instance for layout and index)
  */
-export function readColdOnce(request: Request): boolean {
-  let v = coldByRequest.get(request);
+export function readColdOnce(key: object): boolean {
+  let v = coldByContext.get(key);
   if (v === undefined) {
     v = served++ === 0;
-    coldByRequest.set(request, v);
+    coldByContext.set(key, v);
   }
   return v;
 }

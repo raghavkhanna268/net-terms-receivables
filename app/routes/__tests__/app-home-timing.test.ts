@@ -297,36 +297,35 @@ describe("app home timing instrumentation", () => {
     });
 
     it("cold flag encoded in stage name reflects isolate state", async () => {
-      // Both layout and index must receive the same Request object to share cold state
+      // Both layout and index must receive the same context object to share cold state
+      // (workers/app.ts creates one context per fetch, React Router passes it to all loaders)
       const { loader: layoutLoader } = await import("../app");
       const { loader: indexLoader } = await import("../app._index");
 
-      // Create a shared request for first request
-      const request1 = new Request("https://example.com/app");
-      const createArgs = (req: Request) => ({
-        request: req,
-        context: {
-          shopify: {
-            authenticate: {
-              admin: vi.fn().mockResolvedValue({
-                admin: {},
-                session: { shop: TEST_SHOP },
-                redirect: vi.fn(),
-              }),
-            },
-          },
-          cloudflare: {
-            env: {},
-            ctx: { waitUntil: vi.fn() },
+      // Create a context factory (one context per request, shared by layout and index)
+      const createContext = () => ({
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              admin: {},
+              session: { shop: TEST_SHOP },
+              redirect: vi.fn(),
+            }),
           },
         },
-        params: {},
-      } as never);
+        cloudflare: {
+          env: {},
+          ctx: { waitUntil: vi.fn() },
+        },
+      });
 
-      // First request - both loaders get the same Request object
+      // First request - both loaders get the same context object
+      const context1 = createContext();
+      const request1Layout = new Request("https://example.com/app");
+      const request1Index = new Request("https://example.com/app");
       await Promise.all([
-        layoutLoader(createArgs(request1)),
-        indexLoader(createArgs(request1)),
+        layoutLoader({ request: request1Layout, context: context1, params: {} } as never),
+        indexLoader({ request: request1Index, context: context1, params: {} } as never),
       ]);
 
       let allLogs = consoleLogSpy.mock.calls
@@ -339,12 +338,14 @@ describe("app home timing instrumentation", () => {
         expect(log.stage).toMatch(/_cold$/);
       }
 
-      // Clear and make second request with a new Request object
+      // Clear and make second request with a new context object
       consoleLogSpy.mockClear();
-      const request2 = new Request("https://example.com/app");
+      const context2 = createContext();
+      const request2Layout = new Request("https://example.com/app");
+      const request2Index = new Request("https://example.com/app");
       await Promise.all([
-        layoutLoader(createArgs(request2)),
-        indexLoader(createArgs(request2)),
+        layoutLoader({ request: request2Layout, context: context2, params: {} } as never),
+        indexLoader({ request: request2Index, context: context2, params: {} } as never),
       ]);
 
       allLogs = consoleLogSpy.mock.calls
@@ -576,18 +577,23 @@ describe("cold flag across layout and index", () => {
     };
   }
 
-  it("same Request object gives same cold value to layout and index", async () => {
+  it("different Request objects but same context gives same cold value to layout and index", async () => {
     const { loader: layoutLoader } = await import("../app");
     const { loader: indexLoader } = await import("../app._index");
 
-    // Both loaders must receive the same Request object to share cold state
-    const request = new Request("https://example.com/app");
-    const args = { request, context: createContextForColdTest(), params: {} } as never;
+    // React Router 7.18.4 creates new Request objects for each loader,
+    // but workers/app.ts creates one context per fetch. Cold is keyed by context.
+    const context = createContextForColdTest();
+    const requestLayout = new Request("https://example.com/app");
+    const requestIndex = new Request("https://example.com/app");
 
-    // Both loaders get the same Request object
+    // Layout and index get different Request objects but same context
+    const argsLayout = { request: requestLayout, context, params: {} } as never;
+    const argsIndex = { request: requestIndex, context, params: {} } as never;
+
     await Promise.all([
-      layoutLoader(args),
-      indexLoader(args),
+      layoutLoader(argsLayout),
+      indexLoader(argsIndex),
     ]);
 
     const allLogs = consoleLogSpy.mock.calls
@@ -595,23 +601,27 @@ describe("cold flag across layout and index", () => {
       .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"))
       .map((logStr: unknown) => JSON.parse(logStr as string));
 
-    // All stages should have _cold suffix since same request
+    // All stages should have _cold suffix since same context (same request)
     expect(allLogs.length).toBeGreaterThan(0);
     for (const log of allLogs) {
       expect(log.stage).toMatch(/_cold$/);
     }
   });
 
-  it("overlapping requests A and B: only A is cold", async () => {
+  it("overlapping requests A and B: ALL of A's logs are cold, NONE of B's are", async () => {
     const { loader: layoutLoader } = await import("../app");
     const { loader: indexLoader } = await import("../app._index");
 
+    // Different contexts for A and B (workers/app.ts creates one per fetch)
+    const contextA = createContextForColdTest();
+    const contextB = createContextForColdTest();
     const requestA = new Request("https://example.com/app");
     const requestB = new Request("https://example.com/app");
-    const argsA = { request: requestA, context: createContextForColdTest(), params: {} } as never;
-    const argsB = { request: requestB, context: createContextForColdTest(), params: {} } as never;
+    const argsA = { request: requestA, context: contextA, params: {} } as never;
+    const argsB = { request: requestB, context: contextB, params: {} } as never;
 
     // Start both requests before awaiting either (overlapping)
+    // Promise.all preserves execution order: layoutLoader(argsA) calls readColdOnce first
     const promiseA = Promise.all([layoutLoader(argsA), indexLoader(argsA)]);
     const promiseB = Promise.all([layoutLoader(argsB), indexLoader(argsB)]);
 
@@ -626,30 +636,40 @@ describe("cold flag across layout and index", () => {
     const coldLogs = allLogs.filter((log: { stage: string }) => log.stage.endsWith("_cold"));
     const warmLogs = allLogs.filter((log: { stage: string }) => !log.stage.endsWith("_cold"));
 
-    // Only request A's logs should be cold (layout + index phases)
+    // ALL of A's logs end in _cold, NONE of B's do
+    // Since both requests execute the same phases, counts should be equal
     expect(coldLogs.length).toBeGreaterThan(0);
     expect(warmLogs.length).toBeGreaterThan(0);
+    expect(coldLogs.length).toBe(warmLogs.length);
+
+    // Verify stage names are consistent (same phases recorded for both)
+    const coldStages = new Set(coldLogs.map((log: { stage: string }) => log.stage.replace(/_cold$/, "")));
+    const warmStages = new Set(warmLogs.map((log: { stage: string }) => log.stage));
+    expect(coldStages).toEqual(warmStages);
   });
 
   it("third sequential request is warm", async () => {
     const { loader: layoutLoader } = await import("../app");
     const { loader: indexLoader } = await import("../app._index");
 
-    // Request 1 (cold)
+    // Request 1 (cold) - each request gets its own context (workers/app.ts creates one per fetch)
+    const context1 = createContextForColdTest();
     const request1 = new Request("https://example.com/app");
-    const args1 = { request: request1, context: createContextForColdTest(), params: {} } as never;
+    const args1 = { request: request1, context: context1, params: {} } as never;
     await Promise.all([layoutLoader(args1), indexLoader(args1)]);
 
     // Request 2 (warm)
+    const context2 = createContextForColdTest();
     const request2 = new Request("https://example.com/app");
-    const args2 = { request: request2, context: createContextForColdTest(), params: {} } as never;
+    const args2 = { request: request2, context: context2, params: {} } as never;
     await Promise.all([layoutLoader(args2), indexLoader(args2)]);
 
     consoleLogSpy.mockClear();
 
     // Request 3 (should still be warm)
+    const context3 = createContextForColdTest();
     const request3 = new Request("https://example.com/app");
-    const args3 = { request: request3, context: createContextForColdTest(), params: {} } as never;
+    const args3 = { request: request3, context: context3, params: {} } as never;
     await Promise.all([layoutLoader(args3), indexLoader(args3)]);
 
     const logs = consoleLogSpy.mock.calls

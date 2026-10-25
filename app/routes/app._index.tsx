@@ -204,8 +204,8 @@ async function checkOnboardingRedirect(
 }
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
-  // Read cold once - layout and index get same value with same Request object
-  const cold = readColdOnce(request);
+  // Read cold once - layout and index get same value with same context object
+  const cold = readColdOnce(context);
   const timing = new ServerTiming(cold);
   timing.startPhase("loader_total");
 

@@ -7,8 +7,8 @@ import { useEffect } from "react";
 import { ServerTiming, readColdOnce } from "~/lib/server-timing.server";
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
-  // Read cold once for this request - index will get same value with same Request object
-  const cold = readColdOnce(request);
+  // Read cold once for this request - index will get same value with same context object
+  const cold = readColdOnce(context);
   const timing = new ServerTiming(cold);
 
   // Session storage is injected per-request via loadContext in workers/app.ts

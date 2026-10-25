@@ -195,38 +195,56 @@ describe("server-timing.server", () => {
       _resetIsolateStateForTesting();
     });
 
-    it("same Request object returns same cold value for layout and index", () => {
-      const request = new Request("https://example.com/app");
+    it("same context object returns same cold value for layout and index", () => {
+      const context = { shopify: {}, cloudflare: {} };
       
       // Simulate layout reading cold
-      const layoutCold = readColdOnce(request);
-      // Simulate index reading cold with same request
-      const indexCold = readColdOnce(request);
+      const layoutCold = readColdOnce(context);
+      // Simulate index reading cold with same context
+      const indexCold = readColdOnce(context);
       
       expect(layoutCold).toBe(true);
       expect(indexCold).toBe(true);
     });
 
-    it("overlapping requests A and B: only A is cold", () => {
+    it("different Request objects but same context returns same cold value", () => {
+      const context = { shopify: {}, cloudflare: {} };
       const requestA = new Request("https://example.com/app");
       const requestB = new Request("https://example.com/app");
       
+      // Layout and index get different Request objects (React Router behavior)
+      // but same context object (workers/app.ts creates one per fetch)
+      const layoutCold = readColdOnce(context);
+      const indexCold = readColdOnce(context);
+      
+      // Both should be cold since it's the same request (same context)
+      expect(layoutCold).toBe(true);
+      expect(indexCold).toBe(true);
+      
+      // The Request objects are different but that doesn't matter
+      expect(requestA).not.toBe(requestB);
+    });
+
+    it("overlapping requests A and B: only A is cold", () => {
+      const contextA = { shopify: {}, cloudflare: {} };
+      const contextB = { shopify: {}, cloudflare: {} };
+      
       // Start both requests before awaiting either (overlapping)
-      const coldA = readColdOnce(requestA);
-      const coldB = readColdOnce(requestB);
+      const coldA = readColdOnce(contextA);
+      const coldB = readColdOnce(contextB);
       
       expect(coldA).toBe(true);
       expect(coldB).toBe(false);
     });
 
     it("third sequential request is warm", () => {
-      const request1 = new Request("https://example.com/app");
-      const request2 = new Request("https://example.com/app");
-      const request3 = new Request("https://example.com/app");
+      const context1 = { shopify: {}, cloudflare: {} };
+      const context2 = { shopify: {}, cloudflare: {} };
+      const context3 = { shopify: {}, cloudflare: {} };
       
-      const cold1 = readColdOnce(request1);
-      const cold2 = readColdOnce(request2);
-      const cold3 = readColdOnce(request3);
+      const cold1 = readColdOnce(context1);
+      const cold2 = readColdOnce(context2);
+      const cold3 = readColdOnce(context3);
       
       expect(cold1).toBe(true);
       expect(cold2).toBe(false);
@@ -234,13 +252,13 @@ describe("server-timing.server", () => {
     });
 
     it("ServerTiming captures cold state from readColdOnce", () => {
-      const request1 = new Request("https://example.com/app");
-      const cold1 = readColdOnce(request1);
+      const context1 = { shopify: {}, cloudflare: {} };
+      const cold1 = readColdOnce(context1);
       const timing1 = new ServerTiming(cold1);
       expect(timing1.isCold()).toBe(true);
 
-      const request2 = new Request("https://example.com/app");
-      const cold2 = readColdOnce(request2);
+      const context2 = { shopify: {}, cloudflare: {} };
+      const cold2 = readColdOnce(context2);
       const timing2 = new ServerTiming(cold2);
       expect(timing2.isCold()).toBe(false);
     });
@@ -338,12 +356,12 @@ describe("server-timing.server", () => {
 
     it("cold flag NOT in stage name for warm request", async () => {
       // Make it warm by consuming the first request's cold
-      const warmupRequest = new Request("https://example.com/warmup");
-      readColdOnce(warmupRequest);
+      const warmupContext = { shopify: {}, cloudflare: {} };
+      readColdOnce(warmupContext);
 
       // Second request is warm
-      const warmRequest = new Request("https://example.com/warm");
-      const cold = readColdOnce(warmRequest);
+      const warmContext = { shopify: {}, cloudflare: {} };
+      const cold = readColdOnce(warmContext);
       const timing = new ServerTiming(cold);
       await timing.time("loader_total", async () => {});
 
