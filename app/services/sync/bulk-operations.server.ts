@@ -26,7 +26,8 @@
  * objects linked by __parentId.
  *
  * DPDP note: Only billingAddress.companyName is fetched (name fallback for BuyerAccount).
- * No PII fields (names, addresses, phones) are requested.
+ * mainContact.customer PII (email, displayName) is fetched for B2B reminder emails.
+ * Storage is gated by CUSTOMER_PII_FIELDS=1.
  *
  * Note: CompanyAddress.company was renamed to companyName in 2026-10.
  */
@@ -60,6 +61,13 @@ export const BULK_COMPANIES_QUERY = `
                         name
                         dueInDays
                         paymentTermsType
+                      }
+                    }
+                    mainContact {
+                      customer {
+                        id
+                        email
+                        displayName
                       }
                     }
                   }

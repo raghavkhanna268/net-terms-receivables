@@ -34,9 +34,12 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | Data Category | Purpose | Source |
 |---------------|---------|--------|
 | Buyer Account | Credit management (account kind, display name, credit limit, terms, hold state) | Synced from Shopify |
+| B2B Main Contact | Payment reminders for B2B accounts (email, display name, customer ID) | Synced from Shopify CompanyLocation mainContact |
 | Reminder Opt-Out | Payment reminder preference (opt-out timestamp, opt-out source) | Buyer unsubscribe link or merchant toggle |
 | Invoice | Receivables tracking (invoice name, amounts, due date, status) | Synced from Shopify orders |
 | Payer Alias | Payment matching (normalized payer key) | Derived from bank statements |
+
+**Note on B2B Main Contact:** For B2B (COMPANY) buyer accounts, the main contact's email and display name are stored for payment reminder emails. These fields require Shopify's Protected Customer Data (PCD) approval. The mainContactCustomerId links to the Shopify Customer GID for customers/redact matching.
 
 **Note on Reminder Opt-Out:** When a buyer opts out of payment reminders (via unsubscribe link in email or merchant toggle), the opt-out record stores only a timestamp and a source ('link' or 'merchant'), linked to the buyer account. Opted-out buyers receive no reminder emails until a merchant re-enables reminders.
 
@@ -139,11 +142,13 @@ Data request notification emails:
 - Shop owner email is fetched at send time from Shopify Admin API and passed directly to Resend; **never stored** in our database or logged
 
 Payment reminder emails (sent to buyer email address):
-- Recipient: buyer email address (from tagged customer record)
+- Recipient: buyer email address
+  - For B2B (COMPANY) accounts: main contact email from the buyer account
+  - For tagged customer accounts: email from the tagged customer record
 - Invoice name (e.g. "#1001")
 - Invoice total (formatted with shop currency)
 - Invoice due date (formatted in shop timezone)
-- Buyer display name (from tagged customer record, or "Customer" if not available)
+- Buyer display name (mainContactName or displayName, or "Customer" if not available)
 - Shop name (derived from shop domain)
 - Reminder type label (e.g. "Payment due today")
 
@@ -158,6 +163,7 @@ Resend is only used when email delivery is configured; emails are not sent other
 | OAuth Sessions | Until logout, expiry, or uninstall | App uninstall webhook or session expiry |
 | Shop and Account Data | Until 48 hours after uninstall | Shop redact webhook (sent by Shopify 48h after uninstall) |
 | Tagged Customer Data | Until customer erasure or shop redact | Compliance webhooks |
+| B2B Main Contact (email, name, customer ID) | Until customer erasure or shop redact | Nulled on customer erasure when mainContactCustomerId matches; deleted with account on shop redact |
 | Invoices | Retained (no customer-identifying fields) | Buyer relationship anonymized on customer erasure |
 | Payments (matched) | Until shop redact | Narration/payer text redacted on customer erasure if linked to customer |
 | Payments (unmatched narration) | **180 days** | Narration/payer text cleared daily; amounts/UTR/rail retained |
@@ -222,18 +228,21 @@ When a customer must be deleted (GDPR/CCPA erasure request):
 1. **Verify** payload shop matches header shop (returns 401 on mismatch)
 2. **All operations run in a single database transaction** for atomicity. If any step fails, the entire redaction rolls back, allowing Shopify's retry mechanism to safely re-execute.
 3. **Delete** tagged customer row for the customer
-4. **Delete** draft orders linked to customer's buyer account
-5. **Delete** data request records for the customer (contains PII in export)
-6. **Redact** payment fields for payments linked to customer:
+4. **Null** B2B main contact fields on buyer accounts where mainContactCustomerId matches the customer:
+   - mainContactEmail, mainContactName, mainContactCustomerId all set to NULL
+   - No reminder emails can be sent to redacted contacts
+5. **Delete** draft orders linked to customer's buyer account
+6. **Delete** data request records for the customer (contains PII in export)
+7. **Redact** payment fields for payments linked to customer:
    - Payer text cleared
    - Narration set to "[REDACTED]"
    - Preserved: amount, UTR, rail, value date, and all match history
    - Queries are shop-scoped for security
-7. **Delete** payer alias rows for the customer's buyer account (learned payer keys)
-8. **Anonymize** buyer account:
+8. **Delete** payer alias rows for the customer's buyer account (learned payer keys)
+9. **Anonymize** buyer account:
    - Set name to "Redacted Customer"
    - Modify customer ID to prevent FK conflicts
-9. **Preserve** invoice records for legal/tax compliance (Invoice has no customer-identifying fields; buyer link is through anonymized buyer account)
+10. **Preserve** invoice records for legal/tax compliance (Invoice has no customer-identifying fields; buyer link is through anonymized buyer account)
 
 **Legal retention reasoning:** Invoices must be retained for tax compliance (typically 7+ years in India). The invoice itself is a business record; the buyer link is anonymized.
 

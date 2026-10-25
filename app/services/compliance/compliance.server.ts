@@ -326,6 +326,7 @@ export async function redactCustomer(
   payerAliasesDeleted: number;
   buyerAccountAnonymized: boolean;
   paymentsRedacted: number;
+  b2bMainContactsRedacted: number;
 }> {
   // Wrap all operations in a single transaction for atomicity.
   // If any statement fails, the entire operation rolls back, so Shopify's
@@ -335,6 +336,19 @@ export async function redactCustomer(
     const taggedResult = await tx`
       DELETE FROM s8_tagged_customers
       WHERE shop_id = ${shopId} AND customer_id = ${customerGid}
+    `;
+
+    // Null B2B main contact fields where mainContactCustomerId matches
+    // This handles company locations whose main contact is being redacted
+    const b2bMainContactResult = await tx`
+      UPDATE "BuyerAccount"
+      SET 
+        "mainContactEmail" = NULL,
+        "mainContactName" = NULL,
+        "mainContactCustomerId" = NULL,
+        "updatedAt" = NOW()
+      WHERE "shopId" = ${shopId}
+        AND "mainContactCustomerId" = ${customerGid}
     `;
 
     // Delete draft orders linked to customer's buyer account
@@ -425,6 +439,7 @@ export async function redactCustomer(
       payerAliasesDeleted,
       buyerAccountAnonymized,
       paymentsRedacted,
+      b2bMainContactsRedacted: b2bMainContactResult.count,
     };
   });
 }
