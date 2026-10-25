@@ -103,9 +103,13 @@ if scratch(lambda d: edit(os.path.join(d, "package.json"), '"@shopify/cli": "4.9
 if subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "ci", "test_shopify_deploy_step.py")]).returncode != 0:
     fails.append("deploy step stub-CLI self-test failed")
 
+# 14. Post-deploy uid step prints only handle + uid (+ booleans), never other toml text.
+if subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "ci", "test_shopify_extension_uids_step.py")]).returncode != 0:
+    fails.append("extension uids step self-test failed")
+
 if fails:
     print("shopify release guards self-test: FAIL")
     for f in fails:
         print(" -", f)
     sys.exit(1)
-print("shopify release guards self-test: OK (18/18)")
+print("shopify release guards self-test: OK (19/19)")
