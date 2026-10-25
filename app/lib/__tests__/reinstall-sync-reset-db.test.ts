@@ -128,7 +128,7 @@ describeWithDb("reinstall sync reset (DB-backed)", () => {
   });
 
   describe("idempotency", () => {
-    it("second call closes 0 rows", async () => {
+    it("second call closes 0 rows and leaves closed_at unchanged", async () => {
       const bulkOpId = `gid://shopify/BulkOperation/idempotent-${TEST_SUFFIX}`;
 
       await sql`
@@ -150,16 +150,23 @@ describeWithDb("reinstall sync reset (DB-backed)", () => {
       const firstResult = await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP_DOMAIN);
       expect(firstResult.wasReinstalled).toBe(true);
 
+      const [firstOp] = await sql<{ closed_at: Date }[]>`
+        SELECT closed_at FROM s6_bulk_operations
+        WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(firstOp.closed_at).not.toBeNull();
+      const firstClosedAt = firstOp.closed_at;
+
       await sql`UPDATE "Shop" SET "uninstalledAt" = NOW() WHERE id = ${testShopId}`;
 
       const secondResult = await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP_DOMAIN);
       expect(secondResult.wasReinstalled).toBe(true);
 
-      const ops = await sql<{ closed_at: Date }[]>`
+      const [secondOp] = await sql<{ closed_at: Date }[]>`
         SELECT closed_at FROM s6_bulk_operations
         WHERE bulk_operation_id = ${bulkOpId}
       `;
-      expect(ops).toHaveLength(1);
+      expect(secondOp.closed_at.getTime()).toBe(firstClosedAt.getTime());
     });
   });
 

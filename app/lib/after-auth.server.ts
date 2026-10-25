@@ -176,7 +176,7 @@ interface ClearUninstalledResult {
  *
  * @param sql - postgres.js SQL client
  * @param shop - The shop domain
- * @returns Object with wasReinstalled flag, shopId, and closedCount if reinstalled
+ * @returns Object with wasReinstalled flag and shopId if reinstalled
  */
 async function clearUninstalledAtAndMetafieldErrors(sql: Sql, shop: string): Promise<ClearUninstalledResult> {
   try {
