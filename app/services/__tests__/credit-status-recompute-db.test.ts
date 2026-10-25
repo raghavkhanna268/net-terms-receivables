@@ -3486,7 +3486,25 @@ describeWithDb("CREDIT_STATUS_RECOMPUTE no-owner accounts (#203)", () => {
   beforeEach(async () => {
     metafieldWriteCount = 0;
     mockShouldFail = false;
-    mockShopifyGraphQLRequest.mockClear();
+    // Restore mock implementation (earlier tests may have called mockReset)
+    mockShopifyGraphQLRequest.mockImplementation(async () => {
+      if (mockShouldFail) {
+        return {
+          success: false,
+          error: "Simulated metafield write failure",
+        };
+      }
+      metafieldWriteCount++;
+      return {
+        success: true,
+        data: {
+          metafieldsSet: {
+            metafields: [{ id: "mf-1", namespace: "$app", key: "credit_status" }],
+            userErrors: [],
+          },
+        },
+      };
+    });
     consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     
     // Clean up messages and state
