@@ -26,6 +26,19 @@ vi.mock("~/services/drain/reconcile-handlers.server", () => ({
   enqueueReconcileStage: vi.fn().mockResolvedValue(true),
 }));
 
+vi.mock("~/services/gating.server", () => ({
+  getUsageStats: vi.fn().mockResolvedValue({
+    companies: { current: 5, limit: 25 },
+    importsThisMonth: { current: 0, limit: -1 },
+  }),
+  isGatingEnforced: vi.fn().mockReturnValue(false),
+}));
+
+vi.mock("~/lib/plan-url", () => ({
+  getAppHandle: vi.fn().mockReturnValue("net-terms-receivables-1"),
+  buildPlanSelectionUrl: vi.fn().mockReturnValue("https://example.com/upgrade"),
+}));
+
 /**
  * ActionData type for test assertions.
  */
@@ -1534,6 +1547,12 @@ describe("S24: Finishing setup empty state (real render)", () => {
           shopId: "shop-123",
           error: null,
           finishingSetup: false,
+          newAccountsPausedBanner: {
+            show: false,
+            heading: "",
+            bodyText: "",
+            upgradeUrl: null,
+          },
         }),
         useActionData: () => null,
         useNavigation: () => ({ state: "idle" }),
@@ -1570,6 +1589,12 @@ describe("S24: Finishing setup empty state (real render)", () => {
           shopId: "shop-123",
           error: null,
           finishingSetup: false,
+          newAccountsPausedBanner: {
+            show: false,
+            heading: "",
+            bodyText: "",
+            upgradeUrl: null,
+          },
         }),
         useActionData: () => null,
         useNavigation: () => ({ state: "idle" }),
