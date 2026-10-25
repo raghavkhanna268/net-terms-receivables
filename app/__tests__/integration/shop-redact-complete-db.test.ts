@@ -704,14 +704,17 @@ describeWithDb("shop/redact complete DB deletion", () => {
     const bulkMsgId = bulkMsg.send;
 
     // 2. Simulate drain workers reading messages with VT (visibility timeout)
-    // pgmq.read(queue, vt_seconds, limit) returns up to `limit` messages and makes them invisible for vt seconds.
-    // We read with a limit high enough to include our test messages, then verify they were returned.
-    // Using pgmq.read_with_poll would be more accurate but read() is simpler for test purposes.
+    // pgmq.read(queue, vt, qty, conditional) returns up to `qty` messages matching the jsonb filter
+    // and makes them invisible for `vt` seconds.
+    // We use the conditional filter to scope reads to this test's shop only,
+    // avoiding interference with other tests' messages in the shared queue.
+    // pgmq 1.5.1 signature: pgmq.read(queue_name text, vt integer, qty integer, conditional jsonb DEFAULT '{}')
+    const shopFilter = JSON.stringify({ shop: IN_FLIGHT_DOMAIN });
     const readSyncResults = await sql<{ msg_id: string; message: unknown }[]>`
-      SELECT msg_id::text, message FROM pgmq.read('s6_sync', 30, 100)
+      SELECT msg_id::text, message FROM pgmq.read('s6_sync', 30, 10, ${shopFilter}::jsonb)
     `;
     const readBulkResults = await sql<{ msg_id: string; message: unknown }[]>`
-      SELECT msg_id::text, message FROM pgmq.read('s6_bulk', 30, 100)
+      SELECT msg_id::text, message FROM pgmq.read('s6_bulk', 30, 10, ${shopFilter}::jsonb)
     `;
 
     // Find our specific messages in the results
