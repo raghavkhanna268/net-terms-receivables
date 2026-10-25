@@ -58,6 +58,8 @@ describe("compliance.server", () => {
   describe("deleteShop", () => {
     it("deletes shop and all non-FK-linked tables in a transaction", async () => {
       // All queries run inside sql.begin() using mockTx
+      // 0. SELECT FOR UPDATE (serializes with drain's FOR SHARE guards, #239)
+      mockTx.mockResolvedValueOnce([{ id: "shop-123" }]);
       // 1. DELETE s10b_order_refetch_null
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 5 }));
       // 2. DELETE s6_bulk_operations
@@ -99,6 +101,8 @@ describe("compliance.server", () => {
 
     it("returns deleted=false when shop not found", async () => {
       // All queries run inside sql.begin() using mockTx
+      // 0. SELECT FOR UPDATE (serializes with drain's FOR SHARE guards, #239)
+      mockTx.mockResolvedValueOnce([]);
       // 1. DELETE s10b_order_refetch_null (may have rows even if shop doesn't exist)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
       // 2. DELETE s6_bulk_operations
