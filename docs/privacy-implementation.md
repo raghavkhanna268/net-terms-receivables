@@ -128,7 +128,7 @@ Implementation details for shop data deletion:
 1. **Verify** payload `shop_domain` matches header shop (returns 401 on mismatch)
 2. **Delete** all OAuth sessions for the shop (`Session` table)
 3. **Delete** `webhook_receipts` for the shop
-4. **Delete** shop data via `deleteShop` (`app/services/compliance/compliance.server.ts:88-170`) in a single transaction:
+4. **Delete** shop data via `deleteShop` (`app/services/compliance/compliance.server.ts:127-251`) in a single transaction:
    - Non-FK tables with `shop` text column: `s10b_order_refetch_null`, `s6_bulk_operations`, `order_outstanding_missing`, `s10b_customer_pii_fallback`
    - pgmq queue and archive tables: `pgmq.q_s6_sync`, `pgmq.q_s6_bulk`, `pgmq.a_s6_sync`, `pgmq.a_s6_bulk` (messages where `message->>'shop'` matches)
    - Dead-letter queue: `s6_dead_letter` (rows where `message->>'shop'` matches)
@@ -164,7 +164,7 @@ When the worker finishes:
 - If the handler fails with `retryable: false` (e.g., `no_session` because sessions were deleted), it dead-letters immediately on the first read (`processor.server.ts:1062-1063`). The worker's in-memory copy gets dead-lettered by `moveToDeadLetter` (`processor.server.ts:974-997`), which INSERTs into `s6_dead_letter` **before** calling `pgmq.delete`. This writes the shop's message back after the redact.
 - If the handler fails without `retryable: false` (e.g., `shop_not_found`), the message is dead-lettered only if that read had already reached `maxRetries`; otherwise it's left for retry, and because `deleteShop` removed its queue row, it never comes back.
 
-This leak is tracked in [#239](https://github.com/raghavkhanna268/net-terms-receivables/issues/239), which fixes it by reversing the order (delete from queue first, then insert into dead-letter).
+This race is fixed by [#247](https://github.com/raghavkhanna268/net-terms-receivables/pull/247), which added the FOR UPDATE lock to serialize deleteShop with drain transactions.
 
 **Dead-letter retention:**
 
