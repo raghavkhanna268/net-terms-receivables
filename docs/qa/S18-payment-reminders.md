@@ -190,5 +190,5 @@ The code constants (`DAILY_SEND_CAP=100`, `MONTHLY_SEND_CAP=3000` in `app/servic
 - For catch-up, failed eligibility deletes the delayed row (same as other eligibility failures)
 
 ### 11.3 Done criteria
-- [x] S18-50: `app/services/__tests__/reminders-catchup-db.test.ts` - uninstalled shop skips send
-- [x] S18-51: `app/services/__tests__/reminders-catchup-db.test.ts` - catch-up deletes delayed row
+- [x] S18-50: `app/services/__tests__/reminders-uninstalled-db.test.ts` - uninstalled shop skips send
+- [x] S18-51: `app/services/__tests__/reminders-uninstalled-db.test.ts` - catch-up deletes delayed row

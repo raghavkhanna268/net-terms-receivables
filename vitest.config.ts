@@ -79,6 +79,7 @@ const DB_TEST_PATTERNS = [
   "app/services/__tests__/*-db.test.ts",
   "app/services/__tests__/gating.test.ts",
   "app/services/__tests__/reminders-catchup-db.test.ts",
+  "app/services/__tests__/reminders-uninstalled-db.test.ts",
 
   // Drain processor DB tests
   "app/services/drain/__tests__/processor-backstop-db.test.ts",

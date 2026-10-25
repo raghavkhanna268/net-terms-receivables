@@ -717,7 +717,7 @@ export async function sendPaymentReminder(
     return {
       success: true,
       action: "skipped",
-      skipReason: "Shop was uninstalled",
+      skipReason: "shop_uninstalled",
     };
   }
 
@@ -975,7 +975,7 @@ export async function sendCatchupReminder(
     return {
       success: true,
       action: "skipped",
-      skipReason: "Shop was uninstalled",
+      skipReason: "shop_uninstalled",
     };
   }
 
