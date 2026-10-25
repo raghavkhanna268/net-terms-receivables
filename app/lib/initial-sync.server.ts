@@ -93,6 +93,7 @@ export async function getInitialSyncState(
     SELECT bulk_operation_id, reconcile_stage, completed_at, failure_count, started_at
     FROM s6_bulk_operations
     WHERE shop = ${shopDomain} AND origin = 'reconcile' AND reconcile_stage = 'companies'
+      AND closed_at IS NULL
     ORDER BY started_at DESC
     LIMIT 1
   `;
@@ -108,6 +109,7 @@ export async function getInitialSyncState(
       AND origin = 'reconcile'
       AND reconcile_stage = 'customers'
       AND started_at >= ${companiesOp.started_at}
+      AND closed_at IS NULL
     ORDER BY started_at DESC
     LIMIT 1
   `;
@@ -119,6 +121,7 @@ export async function getInitialSyncState(
       AND origin = 'reconcile'
       AND reconcile_stage = 'orders'
       AND started_at >= ${companiesOp.started_at}
+      AND closed_at IS NULL
     ORDER BY started_at DESC
     LIMIT 1
   `;

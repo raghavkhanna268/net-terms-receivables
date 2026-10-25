@@ -754,16 +754,18 @@ export async function loadBulkOperationProgress(
 ): Promise<{
   byteOffset: number;
   completedAt: Date | null;
+  closedAt: Date | null;
   chunkSize: number;
   failureCount: number;
 } | null> {
   const [row] = await sql<{
     byte_offset: string | null;
     completed_at: Date | null;
+    closed_at: Date | null;
     chunk_size: number;
     failure_count: number;
   }[]>`
-    SELECT byte_offset, completed_at, chunk_size, failure_count
+    SELECT byte_offset, completed_at, closed_at, chunk_size, failure_count
     FROM s6_bulk_operations
     WHERE bulk_operation_id = ${bulkOperationId}
   `;
@@ -773,6 +775,7 @@ export async function loadBulkOperationProgress(
   return {
     byteOffset: row.byte_offset !== null ? parseInt(row.byte_offset, 10) : 0,
     completedAt: row.completed_at,
+    closedAt: row.closed_at,
     chunkSize: row.chunk_size,
     failureCount: row.failure_count,
   };
@@ -781,6 +784,9 @@ export async function loadBulkOperationProgress(
 /**
  * Save bulk operation progress to database.
  * byte_offset is the end of the last fully processed line.
+ *
+ * #293: Only updates rows where closed_at IS NULL. Returns whether a row was updated.
+ * This prevents reopening a closed row and allows the caller to skip chaining.
  */
 export async function saveBulkOperationProgress(
   sql: Sql,
@@ -788,23 +794,27 @@ export async function saveBulkOperationProgress(
   byteOffset: number,
   completedAt: Date | null = null,
   chunkSize?: number
-): Promise<void> {
+): Promise<{ rowUpdated: boolean }> {
+  let result;
   if (chunkSize !== undefined) {
-    await sql`
+    result = await sql`
       UPDATE s6_bulk_operations
       SET byte_offset = ${byteOffset},
           completed_at = ${completedAt},
           chunk_size = ${chunkSize}
       WHERE bulk_operation_id = ${bulkOperationId}
+        AND closed_at IS NULL
     `;
   } else {
-    await sql`
+    result = await sql`
       UPDATE s6_bulk_operations
       SET byte_offset = ${byteOffset},
           completed_at = ${completedAt}
       WHERE bulk_operation_id = ${bulkOperationId}
+        AND closed_at IS NULL
     `;
   }
+  return { rowUpdated: result.count > 0 };
 }
 
 /**
@@ -888,8 +898,8 @@ export async function processBulkOperation(
     };
   }
 
-  // If already completed, skip
-  if (progress.completedAt) {
+  // If already completed or closed, skip
+  if (progress.completedAt || progress.closedAt) {
     await markWebhookProcessed(
       sql,
       webhookId,
@@ -899,7 +909,9 @@ export async function processBulkOperation(
     return {
       success: true,
       action: "skipped",
-      skipReason: "Bulk operation already completed",
+      skipReason: progress.closedAt
+        ? "Bulk operation closed (reinstall reset)"
+        : "Bulk operation already completed",
       status: "complete",
     };
   }
@@ -979,8 +991,8 @@ export async function processBulkOperation(
 
   // Handle empty response at EOF
   if (bytes.length === 0 && chunkResult.isEof) {
-    // Mark as completed
-    await saveBulkOperationProgress(
+    // Mark as completed (only if not closed)
+    const { rowUpdated } = await saveBulkOperationProgress(
       sql,
       bulkOperationId,
       startByteOffset,
@@ -999,11 +1011,15 @@ export async function processBulkOperation(
       status: "eof_reached",
     });
 
-    const metadata = await getBulkOperationMetadata(sql, bulkOperationId);
-    const nextStage =
-      metadata?.origin === "reconcile"
-        ? getNextStage(metadata.reconcileStage)
-        : undefined;
+    // Only chain to next stage if the row was actually updated (not closed)
+    let nextStage: "customers" | "orders" | undefined;
+    if (rowUpdated) {
+      const metadata = await getBulkOperationMetadata(sql, bulkOperationId);
+      nextStage =
+        metadata?.origin === "reconcile"
+          ? getNextStage(metadata.reconcileStage)
+          : undefined;
+    }
 
     return {
       success: true,
@@ -1136,7 +1152,8 @@ export async function processBulkOperation(
     chunkResult.isEof && linesToProcess.length === allLines.length;
 
   if (isComplete) {
-    await saveBulkOperationProgress(
+    // Mark as completed (only if not closed)
+    const { rowUpdated } = await saveBulkOperationProgress(
       sql,
       bulkOperationId,
       newByteOffset,
@@ -1156,11 +1173,15 @@ export async function processBulkOperation(
       upsertedCount: totalUpserted,
     });
 
-    const metadata = await getBulkOperationMetadata(sql, bulkOperationId);
-    const nextStage =
-      metadata?.origin === "reconcile"
-        ? getNextStage(metadata.reconcileStage)
-        : undefined;
+    // Only chain to next stage if the row was actually updated (not closed)
+    let nextStage: "customers" | "orders" | undefined;
+    if (rowUpdated) {
+      const metadata = await getBulkOperationMetadata(sql, bulkOperationId);
+      nextStage =
+        metadata?.origin === "reconcile"
+          ? getNextStage(metadata.reconcileStage)
+          : undefined;
+    }
 
     return {
       success: true,

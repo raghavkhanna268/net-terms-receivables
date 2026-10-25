@@ -150,12 +150,13 @@ interface ClearUninstalledResult {
 }
 
 /**
- * Atomically clear uninstalledAt, onboarding state, and metafield sync errors on reinstall.
+ * Atomically clear uninstalledAt, onboarding state, metafield sync errors, and
+ * close open bulk operations on reinstall.
  *
  * This is called on every /app load BEFORE the cache early-return to handle
- * cross-isolate reinstall scenarios. Uses a CTE to perform both updates in a
- * single statement, ensuring atomicity: if clearing the metafield errors fails,
- * the uninstalledAt clear is also rolled back, preserving the reinstall signal.
+ * cross-isolate reinstall scenarios. Uses a CTE to perform all updates in a
+ * single statement, ensuring atomicity: if any update fails, the entire
+ * statement is rolled back, preserving the reinstall signal.
  *
  * S23-09: Also resets onboarding_dismissed_at on reinstall so the merchant sees
  * the Setup Guide again.
@@ -164,17 +165,22 @@ interface ClearUninstalledResult {
  * all BuyerAccount rows for the shop, allowing the resync sweep to retry accounts
  * that had permanent sync failures before uninstall.
  *
- * IMPORTANT: Only touches uninstalledAt, onboarding_dismissed_at on Shop, and
- * metafieldSyncErrorCode/metafieldSyncErrorAt on BuyerAccount.
+ * #293: Also closes all open s6_bulk_operations rows (all origins: reconcile,
+ * manual, webhook) so getInitialSyncState returns not_started and the merchant
+ * can start a fresh sync. Closed rows carry closed_reason='reinstall_reset'.
+ *
+ * IMPORTANT: Only touches uninstalledAt, onboarding_dismissed_at on Shop,
+ * metafieldSyncErrorCode/metafieldSyncErrorAt on BuyerAccount, and
+ * closed_at/closed_reason on s6_bulk_operations.
  * Never touches plan, gating, credit, timezone, or any other column.
  *
  * @param sql - postgres.js SQL client
  * @param shop - The shop domain
- * @returns Object with wasReinstalled flag and shopId if reinstalled
+ * @returns Object with wasReinstalled flag, shopId, and closedCount if reinstalled
  */
 async function clearUninstalledAtAndMetafieldErrors(sql: Sql, shop: string): Promise<ClearUninstalledResult> {
   try {
-    const result = await sql<{ id: string }[]>`
+    const result = await sql<{ id: string; closed_count: number }[]>`
       WITH reinstalled_shop AS (
         UPDATE "Shop"
         SET "uninstalledAt" = NULL, onboarding_dismissed_at = NULL
@@ -186,13 +192,28 @@ async function clearUninstalledAtAndMetafieldErrors(sql: Sql, shop: string): Pro
         SET "metafieldSyncErrorCode" = NULL, "metafieldSyncErrorAt" = NULL
         WHERE "shopId" IN (SELECT id FROM reinstalled_shop)
           AND ("metafieldSyncErrorCode" IS NOT NULL OR "metafieldSyncErrorAt" IS NOT NULL)
+      ),
+      closed_ops AS (
+        UPDATE s6_bulk_operations
+        SET closed_at = NOW(), closed_reason = 'reinstall_reset'
+        WHERE shop = ${shop}
+          AND EXISTS (SELECT 1 FROM reinstalled_shop)
+          AND closed_at IS NULL
+        RETURNING 1
       )
-      SELECT id FROM reinstalled_shop
+      SELECT id, (SELECT count(*) FROM closed_ops)::int AS closed_count FROM reinstalled_shop
     `;
     if (result.length > 0) {
+      const closedCount = result[0].closed_count;
       safeLog("info", "cleared_uninstalled_at_and_metafield_errors", {
         shopHash: await shopHash(shop),
       });
+      if (closedCount > 0) {
+        safeLog("info", "reinstall_initial_sync_reset", {
+          shopHash: await shopHash(shop),
+          closedCount,
+        });
+      }
       return { wasReinstalled: true, shopId: result[0].id };
     }
     return { wasReinstalled: false };
@@ -356,12 +377,16 @@ export function _isShopSetupInFlight(shop: string): boolean {
  *
  * On fresh install: Creates a new Shop row with the given timezone (or default if null).
  * On reinstall: Clears uninstalledAt, resets onboarding, clears metafield sync errors,
- *   and updates timezone (preserves existing if null). All done atomically via CTE.
+ *   closes open bulk operations, and updates timezone (preserves existing if null).
+ *   All done atomically via CTE.
  * On re-auth: Updates timezone only (preserves existing if null). Metafield errors untouched.
  *
  * #208 follow-up: Also clears metafieldSyncErrorCode and metafieldSyncErrorAt on all
  * BuyerAccount rows for the shop when uninstalledAt was set (reinstall only).
  * This is atomic with the Shop update to ensure the reinstall signal isn't lost.
+ *
+ * #293: Also closes all open s6_bulk_operations rows when uninstalledAt was set
+ * (reinstall only), so getInitialSyncState returns not_started for a fresh sync.
  *
  * @param sql - postgres.js SQL client
  * @param shopDomain - Shop domain (e.g., "example.myshopify.com")
@@ -372,7 +397,7 @@ export async function upsertShopOnAuth(
   shopDomain: string,
   timezone: string | null,
 ): Promise<void> {
-  const result = await sql<{ id: string }[]>`
+  const result = await sql<{ id: string; closed_count: number }[]>`
     WITH old_state AS (
       SELECT id, "uninstalledAt" IS NOT NULL AS was_uninstalled
       FROM "Shop"
@@ -397,11 +422,26 @@ export async function upsertShopOnAuth(
       SET "metafieldSyncErrorCode" = NULL, "metafieldSyncErrorAt" = NULL
       WHERE "shopId" IN (SELECT id FROM old_state WHERE was_uninstalled)
         AND ("metafieldSyncErrorCode" IS NOT NULL OR "metafieldSyncErrorAt" IS NOT NULL)
+    ),
+    closed_ops AS (
+      UPDATE s6_bulk_operations
+      SET closed_at = NOW(), closed_reason = 'reinstall_reset'
+      WHERE shop = ${shopDomain}
+        AND EXISTS (SELECT 1 FROM old_state WHERE was_uninstalled)
+        AND closed_at IS NULL
+      RETURNING 1
     )
-    SELECT id FROM upserted
+    SELECT id, (SELECT count(*) FROM closed_ops)::int AS closed_count FROM upserted
   `;
   const shopId = result[0]?.id ?? 'unknown';
+  const closedCount = result[0]?.closed_count ?? 0;
   console.log(`[afterAuth] shop_upserted shop_id=${shopId} timezone=${timezone ?? 'preserved'}`);
+  if (closedCount > 0) {
+    safeLog("info", "reinstall_initial_sync_reset", {
+      shopHash: await shopHash(shopDomain),
+      closedCount,
+    });
+  }
 }
 
 /**

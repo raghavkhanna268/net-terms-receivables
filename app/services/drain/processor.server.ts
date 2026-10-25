@@ -719,13 +719,16 @@ registerSyncHandler("DRAFT_ORDERS_DELETE", handleDraftOrder);
  * - Chains to the next stage in sequence: companies → customers → orders
  * - Uses nextStage from result (based on origin/stage in s6_bulk_operations)
  * - Manual key is propagated from the original stage's webhookId
+ *
+ * #293: Passes prevBulkOperationId to enqueueReconcileStage so it can check
+ * that the previous stage's bulk operation is not closed (reinstall reset).
  */
 async function handleBulkOperationsFinish(sql: Sql, message: BulkMessage): Promise<BulkProcessResult> {
   const result = await processBulkOperation(sql, message);
 
   if (result.nextStage) {
     const manualKey = await getManualKeyForBulkOp(sql, message.bulkOperationId, message.shop);
-    await enqueueReconcileStage(sql, message.shop, result.nextStage, manualKey);
+    await enqueueReconcileStage(sql, message.shop, result.nextStage, manualKey, message.bulkOperationId);
   }
 
   return result;
