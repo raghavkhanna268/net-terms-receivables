@@ -49,6 +49,10 @@ export interface DeleteShopResult {
   bulkOperationsPurged: number;
   outstandingMissingPurged: number;
   piiFallbackPurged: number;
+  pgmqSyncQueuePurged: number;
+  pgmqBulkQueuePurged: number;
+  pgmqSyncArchivePurged: number;
+  pgmqBulkArchivePurged: number;
   deadLetterPurged: number;
 }
 
@@ -112,8 +116,38 @@ export async function deleteShop(
       WHERE shop = ${shopDomain}
     `;
 
+    // pgmq queue and archive tables (message jsonb column at message->>'shop')
+    // Tables created by pgmq.create() at prisma/migrations/20261023000000_s6_pgmq_queues/migration.sql:70,75
+    // Schema: pgmq.q_<name> (queue), pgmq.a_<name> (archive), message column is jsonb
+    //
+    // Safety: A drain worker holding a message under its visibility timeout (VT) will later
+    // call pgmq.archive() or pgmq.delete() on that msg_id. If we delete the row here first,
+    // the worker's subsequent call returns false (0 rows affected) without throwing - this is
+    // the documented pgmq behavior (tested in shop-redact-complete-db.test.ts in-flight case).
+    //
+    // We use raw DELETE for direct control over the WHERE clause (exact shop match).
+    // pgmq.delete(queue, msg_id) requires knowing msg_ids upfront; a SELECT+DELETE would be
+    // two round-trips. Raw DELETE on the queue table is safe because we're only removing
+    // messages, not modifying queue metadata.
+    const pgmqSyncQueueResult = await tx`
+      DELETE FROM pgmq.q_s6_sync
+      WHERE message->>'shop' = ${shopDomain}
+    `;
+    const pgmqBulkQueueResult = await tx`
+      DELETE FROM pgmq.q_s6_bulk
+      WHERE message->>'shop' = ${shopDomain}
+    `;
+    const pgmqSyncArchiveResult = await tx`
+      DELETE FROM pgmq.a_s6_sync
+      WHERE message->>'shop' = ${shopDomain}
+    `;
+    const pgmqBulkArchiveResult = await tx`
+      DELETE FROM pgmq.a_s6_bulk
+      WHERE message->>'shop' = ${shopDomain}
+    `;
+
     // s6_dead_letter (dead-letter queue, shop in message JSON at message->>'shop')
-    // Producer: app/services/drain/processor.server.ts:976-989 (moveToDeadLetter function)
+    // Producer: app/services/drain/processor.server.ts:968-991 (moveToDeadLetter function)
     // The message JSON contains { shop: string, topic: string, webhookId: string, ... }
     const deadLetterResult = await tx`
       DELETE FROM s6_dead_letter
@@ -134,27 +168,34 @@ export async function deleteShop(
       bulkOperationsPurged: bulkOpsResult.count,
       outstandingMissingPurged: outstandingResult.count,
       piiFallbackPurged: piiResult.count,
+      pgmqSyncQueuePurged: pgmqSyncQueueResult.count,
+      pgmqBulkQueuePurged: pgmqBulkQueueResult.count,
+      pgmqSyncArchivePurged: pgmqSyncArchiveResult.count,
+      pgmqBulkArchivePurged: pgmqBulkArchiveResult.count,
       deadLetterPurged: deadLetterResult.count,
     };
   });
 }
 
 /**
- * Purge pgmq messages for a shop.
+ * Legacy pgmq message purge function (no longer needed).
  *
- * Note: pgmq doesn't support per-shop message deletion directly.
- * Messages in the queue are JSON with a shop field. We can:
- * 1. Read messages and delete those matching the shop (slow, not recommended)
- * 2. Let messages expire naturally (default VT is short)
- * 3. Document that shop messages will be ignored by processors (preferred)
+ * As of this version, deleteShop() removes the shop's messages from the pgmq
+ * queue tables (pgmq.q_s6_sync, pgmq.q_s6_bulk) and archive tables
+ * (pgmq.a_s6_sync, pgmq.a_s6_bulk) directly within its transaction.
  *
- * For now, we document this limitation. The drain processor already
- * checks if the shop exists before processing, so orphaned messages
- * are safely ignored.
+ * This function remains for backward compatibility with callers but performs
+ * no operation. The returned reason documents the current behavior.
  *
- * @param sql - postgres.js SQL client
- * @param _shopDomain - Shop domain (unused, documented limitation)
- * @returns Documentation of the limitation
+ * Note: Drain-side handling of in-flight messages (where a worker holds a
+ * message under its visibility timeout when the shop is deleted) is tracked
+ * in https://github.com/raghavkhanna268/net-terms-receivables/issues/239.
+ * The worker's subsequent pgmq.archive() or pgmq.delete() on the missing
+ * msg_id returns false without throwing, which is safe but should be logged.
+ *
+ * @param sql - postgres.js SQL client (unused)
+ * @param _shopDomain - Shop domain (unused)
+ * @returns Documentation that deleteShop handles this now
  */
 export async function purgePgmqMessages(
   _sql: Sql,
@@ -163,9 +204,9 @@ export async function purgePgmqMessages(
   return {
     purged: false,
     reason:
-      "pgmq does not support per-shop message deletion. Messages for deleted shops " +
-      "are safely ignored by the drain processor which checks shop existence. " +
-      "Messages expire naturally based on queue visibility timeout.",
+      "deleteShop() now removes the shop's queue and archive messages directly. " +
+      "See https://github.com/raghavkhanna268/net-terms-receivables/issues/239 " +
+      "for drain-side ack of shop_not_found on in-flight retries.",
   };
 }
 

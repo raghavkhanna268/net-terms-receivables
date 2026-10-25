@@ -118,9 +118,13 @@ describe("webhooks.compliance", () => {
       bulkOperationsPurged: 0,
       outstandingMissingPurged: 0,
       piiFallbackPurged: 0,
+      pgmqSyncQueuePurged: 0,
+      pgmqBulkQueuePurged: 0,
+      pgmqSyncArchivePurged: 0,
+      pgmqBulkArchivePurged: 0,
       deadLetterPurged: 0,
     });
-    mockPurgePgmqMessages.mockResolvedValue({ purged: false, reason: "documented limitation" });
+    mockPurgePgmqMessages.mockResolvedValue({ purged: false, reason: "deleteShop handles it" });
     mockRedactCustomer.mockResolvedValue({
       taggedCustomersDeleted: 1,
       draftOrdersDeleted: 0,
@@ -734,6 +738,10 @@ describe("webhooks.compliance", () => {
         bulkOperationsPurged: 0,
         outstandingMissingPurged: 0,
         piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
         deadLetterPurged: 0,
       });
 
@@ -1184,6 +1192,10 @@ describe("webhooks.compliance", () => {
         bulkOperationsPurged: 1,
         outstandingMissingPurged: 1,
         piiFallbackPurged: 1,
+        pgmqSyncQueuePurged: 1,
+        pgmqBulkQueuePurged: 1,
+        pgmqSyncArchivePurged: 1,
+        pgmqBulkArchivePurged: 1,
         deadLetterPurged: 1,
       });
 
@@ -1217,6 +1229,10 @@ describe("webhooks.compliance", () => {
         bulkOperationsPurged: 0,
         outstandingMissingPurged: 0,
         piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
         deadLetterPurged: 0,
       });
 

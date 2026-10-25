@@ -85,9 +85,13 @@ const mockDeleteShop = vi.fn().mockResolvedValue({
   bulkOperationsPurged: 0,
   outstandingMissingPurged: 0,
   piiFallbackPurged: 0,
+  pgmqSyncQueuePurged: 0,
+  pgmqBulkQueuePurged: 0,
+  pgmqSyncArchivePurged: 0,
+  pgmqBulkArchivePurged: 0,
   deadLetterPurged: 0,
 });
-const mockPurgePgmqMessages = vi.fn().mockResolvedValue({ purged: false, reason: "documented limitation" });
+const mockPurgePgmqMessages = vi.fn().mockResolvedValue({ purged: false, reason: "deleteShop handles it" });
 const mockRedactCustomer = vi.fn().mockResolvedValue({
   taggedCustomersDeleted: 0,
   draftOrdersDeleted: 0,

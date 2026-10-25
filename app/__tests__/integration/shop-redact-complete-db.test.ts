@@ -2,21 +2,27 @@
  * S22 shop/redact complete DB integration test.
  *
  * Verifies that shop/redact deletes every shop-scoped row:
- * - All FK-cascade tables (Session, AccountSource, BuyerAccount, Invoice, BankImport,
+ * - FK-cascade tables via Shop delete (AccountSource, BuyerAccount, Invoice, BankImport,
  *   Payment, Match, PayerAlias, RejectedMatch, ReminderRule, ReminderLog, AuditEvent,
  *   s8_tagged_customers, s8_draft_orders, s22_data_requests, backstop_processed_orders,
  *   s18_shop_reminder_settings)
- * - webhook_receipts (deleted before deleteShop call)
+ * - Session (deleted via sessionStorage.deleteAllForShop before deleteShop)
+ * - webhook_receipts (deleted via deleteWebhookReceiptsForShop before deleteShop)
  * - s10b_order_refetch_null, s6_bulk_operations, order_outstanding_missing,
- *   s10b_customer_pii_fallback, s6_dead_letter (no FK, shop column or shop in JSON)
+ *   s10b_customer_pii_fallback (no FK, shop text column)
+ * - pgmq.q_s6_sync, pgmq.q_s6_bulk, pgmq.a_s6_sync, pgmq.a_s6_bulk (message->>'shop')
+ * - s6_dead_letter (message->>'shop')
  *
  * Test seeds two shops, A and B, each with at least one row in every shop-scoped table.
+ * Also seeds near-miss rows (extended domain, uppercase domain) that must survive.
  * Runs shop/redact for A and asserts:
  * - 0 rows for A in every table
  * - B's row count unchanged in every table
+ * - Near-miss rows unchanged
  * - Re-running for A is idempotent (no throw, no changes, B intact)
+ * - In-flight pgmq messages: read with VT, redact, then archive/delete returns false (no error)
  *
- * NOTE: This test requires a running PostgreSQL instance with the schema applied.
+ * NOTE: This test requires a running PostgreSQL instance with pgmq extension.
  * Run in the "Sequential DB" vitest project.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -41,6 +47,12 @@ describeWithDb("shop/redact complete DB deletion", () => {
   const SHOP_B_ID = `shop-b-${TEST_SUFFIX}`;
   const SHOP_B_DOMAIN = `test-b-${TEST_SUFFIX}.myshopify.com`;
 
+  // Near-miss domains for Shop A (should NOT be deleted)
+  // 1. Longer domain that starts with Shop A's prefix (e.g. "test-a-xxx-extra.myshopify.com")
+  const SHOP_A_EXTENDED_DOMAIN = `test-a-${TEST_SUFFIX}-extra.myshopify.com`;
+  // 2. Uppercase version of Shop A's domain
+  const SHOP_A_UPPER_DOMAIN = `TEST-A-${TEST_SUFFIX}.MYSHOPIFY.COM`;
+
   const CUSTOMER_GID = `gid://shopify/Customer/${TEST_SUFFIX}`;
 
   beforeAll(async () => {
@@ -49,6 +61,9 @@ describeWithDb("shop/redact complete DB deletion", () => {
 
   afterAll(async () => {
     // Cleanup any remaining test data in case of failures
+    // All domains to clean (including near-miss)
+    const allDomains = [SHOP_A_DOMAIN, SHOP_B_DOMAIN, SHOP_A_EXTENDED_DOMAIN, SHOP_A_UPPER_DOMAIN];
+
     // Delete in reverse FK order
     await sql`DELETE FROM "Match" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
     await sql`DELETE FROM "ReminderLog" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
@@ -66,13 +81,18 @@ describeWithDb("shop/redact complete DB deletion", () => {
     await sql`DELETE FROM s22_data_requests WHERE shop_id IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
     await sql`DELETE FROM backstop_processed_orders WHERE shop_id IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
     await sql`DELETE FROM s18_shop_reminder_settings WHERE shop_id IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
-    await sql`DELETE FROM webhook_receipts WHERE shop IN (${SHOP_A_DOMAIN}, ${SHOP_B_DOMAIN})`;
-    await sql`DELETE FROM s10b_order_refetch_null WHERE shop IN (${SHOP_A_DOMAIN}, ${SHOP_B_DOMAIN})`;
-    await sql`DELETE FROM s6_bulk_operations WHERE shop IN (${SHOP_A_DOMAIN}, ${SHOP_B_DOMAIN})`;
-    await sql`DELETE FROM order_outstanding_missing WHERE shop IN (${SHOP_A_DOMAIN}, ${SHOP_B_DOMAIN})`;
-    await sql`DELETE FROM s10b_customer_pii_fallback WHERE shop IN (${SHOP_A_DOMAIN}, ${SHOP_B_DOMAIN})`;
-    await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' IN (${SHOP_A_DOMAIN}, ${SHOP_B_DOMAIN})`;
-    await sql`DELETE FROM "Session" WHERE shop IN (${SHOP_A_DOMAIN}, ${SHOP_B_DOMAIN})`;
+    await sql`DELETE FROM webhook_receipts WHERE shop IN ${sql(allDomains)}`;
+    await sql`DELETE FROM s10b_order_refetch_null WHERE shop IN ${sql(allDomains)}`;
+    await sql`DELETE FROM s6_bulk_operations WHERE shop IN ${sql(allDomains)}`;
+    await sql`DELETE FROM order_outstanding_missing WHERE shop IN ${sql(allDomains)}`;
+    await sql`DELETE FROM s10b_customer_pii_fallback WHERE shop IN ${sql(allDomains)}`;
+    // pgmq queue and archive tables
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' IN ${sql(allDomains)}`;
+    await sql`DELETE FROM pgmq.q_s6_bulk WHERE message->>'shop' IN ${sql(allDomains)}`;
+    await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' IN ${sql(allDomains)}`;
+    await sql`DELETE FROM pgmq.a_s6_bulk WHERE message->>'shop' IN ${sql(allDomains)}`;
+    await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' IN ${sql(allDomains)}`;
+    await sql`DELETE FROM "Session" WHERE shop IN ${sql(allDomains)}`;
     await sql`DELETE FROM "Shop" WHERE id IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
     await sql.end();
   });
@@ -237,11 +257,205 @@ describeWithDb("shop/redact complete DB deletion", () => {
       VALUES (${shopDomain}, ${now.toISOString().slice(0, 10)}::date, 1)
     `;
 
+    // pgmq.q_s6_sync (queue table, message jsonb with shop key)
+    await sql`SELECT pgmq.send('s6_sync', ${sql.json({ shop: shopDomain, topic: 'ORDERS_CREATE', webhookId: 'wh-queue-' + suffix, resourceGid: 'gid://shopify/Order/' + suffix, enqueuedAt: now.toISOString() })})`;
+
+    // pgmq.q_s6_bulk (queue table, message jsonb with shop key)
+    await sql`SELECT pgmq.send('s6_bulk', ${sql.json({ shop: shopDomain, topic: 'BULK_OPERATIONS_FINISH', webhookId: 'wh-bulk-' + suffix, bulkOperationId: 'gid://shopify/BulkOperation/' + suffix, bulkType: 'orders', enqueuedAt: now.toISOString() })})`;
+
+    // pgmq.a_s6_sync (archive table - send then archive)
+    const [syncArchiveMsg] = await sql<[{ send: string }]>`SELECT pgmq.send('s6_sync', ${sql.json({ shop: shopDomain, topic: 'ORDERS_UPDATE', webhookId: 'wh-archive-sync-' + suffix, resourceGid: 'gid://shopify/Order/archive-' + suffix, enqueuedAt: now.toISOString() })})`;
+    await sql`SELECT pgmq.archive('s6_sync', ${syncArchiveMsg.send}::bigint)`;
+
+    // pgmq.a_s6_bulk (archive table - send then archive)
+    const [bulkArchiveMsg] = await sql<[{ send: string }]>`SELECT pgmq.send('s6_bulk', ${sql.json({ shop: shopDomain, topic: 'BULK_OPERATIONS_FINISH', webhookId: 'wh-archive-bulk-' + suffix, bulkOperationId: 'gid://shopify/BulkOperation/archive-' + suffix, bulkType: 'companies', enqueuedAt: now.toISOString() })})`;
+    await sql`SELECT pgmq.archive('s6_bulk', ${bulkArchiveMsg.send}::bigint)`;
+
     // s6_dead_letter (no FK, shop inside message JSON)
     await sql`
       INSERT INTO s6_dead_letter (original_queue, original_msg_id, message, error, dead_lettered_at)
       VALUES ('s6_sync', ${'msg-' + suffix}, ${sql.json({ shop: shopDomain, topic: 'ORDERS_CREATE', webhookId: 'test-wh', resourceGid: 'gid://shopify/Order/123', enqueuedAt: now.toISOString() })}, 'test_error', ${now})
     `;
+  }
+
+  /**
+   * Seeds near-miss rows for tables that use exact shop domain matching.
+   * These rows should NOT be deleted when shop A is redacted.
+   * Near-miss variants:
+   * - Extended domain: Shop A's domain + '-extra' suffix
+   * - Uppercase domain: Shop A's domain in uppercase
+   */
+  async function seedNearMissData(): Promise<void> {
+    const now = new Date();
+
+    // Near-miss rows for Session (exact shop match)
+    await sql`
+      INSERT INTO "Session" (id, shop, state, "isOnline", "accessToken")
+      VALUES (${'offline_nearmiss_extended_' + TEST_SUFFIX}, ${SHOP_A_EXTENDED_DOMAIN}, 'test-state', false, 'test-token')
+    `;
+    await sql`
+      INSERT INTO "Session" (id, shop, state, "isOnline", "accessToken")
+      VALUES (${'offline_nearmiss_upper_' + TEST_SUFFIX}, ${SHOP_A_UPPER_DOMAIN}, 'test-state', false, 'test-token')
+    `;
+
+    // Near-miss rows for webhook_receipts (exact shop match)
+    await sql`
+      INSERT INTO webhook_receipts (shop, webhook_id, topic, received_at)
+      VALUES (${SHOP_A_EXTENDED_DOMAIN}, ${'wh-nearmiss-extended-' + TEST_SUFFIX}, 'ORDERS_CREATE', ${now})
+    `;
+    await sql`
+      INSERT INTO webhook_receipts (shop, webhook_id, topic, received_at)
+      VALUES (${SHOP_A_UPPER_DOMAIN}, ${'wh-nearmiss-upper-' + TEST_SUFFIX}, 'ORDERS_CREATE', ${now})
+    `;
+
+    // Near-miss rows for s10b_order_refetch_null (exact shop match)
+    await sql`
+      INSERT INTO s10b_order_refetch_null (shop, day, count)
+      VALUES (${SHOP_A_EXTENDED_DOMAIN}, ${now.toISOString().slice(0, 10)}::date, 99)
+    `;
+    await sql`
+      INSERT INTO s10b_order_refetch_null (shop, day, count)
+      VALUES (${SHOP_A_UPPER_DOMAIN}, ${now.toISOString().slice(0, 10)}::date, 99)
+    `;
+
+    // Near-miss rows for s6_bulk_operations (exact shop match)
+    await sql`
+      INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, started_at)
+      VALUES (${'gid://shopify/BulkOperation/nearmiss-extended-' + TEST_SUFFIX}, ${SHOP_A_EXTENDED_DOMAIN}, 'orders', ${now})
+    `;
+    await sql`
+      INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, started_at)
+      VALUES (${'gid://shopify/BulkOperation/nearmiss-upper-' + TEST_SUFFIX}, ${SHOP_A_UPPER_DOMAIN}, 'orders', ${now})
+    `;
+
+    // Near-miss rows for order_outstanding_missing (exact shop match)
+    await sql`
+      INSERT INTO order_outstanding_missing (shop, day, count)
+      VALUES (${SHOP_A_EXTENDED_DOMAIN}, ${now.toISOString().slice(0, 10)}::date, 99)
+    `;
+    await sql`
+      INSERT INTO order_outstanding_missing (shop, day, count)
+      VALUES (${SHOP_A_UPPER_DOMAIN}, ${now.toISOString().slice(0, 10)}::date, 99)
+    `;
+
+    // Near-miss rows for s10b_customer_pii_fallback (exact shop match)
+    await sql`
+      INSERT INTO s10b_customer_pii_fallback (shop, day, count)
+      VALUES (${SHOP_A_EXTENDED_DOMAIN}, ${now.toISOString().slice(0, 10)}::date, 99)
+    `;
+    await sql`
+      INSERT INTO s10b_customer_pii_fallback (shop, day, count)
+      VALUES (${SHOP_A_UPPER_DOMAIN}, ${now.toISOString().slice(0, 10)}::date, 99)
+    `;
+
+    // Near-miss rows for pgmq.q_s6_sync (exact message->>'shop' match)
+    await sql`SELECT pgmq.send('s6_sync', ${sql.json({ shop: SHOP_A_EXTENDED_DOMAIN, topic: 'ORDERS_CREATE', webhookId: 'wh-nearmiss-ext-sync-' + TEST_SUFFIX, resourceGid: 'gid://shopify/Order/nearmiss', enqueuedAt: now.toISOString() })})`;
+    await sql`SELECT pgmq.send('s6_sync', ${sql.json({ shop: SHOP_A_UPPER_DOMAIN, topic: 'ORDERS_CREATE', webhookId: 'wh-nearmiss-upper-sync-' + TEST_SUFFIX, resourceGid: 'gid://shopify/Order/nearmiss', enqueuedAt: now.toISOString() })})`;
+
+    // Near-miss rows for pgmq.q_s6_bulk (exact message->>'shop' match)
+    await sql`SELECT pgmq.send('s6_bulk', ${sql.json({ shop: SHOP_A_EXTENDED_DOMAIN, topic: 'BULK_OPERATIONS_FINISH', webhookId: 'wh-nearmiss-ext-bulk-' + TEST_SUFFIX, bulkOperationId: 'gid://shopify/BulkOperation/nearmiss', bulkType: 'orders', enqueuedAt: now.toISOString() })})`;
+    await sql`SELECT pgmq.send('s6_bulk', ${sql.json({ shop: SHOP_A_UPPER_DOMAIN, topic: 'BULK_OPERATIONS_FINISH', webhookId: 'wh-nearmiss-upper-bulk-' + TEST_SUFFIX, bulkOperationId: 'gid://shopify/BulkOperation/nearmiss', bulkType: 'orders', enqueuedAt: now.toISOString() })})`;
+
+    // Near-miss rows for pgmq.a_s6_sync archive (send then archive)
+    const [extSyncArchive] = await sql<[{ send: string }]>`SELECT pgmq.send('s6_sync', ${sql.json({ shop: SHOP_A_EXTENDED_DOMAIN, topic: 'ORDERS_UPDATE', webhookId: 'wh-nearmiss-ext-archive-sync-' + TEST_SUFFIX, resourceGid: 'gid://shopify/Order/nearmiss-archive', enqueuedAt: now.toISOString() })})`;
+    await sql`SELECT pgmq.archive('s6_sync', ${extSyncArchive.send}::bigint)`;
+    const [upperSyncArchive] = await sql<[{ send: string }]>`SELECT pgmq.send('s6_sync', ${sql.json({ shop: SHOP_A_UPPER_DOMAIN, topic: 'ORDERS_UPDATE', webhookId: 'wh-nearmiss-upper-archive-sync-' + TEST_SUFFIX, resourceGid: 'gid://shopify/Order/nearmiss-archive', enqueuedAt: now.toISOString() })})`;
+    await sql`SELECT pgmq.archive('s6_sync', ${upperSyncArchive.send}::bigint)`;
+
+    // Near-miss rows for pgmq.a_s6_bulk archive (send then archive)
+    const [extBulkArchive] = await sql<[{ send: string }]>`SELECT pgmq.send('s6_bulk', ${sql.json({ shop: SHOP_A_EXTENDED_DOMAIN, topic: 'BULK_OPERATIONS_FINISH', webhookId: 'wh-nearmiss-ext-archive-bulk-' + TEST_SUFFIX, bulkOperationId: 'gid://shopify/BulkOperation/nearmiss-archive', bulkType: 'companies', enqueuedAt: now.toISOString() })})`;
+    await sql`SELECT pgmq.archive('s6_bulk', ${extBulkArchive.send}::bigint)`;
+    const [upperBulkArchive] = await sql<[{ send: string }]>`SELECT pgmq.send('s6_bulk', ${sql.json({ shop: SHOP_A_UPPER_DOMAIN, topic: 'BULK_OPERATIONS_FINISH', webhookId: 'wh-nearmiss-upper-archive-bulk-' + TEST_SUFFIX, bulkOperationId: 'gid://shopify/BulkOperation/nearmiss-archive', bulkType: 'companies', enqueuedAt: now.toISOString() })})`;
+    await sql`SELECT pgmq.archive('s6_bulk', ${upperBulkArchive.send}::bigint)`;
+
+    // Near-miss rows for s6_dead_letter (exact message->>'shop' match)
+    await sql`
+      INSERT INTO s6_dead_letter (original_queue, original_msg_id, message, error, dead_lettered_at)
+      VALUES ('s6_sync', ${'msg-nearmiss-extended-' + TEST_SUFFIX}, ${sql.json({ shop: SHOP_A_EXTENDED_DOMAIN, topic: 'ORDERS_CREATE', webhookId: 'test-wh', resourceGid: 'gid://shopify/Order/123', enqueuedAt: now.toISOString() })}, 'test_error', ${now})
+    `;
+    await sql`
+      INSERT INTO s6_dead_letter (original_queue, original_msg_id, message, error, dead_lettered_at)
+      VALUES ('s6_sync', ${'msg-nearmiss-upper-' + TEST_SUFFIX}, ${sql.json({ shop: SHOP_A_UPPER_DOMAIN, topic: 'ORDERS_CREATE', webhookId: 'test-wh', resourceGid: 'gid://shopify/Order/123', enqueuedAt: now.toISOString() })}, 'test_error', ${now})
+    `;
+  }
+
+  /**
+   * Gets counts of near-miss rows that should survive shop A's deletion.
+   */
+  async function getNearMissCounts(): Promise<Record<string, number>> {
+    const [result] = await sql<[{
+      sessionExtended: string;
+      sessionUpper: string;
+      webhookReceiptsExtended: string;
+      webhookReceiptsUpper: string;
+      refetchNullExtended: string;
+      refetchNullUpper: string;
+      bulkOpsExtended: string;
+      bulkOpsUpper: string;
+      outstandingExtended: string;
+      outstandingUpper: string;
+      piiFallbackExtended: string;
+      piiFallbackUpper: string;
+      pgmqSyncQueueExtended: string;
+      pgmqSyncQueueUpper: string;
+      pgmqBulkQueueExtended: string;
+      pgmqBulkQueueUpper: string;
+      pgmqSyncArchiveExtended: string;
+      pgmqSyncArchiveUpper: string;
+      pgmqBulkArchiveExtended: string;
+      pgmqBulkArchiveUpper: string;
+      deadLetterExtended: string;
+      deadLetterUpper: string;
+    }]>`
+      SELECT
+        (SELECT COUNT(*)::text FROM "Session" WHERE shop = ${SHOP_A_EXTENDED_DOMAIN}) as "sessionExtended",
+        (SELECT COUNT(*)::text FROM "Session" WHERE shop = ${SHOP_A_UPPER_DOMAIN}) as "sessionUpper",
+        (SELECT COUNT(*)::text FROM webhook_receipts WHERE shop = ${SHOP_A_EXTENDED_DOMAIN}) as "webhookReceiptsExtended",
+        (SELECT COUNT(*)::text FROM webhook_receipts WHERE shop = ${SHOP_A_UPPER_DOMAIN}) as "webhookReceiptsUpper",
+        (SELECT COUNT(*)::text FROM s10b_order_refetch_null WHERE shop = ${SHOP_A_EXTENDED_DOMAIN}) as "refetchNullExtended",
+        (SELECT COUNT(*)::text FROM s10b_order_refetch_null WHERE shop = ${SHOP_A_UPPER_DOMAIN}) as "refetchNullUpper",
+        (SELECT COUNT(*)::text FROM s6_bulk_operations WHERE shop = ${SHOP_A_EXTENDED_DOMAIN}) as "bulkOpsExtended",
+        (SELECT COUNT(*)::text FROM s6_bulk_operations WHERE shop = ${SHOP_A_UPPER_DOMAIN}) as "bulkOpsUpper",
+        (SELECT COUNT(*)::text FROM order_outstanding_missing WHERE shop = ${SHOP_A_EXTENDED_DOMAIN}) as "outstandingExtended",
+        (SELECT COUNT(*)::text FROM order_outstanding_missing WHERE shop = ${SHOP_A_UPPER_DOMAIN}) as "outstandingUpper",
+        (SELECT COUNT(*)::text FROM s10b_customer_pii_fallback WHERE shop = ${SHOP_A_EXTENDED_DOMAIN}) as "piiFallbackExtended",
+        (SELECT COUNT(*)::text FROM s10b_customer_pii_fallback WHERE shop = ${SHOP_A_UPPER_DOMAIN}) as "piiFallbackUpper",
+        (SELECT COUNT(*)::text FROM pgmq.q_s6_sync WHERE message->>'shop' = ${SHOP_A_EXTENDED_DOMAIN}) as "pgmqSyncQueueExtended",
+        (SELECT COUNT(*)::text FROM pgmq.q_s6_sync WHERE message->>'shop' = ${SHOP_A_UPPER_DOMAIN}) as "pgmqSyncQueueUpper",
+        (SELECT COUNT(*)::text FROM pgmq.q_s6_bulk WHERE message->>'shop' = ${SHOP_A_EXTENDED_DOMAIN}) as "pgmqBulkQueueExtended",
+        (SELECT COUNT(*)::text FROM pgmq.q_s6_bulk WHERE message->>'shop' = ${SHOP_A_UPPER_DOMAIN}) as "pgmqBulkQueueUpper",
+        (SELECT COUNT(*)::text FROM pgmq.a_s6_sync WHERE message->>'shop' = ${SHOP_A_EXTENDED_DOMAIN}) as "pgmqSyncArchiveExtended",
+        (SELECT COUNT(*)::text FROM pgmq.a_s6_sync WHERE message->>'shop' = ${SHOP_A_UPPER_DOMAIN}) as "pgmqSyncArchiveUpper",
+        (SELECT COUNT(*)::text FROM pgmq.a_s6_bulk WHERE message->>'shop' = ${SHOP_A_EXTENDED_DOMAIN}) as "pgmqBulkArchiveExtended",
+        (SELECT COUNT(*)::text FROM pgmq.a_s6_bulk WHERE message->>'shop' = ${SHOP_A_UPPER_DOMAIN}) as "pgmqBulkArchiveUpper",
+        (SELECT COUNT(*)::text FROM s6_dead_letter WHERE message->>'shop' = ${SHOP_A_EXTENDED_DOMAIN}) as "deadLetterExtended",
+        (SELECT COUNT(*)::text FROM s6_dead_letter WHERE message->>'shop' = ${SHOP_A_UPPER_DOMAIN}) as "deadLetterUpper"
+    `;
+
+    return {
+      Session_extended: parseInt(result.sessionExtended, 10),
+      Session_upper: parseInt(result.sessionUpper, 10),
+      webhook_receipts_extended: parseInt(result.webhookReceiptsExtended, 10),
+      webhook_receipts_upper: parseInt(result.webhookReceiptsUpper, 10),
+      s10b_order_refetch_null_extended: parseInt(result.refetchNullExtended, 10),
+      s10b_order_refetch_null_upper: parseInt(result.refetchNullUpper, 10),
+      s6_bulk_operations_extended: parseInt(result.bulkOpsExtended, 10),
+      s6_bulk_operations_upper: parseInt(result.bulkOpsUpper, 10),
+      order_outstanding_missing_extended: parseInt(result.outstandingExtended, 10),
+      order_outstanding_missing_upper: parseInt(result.outstandingUpper, 10),
+      s10b_customer_pii_fallback_extended: parseInt(result.piiFallbackExtended, 10),
+      s10b_customer_pii_fallback_upper: parseInt(result.piiFallbackUpper, 10),
+      pgmq_q_s6_sync_extended: parseInt(result.pgmqSyncQueueExtended, 10),
+      pgmq_q_s6_sync_upper: parseInt(result.pgmqSyncQueueUpper, 10),
+      pgmq_q_s6_bulk_extended: parseInt(result.pgmqBulkQueueExtended, 10),
+      pgmq_q_s6_bulk_upper: parseInt(result.pgmqBulkQueueUpper, 10),
+      pgmq_a_s6_sync_extended: parseInt(result.pgmqSyncArchiveExtended, 10),
+      pgmq_a_s6_sync_upper: parseInt(result.pgmqSyncArchiveUpper, 10),
+      pgmq_a_s6_bulk_extended: parseInt(result.pgmqBulkArchiveExtended, 10),
+      pgmq_a_s6_bulk_upper: parseInt(result.pgmqBulkArchiveUpper, 10),
+      s6_dead_letter_extended: parseInt(result.deadLetterExtended, 10),
+      s6_dead_letter_upper: parseInt(result.deadLetterUpper, 10),
+    };
   }
 
   async function getRowCounts(shopId: string, shopDomain: string): Promise<Record<string, number>> {
@@ -268,6 +482,10 @@ describeWithDb("shop/redact complete DB deletion", () => {
       bulkOperations: string;
       outstandingMissing: string;
       piiFallback: string;
+      pgmqSyncQueue: string;
+      pgmqBulkQueue: string;
+      pgmqSyncArchive: string;
+      pgmqBulkArchive: string;
       deadLetter: string;
       shop: string;
     }]>`
@@ -294,6 +512,10 @@ describeWithDb("shop/redact complete DB deletion", () => {
         (SELECT COUNT(*)::text FROM s6_bulk_operations WHERE shop = ${shopDomain}) as "bulkOperations",
         (SELECT COUNT(*)::text FROM order_outstanding_missing WHERE shop = ${shopDomain}) as "outstandingMissing",
         (SELECT COUNT(*)::text FROM s10b_customer_pii_fallback WHERE shop = ${shopDomain}) as "piiFallback",
+        (SELECT COUNT(*)::text FROM pgmq.q_s6_sync WHERE message->>'shop' = ${shopDomain}) as "pgmqSyncQueue",
+        (SELECT COUNT(*)::text FROM pgmq.q_s6_bulk WHERE message->>'shop' = ${shopDomain}) as "pgmqBulkQueue",
+        (SELECT COUNT(*)::text FROM pgmq.a_s6_sync WHERE message->>'shop' = ${shopDomain}) as "pgmqSyncArchive",
+        (SELECT COUNT(*)::text FROM pgmq.a_s6_bulk WHERE message->>'shop' = ${shopDomain}) as "pgmqBulkArchive",
         (SELECT COUNT(*)::text FROM s6_dead_letter WHERE message->>'shop' = ${shopDomain}) as "deadLetter",
         (SELECT COUNT(*)::text FROM "Shop" WHERE id = ${shopId}) as shop
     `;
@@ -321,6 +543,10 @@ describeWithDb("shop/redact complete DB deletion", () => {
       s6_bulk_operations: parseInt(result.bulkOperations, 10),
       order_outstanding_missing: parseInt(result.outstandingMissing, 10),
       s10b_customer_pii_fallback: parseInt(result.piiFallback, 10),
+      pgmq_q_s6_sync: parseInt(result.pgmqSyncQueue, 10),
+      pgmq_q_s6_bulk: parseInt(result.pgmqBulkQueue, 10),
+      pgmq_a_s6_sync: parseInt(result.pgmqSyncArchive, 10),
+      pgmq_a_s6_bulk: parseInt(result.pgmqBulkArchive, 10),
       s6_dead_letter: parseInt(result.deadLetter, 10),
       Shop: parseInt(result.shop, 10),
     };
@@ -392,5 +618,149 @@ describeWithDb("shop/redact complete DB deletion", () => {
     for (const [table, count] of Object.entries(countsB)) {
       expect(count, `Shop B ${table} on replay should be 1`).toBe(1);
     }
+  });
+
+  it("near-miss domains (extended prefix and uppercase) are not deleted", async () => {
+    // Seed near-miss data (extended domain, uppercase domain)
+    await seedNearMissData();
+
+    // Get baseline counts
+    const nearMissCountsBefore = await getNearMissCounts();
+
+    // Verify near-miss rows exist (all should be 1)
+    for (const [key, count] of Object.entries(nearMissCountsBefore)) {
+      expect(count, `Near-miss ${key} before should be 1`).toBe(1);
+    }
+
+    // Create a temporary shop C with A's domain for deletion test
+    const SHOP_C_ID = `shop-c-${TEST_SUFFIX}`;
+    const now = new Date();
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+      VALUES (${SHOP_C_ID}, ${SHOP_A_DOMAIN}, 'INR', ${now}, ${now})
+    `;
+
+    // Run shop/redact for shop A's domain (which shop C now has)
+    const sessionStorage = new LightSessionStorage(sql);
+    await sessionStorage.deleteAllForShop(SHOP_A_DOMAIN);
+    await deleteWebhookReceiptsForShop(sql, SHOP_A_DOMAIN);
+    const result = await deleteShop(sql, SHOP_A_DOMAIN);
+
+    expect(result.deleted).toBe(true);
+    expect(result.shopId).toBe(SHOP_C_ID);
+
+    // Verify near-miss rows are still intact
+    const nearMissCountsAfter = await getNearMissCounts();
+    for (const [key, count] of Object.entries(nearMissCountsAfter)) {
+      expect(count, `Near-miss ${key} after should be 1`).toBe(1);
+    }
+
+    // Shop B should also still be intact
+    const countsB = await getRowCounts(SHOP_B_ID, SHOP_B_DOMAIN);
+    for (const [table, count] of Object.entries(countsB)) {
+      expect(count, `Shop B ${table} after near-miss test should be 1`).toBe(1);
+    }
+  });
+
+  it("in-flight pgmq messages: worker holding message under VT can safely archive/delete after shop redact", async () => {
+    // This test proves that when a drain worker holds a message under its visibility timeout (VT)
+    // and shop/redact deletes the message row, the worker's subsequent pgmq.archive() or
+    // pgmq.delete() call returns false (0 rows affected) without throwing an error.
+    // This is the documented pgmq v1.5.1 behavior.
+
+    const IN_FLIGHT_SUFFIX = `inflight-${TEST_SUFFIX}`;
+    const IN_FLIGHT_SHOP_ID = `shop-inflight-${TEST_SUFFIX}`;
+    const IN_FLIGHT_DOMAIN = `test-inflight-${TEST_SUFFIX}.myshopify.com`;
+
+    // Create a shop for this test
+    const now = new Date();
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+      VALUES (${IN_FLIGHT_SHOP_ID}, ${IN_FLIGHT_DOMAIN}, 'INR', ${now}, ${now})
+    `;
+
+    // 1. Send messages to both queues
+    const [syncMsg] = await sql<[{ send: string }]>`
+      SELECT pgmq.send('s6_sync', ${sql.json({
+        shop: IN_FLIGHT_DOMAIN,
+        topic: 'ORDERS_CREATE',
+        webhookId: `wh-inflight-sync-${IN_FLIGHT_SUFFIX}`,
+        resourceGid: `gid://shopify/Order/inflight-sync`,
+        enqueuedAt: now.toISOString()
+      })})
+    `;
+    const [bulkMsg] = await sql<[{ send: string }]>`
+      SELECT pgmq.send('s6_bulk', ${sql.json({
+        shop: IN_FLIGHT_DOMAIN,
+        topic: 'BULK_OPERATIONS_FINISH',
+        webhookId: `wh-inflight-bulk-${IN_FLIGHT_SUFFIX}`,
+        bulkOperationId: `gid://shopify/BulkOperation/inflight`,
+        bulkType: 'orders',
+        enqueuedAt: now.toISOString()
+      })})
+    `;
+
+    const syncMsgId = syncMsg.send;
+    const bulkMsgId = bulkMsg.send;
+
+    // 2. Simulate drain workers reading messages with VT (visibility timeout)
+    // pgmq.read(queue, vt_seconds, limit) returns the message and makes it invisible for vt seconds
+    // Note: pgmq.read returns a set of rows directly, we query for specific msg_id after to simulate the read
+    const readSync = await sql<{ msg_id: string }[]>`
+      SELECT msg_id::text FROM pgmq.read('s6_sync', 30, 1) WHERE msg_id = ${syncMsgId}::bigint
+    `;
+    const readBulk = await sql<{ msg_id: string }[]>`
+      SELECT msg_id::text FROM pgmq.read('s6_bulk', 30, 1) WHERE msg_id = ${bulkMsgId}::bigint
+    `;
+
+    expect(readSync.length).toBe(1);
+    expect(readBulk.length).toBe(1);
+    expect(readSync[0].msg_id).toBe(syncMsgId);
+    expect(readBulk[0].msg_id).toBe(bulkMsgId);
+
+    // 3. Run shop/redact to delete the messages from the queue
+    const sessionStorage = new LightSessionStorage(sql);
+    await sessionStorage.deleteAllForShop(IN_FLIGHT_DOMAIN);
+    await deleteWebhookReceiptsForShop(sql, IN_FLIGHT_DOMAIN);
+    const result = await deleteShop(sql, IN_FLIGHT_DOMAIN);
+
+    expect(result.deleted).toBe(true);
+    expect(result.shopId).toBe(IN_FLIGHT_SHOP_ID);
+    expect(result.pgmqSyncQueuePurged).toBe(1);
+    expect(result.pgmqBulkQueuePurged).toBe(1);
+
+    // 4. Now simulate what the drain worker does after processing:
+    // it calls pgmq.archive() (or pgmq.delete()) on the msg_id.
+    // Since we deleted the row, these should return false (not throw).
+    const [archiveSyncResult] = await sql<[{ archive: boolean }]>`
+      SELECT pgmq.archive('s6_sync', ${syncMsgId}::bigint)
+    `;
+    const [deleteBulkResult] = await sql<[{ delete: boolean }]>`
+      SELECT pgmq.delete('s6_bulk', ${bulkMsgId}::bigint)
+    `;
+
+    // pgmq.archive() and pgmq.delete() return false when the msg_id doesn't exist
+    // This is the safe behavior - no error thrown, just returns false
+    expect(archiveSyncResult.archive).toBe(false);
+    expect(deleteBulkResult.delete).toBe(false);
+
+    // Verify the messages are indeed gone from both queue and archive
+    const [syncQueueCount] = await sql<[{ count: string }]>`
+      SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync WHERE msg_id = ${syncMsgId}::bigint
+    `;
+    const [bulkQueueCount] = await sql<[{ count: string }]>`
+      SELECT COUNT(*)::text as count FROM pgmq.q_s6_bulk WHERE msg_id = ${bulkMsgId}::bigint
+    `;
+    const [syncArchiveCount] = await sql<[{ count: string }]>`
+      SELECT COUNT(*)::text as count FROM pgmq.a_s6_sync WHERE msg_id = ${syncMsgId}::bigint
+    `;
+    const [bulkArchiveCount] = await sql<[{ count: string }]>`
+      SELECT COUNT(*)::text as count FROM pgmq.a_s6_bulk WHERE msg_id = ${bulkMsgId}::bigint
+    `;
+
+    expect(parseInt(syncQueueCount.count, 10)).toBe(0);
+    expect(parseInt(bulkQueueCount.count, 10)).toBe(0);
+    expect(parseInt(syncArchiveCount.count, 10)).toBe(0);
+    expect(parseInt(bulkArchiveCount.count, 10)).toBe(0);
   });
 });

@@ -95,6 +95,7 @@ const DB_TEST_PATTERNS = [
   // Route DB tests
   "app/routes/__tests__/app.imports.test.ts",
   "app/routes/__tests__/app._index.test.ts",
+  "app/routes/__tests__/app._index-overlimit-db.test.ts",
 
   // Lib DB tests
   "app/lib/__tests__/after-auth-db.test.ts",

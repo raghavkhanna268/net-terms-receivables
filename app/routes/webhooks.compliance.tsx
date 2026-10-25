@@ -16,6 +16,7 @@ import {
 } from "~/services/compliance";
 import { getShopifyApp } from "~/shopify.server";
 import { deleteWebhookReceiptsForShop } from "~/lib/webhook-receipts.server";
+import { safeLog, shopHash } from "~/lib/log.server";
 
 /**
  * Fetch shop owner email using the offline session admin client.
@@ -229,19 +230,27 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       );
 
       const result = await deleteShop(sql, payloadShop);
+      const hash = await shopHash(payloadShop);
 
       if (result.deleted) {
-        console.log(
-          `[Compliance] shop/redact: Deleted Shop id=${result.shopId} wh=${webhookId} ` +
-            `refetch_null=${result.refetchNullPurged} bulk_ops=${result.bulkOperationsPurged} ` +
-            `outstanding_missing=${result.outstandingMissingPurged} pii_fallback=${result.piiFallbackPurged} ` +
-            `dead_letter=${result.deadLetterPurged} (all data cascaded via FKs)`
-        );
+        safeLog("info", "shop_redact_deleted", {
+          shopHash: hash,
+          webhookId,
+          refetchNullPurged: result.refetchNullPurged,
+          bulkOperationsPurged: result.bulkOperationsPurged,
+          outstandingMissingPurged: result.outstandingMissingPurged,
+          piiFallbackPurged: result.piiFallbackPurged,
+          pgmqSyncQueuePurged: result.pgmqSyncQueuePurged,
+          pgmqBulkQueuePurged: result.pgmqBulkQueuePurged,
+          pgmqSyncArchivePurged: result.pgmqSyncArchivePurged,
+          pgmqBulkArchivePurged: result.pgmqBulkArchivePurged,
+          deadLetterPurged: result.deadLetterPurged,
+        });
       } else {
-        console.log(
-          `[Compliance] shop/redact: Shop not found wh=${webhookId} ` +
-            `(may have been deleted already or never installed)`
-        );
+        safeLog("info", "shop_redact_not_found", {
+          shopHash: hash,
+          webhookId,
+        });
       }
       break;
     }

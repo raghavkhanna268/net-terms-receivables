@@ -66,9 +66,17 @@ describe("compliance.server", () => {
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
       // 4. DELETE s10b_customer_pii_fallback
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-      // 5. DELETE s6_dead_letter
+      // 5. DELETE pgmq.q_s6_sync
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 6 }));
+      // 6. DELETE pgmq.q_s6_bulk
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 7 }));
+      // 7. DELETE pgmq.a_s6_sync
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 8 }));
+      // 8. DELETE pgmq.a_s6_bulk
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 9 }));
+      // 9. DELETE s6_dead_letter
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 4 }));
-      // 6. DELETE Shop
+      // 10. DELETE Shop
       mockTx.mockResolvedValueOnce([{ id: "shop-123" }]);
 
       const result = await deleteShop(mockSql, "test-shop.myshopify.com");
@@ -80,6 +88,10 @@ describe("compliance.server", () => {
         bulkOperationsPurged: 2,
         outstandingMissingPurged: 3,
         piiFallbackPurged: 1,
+        pgmqSyncQueuePurged: 6,
+        pgmqBulkQueuePurged: 7,
+        pgmqSyncArchivePurged: 8,
+        pgmqBulkArchivePurged: 9,
         deadLetterPurged: 4,
       });
       expect(mockSql.begin).toHaveBeenCalledTimes(1);
@@ -95,9 +107,17 @@ describe("compliance.server", () => {
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
       // 4. DELETE s10b_customer_pii_fallback
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 5. DELETE s6_dead_letter
+      // 5. DELETE pgmq.q_s6_sync
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 6. DELETE Shop (no rows)
+      // 6. DELETE pgmq.q_s6_bulk
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 7. DELETE pgmq.a_s6_sync
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 8. DELETE pgmq.a_s6_bulk
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 9. DELETE s6_dead_letter
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 10. DELETE Shop (no rows)
       mockTx.mockResolvedValueOnce([]);
 
       const result = await deleteShop(mockSql, "nonexistent.myshopify.com");
@@ -109,17 +129,21 @@ describe("compliance.server", () => {
         bulkOperationsPurged: 0,
         outstandingMissingPurged: 0,
         piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
         deadLetterPurged: 0,
       });
     });
   });
 
   describe("purgePgmqMessages", () => {
-    it("returns documented limitation (pgmq does not support per-shop deletion)", async () => {
+    it("returns that deleteShop now handles pgmq deletion", async () => {
       const result = await purgePgmqMessages(mockSql, "test-shop.myshopify.com");
 
       expect(result.purged).toBe(false);
-      expect(result.reason).toContain("pgmq does not support per-shop message deletion");
+      expect(result.reason).toContain("deleteShop() now removes the shop's queue and archive messages");
     });
   });
 
