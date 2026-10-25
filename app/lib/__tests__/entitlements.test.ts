@@ -441,5 +441,12 @@ describe("getPlanConfig", () => {
       const plan = getPlanConfig("enterprise" as PlanKey);
       expect(plan.key).toBe("none");
     });
+
+    it("returns none config for 'bogus' (QA2 test case)", () => {
+      const plan = getPlanConfig("bogus" as PlanKey);
+      expect(plan.key).toBe("none");
+      expect(plan.limits.companies).toBe(0);
+      expect(plan.limits.importsPerMonth).toBe(-1);
+    });
   });
 });

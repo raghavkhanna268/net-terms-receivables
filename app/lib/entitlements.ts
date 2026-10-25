@@ -201,11 +201,19 @@ export function mapSubscriptionToPlanKey(
 /**
  * Get the configuration for a plan key.
  *
- * @param key - The plan key
- * @returns The plan configuration
+ * Defensive: returns none config for unknown/invalid keys.
+ * This handles cases where a raw string from DB is cast to PlanKey.
+ *
+ * @param key - The plan key (may be unknown string cast to PlanKey)
+ * @returns The plan configuration (none if key is unknown)
  */
 export function getPlanConfig(key: PlanKey): PlanConfig {
-  return PLAN_CONFIGS[key] ?? PLAN_CONFIGS.none;
+  // Defensive: check if key exists in PLAN_CONFIGS before accessing
+  // This handles arbitrary strings that were cast to PlanKey
+  if (key in PLAN_CONFIGS) {
+    return PLAN_CONFIGS[key];
+  }
+  return PLAN_CONFIGS.none;
 }
 
 /**

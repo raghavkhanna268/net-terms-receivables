@@ -35,7 +35,6 @@ import {
   type LimitKey,
   getPlanConfig,
   getDefaultPlan,
-  mapSubscriptionToPlanKey,
   planHasFeature,
   planLimit,
   resolvePlanKey,
@@ -271,22 +270,21 @@ async function fetchPlanFromShopify(
     };
   }
 
-  // Map the subscription name to a plan key
-  const planKey = mapSubscriptionToPlanKey(activeSubscription.name);
+  // Map the subscription name to a plan key using resolvePlanKey
+  // (Only the subscription name is mapped today; handle-first matching arrives with T2 Partner API)
+  const planKey = resolvePlanKey(activeSubscription.name);
 
-  if (!planKey) {
+  // Warn for unknown names that resolve to 'none'
+  // Known names: starter, growth, unlimited, free, scale
+  const normalizedName = activeSubscription.name?.toLowerCase().trim() ?? "";
+  const knownNames = ["starter", "growth", "unlimited", "free", "scale"];
+  if (!knownNames.includes(normalizedName)) {
     safeLog("warn", "unknown_subscription_name", {
       shopHash: await shopHash(shop),
       subscriptionId: activeSubscription.id,
       isTest: activeSubscription.test,
     });
     captureMessage("unknown_subscription_name", "warning");
-    return {
-      planKey: "none",
-      subscriptionId: activeSubscription.id,
-      subscriptionName: activeSubscription.name,
-      isTest: activeSubscription.test,
-    };
   }
 
   return {
