@@ -469,7 +469,7 @@ describe("S21 Account page banner using buildAccountOverLimitBannerState helper"
     const { buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
     const state = buildAccountOverLimitBannerState(true, true);
     expect(state.show).toBe(true);
-    expect(state.heading).toBe("This account is over your plan limit");
+    expect(state.heading).toBe("This account was added after you reached your plan limit");
   });
 
   it("hides banner when isGated is false", async () => {

@@ -387,7 +387,7 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
           success: false,
           upgradeRequired: true,
           code: "plan_limit_account_gated",
-          error: "This account is over your plan limit. Upgrade to edit credit limits.",
+          error: "This account was added after you reached your plan limit. Upgrade your plan to manage credit limits for this account.",
         } satisfies ActionData,
         { status: 403 }
       );
