@@ -98,12 +98,6 @@ for raw in sys.stdin:
         continue
     if line == "Mode: DRY-RUN (use --apply to write)":
         dry_run_seen = True
-    # Fail closed: check for id-shaped values on EVERY non-empty, non-apply line
-    # before any other processing. This catches leaks even if the allowlist
-    # patterns would not match the line.
-    if contains_id_shaped_value(line):
-        id_leak += 1
-        continue
     out = None
     sm = SHOP_RE.match(line)
     if sm:
@@ -117,8 +111,14 @@ for raw in sys.stdin:
     if out is None:
         dropped += 1
         continue
+    # QA 2 ruling: check host and id-shaped values on OUTPUT (`out`) after shop
+    # masking and error redaction, not on raw input. Host leaks (exit 5) have
+    # precedence over id leaks (exit 6).
     if HOST.search(out):
         host_leak += 1
+        continue
+    if contains_id_shaped_value(out):
+        id_leak += 1
         continue
     print(out)
 

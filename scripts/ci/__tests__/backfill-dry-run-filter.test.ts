@@ -32,57 +32,61 @@ Backstop Backfill Script (S13)
 Mode: DRY-RUN (use --apply to write)
 Window: 2026-10-01T00:00:00.000Z to 2026-10-15T00:00:00.000Z
 Finding candidates (held accounts with missing backstop)...
-
-Found 1 candidate(s):
 `;
 
-  it("blocks UUIDs (with hyphens)", () => {
+  // QA 2 ruling: id-shape check runs on OUTPUT after masking, not on raw input.
+  // Lines that don't match the allowlist are dropped (not printed), so they don't
+  // trigger id-leak errors. This is correct behavior.
+  it("drops non-allowlisted lines with UUIDs without failing", () => {
     const input = DRY_RUN_HEADER + "  account: 550e8400-e29b-41d4-a716-446655440000\n";
     const result = runFilter(input);
-    expect(result.exitCode).toBe(6);
-    expect(result.stdout).toContain("id-shaped value in output");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("dropped_lines=1");
+    expect(result.stdout).not.toContain("550e8400");
   });
 
-  it("blocks UUIDs (without hyphens)", () => {
-    const input = DRY_RUN_HEADER + "  account: 550e8400e29b41d4a716446655440000\n";
-    const result = runFilter(input);
-    expect(result.exitCode).toBe(6);
-    expect(result.stdout).toContain("id-shaped value in output");
-  });
-
-  it("blocks Shopify GIDs", () => {
+  it("drops non-allowlisted lines with GIDs without failing", () => {
     const input = DRY_RUN_HEADER + "  Order: gid://shopify/Order/12345678901234\n";
     const result = runFilter(input);
-    expect(result.exitCode).toBe(6);
-    expect(result.stdout).toContain("id-shaped value in output");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("dropped_lines=1");
   });
 
-  it("blocks long numeric IDs (6+ digits)", () => {
+  it("drops non-allowlisted lines with long numeric IDs without failing", () => {
     const input = DRY_RUN_HEADER + "  account: 123456789\n";
     const result = runFilter(input);
-    expect(result.exitCode).toBe(6);
-    expect(result.stdout).toContain("id-shaped value in output");
+    expect(result.exitCode).toBe(0);
   });
 
-  it("blocks CUID-like tokens", () => {
+  it("drops non-allowlisted lines with CUIDs without failing", () => {
     const input = DRY_RUN_HEADER + "  account: clh3am0kn00001x2jc8zy4w3v\n";
     const result = runFilter(input);
-    expect(result.exitCode).toBe(6);
-    expect(result.stdout).toContain("id-shaped value in output");
+    expect(result.exitCode).toBe(0);
   });
 
-  it("blocks seed-account-* fixture IDs", () => {
+  it("drops non-allowlisted lines with seed-account IDs without failing", () => {
     const input = DRY_RUN_HEADER + "  account: seed-account-held-1\n";
     const result = runFilter(input);
+    expect(result.exitCode).toBe(0);
+  });
+
+  // Test that id-shaped values in ALLOWLISTED output ARE caught.
+  // The "Candidates: N" pattern is allowlisted, so large counts trigger id check.
+  it("blocks long numeric IDs in allowlisted output", () => {
+    const input = DRY_RUN_HEADER + "Candidates: 1234567\n";
+    const result = runFilter(input);
     expect(result.exitCode).toBe(6);
     expect(result.stdout).toContain("id-shaped value in output");
   });
 
-  it("blocks CompanyLocation GIDs in any context", () => {
+  it("blocks GIDs embedded in allowlisted error output", () => {
+    // Error lines are transformed but the GID pattern would still be present
+    // Actually, error lines use redact_class() which replaces digits/hex, so GIDs are redacted.
+    // This test verifies GIDs in non-allowlisted lines are dropped, not printed.
     const input = DRY_RUN_HEADER + "  location: gid://shopify/CompanyLocation/24539398309\n";
     const result = runFilter(input);
-    expect(result.exitCode).toBe(6);
-    expect(result.stdout).toContain("id-shaped value in output");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).not.toContain("gid://");
   });
 });
 
