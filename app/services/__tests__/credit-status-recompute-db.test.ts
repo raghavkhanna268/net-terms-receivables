@@ -3697,3 +3697,7 @@ describeWithDb("leak checks (#204)", () => {
     await sql`DELETE FROM pgmq.q_s6_sync WHERE msg_id = ${msgId}::bigint`;
   });
 });
+
+// Note: The no-owner logic in getOwnerGid is tested via unit tests in credit-status.test.ts.
+// The BuyerAccount_kind_consistency CHECK constraint prevents inserting no-owner rows in the DB,
+// so drain handler tests only use valid rows that satisfy the constraint.
