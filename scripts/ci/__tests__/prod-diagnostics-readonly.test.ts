@@ -480,19 +480,37 @@ describe("S12 Validation deployed inputQuery metrics (no text)", () => {
     expect(other.iq_has_credit_status).toBe(false);
   });
 
-  it("null is distinguished from empty string", () => {
+  it("null inputQuery reports credit_status as \"unknown\", not false", () => {
     const nul = status(null).s;
-    expect(nul).toMatchObject({ input_query_null: true, input_query_length: 0, deployed_input_query_has_credit_status: false });
+    expect(nul).toMatchObject({ input_query_null: true, input_query_length: 0, deployed_input_query_has_credit_status: "unknown" });
+  });
+
+  it("empty-string inputQuery is non-null (length 0) and reports a definite false", () => {
     const empty = status("").s;
     expect(empty).toMatchObject({ input_query_null: false, input_query_length: 0, deployed_input_query_has_credit_status: false });
   });
 
-  it("missing inputQuery key and missing validation node both read as null", () => {
-    expect(status(undefined, false).s).toMatchObject({ input_query_null: true, input_query_length: 0 });
+  it("non-null inputQuery always reports a boolean credit_status", () => {
+    expect(status(MULTILINE_DOLLAR_APP).s.deployed_input_query_has_credit_status).toBe(true);
+    expect(status("query { cart { lines { id } } }").s.deployed_input_query_has_credit_status).toBe(false);
+  });
+
+  it("missing inputQuery key and missing validation node both read as null => unknown", () => {
+    expect(status(undefined, false).s).toMatchObject({
+      input_query_null: true,
+      input_query_length: 0,
+      deployed_input_query_has_credit_status: "unknown",
+    });
     const { json } = runSnippet(run, STATUS_START, CROSS_START, {
       HTTP_RESPONSE_JSON: JSON.stringify({ data: { validations: { nodes: [] } } }),
     });
-    expect(json[0]).toMatchObject({ exists: false, input_query_null: true, input_query_length: 0, iq_has_metafield: false });
+    expect(json[0]).toMatchObject({
+      exists: false,
+      input_query_null: true,
+      input_query_length: 0,
+      iq_has_metafield: false,
+      deployed_input_query_has_credit_status: "unknown",
+    });
   });
 
   it("status prints only booleans and integers under a fixed key set", () => {
@@ -514,6 +532,13 @@ describe("S12 Validation deployed inputQuery metrics (no text)", () => {
     );
     for (const [k, v] of Object.entries(s)) {
       if (k === "input_query_length") expect(Number.isInteger(v)).toBe(true);
+      else expect(typeof v).toBe("boolean");
+    }
+    // Null case: the only non-boolean allowed is the fixed enum "unknown".
+    const nul = status(null).s;
+    for (const [k, v] of Object.entries(nul)) {
+      if (k === "input_query_length") expect(v).toBe(0);
+      else if (k === "deployed_input_query_has_credit_status") expect(v).toBe("unknown");
       else expect(typeof v).toBe("boolean");
     }
   });
@@ -549,11 +574,38 @@ describe("S12 Validation deployed inputQuery metrics (no text)", () => {
             input_query_length: [...MULTILINE_APP_PREFIX].length,
             has_credit_status: true,
           },
-          { id: "fn-2", handle_is_credit_check_validation: false, input_query_null: true, input_query_length: 0, has_credit_status: false },
+          { id: "fn-2", handle_is_credit_check_validation: false, input_query_null: true, input_query_length: 0, has_credit_status: "unknown" },
         ],
       });
       expect(stdout).not.toContain(SENTINEL);
       expect(stdout).not.toContain("metafield(");
+    });
+
+    it("per-function has_credit_status: null => \"unknown\", empty string and non-matching => false", () => {
+      const { stdout, json } = cross({
+        data: {
+          shopifyFunctions: {
+            nodes: [
+              { id: "fn-null", handle: "credit-check-validation", inputQuery: null },
+              { id: "fn-missing", handle: "other" },
+              { id: "fn-empty", handle: "other", inputQuery: "" },
+              { id: "fn-nomatch", handle: "other", inputQuery: `query { cart { lines { id } } } # ${SENTINEL}` },
+              { id: "fn-match", handle: "other", inputQuery: MULTILINE_DOLLAR_APP },
+            ],
+          },
+        },
+      });
+      const fns = (json[0] as { functions: Array<Record<string, unknown>> }).functions;
+      expect(fns.map((f) => [f.id, f.input_query_null, f.has_credit_status])).toEqual([
+        ["fn-null", true, "unknown"],
+        ["fn-missing", true, "unknown"],
+        ["fn-empty", false, false],
+        ["fn-nomatch", false, false],
+        ["fn-match", false, true],
+      ]);
+      expect(stdout).not.toContain(SENTINEL);
+      expect(stdout).not.toContain("buyerIdentity");
+      expect(stdout).not.toContain("lines {");
     });
 
     it("soft-fails on HTTP error and on GraphQL errors (codes only)", () => {

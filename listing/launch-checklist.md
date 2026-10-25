@@ -127,10 +127,10 @@
 ## Feature Gates (must hold until conditions are met)
 
 - [ ] **⚠️ `PLAN_GATING_ENFORCED` stays `"false"` in every environment** (`wrangler.jsonc` `[vars]` and any env sections)
-  - **Until:** Raghav decides pricing, the Shopify plans are created, **and** the lead Developer's `activeAccountFragment` fix lands
+  - **Until:** Raghav decides pricing and the Shopify plans are created (the `activeAccountFragment` condition was satisfied by #127)
   - **Go:** comes from Raghav via Wholesale Terms Builder
   - **Owner:** Raghav (decision), then DevOps flips it
-  - **Why:** enabling it earlier silently stops holds for gated accounts
+  - **Why:** enabling it gates new over-limit accounts and skips reminders for gated accounts (holds and aging are unaffected)
   - **Check before every deploy:** the deployed value is `"false"`; if not, do not deploy and escalate
 
 - [ ] **⚠️ Payment reminders (S18): Resend prerequisites before any shop enables reminders**
