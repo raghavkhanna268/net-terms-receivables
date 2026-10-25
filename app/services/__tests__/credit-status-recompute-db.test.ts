@@ -56,7 +56,7 @@ vi.mock("../shopify-client.server", async (importOriginal) => {
 // Import after mock setup
 import { recomputeCreditStatus } from "../credit-status-recompute.server";
 import { hasOverdueInvoices } from "../overdue.server";
-import { getSyncHandler, runDrain } from "../drain/processor.server";
+import { getSyncHandler } from "../drain/processor.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;

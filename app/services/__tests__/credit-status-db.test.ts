@@ -5,7 +5,7 @@
  * This file tests the real DB operations while mocking only the HTTP layer
  * (shopifyGraphQLRequest) for syncVersion race condition tests.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 
