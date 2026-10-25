@@ -333,6 +333,21 @@ function formatLogDate(date: string | Date, timezone: string): string {
   });
 }
 
+/**
+ * Format a YYYY-MM-DD date string as a calendar date without timezone shift.
+ * Uses UTC to avoid date boundary issues when displaying a pure date.
+ */
+export function formatCatchUpByDate(dateStr: string): string {
+  const [year, month, day] = dateStr.split("-").map(Number);
+  const d = new Date(Date.UTC(year, month - 1, day));
+  return d.toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+}
+
 function ReminderLogRow({ entry, timezone }: { entry: ReminderLogEntry; timezone: string }) {
   const badgeTone = getStatusBadgeTone(entry.status);
   return (
@@ -459,7 +474,7 @@ export default function RemindersSettingsPage() {
                         <RuleOffsetLabel offsetDays={reminder.offsetDays} />
                       </s-table-cell>
                       <s-table-cell>
-                        {formatLogDate(reminder.catchUpBy, shopTimezone)}
+                        {formatCatchUpByDate(reminder.catchUpBy)}
                       </s-table-cell>
                     </s-table-row>
                   ))}

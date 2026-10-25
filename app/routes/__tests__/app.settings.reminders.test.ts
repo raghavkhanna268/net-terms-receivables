@@ -1360,7 +1360,7 @@ describe("Reminder Settings Route - loader passthrough", () => {
         invoiceName: "#INV-001",
         offsetDays: 0,
         firstCappedAt: new Date(),
-        catchUpBy: new Date("2026-10-28"),
+        catchUpBy: "2026-10-28",
       },
     ]);
 
@@ -1501,7 +1501,7 @@ describe("Reminder Settings Route - render tests", () => {
               invoiceName: "#INV-DELAYED",
               offsetDays: 7,
               firstCappedAt: new Date(),
-              catchUpBy: new Date("2026-10-28"),
+              catchUpBy: "2026-10-28",
             },
           ],
         }),
@@ -1637,7 +1637,7 @@ describe("Reminder Settings Route - render tests", () => {
               invoiceName: piiEmail,
               offsetDays: 0,
               firstCappedAt: new Date(),
-              catchUpBy: new Date("2026-10-28"),
+              catchUpBy: "2026-10-28",
             },
           ],
         }),
@@ -1729,5 +1729,155 @@ describe("formatStatus and getStatusBadgeTone exports", () => {
     expect(getStatusBadgeTone("delayed")).toBe("warning");
     expect(getStatusBadgeTone("skipped_daily_limit")).toBeUndefined();
     expect(getStatusBadgeTone("unknown")).toBeUndefined();
+  });
+});
+
+describe("formatCatchUpByDate timezone-safe formatting", () => {
+  it("formats YYYY-MM-DD without timezone shift", async () => {
+    const { formatCatchUpByDate } = await import("../app.settings.reminders");
+
+    expect(formatCatchUpByDate("2026-10-28")).toBe("Oct 28, 2026");
+    expect(formatCatchUpByDate("2026-01-15")).toBe("Jan 15, 2026");
+    expect(formatCatchUpByDate("2026-12-31")).toBe("Dec 31, 2026");
+  });
+});
+
+describe("Catch-up by date renders correctly for all timezones", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.doUnmock("react-router");
+    vi.resetModules();
+  });
+
+  it("shopTimezone 'America/New_York' with catchUpBy '2026-10-28' shows 'Oct 28, 2026'", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      const React = await import("react");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          settings: { enabled: true },
+          rules: [],
+          logs: [],
+          providerConfigured: true,
+          shopTimezone: "America/New_York",
+          shopSentToday: 0,
+          statusCounts: { sent: 0, delayed: 1, skippedDailyLimit: 0 },
+          delayedReminders: [
+            {
+              id: "log-ny-tz",
+              invoiceName: "#INV-NY",
+              offsetDays: 0,
+              firstCappedAt: new Date(),
+              catchUpBy: "2026-10-28",
+            },
+          ],
+        }),
+        useNavigation: () => ({ state: "idle" }),
+        Form: ({ children, ...props }: { children?: React.ReactNode; [key: string]: unknown }) =>
+          React.createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: RemindersSettingsPage } = await import("../app.settings.reminders");
+
+    const html = renderToString(createElement(RemindersSettingsPage));
+
+    expect(html).toContain("Oct 28, 2026");
+    expect(html).not.toContain("Oct 27, 2026");
+  });
+
+  it("shopTimezone 'Asia/Kolkata' with catchUpBy '2026-10-28' shows 'Oct 28, 2026'", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      const React = await import("react");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          settings: { enabled: true },
+          rules: [],
+          logs: [],
+          providerConfigured: true,
+          shopTimezone: "Asia/Kolkata",
+          shopSentToday: 0,
+          statusCounts: { sent: 0, delayed: 1, skippedDailyLimit: 0 },
+          delayedReminders: [
+            {
+              id: "log-kolkata-tz",
+              invoiceName: "#INV-KOLKATA",
+              offsetDays: 0,
+              firstCappedAt: new Date(),
+              catchUpBy: "2026-10-28",
+            },
+          ],
+        }),
+        useNavigation: () => ({ state: "idle" }),
+        Form: ({ children, ...props }: { children?: React.ReactNode; [key: string]: unknown }) =>
+          React.createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: RemindersSettingsPage } = await import("../app.settings.reminders");
+
+    const html = renderToString(createElement(RemindersSettingsPage));
+
+    expect(html).toContain("Oct 28, 2026");
+  });
+
+  it("shopTimezone 'Pacific/Honolulu' with catchUpBy '2026-10-28' shows 'Oct 28, 2026'", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      const React = await import("react");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          settings: { enabled: true },
+          rules: [],
+          logs: [],
+          providerConfigured: true,
+          shopTimezone: "Pacific/Honolulu",
+          shopSentToday: 0,
+          statusCounts: { sent: 0, delayed: 1, skippedDailyLimit: 0 },
+          delayedReminders: [
+            {
+              id: "log-honolulu-tz",
+              invoiceName: "#INV-HONOLULU",
+              offsetDays: 0,
+              firstCappedAt: new Date(),
+              catchUpBy: "2026-10-28",
+            },
+          ],
+        }),
+        useNavigation: () => ({ state: "idle" }),
+        Form: ({ children, ...props }: { children?: React.ReactNode; [key: string]: unknown }) =>
+          React.createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: RemindersSettingsPage } = await import("../app.settings.reminders");
+
+    const html = renderToString(createElement(RemindersSettingsPage));
+
+    expect(html).toContain("Oct 28, 2026");
+    expect(html).not.toContain("Oct 27, 2026");
   });
 });

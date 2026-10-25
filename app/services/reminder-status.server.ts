@@ -17,7 +17,7 @@ export interface DelayedReminder {
   invoiceName: string;
   offsetDays: number;
   firstCappedAt: Date | null;
-  catchUpBy: Date;
+  catchUpBy: string;
 }
 
 /**
@@ -86,14 +86,14 @@ export async function getDelayedReminders(
     invoiceName: string;
     offsetDays: number;
     firstCappedAt: Date | null;
-    catchUpBy: Date;
+    catchUpBy: string;
   }[]>`
     SELECT
       rl.id,
       i.name AS "invoiceName",
       r."offsetDays",
       rl."firstCappedAt",
-      ((i."dueAt" AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE + r."offsetDays" + 3) AS "catchUpBy"
+      ((i."dueAt" AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE + r."offsetDays" + 3)::TEXT AS "catchUpBy"
     FROM "ReminderLog" rl
     INNER JOIN "Invoice" i ON i.id = rl."invoiceId" AND i."shopId" = rl."shopId"
     INNER JOIN "ReminderRule" r ON r.id = rl."ruleId" AND r."shopId" = rl."shopId"

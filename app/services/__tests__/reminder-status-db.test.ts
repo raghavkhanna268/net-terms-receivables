@@ -250,10 +250,9 @@ describeWithDb("S18 reminder status queries (DB)", () => {
       expect(reminders[0].firstCappedAt).toBeDefined();
       
       // catchUpBy = 2026-10-25 (dueAt in Asia/Kolkata) + 0 (offsetDays) + 3 = 2026-10-28
-      const catchUpByDate = new Date(reminders[0].catchUpBy);
-      expect(catchUpByDate.getUTCFullYear()).toBe(2026);
-      expect(catchUpByDate.getUTCMonth()).toBe(9); // October (0-indexed)
-      expect(catchUpByDate.getUTCDate()).toBe(28);
+      // Returned as TEXT 'YYYY-MM-DD'
+      expect(typeof reminders[0].catchUpBy).toBe("string");
+      expect(reminders[0].catchUpBy).toBe("2026-10-28");
     });
 
     it("catchUpBy computation with non-zero offsetDays", async () => {
@@ -282,10 +281,9 @@ describeWithDb("S18 reminder status queries (DB)", () => {
       expect(reminders[0].offsetDays).toBe(7);
       
       // catchUpBy = 2026-10-20 + 7 + 3 = 2026-10-30
-      const catchUpByDate = new Date(reminders[0].catchUpBy);
-      expect(catchUpByDate.getUTCFullYear()).toBe(2026);
-      expect(catchUpByDate.getUTCMonth()).toBe(9); // October
-      expect(catchUpByDate.getUTCDate()).toBe(30);
+      // Returned as TEXT 'YYYY-MM-DD'
+      expect(typeof reminders[0].catchUpBy).toBe("string");
+      expect(reminders[0].catchUpBy).toBe("2026-10-30");
     });
 
     it("timezone boundary case: Asia/Kolkata vs UTC around midnight", async () => {
@@ -316,10 +314,9 @@ describeWithDb("S18 reminder status queries (DB)", () => {
       // In Asia/Kolkata (UTC+5:30), 2026-10-25 23:00 UTC = 2026-10-26 04:30 IST
       // So the date in shop timezone is Oct 26
       // catchUpBy = 2026-10-26 + 0 + 3 = 2026-10-29
-      const catchUpByDate = new Date(reminders[0].catchUpBy);
-      expect(catchUpByDate.getUTCFullYear()).toBe(2026);
-      expect(catchUpByDate.getUTCMonth()).toBe(9); // October
-      expect(catchUpByDate.getUTCDate()).toBe(29);
+      // Returned as TEXT 'YYYY-MM-DD'
+      expect(typeof reminders[0].catchUpBy).toBe("string");
+      expect(reminders[0].catchUpBy).toBe("2026-10-29");
     });
 
     it("shop isolation: another shop's delayed rows aren't listed", async () => {
