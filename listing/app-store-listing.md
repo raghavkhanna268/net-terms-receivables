@@ -40,10 +40,40 @@ Net Terms Receivables helps Indian wholesale merchants track outstanding invoice
 
 ## Pricing Details
 
-**[OWNER]** Pricing not finalized. Create plans in Partner Dashboard before submission.
+| Plan | Monthly | Annual | Buyer Accounts | Support |
+|------|---------|--------|----------------|---------|
+| Starter | $9/month | $90/year | Up to 25 | Standard |
+| Growth | $19/month | $190/year | Up to 100 | Standard |
+| Unlimited | $29/month | $290/year | Unlimited | Priority |
 
-Spec: Define pricing tiers in the Partner Dashboard "Pricing" section. Use Shopify App Pricing (recommended) or Billing API. Include free trial if applicable.
+- **30-day free trial** on all plans
+- **Annual billing** at 10× monthly (2 months free)
+- **Every feature included** on every plan
+- **No free plan**
+
+Spec: Configure these plans in the Partner Dashboard "Pricing" section using Shopify App Pricing (recommended) or Billing API.
 Ref: https://shopify.dev/docs/apps/launch/billing
+
+### DRAFT: Top features (per plan, for the Partner Dashboard plan descriptions; final copy owned by Wholesale Terms Builder)
+
+**Starter (up to 25 buyer accounts)**
+- Up to 25 buyer accounts · All features included
+
+**Growth (up to 100 buyer accounts)**
+- Up to 100 buyer accounts · All features included
+
+**Unlimited**
+- Unlimited buyer accounts · Priority support · All features included
+
+**All plans include:**
+- Sync buyer accounts from B2B Companies or tagged Customers
+- Track invoices with aging buckets (current through 90+ days)
+- Set credit limits and manual holds per buyer
+- Block checkout when accounts are on hold or over limit
+- Hide payment methods for held accounts at checkout
+- Import HDFC, ICICI, SBI, Axis bank statements (browser-side)
+- Match payments to invoices; confirm to mark orders paid
+- Send payment reminders before and after due dates
 
 ---
 
