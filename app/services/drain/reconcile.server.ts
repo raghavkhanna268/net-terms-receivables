@@ -20,6 +20,7 @@
 
 import type { Sql } from "~/lib/db-light.server";
 import { S6_QUEUES } from "~/lib/pgmq.server";
+import { recoverStaleBulkOperations } from "./bulk-op-recovery.server";
 
 /**
  * Reconcile message for triggering bulk exports.
@@ -80,6 +81,19 @@ export function makeReconcileWebhookId(
  * @returns Number of messages enqueued
  */
 export async function enqueueReconcileForAllShops(sql: Sql): Promise<number> {
+  // Recover any stale bulk operations before starting new reconciles.
+  // This ensures missed finish webhooks don't leave shops stuck in in_progress
+  // state indefinitely. Recovery is idempotent and safe to run repeatedly.
+  const recoveryResult = await recoverStaleBulkOperations(sql);
+  if (recoveryResult.found > 0) {
+    console.log(
+      `[reconcile] recovered ${recoveryResult.enqueued} completed, ` +
+      `${recoveryResult.markedFailed} failed, ` +
+      `${recoveryResult.skipped} skipped, ` +
+      `${recoveryResult.errors} errors out of ${recoveryResult.found} stale ops`
+    );
+  }
+
   // Get all installed shops (exclude uninstalled)
   const shops = await sql<{ domain: string }[]>`
     SELECT domain FROM "Shop" WHERE "uninstalledAt" IS NULL
