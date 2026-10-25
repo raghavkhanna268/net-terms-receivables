@@ -234,4 +234,112 @@ describeWithDb("Server-side rejection with no DB writes", () => {
     `;
     expect(parseInt(paymentCount.c, 10)).toBe(0);
   });
+
+  it("extra per-credit keys (direction, rawRow, secretData) are NOT stored in Payment", async () => {
+    // This tests that unknown fields passed in credits are not stored in the DB.
+    // The validator passes them through (via `as CreditRow[]` cast), but the
+    // DB insert only uses known columns.
+    const payload = {
+      bank: "HDFC",
+      fileName: "extra-fields.csv",
+      credits: [
+        {
+          date: yesterday(),
+          amountPaise: 75000,
+          rail: "NEFT",
+          narration: "NEFT CR-EXTRA-FIELDS-TEST-MARKER",
+          utr: "HDFCN" + Date.now(),
+          // Extra fields that should NOT be stored:
+          direction: "DR",
+          rawRow: [1, 2, 3, 4, "sensitive"],
+          secretData: "SHOULD_NOT_BE_STORED",
+          fileData: { bytes: [0, 1, 2] },
+        },
+      ],
+    };
+
+    const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+    
+    // Import succeeds (extra fields are ignored, not rejected)
+    expect(response.status).toBe(200);
+
+    // Verify Payment was created
+    const [paymentCount] = await sql<{ c: string }[]>`
+      SELECT COUNT(*)::text AS c FROM "Payment" WHERE "shopId" = ${testShopId}
+    `;
+    expect(parseInt(paymentCount.c, 10)).toBe(1);
+
+    // Verify BankImport was created
+    const [importCount] = await sql<{ c: string }[]>`
+      SELECT COUNT(*)::text AS c FROM "BankImport" WHERE "shopId" = ${testShopId}
+    `;
+    expect(parseInt(importCount.c, 10)).toBe(1);
+
+    // Get the stored Payment row and verify no extra fields
+    const payments = await sql<Array<Record<string, unknown>>>`
+      SELECT * FROM "Payment" WHERE "shopId" = ${testShopId}
+    `;
+    expect(payments.length).toBe(1);
+    const payment = payments[0];
+
+    // Known fields should be present
+    expect(payment.amountPaise).toBe(75000);
+    expect(payment.rail).toBe("NEFT");
+    expect(payment.narration).toBe("NEFT CR-EXTRA-FIELDS-TEST-MARKER");
+
+    // Extra fields should NOT be stored (they're not Payment columns)
+    expect(payment).not.toHaveProperty("direction");
+    expect(payment).not.toHaveProperty("rawRow");
+    expect(payment).not.toHaveProperty("secretData");
+    expect(payment).not.toHaveProperty("fileData");
+
+    // Double-check by serializing and searching for the marker string
+    const serialized = JSON.stringify(payment);
+    expect(serialized).not.toContain("SHOULD_NOT_BE_STORED");
+    expect(serialized).not.toContain("sensitive");
+  });
+
+  it("top-level extra fields (file, fileData) are NOT stored in BankImport", async () => {
+    const payload = {
+      bank: "HDFC",
+      fileName: "toplevel-extra.csv",
+      // Extra top-level fields that should NOT be stored:
+      file: "SGVsbG8gV29ybGQ=", // base64 data
+      fileData: { byteLength: 1000, data: [0, 1, 2, 3] },
+      secretField: "TOP_LEVEL_SECRET",
+      credits: [
+        {
+          date: yesterday(),
+          amountPaise: 50000,
+          rail: "IMPS",
+          narration: "IMPS CR-TOPLEVEL-EXTRA-TEST",
+          utr: "IMPS" + Date.now(),
+        },
+      ],
+    };
+
+    const response = await callAction(sql, TEST_SHOP_DOMAIN, payload);
+    expect(response.status).toBe(200);
+
+    // Get the stored BankImport row
+    const imports = await sql<Array<Record<string, unknown>>>`
+      SELECT * FROM "BankImport" WHERE "shopId" = ${testShopId}
+    `;
+    expect(imports.length).toBe(1);
+    const bankImport = imports[0];
+
+    // Known fields should be present
+    expect(bankImport.bank).toBe("HDFC");
+    expect(bankImport.fileName).toBe("toplevel-extra.csv");
+
+    // Extra top-level fields should NOT be stored
+    expect(bankImport).not.toHaveProperty("file");
+    expect(bankImport).not.toHaveProperty("fileData");
+    expect(bankImport).not.toHaveProperty("secretField");
+
+    // Verify by serializing
+    const serialized = JSON.stringify(bankImport);
+    expect(serialized).not.toContain("SGVsbG8gV29ybGQ"); // base64 data
+    expect(serialized).not.toContain("TOP_LEVEL_SECRET");
+  });
 });

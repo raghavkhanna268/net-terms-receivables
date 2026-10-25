@@ -434,9 +434,13 @@ describe("SheetJS lazy-load chunk analysis (S14)", () => {
     }
     
     if (xlsxChunk) {
-      console.log(`\nSheetJS chunk: ${xlsxChunk.name}`);
+      // Note: This may be parse.client (which calls sheet_to_json) or the xlsx library chunk
+      const label = xlsxChunk.name.includes("parse.client") 
+        ? "Banks parser chunk (contains xlsx calls)" 
+        : "xlsx-containing chunk";
+      console.log(`\n${label}: ${xlsxChunk.name}`);
       console.log(`  Raw: ${xlsxChunk.rawKiB} KiB / gzip: ${xlsxChunk.gzipKiB} KiB`);
-      console.log(`  Contains xlsx: ${xlsxChunk.hasXlsx}`);
+      console.log(`  Contains xlsx markers: ${xlsxChunk.hasXlsx}`);
     }
     
     console.log("\n=========================================\n");
