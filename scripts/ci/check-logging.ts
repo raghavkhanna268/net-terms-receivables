@@ -1998,6 +1998,8 @@ function groupViolations(violations: Violation[]): Map<string, Violation[]> {
 // Main
 // ============================================================================
 
+import { pathToFileURL } from "url";
+
 /**
  * Result of running the logging guard analysis.
  */
@@ -2008,22 +2010,25 @@ export interface AnalysisResult {
 
 /**
  * Run the logging guard analysis on a directory.
- * Exported for direct testing without subprocess spawning.
+ * This is the single implementation - main() is a thin wrapper.
  *
  * @param rootDir - Root directory to scan
  * @param allowlistFile - Path to logging allowlist file
- * @param loggerMockAllowlistFile - Path to logger mock allowlist file
+ * @param loggerMockAllowlistFile - Path to logger mock allowlist file (required)
  * @returns Analysis result with exit code and output
  */
 export function runAnalysis(
   rootDir: string,
   allowlistFile: string,
-  loggerMockAllowlistFile?: string
+  loggerMockAllowlistFile: string
 ): AnalysisResult {
   const outputLines: string[] = [];
   const log = (msg: string) => outputLines.push(msg);
 
   const { tsFiles, scriptFiles, testFiles } = findSourceFiles(rootDir);
+
+  log("=== AST-based Logging Guard Check ===\n");
+  log(`Scanning ${tsFiles.length} TypeScript files, ${scriptFiles.length} script files, and ${testFiles.length} test files...\n`);
 
   const allViolations: Violation[] = [];
   const loggerMockViolations: Violation[] = [];
@@ -2043,20 +2048,15 @@ export function runAnalysis(
     allViolations.push(...violations);
   }
 
-  if (loggerMockAllowlistFile) {
-    for (const testFile of testFiles) {
-      const violations = analyzeTestFileForLoggerMocks(testFile);
-      loggerMockViolations.push(...violations);
-    }
+  for (const testFile of testFiles) {
+    const violations = analyzeTestFileForLoggerMocks(testFile);
+    loggerMockViolations.push(...violations);
   }
 
   const grouped = groupViolations(allViolations);
   const allowlist = loadAllowlist(allowlistFile);
-
   const { entries: loggerMockAllowlist, invalidEntries: invalidLoggerMockEntries } =
-    loggerMockAllowlistFile
-      ? loadLoggerMockAllowlist(loggerMockAllowlistFile)
-      : { entries: new Map<string, string>(), invalidEntries: [] };
+    loadLoggerMockAllowlist(loggerMockAllowlistFile);
 
   let newViolations = 0;
   const overAllowlist: Array<{
@@ -2100,240 +2100,86 @@ export function runAnalysis(
     }
   }
 
+  log("=== Results ===\n");
+
   let shouldFail = false;
 
   if (newViolations === 0 && staleEntries.length === 0 &&
       newLoggerMockViolations.length === 0 && staleLoggerMockEntries.length === 0 &&
       invalidLoggerMockEntries.length === 0) {
+    log("\x1b[32m✓ No logging violations found\x1b[0m");
     return { exitCode: 0, output: outputLines.join("\n") };
   }
 
   if (newViolations > 0) {
     shouldFail = true;
+    log(`\x1b[31m✗ Found ${newViolations} NEW logging violation(s) above allowlist:\x1b[0m\n`);
+
     for (const { key, found, allowed, violations } of overAllowlist) {
-      log(`${key}: found ${found}, allowed ${allowed}`);
+      log(`  ${key}: found ${found}, allowed ${allowed}`);
       for (const v of violations.slice(0, 5)) {
-        log(`  ${v.file}:${v.line}:${v.column} [${v.rule}] ${v.message}`);
-        log(`    ${v.snippet}`);
+        log(`    ${v.file}:${v.line} ${v.message}`);
+        log(`      ${v.snippet}`);
       }
       if (violations.length > 5) {
-        log(`  ... and ${violations.length - 5} more`);
+        log(`    ... and ${violations.length - 5} more`);
       }
+      log("");
     }
+
+    log("\x1b[33mTo fix: Update the code to use safeLog with shopId/shopHash.\x1b[0m");
+    log("\x1b[33mTo allowlist (temporary): add/update entry in scripts/ci/logging-allowlist.txt\x1b[0m");
+    log("\x1b[33mFormat: file:rule:count\x1b[0m\n");
   }
 
   if (staleEntries.length > 0) {
     shouldFail = true;
-    log("stale allowlist entries:");
+    log(`\x1b[31m✗ Found ${staleEntries.length} stale/over-counted allowlist entry(ies):\x1b[0m\n`);
     for (const { key, allowed, found } of staleEntries) {
       log(`  ${key}: allowed ${allowed}, found only ${found}`);
     }
+    log("\n\x1b[33mTo fix: Reduce the count in logging-allowlist.txt to match actual violations.\x1b[0m\n");
   }
 
   if (newLoggerMockViolations.length > 0) {
     shouldFail = true;
-    log("logger mock violation(s):");
+    log(`\x1b[31m✗ Found ${newLoggerMockViolations.length} logger mock violation(s):\x1b[0m\n`);
     for (const v of newLoggerMockViolations) {
       log(`  ${v.file}:${v.line} ${v.message}`);
+      log(`    ${v.snippet}`);
     }
+    log("\n\x1b[33mTo fix: Use the real safeLog/toErrorCode/shopHash instead of mocking.\x1b[0m");
+    log("\x1b[33mTo allowlist (with justification): add entry to scripts/ci/logger-mock-allowlist.txt\x1b[0m");
+    log("\x1b[33mFormat: path: reason (reason must not be 'legacy')\x1b[0m\n");
   }
 
   if (staleLoggerMockEntries.length > 0) {
     shouldFail = true;
-    log("stale logger-mock-allowlist entries:");
+    log(`\x1b[31m✗ Found ${staleLoggerMockEntries.length} stale logger-mock-allowlist entry(ies):\x1b[0m\n`);
     for (const { path: entryPath, reason } of staleLoggerMockEntries) {
       log(`  ${entryPath}: ${reason}`);
     }
+    log("\n\x1b[33mTo fix: Remove the stale entry from scripts/ci/logger-mock-allowlist.txt\x1b[0m\n");
   }
 
   if (invalidLoggerMockEntries.length > 0) {
     shouldFail = true;
-    log("invalid logger-mock-allowlist entries:");
+    log(`\x1b[31m✗ Found ${invalidLoggerMockEntries.length} invalid logger-mock-allowlist entry(ies):\x1b[0m\n`);
     for (const { line, text, issue } of invalidLoggerMockEntries) {
       log(`  Line ${line}: ${text} (${issue})`);
     }
+    log("\n\x1b[33mTo fix: Provide a valid reason (not 'legacy' or empty) in scripts/ci/logger-mock-allowlist.txt\x1b[0m\n");
   }
 
   return { exitCode: shouldFail ? 1 : 0, output: outputLines.join("\n") };
 }
 
 function main(): void {
-  console.log("=== AST-based Logging Guard Check ===\n");
-
-  const { tsFiles, scriptFiles, testFiles } = findSourceFiles(REPO_ROOT);
-  console.log(`Scanning ${tsFiles.length} TypeScript files, ${scriptFiles.length} script files, and ${testFiles.length} test files...\n`);
-
-  const allViolations: Violation[] = [];
-  const loggerMockViolations: Violation[] = [];
-
-  // Analyze TypeScript files (full logging check)
-  for (const file of tsFiles) {
-    const violations = analyzeFile(file, REPO_ROOT);
-    allViolations.push(...violations);
-  }
-
-  // Analyze script files (text-based)
-  for (const file of scriptFiles) {
-    const violations = analyzeScriptFile(file, REPO_ROOT);
-    allViolations.push(...violations);
-  }
-
-  // Gap 4: Analyze test files for token-prefix and domain-literal only
-  for (const testFile of testFiles) {
-    const violations = analyzeTestFile(testFile);
-    allViolations.push(...violations);
-  }
-
-  // Gap 5: Analyze test files for logger mocks
-  for (const testFile of testFiles) {
-    const violations = analyzeTestFileForLoggerMocks(testFile);
-    loggerMockViolations.push(...violations);
-  }
-
-  const grouped = groupViolations(allViolations);
-  const allowlist = loadAllowlist(ALLOWLIST_FILE);
-
-  // Load logger mock allowlist
-  const { entries: loggerMockAllowlist, invalidEntries: invalidLoggerMockEntries } = loadLoggerMockAllowlist(LOGGER_MOCK_ALLOWLIST_FILE);
-
-  let newViolations = 0;
-  const overAllowlist: Array<{
-    key: string;
-    found: number;
-    allowed: number;
-    violations: Violation[];
-  }> = [];
-  const staleEntries: Array<{ key: string; allowed: number; found: number }> = [];
-
-  // Check for violations exceeding allowlist
-  for (const [key, violations] of grouped) {
-    const found = violations.length;
-    const allowed = allowlist.get(key) ?? 0;
-
-    if (found > allowed) {
-      newViolations += found - allowed;
-      overAllowlist.push({ key, found, allowed, violations });
-    }
-  }
-
-  // Check for stale allowlist entries (P2.6: fail on stale/over-counted)
-  for (const [key, allowed] of allowlist) {
-    const found = grouped.get(key)?.length ?? 0;
-    if (found < allowed) {
-      staleEntries.push({ key, allowed, found });
-    }
-  }
-
-  // Gap 5: Check logger mock violations against allowlist
-  const newLoggerMockViolations: Violation[] = [];
-  const loggerMockFilesWithViolations = new Set<string>();
-  for (const v of loggerMockViolations) {
-    loggerMockFilesWithViolations.add(v.file);
-    if (!loggerMockAllowlist.has(v.file)) {
-      newLoggerMockViolations.push(v);
-    }
-  }
-
-  // Check for stale logger mock allowlist entries (ratchet)
-  const staleLoggerMockEntries: Array<{ path: string; reason: string }> = [];
-  for (const [path, reason] of loggerMockAllowlist) {
-    if (!loggerMockFilesWithViolations.has(path)) {
-      staleLoggerMockEntries.push({ path, reason });
-    }
-  }
-
-  // Report results
-  console.log("=== Results ===\n");
-
-  let shouldFail = false;
-
-  if (newViolations === 0 && staleEntries.length === 0 && 
-      newLoggerMockViolations.length === 0 && staleLoggerMockEntries.length === 0 &&
-      invalidLoggerMockEntries.length === 0) {
-    console.log("\x1b[32m✓ No logging violations found\x1b[0m");
-    process.exit(0);
-  }
-
-  if (newViolations > 0) {
-    shouldFail = true;
-    console.log(
-      `\x1b[31m✗ Found ${newViolations} NEW logging violation(s) above allowlist:\x1b[0m\n`
-    );
-
-    for (const { key, found, allowed, violations } of overAllowlist) {
-      console.log(`  ${key}: found ${found}, allowed ${allowed}`);
-      for (const v of violations.slice(0, 5)) {
-        console.log(`    ${v.file}:${v.line} ${v.message}`);
-        console.log(`      ${v.snippet}`);
-      }
-      if (violations.length > 5) {
-        console.log(`    ... and ${violations.length - 5} more`);
-      }
-      console.log();
-    }
-
-    console.log("\x1b[33mTo fix: Update the code to use safeLog with shopId/shopHash.\x1b[0m");
-    console.log("\x1b[33mTo allowlist (temporary): add/update entry in scripts/ci/logging-allowlist.txt\x1b[0m");
-    console.log("\x1b[33mFormat: file:rule:count\x1b[0m\n");
-  }
-
-  // P2.6: Stale entries now FAIL (ratchet)
-  if (staleEntries.length > 0) {
-    shouldFail = true;
-    console.log(
-      `\x1b[31m✗ Found ${staleEntries.length} stale/over-counted allowlist entry(ies):\x1b[0m\n`
-    );
-    for (const { key, allowed, found } of staleEntries) {
-      console.log(`  ${key}: allowed ${allowed}, found only ${found}`);
-    }
-    console.log("\n\x1b[33mTo fix: Reduce the count in logging-allowlist.txt to match actual violations.\x1b[0m\n");
-  }
-
-  // Gap 5: Report logger mock violations
-  if (newLoggerMockViolations.length > 0) {
-    shouldFail = true;
-    console.log(
-      `\x1b[31m✗ Found ${newLoggerMockViolations.length} logger mock violation(s):\x1b[0m\n`
-    );
-    for (const v of newLoggerMockViolations) {
-      console.log(`  ${v.file}:${v.line} ${v.message}`);
-      console.log(`    ${v.snippet}`);
-    }
-    console.log("\n\x1b[33mTo fix: Use the real safeLog/toErrorCode/shopHash instead of mocking.\x1b[0m");
-    console.log("\x1b[33mTo allowlist (with justification): add entry to scripts/ci/logger-mock-allowlist.txt\x1b[0m");
-    console.log("\x1b[33mFormat: path: reason (reason must not be 'legacy')\x1b[0m\n");
-  }
-
-  // Gap 5: Stale logger mock allowlist entries FAIL (ratchet)
-  if (staleLoggerMockEntries.length > 0) {
-    shouldFail = true;
-    console.log(
-      `\x1b[31m✗ Found ${staleLoggerMockEntries.length} stale logger-mock-allowlist entry(ies):\x1b[0m\n`
-    );
-    for (const { path: entryPath, reason } of staleLoggerMockEntries) {
-      console.log(`  ${entryPath}: ${reason}`);
-    }
-    console.log("\n\x1b[33mTo fix: Remove the stale entry from scripts/ci/logger-mock-allowlist.txt\x1b[0m\n");
-  }
-
-  // P3: Invalid logger mock allowlist entries (empty or 'legacy' reason)
-  if (invalidLoggerMockEntries.length > 0) {
-    shouldFail = true;
-    console.log(
-      `\x1b[31m✗ Found ${invalidLoggerMockEntries.length} invalid logger-mock-allowlist entry(ies):\x1b[0m\n`
-    );
-    for (const { line, text, issue } of invalidLoggerMockEntries) {
-      console.log(`  Line ${line}: ${text} (${issue})`);
-    }
-    console.log("\n\x1b[33mTo fix: Provide a valid reason (not 'legacy' or empty) in scripts/ci/logger-mock-allowlist.txt\x1b[0m\n");
-  }
-
-  process.exit(shouldFail ? 1 : 0);
+  const result = runAnalysis(REPO_ROOT, ALLOWLIST_FILE, LOGGER_MOCK_ALLOWLIST_FILE);
+  console.log(result.output);
+  process.exit(result.exitCode);
 }
 
-if (process.argv[1] && (
-  process.argv[1].endsWith("check-logging.ts") ||
-  process.argv[1].includes("check-logging")
-)) {
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   main();
 }
