@@ -2,6 +2,8 @@
 
 > **Status:** Pre-launch checklist for App Store review and production readiness.
 > Items marked ⚠️ are blocking. Items marked **TBD** require decisions.
+> These are gates before App Store submission or the first real merchant, whichever comes first.
+> Step-by-step guides: [docs/launch-checklist/README.md](../docs/launch-checklist/README.md). Operations: [docs/ops.md](../docs/ops.md).
 
 ---
 
@@ -14,6 +16,7 @@
   - Paid tier: 10M requests/month, 30 seconds default CPU limit (max 5 min configurable)
   - **Why:** Production traffic may exceed free tier; paid tier provides significantly better CPU headroom
   - **Reference:** [Cloudflare Workers Limits](https://developers.cloudflare.com/workers/platform/limits/)
+  - **Owner:** Raghav (paid upgrade); DevOps redeploys after
   - **Steps:** [docs/launch-checklist/workers-paid-upgrade.md](../docs/launch-checklist/workers-paid-upgrade.md)
 
 ### Supabase
@@ -30,6 +33,10 @@
 
 - [ ] Verify database is in Mumbai region (ap-south-1)
   - **Current:** Confirmed in wrangler.jsonc and README
+
+- [ ] **Delete the old Seoul Supabase project and the old Hyperdrive config that points at the Seoul project**
+  - **Status:** Pending Raghav's decision; nothing is deleted without his explicit OK
+  - **Owner:** Raghav (decision), then DevOps
 
 ---
 
@@ -49,12 +56,15 @@
 - [ ] **Before S24:** Audit requested scopes and drop any that no merged code uses. See `docs/scopes.md` for the current scope list and justifications.
 
 - [ ] **⚠️ Request `read_all_orders` scope (if needed)**
+  - **Owner:** Raghav (Partner Dashboard). **Steps:** [docs/launch-checklist/read-all-orders-request.md](../docs/launch-checklist/read-all-orders-request.md)
   - Current: `read_orders` limited to 60-day order window
   - **Justification:** Historical invoice backfill for existing merchants
   - **Decision needed:** Is 60-day window sufficient for launch?
 
 - [ ] **⚠️ Protected Customer Data (PCD) Access Request**
   - Required for: `read_customers`, `read_orders` scopes (after PR #28)
+  - **Status:** Level 1 plus Name and Email fields already requested in the Partner Dashboard (see [docs/privacy.md](../docs/privacy.md), Protected Customer Data note)
+  - **Owner:** Raghav (Partner Dashboard)
   - [ ] **PCD Level 1** — Customer data excluding name, address, phone, and email fields
     - [ ] File PCD access request form in Partner Dashboard
     - [ ] Justify data access requirements
@@ -80,6 +90,10 @@
   - [ ] Verify `shop/redact` deletes all shop data (cascade)
   - [ ] Verify `customers/redact` returns 200 (no customer data stored yet)
   - [ ] After PR #32: Verify `customers/redact` deletes s8_tagged_customers
+- [ ] **⚠️ Uninstall/reinstall test (including the `shop/redact` cascade)**
+  - Runs only on a separate throwaway dev store, never on the main dev store, because it destroys data
+  - Needs Raghav's explicit approval before it runs
+  - **Owner:** Raghav (approval)
 
 ### Embedded App Requirements
 
@@ -113,14 +127,17 @@
 ## Feature Gates (must hold until conditions are met)
 
 - [ ] **⚠️ `PLAN_GATING_ENFORCED` stays `"false"` in every environment** (`wrangler.jsonc` `[vars]` and any env sections)
-  - **Until:** the lead Developer's gating fix (eligibility and aging) has merged **and** Team Lead gives the go
+  - **Until:** Raghav decides pricing, the Shopify plans are created, **and** the lead Developer's `activeAccountFragment` fix lands
+  - **Go:** comes from Raghav via Wholesale Terms Builder
+  - **Owner:** Raghav (decision), then DevOps flips it
   - **Why:** enabling it earlier silently stops holds for gated accounts
   - **Check before every deploy:** the deployed value is `"false"`; if not, do not deploy and escalate
 
 - [ ] **⚠️ Payment reminders (S18): Resend prerequisites before any shop enables reminders**
-  - [ ] `RESEND_API_KEY` set as a Worker secret (names only in tickets and logs; never paste values)
-  - [ ] `RESEND_FROM` set as a Worker secret
-  - [ ] Resend Data Processing Agreement (DPA) accepted by Raghav
+  - [ ] Resend Data Processing Agreement (DPA) accepted by Raghav (first)
+  - [ ] Then `RESEND_API_KEY` set as a Worker secret (names only in tickets and logs; never paste values)
+  - [ ] Then `RESEND_FROM` set as a Worker secret
+  - **Owner:** Raghav (DPA, values via secure secret request), then DevOps sets the secrets
   - **Why:** without both secrets reminder sends are acked as "disabled" (safe no-op); once set, real emails go to buyers of any shop with reminders enabled, so the DPA must be in place first
 
 ---
@@ -130,8 +147,9 @@
 - [ ] **⚠️ Wire Sentry error monitoring**
   - Package installed: `@sentry/cloudflare`
   - Wrapper implemented: `app/lib/sentry.ts`
-  - [ ] Create Sentry project
-  - [ ] Set `SENTRY_DSN` secret in Cloudflare Workers
+  - [ ] Create Sentry project (Raghav), DSN provided through a secure secret request
+  - [ ] Set `SENTRY_DSN` secret in Cloudflare Workers (DevOps)
+  - **Steps:** [docs/launch-checklist/sentry-setup.md](../docs/launch-checklist/sentry-setup.md)
   - [ ] Verify errors are captured in dev store testing
 
 ---
