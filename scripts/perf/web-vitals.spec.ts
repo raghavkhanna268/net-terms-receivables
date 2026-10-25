@@ -41,15 +41,15 @@ interface MeasurementResult {
 const RUNS_PER_PAGE = 3;
 
 const PAGES = [
-  { route: "dashboard", name: "Dashboard (app._index)" },
-  { route: "onboarding", name: "Onboarding" },
-  { route: "account", name: "Account Page (app.accounts.$id)" },
-  { route: "imports", name: "Imports" },
+  { route: "dashboard", label: "Dashboard (app._index)" },
+  { route: "onboarding", label: "Onboarding" },
+  { route: "account", label: "Account Page (app.accounts.$id)" },
+  { route: "imports", label: "Imports" },
 ];
 
 const PROFILES = [
   {
-    name: "mobile-throttled",
+    label: "mobile-throttled",
     viewport: { width: 375, height: 812 },
     cpuSlowdown: 4,
     networkConditions: {
@@ -60,7 +60,7 @@ const PROFILES = [
     },
   },
   {
-    name: "desktop",
+    label: "desktop",
     viewport: { width: 1280, height: 800 },
     cpuSlowdown: 1,
     networkConditions: null,
@@ -210,9 +210,9 @@ test.describe("Web Vitals Measurements", () => {
   });
 
   for (const profile of PROFILES) {
-    test.describe(`Profile: ${profile.name}`, () => {
+    test.describe(`Profile: ${profile.label}`, () => {
       for (const pageConfig of PAGES) {
-        test(`${pageConfig.name} - meets Web Vitals targets`, async ({ browser }) => {
+        test(`${pageConfig.label} - meets Web Vitals targets`, async ({ browser }) => {
           const results: MeasurementResult[] = [];
 
           for (let run = 0; run < RUNS_PER_PAGE; run++) {
@@ -227,7 +227,7 @@ test.describe("Web Vitals Measurements", () => {
               const metrics = await measurePage(page, pageConfig.route, serverPort);
               results.push(metrics);
               console.log(
-                `  ${pageConfig.name} Run ${run + 1}: LCP=${metrics.lcp.toFixed(0)}ms, CLS=${metrics.cls.toFixed(4)}, INP=${metrics.inp.toFixed(0)}ms`
+                `  ${pageConfig.label} Run ${run + 1}: LCP=${metrics.lcp.toFixed(0)}ms, CLS=${metrics.cls.toFixed(4)}, INP=${metrics.inp.toFixed(0)}ms`
               );
             } finally {
               await context.close();
@@ -239,7 +239,7 @@ test.describe("Web Vitals Measurements", () => {
           const medianInp = median(results.map((r) => r.inp));
 
           console.log(
-            `  ${pageConfig.name} Median: LCP=${medianLcp.toFixed(0)}ms, CLS=${medianCls.toFixed(4)}, INP=${medianInp.toFixed(0)}ms`
+            `  ${pageConfig.label} Median: LCP=${medianLcp.toFixed(0)}ms, CLS=${medianCls.toFixed(4)}, INP=${medianInp.toFixed(0)}ms`
           );
 
           expect(medianLcp, `LCP should be ≤ ${TARGETS.lcp}ms`).toBeLessThanOrEqual(TARGETS.lcp);
@@ -269,7 +269,7 @@ test.describe("Web Vitals Report", () => {
 
     type ReportRow = {
       page: string;
-      profile: string;
+      profileLabel: string;
       lcp: number;
       cls: number;
       inp: number;
@@ -303,8 +303,8 @@ test.describe("Web Vitals Report", () => {
           const medianInp = median(results.map((r) => r.inp));
 
           report.push({
-            page: pageConfig.name,
-            profile: profile.name,
+            page: pageConfig.label,
+            profileLabel: profile.label,
             lcp: medianLcp,
             cls: medianCls,
             inp: medianInp,
@@ -318,11 +318,11 @@ test.describe("Web Vitals Report", () => {
       console.log(`Targets: LCP ≤ ${TARGETS.lcp}ms, CLS ≤ ${TARGETS.cls}, INP ≤ ${TARGETS.inp}ms\n`);
 
       for (const profile of PROFILES) {
-        console.log(`### ${profile.name}\n`);
+        console.log(`### ${profile.label}\n`);
         console.log("| Page | LCP (ms) | CLS | INP (ms) | Pass |");
         console.log("|------|----------|-----|----------|------|");
 
-        for (const row of report.filter((r) => r.profile === profile.name)) {
+        for (const row of report.filter((r) => r.profileLabel === profile.label)) {
           const lcpStr = `${row.lcp.toFixed(0)}${row.lcp > TARGETS.lcp ? " ❌" : ""}`;
           const clsStr = `${row.cls.toFixed(4)}${row.cls > TARGETS.cls ? " ❌" : ""}`;
           const inpStr = `${row.inp.toFixed(0)}${row.inp > TARGETS.inp ? " ❌" : ""}`;

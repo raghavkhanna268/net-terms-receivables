@@ -38,7 +38,7 @@ interface PageResult {
 }
 
 interface ProfileResult {
-  profile: string;
+  profileLabel: string;
   pages: PageResult[];
 }
 
@@ -47,15 +47,15 @@ const MOBILE_VIEWPORT = { width: 375, height: 812 };
 const DESKTOP_VIEWPORT = { width: 1280, height: 800 };
 
 const PAGES_TO_TEST = [
-  { route: "/app", name: "Dashboard (app._index)", fixture: "dashboard" },
-  { route: "/app/onboarding", name: "Onboarding", fixture: "onboarding" },
-  { route: "/app/accounts/test-buyer-1", name: "Account Page", fixture: "account" },
-  { route: "/app/imports", name: "Imports", fixture: "imports" },
+  { route: "/app", label: "Dashboard (app._index)", fixture: "dashboard" },
+  { route: "/app/onboarding", label: "Onboarding", fixture: "onboarding" },
+  { route: "/app/accounts/test-buyer-1", label: "Account Page", fixture: "account" },
+  { route: "/app/imports", label: "Imports", fixture: "imports" },
 ];
 
 const PROFILES = [
   {
-    name: "mobile-throttled",
+    label: "mobile-throttled",
     viewport: MOBILE_VIEWPORT,
     cpuSlowdown: 4,
     networkConditions: {
@@ -66,7 +66,7 @@ const PROFILES = [
     },
   },
   {
-    name: "desktop",
+    label: "desktop",
     viewport: DESKTOP_VIEWPORT,
     cpuSlowdown: 1,
     networkConditions: null,
@@ -137,7 +137,7 @@ async function setupPage(
 ): Promise<{ context: BrowserContext; page: Page }> {
   const context = await browser.newContext({
     viewport: profile.viewport,
-    userAgent: profile.name.includes("mobile")
+    userAgent: profile.label.includes("mobile")
       ? "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1"
       : undefined,
   });
@@ -318,14 +318,14 @@ async function runMeasurements(): Promise<ProfileResult[]> {
     console.log(`Server running at ${baseUrl}`);
 
     for (const profile of PROFILES) {
-      console.log(`\n--- Profile: ${profile.name} ---`);
+      console.log(`\n--- Profile: ${profile.label} ---`);
       const profileResult: ProfileResult = {
-        profile: profile.name,
+        profileLabel: profile.label,
         pages: [],
       };
 
       for (const pageConfig of PAGES_TO_TEST) {
-        console.log(`  Testing: ${pageConfig.name}`);
+        console.log(`  Testing: ${pageConfig.label}`);
         const pageResult: PageResult = {
           route: pageConfig.route,
           lcp: [],
@@ -386,12 +386,12 @@ function formatResults(results: ProfileResult[]): string {
   lines.push(`Runs per page: ${RUNS_PER_PAGE}`);
   lines.push(`Targets: LCP ≤ 2500ms, CLS ≤ 0.1, INP ≤ 200ms\n`);
 
-  for (const profile of results) {
-    lines.push(`### ${profile.profile}\n`);
+  for (const profileResult of results) {
+    lines.push(`### ${profileResult.profileLabel}\n`);
     lines.push("| Page | LCP (ms) | CLS | INP (ms) | Pass |");
     lines.push("|------|----------|-----|----------|------|");
 
-    for (const page of profile.pages) {
+    for (const page of profileResult.pages) {
       const lcpPass = page.medianLcp <= 2500;
       const clsPass = page.medianCls <= 0.1;
       const inpPass = page.medianInp <= 200;
@@ -438,7 +438,7 @@ async function main() {
   console.log(`\nResults saved to ${outputPath}`);
 }
 
-main().catch((err) => {
-  console.error("Error:", err);
+main().catch(() => {
+  console.error("Measurement failed. Check the stack trace above.");
   process.exit(1);
 });
