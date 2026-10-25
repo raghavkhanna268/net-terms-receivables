@@ -55,7 +55,7 @@ Worker logs are accessible via Cloudflare dashboard (Workers → Logs) or `wrang
 ### 3.1 Immediate Actions by Severity
 
 **Critical:**
-1. Disable the app via Shopify Partners Dashboard (removes from all merchants)
+1. Disable the app via Shopify Partners Dashboard (removes from all merchants) [Unverified — Raghav to confirm procedure]
 2. Rotate all secrets (see 3.2)
 3. Notify Shopify Partner Security immediately
 
@@ -104,9 +104,10 @@ Worker logs are accessible via Cloudflare dashboard (Workers → Logs) or `wrang
 If an offline access token is compromised:
 1. Mark the session `needsReauth=true` in the database (`prisma/schema.prisma:136`)
 2. Setting `needsReauth=true` stops this app's background jobs from using/refreshing the token (`app/lib/offline-token.server.ts:197-203`, `:409-414`)
-3. **Important:** This does NOT revoke the token at Shopify. Shopify app tokens are invalidated on uninstall; for a compromised offline token, force reinstall to revoke. The affected shop will need to re-authenticate on next access.
+3. Rotate the app's client secret (`SHOPIFY_API_SECRET`) to invalidate all existing offline tokens [Unverified — Raghav to confirm]
+4. The next request from any shop will fail authentication and trigger OAuth re-authorization
 
-Note: No direct "revoke token" API call is implemented in this codebase.
+Note: No direct "revoke token" API call is implemented in this codebase. Shopify app tokens are invalidated on uninstall or client secret rotation [Unverified].
 
 ---
 
@@ -192,11 +193,11 @@ Every Critical or High severity incident requires a post-mortem within [TBD — 
 
 | Role | Contact | Notes |
 |------|---------|-------|
-| Incident Owner | Raghav Khanna (raghavkhanna468@gmail.com) | All roles |
-| Shopify Partner Security | Raghav Khanna (raghavkhanna468@gmail.com) | For breach notification |
-| Sentry Account Owner | Raghav Khanna (raghavkhanna468@gmail.com) | For log access |
-| Cloudflare Account Owner | Raghav Khanna (raghavkhanna468@gmail.com) | For worker management |
-| Legal/DPO | Raghav Khanna (raghavkhanna468@gmail.com) | For regulatory notification |
+| Incident Owner | Owner: Raghav Khanna | [TBD — Raghav to decide] |
+| Shopify Partner Security | [TBD — Shopify Partner support contact, unverified] | For breach notification |
+| Sentry Account Owner | Owner: Raghav Khanna | [TBD — Raghav to decide] |
+| Cloudflare Account Owner | Owner: Raghav Khanna | [TBD — Raghav to decide] |
+| Legal/DPO | [TBD — Raghav to decide] | For regulatory notification |
 
 ---
 

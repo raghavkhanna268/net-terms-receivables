@@ -14,11 +14,9 @@
 |--------|--------------|-------|
 | Raghav (Owner) | Full access to Supabase, Cloudflare, GitHub, Shopify Partners | Proposed, pending owner review. Sentry and Resend not yet enabled. |
 
-**Proposed, pending owner review:** Human access is limited to the owner:
-- **GitHub:** Sole collaborator `raghavkhanna268` (admin) on a user-owned public repository.
-- **Cloudflare:** 1 member (Raghav, Super Administrator).
-- **Supabase:** [Unverified — Raghav to confirm] (expected sole owner).
-- **Shopify Partners:** [Unverified — Raghav to confirm] (expected sole owner).
+**Proposed, pending owner review:** Admin access to each service is limited to the owner.
+- **Supabase:** [Unverified — Raghav to confirm]
+- **Shopify Partners:** [Unverified — Raghav to confirm]
 
 ### 1.2 Automated Access
 
