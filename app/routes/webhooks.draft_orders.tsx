@@ -2,6 +2,28 @@ import type { ActionFunctionArgs } from "react-router";
 import { getRequestSql } from "~/lib/request-context.server";
 import { verifyWebhook, normalizeWebhookTopic } from "~/lib/webhook-verify.server";
 import { parseTriggeredAt, recordAndEnqueueSync } from "~/lib/webhook-receipts.server";
+import { safeLog } from "~/lib/log.server";
+
+/**
+ * Build a Shopify DraftOrder GID from a numeric id.
+ * Returns null if the id is not a positive integer.
+ */
+export function buildDraftOrderGid(id: unknown): string | null {
+  if (typeof id === "number") {
+    if (!Number.isInteger(id) || id <= 0) {
+      return null;
+    }
+    return `gid://shopify/DraftOrder/${id}`;
+  }
+  if (typeof id === "string") {
+    const parsed = parseInt(id, 10);
+    if (isNaN(parsed) || parsed <= 0 || String(parsed) !== id) {
+      return null;
+    }
+    return `gid://shopify/DraftOrder/${parsed}`;
+  }
+  return null;
+}
 
 /**
  * Webhook handler for draft order lifecycle events (S8).
@@ -60,14 +82,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return new Response(null, { status: 200 });
   }
 
-  const typedPayload = payload as { admin_graphql_api_id?: string };
-  const resourceGid = typedPayload.admin_graphql_api_id;
+  const typedPayload = payload as { admin_graphql_api_id?: string; id?: unknown };
+  let resourceGid = typedPayload.admin_graphql_api_id;
 
   if (!resourceGid) {
-    console.warn(
-      `[webhooks.draft_orders] Missing admin_graphql_api_id in ${normalizedTopic}`
-    );
-    return new Response(null, { status: 200 });
+    const builtGid = buildDraftOrderGid(typedPayload.id);
+    if (builtGid) {
+      resourceGid = builtGid;
+    } else {
+      safeLog("warn", "draft_orders_webhook_no_gid", {
+        topic: normalizedTopic,
+        hasId: typedPayload.id !== undefined,
+      });
+      return new Response(null, { status: 200 });
+    }
   }
 
   const sql = getRequestSql();

@@ -33,6 +33,11 @@ vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
 }));
 
+const mockSafeLog = vi.fn();
+vi.mock("~/lib/log.server", () => ({
+  safeLog: (...args: unknown[]) => mockSafeLog(...args),
+}));
+
 function createMockActionArgs(request: Request): ActionFunctionArgs {
   return {
     request,
@@ -57,6 +62,7 @@ describe("webhooks.draft_orders logging", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockParseTriggeredAt.mockReturnValue(null);
+    mockSafeLog.mockClear();
     process.env = { ...originalEnv, SHOPIFY_API_SECRET: "test-secret" };
 
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -89,6 +95,13 @@ describe("webhooks.draft_orders logging", () => {
     const outputStr = allOutput.join("\n");
     expect(outputStr).not.toContain("webhookId");
     expect(outputStr).not.toContain("wh=");
+
+    for (const call of mockSafeLog.mock.calls) {
+      const payload = call[2];
+      if (payload && typeof payload === "object") {
+        expect(payload).not.toHaveProperty("webhookId");
+      }
+    }
   }
 
   describe("webhookId not logged but still used for idempotency", () => {
