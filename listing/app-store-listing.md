@@ -162,7 +162,7 @@ The app accesses **Level 1 + Name + Email** protected customer fields.
 | `displayName` | Yes | Display in buyer ledger; payment matching |
 | Phone, addresses | **No** | Not requested, blocked in code |
 
-`email` and `displayName` are fetched and stored only when `CUSTOMER_PII_FIELDS=1`. Phone and address fields are explicitly forbidden and rejected by `validateNoForbiddenFields()`.
+`email` and `displayName` are fetched and stored only when `CUSTOMER_PII_FIELDS=1` (`app/services/sync/customer-fields.server.ts:69`). Phone and address fields are explicitly forbidden and rejected by `validateNoForbiddenFields()`.
 
 ### What the App Writes to Shopify
 
