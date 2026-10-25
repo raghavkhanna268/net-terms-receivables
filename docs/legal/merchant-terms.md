@@ -55,8 +55,8 @@ TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE APP IS PROVIDED "AS IS" WITHOUT WARR
 ### 7. Termination
 
 You may uninstall the App at any time through Shopify. Upon uninstallation:
-- Your data is marked for deletion
-- Full deletion occurs 48 hours later when Shopify sends the shop/redact webhook
+- Sessions and webhook receipts are deleted immediately
+- Remaining shop data is deleted when Shopify sends `shop/redact` (48 hours after uninstall)
 
 ### 8. Governing Law
 
@@ -100,6 +100,8 @@ The App processes the following categories of buyer personal data:
 - Physical addresses
 - Payment card data
 
+...except as incidentally present in uploaded bank-statement narration (`Payment.narration`/`payerText`, `prisma/schema.prisma:434-436`).
+
 ### 4. Sub-Processors
 
 We use the following sub-processors to provide the App:
@@ -141,7 +143,7 @@ We implement appropriate technical and organizational measures:
 
 ### 7. Data Retention
 
-See `docs/security/data-retention.md` for complete retention schedule.
+See `docs/security/data-retention.md` for retention schedule.
 
 Key retention periods:
 - Unmatched payment narrations: 180 days, then purged
@@ -173,7 +175,7 @@ This DPA remains in effect as long as the App processes personal data on your be
 
 Upon termination:
 - We delete your data per Section 7 above
-- No personal data is retained beyond the stated retention periods
+- No personal data is retained beyond the stated retention periods, except copies in provider-managed backups and logs for the provider retention windows listed in `docs/security/data-retention.md`
 - Deletion is automatic via Shopify compliance webhooks
 
 ---

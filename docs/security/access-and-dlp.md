@@ -90,7 +90,7 @@ The `safeLog()` function (lines 325-347) provides structured logging with automa
   - Shopify tokens: `shpat_*`, `shpua_*`, `shpss_*`
   - JWT-like strings: three-part dot-separated base64
 
-- **shopHash()** function (lines 419-433): Hashes shop domains using SHA-256 (first 12 hex chars) for safe logging in compliance paths where no shopId exists.
+- **shopHash()** function (lines 416-433): Hashes shop domains using SHA-256 (first 12 hex chars) for safe logging in compliance paths where no shopId exists. PR #260 (pending) switches this to HMAC-SHA-256 keyed by `LOG_HASH_KEY`, fail closed.
 
 ### 4.2 Sentry Scrubbing
 
@@ -122,7 +122,7 @@ The Sentry configuration includes multiple layers of PII protection:
 
 **Location:** `scripts/ci/check-logging.ts`
 
-The AST-based logging guard (2173 lines) runs in CI to prevent PII leaks at build time.
+The AST-based logging guard (2175 lines) runs in CI to prevent PII leaks at build time.
 
 **Checked patterns:**
 - `console.*`, `safeLog`, and Sentry method calls with sensitive data
@@ -133,12 +133,14 @@ The AST-based logging guard (2173 lines) runs in CI to prevent PII leaks at buil
 
 **CI step:** `./scripts/ci/check-logging.sh` (see `.github/workflows/ci.yml`)
 
-**Sensitive key patterns** (lines 40-41):
+**Sensitive key patterns** (line 41):
 ```typescript
 const SENSITIVE_PATTERN = /amount|paise|total|outstanding|balance|shop|domain|email|name|narration|payer|remitter|phone|address|note/i;
 ```
 
-**Safe key allowlist** (lines 100-140): Documents which keys matching the deny pattern are actually safe (IDs, counts, code-controlled enums).
+**Safe key allowlist** (lines 101-142): Documents which keys matching the deny pattern are actually safe (IDs, counts, code-controlled enums).
+
+Existing violations are grandfathered in `scripts/ci/logging-allowlist.txt` (9 entries).
 
 ### 4.4 Logger Mock Allowlist
 
@@ -146,7 +148,7 @@ const SENSITIVE_PATTERN = /amount|paise|total|outstanding|balance|shop|domain|em
 
 Tests that mock `safeLog`, `toErrorCode`, or `shopHash` must be explicitly allowlisted with a justification. The allowlist is currently empty, meaning no tests mock the logger.
 
-**CI enforcement:** `check-logging.ts` Gap 5 (lines 1716-1900) scans test files for logger mocks. Violations without an allowlist entry fail CI.
+**CI enforcement:** `check-logging.ts` Gap 5 (lines 1715-1905) scans test files for logger mocks. Violations without an allowlist entry fail CI.
 
 ### 4.5 CUSTOMER_PII_FIELDS Gating
 
@@ -166,18 +168,17 @@ When enabled (`"1"`), the app fetches and stores buyer email and display name in
 
 ### 5.1 Webhook Verification
 
-- **HMAC-SHA256:** All Shopify webhooks verified using constant-time comparison (`app/lib/webhook-verify.server.ts`)
-- **Payload shop verification:** Compliance webhooks verify `payload.shop_domain` matches header `X-Shopify-Shop-Domain` to prevent forged deletions
+- **HMAC-SHA256:** Webhooks verified by `verifyWebhook()` (constant-time compare, `app/lib/webhook-verify.server.ts:127-136`, `:241`) or, for `bulk_operations/finish`, the Shopify library's `authenticate.webhook` (`webhooks.bulk_operations.finish.tsx:33`)
+- **Payload shop verification:** Compliance webhooks verify `payload.shop_domain` matches header `X-Shopify-Shop-Domain` to prevent forged deletions (`webhooks.compliance.tsx:89`, `:176`, `:212`)
 
 ### 5.2 Session Isolation
 
 - Sessions scoped per shop via `offline_{shop}` session ID format
 - Shop domain validated on all webhook handlers
-- Cross-shop access impossible due to FK constraints
 
 ### 5.3 Token Handling
 
-- `Session.accessToken` (`prisma/schema.prisma:123`) and `Session.refreshToken` (`:132`) are stored as plain-text columns; encrypted at rest by Supabase (AES-256) at the storage layer, not encrypted by the app. App-level encryption: not implemented.
+- `Session.accessToken` (`prisma/schema.prisma:123`) and `Session.refreshToken` (`:132`) are stored as plain-text columns; any at-rest encryption is provider-managed by Supabase at the storage layer [Raghav to confirm], not by the app. App-level encryption: not implemented (tracked in issue #266).
 - Refresh token rotation handled by `app/lib/offline-token.server.ts`
 - Invalid tokens trigger `needsReauth` flag (`prisma/schema.prisma:136`) requiring merchant re-authentication
 
@@ -187,3 +188,5 @@ Queries are filtered by `shopId` and `session.shop` in loaders and services to e
 - Invoice queries: `app/services/sync/order.server.ts:117` (`WHERE "shopId" = ${shopId}`)
 - Buyer account queries: `app/routes/app._index.tsx:188` (`WHERE "shopId" = ${shopId}`)
 - Tagged customer queries: `app/services/sync/customer.server.ts:204` (`WHERE shop_id = ${shopId}`)
+
+FK constraints do not prevent cross-shop reads; isolation is enforced in application code.

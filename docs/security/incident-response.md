@@ -55,7 +55,7 @@ Worker logs are accessible via Cloudflare dashboard (Workers → Logs) or `wrang
 ### 3.1 Immediate Actions by Severity
 
 **Critical:**
-1. Disable the app via Shopify Partners Dashboard (removes from all merchants)
+1. Disable the app via Shopify Partners Dashboard (removes from all merchants) [Raghav to confirm procedure]
 2. Rotate all secrets (see 3.2)
 3. Notify Shopify Partner Security immediately
 
@@ -135,10 +135,10 @@ Per [Shopify Partner Agreement](https://www.shopify.com/partners/terms):
 ### 5.1 GDPR (EU)
 
 Per GDPR Article 33:
-- **Authority notification:** Within 72 hours of becoming aware of a personal data breach
-- **Data subject notification:** Without undue delay if high risk to rights and freedoms
+- **Controller duties (Art. 33(1)):** The merchant (Controller) must notify the supervisory authority within 72 hours of becoming aware of a personal data breach, and notify data subjects without undue delay if high risk
+- **Our role as Processor (Art. 33(2)):** We notify the merchant (the Controller) without undue delay so they can meet their Article 33 duties
 - **Authority:** Supervisory authority of the lead establishment (or affected Member State)
-- **Timeline for data subjects:** [Raghav to confirm]
+- **Timelines:** [Raghav to confirm]
 
 ### 5.2 DPDP Rules 2025 (India)
 
