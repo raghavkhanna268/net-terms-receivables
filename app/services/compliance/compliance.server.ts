@@ -16,6 +16,11 @@
 
 import type { Sql } from "~/lib/db-light.server";
 import { safeLog, shopHash, toErrorCode } from "~/lib/log.server";
+import { getAppHandle } from "~/lib/plan-url";
+import {
+  parseRecipientAllowlist,
+  isRecipientAllowed,
+} from "~/services/recipient-allowlist.server";
 
 // ============================================================================
 // RETENTION CONSTANTS
@@ -45,6 +50,9 @@ export const UNMATCHED_NARRATION_RETENTION_DAYS = 180;
 export interface DeleteShopResult {
   deleted: boolean;
   shopId: string | null;
+  /** True when the shop row exists but was skipped because it reinstalled (uninstalledAt IS NULL) */
+  skippedReinstalled: boolean;
+  sessionsDeleted: number;
   refetchNullPurged: number;
   bulkOperationsPurged: number;
   orderGapPurged: number;
@@ -128,10 +136,45 @@ export async function deleteShop(
   shopDomain: string
 ): Promise<DeleteShopResult> {
   return sql.begin(async (tx) => {
-    // Serializes with drain's FOR SHARE Shop guards (#239)
-    await tx`SELECT id FROM "Shop" WHERE domain = ${shopDomain} FOR UPDATE`;
+    // Lock the Shop row to serialize with drain's FOR SHARE guards (#239) and
+    // concurrent reinstalls. Fetch uninstalledAt to check if the shop reinstalled
+    // within the 48h window before shop/redact arrived.
+    const [lockedShop] = await tx<{ id: string; uninstalledAt: Date | null }[]>`
+      SELECT id, "uninstalledAt" FROM "Shop" WHERE domain = ${shopDomain} FOR UPDATE
+    `;
+
+    // If the shop exists but uninstalledAt is NULL, the shop reinstalled after
+    // the uninstall that triggered this shop/redact. Skip deletion to preserve
+    // the reinstalled shop's data. See issue #291.
+    if (lockedShop && lockedShop.uninstalledAt === null) {
+      return {
+        deleted: false,
+        shopId: lockedShop.id,
+        skippedReinstalled: true,
+        sessionsDeleted: 0,
+        refetchNullPurged: 0,
+        bulkOperationsPurged: 0,
+        orderGapPurged: 0,
+        piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
+        deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
+      };
+    }
 
     // Delete non-FK-linked tables first (shop text column or shop in JSON)
+
+    // Session table: delete all OAuth sessions for this shop.
+    // Moved here from webhooks.compliance.tsx to ensure sessions are only deleted
+    // when the shop is actually being erased (not skipped by reinstall guard).
+    // See issue #291.
+    const sessionsResult = await tx`
+      DELETE FROM "Session" WHERE shop = ${shopDomain}
+    `;
 
     // s10b_order_refetch_null (aggregate counter, shop text column)
     const refetchResult = await tx`
@@ -235,6 +278,8 @@ export async function deleteShop(
     return {
       deleted: result !== undefined,
       shopId: result?.id ?? null,
+      skippedReinstalled: false,
+      sessionsDeleted: sessionsResult.count,
       refetchNullPurged: refetchResult.count,
       bulkOperationsPurged: bulkOpsResult.count,
       orderGapPurged: outstandingResult.count,
@@ -814,11 +859,16 @@ export interface DataRequestEmailResult {
  * Build the embedded admin URL for the data requests page.
  *
  * @param shopDomain - Shop domain
- * @returns Embedded admin URL
+ * @returns Embedded admin URL, or null if app handle is not configured
  */
-function buildDataRequestsAdminUrl(shopDomain: string): string {
+function buildDataRequestsAdminUrl(shopDomain: string): string | null {
+  const appHandle = getAppHandle();
+  if (appHandle === null) {
+    safeLog("warn", "plan_url_app_handle_missing", {});
+    return null;
+  }
   const shopName = shopDomain.replace(".myshopify.com", "");
-  return `https://admin.shopify.com/store/${shopName}/apps/net-terms-receivables/app/data-requests`;
+  return `https://admin.shopify.com/store/${shopName}/apps/${appHandle}/app/data-requests`;
 }
 
 /**
@@ -861,30 +911,61 @@ export async function sendDataRequestNotification(
 
   const downloadUrl = buildDataRequestsAdminUrl(shopDomain);
 
-  const emailBody = {
-    from: resendFrom,
-    to: shopOwnerEmail,
-    subject: "Customer Data Request Ready for Download",
-    html: `
+  const downloadLinkHtml = downloadUrl
+    ? `<p><a href="${downloadUrl}">Download Customer Data Export</a></p>`
+    : `<p>Open the Net Terms Receivables app in your Shopify admin and go to Data Requests.</p>`;
+
+  const downloadLinkText = downloadUrl
+    ? downloadUrl
+    : "Open the Net Terms Receivables app in your Shopify admin and go to Data Requests.";
+
+  const htmlContent = `
       <p>Hello,</p>
       <p>A customer has requested a copy of their data under GDPR/CCPA regulations.</p>
       <p>The data export is ready for download in your Shopify admin:</p>
-      <p><a href="${downloadUrl}">Download Customer Data Export</a></p>
+      ${downloadLinkHtml}
       <p>Please review and provide this data to the customer within the required timeframe.</p>
       <p>The export will be available for 30 days.</p>
       <p>— Net Terms Receivables</p>
-    `.trim(),
-    text: `Hello,
+    `.trim();
+
+  const textContent = `Hello,
 
 A customer has requested a copy of their data under GDPR/CCPA regulations.
 
 The data export is ready for download in your Shopify admin:
-${downloadUrl}
+${downloadLinkText}
 
 Please review and provide this data to the customer within the required timeframe.
 The export will be available for 30 days.
 
-— Net Terms Receivables`,
+— Net Terms Receivables`;
+
+  // Pre-launch recipient allowlist check (fail closed)
+  const allowlist = parseRecipientAllowlist(process.env.RESEND_TEST_RECIPIENTS);
+  if (allowlist.size === 0) {
+    safeLog("info", "data_request_email_skipped", {
+      shopHash: hash,
+      requestId,
+      reason: "recipient_allowlist_empty",
+    });
+    return { sent: false, skippedReason: "recipient_allowlist_empty" };
+  }
+  if (!isRecipientAllowed(shopOwnerEmail, allowlist)) {
+    safeLog("info", "data_request_email_skipped", {
+      shopHash: hash,
+      requestId,
+      reason: "recipient_not_allowlisted",
+    });
+    return { sent: false, skippedReason: "recipient_not_allowlisted" };
+  }
+
+  const emailBody = {
+    from: resendFrom,
+    to: shopOwnerEmail,
+    subject: "Customer Data Request Ready for Download",
+    html: htmlContent,
+    text: textContent,
   };
 
   try {

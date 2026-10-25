@@ -23,7 +23,8 @@ export function buildOverLimitBannerState(
   gatedCount: number,
   gatingEnforced: boolean
 ): OverLimitBannerState {
-  if (gatedCount <= 0) {
+  // Don't show over-limit banner when gating is not enforced
+  if (gatedCount <= 0 || !gatingEnforced) {
     return {
       show: false,
       heading: "",
@@ -37,19 +38,15 @@ export function buildOverLimitBannerState(
 
   const bodyText =
     "Nothing is hidden and totals include all accounts. Only these actions " +
-    "are limited: reminders, credit-limit edits, account-detail edits and " +
-    "bulk statement import. Matching, confirming a match and mark-paid are " +
+    "are limited: reminders, credit-limit edits, and account-detail edits. " +
+    "Matching, confirming a match and mark-paid are " +
     "never gated. Credit holds and the checkout block work on every plan.";
-
-  const enforcementNote = gatingEnforced
-    ? null
-    : "(Limits are not currently enforced.)";
 
   return {
     show: true,
     heading,
     bodyText,
-    enforcementNote,
+    enforcementNote: null,
   };
 }
 
@@ -64,7 +61,8 @@ export function buildAccountOverLimitBannerState(
   isGated: boolean,
   gatingEnforced: boolean
 ): OverLimitBannerState {
-  if (!isGated) {
+  // Don't show over-limit banner when gating is not enforced
+  if (!isGated || !gatingEnforced) {
     return {
       show: false,
       heading: "",
@@ -73,22 +71,18 @@ export function buildAccountOverLimitBannerState(
     };
   }
 
-  const heading = "This account is over your plan limit";
+  const heading = "This account was added after you reached your plan limit";
 
   const bodyText =
     "Nothing is hidden. Only these actions are limited: reminders, credit-limit " +
-    "edits, account-detail edits and bulk statement import. Matching, confirming " +
+    "edits, and account-detail edits. Matching, confirming " +
     "a match and mark-paid are never gated. Credit holds and the checkout block " +
     "work on every plan.";
-
-  const enforcementNote = gatingEnforced
-    ? null
-    : "(Limits are not currently enforced.)";
 
   return {
     show: true,
     heading,
     bodyText,
-    enforcementNote,
+    enforcementNote: null,
   };
 }

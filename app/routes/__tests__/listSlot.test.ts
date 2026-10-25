@@ -15,7 +15,6 @@ import { join } from "path";
 const ROUTE_FILES = [
   "app/routes/app._index.tsx",
   "app/routes/app.onboarding.tsx",
-  "app/routes/app.plan.tsx",
   "app/routes/app.accounts.$id.tsx",
   "app/routes/app.settings.reminders.tsx",
   "app/routes/app.tag-rules.tsx",
@@ -130,7 +129,6 @@ describe("s-table-header coverage", () => {
     const allRouteFiles = [
       "app/routes/app._index.tsx",
       "app/routes/app.onboarding.tsx",
-      "app/routes/app.plan.tsx",
       "app/routes/app.accounts.$id.tsx",
       "app/routes/app.settings.reminders.tsx",
       "app/routes/app.tag-rules.tsx",

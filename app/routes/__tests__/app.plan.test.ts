@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { renderToString } from "react-dom/server";
+import { createElement } from "react";
 
 /**
  * Tests for plan page loader (S21).
@@ -125,8 +127,8 @@ describe("Plan Page Loader", () => {
 
     expect(result.plan).toBeNull();
     expect(result.usage).toEqual({
-      companies: { current: 0, limit: 3 },
-      importsThisMonth: { current: 0, limit: 1 },
+      companies: { current: 0, limit: 0 },
+      importsThisMonth: { current: 0, limit: -1 },
     });
     expect(result.gatedCount).toBe(0);
     expect(result.error).toBeNull();
@@ -147,8 +149,8 @@ describe("Plan Page Loader", () => {
       new Error("Database error")
     );
     (getUsageStats as ReturnType<typeof vi.fn>).mockResolvedValue({
-      companies: { current: 0, limit: 3 },
-      importsThisMonth: { current: 0, limit: 1 },
+      companies: { current: 0, limit: 0 },
+      importsThisMonth: { current: 0, limit: -1 },
     });
     (getGatedAccountCount as ReturnType<typeof vi.fn>).mockResolvedValue(0);
 
@@ -181,8 +183,8 @@ describe("Plan Page Loader", () => {
       new Error("Database connection timed out")
     );
     (getUsageStats as ReturnType<typeof vi.fn>).mockResolvedValue({
-      companies: { current: 0, limit: 3 },
-      importsThisMonth: { current: 0, limit: 1 },
+      companies: { current: 0, limit: 0 },
+      importsThisMonth: { current: 0, limit: -1 },
     });
     (getGatedAccountCount as ReturnType<typeof vi.fn>).mockResolvedValue(0);
 
@@ -216,7 +218,7 @@ describe("Plan Page Loader", () => {
     (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
     (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-      plan: { key: "free", limits: { companies: 3, importsPerMonth: 1 } },
+      plan: { key: "none", limits: { companies: 0, importsPerMonth: -1 } },
       subscriptionId: null,
       subscriptionName: null,
       isTest: false,
@@ -224,8 +226,8 @@ describe("Plan Page Loader", () => {
     });
 
     (getUsageStats as ReturnType<typeof vi.fn>).mockResolvedValue({
-      companies: { current: 3, limit: 3 },
-      importsThisMonth: { current: 1, limit: 1 },
+      companies: { current: 0, limit: 0 },
+      importsThisMonth: { current: 0, limit: -1 },
     });
 
     (getGatedAccountCount as ReturnType<typeof vi.fn>).mockResolvedValue(2);
@@ -290,15 +292,15 @@ describe("Plan Page Loader", () => {
 });
 
 describe("Plan Page Component Logic", () => {
-  it("shows upgrade section for non-scale plans", () => {
+  it("shows upgrade section for non-unlimited plans", () => {
     const planKey = "growth" as string;
-    const canUpgrade = planKey !== "scale";
+    const canUpgrade = planKey !== "unlimited";
     expect(canUpgrade).toBe(true);
   });
 
-  it("hides upgrade section for scale plan", () => {
-    const planKey = "scale" as string;
-    const canUpgrade = planKey !== "scale";
+  it("hides upgrade section for unlimited plan", () => {
+    const planKey = "unlimited" as string;
+    const canUpgrade = planKey !== "unlimited";
     expect(canUpgrade).toBe(false);
   });
 
@@ -309,104 +311,13 @@ describe("Plan Page Component Logic", () => {
     expect(bannerTone).toBe("warning");
   });
 
-  it("uses info banner tone when gating is OFF and limit reached", () => {
+  it("shows no limit-related banners when gating is OFF (T1: Usage Note removed)", () => {
+    // When gating is off, no limit-related banners are shown at all
+    // (Usage Note banner was removed in T1)
     const gatingEnforced = false;
     const hasLimitReached = true;
-    const bannerTone = hasLimitReached && !gatingEnforced ? "info" : "warning";
-    expect(bannerTone).toBe("info");
-  });
-});
-
-/**
- * Tests for FeatureComparisonTable logic (S21).
- *
- * The FeatureComparisonTable component in app.plan.tsx iterates over
- * ALL_PLAN_KEYS and ALL_FEATURE_KEYS, calling planHasFeature() to
- * determine whether to show ✓ or — for each cell.
- *
- * These tests verify the pure logic that the table uses, especially
- * that credit_holds shows as included (✓) for ALL four plan tiers.
- */
-describe("FeatureComparisonTable logic", () => {
-  it("credit_holds shows as included for all four tiers", async () => {
-    const { ALL_PLAN_KEYS, getPlanConfig, planHasFeature } = await import(
-      "~/lib/entitlements"
-    );
-
-    const creditHoldsRow = ALL_PLAN_KEYS.map((planKey) => {
-      const plan = getPlanConfig(planKey);
-      return { planKey, hasFeature: planHasFeature(plan, "credit_holds") };
-    });
-
-    expect(creditHoldsRow).toEqual([
-      { planKey: "free", hasFeature: true },
-      { planKey: "starter", hasFeature: true },
-      { planKey: "growth", hasFeature: true },
-      { planKey: "scale", hasFeature: true },
-    ]);
-  });
-
-  it("aging_dashboard shows as included for all four tiers", async () => {
-    const { ALL_PLAN_KEYS, getPlanConfig, planHasFeature } = await import(
-      "~/lib/entitlements"
-    );
-
-    for (const planKey of ALL_PLAN_KEYS) {
-      const plan = getPlanConfig(planKey);
-      expect(planHasFeature(plan, "aging_dashboard")).toBe(true);
-    }
-  });
-
-  it("matching shows as included for all four tiers", async () => {
-    const { ALL_PLAN_KEYS, getPlanConfig, planHasFeature } = await import(
-      "~/lib/entitlements"
-    );
-
-    const matchingRow = ALL_PLAN_KEYS.map((planKey) => {
-      const plan = getPlanConfig(planKey);
-      return { planKey, hasFeature: planHasFeature(plan, "matching") };
-    });
-
-    expect(matchingRow).toEqual([
-      { planKey: "free", hasFeature: true },
-      { planKey: "starter", hasFeature: true },
-      { planKey: "growth", hasFeature: true },
-      { planKey: "scale", hasFeature: true },
-    ]);
-  });
-
-  it("pdf_statements shows as NOT included for free and starter", async () => {
-    const { getPlanConfig, planHasFeature } = await import("~/lib/entitlements");
-
-    expect(planHasFeature(getPlanConfig("free"), "pdf_statements")).toBe(false);
-    expect(planHasFeature(getPlanConfig("starter"), "pdf_statements")).toBe(false);
-    expect(planHasFeature(getPlanConfig("growth"), "pdf_statements")).toBe(true);
-    expect(planHasFeature(getPlanConfig("scale"), "pdf_statements")).toBe(true);
-  });
-
-  it("generates correct table data for all features", async () => {
-    const { ALL_PLAN_KEYS, ALL_FEATURE_KEYS, getPlanConfig, planHasFeature } =
-      await import("~/lib/entitlements");
-
-    const tableRows = ALL_FEATURE_KEYS.map((feature) => {
-      const cells = ALL_PLAN_KEYS.map((planKey) => {
-        const plan = getPlanConfig(planKey);
-        return planHasFeature(plan, feature);
-      });
-      return { feature, cells };
-    });
-
-    const creditHoldsRowData = tableRows.find((row) => row.feature === "credit_holds");
-    expect(creditHoldsRowData?.cells).toEqual([true, true, true, true]);
-
-    const agingRowData = tableRows.find((row) => row.feature === "aging_dashboard");
-    expect(agingRowData?.cells).toEqual([true, true, true, true]);
-
-    const matchingRowData = tableRows.find((row) => row.feature === "matching");
-    expect(matchingRowData?.cells).toEqual([true, true, true, true]);
-
-    const auditExportRowData = tableRows.find((row) => row.feature === "audit_export");
-    expect(auditExportRowData?.cells).toEqual([false, false, false, true]);
+    const showBanner = hasLimitReached && gatingEnforced;
+    expect(showBanner).toBe(false);
   });
 });
 
@@ -431,11 +342,10 @@ describe("S21 Over-limit banner using buildOverLimitBannerState helper", () => {
     expect(state.show).toBe(false);
   });
 
-  it("shows banner when gatingEnforced is false (flag-off behavior)", async () => {
+  it("hides banner when gatingEnforced is false (T1: no banner when gating off)", async () => {
     const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
     const state = buildOverLimitBannerState(3, false);
-    expect(state.show).toBe(true);
-    expect(state.enforcementNote).toBe("(Limits are not currently enforced.)");
+    expect(state.show).toBe(false);
   });
 
   it("no enforcement note when gatingEnforced is true", async () => {
@@ -469,7 +379,7 @@ describe("S21 Account page banner using buildAccountOverLimitBannerState helper"
     const { buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
     const state = buildAccountOverLimitBannerState(true, true);
     expect(state.show).toBe(true);
-    expect(state.heading).toBe("This account is over your plan limit");
+    expect(state.heading).toBe("This account was added after you reached your plan limit");
   });
 
   it("hides banner when isGated is false", async () => {
@@ -478,11 +388,10 @@ describe("S21 Account page banner using buildAccountOverLimitBannerState helper"
     expect(state.show).toBe(false);
   });
 
-  it("shows banner when gatingEnforced is false (flag-off behavior)", async () => {
+  it("hides banner when gatingEnforced is false (T1: no banner when gating off)", async () => {
     const { buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
     const state = buildAccountOverLimitBannerState(true, false);
-    expect(state.show).toBe(true);
-    expect(state.enforcementNote).toBe("(Limits are not currently enforced.)");
+    expect(state.show).toBe(false);
   });
 
   it("hides banner when account not gated even if gatingEnforced is false", async () => {
@@ -497,19 +406,6 @@ describe("S21 No price strings in plan output", () => {
     const { PLAN_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
     
     const allNames = Object.values(PLAN_DISPLAY_NAMES).join("");
-    
-    expect(allNames).not.toContain("$");
-    expect(allNames).not.toContain("₹");
-    expect(allNames).not.toContain("€");
-    expect(allNames).not.toContain("£");
-    expect(allNames).not.toContain("¥");
-    expect(allNames).not.toMatch(/\d+\.\d{2}/);
-  });
-
-  it("FEATURE_DISPLAY_NAMES contains no currency symbols", async () => {
-    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
-    
-    const allNames = Object.values(FEATURE_DISPLAY_NAMES).join("");
     
     expect(allNames).not.toContain("$");
     expect(allNames).not.toContain("₹");
@@ -559,5 +455,282 @@ describe("S21 No price strings in plan output", () => {
       expect(state.bodyText).not.toContain("$");
       expect(state.bodyText).not.toContain("₹");
     }
+  });
+});
+
+/**
+ * UsageDisplay component render tests (T1 QA2).
+ *
+ * Tests that UsageDisplay renders correctly with gating ON and OFF:
+ * - gatingEnforced=false: no 'At Limit', 'Near Limit' badges
+ * - gatingEnforced=true at limit: shows 'At Limit' badge
+ * - gatingEnforced=true near limit: shows 'Near Limit' badge
+ */
+describe("UsageDisplay component render tests", () => {
+  it("shows no badges when gatingEnforced is false (at limit)", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { UsageDisplay } = await import("../app.plan");
+
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 25,
+        limit: 25,
+        label: "Buyer Accounts",
+        gatingEnforced: false,
+      })
+    );
+
+    expect(html).not.toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+    expect(html).not.toContain("Usage Note");
+  });
+
+  it("shows no badges when gatingEnforced is false (near limit)", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { UsageDisplay } = await import("../app.plan");
+
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 20, // 80% of 25
+        limit: 25,
+        label: "Buyer Accounts",
+        gatingEnforced: false,
+      })
+    );
+
+    expect(html).not.toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+    expect(html).not.toContain("Usage Note");
+  });
+
+  it("shows At Limit badge when gatingEnforced is true and at limit", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { UsageDisplay } = await import("../app.plan");
+
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 25,
+        limit: 25,
+        label: "Buyer Accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+  });
+
+  it("shows Near Limit badge when gatingEnforced is true and near limit", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { UsageDisplay } = await import("../app.plan");
+
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 20, // 80% of 25
+        limit: 25,
+        label: "Buyer Accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).not.toContain("At Limit");
+    expect(html).toContain("Near Limit");
+  });
+
+  it("shows usage with limit format when gatingEnforced is true", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { UsageDisplay } = await import("../app.plan");
+
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 10,
+        limit: 25,
+        label: "Buyer Accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).toContain("10 / 25");
+  });
+
+  it("shows usage count only when gatingEnforced is false", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { UsageDisplay } = await import("../app.plan");
+
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 10,
+        limit: 25,
+        label: "Buyer Accounts",
+        gatingEnforced: false,
+      })
+    );
+
+    expect(html).toContain(">10<");
+    expect(html).not.toContain("/ 25");
+  });
+});
+
+/**
+ * Credit-hold and credit-status feature availability tests (T1/T5).
+ *
+ * Verifies that credit_holds feature is available on ALL plans regardless
+ * of gating status. Plan-limit gating only affects the "at limit" badges
+ * and "Upgrade to Add More" CTAs, not feature availability or credit-status UI.
+ *
+ * T5 removed the feature comparison table and FEATURE_DISPLAY_NAMES,
+ * so these tests only verify entitlements-level feature availability.
+ */
+describe("credit-hold feature availability (unaffected by plan gating)", () => {
+  it("credit_holds feature is available on all plans including none", async () => {
+    const { ALL_PLAN_KEYS, getPlanConfig, planHasFeature } = await import("~/lib/entitlements");
+    
+    for (const planKey of ALL_PLAN_KEYS) {
+      const plan = getPlanConfig(planKey);
+      expect(planHasFeature(plan, "credit_holds")).toBe(true);
+    }
+  });
+
+  it("credit_holds is in ALL_FEATURE_KEYS", async () => {
+    const { ALL_FEATURE_KEYS } = await import("~/lib/entitlements");
+    expect(ALL_FEATURE_KEYS).toContain("credit_holds");
+  });
+
+  it("banner-state builder: no over-limit banner when gating off, credit_holds on all plans", async () => {
+    const { buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    
+    // Over-limit banner hidden when gating is off (plan-limit gating)
+    const overLimitState = buildAccountOverLimitBannerState(true, false);
+    expect(overLimitState.show).toBe(false);
+    
+    // Credit-hold feature still available on all plans - verified by entitlements
+    const { ALL_PLAN_KEYS, getPlanConfig, planHasFeature } = await import("~/lib/entitlements");
+    for (const planKey of ALL_PLAN_KEYS) {
+      const plan = getPlanConfig(planKey);
+      // Credit holds feature is available on ALL plans including over-limit shops
+      // This means credit-status badges (OK/Near Limit/Held) and manual hold controls render
+      expect(planHasFeature(plan, "credit_holds")).toBe(true);
+    }
+  });
+});
+
+/**
+ * Render tests for UsageDisplay component (T1 plan-limit gating).
+ *
+ * Real renderToString tests verifying that usage badges only show
+ * when gating is enforced.
+ */
+describe("UsageDisplay render tests (T1)", () => {
+  it("gating OFF at-limit: does NOT show At Limit, Near Limit, or Usage Note", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 25,
+        limit: 25,
+        label: "Buyer accounts",
+        gatingEnforced: false,
+      })
+    );
+
+    expect(html).not.toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+    expect(html).not.toContain("Usage Note");
+  });
+
+  it("gating OFF near-limit: does NOT show At Limit, Near Limit, or Usage Note", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 22,
+        limit: 25,
+        label: "Buyer accounts",
+        gatingEnforced: false,
+      })
+    );
+
+    expect(html).not.toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+    expect(html).not.toContain("Usage Note");
+  });
+
+  it("gating ON at-limit: shows At Limit badge", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 25,
+        limit: 25,
+        label: "Buyer accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+  });
+
+  it("gating ON over-limit: shows At Limit badge", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 30,
+        limit: 25,
+        label: "Buyer accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+  });
+
+  it("gating ON near-limit: shows Near Limit badge", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 22,
+        limit: 25,
+        label: "Buyer accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).toContain("Near Limit");
+    expect(html).not.toContain("At Limit");
+  });
+
+  it("gating ON below near-limit threshold: shows neither badge", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 10,
+        limit: 25,
+        label: "Buyer accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).not.toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+  });
+
+  it("unlimited plan: shows neither badge regardless of gating", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 100,
+        limit: -1,
+        label: "Buyer accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).not.toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
   });
 });

@@ -9,6 +9,7 @@ import {
   parseIndianAmount,
   isBlankOrZero,
   formatPaiseToDisplay,
+  normalizeIciciRef,
 } from "../normalisers.js";
 
 describe("normalisers", () => {
@@ -365,6 +366,29 @@ describe("normalisers", () => {
 
     it("formats 100000000 paise as ₹10,00,000.00 (10 lakh)", () => {
       expect(formatPaiseToDisplay(100000000)).toBe("₹10,00,000.00");
+    });
+  });
+
+  describe("normalizeIciciRef", () => {
+    it("trims and preserves case (no uppercasing for hash stability)", () => {
+      expect(normalizeIciciRef("synt000001")).toBe("synt000001");
+      expect(normalizeIciciRef("SYNT000001")).toBe("SYNT000001");
+    });
+
+    it("preserves pure numeric cheque numbers", () => {
+      expect(normalizeIciciRef("000456")).toBe("000456");
+    });
+
+    it("returns undefined for undefined input", () => {
+      expect(normalizeIciciRef(undefined)).toBeUndefined();
+    });
+
+    it("returns undefined for empty string", () => {
+      expect(normalizeIciciRef("")).toBeUndefined();
+    });
+
+    it("trims whitespace", () => {
+      expect(normalizeIciciRef("  SYNT000001  ")).toBe("SYNT000001");
     });
   });
 });
