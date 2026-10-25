@@ -24,6 +24,7 @@ import { createServer, type Server } from "http";
 import { readFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { medianOfReported, countReported, formatMetric } from "./web-vitals-helpers";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -35,9 +36,9 @@ interface WebVitalMetric {
 }
 
 interface MeasurementResult {
-  lcp: number;
-  cls: number;
-  inp: number;
+  lcp: number | null;
+  cls: number | null;
+  inp: number | null;
 }
 
 const RUNS_PER_PAGE = 3;
@@ -69,19 +70,6 @@ const PROFILES = [
   },
 ];
 
-function median(values: number[]): number {
-  if (values.length === 0) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-}
-
-function formatMetric(value: number, unit: string = "ms"): string {
-  if (value === 0) return "not measured";
-  if (unit === "ms") return `${value.toFixed(0)}${unit}`;
-  return value.toFixed(4);
-}
-
 async function setupCDPThrottling(
   page: Page,
   cpuSlowdown: number,
@@ -99,7 +87,7 @@ async function setupCDPThrottling(
 }
 
 async function measurePage(page: Page, route: string, port: number): Promise<MeasurementResult> {
-  const metrics: MeasurementResult = { lcp: 0, cls: 0, inp: 0 };
+  const metrics: MeasurementResult = { lcp: null, cls: null, inp: null };
 
   await page.addInitScript(() => {
     (window as unknown as { __WEB_VITALS_RESULTS__: WebVitalMetric[] }).__WEB_VITALS_RESULTS__ = [];
@@ -209,16 +197,18 @@ test.describe("Web Vitals Harness Measurements (tooling only)", () => {
     type ReportRow = {
       page: string;
       profileLabel: string;
-      lcp: number;
-      cls: number;
-      inp: number;
+      lcpValues: (number | null)[];
+      clsValues: (number | null)[];
+      inpValues: (number | null)[];
     };
 
     const report: ReportRow[] = [];
 
     for (const profile of PROFILES) {
       for (const pageConfig of PAGES) {
-        const results: MeasurementResult[] = [];
+        const lcpValues: (number | null)[] = [];
+        const clsValues: (number | null)[] = [];
+        const inpValues: (number | null)[] = [];
 
         for (let run = 0; run < RUNS_PER_PAGE; run++) {
           const context = await browser.newContext({
@@ -229,22 +219,20 @@ test.describe("Web Vitals Harness Measurements (tooling only)", () => {
 
           try {
             const metrics = await measurePage(page, pageConfig.route, serverPort);
-            results.push(metrics);
+            lcpValues.push(metrics.lcp);
+            clsValues.push(metrics.cls);
+            inpValues.push(metrics.inp);
           } finally {
             await context.close();
           }
         }
 
-        const medianLcp = median(results.map((r) => r.lcp));
-        const medianCls = median(results.map((r) => r.cls));
-        const medianInp = median(results.map((r) => r.inp));
-
         report.push({
           page: pageConfig.label,
           profileLabel: profile.label,
-          lcp: medianLcp,
-          cls: medianCls,
-          inp: medianInp,
+          lcpValues,
+          clsValues,
+          inpValues,
         });
       }
     }
@@ -260,9 +248,13 @@ test.describe("Web Vitals Harness Measurements (tooling only)", () => {
       console.log("|------|-----|-----|-----|");
 
       for (const row of report.filter((r) => r.profileLabel === profile.label)) {
-        const lcpStr = formatMetric(row.lcp, "ms");
-        const clsStr = formatMetric(row.cls, "");
-        const inpStr = formatMetric(row.inp, "ms");
+        const lcpMedian = medianOfReported(row.lcpValues);
+        const clsMedian = medianOfReported(row.clsValues);
+        const inpMedian = medianOfReported(row.inpValues);
+
+        const lcpStr = formatMetric(lcpMedian, countReported(row.lcpValues), RUNS_PER_PAGE, "ms");
+        const clsStr = formatMetric(clsMedian, countReported(row.clsValues), RUNS_PER_PAGE, "");
+        const inpStr = formatMetric(inpMedian, countReported(row.inpValues), RUNS_PER_PAGE, "ms");
         console.log(`| ${row.page} | ${lcpStr} | ${clsStr} | ${inpStr} |`);
       }
       console.log("");
