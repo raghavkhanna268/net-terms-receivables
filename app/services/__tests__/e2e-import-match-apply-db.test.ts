@@ -189,7 +189,7 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
       )
       VALUES (
         gen_random_uuid()::text, ${testShopId}, ${testBuyerAccountId},
-        ${testOrderGid}, '#E2E1001', 85000.00, 85000.00, 'open',
+        ${testOrderGid}, '#91001', 85000.00, 85000.00, 'open',
         NOW() - INTERVAL '10 days', NOW() + INTERVAL '20 days', 'schedule', NOW(), NOW()
       )
       RETURNING id
@@ -250,7 +250,7 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
           rail: "NEFT",
           utr: syntheticUtr,
           payerName: "E2E SYNTHETIC WHOLESALE CORP",
-          narration: `NEFT CR-E2E SYNTHETIC WHOLESALE CORP-INV#E2E1001`,
+          narration: `NEFT CR-E2E SYNTHETIC WHOLESALE CORP-INV #91001`,
         },
       ],
     };
@@ -381,7 +381,7 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
           rail: "NEFT",
           utr: syntheticUtr,
           payerName: "E2E SYNTHETIC WHOLESALE CORP",
-          narration: `NEFT CR-E2E SYNTHETIC WHOLESALE CORP-#E2E1001`,
+          narration: `NEFT CR-E2E SYNTHETIC WHOLESALE CORP-#91001`,
         },
       ],
     };
@@ -432,7 +432,7 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
           rail: "NEFT",
           utr: syntheticUtr,
           payerName: "E2E SYNTHETIC WHOLESALE CORP",
-          narration: `NEFT CR-E2E SYNTHETIC WHOLESALE-INV#E2E1001`,
+          narration: `NEFT CR-E2E SYNTHETIC WHOLESALE-INV #91001`,
         },
       ],
     };
@@ -487,7 +487,7 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
           rail: "NEFT",
           utr: syntheticUtr,
           payerName: "E2E SYNTHETIC WHOLESALE CORP",
-          narration: `NEFT CR-E2E SYNTHETIC WHOLESALE-#E2E1001`,
+          narration: `NEFT CR-E2E SYNTHETIC WHOLESALE-#91001`,
         },
       ],
     };
@@ -581,7 +581,7 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
           rail: "NEFT",
           utr: syntheticUtr,
           payerName: "E2E SYNTHETIC WHOLESALE CORP",
-          narration: `NEFT CR-E2E SYNTHETIC WHOLESALE CORP-#E2E1001`,
+          narration: `NEFT CR-E2E SYNTHETIC WHOLESALE CORP-#91001`,
         },
       ],
     };
@@ -619,7 +619,7 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
           rail: "NEFT",
           utr: syntheticUtr,
           payerName: "E2E SYNTHETIC WHOLESALE CORP",
-          narration: `NEFT CR-E2E SYNTHETIC WHOLESALE-#E2E1001`,
+          narration: `NEFT CR-E2E SYNTHETIC WHOLESALE-#91001`,
         },
       ],
     };
@@ -671,8 +671,9 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
     try {
       const syntheticUtr = makeValidNeftUtr("80000000008");
       const piiPayerName = "SECRET PAYER NAME PVT LTD";
-      const piiNarration = `NEFT CR-${piiPayerName}-CONFIDENTIAL REF 12345`;
-      const piiAmount = 9876543;
+      const piiNarration = `NEFT CR-${piiPayerName}-#91001`;
+      const piiAmountPaise = 8500000;
+      const piiAmountRupees = 85000;
 
       const importPayload = {
         bank: "HDFC",
@@ -680,7 +681,7 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
         credits: [
           {
             date: getUtcDateString(2),
-            amountPaise: piiAmount,
+            amountPaise: piiAmountPaise,
             rail: "NEFT",
             utr: syntheticUtr,
             payerName: piiPayerName,
@@ -698,10 +699,13 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
         ORDER BY score DESC LIMIT 1
       `;
 
-      if (match) {
-        await confirmMatch(sql, testShopId, match.id, "e2e-test-user");
-        await applyMatch(sql, testShopId, match.id, "e2e-test-user");
-      }
+      expect(match).toBeDefined();
+
+      const confirmResult = await confirmMatch(sql, testShopId, match.id, "e2e-test-user");
+      expect(confirmResult.success).toBe(true);
+
+      const applyResult = await applyMatch(sql, testShopId, match.id, "e2e-test-user");
+      expect(applyResult.success).toBe(true);
 
       expect(consoleLogs.length).toBeGreaterThan(0);
 
@@ -712,7 +716,11 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
       expect(allLogs).not.toContain("CONFIDENTIAL");
       expect(allLogs).not.toContain(piiNarration);
       expect(allLogs).not.toContain(".myshopify.com");
-      expect(allLogs).not.toContain(String(piiAmount));
+      expect(allLogs).not.toContain(String(piiAmountPaise));
+      expect(allLogs).not.toContain(String(piiAmountRupees));
+      expect(allLogs).not.toContain("₹85,000");
+      expect(allLogs).not.toContain("85,000.00");
+      expect(allLogs).not.toContain("₹85000");
     } finally {
       logSpy.mockRestore();
       errorSpy.mockRestore();
@@ -743,7 +751,7 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
             rail: "NEFT",
             utr: syntheticUtr,
             payerName: "E2E SYNTHETIC WHOLESALE CORP",
-            narration: `NEFT CR-E2E SYNTHETIC WHOLESALE-#E2E1001`,
+            narration: `NEFT CR-E2E SYNTHETIC WHOLESALE-#91001`,
           },
         ],
       };
