@@ -33,7 +33,7 @@ import {
   rejectMatch,
   MAX_PAYMENTS_PER_REQUEST,
 } from "~/services/matcher.server";
-import { applyMatch, unmatchMatch } from "~/services/apply.server";
+import { applyMatch, unmatchMatch, RECONCILE_HUMAN_MESSAGES } from "~/services/apply.server";
 import { formatPaiseAmount } from "~/lib/aging";
 import { resolvePlan } from "~/services/plan.server";
 import { isGatingEnforced } from "~/services/gating.server";
@@ -64,6 +64,7 @@ const KNOWN_HUMAN_MESSAGES = new Set([
   "Failed to reject match",
   "Failed to apply match",
   "Failed to unmatch",
+  ...RECONCILE_HUMAN_MESSAGES,
 ]);
 
 /**
