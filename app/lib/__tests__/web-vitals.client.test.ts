@@ -328,7 +328,7 @@ describe("debug logging", () => {
   });
 
   describe("debugLogMetric", () => {
-    it("logs name and value when debug is enabled", () => {
+    it("logs metricName and metricValue when debug is enabled", () => {
       // @ts-expect-error - Mocking localStorage
       global.localStorage = {
         getItem: vi.fn().mockReturnValue("1"),
@@ -341,7 +341,7 @@ describe("debug logging", () => {
       expect(consoleSpy).toHaveBeenCalledWith("[web-vitals]", "LCP", 2500);
     });
 
-    it("logs only name and value - no other arguments", () => {
+    it("logs only metricName and metricValue - no other arguments", () => {
       // @ts-expect-error - Mocking localStorage
       global.localStorage = {
         getItem: vi.fn().mockReturnValue("1"),

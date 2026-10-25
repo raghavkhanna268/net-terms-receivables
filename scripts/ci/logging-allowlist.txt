@@ -41,3 +41,11 @@ scripts/validate-graphql-schema.ts:shop-interpolation:19
 # =============================================================================
 scripts/benchmark-cpu-breakdown.mjs:script-domain:1
 scripts/benchmark-db-cpu.mjs:script-domain:1
+
+# =============================================================================
+# Web Vitals debug logging - intentional opt-in debug output
+# =============================================================================
+# web-vitals.client.ts: 1 console.debug with metricName (metric type like LCP/CLS/INP)
+# This is intentional opt-in debug logging enabled via localStorage flag
+# See docs/ops/web-vitals-debug.md for documentation
+app/lib/web-vitals.client.ts:sensitive-value:1
