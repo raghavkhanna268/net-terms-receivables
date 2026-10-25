@@ -16,6 +16,7 @@
 
 import type { Sql } from "~/lib/db-light.server";
 import { safeLog, shopHash, toErrorCode } from "~/lib/log.server";
+import { getAppHandle } from "~/lib/plan-url";
 
 // ============================================================================
 // RETENTION CONSTANTS
@@ -814,11 +815,16 @@ export interface DataRequestEmailResult {
  * Build the embedded admin URL for the data requests page.
  *
  * @param shopDomain - Shop domain
- * @returns Embedded admin URL
+ * @returns Embedded admin URL, or null if app handle is not configured
  */
-function buildDataRequestsAdminUrl(shopDomain: string): string {
+function buildDataRequestsAdminUrl(shopDomain: string): string | null {
+  const appHandle = getAppHandle();
+  if (appHandle === null) {
+    safeLog("warn", "plan_url_app_handle_missing", {});
+    return null;
+  }
   const shopName = shopDomain.replace(".myshopify.com", "");
-  return `https://admin.shopify.com/store/${shopName}/apps/net-terms-receivables/app/data-requests`;
+  return `https://admin.shopify.com/store/${shopName}/apps/${appHandle}/app/data-requests`;
 }
 
 /**
@@ -861,6 +867,14 @@ export async function sendDataRequestNotification(
 
   const downloadUrl = buildDataRequestsAdminUrl(shopDomain);
 
+  const downloadLinkHtml = downloadUrl
+    ? `<p><a href="${downloadUrl}">Download Customer Data Export</a></p>`
+    : `<p>Open the Net Terms Receivables app in your Shopify admin and go to Data Requests.</p>`;
+
+  const downloadLinkText = downloadUrl
+    ? downloadUrl
+    : "Open the Net Terms Receivables app in your Shopify admin and go to Data Requests.";
+
   const emailBody = {
     from: resendFrom,
     to: shopOwnerEmail,
@@ -869,7 +883,7 @@ export async function sendDataRequestNotification(
       <p>Hello,</p>
       <p>A customer has requested a copy of their data under GDPR/CCPA regulations.</p>
       <p>The data export is ready for download in your Shopify admin:</p>
-      <p><a href="${downloadUrl}">Download Customer Data Export</a></p>
+      ${downloadLinkHtml}
       <p>Please review and provide this data to the customer within the required timeframe.</p>
       <p>The export will be available for 30 days.</p>
       <p>— Net Terms Receivables</p>
@@ -879,7 +893,7 @@ export async function sendDataRequestNotification(
 A customer has requested a copy of their data under GDPR/CCPA regulations.
 
 The data export is ready for download in your Shopify admin:
-${downloadUrl}
+${downloadLinkText}
 
 Please review and provide this data to the customer within the required timeframe.
 The export will be available for 30 days.

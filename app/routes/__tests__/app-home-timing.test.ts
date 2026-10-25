@@ -36,6 +36,7 @@ const mockSql = Object.assign(vi.fn(), { unsafe: vi.fn((s) => s) });
 // Mock modules
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
+  getRequestWaitUntil: vi.fn(() => undefined),
 }));
 
 vi.mock("~/services/plan.server", () => ({
@@ -123,6 +124,7 @@ describe("app home timing instrumentation", () => {
           authenticate: {
             admin: vi.fn().mockResolvedValue({
               session: { shop: TEST_SHOP },
+              sessionToken: "test-session-token",
             }),
           },
         },
@@ -309,6 +311,7 @@ describe("app home timing instrumentation", () => {
             admin: vi.fn().mockResolvedValue({
               admin: {},
               session: { shop: TEST_SHOP },
+              sessionToken: "test-session-token",
               redirect: vi.fn(),
             }),
           },
@@ -566,6 +569,7 @@ describe("cold flag across layout and index", () => {
           admin: vi.fn().mockResolvedValue({
             admin: {},
             session: { shop: TEST_SHOP },
+            sessionToken: "test-session-token",
             redirect: vi.fn(),
           }),
         },
@@ -741,6 +745,7 @@ describe("redirect and throw paths", () => {
           admin: vi.fn().mockResolvedValue({
             admin: {},
             session: { shop: TEST_SHOP },
+            sessionToken: "test-session-token",
             redirect: mockRedirect,
           }),
         },
