@@ -89,6 +89,9 @@ interface CreditRow {
  * Parsed credit from client-side bank statement parsing.
  * Contains additional fields (direction, dedupeKey, sourceRow) that are
  * NOT sent to the server.
+ * 
+ * Note: `rail` is typed as `string` because parseBankStatement returns string.
+ * The server-side validation will verify it's a valid rail type.
  */
 export interface ParsedCredit {
   date: string;
@@ -97,7 +100,7 @@ export interface ParsedCredit {
   narration: string;
   refNo?: string;
   balancePaise?: number;
-  rail: ValidRail;
+  rail: string;
   utr?: string;
   payerName?: string;
   dedupeKey?: string;

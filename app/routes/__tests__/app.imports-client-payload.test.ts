@@ -47,7 +47,7 @@ function toCredits(parseResult: Awaited<ReturnType<typeof parseBankStatement>>):
       narration: t.narration,
       refNo: t.refNo,
       balancePaise: t.balancePaise,
-      rail: t.parsed.rail as ParsedCredit["rail"],
+      rail: t.parsed.rail,
       utr: t.parsed.utr,
       payerName: t.parsed.payerName,
       dedupeKey: t.dedupeKey,
