@@ -100,7 +100,7 @@ function isSensitiveIdentifier(name: string): boolean {
  */
 const SAFE_KEY_ALLOWLIST: Record<string, string> = {
   // Hashed identifiers (not the raw domain)
-  shopHash: "SHA-256 hash prefix of domain, not PII",
+  shopHash: "HMAC-SHA-256 prefix keyed by LOG_HASH_KEY secret, not reversible without the key",
 
   // Internal database IDs (UUIDs, not domains or names)
   shopId: "Internal UUID primary key, not the domain string",

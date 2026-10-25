@@ -55,6 +55,12 @@ vi.mock("~/services/sync/company-location.server", () => ({
   }),
 }));
 
+// Mock request context for shopHash key and session storage
+vi.mock("~/lib/request-context.server", () => ({
+  getRequestEnv: vi.fn(() => ({ LOG_HASH_KEY: "test-key-for-processor-tests" })),
+  getRequestSql: vi.fn(() => ({})),
+}));
+
 vi.mock("~/services/sync/order.server", () => ({
   processOrderWebhook: vi.fn().mockResolvedValue({
     success: true,

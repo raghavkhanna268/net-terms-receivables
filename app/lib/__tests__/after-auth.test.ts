@@ -25,6 +25,7 @@ const mockSqlQuery = Object.assign(
 );
 vi.mock("../request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSqlQuery),
+  getRequestEnv: vi.fn(() => ({ LOG_HASH_KEY: "test-key-for-after-auth-tests" })),
 }));
 
 import { ensureMetafieldDefinitions } from "../metafield-definitions.server";

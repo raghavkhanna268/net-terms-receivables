@@ -23,6 +23,7 @@ const mockSql = Object.assign(vi.fn(), {
 
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
+  getRequestEnv: vi.fn(() => ({ LOG_HASH_KEY: "test-key-for-onboarding-tests" })),
 }));
 
 const mockEnsureValidation = vi.fn();

@@ -14,6 +14,7 @@ export interface WorkerEnv {
   CUSTOMER_PII_FIELDS?: string;
   RESEND_API_KEY?: string;
   RESEND_FROM?: string;
+  LOG_HASH_KEY?: string;
 }
 
 export interface RequestStore {
