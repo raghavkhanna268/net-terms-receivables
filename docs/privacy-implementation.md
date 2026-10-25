@@ -161,9 +161,8 @@ pgmq visibility timeout (VT) is not a row lock. When a drain worker holds a mess
 
 When the worker finishes:
 - If the handler succeeds, its `pgmq.archive()` or `pgmq.delete()` on the now-missing `msg_id` returns `false` without throwing — this is safe.
-- If the handler fails permanently (e.g., `no_session` because sessions were deleted, or `shop_not_found`) or at the retry limit, the worker's in-memory copy gets dead-lettered by `moveToDeadLetter` (`app/services/drain/processor.server.ts:968-991`), which INSERTs into `s6_dead_letter` **before** calling `pgmq.delete`. This writes the shop's message back after the redact.
-
-The failure typically happens on the first read, not after retries: shop/redact deletes sessions first, so API-calling handlers fail immediately with `retryable: false`. A message left for retry never comes back because its queue row is gone.
+- If the handler fails with `retryable: false` (e.g., `no_session` because sessions were deleted), it dead-letters immediately on the first read (`processor.server.ts:1056-1057`). The worker's in-memory copy gets dead-lettered by `moveToDeadLetter` (`processor.server.ts:968-991`), which INSERTs into `s6_dead_letter` **before** calling `pgmq.delete`. This writes the shop's message back after the redact.
+- If the handler fails without `retryable: false` (e.g., `shop_not_found`), it retries up to `maxRetries` and dead-letters at the retry limit. However, the queue row is already gone, so retries never happen — only the first in-flight read matters.
 
 This leak is tracked in [#239](https://github.com/raghavkhanna268/net-terms-receivables/issues/239), which fixes it by reversing the order (delete from queue first, then insert into dead-letter).
 
