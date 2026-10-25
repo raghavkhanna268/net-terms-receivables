@@ -227,9 +227,8 @@ describe("Tag Rules Route", () => {
       expect(result.shopId).toBeNull();
       expect(result.tagRules).toEqual([]);
 
-      // Verify auth was called before any DB access
+      // Verify auth called; only the shop lookup ran (no further DB queries)
       expect(mockContext.shopify.authenticate.admin).toHaveBeenCalledTimes(1);
-      // Verify only the shop lookup was called (no further DB queries)
       expect(mockSql).toHaveBeenCalledTimes(1);
     });
 
@@ -798,9 +797,8 @@ describe("Tag Rules Route", () => {
       expect(status).not.toBe(404);
       expect(status).not.toBe(500);
 
-      // Verify auth was called before any DB access
+      // Verify auth called; only the shop lookup ran (no further DB queries after early return)
       expect(mockContext.shopify.authenticate.admin).toHaveBeenCalledTimes(1);
-      // Verify only the shop lookup was called (no further DB queries after early return)
       expect(mockSql).toHaveBeenCalledTimes(1);
     });
   });
@@ -1264,11 +1262,10 @@ describe("S24: Finishing setup empty state (real render)", () => {
     vi.resetModules();
   });
 
-  it("Refresh button uses useRevalidator (loader re-run picks up new shop row)", async () => {
+  it("useRevalidator hook is called during render in finishing setup state", async () => {
     const { renderToString } = await import("react-dom/server");
     const { createElement } = await import("react");
 
-    const mockRevalidate = vi.fn();
     let revalidatorCalled = false;
 
     vi.doMock("react-router", async () => {
@@ -1286,7 +1283,7 @@ describe("S24: Finishing setup empty state (real render)", () => {
         useNavigation: () => ({ state: "idle" }),
         useRevalidator: () => {
           revalidatorCalled = true;
-          return { revalidate: mockRevalidate, state: "idle" };
+          return { revalidate: vi.fn(), state: "idle" };
         },
       };
     });
