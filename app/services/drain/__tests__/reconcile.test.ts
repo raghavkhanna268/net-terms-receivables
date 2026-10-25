@@ -136,6 +136,12 @@ describe("Reconcile", () => {
       expect(isReconcileMessage({ topic: "RECONCILE_COMPANIES" })).toBe(true);
     });
 
+    it("returns true for RECONCILE_CUSTOMERS topic", async () => {
+      const { isReconcileMessage } = await import("../reconcile.server");
+
+      expect(isReconcileMessage({ topic: "RECONCILE_CUSTOMERS" })).toBe(true);
+    });
+
     it("returns true for RECONCILE_ORDERS topic", async () => {
       const { isReconcileMessage } = await import("../reconcile.server");
 

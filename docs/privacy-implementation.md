@@ -222,8 +222,9 @@ The app performs nightly reconciliation to ensure local ledger consistency with 
 1. **pg_cron** triggers at 02:00 UTC daily
 2. Worker enqueues `RECONCILE_COMPANIES` messages per active shop
 3. Bulk export downloads JSONL via HTTP Range chunking (CPU-safe)
-4. After companies complete, `RECONCILE_ORDERS` is enqueued
-5. Orders are upserted via the same S6 services as webhooks
+4. After companies complete, `RECONCILE_CUSTOMERS` is enqueued (skipped if shop has no tag rules)
+5. After customers complete, `RECONCILE_ORDERS` is enqueued
+6. Orders are upserted via the same S6 services as webhooks
 
 **Data minimisation:**
 - No drift report is generated or stored (removed in QA review)
@@ -235,6 +236,11 @@ The app performs nightly reconciliation to ensure local ledger consistency with 
 - Orders >60 days old may return null without `read_all_orders` scope
 - These are counted but never marked deleted/paid/cancelled
 - Last known invoice state is preserved
+
+**Customers stage limitations (S8 backlog):**
+- Reconcile only adds or updates customers matching tag rules; it does not remove tagged customers
+- Removing a tag relies on the `customers/update` webhook (not reconcile)
+- If a webhook is missed, the customer remains a tagged buyer until the next webhook event
 
 ---
 
