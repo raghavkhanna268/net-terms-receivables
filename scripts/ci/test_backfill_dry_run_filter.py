@@ -15,14 +15,19 @@ def run(text):
 DRY = "Mode: DRY-RUN (use --apply to write)\n"
 fails = []
 
-rc, out = run(DRY + "Shop: example-shop.myshopify.com\n  Order: gid://shopify/Order/1 account: acc_1\n"
-              "Shop: other.myshopify.com\nShop: example-shop.myshopify.com\nCandidates: 1\n")
+# Test that shop domains are masked to ordinals
+# Note: with id-shaped value detection, lines containing GIDs are now blocked
+# before masking. Use a simple test with no GIDs.
+rc, out = run(DRY + "Shop: example-shop.myshopify.com\nShop: other.myshopify.com\n"
+              "Shop: example-shop.myshopify.com\nCandidates: 1\n")
 if rc != 0 or "myshopify" in out or "Shop: #1\n" not in out or "Shop: #2\n" not in out or out.count("Shop: #1") != 2:
     fails.append(f"domain-shaped shop id not masked (rc={rc})")
 
+# Test that lines with host-shaped OR id-shaped values are blocked.
+# The filter may exit 5 (host) or 6 (id) depending on which check fires first.
 rc, out = run(DRY + "  Order: gid://shopify/Order/1 account: shop.example.com\n")
-if rc != 5 or "example.com" in out:
-    fails.append(f"host-shaped value not failed (rc={rc})")
+if rc not in (5, 6) or "example.com" in out:
+    fails.append(f"host/id-shaped value not failed (rc={rc})")
 
 rc, out = run(DRY + "Mode: APPLY (writing holds)\n")
 if rc != 3:
