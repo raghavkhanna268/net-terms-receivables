@@ -11,10 +11,17 @@
  * - Migration backfill: existing rows remain status='sent'
  *
  * Uses real Postgres. Test domains are test-* only. No real customer data.
+ *
+ * TIMEZONE TESTING:
+ * Tests use vi.setSystemTime() to freeze both JS and derived dates. All date
+ * values (dueAt, issuedAt, cap dates, sentAt) are computed from the frozen
+ * instant rather than SQL NOW(). Tests run at IST day boundary instants to
+ * catch bugs where 'today' disagrees between JS and DB sides.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
+import { DateTime } from "luxon";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -23,29 +30,53 @@ const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
 /**
- * Compute a fixed-offset Etc/GMT±N timezone where the DB's current local hour is ~12.
- * Uses DB's NOW() as the single clock source so the timezone choice aligns with the
- * business-hour check in s18_enqueue_reminders() which also uses NOW().
- * PostgreSQL uses POSIX convention where Etc/GMT+5 means UTC-5 (opposite of ISO).
+ * IST day boundary instants for testing.
+ * All on 2026-10-15 IST (a date chosen to avoid DST transitions).
+ *
+ * Key boundaries around IST midnight (18:30 UTC):
+ * - 18:29 UTC on Oct 14 = 23:59 IST on Oct 14 (just before IST midnight)
+ * - 18:31 UTC on Oct 14 = 00:01 IST on Oct 15 (just after IST midnight)
+ *
+ * Other boundaries:
+ * - 23:59 IST = 18:29 UTC on Oct 15 (near end of IST day)
+ * - 00:00 IST = 18:30 UTC on Oct 14 (start of IST day, previous UTC day)
+ * - 05:29 IST = 23:59 UTC on Oct 14 (just before UTC day change)
+ * - 05:30 IST = 00:00 UTC on Oct 15 (UTC midnight = IST 05:30)
+ * - 12:00 IST = 06:30 UTC on Oct 15 (baseline, middle of business day)
  */
-async function getTestTimezone(sql: ReturnType<typeof postgres>): Promise<string> {
-  const [row] = await sql<{ utc_hour: number }[]>`
-    SELECT EXTRACT(HOUR FROM NOW() AT TIME ZONE 'UTC')::int AS utc_hour
-  `;
-  const utcHour = row.utc_hour;
-  const offsetToMakeNoon = utcHour - 12;
-  if (offsetToMakeNoon === 0) {
-    return "Etc/GMT";
-  } else if (offsetToMakeNoon > 0) {
-    return `Etc/GMT+${offsetToMakeNoon}`;
-  } else {
-    return `Etc/GMT${offsetToMakeNoon}`;
-  }
+const BOUNDARY_INSTANTS = [
+  { name: "12:00 IST (baseline)", utc: "2026-10-15T06:30:00Z", istDate: "2026-10-15" },
+  { name: "23:59 IST", utc: "2026-10-15T18:29:00Z", istDate: "2026-10-15" },
+  { name: "00:00 IST", utc: "2026-10-14T18:30:00Z", istDate: "2026-10-15" },
+  { name: "18:29 UTC (23:59 IST Oct 14)", utc: "2026-10-14T18:29:00Z", istDate: "2026-10-14" },
+  { name: "18:31 UTC (00:01 IST Oct 15)", utc: "2026-10-14T18:31:00Z", istDate: "2026-10-15" },
+  { name: "05:29 IST", utc: "2026-10-14T23:59:00Z", istDate: "2026-10-15" },
+  { name: "00:00 UTC (05:30 IST)", utc: "2026-10-15T00:00:00Z", istDate: "2026-10-15" },
+] as const;
+
+/**
+ * Helper to compute dates relative to the frozen instant.
+ * Computes both IST dates (for dueAt, issuedAt) and UTC dates (for cap rows).
+ * @param utcInstant - The frozen UTC instant (e.g. "2026-10-15T06:30:00Z")
+ * @param istDateStr - The IST date for this instant (e.g. "2026-10-15")
+ */
+function computeDatesFromInstant(utcInstant: string, istDateStr: string) {
+  const utcDt = DateTime.fromISO(utcInstant, { zone: "UTC" });
+  const istNoon = DateTime.fromISO(`${istDateStr}T12:00:00`, { zone: "Asia/Kolkata" });
+  const utcDateStr = utcDt.toISODate()!;
+  return {
+    todayIST: istDateStr,
+    todayUTC: utcDateStr,
+    todayISTNoon: istNoon.toJSDate(),
+    monthStrIST: istDateStr.substring(0, 7),
+    monthStrUTC: utcDateStr.substring(0, 7),
+    daysAgo: (n: number) => istNoon.minus({ days: n }).toJSDate(),
+    hoursAgo: (n: number) => istNoon.minus({ hours: n }).toJSDate(),
+  };
 }
 
 describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   let sql: ReturnType<typeof postgres>;
-  let testTimezone: string;
   const TEST_SUFFIX = Date.now().toString(36) + "-catchup";
   const TEST_SHOP_ID = `shop-catchup-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `test-catchup-${TEST_SUFFIX}.myshopify.com`;
@@ -55,13 +86,13 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   const TEST_RULE_ID_2 = `rule-catchup-2-${TEST_SUFFIX}`;
   const TEST_RULE_ID_3 = `rule-catchup-3-${TEST_SUFFIX}`;
 
-  const _FIXED_DATE = new Date("2026-10-15T12:00:00Z");
-  const _FIXED_DATE_STR = "2026-10-15";
+  const FIXED_DATE_STR = "2026-10-15";
+  const FIXED_UTC_INSTANT = "2026-10-15T06:30:00Z";
   const FIXED_MONTH_STR = "2026-10";
+  const TEST_TIMEZONE = "Asia/Kolkata";
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
-    testTimezone = await getTestTimezone(sql);
 
     await sql`
       DELETE FROM s18_global_sends 
@@ -70,7 +101,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
 
     await sql`
       INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
-      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', ${testTimezone}, 'free', NOW(), NOW())
+      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', ${TEST_TIMEZONE}, 'free', NOW(), NOW())
     `;
 
     await sql`
@@ -123,6 +154,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   });
 
   beforeEach(async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     await sql`DELETE FROM "ReminderLog" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
     mockFetch.mockReset();
@@ -133,53 +165,48 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
   });
 
   describe("cap boundary - delayed instead of deleted", () => {
-    it("upserts as delayed when daily cap is reached", async () => {
-      const { sendPaymentReminder, DAILY_SEND_CAP } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+    describe.each(BOUNDARY_INSTANTS)("at $name", ({ utc, istDate }) => {
+      it("upserts as delayed when daily cap is reached", async () => {
+        vi.setSystemTime(new Date(utc));
+        const { sendPaymentReminder, DAILY_SEND_CAP } = await import("../reminders.server");
+        const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
-      const invoiceId = `inv-cap-delayed-${TEST_SUFFIX}`;
-      const orderId = `gid://shopify/Order/cap-delayed-${TEST_SUFFIX}`;
+        const dates = computeDatesFromInstant(utc, istDate);
+        const invoiceId = `inv-cap-delayed-${utc.replace(/[:.]/g, "-")}-${TEST_SUFFIX}`;
+        const orderId = `gid://shopify/Order/cap-delayed-${utc.replace(/[:.]/g, "-")}-${TEST_SUFFIX}`;
 
-      // Invoice dueAt is TODAY (so offsetDays=0 fires today)
-      await sql`
-        INSERT INTO "Invoice" (
-          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
-          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
-        )
-        VALUES (
-          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
-          '#CAP-DELAYED', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
-        )
-      `;
+        await sql`
+          INSERT INTO "Invoice" (
+            id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+            status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+          )
+          VALUES (
+            ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+            '#CAP-DELAYED', 10000.00, 10000.00, 'open',
+            ${dates.daysAgo(5)}, ${dates.todayISTNoon}, ${dates.todayISTNoon}, ${dates.todayISTNoon}
+          )
+        `;
 
-      // Fill the daily cap for TODAY (not FIXED_DATE)
-      const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
-      const todayStr = mockNow.toISODate()!;
-      const monthStr = todayStr.substring(0, 7);
+        // Cap row uses UTC date (product's reserveGlobalSendSlot uses date.toISOString().split('T')[0])
+        await sql`
+          INSERT INTO s18_global_sends (send_key, send_date, send_month, daily_count, monthly_count, updated_at)
+          VALUES ('global', ${dates.todayUTC}::DATE, ${dates.monthStrUTC}, ${DAILY_SEND_CAP}, 0, ${dates.todayISTNoon})
+          ON CONFLICT (send_key, send_date) DO UPDATE SET daily_count = ${DAILY_SEND_CAP}
+        `;
 
-      await sql`
-        INSERT INTO s18_global_sends (send_key, send_date, send_month, daily_count, monthly_count, updated_at)
-        VALUES ('global', ${todayStr}::DATE, ${monthStr}, ${DAILY_SEND_CAP}, 0, NOW())
-        ON CONFLICT (send_key, send_date) DO UPDATE SET daily_count = ${DAILY_SEND_CAP}
-      `;
-
-      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
-
-      try {
         const result = await sendPaymentReminder(
           sql,
           TEST_SHOP_ID,
           invoiceId,
           TEST_RULE_ID_1,
           0,
-          "Asia/Kolkata",
+          TEST_TIMEZONE,
           validEnv
         );
 
@@ -196,9 +223,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         expect(log.status).toBe("delayed");
         expect(log.firstCappedAt).not.toBeNull();
         expect(log.sentAt).toBeNull();
-      } finally {
-        luxonSpy.mockRestore();
-      }
+      });
     });
   });
 
@@ -249,9 +274,11 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
     });
 
     it("older delayed stage skipped when newer stage is already sent", async () => {
+      vi.setSystemTime(new Date(FIXED_UTC_INSTANT));
       const { sendCatchupReminder } = await import("../reminders.server");
       const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
+      const dates = computeDatesFromInstant(FIXED_UTC_INSTANT, FIXED_DATE_STR);
       const invoiceId = `inv-sent-newer-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/sent-newer-${TEST_SUFFIX}`;
       const logIdDelayed = `log-old-delayed-${TEST_SUFFIX}`;
@@ -264,62 +291,50 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#SENT-NEWER', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '3 days', NOW() - INTERVAL '2 days', NOW(), NOW()
+          ${dates.daysAgo(3)}, ${dates.daysAgo(2)}, ${dates.todayISTNoon}, ${dates.todayISTNoon}
         )
       `;
 
-      // Invoice due 2 days ago, offsetDays=0 means reminder was due 2 days ago
-      // D+2 is within catch-up window D+1..D+3
-
-      // Older stage (offsetDays=0) is delayed from 2 days ago
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES (${logIdDelayed}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '2 days')
+        VALUES (${logIdDelayed}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)})
       `;
 
-      // Newer stage (offsetDays=7) was already sent yesterday
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "sentAt")
-        VALUES (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_2}, ${invoiceId}, 'sent'::"ReminderLogStatus", NOW() - INTERVAL '1 day')
+        VALUES (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_2}, ${invoiceId}, 'sent'::"ReminderLogStatus", ${dates.daysAgo(1)})
       `;
 
-      const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
-      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+      const result = await sendCatchupReminder(
+        sql,
+        TEST_SHOP_ID,
+        invoiceId,
+        TEST_RULE_ID_1,
+        logIdDelayed,
+        0,
+        TEST_TIMEZONE,
+        validEnv
+      );
 
-      try {
-        const result = await sendCatchupReminder(
-          sql,
-          TEST_SHOP_ID,
-          invoiceId,
-          TEST_RULE_ID_1,
-          logIdDelayed,
-          0,
-          "Asia/Kolkata",
-          validEnv
-        );
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("skipped");
+      expect(result.skipReason).toContain("Newer stage exists");
 
-        expect(result.success).toBe(true);
-        expect(result.action).toBe("skipped");
-        expect(result.skipReason).toContain("Newer stage exists");
-
-        // Verify the older delayed stage is now skipped_daily_limit
-        const [log] = await sql<{ status: string }[]>`
-          SELECT status FROM "ReminderLog"
-          WHERE id = ${logIdDelayed}
-        `;
-        expect(log.status).toBe("skipped_daily_limit");
-      } finally {
-        luxonSpy.mockRestore();
-      }
+      const [log] = await sql<{ status: string }[]>`
+        SELECT status FROM "ReminderLog"
+        WHERE id = ${logIdDelayed}
+      `;
+      expect(log.status).toBe("skipped_daily_limit");
     });
   });
 
   describe("payment mid-window - delayed row deleted silently", () => {
     it("deletes delayed row when invoice is paid before catch-up", async () => {
+      vi.setSystemTime(new Date(FIXED_UTC_INSTANT));
       const { sendCatchupReminder } = await import("../reminders.server");
       const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
+      const dates = computeDatesFromInstant(FIXED_UTC_INSTANT, FIXED_DATE_STR);
       const invoiceId = `inv-paid-mid-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/paid-mid-${TEST_SUFFIX}`;
       const logId = `log-paid-mid-${TEST_SUFFIX}`;
@@ -332,44 +347,36 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#PAID-MID', 10000.00, 0.00, 'paid',
-          NOW() - INTERVAL '5 days', NOW() - INTERVAL '1 day', NOW(), NOW()
+          ${dates.daysAgo(5)}, ${dates.daysAgo(1)}, ${dates.todayISTNoon}, ${dates.todayISTNoon}
         )
       `;
 
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '1 day')
+        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(1)})
       `;
 
-      const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
-      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+      const result = await sendCatchupReminder(
+        sql,
+        TEST_SHOP_ID,
+        invoiceId,
+        TEST_RULE_ID_1,
+        logId,
+        0,
+        TEST_TIMEZONE,
+        validEnv
+      );
 
-      try {
-        const result = await sendCatchupReminder(
-          sql,
-          TEST_SHOP_ID,
-          invoiceId,
-          TEST_RULE_ID_1,
-          logId,
-          0,
-          "Asia/Kolkata",
-          validEnv
-        );
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("skipped");
+      expect(result.skipReason).toContain("paid");
 
-        expect(result.success).toBe(true);
-        expect(result.action).toBe("skipped");
-        expect(result.skipReason).toContain("paid");
+      const [log] = await sql<{ id: string }[]>`
+        SELECT id FROM "ReminderLog"
+        WHERE "invoiceId" = ${invoiceId} AND "ruleId" = ${TEST_RULE_ID_1}
+      `;
 
-        const [log] = await sql<{ id: string }[]>`
-          SELECT id FROM "ReminderLog"
-          WHERE "invoiceId" = ${invoiceId} AND "ruleId" = ${TEST_RULE_ID_1}
-        `;
-
-        expect(log).toBeUndefined();
-      } finally {
-        luxonSpy.mockRestore();
-      }
+      expect(log).toBeUndefined();
     });
   });
 
@@ -408,22 +415,22 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
 
   describe("at most one per invoice per day", () => {
     it("skips catch-up when invoice already has sent reminder today", async () => {
+      vi.setSystemTime(new Date(FIXED_UTC_INSTANT));
       const { sendCatchupReminder } = await import("../reminders.server");
       const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
+      const dates = computeDatesFromInstant(FIXED_UTC_INSTANT, FIXED_DATE_STR);
       const invoiceId = `inv-one-per-day-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/one-per-day-${TEST_SUFFIX}`;
       const logIdDelayed = `log-delayed-opd-${TEST_SUFFIX}`;
       const logIdSent = `log-sent-opd-${TEST_SUFFIX}`;
-      // Create a custom rule with higher offsetDays that we'll try to catch up
       const ruleId3 = `rule-catch-opd-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
-        VALUES (${ruleId3}, ${TEST_SHOP_ID}, 14, 'email'::"ReminderChannel", true, NOW(), NOW())
+        VALUES (${ruleId3}, ${TEST_SHOP_ID}, 14, 'email'::"ReminderChannel", true, ${dates.todayISTNoon}, ${dates.todayISTNoon})
       `;
 
-      // Invoice due 15 days ago. With offsetDays=14, reminder was due 1 day ago (D+1 is in catch-up window).
       await sql`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
@@ -432,98 +439,83 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#ONE-PER-DAY', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '20 days', NOW() - INTERVAL '15 days', NOW(), NOW()
+          ${dates.daysAgo(20)}, ${dates.daysAgo(15)}, ${dates.todayISTNoon}, ${dates.todayISTNoon}
         )
       `;
 
-      // Create delayed log for rule 3 (offsetDays=14) - this has the highest offsetDays, so no "newer stage"
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES (${logIdDelayed}, ${TEST_SHOP_ID}, ${ruleId3}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '1 day')
+        VALUES (${logIdDelayed}, ${TEST_SHOP_ID}, ${ruleId3}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(1)})
       `;
 
-      // Rule 1 (offsetDays=0) was sent TODAY - this should block the catch-up (one per invoice per day)
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "sentAt")
-        VALUES (${logIdSent}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'sent'::"ReminderLogStatus", NOW())
+        VALUES (${logIdSent}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'sent'::"ReminderLogStatus", ${dates.todayISTNoon})
       `;
 
-      const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: testTimezone });
-      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
-
       try {
-        // Try to catch-up rule 3 (offsetDays=14, highest), which puts us at D+1 from reminder date (within window)
-        // No "newer stage" check should skip since this IS the newest stage
         const result = await sendCatchupReminder(
           sql,
           TEST_SHOP_ID,
           invoiceId,
           ruleId3,
           logIdDelayed,
-          14, // offsetDays=14
-          testTimezone,
+          14,
+          TEST_TIMEZONE,
           validEnv
         );
 
-        // Expect skip because rule 1 was already sent today for this invoice
         expect(result.success).toBe(true);
         expect(result.action).toBe("skipped");
         expect(result.skipReason).toContain("already sent today");
       } finally {
-        luxonSpy.mockRestore();
         await sql`DELETE FROM "ReminderLog" WHERE "ruleId" = ${ruleId3}`;
         await sql`DELETE FROM "ReminderRule" WHERE id = ${ruleId3}`;
       }
     });
 
-    it("REMINDER_SEND skips when another stage already sent today", async () => {
-      const { sendPaymentReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+    describe.each(BOUNDARY_INSTANTS)("at $name", ({ utc, istDate }) => {
+      it("REMINDER_SEND skips when another stage already sent today", async () => {
+        vi.setSystemTime(new Date(utc));
+        const { sendPaymentReminder } = await import("../reminders.server");
+        const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
-      const invoiceId = `inv-concurrent-${TEST_SUFFIX}`;
-      const orderId = `gid://shopify/Order/concurrent-${TEST_SUFFIX}`;
+        const dates = computeDatesFromInstant(utc, istDate);
+        const invoiceId = `inv-concurrent-${utc.replace(/[:.]/g, "-")}-${TEST_SUFFIX}`;
+        const orderId = `gid://shopify/Order/concurrent-${utc.replace(/[:.]/g, "-")}-${TEST_SUFFIX}`;
 
-      // Invoice due today, so offsetDays=0 is due TODAY
-      await sql`
-        INSERT INTO "Invoice" (
-          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
-          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
-        )
-        VALUES (
-          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
-          '#CONCURRENT', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
-        )
-      `;
+        await sql`
+          INSERT INTO "Invoice" (
+            id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+            status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+          )
+          VALUES (
+            ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+            '#CONCURRENT', 10000.00, 10000.00, 'open',
+            ${dates.daysAgo(5)}, ${dates.todayISTNoon}, ${dates.todayISTNoon}, ${dates.todayISTNoon}
+          )
+        `;
 
-      const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
-      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
-      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-concurrent" }) });
+        mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-concurrent" }) });
 
-      try {
-        // First: REMINDER_SEND for offsetDays=0 (due today)
         const sendResult1 = await sendPaymentReminder(
           sql,
           TEST_SHOP_ID,
           invoiceId,
           TEST_RULE_ID_1,
           0,
-          "Asia/Kolkata",
+          TEST_TIMEZONE,
           validEnv
         );
         expect(sendResult1.action).toBe("sent");
 
-        // Second: REMINDER_SEND for same invoice, same rule (idempotent)
-        // Should be skipped because reminder already sent
         const sendResult2 = await sendPaymentReminder(
           sql,
           TEST_SHOP_ID,
           invoiceId,
           TEST_RULE_ID_1,
           0,
-          "Asia/Kolkata",
+          TEST_TIMEZONE,
           validEnv
         );
 
@@ -531,19 +523,18 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         expect(sendResult2.action).toBe("skipped");
         expect(sendResult2.skipReason).toContain("already sent");
 
-        // Verify only one fetch call (the first send)
         expect(mockFetch).toHaveBeenCalledTimes(1);
-      } finally {
-        luxonSpy.mockRestore();
-      }
+      });
     });
   });
 
   describe("duplicate catch-up messages", () => {
     it("second catch-up message skips when first already sent", async () => {
+      vi.setSystemTime(new Date(FIXED_UTC_INSTANT));
       const { sendCatchupReminder } = await import("../reminders.server");
       const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
+      const dates = computeDatesFromInstant(FIXED_UTC_INSTANT, FIXED_DATE_STR);
       const invoiceId = `inv-dup-catchup-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/dup-catchup-${TEST_SUFFIX}`;
       const logId = `log-dup-catchup-${TEST_SUFFIX}`;
@@ -556,55 +547,45 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#DUP-CATCHUP', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW() - INTERVAL '2 days', NOW(), NOW()
+          ${dates.daysAgo(5)}, ${dates.daysAgo(2)}, ${dates.todayISTNoon}, ${dates.todayISTNoon}
         )
       `;
 
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '2 days')
+        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)})
       `;
 
-      const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
-      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
       mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-dup" }) });
 
-      try {
-        // First catch-up sends
-        const result1 = await sendCatchupReminder(
-          sql,
-          TEST_SHOP_ID,
-          invoiceId,
-          TEST_RULE_ID_1,
-          logId,
-          0,
-          "Asia/Kolkata",
-          validEnv
-        );
-        expect(result1.action).toBe("sent");
+      const result1 = await sendCatchupReminder(
+        sql,
+        TEST_SHOP_ID,
+        invoiceId,
+        TEST_RULE_ID_1,
+        logId,
+        0,
+        TEST_TIMEZONE,
+        validEnv
+      );
+      expect(result1.action).toBe("sent");
 
-        // Second catch-up message (duplicate from hourly enqueue) skips
-        const result2 = await sendCatchupReminder(
-          sql,
-          TEST_SHOP_ID,
-          invoiceId,
-          TEST_RULE_ID_1,
-          logId,
-          0,
-          "Asia/Kolkata",
-          validEnv
-        );
+      const result2 = await sendCatchupReminder(
+        sql,
+        TEST_SHOP_ID,
+        invoiceId,
+        TEST_RULE_ID_1,
+        logId,
+        0,
+        TEST_TIMEZONE,
+        validEnv
+      );
 
-        expect(result2.success).toBe(true);
-        expect(result2.action).toBe("skipped");
-        expect(result2.skipReason).toContain("not in delayed state");
+      expect(result2.success).toBe(true);
+      expect(result2.action).toBe("skipped");
+      expect(result2.skipReason).toContain("not in delayed state");
 
-        // Only one fetch call
-        expect(mockFetch).toHaveBeenCalledTimes(1);
-      } finally {
-        luxonSpy.mockRestore();
-      }
+      expect(mockFetch).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -755,67 +736,62 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   });
 
   describe("partly paid invoice - sends with outstanding balance", () => {
-    it("sends reminder for partly paid invoice (outstanding > 0)", async () => {
-      const { sendPaymentReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+    describe.each(BOUNDARY_INSTANTS)("at $name", ({ utc, istDate }) => {
+      it("sends reminder for partly paid invoice (outstanding > 0)", async () => {
+        vi.setSystemTime(new Date(utc));
+        const { sendPaymentReminder } = await import("../reminders.server");
+        const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
-      const invoiceId = `inv-partly-paid-${TEST_SUFFIX}`;
-      const orderId = `gid://shopify/Order/partly-paid-${TEST_SUFFIX}`;
+        const dates = computeDatesFromInstant(utc, istDate);
+        const invoiceId = `inv-partly-paid-${utc.replace(/[:.]/g, "-")}-${TEST_SUFFIX}`;
+        const orderId = `gid://shopify/Order/partly-paid-${utc.replace(/[:.]/g, "-")}-${TEST_SUFFIX}`;
 
-      // Invoice with total=10000 but outstanding=3000 (partly paid)
-      await sql`
-        INSERT INTO "Invoice" (
-          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
-          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
-        )
-        VALUES (
-          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
-          '#PARTLY-PAID', 10000.00, 3000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
-        )
-      `;
+        await sql`
+          INSERT INTO "Invoice" (
+            id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+            status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+          )
+          VALUES (
+            ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+            '#PARTLY-PAID', 10000.00, 3000.00, 'open',
+            ${dates.daysAgo(5)}, ${dates.todayISTNoon}, ${dates.todayISTNoon}, ${dates.todayISTNoon}
+          )
+        `;
 
-      const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
-      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
-      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-partly-paid" }) });
+        mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-partly-paid" }) });
 
-      try {
         const result = await sendPaymentReminder(
           sql,
           TEST_SHOP_ID,
           invoiceId,
           TEST_RULE_ID_1,
           0,
-          "Asia/Kolkata",
+          TEST_TIMEZONE,
           validEnv
         );
 
         expect(result.success).toBe(true);
         expect(result.action).toBe("sent");
 
-        // Verify fetch was called (email sent)
         expect(mockFetch).toHaveBeenCalledTimes(1);
 
-        // Verify ReminderLog was created with 'sent' status
         const [log] = await sql<{ status: string }[]>`
           SELECT status FROM "ReminderLog"
           WHERE "invoiceId" = ${invoiceId} AND "ruleId" = ${TEST_RULE_ID_1}
         `;
         expect(log.status).toBe("sent");
-      } finally {
-        luxonSpy.mockRestore();
-      }
+      });
     });
 
     it("skips invoice when outstanding is zero", async () => {
+      vi.setSystemTime(new Date(FIXED_UTC_INSTANT));
       const { sendPaymentReminder } = await import("../reminders.server");
       const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
+      const dates = computeDatesFromInstant(FIXED_UTC_INSTANT, FIXED_DATE_STR);
       const invoiceId = `inv-zero-outstanding-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/zero-outstanding-${TEST_SUFFIX}`;
 
-      // Invoice with outstanding=0 (fully paid but status still 'open')
       await sql`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
@@ -824,55 +800,46 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#ZERO-OUTSTANDING', 10000.00, 0.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          ${dates.daysAgo(5)}, ${dates.todayISTNoon}, ${dates.todayISTNoon}, ${dates.todayISTNoon}
         )
       `;
 
-      const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
-      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+      const result = await sendPaymentReminder(
+        sql,
+        TEST_SHOP_ID,
+        invoiceId,
+        TEST_RULE_ID_1,
+        0,
+        TEST_TIMEZONE,
+        validEnv
+      );
 
-      try {
-        const result = await sendPaymentReminder(
-          sql,
-          TEST_SHOP_ID,
-          invoiceId,
-          TEST_RULE_ID_1,
-          0,
-          "Asia/Kolkata",
-          validEnv
-        );
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("skipped");
+      expect(result.skipReason).toContain("outstanding is zero");
 
-        expect(result.success).toBe(true);
-        expect(result.action).toBe("skipped");
-        expect(result.skipReason).toContain("outstanding is zero");
+      expect(mockFetch).not.toHaveBeenCalled();
 
-        // Verify no fetch was called
-        expect(mockFetch).not.toHaveBeenCalled();
-
-        // Verify no ReminderLog was created
-        const logs = await sql<{ id: string }[]>`
-          SELECT id FROM "ReminderLog"
-          WHERE "invoiceId" = ${invoiceId} AND "ruleId" = ${TEST_RULE_ID_1}
-        `;
-        expect(logs.length).toBe(0);
-      } finally {
-        luxonSpy.mockRestore();
-      }
+      const logs = await sql<{ id: string }[]>`
+        SELECT id FROM "ReminderLog"
+        WHERE "invoiceId" = ${invoiceId} AND "ruleId" = ${TEST_RULE_ID_1}
+      `;
+      expect(logs.length).toBe(0);
     });
   });
 
   describe("delayed-to-sent transition preserves firstCappedAt", () => {
     it("markDelayedAsSent keeps firstCappedAt for 'sent late' tracking", async () => {
+      vi.setSystemTime(new Date(FIXED_UTC_INSTANT));
       const { sendCatchupReminder } = await import("../reminders.server");
       const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
+      const dates = computeDatesFromInstant(FIXED_UTC_INSTANT, FIXED_DATE_STR);
       const invoiceId = `inv-sent-late-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/sent-late-${TEST_SUFFIX}`;
       const logId = `log-sent-late-${TEST_SUFFIX}`;
       const firstCappedAtTime = new Date("2026-10-14T10:00:00Z");
 
-      // Create invoice due yesterday (offset-0 rule is in catch-up window today)
       await sql`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
@@ -881,93 +848,77 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#SENT-LATE', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW() - INTERVAL '1 day', NOW(), NOW()
+          ${dates.daysAgo(5)}, ${dates.daysAgo(1)}, ${dates.todayISTNoon}, ${dates.todayISTNoon}
         )
       `;
 
-      // Create delayed ReminderLog with firstCappedAt set
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
         VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${firstCappedAtTime})
       `;
 
-      // Verify firstCappedAt is set before send
       const [before] = await sql<{ firstCappedAt: Date | null }[]>`
         SELECT "firstCappedAt" FROM "ReminderLog" WHERE id = ${logId}
       `;
       expect(before.firstCappedAt).not.toBeNull();
 
-      const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
-      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
       mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-sent-late" }) });
 
-      try {
-        const result = await sendCatchupReminder(
-          sql,
-          TEST_SHOP_ID,
-          invoiceId,
-          TEST_RULE_ID_1,
-          logId,
-          0,
-          "Asia/Kolkata",
-          validEnv
-        );
+      const result = await sendCatchupReminder(
+        sql,
+        TEST_SHOP_ID,
+        invoiceId,
+        TEST_RULE_ID_1,
+        logId,
+        0,
+        TEST_TIMEZONE,
+        validEnv
+      );
 
-        expect(result.success).toBe(true);
-        expect(result.action).toBe("sent");
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("sent");
 
-        // Verify: status='sent', sentAt set, firstCappedAt UNCHANGED
-        const [after] = await sql<{ status: string; sentAt: Date | null; firstCappedAt: Date | null }[]>`
-          SELECT status, "sentAt", "firstCappedAt" FROM "ReminderLog" WHERE id = ${logId}
-        `;
-        expect(after.status).toBe("sent");
-        expect(after.sentAt).not.toBeNull();
-        expect(after.firstCappedAt).not.toBeNull();
-        expect(after.firstCappedAt!.toISOString()).toBe(firstCappedAtTime.toISOString());
-      } finally {
-        luxonSpy.mockRestore();
-      }
+      const [after] = await sql<{ status: string; sentAt: Date | null; firstCappedAt: Date | null }[]>`
+        SELECT status, "sentAt", "firstCappedAt" FROM "ReminderLog" WHERE id = ${logId}
+      `;
+      expect(after.status).toBe("sent");
+      expect(after.sentAt).not.toBeNull();
+      expect(after.firstCappedAt).not.toBeNull();
+      expect(after.firstCappedAt!.toISOString()).toBe(firstCappedAtTime.toISOString());
     });
   });
 
   describe("one reminder per invoice per day - newer stage wins", () => {
-    it("stage 1 delayed becomes skipped when stage 2 is due today, only stage 2 sends", async () => {
-      const { sendPaymentReminder, sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+    describe.each(BOUNDARY_INSTANTS)("at $name", ({ utc, istDate }) => {
+      it("stage 1 delayed becomes skipped when stage 2 is due today, only stage 2 sends", async () => {
+        vi.setSystemTime(new Date(utc));
+        const { sendPaymentReminder, sendCatchupReminder } = await import("../reminders.server");
+        const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
-      const invoiceId = `inv-newer-stage-${TEST_SUFFIX}`;
-      const orderId = `gid://shopify/Order/newer-stage-${TEST_SUFFIX}`;
-      const logIdStage1 = `log-stage1-${TEST_SUFFIX}`;
+        const dates = computeDatesFromInstant(utc, istDate);
+        const invoiceId = `inv-newer-stage-${utc.replace(/[:.]/g, "-")}-${TEST_SUFFIX}`;
+        const orderId = `gid://shopify/Order/newer-stage-${utc.replace(/[:.]/g, "-")}-${TEST_SUFFIX}`;
+        const logIdStage1 = `log-stage1-${utc.replace(/[:.]/g, "-")}-${TEST_SUFFIX}`;
 
-      // Create invoice due 7 days ago:
-      // - stage 1 (offset 0) was due 7 days ago -> delayed row exists
-      // - stage 2 (offset 7) is due TODAY
-      await sql`
-        INSERT INTO "Invoice" (
-          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
-          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
-        )
-        VALUES (
-          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
-          '#NEWER-STAGE', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '14 days', NOW() - INTERVAL '7 days', NOW(), NOW()
-        )
-      `;
+        await sql`
+          INSERT INTO "Invoice" (
+            id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+            status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+          )
+          VALUES (
+            ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+            '#NEWER-STAGE', 10000.00, 10000.00, 'open',
+            ${dates.daysAgo(14)}, ${dates.daysAgo(7)}, ${dates.todayISTNoon}, ${dates.todayISTNoon}
+          )
+        `;
 
-      // Create delayed ReminderLog for stage 1 (offset 0, due 7 days ago)
-      await sql`
-        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES (${logIdStage1}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '7 days')
-      `;
+        await sql`
+          INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
+          VALUES (${logIdStage1}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(7)})
+        `;
 
-      const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
-      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
-      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-stage2" }) });
+        mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-stage2" }) });
 
-      try {
-        // First, try catch-up for stage 1 - should be skipped (newer stage due today)
         const resultCatchup = await sendCatchupReminder(
           sql,
           TEST_SHOP_ID,
@@ -975,59 +926,50 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
           TEST_RULE_ID_1,
           logIdStage1,
           0,
-          "Asia/Kolkata",
+          TEST_TIMEZONE,
           validEnv
         );
         expect(resultCatchup.success).toBe(true);
         expect(resultCatchup.action).toBe("skipped");
 
-        // Now send stage 2 (offset 7, due today)
         const resultSend = await sendPaymentReminder(
           sql,
           TEST_SHOP_ID,
           invoiceId,
           TEST_RULE_ID_2,
           7,
-          "Asia/Kolkata",
+          TEST_TIMEZONE,
           validEnv
         );
         expect(resultSend.success).toBe(true);
         expect(resultSend.action).toBe("sent");
 
-        // Verify: exactly 1 fetch call (stage 2 only)
         expect(mockFetch).toHaveBeenCalledTimes(1);
 
-        // Verify final ReminderLog state
         const logs = await sql<{ ruleId: string; status: string }[]>`
           SELECT "ruleId", status FROM "ReminderLog"
           WHERE "invoiceId" = ${invoiceId}
           ORDER BY "ruleId"
         `;
 
-        // Stage 1 should be skipped_daily_limit (newer stage exists)
         const stage1Log = logs.find(l => l.ruleId === TEST_RULE_ID_1);
         expect(stage1Log).toBeDefined();
         expect(stage1Log!.status).toBe("skipped_daily_limit");
 
-        // Stage 2 should be sent
         const stage2Log = logs.find(l => l.ruleId === TEST_RULE_ID_2);
         expect(stage2Log).toBeDefined();
         expect(stage2Log!.status).toBe("sent");
-      } finally {
-        luxonSpy.mockRestore();
-      }
+      });
     });
   });
 
   describe("SQL-level enqueue behavior", () => {
     it("Part 2.5: marks delayed as skipped when newer stage is due today", async () => {
+      vi.setSystemTime(new Date(FIXED_UTC_INSTANT));
+      const dates = computeDatesFromInstant(FIXED_UTC_INSTANT, FIXED_DATE_STR);
       const invoiceId = `inv-part25-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/part25-${TEST_SUFFIX}`;
 
-      // Invoice due 7 days ago in shop timezone:
-      // - Rule 1 (offsetDays=0): reminder date = 7 days ago (within D+3 catch-up window for now - wait, 7 > 3)
-      // - Rule 2 (offsetDays=7): reminder date = 7 days ago + 7 = today
-      // For Part 2.5 to trigger, rule 1 must be delayed and rule 2 (higher offset) must be due TODAY.
       await sql`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
@@ -1036,17 +978,15 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#PART25', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '10 days',
-          -- dueAt = 7 days ago, so offsetDays=7 gives reminder date of today
-          ((NOW() AT TIME ZONE ${testTimezone})::DATE - INTERVAL '7 days')::timestamp AT TIME ZONE ${testTimezone},
-          NOW(), NOW()
+          ${dates.daysAgo(10)},
+          ${dates.daysAgo(7)},
+          ${dates.todayISTNoon}, ${dates.todayISTNoon}
         )
       `;
 
-      // Rule 1 (offsetDays=0) is delayed from yesterday
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '1 day')
+        VALUES (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(1)})
       `;
 
       await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
@@ -1064,6 +1004,8 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
     });
 
     it("Part 4: excludes invoices with any stage due today from catch-up", async () => {
+      vi.setSystemTime(new Date(FIXED_UTC_INSTANT));
+      const dates = computeDatesFromInstant(FIXED_UTC_INSTANT, FIXED_DATE_STR);
       const invoiceId = `inv-part4-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/part4-${TEST_SUFFIX}`;
 
@@ -1075,16 +1017,15 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#PART4', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '14 days',
-          -- dueAt = 7 days ago, so offset-0 is in catchup window but offset-7 is due today
-          NOW() - INTERVAL '7 days',
-          NOW(), NOW()
+          ${dates.daysAgo(14)},
+          ${dates.daysAgo(7)},
+          ${dates.todayISTNoon}, ${dates.todayISTNoon}
         )
       `;
 
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '7 days')
+        VALUES (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(7)})
       `;
 
       await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
@@ -1115,6 +1056,8 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
     });
 
     it("backfill: newly delayed row has firstCappedAt for 'sent late' tracking", async () => {
+      vi.setSystemTime(new Date(FIXED_UTC_INSTANT));
+      const dates = computeDatesFromInstant(FIXED_UTC_INSTANT, FIXED_DATE_STR);
       const invoiceId = `inv-backfill-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/backfill-${TEST_SUFFIX}`;
 
@@ -1126,7 +1069,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#BACKFILL', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          ${dates.daysAgo(5)}, ${dates.todayISTNoon}, ${dates.todayISTNoon}, ${dates.todayISTNoon}
         )
       `;
 
@@ -1148,9 +1091,11 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
 
   describe("auth error logging", () => {
     it("logs reminders_catchup_auth_error on 401 response", async () => {
+      vi.setSystemTime(new Date(FIXED_UTC_INSTANT));
       const { sendCatchupReminder } = await import("../reminders.server");
       const validEnv = { RESEND_API_KEY: "re_test_invalid", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
 
+      const dates = computeDatesFromInstant(FIXED_UTC_INSTANT, FIXED_DATE_STR);
       const invoiceId = `inv-auth-error-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/auth-error-${TEST_SUFFIX}`;
       const logId = `log-auth-error-${TEST_SUFFIX}`;
@@ -1163,18 +1108,14 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#AUTH-ERROR', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW() - INTERVAL '1 day', NOW(), NOW()
+          ${dates.daysAgo(5)}, ${dates.daysAgo(1)}, ${dates.todayISTNoon}, ${dates.todayISTNoon}
         )
       `;
 
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '1 day')
+        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(1)})
       `;
-
-      const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: testTimezone });
-      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       mockFetch.mockResolvedValue({
         ok: false,
@@ -1192,7 +1133,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
           TEST_RULE_ID_1,
           logId,
           0,
-          testTimezone,
+          TEST_TIMEZONE,
           validEnv
         );
 
@@ -1204,7 +1145,6 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
           expect.stringContaining("reminders_catchup_auth_error")
         );
       } finally {
-        luxonSpy.mockRestore();
         consoleSpy.mockRestore();
       }
     });
@@ -1245,13 +1185,14 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
     });
 
     it("flag=false: catch-up sends to gated account", async () => {
+      vi.setSystemTime(new Date(FIXED_UTC_INSTANT));
       const { sendCatchupReminder } = await import("../reminders.server");
       const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
       const originalEnv = process.env.PLAN_GATING_ENFORCED;
 
-      // Set gating flag to false via env var
       (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "false";
 
+      const dates = computeDatesFromInstant(FIXED_UTC_INSTANT, FIXED_DATE_STR);
       const invoiceId = `inv-catchup-gated-send-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/catchup-gated-send-${TEST_SUFFIX}`;
       const logId = `log-catchup-gated-send-${TEST_SUFFIX}`;
@@ -1264,18 +1205,15 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_GATED_ACCOUNT_ID}, ${orderId},
           '#CATCHUP-GATED-SEND', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW() - INTERVAL '1 day', NOW(), NOW()
+          ${dates.daysAgo(5)}, ${dates.daysAgo(1)}, ${dates.todayISTNoon}, ${dates.todayISTNoon}
         )
       `;
 
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '1 day')
+        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(1)})
       `;
 
-      const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: testTimezone });
-      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
       mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-catchup-gated" }) });
 
       try {
@@ -1286,28 +1224,27 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
           TEST_RULE_ID_1,
           logId,
           0,
-          testTimezone,
+          TEST_TIMEZONE,
           validEnv
         );
 
-        // With gating=false, gated account should receive the catch-up
         expect(result.success).toBe(true);
         expect(result.action).toBe("sent");
         expect(mockFetch).toHaveBeenCalled();
       } finally {
-        luxonSpy.mockRestore();
         (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = originalEnv;
       }
     });
 
     it("flag=true: catch-up skips gated account", async () => {
+      vi.setSystemTime(new Date(FIXED_UTC_INSTANT));
       const { sendCatchupReminder } = await import("../reminders.server");
       const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
       const originalEnv = process.env.PLAN_GATING_ENFORCED;
 
-      // Set gating flag to true via env var
       (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "true";
 
+      const dates = computeDatesFromInstant(FIXED_UTC_INSTANT, FIXED_DATE_STR);
       const invoiceId = `inv-catchup-gated-skip-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/catchup-gated-skip-${TEST_SUFFIX}`;
       const logId = `log-catchup-gated-skip-${TEST_SUFFIX}`;
@@ -1320,18 +1257,15 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_GATED_ACCOUNT_ID}, ${orderId},
           '#CATCHUP-GATED-SKIP', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW() - INTERVAL '1 day', NOW(), NOW()
+          ${dates.daysAgo(5)}, ${dates.daysAgo(1)}, ${dates.todayISTNoon}, ${dates.todayISTNoon}
         )
       `;
 
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '1 day')
+        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(1)})
       `;
 
-      const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: testTimezone });
-      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
       mockFetch.mockReset();
 
       try {
@@ -1342,23 +1276,20 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
           TEST_RULE_ID_1,
           logId,
           0,
-          testTimezone,
+          TEST_TIMEZONE,
           validEnv
         );
 
-        // With gating=true, gated account should be skipped
         expect(result.success).toBe(true);
         expect(result.action).toBe("skipped");
         expect(result.skipReason).toContain("gated");
         expect(mockFetch).not.toHaveBeenCalled();
 
-        // Delayed log entry should be deleted
         const [log] = await sql<{ id: string }[]>`
           SELECT id FROM "ReminderLog" WHERE id = ${logId}
         `;
         expect(log).toBeUndefined();
       } finally {
-        luxonSpy.mockRestore();
         (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = originalEnv;
       }
     });
