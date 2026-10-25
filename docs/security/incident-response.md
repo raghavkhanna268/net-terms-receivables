@@ -57,7 +57,7 @@ Worker logs are accessible via Cloudflare dashboard (Workers → Logs) or `wrang
 **Critical:**
 1. Disable the app via Shopify Partners Dashboard (removes from all merchants) [Unverified — Raghav to confirm procedure]
 2. Rotate all secrets (see 3.2)
-3. Notify Shopify Partner Security immediately
+3. Notify Shopify Partner Support within 24 hours per [Partner Program Agreement §1(vi)](https://www.shopify.com/partners/terms)
 
 **High:**
 1. Rotate affected credentials
@@ -195,7 +195,7 @@ Every Critical or High severity incident requires a post-mortem within [TBD — 
 |------|---------|-------|
 | Incident Owner | Owner: Raghav Khanna | [TBD — Raghav to decide] |
 | Shopify Partner Security | [TBD — Shopify Partner support contact, unverified] | For breach notification |
-| Sentry Account Owner | Owner: Raghav Khanna | [TBD — Raghav to decide] |
+| Sentry Account Owner | Not enabled | Sentry not enabled (no `SENTRY_DSN`) |
 | Cloudflare Account Owner | Owner: Raghav Khanna | [TBD — Raghav to decide] |
 | Legal/DPO | [TBD — Raghav to decide] | For regulatory notification |
 
