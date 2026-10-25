@@ -12,12 +12,14 @@ The app uses Shopify App Pricing (managed pricing) where plans are configured in
 
 | Plan | Companies | Imports/Month | Features |
 |------|-----------|---------------|----------|
-| **Free** | 3 | 1 | Aging dashboard |
-| **Starter** | 25 | Unlimited | + Matching, Reminders |
+| **Free** | 3 | 1 | Aging dashboard, Matching |
+| **Starter** | 25 | Unlimited | + Reminders |
 | **Growth** | 100 | Unlimited | + PDF statements, Payer memory |
 | **Scale** | Unlimited | Unlimited | + Audit export |
 
 **Note on credit holds**: The `credit_holds` feature key exists in `entitlements.ts`, but nothing in the codebase calls `checkFeature()` or `hasFeature()` to enforce it. Credit holds, hold recomputation, the daily sweep, and the checkout Validation Function run on **all plans**. The tier table above reflects features that are (or will be) actually gated.
+
+**Note on matching**: Payment matching (suggestions, confirm-match, and mark-paid) is available on every plan and is never gated.
 
 ## Partner Dashboard Configuration
 

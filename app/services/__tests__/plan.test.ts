@@ -139,7 +139,7 @@ describe("Plan Resolution Service", () => {
       expect(plan.limits.companies).toBe(3);
       expect(plan.limits.importsPerMonth).toBe(1);
       expect(plan.features.has("aging_dashboard")).toBe(true);
-      expect(plan.features.has("matching")).toBe(false);
+      expect(plan.features.has("matching")).toBe(true);
     });
 
     it("returns correct limits for starter plan", async () => {
