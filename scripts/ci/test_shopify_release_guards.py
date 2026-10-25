@@ -57,7 +57,7 @@ def edit(path, old, new):
 
 
 # 3. Extra scope in toml fails.
-if scratch(lambda d: edit(os.path.join(d, "shopify.app.toml"), 'scopes = "read_all_orders,', 'scopes = "read_products,read_all_orders,')) == 0:
+if scratch(lambda d: edit(os.path.join(d, "shopify.app.toml"), 'scopes = "read_draft_orders,', 'scopes = "read_products,read_draft_orders,')) == 0:
     fails.append("extra toml scope not failed")
 # 4. Wrangler mismatch fails.
 if scratch(lambda d: edit(os.path.join(d, "wrangler.jsonc"), ',write_validations"', '"')) == 0:
@@ -99,11 +99,11 @@ if scratch(lambda d: edit(os.path.join(d, ".github/workflows/shopify-app-release
 if scratch(lambda d: edit(os.path.join(d, "package.json"), '"@shopify/cli": "4.9.4"', '"@shopify/cli": "^4.9.4"')) == 0:
     fails.append("unpinned CLI devDependency not failed")
 
-# 13. S24: Adding read_locations (a 10th scope outside the approved 9) fails.
+# 13. S24: Adding read_locations (a 9th scope outside the approved 8) fails.
 def add_read_locations(d):
     """Add read_locations to both files sequentially."""
-    edit(os.path.join(d, "shopify.app.toml"), 'scopes = "read_all_orders,', 'scopes = "read_locations,read_all_orders,')
-    edit(os.path.join(d, "wrangler.jsonc"), '"SCOPES": "read_all_orders,', '"SCOPES": "read_locations,read_all_orders,')
+    edit(os.path.join(d, "shopify.app.toml"), 'scopes = "read_draft_orders,', 'scopes = "read_locations,read_draft_orders,')
+    edit(os.path.join(d, "wrangler.jsonc"), '"SCOPES": "read_draft_orders,', '"SCOPES": "read_locations,read_draft_orders,')
 
 # Capture output to verify read_locations is named
 import io
@@ -113,7 +113,7 @@ with contextlib.redirect_stdout(_test13_output):
     _test13_rc = scratch(add_read_locations)
 _test13_text = _test13_output.getvalue()
 if _test13_rc == 0:
-    fails.append("read_locations (10th scope) not rejected")
+    fails.append("read_locations (9th scope) not rejected")
 elif "read_locations" not in _test13_text:
     fails.append("read_locations not named in guard output")
 
