@@ -126,14 +126,17 @@ Implementation details for customer erasure:
 
 Implementation details for shop data deletion:
 1. **Verify** payload `shop_domain` matches header shop (returns 401 on mismatch)
-2. **Delete** all OAuth sessions for the shop
-3. **Delete** `Shop` row — **all shop data cascades via ON DELETE CASCADE FKs**:
-   - `AccountSource`, `BuyerAccount`, `BankImport`, `ReminderRule`, `AuditEvent`
-   - `Invoice`, `Payment`, `Match`, `ReminderLog` (direct Shop FKs)
-   - `s8_tagged_customers`, `s8_draft_orders` (S8 FKs)
-   - `s22_data_requests` (S22 FK — exports purged even if not yet expired)
-
-**pgmq messages:** Failed messages for deleted shops are removed by `deleteShop` (see below). Any remaining messages fail at the sync handler level and dead-letter.
+2. **Delete** all OAuth sessions for the shop (`Session` table)
+3. **Delete** `webhook_receipts` for the shop
+4. **Delete** shop data via `deleteShop` (`app/services/compliance/compliance.server.ts:88-170`) in a single transaction:
+   - Non-FK tables with `shop` text column: `s10b_order_refetch_null`, `s6_bulk_operations`, `order_outstanding_missing`, `s10b_customer_pii_fallback`
+   - pgmq queue and archive tables: `pgmq.q_s6_sync`, `pgmq.q_s6_bulk`, `pgmq.a_s6_sync`, `pgmq.a_s6_bulk` (messages where `message->>'shop'` matches)
+   - Dead-letter queue: `s6_dead_letter` (rows where `message->>'shop'` matches)
+   - `Shop` row — **all shop data cascades via ON DELETE CASCADE FKs**:
+     - `AccountSource`, `BuyerAccount`, `BankImport`, `ReminderRule`, `AuditEvent`
+     - `Invoice`, `Payment`, `Match`, `ReminderLog` (direct Shop FKs)
+     - `s8_tagged_customers`, `s8_draft_orders` (S8 FKs)
+     - `s22_data_requests`, `backstop_processed_orders`, `s18_shop_reminder_settings` (S22/S13/S18 FKs)
 
 ---
 
@@ -141,24 +144,33 @@ Implementation details for shop data deletion:
 
 ### pgmq Message Queue and Dead-Letter Cleanup
 
-**Dead-letter queue mechanism:**
-1. The drain processor (`app/services/drain/processor.server.ts`) reads messages and dispatches to topic handlers
-2. Messages that fail are retried up to `maxRetries` (default 5)
-3. After 5 failed reads, `moveToDeadLetter` (`app/services/drain/processor.server.ts:968-991`) inserts the full message JSON into `s6_dead_letter` and deletes it from the source queue
-4. The weekly `s10_dlq_cleanup_weekly` cron job (`prisma/migrations/20261024010000_s10_drain_cron/migration.sql:175-181`) deletes dead-letter rows older than 30 days
+**Shop deletion removes queue messages:**
 
-**Shop deletion behaviour:**
-- `deleteShop` in `app/services/compliance/compliance.server.ts` deletes all `s6_dead_letter` rows where `message->>'shop'` matches the shop domain ([PR #238 at 98c41bf](https://github.com/AnyContext-dev/sample-b2b-saas/blob/98c41bf53de1e68f7e769b1494b7f363d97dc9d5/app/services/compliance/compliance.server.ts))
-- Messages still in the queue (not yet failed) are not deleted, but will fail when the sync handler cannot find the Shop record
+`deleteShop` (`app/services/compliance/compliance.server.ts:88-170`) deletes the shop's messages from:
+- Live queues: `pgmq.q_s6_sync`, `pgmq.q_s6_bulk` (lines 125-131)
+- Archive tables: `pgmq.a_s6_sync`, `pgmq.a_s6_bulk` (lines 133-139)
+- Dead-letter queue: `s6_dead_letter` (lines 144-147)
 
-**Actual behaviour for queued messages targeting deleted shops:**
+All deletes match `message->>'shop' = shopDomain` and run in a single transaction.
 
-1. The drain processor dispatches messages to topic handlers
-2. Sync handlers that perform shop lookup return an error if the Shop row is missing:
-   - `app/services/sync/customer.server.ts:85-95` — returns `{ success: false, error: "Shop not found: {domain}" }`
-   - `app/services/sync/order.server.ts:84-91` — returns `{ success: false, error: "shop_not_found", errorCode: "shop_not_found" }`
-3. Without explicit `retryable: false`, these errors retry until `maxRetries` (5), then dead-letter via `moveToDeadLetter`
-4. The dead-lettered messages are then deleted by the next `deleteShop` call (if triggered again) or by the weekly 30-day cleanup cron
+**In-flight message edge case:**
+
+A drain worker holding a message under its visibility timeout (VT) at the moment `deleteShop` runs will not see that message deleted (it's locked by the worker). When the worker finishes:
+- If it calls `pgmq.archive()` or `pgmq.delete()` on the now-missing `msg_id`, pgmq returns `0` (no rows affected) without throwing — this is safe
+- If the handler fails (e.g., shop lookup returns error), the message retries up to `maxRetries` (5) via the drain processor (`app/services/drain/processor.server.ts`)
+- After 5 failed reads, `moveToDeadLetter` (`app/services/drain/processor.server.ts:968-991`) inserts the full message JSON into `s6_dead_letter`
+
+This in-flight edge case is tracked in [#239](https://github.com/raghavkhanna268/net-terms-receivables/issues/239).
+
+**Dead-letter retention:**
+
+The weekly `s10_dlq_cleanup_weekly` cron job (`prisma/migrations/20261024010000_s10_drain_cron/migration.sql:175-181`) deletes dead-letter rows older than 30 days. Combined with the weekly schedule, leftover failed jobs are purged up to about 37 days after they dead-lettered.
+
+**Sync handlers with shop lookup:**
+
+Handlers that perform shop lookup return an error if the Shop row is missing:
+- `app/services/sync/customer.server.ts:85-95` — returns `{ success: false, error: "Shop not found: {domain}" }`
+- `app/services/sync/order.server.ts:84-91` — returns `{ success: false, error: "shop_not_found", errorCode: "shop_not_found" }`
 
 ### Supabase Database Backups
 
