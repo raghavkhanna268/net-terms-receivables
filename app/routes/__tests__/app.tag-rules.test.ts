@@ -765,6 +765,154 @@ describe("Tag Rules Route", () => {
     });
   });
 
+  describe("action - first-tag-rule enqueue", () => {
+    it("enqueues customers reconcile when first tag rule is created (count=1)", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      const { enqueueReconcileStage } = await import(
+        "~/services/drain/reconcile-handlers.server"
+      );
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      // Shop lookup (action uses SELECT id, domain FROM "Shop")
+      mockSql.mockResolvedValueOnce([{ id: "shop-first", domain: "mock-first.myshopify.com" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
+      // Pre-check - none found
+      mockSql.mockResolvedValueOnce([]);
+      // Insert returning id
+      mockSql.mockResolvedValueOnce([{ id: "first-rule-id" }]);
+      // S8: Count tag rules - FIRST rule (count=1)
+      mockSql.mockResolvedValueOnce([{ count: "1" }]);
+      // Idempotency check - no existing message
+      mockSql.mockResolvedValueOnce([]);
+
+      const formData = new FormData();
+      formData.append("intent", "create_tag_rule");
+      formData.append("tag", "net30");
+      formData.append("defaultTermsDays", "30");
+
+      const postRequest = new Request("https://example.com/app/tag-rules", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.tag-rules");
+      const rawResult = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const result = extractActionData(rawResult);
+      expect(result.success).toBe(true);
+      expect(result.createdRuleId).toBe("first-rule-id");
+
+      // Verify enqueueReconcileStage was called with "customers"
+      expect(enqueueReconcileStage).toHaveBeenCalledWith(
+        expect.anything(),
+        "mock-first.myshopify.com",
+        "customers",
+        expect.stringContaining("first-tag-rule:")
+      );
+    });
+
+    it("does NOT enqueue customers reconcile when second tag rule is created (count=2)", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      const { enqueueReconcileStage } = await import(
+        "~/services/drain/reconcile-handlers.server"
+      );
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+      (enqueueReconcileStage as ReturnType<typeof vi.fn>).mockClear();
+
+      // Shop lookup (action uses SELECT id, domain FROM "Shop")
+      mockSql.mockResolvedValueOnce([{ id: "shop-second", domain: "mock-second.myshopify.com" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
+      // Pre-check - none found
+      mockSql.mockResolvedValueOnce([]);
+      // Insert returning id
+      mockSql.mockResolvedValueOnce([{ id: "second-rule-id" }]);
+      // S8: Count tag rules - SECOND rule (count=2)
+      mockSql.mockResolvedValueOnce([{ count: "2" }]);
+
+      const formData = new FormData();
+      formData.append("intent", "create_tag_rule");
+      formData.append("tag", "wholesale");
+      formData.append("defaultTermsDays", "45");
+
+      const postRequest = new Request("https://example.com/app/tag-rules", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.tag-rules");
+      const rawResult = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const result = extractActionData(rawResult);
+      expect(result.success).toBe(true);
+      expect(result.createdRuleId).toBe("second-rule-id");
+
+      // Verify enqueueReconcileStage was NOT called
+      expect(enqueueReconcileStage).not.toHaveBeenCalled();
+    });
+
+    it("first-tag-rule enqueue is idempotent (skips if message already queued)", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      const { enqueueReconcileStage } = await import(
+        "~/services/drain/reconcile-handlers.server"
+      );
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+      (enqueueReconcileStage as ReturnType<typeof vi.fn>).mockClear();
+
+      // Shop lookup (action uses SELECT id, domain FROM "Shop")
+      mockSql.mockResolvedValueOnce([{ id: "shop-idem", domain: "mock-idem.myshopify.com" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
+      // Pre-check - none found
+      mockSql.mockResolvedValueOnce([]);
+      // Insert returning id
+      mockSql.mockResolvedValueOnce([{ id: "idem-rule-id" }]);
+      // S8: Count tag rules - FIRST rule (count=1)
+      mockSql.mockResolvedValueOnce([{ count: "1" }]);
+      // Idempotency check - message ALREADY exists in queue
+      mockSql.mockResolvedValueOnce([{ msg_id: "existing-msg-123" }]);
+
+      const formData = new FormData();
+      formData.append("intent", "create_tag_rule");
+      formData.append("tag", "net30");
+      formData.append("defaultTermsDays", "30");
+
+      const postRequest = new Request("https://example.com/app/tag-rules", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.tag-rules");
+      const rawResult = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const result = extractActionData(rawResult);
+      expect(result.success).toBe(true);
+      expect(result.createdRuleId).toBe("idem-rule-id");
+
+      // Verify enqueueReconcileStage was NOT called (idempotent skip)
+      expect(enqueueReconcileStage).not.toHaveBeenCalled();
+    });
+  });
+
   describe("action - shop not found (S24 audit)", () => {
     it("returns 400 with user-friendly message when shop not found", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");

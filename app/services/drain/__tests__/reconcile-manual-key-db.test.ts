@@ -151,6 +151,38 @@ describeWithDb("reconcile manual key propagation (DB-backed)", () => {
 
       expect(result).toBeUndefined();
     });
+
+    it("returns manualKey when bulk op was triggered by manual customers run", async () => {
+      const { getManualKeyForBulkOp } = await import("../reconcile-handlers.server");
+
+      const bulkOpId = `gid://shopify/BulkOperation/manual-cust-${TEST_SUFFIX}`;
+      const manualWebhookId = `reconcile:${TEST_SHOP_DOMAIN}:manual:1729785600000:customers`;
+
+      await sql`
+        INSERT INTO s6_processed_webhooks (webhook_id, topic, resource_gid, processed_at)
+        VALUES (${manualWebhookId}, 'RECONCILE_CUSTOMERS', ${bulkOpId}, NOW())
+      `;
+
+      const result = await getManualKeyForBulkOp(sql, bulkOpId, TEST_SHOP_DOMAIN);
+
+      expect(result).toBe("manual:1729785600000");
+    });
+
+    it("returns undefined when customers bulk op was triggered by cron (day-based key)", async () => {
+      const { getManualKeyForBulkOp } = await import("../reconcile-handlers.server");
+
+      const bulkOpId = `gid://shopify/BulkOperation/cron-cust-${TEST_SUFFIX}`;
+      const cronWebhookId = `reconcile:${TEST_SHOP_DOMAIN}:2026-10-24:customers`;
+
+      await sql`
+        INSERT INTO s6_processed_webhooks (webhook_id, topic, resource_gid, processed_at)
+        VALUES (${cronWebhookId}, 'RECONCILE_CUSTOMERS', ${bulkOpId}, NOW())
+      `;
+
+      const result = await getManualKeyForBulkOp(sql, bulkOpId, TEST_SHOP_DOMAIN);
+
+      expect(result).toBeUndefined();
+    });
   });
 
   describe("enqueueReconcileOrders", () => {
