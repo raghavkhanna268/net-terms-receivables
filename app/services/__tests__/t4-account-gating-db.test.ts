@@ -54,7 +54,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
       if (originalEnv === undefined) {
         delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
       } else {
-        process.env.PLAN_GATING_ENFORCED = originalEnv;
+        (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
       }
       await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${SHOP_ID}`;
       await sql`DELETE FROM s8_tagged_customers WHERE shop_id = ${SHOP_ID}`;
@@ -266,7 +266,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
       if (originalEnv === undefined) {
         delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
       } else {
-        process.env.PLAN_GATING_ENFORCED = originalEnv;
+        (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
       }
       await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'%' + TEST_SUFFIX + '%'}`;
       await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${SHOP_ID}`;
@@ -400,7 +400,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
       if (originalEnv === undefined) {
         delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
       } else {
-        process.env.PLAN_GATING_ENFORCED = originalEnv;
+        (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
       }
       await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${SHOP_ID}`;
       await sql`DELETE FROM "Shop" WHERE id = ${SHOP_ID}`;
@@ -500,7 +500,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
       if (originalEnv === undefined) {
         delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
       } else {
-        process.env.PLAN_GATING_ENFORCED = originalEnv;
+        (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
       }
       await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'%' + TEST_SUFFIX + '%'}`;
       await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${SHOP_ID}`;
@@ -628,7 +628,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
       if (originalEnv === undefined) {
         delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
       } else {
-        process.env.PLAN_GATING_ENFORCED = originalEnv;
+        (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
       }
       await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${SHOP_ID}`;
       await sql`DELETE FROM "Shop" WHERE id = ${SHOP_ID}`;
@@ -845,7 +845,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
       if (originalEnv === undefined) {
         delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
       } else {
-        process.env.PLAN_GATING_ENFORCED = originalEnv;
+        (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
       }
       await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'%' + TEST_SUFFIX + '%'}`;
       await sql`DELETE FROM "BuyerAccount" WHERE "shopId" IN (${SHOP_ID_UNLIMITED}, ${SHOP_ID_OFF})`;
@@ -942,7 +942,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
       if (originalEnv === undefined) {
         delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
       } else {
-        process.env.PLAN_GATING_ENFORCED = originalEnv;
+        (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
       }
     });
   });
@@ -972,7 +972,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
       if (originalEnv === undefined) {
         delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
       } else {
-        process.env.PLAN_GATING_ENFORCED = originalEnv;
+        (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
       }
       await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${SHOP_ID}`;
       await sql`DELETE FROM s8_tagged_customers WHERE shop_id = ${SHOP_ID}`;
@@ -1140,7 +1140,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
       if (originalEnv === undefined) {
         delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
       } else {
-        process.env.PLAN_GATING_ENFORCED = originalEnv;
+        (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
       }
       await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'%' + TEST_SUFFIX + '%'}`;
       await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${SHOP_ID}`;
@@ -1205,7 +1205,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
       if (originalEnv === undefined) {
         delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
       } else {
-        process.env.PLAN_GATING_ENFORCED = originalEnv;
+        (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
       }
       await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${SHOP_ID}`;
       await sql`DELETE FROM "Shop" WHERE id = ${SHOP_ID}`;
