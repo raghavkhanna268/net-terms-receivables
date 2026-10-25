@@ -9,6 +9,11 @@
  * - NEVER sends: shop domain, host param, query strings, session token,
  *   user/customer data, country, IP, user agent, id, version
  *
+ * Debug logging (opt-in):
+ * - Set localStorage key `debug:web-vitals` to `1` to enable
+ * - Logs ONLY metric name and value to console.debug
+ * - See docs/ops/web-vitals-debug.md for usage instructions
+ *
  * Authentication: Uses fetch (not sendBeacon) so App Bridge's global fetch
  * can attach the session token automatically.
  *
@@ -54,6 +59,40 @@ interface ShopifyGlobal {
  * Per S23-30: LCP, CLS, INP only.
  */
 const ALLOWED_METRICS = new Set<MetricName>(["LCP", "CLS", "INP"]);
+
+/**
+ * localStorage key for enabling debug logging.
+ * Set to "1" to enable console.debug output.
+ */
+const DEBUG_STORAGE_KEY = "debug:web-vitals";
+
+/**
+ * Check if debug logging is enabled via localStorage.
+ * Returns false in SSR or when localStorage is unavailable.
+ */
+export function isDebugEnabled(): boolean {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") {
+    return false;
+  }
+  try {
+    return localStorage.getItem(DEBUG_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Log a metric to console.debug if debug mode is enabled.
+ * Only logs metric name and value - no other data (privacy-safe).
+ *
+ * @param name - Metric name (e.g., "LCP", "CLS", "INP")
+ * @param value - Metric value (rounded appropriately)
+ */
+export function debugLogMetric(name: string, value: number): void {
+  if (isDebugEnabled()) {
+    console.debug("[web-vitals]", name, value);
+  }
+}
 
 /**
  * Strict route allowlist: /app with optional path segments.
@@ -124,6 +163,7 @@ function sendMetrics(payload: WebVitalsPayload): void {
 /**
  * Filter and transform metrics from App Bridge to our payload format.
  * Only includes LCP, CLS, INP. Strips id, version, and all other data.
+ * Also logs metrics to console.debug if debug mode is enabled.
  *
  * @param metrics - Raw metrics from App Bridge
  * @param route - Clean route (pathname only)
@@ -135,11 +175,15 @@ export function filterMetrics(
 ): WebVitalsPayload | null {
   const filtered = metrics
     .filter((m) => ALLOWED_METRICS.has(m.name))
-    .map((m) => ({
-      name: m.name,
-      value: roundValue(m.name, m.value),
-      route,
-    }));
+    .map((m) => {
+      const roundedValue = roundValue(m.name, m.value);
+      debugLogMetric(m.name, roundedValue);
+      return {
+        name: m.name,
+        value: roundedValue,
+        route,
+      };
+    });
 
   if (filtered.length === 0) {
     return null;
