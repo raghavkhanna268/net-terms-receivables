@@ -255,4 +255,69 @@ describe("reminder unsubscribe token module", () => {
       expect(logCall[2]).not.toHaveProperty("email");
     });
   });
+
+  describe("dual-key verification for secret rotation", () => {
+    const CURRENT_SECRET = "current-secret-obviously-fake";
+    const PREVIOUS_SECRET = "previous-secret-obviously-fake";
+
+    it("(a) token signed with current key verifies", () => {
+      const token = generateUnsubscribeToken(TEST_SHOP_ID, TEST_BUYER_ID, CURRENT_SECRET);
+      const payload = verifyUnsubscribeToken(token!, CURRENT_SECRET);
+
+      expect(payload).not.toBeNull();
+      expect(payload!.shopId).toBe(TEST_SHOP_ID);
+      expect(payload!.buyerAccountId).toBe(TEST_BUYER_ID);
+    });
+
+    it("(b) token signed with old key verifies when PREVIOUS = old key", () => {
+      const token = generateUnsubscribeToken(TEST_SHOP_ID, TEST_BUYER_ID, PREVIOUS_SECRET);
+      const payload = verifyUnsubscribeToken(token!, CURRENT_SECRET, PREVIOUS_SECRET);
+
+      expect(payload).not.toBeNull();
+      expect(payload!.shopId).toBe(TEST_SHOP_ID);
+      expect(payload!.buyerAccountId).toBe(TEST_BUYER_ID);
+    });
+
+    it("(c) old-key token FAILS when PREVIOUS is unset", () => {
+      const token = generateUnsubscribeToken(TEST_SHOP_ID, TEST_BUYER_ID, PREVIOUS_SECRET);
+      const payload = verifyUnsubscribeToken(token!, CURRENT_SECRET);
+
+      expect(payload).toBeNull();
+    });
+
+    it("(d) new tokens are signed with current, not previous", () => {
+      const token = generateUnsubscribeToken(TEST_SHOP_ID, TEST_BUYER_ID, CURRENT_SECRET);
+
+      const verifiesWithCurrent = verifyUnsubscribeToken(token!, CURRENT_SECRET);
+      expect(verifiesWithCurrent).not.toBeNull();
+
+      const verifiesWithPreviousAlone = verifyUnsubscribeToken(token!, PREVIOUS_SECRET);
+      expect(verifiesWithPreviousAlone).toBeNull();
+    });
+
+    it("(e) tampered token fails under both keys", () => {
+      const token = generateUnsubscribeToken(TEST_SHOP_ID, TEST_BUYER_ID, CURRENT_SECRET);
+      const tamperedToken = token!.slice(0, -1) + (token!.slice(-1) === "A" ? "B" : "A");
+
+      const payloadCurrent = verifyUnsubscribeToken(tamperedToken, CURRENT_SECRET);
+      const payloadBoth = verifyUnsubscribeToken(tamperedToken, CURRENT_SECRET, PREVIOUS_SECRET);
+
+      expect(payloadCurrent).toBeNull();
+      expect(payloadBoth).toBeNull();
+    });
+
+    it("ignores empty previousSecret", () => {
+      const token = generateUnsubscribeToken(TEST_SHOP_ID, TEST_BUYER_ID, PREVIOUS_SECRET);
+      const payload = verifyUnsubscribeToken(token!, CURRENT_SECRET, "");
+
+      expect(payload).toBeNull();
+    });
+
+    it("ignores whitespace-only previousSecret", () => {
+      const token = generateUnsubscribeToken(TEST_SHOP_ID, TEST_BUYER_ID, PREVIOUS_SECRET);
+      const payload = verifyUnsubscribeToken(token!, CURRENT_SECRET, "   ");
+
+      expect(payload).toBeNull();
+    });
+  });
 });
