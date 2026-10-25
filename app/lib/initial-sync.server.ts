@@ -1,5 +1,5 @@
 /**
- * Initial Sync Helper for S23-04.
+ * Initial Sync Helper for S23-04 + S8.
  *
  * Derives sync status from existing s6_bulk_operations and s6_dead_letter tables.
  * Provides enqueue function to trigger reconcile for a single shop.
@@ -7,11 +7,18 @@
  * Status is derived from the LATEST run only (most recent s6_bulk_operations row
  * per reconcile stage). DLQ lookups are scoped to that run's bulk_op_id.
  *
+ * Reconcile sequence: companies → customers → orders
+ *
  * Status states:
  * - not_started: No bulk operations with origin='reconcile' exist for the shop
- * - in_progress: Latest run exists but companies or orders stage is incomplete
- * - done: Both companies and orders stages have completed_at set in latest run
- * - failed: Latest run has failure_count >= 5 or entries exist in DLQ for that run
+ * - in_progress: Latest run exists but not all stages have completed
+ * - done: All stages complete (companies, customers if has tag rules, orders)
+ * - failed: Any stage has failure_count >= 5 or entries exist in DLQ for that run
+ *
+ * Customers stage skip:
+ * When a shop has no tag rules, the customers stage is skipped entirely (no bulk
+ * op created). The skip is detected at read time by checking if tag rules exist
+ * for the shop. NO sentinel row is stored for a skipped customers stage.
  *
  * @module
  */
@@ -20,6 +27,7 @@ import type { Sql } from "./db-light.server";
 import { safeLog, shopHash } from "./log.server";
 import { S6_QUEUES } from "./pgmq.server";
 import type { ReconcileMessage } from "~/services/drain/reconcile.server";
+import { getTagRules } from "~/services/sync/customer.server";
 
 /**
  * Maximum failure count before considering an operation failed.
@@ -56,12 +64,18 @@ interface BulkOperation {
  * Derives status from the LATEST companies op as the "current run":
  * - not_started: No bulk operations with origin='reconcile' exist for the shop
  * - in_progress: Current run exists but not all stages have completed_at
- * - done: Both companies and orders stages have completed_at set in current run
- * - failed: Current run has failure_count >= MAX_FAILURE_COUNT or in DLQ
+ * - done: All required stages complete (companies, customers if applicable, orders)
+ * - failed: Any stage has failure_count >= MAX_FAILURE_COUNT or in DLQ
  *
- * Orders ops are only considered if they started at or after the latest
- * companies op's started_at (to avoid mixing old failed orders with new runs).
+ * Stage ops are only considered if they started at or after the latest
+ * companies op's started_at (to avoid mixing old failed ops with new runs).
  * DLQ lookups are scoped to the current run's bulk_op_ids.
+ *
+ * Customers stage skip detection:
+ * If no customers bulk op exists for the current run, we check if the shop has
+ * tag rules. If no tag rules exist, the customers stage was legitimately skipped.
+ * If tag rules exist but no customers op, the stage is still in progress (queued
+ * but not yet started).
  *
  * @param sql - postgres.js SQL client
  * @param shopDomain - Shop domain
@@ -83,6 +97,17 @@ export async function getInitialSyncState(
     return { status: "not_started" };
   }
 
+  const [customersOp] = await sql<BulkOperation[]>`
+    SELECT bulk_op_id, reconcile_stage, completed_at, failure_count, started_at
+    FROM s6_bulk_operations
+    WHERE shop = ${shopDomain}
+      AND origin = 'reconcile'
+      AND reconcile_stage = 'customers'
+      AND started_at >= ${companiesOp.started_at}
+    ORDER BY started_at DESC
+    LIMIT 1
+  `;
+
   const [ordersOp] = await sql<BulkOperation[]>`
     SELECT bulk_op_id, reconcile_stage, completed_at, failure_count, started_at
     FROM s6_bulk_operations
@@ -95,6 +120,9 @@ export async function getInitialSyncState(
   `;
 
   const bulkOpIds = [companiesOp.bulk_op_id];
+  if (customersOp) {
+    bulkOpIds.push(customersOp.bulk_op_id);
+  }
   if (ordersOp) {
     bulkOpIds.push(ordersOp.bulk_op_id);
   }
@@ -103,22 +131,38 @@ export async function getInitialSyncState(
     SELECT COUNT(*)::text as count
     FROM s6_dead_letter
     WHERE message->>'bulkOperationId' = ANY(${bulkOpIds})
-      AND message->>'topic' IN ('RECONCILE_COMPANIES', 'RECONCILE_ORDERS', 'BULK_OPERATIONS_FINISH')
+      AND message->>'topic' IN ('RECONCILE_COMPANIES', 'RECONCILE_CUSTOMERS', 'RECONCILE_ORDERS', 'BULK_OPERATIONS_FINISH')
   `;
 
   const hasDlqEntries = parseInt(dlqCount[0]?.count ?? "0", 10) > 0;
 
   const hasFailedCompanies = companiesOp.failure_count >= MAX_FAILURE_COUNT;
+  const hasFailedCustomers = customersOp != null && customersOp.failure_count >= MAX_FAILURE_COUNT;
   const hasFailedOrders = ordersOp != null && ordersOp.failure_count >= MAX_FAILURE_COUNT;
 
-  if (hasFailedCompanies || hasFailedOrders || hasDlqEntries) {
+  if (hasFailedCompanies || hasFailedCustomers || hasFailedOrders || hasDlqEntries) {
     return { status: "failed" };
   }
 
   const companiesComplete = companiesOp.completed_at !== null;
   const ordersComplete = ordersOp != null && ordersOp.completed_at !== null;
 
-  if (companiesComplete && ordersComplete) {
+  let customersComplete: boolean;
+  if (customersOp) {
+    customersComplete = customersOp.completed_at !== null;
+  } else {
+    const [shopRow] = await sql<{ id: string }[]>`
+      SELECT id FROM "Shop" WHERE domain = ${shopDomain}
+    `;
+    if (shopRow) {
+      const tagRules = await getTagRules(sql, shopRow.id);
+      customersComplete = tagRules.length === 0;
+    } else {
+      customersComplete = true;
+    }
+  }
+
+  if (companiesComplete && customersComplete && ordersComplete) {
     return { status: "done" };
   }
 
@@ -165,7 +209,8 @@ async function hasManualSyncQueued(sql: Sql, shopDomain: string): Promise<boolea
  *
  * Starts the initial sync by enqueuing a RECONCILE_COMPANIES message.
  * The drain will process it and start the bulk operation.
- * After companies complete, RECONCILE_ORDERS is automatically enqueued.
+ * After companies complete, RECONCILE_CUSTOMERS is enqueued (skipped if no tag rules),
+ * then RECONCILE_ORDERS is automatically enqueued.
  *
  * Uses manual idempotency key: "reconcile:<shop>:manual:<timestamp>:companies"
  * This allows retries even if today's nightly cron key was already processed.

@@ -11,7 +11,9 @@
  * Reads messages from s6_sync and s6_bulk queues, processes them
  * via registered topic handlers, and handles retry/DLQ.
  *
- * NOTE: The ?reconcile=true path is disabled until S10b reconcile handlers exist.
+ * Reconcile flow (?reconcile=true):
+ * Enqueues RECONCILE_COMPANIES for all installed shops. The drain then chains
+ * through companies → customers → orders stages automatically.
  */
 
 import type { ActionFunctionArgs } from "react-router";

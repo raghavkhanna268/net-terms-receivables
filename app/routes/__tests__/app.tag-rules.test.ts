@@ -22,6 +22,10 @@ vi.mock("@shopify/shopify-app-react-router/server", () => ({
   boundary: { headers: vi.fn(() => ({})) },
 }));
 
+vi.mock("~/services/drain/reconcile-handlers.server", () => ({
+  enqueueReconcileStage: vi.fn().mockResolvedValue(true),
+}));
+
 /**
  * ActionData type for test assertions.
  */
@@ -674,14 +678,16 @@ describe("Tag Rules Route", () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
-      // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Shop lookup (action uses SELECT id, domain FROM "Shop")
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", domain: "test.myshopify.com" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check for case-insensitive duplicate - none found
       mockSql.mockResolvedValueOnce([]);
       // Insert returning id
       mockSql.mockResolvedValueOnce([{ id: "new-rule-id" }]);
+      // S8: Count tag rules (first-tag-rule check) - more than 1 means not first
+      mockSql.mockResolvedValueOnce([{ count: "2" }]);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
@@ -724,14 +730,16 @@ describe("Tag Rules Route", () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
-      // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Shop lookup (action uses SELECT id, domain FROM "Shop")
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", domain: "test.myshopify.com" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check - none found
       mockSql.mockResolvedValueOnce([]);
       // Insert returning id
       mockSql.mockResolvedValueOnce([{ id: "new-rule-id" }]);
+      // S8: Count tag rules (first-tag-rule check) - more than 1 means not first
+      mockSql.mockResolvedValueOnce([{ count: "2" }]);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");

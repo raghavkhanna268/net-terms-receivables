@@ -514,18 +514,44 @@ describe("Bulk JSONL Processor", () => {
   });
 });
 
+describe("getNextStage", () => {
+  it("returns customers after companies", async () => {
+    const { getNextStage } = await import("../bulk-jsonl-processor.server");
+    expect(getNextStage("companies")).toBe("customers");
+  });
+
+  it("returns orders after customers", async () => {
+    const { getNextStage } = await import("../bulk-jsonl-processor.server");
+    expect(getNextStage("customers")).toBe("orders");
+  });
+
+  it("returns undefined after orders (final stage)", async () => {
+    const { getNextStage } = await import("../bulk-jsonl-processor.server");
+    expect(getNextStage("orders")).toBeUndefined();
+  });
+
+  it("returns undefined for null stage", async () => {
+    const { getNextStage } = await import("../bulk-jsonl-processor.server");
+    expect(getNextStage(null)).toBeUndefined();
+  });
+
+  it("returns undefined for unknown stage", async () => {
+    const { getNextStage } = await import("../bulk-jsonl-processor.server");
+    expect(getNextStage("unknown")).toBeUndefined();
+  });
+});
+
 describe("Reconcile chaining", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.resetModules();
   });
 
-  it("companies reconcile sets chainToOrders when origin=reconcile and stage=companies", async () => {
-    // This is tested at the processor level via the processBulkOperation result
-    // Here we just verify the getBulkOperationMetadata function
+  it("companies reconcile sets nextStage=customers when origin=reconcile and stage=companies", async () => {
     const { getBulkOperationMetadata } = await import(
       "../bulk-operations.server"
     );
+    const { getNextStage } = await import("../bulk-jsonl-processor.server");
 
     const mockSql = vi.fn().mockImplementation(() =>
       Promise.resolve([
@@ -548,6 +574,37 @@ describe("Reconcile chaining", () => {
     expect(metadata).not.toBeNull();
     expect(metadata!.origin).toBe("reconcile");
     expect(metadata!.reconcileStage).toBe("companies");
+    expect(getNextStage(metadata!.reconcileStage)).toBe("customers");
+  });
+
+  it("customers reconcile sets nextStage=orders when origin=reconcile and stage=customers", async () => {
+    const { getBulkOperationMetadata } = await import(
+      "../bulk-operations.server"
+    );
+    const { getNextStage } = await import("../bulk-jsonl-processor.server");
+
+    const mockSql = vi.fn().mockImplementation(() =>
+      Promise.resolve([
+        {
+          shop: "test.myshopify.com",
+          bulk_type: "customers",
+          origin: "reconcile",
+          reconcile_stage: "customers",
+          failure_count: 0,
+          chunk_size: 524288,
+        },
+      ])
+    );
+
+    const metadata = await getBulkOperationMetadata(
+      mockSql as never,
+      "gid://shopify/BulkOperation/456"
+    );
+
+    expect(metadata).not.toBeNull();
+    expect(metadata!.origin).toBe("reconcile");
+    expect(metadata!.reconcileStage).toBe("customers");
+    expect(getNextStage(metadata!.reconcileStage)).toBe("orders");
   });
 });
 
