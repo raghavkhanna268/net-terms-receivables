@@ -20,7 +20,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import type { ErrorEvent, EventHint, Breadcrumb } from "@sentry/cloudflare";
+import type { ErrorEvent, EventHint } from "@sentry/cloudflare";
 import { buildSentryOptions, RESTRICTIVE_DATA_COLLECTION } from "../sentry";
 import {
   scrubPiiFromString,
