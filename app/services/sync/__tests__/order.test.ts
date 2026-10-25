@@ -113,6 +113,53 @@ describeWithDb("Order Sync", () => {
       expect(invoice.dueSource).toBe("schedule");
     });
 
+    // #292: INR order imports unchanged - this test serves as (a) verification
+    // The above test "creates Invoice for order with payment terms" uses INR currency
+    // and verifies the order is processed normally, creating an Invoice.
+
+    it("#292: skips USD order in INR shop (order_currency_not_supported)", async () => {
+      // A USD order in a shop that switched to INR should be skipped
+      // The order was created when the shop was USD, so we shouldn't import it as INR
+      const order: ShopifyOrder = {
+        id: `gid://shopify/Order/ord-${TEST_SUFFIX}-usd`,
+        name: "#USD-ORDER",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
+        totalPriceSet: {
+          shopMoney: { amount: "50000.00", currencyCode: "USD" }, // USD, not INR
+        },
+        paymentTerms: {
+          id: "pt-usd",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+          dueInDays: 30,
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      const result = await processOrderWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "ORDERS_CREATE",
+        order,
+        `wh-ord-${TEST_SUFFIX}-usd`
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("skipped");
+      expect(result.skipReason).toBe("order_currency_not_supported");
+
+      // Verify NO invoice was created
+      const invoices = await sql`
+        SELECT * FROM "Invoice" WHERE "orderId" = ${order.id}
+      `;
+      expect(invoices).toHaveLength(0);
+    });
+
     it("skips retail orders (no payment terms, no B2B, no tag) as permanent skip", async () => {
       // A retail order with no payment terms and no company location is a permanent skip
       const order: ShopifyOrder = {
