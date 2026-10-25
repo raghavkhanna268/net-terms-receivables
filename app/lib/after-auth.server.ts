@@ -109,11 +109,10 @@ async function clearAndMaybeSetup(
   admin: AdminGraphqlClient,
   waitUntil: WaitUntilFn,
 ): Promise<void> {
-  const reinstallResult = await clearUninstalledAtIfSet(sql, shop);
+  const reinstallResult = await clearUninstalledAtAndMetafieldErrors(sql, shop);
 
-  if (reinstallResult.wasReinstalled && reinstallResult.shopId) {
+  if (reinstallResult.wasReinstalled) {
     setupCompletedShops.delete(shop);
-    await clearMetafieldSyncErrorsOnReinstall(sql, reinstallResult.shopId, shop);
   }
 
   runSetupIfNeeded(shop, admin, waitUntil);
@@ -143,7 +142,7 @@ function runSetupIfNeeded(
 }
 
 /**
- * Result of clearUninstalledAtIfSet containing reinstall status and shop ID.
+ * Result of clearUninstalledAtAndMetafieldErrors containing reinstall status and shop ID.
  */
 interface ClearUninstalledResult {
   wasReinstalled: boolean;
@@ -151,32 +150,47 @@ interface ClearUninstalledResult {
 }
 
 /**
- * Clear uninstalledAt and reset onboarding state if the shop was uninstalled.
+ * Atomically clear uninstalledAt, onboarding state, and metafield sync errors on reinstall.
  *
  * This is called on every /app load BEFORE the cache early-return to handle
- * cross-isolate reinstall scenarios. It's a single cheap, shop-scoped conditional
- * UPDATE using the indexed domain column - no extra SELECT or round-trip.
+ * cross-isolate reinstall scenarios. Uses a CTE to perform both updates in a
+ * single statement, ensuring atomicity: if clearing the metafield errors fails,
+ * the uninstalledAt clear is also rolled back, preserving the reinstall signal.
  *
  * S23-09: Also resets onboarding_dismissed_at on reinstall so the merchant sees
- * the Setup Guide again. This is in the same UPDATE to remain a single statement.
+ * the Setup Guide again.
  *
- * IMPORTANT: Only sets uninstalledAt and onboarding_dismissed_at to NULL.
+ * #208 follow-up: Also clears metafieldSyncErrorCode and metafieldSyncErrorAt on
+ * all BuyerAccount rows for the shop, allowing the resync sweep to retry accounts
+ * that had permanent sync failures before uninstall.
+ *
+ * IMPORTANT: Only touches uninstalledAt, onboarding_dismissed_at on Shop, and
+ * metafieldSyncErrorCode/metafieldSyncErrorAt on BuyerAccount.
  * Never touches plan, gating, credit, timezone, or any other column.
  *
  * @param sql - postgres.js SQL client
  * @param shop - The shop domain
  * @returns Object with wasReinstalled flag and shopId if reinstalled
  */
-async function clearUninstalledAtIfSet(sql: Sql, shop: string): Promise<ClearUninstalledResult> {
+async function clearUninstalledAtAndMetafieldErrors(sql: Sql, shop: string): Promise<ClearUninstalledResult> {
   try {
     const result = await sql<{ id: string }[]>`
-      UPDATE "Shop"
-      SET "uninstalledAt" = NULL, onboarding_dismissed_at = NULL
-      WHERE domain = ${shop} AND "uninstalledAt" IS NOT NULL
-      RETURNING id
+      WITH reinstalled_shop AS (
+        UPDATE "Shop"
+        SET "uninstalledAt" = NULL, onboarding_dismissed_at = NULL
+        WHERE domain = ${shop} AND "uninstalledAt" IS NOT NULL
+        RETURNING id
+      ),
+      cleared_accounts AS (
+        UPDATE "BuyerAccount"
+        SET "metafieldSyncErrorCode" = NULL, "metafieldSyncErrorAt" = NULL
+        WHERE "shopId" IN (SELECT id FROM reinstalled_shop)
+          AND ("metafieldSyncErrorCode" IS NOT NULL OR "metafieldSyncErrorAt" IS NOT NULL)
+      )
+      SELECT id FROM reinstalled_shop
     `;
     if (result.length > 0) {
-      safeLog("info", "cleared_uninstalled_at_and_onboarding", {
+      safeLog("info", "cleared_uninstalled_at_and_metafield_errors", {
         shopHash: await shopHash(shop),
       });
       return { wasReinstalled: true, shopId: result[0].id };
@@ -186,43 +200,6 @@ async function clearUninstalledAtIfSet(sql: Sql, shop: string): Promise<ClearUni
     const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
     console.error(`[afterAuth] clear_uninstalled_at_failed reason=db_error err=${errInfo}`);
     return { wasReinstalled: false };
-  }
-}
-
-/**
- * Clear metafield sync error fields on BuyerAccount rows for a reinstalled shop.
- *
- * Called only when clearUninstalledAtIfSet detects a reinstall (uninstalledAt was set).
- * Clears metafieldSyncErrorCode and metafieldSyncErrorAt for all BuyerAccount rows
- * belonging to the shop, allowing the resync sweep to retry previously failed accounts.
- *
- * This is a shop-scoped UPDATE using the indexed shopId column.
- * Normal re-auth (uninstalledAt already NULL) never calls this function.
- *
- * @param sql - postgres.js SQL client
- * @param shopId - The shop's internal ID (from clearUninstalledAtIfSet)
- * @param shopDomain - The shop domain (for logging only)
- */
-async function clearMetafieldSyncErrorsOnReinstall(
-  sql: Sql,
-  shopId: string,
-  shopDomain: string,
-): Promise<void> {
-  try {
-    const result = await sql<{ count: string }[]>`
-      UPDATE "BuyerAccount"
-      SET "metafieldSyncErrorCode" = NULL, "metafieldSyncErrorAt" = NULL
-      WHERE "shopId" = ${shopId}
-        AND ("metafieldSyncErrorCode" IS NOT NULL OR "metafieldSyncErrorAt" IS NOT NULL)
-    `;
-    const clearedCount = result.count ?? 0;
-    safeLog("info", "cleared_metafield_sync_errors_on_reinstall", {
-      shopHash: await shopHash(shopDomain),
-      clearedCount: Number(clearedCount),
-    });
-  } catch (error) {
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] clear_metafield_sync_errors_failed reason=db_error err=${errInfo}`);
   }
 }
 
@@ -378,8 +355,13 @@ export function _isShopSetupInFlight(shop: string): boolean {
  * This is idempotent: INSERT ... ON CONFLICT updates existing rows.
  *
  * On fresh install: Creates a new Shop row with the given timezone (or default if null).
- * On reinstall: Clears uninstalledAt and updates timezone (preserves existing if null).
- * On re-auth: Updates timezone only (preserves existing if null).
+ * On reinstall: Clears uninstalledAt, resets onboarding, clears metafield sync errors,
+ *   and updates timezone (preserves existing if null). All done atomically via CTE.
+ * On re-auth: Updates timezone only (preserves existing if null). Metafield errors untouched.
+ *
+ * #208 follow-up: Also clears metafieldSyncErrorCode and metafieldSyncErrorAt on all
+ * BuyerAccount rows for the shop when uninstalledAt was set (reinstall only).
+ * This is atomic with the Shop update to ensure the reinstall signal isn't lost.
  *
  * @param sql - postgres.js SQL client
  * @param shopDomain - Shop domain (e.g., "example.myshopify.com")
@@ -391,18 +373,32 @@ export async function upsertShopOnAuth(
   timezone: string | null,
 ): Promise<void> {
   const result = await sql<{ id: string }[]>`
-    INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
-    VALUES (${shopDomain}, COALESCE(${timezone}, 'Asia/Kolkata'), 'INR', 'free', NOW(), NOW())
-    ON CONFLICT (domain)
-    DO UPDATE SET
-      timezone = COALESCE(${timezone}, "Shop".timezone),
-      "uninstalledAt" = NULL,
-      onboarding_dismissed_at = CASE
-        WHEN "Shop"."uninstalledAt" IS NOT NULL THEN NULL
-        ELSE "Shop".onboarding_dismissed_at
-      END,
-      "updatedAt" = NOW()
-    RETURNING id
+    WITH old_state AS (
+      SELECT id, "uninstalledAt" IS NOT NULL AS was_uninstalled
+      FROM "Shop"
+      WHERE domain = ${shopDomain}
+    ),
+    upserted AS (
+      INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
+      VALUES (${shopDomain}, COALESCE(${timezone}, 'Asia/Kolkata'), 'INR', 'free', NOW(), NOW())
+      ON CONFLICT (domain)
+      DO UPDATE SET
+        timezone = COALESCE(${timezone}, "Shop".timezone),
+        "uninstalledAt" = NULL,
+        onboarding_dismissed_at = CASE
+          WHEN "Shop"."uninstalledAt" IS NOT NULL THEN NULL
+          ELSE "Shop".onboarding_dismissed_at
+        END,
+        "updatedAt" = NOW()
+      RETURNING id
+    ),
+    cleared_accounts AS (
+      UPDATE "BuyerAccount"
+      SET "metafieldSyncErrorCode" = NULL, "metafieldSyncErrorAt" = NULL
+      WHERE "shopId" IN (SELECT id FROM old_state WHERE was_uninstalled)
+        AND ("metafieldSyncErrorCode" IS NOT NULL OR "metafieldSyncErrorAt" IS NOT NULL)
+    )
+    SELECT id FROM upserted
   `;
   const shopId = result[0]?.id ?? 'unknown';
   console.log(`[afterAuth] shop_upserted shop_id=${shopId} timezone=${timezone ?? 'preserved'}`);
@@ -420,13 +416,7 @@ export function evictShopFromSetupCache(shop: string): void {
 }
 
 /**
- * Exported for testing: clear uninstalledAt if set.
+ * Exported for testing: atomically clear uninstalledAt and metafield errors.
  * @internal
  */
-export { clearUninstalledAtIfSet as _clearUninstalledAtIfSetForTesting };
-
-/**
- * Exported for testing: clear metafield sync errors on reinstall.
- * @internal
- */
-export { clearMetafieldSyncErrorsOnReinstall as _clearMetafieldSyncErrorsOnReinstallForTesting };
+export { clearUninstalledAtAndMetafieldErrors as _clearUninstalledAtAndMetafieldErrorsForTesting };
