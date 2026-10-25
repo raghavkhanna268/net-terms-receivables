@@ -339,7 +339,7 @@ describe("sendPaymentReminder - allowlist", () => {
       "rule-123",
       0,
       "Asia/Kolkata",
-      { ...validEnv, RESEND_TEST_RECIPIENTS: "  buyer@test-example.com  ,  other@test.com  " }
+      { ...validEnv, RESEND_TEST_RECIPIENTS: "  buyer@test-example.com  ,  other@test-example.com  " }
     );
 
     expect(result.success).toBe(true);

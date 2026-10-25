@@ -444,14 +444,14 @@ describe("sendViaResend", () => {
           to: ["buyer@test-example.com"],
           subject: "Test",
           html: "<p>Test</p>",
-          headers: { "List-Unsubscribe": "<mailto:unsub@test.com>" },
+          headers: { "List-Unsubscribe": "<mailto:unsub@test-example.com>" },
         },
         { RESEND_API_KEY: "re_test_1234", RESEND_TEST_RECIPIENTS: "buyer@test-example.com" }
       );
 
       const [, options] = mockFetch.mock.calls[0];
       const body = JSON.parse(options.body);
-      expect(body.headers["List-Unsubscribe"]).toBe("<mailto:unsub@test.com>");
+      expect(body.headers["List-Unsubscribe"]).toBe("<mailto:unsub@test-example.com>");
     });
 
     it("includes text content when provided", async () => {

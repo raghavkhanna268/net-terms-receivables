@@ -1288,29 +1288,6 @@ export async function sendCatchupReminder(
     };
   }
 
-  // Gate 8f: Pre-launch recipient allowlist check (fail closed)
-  // Check BEFORE claiming slot/cap so skipped sends don't consume resources
-  // Don't delete the delayed row - wait for allowlist to be configured or recipient added
-  const allowlist = parseRecipientAllowlist(
-    env.RESEND_TEST_RECIPIENTS ?? process.env.RESEND_TEST_RECIPIENTS
-  );
-  if (allowlist.size === 0) {
-    safeLog("info", "reminder_send_skipped", { shopId, reason: "recipient_allowlist_empty", skippedCount: 1, allowedCount: 0 });
-    return {
-      success: true,
-      action: "skipped",
-      skipReason: "Recipient allowlist is empty or not configured",
-    };
-  }
-  if (!isRecipientAllowed(invoice.buyerEmail, allowlist)) {
-    safeLog("info", "reminder_send_skipped", { shopId, reason: "recipient_not_allowlisted", skippedCount: 1, allowedCount: 0 });
-    return {
-      success: true,
-      action: "skipped",
-      skipReason: "Recipient not in pre-launch allowlist",
-    };
-  }
-
   // Gate 9: Check shop reminders are enabled
   const settings = await getShopReminderSettings(sql, shopId);
   if (!settings?.enabled) {
@@ -1361,6 +1338,30 @@ export async function sendCatchupReminder(
       success: true,
       action: "skipped",
       skipReason: "Newer stage due today",
+    };
+  }
+
+  // Gate 11c: Pre-launch recipient allowlist check (fail closed)
+  // Check AFTER gates 9/10/11/11b so we skip for valid business reasons first,
+  // but BEFORE claiming slot/cap so skipped sends don't consume resources.
+  // Don't delete the delayed row - wait for allowlist to be configured or recipient added.
+  const allowlist = parseRecipientAllowlist(
+    env.RESEND_TEST_RECIPIENTS ?? process.env.RESEND_TEST_RECIPIENTS
+  );
+  if (allowlist.size === 0) {
+    safeLog("info", "reminder_send_skipped", { shopId, reason: "recipient_allowlist_empty", skippedCount: 1, allowedCount: 0 });
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Recipient allowlist is empty or not configured",
+    };
+  }
+  if (!isRecipientAllowed(invoice.buyerEmail, allowlist)) {
+    safeLog("info", "reminder_send_skipped", { shopId, reason: "recipient_not_allowlisted", skippedCount: 1, allowedCount: 0 });
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Recipient not in pre-launch allowlist",
     };
   }
 
