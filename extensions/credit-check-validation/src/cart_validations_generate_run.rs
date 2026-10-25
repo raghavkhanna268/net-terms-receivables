@@ -6,6 +6,47 @@ use shopify_function::Result;
 const ERROR_MSG_ON_HOLD: &str = "Your account is currently on hold. Please contact us to resolve any outstanding issues before placing an order.";
 const ERROR_MSG_OVER_LIMIT: &str = "This order would exceed your credit limit. Please contact us to discuss your account or make a payment on outstanding invoices.";
 
+/// #292: The only supported shop currency in v1.
+const SUPPORTED_SHOP_CURRENCY: &str = "INR";
+
+/// #292: Shop config from the $app:shop_config metafield.
+/// Written by after-auth and read by functions to determine shop currency.
+#[derive(Default, PartialEq, Clone, Debug)]
+pub struct ShopConfig {
+    pub schema_version: Option<i32>,
+    pub currency_code: Option<String>,
+}
+
+impl ShopConfig {
+    fn from_json_value(json_value: &JsonValue) -> Self {
+        if let JsonValue::Object(obj) = json_value {
+            ShopConfig {
+                schema_version: obj
+                    .get("schemaVersion")
+                    .and_then(|v| match v {
+                        JsonValue::Number(n) => Some(*n as i32),
+                        _ => None,
+                    }),
+                currency_code: obj
+                    .get("currencyCode")
+                    .and_then(|v| match v {
+                        JsonValue::String(s) => Some(s.clone()),
+                        _ => None,
+                    }),
+            }
+        } else {
+            ShopConfig::default()
+        }
+    }
+
+    /// #292: Check if the shop is an INR shop.
+    /// Returns Some(true) if shop_config has INR currency, Some(false) if non-INR.
+    /// Returns None if shop_config is missing/invalid (fail-open for rollout safety).
+    fn is_inr_shop(&self) -> Option<bool> {
+        self.currency_code.as_ref().map(|c| c == SUPPORTED_SHOP_CURRENCY)
+    }
+}
+
 #[derive(Default, PartialEq, Clone, Debug)]
 pub struct CreditStatus {
     pub schema_version: Option<i32>,
@@ -126,11 +167,27 @@ fn pass() -> schema::CartValidationsGenerateRunResult {
     schema::CartValidationsGenerateRunResult { operations: vec![] }
 }
 
+/// #292: Evaluate credit status with INR-only logic.
+///
+/// Decision table (per rulings):
+/// 1. HELD → block (before any other check)
+/// 2. schemaVersion missing or != 1 → pass (fail-open)
+/// 3. Non-INR shop (shop_config.currencyCode != "INR") → pass (non-held buyers never blocked)
+/// 4. INR shop with non-INR cart → pass (hide-terms handles it, no blocking)
+/// 5. Over-limit → block
+/// 6. Otherwise → pass
 fn evaluate_credit_status(
     credit_status: &CreditStatus,
     cart_currency: &str,
     cart_total_paise: u64,
+    shop_config: &ShopConfig,
 ) -> schema::CartValidationsGenerateRunResult {
+    // #292: HELD check comes FIRST, before schemaVersion
+    if credit_status.hold == Some(true) {
+        return create_validation_error(ERROR_MSG_ON_HOLD);
+    }
+
+    // schemaVersion gate (unchanged from original)
     if credit_status.schema_version.is_none() {
         return pass();
     }
@@ -139,8 +196,12 @@ fn evaluate_credit_status(
         return pass();
     }
 
-    if credit_status.hold == Some(true) {
-        return create_validation_error(ERROR_MSG_ON_HOLD);
+    // #292: Non-INR shop → pass (non-held buyers never blocked in non-INR shop)
+    // Missing shop_config alone does NOT block (fail-open for rollout safety)
+    if let Some(is_inr) = shop_config.is_inr_shop() {
+        if !is_inr {
+            return pass();
+        }
     }
 
     let status_currency = match &credit_status.currency_code {
@@ -148,6 +209,8 @@ fn evaluate_credit_status(
         None => return pass(),
     };
 
+    // #292: INR shop with non-INR cart → pass (hide-terms handles it)
+    // Changed from the original fail-open to explicit pass with different intent
     if status_currency != cart_currency {
         return pass();
     }
@@ -197,6 +260,12 @@ fn cart_validations_generate_run(input: schema::cart_validations_generate_run::I
         None => return Ok(pass()),
     };
 
+    // #292: Read shop_config for INR-only logic
+    let shop_config = match input.shop().metafield() {
+        Some(m) => ShopConfig::from_json_value(m.json_value()),
+        None => ShopConfig::default(),
+    };
+
     let buyer_identity = match cart.buyer_identity() {
         Some(bi) => bi,
         None => return Ok(pass()),
@@ -211,6 +280,7 @@ fn cart_validations_generate_run(input: schema::cart_validations_generate_run::I
                 &credit_status,
                 &cart_currency,
                 cart_total_paise,
+                &shop_config,
             ));
         }
         return Ok(pass());
@@ -224,6 +294,7 @@ fn cart_validations_generate_run(input: schema::cart_validations_generate_run::I
                 &credit_status,
                 &cart_currency,
                 cart_total_paise,
+                &shop_config,
             ));
         }
     }
@@ -253,7 +324,15 @@ mod tests {
         serde_json::to_string(current).expect("Failed to serialize fixture")
     }
 
-    fn make_input_with_step(cart_amount: &str, currency: &str, metafield_json: Option<&str>, has_b2b: bool, buyer_journey_step: Option<&str>) -> String {
+    /// #292: Helper to create test input with shop_config
+    fn make_input_with_step_and_shop_config(
+        cart_amount: &str,
+        currency: &str,
+        metafield_json: Option<&str>,
+        has_b2b: bool,
+        buyer_journey_step: Option<&str>,
+        shop_config_json: Option<&str>,
+    ) -> String {
         let customer_metafield = match metafield_json {
             Some(mf) if !has_b2b => format!(r#"{{ "jsonValue": {} }}"#, mf),
             _ => "null".to_string(),
@@ -276,6 +355,11 @@ mod tests {
             None => "null".to_string(),
         };
 
+        let shop_metafield = match shop_config_json {
+            Some(cfg) => format!(r#"{{ "jsonValue": {} }}"#, cfg),
+            None => "null".to_string(),
+        };
+
         format!(
             r#"{{
                 "cart": {{
@@ -294,9 +378,24 @@ mod tests {
                 }},
                 "buyerJourney": {{
                     "step": {}
+                }},
+                "shop": {{
+                    "metafield": {}
                 }}
             }}"#,
-            cart_amount, currency, customer_metafield, purchasing_company, step_value
+            cart_amount, currency, customer_metafield, purchasing_company, step_value, shop_metafield
+        )
+    }
+
+    fn make_input_with_step(cart_amount: &str, currency: &str, metafield_json: Option<&str>, has_b2b: bool, buyer_journey_step: Option<&str>) -> String {
+        // #292: Default to INR shop config for backward compatibility
+        make_input_with_step_and_shop_config(
+            cart_amount,
+            currency,
+            metafield_json,
+            has_b2b,
+            buyer_journey_step,
+            Some(r#"{"schemaVersion": 1, "currencyCode": "INR"}"#),
         )
     }
 
@@ -464,6 +563,11 @@ mod tests {
             },
             "buyerJourney": {
                 "step": "CHECKOUT_COMPLETION"
+            },
+            "shop": {
+                "metafield": {
+                    "jsonValue": {"schemaVersion": 1, "currencyCode": "INR"}
+                }
             }
         }
         "#;
@@ -603,6 +707,11 @@ mod tests {
             },
             "buyerJourney": {
                 "step": "CHECKOUT_COMPLETION"
+            },
+            "shop": {
+                "metafield": {
+                    "jsonValue": {"schemaVersion": 1, "currencyCode": "INR"}
+                }
             }
         }
         "#;
@@ -635,10 +744,11 @@ mod tests {
 
     #[test]
     fn test_unknown_schema_version_passes() {
+        // #292: HELD check comes first, so use hold:false to test schemaVersion fail-open
         let input = make_input(
             "100.00",
             "INR",
-            Some(r#"{"schemaVersion": 999, "currencyCode": "INR", "hold": true, "holdReasonCode": "PAYMENT_OVERDUE", "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#),
+            Some(r#"{"schemaVersion": 999, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#),
             false,
             "CHECKOUT_COMPLETION"
         );
@@ -680,6 +790,11 @@ mod tests {
             },
             "buyerJourney": {
                 "step": "CHECKOUT_COMPLETION"
+            },
+            "shop": {
+                "metafield": {
+                    "jsonValue": {"schemaVersion": 1, "currencyCode": "INR"}
+                }
             }
         }
         "#;
@@ -753,6 +868,11 @@ mod tests {
                 }},
                 "buyerJourney": {{
                     "step": "CHECKOUT_COMPLETION"
+                }},
+                "shop": {{
+                    "metafield": {{
+                        "jsonValue": {{"schemaVersion": 1, "currencyCode": "INR"}}
+                    }}
                 }}
             }}"#,
             location_metafield

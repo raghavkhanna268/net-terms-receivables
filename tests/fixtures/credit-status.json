@@ -41,8 +41,8 @@
     "wrongSchemaVersion": {
       "schemaVersion": 999,
       "currencyCode": "INR",
-      "hold": true,
-      "holdReasonCode": "PAYMENT_OVERDUE",
+      "hold": false,
+      "holdReasonCode": null,
       "limitPaise": "10000000",
       "exposurePaise": "0",
       "updatedAt": "2026-10-23T00:00:00Z"

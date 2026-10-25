@@ -98,6 +98,10 @@ function createMockSql() {
     if (query.includes("GREATEST(0, daily_count - 1)")) {
       return [];
     }
+    // #292: Shop currency check (INR-only in v1)
+    if (query.includes("currency") && query.includes("Shop") && query.includes("SELECT")) {
+      return mockResults.get("shop_currency") ?? [{ currency: "INR" }];
+    }
     return [];
   };
 

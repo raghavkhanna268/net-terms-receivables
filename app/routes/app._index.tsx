@@ -23,6 +23,7 @@ import {
 import type { Sql } from "~/lib/db-light.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { buildOverLimitBannerState } from "~/lib/over-limit-banner";
+import { isShopCurrencySupported } from "~/lib/shop-currency.server";
 
 const PAGE_SIZE = 20;
 
@@ -317,11 +318,15 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const storeHandle = shopDomain.replace(".myshopify.com", "");
   const gatingEnforced = isGatingEnforced();
 
+  // #292: Check if shop currency is supported (INR-only in v1)
+  const currencySupported = shop ? isShopCurrencySupported(shop.currency) : true;
+
   return {
     shopName: storeHandle,
     shopDomain,
     storeHandle,
     shopCurrency: shop?.currency ?? "INR",
+    currencySupported,
     plan: planData
       ? {
           key: planData.plan.key,
@@ -648,6 +653,7 @@ export default function Index() {
     onlyOverLimit,
     overLimitCount,
     error,
+    currencySupported,
   } = useLoaderData<typeof loader>();
 
   const planKey = (plan?.key ?? "none") as PlanKey;
@@ -669,6 +675,17 @@ export default function Index() {
 
   return (
     <s-page heading="Net Terms Receivables">
+      {/* #292: Currency Not Supported Banner */}
+      {!currencySupported && (
+        <s-section>
+          <s-banner tone="critical" heading="Currency Not Supported">
+            Net Terms currently supports INR stores only. Your store uses a
+            different currency, so net terms payment methods will not be
+            available at checkout.
+          </s-banner>
+        </s-section>
+      )}
+
       {/* S21: Plan Banner */}
       <s-section heading="Your Plan">
         <PlanBanner

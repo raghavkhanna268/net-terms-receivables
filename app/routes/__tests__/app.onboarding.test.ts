@@ -21,6 +21,20 @@ const mockSql = Object.assign(vi.fn(), {
   json: vi.fn((obj) => JSON.stringify(obj)),
 });
 
+// #292: Helper to wrap mockImplementation with default currency check for INR shops
+function wrapWithCurrencyCheck(
+  handler: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<unknown[]>
+) {
+  return (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const query = strings.join("?");
+    // Handle currency query from enqueueInitialSync
+    if (query.includes("currency") && query.includes("Shop") && query.includes("SELECT") && !query.includes("timezone")) {
+      return Promise.resolve([{ currency: "INR" }]);
+    }
+    return handler(strings, ...values);
+  };
+}
+
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
 }));
@@ -1232,7 +1246,7 @@ describe("S23-04: initial sync", () => {
   describe("action start_sync", () => {
     it("enqueues sync when status is not_started", async () => {
       let enqueued = false;
-      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      mockSql.mockImplementation(wrapWithCurrencyCheck((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("SELECT id FROM")) {
           return Promise.resolve([{ id: TEST_SHOP_ID }]);
@@ -1254,7 +1268,7 @@ describe("S23-04: initial sync", () => {
           return Promise.resolve([{ send: "1" }]);
         }
         return Promise.resolve([]);
-      });
+      }));
 
       const { action } = await import("../app.onboarding");
 
@@ -1287,7 +1301,7 @@ describe("S23-04: initial sync", () => {
 
     it("enqueues sync when status is failed", async () => {
       let enqueued = false;
-      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      mockSql.mockImplementation(wrapWithCurrencyCheck((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("SELECT id FROM")) {
           return Promise.resolve([{ id: TEST_SHOP_ID }]);
@@ -1311,7 +1325,7 @@ describe("S23-04: initial sync", () => {
           return Promise.resolve([{ send: "1" }]);
         }
         return Promise.resolve([]);
-      });
+      }));
 
       const { action } = await import("../app.onboarding");
 
@@ -1344,7 +1358,7 @@ describe("S23-04: initial sync", () => {
 
     it("does not enqueue when status is in_progress", async () => {
       let enqueued = false;
-      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      mockSql.mockImplementation(wrapWithCurrencyCheck((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("SELECT id FROM")) {
           return Promise.resolve([{ id: TEST_SHOP_ID }]);
@@ -1362,7 +1376,7 @@ describe("S23-04: initial sync", () => {
           return Promise.resolve([{ send: "1" }]);
         }
         return Promise.resolve([]);
-      });
+      }));
 
       const { action } = await import("../app.onboarding");
 
@@ -1395,7 +1409,7 @@ describe("S23-04: initial sync", () => {
 
     it("does not enqueue when status is done", async () => {
       let enqueued = false;
-      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      mockSql.mockImplementation(wrapWithCurrencyCheck((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("SELECT id FROM")) {
           return Promise.resolve([{ id: TEST_SHOP_ID }]);
@@ -1414,7 +1428,7 @@ describe("S23-04: initial sync", () => {
           return Promise.resolve([{ send: "1" }]);
         }
         return Promise.resolve([]);
-      });
+      }));
 
       const { action } = await import("../app.onboarding");
 
@@ -1447,7 +1461,7 @@ describe("S23-04: initial sync", () => {
 
     it("does not duplicate enqueue when already queued", async () => {
       let enqueueCount = 0;
-      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      mockSql.mockImplementation(wrapWithCurrencyCheck((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("SELECT id FROM")) {
           return Promise.resolve([{ id: TEST_SHOP_ID }]);
@@ -1469,7 +1483,7 @@ describe("S23-04: initial sync", () => {
           return Promise.resolve([{ send: "1" }]);
         }
         return Promise.resolve([]);
-      });
+      }));
 
       const { action } = await import("../app.onboarding");
 
@@ -1569,7 +1583,7 @@ describe("S23-04: initial sync", () => {
     it("start_sync logs use shopHash, not raw domain or ids", async () => {
       const consoleInfoSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
-      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      mockSql.mockImplementation(wrapWithCurrencyCheck((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("SELECT id FROM")) {
           return Promise.resolve([{ id: TEST_SHOP_ID }]);
@@ -1590,7 +1604,7 @@ describe("S23-04: initial sync", () => {
           return Promise.resolve([{ send: "1" }]);
         }
         return Promise.resolve([]);
-      });
+      }));
 
       const { action } = await import("../app.onboarding");
 

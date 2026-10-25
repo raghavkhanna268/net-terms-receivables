@@ -40,6 +40,7 @@ import {
   type InitialSyncStatus,
   type InitialSyncState,
 } from "~/lib/initial-sync.server";
+import { isShopCurrencySupported } from "~/lib/shop-currency.server";
 
 /**
  * Client-side version of canStartSync to avoid importing server-only module in client code.
@@ -355,6 +356,13 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     };
   }
 
+  // #292: Fetch shop currency for INR-only check
+  const [shopCurrencyResult] = await sql<{ currency: string | null }[]>`
+    SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
+  `;
+  const shopCurrency = shopCurrencyResult?.currency;
+  const currencySupported = isShopCurrencySupported(shopCurrency);
+
   const [validationResult, paymentCustomizationResult, metafieldStatus, syncState] = await Promise.all([
     fetchValidationInfo(admin),
     fetchPaymentCustomizationInfo(admin),
@@ -402,6 +410,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     shopId: dbData.shopId,
     registrationStatus,
     initialSyncState: syncState,
+    currencySupported,
   };
 };
 
@@ -538,6 +547,18 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   }
 
   if (actionType === "start_sync") {
+    // #292: Check shop currency before allowing sync
+    const [shopCurrencyResult] = await sql<{ currency: string | null }[]>`
+      SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
+    `;
+    if (!isShopCurrencySupported(shopCurrencyResult?.currency)) {
+      return {
+        success: false,
+        error: "Sync not available for non-INR stores",
+        action: "start_sync",
+      };
+    }
+
     const syncState = await getInitialSyncState(sql, shopDomain);
 
     if (!canStartSyncServer(syncState.status)) {
@@ -757,7 +778,7 @@ function OnboardingChecklist({
 const POLL_INTERVAL_MS = 5000;
 
 export default function OnboardingPage() {
-  const { error, state, registrationStatus, initialSyncState } = useLoaderData<typeof loader>();
+  const { error, state, registrationStatus, initialSyncState, currencySupported } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const revalidator = useRevalidator();
@@ -815,6 +836,17 @@ export default function OnboardingPage() {
 
   return (
     <s-page heading="Setup Guide">
+      {/* #292: Currency Not Supported Banner */}
+      {!currencySupported && (
+        <s-section>
+          <s-banner tone="critical" heading="Currency Not Supported">
+            Net Terms currently supports INR stores only. Your store uses a
+            different currency, so the initial sync and net terms payment methods
+            are not available.
+          </s-banner>
+        </s-section>
+      )}
+
       {actionData?.success && actionData.action === "retry_registration" && (
         <s-section>
           <s-banner tone="success" heading="Retry Complete">

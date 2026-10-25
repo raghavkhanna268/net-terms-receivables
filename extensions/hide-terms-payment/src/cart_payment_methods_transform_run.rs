@@ -3,6 +3,47 @@ use shopify_function::prelude::*;
 use shopify_function::scalars::JsonValue;
 use shopify_function::Result;
 
+/// #292: The only supported shop currency in v1.
+const SUPPORTED_SHOP_CURRENCY: &str = "INR";
+
+/// #292: Shop config from the $app:shop_config metafield.
+/// Written by after-auth and read by functions to determine shop currency.
+#[derive(Default, PartialEq, Clone, Debug)]
+pub struct ShopConfig {
+    pub schema_version: Option<i32>,
+    pub currency_code: Option<String>,
+}
+
+impl ShopConfig {
+    fn from_json_value(json_value: &JsonValue) -> Self {
+        if let JsonValue::Object(obj) = json_value {
+            ShopConfig {
+                schema_version: obj
+                    .get("schemaVersion")
+                    .and_then(|v| match v {
+                        JsonValue::Number(n) => Some(*n as i32),
+                        _ => None,
+                    }),
+                currency_code: obj
+                    .get("currencyCode")
+                    .and_then(|v| match v {
+                        JsonValue::String(s) => Some(s.clone()),
+                        _ => None,
+                    }),
+            }
+        } else {
+            ShopConfig::default()
+        }
+    }
+
+    /// #292: Check if the shop is an INR shop.
+    /// Returns Some(true) if shop_config has INR currency, Some(false) if non-INR.
+    /// Returns None if shop_config is missing/invalid (fail-open for rollout safety).
+    fn is_inr_shop(&self) -> Option<bool> {
+        self.currency_code.as_ref().map(|c| c == SUPPORTED_SHOP_CURRENCY)
+    }
+}
+
 /// Configuration for the payment customization (from $app:hide-terms-config metafield).
 /// 
 /// For B2B company locations: uses deferredPaymentPatterns to match payment method names.
@@ -181,10 +222,15 @@ fn cart_payment_methods_transform_run(
     input: schema::cart_payment_methods_transform_run::Input,
 ) -> Result<schema::CartPaymentMethodsTransformRunResult> {
     let cart = input.cart();
-    let buyer_identity = match cart.buyer_identity() {
-        Some(bi) => bi,
-        None => return Ok(pass()),
+
+    // #292: Read shop_config for INR-only logic
+    let shop_config = match input.shop().metafield() {
+        Some(m) => ShopConfig::from_json_value(m.json_value()),
+        None => ShopConfig::default(),
     };
+
+    // #292: Get cart currency for currency-mismatch hiding
+    let cart_currency = cart.cost().total_amount().currency_code().to_string();
 
     // Load config once (used for both B2B and customer paths)
     let config = match input.payment_customization() {
@@ -196,6 +242,34 @@ fn cart_payment_methods_transform_run(
     };
     let deferred_patterns = config.get_deferred_patterns();
 
+    // Helper closure to hide deferred payment methods
+    let hide_deferred = || -> Vec<schema::Operation> {
+        input
+            .payment_methods()
+            .iter()
+            .filter(|pm| matches_deferred_patterns(pm.name(), &deferred_patterns))
+            .map(|pm| hide_payment_method(pm.id().to_string()))
+            .collect()
+    };
+
+    // #292: Non-INR shop → hide deferred payment (net-terms not available for non-INR shops)
+    // Missing shop_config alone does NOT hide (fail-open for rollout safety)
+    if let Some(is_inr) = shop_config.is_inr_shop() {
+        if !is_inr {
+            return Ok(schema::CartPaymentMethodsTransformRunResult { operations: hide_deferred() });
+        }
+    }
+
+    // #292: INR shop with non-INR cart → hide deferred payment (currency mismatch)
+    if shop_config.is_inr_shop() == Some(true) && cart_currency != SUPPORTED_SHOP_CURRENCY {
+        return Ok(schema::CartPaymentMethodsTransformRunResult { operations: hide_deferred() });
+    }
+
+    let buyer_identity = match cart.buyer_identity() {
+        Some(bi) => bi,
+        None => return Ok(pass()),
+    };
+
     // Check B2B company location first (takes precedence)
     if let Some(purchasing_company) = buyer_identity.purchasing_company() {
         let location = purchasing_company.location();
@@ -205,14 +279,7 @@ fn cart_payment_methods_transform_run(
             
             if credit_status.is_held() {
                 // For B2B, hide deferred payment methods using configured patterns
-                let operations: Vec<schema::Operation> = input
-                    .payment_methods()
-                    .iter()
-                    .filter(|pm| matches_deferred_patterns(pm.name(), &deferred_patterns))
-                    .map(|pm| hide_payment_method(pm.id().to_string()))
-                    .collect();
-                
-                return Ok(schema::CartPaymentMethodsTransformRunResult { operations });
+                return Ok(schema::CartPaymentMethodsTransformRunResult { operations: hide_deferred() });
             }
         }
         // No metafield or not held - pass (fail-open)
@@ -236,12 +303,7 @@ fn cart_payment_methods_transform_run(
                         .collect()
                 } else {
                     // No specific method configured - hide by deferred payment patterns
-                    input
-                        .payment_methods()
-                        .iter()
-                        .filter(|pm| matches_deferred_patterns(pm.name(), &deferred_patterns))
-                        .map(|pm| hide_payment_method(pm.id().to_string()))
-                        .collect()
+                    hide_deferred()
                 };
                 
                 return Ok(schema::CartPaymentMethodsTransformRunResult { operations });
@@ -262,10 +324,12 @@ mod tests {
         run_function_with_input(cart_payment_methods_transform_run, input_json)
     }
 
-    fn make_b2b_input_with_config(
+    fn make_b2b_input_full(
         metafield_json: Option<&str>,
         payment_methods: &[(&str, &str)],
         config_json: Option<&str>,
+        cart_currency: &str,
+        shop_config_json: Option<&str>,
     ) -> String {
         let location_metafield = match metafield_json {
             Some(mf) => format!(r#"{{ "metafield": {{ "jsonValue": {} }} }}"#, mf),
@@ -283,9 +347,19 @@ mod tests {
             None => "null".to_string(),
         };
 
+        let shop_metafield = match shop_config_json {
+            Some(cfg) => format!(r#"{{ "jsonValue": {} }}"#, cfg),
+            None => "null".to_string(),
+        };
+
         format!(
             r#"{{
                 "cart": {{
+                    "cost": {{
+                        "totalAmount": {{
+                            "currencyCode": "{}"
+                        }}
+                    }},
                     "buyerIdentity": {{
                         "customer": null,
                         "purchasingCompany": {{
@@ -294,9 +368,27 @@ mod tests {
                     }}
                 }},
                 "paymentMethods": [{}],
-                "paymentCustomization": {}
+                "paymentCustomization": {},
+                "shop": {{
+                    "metafield": {}
+                }}
             }}"#,
-            location_metafield, pm_json, pc_json
+            cart_currency, location_metafield, pm_json, pc_json, shop_metafield
+        )
+    }
+
+    fn make_b2b_input_with_config(
+        metafield_json: Option<&str>,
+        payment_methods: &[(&str, &str)],
+        config_json: Option<&str>,
+    ) -> String {
+        // #292: Default to INR shop config and INR cart for backward compatibility
+        make_b2b_input_full(
+            metafield_json,
+            payment_methods,
+            config_json,
+            "INR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": "INR"}"#),
         )
     }
 
@@ -304,10 +396,12 @@ mod tests {
         make_b2b_input_with_config(metafield_json, payment_methods, None)
     }
 
-    fn make_customer_input(
+    fn make_customer_input_full(
         metafield_json: Option<&str>,
         payment_methods: &[(&str, &str)],
         config_json: Option<&str>,
+        cart_currency: &str,
+        shop_config_json: Option<&str>,
     ) -> String {
         let customer_metafield = match metafield_json {
             Some(mf) => format!(r#"{{ "metafield": {{ "jsonValue": {} }} }}"#, mf),
@@ -325,18 +419,46 @@ mod tests {
             None => "null".to_string(),
         };
 
+        let shop_metafield = match shop_config_json {
+            Some(cfg) => format!(r#"{{ "jsonValue": {} }}"#, cfg),
+            None => "null".to_string(),
+        };
+
         format!(
             r#"{{
                 "cart": {{
+                    "cost": {{
+                        "totalAmount": {{
+                            "currencyCode": "{}"
+                        }}
+                    }},
                     "buyerIdentity": {{
                         "customer": {},
                         "purchasingCompany": null
                     }}
                 }},
                 "paymentMethods": [{}],
-                "paymentCustomization": {}
+                "paymentCustomization": {},
+                "shop": {{
+                    "metafield": {}
+                }}
             }}"#,
-            customer_metafield, pm_json, pc_json
+            cart_currency, customer_metafield, pm_json, pc_json, shop_metafield
+        )
+    }
+
+    fn make_customer_input(
+        metafield_json: Option<&str>,
+        payment_methods: &[(&str, &str)],
+        config_json: Option<&str>,
+    ) -> String {
+        // #292: Default to INR shop config and INR cart for backward compatibility
+        make_customer_input_full(
+            metafield_json,
+            payment_methods,
+            config_json,
+            "INR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": "INR"}"#),
         )
     }
 
@@ -518,6 +640,11 @@ mod tests {
         let input = format!(
             r#"{{
                 "cart": {{
+                    "cost": {{
+                        "totalAmount": {{
+                            "currencyCode": "INR"
+                        }}
+                    }},
                     "buyerIdentity": {{
                         "customer": null,
                         "purchasingCompany": {{
@@ -528,7 +655,12 @@ mod tests {
                 "paymentMethods": [
                     {{ "id": "pm1", "name": "Deferred Payment" }}
                 ],
-                "paymentCustomization": null
+                "paymentCustomization": null,
+                "shop": {{
+                    "metafield": {{
+                        "jsonValue": {{"schemaVersion": 1, "currencyCode": "INR"}}
+                    }}
+                }}
             }}"#,
             location_metafield
         );
@@ -553,12 +685,22 @@ mod tests {
         let input = r#"
         {
             "cart": {
+                "cost": {
+                    "totalAmount": {
+                        "currencyCode": "INR"
+                    }
+                },
                 "buyerIdentity": null
             },
             "paymentMethods": [
                 { "id": "gid://shopify/PaymentCustomizationPaymentMethod/1", "name": "Credit Card" }
             ],
-            "paymentCustomization": null
+            "paymentCustomization": null,
+            "shop": {
+                "metafield": {
+                    "jsonValue": {"schemaVersion": 1, "currencyCode": "INR"}
+                }
+            }
         }
         "#;
         let result = run_test(input).unwrap();
@@ -584,6 +726,11 @@ mod tests {
         let input = r#"
         {
             "cart": {
+                "cost": {
+                    "totalAmount": {
+                        "currencyCode": "INR"
+                    }
+                },
                 "buyerIdentity": {
                     "customer": {
                         "metafield": {
@@ -603,7 +750,12 @@ mod tests {
                 { "id": "gid://shopify/PaymentCustomizationPaymentMethod/1", "name": "Credit Card" },
                 { "id": "gid://shopify/PaymentCustomizationPaymentMethod/2", "name": "Deferred Payment" }
             ],
-            "paymentCustomization": null
+            "paymentCustomization": null,
+            "shop": {
+                "metafield": {
+                    "jsonValue": {"schemaVersion": 1, "currencyCode": "INR"}
+                }
+            }
         }
         "#;
         let result = run_test(input).unwrap();
@@ -820,5 +972,79 @@ mod tests {
         
         // Should hide methods matching trimmed patterns
         assert!(!result.operations.is_empty(), "Trimmed patterns should still match");
+    }
+
+    // =========================================================================
+    // #292 INR-Only Tests
+    // =========================================================================
+
+    #[test]
+    fn test_non_inr_shop_hides_deferred() {
+        // Non-INR shop should hide deferred payment regardless of credit_status
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),  // not held
+            &default_payment_methods(),
+            None,
+            "USD",
+            Some(r#"{"schemaVersion": 1, "currencyCode": "USD"}"#),
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "Non-INR shop should hide deferred methods");
+    }
+
+    #[test]
+    fn test_inr_shop_with_non_inr_cart_hides_deferred() {
+        // INR shop with non-INR cart should hide deferred payment
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),  // not held
+            &default_payment_methods(),
+            None,
+            "USD",  // cart in USD
+            Some(r#"{"schemaVersion": 1, "currencyCode": "INR"}"#),  // shop is INR
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "INR shop with non-INR cart should hide deferred methods");
+    }
+
+    #[test]
+    fn test_inr_shop_with_inr_cart_passes() {
+        // INR shop with INR cart and not-held account should pass
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),  // not held
+            &default_payment_methods(),
+            None,
+            "INR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": "INR"}"#),
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "INR shop with INR cart and not-held should pass");
+    }
+
+    #[test]
+    fn test_missing_shop_config_passes() {
+        // Missing shop_config should fail-open (not hide deferred)
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),  // not held
+            &default_payment_methods(),
+            None,
+            "INR",
+            None,  // no shop_config
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Missing shop_config should fail-open (not hide)");
+    }
+
+    #[test]
+    fn test_customer_non_inr_shop_hides_deferred() {
+        // Non-INR shop should hide deferred payment for customer path too
+        let input = make_customer_input_full(
+            Some(ok_metafield()),  // not held
+            &default_payment_methods(),
+            None,
+            "USD",
+            Some(r#"{"schemaVersion": 1, "currencyCode": "USD"}"#),
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "Non-INR shop should hide deferred for customer path");
     }
 }
