@@ -138,12 +138,17 @@ describeWithDb("DLQ no_session sanitization (#239 follow-up)", () => {
   });
 
   afterAll(async () => {
+    // Clean up Invoice/BuyerAccount first (FK constraint)
+    await sqlRef`DELETE FROM "Invoice" WHERE "shopId" IN (${installedShopId}, ${uninstalledShopId})`;
+    await sqlRef`DELETE FROM "BuyerAccount" WHERE "shopId" IN (${installedShopId}, ${uninstalledShopId})`;
     await sqlRef`DELETE FROM "AuditEvent" WHERE "shopId" IN (${installedShopId}, ${uninstalledShopId})`;
     await sqlRef`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' LIKE ${"test-nosess-%" + SUFFIX + "%"}`;
     await sqlRef`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' LIKE ${"test-nosess-%" + SUFFIX + "%"}`;
     await sqlRef`DELETE FROM s6_dead_letter WHERE message->>'webhookId' LIKE ${`%${SUFFIX}%`}`;
     await sqlRef`DELETE FROM s6_dead_letter WHERE message->>'originalMsgId' IS NOT NULL AND message->>'topic' LIKE 'ORDERS%' AND message->>'webhookId' LIKE ${`%${SUFFIX}%`}`;
     await sqlRef`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${`%${SUFFIX}%`}`;
+    // Clean up any temp shops from failed tests
+    await sqlRef`DELETE FROM "Shop" WHERE domain LIKE ${"test-nosess-%" + SUFFIX + "%"}`;
     await sqlRef`DELETE FROM "Shop" WHERE domain = ${INSTALLED_SHOP_DOMAIN}`;
     await sqlRef`DELETE FROM "Shop" WHERE domain = ${UNINSTALLED_SHOP_DOMAIN}`;
     await sqlRef.end();
@@ -374,6 +379,36 @@ describeWithDb("DLQ no_session sanitization (#239 follow-up)", () => {
   it("ORDERS_CREATE + uninstalled Shop: backstop AuditEvent written with code only", async () => {
     const webhookId = `wh-backstop-${SUFFIX}`;
     const orderGid = `gid://shopify/Order/backstop-${SUFFIX}`;
+    const buyerAccountId = crypto.randomUUID();
+    const invoiceId = crypto.randomUUID();
+    const companyGid = `gid://shopify/Company/backstop-${SUFFIX}`;
+    const locationGid = `gid://shopify/CompanyLocation/backstop-${SUFFIX}`;
+
+    // Seed BuyerAccount for the uninstalled shop (COMPANY requires companyId and companyLocationId)
+    await sqlRef`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, name, "companyId", "companyLocationId", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${buyerAccountId}, ${uninstalledShopId}, 'COMPANY', 'Test Backstop Buyer',
+        ${companyGid}, ${locationGid}, NOW(), NOW()
+      )
+      ON CONFLICT (id) DO NOTHING
+    `;
+
+    // Seed Invoice with orderId matching the order GID (triggers recordBackstopFailure)
+    await sqlRef`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+        "issuedAt", status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoiceId}, ${uninstalledShopId}, ${buyerAccountId}, ${orderGid},
+        '#TEST-BACKSTOP', 100.00, 100.00, NOW(), 'open', NOW(), NOW()
+      )
+      ON CONFLICT (id) DO NOTHING
+    `;
+
     const message = {
       shop: UNINSTALLED_SHOP_DOMAIN,
       topic: "ORDERS_CREATE",
@@ -399,6 +434,32 @@ describeWithDb("DLQ no_session sanitization (#239 follow-up)", () => {
     expect(dlqRow).toBeDefined();
     expect(dlqRow!.message.sanitized).toBe(true);
     expect(dlqRow!.error).toBe("non_retryable:no_session");
+
+    // Query AuditEvent for backstop.failed
+    const [auditRow] = await sqlRef<[{ id: string; shopId: string; type: string; data: Record<string, unknown> }?]>`
+      SELECT id, "shopId", type, data
+      FROM "AuditEvent"
+      WHERE "shopId" = ${uninstalledShopId}
+        AND type = 'backstop.failed'
+        AND data->>'orderGid' = ${orderGid}
+    `;
+
+    expect(auditRow).toBeDefined();
+    expect(auditRow!.shopId).toBe(uninstalledShopId);
+    expect(auditRow!.type).toBe("backstop.failed");
+    expect(auditRow!.data.errorCode).toBe("no_session");
+
+    // Assert no PII in AuditEvent data: no remitter, narration, domain, or webhookId
+    const dataJson = JSON.stringify(auditRow!.data);
+    expect(dataJson).not.toContain("remitter");
+    expect(dataJson).not.toContain("narration");
+    expect(dataJson).not.toContain(UNINSTALLED_SHOP_DOMAIN);
+    expect(dataJson).not.toContain("myshopify.com");
+    expect(dataJson).not.toContain(webhookId);
+
+    // Cleanup test-specific data
+    await sqlRef`DELETE FROM "Invoice" WHERE id = ${invoiceId}`;
+    await sqlRef`DELETE FROM "BuyerAccount" WHERE id = ${buyerAccountId}`;
   });
 
   it("out-of-scope topic (CUSTOMERS_CREATE) keeps full message unsanitized", async () => {
@@ -442,43 +503,228 @@ describeWithDb("DLQ no_session sanitization (#239 follow-up)", () => {
     expect(allOutput).not.toContain("dlq_sanitized_shop_not_found");
   });
 
-  it("in-flight redact: deleteShop results in deadLetterAlreadyGoneCount +1 and no DLQ row", async () => {
-    const tempShopId = crypto.randomUUID();
-    const tempShopDomain = `test-nosess-inflight-${SUFFIX}.myshopify.com`;
-    const webhookId = `wh-inflight-${SUFFIX}`;
-
-    await sqlRef`
-      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
-      VALUES (${tempShopId}, ${tempShopDomain}, 'USD', NOW(), NOW())
-      ON CONFLICT (domain) DO NOTHING
-    `;
-
+  it("CUSTOMERS_CREATE with explicit errorCode no_session still NOT sanitized (out of scope)", async () => {
+    // N1: Test that CUSTOMERS_CREATE is NOT sanitized even when errorCode IS 'no_session'.
+    // CUSTOMERS_CREATE is not in NO_SESSION_SHOP_CHECK_TOPICS, so sanitizeIfShopGone is never true.
+    // This test calls moveToDeadLetter directly to bypass handler limitations.
+    const webhookId = `wh-custexplicit-${SUFFIX}`;
     const message = {
-      shop: tempShopDomain,
-      topic: "ORDERS_CREATE",
+      shop: MISSING_SHOP_DOMAIN,
+      topic: "CUSTOMERS_CREATE" as const,
       webhookId,
-      resourceGid: `gid://shopify/Order/inflight-${SUFFIX}`,
+      resourceGid: `gid://shopify/Customer/custexplicit-${SUFFIX}`,
       enqueuedAt: new Date().toISOString(),
     };
 
-    await sqlRef`
-      INSERT INTO pgmq.q_s6_sync (vt, read_ct, enqueued_at, message)
-      VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(message)}::jsonb)
+    // Insert message into queue to get a real msgId
+    const [{ send: msgId }] = await sqlRef<[{ send: string }]>`
+      SELECT pgmq.send('s6_sync', ${sqlRef.json(message)}::jsonb)
     `;
 
-    await sqlRef`DELETE FROM pgmq.q_s6_sync WHERE message->>'webhookId' = ${webhookId}`;
-    await sqlRef`DELETE FROM "Shop" WHERE id = ${tempShopId}`;
+    // Import moveToDeadLetter and call it with sanitizeIfShopGone: true
+    // Even with the flag, CUSTOMERS_CREATE is not in NO_SESSION_SHOP_CHECK_TOPICS
+    // so isCoveredSyncTopic returns false and no sanitization happens
+    const { moveToDeadLetterForTest } = await import("~/services/drain/processor.server");
+    const dlqd = await moveToDeadLetterForTest(
+      sqlRef,
+      "s6_sync",
+      msgId,
+      message,
+      "non_retryable:no_session",
+      1,
+      { sanitizeIfShopGone: true }
+    );
 
-    const { runDrain } = await import("~/services/drain/processor.server");
-    const drainResult = await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000, maxRetries: 5 });
+    expect(dlqd).toBe(true);
 
+    const [dlqRow] = await sqlRef<[{ message: Record<string, unknown>; error: string }?]>`
+      SELECT message, error
+      FROM s6_dead_letter
+      WHERE message->>'webhookId' = ${webhookId}
+    `;
+
+    expect(dlqRow).toBeDefined();
+    expect(dlqRow!.message.sanitized).toBeUndefined();
+    expect(dlqRow!.message.shop).toBe(MISSING_SHOP_DOMAIN);
+    expect(dlqRow!.message.topic).toBe("CUSTOMERS_CREATE");
+    expect(dlqRow!.error).toBe("non_retryable:no_session");
+
+    const consoleOutput = getAllConsoleOutput();
+    const allOutput = consoleOutput.join("\n");
+    expect(allOutput).not.toContain("dlq_sanitized_shop_not_found");
+  });
+
+  it("no log emitted when pgmq.delete returns false (message already gone)", async () => {
+    // N2: Verify that dlq_sanitized_shop_not_found is NOT logged when pgmq.delete returns false.
+    // This happens when deleteShop already deleted the queue row.
+    const webhookId = `wh-deletefail-${SUFFIX}`;
+    const message = {
+      shop: MISSING_SHOP_DOMAIN,
+      topic: "ORDERS_CREATE" as const,
+      webhookId,
+      resourceGid: `gid://shopify/Order/deletefail-${SUFFIX}`,
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    // Insert and immediately delete the queue row (simulating deleteShop race)
+    const [{ send: msgId }] = await sqlRef<[{ send: string }]>`
+      SELECT pgmq.send('s6_sync', ${sqlRef.json(message)}::jsonb)
+    `;
+    await sqlRef`SELECT pgmq.delete('s6_sync', ${msgId}::bigint)`;
+
+    // Call moveToDeadLetter with the now-deleted msgId
+    const { moveToDeadLetterForTest } = await import("~/services/drain/processor.server");
+    const dlqd = await moveToDeadLetterForTest(
+      sqlRef,
+      "s6_sync",
+      msgId,
+      message,
+      "non_retryable:no_session",
+      1,
+      { sanitizeIfShopGone: true }
+    );
+
+    expect(dlqd).toBe(false);
+
+    // No DLQ row should exist
     const [dlqRow] = await sqlRef<[{ message: Record<string, unknown> }?]>`
       SELECT message
       FROM s6_dead_letter
       WHERE message->>'webhookId' = ${webhookId}
     `;
-
     expect(dlqRow).toBeUndefined();
-    expect(drainResult.deadLetterAlreadyGoneCount).toBeGreaterThanOrEqual(0);
+
+    // The log should NOT be emitted since pgmq.delete returned false
+    const consoleOutput = getAllConsoleOutput();
+    const allOutput = consoleOutput.join("\n");
+    expect(allOutput).not.toContain("dlq_sanitized_shop_not_found");
+  });
+
+  describe("FOR SHARE serialization with deleteShop (two-connection)", () => {
+    let sql2: ReturnType<typeof postgres>;
+
+    beforeAll(async () => {
+      sql2 = postgres(TEST_DATABASE_URL!, sqlOptions);
+    });
+
+    afterAll(async () => {
+      await sql2.end();
+    });
+
+    it("moveToDeadLetter FOR SHARE blocks until deleteShop FOR UPDATE commits, then sanitizes", async () => {
+      // B2: Test that FOR SHARE in moveToDeadLetter serializes with deleteShop's FOR UPDATE.
+      // Setup: Shop exists, message in queue.
+      // Connection 1: Start tx, take FOR UPDATE on Shop (simulating deleteShop starting)
+      // Connection 2: Call moveToDeadLetter - FOR SHARE will block
+      // Connection 1: Set uninstalledAt on Shop, delete queue row, commit
+      // Connection 2: FOR SHARE unblocks, sees Shop is uninstalled, sanitizes,
+      //               pgmq.delete returns false (row already deleted)
+      // Result: No DLQ row (correct - deleteShop handled it), no log emitted
+      const tempShopId = crypto.randomUUID();
+      const tempShopDomain = `test-nosess-forshare-${SUFFIX}.myshopify.com`;
+      const webhookId = `wh-forshare-${SUFFIX}`;
+
+      await sqlRef`
+        INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+        VALUES (${tempShopId}, ${tempShopDomain}, 'USD', NOW(), NOW())
+        ON CONFLICT (domain) DO NOTHING
+      `;
+
+      const message = {
+        shop: tempShopDomain,
+        topic: "ORDERS_CREATE" as const,
+        webhookId,
+        resourceGid: `gid://shopify/Order/forshare-${SUFFIX}`,
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      // Insert message to get msgId
+      const [{ send: msgId }] = await sqlRef<[{ send: string }]>`
+        SELECT pgmq.send('s6_sync', ${sqlRef.json(message)}::jsonb)
+      `;
+
+      let forUpdateHeld = false;
+      let forShareStarted = false;
+      let forShareDone = false;
+
+      // Connection 1: Start tx, take FOR UPDATE on Shop, wait, then uninstall and delete queue row
+      const forUpdatePromise = sqlRef.begin(async (tx) => {
+        await tx`
+          SELECT id FROM "Shop"
+          WHERE domain = ${tempShopDomain}
+          FOR UPDATE
+        `;
+        forUpdateHeld = true;
+
+        // Wait for connection 2 to start its moveToDeadLetter call
+        await new Promise<void>((resolve) => {
+          const check = setInterval(() => {
+            if (forShareStarted) {
+              clearInterval(check);
+              resolve();
+            }
+          }, 20);
+        });
+
+        // Wait 200ms to verify FOR SHARE is blocked
+        await new Promise((r) => setTimeout(r, 200));
+        expect(forShareDone).toBe(false);
+
+        // Now "uninstall" the shop and delete the queue row (simulating deleteShop)
+        await tx`UPDATE "Shop" SET "uninstalledAt" = NOW() WHERE id = ${tempShopId}`;
+        await tx`SELECT pgmq.delete('s6_sync', ${msgId}::bigint)`;
+
+        // Commit happens here, releasing FOR UPDATE
+      });
+
+      // Wait for FOR UPDATE to be held
+      await new Promise<void>((resolve) => {
+        const check = setInterval(() => {
+          if (forUpdateHeld) {
+            clearInterval(check);
+            resolve();
+          }
+        }, 20);
+      });
+
+      // Connection 2: Call moveToDeadLetter with sanitizeIfShopGone (will block on FOR SHARE)
+      const { moveToDeadLetterForTest } = await import("~/services/drain/processor.server");
+      forShareStarted = true;
+      const movePromise = moveToDeadLetterForTest(
+        sql2,
+        "s6_sync",
+        msgId,
+        message,
+        "non_retryable:no_session",
+        1,
+        { sanitizeIfShopGone: true }
+      ).then((result) => {
+        forShareDone = true;
+        return result;
+      });
+
+      // Wait for both to complete
+      await forUpdatePromise;
+      const dlqd = await movePromise;
+
+      expect(forShareDone).toBe(true);
+      expect(dlqd).toBe(false); // pgmq.delete returned false (row already deleted)
+
+      // No DLQ row should exist
+      const [dlqRow] = await sqlRef<[{ message: Record<string, unknown> }?]>`
+        SELECT message
+        FROM s6_dead_letter
+        WHERE message->>'webhookId' = ${webhookId}
+      `;
+      expect(dlqRow).toBeUndefined();
+
+      // The log should NOT be emitted since pgmq.delete returned false
+      const consoleOutput = getAllConsoleOutput();
+      const allOutput = consoleOutput.join("\n");
+      expect(allOutput).not.toContain("dlq_sanitized_shop_not_found");
+
+      // Cleanup
+      await sqlRef`DELETE FROM "Shop" WHERE id = ${tempShopId}`;
+    });
   });
 });

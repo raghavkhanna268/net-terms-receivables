@@ -1097,7 +1097,10 @@ async function moveToDeadLetter(
     }
   }
 
-  return sql.begin(async (tx) => {
+  // Track no_session sanitization for post-commit logging
+  let noSessionReasonCode: string | undefined;
+
+  const success = await sql.begin(async (tx) => {
     // #239 follow-up: Shop-row check on no_session path.
     // MUST run FIRST to match deleteShop's lock order (Shop FOR UPDATE → queue rows).
     if (opts?.sanitizeIfShopGone && queue === S6_QUEUES.SYNC && isCoveredSyncTopic(message.topic)) {
@@ -1112,12 +1115,7 @@ async function moveToDeadLetter(
         const sanitized = sanitizeSyncMessage(message as SyncMessage, msgId, readCt);
         if (sanitized) {
           messageToStore = sanitized;
-          const reasonCode = shopRow ? "no_session_uninstalled" : "no_session_missing";
-          safeLog("info", "dlq_sanitized_shop_not_found", {
-            topic: message.topic,
-            originalMsgId: msgId,
-            reasonCode,
-          });
+          noSessionReasonCode = shopRow ? "no_session_uninstalled" : "no_session_missing";
         }
       }
       // Installed shop: messageToStore stays as full message
@@ -1148,6 +1146,17 @@ async function moveToDeadLetter(
     `;
     return true;
   });
+
+  // Log only after successful commit (pgmq.delete returned true and DLQ insert succeeded)
+  if (success && noSessionReasonCode) {
+    safeLog("info", "dlq_sanitized_shop_not_found", {
+      topic: message.topic,
+      originalMsgId: msgId,
+      reasonCode: noSessionReasonCode,
+    });
+  }
+
+  return success;
 }
 
 /**
@@ -1536,3 +1545,10 @@ export async function runDrain(
 
   return result;
 }
+
+/**
+ * Test-only export for moveToDeadLetter.
+ * Allows direct testing of the dead-letter function with specific parameters.
+ * NOT for production use - callers should go through runDrain.
+ */
+export const moveToDeadLetterForTest = moveToDeadLetter;
