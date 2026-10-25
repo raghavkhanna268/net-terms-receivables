@@ -344,6 +344,11 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
     });
 
     it("is idempotent: two calls queue exactly one finish message", async () => {
+      // foundCount = 'stale rows matched by query' (completed_at IS NULL, started > threshold).
+      // Queue dedupe in enqueueCompletedOperation makes reruns no-ops: the second call
+      // still finds the row (completed_at not yet set by drain handler) but skips
+      // enqueueing because a BULK_OPERATIONS_FINISH message already exists for that
+      // shop + bulkOperationId.
       const { adminGraphQL } = await import("../admin-client.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/idempotent-${TEST_SUFFIX}`;
@@ -367,12 +372,18 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
       expect(result1.enqueuedCount).toBe(1);
 
       const result2 = await recoverStaleBulkOperationsForShop(sql, TEST_SHOP_DOMAIN, 60);
-      expect(result2.foundCount).toBe(0);
+      expect(result2.foundCount).toBe(1);
       expect(result2.enqueuedCount).toBe(0);
+      expect(result2.skippedCount).toBe(1);
 
-      const queuedMsgs = await sql<{ message: { bulkOperationId: string; webhookId: string } }[]>`
+      // Exactly ONE message in queue after both calls
+      const queuedMsgs = await sql<
+        { message: { topic: string; shop: string; bulkOperationId: string; webhookId: string } }[]
+      >`
         SELECT message FROM pgmq.q_s6_bulk
-        WHERE message->>'bulkOperationId' = ${bulkOpId}
+        WHERE message->>'topic' = 'BULK_OPERATIONS_FINISH'
+          AND message->>'shop' = ${TEST_SHOP_DOMAIN}
+          AND message->>'bulkOperationId' = ${bulkOpId}
       `;
       expect(queuedMsgs).toHaveLength(1);
       expect(queuedMsgs[0].message.webhookId).toBe(`recovery:${bulkOpId}`);
