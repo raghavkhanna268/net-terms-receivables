@@ -541,6 +541,57 @@ describeWithDb("S17 apply service DB integration", () => {
 
       expect(parseFloat(invoice.outstanding)).toBe(3000);
     });
+
+    it("apply vs unmatch race: concurrent calls on same confirmed match", async () => {
+      const paymentId = await createPayment(1000000n);
+      const invoiceId = await createInvoice(1000000n);
+      const matchId = await createConfirmedMatch(paymentId, invoiceId, 1000000n);
+
+      const [applyResult, unmatchResult] = await Promise.all([
+        applyMatch(sql, TEST_SHOP_ID, matchId, "test-user"),
+        unmatchMatch(sql, TEST_SHOP_ID, matchId, "test-user"),
+      ]);
+
+      const [finalMatch] = await sql<{ state: string }[]>`
+        SELECT state FROM "Match" WHERE id = ${matchId}
+      `;
+
+      const [finalInvoice] = await sql<{ outstanding: string; status: string }[]>`
+        SELECT outstanding::text, status FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+
+      if (applyResult.success && applyResult.invoicePaid) {
+        expect(finalMatch.state).toBe("pushed");
+        expect(finalInvoice.status).toBe("paid");
+        expect(parseFloat(finalInvoice.outstanding)).toBe(0);
+        expect(unmatchResult.success).toBe(false);
+      } else if (unmatchResult.success) {
+        expect(finalMatch.state).toBe("unmatched");
+        expect(finalInvoice.status).toBe("open");
+        expect(parseFloat(finalInvoice.outstanding)).toBe(10000);
+        expect(applyResult.success).toBe(false);
+      } else if (applyResult.reasonCode === "PUSH_IN_PROGRESS" || unmatchResult.error?.includes("push is in progress")) {
+        expect(["confirmed", "pushing", "pushed"]).toContain(finalMatch.state);
+      } else {
+        expect(applyResult.success || unmatchResult.success).toBe(true);
+      }
+
+      const appliedAudits = await sql<{ id: string }[]>`
+        SELECT id FROM "AuditEvent"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+          AND type = 'match.applied'
+          AND data->>'matchId' = ${matchId}
+      `;
+
+      const unmatchedAudits = await sql<{ id: string }[]>`
+        SELECT id FROM "AuditEvent"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+          AND type = 'match.unmatched'
+          AND data->>'matchId' = ${matchId}
+      `;
+
+      expect(appliedAudits.length + unmatchedAudits.length).toBeLessThanOrEqual(1);
+    });
   });
 
   describe("Credit status recompute enqueue", () => {
