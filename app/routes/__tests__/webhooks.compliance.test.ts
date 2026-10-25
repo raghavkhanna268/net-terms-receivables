@@ -111,7 +111,15 @@ describe("webhooks.compliance", () => {
       json: async () => ({ data: { shop: { email: "owner@shop.com", contactEmail: null } } }),
     });
     mockUnauthenticatedAdmin.mockResolvedValue({ admin: { graphql: mockGraphql } });
-    mockDeleteShop.mockResolvedValue({ deleted: true, shopId: "shop-123" });
+    mockDeleteShop.mockResolvedValue({
+      deleted: true,
+      shopId: "shop-123",
+      refetchNullPurged: 0,
+      bulkOperationsPurged: 0,
+      outstandingMissingPurged: 0,
+      piiFallbackPurged: 0,
+      deadLetterPurged: 0,
+    });
     mockPurgePgmqMessages.mockResolvedValue({ purged: false, reason: "documented limitation" });
     mockRedactCustomer.mockResolvedValue({
       taggedCustomersDeleted: 1,
@@ -719,7 +727,15 @@ describe("webhooks.compliance", () => {
 
     it("returns 200 even when no sessions exist (idempotent)", async () => {
       mockDeleteAllForShop.mockResolvedValue(0);
-      mockDeleteShop.mockResolvedValue({ deleted: false, shopId: null });
+      mockDeleteShop.mockResolvedValue({
+        deleted: false,
+        shopId: null,
+        refetchNullPurged: 0,
+        bulkOperationsPurged: 0,
+        outstandingMissingPurged: 0,
+        piiFallbackPurged: 0,
+        deadLetterPurged: 0,
+      });
 
       const payload = { shop_domain: "test-no-sessions-shop.myshopify.com", shop_id: 999 };
 
@@ -1161,7 +1177,15 @@ describe("webhooks.compliance", () => {
 
     it("SHOP_REDACT success path logs no shop domain", async () => {
       mockDeleteAllForShop.mockResolvedValue(3);
-      mockDeleteShop.mockResolvedValue({ deleted: true, shopId: "shop-del-123" });
+      mockDeleteShop.mockResolvedValue({
+        deleted: true,
+        shopId: "shop-del-123",
+        refetchNullPurged: 1,
+        bulkOperationsPurged: 1,
+        outstandingMissingPurged: 1,
+        piiFallbackPurged: 1,
+        deadLetterPurged: 1,
+      });
 
       const payload = { shop_domain: TEST_SHOP, shop_id: 123 };
 
@@ -1186,7 +1210,15 @@ describe("webhooks.compliance", () => {
 
     it("SHOP_REDACT shop not found path logs no shop domain", async () => {
       mockDeleteAllForShop.mockResolvedValue(0);
-      mockDeleteShop.mockResolvedValue({ deleted: false, shopId: null });
+      mockDeleteShop.mockResolvedValue({
+        deleted: false,
+        shopId: null,
+        refetchNullPurged: 0,
+        bulkOperationsPurged: 0,
+        outstandingMissingPurged: 0,
+        piiFallbackPurged: 0,
+        deadLetterPurged: 0,
+      });
 
       const payload = { shop_domain: TEST_SHOP, shop_id: 123 };
 

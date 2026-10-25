@@ -40,6 +40,19 @@ import { safeLog, shopHash, toErrorCode } from "~/lib/log.server";
 export const UNMATCHED_NARRATION_RETENTION_DAYS = 180;
 
 /**
+ * Deletion counts returned by deleteShop.
+ */
+export interface DeleteShopResult {
+  deleted: boolean;
+  shopId: string | null;
+  refetchNullPurged: number;
+  bulkOperationsPurged: number;
+  outstandingMissingPurged: number;
+  piiFallbackPurged: number;
+  deadLetterPurged: number;
+}
+
+/**
  * Delete a shop and all its data via ON DELETE CASCADE.
  * This is the final step in the shop/redact webhook handler.
  *
@@ -48,39 +61,82 @@ export const UNMATCHED_NARRATION_RETENTION_DAYS = 180;
  * - Shop -> Invoice, Payment, Match, ReminderLog (direct FKs)
  * - Shop -> s8_tagged_customers, s8_draft_orders (S22 FKs)
  * - Shop -> s22_data_requests (S22 FK)
+ * - Shop -> backstop_processed_orders (S13 FK)
+ * - Shop -> s18_shop_reminder_settings (S18 FK)
  *
- * Also deletes non-FK-linked data:
- * - s10b_order_refetch_null (aggregate counter, no FK)
+ * Also deletes non-FK-linked data (no FK, shop text column or shop in JSON):
+ * - s10b_order_refetch_null (aggregate counter, shop text column)
+ * - s6_bulk_operations (bulk op tracking, shop text column)
+ * - order_outstanding_missing (aggregate counter, shop text column)
+ * - s10b_customer_pii_fallback (aggregate counter, shop text column)
+ * - s6_dead_letter (dead-letter queue, shop in message JSON)
+ *
+ * All deletes are wrapped in a single transaction for atomicity.
+ * If any statement fails, the entire operation rolls back.
  *
  * Per Shopify docs, shop/redact is sent 48 hours after app/uninstalled.
  * See: https://shopify.dev/docs/apps/build/privacy-law-compliance
  *
  * @param sql - postgres.js SQL client
  * @param shopDomain - Shop domain to delete
- * @returns Object with deletion result
+ * @returns Object with deletion result and counts
  */
 export async function deleteShop(
   sql: Sql,
   shopDomain: string
-): Promise<{ deleted: boolean; shopId: string | null; refetchNullPurged: number }> {
-  // Delete s10b_order_refetch_null first (not FK-linked)
-  const refetchResult = await sql`
-    DELETE FROM s10b_order_refetch_null
-    WHERE shop = ${shopDomain}
-  `;
+): Promise<DeleteShopResult> {
+  return sql.begin(async (tx) => {
+    // Delete non-FK-linked tables first (shop text column or shop in JSON)
 
-  // Delete shop - all FK-linked data cascades
-  const [result] = await sql<{ id: string }[]>`
-    DELETE FROM "Shop"
-    WHERE domain = ${shopDomain}
-    RETURNING id
-  `;
+    // s10b_order_refetch_null (aggregate counter, shop text column)
+    const refetchResult = await tx`
+      DELETE FROM s10b_order_refetch_null
+      WHERE shop = ${shopDomain}
+    `;
 
-  return {
-    deleted: result !== undefined,
-    shopId: result?.id ?? null,
-    refetchNullPurged: refetchResult.count,
-  };
+    // s6_bulk_operations (bulk op tracking, shop text column)
+    const bulkOpsResult = await tx`
+      DELETE FROM s6_bulk_operations
+      WHERE shop = ${shopDomain}
+    `;
+
+    // order_outstanding_missing (aggregate counter, shop text column)
+    const outstandingResult = await tx`
+      DELETE FROM order_outstanding_missing
+      WHERE shop = ${shopDomain}
+    `;
+
+    // s10b_customer_pii_fallback (aggregate counter, shop text column)
+    const piiResult = await tx`
+      DELETE FROM s10b_customer_pii_fallback
+      WHERE shop = ${shopDomain}
+    `;
+
+    // s6_dead_letter (dead-letter queue, shop in message JSON at message->>'shop')
+    // Producer: app/services/drain/processor.server.ts:976-989 (moveToDeadLetter function)
+    // The message JSON contains { shop: string, topic: string, webhookId: string, ... }
+    const deadLetterResult = await tx`
+      DELETE FROM s6_dead_letter
+      WHERE message->>'shop' = ${shopDomain}
+    `;
+
+    // Delete shop - all FK-linked data cascades
+    const [result] = await tx<{ id: string }[]>`
+      DELETE FROM "Shop"
+      WHERE domain = ${shopDomain}
+      RETURNING id
+    `;
+
+    return {
+      deleted: result !== undefined,
+      shopId: result?.id ?? null,
+      refetchNullPurged: refetchResult.count,
+      bulkOperationsPurged: bulkOpsResult.count,
+      outstandingMissingPurged: outstandingResult.count,
+      piiFallbackPurged: piiResult.count,
+      deadLetterPurged: deadLetterResult.count,
+    };
+  });
 }
 
 /**

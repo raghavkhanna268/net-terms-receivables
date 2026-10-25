@@ -78,7 +78,15 @@ vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
 }));
 
-const mockDeleteShop = vi.fn().mockResolvedValue({ deleted: true, shopId: "shop-123", refetchNullPurged: 0 });
+const mockDeleteShop = vi.fn().mockResolvedValue({
+  deleted: true,
+  shopId: "shop-123",
+  refetchNullPurged: 0,
+  bulkOperationsPurged: 0,
+  outstandingMissingPurged: 0,
+  piiFallbackPurged: 0,
+  deadLetterPurged: 0,
+});
 const mockPurgePgmqMessages = vi.fn().mockResolvedValue({ purged: false, reason: "documented limitation" });
 const mockRedactCustomer = vi.fn().mockResolvedValue({
   taggedCustomersDeleted: 0,

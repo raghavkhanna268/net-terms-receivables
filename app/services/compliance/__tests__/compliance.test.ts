@@ -56,11 +56,20 @@ describe("compliance.server", () => {
   });
 
   describe("deleteShop", () => {
-    it("deletes shop and returns deleted=true with shopId", async () => {
+    it("deletes shop and all non-FK-linked tables in a transaction", async () => {
+      // All queries run inside sql.begin() using mockTx
       // 1. DELETE s10b_order_refetch_null
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 5 }));
-      // 2. DELETE Shop
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 5 }));
+      // 2. DELETE s6_bulk_operations
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
+      // 3. DELETE order_outstanding_missing
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
+      // 4. DELETE s10b_customer_pii_fallback
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+      // 5. DELETE s6_dead_letter
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 4 }));
+      // 6. DELETE Shop
+      mockTx.mockResolvedValueOnce([{ id: "shop-123" }]);
 
       const result = await deleteShop(mockSql, "test-shop.myshopify.com");
 
@@ -68,15 +77,28 @@ describe("compliance.server", () => {
         deleted: true,
         shopId: "shop-123",
         refetchNullPurged: 5,
+        bulkOperationsPurged: 2,
+        outstandingMissingPurged: 3,
+        piiFallbackPurged: 1,
+        deadLetterPurged: 4,
       });
-      expect(mockSql).toHaveBeenCalledTimes(2);
+      expect(mockSql.begin).toHaveBeenCalledTimes(1);
     });
 
     it("returns deleted=false when shop not found", async () => {
+      // All queries run inside sql.begin() using mockTx
       // 1. DELETE s10b_order_refetch_null (may have rows even if shop doesn't exist)
-      mockSql.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 2. DELETE Shop (no rows)
-      mockSql.mockResolvedValueOnce([]);
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 2. DELETE s6_bulk_operations
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 3. DELETE order_outstanding_missing
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 4. DELETE s10b_customer_pii_fallback
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 5. DELETE s6_dead_letter
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 6. DELETE Shop (no rows)
+      mockTx.mockResolvedValueOnce([]);
 
       const result = await deleteShop(mockSql, "nonexistent.myshopify.com");
 
@@ -84,6 +106,10 @@ describe("compliance.server", () => {
         deleted: false,
         shopId: null,
         refetchNullPurged: 0,
+        bulkOperationsPurged: 0,
+        outstandingMissingPurged: 0,
+        piiFallbackPurged: 0,
+        deadLetterPurged: 0,
       });
     });
   });

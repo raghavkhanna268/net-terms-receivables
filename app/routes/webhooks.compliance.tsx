@@ -228,12 +228,14 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         `[Compliance] shop/redact: Deleted ${receiptsDeleted} webhook receipts wh=${webhookId}`
       );
 
-      const { deleted, shopId } = await deleteShop(sql, payloadShop);
+      const result = await deleteShop(sql, payloadShop);
 
-      if (deleted) {
+      if (result.deleted) {
         console.log(
-          `[Compliance] shop/redact: Deleted Shop id=${shopId} wh=${webhookId} ` +
-            `(all data cascaded via FKs)`
+          `[Compliance] shop/redact: Deleted Shop id=${result.shopId} wh=${webhookId} ` +
+            `refetch_null=${result.refetchNullPurged} bulk_ops=${result.bulkOperationsPurged} ` +
+            `outstanding_missing=${result.outstandingMissingPurged} pii_fallback=${result.piiFallbackPurged} ` +
+            `dead_letter=${result.deadLetterPurged} (all data cascaded via FKs)`
         );
       } else {
         console.log(
