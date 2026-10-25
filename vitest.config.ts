@@ -49,6 +49,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * Route DB tests:
  * - app/routes/__tests__/app.imports.test.ts
  * - app/routes/__tests__/app._index.test.ts
+ * - app/routes/__tests__/app.accounts.$id-db.test.ts
  *
  * Lib DB tests:
  * - app/lib/__tests__/after-auth-db.test.ts
@@ -94,6 +95,7 @@ const DB_TEST_PATTERNS = [
   // Route DB tests
   "app/routes/__tests__/app.imports.test.ts",
   "app/routes/__tests__/app._index.test.ts",
+  "app/routes/__tests__/app.accounts.$id-db.test.ts",
 
   // Lib DB tests
   "app/lib/__tests__/after-auth-db.test.ts",
