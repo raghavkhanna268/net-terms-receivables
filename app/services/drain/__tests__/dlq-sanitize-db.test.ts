@@ -279,6 +279,64 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     );
   }
 
+  async function driveUntilRead(
+    webhookId: string,
+    maxRetries: number,
+    maxIterations = 20
+  ): Promise<number> {
+    const { runDrain } = await import("~/services/drain/processor.server");
+
+    for (let iter = 0; iter < maxIterations; iter++) {
+      const [row] = await sqlRef<[{ read_ct: number }?]>`
+        SELECT read_ct FROM pgmq.q_s6_sync
+        WHERE message->>'webhookId' = ${webhookId}
+      `;
+      if (row && row.read_ct > 0) {
+        return row.read_ct;
+      }
+
+      await sqlRef`
+        UPDATE pgmq.q_s6_sync
+        SET vt = NOW() - interval '1 second'
+        WHERE message->>'webhookId' = ${webhookId}
+      `;
+      await runDrain(sqlRef, { batchSize: 1, timeBudgetMs: 5000, maxRetries });
+    }
+
+    throw new Error(
+      `Message ${webhookId} read_ct never increased after ${maxIterations} iterations`
+    );
+  }
+
+  async function driveUntilArchived(
+    webhookId: string,
+    maxRetries: number,
+    maxIterations = 20
+  ): Promise<void> {
+    const { runDrain } = await import("~/services/drain/processor.server");
+
+    for (let iter = 0; iter < maxIterations; iter++) {
+      const [archived] = await sqlRef<[{ count: string }]>`
+        SELECT COUNT(*)::text as count FROM pgmq.a_s6_sync
+        WHERE message->>'webhookId' = ${webhookId}
+      `;
+      if (parseInt(archived.count, 10) > 0) {
+        return;
+      }
+
+      await sqlRef`
+        UPDATE pgmq.q_s6_sync
+        SET vt = NOW() - interval '1 second'
+        WHERE message->>'webhookId' = ${webhookId}
+      `;
+      await runDrain(sqlRef, { batchSize: 1, timeBudgetMs: 5000, maxRetries });
+    }
+
+    throw new Error(
+      `Message ${webhookId} not archived after ${maxIterations} iterations`
+    );
+  }
+
   // Mock returns retryable (no retryable:false), matching real handlers, so message must reach maxRetries.
   it("company_locations shop_not_found stores sanitized message in DLQ after maxRetries", async () => {
     const webhookId = `wh-loc-${testContext.suffix}`;
@@ -382,8 +440,7 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
       VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(message)}::jsonb)
     `;
 
-    const { runDrain } = await import("~/services/drain/processor.server");
-    await runDrain(sqlRef, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 1 });
+    await driveUntilDeadLettered(webhookId, 1);
 
     const [dlqRow] = await sqlRef<[{ message: Record<string, unknown>; error: string }?]>`
       SELECT message, error
@@ -413,8 +470,7 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
       VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(message)}::jsonb)
     `;
 
-    const { runDrain } = await import("~/services/drain/processor.server");
-    await runDrain(sqlRef, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 1 });
+    await driveUntilDeadLettered(webhookId, 1);
 
     const [dlqRow] = await sqlRef<[{ message: Record<string, unknown> }?]>`
       SELECT message
@@ -452,8 +508,7 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
       VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(message)}::jsonb)
     `;
 
-    const { runDrain } = await import("~/services/drain/processor.server");
-    await runDrain(sqlRef, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 1 });
+    await driveUntilDeadLettered(webhookId, 1);
 
     const [dlqRow] = await sqlRef<[{ message: Record<string, unknown>; error: string }?]>`
       SELECT message, error
@@ -521,9 +576,8 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
       VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(message)}::jsonb)
     `;
 
-    const { runDrain } = await import("~/services/drain/processor.server");
-
-    await runDrain(sqlRef, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 5 });
+    const readCt = await driveUntilRead(webhookId, 5);
+    expect(readCt).toBeGreaterThan(0);
 
     const [stillInQueue] = await sqlRef<[{ count: string }]>`
       SELECT COUNT(*)::text as count
@@ -630,10 +684,7 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
       VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(sanitizedMessage)}::jsonb)
     `;
 
-    const { runDrain } = await import("~/services/drain/processor.server");
-    const result = await runDrain(sqlRef, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 5 });
-
-    expect(result.skipped).toBeGreaterThanOrEqual(1);
+    await driveUntilArchived(webhookId, 5);
 
     const [archivedMsg] = await sqlRef<[{ message: Record<string, unknown> }?]>`
       SELECT message
@@ -642,6 +693,13 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     `;
     expect(archivedMsg).toBeDefined();
     expect(archivedMsg!.message.sanitized).toBe(true);
+
+    const [notInQueue] = await sqlRef<[{ count: string }]>`
+      SELECT COUNT(*)::text as count
+      FROM pgmq.q_s6_sync
+      WHERE message->>'webhookId' = ${webhookId}
+    `;
+    expect(parseInt(notInQueue.count, 10)).toBe(0);
 
     const [dlqRow] = await sqlRef<[{ message: Record<string, unknown> }?]>`
       SELECT message

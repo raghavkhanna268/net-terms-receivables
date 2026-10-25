@@ -15,7 +15,7 @@
 import * as ts from "typescript";
 import * as fs from "fs";
 import * as path from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 
 // ============================================================================
 // Configuration
@@ -1997,8 +1997,6 @@ function groupViolations(violations: Violation[]): Map<string, Violation[]> {
 // ============================================================================
 // Main
 // ============================================================================
-
-import { pathToFileURL } from "url";
 
 /**
  * Result of running the logging guard analysis.
