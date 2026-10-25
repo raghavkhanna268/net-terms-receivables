@@ -28,9 +28,16 @@ Invoices are categorized into these buckets based on days past due:
 - **1 day after due = 1-30**: An invoice 1 day past its due date is in the 1-30 bucket
 - **Null due date = Current**: Invoices without a due date are treated as not yet due
 
+### When Invoices Become Overdue
+
+Invoices become overdue 1 day after the due date (end of day, shop time). This means:
+- An invoice due on October 23 is **not** overdue until October 25 (after the end of October 24)
+- The 1-day grace period allows for same-day and next-day payments without triggering credit holds
+- `dueAt` is stored as end-of-day in shop time (a `timestamptz` instant). The overdue check `dueAt < NOW() - INTERVAL '1 day'` compares absolute instants, not calendar days in any timezone.
+
 ### Timezone
 
-All date calculations use the **Asia/Kolkata** timezone. The "as of" date is determined by the start of the current day in IST. This ensures consistent bucket assignment regardless of the server's local time.
+All date calculations use the **shop's configured timezone** (stored in `Shop.timezone`), with **Asia/Kolkata** as the fallback when no timezone is set. The "as of" date is determined by the start of the current day in the shop's timezone. This ensures consistent bucket assignment regardless of the server's local time.
 
 ## Amount Handling
 
