@@ -15,7 +15,6 @@ import {
   sendDataRequestNotification,
 } from "~/services/compliance";
 import { getShopifyApp } from "~/shopify.server";
-import { deleteWebhookReceiptsForShop } from "~/lib/webhook-receipts.server";
 import { safeLog, shopHash } from "~/lib/log.server";
 
 /**
@@ -223,12 +222,8 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         `[Compliance] shop/redact: pgmq purge - ${pgmqResult.reason}`
       );
 
-      // Purge webhook receipts for the shop (S20 compliance)
-      const receiptsDeleted = await deleteWebhookReceiptsForShop(sql, payloadShop);
-      console.log(
-        `[Compliance] shop/redact: Deleted ${receiptsDeleted} webhook receipts wh=${webhookId}`
-      );
-
+      // deleteShop now handles webhook_receipts and s6_processed_webhooks internally
+      // to ensure proper ordering (join delete before receipts delete)
       const result = await deleteShop(sql, payloadShop);
       const hash = await shopHash(payloadShop);
 
@@ -245,6 +240,8 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
           pgmqSyncArchivePurged: result.pgmqSyncArchivePurged,
           pgmqBulkArchivePurged: result.pgmqBulkArchivePurged,
           deadLetterPurged: result.deadLetterPurged,
+          processedWebhooksPurged: result.processedWebhooksPurged,
+          webhookReceiptsPurged: result.webhookReceiptsPurged,
         });
       } else {
         safeLog("info", "shop_redact_not_found", {

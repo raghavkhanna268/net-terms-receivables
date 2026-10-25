@@ -36,10 +36,15 @@ topics once reconcile coverage exists.
 **COMPANIES_\* topics:** The company handler has no Shop lookup, so companies
 never produce `shop_not_found`. They are listed as covered but cannot be sanitized.
 
-**ORDER/LOCATION CREATE/UPDATE:** These run `adminGraphQL` before the Shop lookup.
-After uninstall or redact, sessions are gone, so these fail with `No session found`
-(`retryable: false`). The DLQ reason becomes `non_retryable:...`, which is not
-sanitized. Only DELETE operations and existing-session cases reach the Shop lookup.
+**ORDER/LOCATION CREATE/UPDATE after uninstall:** These run `adminGraphQL` before
+the Shop lookup. After uninstall or redact, sessions are gone, so these fail with
+`No session found` (`retryable: false`). The DLQ reason becomes `non_retryable:...`,
+which is not sanitized. This PR does NOT relabel `no_session` as `shop_not_found`.
+
+A follow-up (Part of #239) will add a Shop-row check on the no-session
+CREATE/UPDATE-after-uninstall path that sanitizes only when the Shop row is missing
+or `uninstalledAt` is set. This ships in the same pre-launch batch as the
+customers/draft-orders sanitize, after S8 PR-B.
 
 **What actually gets sanitized:**
 - `COMPANY_LOCATIONS_DELETE` when the Shop row is missing

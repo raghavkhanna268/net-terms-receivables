@@ -1716,6 +1716,40 @@ describe("S8 Draft Order handler path tests", () => {
   });
 });
 
+describe("S18 REMINDER_CATCHUP handler", () => {
+  it("REMINDER_CATCHUP handler is registered and routes to handleReminderCatchup", async () => {
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("REMINDER_CATCHUP");
+
+    expect(handler).toBeDefined();
+  });
+
+  it("REMINDER_CATCHUP invalid message format returns non-retryable error", async () => {
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("REMINDER_CATCHUP");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const invalidMessage = {
+      topic: "REMINDER_CATCHUP",
+      shop: "test.myshopify.com",
+      webhookId: "wh-catchup-invalid",
+      resourceGid: "gid://test/Invoice/123",
+      // Missing required REMINDER_CATCHUP fields: shopId, invoiceId, ruleId, logId
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, invalidMessage);
+
+    expect(result.success).toBe(false);
+    expect(result.retryable).toBe(false);
+    expect(result.error).toContain("Invalid REMINDER_CATCHUP message format");
+  });
+});
+
 describe("DLQ shop_not_found sanitization (#239 part a)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1977,4 +2011,3 @@ describe("DLQ shop_not_found sanitization (#239 part a)", () => {
     expect(result.error).toContain("test-customer-shop");
   });
 });
-

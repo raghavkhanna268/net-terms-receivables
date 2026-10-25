@@ -192,6 +192,7 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     }
   }
 
+  // Mock returns retryable (no retryable:false), matching real handlers, so message must reach maxRetries.
   it("company_locations shop_not_found stores sanitized message in DLQ after maxRetries", async () => {
     const webhookId = `wh-loc-${SUFFIX}`;
     const message = {
@@ -238,6 +239,7 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     expect(allOutput).toContain("dlq_sanitized_shop_not_found");
   });
 
+  // Mock returns retryable (no retryable:false), matching real handlers, so message must reach maxRetries.
   it("orders shop_not_found stores sanitized message in DLQ after maxRetries", async () => {
     const webhookId = `wh-order-${SUFFIX}`;
     const message = {
