@@ -49,6 +49,7 @@
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.64.0",
     "@eslint/js": "^9.27.0",
+    "@playwright/test": "^1.64.1",
     "@react-router/dev": "^7.18.2",
     "@react-router/fs-routes": "^7.18.2",
     "@shopify/api-codegen-preset": "^2.0.0",
@@ -69,6 +70,7 @@
     "graphql-config": "^5.1.1",
     "jsonc-parser": "^3.3.1",
     "luxon": "^3.7.2",
+    "playwright": "^1.64.1",
     "preact": "^11.0.1",
     "prettier": "^3.6.2",
     "tsx": "^4.19.4",

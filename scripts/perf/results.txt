@@ -1,0 +1,32 @@
+
+Running 1 test using 1 worker
+
+(node:4744) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+## Web Vitals Measurement Report
+
+Runs per page: 3
+Targets: LCP ≤ 2500ms, CLS ≤ 0.1, INP ≤ 200ms
+
+### mobile-throttled
+
+| Page | LCP (ms) | CLS | INP (ms) | Pass |
+|------|----------|-----|----------|------|
+| Dashboard (app._index) | 2084 | 0.0000 | 8 | ✅ |
+| Onboarding | 2028 | 0.0000 | 8 | ✅ |
+| Account Page (app.accounts.$id) | 2076 | 0.0000 | 8 | ✅ |
+| Imports | 0 | 0.0000 | 0 | ✅ |
+
+### desktop
+
+| Page | LCP (ms) | CLS | INP (ms) | Pass |
+|------|----------|-----|----------|------|
+| Dashboard (app._index) | 284 | 0.0000 | 16 | ✅ |
+| Onboarding | 268 | 0.0000 | 16 | ✅ |
+| Account Page (app.accounts.$id) | 264 | 0.0000 | 8 | ✅ |
+| Imports | 0 | 0.0000 | 0 | ✅ |
+
+  ✓  1 [chromium] › web-vitals.spec.ts:255:3 › Web Vitals Report › Generate measurement report (1.1m)
+
+  1 passed (1.1m)
