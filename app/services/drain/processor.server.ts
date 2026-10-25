@@ -828,6 +828,7 @@ async function handleCreditStatusRecompute(sql: Sql, message: SyncMessage): Prom
       success: false,
       action: "skipped",
       error: result.error,
+      errorCode: result.errorCode,
       retryable: result.retryable ?? true,
     };
   }

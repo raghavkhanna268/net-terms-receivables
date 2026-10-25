@@ -222,7 +222,7 @@ describeWithDb("CompanyLocation Sync", () => {
 
       const result = await processCompanyLocationWebhook(
         sql,
-        "unknown-shop.myshopify.com",
+        "test-unknown-shop.myshopify.com",
         "COMPANY_LOCATIONS_CREATE",
         location,
         `wh-loc-${TEST_SUFFIX}-5`

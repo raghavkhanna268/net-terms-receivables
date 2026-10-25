@@ -1,0 +1,8 @@
+# Logger mock allowlist - format: path: reason
+# Tests listed here are allowed to mock the logger (safeLog/toErrorCode/shopHash).
+# Each entry must have a non-empty reason that is NOT 'legacy'.
+# Stale entries fail CI (ratchet mode).
+#
+# Prefer using the real safeLog/toErrorCode/shopHash in tests.
+# Only add entries here when mocking is truly necessary.
+

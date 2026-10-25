@@ -1049,7 +1049,7 @@ describe("Tag rules safeLog (R2 PII prevention)", () => {
       body: formData,
     });
 
-    const mockSession = { shop: "sensitive-store.myshopify.com" };
+    const mockSession = { shop: "test-sensitive-store.myshopify.com" };
     const mockContext = {
       shopify: {
         authenticate: {
@@ -1080,7 +1080,7 @@ describe("Tag rules safeLog (R2 PII prevention)", () => {
         expect(output).not.toContain(sensitiveTag);
         // Must not contain domain
         expect(output).not.toContain("myshopify.com");
-        expect(output).not.toContain("sensitive-store");
+        expect(output).not.toContain("test-sensitive-store");
         // Should contain safe fields
         expect(output).toContain("tag_rule_created");
         expect(output).toContain("shopId");
@@ -1102,7 +1102,7 @@ describe("Tag rules safeLog (R2 PII prevention)", () => {
     mockSql.mockResolvedValueOnce([]);
     // Insert - throw error
     const dbError = new Error(
-      "Database error for sensitive-store.myshopify.com tag secret-tier-99"
+      "Database error for test-sensitive-store.myshopify.com tag secret-tier-99"
     );
     mockSql.mockRejectedValueOnce(dbError);
 
@@ -1116,7 +1116,7 @@ describe("Tag rules safeLog (R2 PII prevention)", () => {
       body: formData,
     });
 
-    const mockSession = { shop: "sensitive-store.myshopify.com" };
+    const mockSession = { shop: "test-sensitive-store.myshopify.com" };
     const mockContext = {
       shopify: {
         authenticate: {
@@ -1142,7 +1142,7 @@ describe("Tag rules safeLog (R2 PII prevention)", () => {
         expect(output).not.toContain(sensitiveTag);
         // Must not contain domain
         expect(output).not.toContain("myshopify.com");
-        expect(output).not.toContain("sensitive-store");
+        expect(output).not.toContain("test-sensitive-store");
         // Must not contain raw error message
         expect(output).not.toContain("Database error");
         // Should contain safe fields

@@ -20,7 +20,7 @@ import crypto from "node:crypto";
 import type { ActionFunctionArgs } from "react-router";
 
 const SYNTHETIC_TEST_SECRET = "synthetic-test-secret-s22-compliance";
-const TEST_SHOP = "qa-unmocked.myshopify.com";
+const TEST_SHOP = "test-qa-unmocked.myshopify.com";
 
 function generateShopifyHmac(body: string, secret: string): string {
   return crypto.createHmac("sha256", secret).update(body, "utf8").digest("base64");
@@ -407,7 +407,7 @@ describe("webhooks.compliance unmocked HMAC tests (#39)", () => {
     it("returns 400 when header shop differs from payload shop_domain", async () => {
       const payload = {
         shop_id: 123,
-        shop_domain: "other-shop.myshopify.com",
+        shop_domain: "test-other-shop.myshopify.com",
       };
       const body = JSON.stringify(payload);
       const request = createSignedRequest(body, "shop/redact", SYNTHETIC_TEST_SECRET, {
@@ -440,7 +440,7 @@ describe("webhooks.compliance unmocked HMAC tests (#39)", () => {
     it("returns 400 when header shop differs from payload shop_domain", async () => {
       const payload = {
         shop_id: 123,
-        shop_domain: "other-shop.myshopify.com",
+        shop_domain: "test-other-shop.myshopify.com",
         customer: { id: 456 },
       };
       const body = JSON.stringify(payload);

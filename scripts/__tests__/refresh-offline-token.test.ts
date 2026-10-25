@@ -184,7 +184,7 @@ describeWithDb("scripts/lib/refresh-offline-token", () => {
   it("returns no_session for non-existent session", async () => {
     const result = await refreshOfflineTokenIfNeeded(
       TEST_DATABASE_URL!,
-      "nonexistent-shop.myshopify.com",
+      "test-nonexistent-shop.myshopify.com",
       TEST_CLIENT_ID,
       TEST_CLIENT_SECRET,
       0
@@ -197,7 +197,7 @@ describeWithDb("scripts/lib/refresh-offline-token", () => {
   it("X6: error result has errorCode only, no raw error message (per #174)", async () => {
     const result = await refreshOfflineTokenIfNeeded(
       TEST_DATABASE_URL!,
-      "nonexistent-shop.myshopify.com",
+      "test-nonexistent-shop.myshopify.com",
       TEST_CLIENT_ID,
       TEST_CLIENT_SECRET,
       0
