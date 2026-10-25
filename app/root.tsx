@@ -15,8 +15,12 @@ import {
 /**
  * Determines if the current route chain requires App Bridge.
  *
- * App Bridge is only loaded for embedded admin routes (app.* and auth.*).
- * Public routes (privacy, unsubscribe, landing) don't need it.
+ * App Bridge is only loaded for embedded admin routes:
+ * - /app or /app/...
+ * - /auth or /auth/...
+ *
+ * Public routes (privacy, unsubscribe, landing) and near-misses
+ * (/apple, /authors, etc.) do not load App Bridge.
  *
  * Routes can override this by setting `handle: { embedded: false }`.
  */
@@ -31,7 +35,9 @@ function useIsEmbeddedRoute(): boolean {
   }
 
   const pathname = matches[matches.length - 1]?.pathname ?? "";
-  return pathname.startsWith("/app") || pathname.startsWith("/auth");
+  const isAppRoute = pathname === "/app" || pathname.startsWith("/app/");
+  const isAuthRoute = pathname === "/auth" || pathname.startsWith("/auth/");
+  return isAppRoute || isAuthRoute;
 }
 
 export const loader = async (_args: LoaderFunctionArgs) => {
@@ -40,6 +46,11 @@ export const loader = async (_args: LoaderFunctionArgs) => {
     isDevMode: import.meta.env.DEV,
   };
 };
+
+/**
+ * Root loader data is static (env vars only), so skip revalidation on navigation.
+ */
+export const shouldRevalidate = () => false;
 
 interface AppBridgeHeadProps {
   apiKey: string;

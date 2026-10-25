@@ -36,13 +36,36 @@ Public routes like `/privacy` (App Store listing link) and `/unsubscribe` (buyer
 
 ### Duplicate Script from AppProvider
 
-The `AppProvider` component from `@shopify/shopify-app-react-router` (v4.0.0) also renders an App Bridge `<script>` tag in the body (see `node_modules/@shopify/shopify-app-react-router/src/react/components/AppProvider/AppProvider.tsx`, lines 101-106). There is no option to disable this.
+The `AppProvider` component from `@shopify/shopify-app-react-router` (v4.0.0) also renders an App Bridge `<script>` tag in the body:
 
-Having the script in `<head>` (from our root layout) AND in `<body>` (from AppProvider) results in two script tags, but this is harmless because:
+```tsx
+// node_modules/@shopify/shopify-app-react-router/src/react/components/AppProvider/AppProvider.tsx
+// lines 101-106
+return (
+  <script
+    src="https://cdn.shopify.com/shopifycloud/app-bridge.js"
+    data-api-key={apiKey}
+  />
+);
+```
 
-1. **Browser caching**: The second script tag triggers no additional network request; the browser serves it from cache.
-2. **Script execution**: Only the first `<script>` tag executes the script. The browser doesn't re-execute JavaScript from duplicate script tags pointing to the same URL.
-3. **BFS compliance**: What matters for Built for Shopify is that App Bridge is in `<head>` before any other scripts, which we satisfy. The duplicate in body has no functional impact.
+There is no prop to disable this script, and `AppBridge` is not exported separately.
+
+**App Bridge CDN source check:** The minified CDN script (`curl https://cdn.shopify.com/shopifycloud/app-bridge.js`) contains `window.shopify=n.shopify` but no visible guard like `if (window.shopify) return;` or `__SHOPIFY_APP_BRIDGE_INITIALIZED`. Whether App Bridge handles double-loading gracefully is **unverified from source**.
+
+### Dev-store Verification (pending)
+
+Before merging, verify in Raghav's dev-store admin with DevTools open:
+
+1. **Script count**: In Elements, search for `app-bridge.js`. Record the number of `<script>` tags (expected: 2, one in head, one in body from AppProvider).
+2. **Network load count**: In Network tab, filter by `app-bridge.js`. Record the number of requests (expected: 1 if cached, or 2 if not).
+3. **Console errors**: Check for any App Bridge errors, double-init warnings, or "missing configuration" errors.
+4. **`window.shopify` defined**: In Console, run `typeof window.shopify` (expected: `'object'`).
+5. **Navigation works**: Click links in `<s-app-nav>` / NavMenu. Verify navigation occurs without errors.
+6. **Toast works**: In Console, run `shopify.toast.show('Test')`. Verify toast appears.
+7. **Debug meta logs**: Under `shopify app dev`, verify `[shopify-debug] web-vitals` style logs appear in Console on page load.
+
+**This PR is on merge hold until these results are recorded here.**
 
 ## Debug Meta Tag
 
