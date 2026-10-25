@@ -55,7 +55,8 @@ export async function processCompanyLocationWebhook(
     return {
       success: false,
       action: "skipped",
-      error: `Shop not found: ${shopDomain}`,
+      error: "shop_not_found",
+      errorCode: "shop_not_found",
     };
   }
 

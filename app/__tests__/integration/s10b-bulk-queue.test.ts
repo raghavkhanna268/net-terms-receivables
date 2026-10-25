@@ -27,6 +27,7 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 describeWithDb("S10b processBulkQueue Integration", () => {
   let sql: ReturnType<typeof postgres>;
   const TEST_SUFFIX = Date.now().toString(36);
+  const TEST_SHOP_ID = `shop-bulk-${TEST_SUFFIX}`;
   const TEST_SHOP = `test-bulk-${TEST_SUFFIX}.myshopify.com`;
   const TEST_TOPIC = `TEST_BULK_${TEST_SUFFIX}`;
 
@@ -36,6 +37,12 @@ describeWithDb("S10b processBulkQueue Integration", () => {
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
     originalHandler = getBulkHandler(TEST_TOPIC);
+
+    // Create test Shop row for bulk progress continuation guard (#239)
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP}, 'INR', NOW(), NOW())
+    `;
   });
 
   afterAll(async () => {
@@ -51,6 +58,9 @@ describeWithDb("S10b processBulkQueue Integration", () => {
         // May already be archived or deleted
       }
     }
+
+    // Clean up test Shop row
+    await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
 
     await sql.end();
   });

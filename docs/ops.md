@@ -165,3 +165,13 @@ The workflow can be gated on a GitHub Environment named `production` for additio
 4. Uncomment the `environment: production` line in the workflow
 
 When configured, the workflow will require approval before running diagnostics against production.
+
+---
+
+## S18: Reminder Unsubscribe Secret Rotation
+
+To rotate `REMINDER_UNSUBSCRIBE_SECRET` without breaking links in already-sent emails:
+
+1. Copy the current secret to `REMINDER_UNSUBSCRIBE_SECRET_PREVIOUS`
+2. Set a new value for `REMINDER_UNSUBSCRIBE_SECRET`
+3. After all old-secret links have expired (links are valid indefinitely, so wait for the oldest campaign's opt-out window), remove `REMINDER_UNSUBSCRIBE_SECRET_PREVIOUS`

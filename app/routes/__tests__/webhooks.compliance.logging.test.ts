@@ -137,6 +137,8 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
   it("shop/redact deleted logs shop_redact_deleted with shopHash and counts, no raw domain", async () => {
     // Setup mocks for successful deletion
     // Transaction operations:
+    // 0. SELECT FOR UPDATE (serializes with drain's FOR SHARE guards, #239)
+    mockTx.mockResolvedValueOnce([{ id: "shop-logging-test" }]);
     // 1. DELETE s10b_order_refetch_null
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
     // 2. DELETE s6_bulk_operations
@@ -155,7 +157,13 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
     // 9. DELETE s6_dead_letter
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-    // 10. DELETE Shop (returns deleted shop)
+    // 10. DELETE s6_processed_webhooks (reconcile prefix)
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
+    // 11. DELETE s6_processed_webhooks (receipts join)
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
+    // 12. DELETE webhook_receipts
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 5 }));
+    // 13. DELETE Shop (returns deleted shop)
     mockTx.mockResolvedValueOnce([{ id: "shop-logging-test" }]);
 
     const payload = { shop_id: 123, shop_domain: TEST_SHOP };
@@ -180,6 +188,8 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     expect(outputStr).toContain("bulkOperationsPurged");
     expect(outputStr).toContain("pgmqSyncQueuePurged");
     expect(outputStr).toContain("deadLetterPurged");
+    expect(outputStr).toContain("processedWebhooksPurged");
+    expect(outputStr).toContain("webhookReceiptsPurged");
 
     // Assert NO raw shop domain appears in any output
     expect(outputStr).not.toContain(".myshopify.com");
@@ -189,6 +199,7 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
   it("shop/redact not found logs shop_redact_not_found with shopHash, no raw domain", async () => {
     // Setup mocks for shop not found (all deletes return 0, shop delete returns empty)
     // Transaction operations:
+    mockTx.mockResolvedValueOnce([]); // SELECT FOR UPDATE (serializes with drain's FOR SHARE guards, #239)
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // s10b_order_refetch_null
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // s6_bulk_operations
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // order_outstanding_missing
@@ -198,6 +209,9 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // pgmq.a_s6_sync
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // pgmq.a_s6_bulk
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // s6_dead_letter
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // s6_processed_webhooks (reconcile)
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // s6_processed_webhooks (receipts)
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // webhook_receipts
     mockTx.mockResolvedValueOnce([]); // Shop (empty - not found)
 
     const payload = { shop_id: 999, shop_domain: TEST_SHOP };

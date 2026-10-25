@@ -230,6 +230,10 @@ describe("Tag Rules Route", () => {
       expect(result.error).toBeNull();
       expect(result.shopId).toBeNull();
       expect(result.tagRules).toEqual([]);
+
+      // Verify auth called; only the shop lookup ran (no further DB queries)
+      expect(mockContext.shopify.authenticate.admin).toHaveBeenCalledTimes(1);
+      expect(mockSql).toHaveBeenCalledTimes(1);
     });
 
     it("returns finishingSetup=false for normal shop lookup", async () => {
@@ -923,7 +927,7 @@ describe("Tag Rules Route", () => {
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
-      formData.append("tag", "net30");
+      formData.append("tag", "test-net30");
       formData.append("defaultTermsDays", "30");
 
       const postRequest = new Request("https://example.com/app/tag-rules", {
@@ -945,37 +949,13 @@ describe("Tag Rules Route", () => {
       expect(status).toBe(400);
       expect(result.success).toBe(false);
       expect(result.error).toContain("still being set up");
-    });
-
-    it("does not return 404 or 500 when shop not found", async () => {
-      const { getRequestSql } = await import("~/lib/request-context.server");
-      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-
-      // Shop lookup - not found
-      mockSql.mockResolvedValueOnce([]);
-
-      const formData = new FormData();
-      formData.append("intent", "create_tag_rule");
-      formData.append("tag", "net30");
-      formData.append("defaultTermsDays", "30");
-
-      const postRequest = new Request("https://example.com/app/tag-rules", {
-        method: "POST",
-        body: formData,
-      });
-
-      const { action } = await import("../app.tag-rules");
-      const rawResult = await action({
-        request: postRequest,
-        context: mockContext as never,
-        params: {},
-        url: mockUrl,
-        pattern: mockPattern,
-      });
-
-      const status = extractStatus(rawResult);
+      // Not 404 or 500 (the user-friendly 400 is the correct response)
       expect(status).not.toBe(404);
       expect(status).not.toBe(500);
+
+      // Verify auth called; only the shop lookup ran (no further DB queries after early return)
+      expect(mockContext.shopify.authenticate.admin).toHaveBeenCalledTimes(1);
+      expect(mockSql).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -1438,6 +1418,42 @@ describe("S24: Finishing setup empty state (real render)", () => {
     vi.resetModules();
   });
 
+  it("useRevalidator hook is called during render in finishing setup state", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+
+    let revalidatorCalled = false;
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          storeMode: "tag_based",
+          tagRules: [],
+          shopId: null,
+          error: null,
+          finishingSetup: true,
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({ state: "idle" }),
+        useRevalidator: () => {
+          revalidatorCalled = true;
+          return { revalidate: vi.fn(), state: "idle" };
+        },
+      };
+    });
+
+    vi.resetModules();
+    const { default: TagRulesPage } = await import("../app.tag-rules");
+
+    const html = renderToString(createElement(TagRulesPage));
+
+    expect(html).toContain("s-button");
+    expect(html).toContain("Refresh");
+    expect(revalidatorCalled).toBe(true);
+  });
+
   it("renders finishing setup banner and empty state when finishingSetup is true", async () => {
     const { renderToString } = await import("react-dom/server");
     const { createElement } = await import("react");
@@ -1455,6 +1471,7 @@ describe("S24: Finishing setup empty state (real render)", () => {
         }),
         useActionData: () => null,
         useNavigation: () => ({ state: "idle" }),
+        useRevalidator: () => ({ revalidate: vi.fn(), state: "idle" }),
       };
     });
 
@@ -1489,6 +1506,7 @@ describe("S24: Finishing setup empty state (real render)", () => {
         }),
         useActionData: () => null,
         useNavigation: () => ({ state: "idle" }),
+        useRevalidator: () => ({ revalidate: vi.fn(), state: "idle" }),
       };
     });
 
@@ -1519,6 +1537,7 @@ describe("S24: Finishing setup empty state (real render)", () => {
         }),
         useActionData: () => null,
         useNavigation: () => ({ state: "idle" }),
+        useRevalidator: () => ({ revalidate: vi.fn(), state: "idle" }),
         Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
           createElement("form", props, children),
       };
@@ -1554,6 +1573,7 @@ describe("S24: Finishing setup empty state (real render)", () => {
         }),
         useActionData: () => null,
         useNavigation: () => ({ state: "idle" }),
+        useRevalidator: () => ({ revalidate: vi.fn(), state: "idle" }),
         Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
           createElement("form", props, children),
       };

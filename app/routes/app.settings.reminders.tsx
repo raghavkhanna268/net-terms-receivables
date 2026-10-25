@@ -20,19 +20,27 @@ import { getRequestSql } from "~/lib/request-context.server";
 import {
   getShopReminderSettings,
   getShopReminderRules,
+  getShopReminderLogs,
   updateShopReminderSettings,
   updateReminderRule,
   createReminderRule,
   deleteReminderRule,
   isReminderSendingEnabled,
   isValidOffset,
-  getGlobalSendCounts,
   ensureDefaultReminderRules,
-  DAILY_SEND_CAP,
-  MONTHLY_SEND_CAP,
   OFFSET_MIN,
   OFFSET_MAX,
 } from "~/services/reminders.server";
+import type { ReminderLogEntry } from "~/services/reminders.server";
+import {
+  getReminderStatusCounts,
+  getDelayedReminders,
+  getShopSentTodayCount,
+} from "~/services/reminder-status.server";
+import type {
+  ReminderStatusCounts,
+  DelayedReminder,
+} from "~/services/reminder-status.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 
 const VALID_INTENTS = ["toggle_enabled", "update_rule", "create_rule", "delete_rule"] as const;
@@ -55,8 +63,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
-  const [shop] = await sql<{ id: string }[]>`
-    SELECT id FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ id: string; timezone: string }[]>`
+    SELECT id, timezone FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
   if (!shop) {
@@ -64,53 +72,41 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       error: "Shop not found",
       settings: null,
       rules: [],
+      logs: [],
       providerConfigured: false,
-      dailyCap: DAILY_SEND_CAP,
-      monthlyCap: MONTHLY_SEND_CAP,
-      dailyUsage: 0,
-      monthlyUsage: 0,
-      usageError: false,
+      shopTimezone: "UTC",
+      statusCounts: { sent: 0, delayed: 0, skippedDailyLimit: 0 } as ReminderStatusCounts,
+      delayedReminders: [] as DelayedReminder[],
+      shopSentToday: 0,
     };
   }
 
   // Ensure default rules exist (idempotent, only seeds when shop has no rules)
   await ensureDefaultReminderRules(sql, shop.id);
 
-  const [settings, rules] = await Promise.all([
+  const [settings, rules, logs, statusCounts, delayedReminders, shopSentToday] = await Promise.all([
     getShopReminderSettings(sql, shop.id),
     getShopReminderRules(sql, shop.id),
+    getShopReminderLogs(sql, shop.id, 50),
+    getReminderStatusCounts(sql, shop.id),
+    getDelayedReminders(sql, shop.id, 50),
+    getShopSentTodayCount(sql, shop.id),
   ]);
 
   const env = (context as { cloudflare?: { env?: { RESEND_API_KEY?: string; RESEND_FROM?: string } } })
     .cloudflare?.env;
   const providerConfigured = isReminderSendingEnabled(env);
 
-  // Fetch global send counts with graceful error handling
-  let dailyUsage = 0;
-  let monthlyUsage = 0;
-  let usageError = false;
-  try {
-    const counts = await getGlobalSendCounts(sql);
-    dailyUsage = counts.daily;
-    monthlyUsage = counts.monthly;
-  } catch (err) {
-    safeLog("error", "reminders_send_counts_error", {
-      shopId: shop.id,
-      err: toErrorCode(err),
-    });
-    usageError = true;
-  }
-
   return {
     error: null,
     settings: settings ?? { enabled: false },
     rules,
+    logs,
     providerConfigured,
-    dailyCap: DAILY_SEND_CAP,
-    monthlyCap: MONTHLY_SEND_CAP,
-    dailyUsage,
-    monthlyUsage,
-    usageError,
+    shopTimezone: shop.timezone,
+    statusCounts,
+    delayedReminders,
+    shopSentToday,
   };
 };
 
@@ -164,6 +160,15 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
           return {
             success: false,
             error: `Offset must be between ${OFFSET_MIN} and ${OFFSET_MAX} days`,
+          };
+        }
+
+        // Check for duplicate offset (excluding the rule being updated)
+        const existingRules = await getShopReminderRules(sql, shop.id);
+        if (existingRules.some((r) => r.id !== ruleId && r.offsetDays === offsetDays)) {
+          return {
+            success: false,
+            error: "A rule with this offset already exists",
           };
         }
 
@@ -294,17 +299,86 @@ function RuleRow({
   );
 }
 
+export function formatStatus(status: string): string {
+  switch (status) {
+    case "sent":
+      return "Sent";
+    case "delayed":
+      return "Delayed (daily limit)";
+    case "skipped_daily_limit":
+      return "Skipped (daily limit)";
+    default:
+      return "Skipped";
+  }
+}
+
+export function getStatusBadgeTone(status: string): "success" | "warning" | undefined {
+  switch (status) {
+    case "sent":
+      return "success";
+    case "delayed":
+      return "warning";
+    default:
+      return undefined;
+  }
+}
+
+function formatLogDate(date: string | Date, timezone: string): string {
+  const d = typeof date === "string" ? new Date(date) : date;
+  return d.toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    timeZone: timezone,
+  });
+}
+
+/**
+ * Format a YYYY-MM-DD date string as a calendar date without timezone shift.
+ * Uses UTC to avoid date boundary issues when displaying a pure date.
+ */
+export function formatCatchUpByDate(dateStr: string): string {
+  const [year, month, day] = dateStr.split("-").map(Number);
+  const d = new Date(Date.UTC(year, month - 1, day));
+  return d.toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+function ReminderLogRow({ entry, timezone }: { entry: ReminderLogEntry; timezone: string }) {
+  const badgeTone = getStatusBadgeTone(entry.status);
+  return (
+    <s-table-row key={entry.id}>
+      <s-table-cell>{entry.invoiceName}</s-table-cell>
+      <s-table-cell>
+        <RuleOffsetLabel offsetDays={entry.offsetDays} />
+      </s-table-cell>
+      <s-table-cell>
+        {badgeTone ? (
+          <s-badge tone={badgeTone}>{formatStatus(entry.status)}</s-badge>
+        ) : (
+          <s-badge>{formatStatus(entry.status)}</s-badge>
+        )}
+      </s-table-cell>
+      <s-table-cell>{formatLogDate(entry.date, timezone)}</s-table-cell>
+    </s-table-row>
+  );
+}
+
 export default function RemindersSettingsPage() {
   const {
     error,
     settings,
     rules,
+    logs,
     providerConfigured,
-    dailyCap,
-    monthlyCap,
-    dailyUsage,
-    monthlyUsage,
-    usageError,
+    shopTimezone,
+    statusCounts,
+    delayedReminders,
+    shopSentToday,
   } = useLoaderData<typeof loader>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
@@ -364,16 +438,51 @@ export default function RemindersSettingsPage() {
         </s-stack>
       </s-section>
 
-      {/* Send Limits - shared across all shops using this app's email account */}
-      <s-section heading="Email Send Limits">
-        <s-paragraph>
-          <s-text tone="neutral">
-            Shared across all shops.{" "}
-            {usageError
-              ? `Daily: ${dailyCap}, Monthly: ${monthlyCap}`
-              : `Today: ${dailyUsage}/${dailyCap}. Month: ${monthlyUsage}/${monthlyCap}`}
-          </s-text>
-        </s-paragraph>
+      {/* Reminder Status */}
+      <s-section heading="Reminder status">
+        <s-stack>
+          <s-paragraph>
+            <s-text type="strong">Sent today: </s-text>
+            <s-text>{shopSentToday}</s-text>
+            {" · "}
+            <s-text type="strong">Total sent: </s-text>
+            <s-text>{statusCounts.sent}</s-text>
+            {" · "}
+            <s-text type="strong">Delayed (daily limit): </s-text>
+            <s-text>{statusCounts.delayed}</s-text>
+            {" · "}
+            <s-text type="strong">Skipped (daily limit): </s-text>
+            <s-text>{statusCounts.skippedDailyLimit}</s-text>
+          </s-paragraph>
+
+          {delayedReminders.length > 0 && (
+            <>
+              <s-paragraph>
+                <s-text type="strong">Catch-up by</s-text>
+              </s-paragraph>
+              <s-table>
+                <s-table-header-row>
+                  <s-table-header>Invoice</s-table-header>
+                  <s-table-header>Stage</s-table-header>
+                  <s-table-header>Catch-up by</s-table-header>
+                </s-table-header-row>
+                <s-table-body>
+                  {delayedReminders.map((reminder) => (
+                    <s-table-row key={reminder.id}>
+                      <s-table-cell>{reminder.invoiceName}</s-table-cell>
+                      <s-table-cell>
+                        <RuleOffsetLabel offsetDays={reminder.offsetDays} />
+                      </s-table-cell>
+                      <s-table-cell>
+                        {formatCatchUpByDate(reminder.catchUpBy)}
+                      </s-table-cell>
+                    </s-table-row>
+                  ))}
+                </s-table-body>
+              </s-table>
+            </>
+          )}
+        </s-stack>
       </s-section>
 
       {/* Reminder Rules */}
@@ -411,6 +520,37 @@ export default function RemindersSettingsPage() {
         </s-stack>
       </s-section>
 
+      {/* Reminder Log */}
+      <s-section heading="Reminder Log">
+        <s-stack>
+          <s-paragraph>
+            Recent reminder activity. Shows invoice, stage, status, and date.
+          </s-paragraph>
+
+          {logs.length === 0 ? (
+            <s-empty-state heading="No reminder history">
+              <s-text slot="subheading">
+                Sent and delayed reminders will appear here.
+              </s-text>
+            </s-empty-state>
+          ) : (
+            <s-table>
+              <s-table-header-row>
+                <s-table-header>Invoice</s-table-header>
+                <s-table-header>Stage</s-table-header>
+                <s-table-header>Status</s-table-header>
+                <s-table-header>Date</s-table-header>
+              </s-table-header-row>
+              <s-table-body>
+                {logs.map((entry) => (
+                  <ReminderLogRow key={entry.id} entry={entry} timezone={shopTimezone} />
+                ))}
+              </s-table-body>
+            </s-table>
+          )}
+        </s-stack>
+      </s-section>
+
       {/* Help Section */}
       <s-section slot="aside" heading="About Reminders">
         <s-paragraph>
@@ -434,6 +574,15 @@ export default function RemindersSettingsPage() {
         <s-paragraph>
           Each reminder is sent only once per invoice, even if the job runs
           multiple times.
+        </s-paragraph>
+      </s-section>
+
+      <s-section slot="aside" heading="Delayed Reminders">
+        <s-paragraph>
+          Reminder emails are sent within a daily sending limit. Reminders over
+          the limit are delayed and retried over the next 3 days (shop time). If
+          one still can&apos;t be sent within 3 days, or a later reminder for
+          the same invoice replaces it, it&apos;s marked Skipped (daily limit).
         </s-paragraph>
       </s-section>
 

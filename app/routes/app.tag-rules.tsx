@@ -24,7 +24,7 @@ import type {
   LoaderFunctionArgs,
   ActionFunctionArgs,
 } from "react-router";
-import { useLoaderData, useActionData, Form, useNavigation, data } from "react-router";
+import { useLoaderData, useActionData, Form, useNavigation, useRevalidator, data } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { safeLog, toErrorCode, shopHash } from "~/lib/log.server";
@@ -466,6 +466,7 @@ export default function TagRulesPage() {
   const { storeMode, tagRules, error, finishingSetup } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
+  const revalidator = useRevalidator();
   const isSubmitting = navigation.state === "submitting";
 
   const [tag, setTag] = useState("");
@@ -493,7 +494,7 @@ export default function TagRulesPage() {
             </s-text>
             <s-button
               slot="primary-action"
-              onClick={() => window.location.reload()}
+              onClick={() => revalidator.revalidate()}
             >
               Refresh
             </s-button>

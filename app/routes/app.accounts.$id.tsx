@@ -23,10 +23,16 @@ import type {
   LoaderFunctionArgs,
   ActionFunctionArgs,
 } from "react-router";
+import { data } from "react-router";
 import { useLoaderData, useActionData, Form, useNavigation } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { isAccountActive, isGatingEnforced } from "~/services/gating.server";
+import {
+  getBuyerOptOutStatus,
+  setBuyerOptOut,
+  clearBuyerOptOut,
+} from "~/services/reminder-optout.server";
 import {
   getCreditStatusDisplay,
   getCompanyTotals,
@@ -68,6 +74,7 @@ interface LoaderData {
     defaultTermsSource: "explicit" | "tag" | null;
     isGated: boolean;
   } | null;
+  upgradeUrl: string;
   creditStatus: {
     creditLimitAmount: number | null;
     creditLimitPaise: string | null;
@@ -113,13 +120,22 @@ interface LoaderData {
     totalCount: number;
   };
   gatingEnforced: boolean;
+  reminderOptOut: {
+    optedOut: boolean;
+    optOutAt: string | null;
+    optOutSource: "merchant" | "link" | null;
+  } | null;
   error: string | null;
 }
 
 interface ActionData {
+  ok?: boolean;
   success: boolean;
   error?: string;
   metafieldSyncPending?: boolean;
+  action?: "updateCredit" | "updateReminderOptOut";
+  upgradeRequired?: boolean;
+  code?: string;
 }
 
 export const loader = async ({ request, context, params }: LoaderFunctionArgs) => {
@@ -129,6 +145,10 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
   const shopDomain = session.shop;
   const accountId = params.id;
 
+  const storeHandle = shopDomain.replace(".myshopify.com", "");
+  const appHandle = process.env.APP_HANDLE ?? "net-terms-receivables";
+  const upgradeUrl = `https://admin.shopify.com/store/${storeHandle}/charges/${appHandle}/pricing_plans`;
+
   if (!accountId) {
     return {
       account: null,
@@ -136,6 +156,8 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       companyTotals: null,
       invoices: { rows: [], totalCount: 0 },
       gatingEnforced: isGatingEnforced(),
+      reminderOptOut: null,
+      upgradeUrl,
       error: "Account ID is required",
     } satisfies LoaderData;
   }
@@ -151,6 +173,8 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       companyTotals: null,
       invoices: { rows: [], totalCount: 0 },
       gatingEnforced: isGatingEnforced(),
+      reminderOptOut: null,
+      upgradeUrl,
       error: "Shop not found",
     } satisfies LoaderData;
   }
@@ -183,6 +207,8 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       companyTotals: null,
       invoices: { rows: [], totalCount: 0 },
       gatingEnforced: isGatingEnforced(),
+      reminderOptOut: null,
+      upgradeUrl,
       error: "Account not found",
     } satisfies LoaderData;
   }
@@ -292,12 +318,23 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
     totalCount: invoiceResult.totalCount,
   };
 
+  const optOutStatus = await getBuyerOptOutStatus(sql, shop.id, accountId);
+  const reminderOptOut = optOutStatus
+    ? {
+        optedOut: optOutStatus.optedOut,
+        optOutAt: optOutStatus.optOutAt?.toISOString() ?? null,
+        optOutSource: optOutStatus.optOutSource,
+      }
+    : null;
+
   return {
     account,
     creditStatus,
     companyTotals,
     invoices,
     gatingEnforced: isGatingEnforced(),
+    reminderOptOut,
+    upgradeUrl,
     error: null,
   } satisfies LoaderData;
 };
@@ -344,7 +381,16 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
     // Only gate credit-limit and account-details edits.
     const isGated = !isAccountActive(accountRow.gatedAt);
     if (!holdOnly && isGated) {
-      return { success: false, error: "Cannot edit gated accounts" } satisfies ActionData;
+      return data(
+        {
+          ok: false,
+          success: false,
+          upgradeRequired: true,
+          code: "plan_limit_account_gated",
+          error: "This account is over your plan limit. Upgrade to edit credit limits.",
+        } satisfies ActionData,
+        { status: 403 }
+      );
     }
     const holdReasonCodeRaw = formData.get("holdReasonCode") as string | null;
     const holdReasonCode = (holdReasonCodeRaw && holdReasonCodeRaw.trim() !== "") 
@@ -415,9 +461,40 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
 
     return {
       success: true,
+      action: "updateCredit",
       metafieldSyncPending: result.metafieldSyncPending,
       error: result.metafieldSyncPending ? result.error : undefined,
     } satisfies ActionData;
+  }
+
+  if (action === "updateReminderOptOut") {
+    const enable = formData.get("enable") === "true";
+
+    if (enable) {
+      const cleared = await clearBuyerOptOut(sql, shop.id, accountId);
+
+      if (cleared) {
+        await sql`
+          INSERT INTO "AuditEvent" (id, "shopId", actor, type, data, at)
+          VALUES (
+            gen_random_uuid(),
+            ${shop.id},
+            'system',
+            'reminder.opt_out_cleared',
+            ${sql.json({
+              buyerAccountId: accountId,
+              source: "merchant",
+            })},
+            NOW()
+          )
+        `;
+      }
+
+      return { success: true, action: "updateReminderOptOut" } satisfies ActionData;
+    } else {
+      await setBuyerOptOut(sql, shop.id, accountId, "merchant");
+      return { success: true, action: "updateReminderOptOut" } satisfies ActionData;
+    }
   }
 
   return { success: false, error: "Unknown action" } satisfies ActionData;
@@ -492,10 +569,11 @@ function InvoiceTable({
 }
 
 export default function AccountPage() {
-  const { account, creditStatus, companyTotals, invoices, gatingEnforced, error } = useLoaderData<typeof loader>();
+  const { account, creditStatus, companyTotals, invoices, gatingEnforced, reminderOptOut, upgradeUrl, error } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
+  const isReminderSubmitting = isSubmitting && navigation.formData?.get("_action") === "updateReminderOptOut";
 
   const serverNoLimit = creditStatus?.creditLimitAmount === null;
   const [noLimitChecked, setNoLimitChecked] = useState(serverNoLimit);
@@ -522,7 +600,7 @@ export default function AccountPage() {
     <s-page heading={account.name}>
       <s-link href="/" slot="breadcrumb-actions">Back to Dashboard</s-link>
 
-      {actionData?.success && (
+      {actionData?.success && actionData.action === "updateCredit" && (
         <s-section>
           <s-banner
             tone={actionData.metafieldSyncPending ? "warning" : "info"}
@@ -531,6 +609,14 @@ export default function AccountPage() {
             {actionData.metafieldSyncPending
               ? "Credit settings saved but Shopify sync is pending. The validation function may not reflect changes immediately."
               : "Credit settings saved successfully."}
+          </s-banner>
+        </s-section>
+      )}
+
+      {actionData?.success && actionData.action === "updateReminderOptOut" && (
+        <s-section>
+          <s-banner tone="info" heading="Payment reminder settings updated">
+            The buyer&apos;s payment reminder preference has been saved.
           </s-banner>
         </s-section>
       )}
@@ -548,10 +634,15 @@ export default function AccountPage() {
         return bannerState.show && (
           <s-section>
             <s-banner tone="warning" heading={bannerState.heading}>
-              <s-text>
-                {bannerState.bodyText}
-                {bannerState.enforcementNote && ` ${bannerState.enforcementNote}`}
-              </s-text>
+              <s-stack>
+                <s-text>
+                  {bannerState.bodyText}
+                  {bannerState.enforcementNote && ` ${bannerState.enforcementNote}`}
+                </s-text>
+                <s-button href={upgradeUrl} target="_top" variant="secondary">
+                  Upgrade
+                </s-button>
+              </s-stack>
             </s-banner>
           </s-section>
         );
@@ -773,8 +864,15 @@ export default function AccountPage() {
               </s-text>
             </s-paragraph>
             <s-banner tone="info" heading="Upgrade to edit credit settings">
-              Credit limit and account detail editing requires an upgrade. Holds still
-              work on all plans.
+              <s-stack>
+                <s-text>
+                  Credit limit and account detail editing requires an upgrade. Holds still
+                  work on all plans.
+                </s-text>
+                <s-button href={upgradeUrl} target="_top" variant="secondary">
+                  Upgrade
+                </s-button>
+              </s-stack>
             </s-banner>
             <Form method="post">
               <input type="hidden" name="_action" value="updateCredit" />
@@ -813,6 +911,56 @@ export default function AccountPage() {
               </s-stack>
             </Form>
           </s-stack>
+        </s-section>
+      )}
+
+      {reminderOptOut && (
+        <s-section heading="Payment Reminders">
+          <Form method="post">
+            <input type="hidden" name="_action" value="updateReminderOptOut" />
+            <input type="hidden" name="enable" value={reminderOptOut.optedOut ? "true" : "false"} />
+            <s-stack gap="base">
+              <s-paragraph>
+                <s-text>
+                  Payment reminder emails help buyers stay on top of upcoming and overdue invoices.
+                </s-text>
+              </s-paragraph>
+              <s-paragraph>
+                <s-text type="strong">Current status: </s-text>
+                {reminderOptOut.optedOut ? (
+                  <s-badge tone="warning">Opted out</s-badge>
+                ) : (
+                  <s-badge>Receiving reminders</s-badge>
+                )}
+              </s-paragraph>
+              {reminderOptOut.optedOut && reminderOptOut.optOutAt && (
+                <s-paragraph>
+                  Opted out on {new Date(reminderOptOut.optOutAt).toLocaleDateString("en-IN", {
+                    timeZone: "Asia/Kolkata",
+                  })}
+                  {reminderOptOut.optOutSource === "link" && " via email unsubscribe link"}
+                  {reminderOptOut.optOutSource === "merchant" && " by merchant"}
+                </s-paragraph>
+              )}
+              <s-button
+                type="submit"
+                variant={reminderOptOut.optedOut ? "primary" : "secondary"}
+                disabled={isReminderSubmitting}
+              >
+                {isReminderSubmitting
+                  ? "Saving..."
+                  : reminderOptOut.optedOut
+                    ? "Re-enable reminders"
+                    : "Disable reminders"}
+              </s-button>
+              {reminderOptOut.optedOut && (
+                <s-paragraph>
+                  Re-enabling reminders does not resend previously skipped reminder stages.
+                  The next due stage will send normally.
+                </s-paragraph>
+              )}
+            </s-stack>
+          </Form>
         </s-section>
       )}
 
@@ -855,6 +1003,18 @@ export default function AccountPage() {
             </s-list-item>
           ))}
         </s-unordered-list>
+      </s-section>
+
+      <s-section slot="aside" heading="Payment Reminders">
+        <s-paragraph>
+          Buyers can opt out of payment reminder emails via the unsubscribe link in each reminder.
+        </s-paragraph>
+        <s-paragraph>
+          Only merchants can re-enable reminders for an opted-out buyer.
+        </s-paragraph>
+        <s-paragraph>
+          Re-enabling does not resend skipped reminders; the next scheduled stage sends normally.
+        </s-paragraph>
       </s-section>
     </s-page>
   );

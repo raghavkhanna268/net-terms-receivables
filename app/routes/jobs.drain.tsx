@@ -167,8 +167,8 @@ export async function action({ request, context }: ActionFunctionArgs) {
     // Log summary (avoid PII - just stats)
     console.log(
       `[drain] processed=${result.processed} skipped=${result.skipped} ` +
-        `failed=${result.failed} dlq=${result.deadLettered} noHandler=${result.noHandler} ` +
-        `timedOut=${result.timedOut} elapsed=${result.elapsedMs}ms`
+        `failed=${result.failed} dlq=${result.deadLettered} dlqGoneCount=${result.deadLetterAlreadyGoneCount} ` +
+        `noHandler=${result.noHandler} timedOut=${result.timedOut} elapsed=${result.elapsedMs}ms`
     );
 
     // Return result as JSON
