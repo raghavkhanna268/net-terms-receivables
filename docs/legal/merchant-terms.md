@@ -6,12 +6,12 @@
 
 ---
 
-**Legal Entity:** [Raghav to confirm]  
+**Owner/Operator:** Raghav Khanna  
 **Address:** [Raghav to confirm]  
 **Governing Law:** [Raghav to confirm]  
 **Jurisdiction:** [Raghav to confirm]
 
-**Effective Date:** [TBD]  
+**Effective Date:** [App Store submission date]  
 **Last Updated:** 2026-10-25
 
 ---
@@ -109,9 +109,9 @@ We use the following sub-processors to provide the App:
 | Sub-Processor | Service | Data Processed | Location | DPA |
 |---------------|---------|----------------|----------|-----|
 | **Cloudflare, Inc.** | Application hosting (Workers), connection pooling (Hyperdrive) | All App data in transit; edge processing | Global (Worker placed ap-south-1 via region hint) | [Raghav to confirm] |
-| **Supabase, Inc.** | Database hosting (Postgres) | All App data at rest | [Raghav to confirm region] | [Raghav to confirm] |
+| **Supabase, Inc.** | Database hosting (Postgres) | All App data at rest | AWS ap-south-1 (Mumbai) | [Raghav to confirm] |
 | **Plus Five Five, Inc. (Resend)** | Email delivery | Buyer name and email, merchant name (`app/services/reminders.server.ts:949-956`), shop-owner email (data-request notice) | US | [Resend DPA](https://resend.com/legal/dpa) (DPA §6.1) |
-| **Functional Software, Inc. d/b/a Sentry** | Error monitoring | Scrubbed error events only (no PII by design — see `app/lib/sentry.ts:83-137`) | US and other countries [Raghav to confirm] | [Sentry DPA](https://sentry.io/legal/dpa/) |
+| **Functional Software, Inc. d/b/a Sentry** | Error monitoring (planned, not active) | Scrubbed error events only (no PII by design — see `app/lib/sentry.ts:83-137`) | US | [Sentry DPA](https://sentry.io/legal/dpa/) |
 
 **Note:** Shopify is the platform and data source, not our sub-processor. Shopify's DPA governs your relationship with Shopify: [Shopify DPA](https://www.shopify.com/legal/dpa).
 
@@ -136,7 +136,7 @@ We support your compliance with data subject requests:
 We implement appropriate technical and organizational measures:
 
 - **Encryption in transit:** TLS for all communications
-- **Encryption at rest:** Supabase-managed (provider-controlled)
+- **Encryption at rest:** Supabase encrypts data at rest with AES-256 (provider-managed, per [Supabase security](https://supabase.com/security))
 - **Access control:** OAuth 2.0 with shop-scoped sessions
 - **PII redaction in logs:** `safeLog()` with allowlist (`app/lib/log.server.ts`)
 - **Error monitoring scrubbing:** Sentry `beforeSend` hooks (`app/lib/sentry.ts:83-137`)
@@ -186,6 +186,6 @@ Upon termination:
 
 **App Provider:**
 
-[Raghav to confirm]  
-[Title]  
-[Date]
+Raghav Khanna  
+Owner  
+[App Store submission date]

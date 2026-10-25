@@ -8,16 +8,16 @@
 
 ## 1. Detection
 
-### 1.1 Sentry Error Monitoring
+### 1.1 Error Monitoring
 
-Sentry is initialised in the Cloudflare Workers entry point via `wrapWithSentry()`:
+Error monitoring is not yet enabled. When enabled, Sentry will be initialised in the Cloudflare Workers entry point via `wrapWithSentry()`:
 
-- **Initialisation:** `workers/app.ts:16` wraps the worker handler with Sentry
-- **Configuration:** `app/lib/sentry.ts:173-199` configures the Sentry SDK with:
+- **Initialisation (planned):** `workers/app.ts:16` will wrap the worker handler with Sentry
+- **Configuration (planned):** `app/lib/sentry.ts:173-199` configures the Sentry SDK with:
   - `dataCollection` set to restrictive mode (lines 19-31)
   - `beforeSend` / `beforeSendTransaction` scrubbing hooks (lines 140-150)
 
-Sentry captures:
+When enabled, Sentry will capture:
 - Uncaught exceptions from request handlers
 - SSR render errors via `handleError` in `app/entry.server.tsx:12-23`
 - Manually captured exceptions via `captureExceptionWithTags` (e.g., `app/entry.server.tsx:22`)
@@ -177,7 +177,7 @@ Every Critical or High severity incident requires a post-mortem within [Raghav t
 |------|---------|-------|
 | Incident Owner | Raghav | [Raghav to confirm] |
 | Shopify Partner Security | [Raghav to confirm] | For breach notification |
-| Sentry Account Owner | [Raghav to confirm] | For log access |
+| Sentry Account Owner | [Raghav to confirm] | For log access (when error monitoring is enabled) |
 | Cloudflare Account Owner | [Raghav to confirm] | For worker management |
 | Legal/DPO | [Raghav to confirm] | For regulatory notification |
 

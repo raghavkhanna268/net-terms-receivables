@@ -32,12 +32,11 @@
 
 | Service | 2FA Status | Notes |
 |---------|------------|-------|
-| GitHub | [Raghav to confirm] | Repository and Actions |
-| Shopify Partners | [Raghav to confirm] | App management |
-| Cloudflare | [Raghav to confirm] | Workers, Hyperdrive |
-| Supabase | [Raghav to confirm] | Database access |
-| Sentry | [Raghav to confirm] | Error monitoring |
-| Resend | [Raghav to confirm] | Email delivery |
+| GitHub | Enabled | Repository and Actions |
+| Shopify Partners | Enabled | App management |
+| Cloudflare | Enabled | Workers, Hyperdrive |
+| Supabase | Enabled | Database access |
+| Resend | Enabled | Email delivery |
 
 ---
 
@@ -178,7 +177,7 @@ When enabled (`"1"`), the app fetches and stores buyer email and display name in
 
 ### 5.3 Token Handling
 
-- `Session.accessToken` (`prisma/schema.prisma:123`) and `Session.refreshToken` (`:132`) are stored as plain-text columns; any at-rest encryption is provider-managed by Supabase at the storage layer [Raghav to confirm], not by the app. App-level encryption: not implemented (tracked in issue #266).
+- `Session.accessToken` (`prisma/schema.prisma:123`) and `Session.refreshToken` (`:132`) are stored as plain-text columns; Supabase encrypts data at rest with AES-256 (provider-managed, per [Supabase security](https://supabase.com/security)), not by the app. App-level encryption: not implemented (tracked in issue #266).
 - Refresh token rotation handled by `app/lib/offline-token.server.ts`
 - Invalid tokens trigger `needsReauth` flag (`prisma/schema.prisma:136`) requiring merchant re-authentication
 

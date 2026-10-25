@@ -1,8 +1,8 @@
 # Privacy Policy — Net Terms Receivables
 
-**Effective Date:** [TBD: effective date]
+**Effective Date:** [App Store submission date]
 
-**Last Updated:** [TBD: effective date]
+**Last Updated:** [App Store submission date]
 
 ---
 
@@ -10,10 +10,10 @@
 
 Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wholesale merchants manage net-terms invoices, track credit limits, and match bank transfer payments. This Privacy Policy describes what data we collect, why we collect it, how we use it, and your rights.
 
-**Legal Entity and Contact:**
-- [TBD: legal entity] — Company name, address, and registration details
-- **Contact Email:** [TBD: contact email]
-- **Data Protection Officer:** [TBD: legal entity] (if applicable)
+**Owner/Operator and Contact:**
+- Raghav Khanna
+- **Contact Email:** [privacy contact email]
+- **Data Protection Officer:** Not applicable (individual operator)
 
 ---
 
@@ -128,9 +128,9 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | Cloudflare, Inc. | Application hosting (Workers), connection pooling (Hyperdrive) | Global (Worker placed ap-south-1) | [TBD: DPA] |
 | Supabase, Inc. | Database hosting (Postgres) | AWS ap-south-1 (Mumbai) | [TBD: DPA] |
 | Resend, Inc. | Email delivery (data request notifications, payment reminders) | US | [Resend DPA](https://resend.com/legal/dpa) |
-| Functional Software, Inc. | Error monitoring (Sentry) | [TBD] | [Sentry DPA](https://sentry.io/legal/dpa/) |
+| Functional Software, Inc. | Error monitoring (Sentry) — planned, not active | US | [Sentry DPA](https://sentry.io/legal/dpa/) |
 
-**Note:** Sentry is only active when error monitoring is enabled. Error events are scrubbed before transmission: request headers, cookies, query strings, and body data are removed; exception messages are replaced with error codes; breadcrumbs are deleted; and only allowlisted metadata keys (shopId, code, errorCode, requestId, webhookId, jobId, topic, status) are retained.
+**Note:** Error monitoring is not yet enabled. Error events are scrubbed before transmission: request headers, cookies, query strings, and body data are removed; exception messages are replaced with error codes; breadcrumbs are deleted; and only allowlisted metadata keys (shopId, code, errorCode, requestId, webhookId, jobId, topic, status) are retained.
 
 **Resend data handling:**
 
@@ -281,8 +281,8 @@ We may update this Privacy Policy from time to time. Material changes will be co
 ## 11. Contact
 
 For privacy inquiries:
-- **Email:** [TBD: contact email]
-- **Address:** [TBD: legal entity]
+- **Email:** [privacy contact email]
+- **Owner/Operator:** Raghav Khanna
 
 ---
 
