@@ -80,7 +80,7 @@ Net Terms Receivables is a B2B net-terms receivables management app for Shopify 
 
 - We fetch only the fields needed for receivables: order ID, name, total, payment status, payment terms, company/customer reference
 - We do NOT fetch line items, shipping details, or fulfillment data
-- Customer PII (email, phone, address) is handled per Protected Customer Data Level 1 + Name + Email (REQUESTED, not yet approved)
+- Customer PII (email, phone, address) is handled per PCD Level 1 (Name, Email): requested/draft, not approved
 - Retention/purge jobs exist: `s22_data_requests` with 30-day expiration, GDPR `customers/redact` webhook deletes customer-linked data
 - All data is deleted on `shop/redact` webhook (48 hours post-uninstall)
 

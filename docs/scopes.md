@@ -12,7 +12,7 @@ This document lists all OAuth scopes requested by the Net Terms Receivables app,
 
 #### read_all_orders
 
-**Granted:** 25 Oct 2026
+**Requested:** 25 Oct 2026 22:13 IST; grant evidence accepted by Team Lead (WTB, Partners API access card, 22:23 IST: no Request button, no explicit Approved label); to be confirmed by DevOps's post-release granted-scopes check
 
 Extends `write_orders` (which implies `read_orders`) to access orders older than 60 days.
 

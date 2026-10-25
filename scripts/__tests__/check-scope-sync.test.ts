@@ -133,7 +133,7 @@ scopes = "read_orders,write_orders"
       expect(wranglerScopes).not.toContain("read_locations");
     });
 
-    it("read_all_orders IS present (granted 25 Oct 2026)", () => {
+    it("read_all_orders IS present", () => {
       expect(tomlScopes).toContain("read_all_orders");
       expect(wranglerScopes).toContain("read_all_orders");
     });
