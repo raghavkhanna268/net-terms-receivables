@@ -442,6 +442,7 @@ describe("log.server", () => {
 
         expect(parsed.shopId).toBe("id-123");
         expect(parsed.shopHash).toBeUndefined();
+        expect("shopHash" in parsed).toBe(false);
         expect(output).not.toContain("shopHash");
 
         consoleLogSpy.mockRestore();

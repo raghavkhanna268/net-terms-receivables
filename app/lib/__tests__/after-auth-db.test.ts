@@ -626,6 +626,7 @@ describeWithDb("runAfterAuth cross-isolate reinstall via getRequestSql mock (DB)
 
     vi.doMock("../request-context.server", () => ({
       getRequestSql: vi.fn(() => sql),
+      getRequestEnv: vi.fn(() => ({ LOG_HASH_KEY: "test-key-for-after-auth-db-tests" })),
     }));
 
     vi.doMock("../metafield-definitions.server", () => ({
@@ -1407,6 +1408,7 @@ describeWithDb("full after-auth flow clears metafield errors on reinstall (DB)",
 
       vi.doMock("../request-context.server", () => ({
         getRequestSql: vi.fn(() => sql),
+        getRequestEnv: vi.fn(() => ({ LOG_HASH_KEY: "test-key-for-after-auth-db-tests" })),
       }));
 
       vi.doMock("../metafield-definitions.server", () => ({
@@ -1486,6 +1488,7 @@ describeWithDb("full after-auth flow clears metafield errors on reinstall (DB)",
 
       vi.doMock("../request-context.server", () => ({
         getRequestSql: vi.fn(() => sql),
+        getRequestEnv: vi.fn(() => ({ LOG_HASH_KEY: "test-key-for-after-auth-db-tests" })),
       }));
 
       vi.doMock("../metafield-definitions.server", () => ({
@@ -1557,6 +1560,7 @@ describeWithDb("full after-auth flow clears metafield errors on reinstall (DB)",
 
       vi.doMock("../request-context.server", () => ({
         getRequestSql: vi.fn(() => sql),
+        getRequestEnv: vi.fn(() => ({ LOG_HASH_KEY: "test-key-for-after-auth-db-tests" })),
       }));
 
       vi.doMock("../metafield-definitions.server", () => ({
@@ -1647,6 +1651,7 @@ describeWithDb("full after-auth flow clears metafield errors on reinstall (DB)",
 
       vi.doMock("../request-context.server", () => ({
         getRequestSql: vi.fn(() => sql),
+        getRequestEnv: vi.fn(() => ({ LOG_HASH_KEY: "test-key-for-after-auth-db-tests" })),
       }));
 
       vi.doMock("../metafield-definitions.server", () => ({
