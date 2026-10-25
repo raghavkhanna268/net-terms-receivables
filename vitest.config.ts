@@ -84,6 +84,7 @@ const DB_TEST_PATTERNS = [
   "app/services/__tests__/reminders-catchup-db.test.ts",
   "app/services/__tests__/reminders-uninstalled-db.test.ts",
   "app/services/__tests__/reminder-optout-db.test.ts",
+  "app/services/__tests__/retention-db.test.ts",
 
   // Drain processor DB tests
   "app/services/drain/__tests__/processor-backstop-db.test.ts",
