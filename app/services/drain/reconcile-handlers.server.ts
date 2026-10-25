@@ -160,16 +160,28 @@ export async function startReconcileBulkOperation(
  * For manual runs, pass the manualKey from the companies message so
  * orders uses the same key base (allowing retry even if day key is used).
  *
+ * Guard: Does not enqueue if Shop no longer exists (#239). If shop/redact
+ * ran while companies reconcile was in flight, re-enqueueing would create
+ * a message that can't be processed and would dead-letter.
+ *
  * @param sql - postgres.js SQL client
  * @param shop - Shop domain
  * @param manualKey - Optional manual key base from companies stage
- * @returns Whether the message was enqueued
+ * @returns Whether the message was enqueued (false if shop doesn't exist)
  */
 export async function enqueueReconcileOrders(
   sql: Sql,
   shop: string,
   manualKey?: string
 ): Promise<boolean> {
+  // Guard: don't re-enqueue for a shop that was deleted (redact) (#239)
+  const [shopExists] = await sql<[{ exists: boolean }]>`
+    SELECT EXISTS(SELECT 1 FROM "Shop" WHERE domain = ${shop}) as exists
+  `;
+  if (!shopExists.exists) {
+    return false;
+  }
+
   let webhookId: string;
   if (manualKey) {
     webhookId = `reconcile:${shop}:${manualKey}:orders`;

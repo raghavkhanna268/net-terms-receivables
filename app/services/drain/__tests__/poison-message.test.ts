@@ -170,8 +170,9 @@ describe("Per-message isolation (poison message test)", () => {
     ];
 
     let syncReadCalled = false;
-    const mockSql = Object.assign(
-      vi.fn().mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
+
+    const createMockSqlFn = () => {
+      const fn = vi.fn().mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
         const query = strings.join("?");
 
         // Handle pgmq.read - check values for queue name
@@ -192,7 +193,7 @@ describe("Per-message isolation (poison message test)", () => {
         // Track archives
         if (query.includes("pgmq.archive")) {
           archiveCalls.push(query);
-          return Promise.resolve([{ archived: true }]);
+          return Promise.resolve([{ archive: true }]);
         }
 
         // Track DLQ inserts
@@ -201,14 +202,25 @@ describe("Per-message isolation (poison message test)", () => {
           return Promise.resolve([]);
         }
 
-        // Delete after DLQ
+        // Delete for DLQ - return { delete: true } to indicate success
         if (query.includes("pgmq.delete")) {
-          return Promise.resolve([{ deleted: true }]);
+          return Promise.resolve([{ delete: true }]);
         }
 
         return Promise.resolve([]);
-      }),
-      { json: vi.fn((v: unknown) => v) }
+      });
+      return fn;
+    };
+
+    const mockSql = Object.assign(
+      createMockSqlFn(),
+      {
+        json: vi.fn((v: unknown) => v),
+        begin: vi.fn().mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) => {
+          const txSql = Object.assign(createMockSqlFn(), { json: vi.fn((v: unknown) => v) });
+          return callback(txSql);
+        }),
+      }
     );
 
     const result = await runDrain(mockSql as never);

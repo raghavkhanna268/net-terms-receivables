@@ -964,6 +964,14 @@ async function extendVisibility(sql: Sql, queue: string, msgId: string, seconds:
 
 /**
  * Move a message to the dead-letter queue.
+ *
+ * Delete-first design for shop/redact safety (#239):
+ * If shop/redact deleted this message while we held it under VT, pgmq.delete
+ * returns false and we skip the s6_dead_letter INSERT. This prevents the
+ * DLQ write from re-creating data that the redact just cleaned up.
+ *
+ * @returns true if the message was successfully dead-lettered, false if
+ *          the message was already deleted (e.g., by shop/redact)
  */
 async function moveToDeadLetter(
   sql: Sql,
@@ -971,23 +979,33 @@ async function moveToDeadLetter(
   msgId: string,
   message: SyncMessage | BulkMessage,
   error: string
-): Promise<void> {
-  await sql`
-    INSERT INTO s6_dead_letter (
-      original_queue,
-      original_msg_id,
-      message,
-      error,
-      dead_lettered_at
-    ) VALUES (
-      ${queue},
-      ${msgId},
-      ${sql.json(message)},
-      ${error},
-      NOW()
-    )
-  `;
-  await sql`SELECT pgmq.delete(${queue}, ${msgId}::bigint)`;
+): Promise<boolean> {
+  return sql.begin(async (tx) => {
+    const [result] = await tx<[{ delete: boolean }]>`
+      SELECT pgmq.delete(${queue}, ${msgId}::bigint)
+    `;
+
+    if (!result.delete) {
+      return false;
+    }
+
+    await tx`
+      INSERT INTO s6_dead_letter (
+        original_queue,
+        original_msg_id,
+        message,
+        error,
+        dead_lettered_at
+      ) VALUES (
+        ${queue},
+        ${msgId},
+        ${tx.json(message)},
+        ${error},
+        NOW()
+      )
+    `;
+    return true;
+  });
 }
 
 /**
@@ -1023,14 +1041,14 @@ async function processSyncQueue(
 
     if (!handler) {
       if (msg.read_ct >= config.noHandlerMaxReads) {
-        await moveToDeadLetter(
+        const dlqd = await moveToDeadLetter(
           sql,
           S6_QUEUES.SYNC,
           msg.msg_id,
           msg.message,
           `permanent:no_handler`
         );
-        result.deadLettered++;
+        if (dlqd) result.deadLettered++;
       } else {
         // Extend visibility by 1 hour
         await extendVisibility(sql, S6_QUEUES.SYNC, msg.msg_id, 3600);
@@ -1083,14 +1101,14 @@ async function processSyncQueue(
             }
           }
 
-          await moveToDeadLetter(
+          const dlqd = await moveToDeadLetter(
             sql,
             S6_QUEUES.SYNC,
             msg.msg_id,
             msg.message,
             dlqReason
           );
-          result.deadLettered++;
+          if (dlqd) result.deadLettered++;
         } else {
           // Leave for retry (visibility timeout will make it available again)
           result.failed++;
@@ -1127,8 +1145,8 @@ async function processSyncQueue(
           }
         }
 
-        await moveToDeadLetter(sql, S6_QUEUES.SYNC, msg.msg_id, msg.message, errorCode);
-        result.deadLettered++;
+        const dlqd = await moveToDeadLetter(sql, S6_QUEUES.SYNC, msg.msg_id, msg.message, errorCode);
+        if (dlqd) result.deadLettered++;
       } else {
         result.failed++;
       }
@@ -1177,14 +1195,14 @@ async function processBulkQueue(
 
     if (!handler) {
       if (msg.read_ct >= config.noHandlerMaxReads) {
-        await moveToDeadLetter(
+        const dlqd = await moveToDeadLetter(
           sql,
           S6_QUEUES.BULK,
           msg.msg_id,
           msg.message,
           `permanent:no_handler`
         );
-        result.deadLettered++;
+        if (dlqd) result.deadLettered++;
       } else {
         await extendVisibility(sql, S6_QUEUES.BULK, msg.msg_id, 3600);
         result.noHandler++;
@@ -1198,12 +1216,20 @@ async function processBulkQueue(
       if (bulkResult.success) {
         // Check status for progress vs complete
         if (bulkResult.status === "progress") {
-          // Atomically send continuation and archive old message in one transaction.
+          // Guard: only send continuation if Shop still exists (#239).
+          // If shop was deleted (redact) while we processed this batch, don't re-enqueue.
+          const [shopExists] = await sql<[{ exists: boolean }]>`
+            SELECT EXISTS(SELECT 1 FROM "Shop" WHERE domain = ${msg.message.shop}) as exists
+          `;
+
+          // Atomically send continuation (if shop exists) and archive old message.
           // This eliminates the duplicate-message window entirely:
-          // - If transaction commits: new message exists, old is archived
+          // - If transaction commits: new message exists (if shop alive), old is archived
           // - If transaction fails/crashes: old message retries normally
           await sql.begin(async (tx) => {
-            await tx`SELECT pgmq.send(${S6_QUEUES.BULK}, ${tx.json(msg.message)})`;
+            if (shopExists.exists) {
+              await tx`SELECT pgmq.send(${S6_QUEUES.BULK}, ${tx.json(msg.message)})`;
+            }
             await tx`SELECT pgmq.archive(${S6_QUEUES.BULK}, ${msg.msg_id}::bigint)`;
           });
 
@@ -1224,14 +1250,14 @@ async function processBulkQueue(
 
         if (errorType === "permanent") {
           // Permanent error (4xx, bad data, exhausted retries) - go to DLQ
-          await moveToDeadLetter(
+          const dlqd = await moveToDeadLetter(
             sql,
             S6_QUEUES.BULK,
             msg.msg_id,
             msg.message,
             `permanent:${errorCode}`
           );
-          result.deadLettered++;
+          if (dlqd) result.deadLettered++;
         } else if (errorType === "retryable") {
           // Retryable error - leave message in queue for retry via read_ct
           // The failure_count was already incremented by processBulkOperation
@@ -1240,14 +1266,14 @@ async function processBulkQueue(
         } else {
           // Unknown error type or legacy path - use read_ct for DLQ
           if (msg.read_ct >= config.maxRetries) {
-            await moveToDeadLetter(
+            const dlqd = await moveToDeadLetter(
               sql,
               S6_QUEUES.BULK,
               msg.msg_id,
               msg.message,
               errorCode
             );
-            result.deadLettered++;
+            if (dlqd) result.deadLettered++;
           } else {
             result.failed++;
           }
@@ -1261,8 +1287,8 @@ async function processBulkQueue(
     } catch (err) {
       const errorCode = toErrorCode(err);
       if (msg.read_ct >= config.maxRetries) {
-        await moveToDeadLetter(sql, S6_QUEUES.BULK, msg.msg_id, msg.message, errorCode);
-        result.deadLettered++;
+        const dlqd = await moveToDeadLetter(sql, S6_QUEUES.BULK, msg.msg_id, msg.message, errorCode);
+        if (dlqd) result.deadLettered++;
       } else {
         result.failed++;
       }
