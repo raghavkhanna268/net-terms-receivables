@@ -437,6 +437,7 @@ function BuyerLedgerTable({
   onlyOverLimit,
   onNextPage,
   onPreviousPage,
+  gatingEnforced,
 }: {
   rows: BuyerLedgerRow[];
   sortBy: string;
@@ -447,6 +448,7 @@ function BuyerLedgerTable({
   onlyOverLimit: boolean;
   onNextPage: string;
   onPreviousPage: string;
+  gatingEnforced: boolean;
 }) {
   const totalPages = Math.ceil(totalCount / pageSize);
   const fp = onlyOverLimit ? "&overlimit=true" : "";
@@ -502,7 +504,7 @@ function BuyerLedgerTable({
                   <s-link href={`?buyer=${row.buyer_account_id}&sortBy=${sortBy}&sortOrder=${sortOrder}&page=${page}${fp}`}>
                     {row.buyer_name}
                   </s-link>
-                  {row.is_gated && <s-badge tone="warning">over plan limit</s-badge>}
+                  {gatingEnforced && row.is_gated && <s-badge tone="warning">over plan limit</s-badge>}
                 </s-table-cell>
                 <s-table-cell>
                   {creditLimit !== null
@@ -758,7 +760,7 @@ export default function Index() {
                 <s-paragraph>
                   <s-text type="strong">Show: </s-text>
                   {!onlyOverLimit ? "All" : <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}`}>All</s-link>}
-                  {overLimitCount > 0 && (
+                  {gatingEnforced && overLimitCount > 0 && (
                     <>
                       {" | "}
                       {onlyOverLimit ? "Over limit only" : <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}&overlimit=true`}>Over limit only</s-link>}
@@ -776,6 +778,7 @@ export default function Index() {
                     onlyOverLimit={onlyOverLimit}
                     onNextPage={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page + 1}${onlyOverLimit ? "&overlimit=true" : ""}`}
                     onPreviousPage={`?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page - 1}${onlyOverLimit ? "&overlimit=true" : ""}`}
+                    gatingEnforced={gatingEnforced}
                   />
                 ) : (
                   <s-empty-state heading="No buyer accounts">
