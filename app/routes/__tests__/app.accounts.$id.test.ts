@@ -38,12 +38,13 @@ vi.mock("~/lib/aging-queries.server", () => ({
 
 import { getCreditStatusDisplay, getCompanyTotals } from "~/services/credit-status.server";
 import { getBuyerInvoices } from "~/lib/aging-queries.server";
-import { isAccountActive } from "~/services/gating.server";
+import { isAccountActive, isGatingEnforced } from "~/services/gating.server";
 
 const mockGetCreditStatusDisplay = vi.mocked(getCreditStatusDisplay);
 const mockGetCompanyTotals = vi.mocked(getCompanyTotals);
 const mockGetBuyerInvoices = vi.mocked(getBuyerInvoices);
 const mockIsAccountActive = vi.mocked(isAccountActive);
+const mockIsGatingEnforced = vi.mocked(isGatingEnforced);
 
 const TEST_SHOP = "test-shop.myshopify.com";
 const TEST_SHOP_ID = "shop-123";
@@ -623,8 +624,9 @@ describe("app.accounts.$id loader syncState", () => {
       expect(result.account?.isGated).toBe(false);
     });
 
-    it("gated account with syncPending=true still gets banner data", async () => {
+    it("gated account with syncPending=true still gets banner data when gating enforced", async () => {
       const gatedDate = new Date("2026-10-01T00:00:00Z");
+      mockIsGatingEnforced.mockReturnValue(true);
       setupBaseMocks({ 
         syncPending: true, 
         syncErrorCode: "no_session", 
@@ -639,6 +641,8 @@ describe("app.accounts.$id loader syncState", () => {
       expect(result.creditStatus?.syncState).toBe("needs_attention");
       expect(result.creditStatus?.syncErrorInfo?.category).toBe("session");
       expect(result.creditStatus?.syncErrorInfo?.message).toContain("reopen the app or reinstall");
+      
+      mockIsGatingEnforced.mockReturnValue(false);
     });
   });
 
