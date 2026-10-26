@@ -103,7 +103,7 @@ Reference these existing implementations when filling out the justification:
 
 | Feature | File | What It Does |
 |---------|------|--------------|
-| Bulk order export | `app/services/sync/bulk-operations.server.ts` | Reads order fields for backfill (see lines 135-195 for exact fields) |
+| Bulk order export | `app/services/sync/bulk-operations.server.ts` | Reads order fields for backfill (`BULK_ORDERS_QUERY` at lines 127-210) |
 | Apply matched payment | `app/services/apply.server.ts` | Calls `orderMarkAsPaid` on orders when a confirmed bank match is applied |
 | Order webhooks | `app/routes/webhooks.orders.tsx` | Handles order create/update/paid/cancelled events, including for orders >60 days old |
 | Null refetch handling | `app/services/drain/processor.server.ts` | Handles null refetch for orders >60 days; uses webhook topic as evidence for paid/cancelled state |
