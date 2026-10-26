@@ -88,6 +88,8 @@ describe("isEmailSendingConfigured", () => {
 
   describe("with process.env fallback", () => {
     it("returns true when both are set in process.env", () => {
+      vi.stubEnv("RESEND_API_KEY", undefined);
+      vi.stubEnv("RESEND_FROM", undefined);
       vi.stubEnv("RESEND_API_KEY", "re_fake_key_for_test_only_12345");
       vi.stubEnv("RESEND_FROM", "noreply@example.com");
 
@@ -95,18 +97,24 @@ describe("isEmailSendingConfigured", () => {
     });
 
     it("returns false when only API key is in process.env", () => {
+      vi.stubEnv("RESEND_API_KEY", undefined);
+      vi.stubEnv("RESEND_FROM", undefined);
       vi.stubEnv("RESEND_API_KEY", "re_fake_key_for_test_only_12345");
 
       expect(isEmailSendingConfigured()).toBe(false);
     });
 
     it("returns false when only sender is in process.env", () => {
+      vi.stubEnv("RESEND_API_KEY", undefined);
+      vi.stubEnv("RESEND_FROM", undefined);
       vi.stubEnv("RESEND_FROM", "noreply@example.com");
 
       expect(isEmailSendingConfigured()).toBe(false);
     });
 
     it("env parameter takes precedence over process.env when provided", () => {
+      vi.stubEnv("RESEND_API_KEY", undefined);
+      vi.stubEnv("RESEND_FROM", undefined);
       vi.stubEnv("RESEND_API_KEY", "re_fake_key_for_test_only_12345");
       vi.stubEnv("RESEND_FROM", "noreply@example.com");
 
@@ -119,6 +127,8 @@ describe("isEmailSendingConfigured", () => {
     });
 
     it("undefined in env parameter falls back to process.env (nullish coalescing)", () => {
+      vi.stubEnv("RESEND_API_KEY", undefined);
+      vi.stubEnv("RESEND_FROM", undefined);
       vi.stubEnv("RESEND_API_KEY", "re_fake_key_for_test_only_12345");
       vi.stubEnv("RESEND_FROM", "noreply@example.com");
 
