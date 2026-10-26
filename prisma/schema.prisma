@@ -686,6 +686,10 @@ model S6BulkOperation {
   reconcileStage  String?   @map("reconcile_stage")
   failureCount    Int       @default(0) @map("failure_count")
   chunkSize       Int       @default(524288) @map("chunk_size")
+  /// When the operation was closed. NULL means open.
+  closedAt        DateTime? @map("closed_at") @db.Timestamptz(6)
+  /// Why the operation was closed. Currently only 'reinstall_reset'.
+  closedReason    String?   @map("closed_reason")
 
   @@map("s6_bulk_operations")
 }
