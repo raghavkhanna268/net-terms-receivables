@@ -48,6 +48,7 @@ import { isShopCurrencySupported, NO_CURRENCY_SENTINEL } from "~/lib/shop-curren
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY, CURRENCY_FLIP_BLOCKED_BANNER_TEXT, SUPPORT_EMAIL_MAILTO } from "~/lib/shop-currency-copy";
 import { isEmailSendingConfigured } from "~/lib/email-sender-config.server";
 import { checkAndRecoverCurrency } from "~/services/shop-currency-recovery.server";
+import { getShopReminderSettings } from "~/services/reminders.server";
 import { ServerTiming, mergeServerTimingHeaders, readColdOnce } from "~/lib/server-timing.server";
 
 /**
@@ -424,7 +425,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   // Currency recovery and Admin checks run in parallel; sync state runs alongside untimed.
   const storedCurrency = dbData.currency ?? NO_CURRENCY_SENTINEL;
 
-  const [adminResults, syncState] = await Promise.all([
+  const [adminResults, syncState, reminderSettings] = await Promise.all([
     (async () => {
       timing.startPhase("onboarding_checks");
       const results = await Promise.all([
@@ -437,6 +438,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       return results;
     })(),
     getInitialSyncStateWithRecovery(sql, shopDomain),
+    getShopReminderSettings(sql, dbData.shopId),
   ]);
 
   const [currencyResult, validationResult, paymentCustomizationResult, metafieldStatus] = adminResults;
@@ -450,6 +452,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const paymentCustomizationError = paymentCustomizationResult.error;
 
   const emailSendingConfigured = isEmailSendingConfigured();
+  const remindersEnabled = reminderSettings?.enabled ?? false;
 
   const inputs: OnboardingStepInputs = {
     shopId: dbData.shopId,
@@ -459,6 +462,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     validation,
     paymentCustomization,
     emailSendingConfigured,
+    remindersEnabled,
     dismissedAt: dbData.dismissedAt,
   };
 

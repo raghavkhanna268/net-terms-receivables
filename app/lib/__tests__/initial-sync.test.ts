@@ -52,10 +52,13 @@ describe("initial-sync.server", () => {
   });
 
   describe("getInitialSyncState", () => {
-    it("returns not_started when no bulk operations exist", async () => {
+    it("returns not_started when no bulk operations exist and no queued message", async () => {
       mockSql.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("s6_bulk_operations") && query.includes("companies")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("pgmq.q_s6_sync") && query.includes("RECONCILE_COMPANIES")) {
           return Promise.resolve([]);
         }
         return Promise.resolve([]);
@@ -65,6 +68,24 @@ describe("initial-sync.server", () => {
       const result = await getInitialSyncState(mockSql as unknown as Sql, "test.myshopify.com");
 
       expect(result.status).toBe("not_started");
+    });
+
+    it("returns in_progress when no bulk ops but RECONCILE_COMPANIES message is queued", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("pgmq.q_s6_sync") && query.includes("RECONCILE_COMPANIES")) {
+          return Promise.resolve([{ msg_id: "queued-123" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { getInitialSyncState } = await import("../initial-sync.server");
+      const result = await getInitialSyncState(mockSql as unknown as Sql, "test-queued-sync.myshopify.com");
+
+      expect(result.status).toBe("in_progress");
     });
 
     it("returns in_progress when companies operation exists without completed_at", async () => {
