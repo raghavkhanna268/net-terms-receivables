@@ -140,6 +140,8 @@ export interface DrainConfig {
   maxRetries: number;
   /** Max read_ct for no-handler messages before DLQ (default: 48, ~2 days) */
   noHandlerMaxReads: number;
+  /** Max drain passes per tick (default: 1 = today's single-pass behavior; max: MAX_DRAIN_PASSES) */
+  maxPasses: number;
 }
 
 export const DEFAULT_DRAIN_CONFIG: DrainConfig = {
@@ -148,6 +150,7 @@ export const DEFAULT_DRAIN_CONFIG: DrainConfig = {
   timeBudgetMs: 15000,
   maxRetries: 5,
   noHandlerMaxReads: 48,
+  maxPasses: 1,
 };
 
 /**
@@ -1627,12 +1630,17 @@ async function processSyncQueue(
 
 /**
  * Process the s6_bulk queue.
+ *
+ * @param handledBulkOpIds - Set of bulk operation IDs already handled this tick.
+ *   Continuation messages for these ops are skipped to prevent re-polling
+ *   the same bulk operation multiple times within one tick.
  */
 async function processBulkQueue(
   sql: Sql,
   config: DrainConfig,
   startTime: number,
-  previousResult: DrainResult
+  previousResult: DrainResult,
+  handledBulkOpIds: Set<string>
 ): Promise<DrainResult> {
   const result = { ...previousResult };
 
@@ -1737,6 +1745,13 @@ async function processBulkQueue(
       continue;
     }
 
+    // Skip bulk operations already handled this tick (prevents re-polling continuations)
+    const bulkOpId = msg.message.bulkOperationId;
+    if (bulkOpId && handledBulkOpIds.has(bulkOpId)) {
+      result.skipped++;
+      continue;
+    }
+
     const handler = getBulkHandler(msg.message.topic);
 
     if (!handler) {
@@ -1765,6 +1780,11 @@ async function processBulkQueue(
       const bulkResult = await handler(sql, msg.message);
 
       if (bulkResult.success) {
+        // Mark this bulk operation as handled this tick to prevent re-polling continuations
+        if (bulkOpId) {
+          handledBulkOpIds.add(bulkOpId);
+        }
+
         // Check status for progress vs complete
         if (bulkResult.status === "progress") {
           // Guard: only send continuation if Shop still exists and is not uninstalled (#239).
@@ -1941,7 +1961,8 @@ function countMessagesTouched(result: DrainResult): number {
  * - Both queues return empty in a pass
  * - A pass processed 0 messages in total
  * - Elapsed time reaches the safety margin (timeBudgetMs - PASS_START_MARGIN_MS)
- * - MAX_DRAIN_PASSES is reached
+ * - Elapsed time nears the visibility timeout (prevents message re-read in same tick)
+ * - maxPasses is reached (default 1 = today's behavior; max MAX_DRAIN_PASSES)
  *
  * @param sql - postgres.js SQL client
  * @param config - Drain configuration (optional, uses defaults)
@@ -1954,6 +1975,13 @@ export async function runDrain(
   const fullConfig = { ...DEFAULT_DRAIN_CONFIG, ...config };
   const startTime = Date.now();
   const passStartMargin = fullConfig.timeBudgetMs - PASS_START_MARGIN_MS;
+  const vtMarginMs = fullConfig.visibilityTimeoutSec * 1000;
+
+  // Clamp maxPasses to valid range
+  const maxPasses = Math.max(1, Math.min(fullConfig.maxPasses, MAX_DRAIN_PASSES));
+
+  // Track bulk operation IDs handled this tick to prevent re-polling continuations
+  const handledBulkOpIds = new Set<string>();
 
   const aggregatedResult: DrainResult = {
     processed: 0,
@@ -1967,18 +1995,23 @@ export async function runDrain(
     errors: [],
   };
 
-  for (let pass = 0; pass < MAX_DRAIN_PASSES; pass++) {
-    const elapsed = Date.now() - startTime;
-    if (elapsed >= passStartMargin) {
-      aggregatedResult.timedOut = true;
-      break;
+  for (let pass = 0; pass < maxPasses; pass++) {
+    // Always run pass 1 (pass === 0); check margin only before pass 2+
+    if (pass > 0) {
+      const elapsed = Date.now() - startTime;
+      // Stop if elapsed time nears either the time budget margin or the VT
+      const stopThreshold = Math.min(passStartMargin, vtMarginMs - PASS_START_MARGIN_MS);
+      if (elapsed >= stopThreshold) {
+        aggregatedResult.timedOut = true;
+        break;
+      }
     }
 
     const syncResult = await processSyncQueue(sql, fullConfig, startTime);
 
     let passResult = syncResult;
     if (!syncResult.timedOut) {
-      passResult = await processBulkQueue(sql, fullConfig, startTime, syncResult);
+      passResult = await processBulkQueue(sql, fullConfig, startTime, syncResult, handledBulkOpIds);
     }
 
     aggregatedResult.processed += passResult.processed;
