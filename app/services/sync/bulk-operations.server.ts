@@ -417,19 +417,25 @@ export async function getBulkOperationMetadata(
  * Increment failure count for a bulk operation.
  *
  * #293: Only updates rows where closed_at IS NULL to prevent reopening closed rows.
+ *
+ * R1: Owner-checked with processing_lease_token to prevent stale processor A
+ * from incrementing failure_count after processor B has taken over the lease.
+ * leaseToken is REQUIRED - all processor writes must be owner-checked.
  */
 export async function incrementBulkOperationFailureCount(
   sql: import("~/lib/db-light.server").Sql,
-  bulkOperationId: string
-): Promise<number> {
+  bulkOperationId: string,
+  leaseToken: string
+): Promise<{ rowUpdated: boolean; failureCount: number }> {
   const [row] = await sql<{ failure_count: number }[]>`
     UPDATE s6_bulk_operations
     SET failure_count = failure_count + 1
     WHERE bulk_operation_id = ${bulkOperationId}
       AND closed_at IS NULL
+      AND processing_lease_token = ${leaseToken}
     RETURNING failure_count
   `;
-  return row?.failure_count ?? 0;
+  return { rowUpdated: row !== undefined, failureCount: row?.failure_count ?? 0 };
 }
 
 /**
@@ -437,16 +443,22 @@ export async function incrementBulkOperationFailureCount(
  * Called on successful progress to give the operation a clean slate.
  *
  * #293: Only updates rows where closed_at IS NULL to prevent reopening closed rows.
+ *
+ * R1: Owner-checked with processing_lease_token to prevent stale processor A
+ * from resetting failure_count after processor B has taken over the lease.
+ * leaseToken is REQUIRED - all processor writes must be owner-checked.
  */
 export async function resetBulkOperationFailureCount(
   sql: import("~/lib/db-light.server").Sql,
-  bulkOperationId: string
+  bulkOperationId: string,
+  leaseToken: string
 ): Promise<void> {
   await sql`
     UPDATE s6_bulk_operations
     SET failure_count = 0
     WHERE bulk_operation_id = ${bulkOperationId}
       AND closed_at IS NULL
+      AND processing_lease_token = ${leaseToken}
   `;
 }
 
@@ -454,16 +466,22 @@ export async function resetBulkOperationFailureCount(
  * Update chunk size for a bulk operation (for growing range window).
  *
  * #293: Only updates rows where closed_at IS NULL to prevent reopening closed rows.
+ *
+ * R1: Owner-checked with processing_lease_token to prevent stale processor A
+ * from updating chunk_size after processor B has taken over the lease.
+ * leaseToken is REQUIRED - all processor writes must be owner-checked.
  */
 export async function updateBulkOperationChunkSize(
   sql: import("~/lib/db-light.server").Sql,
   bulkOperationId: string,
-  chunkSize: number
+  chunkSize: number,
+  leaseToken: string
 ): Promise<void> {
   await sql`
     UPDATE s6_bulk_operations
     SET chunk_size = ${chunkSize}
     WHERE bulk_operation_id = ${bulkOperationId}
       AND closed_at IS NULL
+      AND processing_lease_token = ${leaseToken}
   `;
 }

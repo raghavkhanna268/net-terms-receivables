@@ -1,0 +1,270 @@
+# Seed the throwaway e2e store (INR) with test data for Net Terms Receivables.
+#
+# SECURITY CONSTRAINTS (do not weaken):
+# - Manual dispatch only, and the job runs only on refs/heads/main
+# - Inputs are booleans only (dry_run defaults to true). There is NO shop or
+#   domain input: the store comes only from the E2E_SHOP repo secret
+# - E2E_SHOP is masked at once; the guard (scripts/ci/e2e-shop-guard.sh) fails
+#   closed if it is empty, not a *.myshopify.com domain, or equal to the main
+#   dev store (ALLOWED_DEV_STORE secret). Neither value is ever printed
+# - SHOP and seed.ts's dev-store guard env (ALLOWED_DEV_STORE) both come from
+#   E2E_SHOP, so seed.ts refuses any other shop
+# - Access/refresh tokens are NEVER logged, echoed, written to files or uploaded;
+#   the access token is masked with ::add-mask:: immediately
+# - Exits non-zero BEFORE any seed write if: no offline session, no access token,
+#   session needsReauth is set, token expired without a refresh token, or the
+#   refresh failed
+# - Only counts, enums and booleans are printed; seed.ts output is piped through
+#   scripts/ci/redact-seed-output.sh (GIDs, order names, amounts, emails, domains)
+#
+# seed-dev-store.yml (main dev store) is unchanged and separate.
+#
+# Run via GitHub Actions UI: Actions > Seed E2E Store > Run workflow (on main)
+
+name: Seed E2E Store
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (preview only, no mutations)'
+        type: boolean
+        default: true
+      reviewer_demo:
+        description: 'Also seed the reviewer demo company/orders (--reviewer-demo)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: seed-e2e-store
+  cancel-in-progress: false
+
+jobs:
+  seed:
+    name: Seed e2e store
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Same budget as seed-dev-store.yml (~35 orders at 12s pacing + retries)
+    timeout-minutes: 20
+
+    env:
+      # SHOP is NOT set here: step env headers are printed in public logs.
+      # It is resolved from the E2E_SHOP secret and masked.
+      INPUT_DRY_RUN: ${{ inputs.dry_run }}
+      INPUT_REVIEWER_DEMO: ${{ inputs.reviewer_demo }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve, mask and guard e2e-store domain
+        env:
+          # Secrets, so the env header prints ***.
+          E2E_SHOP: ${{ secrets.E2E_SHOP }}
+          MAIN_DEV_STORE: ${{ secrets.ALLOWED_DEV_STORE }}
+        # Masks first; fails closed on empty / bad format / equal to main dev store.
+        # On success writes SHOP and ALLOWED_DEV_STORE (= E2E_SHOP) to GITHUB_ENV.
+        run: bash scripts/ci/e2e-shop-guard.sh
+
+      - name: Setup Node
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Read and refresh offline token
+        id: token
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          DATABASE_URL_SESSION: ${{ secrets.DATABASE_URL_SESSION }}
+          SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
+          SHOPIFY_API_SECRET: ${{ secrets.SHOPIFY_API_SECRET }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
+        run: |
+          set -euo pipefail
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
+
+          # Mask API credentials immediately
+          if [ -n "$SHOPIFY_API_KEY" ]; then
+            echo "::add-mask::$SHOPIFY_API_KEY"
+          fi
+          if [ -n "$SHOPIFY_API_SECRET" ]; then
+            echo "::add-mask::$SHOPIFY_API_SECRET"
+          fi
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL_MIGRATIONS secret is not set"
+            exit 1
+          fi
+          if [ -z "${SHOP:-}" ]; then
+            echo "::error::e2e_shop_unresolved"
+            exit 1
+          fi
+
+          # Read offline session from DB (read-only)
+          SESSION_DATA=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP" -t -A -F '|' "$DATABASE_URL" <<'EOSQL'
+          SELECT
+            "accessToken",
+            expires AT TIME ZONE 'UTC',
+            CASE WHEN "refreshToken" IS NOT NULL AND "refreshToken" != '' THEN 'true' ELSE 'false' END,
+            CASE WHEN "needsReauth" THEN 'true' ELSE 'false' END
+          FROM "Session"
+          WHERE shop = :'shop' AND "isOnline" = false
+          LIMIT 1;
+          EOSQL
+          )
+
+          if [ -z "$SESSION_DATA" ]; then
+            echo "::error::No offline session found for the e2e store"
+            echo "has_session=false"
+            echo "needs_reauth=true"
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "has_session=true"
+
+          ACCESS_TOKEN=$(echo "$SESSION_DATA" | cut -d'|' -f1)
+          EXPIRES_RAW=$(echo "$SESSION_DATA" | cut -d'|' -f2)
+          HAS_REFRESH=$(echo "$SESSION_DATA" | cut -d'|' -f3)
+          NEEDS_REAUTH=$(echo "$SESSION_DATA" | cut -d'|' -f4)
+
+          # Check if we have a token
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "::error::Offline session has no access token"
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # Mask the token immediately before any other use
+          echo "::add-mask::$ACCESS_TOKEN"
+          echo "has_token=true"
+          echo "has_refresh_token=$HAS_REFRESH"
+
+          # Session flagged for merchant re-auth (Session.needsReauth): stop before any write
+          if [ "$NEEDS_REAUTH" != "false" ]; then
+            echo "needs_reauth=true"
+            echo "::error::Offline session needs re-auth (needsReauth set)"
+            exit 1
+          fi
+
+          # Check if token is expired or within 5 minutes of expiry
+          NEEDS_REFRESH=false
+          TOKEN_EXPIRED=false
+          if [ -n "$EXPIRES_RAW" ]; then
+            EXPIRES_EPOCH=$(date -u -d "$EXPIRES_RAW" +%s 2>/dev/null || echo "0")
+            NOW_EPOCH=$(date -u +%s)
+            THRESHOLD_EPOCH=$((NOW_EPOCH + 300)) # 5 minutes from now
+
+            if [ "$EXPIRES_EPOCH" -le "$NOW_EPOCH" ]; then
+              NEEDS_REFRESH=true
+              TOKEN_EXPIRED=true
+            elif [ "$EXPIRES_EPOCH" -le "$THRESHOLD_EPOCH" ]; then
+              NEEDS_REFRESH=true
+            fi
+          fi
+          echo "expired=$TOKEN_EXPIRED"
+
+          # Refresh if needed and we have a refresh token
+          if [ "$NEEDS_REFRESH" = "true" ]; then
+            if [ "$HAS_REFRESH" = "true" ]; then
+              echo "Refreshing token..."
+
+              # Use DATABASE_URL_SESSION for writes (as #49 does)
+              if [ -z "$DATABASE_URL_SESSION" ]; then
+                echo "::error::DATABASE_URL_SESSION secret is not set (required for token refresh)"
+                exit 1
+              fi
+
+              # Capture stdout only (not stderr), validate JSON
+              # Use env -u to unset PGOPTIONS so refresh helper can write to DB
+              REFRESH_RESULT=$(env -u PGOPTIONS DATABASE_URL="$DATABASE_URL_SESSION" npx tsx scripts/lib/refresh-offline-token.ts \
+                --shop "$SHOP" \
+                --threshold-minutes 5) || true
+
+              # Validate JSON output
+              if ! echo "$REFRESH_RESULT" | jq -e . >/dev/null 2>&1; then
+                echo "needs_reauth=true"
+                echo "::error::Token refresh returned invalid JSON"
+                exit 1
+              fi
+
+              # Parse result with guarded jq calls
+              REFRESH_SUCCESS=$(echo "$REFRESH_RESULT" | jq -r '.success // false' 2>/dev/null || echo "false")
+              WAS_REFRESHED=$(echo "$REFRESH_RESULT" | jq -r '.wasRefreshed // false' 2>/dev/null || echo "false")
+
+              if [ "$REFRESH_SUCCESS" = "true" ]; then
+                echo "refreshed=$WAS_REFRESHED"
+                if [ "$WAS_REFRESHED" = "true" ]; then
+                  # Re-read the new token from DB
+                  export PGOPTIONS="-c default_transaction_read_only=on"
+                  ACCESS_TOKEN=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP" -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT "accessToken"
+          FROM "Session"
+          WHERE shop = :'shop' AND "isOnline" = false
+          LIMIT 1;
+          EOSQL
+                  )
+
+                  # Verify we got a token after refresh
+                  if [ -z "$ACCESS_TOKEN" ]; then
+                    echo "::error::No access token found after refresh"
+                    exit 1
+                  fi
+
+                  # Mask the new token
+                  echo "::add-mask::$ACCESS_TOKEN"
+                fi
+              else
+                # errorCode is an enum (RefreshErrorCode | config_error); a failed refresh needs re-auth
+                ERROR_CODE=$(echo "$REFRESH_RESULT" | jq -r '.errorCode // "unknown"' 2>/dev/null || echo "unknown")
+                echo "needs_reauth=true"
+                echo "::error::Token refresh failed: $ERROR_CODE"
+                exit 1
+              fi
+            else
+              echo "needs_reauth=true"
+              echo "::error::Token expired but no refresh token available"
+              exit 1
+            fi
+          else
+            echo "refreshed=false"
+          fi
+          echo "needs_reauth=false"
+
+          # Output token to GITHUB_ENV (masked, never echoed)
+          {
+            echo "SHOPIFY_ADMIN_TOKEN<<EOF_TOKEN"
+            echo "$ACCESS_TOKEN"
+            echo "EOF_TOKEN"
+          } >> "$GITHUB_ENV"
+
+          echo "has_token=true" >> "$GITHUB_OUTPUT"
+
+      - name: Run seed script
+        env:
+          SHOPIFY_ADMIN_TOKEN: ${{ env.SHOPIFY_ADMIN_TOKEN }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+        run: |
+          set -euo pipefail
+
+          # seed.ts validateEnv refuses unless SHOP == ALLOWED_DEV_STORE (both = E2E_SHOP here)
+          ARGS=()
+          if [ "$INPUT_DRY_RUN" = "true" ]; then
+            ARGS+=("--dry-run")
+          fi
+          if [ "$INPUT_REVIEWER_DEMO" = "true" ]; then
+            ARGS+=("--reviewer-demo")
+          fi
+          echo "dry_run=$INPUT_DRY_RUN"
+          echo "reviewer_demo=$INPUT_REVIEWER_DEMO"
+          # Public logs: redact GIDs, order names, amounts, emails and domains
+          # (pipefail keeps seed.ts's exit code).
+          npx tsx scripts/seed.ts "${ARGS[@]}" 2>&1 | bash scripts/ci/redact-seed-output.sh
