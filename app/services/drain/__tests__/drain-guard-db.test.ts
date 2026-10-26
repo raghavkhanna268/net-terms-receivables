@@ -121,6 +121,22 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
     consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     consoleDebugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+
+    // Archive any leftover messages from other tests to prevent cross-test pollution
+    await sqlRef`
+      WITH visible AS (
+        SELECT msg_id FROM pgmq.q_s6_sync
+        WHERE message->>'webhookId' NOT LIKE ${`%${testContext.suffix}%`}
+      )
+      SELECT pgmq.archive('s6_sync', msg_id) FROM visible WHERE msg_id IS NOT NULL
+    `;
+    await sqlRef`
+      WITH visible AS (
+        SELECT msg_id FROM pgmq.q_s6_bulk
+        WHERE message->>'bulkOperationId' NOT LIKE ${`%${testContext.suffix}%`}
+      )
+      SELECT pgmq.archive('s6_bulk', msg_id) FROM visible WHERE msg_id IS NOT NULL
+    `;
   });
 
   afterEach(async () => {
@@ -143,7 +159,7 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
     );
   }
 
-  function findLogEntry(key: string): Record<string, unknown> | null {
+  function findLogEntry(key: string, msgId?: string): Record<string, unknown> | null {
     const allCalls = [
       ...consoleLogSpy.mock.calls,
       ...consoleInfoSpy.mock.calls,
@@ -154,7 +170,11 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
       for (const arg of args) {
         if (typeof arg === "string" && arg.includes(`"event":"${key}"`)) {
           try {
-            return JSON.parse(arg);
+            const parsed = JSON.parse(arg);
+            if (msgId && parsed.msgId !== msgId) {
+              continue;
+            }
+            return parsed;
           } catch {
             continue;
           }
@@ -203,6 +223,12 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
         const deleteResult = await deleteShop(sqlRef, redactedDomain);
         expect(deleteResult.deleted).toBe(true);
 
+        // Verify Shop row is actually gone
+        const [shopCheck] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM "Shop" WHERE domain = ${redactedDomain}
+        `;
+        expect(parseInt(shopCheck.count, 10)).toBe(0);
+
         const webhookId = `wh-late-sync-${suffix}`;
         const message = {
           shop: redactedDomain,
@@ -238,7 +264,7 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
         `;
         expect(parseInt(dlqCount.count, 10)).toBe(0);
 
-        const logEntry = findLogEntry("drain_shop_missing_deleted");
+        const logEntry = findLogEntry("drain_shop_missing_deleted", msgId);
         expect(logEntry).not.toBeNull();
         expect(logEntry!.queue).toBe("sync");
         expect(logEntry!.topic).toBe("ORDERS_UPDATED");
@@ -267,6 +293,12 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
         const { deleteShop } = await import("~/services/compliance/compliance.server");
         const deleteResult = await deleteShop(sqlRef, redactedDomain);
         expect(deleteResult.deleted).toBe(true);
+
+        // Verify Shop row is actually gone
+        const [shopCheck] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM "Shop" WHERE domain = ${redactedDomain}
+        `;
+        expect(parseInt(shopCheck.count, 10)).toBe(0);
 
         const bulkOpId = `bulk-late-${suffix}`;
         const message = {
@@ -303,7 +335,7 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
         `;
         expect(parseInt(dlqCount.count, 10)).toBe(0);
 
-        const logEntry = findLogEntry("drain_shop_missing_deleted");
+        const logEntry = findLogEntry("drain_shop_missing_deleted", msgId);
         expect(logEntry).not.toBeNull();
         expect(logEntry!.queue).toBe("bulk");
         expect(logEntry!.topic).toBe("BULK_OPERATIONS_FINISH");
