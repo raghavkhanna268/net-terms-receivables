@@ -484,9 +484,7 @@ describeWithDb("eligibility-checkout-db", () => {
       }
     });
 
-    // Skipped: customer.server.ts:697-705 does not trim whitespace
-    // See https://github.com/raghavkhanna268/net-terms-receivables/issues/479
-    it.skip("' wholesale ' should match wholesale (skipped: #479)", async () => {
+    it("' wholesale ' should match wholesale", async () => {
       const { shopId, cleanup } = await setupTestShop();
 
       try {
@@ -502,9 +500,7 @@ describeWithDb("eligibility-checkout-db", () => {
       }
     });
 
-    // Skipped: customer.server.ts:697-705 does not trim whitespace
-    // See https://github.com/raghavkhanna268/net-terms-receivables/issues/479
-    it.skip("'wholesale ' should match wholesale (skipped: #479)", async () => {
+    it("'wholesale ' should match wholesale", async () => {
       const { shopId, cleanup } = await setupTestShop();
 
       try {
