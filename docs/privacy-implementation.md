@@ -15,7 +15,7 @@ This section maps public privacy policy data categories to internal database tab
 | s8_tagged_customers | Customer GID, tags, tag_active, email*, displayName* | 2.3 Tagged Customer Data |
 | s8_draft_orders | Draft order GID, buyer account ref, total, status | 2.3 Tagged Customer Data |
 
-*Email and displayName are **gated** by `CUSTOMER_PII_FIELDS=1` env var, which requires Protected Customer Data (PCD) approval. Level 1 + Name and Email fields have been requested in the Partner Dashboard; the fields remain NULL until approval is granted and the flag is enabled.
+*Email and displayName are **gated** by `CUSTOMER_PII_FIELDS=1` env var, which requires Protected Customer Data (PCD) approval. Level 2 (protected customer fields: Name, Email only) request is in Draft, not yet submitted (Raghav to submit), as of 26 Oct 17:15 IST; the fields remain NULL until approval and the flag is enabled.
 
 **PII Minimisation (S22):** When a tagged customer becomes `tag_active=false` and has no open invoices, their email and displayName are automatically nulled.
 
@@ -265,7 +265,7 @@ The app performs nightly reconciliation to ensure local ledger consistency with 
 
 When enabled:
 - `s8_tagged_customers.email` and `s8_tagged_customers.displayName` are populated from Shopify
-- Requires Shopify PCD approval (Level 1 + Name and Email fields)
+- Requires Shopify PCD approval, Level 2 (protected customer fields: Name, Email only)
 
 When disabled or unset:
 - Email and displayName fields remain NULL

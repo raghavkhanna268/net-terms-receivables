@@ -21,7 +21,7 @@ Per [Shopify Access Scopes documentation](https://shopify.dev/docs/api/usage/acc
 | `read_customers` | `write_customers` | `admin-client.server.ts:136-191` (ORDER_QUERY `customer { id }`), `bulk-operations.server.ts:108-186` (BULK_ORDERS_QUERY `purchasingEntity … on Customer`, `customer { id }`), `customer-fields.server.ts:149,229` (`getCustomerQuery`, `getBulkCustomersQuery`), `webhooks.customers.tsx` |
 | `read_orders` | `write_orders` | `bulk-operations.server.ts:108-186` (BULK_ORDERS_QUERY), `webhooks.orders.tsx` |
 
-**Protected Customer Data note:** Reading customer data via `write_customers` is still protected customer data. The PCD approval (Level 1 + Name + Email, 2026-10-23) remains required.
+**Protected Customer Data note:** Reading customer data via `write_customers` is still protected customer data. The PCD approval (Level 1 + Name + Email, 2026-10-23) remains required. [Corrected 26 Oct: not approved; request is Draft, not yet submitted]
 
 ### Final Production Scope List (8)
 
