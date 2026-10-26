@@ -690,7 +690,7 @@ export async function incrementOrderOutstandingMissing(
   shop: string,
   n: number = 1
 ): Promise<boolean> {
-  if (n <= 0) return true;
+  if (n <= 0) return false;
   const result = await sql`
     WITH shop_check AS (
       SELECT 1 FROM "Shop" WHERE domain = ${shop} FOR SHARE
