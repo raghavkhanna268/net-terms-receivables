@@ -24,26 +24,32 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 const SUFFIX = Date.now().toString(36) + "-orders-nosession";
 
 /**
- * Archive all visible messages in q_s6_sync that don't belong to our test shops.
+ * Archive all messages in q_s6_sync that don't belong to our test shops.
  * This prevents batch pollution from other test files' leftover messages.
+ *
+ * Notes:
+ * - Archives ALL foreign rows regardless of vt (visibility timeout) or read_ct,
+ *   because rows read by an earlier drain (vt +30s) can reappear mid-file.
+ * - Handles messages with NULL shop key (message->>'shop' IS NULL).
+ * - Uses pgmq.archive batch overload for efficiency.
  */
 async function archiveStaleQueueMessages(
   sql: ReturnType<typeof postgres>,
   ourDomains: string[]
 ): Promise<number> {
   const result = await sql<{ msg_id: string }[]>`
-    WITH stale AS (
-      SELECT msg_id FROM pgmq.q_s6_sync
-      WHERE vt <= NOW()
-        AND message->>'shop' NOT IN ${sql(ourDomains)}
-    )
-    SELECT msg_id::text FROM stale
+    SELECT msg_id::text FROM pgmq.q_s6_sync
+    WHERE message->>'shop' IS NULL
+       OR message->>'shop' NOT IN ${sql(ourDomains)}
   `;
-  
-  for (const row of result) {
-    await sql`SELECT pgmq.archive('s6_sync', ${row.msg_id}::bigint)`;
+
+  if (result.length === 0) {
+    return 0;
   }
-  
+
+  const msgIds = result.map((r) => r.msg_id);
+  await sql`SELECT pgmq.archive('s6_sync', ${sql.array(msgIds)}::bigint[])`;
+
   return result.length;
 }
 
