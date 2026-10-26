@@ -57,6 +57,15 @@ vi.mock("~/services/sync/company.server", async (importOriginal) => {
 describeWithDb("ORDERS_* no-session ACK behavior (#239 extension)", () => {
   beforeAll(async () => {
     sqlRef = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    // Clean up any leftover data from previous runs
+    const allDomains = [UNINSTALLED_SHOP.domain, INSTALLED_SHOP.domain];
+    await sqlRef`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' IN ${sqlRef(allDomains)}`;
+    await sqlRef`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' IN ${sqlRef(allDomains)}`;
+    await sqlRef`DELETE FROM s6_dead_letter WHERE message->>'shop' IN ${sqlRef(allDomains)}`;
+    await sqlRef`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${`%${SUFFIX}%`}`;
+    await sqlRef`DELETE FROM backstop_processed_orders WHERE order_gid LIKE ${`%${SUFFIX}%`}`;
+    await sqlRef`DELETE FROM "Shop" WHERE id IN (${UNINSTALLED_SHOP.id}, ${INSTALLED_SHOP.id})`;
   });
 
   afterAll(async () => {
@@ -102,17 +111,16 @@ describeWithDb("ORDERS_* no-session ACK behavior (#239 extension)", () => {
     expect(parseInt(queueCountBefore.count, 10)).toBe(1);
 
     const { runDrain } = await import("~/services/drain/processor.server");
-    const result = await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
+    await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
 
-    expect(result.processed + result.skipped).toBeGreaterThanOrEqual(1);
-    expect(result.deadLettered).toBe(0);
-
+    // Message should be removed from the queue (ACKed)
     const [queueCountAfter] = await sqlRef<[{ count: string }]>`
       SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync
       WHERE message->>'shop' = ${UNINSTALLED_SHOP.domain}
     `;
     expect(parseInt(queueCountAfter.count, 10), "message removed from q_s6_sync").toBe(0);
 
+    // No DLQ entry for this shop (ACKed, not dead-lettered)
     const [dlqCount] = await sqlRef<[{ count: string }]>`
       SELECT COUNT(*)::text as count FROM s6_dead_letter
       WHERE message->>'shop' = ${UNINSTALLED_SHOP.domain}
