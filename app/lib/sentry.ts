@@ -38,7 +38,6 @@ const ALLOWED_SENTRY_KEYS = new Set([
   "shopId",
   "code",
   "requestId",
-  "webhookId",
   "jobId",
   "topic",
   "status",
