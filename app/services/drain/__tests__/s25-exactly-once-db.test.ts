@@ -1447,44 +1447,14 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
   // C11: IN ${sql()} empty-list guard and correct filtering
   // The empty list guard prevents crashes when orderIds/orphanParentIds is empty.
   // ==========================================================================
-  describe("C11: IN clause filters correctly", () => {
-    it("empty ids list does not crash and returns gracefully", async () => {
+  describe("C11: empty list guard for IN clause", () => {
+    it("processOrderLines with empty list does not crash IN clause", async () => {
       const { processOrderLines } = await import("~/services/sync/bulk-jsonl-processor.server");
 
       // processOrderLines returns a number (upsert count)
+      // The empty list guard prevents "IN ()" SQL error
       const result = await processOrderLines(sql, TEST_SHOP_ID, TEST_SHOP_DOMAIN, []);
       expect(result).toBe(0);
-    });
-
-    it("IN clause filters by provided order ids only", async () => {
-      // This test verifies that when we have existing invoices in the DB,
-      // the IN clause only fetches the ones that match the input order IDs.
-      // We verify this by checking that an invoice NOT in the input is unchanged.
-      const { loadBulkOperationProgress } = await import("~/services/sync/bulk-jsonl-processor.server");
-
-      const OP_A = `gid://shopify/BulkOperation/c11-in-a-${TEST_SUFFIX}`;
-      const OP_B = `gid://shopify/BulkOperation/c11-in-b-${TEST_SUFFIX}`;
-
-      // Create two ops with different byte offsets
-      await sql`
-        INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, started_at, byte_offset)
-        VALUES
-          (${OP_A}, ${TEST_SHOP_DOMAIN}, 'companies', 'reconcile', NOW(), 100),
-          (${OP_B}, ${TEST_SHOP_DOMAIN}, 'orders', 'reconcile', NOW(), 200)
-      `;
-
-      // Load only OP_A - the IN clause should not return OP_B
-      const progressA = await loadBulkOperationProgress(sql, OP_A);
-      expect(progressA).not.toBeNull();
-      expect(progressA!.byteOffset).toBe(100);
-
-      // Load OP_B separately to verify it exists with different data
-      const progressB = await loadBulkOperationProgress(sql, OP_B);
-      expect(progressB).not.toBeNull();
-      expect(progressB!.byteOffset).toBe(200);
-
-      // Cleanup
-      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id IN (${OP_A}, ${OP_B})`;
     });
   });
 
@@ -1540,9 +1510,9 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const { deleteShop } = await import("~/services/compliance/compliance.server");
       const { enqueueReconcileStage } = await import("../reconcile-handlers.server");
 
-      const LOCK_SHOP_ID = `shop-lock-${TEST_SUFFIX}`;
-      const LOCK_SHOP_DOMAIN = `lock-${TEST_SUFFIX}.myshopify.com`;
-      const bulkOpId = `gid://shopify/BulkOperation/lock-${TEST_SUFFIX}`;
+      const LOCK_SHOP_ID = `shop-test-lock-${TEST_SUFFIX}`;
+      const LOCK_SHOP_DOMAIN = `test-lock-${TEST_SUFFIX}.myshopify.com`;
+      const bulkOpId = `gid://shopify/BulkOperation/test-lock-${TEST_SUFFIX}`;
 
       // Create shop with uninstalledAt set (for deleteShop to work)
       await sql`
@@ -1580,9 +1550,9 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
     it("shop check failure leaves next_stage_enqueued_at NULL", async () => {
       const { enqueueReconcileStage } = await import("../reconcile-handlers.server");
 
-      const NULL_SHOP_ID = `shop-null-${TEST_SUFFIX}`;
-      const NULL_SHOP_DOMAIN = `null-${TEST_SUFFIX}.myshopify.com`;
-      const bulkOpId = `gid://shopify/BulkOperation/null-${TEST_SUFFIX}`;
+      const NULL_SHOP_ID = `shop-test-null-${TEST_SUFFIX}`;
+      const NULL_SHOP_DOMAIN = `test-null-${TEST_SUFFIX}.myshopify.com`;
+      const bulkOpId = `gid://shopify/BulkOperation/test-null-${TEST_SUFFIX}`;
 
       // Create shop that is uninstalled (shop check will fail)
       await sql`
@@ -1609,6 +1579,73 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       // Cleanup
       await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
       await sql`DELETE FROM "Shop" WHERE id = ${NULL_SHOP_ID}`;
+    });
+
+    it("concurrent double-enqueue for same op: exactly one succeeds, no deadlock", async () => {
+      const { enqueueReconcileStage } = await import("../reconcile-handlers.server");
+
+      const RACE_SHOP_ID = `shop-test-race-${TEST_SUFFIX}`;
+      const RACE_SHOP_DOMAIN = `test-race-${TEST_SUFFIX}.myshopify.com`;
+      const bulkOpId = `gid://shopify/BulkOperation/test-race-${TEST_SUFFIX}`;
+
+      // Create shop
+      await sql`
+        INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+        VALUES (${RACE_SHOP_ID}, ${RACE_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+      `;
+
+      // Create completed bulk op that can have next stage enqueued
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage, 
+          started_at, completed_at, next_stage_enqueued_at
+        )
+        VALUES (
+          ${bulkOpId}, ${RACE_SHOP_DOMAIN}, 'companies', 'reconcile', 'companies',
+          NOW() - INTERVAL '1 hour', NOW(), NULL
+        )
+      `;
+
+      // Clear any existing messages
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${RACE_SHOP_DOMAIN}`;
+
+      // Run two concurrent enqueueReconcileStage calls for the same op
+      // Without the fix (using FOR SHARE then UPDATE), this could deadlock
+      const results = await Promise.allSettled([
+        enqueueReconcileStage(sql, RACE_SHOP_DOMAIN, "customers", undefined, bulkOpId),
+        enqueueReconcileStage(sql, RACE_SHOP_DOMAIN, "customers", undefined, bulkOpId),
+      ]);
+
+      // Both should complete (no deadlock 40P01)
+      expect(results[0].status).toBe("fulfilled");
+      expect(results[1].status).toBe("fulfilled");
+
+      // Extract results
+      const result1 = results[0].status === "fulfilled" ? results[0].value : false;
+      const result2 = results[1].status === "fulfilled" ? results[1].value : false;
+
+      // Exactly one should return true (the winner)
+      const successCount = [result1, result2].filter(Boolean).length;
+      expect(successCount).toBe(1);
+
+      // Exactly one queue message should exist
+      const [queueCount] = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${RACE_SHOP_DOMAIN}
+          AND message->>'topic' = 'RECONCILE_CUSTOMERS'
+      `;
+      expect(parseInt(queueCount.count, 10)).toBe(1);
+
+      // Verify next_stage_enqueued_at is set
+      const [row] = await sql<{ next_stage_enqueued_at: Date | null }[]>`
+        SELECT next_stage_enqueued_at FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(row.next_stage_enqueued_at).not.toBeNull();
+
+      // Cleanup
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${RACE_SHOP_DOMAIN}`;
+      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${RACE_SHOP_ID}`;
     });
   });
 
@@ -1688,7 +1725,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
   // ==========================================================================
   // C12e: Fail-safe op-id bind retry
   // ==========================================================================
-  describe("C12e: fail-safe op-id bind with retry", () => {
+  describe("C12e: bind failure keeps claim with NULL op id (residual risk)", () => {
     const BIND_TRIGGER_NAME = "s25_bind_fail_trigger";
     const BIND_TRIGGER_FUNC = "s25_bind_fail_func";
 
@@ -1697,27 +1734,20 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       await sql`DROP FUNCTION IF EXISTS ${sql(BIND_TRIGGER_FUNC)}()`;
     });
 
-    it("op-id bind retries on failure and succeeds", async () => {
+    it("bind failure throws, claim kept with NULL bulk_operation_id", async () => {
       const reconcileHandlers = await import("../reconcile-handlers.server");
       const { adminGraphQL } = await import("../admin-client.server");
 
-      const webhookId = `reconcile:${TEST_SHOP_DOMAIN}:2025-02-10:companies`;
-      const chainKey = `${TEST_SHOP_DOMAIN}:2025-02-10`;
-      const opId = `gid://shopify/BulkOperation/bind-retry-${TEST_SUFFIX}`;
+      const webhookId = `reconcile:${TEST_SHOP_DOMAIN}:2025-02-15:companies`;
+      const chainKey = `${TEST_SHOP_DOMAIN}:2025-02-15`;
+      const opId = `gid://shopify/BulkOperation/test-bind-fail-${TEST_SUFFIX}`;
 
-      // Create trigger that fails the first 2 attempts, succeeds on 3rd
+      // Create trigger that always fails bind (UPDATE from NULL to non-NULL op id)
       await sql`
         CREATE OR REPLACE FUNCTION ${sql(BIND_TRIGGER_FUNC)}() RETURNS TRIGGER AS $$
-        DECLARE
-          fail_count INTEGER;
         BEGIN
           IF OLD.bulk_operation_id IS NULL AND NEW.bulk_operation_id IS NOT NULL THEN
-            -- Use advisory lock to track attempts
-            SELECT COUNT(*) INTO fail_count FROM pg_advisory_locks WHERE locktype = 'advisory' AND objid = 999999;
-            IF fail_count < 2 THEN
-              PERFORM pg_advisory_lock(999999);
-              RAISE EXCEPTION 'Bind fail trigger: simulated transient failure';
-            END IF;
+            RAISE EXCEPTION 'C12e test: simulated bind failure';
           END IF;
           RETURN NEW;
         END;
@@ -1730,7 +1760,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         EXECUTE FUNCTION ${sql(BIND_TRIGGER_FUNC)}()
       `;
 
-      // Mock adminGraphQL
+      // Mock adminGraphQL to return success (Shopify op starts)
       vi.mocked(adminGraphQL).mockResolvedValue({
         success: true,
         data: {
@@ -1742,19 +1772,25 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         retryable: false,
       });
 
-      // The retry logic should handle the transient failures
-      // Note: This test may throw if all retries fail, which is expected behavior
-      // For now, we verify the retry mechanism exists by checking the code path
-      try {
-        await reconcileHandlers.startReconcileBulkOperation(sql, TEST_SHOP_DOMAIN, "companies", webhookId);
-      } catch {
-        // Expected if all retries fail (trigger is too aggressive)
-      }
+      // The call should throw because bind fails
+      await expect(
+        reconcileHandlers.startReconcileBulkOperation(sql, TEST_SHOP_DOMAIN, "companies", webhookId)
+      ).rejects.toThrow("C12e test: simulated bind failure");
+
+      // Drop trigger to check state
+      await sql`DROP TRIGGER IF EXISTS ${sql(BIND_TRIGGER_NAME)} ON s6_reconcile_stage_claims`;
+
+      // The claim should exist with NULL bulk_operation_id (not released)
+      const [claim] = await sql<{ bulk_operation_id: string | null; claimed_at: Date }[]>`
+        SELECT bulk_operation_id, claimed_at FROM s6_reconcile_stage_claims
+        WHERE chain_key = ${chainKey} AND stage = 'companies'
+      `;
+      expect(claim).toBeDefined();
+      expect(claim.bulk_operation_id).toBeNull();
 
       // Cleanup
       await sql`DELETE FROM s6_reconcile_stage_claims WHERE chain_key = ${chainKey}`;
       await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${opId}`;
-      await sql`SELECT pg_advisory_unlock_all()`;
     });
   });
 

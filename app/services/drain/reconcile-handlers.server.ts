@@ -456,27 +456,17 @@ export async function startReconcileBulkOperation(
     // preventing a retry from starting a SECOND Shopify op. The retry will see
     // "already_running" from claimReconcileStage and skip.
     //
-    // FAIL-SAFE: If recordClaimBulkOperationId fails, retry up to 3 times. If all
-    // retries fail, re-throw so the claim stays with NULL bulk_operation_id but
-    // bulkOperationId is set, preventing release. The claim becomes reclaimable
-    // after CLAIM_RECLAIM_MINUTES, but claimReconcileStage will return "orphan"
-    // because the op row exists (once registered). If registration also fails,
-    // the orphan path adopts the existing Shopify op without starting a new one.
+    // RESIDUAL RISK: If recordClaimBulkOperationId fails (DB error), the claim keeps
+    // NULL bulk_operation_id. After CLAIM_RECLAIM_MINUTES, claimReconcileStage's
+    // reclaim path returns "claimed" (not "orphan" because there's no op row yet),
+    // allowing a retry to start a SECOND Shopify op. This requires: (1) DB failure
+    // on bind, (2) this call crashes before registerBulkOperation, (3) 5+ minutes
+    // pass, (4) retry claims and starts another op. Shopify allows 5 concurrent
+    // bulk ops (as of 2026-01), so this doesn't fail immediately, but creates
+    // duplicate work. Mitigation: the original op will complete and can be adopted
+    // by the orphan path if the claim eventually gets its op id recorded.
     if (chainKey) {
-      let bindAttempts = 0;
-      const maxBindAttempts = 3;
-      while (bindAttempts < maxBindAttempts) {
-        try {
-          await recordClaimBulkOperationId(sql, chainKey, kind, shop, bulkOperationId);
-          break;
-        } catch (bindErr) {
-          bindAttempts++;
-          if (bindAttempts >= maxBindAttempts) {
-            throw bindErr;
-          }
-          await new Promise((r) => setTimeout(r, 100 * bindAttempts));
-        }
-      }
+      await recordClaimBulkOperationId(sql, chainKey, kind, shop, bulkOperationId);
     }
 
     // Now register the bulk operation. If this fails, we do NOT release the claim
@@ -587,22 +577,13 @@ export async function enqueueReconcileStage(
     }
 
     // 2. Check/update s6_bulk_operations rows (after Shop lock)
-    // #293: Check that the previous stage's bulk operation is not closed
+    // S25: markNextStageEnqueued's UPDATE includes closed_at IS NULL guard,
+    // so we don't need a separate SELECT. This avoids lock-upgrade deadlock
+    // (two FOR SHARE holders both trying to UPDATE would deadlock).
     if (prevBulkOperationId) {
-      const [prevOp] = await tx<[{ bulk_operation_id: string }?]>`
-        SELECT bulk_operation_id FROM s6_bulk_operations
-        WHERE bulk_operation_id = ${prevBulkOperationId}
-          AND closed_at IS NULL
-        FOR SHARE
-      `;
-      if (!prevOp) {
-        return false;
-      }
-
-      // S25: Atomically check if next stage was already enqueued (after Shop lock)
       const markedEnqueued = await markNextStageEnqueued(tx, prevBulkOperationId, shop);
       if (!markedEnqueued) {
-        // Already enqueued by another processor
+        // Either already enqueued, or op is closed
         return false;
       }
     }
