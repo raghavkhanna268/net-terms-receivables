@@ -18,6 +18,7 @@ import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { assertNoQueueLeftovers } from "../../../../tests/helpers/queue-leftovers";
 import { S6_QUEUES } from "~/lib/pgmq.server";
+import { toErrorCode } from "~/lib/log.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -1004,6 +1005,108 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
         await cleanupTestData([existingDomain, messageShop], suffix);
       }
     });
+
+    it("bulk: underscore in message shop: exact match required (catches = to LIKE mutation)", async () => {
+      const suffix = testContext.suffix;
+      const existingDomain = `test-bulk-underXscore-${suffix}.myshopify.com`;
+      const messageShop = `test-bulk-under_score-${suffix}.myshopify.com`;
+      const shopId = `shop-bulk-underscore-${suffix}`;
+
+      try {
+        const now = new Date();
+
+        await sqlRef`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${shopId}, ${existingDomain}, 'INR', ${now}, ${now})
+        `;
+
+        const bulkOpId = `bulk-wildcard-underscore-${suffix}`;
+        const wildcardMessage = {
+          shop: messageShop,
+          topic: "BULK_OPERATIONS_FINISH",
+          bulkOperationId: bulkOpId,
+          bulkType: "orders",
+          enqueuedAt: new Date().toISOString(),
+        };
+
+        const [sendResult] = await sqlRef<[{ send: string }]>`
+          SELECT pgmq.send(${S6_QUEUES.BULK}, ${sqlRef.json(wildcardMessage)})
+        `;
+        const msgId = sendResult.send;
+
+        const { runDrain } = await import("~/services/drain/processor.server");
+        await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
+
+        const [wildcardDeleted] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM pgmq.q_s6_bulk
+          WHERE message->>'bulkOperationId' = ${bulkOpId}
+        `;
+        expect(parseInt(wildcardDeleted.count, 10)).toBe(0);
+
+        const [wildcardArchive] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM pgmq.a_s6_bulk
+          WHERE message->>'bulkOperationId' = ${bulkOpId}
+        `;
+        expect(parseInt(wildcardArchive.count, 10)).toBe(0);
+
+        const logEntry = findLogEntry("drain_shop_missing_deleted", msgId);
+        expect(logEntry).not.toBeNull();
+        expect(logEntry!.queue).toBe("bulk");
+      } finally {
+        await cleanupTestData([existingDomain, messageShop], suffix);
+      }
+    });
+
+    it("bulk: percent in message shop: exact match required (catches = to LIKE mutation)", async () => {
+      const suffix = testContext.suffix;
+      const existingDomain = `test-bulk-pctxyz-${suffix}.myshopify.com`;
+      const messageShop = `test-bulk-pct%-${suffix}.myshopify.com`;
+      const shopId = `shop-bulk-pct-${suffix}`;
+
+      try {
+        const now = new Date();
+
+        await sqlRef`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${shopId}, ${existingDomain}, 'INR', ${now}, ${now})
+        `;
+
+        const bulkOpId = `bulk-wildcard-pct-${suffix}`;
+        const wildcardMessage = {
+          shop: messageShop,
+          topic: "BULK_OPERATIONS_FINISH",
+          bulkOperationId: bulkOpId,
+          bulkType: "orders",
+          enqueuedAt: new Date().toISOString(),
+        };
+
+        const [sendResult] = await sqlRef<[{ send: string }]>`
+          SELECT pgmq.send(${S6_QUEUES.BULK}, ${sqlRef.json(wildcardMessage)})
+        `;
+        const msgId = sendResult.send;
+
+        const { runDrain } = await import("~/services/drain/processor.server");
+        await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
+
+        const [wildcardDeleted] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM pgmq.q_s6_bulk
+          WHERE message->>'bulkOperationId' = ${bulkOpId}
+        `;
+        expect(parseInt(wildcardDeleted.count, 10)).toBe(0);
+
+        const [wildcardArchive] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM pgmq.a_s6_bulk
+          WHERE message->>'bulkOperationId' = ${bulkOpId}
+        `;
+        expect(parseInt(wildcardArchive.count, 10)).toBe(0);
+
+        const logEntry = findLogEntry("drain_shop_missing_deleted", msgId);
+        expect(logEntry).not.toBeNull();
+        expect(logEntry!.queue).toBe("bulk");
+      } finally {
+        await cleanupTestData([existingDomain, messageShop], suffix);
+      }
+    });
   });
 
   describe("DB error handling in guard", () => {
@@ -1040,13 +1143,16 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
         }) as typeof sqlRef;
 
         const { runDrain } = await import("~/services/drain/processor.server");
-        await runDrain(proxiedSql, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 5 });
+        const result = await runDrain(proxiedSql, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 5 });
+
+        expect(result.failed).toBe(1);
+        expect(result.deadLettered).toBe(0);
 
         const errorLog = findLogEntry("sync_message_exception");
         expect(errorLog).not.toBeNull();
         expect(errorLog!.topic).toBe("ORDERS_UPDATED");
         expect(errorLog!.queue).toBe("s6_sync");
-        expect(errorLog!.errorCode).toBeDefined();
+        expect(errorLog!.errorCode).toBe(toErrorCode(errorOnce));
         expect(errorLog!.readCt).toBe(1);
 
         const [stillInQueue] = await sqlRef<[{ count: string }]>`
@@ -1093,18 +1199,28 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
         }) as typeof sqlRef;
 
         const { runDrain } = await import("~/services/drain/processor.server");
-        await runDrain(proxiedSql, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 5 });
+        const result = await runDrain(proxiedSql, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 5 });
+
+        expect(result.deadLettered).toBe(1);
+        expect(result.failed).toBe(0);
+        expect(result.processed).toBe(0);
+        expect(result.deadLetterAlreadyGoneCount).toBe(0);
+
+        const [dlqCount] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM s6_dead_letter WHERE message->>'webhookId' = ${webhookId}
+        `;
+        expect(parseInt(dlqCount.count, 10)).toBe(1);
 
         const [dlqRow] = await sqlRef<[{ message: Record<string, unknown>; error: string }?]>`
           SELECT message, error FROM s6_dead_letter WHERE message->>'webhookId' = ${webhookId}
         `;
         expect(dlqRow).toBeDefined();
         expect(dlqRow!.message.webhookId).toBe(webhookId);
-        expect(dlqRow!.error).toMatch(/^permanent:/);
+        expect(dlqRow!.error).toBe(`permanent:${toErrorCode(alwaysThrow)}`);
 
         const errorLog = findLogEntry("sync_message_exception");
         expect(errorLog).not.toBeNull();
-        expect(errorLog!.errorCode).toBeDefined();
+        expect(errorLog!.errorCode).toBe(toErrorCode(alwaysThrow));
         expect(errorLog!.readCt).toBe(5);
 
         const [notInQueue] = await sqlRef<[{ count: string }]>`
@@ -1152,13 +1268,16 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
         }) as typeof sqlRef;
 
         const { runDrain } = await import("~/services/drain/processor.server");
-        await runDrain(proxiedSql, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 5 });
+        const result = await runDrain(proxiedSql, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 5 });
+
+        expect(result.failed).toBe(1);
+        expect(result.deadLettered).toBe(0);
 
         const errorLog = findLogEntry("bulk_message_exception");
         expect(errorLog).not.toBeNull();
         expect(errorLog!.topic).toBe("BULK_OPERATIONS_FINISH");
         expect(errorLog!.queue).toBe("s6_bulk");
-        expect(errorLog!.errorCode).toBeDefined();
+        expect(errorLog!.errorCode).toBe(toErrorCode(errorOnce));
         expect(errorLog!.readCt).toBe(1);
 
         const [stillInQueue] = await sqlRef<[{ count: string; read_ct: string }?]>`
@@ -1212,18 +1331,28 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
         }) as typeof sqlRef;
 
         const { runDrain } = await import("~/services/drain/processor.server");
-        await runDrain(proxiedSql, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 5 });
+        const result = await runDrain(proxiedSql, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 5 });
+
+        expect(result.deadLettered).toBe(1);
+        expect(result.failed).toBe(0);
+        expect(result.processed).toBe(0);
+        expect(result.deadLetterAlreadyGoneCount).toBe(0);
+
+        const [dlqCount] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM s6_dead_letter WHERE message->>'bulkOperationId' = ${bulkOpId}
+        `;
+        expect(parseInt(dlqCount.count, 10)).toBe(1);
 
         const [dlqRow] = await sqlRef<[{ message: Record<string, unknown>; error: string }?]>`
           SELECT message, error FROM s6_dead_letter WHERE message->>'bulkOperationId' = ${bulkOpId}
         `;
         expect(dlqRow).toBeDefined();
         expect(dlqRow!.message.bulkOperationId).toBe(bulkOpId);
-        expect(dlqRow!.error).toMatch(/^permanent:/);
+        expect(dlqRow!.error).toBe(`permanent:${toErrorCode(alwaysThrow)}`);
 
         const errorLog = findLogEntry("bulk_message_exception");
         expect(errorLog).not.toBeNull();
-        expect(errorLog!.errorCode).toBeDefined();
+        expect(errorLog!.errorCode).toBe(toErrorCode(alwaysThrow));
         expect(errorLog!.readCt).toBe(5);
 
         const [notInQueue] = await sqlRef<[{ count: string }]>`
