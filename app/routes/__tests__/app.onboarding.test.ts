@@ -2966,3 +2966,106 @@ describe("Sequential DB: Initial Sync currency UI", () => {
     });
   });
 });
+
+describe("Button loading state isolation", () => {
+  afterEach(() => {
+    vi.doUnmock("react-router");
+    vi.resetModules();
+  });
+
+  it("Retry submit does not put Dismiss into loading state (fails on revert)", async () => {
+    const mockFormData = new FormData();
+    mockFormData.set("_action", "retry_registration");
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 0,
+            totalCount: 5,
+            dismissedAt: null,
+          },
+          registrationStatus: {
+            validation: { name: "Validation Function", status: "missing" },
+            paymentCustomization: { name: "Payment Customization", status: "ok" },
+            metafieldDefinitions: { name: "Metafield Definitions", status: "ok" },
+          },
+          initialSyncState: { status: "not_started" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+          currencyFlipBlocked: false,
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({
+          state: "submitting",
+          formData: mockFormData,
+        }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    expect(html).toContain("Retrying...");
+    expect(html).toContain("Dismiss for now");
+    expect(html).not.toContain("Dismissing...");
+  });
+
+  it("Dismiss submit does not put Retry into loading state (fails on revert)", async () => {
+    const mockFormData = new FormData();
+    mockFormData.set("_action", "dismiss");
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 0,
+            totalCount: 5,
+            dismissedAt: null,
+          },
+          registrationStatus: {
+            validation: { name: "Validation Function", status: "missing" },
+            paymentCustomization: { name: "Payment Customization", status: "ok" },
+            metafieldDefinitions: { name: "Metafield Definitions", status: "ok" },
+          },
+          initialSyncState: { status: "not_started" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+          currencyFlipBlocked: false,
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({
+          state: "submitting",
+          formData: mockFormData,
+        }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    expect(html).toContain("Dismissing...");
+    expect(html).toContain("Retry");
+    expect(html).not.toContain("Retrying...");
+  });
+});

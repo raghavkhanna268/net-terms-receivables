@@ -862,6 +862,8 @@ export default function OnboardingPage() {
 
   const isRetrying = isSubmitting && navigation.formData?.get("_action") === "retry_registration";
   const isStartingSync = isSubmitting && navigation.formData?.get("_action") === "start_sync";
+  const isDismissing = isSubmitting && navigation.formData?.get("_action") === "dismiss";
+  const isReopening = isSubmitting && navigation.formData?.get("_action") === "reopen";
 
   const currentRegistrationStatus: RegistrationStatus | null =
     actionData?.action === "retry_registration" && actionData.registrationStatus
@@ -1016,16 +1018,16 @@ export default function OnboardingPage() {
             {!isDismissed && !state.isComplete && (
               <Form method="post">
                 <input type="hidden" name="_action" value="dismiss" />
-                <s-button type="submit" disabled={isSubmitting}>
-                  {isSubmitting ? "Dismissing..." : "Dismiss for now"}
+                <s-button type="submit" disabled={isDismissing}>
+                  {isDismissing ? "Dismissing..." : "Dismiss for now"}
                 </s-button>
               </Form>
             )}
             {isDismissed && (
               <Form method="post">
                 <input type="hidden" name="_action" value="reopen" />
-                <s-button type="submit" variant="primary" disabled={isSubmitting}>
-                  {isSubmitting ? "Reopening..." : "Continue setup"}
+                <s-button type="submit" variant="primary" disabled={isReopening}>
+                  {isReopening ? "Reopening..." : "Continue setup"}
                 </s-button>
               </Form>
             )}
