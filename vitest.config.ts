@@ -158,6 +158,9 @@ const DB_TEST_PATTERNS = [
 
   // Ingestion paths DB tests
   "tests/integration/ingestion-paths-db.test.ts",
+
+  // Confirm concurrency lock DB tests
+  "tests/integration/confirm-concurrency-lock-db.test.ts",
 ];
 
 export default defineConfig({
