@@ -131,7 +131,7 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
      * - Line 4: Empty line
      * - Line 5: "HDFC BANK"
      * - Line 6: "Statement of Account"
-     * - Line 7: "Account No: 00999888777666"
+     * - Line 7: "Account No: SYNT00999888777"
      * - Line 8: "Account Type: Savings Account"
      * - Line 9: "Branch: SYNTHETIC REVIEW BRANCH"
      * - Line 10: Empty line
