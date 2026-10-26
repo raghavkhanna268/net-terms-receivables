@@ -49,43 +49,33 @@ const PENDING_FOLLOWUP_ALLOWLIST: Array<{
 }> = [
   {
     file: "app/services/compliance/compliance.server.ts",
-    line: 972,
+    line: 983,
     reason: "pending follow-up: remove after Developer PR merges",
   },
   {
     file: "app/services/compliance/compliance.server.ts",
-    line: 976,
+    line: 987,
     reason: "pending follow-up: remove after Developer PR merges",
   },
   {
     file: "app/services/compliance/compliance.server.ts",
-    line: 985,
+    line: 996,
     reason: "pending follow-up: remove after Developer PR merges",
   },
   {
     file: "app/services/compliance/compliance.server.ts",
-    line: 998,
-    reason: "pending follow-up: remove after Developer PR merges",
-  },
-  {
-    file: "app/routes/privacy.tsx",
-    line: 266,
-    reason: "pending follow-up: rename in second PR (after #357 merged)",
-  },
-  {
-    file: "app/services/compliance/__tests__/compliance.test.ts",
-    line: 1051,
+    line: 1009,
     reason: "pending follow-up: remove after Developer PR merges",
   },
   {
     file: "app/services/compliance/__tests__/compliance.test.ts",
-    line: 1053,
+    line: 1058,
     reason: "pending follow-up: remove after Developer PR merges",
   },
   {
-    file: "app/routes/__tests__/privacy.test.ts",
-    line: 105,
-    reason: "pending follow-up: rename in second PR (after #357 merged)",
+    file: "app/services/compliance/__tests__/compliance.test.ts",
+    line: 1060,
+    reason: "pending follow-up: remove after Developer PR merges",
   },
 ];
 
@@ -94,6 +84,7 @@ export interface OldNameMatch {
   line: number;
   text: string;
   offset: number;
+  matchLength: number;
 }
 
 /**
@@ -127,6 +118,9 @@ export function scanForOldName(
   let match: RegExpExecArray | null;
 
   while ((match = pattern.exec(normalized)) !== null) {
+    const normalizedMatchLength = match[0].length;
+    const normalizedMatchEnd = match.index + normalizedMatchLength;
+
     let originalOffset = 0;
     let normalizedOffset = 0;
 
@@ -144,14 +138,32 @@ export function scanForOldName(
       normalizedOffset++;
     }
 
-    const lineNumber = offsetToLine(content, originalOffset);
+    const matchStartOriginal = originalOffset;
+
+    while (normalizedOffset < normalizedMatchEnd && originalOffset < content.length) {
+      const char = content[originalOffset];
+      if (/\s/.test(char)) {
+        while (
+          originalOffset < content.length - 1 &&
+          /\s/.test(content[originalOffset + 1])
+        ) {
+          originalOffset++;
+        }
+      }
+      originalOffset++;
+      normalizedOffset++;
+    }
+
+    const matchLength = originalOffset - matchStartOriginal;
+    const lineNumber = offsetToLine(content, matchStartOriginal);
     const lineText = lines[lineNumber - 1] || "";
 
     matches.push({
       file: filePath,
       line: lineNumber,
       text: lineText.trim().slice(0, 100),
-      offset: originalOffset,
+      offset: matchStartOriginal,
+      matchLength,
     });
   }
 
@@ -167,21 +179,51 @@ function isInSkipPath(filePath: string): boolean {
   return false;
 }
 
-function isPendingFollowup(filePath: string, lineNumber: number): boolean {
-  return PENDING_FOLLOWUP_ALLOWLIST.some(
-    (entry) => filePath === entry.file && lineNumber === entry.line
-  );
+/**
+ * Check if the offset is on a line matching an allowlist pattern.
+ * Uses exact line matching (not a context window).
+ */
+export function isAllowlisted(content: string, offset: number): boolean {
+  const lineStart = content.lastIndexOf("\n", offset - 1) + 1;
+  const lineEnd = content.indexOf("\n", offset);
+  const line = content.slice(lineStart, lineEnd === -1 ? content.length : lineEnd);
+
+  return ALLOWLIST_PATTERNS.some(({ pattern }) => pattern.test(line));
 }
 
-function isAllowlisted(content: string, offset: number, matchLength: number): boolean {
-  const contextStart = Math.max(0, offset - 100);
-  const contextEnd = Math.min(content.length, offset + matchLength + 100);
-  const context = content.slice(contextStart, contextEnd);
+/**
+ * Check if offset is inside a string literal.
+ * Handles single quotes, double quotes, and template literals.
+ */
+function isInsideStringLiteral(content: string, offset: number): boolean {
+  let inSingle = false;
+  let inDouble = false;
+  let inTemplate = false;
 
-  return ALLOWLIST_PATTERNS.some(({ pattern }) => pattern.test(context));
+  for (let i = 0; i < offset && i < content.length; i++) {
+    const char = content[i];
+    const prev = i > 0 ? content[i - 1] : "";
+
+    if (prev === "\\") continue;
+
+    if (char === "'" && !inDouble && !inTemplate) {
+      inSingle = !inSingle;
+    } else if (char === '"' && !inSingle && !inTemplate) {
+      inDouble = !inDouble;
+    } else if (char === "`" && !inSingle && !inDouble) {
+      inTemplate = !inTemplate;
+    }
+  }
+
+  return inSingle || inDouble || inTemplate;
 }
 
-function isInComment(content: string, offset: number): boolean {
+/**
+ * Check if offset is inside a comment (line or block).
+ * Properly handles line comments, block comments, unclosed block comments
+ * (not treated as comments), and comment markers inside string literals.
+ */
+export function isInComment(content: string, offset: number): boolean {
   const lineStart = content.lastIndexOf("\n", offset) + 1;
   const lineContent = content.slice(lineStart, offset);
   const trimmed = lineContent.trim();
@@ -189,13 +231,67 @@ function isInComment(content: string, offset: number): boolean {
   if (trimmed.startsWith("//")) return true;
   if (trimmed.startsWith("*")) return true;
 
-  const lastBlockOpen = content.lastIndexOf("/*", offset);
-  const lastBlockClose = content.lastIndexOf("*/", offset);
-  if (lastBlockOpen !== -1 && lastBlockOpen > lastBlockClose) {
-    return true;
+  let lastValidBlockOpen = -1;
+  let searchStart = 0;
+
+  while (true) {
+    const blockOpen = content.indexOf("/*", searchStart);
+    if (blockOpen === -1 || blockOpen >= offset) break;
+
+    if (!isInsideStringLiteral(content, blockOpen)) {
+      const blockClose = content.indexOf("*/", blockOpen + 2);
+      if (blockClose === -1 || blockClose >= offset) {
+        lastValidBlockOpen = blockOpen;
+        break;
+      }
+      searchStart = blockClose + 2;
+    } else {
+      searchStart = blockOpen + 2;
+    }
+  }
+
+  if (lastValidBlockOpen !== -1) {
+    const nextClose = content.indexOf("*/", offset);
+    if (nextClose !== -1) {
+      return true;
+    }
   }
 
   return false;
+}
+
+/**
+ * Find violations in file content after applying comment and allowlist filters.
+ * This is the core logic used by the guard test.
+ */
+export function findViolations(
+  content: string,
+  filePath: string,
+  pendingAllowlist: Array<{ file: string; line: number }> = []
+): OldNameMatch[] {
+  const matches = scanForOldName(content, filePath);
+  const violations: OldNameMatch[] = [];
+
+  for (const match of matches) {
+    if (isInComment(content, match.offset)) {
+      continue;
+    }
+
+    if (isAllowlisted(content, match.offset)) {
+      continue;
+    }
+
+    const isPending = pendingAllowlist.some(
+      (entry) => filePath === entry.file && match.line === entry.line
+    );
+    if (isPending) {
+      continue;
+    }
+
+    violations.push(match);
+  }
+
+  return violations;
 }
 
 function findTsFiles(dir: string, files: string[] = []): string[] {
@@ -276,7 +372,7 @@ describe("App Name Guard", () => {
   it("no old app name in UI strings (app/**/*.{ts,tsx})", () => {
     const appDir = path.join(process.cwd(), "app");
     const files = findTsFiles(appDir);
-    const violations: OldNameMatch[] = [];
+    const allViolations: OldNameMatch[] = [];
 
     for (const filePath of files) {
       const relativePath = path.relative(process.cwd(), filePath);
@@ -286,31 +382,16 @@ describe("App Name Guard", () => {
       }
 
       const content = fs.readFileSync(filePath, "utf-8");
-      const matches = scanForOldName(content, relativePath);
-
-      for (const match of matches) {
-        if (isInComment(content, match.offset)) {
-          continue;
-        }
-
-        if (isAllowlisted(content, match.offset, 22)) {
-          continue;
-        }
-
-        if (isPendingFollowup(relativePath, match.line)) {
-          continue;
-        }
-
-        violations.push(match);
-      }
+      const violations = findViolations(content, relativePath, PENDING_FOLLOWUP_ALLOWLIST);
+      allViolations.push(...violations);
     }
 
-    if (violations.length > 0) {
-      const message = violations
+    if (allViolations.length > 0) {
+      const message = allViolations
         .map((v) => `  ${v.file}:${v.line}: ${v.text}`)
         .join("\n");
       expect.fail(
-        `Found ${violations.length} occurrence(s) of old app name in UI strings:\n${message}`
+        `Found ${allViolations.length} occurrence(s) of old app name in UI strings:\n${message}`
       );
     }
   });
@@ -322,7 +403,7 @@ describe("App Name Guard", () => {
     }
 
     const files = findTsFiles(emailsDir);
-    const violations: OldNameMatch[] = [];
+    const allViolations: OldNameMatch[] = [];
 
     for (const filePath of files) {
       const relativePath = path.relative(process.cwd(), filePath);
@@ -332,27 +413,16 @@ describe("App Name Guard", () => {
       }
 
       const content = fs.readFileSync(filePath, "utf-8");
-      const matches = scanForOldName(content, relativePath);
-
-      for (const match of matches) {
-        if (isInComment(content, match.offset)) {
-          continue;
-        }
-
-        if (isPendingFollowup(relativePath, match.line)) {
-          continue;
-        }
-
-        violations.push(match);
-      }
+      const violations = findViolations(content, relativePath, PENDING_FOLLOWUP_ALLOWLIST);
+      allViolations.push(...violations);
     }
 
-    if (violations.length > 0) {
-      const message = violations
+    if (allViolations.length > 0) {
+      const message = allViolations
         .map((v) => `  ${v.file}:${v.line}: ${v.text}`)
         .join("\n");
       expect.fail(
-        `Found ${violations.length} occurrence(s) of old app name in email templates:\n${message}`
+        `Found ${allViolations.length} occurrence(s) of old app name in email templates:\n${message}`
       );
     }
   });
@@ -410,5 +480,87 @@ const b = "Net Terms Receivables";
     expect(matches.length).toBe(2);
     expect(matches[0].line).toBe(2);
     expect(matches[1].line).toBe(3);
+  });
+
+  it("computes matchLength from actual matched text (fails on hardcoded 22)", () => {
+    const fixture = `const name = "Net Terms Receivables";`;
+    const matches = scanForOldName(fixture, "test-fixture.ts");
+    expect(matches.length).toBe(1);
+    expect(matches[0].matchLength).toBe(21);
+  });
+
+  it("computes matchLength correctly for multi-line split name", () => {
+    const fixture = `const name = "Net Terms
+    Receivables";`;
+    const matches = scanForOldName(fixture, "test-fixture.ts");
+    expect(matches.length).toBe(1);
+    expect(matches[0].matchLength).toBe(25);
+  });
+});
+
+describe("isInComment (unit tests)", () => {
+  it("filters match inside line comment", () => {
+    const fixture = `// Net Terms Receivables comment
+const x = 1;`;
+    const violations = findViolations(fixture, "test-fixture.ts");
+    expect(violations.length).toBe(0);
+  });
+
+  it("filters match inside properly closed block comment", () => {
+    const fixture = `/* Net Terms Receivables */ const x = 1;`;
+    const violations = findViolations(fixture, "test-fixture.ts");
+    expect(violations.length).toBe(0);
+  });
+
+  it("unclosed /* does not hide a later real match (fails on main)", () => {
+    const fixture = `const x = "text /* not a comment";
+const y = "Net Terms Receivables";`;
+    const violations = findViolations(fixture, "test-fixture.ts");
+    expect(violations.length).toBe(1);
+    expect(violations[0].line).toBe(2);
+  });
+
+  it("/* inside string literal does not hide later match (fails on main)", () => {
+    const fixture = `const regex = "pattern /* here";
+const name = "Net Terms Receivables";
+const end = "and */ done";`;
+    const violations = findViolations(fixture, "test-fixture.ts");
+    expect(violations.length).toBe(1);
+    expect(violations[0].line).toBe(2);
+  });
+
+  it("real block comment still filters correctly", () => {
+    const fixture = `const before = 1;
+/* 
+Net Terms Receivables inside comment
+*/
+const after = "Net Terms Receivables";`;
+    const violations = findViolations(fixture, "test-fixture.ts");
+    expect(violations.length).toBe(1);
+    expect(violations[0].line).toBe(5);
+  });
+});
+
+describe("isAllowlisted (unit tests)", () => {
+  it("allowlist entry only exempts its exact line (fails on main)", () => {
+    const fixture = `const url = "github.com/user/net-terms-receivables";
+const name = "Net Terms Receivables";`;
+    const violations = findViolations(fixture, "test-fixture.ts");
+    expect(violations.length).toBe(1);
+    expect(violations[0].line).toBe(2);
+  });
+
+  it("allowlist pattern on same line filters the match", () => {
+    const fixture = `const url = "github.com/user/net-terms-receivables Net Terms Receivables";`;
+    const violations = findViolations(fixture, "test-fixture.ts");
+    expect(violations.length).toBe(0);
+  });
+
+  it("allowlist does not apply across lines within 100 chars (fails on main)", () => {
+    const fixture = `const h = "net-terms-receivables";
+const m = "Net Terms Receivables";`;
+    const violations = findViolations(fixture, "test-fixture.ts");
+    expect(violations.length).toBe(1);
+    expect(violations[0].line).toBe(2);
   });
 });

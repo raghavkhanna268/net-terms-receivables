@@ -183,7 +183,7 @@ interface ClearUninstalledResult {
  */
 async function clearUninstalledAtAndMetafieldErrors(sql: Sql, shop: string): Promise<ClearUninstalledResult> {
   try {
-    const result = await sql<{ id: string; closed_count: number }[]>`
+    const result = await sql<{ id: string; closed_count: number; deleted_claims_count: number }[]>`
       WITH reinstalled_shop AS (
         UPDATE "Shop"
         SET "uninstalledAt" = NULL, onboarding_dismissed_at = NULL
@@ -203,18 +203,28 @@ async function clearUninstalledAtAndMetafieldErrors(sql: Sql, shop: string): Pro
           AND EXISTS (SELECT 1 FROM reinstalled_shop)
           AND closed_at IS NULL
         RETURNING 1
+      ),
+      deleted_claims AS (
+        DELETE FROM s6_reconcile_stage_claims
+        WHERE shop = ${shop}
+          AND EXISTS (SELECT 1 FROM reinstalled_shop)
+        RETURNING 1
       )
-      SELECT id, (SELECT count(*) FROM closed_ops)::int AS closed_count FROM reinstalled_shop
+      SELECT id, (SELECT count(*) FROM closed_ops)::int AS closed_count,
+             (SELECT count(*) FROM deleted_claims)::int AS deleted_claims_count
+      FROM reinstalled_shop
     `;
     if (result.length > 0) {
       const closedCount = result[0].closed_count;
+      const deletedClaimsCount = result[0].deleted_claims_count;
       safeLog("info", "cleared_uninstalled_at_and_metafield_errors", {
         shopHash: await shopHash(shop),
       });
-      if (closedCount > 0) {
+      if (closedCount > 0 || deletedClaimsCount > 0) {
         safeLog("info", "reinstall_initial_sync_reset", {
           shopHash: await shopHash(shop),
           closedCount,
+          claimsDeletedCount: deletedClaimsCount,
         });
       }
       return { wasReinstalled: true, shopId: result[0].id };
@@ -494,7 +504,7 @@ export async function upsertShopOnAuth(
   timezone: string | null,
   currency: string,
 ): Promise<void> {
-  const result = await sql<{ id: string; closed_count: number }[]>`
+  const result = await sql<{ id: string; closed_count: number; deleted_claims_count: number }[]>`
     WITH old_state AS (
       SELECT id, "uninstalledAt" IS NOT NULL AS was_uninstalled
       FROM "Shop"
@@ -530,16 +540,26 @@ export async function upsertShopOnAuth(
         AND EXISTS (SELECT 1 FROM old_state WHERE was_uninstalled)
         AND closed_at IS NULL
       RETURNING 1
+    ),
+    deleted_claims AS (
+      DELETE FROM s6_reconcile_stage_claims
+      WHERE shop = ${shopDomain}
+        AND EXISTS (SELECT 1 FROM old_state WHERE was_uninstalled)
+      RETURNING 1
     )
-    SELECT id, (SELECT count(*) FROM closed_ops)::int AS closed_count FROM upserted
+    SELECT id, (SELECT count(*) FROM closed_ops)::int AS closed_count,
+           (SELECT count(*) FROM deleted_claims)::int AS deleted_claims_count
+    FROM upserted
   `;
   const shopId = result[0]?.id ?? 'unknown';
   const closedCount = result[0]?.closed_count ?? 0;
+  const deletedClaimsCount = result[0]?.deleted_claims_count ?? 0;
   console.log(`[afterAuth] shop_upserted shop_id=${shopId} timezone=${timezone ?? 'preserved'}`);
-  if (closedCount > 0) {
+  if (closedCount > 0 || deletedClaimsCount > 0) {
     safeLog("info", "reinstall_initial_sync_reset", {
       shopHash: await shopHash(shopDomain),
       closedCount,
+      claimsDeletedCount: deletedClaimsCount,
     });
   }
 }
