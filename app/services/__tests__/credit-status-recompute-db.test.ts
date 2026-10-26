@@ -1087,8 +1087,6 @@ describeWithDb("enqueue_credit_status_recomputes SQL function", () => {
 
 describeWithDb("CREDIT_STATUS_RECOMPUTE message producers set source", () => {
   let sql: ReturnType<typeof postgres>;
-  let dbNow: Date;
-  void dbNow;
   const TEST_SUFFIX = lettersOnlyId(8) + "-src";
   const TEST_SHOP_ID = `shop-src-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `src-test-${TEST_SUFFIX}.myshopify.com`;
@@ -1116,15 +1114,9 @@ describeWithDb("CREDIT_STATUS_RECOMPUTE message producers set source", () => {
   });
 
   beforeEach(async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    dbNow = await syncClockToDb(sql);
     // Clean up queue messages before each test
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'buyerAccountId' = ${TEST_ACCOUNT_ID}`;
     await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'buyerAccountId' = ${TEST_ACCOUNT_ID}`;
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
   });
 
   afterAll(async () => {
@@ -1774,8 +1766,6 @@ describeWithDb("Part 3 resync pass (#204)", () => {
 
 describeWithDb("permanent sync error handling (#204)", () => {
   let sql: ReturnType<typeof postgres>;
-  let dbNow: Date;
-  void dbNow;
   const TEST_SUFFIX = lettersOnlyId(8) + "-perm";
   const TEST_SHOP_ID = `shop-perm-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `perm-test-${TEST_SUFFIX}.myshopify.com`;
@@ -1818,9 +1808,6 @@ describeWithDb("permanent sync error handling (#204)", () => {
   });
 
   beforeEach(async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    dbNow = await syncClockToDb(sql);
-
     mockShouldFail = false;
     // Reset mock and restore default implementation (keyed mocks from previous test persist otherwise)
     mockShopifyGraphQLRequest.mockReset();
@@ -1858,10 +1845,6 @@ describeWithDb("permanent sync error handling (#204)", () => {
     await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_re%:' + TEST_ACCOUNT_ID + '%'}`;
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
   });
 
   describe("retryable vs permanent classification", () => {
@@ -2772,8 +2755,6 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
 
 describeWithDb("audit INSERT failure robustness (#204)", () => {
   let sql: ReturnType<typeof postgres>;
-  let dbNow: Date;
-  void dbNow;
   const TEST_SUFFIX = lettersOnlyId(8) + "-robust";
   const TEST_SHOP_ID = `shop-robust-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `robust-test-${TEST_SUFFIX}.myshopify.com`;
@@ -2826,9 +2807,6 @@ describeWithDb("audit INSERT failure robustness (#204)", () => {
   });
 
   beforeEach(async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    dbNow = await syncClockToDb(sql);
-
     mockShouldFail = false;
     // Reset mock and restore default implementation
     mockShopifyGraphQLRequest.mockReset();
@@ -2871,7 +2849,6 @@ describeWithDb("audit INSERT failure robustness (#204)", () => {
   });
 
   afterEach(async () => {
-    vi.useRealTimers();
     // Clean up trigger after each test
     await sql.unsafe(`DROP TRIGGER IF EXISTS ${TRIGGER_NAME} ON "AuditEvent"`);
     await sql.unsafe(`DROP FUNCTION IF EXISTS ${TRIGGER_FN_NAME}()`);
@@ -2965,8 +2942,6 @@ describeWithDb("audit INSERT failure robustness (#204)", () => {
 
 describeWithDb("release and hold direction end-to-end (#204)", () => {
   let sql: ReturnType<typeof postgres>;
-  let dbNow: Date;
-  void dbNow;
   const TEST_SUFFIX = lettersOnlyId(8) + "-dir";
   const TEST_SHOP_ID = `shop-dir-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `dir-test-${TEST_SUFFIX}.myshopify.com`;
@@ -3022,9 +2997,6 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
   });
 
   beforeEach(async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    dbNow = await syncClockToDb(sql);
-
     _metafieldWriteCount = 0;
     _lastMetafieldValue = null;
     _mockShouldFail = false;
@@ -3046,10 +3018,6 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
     await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_re%:' + TEST_ACCOUNT_ID + '%'}`;
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
   });
 
   describe("release direction (B) - end-to-end", () => {
@@ -3367,8 +3335,6 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
 
 describeWithDb("Part 1 and Part 2 regression (#204)", () => {
   let sql: ReturnType<typeof postgres>;
-  let dbNow: Date;
-  void dbNow;
   const TEST_SUFFIX = lettersOnlyId(8) + "-reg";
   const TEST_SHOP_ID = `shop-reg-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `reg-test-${TEST_SUFFIX}.myshopify.com`;
@@ -3410,9 +3376,6 @@ describeWithDb("Part 1 and Part 2 regression (#204)", () => {
   });
 
   beforeEach(async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    dbNow = await syncClockToDb(sql);
-
     await sql`
       UPDATE "BuyerAccount"
       SET "holdState" = 'OK', "holdReasonCode" = NULL, "manualHold" = false,
@@ -3423,10 +3386,6 @@ describeWithDb("Part 1 and Part 2 regression (#204)", () => {
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_re%:' + TEST_ACCOUNT_ID + '%'}`;
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
   });
 
   it("Part 1: OK account with overdue invoice is enqueued with credit_recompute key", async () => {
@@ -4279,8 +4238,6 @@ describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
 
 describeWithDb("safeLog console output for credit status events (#212)", () => {
   let sql: ReturnType<typeof postgres>;
-  let dbNow: Date;
-  void dbNow;
   const TEST_SUFFIX = lettersOnlyId(8) + "-safelog";
   const TEST_SHOP_ID = `shop-safelog-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `safelog-test-${TEST_SUFFIX}.myshopify.com`;
@@ -4318,9 +4275,6 @@ describeWithDb("safeLog console output for credit status events (#212)", () => {
   });
 
   beforeEach(async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    dbNow = await syncClockToDb(sql);
-
     metafieldWriteCount = 0;
     mockShouldFail = false;
     mockShopifyGraphQLRequest.mockReset();
@@ -4342,10 +4296,6 @@ describeWithDb("safeLog console output for credit status events (#212)", () => {
           "metafieldSyncErrorAt" = NULL, "metafieldSyncErrorCode" = NULL
       WHERE id = ${TEST_ACCOUNT_ID}
     `;
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
   });
 
   it("credit_status_metafield_write_failed includes retryable field", async () => {
@@ -4415,8 +4365,6 @@ describeWithDb("safeLog console output for credit status events (#212)", () => {
 
 describeWithDb("retryable vs non-retryable error handling (#212)", () => {
   let sql: ReturnType<typeof postgres>;
-  let dbNow: Date;
-  void dbNow;
   const TEST_SUFFIX = lettersOnlyId(8) + "-retry";
   const TEST_SHOP_ID = `shop-retry-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `retry-test-${TEST_SUFFIX}.myshopify.com`;
@@ -4454,9 +4402,6 @@ describeWithDb("retryable vs non-retryable error handling (#212)", () => {
   });
 
   beforeEach(async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    dbNow = await syncClockToDb(sql);
-
     metafieldWriteCount = 0;
     mockShouldFail = false;
     mockShopifyGraphQLRequest.mockReset();
@@ -4468,10 +4413,6 @@ describeWithDb("retryable vs non-retryable error handling (#212)", () => {
           "metafieldSyncErrorAt" = NULL, "metafieldSyncErrorCode" = NULL
       WHERE id = ${TEST_ACCOUNT_ID}
     `;
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
   });
 
   it("retryable=true error sets metafieldSyncErrorAt (enables backoff)", async () => {
@@ -4587,8 +4528,6 @@ describeWithDb("retryable vs non-retryable error handling (#212)", () => {
 
 describeWithDb("updateCreditStatus marker and audit (#212)", () => {
   let sql: ReturnType<typeof postgres>;
-  let dbNow: Date;
-  void dbNow;
   const TEST_SUFFIX = lettersOnlyId(8) + "-ucsmrk";
   const TEST_SHOP_ID = `shop-ucsmrk-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `ucs-marker-test-${TEST_SUFFIX}.myshopify.com`;
@@ -4626,9 +4565,6 @@ describeWithDb("updateCreditStatus marker and audit (#212)", () => {
   });
 
   beforeEach(async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    dbNow = await syncClockToDb(sql);
-
     mockShopifyGraphQLRequest.mockReset();
 
     await sql`
@@ -4641,10 +4577,6 @@ describeWithDb("updateCreditStatus marker and audit (#212)", () => {
     `;
 
     await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${TEST_SHOP_ID}`;
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
   });
 
   it("permanent failure sets marker and writes exactly one sync_failed audit row", async () => {
