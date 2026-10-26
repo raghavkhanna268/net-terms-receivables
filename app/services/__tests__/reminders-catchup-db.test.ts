@@ -22,6 +22,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { DateTime } from "luxon";
+import { assertNoQueueLeftovers } from "../../../tests/helpers/queue-leftovers";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -162,6 +163,11 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
       DELETE FROM s18_global_sends 
       WHERE send_key = 'global' AND send_month = ${dates.monthStrUTC}
     `;
+
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+
+    await assertNoQueueLeftovers(sql, [TEST_SHOP_DOMAIN], "reminders-catchup-db.test.ts");
+
     await sql.end();
   });
 
