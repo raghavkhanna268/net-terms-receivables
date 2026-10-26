@@ -1,7 +1,10 @@
 /**
  * Tests for the read-only access scopes probes in prod-diagnostics.yml:
- * "Access scopes probe" (diagnostics job, shop_idx=2) and
- * "E2E access scopes probe" (e2e_second_shop job, shop_idx=1).
+ * "Access scopes probe" (diagnostics job, shop_idx=2),
+ * "E2E access scopes probe" (e2e_second_shop job, shop_idx=1) and
+ * "Reviewer shop probe" (reviewer_shop_probe job, shop_idx=reviewer; its
+ * selection, refusals and currency enum are covered in
+ * prod-diagnostics-reviewer-shop-probe.test.ts).
  *
  * Public-repo safe: each probe prints ONLY shop_idx, a status line,
  * scopes_count=<int> and has_read_all_orders=<bool>. Never the scope handle
@@ -138,7 +141,7 @@ function expectSafe(stdout: string) {
   for (const line of out.trim().split("\n")) {
     if (line === "" || line === "=== Access scopes (read-only) ===" || line.startsWith("::warning::")) continue;
     expect(line).toMatch(
-      /^(shop_idx=(1|2|unknown)|scopes_count=\d+|has_read_all_orders=(true|false)|access_scopes=(ok|skipped_[a-z_]+|error (http_status=\d{3}|parse_failed|error_codes=[A-Z0-9_,]+)))$/
+      /^(shop_idx=(1|2|reviewer|unknown)|currency=(INR|USD|NONE|OTHER)|token_expired=(true|false|unknown)|scopes_count=\d+|has_read_all_orders=(true|false)|access_scopes=(ok|skipped_[a-z_]+|error (http_status=\d{3}|parse_failed|error_codes=[A-Z0-9_,]+)))$/
     );
   }
 }
@@ -161,6 +164,15 @@ const CASES = [
     start: "# E2E access scopes query and summary (counts/booleans only)",
     end: "# End E2E access scopes query and summary",
     env: { E2E_SHOP_DOMAIN: PLANTED_DOMAIN },
+  },
+  {
+    label: "reviewer_shop_probe job",
+    job: "reviewer_shop_probe",
+    stepName: "Reviewer shop probe",
+    idx: "reviewer",
+    start: "# Reviewer access scopes query and summary (counts/booleans only)",
+    end: "# End reviewer access scopes query and summary",
+    env: { REVIEWER_SHOP_DOMAIN: PLANTED_DOMAIN },
   },
 ] as const;
 
@@ -209,7 +221,7 @@ describe("prod-diagnostics access scopes probes", () => {
         // Never echoes the handles, the domain or the token.
         const echoes = run.split("\n").filter((l) => /^\s*echo\b/.test(l) && !l.includes("::add-mask::"));
         for (const l of echoes) {
-          expect(l).not.toMatch(/\$\{?(ACCESS_TOKEN|SHOP_DOMAIN|E2E_SHOP_DOMAIN|ALLOWED_DEV_STORE)\b/);
+          expect(l).not.toMatch(/\$\{?(ACCESS_TOKEN|SHOP_DOMAIN|E2E_SHOP_DOMAIN|REVIEWER_SHOP_DOMAIN|ALLOWED_DEV_STORE|E2E_SHOP)\b/);
         }
         expect(run).not.toMatch(/join\(",\s*"\)[^\n]*handle|handle[^\n]*join\(/);
         expect(run).toContain(`echo "shop_idx=${c.idx}"`);
