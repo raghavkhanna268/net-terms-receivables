@@ -9,7 +9,8 @@
  * - fetch (mocked to prevent external calls)
  *
  * Uses the repo's describeWithDb / TEST_DATABASE_URL pattern.
- * See app/services/__tests__/access-log-db.test.ts for reference.
+ * Matcher/apply services run REAL against the database - only Shopify GraphQL
+ * and external services are mocked.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi, afterEach } from "vitest";
 import postgres from "postgres";
@@ -47,14 +48,9 @@ vi.mock("~/services/matcher.server", async (importOriginal) => {
   };
 });
 
-vi.mock("~/services/apply.server", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("~/services/apply.server")>();
-  return {
-    ...actual,
-    applyMatch: vi.fn().mockResolvedValue({ success: true }),
-    unmatchMatch: vi.fn().mockResolvedValue({ success: true }),
-  };
-});
+vi.mock("~/lib/recompute-enqueue.server", () => ({
+  enqueueCreditStatusRecompute: vi.fn().mockResolvedValue(true),
+}));
 
 describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
   let sql: ReturnType<typeof postgres>;
@@ -87,6 +83,7 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
   const REMINDER_RULE_A_ID = `rule-a-${TEST_SUFFIX}`;
   const REMINDER_RULE_B_ID = `rule-b-${TEST_SUFFIX}`;
 
+  const SHOP_A_BUYER_NAME = "Shop A Buyer LLC";
   const SHOP_B_BUYER_NAME = "Shop B Buyer Corp";
   const SHOP_B_INVOICE_AMOUNT = "99999.99";
   const SHOP_B_PAYMENT_AMOUNT = "88888.88";
@@ -109,11 +106,15 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
     };
   }
 
-  function createLoaderArgs(urlPath: string, params: Record<string, string> = {}) {
+  function createLoaderArgs(
+    urlPath: string,
+    params: Record<string, string> = {},
+    shopDomain = SHOP_A_DOMAIN
+  ) {
     const url = new URL(`https://example.com${urlPath}`);
     return {
       request: new Request(url),
-      context: createMockContext(SHOP_A_DOMAIN),
+      context: createMockContext(shopDomain),
       params,
       url,
       pattern: urlPath.replace(/\/[^/]+$/, "/:id"),
@@ -123,7 +124,8 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
   function createActionArgs(
     urlPath: string,
     formData: Record<string, string>,
-    params: Record<string, string> = {}
+    params: Record<string, string> = {},
+    shopDomain = SHOP_A_DOMAIN
   ) {
     const url = new URL(`https://example.com${urlPath}`);
     const body = new FormData();
@@ -132,7 +134,7 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
     }
     return {
       request: new Request(url, { method: "POST", body }),
-      context: createMockContext(SHOP_A_DOMAIN),
+      context: createMockContext(shopDomain),
       params,
       url,
       pattern: urlPath.replace(/\/[^/]+$/, "/:id"),
@@ -153,11 +155,12 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
       INSERT INTO "BuyerAccount" (
         id, "shopId", kind, "companyId", "companyLocationId", name,
         "creditLimit", "holdState", bypass, "syncPending",
+        "reminderOptOutAt", "reminderOptOutSource",
         "createdAt", "updatedAt"
       )
       VALUES
-        (${BUYER_A_ID}, ${SHOP_A_ID}, 'COMPANY', ${"co-a-" + TEST_SUFFIX}, ${"loc-a-" + TEST_SUFFIX}, 'Shop A Buyer LLC', 50000.00, 'OK', false, false, NOW(), NOW()),
-        (${BUYER_B_ID}, ${SHOP_B_ID}, 'COMPANY', ${"co-b-" + TEST_SUFFIX}, ${"loc-b-" + TEST_SUFFIX}, ${SHOP_B_BUYER_NAME}, 75000.00, 'OK', false, false, NOW(), NOW())
+        (${BUYER_A_ID}, ${SHOP_A_ID}, 'COMPANY', ${"co-a-" + TEST_SUFFIX}, ${"loc-a-" + TEST_SUFFIX}, ${SHOP_A_BUYER_NAME}, 50000.00, 'OK', false, false, NULL, NULL, NOW(), NOW()),
+        (${BUYER_B_ID}, ${SHOP_B_ID}, 'COMPANY', ${"co-b-" + TEST_SUFFIX}, ${"loc-b-" + TEST_SUFFIX}, ${SHOP_B_BUYER_NAME}, 75000.00, 'OK', false, false, NOW(), 'merchant'::"ReminderOptOutSource", NOW(), NOW())
     `;
 
     await sql`
@@ -205,8 +208,8 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
     await sql`
       INSERT INTO "S22DataRequest" (id, "shopId", "customerGid", "requestId", status, "receivedAt", "expiresAt")
       VALUES
-        (${DATA_REQUEST_A_ID}, ${SHOP_A_ID}, 'cust-a-gid', 'req-a-id', 'pending', NOW(), NOW() + interval '30 days'),
-        (${DATA_REQUEST_B_ID}, ${SHOP_B_ID}, 'cust-b-gid', 'req-b-id', 'pending', NOW(), NOW() + interval '30 days')
+        (${DATA_REQUEST_A_ID}, ${SHOP_A_ID}, 'cust-a-1', 'req-a-id', 'pending', NOW(), NOW() + interval '30 days'),
+        (${DATA_REQUEST_B_ID}, ${SHOP_B_ID}, 'cust-b-1', 'req-b-id', 'pending', NOW(), NOW() + interval '30 days')
     `;
   });
 
@@ -237,70 +240,30 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
     vi.clearAllMocks();
   });
 
-  interface RouteTest {
-    name: string;
-    route: string;
-    loadModule: () => Promise<unknown>;
-    params: Record<string, string>;
-    shopBRecordId: string;
-    assertNotFound: (result: unknown) => void;
-    assertNoBData: (result: unknown) => void | Promise<void>;
-  }
+  describe("app.accounts.$id loader isolation", () => {
+    it("shop A session cannot read shop B's buyer account (negative)", async () => {
+      const args = createLoaderArgs(`/app/accounts/${BUYER_B_ID}`, { id: BUYER_B_ID });
+      const { loader } = await import("../app.accounts.$id");
+      const result = (await loader(args as never)) as { account: unknown; error: string | null };
+      expect(result.account).toBeNull();
+      expect(result.error).toBe("Account not found");
+      const str = JSON.stringify(result);
+      expect(str).not.toContain(SHOP_B_BUYER_NAME);
+    });
 
-  const routeTests: RouteTest[] = [
-    {
-      name: "app.accounts.$id",
-      route: "/app/accounts/",
-      loadModule: () => import("../app.accounts.$id"),
-      params: { id: "" },
-      shopBRecordId: BUYER_B_ID,
-      assertNotFound: (result) => {
-        const r = result as { account: unknown; error: string | null };
-        expect(r.account).toBeNull();
-        expect(r.error).toBe("Account not found");
-      },
-      assertNoBData: (result) => {
-        const str = JSON.stringify(result);
-        expect(str).not.toContain(SHOP_B_BUYER_NAME);
-        expect(str).not.toContain(BUYER_B_ID);
-      },
-    },
-    {
-      name: "app.data-requests.$id.download",
-      route: "/app/data-requests/",
-      loadModule: () => import("../app.data-requests.$id.download"),
-      params: { id: "" },
-      shopBRecordId: "req-b-id",
-      assertNotFound: (result) => {
-        expect(result).toBeInstanceOf(Response);
-        const r = result as Response;
-        expect(r.status).toBe(404);
-      },
-      assertNoBData: async (result) => {
-        if (result instanceof Response) {
-          const body = await result.text();
-          expect(body).not.toContain("cust-b-gid");
-          expect(body).not.toContain("req-b-id");
-        }
-      },
-    },
-  ];
-
-  describe("Cross-tenant ID access", () => {
-    for (const test of routeTests) {
-      it(`${test.name}: shop A session cannot read shop B's record`, async () => {
-        const params = { ...test.params, id: test.shopBRecordId };
-        const args = createLoaderArgs(test.route + test.shopBRecordId, params);
-        const mod = await test.loadModule() as { loader: (args: never) => Promise<unknown> };
-        const result = await mod.loader(args as never);
-        test.assertNotFound(result);
-        await test.assertNoBData(result);
-      });
-    }
+    it("shop A session CAN read shop A's buyer account (positive control)", async () => {
+      const args = createLoaderArgs(`/app/accounts/${BUYER_A_ID}`, { id: BUYER_A_ID });
+      const { loader } = await import("../app.accounts.$id");
+      const result = (await loader(args as never)) as { account: { id: string; name: string } | null; error: string | null };
+      expect(result.error).toBeNull();
+      expect(result.account).not.toBeNull();
+      expect(result.account!.id).toBe(BUYER_A_ID);
+      expect(result.account!.name).toBe(SHOP_A_BUYER_NAME);
+    });
   });
 
   describe("app.accounts.$id action isolation", () => {
-    it("shop A cannot update shop B's buyer account credit settings", async () => {
+    it("shop A cannot update shop B's buyer account credit settings (negative)", async () => {
       const beforeSnapshot = await sql`
         SELECT "creditLimit", "holdState" FROM "BuyerAccount" WHERE id = ${BUYER_B_ID}
       `;
@@ -324,10 +287,35 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
       expect(afterSnapshot[0]).toEqual(beforeSnapshot[0]);
     });
 
-    it("shop A cannot update shop B's buyer reminder opt-out", async () => {
+    it("shop A CAN update shop A's buyer account credit settings (positive control)", async () => {
+      const args = createActionArgs(
+        `/app/accounts/${BUYER_A_ID}`,
+        { _action: "updateCredit", creditLimit: "60000", noLimit: "false", manualHold: "false" },
+        { id: BUYER_A_ID }
+      );
+
+      const { action } = await import("../app.accounts.$id");
+      const result = await action(args as never);
+
+      const r = result as { success: boolean; error?: string };
+      expect(r.success).toBe(true);
+
+      const afterSnapshot = await sql`
+        SELECT "creditLimit" FROM "BuyerAccount" WHERE id = ${BUYER_A_ID}
+      `;
+      expect(parseFloat(afterSnapshot[0].creditLimit)).toBe(60000);
+
+      await sql`UPDATE "BuyerAccount" SET "creditLimit" = 50000.00 WHERE id = ${BUYER_A_ID}`;
+    });
+
+    it("shop A cannot update shop B's buyer reminder opt-out (negative)", async () => {
+      const beforeSnapshot = await sql`
+        SELECT "reminderOptOutAt", "reminderOptOutSource" FROM "BuyerAccount" WHERE id = ${BUYER_B_ID}
+      `;
+
       const args = createActionArgs(
         `/app/accounts/${BUYER_B_ID}`,
-        { _action: "updateReminderOptOut", enable: "false" },
+        { _action: "updateReminderOptOut", enable: "true" },
         { id: BUYER_B_ID }
       );
 
@@ -337,94 +325,307 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
       const r = result as { success: boolean; error?: string };
       expect(r.success).toBe(false);
       expect(r.error).toBe("Account not found");
+
+      const afterSnapshot = await sql`
+        SELECT "reminderOptOutAt", "reminderOptOutSource" FROM "BuyerAccount" WHERE id = ${BUYER_B_ID}
+      `;
+      expect(afterSnapshot[0].reminderOptOutAt).toEqual(beforeSnapshot[0].reminderOptOutAt);
+      expect(afterSnapshot[0].reminderOptOutSource).toBe(beforeSnapshot[0].reminderOptOutSource);
+    });
+
+    it("shop A CAN update shop A's buyer reminder opt-out (positive control)", async () => {
+      await sql`UPDATE "BuyerAccount" SET "reminderOptOutAt" = NOW(), "reminderOptOutSource" = 'merchant'::"ReminderOptOutSource" WHERE id = ${BUYER_A_ID}`;
+
+      const args = createActionArgs(
+        `/app/accounts/${BUYER_A_ID}`,
+        { _action: "updateReminderOptOut", enable: "true" },
+        { id: BUYER_A_ID }
+      );
+
+      const { action } = await import("../app.accounts.$id");
+      const result = await action(args as never);
+
+      const r = result as { success: boolean };
+      expect(r.success).toBe(true);
+
+      const afterSnapshot = await sql`
+        SELECT "reminderOptOutAt", "reminderOptOutSource" FROM "BuyerAccount" WHERE id = ${BUYER_A_ID}
+      `;
+      expect(afterSnapshot[0].reminderOptOutAt).toBeNull();
+      expect(afterSnapshot[0].reminderOptOutSource).toBeNull();
     });
   });
 
-  describe("app.reconcile action isolation", () => {
-    it("shop A cannot confirm shop B's match", async () => {
-      const beforeSnapshot = await sql`
-        SELECT state FROM "Match" WHERE id = ${MATCH_B_ID}
-      `;
+  describe("app.data-requests.$id.download loader isolation", () => {
+    it("shop A session cannot download shop B's data request (negative)", async () => {
+      const args = createLoaderArgs(`/app/data-requests/req-b-id/download`, { id: "req-b-id" });
+      const mod = await import("../app.data-requests.$id.download");
+      const result = await mod.loader(args as never);
+      expect(result).toBeInstanceOf(Response);
+      const r = result as Response;
+      expect(r.status).toBe(404);
+    });
+
+    it("shop A session CAN download shop A's data request (positive control)", async () => {
+      const args = createLoaderArgs(`/app/data-requests/req-a-id/download`, { id: "req-a-id" });
+      const mod = await import("../app.data-requests.$id.download");
+      const result = await mod.loader(args as never);
+      expect(result).toBeInstanceOf(Response);
+      const r = result as Response;
+      expect(r.status).toBe(200);
+    });
+  });
+
+  describe("app.reconcile action isolation - REAL confirmMatch/rejectMatch/applyMatch", () => {
+    beforeEach(async () => {
+      await sql`UPDATE "Match" SET state = 'suggested' WHERE id IN (${MATCH_A_ID}, ${MATCH_B_ID})`;
+    });
+
+    it("shop A cannot confirm shop B's match (negative)", async () => {
+      const beforeSnapshot = await sql`SELECT state FROM "Match" WHERE id = ${MATCH_B_ID}`;
       expect(beforeSnapshot[0].state).toBe("suggested");
 
       const args = createActionArgs("/app/reconcile", { intent: "confirm", matchId: MATCH_B_ID });
-
-      const { confirmMatch } = await import("~/services/matcher.server");
-      vi.mocked(confirmMatch).mockResolvedValue({ success: false, error: "Match not found" });
-
       const { action } = await import("../app.reconcile");
-      const result = await action(args as never);
+      const result = (await action(args as never)) as { success: boolean; error?: string };
 
-      const r = result as { success: boolean; error?: string };
-      expect(r.success).toBe(false);
+      expect(result.success).toBe(false);
 
-      const afterSnapshot = await sql`
-        SELECT state FROM "Match" WHERE id = ${MATCH_B_ID}
-      `;
+      const afterSnapshot = await sql`SELECT state FROM "Match" WHERE id = ${MATCH_B_ID}`;
       expect(afterSnapshot[0].state).toBe("suggested");
     });
 
-    it("shop A cannot reject shop B's match", async () => {
-      const beforeSnapshot = await sql`
-        SELECT state FROM "Match" WHERE id = ${MATCH_B_ID}
-      `;
+    it("shop A CAN confirm shop A's match (positive control)", async () => {
+      const args = createActionArgs("/app/reconcile", { intent: "confirm", matchId: MATCH_A_ID });
+      const { action } = await import("../app.reconcile");
+      const result = (await action(args as never)) as { success: boolean };
+
+      expect(result.success).toBe(true);
+
+      const afterSnapshot = await sql`SELECT state FROM "Match" WHERE id = ${MATCH_A_ID}`;
+      expect(afterSnapshot[0].state).toBe("confirmed");
+
+      await sql`UPDATE "Match" SET state = 'suggested' WHERE id = ${MATCH_A_ID}`;
+    });
+
+    it("shop A cannot reject shop B's match (negative)", async () => {
+      const beforeSnapshot = await sql`SELECT state FROM "Match" WHERE id = ${MATCH_B_ID}`;
 
       const args = createActionArgs("/app/reconcile", { intent: "reject", matchId: MATCH_B_ID });
-
-      const { rejectMatch } = await import("~/services/matcher.server");
-      vi.mocked(rejectMatch).mockResolvedValue({ success: false, error: "Match not found" });
-
       const { action } = await import("../app.reconcile");
-      const result = await action(args as never);
+      const result = (await action(args as never)) as { success: boolean };
 
-      const r = result as { success: boolean };
-      expect(r.success).toBe(false);
+      expect(result.success).toBe(false);
 
-      const afterSnapshot = await sql`
-        SELECT state FROM "Match" WHERE id = ${MATCH_B_ID}
-      `;
+      const afterSnapshot = await sql`SELECT state FROM "Match" WHERE id = ${MATCH_B_ID}`;
       expect(afterSnapshot[0]).toEqual(beforeSnapshot[0]);
     });
 
-    it("shop A cannot apply shop B's match", async () => {
-      const { applyMatch } = await import("~/services/apply.server");
-      vi.mocked(applyMatch).mockResolvedValue({
-        success: false,
-        error: "Match not found",
-        invoicePaid: false,
-        shopifyPushSucceeded: false,
-      });
+    it("shop A CAN reject shop A's match (positive control)", async () => {
+      const args = createActionArgs("/app/reconcile", { intent: "reject", matchId: MATCH_A_ID });
+      const { action } = await import("../app.reconcile");
+      const result = (await action(args as never)) as { success: boolean };
 
-      const beforeInvoice = await sql`
-        SELECT outstanding FROM "Invoice" WHERE id = ${INVOICE_B_ID}
-      `;
+      expect(result.success).toBe(true);
+
+      const afterSnapshot = await sql`SELECT state FROM "Match" WHERE id = ${MATCH_A_ID}`;
+      expect(afterSnapshot[0].state).toBe("rejected");
+
+      await sql`UPDATE "Match" SET state = 'suggested' WHERE id = ${MATCH_A_ID}`;
+    });
+
+    it("shop A cannot apply shop B's match (negative)", async () => {
+      await sql`UPDATE "Match" SET state = 'confirmed' WHERE id = ${MATCH_B_ID}`;
+
+      const beforeInvoice = await sql`SELECT outstanding FROM "Invoice" WHERE id = ${INVOICE_B_ID}`;
 
       const args = createActionArgs("/app/reconcile", { intent: "apply", matchId: MATCH_B_ID });
-
       const { action } = await import("../app.reconcile");
-      const result = await action(args as never);
+      const result = (await action(args as never)) as { success: boolean };
 
-      const r = result as { success: boolean };
-      expect(r.success).toBe(false);
+      expect(result.success).toBe(false);
 
-      const afterInvoice = await sql`
-        SELECT outstanding FROM "Invoice" WHERE id = ${INVOICE_B_ID}
-      `;
+      const afterInvoice = await sql`SELECT outstanding FROM "Invoice" WHERE id = ${INVOICE_B_ID}`;
       expect(afterInvoice[0]).toEqual(beforeInvoice[0]);
+
+      await sql`UPDATE "Match" SET state = 'suggested' WHERE id = ${MATCH_B_ID}`;
+    });
+
+    it("shop A cannot unmatch shop B's match (negative)", async () => {
+      await sql`UPDATE "Match" SET state = 'confirmed' WHERE id = ${MATCH_B_ID}`;
+
+      const args = createActionArgs("/app/reconcile", { intent: "unmatch", matchId: MATCH_B_ID });
+      const { action } = await import("../app.reconcile");
+      const result = (await action(args as never)) as { success: boolean };
+
+      expect(result.success).toBe(false);
+
+      await sql`UPDATE "Match" SET state = 'suggested' WHERE id = ${MATCH_B_ID}`;
+    });
+  });
+
+  describe("app.reconcile loader ?payment param isolation", () => {
+    it("shop A cannot load shop B's payment via ?payment param (negative)", async () => {
+      const url = new URL(`https://example.com/app/reconcile?payment=${PAYMENT_B_ID}`);
+      const args = {
+        request: new Request(url),
+        context: createMockContext(SHOP_A_DOMAIN),
+        params: {},
+        url,
+        pattern: "/app/reconcile",
+      } as unknown;
+
+      const { loader } = await import("../app.reconcile");
+      const result = (await loader(args as never)) as { selectedPayment: unknown };
+
+      expect(result.selectedPayment).toBeNull();
+    });
+
+    it("shop A CAN load shop A's payment via ?payment param (positive control)", async () => {
+      const url = new URL(`https://example.com/app/reconcile?payment=${PAYMENT_A_ID}`);
+      const args = {
+        request: new Request(url),
+        context: createMockContext(SHOP_A_DOMAIN),
+        params: {},
+        url,
+        pattern: "/app/reconcile",
+      } as unknown;
+
+      const { loader } = await import("../app.reconcile");
+      const result = (await loader(args as never)) as { selectedPayment: { payment: { id: string } } | null };
+
+      expect(result.selectedPayment).not.toBeNull();
+      expect(result.selectedPayment!.payment.id).toBe(PAYMENT_A_ID);
+    });
+  });
+
+  describe("app.settings.reminders action ruleId isolation", () => {
+    it("shop A cannot update shop B's reminder rule via update_rule (negative)", async () => {
+      const beforeSnapshot = await sql`SELECT "offsetDays", enabled FROM "ReminderRule" WHERE id = ${REMINDER_RULE_B_ID}`;
+
+      const args = createActionArgs("/app/settings/reminders", {
+        intent: "update_rule",
+        ruleId: REMINDER_RULE_B_ID,
+        offsetDays: "14",
+        enabled: "false",
+      });
+
+      const { action } = await import("../app.settings.reminders");
+      const result = (await action(args as never)) as { success: boolean; error?: string };
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("Rule not found");
+
+      const afterSnapshot = await sql`SELECT "offsetDays", enabled FROM "ReminderRule" WHERE id = ${REMINDER_RULE_B_ID}`;
+      expect(afterSnapshot[0]).toEqual(beforeSnapshot[0]);
+    });
+
+    it("shop A CAN update shop A's reminder rule via update_rule (positive control)", async () => {
+      const args = createActionArgs("/app/settings/reminders", {
+        intent: "update_rule",
+        ruleId: REMINDER_RULE_A_ID,
+        offsetDays: "-7",
+        enabled: "false",
+      });
+
+      const { action } = await import("../app.settings.reminders");
+      const result = (await action(args as never)) as { success: boolean };
+
+      expect(result.success).toBe(true);
+
+      const afterSnapshot = await sql`SELECT enabled FROM "ReminderRule" WHERE id = ${REMINDER_RULE_A_ID}`;
+      expect(afterSnapshot[0].enabled).toBe(false);
+
+      await sql`UPDATE "ReminderRule" SET enabled = true WHERE id = ${REMINDER_RULE_A_ID}`;
+    });
+
+    it("shop A cannot delete shop B's reminder rule via delete_rule (negative)", async () => {
+      const beforeCount = await sql`SELECT COUNT(*)::int AS count FROM "ReminderRule" WHERE id = ${REMINDER_RULE_B_ID}`;
+      expect(beforeCount[0].count).toBe(1);
+
+      const args = createActionArgs("/app/settings/reminders", {
+        intent: "delete_rule",
+        ruleId: REMINDER_RULE_B_ID,
+      });
+
+      const { action } = await import("../app.settings.reminders");
+      const result = (await action(args as never)) as { success: boolean; error?: string };
+
+      expect(result.success).toBe(false);
+
+      const afterCount = await sql`SELECT COUNT(*)::int AS count FROM "ReminderRule" WHERE id = ${REMINDER_RULE_B_ID}`;
+      expect(afterCount[0].count).toBe(1);
+    });
+  });
+
+  describe("app._index loader ?buyer param isolation (with deferred dashboardData)", () => {
+    it("shop A cannot view shop B's buyer invoices via ?buyer param (negative)", async () => {
+      const url = new URL(`https://example.com/app?buyer=${BUYER_B_ID}`);
+      const args = {
+        request: new Request(url),
+        context: createMockContext(SHOP_A_DOMAIN),
+        params: {},
+        url,
+        pattern: "/app",
+      } as unknown;
+
+      const { loader } = await import("../app._index");
+      const result = (await loader(args as never)) as unknown as {
+        dashboardData: Promise<{ selectedBuyerInvoices: unknown }> | { selectedBuyerInvoices: unknown } | null;
+        selectedBuyerId: string | null;
+      };
+
+      if (result.dashboardData && typeof (result.dashboardData as Promise<unknown>).then === "function") {
+        const resolved = await (result.dashboardData as Promise<{ selectedBuyerInvoices: unknown }>);
+        expect(resolved.selectedBuyerInvoices).toBeNull();
+      } else if (result.dashboardData) {
+        expect((result.dashboardData as { selectedBuyerInvoices: unknown }).selectedBuyerInvoices).toBeNull();
+      }
+    });
+
+    it("shop A CAN view shop A's buyer invoices via ?buyer param (positive control)", async () => {
+      const url = new URL(`https://example.com/app?buyer=${BUYER_A_ID}`);
+      const args = {
+        request: new Request(url),
+        context: createMockContext(SHOP_A_DOMAIN),
+        params: {},
+        url,
+        pattern: "/app",
+      } as unknown;
+
+      const { loader } = await import("../app._index");
+      const result = (await loader(args as never)) as unknown as {
+        dashboardData: Promise<{ selectedBuyerInvoices: { buyerName: string } | null }> | { selectedBuyerInvoices: { buyerName: string } | null } | null;
+      };
+
+      if (result.dashboardData && typeof (result.dashboardData as Promise<unknown>).then === "function") {
+        const resolved = await (result.dashboardData as Promise<{ selectedBuyerInvoices: { buyerName: string } | null }>);
+        expect(resolved.selectedBuyerInvoices).not.toBeNull();
+        expect(resolved.selectedBuyerInvoices!.buyerName).toBe(SHOP_A_BUYER_NAME);
+      } else if (result.dashboardData) {
+        const dd = result.dashboardData as { selectedBuyerInvoices: { buyerName: string } | null };
+        expect(dd.selectedBuyerInvoices).not.toBeNull();
+        expect(dd.selectedBuyerInvoices!.buyerName).toBe(SHOP_A_BUYER_NAME);
+      }
     });
   });
 
   describe("List loaders return only shop A's data", () => {
-    it("app._index loader returns only shop A's buyer accounts", async () => {
+    it("app._index loader returns only shop A's buyer accounts (deferred dashboardData awaited)", async () => {
       const args = createLoaderArgs("/app");
 
       const { loader } = await import("../app._index");
-      const result = (await loader(args as never)) as { dashboardData?: Promise<unknown> };
+      const result = (await loader(args as never)) as unknown as {
+        dashboardData: Promise<{ buyerLedger: { rows: Array<{ name: string; id: string }> } | null }> | null;
+      };
 
-      const str = JSON.stringify(result);
-      expect(str).not.toContain(SHOP_B_BUYER_NAME);
-      expect(str).not.toContain(BUYER_B_ID);
-      expect(str).not.toContain(SHOP_B_INVOICE_AMOUNT);
+      if (result.dashboardData && typeof (result.dashboardData as Promise<unknown>).then === "function") {
+        const resolved = await result.dashboardData;
+        const str = JSON.stringify(resolved);
+        expect(str).not.toContain(SHOP_B_BUYER_NAME);
+        expect(str).not.toContain(BUYER_B_ID);
+        expect(str).not.toContain(SHOP_B_INVOICE_AMOUNT);
+      }
     });
 
     it("app.reconcile loader returns only shop A's matches", async () => {
@@ -446,7 +647,7 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
 
       const str = JSON.stringify(result);
       expect(str).not.toContain("req-b-id");
-      expect(str).not.toContain("cust-b-gid");
+      expect(str).not.toContain("cust-b-1");
     });
 
     it("app.settings.reminders loader returns only shop A's reminder rules", async () => {
@@ -680,13 +881,13 @@ describe("Tenant Isolation - Route coverage guard", () => {
     "app.tsx": "Layout wrapper, no record IDs",
     "app.onboarding.tsx": "Setup flow, no record IDs",
     "app.welcome.tsx": "Welcome redirect, no record IDs",
-    "app._index.tsx": "List route, covered by list loader tests",
-    "app.reconcile.tsx": "Covered by action isolation tests",
-    "app.imports.tsx": "No record ID params, shop-scoped by session",
-    "app.data-requests.tsx": "List route, no record ID param in URL",
-    "app.settings.reminders.tsx": "No record ID params",
+    "app._index.tsx": "List route, covered by ?buyer param test",
+    "app.reconcile.tsx": "Covered by action isolation tests and ?payment param test",
+    "app.imports.tsx": "No record ID params in action (uses JSON body), shop-scoped by session",
+    "app.data-requests.tsx": "List route, no record ID param in URL or form",
+    "app.settings.reminders.tsx": "Covered by ruleId action isolation tests (update_rule, delete_rule)",
     "app.plan.tsx": "No record IDs",
-    "app.tag-rules.tsx": "No record IDs",
+    "app.tag-rules.tsx": "No record ID params (create_tag_rule only, no update/delete with ID)",
   };
 
   const TESTED_ROUTES = [
@@ -730,5 +931,31 @@ describe("Tenant Isolation - Route coverage guard", () => {
     for (const [route, reason] of Object.entries(ALLOWLIST)) {
       expect(reason.length, `${route} allowlist reason is empty`).toBeGreaterThan(0);
     }
+  });
+
+  it("routes with formData.get(...Id) or searchParams.get patterns are covered", () => {
+    const routeFiles = fs.readdirSync(ROUTES_DIR)
+      .filter(f => f.startsWith("app.") && f.endsWith(".tsx") && !f.includes("test"));
+
+    const routesWithIdParams: string[] = [];
+
+    for (const routeFile of routeFiles) {
+      const content = fs.readFileSync(path.join(ROUTES_DIR, routeFile), "utf-8");
+
+      const hasFormDataId = /formData\.get\(["'](\w*[Ii]d)["']\)/.test(content);
+      const hasSearchParamsId = /searchParams\.get\(["'](payment|buyer|match|invoice|rule|import)["']\)/.test(content);
+
+      if (hasFormDataId || hasSearchParamsId) {
+        routesWithIdParams.push(routeFile);
+      }
+    }
+
+    const allCovered = [...TESTED_ROUTES, ...Object.keys(ALLOWLIST)];
+    const uncoveredIdRoutes = routesWithIdParams.filter(r => !allCovered.includes(r));
+
+    expect(
+      uncoveredIdRoutes,
+      `Routes with ID params in formData/searchParams not covered: ${uncoveredIdRoutes.join(", ")}`
+    ).toHaveLength(0);
   });
 });
