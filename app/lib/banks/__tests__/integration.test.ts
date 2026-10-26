@@ -821,11 +821,11 @@ describe("HDFC parser dedupe-key stability", () => {
     // Synthetic HDFC CSV with zero-padded UPI ref and cheque ref
     const csv = `HDFC BANK
 Account No: XXXXXX1234
-Statement Period: 01/10/2026 to 31/10/2026
+Statement Period: 01/02/2020 to 29/02/2020
 
 Date,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance
-15/10/26,UPI-SYNTHETIC VENDOR-vendor@synth-SYNT0001234-600000000001-UPI,0000600000000001,15/10/26,,50000.00,150000.00
-16/10/26,CHQ DEP-SYNTHETIC RETAILER-000654,000654,16/10/26,,75000.00,225000.00
+03/02/20,UPI-SYNTHETIC VENDOR-vendor@synth-SYNT0001234-600000000001-UPI,0000600000000001,03/02/20,,50000.00,150000.00
+04/02/20,CHQ DEP-SYNTHETIC RETAILER-000654,000654,04/02/20,,75000.00,225000.00
 `;
     const file = new File([csv], "hdfc-stability-test.csv", { type: "text/csv" });
     const result = await parseBankStatement(file);
@@ -847,7 +847,7 @@ Date,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balanc
     expect(chqTxn!.dedupeKey.startsWith("sha256:")).toBe(true);
     // Hardcoded hash computed from main's code
     expect(chqTxn!.dedupeKey).toBe(
-      "sha256:557be17f78038c7b70563ea8631a6751369032a923ab977f5f9a32848d5423a9"
+      "sha256:33dd758200fdf7d8a542ac6d7fe7ec85b11156a485457b0b214be5bedc541fd6"
     );
   });
 });
@@ -861,11 +861,11 @@ describe("ICICI parser real-layout handling", () => {
     // - Legends footer block (regression test for footer detection)
     // - CMS credit with stable dedupe key
     const csv = `,S No.,Value Date,Transaction Date,Cheque Number,Transaction Remarks,Withdrawal Amount(INR),Deposit Amount(INR),Balance(INR),
-,1,15/10/2026,15/10/2026,,UPI/SYNT VENDOR/syntvendor@oksynt/Payment for invoice,0.00,50000.00,150000.00,
-,2,16/10/2026,16/10/2026,,UPI/SYNT WHOLESALER/syntwholesaler/Order payment/SYNT BANK/600000000002/SYNT000001 with additional,0.00,25000.00,175000.00,
+,1,03/02/2020,03/02/2020,,UPI/SYNT VENDOR/syntvendor@oksynt/Payment for invoice,0.00,50000.00,150000.00,
+,2,04/02/2020,04/02/2020,,UPI/SYNT WHOLESALER/syntwholesaler/Order payment/SYNT BANK/600000000002/SYNT000001 with additional,0.00,25000.00,175000.00,
 ,,,,,remarks text that wraps to next row,,,,
-,3,17/10/2026,17/10/2026,,CMS/ SYNT00123456/SYNT CORPORATE COLLECTIONS PVT LTD,0.00,100000.00,275000.00,
-,4,18/10/2026,18/10/2026,,UPI/SYNT STORE/syntstore.payments@oksynt/Purchase/SYNT CO-OP BANK/600000000003/SYNT000002,10000.00,0.00,265000.00,
+,3,05/02/2020,05/02/2020,,CMS/ SYNT00123456/SYNT CORPORATE COLLECTIONS PVT LTD,0.00,100000.00,275000.00,
+,4,06/02/2020,06/02/2020,,UPI/SYNT STORE/syntstore.payments@oksynt/Purchase/SYNT CO-OP BANK/600000000003/SYNT000002,10000.00,0.00,265000.00,
 ,Legends,,,,,,,
 ,1. SYNT - Synthetic test legend entry,,,,,,,
 ,2. TEST - Another synthetic legend,,,,,,,
@@ -897,7 +897,7 @@ describe("ICICI parser real-layout handling", () => {
     expect(cmsTxn!.dedupeKey.startsWith("sha256:")).toBe(true);
     // Pinned sha256 key for CMS transaction
     expect(cmsTxn!.dedupeKey).toBe(
-      "sha256:4d06048bd385336d1fd8793059c3bb62660f53d256b45e7a0e06a9cf31bc132b"
+      "sha256:63e01aad390bd12b03727274f7865584f4d303888b0fadd3382ca883f81a549b"
     );
 
     // Legends footer should NOT appear in any transaction's narration

@@ -70,16 +70,16 @@ vi.mock("~/lib/webhook-receipts.server", () => ({
   deleteWebhookReceiptsForShop: (...args: unknown[]) => mockDeleteWebhookReceiptsForShop(...args),
 }));
 
-const mockGraphql = vi.fn().mockResolvedValue({
-  json: async () => ({ data: { shop: { email: "owner@shop.com", contactEmail: null } } }),
+const { mockAdmin, mockGetOfflineAdminContext } = vi.hoisted(() => {
+  const mockGraphql = vi.fn().mockResolvedValue({
+    json: async () => ({ data: { shop: { email: "owner@shop.com", contactEmail: null } } }),
+  });
+  const mockAdmin = { graphql: mockGraphql };
+  const mockGetOfflineAdminContext = vi.fn().mockResolvedValue({ success: true, admin: mockAdmin, retryable: false });
+  return { mockAdmin, mockGetOfflineAdminContext };
 });
-const mockUnauthenticatedAdmin = vi.fn().mockResolvedValue({ admin: { graphql: mockGraphql } });
-vi.mock("~/shopify.server", () => ({
-  getShopifyApp: () => ({
-    unauthenticated: {
-      admin: mockUnauthenticatedAdmin,
-    },
-  }),
+vi.mock("~/lib/offline-admin.server", () => ({
+  getOfflineAdminContext: (...args: unknown[]) => mockGetOfflineAdminContext(...args),
 }));
 
 const mockGenerateCustomerDataExport = vi.fn();
@@ -127,7 +127,9 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     vi.clearAllMocks();
     mockSql.mockResolvedValue(mockSqlResult);
     mockTx.mockResolvedValue(Object.assign([], { count: 0 }));
-    process.env = { ...originalEnv, SHOPIFY_API_SECRET: SYNTHETIC_TEST_SECRET };
+    process.env = { ...originalEnv, SHOPIFY_API_KEY: "test-api-key", SHOPIFY_API_SECRET: SYNTHETIC_TEST_SECRET };
+    // Reset mock to default for each test
+    mockGetOfflineAdminContext.mockResolvedValue({ success: true, admin: mockAdmin, retryable: false });
 
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     consoleInfoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
@@ -177,27 +179,29 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
     // 3. DELETE s6_bulk_operations
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-    // 4. DELETE order_outstanding_missing
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-    // 5. DELETE s10b_customer_pii_fallback
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-    // 6. DELETE pgmq.q_s6_sync
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 4 }));
-    // 7. DELETE pgmq.q_s6_bulk
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-    // 8. DELETE pgmq.a_s6_sync
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-    // 9. DELETE pgmq.a_s6_bulk
+    // 4. DELETE s6_reconcile_stage_claims
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-    // 10. DELETE s6_dead_letter
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-    // 11. DELETE s6_processed_webhooks (reconcile prefix)
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-    // 12. DELETE s6_processed_webhooks (receipts join)
+    // 5. DELETE order_outstanding_missing
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-    // 13. DELETE webhook_receipts
+    // 6. DELETE s10b_customer_pii_fallback
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+    // 7. DELETE pgmq.q_s6_sync
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 4 }));
+    // 8. DELETE pgmq.q_s6_bulk
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
+    // 9. DELETE pgmq.a_s6_sync
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+    // 10. DELETE pgmq.a_s6_bulk
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+    // 11. DELETE s6_dead_letter
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+    // 12. DELETE s6_processed_webhooks (reconcile prefix)
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
+    // 13. DELETE s6_processed_webhooks (receipts join)
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
+    // 14. DELETE webhook_receipts
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 5 }));
-    // 14. DELETE Shop (returns deleted shop)
+    // 15. DELETE Shop (returns deleted shop)
     mockTx.mockResolvedValueOnce([{ id: "shop-logging-test" }]);
 
     const payload = { shop_id: 123, shop_domain: TEST_SHOP };
@@ -441,7 +445,9 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     mockPurgeExpiredDataRequests.mockResolvedValueOnce(undefined);
     mockGenerateCustomerDataExport.mockResolvedValueOnce({ taggedCustomers: [], draftOrders: [] });
     mockPersistDataRequest.mockResolvedValueOnce({ id: "dr-001", alreadyExists: false });
-    mockUnauthenticatedAdmin.mockResolvedValueOnce({ admin: { graphql: vi.fn().mockResolvedValue({ json: async () => ({ data: { shop: {} } }) }) } });
+    // Mock admin context with no shop email in GraphQL response
+    const noEmailAdmin = { graphql: vi.fn().mockResolvedValue({ json: async () => ({ data: { shop: {} } }) }) };
+    mockGetOfflineAdminContext.mockResolvedValueOnce({ success: true, admin: noEmailAdmin, retryable: false });
 
     const payload = { customer: { id: 456 }, data_request: { id: 789 }, shop_domain: TEST_SHOP };
     const body = JSON.stringify(payload);

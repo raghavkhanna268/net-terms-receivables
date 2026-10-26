@@ -41,7 +41,7 @@ interface MeasurementResult {
   inp: number | null;
 }
 
-const RUNS_PER_PAGE = 3;
+const RUNS_PER_PAGE = 5;
 
 const PAGES = [
   { route: "dashboard", label: "Dashboard (app._index)" },

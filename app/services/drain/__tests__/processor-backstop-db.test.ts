@@ -12,6 +12,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
+import { assertNoQueueLeftovers } from "../../../../tests/helpers/queue-leftovers";
 
 // Mock admin client for GraphQL calls
 vi.mock("../admin-client.server", () => ({
@@ -35,7 +36,7 @@ describeWithDb("processor backstop integration (DB-backed)", () => {
   let sql: ReturnType<typeof postgres>;
   const TEST_SUFFIX = Date.now().toString(36) + "-proc-backstop";
   const TEST_SHOP_ID = `shop-proc-${TEST_SUFFIX}`;
-  const TEST_SHOP_DOMAIN = `proc-test-${TEST_SUFFIX}.myshopify.com`;
+  const TEST_SHOP_DOMAIN = `test-proc-${TEST_SUFFIX}.myshopify.com`;
   const TEST_ACCOUNT_ID = `acc-proc-${TEST_SUFFIX}`;
 
   beforeAll(async () => {
@@ -64,11 +65,25 @@ describeWithDb("processor backstop integration (DB-backed)", () => {
   });
 
   afterAll(async () => {
+    // Clean up queue messages enqueued by this test (e.g., CREDIT_STATUS_RECOMPUTE)
+    // before deleting the shop/account they reference
+    await sql`
+      SELECT pgmq.archive('s6_sync', ARRAY(
+        SELECT msg_id FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
+      ))
+    `;
+    await sql`
+      DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
+    `;
+
     await sql`DELETE FROM backstop_processed_orders WHERE shop_id = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${`proc-${TEST_SUFFIX}%`}`;
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+
+    await assertNoQueueLeftovers(sql, [TEST_SHOP_DOMAIN], "processor-backstop-db.test.ts");
+
     await sql.end();
   });
 

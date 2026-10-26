@@ -61,11 +61,12 @@ interface SessionWithUser {
 }
 
 /**
- * Check if a string looks like a numeric user ID (not an email).
- * Returns true for non-empty strings containing only digits.
+ * Check if a string looks like a positive numeric user ID.
+ * Must start with 1-9 (no leading zeros, no "0"), followed by 0-23 more digits.
+ * Max 24 digits covers 64-bit unsigned integers with room to spare.
  */
 function isNumericId(value: string): boolean {
-  return value.length > 0 && /^\d+$/.test(value);
+  return /^[1-9]\d{0,23}$/.test(value);
 }
 
 /**
@@ -94,9 +95,24 @@ export function getActorFromSessionToken(
 
   const userId = session.onlineAccessInfo?.associated_user?.id;
   if (userId !== undefined && userId !== null) {
-    return String(userId);
+    if (typeof userId === "number") {
+      if (Number.isSafeInteger(userId) && userId > 0) {
+        return String(userId);
+      }
+    } else if (typeof userId === "bigint") {
+      if (userId > 0n) {
+        const userIdStr = String(userId);
+        if (isNumericId(userIdStr)) {
+          return userIdStr;
+        }
+      }
+    } else {
+      const userIdStr = String(userId);
+      if (isNumericId(userIdStr)) {
+        return userIdStr;
+      }
+    }
   }
-
   return "unknown";
 }
 

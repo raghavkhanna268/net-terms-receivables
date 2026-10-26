@@ -1,7 +1,7 @@
 # This file stores configurations for your Shopify app.
 # The client_id will be populated when you run `shopify app config link`
 client_id = "dbfae79a0ca15489c7467598bce10965"
-name = "Net Terms Receivables"
+name = "Termwise: Net Terms & Credit"
 application_url = "https://net-terms-receivables.raghavkhanna.workers.dev"
 embedded = true
 
@@ -89,6 +89,14 @@ api_version = "2026-10"
   [[webhooks.subscriptions]]
   uri = "/webhooks/draft_orders"
   topics = ["draft_orders/create", "draft_orders/update", "draft_orders/delete"]
+
+  # #342: Shop update webhook for currency change detection
+  # Triggers shop_config metafield and Shop.currency update without waiting for /app load
+  # Per shopify.dev/docs/api/admin-graphql WebhookSubscriptionTopic enum: shop/update
+  # requires no special scope beyond app installation.
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/shop/update"
+  topics = ["shop/update"]
 
 [auth]
 redirect_urls = ["https://net-terms-receivables.raghavkhanna.workers.dev/auth/callback"]

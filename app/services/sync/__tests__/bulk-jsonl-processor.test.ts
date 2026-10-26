@@ -757,7 +757,7 @@ describe("Bulk JSONL Processor", () => {
         mockSql as never,
         "gid://shopify/BulkOperation/123",
         1024,
-        null,
+        "test-lease-token",
         2097152 // 2MB chunk size
       );
 
