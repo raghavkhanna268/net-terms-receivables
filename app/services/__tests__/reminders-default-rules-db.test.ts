@@ -12,10 +12,36 @@
  * - hasSiblingRuleSent catch-up guard (4 tests): [helper test fails on revert]
  * - End-to-end: 2 duplicate rules produce exactly 1 send [fails on revert]
  * - sendCatchupReminder: skips when sibling already sent [fails on revert]
+ *
+ * Clock source: End-to-end tests use the database's NOW() as the single time source.
+ * The shop timezone is computed from DB's UTC hour so the business-hour check
+ * in s18_enqueue_reminders() (which uses NOW()) sees a local hour of ~12.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
+import { syncClockToDb } from "../../../tests/helpers/db-clock";
+
+/**
+ * Compute a fixed-offset Etc/GMT±N timezone where the DB's current local hour is ~12.
+ * Uses DB's NOW() as the single clock source so the timezone choice aligns with the
+ * business-hour check in s18_enqueue_reminders() which also uses NOW().
+ * PostgreSQL uses POSIX convention where Etc/GMT+5 means UTC-5 (opposite of ISO).
+ */
+async function getTestTimezone(sql: ReturnType<typeof postgres>): Promise<string> {
+  const [row] = await sql<{ utc_hour: number }[]>`
+    SELECT EXTRACT(HOUR FROM NOW() AT TIME ZONE 'UTC')::int AS utc_hour
+  `;
+  const utcHour = row.utc_hour;
+  const offsetToMakeNoon = utcHour - 12;
+  if (offsetToMakeNoon === 0) {
+    return "Etc/GMT";
+  } else if (offsetToMakeNoon > 0) {
+    return `Etc/GMT+${offsetToMakeNoon}`;
+  } else {
+    return `Etc/GMT${offsetToMakeNoon}`;
+  }
+}
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -378,44 +404,19 @@ describeWithDb("Sequential DB", () => {
     let FIXED_MONTH_STR: string;
     let DUE_DATE_STR: string;
 
-    const CANDIDATE_ZONES = [
-      "Pacific/Auckland", "Asia/Tokyo", "Asia/Shanghai", "Asia/Kolkata",
-      "Asia/Dubai", "Europe/Moscow", "Europe/Berlin", "Europe/London",
-      "Atlantic/Azores", "America/Sao_Paulo", "America/New_York",
-      "America/Chicago", "America/Denver", "America/Los_Angeles",
-      "Pacific/Honolulu",
-    ];
-
     const mockFetch = vi.fn();
 
     beforeAll(async () => {
       vi.stubGlobal("fetch", mockFetch);
       sql = postgres(TEST_DATABASE_URL!, sqlOptions);
 
-      const [pgNow] = await sql<{ now: Date }[]>`SELECT NOW() AS now`;
-
-      let foundTz: string | null = null;
-      for (const tz of CANDIDATE_ZONES) {
-        const [hourRow] = await sql<{ h: number }[]>`
-          SELECT EXTRACT(HOUR FROM (${pgNow.now}::TIMESTAMPTZ AT TIME ZONE ${tz}))::INT AS h
-        `;
-        if (hourRow.h >= 9 && hourRow.h <= 18) {
-          foundTz = tz;
-          break;
-        }
-      }
-      if (!foundTz) {
-        throw new Error(
-          `No candidate timezone has local hour 09-18 at Postgres NOW(). ` +
-          `This should not happen with the given candidate list.`
-        );
-      }
-      SHOP_TIMEZONE = foundTz;
+      await syncClockToDb(sql);
+      SHOP_TIMEZONE = await getTestTimezone(sql);
 
       const [dateRow] = await sql<{ d: string; m: string }[]>`
         SELECT 
-          (${pgNow.now}::TIMESTAMPTZ AT TIME ZONE ${SHOP_TIMEZONE})::DATE::TEXT AS d,
-          TO_CHAR(${pgNow.now}::TIMESTAMPTZ AT TIME ZONE ${SHOP_TIMEZONE}, 'YYYY-MM') AS m
+          (NOW() AT TIME ZONE ${SHOP_TIMEZONE})::DATE::TEXT AS d,
+          TO_CHAR(NOW() AT TIME ZONE ${SHOP_TIMEZONE}, 'YYYY-MM') AS m
       `;
       DUE_DATE_STR = dateRow.d;
       FIXED_MONTH_STR = dateRow.m;
