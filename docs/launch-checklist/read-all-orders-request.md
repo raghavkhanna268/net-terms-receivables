@@ -76,9 +76,9 @@ Termwise is a B2B net-terms receivables management app for Shopify merchants. It
 
 **How do you minimize data access?**
 
-- The bulk order query fetches only receivables fields: order ID, name, timestamps (createdAt, processedAt, updatedAt, cancelledAt, closedAt), displayFinancialStatus, displayFulfillmentStatus, totalPriceSet, totalOutstandingSet, paymentTerms (including paymentSchedules with dueAt, issuedAt, completedAt, amount), purchasingEntity (company/location IDs), and customer (ID and tags only—no email in orders)
-- The bulk order query does NOT fetch line items, shipping addresses, or customer contact details (email, phone, address). Note: customer email and displayName ARE fetched separately in the customer sync (`CUSTOMER_PII_FIELDS`, gated by PCD approval) for labels, payment matching and reminders (`docs/scopes.md:165`)
-- Protected Customer Data (PCD) Level 1 (Name, Email): completed, pending Shopify review, not yet approved (per `docs/scopes.md`); phone and address fields are never fetched
+- The bulk order query (`BULK_ORDERS_QUERY` in `bulk-operations.server.ts:127-210`) fetches only receivables fields: order ID, name, timestamps (createdAt, processedAt, updatedAt, cancelledAt, closedAt), displayFinancialStatus, displayFulfillmentStatus, totalPriceSet, totalOutstandingSet, paymentTerms (including paymentSchedules with dueAt, issuedAt, completedAt, amount), purchasingEntity (company/location IDs), and customer (ID and tags only—no email in order queries)
+- Order queries do NOT fetch line items, shipping addresses, or customer contact details (email, phone, address). However, email and displayName ARE read from separate sources when `CUSTOMER_PII_FIELDS` is enabled (production: `wrangler.jsonc:42`): from tagged customers via `getCustomerFields()` (`customer-fields.server.ts:78`) and `fetchCustomerWithFallback()` (`customer-fetch.server.ts:63`) for reminders; from B2B company main contacts via `getBulkCompaniesQuery()` (`bulk-operations.server.ts:36`) and `getCompanyLocationQuery()` (`admin-client.server.ts:98`). Phone and address are NEVER fetched
+- Protected Customer Data (PCD) Level 1 (Name, Email): request completed, pending Shopify review, not yet approved (per `docs/scopes.md`); phone and address fields are never fetched
 - Data request exports (`s22_data_requests`) have 30-day expiration with auto-purge; GDPR `customers/redact` webhook deletes customer-linked data
 - All data is deleted on `shop/redact` webhook (48 hours post-uninstall)
 
