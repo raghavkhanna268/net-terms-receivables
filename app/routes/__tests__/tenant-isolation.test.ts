@@ -93,6 +93,9 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
   const DATA_REQUEST_A_ID = `dr-a-${TEST_SUFFIX}`;
   const DATA_REQUEST_B_ID = `dr-b-${TEST_SUFFIX}`;
 
+  const LIST_DATA_REQUEST_A_ID = `list-dr-a-${TEST_SUFFIX}`;
+  const LIST_DATA_REQUEST_B_ID = `list-dr-b-${TEST_SUFFIX}`;
+
   const REMINDER_RULE_A_ID = `rule-a-${TEST_SUFFIX}`;
   const REMINDER_RULE_B_ID = `rule-b-${TEST_SUFFIX}`;
 
@@ -225,6 +228,13 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
         (${DATA_REQUEST_A_ID}, ${SHOP_A_ID}, 'cust-a-1', 'req-a-id', 'completed', NOW(), NOW() + interval '30 days', '{"customerId": "cust-a-1"}'::jsonb),
         (${DATA_REQUEST_B_ID}, ${SHOP_B_ID}, 'cust-b-1', 'req-b-id', 'completed', NOW(), NOW() + interval '30 days', '{"customerId": "cust-b-1"}'::jsonb)
     `;
+
+    await sql`
+      INSERT INTO s22_data_requests (id, shop_id, customer_gid, request_id, status, received_at, expires_at, export_data)
+      VALUES
+        (${LIST_DATA_REQUEST_A_ID}, ${SHOP_A_ID}, 'list-cust-a-1', 'list-req-a-id', 'pending', NOW(), NOW() + interval '30 days', '{"customerId": "list-cust-a-1"}'::jsonb),
+        (${LIST_DATA_REQUEST_B_ID}, ${SHOP_B_ID}, 'list-cust-b-1', 'list-req-b-id', 'pending', NOW(), NOW() + interval '30 days', '{"customerId": "list-cust-b-1"}'::jsonb)
+    `;
   });
 
   afterAll(async () => {
@@ -233,7 +243,7 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
     await sql`DELETE FROM "Invoice" WHERE id IN (${INVOICE_A_ID}, ${INVOICE_B_ID})`;
     await sql`DELETE FROM "BankImport" WHERE id IN (${IMPORT_A_ID}, ${IMPORT_B_ID})`;
     await sql`DELETE FROM "ReminderRule" WHERE id IN (${REMINDER_RULE_A_ID}, ${REMINDER_RULE_B_ID})`;
-    await sql`DELETE FROM s22_data_requests WHERE id IN (${DATA_REQUEST_A_ID}, ${DATA_REQUEST_B_ID})`;
+    await sql`DELETE FROM s22_data_requests WHERE id IN (${DATA_REQUEST_A_ID}, ${DATA_REQUEST_B_ID}, ${LIST_DATA_REQUEST_A_ID}, ${LIST_DATA_REQUEST_B_ID})`;
     await sql`DELETE FROM "BuyerAccount" WHERE id IN (${BUYER_A_ID}, ${BUYER_B_ID})`;
     await sql`DELETE FROM "AuditEvent" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
     await sql`DELETE FROM "Shop" WHERE id IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
@@ -688,14 +698,14 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
       const result = (await loader(args as never)) as { dataRequests: Array<{ id: string; requestId: string }>; error: string | null };
 
       expect(result.error).toBeNull();
-      const str = JSON.stringify(result);
-      expect(str).not.toContain("req-b-id");
-      expect(str).not.toContain("cust-b-1");
+      expect(result.dataRequests.length).toBeGreaterThan(0);
 
-      if (result.dataRequests.length > 0) {
-        expect(str).toContain(DATA_REQUEST_A_ID);
-        expect(str).toContain("req-a-id");
-      }
+      const str = JSON.stringify(result);
+      expect(str).toContain(LIST_DATA_REQUEST_A_ID);
+      expect(str).toContain("list-req-a-id");
+      expect(str).not.toContain(LIST_DATA_REQUEST_B_ID);
+      expect(str).not.toContain("list-req-b-id");
+      expect(str).not.toContain("list-cust-b-1");
     });
 
     it("app.settings.reminders loader returns shop A's rules, not shop B's", async () => {
