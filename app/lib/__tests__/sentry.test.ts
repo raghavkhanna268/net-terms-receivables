@@ -113,6 +113,11 @@ describe("sentry.ts", () => {
       request?: TestRequest;
       exception?: { values?: Array<{ value?: string; type?: string }> };
       message?: string;
+      logentry?: { message?: string; params?: unknown[] };
+      transaction?: string;
+      fingerprint?: string[];
+      threads?: { values: Array<{ name?: string }> };
+      spans?: Array<{ description?: string; data: Record<string, unknown>; span_id: string; trace_id: string; start_timestamp: number; status: string }>;
       breadcrumbs?: Array<{ message?: string; data?: Record<string, unknown> }>;
       extra?: Record<string, unknown>;
       tags?: Record<string, string>;
@@ -173,7 +178,7 @@ describe("sentry.ts", () => {
         expect(result?.request?.query_string).toBeUndefined();
       });
 
-      it("strips query string from request.url", () => {
+      it("strips query string and scrubs hostname from request.url", () => {
         const event = {
           request: {
             url: "https://example.com/app?shop=test.myshopify.com&id_token=secret",
@@ -182,7 +187,11 @@ describe("sentry.ts", () => {
 
         const result = beforeSend(event, {});
 
-        expect(result?.request?.url).toBe("https://example.com/app");
+        // Query string is stripped and hostname is scrubbed (could be shop domain)
+        expect(result?.request?.url).not.toContain("?");
+        expect(result?.request?.url).not.toContain("myshopify.com");
+        expect(result?.request?.url).not.toContain("id_token");
+        expect(result?.request?.url).toContain("/app");
       });
 
       it("deletes request.data entirely", () => {
@@ -239,7 +248,7 @@ describe("sentry.ts", () => {
     });
 
     describe("message scrubbing", () => {
-      it("redacts myshopify.com from message", () => {
+      it("replaces free text message with safe code", () => {
         const event = {
           message: "Failed for shop test.myshopify.com",
         };
@@ -247,7 +256,13 @@ describe("sentry.ts", () => {
         const result = beforeSend(event, {});
 
         expect(result?.message).not.toContain("myshopify.com");
-        expect(result?.message).toContain("<redacted>");
+        expect(result?.message).toBe("[scrubbed]");
+      });
+
+      it("passes through allowlisted messages", () => {
+        const event = { message: "Unhandled error" };
+        const result = beforeSend(event, {});
+        expect(result?.message).toBe("Unhandled error");
       });
     });
 
@@ -368,6 +383,260 @@ describe("sentry.ts", () => {
 
       expect(mockCapture).toHaveBeenCalledWith(error, {
         tags: expect.objectContaining({ code: "TypeError" }),
+      });
+    });
+  });
+
+  describe("PII scrubbing - buyer names, narrations, amounts", () => {
+    const FAKE_BUYER_NAME = "Asha Verma Test";
+    const FAKE_NARRATION = "NEFT/ACME TRADERS/INV-1001";
+    const FAKE_AMOUNT = "50000.00";
+
+    interface FullTestEvent {
+      message?: string;
+      logentry?: { message?: string; params?: unknown[] };
+      exception?: { values?: Array<{ value?: string; type?: string }> };
+      transaction?: string;
+      fingerprint?: string[];
+      threads?: { values: Array<{ name?: string }> };
+      spans?: Array<{ description?: string; data: Record<string, unknown>; span_id: string; trace_id: string; start_timestamp: number; status: string }>;
+      extra?: Record<string, unknown>;
+      tags?: Record<string, string>;
+      request?: { url?: string };
+    }
+
+    let beforeSend: (event: FullTestEvent, hint: unknown) => FullTestEvent | null;
+    let beforeSendTransaction: (event: FullTestEvent, hint: unknown) => FullTestEvent | null;
+
+    beforeEach(async () => {
+      vi.resetModules();
+      const { withSentry } = await import("@sentry/cloudflare");
+      const { wrapWithSentry } = await import("../sentry");
+
+      const mockHandler = { fetch: vi.fn() };
+      wrapWithSentry(mockHandler);
+
+      const configFn = (withSentry as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const config = configFn({ SENTRY_DSN: "https://test@sentry.io/123" });
+      beforeSend = config.beforeSend as typeof beforeSend;
+      beforeSendTransaction = config.beforeSendTransaction as typeof beforeSendTransaction;
+    });
+
+    function assertNoSensitiveData(json: string) {
+      expect(json).not.toContain(FAKE_BUYER_NAME);
+      expect(json).not.toContain("Asha Verma");
+      expect(json).not.toContain("Asha");
+      expect(json).not.toContain(FAKE_NARRATION);
+      expect(json).not.toContain("ACME TRADERS");
+      expect(json).not.toContain("INV-1001");
+      expect(json).not.toContain(FAKE_AMOUNT);
+      expect(json).not.toContain("50000");
+    }
+
+    describe("captureMessage path", () => {
+      it("scrubs buyer name from message", () => {
+        const event = { message: `Payment received from ${FAKE_BUYER_NAME}` };
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+        assertNoSensitiveData(json);
+        expect(result?.message).toBe("[scrubbed]");
+      });
+
+      it("scrubs narration from message", () => {
+        const event = { message: `Transaction: ${FAKE_NARRATION}` };
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+        assertNoSensitiveData(json);
+      });
+
+      it("scrubs amount from message", () => {
+        const event = { message: `Amount: ${FAKE_AMOUNT}` };
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+        assertNoSensitiveData(json);
+      });
+    });
+
+    describe("captureException path", () => {
+      it("scrubs buyer name from exception value", () => {
+        const event = {
+          exception: {
+            values: [{ value: `Error processing buyer ${FAKE_BUYER_NAME}`, type: "Error" }],
+          },
+        };
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+        assertNoSensitiveData(json);
+      });
+
+      it("scrubs narration from exception value", () => {
+        const event = {
+          exception: {
+            values: [{ value: `Failed to parse: ${FAKE_NARRATION}`, type: "Error" }],
+          },
+        };
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+        assertNoSensitiveData(json);
+      });
+
+      it("scrubs amount from exception value", () => {
+        const event = {
+          exception: {
+            values: [{ value: `Invalid amount: ${FAKE_AMOUNT}`, type: "Error" }],
+          },
+        };
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+        assertNoSensitiveData(json);
+      });
+
+      it("scrubs unusual exception types", () => {
+        const event = {
+          exception: {
+            values: [{ value: "Error", type: FAKE_BUYER_NAME }],
+          },
+        };
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+        assertNoSensitiveData(json);
+        expect(result?.exception?.values?.[0]?.type).toBe("Error");
+      });
+    });
+
+    describe("logentry path", () => {
+      it("scrubs buyer name from logentry message", () => {
+        const event = {
+          logentry: {
+            message: `Processing buyer ${FAKE_BUYER_NAME}`,
+            params: [FAKE_BUYER_NAME, FAKE_AMOUNT],
+          },
+        };
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+        assertNoSensitiveData(json);
+        expect(result?.logentry?.params).toBeUndefined();
+      });
+
+      it("scrubs narration from logentry", () => {
+        const event = {
+          logentry: {
+            message: `Narration: ${FAKE_NARRATION}`,
+            params: [FAKE_NARRATION],
+          },
+        };
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+        assertNoSensitiveData(json);
+      });
+    });
+
+    describe("transaction/span names", () => {
+      it("converts transaction name with buyer name to route template", () => {
+        const event = {
+          transaction: `/app/buyers/${FAKE_BUYER_NAME}/invoices`,
+        };
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+        assertNoSensitiveData(json);
+        expect(result?.transaction).not.toContain(FAKE_BUYER_NAME);
+      });
+
+      it("converts span description with amount to route template", () => {
+        const event = {
+          spans: [
+            {
+              description: `/api/payments?amount=${FAKE_AMOUNT}`,
+              data: { buyerName: FAKE_BUYER_NAME },
+              span_id: "abc123",
+              trace_id: "trace123",
+              start_timestamp: Date.now(),
+              status: "ok",
+            },
+          ],
+        };
+        const result = beforeSendTransaction(event, {});
+        const json = JSON.stringify(result);
+        assertNoSensitiveData(json);
+        expect(result?.spans?.[0]?.description).not.toContain(FAKE_AMOUNT);
+        expect(result?.spans?.[0]?.data?.buyerName).toBeUndefined();
+      });
+
+      it("converts transaction name with numeric ID to route template", () => {
+        const event = { transaction: "/app/buyers/12345/invoices" };
+        const result = beforeSend(event, {});
+        expect(result?.transaction).toBe("/app/buyers/:id/invoices");
+      });
+
+      it("converts transaction name with UUID to route template", () => {
+        const event = { transaction: "/app/orders/550e8400-e29b-41d4-a716-446655440000/details" };
+        const result = beforeSend(event, {});
+        expect(result?.transaction).toBe("/app/orders/:uuid/details");
+      });
+
+      it("strips query strings from transaction names", () => {
+        const event = { transaction: `/app/reconcile?buyer=${FAKE_BUYER_NAME}&amount=${FAKE_AMOUNT}` };
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+        assertNoSensitiveData(json);
+        expect(result?.transaction).toBe("/app/reconcile");
+      });
+    });
+
+    describe("fingerprint scrubbing", () => {
+      it("scrubs sensitive data from fingerprint", () => {
+        const event = {
+          fingerprint: ["{{ default }}", FAKE_BUYER_NAME, `/payments/${FAKE_AMOUNT}`],
+        };
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+        assertNoSensitiveData(json);
+        expect(result?.fingerprint?.[0]).toBe("{{ default }}");
+      });
+    });
+
+    describe("threads scrubbing", () => {
+      it("scrubs thread names containing sensitive data", () => {
+        const event = {
+          threads: {
+            values: [{ name: `Worker for ${FAKE_BUYER_NAME}` }],
+          },
+        };
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+        assertNoSensitiveData(json);
+        expect(result?.threads?.values?.[0]?.name).toBe("[scrubbed]");
+      });
+    });
+
+    describe("full event serialization", () => {
+      it("guarantees no sensitive data in complete event JSON", () => {
+        const event: FullTestEvent = {
+          message: `Payment from ${FAKE_BUYER_NAME}`,
+          logentry: { message: FAKE_NARRATION, params: [FAKE_AMOUNT] },
+          exception: { values: [{ value: `Error: ${FAKE_BUYER_NAME} ${FAKE_NARRATION}`, type: "Error" }] },
+          transaction: `/api/process?buyer=${FAKE_BUYER_NAME}&amount=${FAKE_AMOUNT}`,
+          fingerprint: ["{{ default }}", FAKE_NARRATION],
+          threads: { values: [{ name: FAKE_BUYER_NAME }] },
+          spans: [
+            {
+              description: `/payments/${FAKE_AMOUNT}`,
+              data: { narration: FAKE_NARRATION, buyer: FAKE_BUYER_NAME },
+              span_id: "span1",
+              trace_id: "trace1",
+              start_timestamp: Date.now(),
+              status: "ok",
+            },
+          ],
+          extra: { buyerName: FAKE_BUYER_NAME, amount: FAKE_AMOUNT },
+          tags: { buyer: FAKE_BUYER_NAME },
+          request: { url: `/app?buyer=${FAKE_BUYER_NAME}` },
+        };
+
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+
+        assertNoSensitiveData(json);
       });
     });
   });
