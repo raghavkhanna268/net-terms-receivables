@@ -2,13 +2,46 @@
  * Tests for tag normalization and tag-rule matching parity.
  *
  * (a) Unit tests for normalizeTag
- * (b) Parity tests: both findMatchingTagRule implementations produce same results
+ * (b) Parity tests: all findMatchingTagRule call sites produce same results
+ *
+ * Call sites using normalizeTag:
+ * - customer.server.ts:findMatchingTagRule (sync + webhook via processCustomerWebhook)
+ * - invoice-eligibility.ts:findMatchingTagRule
+ * - due-date.ts:tryTagRules (via inferDueDate)
  */
 
 import { describe, it, expect } from "vitest";
 import { normalizeTag } from "../tag-normalizer";
 import { findMatchingTagRule as customerFindMatchingTagRule } from "~/services/sync/customer.server";
 import { findMatchingTagRule as invoiceFindMatchingTagRule } from "../invoice-eligibility";
+import { inferDueDate, type TagRule } from "../due-date";
+
+function dueDateFindMatchingTagRule(
+  customerTags: string[],
+  tagRules: TagRule[]
+): TagRule | undefined {
+  const result = inferDueDate({
+    paymentTerms: null,
+    orderCreatedAt: new Date("2026-01-15T10:00:00Z"),
+    fulfilledAt: null,
+    accountDefaultTermsDays: null,
+    accountDefaultTermsSource: null,
+    tagRules,
+    customerTags,
+    shopDefaultTermsDays: null,
+    merchantOverrideDueAt: null,
+    shopTimezone: "UTC",
+  });
+  if (result.basis === "tagRule" && result.dueAt) {
+    const matchedRule = tagRules.find((r) => {
+      const normalizedRuleTag = normalizeTag(r.tag);
+      const normalizedCustomerTags = customerTags.map((t) => normalizeTag(t)).filter((t) => t !== "");
+      return normalizedRuleTag !== "" && normalizedCustomerTags.includes(normalizedRuleTag);
+    });
+    return matchedRule;
+  }
+  return undefined;
+}
 
 describe("normalizeTag", () => {
   describe("leading/trailing whitespace", () => {
@@ -98,6 +131,14 @@ describe("normalizeTag", () => {
 
     it("handles single character with spaces", () => {
       expect(normalizeTag(" a ")).toBe("a");
+    });
+
+    it("collapses non-breaking space (\\u00A0) as whitespace", () => {
+      expect(normalizeTag("whole\u00A0sale")).toBe("whole sale");
+    });
+
+    it("trims non-breaking space", () => {
+      expect(normalizeTag("\u00A0wholesale\u00A0")).toBe("wholesale");
     });
   });
 });
@@ -211,6 +252,60 @@ describe("Tag-rule matching parity", () => {
       ruleTag: "wholesale",
       expectedTag: "wholesale",
     },
+    {
+      name: "no match - blank rule against empty customer tag",
+      customerTags: [""],
+      ruleTag: "",
+      expectedTag: null,
+    },
+    {
+      name: "no match - blank rule against whitespace customer tag",
+      customerTags: ["  "],
+      ruleTag: "",
+      expectedTag: null,
+    },
+    {
+      name: "no match - whitespace rule against empty customer tag",
+      customerTags: [""],
+      ruleTag: "   ",
+      expectedTag: null,
+    },
+    {
+      name: "no match - whitespace rule against whitespace customer tag",
+      customerTags: ["  "],
+      ruleTag: "   ",
+      expectedTag: null,
+    },
+    {
+      name: "no match - blank rule against real customer tag",
+      customerTags: ["wholesale"],
+      ruleTag: "",
+      expectedTag: null,
+    },
+    {
+      name: "no match - whitespace rule against real customer tag",
+      customerTags: ["wholesale"],
+      ruleTag: "   ",
+      expectedTag: null,
+    },
+    {
+      name: "non-breaking space in customer tag matches normal space rule",
+      customerTags: ["whole\u00A0sale"],
+      ruleTag: "whole sale",
+      expectedTag: "whole sale",
+    },
+    {
+      name: "non-breaking space in rule matches normal space customer tag",
+      customerTags: ["whole sale"],
+      ruleTag: "whole\u00A0sale",
+      expectedTag: "whole\u00A0sale",
+    },
+    {
+      name: "non-breaking space treated same as regular space",
+      customerTags: ["\u00A0wholesale\u00A0"],
+      ruleTag: "wholesale",
+      expectedTag: "wholesale",
+    },
   ];
 
   describe("customer.server.ts findMatchingTagRule", () => {
@@ -233,15 +328,27 @@ describe("Tag-rule matching parity", () => {
     }
   });
 
-  describe("Both matchers produce identical results", () => {
+  describe("due-date.ts inferDueDate (tryTagRules path)", () => {
+    for (const tc of testCases) {
+      it(tc.name, () => {
+        const rules: TagRule[] = [{ tag: tc.ruleTag, defaultTermsDays: 30 }];
+        const result = dueDateFindMatchingTagRule(tc.customerTags, rules);
+        expect(result?.tag ?? null).toBe(tc.expectedTag);
+      });
+    }
+  });
+
+  describe("All matchers produce identical results", () => {
     for (const tc of testCases) {
       it(`parity: ${tc.name}`, () => {
         const rules = [{ tag: tc.ruleTag, defaultTermsDays: 30 }];
 
         const customerResult = customerFindMatchingTagRule(tc.customerTags, rules);
         const invoiceResult = invoiceFindMatchingTagRule(tc.customerTags, rules);
+        const dueDateResult = dueDateFindMatchingTagRule(tc.customerTags, rules);
 
         expect(customerResult?.tag ?? null).toBe(invoiceResult?.tag ?? null);
+        expect(customerResult?.tag ?? null).toBe(dueDateResult?.tag ?? null);
         expect(customerResult?.tag ?? null).toBe(tc.expectedTag);
       });
     }

@@ -356,11 +356,18 @@ export function findMatchingTagRule(
 ): TagRule | undefined {
   if (customerTags.length === 0 || tagRules.length === 0) return undefined;
 
-  const normalizedTags = customerTags.map((t) => normalizeTag(t));
+  // Normalize customer tags and skip empty ones
+  const normalizedTags = customerTags
+    .map((t) => normalizeTag(t))
+    .filter((t) => t !== "");
 
-  return tagRules.find((rule) =>
-    normalizedTags.includes(normalizeTag(rule.tag))
-  );
+  if (normalizedTags.length === 0) return undefined;
+
+  // Find first matching rule (skip rules with empty normalized tag)
+  return tagRules.find((rule) => {
+    const normalizedRuleTag = normalizeTag(rule.tag);
+    return normalizedRuleTag !== "" && normalizedTags.includes(normalizedRuleTag);
+  });
 }
 
 /**
