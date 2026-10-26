@@ -188,6 +188,34 @@ export interface OrderPaymentTerms {
 export const API_VERSION = "2026-10";
 export const SEED_TAG = "ntr-seed";
 export const SEED_PREFIX = "ntr-seed-";
+
+/**
+ * Reserved email domain for fixture customers (RFC 2606).
+ * Using example.com instead of .example TLD which Shopify rejects as invalid.
+ */
+export const SEED_EMAIL_DOMAIN = "example.com";
+
+/**
+ * Generate a fixture customer email in the format ntr-seed-<key>@example.com.
+ * All fixture customer emails must be generated through this helper to ensure
+ * consistency and use of the reserved domain.
+ */
+export function seedEmail(key: string): string {
+  return `${SEED_PREFIX}${key}@${SEED_EMAIL_DOMAIN}`;
+}
+
+/**
+ * Legacy email patterns that need migration to the new format.
+ * Maps from seed key to the old email that may exist on Shopify.
+ */
+export const LEGACY_SEED_EMAILS: Record<string, string> = {
+  "company-1": "raj.sharma@acme-wholesale.example",
+  "company-2": "priya@bharat-traders.example",
+  "company-3": "amit.singh@delhi-dist.example",
+  "company-4": "sneha@mumbai-merchants.example",
+  "company-5": "arjun.das@kolkata-commerce.example",
+  "company-reviewer-demo": "demo.reviewer@test-buyer.example",
+};
 const MAX_RETRIES = 3;
 const INITIAL_RETRY_DELAY_MS = 1000;
 
@@ -287,11 +315,11 @@ export function getIndiaProvinceCode(city: string): string {
 }
 
 export const COMPANY_SEEDS = [
-  { key: "company-1", name: "Acme Wholesale Pvt Ltd", city: "Mumbai", contact: { firstName: "Raj", lastName: "Sharma", email: "raj.sharma@acme-wholesale.example" } },
-  { key: "company-2", name: "Bharat Traders Co", city: "Ahmedabad", contact: { firstName: "Priya", lastName: "Patel", email: "priya@bharat-traders.example" } },
-  { key: "company-3", name: "Delhi Distributors LLP", city: "Delhi", contact: { firstName: "Amit", lastName: "Singh", email: "amit.singh@delhi-dist.example" } },
-  { key: "company-4", name: "Mumbai Merchants Pvt Ltd", city: "Pune", contact: { firstName: "Sneha", lastName: "Desai", email: "sneha@mumbai-merchants.example" } },
-  { key: "company-5", name: "Kolkata Commerce House", city: "Kolkata", contact: { firstName: "Arjun", lastName: "Das", email: "arjun.das@kolkata-commerce.example" } },
+  { key: "company-1", name: "Acme Wholesale Pvt Ltd", city: "Mumbai", contact: { firstName: "Raj", lastName: "Sharma", email: seedEmail("company-1") } },
+  { key: "company-2", name: "Bharat Traders Co", city: "Ahmedabad", contact: { firstName: "Priya", lastName: "Patel", email: seedEmail("company-2") } },
+  { key: "company-3", name: "Delhi Distributors LLP", city: "Delhi", contact: { firstName: "Amit", lastName: "Singh", email: seedEmail("company-3") } },
+  { key: "company-4", name: "Mumbai Merchants Pvt Ltd", city: "Pune", contact: { firstName: "Sneha", lastName: "Desai", email: seedEmail("company-4") } },
+  { key: "company-5", name: "Kolkata Commerce House", city: "Kolkata", contact: { firstName: "Arjun", lastName: "Das", email: seedEmail("company-5") } },
 ] as const;
 
 /**
@@ -316,7 +344,7 @@ export const REVIEWER_DEMO_COMPANY_SEED = {
   contact: {
     firstName: "Demo",
     lastName: "Reviewer",
-    email: "demo.reviewer@test-buyer.example",
+    email: seedEmail("company-reviewer-demo"),
   },
 } as const;
 
@@ -408,14 +436,15 @@ export interface SeedState {
   currencyCode: string;
   companies: Map<string, CompanyData>;
   paymentTermsTemplates: PaymentTermsTemplate[];
-  createdCount: { companies: number; locations: number; orders: number; roleAssignments: number; dbRules: number; dbAccounts: number };
-  unchangedCount: { companies: number; locations: number; orders: number; roleAssignments: number };
+  createdCount: { companies: number; locations: number; orders: number; roleAssignments: number; dbRules: number; dbAccounts: number; customers: number };
+  unchangedCount: { companies: number; locations: number; orders: number; roleAssignments: number; customers: number };
+  updatedCount: { customers: number };
   adoptedCount: { companies: number };
   driftedCount: { companies: number };
   skippedCount: { companies: number; orders: number; roleAssignments: number };
   skippedReasons: string[];
   deletedCount: { companies: number; orders: number };
-  failedCount: { companies: number; locations: number; orders: number; roleAssignments: number; dbRows: number };
+  failedCount: { companies: number; locations: number; orders: number; roleAssignments: number; dbRows: number; customers: number };
   ordersWithShopifyTerms: number;
   ordersWithoutShopifyTerms: number;
   overdueOrdersCount: number;
@@ -2617,6 +2646,21 @@ export const FIND_CUSTOMER_BY_EMAIL_QUERY = `
 `;
 
 /**
+ * Mutation to update a customer's email.
+ * 
+ * NOTE: Admin API 2026-10 customerUpdate uses plain UserError (field, message only).
+ * Do NOT select `code` on userErrors - it doesn't exist on this type.
+ */
+export const CUSTOMER_UPDATE_MUTATION = `
+  mutation CustomerUpdate($input: CustomerInput!) {
+    customerUpdate(input: $input) {
+      customer { id email }
+      userErrors { field message }
+    }
+  }
+`;
+
+/**
  * Mutation to assign an existing customer as a contact on a company.
  * Used when a customer already exists (from a previous seed run) and we want
  * to attach them to a new company instead of getting a TAKEN error.
@@ -2976,6 +3020,138 @@ interface CustomersSearchResult {
     nodes: CustomerSearchNode[];
     pageInfo: { hasNextPage: boolean; endCursor: string | null };
   };
+}
+
+/**
+ * Migrate legacy seed customer emails from .example TLD to @example.com domain.
+ * 
+ * Shopify rejects .example TLD as invalid ("Email contains an invalid domain name").
+ * This function finds existing customers with old emails and updates them in place
+ * using customerUpdate.
+ * 
+ * Idempotent: customers already on the new email are counted as unchanged.
+ * Lookup is by externalId tag (SEED_TAG) or the existing lookup in ensureTaggedCustomer.
+ * 
+ * @returns void - counts are tracked in state
+ */
+export async function migrateCustomerEmails(state: SeedState): Promise<void> {
+  console.log("\n📧 Migrating fixture customer emails...");
+  
+  for (const [seedKey, legacyEmail] of Object.entries(LEGACY_SEED_EMAILS)) {
+    const newEmail = seedEmail(seedKey);
+    
+    if (state.dryRun) {
+      console.log(`  [dry-run] Would migrate ${seedKey}: legacy → new format`);
+      continue;
+    }
+    
+    // First check if customer already has the new email (idempotent)
+    const newEmailCustomer = await findCustomerByExactEmail(state, newEmail);
+    if (newEmailCustomer) {
+      state.unchangedCount.customers++;
+      continue;
+    }
+    
+    // Look for customer with old email
+    const legacyCustomer = await findCustomerByExactEmail(state, legacyEmail);
+    if (!legacyCustomer) {
+      // No customer with old email exists - nothing to migrate
+      // (customer may have been created fresh with new email)
+      continue;
+    }
+    
+    // Update the customer's email
+    const updated = await updateCustomerEmail(state, legacyCustomer.id, newEmail);
+    if (updated) {
+      state.updatedCount.customers++;
+      console.log(`  ✅ Migrated ${seedKey}`);
+    } else {
+      state.failedCount.customers++;
+    }
+  }
+  
+  const total = state.updatedCount.customers + state.unchangedCount.customers + state.failedCount.customers;
+  if (total > 0 || state.dryRun) {
+    console.log(`  Updated: ${state.updatedCount.customers}, Unchanged: ${state.unchangedCount.customers}, Failed: ${state.failedCount.customers}`);
+  } else {
+    console.log("  No legacy customers found to migrate");
+  }
+}
+
+/**
+ * Find a customer by exact email match.
+ * Returns the customer or null if not found.
+ */
+async function findCustomerByExactEmail(
+  state: SeedState,
+  email: string
+): Promise<{ id: string; email: string } | null> {
+  let cursor: string | undefined = undefined;
+  
+  for (let page = 0; page < MAX_SEARCH_PAGES; page++) {
+    const variables: { query: string; after?: string } = { query: `email:'${email}'` };
+    if (cursor) variables.after = cursor;
+    
+    const response = await graphql<CustomersSearchResult>(
+      state,
+      FIND_CUSTOMER_BY_EMAIL_QUERY,
+      variables
+    );
+    
+    if (response.errors) {
+      return null;
+    }
+    
+    const customers = response.data?.customers.nodes ?? [];
+    const exactMatch = customers.find((c: CustomerSearchNode) => c.email?.toLowerCase() === email.toLowerCase());
+    if (exactMatch && exactMatch.email) {
+      return { id: exactMatch.id, email: exactMatch.email };
+    }
+    
+    const hasNextPage = response.data?.customers.pageInfo?.hasNextPage ?? false;
+    if (!hasNextPage) break;
+    cursor = response.data?.customers.pageInfo?.endCursor ?? undefined;
+  }
+  
+  return null;
+}
+
+/**
+ * Update a customer's email using customerUpdate mutation.
+ * Returns true on success, false on failure.
+ */
+async function updateCustomerEmail(
+  state: SeedState,
+  customerId: string,
+  newEmail: string
+): Promise<boolean> {
+  const result = await graphql<{
+    customerUpdate: {
+      customer: { id: string; email: string } | null;
+      userErrors: UserError[];
+    };
+  }>(state, CUSTOMER_UPDATE_MUTATION, {
+    input: {
+      id: customerId,
+      email: newEmail,
+    },
+  }, { isMutation: true, mutationName: "customerUpdate" });
+  
+  const check = checkMutationResult(
+    result,
+    result.data?.customerUpdate?.userErrors,
+    result.data?.customerUpdate?.customer
+  );
+  
+  if (!check.ok) {
+    console.log(`    ⚠️  Failed to update customer email: ${check.failureReason}`);
+    if (check.failureReason === "user_errors") {
+      logUserErrors(result.data?.customerUpdate?.userErrors ?? [], "customerUpdate");
+    }
+    return false;
+  }
+  
+  return true;
 }
 
 /**
@@ -4122,14 +4298,15 @@ export async function main(): Promise<void> {
     currencyCode: "",
     companies: new Map(),
     paymentTermsTemplates: [],
-    createdCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRules: 0, dbAccounts: 0 },
-    unchangedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0 },
+    createdCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRules: 0, dbAccounts: 0, customers: 0 },
+    unchangedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, customers: 0 },
+    updatedCount: { customers: 0 },
     adoptedCount: { companies: 0 },
     driftedCount: { companies: 0 },
     skippedCount: { companies: 0, orders: 0, roleAssignments: 0 },
     skippedReasons: [],
     deletedCount: { companies: 0, orders: 0 },
-    failedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRows: 0 },
+    failedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRows: 0, customers: 0 },
     ordersWithShopifyTerms: 0,
     ordersWithoutShopifyTerms: 0,
     overdueOrdersCount: 0,
@@ -4194,6 +4371,9 @@ export async function main(): Promise<void> {
     // --reset --apply succeeded, continue to seeding
   }
 
+  // Migrate legacy fixture customer emails (idempotent)
+  await migrateCustomerEmails(state);
+
   // Seed Shopify data
   await seedCompanies(state);
   await seedOrders(state);
@@ -4241,6 +4421,12 @@ export async function main(): Promise<void> {
   console.log(`      Locations:        ${state.createdCount.locations}`);
   console.log(`      Role assignments: ${state.createdCount.roleAssignments}`);
   console.log(`      Orders:           ${state.createdCount.orders}`);
+  console.log(`      Customers:        ${state.createdCount.customers}`);
+
+  if (state.updatedCount.customers > 0) {
+    console.log("    Updated:");
+    console.log(`      Customers:        ${state.updatedCount.customers}`);
+  }
 
   if (state.adoptedCount.companies > 0) {
     console.log("    Adopted (existing company, externalId set):");
@@ -4248,13 +4434,15 @@ export async function main(): Promise<void> {
   }
 
   const hasUnchanged = state.unchangedCount.companies > 0 || state.unchangedCount.locations > 0 ||
-                       state.unchangedCount.orders > 0 || state.unchangedCount.roleAssignments > 0;
+                       state.unchangedCount.orders > 0 || state.unchangedCount.roleAssignments > 0 ||
+                       state.unchangedCount.customers > 0;
   if (hasUnchanged) {
     console.log("    Unchanged:");
     console.log(`      Companies:        ${state.unchangedCount.companies}`);
     console.log(`      Locations:        ${state.unchangedCount.locations}`);
     console.log(`      Role assignments: ${state.unchangedCount.roleAssignments}`);
     console.log(`      Orders:           ${state.unchangedCount.orders}`);
+    console.log(`      Customers:        ${state.unchangedCount.customers}`);
   }
 
   if (state.driftedCount.companies > 0) {
@@ -4285,12 +4473,14 @@ export async function main(): Promise<void> {
 
   // Always print explicit failed counts for every category
   const totalFailures = state.failedCount.companies + state.failedCount.locations + 
-                        state.failedCount.orders + state.failedCount.roleAssignments + state.failedCount.dbRows;
+                        state.failedCount.orders + state.failedCount.roleAssignments + 
+                        state.failedCount.dbRows + state.failedCount.customers;
   console.log("    Failed:");
   console.log(`      Companies:        ${state.failedCount.companies}`);
   console.log(`      Locations:        ${state.failedCount.locations}`);
   console.log(`      Role assignments: ${state.failedCount.roleAssignments}`);
   console.log(`      Orders:           ${state.failedCount.orders}`);
+  console.log(`      Customers:        ${state.failedCount.customers}`);
   console.log(`      DB rows:          ${state.failedCount.dbRows}`);
 
   // Order breakdown
@@ -4343,7 +4533,8 @@ export async function main(): Promise<void> {
  */
 export function computeExitCode(state: SeedState): number {
   const totalFailures = state.failedCount.companies + state.failedCount.locations + 
-                        state.failedCount.orders + state.failedCount.roleAssignments + state.failedCount.dbRows;
+                        state.failedCount.orders + state.failedCount.roleAssignments + 
+                        state.failedCount.dbRows + state.failedCount.customers;
   return (totalFailures > 0 || state.errors.length > 0) ? 1 : 0;
 }
 
