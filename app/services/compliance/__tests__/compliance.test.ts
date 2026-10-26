@@ -670,6 +670,86 @@ describe("compliance.server", () => {
       expect(queryText).toContain("m.amount");
       expect(queryText).toContain("m.state");
     });
+
+    it("includes B2B main contact accounts where mainContactCustomerId matches", async () => {
+      // 1. SELECT s8_tagged_customers
+      mockSql.mockResolvedValueOnce([]);
+      // 2. SELECT s8_draft_orders
+      mockSql.mockResolvedValueOnce([]);
+      // 3. SELECT BuyerAccount (for customerId) - no direct match
+      mockSql.mockResolvedValueOnce([]);
+      // 4. SELECT BuyerAccount (for mainContactCustomerId - B2B main contact accounts)
+      mockSql.mockResolvedValueOnce([
+        {
+          id: "ba-b2b-1",
+          name: "Acme Corp HQ",
+          kind: "COMPANY",
+          mainContactEmail: "contact@acme.com",
+          mainContactName: "Contact Person",
+          mainContactCustomerId: "gid://shopify/Customer/789",
+        },
+        {
+          id: "ba-b2b-2",
+          name: "Acme Corp West",
+          kind: "COMPANY",
+          mainContactEmail: "contact@acme.com",
+          mainContactName: "Contact Person",
+          mainContactCustomerId: "gid://shopify/Customer/789",
+        },
+      ]);
+
+      const result = await generateCustomerDataExport(
+        mockSql,
+        "shop-123",
+        "gid://shopify/Customer/789",
+        "req-b2b-main-contact"
+      );
+
+      expect(result.customerGid).toBe("gid://shopify/Customer/789");
+      expect(result.data.b2bMainContactAccounts).toHaveLength(2);
+      expect(result.data.b2bMainContactAccounts[0]).toEqual({
+        id: "ba-b2b-1",
+        name: "Acme Corp HQ",
+        kind: "COMPANY",
+        mainContactEmail: "contact@acme.com",
+        mainContactName: "Contact Person",
+        mainContactCustomerId: "gid://shopify/Customer/789",
+      });
+      expect(result.data.b2bMainContactAccounts[1]).toEqual({
+        id: "ba-b2b-2",
+        name: "Acme Corp West",
+        kind: "COMPANY",
+        mainContactEmail: "contact@acme.com",
+        mainContactName: "Contact Person",
+        mainContactCustomerId: "gid://shopify/Customer/789",
+      });
+    });
+
+    it("returns empty b2bMainContactAccounts when no match", async () => {
+      // 1. SELECT s8_tagged_customers
+      mockSql.mockResolvedValueOnce([{
+        tags: [],
+        tag_active: false,
+        email: null,
+        display_name: null,
+        created_at: new Date(),
+      }]);
+      // 2. SELECT s8_draft_orders
+      mockSql.mockResolvedValueOnce([]);
+      // 3. SELECT BuyerAccount (for customerId)
+      mockSql.mockResolvedValueOnce([]);
+      // 4. SELECT BuyerAccount (for mainContactCustomerId - B2B main contact accounts) - no match
+      mockSql.mockResolvedValueOnce([]);
+
+      const result = await generateCustomerDataExport(
+        mockSql,
+        "shop-123",
+        "gid://shopify/Customer/no-b2b-match",
+        "req-no-b2b"
+      );
+
+      expect(result.data.b2bMainContactAccounts).toHaveLength(0);
+    });
   });
 
   describe("persistDataRequest", () => {

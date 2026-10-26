@@ -48,7 +48,8 @@ export async function processCompanyLocationWebhook(
   topic: string,
   location: ShopifyCompanyLocation,
   webhookId: string,
-  env: PiiEnv
+  env: PiiEnv,
+  contactKnown: boolean = true
 ): Promise<SyncResult> {
   // Idempotency check
   if (await isWebhookProcessed(sql, webhookId)) {
@@ -120,6 +121,7 @@ export async function processCompanyLocationWebhook(
   }
 
   // Upsert BuyerAccount (gated if over limit, or preserve existing gated state)
+  // When contactKnown=false (ACCESS_DENIED fallback), preserve existing contact fields
   const [result] = await sql<{ id: string; action: string; gated_at: Date | null }[]>`
     INSERT INTO "BuyerAccount" (
       "shopId",
@@ -155,9 +157,9 @@ export async function processCompanyLocationWebhook(
       "companyId" = EXCLUDED."companyId",
       name = EXCLUDED.name,
       "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
-      "mainContactEmail" = EXCLUDED."mainContactEmail",
-      "mainContactName" = EXCLUDED."mainContactName",
-      "mainContactCustomerId" = EXCLUDED."mainContactCustomerId",
+      "mainContactEmail" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactEmail" ELSE "BuyerAccount"."mainContactEmail" END,
+      "mainContactName" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactName" ELSE "BuyerAccount"."mainContactName" END,
+      "mainContactCustomerId" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactCustomerId" ELSE "BuyerAccount"."mainContactCustomerId" END,
       "updatedAt" = NOW()
     RETURNING id, (xmax = 0)::text as action, gated_at
   `;

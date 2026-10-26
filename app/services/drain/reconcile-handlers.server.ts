@@ -31,7 +31,7 @@ import { markWebhookProcessed } from "~/services/sync/company.server";
 import { safeLog, shopHash } from "~/lib/log.server";
 import { adminGraphQL } from "./admin-client.server";
 import {
-  BULK_COMPANIES_QUERY,
+  getBulkCompaniesQuery,
   BULK_ORDERS_QUERY,
   parseBulkOperationResult,
   registerBulkOperation,
@@ -106,8 +106,10 @@ async function buildReconcileMutation(
   shop: string,
   kind: ReconcileStage
 ): Promise<string | null> {
+  const env = getRequestEnv() ?? {};
+
   if (kind === "companies") {
-    return BULK_COMPANIES_QUERY;
+    return getBulkCompaniesQuery(env);
   }
 
   if (kind === "orders") {
@@ -127,7 +129,6 @@ async function buildReconcileMutation(
       return null;
     }
 
-    const env = getRequestEnv() ?? {};
     return getBulkCustomersQuery(tagRules, env);
   }
 

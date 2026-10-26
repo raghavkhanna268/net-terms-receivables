@@ -16,7 +16,8 @@ vi.mock("../admin-client.server", () => ({
     retryable: false,
   }),
   COMPANY_QUERY: "query CompanyById",
-  COMPANY_LOCATION_QUERY: "query CompanyLocationById",
+  getCompanyLocationQuery: vi.fn().mockReturnValue("query CompanyLocationById"),
+  getCompanyLocationQueryWithoutContact: vi.fn().mockReturnValue("query CompanyLocationById"),
   ORDER_QUERY: "query OrderById",
   BULK_OPERATION_STATUS_QUERY: "query BulkOperationStatus",
 }));
@@ -50,7 +51,7 @@ vi.mock("~/services/sync/order.server", () => ({
 
 vi.mock("~/services/sync/bulk-operations.server", () => ({
   registerBulkOperation: vi.fn().mockResolvedValue(undefined),
-  BULK_COMPANIES_QUERY: "mutation BulkCompaniesExport",
+  getBulkCompaniesQuery: vi.fn().mockReturnValue("mutation BulkCompaniesExport"),
   BULK_ORDERS_QUERY: "mutation BulkOrdersExport",
   parseBulkOperationResult: vi.fn().mockReturnValue({
     success: true,

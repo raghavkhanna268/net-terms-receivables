@@ -98,71 +98,6 @@ export function getBulkCompaniesQuery(env: PiiEnv): string {
 }
 
 /**
- * @deprecated Use getBulkCompaniesQuery(env) instead for DPDP compliance.
- * This static version always requests PII fields regardless of flag state.
- */
-export const BULK_COMPANIES_QUERY = `
-  mutation BulkCompaniesExport {
-    bulkOperationRunQuery(
-      query: """
-      {
-        companies {
-          edges {
-            node {
-              id
-              name
-              externalId
-              note
-              createdAt
-              updatedAt
-              mainContact {
-                customer {
-                  id
-                  email
-                  displayName
-                }
-              }
-              locations {
-                edges {
-                  node {
-                    id
-                    name
-                    createdAt
-                    updatedAt
-                    billingAddress {
-                      companyName
-                    }
-                    buyerExperienceConfiguration {
-                      paymentTermsTemplate {
-                        id
-                        name
-                        dueInDays
-                        paymentTermsType
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-      """
-    ) {
-      bulkOperation {
-        id
-        status
-        url
-      }
-      userErrors {
-        field
-        message
-      }
-    }
-  }
-`;
-
-/**
  * GraphQL mutation to start a bulk operation for orders with payment terms.
  *
  * Filters to orders relevant for net-terms invoice management:
@@ -329,10 +264,13 @@ export type ReconcileStage = "companies" | "customers" | "orders";
  * The actual GraphQL call will be made by the caller with access
  * to the authenticated session.
  *
+ * DPDP data minimization: only requests email/displayName when CUSTOMER_PII_FIELDS=1.
+ *
+ * @param env - Environment for PII flag check (required, no default)
  * @returns The GraphQL mutation string to execute
  */
-export function getCompaniesExportMutation(): string {
-  return BULK_COMPANIES_QUERY;
+export function getCompaniesExportMutation(env: PiiEnv): string {
+  return getBulkCompaniesQuery(env);
 }
 
 /**

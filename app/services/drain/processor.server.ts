@@ -41,6 +41,7 @@ import {
   ORDER_QUERY,
   DRAFT_ORDER_QUERY,
   getCompanyLocationQuery,
+  getCompanyLocationQueryWithoutContact,
 } from "./admin-client.server";
 import {
   fetchCustomerWithFallback,
@@ -245,25 +246,27 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
 
   if (!result.success) {
     // Handle access denied on mainContact gracefully - don't fail the whole sync
-    // Log and continue with NULL contact fields
-    if (result.errorCode === "ACCESS_DENIED" || result.error?.includes("access")) {
+    // Match only on errorCode, not message text (more reliable)
+    if (result.errorCode === "ACCESS_DENIED") {
       safeLog("warn", "company_location_contact_access_denied", {
         shopHash: await shopHash(message.shop),
         locationGid: message.resourceGid,
       });
-      // Retry without mainContact fields by fetching base query only
+      // Retry with a query that completely omits mainContact
       const baseResult = await adminGraphQL<{
         node: ShopifyCompanyLocation | null;
-      }>(message.shop, getCompanyLocationQuery({}), { id: message.resourceGid });
+      }>(message.shop, getCompanyLocationQueryWithoutContact(), { id: message.resourceGid });
       
       if (baseResult.success && baseResult.data?.node) {
+        // Pass contactKnown=false to preserve any existing stored contact
         return processCompanyLocationWebhook(
           sql,
           message.shop,
           message.topic,
           baseResult.data.node,
           message.webhookId,
-          {} // Force PII off since we couldn't fetch it
+          env,
+          false // contactKnown=false: preserve existing stored contact
         );
       }
     }

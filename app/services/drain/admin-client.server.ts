@@ -131,10 +131,19 @@ export function getCompanyLocationQuery(env: PiiEnv): string {
 }
 
 /**
- * @deprecated Use getCompanyLocationQuery(env) instead for DPDP compliance.
- * This static version always requests PII fields regardless of flag state.
+ * Build a CompanyLocation query WITHOUT mainContact fields.
+ *
+ * Used as a fallback when ACCESS_DENIED is returned on mainContact.
+ * This query fetches only the base location data (id, name, company.id,
+ * billingAddress, paymentTermsTemplate) and completely omits mainContact.
+ *
+ * When this fallback is used, the caller should preserve existing stored
+ * contact fields (contactKnown=false behavior) rather than NULLing them.
+ *
+ * @returns GraphQL query string without mainContact
  */
-export const COMPANY_LOCATION_QUERY = `
+export function getCompanyLocationQueryWithoutContact(): string {
+  return `
   query CompanyLocationById($id: ID!) {
     node(id: $id) {
       ... on CompanyLocation {
@@ -142,13 +151,6 @@ export const COMPANY_LOCATION_QUERY = `
         name
         company {
           id
-          mainContact {
-            customer {
-              id
-              email
-              displayName
-            }
-          }
         }
         billingAddress {
           companyName
@@ -165,6 +167,7 @@ export const COMPANY_LOCATION_QUERY = `
     }
   }
 `;
+}
 
 /**
  * Fetch bulk operation status and result URL.

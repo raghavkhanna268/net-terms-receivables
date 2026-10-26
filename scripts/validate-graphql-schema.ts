@@ -1384,6 +1384,30 @@ async function validateDynamicQueryBuilders(schema: GraphQLSchema): Promise<{ re
     console.log(`  ✓ getCompanyLocationQuery (with PII): validated`);
   }
 
+  // Variant: getCompanyLocationQueryWithoutContact (ACCESS_DENIED fallback)
+  let getCompanyLocationQueryWithoutContact: () => string;
+  try {
+    const adminClientModule2 = await import("../app/services/drain/admin-client.server");
+    getCompanyLocationQueryWithoutContact = adminClientModule2.getCompanyLocationQueryWithoutContact;
+  } catch {
+    console.error("❌ FATAL: Failed to import getCompanyLocationQueryWithoutContact");
+    process.exit(1);
+  }
+  const companyLocQueryNoContact = getCompanyLocationQueryWithoutContact();
+  const companyLocDocNoContact: GraphQLDocument = {
+    name: "getCompanyLocationQueryWithoutContact()",
+    source: companyLocQueryNoContact,
+    filePath: path.join(__dirname, "../app/services/drain/admin-client.server.ts"),
+  };
+  const companyLocErrorsNoContact = validateDocument(schema, companyLocDocNoContact);
+  if (companyLocErrorsNoContact.length > 0) {
+    results.push({ document: companyLocDocNoContact, errors: companyLocErrorsNoContact });
+    console.log(`  ✗ getCompanyLocationQueryWithoutContact(): FAILED`);
+  } else {
+    validatedCount++;
+    console.log(`  ✓ getCompanyLocationQueryWithoutContact(): validated`);
+  }
+
   // ===== getBulkCompaniesQuery variants =====
 
   // Import getBulkCompaniesQuery from bulk-operations.server.ts
