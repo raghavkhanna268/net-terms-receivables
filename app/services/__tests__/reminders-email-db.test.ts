@@ -606,36 +606,48 @@ describeWithDb("Reminder Email DB Suite", () => {
   // ===========================================================================
   // Case 4: Regression guard for #490 trigger - updated_at changes on UPDATE
   // Guard pinned: prisma/migrations/20261123000000_s18_shop_reminder_settings_trigger_fix
-  //               trigger: update_updated_at_column()
+  //               trigger: s18_shop_reminder_settings_updated_at -> update_updated_at_column()
+  //               Raw SQL UPDATE without explicit updated_at must still advance it.
   // ===========================================================================
   describe("Case 4: #490 trigger regression guard", () => {
-    it("updating s18_shop_reminder_settings changes updated_at (with clock advanced)", async () => {
-      // Guard: trigger s18_shop_reminder_settings_updated_at
-      const { updateShopReminderSettings } = await import("../reminders.server");
+    it("raw SQL UPDATE (not setting updated_at) still advances updated_at via trigger", async () => {
+      // Guard: trigger s18_shop_reminder_settings_updated_at fires on UPDATE
+      // This test FAILS if the trigger is dropped because updated_at stays at seeded value.
+      // NOTE: NOW() in Postgres is transaction time, not vi.setSystemTime, so we seed
+      // an explicit older timestamp and compare against that.
 
       await sql`DELETE FROM s18_shop_reminder_settings WHERE shop_id = ${SHOP_ID}`;
 
-      await updateShopReminderSettings(sql, SHOP_ID, true);
+      // Seed with an explicit older timestamp (year 2020) so trigger advancement is detectable
+      const seededTime = new Date("2020-01-01T00:00:00Z");
+      await sql`
+        INSERT INTO s18_shop_reminder_settings (shop_id, enabled, created_at, updated_at)
+        VALUES (${SHOP_ID}, true, ${seededTime}, ${seededTime})
+      `;
 
+      // Verify seeded value
       const [before] = await sql<{ updatedAt: Date }[]>`
         SELECT updated_at AS "updatedAt" FROM s18_shop_reminder_settings
         WHERE shop_id = ${SHOP_ID}
       `;
       expect(before).toBeDefined();
-      const beforeTime = before.updatedAt.getTime();
+      expect(before.updatedAt.getTime()).toBe(seededTime.getTime());
 
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      // Raw SQL UPDATE that toggles `enabled` but does NOT set `updated_at`
+      // The trigger must fire and set updated_at = NOW()
+      await sql`
+        UPDATE s18_shop_reminder_settings
+        SET enabled = false
+        WHERE shop_id = ${SHOP_ID}
+      `;
 
-      await updateShopReminderSettings(sql, SHOP_ID, false);
-
+      // Verify trigger fired: updated_at must be strictly greater than seeded value
       const [after] = await sql<{ updatedAt: Date }[]>`
         SELECT updated_at AS "updatedAt" FROM s18_shop_reminder_settings
         WHERE shop_id = ${SHOP_ID}
       `;
       expect(after).toBeDefined();
-      const afterTime = after.updatedAt.getTime();
-
-      expect(afterTime).toBeGreaterThan(beforeTime);
+      expect(after.updatedAt.getTime()).toBeGreaterThan(seededTime.getTime());
     });
   });
 
