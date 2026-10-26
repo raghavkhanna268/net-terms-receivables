@@ -108,6 +108,7 @@ const DB_TEST_PATTERNS = [
   "app/services/sync/__tests__/customer.test.ts",
   "app/services/sync/__tests__/order.test.ts",
   "app/services/sync/__tests__/draft-order.test.ts",
+  "app/services/sync/__tests__/draft-order-bulk-db.test.ts",
 
   // Route DB tests
   "app/routes/__tests__/app.imports.test.ts",
