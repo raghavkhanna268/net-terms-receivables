@@ -196,7 +196,6 @@ describe("app home timing instrumentation", () => {
     const EXPECTED_PHASES = [
       "auth_index",
       "shop_lookup",
-      "onboarding_checks",
       "loader_total",
     ];
 
@@ -797,7 +796,7 @@ describe("redirect and throw paths", () => {
     vi.clearAllMocks();
     _resetIsolateStateForTesting();
 
-    // Configure mockSql to trigger onboarding redirect
+    // Configure mockSql to trigger onboarding redirect (single optimized query)
     mockSql.mockImplementation(
       (strings: TemplateStringsArray, ..._values: unknown[]) => {
         const query = strings.join("?");
@@ -806,17 +805,9 @@ describe("redirect and throw paths", () => {
             { id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" },
           ]);
         }
-        // Return null to trigger redirect (onboarding not dismissed)
-        if (query.includes("onboarding_dismissed_at")) {
-          return Promise.resolve([{ onboarding_dismissed_at: null }]);
-        }
-        // No buyers - triggers redirect
-        if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
-          return Promise.resolve([{ count: "0" }]);
-        }
-        // No tag rules - triggers redirect
-        if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
-          return Promise.resolve([{ count: "0" }]);
+        // Single optimized onboarding query returns should_redirect: true
+        if (query.includes("should_redirect")) {
+          return Promise.resolve([{ should_redirect: true }]);
         }
         return Promise.resolve([]);
       }
@@ -873,5 +864,127 @@ describe("redirect and throw paths", () => {
     expect(thrownResponse).toBeInstanceOf(Response);
     expect(thrownResponse!.status).toBe(302);
     expect(thrownResponse!.headers.get("Location")).toBe("/app/onboarding");
+  });
+
+  it("onboarding redirect 302 includes Server-Timing header with only allowlisted phases", async () => {
+    const { loader } = await import("../app._index");
+    const { getAllowedPhases } = await import("~/lib/server-timing.server");
+
+    const mockRedirect = vi.fn().mockImplementation((path: string) => {
+      throw new Response(null, {
+        status: 302,
+        headers: { Location: path },
+      });
+    });
+
+    const mockContext = {
+      shopify: {
+        authenticate: {
+          admin: vi.fn().mockResolvedValue({
+            admin: {},
+            session: { shop: TEST_SHOP },
+            sessionToken: "test-session-token",
+            redirect: mockRedirect,
+          }),
+        },
+      },
+      cloudflare: {
+        env: {},
+        ctx: { waitUntil: vi.fn() },
+      },
+    };
+
+    const request = new Request("https://example.com/app");
+    const args = { request, context: mockContext, params: {} } as never;
+
+    let thrownResponse: Response | null = null;
+    try {
+      await loader(args);
+    } catch (err) {
+      if (err instanceof Response) {
+        thrownResponse = err;
+      } else {
+        throw err;
+      }
+    }
+
+    expect(thrownResponse).toBeInstanceOf(Response);
+    
+    const serverTiming = thrownResponse!.headers.get("Server-Timing");
+    expect(serverTiming).not.toBeNull();
+    expect(serverTiming).toBeTruthy();
+
+    // Parse Server-Timing header and verify all phases are allowlisted
+    const allowedPhases = getAllowedPhases();
+    const entries = serverTiming!.split(/,\s*/);
+    const phaseNames: string[] = [];
+    
+    for (const entry of entries) {
+      if (!entry) continue;
+      const [phase] = entry.split(";");
+      phaseNames.push(phase);
+      expect(allowedPhases.has(phase)).toBe(true);
+    }
+
+    // Verify the expected phases are present (auth_index, shop_lookup, loader_total)
+    expect(phaseNames).toContain("auth_index");
+    expect(phaseNames).toContain("shop_lookup");
+    expect(phaseNames).toContain("loader_total");
+
+    // Verify format: phase;dur=X.X
+    const entryPattern = /^[a-z_]+;dur=\d+(\.\d+)?$/;
+    for (const entry of entries) {
+      if (entry) {
+        expect(entry).toMatch(entryPattern);
+      }
+    }
+  });
+
+  it("onboarding redirect does NOT call safeLog for timing (no logAllPhases on redirect path)", async () => {
+    const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    
+    const { loader } = await import("../app._index");
+
+    const mockRedirect = vi.fn().mockImplementation((path: string) => {
+      throw new Response(null, {
+        status: 302,
+        headers: { Location: path },
+      });
+    });
+
+    const mockContext = {
+      shopify: {
+        authenticate: {
+          admin: vi.fn().mockResolvedValue({
+            admin: {},
+            session: { shop: TEST_SHOP },
+            sessionToken: "test-session-token",
+            redirect: mockRedirect,
+          }),
+        },
+      },
+      cloudflare: {
+        env: {},
+        ctx: { waitUntil: vi.fn() },
+      },
+    };
+
+    const request = new Request("https://example.com/app");
+    const args = { request, context: mockContext, params: {} } as never;
+
+    try {
+      await loader(args);
+    } catch {
+      // Expected redirect throw
+    }
+
+    // Verify NO app_home_timing logs were emitted (redirect path doesn't log phases)
+    const timingLogs = consoleLogSpy.mock.calls
+      .map((c: unknown[]) => c[0])
+      .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"));
+    
+    expect(timingLogs.length).toBe(0);
+    
+    consoleLogSpy.mockRestore();
   });
 });
