@@ -270,27 +270,35 @@ export async function enqueueCreditStatusRecompute(
   shopDomain: string,
   buyerAccountId: string,
   source: "invoice_change" | "daily_sweep" | "manual",
-): Promise<void> {
-  // Deterministic dedupe key: account ID + date (for daily sweep deduplication)
-  // For event-driven, use a unique key per event
-  const today = new Date().toISOString().split("T")[0];
-  const dedupeKey =
-    source === "daily_sweep"
-      ? `credit_recompute:${buyerAccountId}:${today}`
-      : `credit_recompute:${buyerAccountId}:${Date.now()}`;
+): Promise<boolean> {
+  const enqueued = await sql.begin(async (tx) => {
+    const [shopRow] = await tx<[{ id: string }?]>`
+      SELECT id FROM "Shop" WHERE domain = ${shopDomain} FOR SHARE
+    `;
+    if (!shopRow) {
+      return false;
+    }
 
-  const message = {
-    topic: "CREDIT_STATUS_RECOMPUTE",
-    shop: shopDomain,
-    buyerAccountId,
-    source,
-    webhookId: dedupeKey,
-    resourceGid: buyerAccountId,
-  };
+    const today = new Date().toISOString().split("T")[0];
+    const dedupeKey =
+      source === "daily_sweep"
+        ? `credit_recompute:${buyerAccountId}:${today}`
+        : `credit_recompute:${buyerAccountId}:${Date.now()}`;
 
-  await sql`
-    SELECT pgmq.send('s6_sync', ${sql.json(message)})
-  `;
+    const message = {
+      topic: "CREDIT_STATUS_RECOMPUTE",
+      shop: shopDomain,
+      buyerAccountId,
+      source,
+      webhookId: dedupeKey,
+      resourceGid: buyerAccountId,
+    };
+
+    await tx`SELECT pgmq.send('s6_sync', ${tx.json(message)})`;
+    return true;
+  });
+
+  return enqueued;
 }
 
 /**
@@ -308,12 +316,10 @@ export async function enqueueCreditStatusRecompute(
 export async function enqueueRecomputeForInvoice(
   sql: Sql,
   invoiceId: string,
-): Promise<void> {
-  // Look up the invoice to get shop domain and buyer account
-  const [invoice] = await sql<{
-    buyerAccountId: string | null;
-    shopDomain: string;
-  }[]>`
+): Promise<boolean> {
+  const [invoice] = await sql<
+    [{ buyerAccountId: string | null; shopDomain: string }?]
+  >`
     SELECT i."buyerAccountId", s.domain AS "shopDomain"
     FROM "Invoice" i
     JOIN "Shop" s ON s.id = i."shopId"
@@ -321,10 +327,10 @@ export async function enqueueRecomputeForInvoice(
   `;
 
   if (!invoice?.buyerAccountId) {
-    return;
+    return false;
   }
 
-  await enqueueCreditStatusRecompute(
+  return enqueueCreditStatusRecompute(
     sql,
     invoice.shopDomain,
     invoice.buyerAccountId,
