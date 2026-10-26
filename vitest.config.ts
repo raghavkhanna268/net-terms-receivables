@@ -88,6 +88,7 @@ const DB_TEST_PATTERNS = [
   // Service DB tests (*-db.test.ts pattern plus gating.test.ts)
   "app/services/__tests__/*-db.test.ts",
   "app/services/__tests__/gating.test.ts",
+  "app/services/__tests__/billing-plan-state-db.test.ts",
   "app/services/__tests__/reminders-catchup-db.test.ts",
   "app/services/__tests__/reminders-uninstalled-db.test.ts",
   "app/services/__tests__/reminder-optout-db.test.ts",
