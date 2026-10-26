@@ -58,6 +58,7 @@ import {
   type StartReconcileResult,
 } from "./reconcile-handlers.server";
 import { toErrorCode, safeLog, shopHash } from "~/lib/log.server";
+import { isShopCurrencySupported } from "~/lib/shop-currency.server";
 import {
   isShopNotFoundReason,
   sanitizeSyncMessage,
@@ -1108,6 +1109,31 @@ async function moveToDeadLetter(
 }
 
 /**
+ * #292: Batch lookup shop currencies for INR-only filtering.
+ * Returns a map of shop domain to currency (or undefined if shop not found).
+ */
+async function loadShopCurrencies(
+  sql: Sql,
+  shopDomains: string[]
+): Promise<Map<string, string | undefined>> {
+  if (shopDomains.length === 0) {
+    return new Map();
+  }
+
+  const uniqueDomains = [...new Set(shopDomains)];
+  // Note: use IN ${sql(ids)} instead of ANY(${ids}) for fetch_types:false compatibility
+  const rows = await sql<{ domain: string; currency: string | null }[]>`
+    SELECT domain, currency FROM "Shop" WHERE domain IN ${sql(uniqueDomains)}
+  `;
+
+  const result = new Map<string, string | undefined>();
+  for (const row of rows) {
+    result.set(row.domain, row.currency ?? undefined);
+  }
+  return result;
+}
+
+/**
  * Process the s6_sync queue.
  */
 async function processSyncQueue(
@@ -1129,12 +1155,29 @@ async function processSyncQueue(
 
   const messages = await readSyncMessages(sql, config.batchSize, config.visibilityTimeoutSec);
 
+  // #292: Batch lookup shop currencies for INR-only filtering
+  const shopDomains = messages.map((m) => m.message.shop);
+  const shopCurrencies = await loadShopCurrencies(sql, shopDomains);
+  const skippedNonInrCounts = new Map<string, number>();
+
   for (const msg of messages) {
     // Check time budget
     const elapsed = Date.now() - startTime;
     if (elapsed >= config.timeBudgetMs) {
       result.timedOut = true;
       break;
+    }
+
+    // #292: Skip non-INR shops
+    const shopCurrency = shopCurrencies.get(msg.message.shop);
+    if (shopCurrency !== undefined && !isShopCurrencySupported(shopCurrency)) {
+      await archiveMessage(sql, S6_QUEUES.SYNC, msg.msg_id);
+      result.skipped++;
+      skippedNonInrCounts.set(
+        msg.message.shop,
+        (skippedNonInrCounts.get(msg.message.shop) ?? 0) + 1
+      );
+      continue;
     }
 
     // Skip already-sanitized messages (re-enqueued by hand)
@@ -1284,6 +1327,15 @@ async function processSyncQueue(
     }
   }
 
+  // #292: Log aggregated non-INR skip counts
+  for (const [domain, count] of skippedNonInrCounts) {
+    safeLog("info", "drain_skip_non_inr_shop", {
+      queue: S6_QUEUES.SYNC,
+      shopHash: await shopHash(domain),
+      count,
+    });
+  }
+
   result.elapsedMs = Date.now() - startTime;
   return result;
 }
@@ -1309,12 +1361,29 @@ async function processBulkQueue(
 
   const messages = await readBulkMessages(sql, config.batchSize, config.visibilityTimeoutSec);
 
+  // #292: Batch lookup shop currencies for INR-only filtering
+  const shopDomains = messages.map((m) => m.message.shop);
+  const shopCurrencies = await loadShopCurrencies(sql, shopDomains);
+  const skippedNonInrCounts = new Map<string, number>();
+
   for (const msg of messages) {
     // Check time budget
     const currentElapsed = Date.now() - startTime;
     if (currentElapsed >= config.timeBudgetMs) {
       result.timedOut = true;
       break;
+    }
+
+    // #292: Skip non-INR shops
+    const shopCurrency = shopCurrencies.get(msg.message.shop);
+    if (shopCurrency !== undefined && !isShopCurrencySupported(shopCurrency)) {
+      await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
+      result.skipped++;
+      skippedNonInrCounts.set(
+        msg.message.shop,
+        (skippedNonInrCounts.get(msg.message.shop) ?? 0) + 1
+      );
+      continue;
     }
 
     // Skip already-sanitized messages (re-enqueued by hand)
@@ -1453,6 +1522,15 @@ async function processBulkQueue(
         code: errorCode,
       });
     }
+  }
+
+  // #292: Log aggregated non-INR skip counts
+  for (const [domain, count] of skippedNonInrCounts) {
+    safeLog("info", "drain_skip_non_inr_shop", {
+      queue: S6_QUEUES.BULK,
+      shopHash: await shopHash(domain),
+      count,
+    });
   }
 
   result.elapsedMs = Date.now() - startTime;

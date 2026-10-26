@@ -17,6 +17,8 @@ import { ensurePaymentCustomization } from "./payment-customization-registration
 import { getRequestSql } from "./request-context.server";
 import { validateTimezone } from "./aging-dates.server";
 import { safeLog, shopHash, toErrorCode } from "./log.server";
+import { validateCurrencyCode, NO_CURRENCY_SENTINEL } from "./shop-currency.server";
+import { writeShopConfigMetafield } from "~/services/shop-config.server";
 import type { Sql } from "./db-light.server";
 
 /**
@@ -204,66 +206,114 @@ async function clearUninstalledAtAndMetafieldErrors(sql: Sql, shop: string): Pro
 }
 
 /**
- * GraphQL query to fetch shop timezone.
- * Only fetches the ianaTimezone field to minimize data transfer.
+ * GraphQL query to fetch shop timezone and currency.
+ * #292: Also fetches currencyCode for INR-only validation.
  */
-const SHOP_TIMEZONE_QUERY = `
-  query ShopTimezone {
+const SHOP_AUTH_INFO_QUERY = `
+  query ShopAuthInfo {
     shop {
+      id
       ianaTimezone
+      currencyCode
     }
   }
 `;
 
 /**
- * Fetch the shop's timezone from Admin API and upsert the Shop row.
- * Uses validateTimezone to ensure the value is a valid IANA timezone.
+ * #292: Result from fetching shop auth info.
+ */
+interface ShopAuthInfo {
+  shopId: string | null;
+  timezone: string | null;
+  currencyCode: string;
+}
+
+/**
+ * #292: Fetch shop auth info (timezone and currency) from Admin API.
+ */
+async function fetchShopAuthInfo(admin: AdminGraphqlClient): Promise<ShopAuthInfo> {
+  const result: ShopAuthInfo = {
+    shopId: null,
+    timezone: null,
+    currencyCode: NO_CURRENCY_SENTINEL,
+  };
+
+  try {
+    const response = await admin.graphql(SHOP_AUTH_INFO_QUERY);
+    const data = await response.json() as {
+      data?: { shop?: { id?: string; ianaTimezone?: string; currencyCode?: string } };
+      errors?: Array<{ message: string }>;
+    };
+
+    if (data.errors) {
+      console.warn(`[afterAuth] shop_auth_info_query_failed reason=graphql_errors`);
+      return result;
+    }
+
+    const shop = data.data?.shop;
+    if (!shop) {
+      console.warn(`[afterAuth] shop_auth_info_query_failed reason=no_shop_returned`);
+      return result;
+    }
+
+    result.shopId = shop.id ?? null;
+
+    if (shop.ianaTimezone) {
+      const validatedTimezone = validateTimezone(shop.ianaTimezone);
+      if (validatedTimezone !== shop.ianaTimezone) {
+        console.warn(`[afterAuth] timezone_invalid fallback=${validatedTimezone}`);
+      }
+      result.timezone = validatedTimezone;
+    } else {
+      console.warn(`[afterAuth] shop_auth_info_query_failed reason=no_timezone_returned`);
+    }
+
+    const validatedCurrency = validateCurrencyCode(shop.currencyCode);
+    if (validatedCurrency) {
+      result.currencyCode = validatedCurrency;
+    } else {
+      console.warn(`[afterAuth] shop_auth_info_query_failed reason=invalid_currency`);
+    }
+  } catch (error) {
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.warn(`[afterAuth] shop_auth_info_query_failed reason=exception err=${errInfo}`);
+  }
+
+  return result;
+}
+
+/**
+ * Fetch shop auth info and sync to database and metafields.
+ * #292: Also writes shop_config metafield with currency for Rust functions.
  *
  * This function ensures the Shop row exists on every install or re-auth.
  * It uses INSERT ... ON CONFLICT to be idempotent:
- * - Fresh install: Creates new Shop row with timezone (or default if query fails)
- * - Reinstall: Clears uninstalledAt and updates timezone (preserves existing if query fails)
- * - Re-auth: Updates timezone only (preserves existing if query fails)
+ * - Fresh install: Creates new Shop row with timezone and currency (or defaults if query fails)
+ * - Reinstall: Clears uninstalledAt and updates timezone/currency (preserves existing if query fails)
+ * - Re-auth: Updates timezone/currency only (preserves existing if query fails)
+ *
+ * #292: Write order - shop_config FIRST, then DB. A failed shop_config write is logged
+ * but does not block the DB upsert (install must succeed). /app will detect and retry
+ * any shop_config mismatch on next load.
  */
-async function syncShopTimezone(
+async function syncShopInfo(
   shop: string,
   admin: AdminGraphqlClient,
 ): Promise<void> {
   const sql = getRequestSql();
-  let timezone: string | null = null;
 
-  try {
-    const response = await admin.graphql(SHOP_TIMEZONE_QUERY);
-    const result = await response.json() as {
-      data?: { shop?: { ianaTimezone?: string } };
-      errors?: Array<{ message: string }>;
-    };
+  const authInfo = await fetchShopAuthInfo(admin);
 
-    if (result.errors) {
-      console.warn(
-        `[afterAuth] timezone_query_failed reason=graphql_errors`
-      );
-    } else {
-      const ianaTimezone = result.data?.shop?.ianaTimezone;
-      if (ianaTimezone) {
-        const validatedTimezone = validateTimezone(ianaTimezone);
-        if (validatedTimezone !== ianaTimezone) {
-          console.warn(
-            `[afterAuth] timezone_invalid fallback=${validatedTimezone}`
-          );
-        }
-        timezone = validatedTimezone;
-      } else {
-        console.warn(`[afterAuth] timezone_query_failed reason=no_timezone_returned`);
-      }
+  // #292: Write shop_config metafield FIRST, log warning on failure but continue
+  if (authInfo.shopId) {
+    const writeResult = await writeShopConfigMetafield(admin, authInfo.shopId, authInfo.currencyCode);
+    if (!writeResult.success) {
+      safeLog("warn", "shop_config_write_failed", { err: writeResult.error ?? "unknown" });
     }
-  } catch (error) {
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.warn(`[afterAuth] timezone_query_failed reason=exception err=${errInfo}`);
   }
 
   try {
-    await upsertShopOnAuth(sql, shop, timezone);
+    await upsertShopOnAuth(sql, shop, authInfo.timezone, authInfo.currencyCode);
   } catch (error) {
     const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
     console.error(`[afterAuth] upsert_shop_failed reason=db_error err=${errInfo}`);
@@ -306,13 +356,14 @@ async function runSetup(
     console.error(`[afterAuth] payment_customization_failed reason=exception err=${errInfo}`);
   }
   
-  // Timezone sync runs even if earlier steps fail - it's independent.
+  // Shop info sync runs even if earlier steps fail - it's independent.
+  // #292: Also syncs currency and writes shop_config metafield.
   try {
-    await syncShopTimezone(shop, admin);
+    await syncShopInfo(shop, admin);
   } catch (error) {
     hasError = true;
     const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] sync_timezone_failed reason=exception err=${errInfo}`);
+    console.error(`[afterAuth] sync_shop_info_failed reason=exception err=${errInfo}`);
   }
   
   // Only mark complete if all steps succeeded.
@@ -354,23 +405,27 @@ export function _isShopSetupInFlight(shop: string): boolean {
  * Called on every install or re-auth to ensure the Shop row exists.
  * This is idempotent: INSERT ... ON CONFLICT updates existing rows.
  *
- * On fresh install: Creates a new Shop row with the given timezone (or default if null).
+ * On fresh install: Creates a new Shop row with the given timezone and currency (or defaults if null).
  * On reinstall: Clears uninstalledAt, resets onboarding, clears metafield sync errors,
- *   and updates timezone (preserves existing if null). All done atomically via CTE.
- * On re-auth: Updates timezone only (preserves existing if null). Metafield errors untouched.
+ *   and updates timezone/currency (preserves existing if null). All done atomically via CTE.
+ * On re-auth: Updates timezone/currency only (preserves existing if null). Metafield errors untouched.
  *
  * #208 follow-up: Also clears metafieldSyncErrorCode and metafieldSyncErrorAt on all
  * BuyerAccount rows for the shop when uninstalledAt was set (reinstall only).
  * This is atomic with the Shop update to ensure the reinstall signal isn't lost.
  *
+ * #292: Now stores actual shop currency (not hardcoded INR) for INR-only guards.
+ *
  * @param sql - postgres.js SQL client
  * @param shopDomain - Shop domain (e.g., "example.myshopify.com")
  * @param timezone - IANA timezone from Shopify, or null if query failed
+ * @param currency - ISO 4217 currency code from Shopify (e.g., INR, USD)
  */
 export async function upsertShopOnAuth(
   sql: Sql,
   shopDomain: string,
   timezone: string | null,
+  currency: string,
 ): Promise<void> {
   const result = await sql<{ id: string }[]>`
     WITH old_state AS (
@@ -380,10 +435,14 @@ export async function upsertShopOnAuth(
     ),
     upserted AS (
       INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
-      VALUES (${shopDomain}, COALESCE(${timezone}, 'Asia/Kolkata'), 'INR', 'free', NOW(), NOW())
+      VALUES (${shopDomain}, COALESCE(${timezone}, 'Asia/Kolkata'), ${currency}, 'free', NOW(), NOW())
       ON CONFLICT (domain)
       DO UPDATE SET
         timezone = COALESCE(${timezone}, "Shop".timezone),
+        currency = CASE
+          WHEN ${currency} = 'XXX' THEN "Shop".currency
+          ELSE ${currency}
+        END,
         "uninstalledAt" = NULL,
         onboarding_dismissed_at = CASE
           WHEN "Shop"."uninstalledAt" IS NOT NULL THEN NULL
