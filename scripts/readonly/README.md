@@ -39,6 +39,9 @@ output column:
 1. **Derived from the expression** (no annotation needed): `COUNT` → count;
    `ROW_NUMBER/RANK/DENSE_RANK OVER` → id; comparisons, `IS [NOT] NULL`,
    `EXISTS`, `LIKE`, `IN`, `bool_and/bool_or` → boolean; string literal → enum;
+   `'prefix' || ROW_NUMBER() OVER (...)` (lower-case literal prefix, optional
+   `::text`) → enum, e.g. the `shop_kind` label `other_N` from
+   `scripts/ci/shop-labels.ts`;
    `CASE` whose results are all literals/NULL or guarded passthroughs
    (`WHEN x ~ '^[A-Z0-9_]{1,40}$' THEN x`, `WHEN x IN ('a','b') THEN x`) → enum;
    `COALESCE`, casts, `MIN/MAX` keep the inner kind; `NOW() - x` → timestamp
