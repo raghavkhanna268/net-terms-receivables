@@ -465,6 +465,32 @@ describe("shopify-client.server", () => {
       expect(result.retriesAttempted).toBe(0);
       expect(mockAdmin.graphql).not.toHaveBeenCalled();
     });
+
+    /**
+     * Other session errors (message contains 'session' but not InvalidSession or 'No session found')
+     * map to errorCode 'session_error', retryable: true. This matches the original behavior.
+     */
+    it("maps errors with 'session' in message to session_error (retryable)", async () => {
+      mockGetOfflineAdminContext.mockResolvedValueOnce({
+        success: false,
+        errorCode: "unknown",
+        error: "Session expired or invalid",
+        retryable: false,
+        needsReauth: false,
+      });
+
+      const result = await shopifyGraphQL(
+        "test-session-error.myshopify.com",
+        "query { shop { name } }"
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.errorCode).toBe("session_error");
+      expect(result.error).toBe("Session error");
+      expect(result.retryable).toBe(true);
+      expect(result.retriesAttempted).toBe(0);
+      expect(mockAdmin.graphql).not.toHaveBeenCalled();
+    });
   });
 
   describe("ACCESS_DENIED (GraphQL-level)", () => {

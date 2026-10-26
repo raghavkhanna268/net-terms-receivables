@@ -539,6 +539,44 @@ describe("webhooks.compliance", () => {
       expect(mockPersistDataRequest).toHaveBeenCalled();
     });
 
+    it("skips email when getOfflineAdminContext throws (DB/lock error)", async () => {
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Mock getOfflineAdminContext throwing (DB error, lock error, rethrown unexpected error)
+      mockGetOfflineAdminContext.mockRejectedValueOnce(new Error("DB connection failed"));
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+      const payload = {
+        shop_domain: "test-shop.myshopify.com",
+        customer: { id: 456 },
+        data_request: { id: 789 },
+      };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: "test-shop.myshopify.com",
+        topic: "customers/data_request",
+        webhookId: "test-webhook",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      const response = await action(createMockActionArgs(request));
+
+      // Must return 200 even when getOfflineAdminContext throws
+      expect(response.status).toBe(200);
+      expect(mockPersistDataRequest).toHaveBeenCalled();
+      expect(mockSendDataRequestNotification).not.toHaveBeenCalled();
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining("data_request_email_skipped")
+      );
+      consoleSpy.mockRestore();
+    });
+
     it("skips email when shop email cannot be fetched", async () => {
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       // Mock admin API failure

@@ -260,6 +260,7 @@ export async function shopifyGraphQL<T = unknown>(
     // with drain/processor.server.ts, sync-error-info.ts, and credit-status.server.ts
     let errorCode = adminResult.errorCode ?? "token_refresh_failed";
     let retryable = adminResult.retryable;
+    let error = adminResult.error ?? "Token refresh failed";
 
     // Token refresh failures (from refreshOfflineTokenIfNeeded)
     // Behaviour change: transient refresh failures (network_error, http_error, invalid_response)
@@ -267,10 +268,22 @@ export async function shopifyGraphQL<T = unknown>(
     if (errorCode === "admin_no_session") {
       // No session found after token refresh - shop uninstalled or never installed
       errorCode = "no_session";
+      error = "No session found";
       retryable = false;
     } else if (errorCode === "admin_invalid_session") {
       // InvalidSession from admin - token expired, session refresh can recover
       errorCode = "invalid_session";
+      error = "Invalid session";
+      retryable = true;
+    } else if (
+      // Only apply session_error fallback for unknown error codes with 'session' in message
+      // Don't override specific codes like invalid_grant, no_refresh_token, network_error
+      errorCode === "unknown" &&
+      (error.includes("session") || error.includes("Session"))
+    ) {
+      // Other session errors - may be recoverable via session refresh
+      errorCode = "session_error";
+      error = "Session error";
       retryable = true;
     }
     // Note: other codes (invalid_grant, no_refresh_token, no_session, network_error, etc.)
@@ -278,7 +291,7 @@ export async function shopifyGraphQL<T = unknown>(
 
     return {
       success: false,
-      error: adminResult.error ?? "Token refresh failed",
+      error,
       errorCode,
       retryable,
       retriesAttempted: 0,

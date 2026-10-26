@@ -38,8 +38,7 @@ import { safeLog, shopHash } from "./log.server";
 export type OfflineAdminErrorCode =
   | RefreshErrorCode
   | "admin_invalid_session"
-  | "admin_no_session"
-  | "admin_error";
+  | "admin_no_session";
 
 /**
  * Result of getting an offline admin context.

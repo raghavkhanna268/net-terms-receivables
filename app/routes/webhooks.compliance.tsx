@@ -22,22 +22,25 @@ import type { Sql } from "~/lib/db-light.server";
  * Fetch shop owner email using the offline session admin client.
  * Uses getOfflineAdminContext for proper token refresh locking.
  * Returns null if email cannot be fetched (no session, API error, etc.)
+ *
+ * IMPORTANT: All errors are caught and return null. This ensures customers/data_request
+ * never returns 500 after persistDataRequest succeeds - email is best-effort.
  */
 async function fetchShopOwnerEmail(sql: Sql, shop: string): Promise<string | null> {
-  const clientId = process.env.SHOPIFY_API_KEY;
-  const clientSecret = process.env.SHOPIFY_API_SECRET;
-
-  if (!clientId || !clientSecret) {
-    return null;
-  }
-
-  const adminResult = await getOfflineAdminContext(sql, shop, clientId, clientSecret);
-
-  if (!adminResult.success || !adminResult.admin) {
-    return null;
-  }
-
   try {
+    const clientId = process.env.SHOPIFY_API_KEY;
+    const clientSecret = process.env.SHOPIFY_API_SECRET;
+
+    if (!clientId || !clientSecret) {
+      return null;
+    }
+
+    const adminResult = await getOfflineAdminContext(sql, shop, clientId, clientSecret);
+
+    if (!adminResult.success || !adminResult.admin) {
+      return null;
+    }
+
     const response = await adminResult.admin.graphql(`
       query {
         shop {
