@@ -1748,6 +1748,12 @@ async function processBulkQueue(
     // Skip bulk operations already handled this tick (prevents re-polling continuations)
     const bulkOpId = msg.message.bulkOperationId;
     if (bulkOpId && handledBulkOpIds.has(bulkOpId)) {
+      // Replace the message atomically to reset read_ct and preserve retry budget.
+      // pgmq.read() already incremented read_ct, so we delete + re-send to reset it.
+      await sql.begin(async (tx) => {
+        await tx`SELECT pgmq.delete(${S6_QUEUES.BULK}, ${msg.msg_id}::bigint)`;
+        await tx`SELECT pgmq.send(${S6_QUEUES.BULK}, ${tx.json(msg.message)})`;
+      });
       result.skipped++;
       continue;
     }
