@@ -330,6 +330,129 @@ describe("narration-parser", () => {
         expect(result.payerBank).toBe("SYNT BANK");
       });
     });
+
+    describe("VPA hyphen segment handling (#334)", () => {
+      // Alphabetic hyphen in ICICI `/` format
+      it("extracts alphabetic hyphenated VPA in ICICI slash format", () => {
+        const result = parseNarration(
+          "UPI/600000000001/test-buyer@examplebank/SYNT VENDOR/SYNT BANK"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("test-buyer@examplebank");
+      });
+
+      // Alphabetic hyphen in HDFC `-` format
+      it("extracts alphabetic hyphenated VPA in HDFC dash format", () => {
+        const result = parseNarration(
+          "UPI-SYNT VENDOR-test-buyer@examplebank-SYNT0000001-600000000001-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("test-buyer@examplebank");
+      });
+
+      // Numeric phone VPA: 9000000000-1@oksynt
+      it("extracts numeric hyphenated phone VPA", () => {
+        const result = parseNarration(
+          "UPI-9000000000-1@oksynt-SYNT VENDOR-SYNT0000001-600000000001-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("9000000000-1@oksynt");
+      });
+
+      // Mixed: synt1-pay@examplebank
+      it("extracts mixed alphanumeric-hyphen VPA (letters then digits)", () => {
+        const result = parseNarration(
+          "UPI-SYNT VENDOR-synt1-pay@examplebank-SYNT0000001-600000000001-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("synt1-pay@examplebank");
+      });
+
+      // Mixed: 9000000000-synt@examplebank
+      it("extracts mixed numeric-alpha hyphen VPA (digits then letters)", () => {
+        const result = parseNarration(
+          "UPI-9000000000-synt@examplebank-SYNT VENDOR-SYNT0000001-600000000001-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("9000000000-synt@examplebank");
+      });
+
+      // Multi-hyphen: synt-pay-01@oksynt
+      it("extracts multi-hyphen VPA", () => {
+        const result = parseNarration(
+          "UPI-SYNT VENDOR-synt-pay-01@oksynt-SYNT0000001-600000000001-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("synt-pay-01@oksynt");
+      });
+
+      // Negative: one-word name before alphabetic VPA (must NOT glue name on)
+      it("does NOT glue one-word uppercase name to alphabetic VPA", () => {
+        const result = parseNarration(
+          "UPI-SYNTDEMOSTORES-syntpayer@oksynt-SYNT0000001-600000000001-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        // Must be syntpayer@oksynt, NOT syntdemostores-syntpayer@oksynt
+        expect(result.upiId).toBe("syntpayer@oksynt");
+      });
+
+      // Negative: one-word name before numeric VPA (must NOT glue name on)
+      it("does NOT glue one-word uppercase name to numeric VPA", () => {
+        const result = parseNarration(
+          "UPI-SYNTDEMOSTORES-9000000000@oksynt-SYNT0000001-600000000001-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        // Must be 9000000000@oksynt, NOT syntdemostores-9000000000@oksynt
+        expect(result.upiId).toBe("9000000000@oksynt");
+      });
+
+      // ICICI with hyphenated VPA in segment
+      it("extracts hyphenated VPA from ICICI slash format", () => {
+        const result = parseNarration(
+          "UPI/SYNT TRADERS/synt-pay@oksynt/Monthly dues/SYNT BANK/600000000004/SYNT000004"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("synt-pay@oksynt");
+      });
+
+      // Title-case one-word name (must NOT glue name on)
+      it("does NOT glue Title-case one-word name to VPA", () => {
+        const result = parseNarration(
+          "UPI-Syntco-syntpayer@oksynt-SYNT0000001-600000000001-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        // Must be syntpayer@oksynt, NOT syntco-syntpayer@oksynt
+        expect(result.upiId).toBe("syntpayer@oksynt");
+      });
+
+      // Lowercase one-word name looks like VPA part - included by design
+      it("includes lowercase segment as VPA part (may be VPA or name)", () => {
+        const result = parseNarration(
+          "UPI-syntco-syntpayer@oksynt-SYNT0000001-600000000001-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        // Lowercase segments look like VPA parts, so they're included
+        expect(result.upiId).toBe("syntco-syntpayer@oksynt");
+      });
+
+      // Dash-format with / in note segment (like INV/22) - still processes as dash-format
+      it("processes dash-format narration with / elsewhere in note", () => {
+        const result = parseNarration(
+          "UPI-SYNT VENDOR-syntpayer@oksynt-SYNT0000001-600000000001-INV/22"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("syntpayer@oksynt");
+      });
+
+      // Dash-format with / in multiple segments
+      it("processes dash-format with / in reference segment", () => {
+        const result = parseNarration(
+          "UPI-SYNT VENDOR-syntpayer@oksynt-SYNT0000001-REF/001/2030-Payment"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("syntpayer@oksynt");
+      });
+    });
   });
 
   describe("extractUtrForDedupe", () => {
