@@ -1,9 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
   BULK_ORDERS_QUERY,
-  BULK_COMPANIES_QUERY,
+  getBulkCompaniesQuery,
   parseBulkOperationResult,
 } from "../bulk-operations.server";
+import { validateCustomerQuery } from "../customer-fields.server";
 
 describe("Bulk Operations GraphQL", () => {
   describe("BULK_ORDERS_QUERY", () => {
@@ -52,27 +53,61 @@ describe("Bulk Operations GraphQL", () => {
     });
   });
 
-  describe("BULK_COMPANIES_QUERY", () => {
-    it("requests companies with locations", () => {
-      expect(BULK_COMPANIES_QUERY).toContain("companies");
-      expect(BULK_COMPANIES_QUERY).toContain("locations");
+  describe("getBulkCompaniesQuery", () => {
+    describe("with CUSTOMER_PII_FIELDS=1", () => {
+      const query = getBulkCompaniesQuery({ CUSTOMER_PII_FIELDS: "1" });
+
+      it("requests companies with locations", () => {
+        expect(query).toContain("companies");
+        expect(query).toContain("locations");
+      });
+
+      it("only requests billingAddress.companyName (DPDP compliance)", () => {
+        expect(query).toContain("billingAddress");
+        expect(query).toContain("companyName");
+        expect(query).not.toContain("firstName");
+        expect(query).not.toContain("lastName");
+        expect(query).not.toContain("address1");
+        expect(query).not.toContain("city");
+        expect(query).not.toContain("country");
+      });
+
+      it("requests paymentTermsTemplate for default terms", () => {
+        expect(query).toContain("paymentTermsTemplate");
+        expect(query).toContain("dueInDays");
+      });
+
+      it("requests mainContact with email and displayName when PII flag is on", () => {
+        expect(query).toContain("mainContact");
+        expect(query).toContain("customer {");
+        expect(query).toContain("email");
+        expect(query).toContain("displayName");
+      });
+
+      it("does not request forbidden customer fields in mainContact (DPDP compliance)", () => {
+        expect(query).not.toContain("phone");
+        expect(query).not.toContain("addresses");
+        expect(query).not.toContain("defaultAddress");
+      });
     });
 
-    it("only requests billingAddress.companyName (DPDP compliance)", () => {
-      // Should have billingAddress { companyName } but not full address
-      // Note: CompanyAddress.company was renamed to companyName in 2026-10
-      expect(BULK_COMPANIES_QUERY).toContain("billingAddress");
-      expect(BULK_COMPANIES_QUERY).toContain("companyName");
-      expect(BULK_COMPANIES_QUERY).not.toContain("firstName");
-      expect(BULK_COMPANIES_QUERY).not.toContain("lastName");
-      expect(BULK_COMPANIES_QUERY).not.toContain("address1");
-      expect(BULK_COMPANIES_QUERY).not.toContain("city");
-      expect(BULK_COMPANIES_QUERY).not.toContain("country");
-    });
+    describe("with CUSTOMER_PII_FIELDS off (empty env)", () => {
+      const query = getBulkCompaniesQuery({});
 
-    it("requests paymentTermsTemplate for default terms", () => {
-      expect(BULK_COMPANIES_QUERY).toContain("paymentTermsTemplate");
-      expect(BULK_COMPANIES_QUERY).toContain("dueInDays");
+      it("requests mainContact.customer.id only (no email/displayName)", () => {
+        expect(query).toContain("mainContact");
+        expect(query).toContain("customer {");
+        expect(query).toContain("id");
+        expect(query).not.toContain("email");
+        expect(query).not.toContain("displayName");
+      });
+
+      it("still requests base company/location fields", () => {
+        expect(query).toContain("companies");
+        expect(query).toContain("locations");
+        expect(query).toContain("billingAddress");
+        expect(query).toContain("paymentTermsTemplate");
+      });
     });
   });
 
@@ -114,6 +149,23 @@ describe("Bulk Operations GraphQL", () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBe("No bulkOperationRunQuery in response");
+    });
+  });
+
+  describe("validateCustomerQuery integration", () => {
+    it("getBulkCompaniesQuery passes validation with CUSTOMER_PII_FIELDS=1", () => {
+      const query = getBulkCompaniesQuery({ CUSTOMER_PII_FIELDS: "1" });
+      expect(() => validateCustomerQuery(query, { CUSTOMER_PII_FIELDS: "1" })).not.toThrow();
+    });
+
+    it("getBulkCompaniesQuery passes validation with flag off", () => {
+      const query = getBulkCompaniesQuery({});
+      expect(() => validateCustomerQuery(query, {})).not.toThrow();
+    });
+
+    it("BULK_ORDERS_QUERY passes validation (no PII fields in customer)", () => {
+      expect(() => validateCustomerQuery(BULK_ORDERS_QUERY, {})).not.toThrow();
+      expect(() => validateCustomerQuery(BULK_ORDERS_QUERY, { CUSTOMER_PII_FIELDS: "1" })).not.toThrow();
     });
   });
 });

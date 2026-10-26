@@ -46,6 +46,7 @@ import {
 import {
   parseRecipientAllowlist,
   isRecipientAllowed,
+  isAllowlistEnforced,
 } from "./recipient-allowlist.server";
 import { sendViaResend } from "./resend-client.server";
 
@@ -184,7 +185,12 @@ export interface ReminderSendResult {
 
 /**
  * Get invoice data needed for sending a reminder.
- * Joins Invoice with Shop and tagged customer (for email/name via CUSTOMER_PII_FIELDS).
+ * 
+ * Recipient resolution by account type:
+ * - COMPANY (B2B): uses mainContactEmail and mainContactName from BuyerAccount
+ * - TAGGED_CUSTOMER: uses email and displayName from s8_tagged_customers
+ * 
+ * Both require CUSTOMER_PII_FIELDS=1 for PII fields to be populated.
  */
 export async function getInvoiceForReminder(
   sql: Sql,
@@ -204,7 +210,10 @@ export async function getInvoiceForReminder(
       dueAt: Date | null;
       status: string;
       buyerAccountId: string;
+      accountKind: string;
       customerId: string | null;
+      mainContactEmail: string | null;
+      mainContactDisplayName: string | null;
       buyerAccountGatedAt: Date | null;
       shopUninstalledAt: Date | null;
     }[]
@@ -221,7 +230,10 @@ export async function getInvoiceForReminder(
       i."dueAt",
       i.status,
       i."buyerAccountId",
+      ba.kind::TEXT AS "accountKind",
       ba."customerId",
+      ba."mainContactEmail",
+      ba."mainContactName" AS "mainContactDisplayName",
       ba.gated_at AS "buyerAccountGatedAt",
       s."uninstalledAt" AS "shopUninstalledAt"
     FROM "Invoice" i
@@ -235,12 +247,17 @@ export async function getInvoiceForReminder(
     return null;
   }
 
-  // Get customer email/displayName from s8_tagged_customers
-  // This data is only present when CUSTOMER_PII_FIELDS=1 (S8)
+  // Resolve recipient email and name by account type
   let buyerEmail: string | null = null;
-  let buyerName: string | null = null;
+  let buyerDisplayName: string | null = null;
 
-  if (row.customerId) {
+  if (row.accountKind === "COMPANY") {
+    // B2B: use mainContactEmail and mainContactName from BuyerAccount
+    buyerEmail = row.mainContactEmail;
+    buyerDisplayName = row.mainContactDisplayName;
+  } else if (row.customerId) {
+    // Tagged customer: get email/displayName from s8_tagged_customers
+    // This data is only present when CUSTOMER_PII_FIELDS=1 (S8)
     const [customer] = await sql<{ email: string | null; displayName: string | null }[]>`
       SELECT email, display_name AS "displayName"
       FROM s8_tagged_customers
@@ -249,18 +266,18 @@ export async function getInvoiceForReminder(
     `;
     if (customer) {
       buyerEmail = customer.email;
-      buyerName = customer.displayName;
+      buyerDisplayName = customer.displayName;
     }
   }
 
-  const shopName = row.shopDomain.replace(".myshopify.com", "");
+  const shopLabel = row.shopDomain.replace(".myshopify.com", "");
   const shopTimezone = validateTimezone(row.shopTimezone);
 
   return {
     invoiceId: row.invoiceId,
     shopId: row.shopId,
     shopDomain: row.shopDomain,
-    shopName,
+    shopName: shopLabel,
     shopTimezone,
     invoiceName: row.invoiceName,
     total: row.total,
@@ -269,7 +286,7 @@ export async function getInvoiceForReminder(
     dueAt: row.dueAt,
     status: row.status as "open" | "paid" | "cancelled",
     buyerEmail,
-    buyerName,
+    buyerName: buyerDisplayName,
     buyerAccountGatedAt: row.buyerAccountGatedAt,
     shopUninstalledAt: row.shopUninstalledAt,
   };
@@ -752,7 +769,7 @@ export async function sendPaymentReminder(
   ruleId: string,
   offsetDays: number,
   timezone: string,
-  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string } = {},
+  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string; RESEND_RECIPIENT_ALLOWLIST_ENFORCED?: string } = {},
   deps: { reserveGlobalSendSlot?: typeof reserveGlobalSendSlot } = {}
 ): Promise<ReminderSendResult> {
   const resendKey = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
@@ -912,10 +929,12 @@ export async function sendPaymentReminder(
 
   // Gate 10d: Pre-launch recipient allowlist check (fail closed)
   // Check BEFORE claiming slot/cap so skipped sends don't consume resources
+  // When RESEND_RECIPIENT_ALLOWLIST_ENFORCED is exactly "false", skip this gate.
   const allowlist = parseRecipientAllowlist(
     env.RESEND_TEST_RECIPIENTS ?? process.env.RESEND_TEST_RECIPIENTS
   );
-  if (allowlist.size === 0) {
+  const enforced = isAllowlistEnforced(env);
+  if (enforced && allowlist.size === 0) {
     safeLog("info", "reminder_send_skipped", { shopId, reason: "recipient_allowlist_empty", skippedCount: 1, allowedCount: 0 });
     return {
       success: true,
@@ -923,7 +942,7 @@ export async function sendPaymentReminder(
       skipReason: "Recipient allowlist is empty or not configured",
     };
   }
-  if (!isRecipientAllowed(invoice.buyerEmail, allowlist)) {
+  if (enforced && !isRecipientAllowed(invoice.buyerEmail, allowlist, env)) {
     safeLog("info", "reminder_send_skipped", { shopId, reason: "recipient_not_allowlisted", skippedCount: 1, allowedCount: 0 });
     return {
       success: true,
@@ -1033,7 +1052,11 @@ export async function sendPaymentReminder(
         headers: unsubscribeHeaders ?? undefined,
         idempotencyKey,
       },
-      { RESEND_API_KEY: resendKey, RESEND_TEST_RECIPIENTS: env.RESEND_TEST_RECIPIENTS ?? process.env.RESEND_TEST_RECIPIENTS }
+      {
+        RESEND_API_KEY: resendKey,
+        RESEND_TEST_RECIPIENTS: env.RESEND_TEST_RECIPIENTS ?? process.env.RESEND_TEST_RECIPIENTS,
+        RESEND_RECIPIENT_ALLOWLIST_ENFORCED: env.RESEND_RECIPIENT_ALLOWLIST_ENFORCED ?? process.env.RESEND_RECIPIENT_ALLOWLIST_ENFORCED,
+      }
     );
 
     if (sendResult.sent) {
@@ -1128,7 +1151,7 @@ export async function sendCatchupReminder(
   _logId: string,
   offsetDays: number,
   timezone: string,
-  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string } = {}
+  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string; RESEND_RECIPIENT_ALLOWLIST_ENFORCED?: string } = {}
 ): Promise<ReminderSendResult> {
   const resendKey = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
   const fromEmail = getResendFrom(env);
@@ -1371,10 +1394,12 @@ export async function sendCatchupReminder(
   // Check AFTER gates 9/10/11/11b so we skip for valid business reasons first,
   // but BEFORE claiming slot/cap so skipped sends don't consume resources.
   // Don't delete the delayed row - wait for allowlist to be configured or recipient added.
+  // When RESEND_RECIPIENT_ALLOWLIST_ENFORCED is exactly "false", skip this gate.
   const allowlist = parseRecipientAllowlist(
     env.RESEND_TEST_RECIPIENTS ?? process.env.RESEND_TEST_RECIPIENTS
   );
-  if (allowlist.size === 0) {
+  const enforced = isAllowlistEnforced(env);
+  if (enforced && allowlist.size === 0) {
     safeLog("info", "reminder_send_skipped", { shopId, reason: "recipient_allowlist_empty", skippedCount: 1, allowedCount: 0 });
     return {
       success: true,
@@ -1382,7 +1407,7 @@ export async function sendCatchupReminder(
       skipReason: "Recipient allowlist is empty or not configured",
     };
   }
-  if (!isRecipientAllowed(invoice.buyerEmail, allowlist)) {
+  if (enforced && !isRecipientAllowed(invoice.buyerEmail, allowlist, env)) {
     safeLog("info", "reminder_send_skipped", { shopId, reason: "recipient_not_allowlisted", skippedCount: 1, allowedCount: 0 });
     return {
       success: true,
@@ -1511,7 +1536,11 @@ export async function sendCatchupReminder(
         headers: unsubscribeHeaders ?? undefined,
         idempotencyKey,
       },
-      { RESEND_API_KEY: resendKey, RESEND_TEST_RECIPIENTS: env.RESEND_TEST_RECIPIENTS ?? process.env.RESEND_TEST_RECIPIENTS }
+      {
+        RESEND_API_KEY: resendKey,
+        RESEND_TEST_RECIPIENTS: env.RESEND_TEST_RECIPIENTS ?? process.env.RESEND_TEST_RECIPIENTS,
+        RESEND_RECIPIENT_ALLOWLIST_ENFORCED: env.RESEND_RECIPIENT_ALLOWLIST_ENFORCED ?? process.env.RESEND_RECIPIENT_ALLOWLIST_ENFORCED,
+      }
     );
 
     if (sendResult.sent) {
