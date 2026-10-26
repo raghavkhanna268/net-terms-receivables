@@ -79,7 +79,7 @@ function createMockSql() {
 
     // ReminderLog status lookup for catchup
     if (query.includes("status") && query.includes("firstCappedAt") && query.includes("FROM \"ReminderLog\"")) {
-      return mockResults.get("log_status") ?? [{ status: "delayed", firstCappedAt: new Date() }];
+      return mockResults.get("log_status") ?? [{ status: "delayed", firstCappedAt: new Date("2026-10-25T10:00:00Z") }];
     }
 
     // ReminderLog UPDATE for catchup
@@ -648,7 +648,7 @@ describe("Real sendPaymentReminder path", () => {
     total: "5000.00",
     outstanding: "5000.00",
     currency: "INR",
-    dueAt: new Date(),
+    dueAt: new Date("2026-10-26T00:00:00+05:30"),
     status: "open",
     buyerAccountId: "buyer-real-test",
     accountKind: "TAGGED_CUSTOMER",
@@ -706,7 +706,7 @@ describe("Real sendPaymentReminder path", () => {
   it("success: reply_to === contactEmail and footer has shop.name + reply sentence", async () => {
     const { sendPaymentReminder } = await import("../reminders.server");
     const { DateTime } = await import("luxon");
-    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    const mockNow = DateTime.fromObject({ year: 2026, month: 10, day: 26, hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
     vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
 
     const result = await sendPaymentReminder(
@@ -739,7 +739,7 @@ describe("Real sendPaymentReminder path", () => {
   it("fetch failure: no reply_to, footer uses handle label, no reply sentence", async () => {
     const { sendPaymentReminder } = await import("../reminders.server");
     const { DateTime } = await import("luxon");
-    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    const mockNow = DateTime.fromObject({ year: 2026, month: 10, day: 26, hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
     vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
 
     mockShopifyGraphQLQueue.mockResolvedValueOnce({
@@ -775,7 +775,7 @@ describe("Real sendPaymentReminder path", () => {
   it("ordering: shopify call happens before sql.begin", async () => {
     const { sendPaymentReminder } = await import("../reminders.server");
     const { DateTime } = await import("luxon");
-    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    const mockNow = DateTime.fromObject({ year: 2026, month: 10, day: 26, hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
     vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
 
     await sendPaymentReminder(
@@ -799,7 +799,7 @@ describe("Real sendPaymentReminder path", () => {
   it("cache: one fetch for two sends to same shop", async () => {
     const { sendPaymentReminder } = await import("../reminders.server");
     const { DateTime } = await import("luxon");
-    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    const mockNow = DateTime.fromObject({ year: 2026, month: 10, day: 26, hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
     vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
 
     mockSql.clearMockResults();
@@ -839,7 +839,7 @@ describe("Real sendPaymentReminder path", () => {
   it("opted-out buyer: skips send, no shopifyGraphQLQueue call, no Resend fetch", async () => {
     const { sendPaymentReminder } = await import("../reminders.server");
     const { DateTime } = await import("luxon");
-    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    const mockNow = DateTime.fromObject({ year: 2026, month: 10, day: 26, hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
     vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
 
     mockSql.clearMockResults();
@@ -949,7 +949,7 @@ describe("Real sendCatchupReminder path", () => {
   it("success: reply_to === contactEmail and footer has shop.name + reply sentence", async () => {
     const { sendCatchupReminder } = await import("../reminders.server");
     const { DateTime } = await import("luxon");
-    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    const mockNow = DateTime.fromObject({ year: 2026, month: 10, day: 26, hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
     vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
 
     const result = await sendCatchupReminder(
@@ -983,7 +983,7 @@ describe("Real sendCatchupReminder path", () => {
   it("fetch failure: no reply_to, footer uses handle label, no reply sentence", async () => {
     const { sendCatchupReminder } = await import("../reminders.server");
     const { DateTime } = await import("luxon");
-    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    const mockNow = DateTime.fromObject({ year: 2026, month: 10, day: 26, hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
     vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
 
     mockShopifyGraphQLQueue.mockResolvedValueOnce({
@@ -1020,7 +1020,7 @@ describe("Real sendCatchupReminder path", () => {
   it("ordering: shopify call happens before sql.begin", async () => {
     const { sendCatchupReminder } = await import("../reminders.server");
     const { DateTime } = await import("luxon");
-    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    const mockNow = DateTime.fromObject({ year: 2026, month: 10, day: 26, hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
     vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
 
     await sendCatchupReminder(
@@ -1045,7 +1045,7 @@ describe("Real sendCatchupReminder path", () => {
   it("cache: one fetch for two catchup sends to same shop", async () => {
     const { sendCatchupReminder } = await import("../reminders.server");
     const { DateTime } = await import("luxon");
-    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    const mockNow = DateTime.fromObject({ year: 2026, month: 10, day: 26, hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
     vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
 
     await sendCatchupReminder(
@@ -1084,7 +1084,7 @@ describe("Real sendCatchupReminder path", () => {
   it("opted-out buyer: skips send, no shopifyGraphQLQueue call, no Resend fetch", async () => {
     const { sendCatchupReminder } = await import("../reminders.server");
     const { DateTime } = await import("luxon");
-    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    const mockNow = DateTime.fromObject({ year: 2026, month: 10, day: 26, hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
     vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
 
     mockSql.clearMockResults();
