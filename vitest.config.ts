@@ -158,6 +158,9 @@ const DB_TEST_PATTERNS = [
 
   // Ingestion paths DB tests
   "tests/integration/ingestion-paths-db.test.ts",
+
+  // Embedded admin scale and N+1 tests
+  "tests/integration/embedded-admin-scale-db.test.ts",
 ];
 
 export default defineConfig({
