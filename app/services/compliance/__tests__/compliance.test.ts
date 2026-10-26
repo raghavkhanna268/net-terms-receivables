@@ -1033,7 +1033,7 @@ describe("compliance.server", () => {
     it("sends email without link when APP_HANDLE is missing", async () => {
       (process.env as Record<string, string | undefined>).APP_HANDLE = undefined;
       process.env.RESEND_API_KEY = "re_test_key";
-      process.env.RESEND_FROM = "noreply@example.com";
+      (process.env as Record<string, string | undefined>).RESEND_FROM = "noreply@example.com";
       vi.stubEnv("RESEND_TEST_RECIPIENTS", "owner@shop.com");
       const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 

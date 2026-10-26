@@ -17,12 +17,14 @@ import {
   processBulkDraftOrder,
   processDraftOrderWebhook,
   getPendingExposure,
+  getAccountsWithDraftExposure,
 } from "../draft-order.server";
 import {
   parseDraftOrderBulkJsonl,
   bulkDraftOrderToShopifyDraftOrder,
 } from "../bulk-parser.server";
 import { processDraftOrderLines } from "../bulk-jsonl-processor.server";
+import { getCreditStatusDisplay } from "~/services/credit-status.server";
 import type { ShopifyDraftOrder } from "../types";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -140,8 +142,8 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
         ),
       ];
 
-      const count = await bulkUpsertDraftOrders(sql, draftOrders);
-      expect(count).toBe(2);
+      const result = await bulkUpsertDraftOrders(sql, draftOrders);
+      expect(result.count).toBe(2);
 
       const rows = await sql`
         SELECT draft_order_id, status, total FROM s8_draft_orders WHERE shop_id = ${TEST_SHOP_ID}
@@ -167,8 +169,8 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
         ),
       ];
 
-      const count = await bulkUpsertDraftOrders(sql, draftOrders);
-      expect(count).toBe(1);
+      const result = await bulkUpsertDraftOrders(sql, draftOrders);
+      expect(result.count).toBe(1);
 
       const [row] = await sql`
         SELECT status, total FROM s8_draft_orders
@@ -209,8 +211,8 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
         TEST_ACCOUNT_ID
       );
 
-      const count = await bulkUpsertDraftOrders(sql, [updated]);
-      expect(count).toBe(1);
+      const result = await bulkUpsertDraftOrders(sql, [updated]);
+      expect(result.count).toBe(1);
 
       const rows = await sql`SELECT total FROM s8_draft_orders WHERE draft_order_id = ${draftOrderId}`;
       expect(rows).toHaveLength(1);
@@ -248,8 +250,8 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
         TEST_ACCOUNT_ID
       );
 
-      const count = await bulkUpsertDraftOrders(sql, [updated]);
-      expect(count).toBe(1);
+      const result = await bulkUpsertDraftOrders(sql, [updated]);
+      expect(result.count).toBe(1);
 
       const rows = await sql`SELECT total, status FROM s8_draft_orders WHERE draft_order_id = ${draftOrderId}`;
       expect(rows).toHaveLength(1);
@@ -390,8 +392,8 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
 
       expect(mappedOrders).toHaveLength(2);
 
-      const count = await bulkUpsertDraftOrders(sql, mappedOrders);
-      expect(count).toBe(2);
+      const result = await bulkUpsertDraftOrders(sql, mappedOrders);
+      expect(result.count).toBe(2);
 
       const rows = await sql`
         SELECT draft_order_id, name, status, total FROM s8_draft_orders
@@ -746,6 +748,7 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
     it("existing UPPERCASE row re-processed ends up lowercase and counts toward exposure", async () => {
       const draftId = `gid://shopify/DraftOrder/resync-upper-${TEST_SUFFIX}`;
       const draftAmount = "8500.00";
+      const draftAmountPaise = 850000n;
 
       // Insert row directly with UPPERCASE status (simulating pre-fix webhook data)
       await sql`
@@ -764,16 +767,12 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
       `;
       expect(beforeRow.status).toBe("OPEN");
 
-      // UPPERCASE row does NOT count toward exposure per credit-status.server.ts
+      // UPPERCASE row does NOT count toward exposure per credit-status.server.ts computeExposure
       // which uses: status IN ('open', 'invoice_sent') - case-sensitive match
-      const [exposureBefore] = await sql<{ total: string }[]>`
-        SELECT COALESCE(SUM(total), '0.00') as total
-        FROM s8_draft_orders
-        WHERE buyer_account_id = ${TEST_ACCOUNT_ID}
-          AND has_payment_terms = true
-          AND status IN ('open', 'invoice_sent')
-      `;
-      expect(exposureBefore.total).toBe("0.00");
+      // QA2 carry-over (b): use the real exported exposure path (getCreditStatusDisplay)
+      const statusBefore = await getCreditStatusDisplay(sql, TEST_ACCOUNT_ID);
+      expect(statusBefore).not.toBeNull();
+      expect(statusBefore!.exposurePaise).toBe(0n);
 
       // Re-process through the normalized bulk path
       const draftOrder: ShopifyDraftOrder = {
@@ -807,15 +806,11 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
       `;
       expect(afterRow.status).toBe("open");
 
-      // NOW it counts toward exposure (same query as credit-status.server.ts)
-      const [exposureAfter] = await sql<{ total: string }[]>`
-        SELECT COALESCE(SUM(total), '0.00') as total
-        FROM s8_draft_orders
-        WHERE buyer_account_id = ${TEST_ACCOUNT_ID}
-          AND has_payment_terms = true
-          AND status IN ('open', 'invoice_sent')
-      `;
-      expect(exposureAfter.total).toBe(draftAmount);
+      // QA2 carry-over (b): use the real exported exposure path (getCreditStatusDisplay)
+      // NOW it counts toward exposure because status is lowercase
+      const statusAfter = await getCreditStatusDisplay(sql, TEST_ACCOUNT_ID);
+      expect(statusAfter).not.toBeNull();
+      expect(statusAfter!.exposurePaise).toBe(draftAmountPaise);
     });
   });
 
@@ -939,7 +934,7 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
     });
   });
 
-  describe("processDraftOrderLines integration (processLines path)", () => {
+  describe("processDraftOrderLines (calls processDraftOrderLines directly)", () => {
     it("only stores INR drafts, skips USD and missing-currency drafts", async () => {
       const jsonlLines = [
         `{"id":"gid://shopify/DraftOrder/pdl-inr-${TEST_SUFFIX}","name":"#PDL-INR","createdAt":"2026-10-25T10:00:00Z","status":"OPEN","totalPriceSet":{"shopMoney":{"amount":"1000.00","currencyCode":"INR"}},"paymentTerms":{"id":"pt1","paymentTermsName":"Net 30","paymentTermsType":"NET"}}`,
@@ -992,6 +987,274 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
 
       const exposure = await getPendingExposure(sql, TEST_ACCOUNT_ID);
       expect(exposure).toBe("5500.00");
+    });
+  });
+
+  describe("#423 bulk reconcile flagging", () => {
+    const BULK_423_SUFFIX = Date.now().toString(36) + "-bulk423";
+    const BULK_SHOP_DOMAIN = `test-bulk423-${BULK_423_SUFFIX}.myshopify.com`;
+    const BULK_SHOP_ID = `shop-bulk423-${BULK_423_SUFFIX}`;
+    const BULK_ACCOUNT_A = `account-bulk423-a-${BULK_423_SUFFIX}`;
+    const BULK_ACCOUNT_B = `account-bulk423-b-${BULK_423_SUFFIX}`;
+    const BULK_COMPANY_A_ID = `gid://shopify/Company/co-bulk423-a-${BULK_423_SUFFIX}`;
+    const BULK_LOCATION_A_ID = `gid://shopify/CompanyLocation/loc-bulk423-a-${BULK_423_SUFFIX}`;
+    const BULK_COMPANY_B_ID = `gid://shopify/Company/co-bulk423-b-${BULK_423_SUFFIX}`;
+    const BULK_LOCATION_B_ID = `gid://shopify/CompanyLocation/loc-bulk423-b-${BULK_423_SUFFIX}`;
+
+    beforeAll(async () => {
+      await sql`
+        INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+        VALUES (${BULK_SHOP_ID}, ${BULK_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+      `;
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "companyId", "companyLocationId", name,
+          "createdAt", "updatedAt"
+        ) VALUES
+        (${BULK_ACCOUNT_A}, ${BULK_SHOP_ID}, 'COMPANY', ${BULK_COMPANY_A_ID}, ${BULK_LOCATION_A_ID}, 'Bulk Test A', NOW(), NOW()),
+        (${BULK_ACCOUNT_B}, ${BULK_SHOP_ID}, 'COMPANY', ${BULK_COMPANY_B_ID}, ${BULK_LOCATION_B_ID}, 'Bulk Test B', NOW(), NOW())
+      `;
+    });
+
+    afterAll(async () => {
+      await sql`DELETE FROM s8_draft_orders WHERE shop_id = ${BULK_SHOP_ID}`;
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${BULK_SHOP_DOMAIN}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${BULK_SHOP_ID}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${BULK_SHOP_ID}`;
+    });
+
+    beforeEach(async () => {
+      await sql`DELETE FROM s8_draft_orders WHERE shop_id = ${BULK_SHOP_ID}`;
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${BULK_SHOP_DOMAIN}`;
+    });
+
+    async function getRecomputeMessages(): Promise<{ buyerAccountId: string; source: string; read_ct: number }[]> {
+      return sql<{ buyerAccountId: string; source: string; read_ct: number }[]>`
+        SELECT
+          message->>'buyerAccountId' AS "buyerAccountId",
+          message->>'source' AS source,
+          read_ct
+        FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${BULK_SHOP_DOMAIN}
+          AND message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+      `;
+    }
+
+    it("bulkUpsertDraftOrders tracks affected accounts on insert", async () => {
+      const draftOrders = [
+        mapDraftOrder(
+          BULK_SHOP_ID,
+          {
+            id: `gid://shopify/DraftOrder/bulk-flag-1-${BULK_423_SUFFIX}`,
+            name: "#BULK-FLAG-1",
+            createdAt: "2026-10-25T10:00:00Z",
+            status: "open",
+            totalPriceSet: { shopMoney: { amount: "1000.00", currencyCode: "INR" } },
+            paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+          },
+          BULK_ACCOUNT_A
+        ),
+        mapDraftOrder(
+          BULK_SHOP_ID,
+          {
+            id: `gid://shopify/DraftOrder/bulk-flag-2-${BULK_423_SUFFIX}`,
+            name: "#BULK-FLAG-2",
+            createdAt: "2026-10-25T10:00:00Z",
+            status: "open",
+            totalPriceSet: { shopMoney: { amount: "2000.00", currencyCode: "INR" } },
+            paymentTerms: { id: "pt2", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+          },
+          BULK_ACCOUNT_B
+        ),
+      ];
+
+      const result = await bulkUpsertDraftOrders(sql, draftOrders);
+
+      expect(result.count).toBe(2);
+      expect(result.affectedAccountIds.size).toBe(2);
+      expect(result.affectedAccountIds.has(BULK_ACCOUNT_A)).toBe(true);
+      expect(result.affectedAccountIds.has(BULK_ACCOUNT_B)).toBe(true);
+    });
+
+    it("bulkUpsertDraftOrders dedupes same account within batch", async () => {
+      const draftOrders = [
+        mapDraftOrder(
+          BULK_SHOP_ID,
+          {
+            id: `gid://shopify/DraftOrder/bulk-dedupe-1-${BULK_423_SUFFIX}`,
+            name: "#BULK-DEDUPE-1",
+            createdAt: "2026-10-25T10:00:00Z",
+            status: "open",
+            totalPriceSet: { shopMoney: { amount: "1000.00", currencyCode: "INR" } },
+            paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+          },
+          BULK_ACCOUNT_A
+        ),
+        mapDraftOrder(
+          BULK_SHOP_ID,
+          {
+            id: `gid://shopify/DraftOrder/bulk-dedupe-2-${BULK_423_SUFFIX}`,
+            name: "#BULK-DEDUPE-2",
+            createdAt: "2026-10-25T10:00:00Z",
+            status: "open",
+            totalPriceSet: { shopMoney: { amount: "2000.00", currencyCode: "INR" } },
+            paymentTerms: { id: "pt2", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+          },
+          BULK_ACCOUNT_A // Same account as first draft
+        ),
+      ];
+
+      const result = await bulkUpsertDraftOrders(sql, draftOrders);
+
+      expect(result.count).toBe(2);
+      // D4: dedupe within batch - same account appears once in affectedAccountIds
+      expect(result.affectedAccountIds.size).toBe(1);
+      expect(result.affectedAccountIds.has(BULK_ACCOUNT_A)).toBe(true);
+    });
+
+    it("processDraftOrderLines with origin='reconcile' flags per batch", async () => {
+      const jsonlLines = [
+        `{"id":"gid://shopify/DraftOrder/pdl-reconcile-${BULK_423_SUFFIX}","name":"#PDL-RECONCILE","createdAt":"2026-10-25T10:00:00Z","status":"OPEN","totalPriceSet":{"shopMoney":{"amount":"5000.00","currencyCode":"INR"}},"paymentTerms":{"id":"pt1","paymentTermsName":"Net 30","paymentTermsType":"NET"},"purchasingEntity":{"__typename":"PurchasingCompany","company":{"id":"${BULK_COMPANY_A_ID}"},"location":{"id":"${BULK_LOCATION_A_ID}"}}}`,
+      ];
+
+      await processDraftOrderLines(sql, BULK_SHOP_DOMAIN, jsonlLines, "reconcile");
+
+      const messages = await getRecomputeMessages();
+      expect(messages).toHaveLength(1);
+      expect(messages[0].buyerAccountId).toBe(BULK_ACCOUNT_A);
+      expect(messages[0].source).toBe("draft_change");
+    });
+
+    it("processDraftOrderLines with '1000.0' vs stored '1000.00' doesn't flag (D3 2dp normalization)", async () => {
+      const draftId = `gid://shopify/DraftOrder/pdl-1dp-${BULK_423_SUFFIX}`;
+
+      // Create initial draft with 2dp total
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at
+        ) VALUES (
+          ${BULK_SHOP_ID}, ${draftId}, ${BULK_ACCOUNT_A}, '#PDL-1DP', '1000.00',
+          true, 'open', NOW()
+        )
+      `;
+
+      // Shopify sends "1000.0" (1 decimal place) - should be no-op
+      const jsonlLines = [
+        `{"id":"${draftId}","name":"#PDL-1DP","createdAt":"2026-10-25T10:00:00Z","status":"OPEN","totalPriceSet":{"shopMoney":{"amount":"1000.0","currencyCode":"INR"}},"paymentTerms":{"id":"pt1","paymentTermsName":"Net 30","paymentTermsType":"NET"},"purchasingEntity":{"__typename":"PurchasingCompany","company":{"id":"${BULK_COMPANY_A_ID}"},"location":{"id":"${BULK_LOCATION_A_ID}"}}}`,
+      ];
+
+      await processDraftOrderLines(sql, BULK_SHOP_DOMAIN, jsonlLines, "reconcile");
+
+      const messages = await getRecomputeMessages();
+      expect(messages).toHaveLength(0);
+    });
+
+    it("processDraftOrderLines with '1000' vs stored '1000.00' doesn't flag (D3 0dp normalization)", async () => {
+      const draftId = `gid://shopify/DraftOrder/pdl-0dp-${BULK_423_SUFFIX}`;
+
+      // Create initial draft with 2dp total
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at
+        ) VALUES (
+          ${BULK_SHOP_ID}, ${draftId}, ${BULK_ACCOUNT_A}, '#PDL-0DP', '1000.00',
+          true, 'open', NOW()
+        )
+      `;
+
+      // Shopify sends "1000" (no decimal places) - should be no-op
+      const jsonlLines = [
+        `{"id":"${draftId}","name":"#PDL-0DP","createdAt":"2026-10-25T10:00:00Z","status":"OPEN","totalPriceSet":{"shopMoney":{"amount":"1000","currencyCode":"INR"}},"paymentTerms":{"id":"pt1","paymentTermsName":"Net 30","paymentTermsType":"NET"},"purchasingEntity":{"__typename":"PurchasingCompany","company":{"id":"${BULK_COMPANY_A_ID}"},"location":{"id":"${BULK_LOCATION_A_ID}"}}}`,
+      ];
+
+      await processDraftOrderLines(sql, BULK_SHOP_DOMAIN, jsonlLines, "reconcile");
+
+      const messages = await getRecomputeMessages();
+      expect(messages).toHaveLength(0);
+    });
+
+    it("processDraftOrderLines with '1000.01' vs stored '1000.00' does flag (real change)", async () => {
+      const draftId = `gid://shopify/DraftOrder/pdl-01diff-${BULK_423_SUFFIX}`;
+
+      // Create initial draft with 2dp total
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at
+        ) VALUES (
+          ${BULK_SHOP_ID}, ${draftId}, ${BULK_ACCOUNT_A}, '#PDL-01DIFF', '1000.00',
+          true, 'open', NOW()
+        )
+      `;
+
+      // Shopify sends "1000.01" (actual change)
+      const jsonlLines = [
+        `{"id":"${draftId}","name":"#PDL-01DIFF","createdAt":"2026-10-25T10:00:00Z","status":"OPEN","totalPriceSet":{"shopMoney":{"amount":"1000.01","currencyCode":"INR"}},"paymentTerms":{"id":"pt1","paymentTermsName":"Net 30","paymentTermsType":"NET"},"purchasingEntity":{"__typename":"PurchasingCompany","company":{"id":"${BULK_COMPANY_A_ID}"},"location":{"id":"${BULK_LOCATION_A_ID}"}}}`,
+      ];
+
+      await processDraftOrderLines(sql, BULK_SHOP_DOMAIN, jsonlLines, "reconcile");
+
+      const messages = await getRecomputeMessages();
+      expect(messages).toHaveLength(1);
+      expect(messages[0].buyerAccountId).toBe(BULK_ACCOUNT_A);
+    });
+
+    it("processDraftOrderLines with origin='initial' does NOT flag per batch", async () => {
+      const jsonlLines = [
+        `{"id":"gid://shopify/DraftOrder/pdl-initial-${BULK_423_SUFFIX}","name":"#PDL-INITIAL","createdAt":"2026-10-25T10:00:00Z","status":"OPEN","totalPriceSet":{"shopMoney":{"amount":"5000.00","currencyCode":"INR"}},"paymentTerms":{"id":"pt1","paymentTermsName":"Net 30","paymentTermsType":"NET"},"purchasingEntity":{"__typename":"PurchasingCompany","company":{"id":"${BULK_COMPANY_A_ID}"},"location":{"id":"${BULK_LOCATION_A_ID}"}}}`,
+      ];
+
+      // D6: Initial sync does NOT flag per batch
+      await processDraftOrderLines(sql, BULK_SHOP_DOMAIN, jsonlLines, "initial");
+
+      const messages = await getRecomputeMessages();
+      expect(messages).toHaveLength(0);
+    });
+
+    it("getAccountsWithDraftExposure returns accounts with open/invoice_sent drafts", async () => {
+      // Create drafts with various statuses
+      const draftIdOpen = `draft-exp-open-${BULK_423_SUFFIX}`;
+      const draftIdSent = `draft-exp-sent-${BULK_423_SUFFIX}`;
+      const draftIdCompleted = `draft-exp-completed-${BULK_423_SUFFIX}`;
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at
+        ) VALUES
+        (${BULK_SHOP_ID}, ${draftIdOpen}, ${BULK_ACCOUNT_A}, '#EXP-OPEN', '1000.00', true, 'open', NOW()),
+        (${BULK_SHOP_ID}, ${draftIdSent}, ${BULK_ACCOUNT_A}, '#EXP-SENT', '2000.00', true, 'invoice_sent', NOW()),
+        (${BULK_SHOP_ID}, ${draftIdCompleted}, ${BULK_ACCOUNT_B}, '#EXP-COMPLETED', '3000.00', true, 'completed', NOW())
+      `;
+
+      const accounts = await getAccountsWithDraftExposure(sql, BULK_SHOP_DOMAIN);
+
+      // Only account A has open/invoice_sent drafts
+      expect(accounts.size).toBe(1);
+      expect(accounts.has(BULK_ACCOUNT_A)).toBe(true);
+      expect(accounts.has(BULK_ACCOUNT_B)).toBe(false);
+    });
+
+    it("two consecutive batches touching same account: debounce prevents duplicate messages", async () => {
+      // First batch
+      const jsonlLines1 = [
+        `{"id":"gid://shopify/DraftOrder/pdl-batch1-${BULK_423_SUFFIX}","name":"#PDL-BATCH1","createdAt":"2026-10-25T10:00:00Z","status":"OPEN","totalPriceSet":{"shopMoney":{"amount":"1000.00","currencyCode":"INR"}},"paymentTerms":{"id":"pt1","paymentTermsName":"Net 30","paymentTermsType":"NET"},"purchasingEntity":{"__typename":"PurchasingCompany","company":{"id":"${BULK_COMPANY_A_ID}"},"location":{"id":"${BULK_LOCATION_A_ID}"}}}`,
+      ];
+
+      await processDraftOrderLines(sql, BULK_SHOP_DOMAIN, jsonlLines1, "reconcile");
+
+      // Second batch (same account)
+      const jsonlLines2 = [
+        `{"id":"gid://shopify/DraftOrder/pdl-batch2-${BULK_423_SUFFIX}","name":"#PDL-BATCH2","createdAt":"2026-10-25T11:00:00Z","status":"OPEN","totalPriceSet":{"shopMoney":{"amount":"2000.00","currencyCode":"INR"}},"paymentTerms":{"id":"pt2","paymentTermsName":"Net 30","paymentTermsType":"NET"},"purchasingEntity":{"__typename":"PurchasingCompany","company":{"id":"${BULK_COMPANY_A_ID}"},"location":{"id":"${BULK_LOCATION_A_ID}"}}}`,
+      ];
+
+      await processDraftOrderLines(sql, BULK_SHOP_DOMAIN, jsonlLines2, "reconcile");
+
+      // Should have only one message for account A due to debounce (read_ct = 0 check)
+      const messages = await getRecomputeMessages();
+      const accountAMessages = messages.filter((m) => m.buyerAccountId === BULK_ACCOUNT_A);
+      expect(accountAMessages).toHaveLength(1);
     });
   });
 });

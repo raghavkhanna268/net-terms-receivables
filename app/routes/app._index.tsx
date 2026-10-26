@@ -31,6 +31,7 @@ import { ServerTiming, mergeServerTimingHeaders, readColdOnce } from "~/lib/serv
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 import { checkAndRecoverCurrency } from "~/services/shop-currency-recovery.server";
+import { processPlanWelcome } from "~/services/plan-welcome.server";
 
 const PAGE_SIZE = 20;
 
@@ -418,6 +419,14 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const shopDomain = session.shop;
 
   const url = new URL(request.url);
+
+  const urlPlanHandle = url.searchParams.get("plan_handle");
+  const urlChargeId = url.searchParams.get("charge_id");
+  const urlShopParam = url.searchParams.get("shop");
+  if (urlPlanHandle || urlChargeId) {
+    await processPlanWelcome(sql, shopDomain, urlShopParam, urlPlanHandle, urlChargeId);
+  }
+
   const page = parsePositiveInt(url.searchParams.get("page"), 1);
   const sortBy = parseSortBy(url.searchParams.get("sortBy"));
   const sortOrder = parseSortOrder(url.searchParams.get("sortOrder"));
