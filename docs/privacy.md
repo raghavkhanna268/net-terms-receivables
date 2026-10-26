@@ -126,9 +126,9 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app built for Indian 
 |--------------|---------|----------|
 | Cloudflare, Inc. | Application hosting (Workers), connection pooling (Hyperdrive) | Global (Worker placed ap-south-1) |
 | Supabase, Inc. | Database hosting (Postgres), encrypted at rest (AES-256) and in transit (TLS) | AWS ap-south-1 (Mumbai, India) |
+| Resend, Inc. | Email delivery (data request notifications, payment reminders) | Tokyo, Japan (ap-northeast-1) data region |
 
-**Not in use; will be listed here before they are enabled:**
-- Resend, Inc. (email delivery)
+**Not in use; will be listed here before it is enabled:**
 - Functional Software, Inc. (Sentry error monitoring)
 
 ---
