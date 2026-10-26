@@ -618,7 +618,7 @@ function checkArgument(
     checkStringConcatenation(arg, sourceFile, relPath, violations);
   }
 
-  // Check for literal domain strings and wh= pattern
+  // Check for literal domain strings
   if (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) {
     const text = arg.text;
     if (DOMAIN_LITERAL_PATTERN.test(text) && !isValidationPattern(text)) {
