@@ -240,7 +240,7 @@ export async function markBulkOperationFailed(
     safeLog("warn", "bulk_op_recovery_marked_failed", {
       shopHash: hash,
       bulkType: bulkType ?? "unknown",
-      shopifyStatus: shopifyStatus ?? "unknown",
+      opStatus: shopifyStatus ?? "unknown",
     });
   }
 
