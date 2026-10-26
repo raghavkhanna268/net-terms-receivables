@@ -289,37 +289,25 @@ export default function PlanPage() {
         </>
       )}
 
-      {/* Aside: Gating Status */}
-      <s-section slot="aside" heading="Plan Gating">
-        <s-stack>
-          <s-paragraph>
-            <s-text type="strong">Enforcement: </s-text>
-            <s-text>
-              {gatingEnforced ? (
-                <s-badge tone="critical">Active</s-badge>
-              ) : (
-                <s-badge>Not Enforced</s-badge>
-              )}
-            </s-text>
-          </s-paragraph>
-          {!gatingEnforced && (
+      {/* Aside: Gating Status - only shown when gating is enforced */}
+      {gatingEnforced && (
+        <s-section slot="aside" heading="Plan Limits">
+          <s-stack>
             <s-paragraph>
+              <s-text type="strong">Status: </s-text>
               <s-text>
-                Plan limits are currently not enforced. All features are available
-                regardless of plan tier.
+                <s-badge tone="critical">Active</s-badge>
               </s-text>
             </s-paragraph>
-          )}
-          {gatingEnforced && (
             <s-paragraph>
               <s-text>
                 Plan limits are enforced. New accounts over your limit will be
-                gated until you upgrade.
+                paused until you upgrade.
               </s-text>
             </s-paragraph>
-          )}
-        </s-stack>
-      </s-section>
+          </s-stack>
+        </s-section>
+      )}
     </s-page>
   );
 }

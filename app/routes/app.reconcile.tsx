@@ -110,6 +110,50 @@ interface MatchSummary {
   reasons: unknown;
   state: string;
   buyerName: string;
+  buyerAccountId?: string;
+}
+
+/**
+ * Label map for match reason types.
+ * Maps internal reason codes to merchant-friendly labels.
+ */
+export const MATCH_REASON_LABELS: Record<string, string> = {
+  amount_exact: "Exact amount",
+  amount_overpayment: "Overpayment",
+  amount_partial: "Partial payment",
+  invoice_ref: "Invoice/Order ref",
+  order_ref: "Invoice/Order ref",
+  payer_alias: "Confirmed alias",
+  payer_name: "Payer name",
+  email_match: "Email match",
+};
+
+/**
+ * Get a merchant-friendly label for a match reason type.
+ * Falls back to a readable version of the code for unknown types.
+ */
+export function getMatchReasonLabel(type: string): string {
+  return MATCH_REASON_LABELS[type] ?? type.replace(/_/g, " ");
+}
+
+/**
+ * Label map for match states.
+ * Maps internal state values to merchant-friendly labels.
+ */
+export const MATCH_STATE_LABELS: Record<string, string> = {
+  suggested: "Suggested",
+  confirmed: "Confirmed",
+  pushing: "Applying…",
+  pushed: "Recorded in Shopify",
+  unmatched: "Rejected",
+};
+
+/**
+ * Get a merchant-friendly label for a match state.
+ * Falls back to Title Case for unknown states.
+ */
+export function getMatchStateLabel(state: string): string {
+  return MATCH_STATE_LABELS[state] ?? state.charAt(0).toUpperCase() + state.slice(1);
 }
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
@@ -275,6 +319,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         reasons: m.reasons,
         state: m.state,
         buyerName: m.buyerName,
+        buyerAccountId: m.buyerAccountId,
       }));
       totalCount = result.totalCount;
     } else if (view === "pushing") {
@@ -295,6 +340,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         reasons: m.reasons,
         state: m.state,
         buyerName: m.buyerName,
+        buyerAccountId: m.buyerAccountId,
       }));
       totalCount = result.totalCount;
     } else {
@@ -315,6 +361,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         reasons: m.reasons,
         state: m.state,
         buyerName: m.buyerName,
+        buyerAccountId: m.buyerAccountId,
       }));
       totalCount = result.totalCount;
     }
@@ -494,7 +541,7 @@ function MatchReasons({ reasons }: { reasons: unknown }) {
     <s-stack>
       {reasons.map((reason, idx) => (
         <s-text key={idx}>
-          {reason.type}: +{reason.points} {reason.detail ? `(${reason.detail})` : ""}
+          {getMatchReasonLabel(reason.type)} +{reason.points}
         </s-text>
       ))}
     </s-stack>
@@ -621,7 +668,7 @@ function PaymentDetailView({
                       <s-badge
                         tone={match.state === "confirmed" ? "success" : "critical"}
                       >
-                        {match.state}
+                        {getMatchStateLabel(match.state)}
                       </s-badge>
                     )}
                   </s-table-cell>
@@ -981,9 +1028,13 @@ function PushingMatchesView({
           {matches.map((match) => (
             <s-table-row key={match.id}>
               <s-table-cell>
-                <s-link href={`/app/invoices/${match.invoiceId}`}>
-                  {match.invoiceName}
-                </s-link>
+                {match.buyerAccountId ? (
+                  <s-link href={`/app/accounts/${match.buyerAccountId}`}>
+                    {match.invoiceName}
+                  </s-link>
+                ) : (
+                  <s-text>{match.invoiceName}</s-text>
+                )}
               </s-table-cell>
               <s-table-cell>{match.buyerName}</s-table-cell>
               <s-table-cell>

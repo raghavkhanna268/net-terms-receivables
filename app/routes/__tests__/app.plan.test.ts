@@ -882,3 +882,106 @@ describe("T4 Over-limit banner renders when usage is null", () => {
     expect(html).not.toContain("accounts over your plan limit");
   });
 });
+
+/**
+ * Plan Gating sidebar visibility tests.
+ *
+ * Verifies that the Plan Gating sidebar:
+ * - Does NOT render when gatingEnforced is false
+ * - DOES render when gatingEnforced is true
+ * - Does NOT show "Not Enforced" or "regardless of plan" copy to merchants
+ */
+describe("Plan Gating sidebar visibility", () => {
+  afterEach(() => {
+    vi.doUnmock("react-router");
+    vi.resetModules();
+  });
+
+  it("does NOT render Plan Limits sidebar when gatingEnforced is false", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          plan: { key: "starter", name: "Starter", isTest: false },
+          usage: { companies: { current: 10, limit: 25 }, importsThisMonth: { current: 3, limit: -1 } },
+          gatedCount: 0,
+          gatingEnforced: false,
+          storeHandle: "test-store",
+          upgradeUrl: "https://admin.shopify.com/store/test-store/charges/net-terms/pricing_plans",
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          error: null,
+        }),
+      };
+    });
+
+    vi.resetModules();
+    const { default: PlanPage } = await import("../app.plan");
+
+    const html = renderToString(createElement(PlanPage));
+
+    expect(html).not.toContain("Plan Limits");
+    expect(html).not.toContain("Plan Gating");
+    expect(html).not.toContain("Not Enforced");
+    expect(html).not.toContain("regardless of plan");
+    expect(html).not.toContain("not enforced");
+    expect(html).not.toContain("limits are not");
+  });
+
+  it("DOES render Plan Limits sidebar when gatingEnforced is true", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          plan: { key: "starter", name: "Starter", isTest: false },
+          usage: { companies: { current: 10, limit: 25 }, importsThisMonth: { current: 3, limit: -1 } },
+          gatedCount: 0,
+          gatingEnforced: true,
+          storeHandle: "test-store",
+          upgradeUrl: "https://admin.shopify.com/store/test-store/charges/net-terms/pricing_plans",
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          error: null,
+        }),
+      };
+    });
+
+    vi.resetModules();
+    const { default: PlanPage } = await import("../app.plan");
+
+    const html = renderToString(createElement(PlanPage));
+
+    expect(html).toContain("Plan Limits");
+    expect(html).toContain("Active");
+    expect(html).toContain("Plan limits are enforced");
+  });
+
+  it("never shows 'Not Enforced' or 'regardless of plan' copy when gating is off", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          plan: { key: "none", name: "No Plan", isTest: false },
+          usage: null,
+          gatedCount: 0,
+          gatingEnforced: false,
+          storeHandle: "test-store",
+          upgradeUrl: null,
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          error: null,
+        }),
+      };
+    });
+
+    vi.resetModules();
+    const { default: PlanPage } = await import("../app.plan");
+
+    const html = renderToString(createElement(PlanPage));
+
+    expect(html).not.toContain("Not Enforced");
+    expect(html).not.toContain("regardless of plan");
+    expect(html).not.toContain("not enforced");
+    expect(html).not.toContain("All features are available");
+  });
+});
