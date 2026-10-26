@@ -149,8 +149,13 @@ When `PLAN_GATING_ENFORCED` is ON and a new BuyerAccount would exceed the limit:
    in Shopify (COMPANY_LOCATIONS_DELETE webhook), the BuyerAccount row is preserved
    for financial history but `locationDeletedAt` is set. Accounts with
    `locationDeletedAt IS NOT NULL` are excluded from the active account count.
-   - A restore (location seen again via webhook or bulk reconcile) clears
-     `locationDeletedAt` only if the event timestamp is newer than the delete.
+   - **Webhook restore**: A non-delete webhook (CREATE/UPDATE) clears `locationDeletedAt`
+     only if the event's `triggeredAt` (X-Shopify-Triggered-At) is newer than the delete.
+     This prevents stale webhooks from incorrectly restoring a location.
+   - **Bulk reconcile restore**: A bulk operation clears `locationDeletedAt` only if
+     the bulk operation's `createdAt` (Shopify's snapshot time) is newer than the delete.
+     If the snapshot time is unknown (null), the location is NOT restored to prevent
+     stale bulk payloads from incorrectly clearing a recent delete.
    - A restored location CAN push the shop over its plan limit because no gating
      check runs on restore (same as tag reactivation).
    - Repeat deletes are idempotent: `COALESCE` preserves the first delete timestamp.

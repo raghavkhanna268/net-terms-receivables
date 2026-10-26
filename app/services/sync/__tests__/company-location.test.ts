@@ -1270,5 +1270,298 @@ describeWithDb("CompanyLocation Sync", () => {
         }
       }
     });
+
+    it("flag-off: webhook restore does not use sql.begin but still clears locationDeletedAt", async () => {
+      const originalEnv = process.env.PLAN_GATING_ENFORCED;
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+
+      try {
+        vi.resetModules();
+        const beginSpy = vi.spyOn(sql, "begin");
+
+        const locationId = `gid://shopify/CompanyLocation/flagoff-restore-${TEST_SUFFIX}`;
+        const companyId = `gid://shopify/Company/flagoff-restore-co-${TEST_SUFFIX}`;
+        const deleteTime = new Date("2026-10-20T10:00:00Z");
+        const restoreTime = new Date("2026-10-21T10:00:00Z"); // newer
+
+        // Create deleted account
+        await sql`
+          INSERT INTO "BuyerAccount" (
+            "shopId", kind, "companyId", "companyLocationId", name, "locationDeletedAt",
+            "createdAt", "updatedAt"
+          ) VALUES (
+            ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'Flag Off Restore',
+            ${deleteTime}, NOW(), NOW()
+          )
+        `;
+
+        const { processCompanyLocationWebhook: processWebhook } = await import("../company-location.server");
+        const result = await processWebhook(
+          sql,
+          TEST_SHOP_DOMAIN,
+          "COMPANY_LOCATIONS_UPDATE",
+          { id: locationId, name: "Restored", company: { id: companyId } },
+          `wh-flagoff-restore-${TEST_SUFFIX}`,
+          {},
+          true,
+          restoreTime
+        );
+
+        expect(result.success).toBe(true);
+        expect(beginSpy).not.toHaveBeenCalled();
+
+        // locationDeletedAt cleared because restoreTime > deleteTime
+        const [account] = await sql<{ locationDeletedAt: Date | null }[]>`
+          SELECT "locationDeletedAt" FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+        `;
+        expect(account.locationDeletedAt).toBeNull();
+
+        beginSpy.mockRestore();
+      } finally {
+        if (originalEnv !== undefined) {
+          (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
+        } else {
+          delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
+        }
+      }
+    });
+
+    it("flag-off: webhook upsert (CREATE) does not use sql.begin", async () => {
+      const originalEnv = process.env.PLAN_GATING_ENFORCED;
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+
+      try {
+        vi.resetModules();
+        const beginSpy = vi.spyOn(sql, "begin");
+
+        const locationId = `gid://shopify/CompanyLocation/flagoff-create-${TEST_SUFFIX}`;
+        const companyId = `gid://shopify/Company/flagoff-create-co-${TEST_SUFFIX}`;
+
+        const { processCompanyLocationWebhook: processWebhook } = await import("../company-location.server");
+        const result = await processWebhook(
+          sql,
+          TEST_SHOP_DOMAIN,
+          "COMPANY_LOCATIONS_CREATE",
+          { id: locationId, name: "Flag Off Create", company: { id: companyId } },
+          `wh-flagoff-create-${TEST_SUFFIX}`,
+          {},
+          true,
+          new Date()
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("created");
+        expect(beginSpy).not.toHaveBeenCalled();
+
+        beginSpy.mockRestore();
+      } finally {
+        if (originalEnv !== undefined) {
+          (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
+        } else {
+          delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
+        }
+      }
+    });
+
+    it("flag-off: bulk upsert does not use sql.begin but still handles locationDeletedAt", async () => {
+      const originalEnv = process.env.PLAN_GATING_ENFORCED;
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+
+      try {
+        vi.resetModules();
+        const beginSpy = vi.spyOn(sql, "begin");
+
+        const locationId = `gid://shopify/CompanyLocation/flagoff-bulk-${TEST_SUFFIX}`;
+        const companyId = `gid://shopify/Company/flagoff-bulk-co-${TEST_SUFFIX}`;
+        const deleteTime = new Date("2026-10-20T10:00:00Z");
+        const snapshotTime = new Date("2026-10-21T10:00:00Z"); // newer
+
+        // Create deleted account
+        await sql`
+          INSERT INTO "BuyerAccount" (
+            "shopId", kind, "companyId", "companyLocationId", name, "locationDeletedAt",
+            "createdAt", "updatedAt"
+          ) VALUES (
+            ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'Flag Off Bulk',
+            ${deleteTime}, NOW(), NOW()
+          )
+        `;
+
+        const { bulkUpsertBuyerAccounts: bulkUpsert, mapCompanyLocationToBuyerAccount: mapLocation } = await import("../company-location.server");
+        const accounts = [
+          mapLocation(TEST_SHOP_ID, {
+            id: locationId,
+            name: "Bulk Restored",
+            company: { id: companyId },
+          }, {}),
+        ];
+
+        const count = await bulkUpsert(sql, accounts, snapshotTime);
+        expect(count).toBe(1);
+        expect(beginSpy).not.toHaveBeenCalled();
+
+        // locationDeletedAt cleared because snapshotTime > deleteTime
+        const [account] = await sql<{ locationDeletedAt: Date | null }[]>`
+          SELECT "locationDeletedAt" FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+        `;
+        expect(account.locationDeletedAt).toBeNull();
+
+        beginSpy.mockRestore();
+      } finally {
+        if (originalEnv !== undefined) {
+          (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
+        } else {
+          delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
+        }
+      }
+    });
+  });
+
+  describe("T5: bulk snapshot time handling", () => {
+    it("bulk snapshot older than delete does NOT clear locationDeletedAt", async () => {
+      const locationId = `gid://shopify/CompanyLocation/stale-bulk-${TEST_SUFFIX}`;
+      const companyId = `gid://shopify/Company/stale-bulk-co-${TEST_SUFFIX}`;
+      const deleteTime = new Date("2026-10-25T10:00:00Z");
+      const staleSnapshotTime = new Date("2026-10-20T10:00:00Z"); // 5 days BEFORE delete
+
+      // Create account with locationDeletedAt set
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name, "locationDeletedAt",
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'Stale Bulk Test',
+          ${deleteTime}, NOW(), NOW()
+        )
+      `;
+
+      const accounts = [
+        mapCompanyLocationToBuyerAccount(TEST_SHOP_ID, {
+          id: locationId,
+          name: "Stale Bulk Update",
+          company: { id: companyId },
+        }, {}),
+      ];
+
+      await bulkUpsertBuyerAccounts(sql, accounts, staleSnapshotTime);
+
+      const [account] = await sql<{ locationDeletedAt: Date | null; name: string }[]>`
+        SELECT "locationDeletedAt", name FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+      `;
+      // locationDeletedAt NOT cleared because staleSnapshotTime < deleteTime
+      expect(account.locationDeletedAt).not.toBeNull();
+      expect(account.locationDeletedAt!.getTime()).toBe(deleteTime.getTime());
+      // But name was still updated
+      expect(account.name).toBe("Stale Bulk Update");
+    });
+
+    it("bulk snapshot newer than delete DOES clear locationDeletedAt", async () => {
+      const locationId = `gid://shopify/CompanyLocation/new-bulk-${TEST_SUFFIX}`;
+      const companyId = `gid://shopify/Company/new-bulk-co-${TEST_SUFFIX}`;
+      const deleteTime = new Date("2026-10-20T10:00:00Z");
+      const newerSnapshotTime = new Date("2026-10-25T10:00:00Z"); // 5 days AFTER delete
+
+      // Create account with locationDeletedAt set
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name, "locationDeletedAt",
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'Newer Bulk Test',
+          ${deleteTime}, NOW(), NOW()
+        )
+      `;
+
+      const accounts = [
+        mapCompanyLocationToBuyerAccount(TEST_SHOP_ID, {
+          id: locationId,
+          name: "Newer Bulk Update",
+          company: { id: companyId },
+        }, {}),
+      ];
+
+      await bulkUpsertBuyerAccounts(sql, accounts, newerSnapshotTime);
+
+      const [account] = await sql<{ locationDeletedAt: Date | null; name: string }[]>`
+        SELECT "locationDeletedAt", name FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+      `;
+      // locationDeletedAt cleared because newerSnapshotTime > deleteTime
+      expect(account.locationDeletedAt).toBeNull();
+      expect(account.name).toBe("Newer Bulk Update");
+    });
+
+    it("bulk with unknown snapshot time (null) does NOT clear locationDeletedAt", async () => {
+      const locationId = `gid://shopify/CompanyLocation/null-bulk-${TEST_SUFFIX}`;
+      const companyId = `gid://shopify/Company/null-bulk-co-${TEST_SUFFIX}`;
+      const deleteTime = new Date("2026-10-20T10:00:00Z");
+
+      // Create account with locationDeletedAt set
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name, "locationDeletedAt",
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'Null Snapshot Test',
+          ${deleteTime}, NOW(), NOW()
+        )
+      `;
+
+      const accounts = [
+        mapCompanyLocationToBuyerAccount(TEST_SHOP_ID, {
+          id: locationId,
+          name: "Null Snapshot Update",
+          company: { id: companyId },
+        }, {}),
+      ];
+
+      // Pass null for snapshotAt (unknown snapshot time)
+      await bulkUpsertBuyerAccounts(sql, accounts, null);
+
+      const [account] = await sql<{ locationDeletedAt: Date | null; name: string }[]>`
+        SELECT "locationDeletedAt", name FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+      `;
+      // locationDeletedAt NOT cleared because snapshotAt is null (unknown)
+      expect(account.locationDeletedAt).not.toBeNull();
+      expect(account.locationDeletedAt!.getTime()).toBe(deleteTime.getTime());
+      // But name was still updated
+      expect(account.name).toBe("Null Snapshot Update");
+    });
+
+    it("bulk with undefined snapshot time does NOT clear locationDeletedAt", async () => {
+      const locationId = `gid://shopify/CompanyLocation/undef-bulk-${TEST_SUFFIX}`;
+      const companyId = `gid://shopify/Company/undef-bulk-co-${TEST_SUFFIX}`;
+      const deleteTime = new Date("2026-10-20T10:00:00Z");
+
+      // Create account with locationDeletedAt set
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name, "locationDeletedAt",
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'Undefined Snapshot Test',
+          ${deleteTime}, NOW(), NOW()
+        )
+      `;
+
+      const accounts = [
+        mapCompanyLocationToBuyerAccount(TEST_SHOP_ID, {
+          id: locationId,
+          name: "Undefined Snapshot Update",
+          company: { id: companyId },
+        }, {}),
+      ];
+
+      // Don't pass snapshotAt at all (undefined)
+      await bulkUpsertBuyerAccounts(sql, accounts);
+
+      const [account] = await sql<{ locationDeletedAt: Date | null; name: string }[]>`
+        SELECT "locationDeletedAt", name FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+      `;
+      // locationDeletedAt NOT cleared because snapshotAt is undefined (unknown)
+      expect(account.locationDeletedAt).not.toBeNull();
+      expect(account.locationDeletedAt!.getTime()).toBe(deleteTime.getTime());
+      // But name was still updated
+      expect(account.name).toBe("Undefined Snapshot Update");
+    });
   });
 });

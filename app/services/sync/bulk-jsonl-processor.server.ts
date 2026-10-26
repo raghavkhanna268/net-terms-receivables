@@ -152,6 +152,7 @@ interface BulkOperationStatus {
   fileSize: number | null;
   objectCount: number | null;
   errorCode: string | null;
+  createdAt: string | null;
 }
 
 /**
@@ -417,12 +418,14 @@ export function decodeTailAsLine(
  * @param shopId - Shop ID
  * @param lines - JSONL lines to process
  * @param env - Environment for PII flag (required)
+ * @param snapshotAt - Bulk operation's createdAt from Shopify (when the snapshot was taken)
  */
 async function processCompanyLines(
   sql: Sql,
   shopId: string,
   lines: string[],
-  env: import("./customer-fields.server").PiiEnv
+  env: import("./customer-fields.server").PiiEnv,
+  snapshotAt?: Date | null
 ): Promise<number> {
   const jsonl = lines.join("\n");
   const { companies, orphanLocations, errors } = parseCompanyBulkJsonl(jsonl);
@@ -455,7 +458,7 @@ async function processCompanyLines(
     accounts.push(mapCompanyLocationToBuyerAccount(shopId, shopifyLoc, env, false));
   }
 
-  return await bulkUpsertBuyerAccounts(sql, accounts);
+  return await bulkUpsertBuyerAccounts(sql, accounts, snapshotAt);
 }
 
 /**
@@ -856,14 +859,15 @@ async function processLines(
   shop: string,
   shopId: string,
   bulkType: string,
-  lines: string[]
+  lines: string[],
+  snapshotAt?: Date | null
 ): Promise<number> {
   // Get Worker env for PII flag (used by companies and customers)
   const env = getRequestEnv() ?? {};
   
   switch (bulkType) {
     case "companies":
-      return await processCompanyLines(sql, shopId, lines, env);
+      return await processCompanyLines(sql, shopId, lines, env, snapshotAt);
     case "orders":
       return await processOrderLines(sql, shopId, shop, lines);
     case "customers":
@@ -983,6 +987,11 @@ export async function processBulkOperation(
   const resultUrl = statusResult.data.url;
   const startByteOffset = progress.byteOffset;
   const currentChunkSize = progress.chunkSize;
+  
+  // T5: Extract snapshot time (bulk operation createdAt) for stale restore detection.
+  // If the bulk operation was created before a location was deleted, we must not
+  // clear locationDeletedAt when we see that location in the bulk data.
+  const snapshotAt = statusResult.data.createdAt ? new Date(statusResult.data.createdAt) : null;
 
   // Fetch chunk starting from saved offset
   const chunkResult = await fetchJsonlChunk(
@@ -1151,7 +1160,8 @@ export async function processBulkOperation(
         shop,
         shopId,
         bulkType,
-        linesToProcess
+        linesToProcess,
+        snapshotAt
       );
     } catch (err) {
       // Increment failure count on processing error

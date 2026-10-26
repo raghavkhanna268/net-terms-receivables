@@ -100,6 +100,12 @@ export async function processCompanyLocationWebhook(
     };
   }
 
+  // T5 restore semantics for webhook path: A non-DELETE webhook (CREATE/UPDATE) means
+  // Shopify just told us this location exists NOW. The webhook payload is a fresh fetch,
+  // so seeing the location here is equivalent to re-fetching it from Shopify. We clear
+  // locationDeletedAt only if triggeredAt (X-Shopify-Triggered-At) is newer than the
+  // existing delete timestamp - this prevents stale webhook payloads (delivered late or
+  // reprocessed) from incorrectly restoring a location that was deleted after them.
   const paymentTerms = location.buyerExperienceConfiguration?.paymentTermsTemplate;
   const defaultTermsDays = paymentTerms?.dueInDays ?? null;
 
@@ -407,15 +413,27 @@ export function mapCompanyLocationToBuyerAccount(
  * parent company was in an earlier chunk), the mainContact* columns are preserved
  * rather than overwritten with NULL. This prevents losing stored contacts.
  *
+ * T5 locationDeletedAt restore: When a bulk operation sees a location, it may
+ * clear locationDeletedAt (restore). To prevent stale bulk snapshots from clearing
+ * a recent delete, we compare snapshotAt (Shopify's bulk operation createdAt) to
+ * locationDeletedAt. If snapshotAt is older than locationDeletedAt, the location
+ * was deleted after the snapshot was taken, so we must NOT clear. If snapshotAt
+ * is unknown (null), we conservatively do NOT clear to avoid data loss.
+ *
  * @param sql - postgres.js SQL client
  * @param accounts - Array of mapped BuyerAccount data
+ * @param snapshotAt - Bulk operation's createdAt from Shopify (when the snapshot was taken)
  * @returns Number of accounts upserted
  */
 export async function bulkUpsertBuyerAccounts(
   sql: Sql,
-  accounts: MappedBuyerAccount[]
+  accounts: MappedBuyerAccount[],
+  snapshotAt?: Date | null
 ): Promise<number> {
   if (accounts.length === 0) return 0;
+  
+  // Normalize undefined to null for SQL compatibility (postgres.js rejects undefined)
+  const bulkSnapshotAt: Date | null = snapshotAt ?? null;
 
   // Group accounts by shopId for batch limit checking
   const accountsByShop = new Map<string, MappedBuyerAccount[]>();
@@ -428,7 +446,8 @@ export async function bulkUpsertBuyerAccounts(
   let totalCount = 0;
 
   // Flag off: row-by-row without transaction (main's behavior, errors propagate)
-  // T5: Clear locationDeletedAt when location seen in bulk (restore)
+  // T5: Clear locationDeletedAt only when snapshotAt is newer than the delete.
+  // If snapshotAt is null (unknown), do NOT clear to prevent stale payloads from restoring.
   if (!isGatingEnforced()) {
     for (const [, shopAccounts] of accountsByShop) {
       for (const a of shopAccounts) {
@@ -473,7 +492,9 @@ export async function bulkUpsertBuyerAccounts(
               "mainContactName" = EXCLUDED."mainContactName",
               "mainContactCustomerId" = EXCLUDED."mainContactCustomerId",
               "locationDeletedAt" = CASE
-                WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL AND NOW() > "BuyerAccount"."locationDeletedAt"
+                WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL
+                     AND ${bulkSnapshotAt}::timestamptz IS NOT NULL
+                     AND ${bulkSnapshotAt}::timestamptz > "BuyerAccount"."locationDeletedAt"
                 THEN NULL
                 ELSE "BuyerAccount"."locationDeletedAt"
               END,
@@ -516,7 +537,9 @@ export async function bulkUpsertBuyerAccounts(
               name = EXCLUDED.name,
               "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
               "locationDeletedAt" = CASE
-                WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL AND NOW() > "BuyerAccount"."locationDeletedAt"
+                WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL
+                     AND ${bulkSnapshotAt}::timestamptz IS NOT NULL
+                     AND ${bulkSnapshotAt}::timestamptz > "BuyerAccount"."locationDeletedAt"
                 THEN NULL
                 ELSE "BuyerAccount"."locationDeletedAt"
               END,
@@ -548,7 +571,8 @@ export async function bulkUpsertBuyerAccounts(
     }
 
     // Unlimited: process row-by-row without gating (no transaction needed, errors propagate)
-    // T5: Clear locationDeletedAt when location seen in bulk (restore)
+    // T5: Clear locationDeletedAt only when snapshotAt is newer than the delete.
+    // If snapshotAt is null (unknown), do NOT clear to prevent stale payloads from restoring.
     if (limit === -1) {
       for (const a of shopAccounts) {
         if (a.contactKnown) {
@@ -589,7 +613,9 @@ export async function bulkUpsertBuyerAccounts(
               "mainContactName" = EXCLUDED."mainContactName",
               "mainContactCustomerId" = EXCLUDED."mainContactCustomerId",
               "locationDeletedAt" = CASE
-                WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL AND NOW() > "BuyerAccount"."locationDeletedAt"
+                WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL
+                     AND ${bulkSnapshotAt}::timestamptz IS NOT NULL
+                     AND ${bulkSnapshotAt}::timestamptz > "BuyerAccount"."locationDeletedAt"
                 THEN NULL
                 ELSE "BuyerAccount"."locationDeletedAt"
               END,
@@ -631,7 +657,9 @@ export async function bulkUpsertBuyerAccounts(
               name = EXCLUDED.name,
               "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
               "locationDeletedAt" = CASE
-                WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL AND NOW() > "BuyerAccount"."locationDeletedAt"
+                WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL
+                     AND ${bulkSnapshotAt}::timestamptz IS NOT NULL
+                     AND ${bulkSnapshotAt}::timestamptz > "BuyerAccount"."locationDeletedAt"
                 THEN NULL
                 ELSE "BuyerAccount"."locationDeletedAt"
               END,
@@ -677,7 +705,8 @@ export async function bulkUpsertBuyerAccounts(
           }
 
           // Use different UPDATE logic based on contactKnown
-          // T5: Clear locationDeletedAt when location seen in bulk (restore)
+          // T5: Clear locationDeletedAt only when snapshotAt is newer than the delete.
+          // If snapshotAt is null (unknown), do NOT clear to prevent stale payloads from restoring.
           if (a.contactKnown) {
             const result = await tx`
               INSERT INTO "BuyerAccount" (
@@ -718,7 +747,9 @@ export async function bulkUpsertBuyerAccounts(
                 "mainContactName" = EXCLUDED."mainContactName",
                 "mainContactCustomerId" = EXCLUDED."mainContactCustomerId",
                 "locationDeletedAt" = CASE
-                  WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL AND NOW() > "BuyerAccount"."locationDeletedAt"
+                  WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL
+                       AND ${bulkSnapshotAt}::timestamptz IS NOT NULL
+                       AND ${bulkSnapshotAt}::timestamptz > "BuyerAccount"."locationDeletedAt"
                   THEN NULL
                   ELSE "BuyerAccount"."locationDeletedAt"
                 END,
@@ -763,7 +794,9 @@ export async function bulkUpsertBuyerAccounts(
                 name = EXCLUDED.name,
                 "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
                 "locationDeletedAt" = CASE
-                  WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL AND NOW() > "BuyerAccount"."locationDeletedAt"
+                  WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL
+                       AND ${bulkSnapshotAt}::timestamptz IS NOT NULL
+                       AND ${bulkSnapshotAt}::timestamptz > "BuyerAccount"."locationDeletedAt"
                   THEN NULL
                   ELSE "BuyerAccount"."locationDeletedAt"
                 END,
