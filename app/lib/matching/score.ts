@@ -360,16 +360,6 @@ const GENERIC_ALIAS_WORDS = new Set([
 ]);
 
 /**
- * Check if ALL tokens in the given normalized string are generic business words.
- */
-function isAllGenericTokens(normalizedText: string): boolean {
-  if (normalizedText.length === 0) return true;
-  const tokens = normalizedText.split(/\s+/).filter((t) => t.length > 0);
-  if (tokens.length === 0) return true;
-  return tokens.every((token) => GENERIC_ALIAS_WORDS.has(token));
-}
-
-/**
  * Check if the alias match includes at least one non-generic token.
  * Returns true if the match should earn the alias bonus.
  *
