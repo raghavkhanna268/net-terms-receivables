@@ -1150,7 +1150,7 @@ describe("S12 Validation deployed inputQuery metrics (no text)", () => {
       });
     }
 
-    it("prints count, ids and per-function booleans/ints only, never text or titles", () => {
+    it("prints count, ordinal indices and per-function booleans/ints only, never GIDs, text or titles", () => {
       const { stdout, json } = cross({
         data: {
           shopifyFunctions: {
@@ -1167,17 +1167,19 @@ describe("S12 Validation deployed inputQuery metrics (no text)", () => {
         function_count: 2,
         functions: [
           {
-            id: "01a1681b-c9af-7830-9995-f515e3eada0b",
+            function_idx: 1,
             handle_is_credit_check_validation: true,
             input_query_null: false,
             input_query_length: [...MULTILINE_APP_PREFIX].length,
             has_credit_status: true,
           },
-          { id: "fn-2", handle_is_credit_check_validation: false, input_query_null: true, input_query_length: 0, has_credit_status: "unknown" },
+          { function_idx: 2, handle_is_credit_check_validation: false, input_query_null: true, input_query_length: 0, has_credit_status: "unknown" },
         ],
       });
       expect(stdout).not.toContain(SENTINEL);
       expect(stdout).not.toContain("metafield(");
+      expect(stdout).not.toContain("01a1681b-c9af-7830-9995-f515e3eada0b");
+      expect(stdout).not.toContain("fn-2");
     });
 
     it("per-function has_credit_status: null => \"unknown\", empty string and non-matching => false", () => {
@@ -1195,16 +1197,18 @@ describe("S12 Validation deployed inputQuery metrics (no text)", () => {
         },
       });
       const fns = (json[0] as { functions: Array<Record<string, unknown>> }).functions;
-      expect(fns.map((f) => [f.id, f.input_query_null, f.has_credit_status])).toEqual([
-        ["fn-null", true, "unknown"],
-        ["fn-missing", true, "unknown"],
-        ["fn-empty", false, false],
-        ["fn-nomatch", false, false],
-        ["fn-match", false, true],
+      expect(fns.map((f) => [f.function_idx, f.input_query_null, f.has_credit_status])).toEqual([
+        [1, true, "unknown"],
+        [2, true, "unknown"],
+        [3, false, false],
+        [4, false, false],
+        [5, false, true],
       ]);
       expect(stdout).not.toContain(SENTINEL);
       expect(stdout).not.toContain("buyerIdentity");
       expect(stdout).not.toContain("lines {");
+      expect(stdout).not.toContain("fn-null");
+      expect(stdout).not.toContain("fn-match");
     });
 
     it("soft-fails on HTTP error and on GraphQL errors (codes only)", () => {
