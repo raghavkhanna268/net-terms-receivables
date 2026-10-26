@@ -24,4 +24,9 @@ query Input {
   buyerJourney {
     step
   }
+  shop {
+    metafield(namespace: "$app", key: "shop_config") {
+      jsonValue
+    }
+  }
 }

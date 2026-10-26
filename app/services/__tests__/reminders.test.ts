@@ -122,6 +122,11 @@ function createMockSql() {
       return mockResults.get("settings") ?? [];
     }
 
+    // #292: Shop currency check (INR-only in v1)
+    if (query.includes("currency") && query.includes("Shop") && query.includes("SELECT")) {
+      return mockResults.get("shop_currency") ?? [{ currency: "INR" }];
+    }
+
     return [];
   };
 
