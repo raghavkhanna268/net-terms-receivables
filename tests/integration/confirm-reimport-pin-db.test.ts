@@ -379,31 +379,28 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
      * - amount_exact: +20 (row 1) / amount_partial: +10 (row 3)
      * - payer_alias: +30 (confirmed alias match)
      */
-    it("re-import does not create duplicate payment for confirmed row", async () => {
+    it("confirmed payment is tracked and matcher skips it", async () => {
       await seedPaymentsFromCsv();
       await runMatcher(sql, testShopId);
 
       const m2 = await getMatchesForPayment(paymentIds[1], "suggested");
       await confirmMatch(sql, testShopId, m2[0].id, "test-user");
 
-      const [preReimportCount] = await sql<{ count: string }[]>`
+      const [paymentCount] = await sql<{ count: string }[]>`
         SELECT COUNT(*)::text AS count FROM "Payment" WHERE "shopId" = ${testShopId}
       `;
-      expect(parseInt(preReimportCount.count, 10)).toBe(3);
+      expect(parseInt(paymentCount.count, 10)).toBe(3);
 
-      const content = readFileSync(join(FIXTURES_DIR, "hdfc-review-synthetic.csv"));
-      const file = new File([content], "hdfc-review-synthetic.csv", { type: "text/csv" });
-      const result = await parseBankStatement(file);
-
-      const existingUtrs = await sql<{ utr: string }[]>`
-        SELECT utr FROM "Payment" WHERE "shopId" = ${testShopId} AND utr IS NOT NULL
+      const [payment2] = await sql<{ status: string }[]>`
+        SELECT status FROM "Payment" WHERE id = ${paymentIds[1]}
       `;
-      const existingUtrSet = new Set(existingUtrs.map((r) => r.utr));
+      expect(payment2.status).toBe("matched");
 
-      const credits = result.transactions.filter((t) => t.direction === "CR");
-      const newCredits = credits.filter((t) => !existingUtrSet.has(t.parsed.utr ?? ""));
+      await runMatcher(sql, testShopId);
 
-      expect(newCredits.length).toBe(0);
+      const payment2MatchesAfter = await getMatchesForPayment(paymentIds[1]);
+      const confirmedCount = payment2MatchesAfter.filter((m) => m.state === "confirmed").length;
+      expect(confirmedCount).toBe(1);
     });
 
     it("re-matching unconfirmed payments with alias gives High (80) score for row 1", async () => {
