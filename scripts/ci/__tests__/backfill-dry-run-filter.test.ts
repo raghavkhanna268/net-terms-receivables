@@ -185,9 +185,9 @@ Shop: example.myshopify.com
     expect(result.stdout).not.toContain("myshopify.com");
   });
 
-  it("exits 5 for unmasked host-shaped values in allowed lines", () => {
-    // Host-shaped values that make it past the allowlist check should fail
-    // For example, if an error message somehow contains a host pattern
+  it("redacts hosts in error lines so they pass", () => {
+    // Error lines are transformed via redact_class() which replaces hosts with <host>.
+    // This verifies the redaction works, so the error line passes.
     const input = `============================================================
 Backstop Backfill Script (S13)
 ============================================================
@@ -199,8 +199,62 @@ Finding candidates (held accounts with missing backstop)...
     ✗ error: Connection failed to api.example.com
 `;
     const result = runFilter(input);
-    // The error line is transformed to error class, which redacts the host
-    // So this should pass, not fail with exit 5
     expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("<host>");
+    expect(result.stdout).not.toContain("example.com");
+  });
+});
+
+describe("backfill-dry-run-filter: check_output_line function", () => {
+  // The check_output_line function is tested directly in the Python self-test
+  // (test_backfill_dry_run_filter.py) because:
+  // 1. stdin-based tests can't trigger exit 5 - shop lines get masked, error
+  //    lines get redacted, and allowlisted patterns are too strict for hosts.
+  // 2. The function must be tested directly to verify exit 5 (host leak),
+  //    exit 6 (id leak), and host-before-id precedence.
+  //
+  // These tests verify the function via a Python subprocess that runs a
+  // small test script exercising check_output_line.
+
+  function testCheckOutputLine(line: string): number {
+    const testScript = `
+import sys
+sys.path.insert(0, '${path.dirname(FILTER_SCRIPT).replace(/\\/g, "\\\\")}')
+import re
+with open('${FILTER_SCRIPT.replace(/\\/g, "\\\\")}') as f:
+    code = f.read()
+main_start = code.find("\\ndropped = 0")
+if main_start > 0:
+    code = code[:main_start]
+exec_globals = {"re": re, "sys": sys, "__name__": "test"}
+exec(code, exec_globals)
+print(exec_globals["check_output_line"]('''${line.replace(/'/g, "\\'")}'''))
+`;
+    const result = spawnSync("python3", ["-c", testScript], {
+      encoding: "utf8",
+      timeout: 5000,
+    });
+    return parseInt(result.stdout?.trim() ?? "-1", 10);
+  }
+
+  it("returns 5 for host-shaped value", () => {
+    expect(testCheckOutputLine("some text with api.example.com in it")).toBe(5);
+  });
+
+  it("returns 6 for id-shaped value (UUID)", () => {
+    expect(testCheckOutputLine("account: 550e8400-e29b-41d4-a716-446655440000")).toBe(6);
+  });
+
+  it("returns 6 for id-shaped value (long numeric)", () => {
+    expect(testCheckOutputLine("Candidates: 1234567")).toBe(6);
+  });
+
+  it("returns 5 when both host and id present (host-before-id)", () => {
+    // Proves the host check runs before the id check
+    expect(testCheckOutputLine("api.example.com uuid:550e8400-e29b-41d4-a716-446655440000")).toBe(5);
+  });
+
+  it("returns 0 for safe line", () => {
+    expect(testCheckOutputLine("Candidates: 5")).toBe(0);
   });
 });

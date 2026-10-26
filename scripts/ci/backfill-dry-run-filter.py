@@ -61,6 +61,19 @@ def contains_id_shaped_value(line: str) -> bool:
         CUID_RE.search(line) or
         SEED_ACCOUNT_RE.search(line)
     )
+
+
+def check_output_line(line: str) -> int:
+    """Check a line that would be printed for host or id leaks.
+
+    Returns exit code: 5 for host leak, 6 for id leak, 0 if safe.
+    Host check runs before id check per QA ruling.
+    """
+    if HOST.search(line):
+        return 5
+    if contains_id_shaped_value(line):
+        return 6
+    return 0
 ALLOW_RE = [re.compile(rf"^{a}$") for a in ALLOW]
 APPLY_RE = re.compile(r"Mode: APPLY|✓ held:|^Applied: |^Skipped: |error \((retryable|fatal)\)")
 ERR_RE = re.compile(r"^\s*(✗ error: |ERROR: |Fatal error:)\s*(.*)$")
@@ -114,10 +127,11 @@ for raw in sys.stdin:
     # QA 2 ruling: check host and id-shaped values on OUTPUT (`out`) after shop
     # masking and error redaction, not on raw input. Host leaks (exit 5) have
     # precedence over id leaks (exit 6).
-    if HOST.search(out):
+    leak_code = check_output_line(out)
+    if leak_code == 5:
         host_leak += 1
         continue
-    if contains_id_shaped_value(out):
+    if leak_code == 6:
         id_leak += 1
         continue
     print(out)
