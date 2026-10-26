@@ -511,6 +511,44 @@ export function logUserErrors(userErrors: UserError[], context?: string): void {
   }
 }
 
+/**
+ * Result of a mutation operation with consistent failure detection.
+ */
+export interface MutationResult<T> {
+  ok: boolean;
+  data: T | null;
+  failureReason: "graphql_errors" | "user_errors" | "null_result" | null;
+}
+
+/**
+ * Check a mutation response for failure conditions.
+ * A mutation is considered FAILED when:
+ * - The response has top-level GraphQL errors
+ * - The response has non-empty userErrors
+ * - The result object is null or missing
+ *
+ * @param response - The GraphQL response
+ * @param userErrors - The userErrors array from the mutation payload
+ * @param result - The result object (e.g., customer, order) from the mutation payload
+ * @returns MutationResult with ok=true if successful, ok=false with failureReason otherwise
+ */
+export function checkMutationResult<T>(
+  response: GraphQLResponse<unknown>,
+  userErrors: UserError[] | undefined,
+  result: T | null | undefined
+): MutationResult<T> {
+  if (response.errors && response.errors.length > 0) {
+    return { ok: false, data: null, failureReason: "graphql_errors" };
+  }
+  if (userErrors && userErrors.length > 0) {
+    return { ok: false, data: null, failureReason: "user_errors" };
+  }
+  if (result === null || result === undefined) {
+    return { ok: false, data: null, failureReason: "null_result" };
+  }
+  return { ok: true, data: result, failureReason: null };
+}
+
 export async function graphql<T>(
   state: SeedState,
   query: string,
@@ -3005,7 +3043,7 @@ export async function ensureTaggedCustomer(
       mutation CreateCustomer($input: CustomerInput!) {
         customerCreate(input: $input) {
           customer { id }
-          userErrors { field message code }
+          userErrors { field message }
         }
       }
     `, {
@@ -3015,18 +3053,18 @@ export async function ensureTaggedCustomer(
       },
     }, { isMutation: true });
 
-    if (createResult.errors) {
-      console.log(`    ⚠️  GraphQL error creating customer: ${createResult.errors.length} error(s)`);
+    const createCheck = checkMutationResult(
+      createResult,
+      createResult.data?.customerCreate?.userErrors,
+      createResult.data?.customerCreate?.customer
+    );
+
+    if (!createCheck.ok) {
+      console.log(`    ⚠️  Failed to create customer: ${createCheck.failureReason}`);
       return null;
     }
 
-    if (createResult.data?.customerCreate.userErrors.length) {
-      const code = createResult.data.customerCreate.userErrors[0].code ?? "UNKNOWN";
-      console.log(`    ⚠️  Failed to create customer: [${code}]`);
-      return null;
-    }
-
-    customerId = createResult.data?.customerCreate.customer?.id;
+    customerId = createCheck.data?.id;
     if (!customerId) {
       console.log(`    ⚠️  No customer ID returned`);
       return null;
@@ -3044,7 +3082,7 @@ export async function ensureTaggedCustomer(
     mutation TagCustomer($id: ID!, $tags: [String!]!) {
       tagsAdd(id: $id, tags: $tags) {
         node { ... on Customer { id } }
-        userErrors { field message code }
+        userErrors { field message }
       }
     }
   `, {
@@ -3052,13 +3090,14 @@ export async function ensureTaggedCustomer(
     tags: [tag],
   }, { isMutation: true });
 
-  if (tagResult.errors) {
-    console.log(`    ⚠️  GraphQL error tagging customer: ${tagResult.errors.length} error(s)`);
-  }
+  const tagCheck = checkMutationResult(
+    tagResult,
+    tagResult.data?.tagsAdd?.userErrors,
+    tagResult.data?.tagsAdd?.node
+  );
 
-  if (tagResult.data?.tagsAdd.userErrors.length) {
-    const code = tagResult.data.tagsAdd.userErrors[0].code ?? "UNKNOWN";
-    console.log(`    ⚠️  Failed to tag customer: [${code}]`);
+  if (!tagCheck.ok) {
+    console.log(`    ⚠️  Failed to tag customer: ${tagCheck.failureReason}`);
   }
 
   return customerId;
@@ -3087,6 +3126,8 @@ export async function seedTaggedCustomerOrders(state: SeedState): Promise<void> 
     if (customerId) {
       customerMap.set(seed.termsDays, customerId);
       console.log(`  ✅ Customer tagged with ${SEED_TAG}-net${seed.termsDays}`);
+    } else {
+      state.errors.push(`Failed to ensure tagged customer for Net ${seed.termsDays}`);
     }
   }
 
@@ -3109,6 +3150,8 @@ export async function seedTaggedCustomerOrders(state: SeedState): Promise<void> 
     const customerId = customerMap.get(orderSpec.customerTermsDays);
     if (!customerId) {
       console.error(`  ❌ [${orderIndex}/${totalTaggedOrders}] No customer found for Net ${orderSpec.customerTermsDays}`);
+      state.failedCount.orders++;
+      state.errors.push(`No customer found for tagged order ${orderIndex}`);
       continue;
     }
 
