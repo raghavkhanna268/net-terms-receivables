@@ -198,6 +198,114 @@ describe("compliance.server", () => {
       });
       expect(mockSql.begin).toHaveBeenCalledTimes(1);
     });
+
+    // REVERT NOTE: This test FAILS if the triggeredAt guard is reverted.
+    it("skips deletion when uninstalledAt is newer than triggeredAt - 47h (reinstall guard)", async () => {
+      const triggeredAt = new Date("2026-10-26T12:00:00Z");
+      const uninstalledAt = new Date(triggeredAt.getTime() - 46 * 60 * 60 * 1000);
+      mockTx.mockResolvedValueOnce([{ id: "shop-recent-uninst-123", uninstalledAt }]);
+
+      const result = await deleteShop(mockSql, "test-recent-uninst.myshopify.com", triggeredAt);
+
+      expect(result).toEqual({
+        deleted: false,
+        shopId: "shop-recent-uninst-123",
+        skippedReinstalled: true,
+        sessionsDeleted: 0,
+        refetchNullPurged: 0,
+        bulkOperationsPurged: 0,
+        reconcileClaimsPurged: 0,
+        orderGapPurged: 0,
+        piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
+        deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
+      });
+      expect(mockSql.begin).toHaveBeenCalledTimes(1);
+    });
+
+    it("deletes when uninstalledAt is older than triggeredAt - 47h (original uninstall)", async () => {
+      const triggeredAt = new Date("2026-10-26T12:00:00Z");
+      const uninstalledAt = new Date(triggeredAt.getTime() - 48 * 60 * 60 * 1000);
+      mockTx.mockResolvedValueOnce([{ id: "shop-old-uninst-123", uninstalledAt }]);
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce([{ id: "shop-old-uninst-123" }]);
+
+      const result = await deleteShop(mockSql, "test-old-uninst.myshopify.com", triggeredAt);
+
+      expect(result.deleted).toBe(true);
+      expect(result.skippedReinstalled).toBe(false);
+      expect(result.shopId).toBe("shop-old-uninst-123");
+    });
+
+    it("deletes when triggeredAt is null and uninstalledAt is set (missing header)", async () => {
+      const uninstalledAt = new Date("2026-10-24T12:00:00Z");
+      mockTx.mockResolvedValueOnce([{ id: "shop-no-trigat-123", uninstalledAt }]);
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce([{ id: "shop-no-trigat-123" }]);
+
+      const result = await deleteShop(mockSql, "test-no-trigat.myshopify.com", null);
+
+      expect(result.deleted).toBe(true);
+      expect(result.skippedReinstalled).toBe(false);
+      expect(result.shopId).toBe("shop-no-trigat-123");
+    });
+
+    it("deletes when triggeredAt is undefined and uninstalledAt is set (missing header)", async () => {
+      const uninstalledAt = new Date("2026-10-24T12:00:00Z");
+      mockTx.mockResolvedValueOnce([{ id: "shop-undef-trigat-123", uninstalledAt }]);
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      mockTx.mockResolvedValueOnce([{ id: "shop-undef-trigat-123" }]);
+
+      const result = await deleteShop(mockSql, "test-undef-trigat.myshopify.com", undefined);
+
+      expect(result.deleted).toBe(true);
+      expect(result.skippedReinstalled).toBe(false);
+      expect(result.shopId).toBe("shop-undef-trigat-123");
+    });
   });
 
   describe("purgePgmqMessages", () => {

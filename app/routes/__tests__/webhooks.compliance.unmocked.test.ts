@@ -218,7 +218,7 @@ describe("webhooks.compliance unmocked HMAC tests (#39)", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-      expect(mockDeleteShop).toHaveBeenCalledWith(expect.anything(), TEST_SHOP);
+      expect(mockDeleteShop).toHaveBeenCalledWith(expect.anything(), TEST_SHOP, null);
     });
   });
 

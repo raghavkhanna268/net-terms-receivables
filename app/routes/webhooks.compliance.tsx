@@ -17,6 +17,7 @@ import {
 import { getOfflineAdminContext } from "~/lib/offline-admin.server";
 import { safeLog, shopHash } from "~/lib/log.server";
 import type { Sql } from "~/lib/db-light.server";
+import { parseTriggeredAt } from "~/lib/webhook-receipts.server";
 
 /**
  * Fetch shop owner email using the offline session admin client.
@@ -230,7 +231,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       // deleteShop handles sessions, webhook_receipts, and s6_processed_webhooks
       // internally within its transaction. Sessions are only deleted when the
       // shop is actually being erased (not skipped by reinstall guard). See #291.
-      const result = await deleteShop(sql, payloadShop);
+      const triggeredAt = parseTriggeredAt(request);
+      const result = await deleteShop(sql, payloadShop, triggeredAt);
       const hash = await shopHash(payloadShop);
 
       if (result.skippedReinstalled) {
