@@ -438,6 +438,8 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
       await sql`UPDATE "Match" SET state = 'confirmed' WHERE id = ${MATCH_B_ID}`;
 
       const beforeInvoice = await sql`SELECT outstanding FROM "Invoice" WHERE id = ${INVOICE_B_ID}`;
+      const beforeMatch = await sql`SELECT state FROM "Match" WHERE id = ${MATCH_B_ID}`;
+      expect(beforeMatch[0].state).toBe("confirmed");
 
       const args = createActionArgs("/app/reconcile", { intent: "apply", matchId: MATCH_B_ID });
       const { action } = await import("../app.reconcile");
@@ -448,17 +450,26 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
       const afterInvoice = await sql`SELECT outstanding FROM "Invoice" WHERE id = ${INVOICE_B_ID}`;
       expect(afterInvoice[0]).toEqual(beforeInvoice[0]);
 
+      const afterMatch = await sql`SELECT state FROM "Match" WHERE id = ${MATCH_B_ID}`;
+      expect(afterMatch[0].state).toBe("confirmed");
+
       await sql`UPDATE "Match" SET state = 'suggested' WHERE id = ${MATCH_B_ID}`;
     });
 
     it("shop A cannot unmatch shop B's match (negative)", async () => {
       await sql`UPDATE "Match" SET state = 'confirmed' WHERE id = ${MATCH_B_ID}`;
 
+      const beforeMatch = await sql`SELECT state FROM "Match" WHERE id = ${MATCH_B_ID}`;
+      expect(beforeMatch[0].state).toBe("confirmed");
+
       const args = createActionArgs("/app/reconcile", { intent: "unmatch", matchId: MATCH_B_ID });
       const { action } = await import("../app.reconcile");
       const result = (await action(args as never)) as { success: boolean };
 
       expect(result.success).toBe(false);
+
+      const afterMatch = await sql`SELECT state FROM "Match" WHERE id = ${MATCH_B_ID}`;
+      expect(afterMatch[0].state).toBe("confirmed");
 
       await sql`UPDATE "Match" SET state = 'suggested' WHERE id = ${MATCH_B_ID}`;
     });
@@ -560,6 +571,7 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
 
   describe("app._index loader ?buyer param isolation (with deferred dashboardData)", () => {
     it("shop A cannot view shop B's buyer invoices via ?buyer param (negative)", async () => {
+      expect.hasAssertions();
       const url = new URL(`https://example.com/app?buyer=${BUYER_B_ID}`);
       const args = {
         request: new Request(url),
@@ -571,19 +583,18 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
 
       const { loader } = await import("../app._index");
       const result = (await loader(args as never)) as unknown as {
-        dashboardData: Promise<{ selectedBuyerInvoices: unknown }> | { selectedBuyerInvoices: unknown } | null;
-        selectedBuyerId: string | null;
+        dashboardData: Promise<{ selectedBuyerInvoices: unknown; buyerLedger: { rows: Array<{ id: string }> } | null }> | null;
       };
 
-      if (result.dashboardData && typeof (result.dashboardData as Promise<unknown>).then === "function") {
-        const resolved = await (result.dashboardData as Promise<{ selectedBuyerInvoices: unknown }>);
-        expect(resolved.selectedBuyerInvoices).toBeNull();
-      } else if (result.dashboardData) {
-        expect((result.dashboardData as { selectedBuyerInvoices: unknown }).selectedBuyerInvoices).toBeNull();
-      }
+      expect(result.dashboardData).toBeTruthy();
+      const resolved = await result.dashboardData!;
+      expect(resolved.selectedBuyerInvoices).toBeNull();
+      const str = JSON.stringify(resolved);
+      expect(str).not.toContain(BUYER_B_ID);
     });
 
     it("shop A CAN view shop A's buyer invoices via ?buyer param (positive control)", async () => {
+      expect.hasAssertions();
       const url = new URL(`https://example.com/app?buyer=${BUYER_A_ID}`);
       const args = {
         request: new Request(url),
@@ -595,23 +606,19 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
 
       const { loader } = await import("../app._index");
       const result = (await loader(args as never)) as unknown as {
-        dashboardData: Promise<{ selectedBuyerInvoices: { buyerName: string } | null }> | { selectedBuyerInvoices: { buyerName: string } | null } | null;
+        dashboardData: Promise<{ selectedBuyerInvoices: { buyerName: string } | null }> | null;
       };
 
-      if (result.dashboardData && typeof (result.dashboardData as Promise<unknown>).then === "function") {
-        const resolved = await (result.dashboardData as Promise<{ selectedBuyerInvoices: { buyerName: string } | null }>);
-        expect(resolved.selectedBuyerInvoices).not.toBeNull();
-        expect(resolved.selectedBuyerInvoices!.buyerName).toBe(SHOP_A_BUYER_NAME);
-      } else if (result.dashboardData) {
-        const dd = result.dashboardData as { selectedBuyerInvoices: { buyerName: string } | null };
-        expect(dd.selectedBuyerInvoices).not.toBeNull();
-        expect(dd.selectedBuyerInvoices!.buyerName).toBe(SHOP_A_BUYER_NAME);
-      }
+      expect(result.dashboardData).toBeTruthy();
+      const resolved = await result.dashboardData!;
+      expect(resolved.selectedBuyerInvoices).not.toBeNull();
+      expect(resolved.selectedBuyerInvoices!.buyerName).toBe(SHOP_A_BUYER_NAME);
     });
   });
 
   describe("List loaders return only shop A's data", () => {
-    it("app._index loader returns only shop A's buyer accounts (deferred dashboardData awaited)", async () => {
+    it("app._index loader returns shop A's buyers, not shop B's (dashboardData awaited)", async () => {
+      expect.hasAssertions();
       const args = createLoaderArgs("/app");
 
       const { loader } = await import("../app._index");
@@ -619,44 +626,49 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
         dashboardData: Promise<{ buyerLedger: { rows: Array<{ name: string; id: string }> } | null }> | null;
       };
 
-      if (result.dashboardData && typeof (result.dashboardData as Promise<unknown>).then === "function") {
-        const resolved = await result.dashboardData;
-        const str = JSON.stringify(resolved);
-        expect(str).not.toContain(SHOP_B_BUYER_NAME);
-        expect(str).not.toContain(BUYER_B_ID);
-        expect(str).not.toContain(SHOP_B_INVOICE_AMOUNT);
-      }
+      expect(result.dashboardData).toBeTruthy();
+      const resolved = await result.dashboardData!;
+      const str = JSON.stringify(resolved);
+
+      expect(str).toContain(BUYER_A_ID);
+      expect(str).not.toContain(SHOP_B_BUYER_NAME);
+      expect(str).not.toContain(BUYER_B_ID);
+      expect(str).not.toContain(SHOP_B_INVOICE_AMOUNT);
     });
 
-    it("app.reconcile loader returns only shop A's matches", async () => {
+    it("app.reconcile loader returns shop A's matches, not shop B's", async () => {
       const args = createLoaderArgs("/app/reconcile");
 
       const { loader } = await import("../app.reconcile");
       const result = await loader(args as never);
 
       const str = JSON.stringify(result);
+      expect(str).toContain(MATCH_A_ID);
       expect(str).not.toContain(MATCH_B_ID);
       expect(str).not.toContain(SHOP_B_PAYMENT_AMOUNT);
     });
 
-    it("app.data-requests loader returns only shop A's data requests", async () => {
+    it("app.data-requests loader returns shop A's data requests, not shop B's", async () => {
       const args = createLoaderArgs("/app/data-requests");
 
       const { loader } = await import("../app.data-requests");
       const result = await loader(args as never);
 
       const str = JSON.stringify(result);
+      expect(str).toContain(DATA_REQUEST_A_ID);
+      expect(str).toContain("req-a-id");
       expect(str).not.toContain("req-b-id");
       expect(str).not.toContain("cust-b-1");
     });
 
-    it("app.settings.reminders loader returns only shop A's reminder rules", async () => {
+    it("app.settings.reminders loader returns shop A's rules, not shop B's", async () => {
       const args = createLoaderArgs("/app/settings/reminders");
 
       const { loader } = await import("../app.settings.reminders");
       const result = await loader(args as never);
 
       const str = JSON.stringify(result);
+      expect(str).toContain(REMINDER_RULE_A_ID);
       expect(str).not.toContain(REMINDER_RULE_B_ID);
     });
   });
