@@ -131,7 +131,7 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
     consoleDebugSpy.mockRestore();
   });
 
-  function getAllConsoleOutput(): string[] {
+  function _getAllConsoleOutput(): string[] {
     const allCalls = [
       ...consoleLogSpy.mock.calls,
       ...consoleInfoSpy.mock.calls,
