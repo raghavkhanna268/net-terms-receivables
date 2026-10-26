@@ -482,6 +482,84 @@ describeWithDb("T4 account-count gating (DB)", () => {
       expect(parseInt(totalCounts[0].ungated)).toBe(25);
       expect(parseInt(totalCounts[0].gated)).toBe(5);
     });
+
+    it("bulk upsert with >25 new rows across multiple batches: exactly limit ungated, rest gated", async () => {
+      // Start with 15 existing accounts, limit is 25 (starter plan)
+      // Creating 40 new accounts should result in: 10 ungated (slots available), 30 gated
+      // This tests batch straddling: BATCH_SIZE=25, so rows span 2 batches
+      for (let i = 1; i <= 15; i++) {
+        const accountId = `acc-multi-batch-existing-${i}-${TEST_SUFFIX}`;
+        const locationId = `gid://shopify/CompanyLocation/multi-batch-existing-${i}-${TEST_SUFFIX}`;
+        const companyId = `gid://shopify/Company/multi-batch-existing-${i}-${TEST_SUFFIX}`;
+        await sql`
+          INSERT INTO "BuyerAccount" (
+            id, "shopId", kind, "companyId", "companyLocationId", name,
+            "creditLimit", "holdState", bypass, "manualHold", "defaultTermsDays", "defaultTermsSource",
+            "syncPending", "syncVersion", "createdAt", "updatedAt"
+          )
+          VALUES (
+            ${accountId}, ${SHOP_ID}, 'COMPANY',
+            ${companyId}, ${locationId}, ${'Multi-batch Existing ' + i},
+            100000.00, 'OK', false, false, 30, 'explicit',
+            false, 1, NOW(), NOW()
+          )
+        `;
+      }
+
+      const { bulkUpsertBuyerAccounts, mapCompanyLocationToBuyerAccount } = await import("../sync/company-location.server");
+
+      // Create 40 new accounts (spans 2 batches at BATCH_SIZE=25)
+      const newLocations = [];
+      for (let i = 1; i <= 40; i++) {
+        newLocations.push({
+          id: `gid://shopify/CompanyLocation/multi-batch-new-${i}-${TEST_SUFFIX}`,
+          company: { id: `gid://shopify/Company/multi-batch-new-${i}-${TEST_SUFFIX}` },
+          name: `Multi-batch New ${i}`,
+          billingAddress: null,
+          buyerExperienceConfiguration: null,
+        });
+      }
+
+      const mappedAccounts = newLocations.map((loc) => mapCompanyLocationToBuyerAccount(SHOP_ID, loc, {}));
+
+      const upsertCount = await bulkUpsertBuyerAccounts(sql, mappedAccounts);
+      expect(upsertCount).toBe(40);
+
+      // Verify: 10 ungated (slots available from 15 to 25), 30 gated
+      const results = await sql<{ companyLocationId: string; gated_at: Date | null }[]>`
+        SELECT "companyLocationId", gated_at FROM "BuyerAccount"
+        WHERE "shopId" = ${SHOP_ID}
+          AND "companyLocationId" LIKE ${'%multi-batch-new-%'}
+        ORDER BY "companyLocationId"
+      `;
+
+      expect(results.length).toBe(40);
+
+      let ungatedCount = 0;
+      let gatedCount = 0;
+      for (const r of results) {
+        if (r.gated_at === null) {
+          ungatedCount++;
+        } else {
+          gatedCount++;
+        }
+      }
+
+      // 25 (limit) - 15 (existing) = 10 slots available
+      expect(ungatedCount).toBe(10);
+      expect(gatedCount).toBe(30);
+
+      // Total: 15 existing + 10 ungated + 30 gated = 55 accounts
+      // But only 25 should be ungated (15 existing + 10 new)
+      const totalCounts = await sql<{ ungated: string; gated: string }[]>`
+        SELECT 
+          COUNT(*) FILTER (WHERE gated_at IS NULL)::text as ungated,
+          COUNT(*) FILTER (WHERE gated_at IS NOT NULL)::text as gated
+        FROM "BuyerAccount" WHERE "shopId" = ${SHOP_ID}
+      `;
+      expect(parseInt(totalCounts[0].ungated)).toBe(25); // 15 existing + 10 new ungated
+      expect(parseInt(totalCounts[0].gated)).toBe(30);   // 40 new - 10 ungated = 30 gated
+    });
   });
 
   describe("(d) CONCURRENCY: two concurrent creates at used = limit-1", () => {

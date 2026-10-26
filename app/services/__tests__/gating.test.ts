@@ -331,6 +331,25 @@ describe("Gating Service", () => {
       
       expect(reactivated).toBe(0);
     });
+
+    it("returns 0 immediately when flag is off (no sql.begin call)", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+      vi.resetModules();
+      const { reactivateGatedAccounts } = await import("../gating.server");
+      
+      // Should return 0 without calling any SQL
+      // Clear mock to verify no calls are made
+      mockSql.mockClear();
+      
+      const reactivated = await reactivateGatedAccounts(
+        mockSql as unknown as Sql,
+        TEST_SHOP_ID
+      );
+      
+      expect(reactivated).toBe(0);
+      // sql() should not have been called at all when flag is off
+      expect(mockSql).not.toHaveBeenCalled();
+    });
   });
 
   describe("enforceCompanyLimit", () => {
