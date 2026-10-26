@@ -518,10 +518,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
           isTest: planData.isTest,
         }
       : null,
-    usage: usage ?? {
-      companies: { current: 0, limit: 0 },
-      importsThisMonth: { current: 0, limit: -1 },
-    },
+    usage,
     upgradeUrl: (() => {
       const handle = getAppHandle();
       if (handle === null) {
@@ -876,8 +873,8 @@ export default function Index() {
   const planName = plan?.name ?? PLAN_DISPLAY_NAMES.none;
   const isTest = plan?.isTest ?? false;
 
-  const companiesUsed = usage.companies.current;
-  const companiesLimit = usage.companies.limit;
+  const companiesUsed = usage?.companies.current ?? 0;
+  const companiesLimit = usage?.companies.limit ?? -1;
 
   const hasInvoices =
     agingTotals && Object.keys(agingTotals.totalByCurrency).length > 0;

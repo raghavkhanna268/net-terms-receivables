@@ -215,16 +215,16 @@ describe("Plan Page Loader", () => {
     (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
     (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-      plan: { key: "none", limits: { companies: 0, importsPerMonth: -1 } },
-      subscriptionId: null,
-      subscriptionName: null,
+      plan: { key: "starter", limits: { companies: 25, importsPerMonth: -1 } },
+      subscriptionId: "sub-123",
+      subscriptionName: "Starter",
       isTest: false,
       fromCache: false,
     });
 
     (getUsageStats as ReturnType<typeof vi.fn>).mockResolvedValue({
-      companies: { current: 0, limit: 0 },
-      importsThisMonth: { current: 0, limit: -1 },
+      companies: { current: 15, limit: 25 },
+      importsThisMonth: { current: 3, limit: -1 },
     });
 
     (getGatedAccountCount as ReturnType<typeof vi.fn>).mockResolvedValue(2);
@@ -241,14 +241,55 @@ describe("Plan Page Loader", () => {
 
     expect(result.gatingEnforced).toBe(false);
     // getUsageStats is always called - usage is shown regardless of flag
+    expect(getUsageStats).toHaveBeenCalledOnce();
     expect(result.usage).toEqual({
-      companies: { current: 0, limit: 0 },
-      importsThisMonth: { current: 0, limit: -1 },
+      companies: { current: 15, limit: 25 },
+      importsThisMonth: { current: 3, limit: -1 },
     });
     // When flag is off, gatedCount is 0 (no query made)
     expect(result.gatedCount).toBe(0);
     // getGatedAccountCount should not be called when flag is off
     expect(getGatedAccountCount).not.toHaveBeenCalled();
+  });
+
+  it("returns null usage and no banner when getUsageStats fails", async () => {
+    const { resolvePlan } = await import("~/services/plan.server");
+    const { getUsageStats, getGatedAccountCount, isGatingEnforced } = await import(
+      "~/services/gating.server"
+    );
+    const { getRequestSql } = await import("~/lib/request-context.server");
+
+    mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+    (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+    (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+      plan: { key: "starter", limits: { companies: 25, importsPerMonth: -1 } },
+      subscriptionId: "sub-123",
+      subscriptionName: "Starter",
+      isTest: false,
+      fromCache: false,
+    });
+
+    (getUsageStats as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("Database connection failed")
+    );
+
+    (getGatedAccountCount as ReturnType<typeof vi.fn>).mockResolvedValue(0);
+    (isGatingEnforced as ReturnType<typeof vi.fn>).mockReturnValue(true);
+
+    const { loader } = await import("../app.plan");
+    const result = await loader({
+      request: mockRequest,
+      context: mockContext as never,
+      params: {},
+      url: mockUrl,
+      pattern: mockPattern,
+    });
+
+    expect(getUsageStats).toHaveBeenCalledOnce();
+    expect(result.usage).toBeNull();
+    expect(result.newAccountsPausedBanner.show).toBe(false);
+    expect(result.newAccountsPausedBanner.heading).toBe("");
   });
 
   it("does not include subscriptionId or fromCache in returned plan", async () => {

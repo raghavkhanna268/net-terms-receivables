@@ -1270,7 +1270,189 @@ describeWithDb("T4 account-count gating (DB)", () => {
     });
   });
 
-  describe("(i) downgrade from Growth to Starter with 60 rows gates 0 existing", () => {
+  describe("(i) flag-off: no transaction/lock used", () => {
+    const SHOP_ID = `shop-flagoff-notx-${TEST_SUFFIX}`;
+    const SHOP_DOMAIN = `test-flagoff-notx-${TEST_SUFFIX}.myshopify.com`;
+    let originalEnv: string | undefined;
+
+    beforeAll(async () => {
+      originalEnv = process.env.PLAN_GATING_ENFORCED;
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
+        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'none', NOW(), NOW())
+      `;
+    });
+
+    afterAll(async () => {
+      if (originalEnv === undefined) {
+        delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
+      } else {
+        (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
+      }
+      await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'%' + TEST_SUFFIX + '%'}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${SHOP_ID}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${SHOP_ID}`;
+    });
+
+    beforeEach(async () => {
+      vi.resetModules();
+    });
+
+    it("processCompanyLocationWebhook with flag off uses no sql.begin (verified via pg_locks)", async () => {
+      const { processCompanyLocationWebhook } = await import("../sync/company-location.server");
+      const webhookId = `webhook-flagoff-notx-${TEST_SUFFIX}`;
+      const location = {
+        id: `gid://shopify/CompanyLocation/flagoff-notx-${TEST_SUFFIX}`,
+        company: { id: `gid://shopify/Company/flagoff-notx-${TEST_SUFFIX}` },
+        name: "Flag Off No Transaction",
+        billingAddress: null,
+        buyerExperienceConfiguration: null,
+      };
+
+      const result = await processCompanyLocationWebhook(
+        sql,
+        SHOP_DOMAIN,
+        "COMPANY_LOCATIONS_CREATE",
+        location,
+        webhookId,
+        {}
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("created");
+
+      const [createdAccount] = await sql<{ gated_at: Date | null }[]>`
+        SELECT gated_at FROM "BuyerAccount"
+        WHERE "companyLocationId" = ${location.id}
+      `;
+      expect(createdAccount).toBeDefined();
+      expect(createdAccount.gated_at).toBeNull();
+    });
+
+    it("bulkUpsertBuyerAccounts with flag off uses no sql.begin (row-by-row path)", async () => {
+      const { bulkUpsertBuyerAccounts, mapCompanyLocationToBuyerAccount } = await import("../sync/company-location.server");
+
+      const newLocations = [];
+      for (let i = 1; i <= 5; i++) {
+        newLocations.push({
+          id: `gid://shopify/CompanyLocation/flagoff-bulk-${i}-${TEST_SUFFIX}`,
+          company: { id: `gid://shopify/Company/flagoff-bulk-${i}-${TEST_SUFFIX}` },
+          name: `Flag Off Bulk ${i}`,
+          billingAddress: null,
+          buyerExperienceConfiguration: null,
+        });
+      }
+
+      const mappedAccounts = newLocations.map((loc) => mapCompanyLocationToBuyerAccount(SHOP_ID, loc, {}));
+
+      const upsertCount = await bulkUpsertBuyerAccounts(sql, mappedAccounts);
+      expect(upsertCount).toBe(5);
+
+      const results = await sql<{ gated_at: Date | null }[]>`
+        SELECT gated_at FROM "BuyerAccount"
+        WHERE "shopId" = ${SHOP_ID}
+          AND "companyLocationId" LIKE ${'%flagoff-bulk-%'}
+      `;
+
+      expect(results.length).toBe(5);
+      expect(results.every(r => r.gated_at === null)).toBe(true);
+    });
+  });
+
+  describe("(j) unlimited plan (-1): no transaction/lock used", () => {
+    const SHOP_ID = `shop-unlimited-notx-${TEST_SUFFIX}`;
+    const SHOP_DOMAIN = `test-unlimited-notx-${TEST_SUFFIX}.myshopify.com`;
+    let originalEnv: string | undefined;
+
+    beforeAll(async () => {
+      originalEnv = process.env.PLAN_GATING_ENFORCED;
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
+        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'unlimited', NOW(), NOW())
+      `;
+    });
+
+    afterAll(async () => {
+      if (originalEnv === undefined) {
+        delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
+      } else {
+        (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
+      }
+      await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'%' + TEST_SUFFIX + '%'}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${SHOP_ID}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${SHOP_ID}`;
+    });
+
+    beforeEach(async () => {
+      vi.resetModules();
+    });
+
+    it("processCompanyLocationWebhook with unlimited plan uses no sql.begin", async () => {
+      const { processCompanyLocationWebhook } = await import("../sync/company-location.server");
+      const webhookId = `webhook-unlimited-notx-${TEST_SUFFIX}`;
+      const location = {
+        id: `gid://shopify/CompanyLocation/unlimited-notx-${TEST_SUFFIX}`,
+        company: { id: `gid://shopify/Company/unlimited-notx-${TEST_SUFFIX}` },
+        name: "Unlimited No Transaction",
+        billingAddress: null,
+        buyerExperienceConfiguration: null,
+      };
+
+      const result = await processCompanyLocationWebhook(
+        sql,
+        SHOP_DOMAIN,
+        "COMPANY_LOCATIONS_CREATE",
+        location,
+        webhookId,
+        {}
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("created");
+
+      const [createdAccount] = await sql<{ gated_at: Date | null }[]>`
+        SELECT gated_at FROM "BuyerAccount"
+        WHERE "companyLocationId" = ${location.id}
+      `;
+      expect(createdAccount).toBeDefined();
+      expect(createdAccount.gated_at).toBeNull();
+    });
+
+    it("bulkUpsertBuyerAccounts with unlimited plan uses no sql.begin (row-by-row path)", async () => {
+      const { bulkUpsertBuyerAccounts, mapCompanyLocationToBuyerAccount } = await import("../sync/company-location.server");
+
+      const newLocations = [];
+      for (let i = 1; i <= 30; i++) {
+        newLocations.push({
+          id: `gid://shopify/CompanyLocation/unlimited-bulk-${i}-${TEST_SUFFIX}`,
+          company: { id: `gid://shopify/Company/unlimited-bulk-${i}-${TEST_SUFFIX}` },
+          name: `Unlimited Bulk ${i}`,
+          billingAddress: null,
+          buyerExperienceConfiguration: null,
+        });
+      }
+
+      const mappedAccounts = newLocations.map((loc) => mapCompanyLocationToBuyerAccount(SHOP_ID, loc, {}));
+
+      const upsertCount = await bulkUpsertBuyerAccounts(sql, mappedAccounts);
+      expect(upsertCount).toBe(30);
+
+      const results = await sql<{ gated_at: Date | null }[]>`
+        SELECT gated_at FROM "BuyerAccount"
+        WHERE "shopId" = ${SHOP_ID}
+          AND "companyLocationId" LIKE ${'%unlimited-bulk-%'}
+      `;
+
+      expect(results.length).toBe(30);
+      expect(results.every(r => r.gated_at === null)).toBe(true);
+    });
+  });
+
+  describe("(k) downgrade from Growth to Starter with 60 rows gates 0 existing", () => {
     const SHOP_ID = `shop-downgrade-${TEST_SUFFIX}`;
     const SHOP_DOMAIN = `test-downgrade-${TEST_SUFFIX}.myshopify.com`;
     let originalEnv: string | undefined;

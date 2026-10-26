@@ -337,6 +337,9 @@ describe("Gating Service", () => {
       vi.resetModules();
       const { reactivateGatedAccounts } = await import("../gating.server");
       
+      // Clear any prior calls before this test
+      (mockSql.begin as ReturnType<typeof vi.fn>).mockClear();
+      
       // Should return 0 without calling any SQL
       // The function returns early when flag is off
       const reactivated = await reactivateGatedAccounts(
@@ -346,6 +349,7 @@ describe("Gating Service", () => {
       
       // Returns 0 without any database operations
       expect(reactivated).toBe(0);
+      expect(mockSql.begin).not.toHaveBeenCalled();
     });
   });
 
