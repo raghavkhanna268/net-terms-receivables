@@ -88,6 +88,7 @@ const DB_TEST_PATTERNS = [
   // Service DB tests (*-db.test.ts pattern plus gating.test.ts)
   "app/services/__tests__/*-db.test.ts",
   "app/services/__tests__/gating.test.ts",
+  "app/services/__tests__/billing-plan-state-db.test.ts",
   "app/services/__tests__/reminders-catchup-db.test.ts",
   "app/services/__tests__/reminders-uninstalled-db.test.ts",
   "app/services/__tests__/reminder-optout-db.test.ts",
@@ -124,6 +125,7 @@ const DB_TEST_PATTERNS = [
   "app/routes/__tests__/app._index-overlimit-db.test.ts",
   "app/routes/__tests__/app.accounts.$id-db.test.ts",
   "app/routes/__tests__/app.accounts.$id.reminder-optout-db.test.ts",
+  "app/routes/__tests__/webhooks.compliance.customers.test.ts",
 
   // Lib DB tests
   "app/lib/__tests__/after-auth-db.test.ts",
@@ -149,6 +151,9 @@ const DB_TEST_PATTERNS = [
 
   // Confirm-reimport pin DB tests
   "tests/integration/confirm-reimport-pin-db.test.ts",
+
+  // Ingestion paths DB tests
+  "tests/integration/ingestion-paths-db.test.ts",
 ];
 
 export default defineConfig({
