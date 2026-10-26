@@ -473,9 +473,8 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
   // ==========================================================================
   describe("C1: concurrent processBulkOperation - exactly one completion", () => {
     it("two concurrent calls result in exactly one completion and one next-stage enqueue", async () => {
-      const { processBulkOperation, getBulkOperationStatus } = await import("~/services/sync/bulk-jsonl-processor.server");
+      const { processBulkOperation } = await import("~/services/sync/bulk-jsonl-processor.server");
       const { adminGraphQL } = await import("../admin-client.server");
-      const { markWebhookProcessed } = await import("~/services/sync/company.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/concurrent-c1-${TEST_SUFFIX}`;
       const webhookId1 = `finish:${bulkOpId}:1`;
@@ -860,7 +859,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
   // ==========================================================================
   describe("C8: lease released on early returns", () => {
     it("MAX_FAILURES return releases processing lease", async () => {
-      const { processBulkOperation, acquireProcessingLease, MAX_FAILURE_COUNT } = await import("~/services/sync/bulk-jsonl-processor.server");
+      const { processBulkOperation, MAX_FAILURE_COUNT } = await import("~/services/sync/bulk-jsonl-processor.server");
       const { adminGraphQL } = await import("../admin-client.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/maxfail-c8-${TEST_SUFFIX}`;
