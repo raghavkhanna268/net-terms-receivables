@@ -74,6 +74,15 @@ import {
   getSeedDbSummary,
   createSeedDbWriteTracker,
 } from "./lib/seed-summary";
+import {
+  HELD_FIXTURE_ID_PREFIX,
+  HELD_FIXTURE_MAX,
+  HELD_FIXTURE_METAFIELDS_QUERY,
+  HELD_FIXTURE_METAFIELDS_SET_MUTATION,
+  reseedHeldFixtureCurrency,
+  type HeldFixtureRow,
+  type OwnerMetafield,
+} from "./lib/held-fixture-currency";
 
 // -- Types --
 
@@ -3917,15 +3926,93 @@ export function isReviewerDemoEnabled(argv: string[], env: Record<string, string
   return false;
 }
 
-function parseArgs(): { dryRun: boolean; reset: boolean; resetApply: boolean; reportDuplicatesMode: boolean; reviewerDemo: boolean } {
+function parseArgs(): { dryRun: boolean; reset: boolean; resetApply: boolean; reportDuplicatesMode: boolean; reseedHeldCurrencyMode: boolean; reviewerDemo: boolean } {
   const args = process.argv.slice(2);
   return {
     dryRun: args.includes("--dry-run"),
     reset: args.includes("--reset"),
     resetApply: args.includes("--apply"),
     reportDuplicatesMode: args.includes("--report-duplicates"),
+    reseedHeldCurrencyMode: args.includes("--reseed-held-currency"),
     reviewerDemo: isReviewerDemoEnabled(args, process.env),
   };
+}
+
+/**
+ * --reseed-held-currency: update the existing credit_status metafield on the held
+ * seed fixtures to the shop currency (INR) in place. DB access is READ ONLY; the
+ * only writes are metafieldsSet on those fixtures' owners. Counts/enums only.
+ */
+export async function runReseedHeldCurrency(state: SeedState): Promise<boolean> {
+  console.log("\n🔒 Re-seeding held fixtures' credit_status currency...");
+  if (!state.databaseUrl) {
+    console.error("  ❌ held_fixture_currency: refused (reason=no_database)");
+    return false;
+  }
+  const sql = postgres(state.databaseUrl, { max: 1 });
+  try {
+    const result = await reseedHeldFixtureCurrency({
+      shopCurrency: state.currencyCode,
+      dryRun: state.dryRun,
+      loadHeldFixtures: async () =>
+        sql.begin("READ ONLY", async (tx) => {
+          const rows = await tx<HeldFixtureRow[]>`
+            SELECT ba.id, ba."companyLocationId", ba."customerId"
+            FROM "BuyerAccount" ba
+            JOIN "Shop" s ON s.id = ba."shopId"
+            WHERE s.domain = ${state.shop}
+              AND ba.id LIKE ${HELD_FIXTURE_ID_PREFIX + "%"}
+              AND (ba."holdState" = 'HELD' OR ba."manualHold" = true)
+            ORDER BY ba.id
+            LIMIT ${HELD_FIXTURE_MAX + 1}
+          `;
+          return [...rows];
+        }),
+      readMetafields: async (ownerIds) => {
+        const res = await graphql<{ nodes: Array<{ id?: string; metafield?: OwnerMetafield | null } | null> }>(
+          state,
+          HELD_FIXTURE_METAFIELDS_QUERY,
+          { ids: ownerIds }
+        );
+        if (res.errors && res.errors.length > 0) {
+          throw new Error("held_fixture_read_failed");
+        }
+        const map = new Map<string, OwnerMetafield | null>();
+        for (const node of res.data?.nodes ?? []) {
+          if (node && typeof node.id === "string") map.set(node.id, node.metafield ?? null);
+        }
+        return map;
+      },
+      writeMetafield: async (ownerId, value, compareDigest) => {
+        const res = await graphql<{ metafieldsSet: { userErrors: Array<{ field: string[] | null; code: string | null }> } }>(
+          state,
+          HELD_FIXTURE_METAFIELDS_SET_MUTATION,
+          {
+            metafields: [
+              { ownerId, namespace: "$app", key: "credit_status", type: "json", value, compareDigest },
+            ],
+          },
+          { isMutation: true, mutationName: "metafieldsSet" }
+        );
+        if (res.errors && res.errors.length > 0) return false;
+        const userErrors = res.data?.metafieldsSet?.userErrors ?? [];
+        if (userErrors.length > 0) {
+          const codes = userErrors.map((e) => (e.code && /^[A-Z_]{1,40}$/.test(e.code) ? e.code : "OTHER"));
+          console.error(`  ❌ metafieldsSet userErrors: count=${userErrors.length} codes=[${codes.join(",")}]`);
+          return false;
+        }
+        return true;
+      },
+    });
+    if (!result.ok) {
+      console.error(`  ❌ held_fixture_currency: failed (reason=${result.reason})`);
+      return false;
+    }
+    console.log("  ✅ held_fixture_currency: ok");
+    return true;
+  } finally {
+    await sql.end();
+  }
 }
 
 function validateEnv(): { shop: string; token: string; databaseUrl: string | null } | null {
@@ -3972,7 +4059,7 @@ export async function main(): Promise<void> {
   console.log("  (Using orderCreate with processedAt - no draft orders)");
   console.log("═══════════════════════════════════════════════════════════════");
 
-  const { dryRun, reset, resetApply, reportDuplicatesMode, reviewerDemo } = parseArgs();
+  const { dryRun, reset, resetApply, reportDuplicatesMode, reseedHeldCurrencyMode, reviewerDemo } = parseArgs();
   const env = validateEnv();
 
   if (!env) {
@@ -4008,6 +4095,7 @@ export async function main(): Promise<void> {
 
   console.log(`\nShop: [configured]`);
   const modeStr = reportDuplicatesMode ? "REPORT DUPLICATES (read-only)" 
+    : reseedHeldCurrencyMode ? (dryRun ? "RESEED HELD CURRENCY (dry-run)" : "RESEED HELD CURRENCY")
     : dryRun ? "DRY RUN (read-only lookups, no mutations)" 
     : reset ? (resetApply ? "RESET + APPLY (will delete)" : "RESET (dry-run, use --apply to delete)") 
     : "SEED";
@@ -4040,6 +4128,12 @@ export async function main(): Promise<void> {
     await reportDuplicates(state);
     console.log("\n✅ Duplicate report complete!");
     process.exit(0);
+  }
+
+  // Held fixtures currency re-seed (in-place metafield update only, then exit)
+  if (reseedHeldCurrencyMode) {
+    const ok = await runReseedHeldCurrency(state);
+    process.exit(ok ? 0 : 1);
   }
 
   // Reset if requested
