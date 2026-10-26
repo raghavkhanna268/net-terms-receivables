@@ -466,6 +466,364 @@ describe("app.onboarding", () => {
       expect(result.error).toBeNull();
       expect(result.state?.dismissedAt).toBe(dismissedDate.toISOString());
     });
+
+    describe("reminders step via loader (step 3)", () => {
+      const originalEnv = { ...process.env };
+
+      beforeEach(() => {
+        process.env.RESEND_API_KEY = "re_test_key_for_loader_test";
+        process.env.RESEND_FROM = "test@example.com";
+      });
+
+      afterEach(() => {
+        process.env.RESEND_API_KEY = originalEnv.RESEND_API_KEY;
+        process.env.RESEND_FROM = originalEnv.RESEND_FROM;
+      });
+
+      it("returns step 3 as 'pending' when email sending is configured but reminders disabled (fails on revert)", async () => {
+        mockSql.mockImplementation((strings: TemplateStringsArray) => {
+          const query = strings.join("?");
+          if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+            return Promise.resolve([{
+              id: TEST_SHOP_ID,
+              defaultTermsDays: 30,
+              onboardingDismissedAt: null,
+            }]);
+          }
+          if (query.includes("SELECT currency") && query.includes("Shop")) {
+            return Promise.resolve([{ currency: "INR" }]);
+          }
+          if (query.includes("COUNT(*)")) {
+            return Promise.resolve([{ count: "1" }]);
+          }
+          if (query.includes("s18_shop_reminder_settings")) {
+            return Promise.resolve([{ enabled: false }]);
+          }
+          return Promise.resolve([]);
+        });
+
+        const mockGraphql = vi.fn().mockImplementation(async (query: string) => {
+          if (query.includes("ShopCurrencyAndId")) {
+            return {
+              json: async () => ({
+                data: {
+                  shop: {
+                    id: "gid://shopify/Shop/12345",
+                    currencyCode: "INR",
+                    metafield: { value: JSON.stringify({ schemaVersion: 1, currencyCode: "INR" }) },
+                  },
+                },
+              }),
+            };
+          }
+          if (query.includes("validations")) {
+            return {
+              json: async () => ({
+                data: {
+                  validations: {
+                    edges: [{
+                      node: {
+                        id: "gid://shopify/Validation/123",
+                        shopifyFunction: { handle: "credit-check-validation" },
+                        title: "Test",
+                        enabled: true,
+                      },
+                    }],
+                  },
+                },
+              }),
+            };
+          }
+          if (query.includes("paymentCustomizations")) {
+            return {
+              json: async () => ({
+                data: {
+                  paymentCustomizations: {
+                    edges: [{
+                      node: {
+                        id: "gid://shopify/PaymentCustomization/456",
+                        shopifyFunction: { handle: "hide-terms-payment" },
+                        title: "Test",
+                        enabled: true,
+                      },
+                    }],
+                  },
+                },
+              }),
+            };
+          }
+          if (query.includes("metafieldDefinitions")) {
+            return {
+              json: async () => ({
+                data: {
+                  metafieldDefinitions: {
+                    edges: [{
+                      node: {
+                        id: "gid://shopify/MetafieldDefinition/789",
+                        namespace: "$app",
+                        key: "credit_status",
+                        ownerType: "COMPANY_LOCATION",
+                      },
+                    }],
+                  },
+                },
+              }),
+            };
+          }
+          return { json: async () => ({ data: {} }) };
+        });
+
+        const { loader } = await import("../app.onboarding");
+
+        const result = await loader({
+          request: new Request("https://example.com/app/onboarding"),
+          context: {
+            shopify: {
+              authenticate: {
+                admin: vi.fn().mockResolvedValue({
+                  session: { shop: TEST_SHOP },
+                  admin: { graphql: mockGraphql },
+                }),
+              },
+            },
+          },
+          params: {},
+        } as unknown as LoaderFunctionArgs);
+
+        const remindersStep = result.state?.steps.find((s) => s.id === "reminders");
+        expect(remindersStep?.status).toBe("pending");
+        expect(remindersStep?.helpText).toContain("Email sending is ready");
+      });
+
+      it("returns step 3 as 'complete' when both email sending and reminders are enabled (fails on revert)", async () => {
+        mockSql.mockImplementation((strings: TemplateStringsArray) => {
+          const query = strings.join("?");
+          if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+            return Promise.resolve([{
+              id: TEST_SHOP_ID,
+              defaultTermsDays: 30,
+              onboardingDismissedAt: null,
+            }]);
+          }
+          if (query.includes("SELECT currency") && query.includes("Shop")) {
+            return Promise.resolve([{ currency: "INR" }]);
+          }
+          if (query.includes("COUNT(*)")) {
+            return Promise.resolve([{ count: "1" }]);
+          }
+          if (query.includes("s18_shop_reminder_settings")) {
+            return Promise.resolve([{ enabled: true }]);
+          }
+          return Promise.resolve([]);
+        });
+
+        const mockGraphql = vi.fn().mockImplementation(async (query: string) => {
+          if (query.includes("ShopCurrencyAndId")) {
+            return {
+              json: async () => ({
+                data: {
+                  shop: {
+                    id: "gid://shopify/Shop/12345",
+                    currencyCode: "INR",
+                    metafield: { value: JSON.stringify({ schemaVersion: 1, currencyCode: "INR" }) },
+                  },
+                },
+              }),
+            };
+          }
+          if (query.includes("validations")) {
+            return {
+              json: async () => ({
+                data: {
+                  validations: {
+                    edges: [{
+                      node: {
+                        id: "gid://shopify/Validation/123",
+                        shopifyFunction: { handle: "credit-check-validation" },
+                        title: "Test",
+                        enabled: true,
+                      },
+                    }],
+                  },
+                },
+              }),
+            };
+          }
+          if (query.includes("paymentCustomizations")) {
+            return {
+              json: async () => ({
+                data: {
+                  paymentCustomizations: {
+                    edges: [{
+                      node: {
+                        id: "gid://shopify/PaymentCustomization/456",
+                        shopifyFunction: { handle: "hide-terms-payment" },
+                        title: "Test",
+                        enabled: true,
+                      },
+                    }],
+                  },
+                },
+              }),
+            };
+          }
+          if (query.includes("metafieldDefinitions")) {
+            return {
+              json: async () => ({
+                data: {
+                  metafieldDefinitions: {
+                    edges: [{
+                      node: {
+                        id: "gid://shopify/MetafieldDefinition/789",
+                        namespace: "$app",
+                        key: "credit_status",
+                        ownerType: "COMPANY_LOCATION",
+                      },
+                    }],
+                  },
+                },
+              }),
+            };
+          }
+          return { json: async () => ({ data: {} }) };
+        });
+
+        const { loader } = await import("../app.onboarding");
+
+        const result = await loader({
+          request: new Request("https://example.com/app/onboarding"),
+          context: {
+            shopify: {
+              authenticate: {
+                admin: vi.fn().mockResolvedValue({
+                  session: { shop: TEST_SHOP },
+                  admin: { graphql: mockGraphql },
+                }),
+              },
+            },
+          },
+          params: {},
+        } as unknown as LoaderFunctionArgs);
+
+        const remindersStep = result.state?.steps.find((s) => s.id === "reminders");
+        expect(remindersStep?.status).toBe("complete");
+      });
+
+      it("returns step 3 as 'pending' when no reminder settings row exists (fails on revert)", async () => {
+        mockSql.mockImplementation((strings: TemplateStringsArray) => {
+          const query = strings.join("?");
+          if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+            return Promise.resolve([{
+              id: TEST_SHOP_ID,
+              defaultTermsDays: 30,
+              onboardingDismissedAt: null,
+            }]);
+          }
+          if (query.includes("SELECT currency") && query.includes("Shop")) {
+            return Promise.resolve([{ currency: "INR" }]);
+          }
+          if (query.includes("COUNT(*)")) {
+            return Promise.resolve([{ count: "1" }]);
+          }
+          if (query.includes("s18_shop_reminder_settings")) {
+            return Promise.resolve([]);
+          }
+          return Promise.resolve([]);
+        });
+
+        const mockGraphql = vi.fn().mockImplementation(async (query: string) => {
+          if (query.includes("ShopCurrencyAndId")) {
+            return {
+              json: async () => ({
+                data: {
+                  shop: {
+                    id: "gid://shopify/Shop/12345",
+                    currencyCode: "INR",
+                    metafield: { value: JSON.stringify({ schemaVersion: 1, currencyCode: "INR" }) },
+                  },
+                },
+              }),
+            };
+          }
+          if (query.includes("validations")) {
+            return {
+              json: async () => ({
+                data: {
+                  validations: {
+                    edges: [{
+                      node: {
+                        id: "gid://shopify/Validation/123",
+                        shopifyFunction: { handle: "credit-check-validation" },
+                        title: "Test",
+                        enabled: true,
+                      },
+                    }],
+                  },
+                },
+              }),
+            };
+          }
+          if (query.includes("paymentCustomizations")) {
+            return {
+              json: async () => ({
+                data: {
+                  paymentCustomizations: {
+                    edges: [{
+                      node: {
+                        id: "gid://shopify/PaymentCustomization/456",
+                        shopifyFunction: { handle: "hide-terms-payment" },
+                        title: "Test",
+                        enabled: true,
+                      },
+                    }],
+                  },
+                },
+              }),
+            };
+          }
+          if (query.includes("metafieldDefinitions")) {
+            return {
+              json: async () => ({
+                data: {
+                  metafieldDefinitions: {
+                    edges: [{
+                      node: {
+                        id: "gid://shopify/MetafieldDefinition/789",
+                        namespace: "$app",
+                        key: "credit_status",
+                        ownerType: "COMPANY_LOCATION",
+                      },
+                    }],
+                  },
+                },
+              }),
+            };
+          }
+          return { json: async () => ({ data: {} }) };
+        });
+
+        const { loader } = await import("../app.onboarding");
+
+        const result = await loader({
+          request: new Request("https://example.com/app/onboarding"),
+          context: {
+            shopify: {
+              authenticate: {
+                admin: vi.fn().mockResolvedValue({
+                  session: { shop: TEST_SHOP },
+                  admin: { graphql: mockGraphql },
+                }),
+              },
+            },
+          },
+          params: {},
+        } as unknown as LoaderFunctionArgs);
+
+        const remindersStep = result.state?.steps.find((s) => s.id === "reminders");
+        expect(remindersStep?.status).toBe("pending");
+        expect(remindersStep?.helpText).toContain("Email sending is ready");
+      });
+    });
   });
 
   describe("S23-02: registration status", () => {
@@ -3316,7 +3674,10 @@ describe("Button loading state isolation", () => {
     expect(html).not.toContain("Dismissing...");
   });
 
-  it("Reopen submit shows Reopening... and does not affect other buttons (fails on revert)", async () => {
+  it("Reopen submit shows Reopening... and does not affect Retry button (fails on revert)", async () => {
+    // When dismissed, only Reopen (not Dismiss) is rendered. To test isolation,
+    // we need a registration status with missing items so Retry button appears.
+    // The Dismiss button never coexists with Reopen by design (mutually exclusive).
     const mockFormData = new FormData();
     mockFormData.set("_action", "reopen");
 
@@ -3334,7 +3695,7 @@ describe("Button loading state isolation", () => {
             dismissedAt: "2026-10-26T10:00:00Z",
           },
           registrationStatus: {
-            validation: { name: "Checkout credit check", status: "ok" },
+            validation: { name: "Checkout credit check", status: "missing" },
             paymentCustomization: { name: "Hide net terms at checkout", status: "ok" },
             metafieldDefinitions: { name: "Store data fields", status: "ok" },
           },
@@ -3359,8 +3720,10 @@ describe("Button loading state isolation", () => {
 
     const html = renderToString(createElement(OnboardingPage));
 
+    // Reopen button shows loading state
     expect(html).toContain("Reopening...");
-    expect(html).not.toContain("Dismissing...");
+    // Retry button exists (because validation is missing) but is NOT loading
+    expect(html).toContain("Retry");
     expect(html).not.toContain("Retrying...");
   });
 });
