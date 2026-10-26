@@ -1,0 +1,435 @@
+/**
+ * Bank-statement upload robustness tests (parser-level, no DB).
+ *
+ * Tests pure parsing and validation that don't require database:
+ * - Case 1: Oversized payload validation (MAX_IMPORT_ROWS)
+ * - Case 2: Invalid validation inputs (empty credits, bad bank/rail/date/amount)
+ * - Case 3: UTF-8 BOM, CRLF line endings, trailing blank lines, quoted fields with commas
+ * - Case 4: Date formats, Indian amounts, Dr/Cr columns (HDFC), separate columns (ICICI)
+ * - Case 5: Malformed row mid-file behavior (skips with error count)
+ * - File type detection: CSV, XLS magic bytes, .pdf, .txt, JSON content
+ *
+ * All fixtures are SYNTHETIC - no real bank data.
+ */
+
+import { describe, it, expect } from "vitest";
+import { parseBankStatement } from "../index.js";
+import { validateImportRequest, MAX_IMPORT_ROWS } from "~/routes/app.imports";
+
+function makeValidNeftUtr(suffix: string): string {
+  const paddedSuffix = suffix.replace(/[^0-9]/g, "").padStart(11, "0").slice(0, 11);
+  return `HDFCN${paddedSuffix}`;
+}
+
+describe("Case 1: Oversized payload validation", () => {
+  it("rejects payload above MAX_IMPORT_ROWS", () => {
+    const credits = Array.from({ length: MAX_IMPORT_ROWS + 1 }, (_, i) => ({
+      date: "2026-10-15",
+      amountPaise: 100000,
+      rail: "NEFT",
+      utr: makeValidNeftUtr(String(i).padStart(11, "0")),
+      payerName: `TEST-PAYER-${i}`,
+      narration: `NEFT CR-TEST-PAYER-${i}-PAYMENT`,
+    }));
+
+    const payload = {
+      bank: "HDFC",
+      fileName: "oversized-test.csv",
+      credits,
+    };
+
+    const { valid, errors } = validateImportRequest(payload);
+
+    expect(valid).toBeNull();
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors.some((e) => e.path === "credits" && e.message.includes("1,001"))).toBe(true);
+    expect(errors.some((e) => e.message.includes("per-import limit"))).toBe(true);
+  });
+
+  it("accepts exactly 1000 rows (boundary)", () => {
+    const credits = Array.from({ length: MAX_IMPORT_ROWS }, (_, i) => ({
+      date: "2026-10-15",
+      amountPaise: 100000,
+      rail: "NEFT",
+      utr: makeValidNeftUtr(`9${String(i).padStart(10, "0")}`),
+      payerName: `TEST-BOUNDARY-${i}`,
+      narration: `NEFT CR-TEST-BOUNDARY-${i}`,
+    }));
+
+    const payload = {
+      bank: "HDFC",
+      fileName: "boundary-test.csv",
+      credits,
+    };
+
+    const { valid, errors } = validateImportRequest(payload);
+    expect(valid).not.toBeNull();
+    expect(errors).toHaveLength(0);
+  });
+});
+
+describe("Case 2: Invalid inputs validation", () => {
+  it("empty credits array gives clear validation error", () => {
+    const payload = {
+      bank: "HDFC",
+      fileName: "empty.csv",
+      credits: [],
+    };
+
+    const { valid, errors } = validateImportRequest(payload);
+    expect(valid).toBeNull();
+    expect(errors.some((e) => e.message.includes("At least one credit row"))).toBe(true);
+  });
+
+  it("invalid bank type gives clear validation error", () => {
+    const payload = {
+      bank: "KOTAK",
+      fileName: "kotak.csv",
+      credits: [
+        {
+          date: "2026-10-15",
+          amountPaise: 100000,
+          rail: "NEFT",
+          narration: "NEFT CR-TEST",
+        },
+      ],
+    };
+
+    const { valid, errors } = validateImportRequest(payload);
+    expect(valid).toBeNull();
+    expect(errors.some((e) => e.path === "bank")).toBe(true);
+  });
+
+  it("invalid rail type gives clear validation error", () => {
+    const payload = {
+      bank: "HDFC",
+      fileName: "badrail.csv",
+      credits: [
+        {
+          date: "2026-10-15",
+          amountPaise: 100000,
+          rail: "SWIFT",
+          narration: "SWIFT CR-TEST",
+        },
+      ],
+    };
+
+    const { valid, errors } = validateImportRequest(payload);
+    expect(valid).toBeNull();
+    expect(errors.some((e) => e.message.includes("Rail must be one of"))).toBe(true);
+  });
+
+  it("invalid date format (DD-MM-YYYY instead of YYYY-MM-DD) gives clear validation error", () => {
+    const payload = {
+      bank: "HDFC",
+      fileName: "baddate.csv",
+      credits: [
+        {
+          date: "31-12-2026",
+          amountPaise: 100000,
+          rail: "NEFT",
+          narration: "NEFT CR-TEST",
+        },
+      ],
+    };
+
+    const { valid, errors } = validateImportRequest(payload);
+    expect(valid).toBeNull();
+    expect(errors.some((e) => e.message.includes("YYYY-MM-DD"))).toBe(true);
+  });
+
+  it("negative amountPaise gives clear validation error", () => {
+    const payload = {
+      bank: "HDFC",
+      fileName: "negative.csv",
+      credits: [
+        {
+          date: "2026-10-15",
+          amountPaise: -100000,
+          rail: "NEFT",
+          narration: "NEFT CR-TEST",
+        },
+      ],
+    };
+
+    const { valid, errors } = validateImportRequest(payload);
+    expect(valid).toBeNull();
+    expect(errors.some((e) => e.message.includes("positive integer"))).toBe(true);
+  });
+
+  it("zero amountPaise gives clear validation error", () => {
+    const payload = {
+      bank: "HDFC",
+      fileName: "zero.csv",
+      credits: [
+        {
+          date: "2026-10-15",
+          amountPaise: 0,
+          rail: "NEFT",
+          narration: "NEFT CR-TEST",
+        },
+      ],
+    };
+
+    const { valid, errors } = validateImportRequest(payload);
+    expect(valid).toBeNull();
+    expect(errors.some((e) => e.message.includes("positive integer"))).toBe(true);
+  });
+});
+
+describe("Case 3: UTF-8 BOM, CRLF line endings, trailing blank lines, quoted fields", () => {
+  it("UTF-8 BOM at file start parses correctly", async () => {
+    const bomContent =
+      "\ufeffHDFC BANK\nStatement\n\nDate,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance\n" +
+      `02/10/26,NEFT CR-TEST-BOM-CORP-INV001,${makeValidNeftUtr("11111111111")},02/10/26,,"50,000.00","1,50,000.00"`;
+
+    const file = new File([bomContent], "bom-test.csv", { type: "text/csv" });
+    const result = await parseBankStatement(file);
+
+    expect(result.detection.bank).toBe("HDFC");
+    expect(result.transactions.length).toBe(1);
+    expect(result.transactions[0].amountPaise).toBe(5000000);
+  });
+
+  it("CRLF line endings parse correctly", async () => {
+    const crlfContent =
+      "HDFC BANK\r\nStatement\r\n\r\nDate,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance\r\n" +
+      `02/10/26,NEFT CR-TEST-CRLF-CORP,${makeValidNeftUtr("22222222222")},02/10/26,,"25,000.00","1,25,000.00"\r\n`;
+
+    const file = new File([crlfContent], "crlf-test.csv", { type: "text/csv" });
+    const result = await parseBankStatement(file);
+
+    expect(result.detection.bank).toBe("HDFC");
+    expect(result.transactions.length).toBe(1);
+    expect(result.transactions[0].amountPaise).toBe(2500000);
+  });
+
+  it("trailing blank lines parse correctly", async () => {
+    const trailingContent =
+      "HDFC BANK\nStatement\n\nDate,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance\n" +
+      `02/10/26,NEFT CR-TEST-TRAILING-CORP,${makeValidNeftUtr("33333333333")},02/10/26,,"10,000.00","1,10,000.00"\n\n\n\n`;
+
+    const file = new File([trailingContent], "trailing-test.csv", { type: "text/csv" });
+    const result = await parseBankStatement(file);
+
+    expect(result.detection.bank).toBe("HDFC");
+    expect(result.transactions.length).toBe(1);
+  });
+
+  it("quoted fields containing commas parse correctly", async () => {
+    const quotedContent =
+      "HDFC BANK\nStatement\n\nDate,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance\n" +
+      `02/10/26,"NEFT CR-TEST, COMMA CORP-INV001",${makeValidNeftUtr("44444444444")},02/10/26,,"15,000.00","1,15,000.00"`;
+
+    const file = new File([quotedContent], "quoted-test.csv", { type: "text/csv" });
+    const result = await parseBankStatement(file);
+
+    expect(result.detection.bank).toBe("HDFC");
+    expect(result.transactions.length).toBe(1);
+    expect(result.transactions[0].narration).toContain("TEST, COMMA CORP");
+  });
+});
+
+describe("Case 4: Date formats and Indian amount grouping", () => {
+  it("parses dd/mm/yyyy date format", async () => {
+    const content =
+      "HDFC BANK\nStatement\n\nDate,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance\n" +
+      `15/10/2026,NEFT CR-TEST-DDMMYYYY,${makeValidNeftUtr("55555555555")},15/10/2026,,"20,000.00","1,20,000.00"`;
+
+    const file = new File([content], "ddmmyyyy.csv", { type: "text/csv" });
+    const result = await parseBankStatement(file);
+
+    expect(result.transactions.length).toBe(1);
+    expect(result.transactions[0].date).toBe("2026-10-15");
+  });
+
+  it("parses dd-MMM-yy date format", async () => {
+    const content =
+      "HDFC BANK\nStatement\n\nDate,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance\n" +
+      `15-Oct-26,NEFT CR-TEST-DDMMMYY,${makeValidNeftUtr("66666666666")},15-Oct-26,,"30,000.00","1,30,000.00"`;
+
+    const file = new File([content], "ddmmmyy.csv", { type: "text/csv" });
+    const result = await parseBankStatement(file);
+
+    expect(result.transactions.length).toBe(1);
+    expect(result.transactions[0].date).toBe("2026-10-15");
+  });
+
+  it("parses dd/mm/yy date format", async () => {
+    const content =
+      "HDFC BANK\nStatement\n\nDate,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance\n" +
+      `15/10/26,NEFT CR-TEST-DDMMYY,${makeValidNeftUtr("77777777777")},15/10/26,,"40,000.00","1,40,000.00"`;
+
+    const file = new File([content], "ddmmyy.csv", { type: "text/csv" });
+    const result = await parseBankStatement(file);
+
+    expect(result.transactions.length).toBe(1);
+    expect(result.transactions[0].date).toBe("2026-10-15");
+  });
+
+  it("parses Indian digit grouping (1,23,456.78)", async () => {
+    const content =
+      "HDFC BANK\nStatement\n\nDate,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance\n" +
+      `02/10/26,NEFT CR-TEST-INDIAN-AMT,${makeValidNeftUtr("88888888888")},02/10/26,,"1,23,456.78","2,23,456.78"`;
+
+    const file = new File([content], "indian-amt.csv", { type: "text/csv" });
+    const result = await parseBankStatement(file);
+
+    expect(result.transactions.length).toBe(1);
+    expect(result.transactions[0].amountPaise).toBe(12345678);
+  });
+
+  it("parses separate Dr/Cr columns correctly", async () => {
+    const content =
+      "HDFC BANK\nStatement\n\nDate,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance\n" +
+      `02/10/26,NEFT DR-TEST-DEBIT,${makeValidNeftUtr("99999999991")},02/10/26,"5,000.00",,"1,00,000.00"\n` +
+      `03/10/26,NEFT CR-TEST-CREDIT,${makeValidNeftUtr("99999999992")},03/10/26,,"10,000.00","1,10,000.00"`;
+
+    const file = new File([content], "dr-cr.csv", { type: "text/csv" });
+    const result = await parseBankStatement(file);
+
+    expect(result.transactions.length).toBe(2);
+
+    const debit = result.transactions.find((t) => t.direction === "DR");
+    const credit = result.transactions.find((t) => t.direction === "CR");
+
+    expect(debit).toBeDefined();
+    expect(debit!.amountPaise).toBe(500000);
+
+    expect(credit).toBeDefined();
+    expect(credit!.amountPaise).toBe(1000000);
+  });
+
+  it("parses separate Withdrawal/Deposit columns (ICICI format)", async () => {
+    const content = `ICICI BANK
+Statement of Account
+Account No: 00123456789012
+
+S No.,Transaction Date,Cheque Number,Remarks,Withdrawal,Deposit,Balance
+1,01.10.2026,,B/F,,,100000.00
+2,02.10.2026,,NEFT-TEST-ICICI-DEBIT,5000.00,,95000.00
+3,03.10.2026,,NEFT-TEST-ICICI-CREDIT,,10000.00,105000.00`;
+
+    const file = new File([content], "icici-dr-cr.csv", { type: "text/csv" });
+    const result = await parseBankStatement(file);
+
+    expect(result.detection.bank).toBe("ICICI");
+    expect(result.transactions).toHaveLength(2);
+
+    const debit = result.transactions.find((t) => t.direction === "DR");
+    const credit = result.transactions.find((t) => t.direction === "CR");
+
+    expect(debit).toBeDefined();
+    expect(debit!.amountPaise).toBe(500000);
+    expect(debit!.narration).toContain("DEBIT");
+
+    expect(credit).toBeDefined();
+    expect(credit!.amountPaise).toBe(1000000);
+    expect(credit!.narration).toContain("CREDIT");
+  });
+
+  it.skip("parses single signed-amount column (negative = debit)", async () => {
+    // Parser does not currently support single signed-amount column format.
+    // ICICI/HDFC/SBI/Axis all use separate Withdrawal/Deposit columns.
+  });
+});
+
+describe("Case 5: Malformed row mid-file (current behavior: skips with error count)", () => {
+  it("skips malformed row and continues parsing valid rows", async () => {
+    const content =
+      "HDFC BANK\nStatement\n\nDate,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance\n" +
+      `02/10/26,NEFT CR-TEST-BEFORE-MALFORMED,${makeValidNeftUtr("10101010101")},02/10/26,,"10,000.00","1,10,000.00"\n` +
+      `MALFORMED ROW WITH INVALID DATA,,,,,\n` +
+      `03/10/26,NEFT CR-TEST-AFTER-MALFORMED,${makeValidNeftUtr("10101010102")},03/10/26,,"20,000.00","1,30,000.00"`;
+
+    const file = new File([content], "malformed-mid.csv", { type: "text/csv" });
+    const result = await parseBankStatement(file);
+
+    expect(result.transactions.length).toBe(2);
+    expect(result.skippedRows).toBeGreaterThan(0);
+
+    expect(result.transactions[0].narration).toContain("BEFORE-MALFORMED");
+    expect(result.transactions[1].narration).toContain("AFTER-MALFORMED");
+  });
+
+  it("reports coded error ROW_PARSE_FAILED for unparseable row", async () => {
+    const content =
+      "HDFC BANK\nStatement\n\nDate,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance\n" +
+      `02/10/26,NEFT CR-TEST-VALID,${makeValidNeftUtr("20202020201")},02/10/26,,"10,000.00","1,10,000.00"\n` +
+      `BADDATE,Some narration with data but bad date,REF123,BADDATE,,"5,000.00","1,15,000.00"\n` +
+      `03/10/26,NEFT CR-TEST-VALID2,${makeValidNeftUtr("20202020202")},03/10/26,,"15,000.00","1,30,000.00"`;
+
+    const file = new File([content], "coded-error.csv", { type: "text/csv" });
+    const result = await parseBankStatement(file);
+
+    expect(result.transactions.length).toBe(2);
+    expect(result.errors.length).toBeGreaterThan(0);
+    expect(result.errors[0].code).toBe("ROW_PARSE_FAILED");
+  });
+
+  it("row accounting: transactions + errors + skippedRows === totalRows", async () => {
+    const content =
+      "HDFC BANK\nStatement\n\nDate,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance\n" +
+      `02/10/26,NEFT CR-TEST-ROW1,${makeValidNeftUtr("30303030301")},02/10/26,,"10,000.00","1,10,000.00"\n` +
+      `MALFORMED,,,,,\n` +
+      `03/10/26,NEFT CR-TEST-ROW2,${makeValidNeftUtr("30303030302")},03/10/26,,"20,000.00","1,30,000.00"\n` +
+      `\n\n`;
+
+    const file = new File([content], "row-accounting.csv", { type: "text/csv" });
+    const result = await parseBankStatement(file);
+
+    expect(result.transactions.length + result.errors.length + result.skippedRows).toBe(
+      result.totalRows
+    );
+  });
+});
+
+describe("File type detection and validation", () => {
+  it("detects HDFC bank from CSV content", async () => {
+    const content =
+      "HDFC BANK\nStatement\n\nDate,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance\n" +
+      `02/10/26,NEFT CR-TEST-DETECT,${makeValidNeftUtr("12121212121")},02/10/26,,"1,000.00","1,000.00"`;
+    const file = new File([content], "test.csv", { type: "text/csv" });
+
+    const result = await parseBankStatement(file);
+    expect(result.detection.bank).toBe("HDFC");
+    expect(result.detection.confidence).toBeGreaterThan(0);
+    expect(result.transactions).toHaveLength(1);
+  });
+
+  it("rejects invalid XLS magic bytes with CFB size error", async () => {
+    const xlsMagic = new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+    const file = new File([xlsMagic], "test.xls", { type: "application/vnd.ms-excel" });
+
+    await expect(parseBankStatement(file)).rejects.toThrow(/CFB file size.*< 512/);
+  });
+
+  it("wrong extension (.pdf) returns UNKNOWN bank with clear error", async () => {
+    const pdfContent = "Some random PDF-like content that is not a bank statement";
+    const file = new File([pdfContent], "statement.pdf", { type: "application/pdf" });
+    const result = await parseBankStatement(file);
+
+    expect(result.detection.bank).toBe("UNKNOWN");
+    expect(result.transactions).toHaveLength(0);
+    expect(result.errors.length).toBeGreaterThan(0);
+    expect(result.errors[0].code).toBe("UNKNOWN_BANK_FORMAT");
+  });
+
+  it("wrong extension (.txt) with non-CSV content returns UNKNOWN bank", async () => {
+    const txtContent = "This is a plain text file\nNot a bank statement\nJust random text";
+    const file = new File([txtContent], "notes.txt", { type: "text/plain" });
+    const result = await parseBankStatement(file);
+
+    expect(result.detection.bank).toBe("UNKNOWN");
+    expect(result.transactions).toHaveLength(0);
+  });
+
+  it("JSON content in CSV file returns UNKNOWN bank (content detection)", async () => {
+    const jsonContent = JSON.stringify({ not: "a bank statement" });
+    const file = new File([jsonContent], "data.csv", { type: "application/json" });
+    const result = await parseBankStatement(file);
+
+    expect(result.detection.bank).toBe("UNKNOWN");
+    expect(result.transactions).toHaveLength(0);
+  });
+});

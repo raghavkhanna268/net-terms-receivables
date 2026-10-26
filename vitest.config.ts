@@ -153,6 +153,9 @@ const DB_TEST_PATTERNS = [
   // Confirm-reimport pin DB tests
   "tests/integration/confirm-reimport-pin-db.test.ts",
 
+  // Bank upload robustness DB tests
+  "tests/integration/bank-upload-robustness-db.test.ts",
+
   // Ingestion paths DB tests
   "tests/integration/ingestion-paths-db.test.ts",
 ];
