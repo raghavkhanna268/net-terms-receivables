@@ -1647,6 +1647,109 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
       await sql`DELETE FROM "Shop" WHERE id = ${RACE_SHOP_ID}`;
     });
+
+    it("deterministic interleave: two sessions with pg_sleep trigger, exactly one succeeds", async () => {
+      // This test creates a deterministic interleave using pg_sleep in a trigger.
+      // The trigger delays the UPDATE, ensuring both connections have started
+      // their transactions before either completes. This tests that the lock order
+      // fix (Shop FOR SHARE first, then UPDATE) prevents deadlock.
+      const { enqueueReconcileStage } = await import("../reconcile-handlers.server");
+
+      const INTERLEAVE_SHOP_ID = `shop-test-interleave-${TEST_SUFFIX}`;
+      const INTERLEAVE_SHOP_DOMAIN = `test-interleave-${TEST_SUFFIX}.myshopify.com`;
+      const bulkOpId = `gid://shopify/BulkOperation/test-interleave-${TEST_SUFFIX}`;
+
+      const TRIGGER_NAME = "s25_interleave_test_trigger";
+      const TRIGGER_FUNC = "s25_interleave_test_func";
+
+      // Create two separate connections for concurrent execution
+      const conn1 = postgres(TEST_DATABASE_URL!, sqlOptions);
+      const conn2 = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+      try {
+        // Create shop
+        await sql`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${INTERLEAVE_SHOP_ID}, ${INTERLEAVE_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+        `;
+
+        // Create completed bulk op ready for next-stage enqueue
+        await sql`
+          INSERT INTO s6_bulk_operations (
+            bulk_operation_id, shop, bulk_type, origin, reconcile_stage,
+            started_at, completed_at, next_stage_enqueued_at
+          )
+          VALUES (
+            ${bulkOpId}, ${INTERLEAVE_SHOP_DOMAIN}, 'companies', 'reconcile', 'companies',
+            NOW() - INTERVAL '1 hour', NOW(), NULL
+          )
+        `;
+
+        // Clear any existing messages
+        await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${INTERLEAVE_SHOP_DOMAIN}`;
+
+        // Create trigger that adds a small delay when updating next_stage_enqueued_at
+        // This ensures both connections have entered their transactions before either completes
+        await sql.unsafe(`DROP TRIGGER IF EXISTS ${TRIGGER_NAME} ON s6_bulk_operations`);
+        await sql.unsafe(`DROP FUNCTION IF EXISTS ${TRIGGER_FUNC}()`);
+        await sql.unsafe(`
+          CREATE FUNCTION ${TRIGGER_FUNC}() RETURNS TRIGGER AS $$
+          BEGIN
+            IF OLD.next_stage_enqueued_at IS NULL AND NEW.next_stage_enqueued_at IS NOT NULL THEN
+              PERFORM pg_sleep(0.1);
+            END IF;
+            RETURN NEW;
+          END;
+          $$ LANGUAGE plpgsql
+        `);
+        await sql.unsafe(`
+          CREATE TRIGGER ${TRIGGER_NAME}
+          BEFORE UPDATE ON s6_bulk_operations
+          FOR EACH ROW
+          EXECUTE FUNCTION ${TRIGGER_FUNC}()
+        `);
+
+        // Start both enqueue calls in parallel
+        // With the 100ms delay in trigger, both should enter their transactions
+        // and attempt the UPDATE at roughly the same time
+        const promise1 = enqueueReconcileStage(conn1, INTERLEAVE_SHOP_DOMAIN, "customers", undefined, bulkOpId);
+        const promise2 = enqueueReconcileStage(conn2, INTERLEAVE_SHOP_DOMAIN, "customers", undefined, bulkOpId);
+
+        // Wait for both to complete
+        const results = await Promise.allSettled([promise1, promise2]);
+
+        // Both should complete (no deadlock 40P01)
+        // If the old lock-upgrade code were still in place, this could deadlock
+        expect(results[0].status).toBe("fulfilled");
+        expect(results[1].status).toBe("fulfilled");
+
+        // Extract results
+        const result1 = results[0].status === "fulfilled" ? results[0].value : false;
+        const result2 = results[1].status === "fulfilled" ? results[1].value : false;
+
+        // Exactly one should return true (the winner of the UPDATE)
+        const successCount = [result1, result2].filter(Boolean).length;
+        expect(successCount).toBe(1);
+
+        // Exactly one queue message should exist
+        const [queueCount] = await sql<{ count: string }[]>`
+          SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync
+          WHERE message->>'shop' = ${INTERLEAVE_SHOP_DOMAIN}
+            AND message->>'topic' = 'RECONCILE_CUSTOMERS'
+        `;
+        expect(parseInt(queueCount.count, 10)).toBe(1);
+
+      } finally {
+        // Cleanup
+        await sql.unsafe(`DROP TRIGGER IF EXISTS ${TRIGGER_NAME} ON s6_bulk_operations`);
+        await sql.unsafe(`DROP FUNCTION IF EXISTS ${TRIGGER_FUNC}()`);
+        await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${INTERLEAVE_SHOP_DOMAIN}`;
+        await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+        await sql`DELETE FROM "Shop" WHERE id = ${INTERLEAVE_SHOP_ID}`;
+        await conn1.end();
+        await conn2.end();
+      }
+    });
   });
 
   // ==========================================================================
@@ -1719,6 +1822,113 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
 
       // Cleanup
       await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+    });
+
+    it("call-site: processBulkOperation rejects cross-shop processing via shop filter", async () => {
+      // This test drives processBulkOperation (not loadBulkOperationProgress directly) to verify
+      // the shop filter prevents cross-shop processing. If shop filters were dropped from
+      // acquireProcessingLease and loadBulkOperationProgress, a message with the wrong shop
+      // could process another shop's row.
+      //
+      // Since bulk_operation_id is the PRIMARY KEY, we can only have ONE row per op id.
+      // The test verifies:
+      // 1. Row owned by Shop A, processing called with Shop B → fails (shop filter protects)
+      // 2. Row owned by Shop A, processing called with Shop A → succeeds (correct shop)
+      const { processBulkOperation, BULK_ERROR_CODES } = await import("~/services/sync/bulk-jsonl-processor.server");
+      const { adminGraphQL } = await import("../admin-client.server");
+
+      const SHOP_A_ID = `shop-call-site-a-${TEST_SUFFIX}`;
+      const SHOP_A_DOMAIN = `shop-call-site-a-${TEST_SUFFIX}.myshopify.com`;
+      const SHOP_B_ID = `shop-call-site-b-${TEST_SUFFIX}`;
+      const SHOP_B_DOMAIN = `shop-call-site-b-${TEST_SUFFIX}.myshopify.com`;
+      const bulkOpId = `gid://shopify/BulkOperation/call-site-cross-shop-${TEST_SUFFIX}`;
+      const webhookIdA = `finish:call-site-a:${bulkOpId}`;
+      const webhookIdB = `finish:call-site-b:${bulkOpId}`;
+
+      // Create both shops in Shop table
+      await sql`
+        INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+        VALUES (${SHOP_A_ID}, ${SHOP_A_DOMAIN}, 'INR', NOW(), NOW())
+      `;
+      await sql`
+        INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+        VALUES (${SHOP_B_ID}, ${SHOP_B_DOMAIN}, 'INR', NOW(), NOW())
+      `;
+
+      // Create op row for Shop A
+      await sql`
+        INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, started_at, byte_offset)
+        VALUES (${bulkOpId}, ${SHOP_A_DOMAIN}, 'companies', 'reconcile', NOW(), 0)
+      `;
+
+      // Mock adminGraphQL to return completed status with no data (empty result)
+      vi.mocked(adminGraphQL).mockResolvedValue({
+        success: true,
+        retryable: false,
+        data: {
+          node: {
+            status: "COMPLETED",
+            url: null,
+            objectCount: "0",
+            partialDataUrl: null,
+            errorCode: null,
+            rootObjectCount: "0",
+          },
+        },
+      });
+
+      // === PART 1: Call processBulkOperation with Shop B (wrong shop) ===
+      // The row belongs to Shop A, so Shop B should fail at lease acquisition
+      const messageB = {
+        topic: "BULK_OPERATIONS_FINISH" as const,
+        shop: SHOP_B_DOMAIN,
+        webhookId: webhookIdB,
+        bulkOperationId: bulkOpId,
+        bulkType: "companies" as const,
+        enqueuedAt: new Date().toISOString(),
+      };
+      const resultB = await processBulkOperation(sql, messageB);
+
+      // Shop B should fail - either "op not found" (initial load without shop filter finds it,
+      // but acquireProcessingLease with shop filter fails = LEASE_CONTENTION)
+      // or the post-lease re-read doesn't find the row (if we somehow got a lease)
+      expect(resultB.success).toBe(false);
+      expect(resultB.errorCode).toBe(BULK_ERROR_CODES.LEASE_CONTENTION);
+
+      // Verify Shop A's row is unchanged (not completed, no lease taken)
+      const [shopARowAfterB] = await sql<{ completed_at: Date | null; processing_lease_token: string | null }[]>`
+        SELECT completed_at, processing_lease_token FROM s6_bulk_operations
+        WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(shopARowAfterB.completed_at).toBeNull();
+      expect(shopARowAfterB.processing_lease_token).toBeNull();
+
+      // === PART 2: Call processBulkOperation with Shop A (correct shop) ===
+      // This should succeed - Shop A owns the row
+      const messageA = {
+        topic: "BULK_OPERATIONS_FINISH" as const,
+        shop: SHOP_A_DOMAIN,
+        webhookId: webhookIdA,
+        bulkOperationId: bulkOpId,
+        bulkType: "companies" as const,
+        enqueuedAt: new Date().toISOString(),
+      };
+      const resultA = await processBulkOperation(sql, messageA);
+
+      // Should succeed - Shop A's row processed correctly
+      expect(resultA.success).toBe(true);
+      expect(resultA.status).toBe("complete");
+
+      // Verify Shop A's row was updated (completed_at now set)
+      const [shopARowFinal] = await sql<{ completed_at: Date | null }[]>`
+        SELECT completed_at FROM s6_bulk_operations
+        WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(shopARowFinal.completed_at).not.toBeNull();
+
+      // Cleanup
+      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+      await sql`DELETE FROM "Shop" WHERE id IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
     });
   });
 
