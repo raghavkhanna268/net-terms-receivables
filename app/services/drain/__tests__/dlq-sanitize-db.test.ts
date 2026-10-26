@@ -551,6 +551,7 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
       });
 
     const webhookId = `wh-graphql-${testContext.suffix}`;
+    const shopId = `shop-graphql-${testContext.suffix}`;
     const message = {
       shop: testContext.missingShopDomain,
       topic: "COMPANY_LOCATIONS_UPDATE",
@@ -559,23 +560,35 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
       enqueuedAt: new Date().toISOString(),
     };
 
+    // Create a Shop row so that moveToDeadLetter sees the shop as existing and NOT uninstalled.
+    // This ensures non-shop errors keep the full message - only shop-gone scenarios sanitize.
     await sqlRef`
-      INSERT INTO pgmq.q_s6_sync (vt, read_ct, enqueued_at, message)
-      VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(message)}::jsonb)
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+      VALUES (${shopId}, ${testContext.missingShopDomain}, 'INR', NOW(), NOW())
     `;
 
-    await driveUntilDeadLettered(webhookId, 1);
+    try {
+      await sqlRef`
+        INSERT INTO pgmq.q_s6_sync (vt, read_ct, enqueued_at, message)
+        VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(message)}::jsonb)
+      `;
 
-    const [dlqRow] = await sqlRef<[{ message: Record<string, unknown>; error: string }?]>`
-      SELECT message, error
-      FROM s6_dead_letter
-      WHERE message->>'webhookId' = ${webhookId}
-    `;
+      await driveUntilDeadLettered(webhookId, 1);
 
-    expect(dlqRow).toBeDefined();
-    expect(dlqRow!.message.sanitized).toBeUndefined();
-    expect(dlqRow!.message.shop).toBe(testContext.missingShopDomain);
-    expect(dlqRow!.error).toContain("graphql_schema_error");
+      const [dlqRow] = await sqlRef<[{ message: Record<string, unknown>; error: string }?]>`
+        SELECT message, error
+        FROM s6_dead_letter
+        WHERE message->>'webhookId' = ${webhookId}
+      `;
+
+      expect(dlqRow).toBeDefined();
+      expect(dlqRow!.message.sanitized).toBeUndefined();
+      expect(dlqRow!.message.shop).toBe(testContext.missingShopDomain);
+      expect(dlqRow!.error).toContain("graphql_schema_error");
+    } finally {
+      // Clean up the Shop row
+      await sqlRef`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    }
   });
 
   it("counts DLQ rows by original_msg_id, never by message->>shop", async () => {

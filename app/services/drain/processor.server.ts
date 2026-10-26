@@ -66,6 +66,7 @@ import {
   sanitizeSyncMessage,
   sanitizeBulkMessage,
   type SanitizedDeadLetterMessage,
+  type SanitizationReason,
 } from "./dead-letter-sanitize.server";
 
 /**
@@ -1200,7 +1201,7 @@ async function extendVisibility(sql: Sql, queue: string, msgId: string, seconds:
  * @returns true if the message was successfully dead-lettered, false if
  *          the message was already deleted (e.g., by shop/redact)
  */
-async function moveToDeadLetter(
+export async function moveToDeadLetter(
   sql: Sql,
   queue: string,
   msgId: string,
@@ -1209,37 +1210,76 @@ async function moveToDeadLetter(
   readCt: number
 ): Promise<boolean> {
   let messageToStore: SyncMessage | BulkMessage | SanitizedDeadLetterMessage = message;
+  let preSanitized = false;
 
   if (isShopNotFoundReason(error)) {
     if (queue === S6_QUEUES.SYNC) {
       const sanitized = sanitizeSyncMessage(message as SyncMessage, msgId, readCt);
       if (sanitized) {
         messageToStore = sanitized;
-        safeLog("info", "dlq_sanitized_shop_not_found", {
-          topic: message.topic,
-          originalMsgId: msgId,
-        });
+        preSanitized = true;
       }
     } else if (queue === S6_QUEUES.BULK) {
       const sanitized = sanitizeBulkMessage(message as BulkMessage, msgId, readCt);
       if (sanitized) {
         messageToStore = sanitized;
-        safeLog("info", "dlq_sanitized_shop_not_found", {
-          topic: message.topic,
-          bulkType: (message as BulkMessage).bulkType,
-          originalMsgId: msgId,
-        });
+        preSanitized = true;
       }
     }
   }
 
   return sql.begin(async (tx) => {
+    const [shopRow] = await tx<[{ id: string; uninstalledAt: Date | null }?]>`
+      SELECT id, "uninstalledAt" FROM "Shop"
+      WHERE domain = ${message.shop}
+      FOR SHARE
+    `;
+
+    const shopRowMissing = !shopRow;
+    const shopUninstalled = shopRow !== undefined && shopRow.uninstalledAt !== null;
+    const shopGone = shopRowMissing || shopUninstalled;
+    const shopId = shopRow?.id;
+    let sanitizationReason: SanitizationReason | null = null;
+
+    if (shopGone && !preSanitized) {
+      const reason: SanitizationReason = shopRowMissing ? "shop_row_missing" : "shop_uninstalled";
+      if (queue === S6_QUEUES.SYNC) {
+        const sanitized = sanitizeSyncMessage(message as SyncMessage, msgId, readCt, reason, shopId);
+        if (sanitized) {
+          messageToStore = sanitized;
+          sanitizationReason = reason;
+        }
+      } else if (queue === S6_QUEUES.BULK) {
+        const sanitized = sanitizeBulkMessage(message as BulkMessage, msgId, readCt, reason, shopId);
+        if (sanitized) {
+          messageToStore = sanitized;
+          sanitizationReason = reason;
+        }
+      }
+    }
+
     const [result] = await tx<[{ delete: boolean }]>`
       SELECT pgmq.delete(${queue}, ${msgId}::bigint)
     `;
 
     if (!result.delete) {
       return false;
+    }
+
+    if (sanitizationReason) {
+      safeLog("info", "dlq_sanitized_shop_not_found", {
+        topic: message.topic,
+        originalMsgId: msgId,
+        reason: sanitizationReason,
+        ...(queue === S6_QUEUES.BULK && { bulkType: (message as BulkMessage).bulkType }),
+      });
+    } else if (preSanitized) {
+      safeLog("info", "dlq_sanitized_shop_not_found", {
+        topic: message.topic,
+        originalMsgId: msgId,
+        reason: "shop_not_found" as SanitizationReason,
+        ...(queue === S6_QUEUES.BULK && { bulkType: (message as BulkMessage).bulkType }),
+      });
     }
 
     await tx`

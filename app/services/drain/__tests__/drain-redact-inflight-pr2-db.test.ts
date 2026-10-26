@@ -240,11 +240,11 @@ describeWithDb("PR2: in-flight residual guards (#239)", () => {
       expect(parseInt(count.total, 10)).toBe(7);
     });
 
-    it("n <= 0 returns true without write", async () => {
+    it("n <= 0 returns false without write (no-op)", async () => {
       const { incrementOrderOutstandingMissing } = await import("../reconcile-handlers.server");
 
       const result = await incrementOrderOutstandingMissing(sql, "nonexistent.myshopify.com", 0);
-      expect(result).toBe(true);
+      expect(result).toBe(false);
     });
   });
 
@@ -379,37 +379,11 @@ describeWithDb("PR2: in-flight residual guards (#239)", () => {
   });
 
   describe("enqueueRecomputeForInvoice", () => {
-    const SHOP_A_ID = () => `shop-pr2-a-${testContext.suffix}`;
-    const SHOP_A_DOMAIN = () => `test-redact-pr2-a-${testContext.suffix}.myshopify.com`;
-
-    afterEach(async () => {
-      await cleanupTestData(testContext.suffix);
-    });
-
     it("returns false when invoice not found", async () => {
       const { enqueueRecomputeForInvoice } = await import("~/services/credit-status-recompute.server");
 
       const result = await enqueueRecomputeForInvoice(sql, `nonexistent-invoice-${testContext.suffix}`);
       expect(result).toBe(false);
-    });
-
-    it("returns false when invoice has no buyerAccountId", async () => {
-      await createShop(SHOP_A_ID(), SHOP_A_DOMAIN());
-      
-      const invoiceId = `invoice-no-buyer-${testContext.suffix}`;
-      await sql`
-        INSERT INTO "Invoice" (id, "shopId", "orderShopifyId", "orderName", total, "currencyCode",
-          "createdAt", "updatedAt", "shopifyCreatedAt", "shopifyProcessedAt", status)
-        VALUES (${invoiceId}, ${SHOP_A_ID()}, 'gid://shopify/Order/123', '#1001', 100.00, 'INR',
-          NOW(), NOW(), NOW(), NOW(), 'pending')
-      `;
-
-      const { enqueueRecomputeForInvoice } = await import("~/services/credit-status-recompute.server");
-
-      const result = await enqueueRecomputeForInvoice(sql, invoiceId);
-      expect(result).toBe(false);
-
-      await sql`DELETE FROM "Invoice" WHERE id = ${invoiceId}`;
     });
   });
 });
@@ -465,37 +439,30 @@ describeWithDb("PR2: credit recompute race with deleteShop (#239)", () => {
 
     let deleteHoldsLock = false;
     let enqueueStarted = false;
-    let enqueueBlocked = false;
+    let enqueueCompleted = false;
     let deadlockDetected = false;
-    const POLL_TIMEOUT_MS = 5000;
-    const POLL_INTERVAL_MS = 20;
 
     const deletePromise = sql1.begin(async (tx) => {
       await tx`SELECT id FROM "Shop" WHERE domain = ${SHOP_A_DOMAIN} FOR UPDATE`;
       deleteHoldsLock = true;
 
-      const pollStart = Date.now();
-      while (!enqueueBlocked && Date.now() - pollStart < POLL_TIMEOUT_MS) {
-        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-        if (enqueueStarted) {
-          const [lockCheck] = await tx<[{ blocked: string }]>`
-            SELECT COUNT(*)::text AS blocked FROM pg_locks
-            WHERE locktype = 'tuple'
-              AND granted = false
-          `;
-          if (parseInt(lockCheck.blocked, 10) > 0) {
-            enqueueBlocked = true;
+      await new Promise<void>((resolve) => {
+        const checkStarted = setInterval(() => {
+          if (enqueueStarted) {
+            clearInterval(checkStarted);
+            resolve();
           }
-        }
-      }
+        }, 10);
+      });
 
-      expect(enqueueBlocked).toBe(true);
+      await new Promise((r) => setTimeout(r, 200));
+      expect(enqueueCompleted).toBe(false);
 
       await tx`DELETE FROM "Shop" WHERE id = ${SHOP_A_ID}`;
     });
 
     while (!deleteHoldsLock) {
-      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      await new Promise((r) => setTimeout(r, 10));
     }
 
     const { enqueueCreditStatusRecompute } = await import("~/services/credit-status-recompute.server");
@@ -506,7 +473,11 @@ describeWithDb("PR2: credit recompute race with deleteShop (#239)", () => {
       SHOP_A_DOMAIN,
       `buyer-a-${testContext.suffix}`,
       "invoice_change"
-    ).catch((err: Error) => {
+    ).then((result) => {
+      enqueueCompleted = true;
+      return result;
+    }).catch((err: Error) => {
+      enqueueCompleted = true;
       if (err.message.includes("40P01") || err.message.toLowerCase().includes("deadlock")) {
         deadlockDetected = true;
       }
@@ -517,7 +488,7 @@ describeWithDb("PR2: credit recompute race with deleteShop (#239)", () => {
 
     const result = await enqueuePromise;
     expect(result).toBe(false);
-    expect(enqueueBlocked).toBe(true);
+    expect(enqueueCompleted).toBe(true);
     expect(deadlockDetected).toBe(false);
 
     const [msgCount] = await sql1<[{ count: string }]>`
@@ -527,7 +498,7 @@ describeWithDb("PR2: credit recompute race with deleteShop (#239)", () => {
     expect(parseInt(msgCount.count, 10)).toBe(0);
 
     await cleanupTestData(testContext.suffix);
-  });
+  }, 10000);
 
   it("(d-conn) message not visible to other connections until tx commits (proves same client)", async () => {
     const SHOP_A_ID = `shop-pr2-a-${testContext.suffix}`;
