@@ -134,6 +134,12 @@ export async function runAfterAuth(
  * Latency optimization: Critical calls run in parallel (~0.5-1.2s).
  * The definitions→validation chain runs sequentially because validation's Function
  * input query references the metafield definitions. Payment customization is independent.
+ *
+ * Concurrent reinstall deduplication:
+ * Two concurrent /app loads after a reinstall share ONE registration promise:
+ * - First call (wins SQL RETURNING): creates setup promise, adds to inFlightSetups
+ * - Second call (loses SQL race): finds in-flight promise, waits for it via waitUntil
+ * This ensures registration runs exactly once even with concurrent loads.
  */
 async function clearAndMaybeSetup(
   sql: Sql,
@@ -146,10 +152,46 @@ async function clearAndMaybeSetup(
   if (reinstallResult.wasReinstalled) {
     setupCompletedShops.delete(shop);
 
-    const criticalSuccess = await runCriticalRegistration(sql, shop, admin);
+    // Check if there's already an in-flight setup for this shop.
+    // Another concurrent reinstall load may have already started registration.
+    const existingPromise = inFlightSetups.get(shop);
+    if (existingPromise) {
+      // Another call is handling this shop's setup - wait for it
+      waitUntil(existingPromise);
+      await existingPromise;
+      return;
+    }
 
-    const backgroundPromise = runBackgroundSetup(shop, admin, criticalSuccess);
-    waitUntil(backgroundPromise);
+    // Create a deferred for the critical registration result
+    let resolveCritical!: (success: boolean) => void;
+    const criticalResultPromise = new Promise<boolean>((resolve) => {
+      resolveCritical = resolve;
+    });
+
+    // Create the full setup promise (critical + background) for deduplication.
+    // Other concurrent calls will wait on this via inFlightSetups.
+    const fullSetupPromise = (async () => {
+      const criticalSuccess = await criticalResultPromise;
+      await runBackgroundSetup(shop, admin, criticalSuccess);
+    })();
+
+    inFlightSetups.set(shop, fullSetupPromise);
+
+    try {
+      // Run critical registration and signal completion
+      const criticalSuccess = await runCriticalRegistration(sql, shop, admin);
+      resolveCritical(criticalSuccess);
+
+      // Background setup runs via waitUntil (not blocking the response)
+      waitUntil(fullSetupPromise);
+    } catch (error) {
+      // On error, signal failure so waiting calls can proceed
+      resolveCritical(false);
+      throw error;
+    } finally {
+      // Clean up in-flight entry after full setup completes
+      fullSetupPromise.finally(() => inFlightSetups.delete(shop));
+    }
     return;
   }
 
