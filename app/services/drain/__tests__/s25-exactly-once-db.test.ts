@@ -1993,12 +1993,19 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
 
     it("OP_NOT_FOUND: unregistered operation returns bulk_op_not_found with no GID", async () => {
       // S25-followup: Test BULK_ERROR_CODES.OP_NOT_FOUND when operation was never registered.
+      // Asserts that the error message and any logged context contain no GID.
       const { processBulkOperation, BULK_ERROR_CODES } = await import("~/services/sync/bulk-jsonl-processor.server");
 
       const SHOP_ID = `shop-op-not-found-${TEST_SUFFIX}`;
       const SHOP_DOMAIN = `op-not-found-${TEST_SUFFIX}.myshopify.com`;
       const bulkOpId = `gid://shopify/BulkOperation/never-registered-${TEST_SUFFIX}`;
       const webhookId = `finish:never-registered:${bulkOpId}`;
+
+      // Spy on console methods to capture safeLog output (safeLog calls console.log/warn/etc)
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const consoleInfoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
 
       try {
         await sql`
@@ -2018,14 +2025,31 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         };
         const result = await processBulkOperation(sql, message);
 
-        // Assertions
+        // Assertions on returned result
         expect(result.success).toBe(false);
         expect(result.error).toBe(BULK_ERROR_CODES.OP_NOT_FOUND);
         expect(result.errorCode).toBe(BULK_ERROR_CODES.OP_NOT_FOUND);
         expect(result.errorType).toBe("permanent");
-        // Key assertion: error string contains no GID
-        expect(result.error).not.toContain("gid://shopify/BulkOperation");
+
+        // Key assertions: no GID in error string or logged context
+        expect(result.error).not.toContain("gid://");
+
+        // Check all console calls for GID patterns (safeLog outputs to console)
+        const allCalls = [
+          ...consoleSpy.mock.calls,
+          ...consoleWarnSpy.mock.calls,
+          ...consoleErrorSpy.mock.calls,
+          ...consoleInfoSpy.mock.calls,
+        ];
+        for (const call of allCalls) {
+          const callString = JSON.stringify(call);
+          expect(callString).not.toContain("gid://");
+        }
       } finally {
+        consoleSpy.mockRestore();
+        consoleWarnSpy.mockRestore();
+        consoleErrorSpy.mockRestore();
+        consoleInfoSpy.mockRestore();
         await sql`DELETE FROM "Shop" WHERE id = ${SHOP_ID}`;
       }
     });
