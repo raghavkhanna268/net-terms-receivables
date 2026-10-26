@@ -171,6 +171,24 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
   let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
   let consoleDebugSpy: ReturnType<typeof vi.spyOn>;
 
+  /**
+   * Archive all messages in q_s6_sync that don't belong to this test's shop domain.
+   * This prevents batch pollution from other test files' leftover messages.
+   */
+  async function archiveForeignQueueMessages(): Promise<number> {
+    const ourDomain = testContext.missingShopDomain;
+    const [result] = await sqlRef<[{ archived: string }]>`
+      SELECT count(*)::text AS archived
+      FROM pgmq.archive('s6_sync', (
+        SELECT array_agg(msg_id)
+        FROM pgmq.q_s6_sync
+        WHERE message->>'shop' IS NULL
+           OR message->>'shop' <> ${ourDomain}
+      ))
+    `;
+    return parseInt(result.archived, 10);
+  }
+
   beforeAll(async () => {
     sqlRef = postgres(TEST_DATABASE_URL!, sqlOptions);
   });
@@ -179,10 +197,14 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     await sqlRef.end();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
     testContext.suffix = makeTestId();
     testContext.missingShopDomain = `test-sanitize-missing-${testContext.suffix}.myshopify.com`;
+
+    // Archive foreign rows before each test to prevent batch pollution
+    await archiveForeignQueueMessages();
+
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     consoleInfoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
     consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
