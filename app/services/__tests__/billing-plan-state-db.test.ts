@@ -6,7 +6,7 @@
  * 2. Plan state transitions (ACTIVE, CANCELLED, FROZEN, DECLINED, EXPIRED)
  * 3. Webhook redelivery idempotency (via real route action)
  * 4. Stale webhook handling (route ignores payload, fetches current API state)
- * 5. Uninstall/reinstall preserves plan_cached_at (pins main's pre-#468 behaviour; #468 changes this)
+ * 5. Uninstall clears plan_cached_at (#468); reinstall preserves other plan columns
  * 6. Plan page test flag behavior
  * 7. Shop isolation (billing for shop B can't change shop A)
  *
@@ -685,8 +685,8 @@ describeWithDb("Billing and Plan State (DB)", () => {
     });
   });
 
-  describe("5. Uninstall/reinstall preserves plan_cached_at (pins main's pre-#468 behaviour)", () => {
-    it("markShopUninstalled preserves plan_cached_at", async () => {
+  describe("5. Uninstall clears plan_cached_at (#468); reinstall preserves other plan columns", () => {
+    it("markShopUninstalled clears plan_cached_at (#468)", async () => {
       const planCachedAt = new Date("2026-10-01T12:00:00Z");
 
       await sql`
@@ -707,15 +707,15 @@ describeWithDb("Billing and Plan State (DB)", () => {
       `;
 
       expect(after.uninstalledAt).not.toBeNull();
-      expect(after.plan_cached_at?.getTime()).toBe(planCachedAt.getTime());
+      // #468: markShopUninstalled now clears plan_cached_at so reinstall forces fresh read
+      expect(after.plan_cached_at).toBeNull();
     });
 
-    it("upsertShopOnAuth reinstall clears uninstalledAt but preserves plan columns", async () => {
-      const planCachedAt = new Date("2026-10-01T12:00:00Z");
-
+    it("upsertShopOnAuth reinstall clears uninstalledAt, preserves other plan columns, keeps plan_cached_at NULL (#468)", async () => {
+      // Post-#468: plan_cached_at is NULL because markShopUninstalled cleared it
       await sql`
-        INSERT INTO "Shop" (domain, timezone, currency, plan_key, subscription_id, subscription_name, is_test, plan_cached_at, "uninstalledAt", "createdAt", "updatedAt")
-        VALUES (${TEST_SHOP_A_DOMAIN}, 'UTC', 'INR', 'growth', 'gid://shopify/AppSubscription/old', 'Growth', false, ${planCachedAt}, NOW(), NOW(), NOW())
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, subscription_id, subscription_name, is_test, "uninstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP_A_DOMAIN}, 'UTC', 'INR', 'growth', 'gid://shopify/AppSubscription/old', 'Growth', false, NOW(), NOW(), NOW())
       `;
 
       const [before] = await sql<{
@@ -729,6 +729,7 @@ describeWithDb("Billing and Plan State (DB)", () => {
       `;
       expect(before.uninstalledAt).not.toBeNull();
       expect(before.plan_key).toBe("growth");
+      expect(before.plan_cached_at).toBeNull();
 
       const { upsertShopOnAuth } = await import("~/lib/after-auth.server");
       await upsertShopOnAuth(sql, TEST_SHOP_A_DOMAIN, "America/New_York", "INR");
@@ -746,15 +747,15 @@ describeWithDb("Billing and Plan State (DB)", () => {
       expect(after.uninstalledAt).toBeNull();
       expect(after.plan_key).toBe("growth");
       expect(after.subscription_id).toBe("gid://shopify/AppSubscription/old");
-      expect(after.plan_cached_at?.getTime()).toBe(planCachedAt.getTime());
+      // #468: plan_cached_at remains NULL, forcing fresh read on next resolvePlan
+      expect(after.plan_cached_at).toBeNull();
     });
 
-    it("clearUninstalledAtAndMetafieldErrors reinstall clears uninstalledAt, preserves plan columns", async () => {
-      const planCachedAt = new Date("2026-10-15T10:00:00Z");
-
+    it("clearUninstalledAtAndMetafieldErrors reinstall clears uninstalledAt, preserves other plan columns, keeps plan_cached_at NULL (#468)", async () => {
+      // Post-#468: plan_cached_at is NULL because markShopUninstalled cleared it
       await sql`
-        INSERT INTO "Shop" (domain, timezone, currency, plan_key, subscription_id, subscription_name, is_test, plan_cached_at, "uninstalledAt", "createdAt", "updatedAt")
-        VALUES (${TEST_SHOP_A_DOMAIN}, 'UTC', 'INR', 'starter', 'gid://shopify/AppSubscription/starter-sub', 'Starter', true, ${planCachedAt}, NOW(), NOW(), NOW())
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, subscription_id, subscription_name, is_test, "uninstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP_A_DOMAIN}, 'UTC', 'INR', 'starter', 'gid://shopify/AppSubscription/starter-sub', 'Starter', true, NOW(), NOW(), NOW())
       `;
 
       const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("~/lib/after-auth.server");
@@ -779,7 +780,8 @@ describeWithDb("Billing and Plan State (DB)", () => {
       expect(after.subscription_id).toBe("gid://shopify/AppSubscription/starter-sub");
       expect(after.subscription_name).toBe("Starter");
       expect(after.is_test).toBe(true);
-      expect(after.plan_cached_at?.getTime()).toBe(planCachedAt.getTime());
+      // #468: plan_cached_at remains NULL, forcing fresh read on next resolvePlan
+      expect(after.plan_cached_at).toBeNull();
     });
   });
 
