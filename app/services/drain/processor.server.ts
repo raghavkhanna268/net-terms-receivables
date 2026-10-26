@@ -69,6 +69,27 @@ import {
 } from "./dead-letter-sanitize.server";
 
 /**
+ * Check if a shop is uninstalled or missing from the database.
+ *
+ * Used by COMPANIES_* and COMPANY_LOCATIONS_* CREATE/UPDATE handlers to detect
+ * post-uninstall webhooks that arrive with no_session errors. When the Shop row
+ * is missing or uninstalledAt is set, we relabel the error as shop_not_found
+ * so the message can be sanitized in the DLQ.
+ *
+ * Part of #239: no-session path for COMPANIES_* and company-location CREATE/UPDATE.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopDomain - Shop domain to check
+ * @returns true if the Shop row is missing or uninstalledAt is set
+ */
+async function isShopUninstalledOrMissing(sql: Sql, shopDomain: string): Promise<boolean> {
+  const [shop] = await sql<{ uninstalledAt: Date | null }[]>`
+    SELECT "uninstalledAt" FROM "Shop" WHERE domain = ${shopDomain}
+  `;
+  return !shop || shop.uninstalledAt !== null;
+}
+
+/**
  * Configuration for drain processing.
  */
 export interface DrainConfig {
@@ -180,6 +201,21 @@ async function handleCompany(sql: Sql, message: SyncMessage): Promise<SyncResult
   }>(message.shop, COMPANY_QUERY, { id: message.resourceGid });
 
   if (!result.success) {
+    // Part of #239: Check if this is a no_session error on a CREATE/UPDATE webhook.
+    // If Shop is missing or uninstalled, relabel as shop_not_found for DLQ sanitization.
+    if (
+      result.errorCode === "no_session" &&
+      (message.topic === "COMPANIES_CREATE" || message.topic === "COMPANIES_UPDATE")
+    ) {
+      if (await isShopUninstalledOrMissing(sql, message.shop)) {
+        return {
+          success: false,
+          action: "skipped",
+          error: "shop_not_found",
+          errorCode: "shop_not_found",
+        };
+      }
+    }
     return {
       success: false,
       action: "skipped",
@@ -271,6 +307,21 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
           env,
           false // contactKnown=false: preserve existing stored contact
         );
+      }
+    }
+    // Part of #239: Check if this is a no_session error on a CREATE/UPDATE webhook.
+    // If Shop is missing or uninstalled, relabel as shop_not_found for DLQ sanitization.
+    if (
+      result.errorCode === "no_session" &&
+      (message.topic === "COMPANY_LOCATIONS_CREATE" || message.topic === "COMPANY_LOCATIONS_UPDATE")
+    ) {
+      if (await isShopUninstalledOrMissing(sql, message.shop)) {
+        return {
+          success: false,
+          action: "skipped",
+          error: "shop_not_found",
+          errorCode: "shop_not_found",
+        };
       }
     }
     return {
