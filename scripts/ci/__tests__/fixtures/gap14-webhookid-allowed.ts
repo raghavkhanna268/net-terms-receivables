@@ -13,11 +13,11 @@ export function destructureWebhookId(data: { webhookId: string; topic: string })
 
 // SHOULD PASS: Function that uses webhookId for DB operations (not logged)
 export async function recordWebhookReceipt(
-  tx: unknown,
-  shop: string,
-  webhookId: string,
-  topic: string,
-  triggeredAt: Date
+  _tx: unknown,
+  _shop: string,
+  _webhookId: string,
+  _topic: string,
+  _triggeredAt: Date
 ): Promise<boolean> {
   return true;
 }
@@ -47,7 +47,7 @@ interface WebhookMessage {
 }
 
 // SHOULD PASS: Function parameter named webhookId
-export function handleWebhook(webhookId: string): void {
+export function handleWebhook(_webhookId: string): void {
   // No logging of webhookId here
 }
 
