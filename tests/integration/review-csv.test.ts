@@ -247,7 +247,7 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
      *
      * There is NO date matching - invoice.dueAt is only for allocation ordering.
      */
-    it("Row 1: pins high confidence match to #1001 with full breakdown", () => {
+    it("Row 1: pins medium-band match (score 60 < 80 threshold) with breakdown", () => {
       const row1 = credits.find((c) => c.refNo === "SYNT0001");
       expect(row1).toBeDefined();
 
