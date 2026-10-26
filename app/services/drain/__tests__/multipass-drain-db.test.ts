@@ -567,22 +567,23 @@ describeWithDb("multi-pass drain DB tests (#454)", () => {
       };
       await sqlRef`SELECT pgmq.send(${S6_QUEUES.BULK}, ${sqlRef.json(bulkMessage)})`;
 
-      // Run drain - pass 1 processes, pass 2+ should stop early (only skips)
+      // Run drain - pass 1 processes, pass 2 has only skips so countMessagesWorked=0 -> stop
       const result = await runDrain(sqlRef, { batchSize: 5, timeBudgetMs: 60000, maxPasses });
 
       // Handler called exactly once (pass 1), not maxPasses times
       expect(handlerCallCount).toBe(1);
       // Should not burn all passes on skips
       expect(result.processed).toBe(1);
-      // Skips should be counted but not prevent early stop
-      expect(result.skipped).toBeGreaterThanOrEqual(0);
-      // Should NOT have reached maxPasses (stopped early)
+      // With skip-exclusion fix: maxPasses=4 stops after pass 2 (pass 2 has 0 work)
+      // passesRun tracks actual passes executed
+      expect(result.passesRun).toBe(2);
+      // Should NOT have reached maxPasses (stopped early due to 0 work in pass 2)
       expect(result.timedOut).toBe(false);
     }, 60000);
   });
 
-  describe("continuation with prior failures still reaches DLQ", () => {
-    it.each([2, 4])("at maxPasses=%i: continuation with read_ct >= 2 preserves retry budget when skipped", async (mp) => {
+  describe("continuation with prior failures preserves retry budget", () => {
+    it.each([2, 4])("at maxPasses=%i: continuation with read_ct >= 2 uses extendVisibility (not delete+resend)", async (mp) => {
       const { registerBulkHandler, runDrain } = await import("../processor.server");
 
       const testSuffix = `bulk-dlq-${TEST_ID}-${mp}-${Date.now()}`;

@@ -1135,6 +1135,8 @@ export interface DrainResult {
   timedOut: boolean;
   /** Total wall time in milliseconds */
   elapsedMs: number;
+  /** Number of passes actually run (useful for monitoring) */
+  passesRun: number;
   /** Errors encountered (for logging) - code only, no raw messages */
   errors: Array<{ msgId: string; topic: string; code: string }>;
 }
@@ -2004,6 +2006,7 @@ export async function runDrain(
     noHandler: 0,
     timedOut: false,
     elapsedMs: 0,
+    passesRun: 0,
     errors: [],
   };
 
@@ -2026,6 +2029,7 @@ export async function runDrain(
       passResult = await processBulkQueue(sql, fullConfig, startTime, syncResult, handledBulkOpIds);
     }
 
+    aggregatedResult.passesRun++;
     aggregatedResult.processed += passResult.processed;
     aggregatedResult.failed += passResult.failed;
     aggregatedResult.deadLettered += passResult.deadLettered;
