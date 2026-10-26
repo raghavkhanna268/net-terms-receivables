@@ -4,10 +4,14 @@
  * Tests verify:
  * 1. COMPLETED, objectCount '0', url key ABSENT: completes
  * 2. COMPLETED, '0', url null: completes (regression)
- * 3. COMPLETED, objectCount absent, url absent: stays the retryable NO_RESULT_URL path
- * 4. COMPLETED, '1', url absent: NO_RESULT_URL permanent
- * 5. COMPLETED, '0', url absent, partialDataUrl set: not treated as empty
- * 6. failure_count 5 + COMPLETED '0' url absent: completes
+ * 3a. COMPLETED, objectCount absent, url absent: stays the retryable NO_RESULT_URL path
+ * 3b. COMPLETED, objectCount null, url absent: stays the retryable NO_RESULT_URL path
+ * 4a. COMPLETED, '1', url absent: NO_RESULT_URL permanent
+ * 4b. COMPLETED, '5', url null: NO_RESULT_URL permanent
+ * 5a. COMPLETED, '0', url absent, partialDataUrl set: NO_RESULT_URL permanent
+ * 5b. COMPLETED, '0', url null, partialDataUrl set: NO_RESULT_URL permanent
+ * 6a. failure_count 5 + COMPLETED '0' url absent: completes
+ * 6b. failure_count 5 + COMPLETED '0' url null: completes
  * 7. failure_count 5 + non-empty status: MAX_FAILURES
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
@@ -199,7 +203,7 @@ describeWithDb("bulk empty-result handling (DB-backed)", () => {
       expect(row.completed_at).not.toBeNull();
     });
 
-    it("(3) COMPLETED, objectCount absent, url absent: stays the retryable NO_RESULT_URL path (failure_count increments)", async () => {
+    it("(3a) COMPLETED, objectCount absent, url absent: stays the retryable NO_RESULT_URL path (failure_count increments)", async () => {
       const { adminGraphQL } = await import("../../drain/admin-client.server");
       const { processBulkOperation } = await import("../bulk-jsonl-processor.server");
 
@@ -243,7 +247,52 @@ describeWithDb("bulk empty-result handling (DB-backed)", () => {
       expect(row.failure_count).toBe(1);
     });
 
-    it("(4) COMPLETED, objectCount '1', url absent: NO_RESULT_URL permanent (the S25 branch)", async () => {
+    it("(3b) COMPLETED, objectCount null, url absent: stays the retryable NO_RESULT_URL path (failure_count increments)", async () => {
+      const { adminGraphQL } = await import("../../drain/admin-client.server");
+      const { processBulkOperation } = await import("../bulk-jsonl-processor.server");
+
+      const bulkOpId = `gid://shopify/BulkOperation/null-objectcount-${TEST_SUFFIX}`;
+      const webhookId = `webhook-null-objectcount-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, failure_count)
+        VALUES (${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'orders', 'reconcile', 'orders', NOW(), 0)
+      `;
+
+      vi.mocked(adminGraphQL).mockResolvedValue({
+        success: true,
+        data: {
+          node: {
+            id: bulkOpId,
+            status: "COMPLETED",
+            objectCount: null,
+            fileSize: null,
+            errorCode: null,
+          },
+        },
+        retryable: false,
+      });
+
+      const result = await processBulkOperation(sql, {
+        topic: "BULK_OPERATIONS_FINISH",
+        shop: TEST_SHOP_DOMAIN,
+        webhookId,
+        enqueuedAt: new Date().toISOString(),
+        bulkOperationId: bulkOpId,
+        bulkType: "orders",
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errorType).toBe("retryable");
+      expect(result.errorCode).toBe("bulk_no_result_url");
+
+      const [row] = await sql<{ failure_count: number }[]>`
+        SELECT failure_count FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(row.failure_count).toBe(1);
+    });
+
+    it("(4a) COMPLETED, objectCount '1', url absent: NO_RESULT_URL permanent (the S25 branch)", async () => {
       const { adminGraphQL } = await import("../../drain/admin-client.server");
       const { processBulkOperation } = await import("../bulk-jsonl-processor.server");
 
@@ -283,12 +332,53 @@ describeWithDb("bulk empty-result handling (DB-backed)", () => {
       expect(result.errorCode).toBe("bulk_no_result_url");
     });
 
-    it("(5) COMPLETED, objectCount '0', url absent, partialDataUrl set: not treated as empty", async () => {
+    it("(4b) COMPLETED, objectCount '5', url null: NO_RESULT_URL permanent", async () => {
       const { adminGraphQL } = await import("../../drain/admin-client.server");
       const { processBulkOperation } = await import("../bulk-jsonl-processor.server");
 
-      const bulkOpId = `gid://shopify/BulkOperation/partial-data-url-${TEST_SUFFIX}`;
-      const webhookId = `webhook-partial-data-url-${TEST_SUFFIX}`;
+      const bulkOpId = `gid://shopify/BulkOperation/has-objects-url-null-${TEST_SUFFIX}`;
+      const webhookId = `webhook-has-objects-url-null-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, failure_count)
+        VALUES (${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'orders', 'reconcile', 'orders', NOW(), 0)
+      `;
+
+      vi.mocked(adminGraphQL).mockResolvedValue({
+        success: true,
+        data: {
+          node: {
+            id: bulkOpId,
+            status: "COMPLETED",
+            url: null,
+            objectCount: "5",
+            fileSize: null,
+            errorCode: null,
+          },
+        },
+        retryable: false,
+      });
+
+      const result = await processBulkOperation(sql, {
+        topic: "BULK_OPERATIONS_FINISH",
+        shop: TEST_SHOP_DOMAIN,
+        webhookId,
+        enqueuedAt: new Date().toISOString(),
+        bulkOperationId: bulkOpId,
+        bulkType: "orders",
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errorType).toBe("permanent");
+      expect(result.errorCode).toBe("bulk_no_result_url");
+    });
+
+    it("(5a) COMPLETED, objectCount '0', url absent, partialDataUrl set: NO_RESULT_URL permanent", async () => {
+      const { adminGraphQL } = await import("../../drain/admin-client.server");
+      const { processBulkOperation } = await import("../bulk-jsonl-processor.server");
+
+      const bulkOpId = `gid://shopify/BulkOperation/partial-data-url-absent-${TEST_SUFFIX}`;
+      const webhookId = `webhook-partial-data-url-absent-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, failure_count)
@@ -323,16 +413,58 @@ describeWithDb("bulk empty-result handling (DB-backed)", () => {
       expect(result.errorType).toBe("permanent");
       expect(result.errorCode).toBe("bulk_no_result_url");
     });
+
+    it("(5b) COMPLETED, objectCount '0', url null, partialDataUrl set: NO_RESULT_URL permanent", async () => {
+      const { adminGraphQL } = await import("../../drain/admin-client.server");
+      const { processBulkOperation } = await import("../bulk-jsonl-processor.server");
+
+      const bulkOpId = `gid://shopify/BulkOperation/partial-data-url-null-${TEST_SUFFIX}`;
+      const webhookId = `webhook-partial-data-url-null-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, failure_count)
+        VALUES (${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'orders', 'reconcile', 'orders', NOW(), 0)
+      `;
+
+      vi.mocked(adminGraphQL).mockResolvedValue({
+        success: true,
+        data: {
+          node: {
+            id: bulkOpId,
+            status: "COMPLETED",
+            url: null,
+            objectCount: "0",
+            fileSize: null,
+            errorCode: null,
+            partialDataUrl: "https://storage.shopify.com/partial.jsonl",
+          },
+        },
+        retryable: false,
+      });
+
+      const result = await processBulkOperation(sql, {
+        topic: "BULK_OPERATIONS_FINISH",
+        shop: TEST_SHOP_DOMAIN,
+        webhookId,
+        enqueuedAt: new Date().toISOString(),
+        bulkOperationId: bulkOpId,
+        bulkType: "orders",
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errorType).toBe("permanent");
+      expect(result.errorCode).toBe("bulk_no_result_url");
+    });
   });
 
   describe("failure_count 5 handling with empty result", () => {
-    it("(6) failure_count 5 + COMPLETED '0' url absent (and null): completes, completed_at is set, initial-sync not failed", async () => {
+    it("(6a) failure_count 5 + COMPLETED '0' url absent: completes, completed_at is set, initial-sync not failed", async () => {
       const { adminGraphQL } = await import("../../drain/admin-client.server");
       const { processBulkOperation } = await import("../bulk-jsonl-processor.server");
       const { getInitialSyncState } = await import("~/lib/initial-sync.server");
 
-      const bulkOpId = `gid://shopify/BulkOperation/maxfail-empty-${TEST_SUFFIX}`;
-      const webhookId = `webhook-maxfail-empty-${TEST_SUFFIX}`;
+      const bulkOpId = `gid://shopify/BulkOperation/maxfail-empty-absent-${TEST_SUFFIX}`;
+      const webhookId = `webhook-maxfail-empty-absent-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, failure_count)
@@ -345,6 +477,55 @@ describeWithDb("bulk empty-result handling (DB-backed)", () => {
           node: {
             id: bulkOpId,
             status: "COMPLETED",
+            objectCount: "0",
+            fileSize: null,
+            errorCode: null,
+          },
+        },
+        retryable: false,
+      });
+
+      const result = await processBulkOperation(sql, {
+        topic: "BULK_OPERATIONS_FINISH",
+        shop: TEST_SHOP_DOMAIN,
+        webhookId,
+        enqueuedAt: new Date().toISOString(),
+        bulkOperationId: bulkOpId,
+        bulkType: "orders",
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.status).toBe("complete");
+
+      const [row] = await sql<{ completed_at: Date | null }[]>`
+        SELECT completed_at FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(row.completed_at).not.toBeNull();
+
+      const syncState = await getInitialSyncState(sql, TEST_SHOP_DOMAIN);
+      expect(syncState.status).not.toBe("failed");
+    });
+
+    it("(6b) failure_count 5 + COMPLETED '0' url null: completes, completed_at is set, initial-sync not failed", async () => {
+      const { adminGraphQL } = await import("../../drain/admin-client.server");
+      const { processBulkOperation } = await import("../bulk-jsonl-processor.server");
+      const { getInitialSyncState } = await import("~/lib/initial-sync.server");
+
+      const bulkOpId = `gid://shopify/BulkOperation/maxfail-empty-null-${TEST_SUFFIX}`;
+      const webhookId = `webhook-maxfail-empty-null-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, failure_count)
+        VALUES (${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'orders', 'reconcile', 'orders', NOW(), 5)
+      `;
+
+      vi.mocked(adminGraphQL).mockResolvedValue({
+        success: true,
+        data: {
+          node: {
+            id: bulkOpId,
+            status: "COMPLETED",
+            url: null,
             objectCount: "0",
             fileSize: null,
             errorCode: null,
