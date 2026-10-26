@@ -141,6 +141,7 @@ const DB_TEST_PATTERNS = [
   "scripts/__tests__/credit-status-metafield-backfill.test.ts",
   "scripts/__tests__/refresh-offline-token.test.ts",
   "scripts/ci/__tests__/backfill-dry-run-preflight.test.ts",
+  "scripts/ci/__tests__/shop-identity-labels-db.test.ts",
   "scripts/__tests__/e2e-bank-import.test.ts",
 
   // Reviewer demo DB tests

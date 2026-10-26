@@ -96,8 +96,12 @@ jobs:
           SINCE: ${{ inputs.since }}
           LOCATION_ID: ${{ inputs.location_id }}
           # Secret, so the env header prints ***. Used only as the psql
-          # variable :allowed (g3-noninr-is-dev-store); never printed.
+          # variable :allowed (g3-noninr-is-dev-store and the shop_kind
+          # label 'main'); never printed.
           ALLOWED_DEV_STORE: ${{ secrets.ALLOWED_DEV_STORE }}
+          # Secret, used only as the psql variable :e2e (shop_kind label
+          # 'e2e', scripts/ci/shop-labels.ts); never printed.
+          E2E_SHOP: ${{ secrets.E2E_SHOP }}
           PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
           set -euo pipefail
@@ -110,6 +114,29 @@ jobs:
               echo "::add-mask::$ALLOWED"
             fi
           fi
+          E2E="${E2E_SHOP:-}"
+          if [ -n "$E2E" ]; then
+            # Validate before masking so a multi-line value cannot slip past ::add-mask::.
+            if [[ ! "$E2E" =~ ^[a-z0-9-]+\.myshopify\.com$ ]]; then
+              E2E=""
+            else
+              echo "::add-mask::$E2E"
+            fi
+          fi
+          # Shop identity labels (shop_kind main / e2e / other_N) need both
+          # secrets, valid and different. Fail closed rather than print
+          # 'unknown' for every shop. List = SHOP_LABEL_SCRIPTS in
+          # scripts/ci/shop-labels.ts.
+          # shop-labels-guard:start
+          case "$QUERY_NAME" in
+            offline-session-preflight|post-drain-aggregates|s12-hold-coverage|s18-reminder-rule-dupes|s18-reminders-due-7d)
+              if [ -z "$ALLOWED" ] || [ -z "$E2E" ] || [ "$ALLOWED" = "$E2E" ]; then
+                echo "::error::ALLOWED_DEV_STORE and E2E_SHOP secrets must both be set, valid and different (required for shop_kind labels by $QUERY_NAME)"
+                exit 1
+              fi
+              ;;
+          esac
+          # shop-labels-guard:end
           if [ "$QUERY_NAME" = "g3-noninr-is-dev-store" ] && [ -z "$ALLOWED" ]; then
             echo "::error::ALLOWED_DEV_STORE secret is unset or invalid (required by g3-noninr-is-dev-store)"
             exit 1
@@ -128,4 +155,4 @@ jobs:
             sudo apt-get install -y -qq postgresql-client
           fi
           source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
-          psql -X -q -v ON_ERROR_STOP=1 -v "allowed=${ALLOWED}" -v "msg_ids=${MSG_IDS}" -v "since=${SINCE}" -v "location_id=${LOCATION_ID}" -f "$FILE" "$DATABASE_URL"
+          psql -X -q -v ON_ERROR_STOP=1 -v "allowed=${ALLOWED}" -v "e2e=${E2E}" -v "msg_ids=${MSG_IDS}" -v "since=${SINCE}" -v "location_id=${LOCATION_ID}" -f "$FILE" "$DATABASE_URL"
