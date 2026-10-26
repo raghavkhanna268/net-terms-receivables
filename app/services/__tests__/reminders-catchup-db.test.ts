@@ -1913,7 +1913,7 @@ describe("isReminderDueToday (pure JS, boundary instants)", () => {
  * 20261120000000 differs from 20261112000000 ONLY in the ORDER BY line.
  * Does not require database access.
  */
-describe("migration diff: 20261120000000 vs 20261112000000 (#230)", () => {
+describe("migration diff: 20261122000000 vs 20261112000000 (#230)", () => {
   it("function bodies differ ONLY in the ORDER BY line", async () => {
     const fs = await import("fs/promises");
     const path = await import("path");
@@ -1924,7 +1924,7 @@ describe("migration diff: 20261120000000 vs 20261112000000 (#230)", () => {
     );
     const newMigrationPath = path.resolve(
       __dirname,
-      "../../../prisma/migrations/20261120000000_s18_catchup_amount_ordering/migration.sql"
+      "../../../prisma/migrations/20261122000000_s18_catchup_amount_ordering/migration.sql"
     );
 
     const baseSql = await fs.readFile(baseMigrationPath, "utf-8");
