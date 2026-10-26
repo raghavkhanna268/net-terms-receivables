@@ -682,45 +682,70 @@ describe("migrateCustomerEmails integration with mocked fetch", () => {
     vi.restoreAllMocks();
   });
 
-  it("when only old-email customer exists, customerUpdate is called once with new email", async () => {
-    const customerId = "gid://shopify/Customer/12345";
+  function createCompanyResponse(seedKey: string, contactEmail: string) {
+    const companyId = `gid://shopify/Company/${seedKey}`;
+    const customerId = `gid://shopify/Customer/${seedKey}`;
+    return {
+      ok: true,
+      json: async () => ({
+        data: {
+          companies: {
+            nodes: [{
+              id: companyId,
+              name: `Test Company ${seedKey}`,
+              externalId: `ntr-seed-${seedKey}`,
+              locations: { edges: [] },
+              contacts: {
+                edges: [{
+                  node: {
+                    id: `gid://shopify/CompanyContact/${seedKey}`,
+                    customer: { id: customerId, email: contactEmail },
+                  },
+                }],
+              },
+            }],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      }),
+    };
+  }
+
+  function createEmptyCompaniesResponse() {
+    return {
+      ok: true,
+      json: async () => ({
+        data: {
+          companies: {
+            nodes: [],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      }),
+    };
+  }
+
+  it("finds customer by company externalId with old email, calls customerUpdate once", async () => {
     const legacyEmail = LEGACY_SEED_EMAILS["company-1"];
     const newEmail = seedEmail("company-1");
-    let customerUpdateCalled = false;
+    let customerUpdateCalled = 0;
     let customerUpdateInput: Record<string, unknown> | null = null;
+    let customerCreateCalled = false;
 
     globalThis.fetch = vi.fn().mockImplementation(async (_url: string, init: { body?: string }) => {
       const body = init?.body ?? "";
 
-      if (body.includes("customers(") || body.includes("customers {")) {
-        const queryMatch = body.match(/email:'([^']+)'/);
-        const searchEmail = queryMatch?.[1] ?? "";
-        
-        if (searchEmail.toLowerCase() === legacyEmail.toLowerCase()) {
-          return {
-            ok: true,
-            json: async () => ({
-              data: {
-                customers: {
-                  nodes: [{ id: customerId, email: legacyEmail, tags: [] }],
-                  pageInfo: { hasNextPage: false, endCursor: null },
-                },
-              },
-            }),
-          };
+      if (body.includes("companies(")) {
+        const queryMatch = body.match(/external_id:'([^']+)'/);
+        const searchId = queryMatch?.[1] ?? "";
+        if (searchId === "ntr-seed-company-1") {
+          return createCompanyResponse("company-1", legacyEmail);
         }
-        return {
-          ok: true,
-          json: async () => ({
-            data: {
-              customers: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
-            },
-          }),
-        };
+        return createEmptyCompaniesResponse();
       }
 
       if (body.includes("customerUpdate")) {
-        customerUpdateCalled = true;
+        customerUpdateCalled++;
         const parsed = JSON.parse(body);
         customerUpdateInput = parsed.variables?.input;
         return {
@@ -728,12 +753,16 @@ describe("migrateCustomerEmails integration with mocked fetch", () => {
           json: async () => ({
             data: {
               customerUpdate: {
-                customer: { id: customerId, email: newEmail },
+                customer: { id: customerUpdateInput?.id, email: newEmail },
                 userErrors: [],
               },
             },
           }),
         };
+      }
+
+      if (body.includes("customerCreate")) {
+        customerCreateCalled = true;
       }
 
       return { ok: true, json: async () => ({ data: null }) };
@@ -741,63 +770,31 @@ describe("migrateCustomerEmails integration with mocked fetch", () => {
 
     await migrateCustomerEmails(state);
 
-    expect(customerUpdateCalled).toBe(true);
-    expect(customerUpdateInput).toMatchObject({
-      id: customerId,
-      email: newEmail,
-    });
-    expect(state.updatedCount.customers).toBeGreaterThan(0);
+    expect(customerUpdateCalled).toBe(1);
+    expect(customerUpdateInput).toMatchObject({ email: newEmail });
+    expect(customerCreateCalled).toBe(false);
+    expect(state.updatedCount.customers).toBe(1);
     expect(computeExitCode(state)).toBe(0);
   });
 
-  it("second run where customer already has new email makes no mutations", async () => {
-    const customerId = "gid://shopify/Customer/12345";
+  it("second run where customer already has new email makes no mutations, exits 0", async () => {
     const newEmail = seedEmail("company-1");
     let customerUpdateCalled = false;
 
     globalThis.fetch = vi.fn().mockImplementation(async (_url: string, init: { body?: string }) => {
       const body = init?.body ?? "";
 
-      if (body.includes("customers(") || body.includes("customers {")) {
-        const queryMatch = body.match(/email:'([^']+)'/);
-        const searchEmail = queryMatch?.[1] ?? "";
-        
-        if (searchEmail.toLowerCase() === newEmail.toLowerCase()) {
-          return {
-            ok: true,
-            json: async () => ({
-              data: {
-                customers: {
-                  nodes: [{ id: customerId, email: newEmail, tags: [] }],
-                  pageInfo: { hasNextPage: false, endCursor: null },
-                },
-              },
-            }),
-          };
+      if (body.includes("companies(")) {
+        const queryMatch = body.match(/external_id:'([^']+)'/);
+        const searchId = queryMatch?.[1] ?? "";
+        if (searchId === "ntr-seed-company-1") {
+          return createCompanyResponse("company-1", newEmail);
         }
-        return {
-          ok: true,
-          json: async () => ({
-            data: {
-              customers: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
-            },
-          }),
-        };
+        return createEmptyCompaniesResponse();
       }
 
       if (body.includes("customerUpdate")) {
         customerUpdateCalled = true;
-        return {
-          ok: true,
-          json: async () => ({
-            data: {
-              customerUpdate: {
-                customer: { id: customerId, email: newEmail },
-                userErrors: [],
-              },
-            },
-          }),
-        };
       }
 
       return { ok: true, json: async () => ({ data: null }) };
@@ -812,37 +809,18 @@ describe("migrateCustomerEmails integration with mocked fetch", () => {
   });
 
   it("customerUpdate userErrors failure gives Failed > 0 and exit 1", async () => {
-    const customerId = "gid://shopify/Customer/12345";
     const legacyEmail = LEGACY_SEED_EMAILS["company-1"];
 
     globalThis.fetch = vi.fn().mockImplementation(async (_url: string, init: { body?: string }) => {
       const body = init?.body ?? "";
 
-      if (body.includes("customers(") || body.includes("customers {")) {
-        const queryMatch = body.match(/email:'([^']+)'/);
-        const searchEmail = queryMatch?.[1] ?? "";
-        
-        if (searchEmail.toLowerCase() === legacyEmail.toLowerCase()) {
-          return {
-            ok: true,
-            json: async () => ({
-              data: {
-                customers: {
-                  nodes: [{ id: customerId, email: legacyEmail, tags: [] }],
-                  pageInfo: { hasNextPage: false, endCursor: null },
-                },
-              },
-            }),
-          };
+      if (body.includes("companies(")) {
+        const queryMatch = body.match(/external_id:'([^']+)'/);
+        const searchId = queryMatch?.[1] ?? "";
+        if (searchId === "ntr-seed-company-1") {
+          return createCompanyResponse("company-1", legacyEmail);
         }
-        return {
-          ok: true,
-          json: async () => ({
-            data: {
-              customers: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
-            },
-          }),
-        };
+        return createEmptyCompaniesResponse();
       }
 
       if (body.includes("customerUpdate")) {
@@ -866,5 +844,48 @@ describe("migrateCustomerEmails integration with mocked fetch", () => {
 
     expect(state.failedCount.customers).toBeGreaterThan(0);
     expect(computeExitCode(state)).toBe(1);
+  });
+
+  it("summary output contains no '@' and no 'gid://'", async () => {
+    const legacyEmail = LEGACY_SEED_EMAILS["company-1"];
+    const newEmail = seedEmail("company-1");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    globalThis.fetch = vi.fn().mockImplementation(async (_url: string, init: { body?: string }) => {
+      const body = init?.body ?? "";
+
+      if (body.includes("companies(")) {
+        const queryMatch = body.match(/external_id:'([^']+)'/);
+        const searchId = queryMatch?.[1] ?? "";
+        if (searchId === "ntr-seed-company-1") {
+          return createCompanyResponse("company-1", legacyEmail);
+        }
+        return createEmptyCompaniesResponse();
+      }
+
+      if (body.includes("customerUpdate")) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              customerUpdate: {
+                customer: { id: "gid://shopify/Customer/12345", email: newEmail },
+                userErrors: [],
+              },
+            },
+          }),
+        };
+      }
+
+      return { ok: true, json: async () => ({ data: null }) };
+    });
+
+    await migrateCustomerEmails(state);
+
+    const allLogOutput = logSpy.mock.calls.map(call => call.join(" ")).join("\n");
+    expect(allLogOutput).not.toContain("@");
+    expect(allLogOutput).not.toContain("gid://");
+
+    logSpy.mockRestore();
   });
 });

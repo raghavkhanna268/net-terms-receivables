@@ -3026,94 +3026,65 @@ interface CustomersSearchResult {
  * Migrate legacy seed customer emails from .example TLD to @example.com domain.
  * 
  * Shopify rejects .example TLD as invalid ("Email contains an invalid domain name").
- * This function finds existing customers with old emails and updates them in place
- * using customerUpdate.
+ * This function finds existing customers via company externalId (the stable key for
+ * fixture company contacts) and updates their email in place using customerUpdate.
  * 
- * Idempotent: customers already on the new email are counted as unchanged.
- * Lookup is by externalId tag (SEED_TAG) or the existing lookup in ensureTaggedCustomer.
+ * Lookup is by company externalId (ntr-seed-company-*), then the contact customer.
+ * 
+ * Idempotent:
+ * - If the contact customer's email is already @example.com, count as unchanged.
+ * - If the contact customer's email is legacy (.example), update it.
+ * - If no company or contact exists, nothing to migrate (create path handles it).
+ * 
+ * The create path cannot duplicate because companyCreate with a taken email fails
+ * with TAKEN error, which triggers adoption of the existing company.
  * 
  * @returns void - counts are tracked in state
  */
 export async function migrateCustomerEmails(state: SeedState): Promise<void> {
-  console.log("\n📧 Migrating fixture customer emails...");
+  if (state.dryRun) {
+    return;
+  }
   
   for (const [seedKey, legacyEmail] of Object.entries(LEGACY_SEED_EMAILS)) {
+    const companyExternalId = `${SEED_PREFIX}${seedKey}`;
     const newEmail = seedEmail(seedKey);
     
-    if (state.dryRun) {
-      console.log(`  [dry-run] Would migrate ${seedKey}: legacy → new format`);
+    // Find company by externalId (stable key)
+    const company = await findCompanyByExternalId(state, companyExternalId);
+    if (!company) {
       continue;
     }
     
-    // First check if customer already has the new email (idempotent)
-    const newEmailCustomer = await findCustomerByExactEmail(state, newEmail);
-    if (newEmailCustomer) {
+    // Get the contact customer
+    const contactCustomer = company.contacts.edges[0]?.node?.customer;
+    if (!contactCustomer) {
+      continue;
+    }
+    
+    const currentEmail = contactCustomer.email?.toLowerCase() ?? "";
+    const newEmailLower = newEmail.toLowerCase();
+    const legacyEmailLower = legacyEmail.toLowerCase();
+    
+    // Already migrated
+    if (currentEmail === newEmailLower) {
       state.unchangedCount.customers++;
       continue;
     }
     
-    // Look for customer with old email
-    const legacyCustomer = await findCustomerByExactEmail(state, legacyEmail);
-    if (!legacyCustomer) {
-      // No customer with old email exists - nothing to migrate
-      // (customer may have been created fresh with new email)
+    // Not the legacy email we're looking for (possibly manual change)
+    if (currentEmail !== legacyEmailLower) {
       continue;
     }
     
     // Update the customer's email
-    const updated = await updateCustomerEmail(state, legacyCustomer.id, newEmail);
+    const updated = await updateCustomerEmail(state, contactCustomer.id, newEmail);
     if (updated) {
       state.updatedCount.customers++;
-      console.log(`  ✅ Migrated ${seedKey}`);
     } else {
       state.failedCount.customers++;
     }
   }
-  
-  const total = state.updatedCount.customers + state.unchangedCount.customers + state.failedCount.customers;
-  if (total > 0 || state.dryRun) {
-    console.log(`  Updated: ${state.updatedCount.customers}, Unchanged: ${state.unchangedCount.customers}, Failed: ${state.failedCount.customers}`);
-  } else {
-    console.log("  No legacy customers found to migrate");
-  }
-}
-
-/**
- * Find a customer by exact email match.
- * Returns the customer or null if not found.
- */
-async function findCustomerByExactEmail(
-  state: SeedState,
-  email: string
-): Promise<{ id: string; email: string } | null> {
-  let cursor: string | undefined = undefined;
-  
-  for (let page = 0; page < MAX_SEARCH_PAGES; page++) {
-    const variables: { query: string; after?: string } = { query: `email:'${email}'` };
-    if (cursor) variables.after = cursor;
-    
-    const response = await graphql<CustomersSearchResult>(
-      state,
-      FIND_CUSTOMER_BY_EMAIL_QUERY,
-      variables
-    );
-    
-    if (response.errors) {
-      return null;
-    }
-    
-    const customers = response.data?.customers.nodes ?? [];
-    const exactMatch = customers.find((c: CustomerSearchNode) => c.email?.toLowerCase() === email.toLowerCase());
-    if (exactMatch && exactMatch.email) {
-      return { id: exactMatch.id, email: exactMatch.email };
-    }
-    
-    const hasNextPage = response.data?.customers.pageInfo?.hasNextPage ?? false;
-    if (!hasNextPage) break;
-    cursor = response.data?.customers.pageInfo?.endCursor ?? undefined;
-  }
-  
-  return null;
 }
 
 /**
@@ -3143,15 +3114,7 @@ async function updateCustomerEmail(
     result.data?.customerUpdate?.customer
   );
   
-  if (!check.ok) {
-    console.log(`    ⚠️  Failed to update customer email: ${check.failureReason}`);
-    if (check.failureReason === "user_errors") {
-      logUserErrors(result.data?.customerUpdate?.userErrors ?? [], "customerUpdate");
-    }
-    return false;
-  }
-  
-  return true;
+  return check.ok;
 }
 
 /**
